@@ -29,6 +29,7 @@ import type { RunsService, RunView } from "../runsService.js";
 import { formatDisposition, formatFinding } from "../reviewVerdict.js";
 import { handoffLines } from "../ship/handoff.js";
 import { previousRunOf, runsSince } from "./thread.js";
+import { mergeContextDependencies, type ContextDependencies } from "../references/contextDependencies.js";
 
 /** The most runs the block carries: the page a thread read brings back is
  *  eight runs (`THREAD_READ_LIMIT`), one of which is the run being continued. */
@@ -202,15 +203,27 @@ export async function threadArtifactsFor(input: {
   runs: Pick<RunsService, "getRun">;
   thread: readonly RunView[];
   agent: string;
-}): Promise<{ block?: ThreadArtifactsBlock; notes: string[] }> {
+  readContext?: (runId: string) => Promise<ContextDependencies | undefined>;
+}): Promise<{ block?: ThreadArtifactsBlock; notes: string[]; context?: ContextDependencies }> {
   const candidates = runsSince(input.thread, input.agent).filter(carriesArtifacts);
   if (candidates.length === 0) return { notes: [] };
   const notes: string[] = [];
+  const contexts = new Map<string, ContextDependencies>();
   const reads = await Promise.all(
     candidates.map(async (view): Promise<ArtifactRecord | undefined> => {
       try {
         const res = await input.runs.getRun(view.id, { include: "messages" });
-        if (res.ok) return res.value;
+        if (res.ok) {
+          if (input.readContext) {
+            const context = await input.readContext(view.id);
+            if (!context || context.status !== "known") {
+              notes.push(`thread artifacts: saved context for run ${view.id} could not be verified — left out`);
+              return undefined;
+            }
+            contexts.set(view.id, context);
+          }
+          return res.value;
+        }
         notes.push(`thread artifacts: the record of run ${view.id} could not be read (${res.error}) — left out`);
       } catch (err) {
         const why = err instanceof Error ? err.message : String(err);
@@ -238,5 +251,6 @@ export async function threadArtifactsFor(input: {
       `thread artifacts: ${n} run${n === 1 ? "" : "s"} ${window} ride${n === 1 ? "s" : ""} the prompt (${block.runs.join(", ")})${cut}`,
     );
   }
-  return { block, notes };
+  const consumed = block.runs.flatMap((id) => (contexts.has(id) ? [contexts.get(id)!] : []));
+  return { block, notes, ...(consumed.length > 0 ? { context: mergeContextDependencies(...consumed) } : {}) };
 }

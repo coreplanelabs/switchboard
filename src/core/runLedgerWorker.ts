@@ -1,3 +1,10 @@
+import { isContextCheckpointReceipt, type CanonicalCheckpointSource } from "./references/contextCheckpoint.js";
+import type { ContextCheckpointRequest, ContextCheckpointResult } from "./runLedger/ledger.js";
+import {
+  isContextDependencies,
+  UNKNOWN_CONTEXT_DEPENDENCIES,
+  type ContextDependencies,
+} from "./references/contextDependencies.js";
 import { type SessionSources, isSessionSources } from "./references/receipts.js";
 // The production ledger: HTTPS to the state Worker's `/runs/*` ledger routes
 // (docs/reference/specs/run-history.md items 28–34), beside `WorkerRunStore`. Same bearer,
@@ -29,6 +36,7 @@ import { type SessionSources, isSessionSources } from "./references/receipts.js"
 //   POST /runs/session/owner       {key, runId, gen, maxBytes}           → {ok}
 //   POST /runs/session/write       {key, gen, rows, attachments}         → {ok, bytes} | 409 fenced
 //   POST /runs/session/append      {key, rowId, rows}                    → {ok, appended}
+//   POST /runs/session/entry       {key, rowId}                          → {rows: TranscriptRow[] | null}
 //   POST /runs/session/read        {key, from, to?}                      → {rows, attachments}
 //   POST /runs/session/read-tail   {key, maxBytes}                       → {rows, attachments, from}
 //   POST /runs/session/clear-owner {key, runId, gen}                     → {ok} | 409 fenced
@@ -239,6 +247,7 @@ export class WorkerRunLedger implements RunLedger {
     gen: string,
     turns: TranscriptTurn[],
     session?: string,
+    seed = false,
   ): Promise<FenceResult> {
     const rows: TranscriptRow[] = [];
     const attachments: TranscriptAttachment[] = [];
@@ -252,7 +261,8 @@ export class WorkerRunLedger implements RunLedger {
       rows.push(...out.rows);
       attachments.push(...out.attachments);
     }
-    const { path, body } = this.target(runId, gen, session);
+    const { path, body: targetBody } = this.target(runId, gen, session);
+    const body = { ...targetBody, ...(seed && session !== undefined ? { seed: true } : {}) };
     // Attachments travel one per request (each is under the fence by the ref
     // threshold); rows are chunked under the fence.
     for (const a of attachments) {
@@ -270,10 +280,32 @@ export class WorkerRunLedger implements RunLedger {
     return { ok: true };
   }
 
+  async readContextCheckpoint(runId: string): Promise<CanonicalCheckpointSource | undefined> {
+    const result = await this.post("/runs/context-checkpoint", { storeKey: this.opts.storeKey, runId });
+    const source = result.data.source as CanonicalCheckpointSource | undefined;
+    return source?.runId === runId && isContextCheckpointReceipt(source.receipt) ? source : undefined;
+  }
+
+  async normalizeContextOrigins(request: ContextCheckpointRequest): Promise<ContextCheckpointResult> {
+    this.checkSessionKey(request.key);
+    this.checkIds(request.runId, request.gen);
+    const result = await this.post("/runs/session/checkpoint", { storeKey: this.opts.storeKey, ...request });
+    const body = result.data as unknown as ContextCheckpointResult;
+    if (body.ok && isContextCheckpointReceipt(body.receipt) && body.receipt.runId === request.runId) return body;
+    return {
+      ok: false,
+      reason:
+        !body.ok && (body.reason === "fenced" || body.reason === "unknown-run")
+          ? body.reason
+          : "checkpoint-unavailable",
+    };
+  }
+
   async writeSessionSources(key: string, runId: string, gen: string, sources: SessionSources): Promise<FenceResult> {
     this.checkSessionKey(key);
     this.checkIds(runId, gen);
     const result = await this.post("/runs/session/write", {
+      storeKey: this.opts.storeKey,
       key,
       gen,
       sourceRunId: runId,
@@ -287,7 +319,7 @@ export class WorkerRunLedger implements RunLedger {
 
   async seed(runId: string, gen: string, turns: TranscriptTurn[], session?: string): Promise<FenceResult> {
     this.checkIds(runId, gen);
-    return this.writeTurns(runId, gen, turns, session);
+    return this.writeTurns(runId, gen, turns, session, true);
   }
 
   async step(
@@ -318,10 +350,18 @@ export class WorkerRunLedger implements RunLedger {
     key: string,
     rowId: string,
     rows: readonly { part: number; json: string }[],
+    context?: ContextDependencies,
   ): Promise<{ ok: boolean; appended: boolean }> {
     this.checkSessionKey(key);
-    const r = await this.post("/runs/session/append", { key, rowId, rows });
-    return { ok: r.data.ok === true, appended: r.data.appended === true };
+    if (context !== undefined && !isContextDependencies(context)) throw new Error("invalid context dependencies");
+    const r = await this.post("/runs/session/append", {
+      storeKey: this.opts.storeKey,
+      key,
+      rowId,
+      rows,
+      context: context ?? UNKNOWN_CONTEXT_DEPENDENCIES,
+    });
+    return { ok: r.data.ok === true && r.data.contextSaved === true, appended: r.data.appended === true };
   }
 
   async claimSession(key: string, runId: string, gen: string, maxBytes?: number): Promise<void> {
@@ -341,6 +381,29 @@ export class WorkerRunLedger implements RunLedger {
     this.checkSessionKey(key);
     this.checkIds(runId, gen);
     return this.fenceResult(await this.post("/runs/session/clear-owner", { key, runId, gen }));
+  }
+
+  async readSessionEntry(key: string, rowId: string): Promise<readonly TranscriptRow[] | undefined> {
+    this.checkSessionKey(key);
+    const response = await this.post("/runs/session/entry", { key, rowId });
+    const rows = response.data.rows;
+    if (
+      !Array.isArray(rows) ||
+      rows.length === 0 ||
+      !rows.every((row: unknown) => {
+        if (!row || typeof row !== "object") return false;
+        const part = row as TranscriptRow;
+        return (
+          Number.isSafeInteger(part.idx) &&
+          part.idx >= 0 &&
+          Number.isSafeInteger(part.part) &&
+          part.part >= 0 &&
+          typeof part.json === "string"
+        );
+      })
+    )
+      return undefined;
+    return rows as TranscriptRow[];
   }
 
   async readSession(key: string, from: number, to?: number): Promise<AssembledTranscript> {

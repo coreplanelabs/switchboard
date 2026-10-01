@@ -630,8 +630,19 @@ function liveView(s: RunSummary): RunView {
 }
 
 /** A stored row as a view: finished, persisted, and priced when it carries usage. */
-function persistedView(item: RunListItem, prices: ModelPriceTable): RunView {
-  const { audienceRefusal: _audienceRefusal, ...visible } = item;
+function persistedView(
+  item: RunListItem & Pick<RunRecord, "sourceReads" | "contextCheckpointReceipt" | "directAudience">,
+  prices: ModelPriceTable,
+): RunView {
+  const {
+    audienceRefusal: _audienceRefusal,
+    sourceReads: _sourceReads,
+    contextCheckpointReceipt: _contextCheckpointReceipt,
+    directAudience: _directAudience,
+    childHandoff: _childHandoff,
+    contextDependencies: _contextDependencies,
+    ...visible
+  } = item;
   return {
     ...visible,
     finished: true,

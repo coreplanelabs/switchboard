@@ -1180,8 +1180,8 @@ export type RunEvent =
         renewals?: number;
         verbosity?: Verbosity;
         repo?: string;
-        /** The admissible fact behind the model's typed repo choice. */
-        repoSource?: "request" | "attachment" | "thread" | "channel";
+        /** The context behind the model's canonical repository choice. */
+        repoSource?: "request" | "attachment" | "thread" | "channel" | "context";
         prTarget?: { number: number; source: "request" | "thread"; quote: string };
         /** The operator-selected first stage of a Ship unit. */
         shipEntry?: "work" | "work_from_thread" | "review" | "plan" | "continue";

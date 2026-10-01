@@ -4,6 +4,9 @@ import { join } from "node:path";
 import { deserialize, serialize } from "node:v8";
 import { onTestFinished } from "vitest";
 import { ConfigStore } from "../../config.js";
+import { SOURCE_READ_ELIGIBILITY_MS } from "../../core/budgets.js";
+import { readTool } from "../../mcp/testing/sourceRead.js";
+import type { SourceReadResponse } from "../../mcp/sourceReadProtocol.js";
 import { ALL_GRANTS } from "../../core/authz/grants.js";
 import { toolResultText } from "../../core/chatMessage.js";
 import { unwrapUntrusted } from "../../core/untrusted.js";
@@ -52,6 +55,7 @@ export const SOURCE = {
   timeWindow: "2026-01-01T00:00:00Z/2026-01-02T00:00:00Z",
   sourceUrl: "https://metrics.example.test/signups",
 };
+export const SOURCE_QUERY = { resource: { project: "signups" }, input: { query: SOURCE.query } };
 export function briefFromSource(source: typeof SOURCE) {
   return {
     schemaVersion: 1,
@@ -78,7 +82,9 @@ export function sourceResult(request: CompletionRequest, toolUseId: string): typ
   if (data === text) throw new Error("Missing source-data envelope");
   const value: unknown = JSON.parse(data);
   if (typeof value !== "object" || value === null) return undefined;
-  const fields = value as Record<string, unknown>;
+  const envelope = value as Record<string, unknown>;
+  const fields = (envelope.status === "succeeded" ? envelope.result : envelope) as Record<string, unknown>;
+  if (!fields || typeof fields !== "object") return undefined;
   if (
     !["query", "result", "timeWindow", "sourceUrl"].every(
       (key) => typeof fields[key] === "string" && fields[key].trim() !== "",
@@ -137,6 +143,8 @@ export function goldenWorld(now: () => number) {
   const posts: Array<{ channel: string; thread_ts?: string; text?: string }> = [];
   const created: string[] = [];
   const sourceReads: Array<{ caller: McpRunCaller; input: Record<string, unknown> }> = [];
+  const sourceActions = new Map<string, SourceReadResponse>();
+  const sourceInspects: string[] = [];
   const state = {
     sourceAllowed: true,
     shared: false,
@@ -192,7 +200,21 @@ export function goldenWorld(now: () => number) {
     rows.push({ text, user, ts, thread_ts: root });
     return { text, user, ts, channel, threadTs: root, botUserId: BOT, trigger: "dm" as const };
   };
-  return { dir, channel, root, client, rows, posts, event, created, sourceReads, state };
+  return {
+    dir,
+    channel,
+    root,
+    client,
+    rows,
+    posts,
+    event,
+    created,
+    sourceReads,
+    sourceActions,
+    sourceInspects,
+    state,
+    now,
+  };
 }
 export type GoldenWorld = ReturnType<typeof goldenWorld>;
 export type ScriptStep = (request: CompletionRequest) => CompletionResult | Promise<CompletionResult>;
@@ -239,31 +261,86 @@ workspaceDir: ${join(world.dir, "workspaces")}
   class Source extends NullMcpToolSource {
     override async toolsFor(_agent: string, caller: McpRunCaller) {
       if (!world.state.sourceAllowed || caller.userId !== `slack:${REQUESTER}`) return { tools: [], servers: [] };
+      const definition = {
+        ...readTool,
+        name: "signups",
+        description: "Read signup failure totals",
+        _meta: { sourceAction: { ...readTool._meta.sourceAction, operationId: "metrics.signups" } },
+        inputSchema: {
+          ...readTool.inputSchema,
+          properties: {
+            ...readTool.inputSchema.properties,
+            input: {
+              type: "object",
+              additionalProperties: false,
+              required: ["query"],
+              properties: { query: { type: "string", minLength: 1 } },
+            },
+          },
+        },
+      };
       const remote = new InMemoryMcpClient([
         {
-          name: "signups",
-          description: "Read signup failure totals",
-          inputSchema: { type: "object", properties: { query: { type: "string" } } },
-          annotations: { readOnlyHint: true },
+          ...definition,
           handler: async (input) => {
-            world.sourceReads.push({ caller: structuredClone(caller), input });
-            if (world.state.revokeOnRead) world.state.sourceAllowed = false;
-            return { content: [{ type: "text", text: JSON.stringify(world.state.sourceResponse) }] };
+            const actionId = String(input.actionId);
+            if (input.action === "inspect") {
+              world.sourceInspects.push(actionId);
+              return {
+                content: [],
+                structuredContent: world.sourceActions.get(actionId) ?? {
+                  version: 1,
+                  status: "refused",
+                  actionId,
+                  reason: "not_found",
+                },
+              };
+            }
+            let response = world.sourceActions.get(actionId);
+            if (!response) {
+              world.sourceReads.push({ caller: structuredClone(caller), input });
+              const observed = world.now();
+              response = {
+                version: 1,
+                actionId,
+                operationId: "metrics.signups",
+                operationRevision: "1",
+                binding: {
+                  id: `binding-${actionId}`,
+                  revision: "fixture-revision",
+                  subjectId: caller.userId,
+                  sessionId: "session-original",
+                  resource: structuredClone(input.resource) as Record<string, string>,
+                  input: structuredClone(input.input) as Record<string, string>,
+                  expiresAt: new Date(observed + SOURCE_READ_ELIGIBILITY_MS).toISOString(),
+                },
+                status: "succeeded",
+                attempt: "completed",
+                observedAt: new Date(observed).toISOString(),
+                truncation: "none",
+                result: structuredClone(world.state.sourceResponse),
+              };
+              world.sourceActions.set(actionId, response);
+              if (world.state.revokeOnRead) world.state.sourceAllowed = false;
+            }
+            return { content: [], structuredContent: response };
           },
         },
       ]);
       const tools = bridgeMcpTools(
-        { name: "metrics", url: "https://metrics.example.test/mcp", agents: ["orchestrator"] },
+        {
+          id: "golden-metrics",
+          connectionRevision: "fixture-connection",
+          name: "metrics",
+          url: "https://metrics.example.test/mcp",
+          agents: ["orchestrator"],
+        },
         remote,
-        [
-          {
-            name: "signups",
-            description: "Read signup failure totals",
-            inputSchema: { type: "object", properties: { query: { type: "string" } } },
-            annotations: { readOnlyHint: true },
-          },
-        ],
-        { budget: newRunBudget() },
+        [definition],
+        {
+          budget: newRunBudget(),
+          currentSource: async () => world.state.sourceAllowed && caller.userId === `slack:${REQUESTER}`,
+        },
       );
       return {
         tools,
@@ -382,7 +459,11 @@ workspaceDir: ${join(world.dir, "workspaces")}
     for (const record of ledger.finished.values()) await runStore.put(record);
     return out;
   }
-  const workerCalls: Array<{ message: Parameters<AdminCoordinatorDeps["dispatch"]>[0]; hasOpenThread: boolean }> = [];
+  const workerCalls: Array<{
+    message: Parameters<AdminCoordinatorDeps["dispatch"]>[0];
+    options: Parameters<AdminCoordinatorDeps["dispatch"]>[2];
+    hasOpenThread: boolean;
+  }> = [];
   async function spawnWorker(instanceId: string, unit: string, reply: string) {
     const unexpected = async (): Promise<never> => {
       throw new Error("Unexpected external coordinator operation");
@@ -401,9 +482,9 @@ workspaceDir: ${join(world.dir, "workspaces")}
       clock: Date.now,
       // The external worker is scripted; the production coordinator chooses
       // its message, contract and IO from the unit admitted by work_start.
-      dispatch: (message, io) => {
+      dispatch: (message, io, options) => {
         const work = (async () => {
-          workerCalls.push({ message, hasOpenThread: io.openThread !== undefined });
+          workerCalls.push({ message, options: structuredClone(options), hasOpenThread: io.openThread !== undefined });
           io.runStarted?.({ id: `worker-${instanceId}` });
           await io.reply(reply);
           return { status: "completed" as const };

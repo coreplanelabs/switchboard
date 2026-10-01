@@ -1,4 +1,7 @@
 import type { AudienceRefusalReceipt } from "../audienceDecision.js";
+import { appendThreadTurn } from "../runLedger/threadSession.js";
+import { UNKNOWN_CONTEXT_DEPENDENCIES } from "../references/contextDependencies.js";
+import type { LedgerWriteThrough } from "../runLedger/writeThrough.js";
 // A registry command run from the dispatcher, as a run (docs/decisions/0008-one-command-definition-every-surface.md;
 // docs/reference/specs/command-registry.md item 18): the machinery the two fast
 // paths and the operator's command branch share. A chat command — typed
@@ -97,7 +100,7 @@ export function isInlineRunCommand(id: string): boolean {
  * and every other read-only answer are not.
  */
 export async function runChatCommand(
-  deps: FastPathDeps,
+  deps: FastPathDeps & { runLedger?: Partial<Pick<LedgerWriteThrough, "appendSession" | "sessionPersistence">> },
   msg: IncomingMessage,
   io: ChannelIO,
   parsed: ParsedChatCommand,
@@ -107,6 +110,36 @@ export async function runChatCommand(
 ): Promise<ChatCommandResult> {
   const commands = deps.commands;
   if (!commands) return { ok: false, text: "" };
+  const persistText = async (text: string, suffix = "") => {
+    if (text && deps.runLedger?.sessionPersistence) {
+      const ledger = deps.runLedger;
+      if (!ledger.appendSession) throw new Error("conversation storage is unavailable");
+      await appendThreadTurn(
+        { appendSession: ledger.appendSession.bind(ledger) },
+        {
+          threadKey: msg.threadKey,
+          rowId: `${msg.messageId ?? `request:${trace.root.traceId}:${trace.root.id}`}:command:${parsed.kind === "invoke" ? parsed.id : "help"}${suffix}`,
+          role: "assistant",
+          text,
+          context: UNKNOWN_CONTEXT_DEPENDENCIES,
+        },
+      );
+    }
+  };
+  const persistResult = async (result: ChatCommandResult): Promise<ChatCommandResult> => {
+    await persistText(result.text);
+    const followUp = result.followUp;
+    return followUp
+      ? {
+          ...result,
+          followUp: async () => {
+            const outcome = await followUp();
+            if (outcome) await persistText(outcome.text, ":settled");
+            return outcome;
+          },
+        }
+      : result;
+  };
   const resolveRepo = async (): Promise<string | undefined> =>
     (await resolveRepoForCommand(deps, msg, await io.history())).repo;
   const invoke = (span: Span) =>
@@ -125,14 +158,18 @@ export async function runChatCommand(
     // typed line the operator also read is recorded — announced to no surface
     // beyond what it was — so the agreement row can compare the two doors.
     if (inline || opts.route?.outcome !== undefined || opts.operator !== undefined)
-      return runInlineCommandRun(deps, msg, cliWords(parsed.id)[0], io, invoke, ending, trace, {
-        ...opts,
-        announce: inline,
-      });
+      return persistResult(
+        await runInlineCommandRun(deps, msg, cliWords(parsed.id)[0], io, invoke, ending, trace, {
+          ...opts,
+          announce: inline,
+        }),
+      );
   }
   // A config reply, a listing, `help`: no run — the command's own work is the
   // request's one step, log-only.
-  return trace.root.span("run.command", invoke, { attrs: { command: parsed.kind === "invoke" ? parsed.id : "help" } });
+  return persistResult(
+    await trace.root.span("run.command", invoke, { attrs: { command: parsed.kind === "invoke" ? parsed.id : "help" } }),
+  );
 }
 
 /**

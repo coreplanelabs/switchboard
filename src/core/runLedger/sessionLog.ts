@@ -7,6 +7,11 @@
 // drop, the tail cut a follow-up seeds from, and the sweep's drop decision.
 
 import type { ChatMessage, ContentPart } from "../chatMessage.js";
+import {
+  isContextDependencies,
+  UNKNOWN_CONTEXT_DEPENDENCIES,
+  type ContextDependencies,
+} from "../references/contextDependencies.js";
 import { DEFAULT_RETENTION_POLICY, utf8ByteLength } from "../runRecord.js";
 import type { StoredRow } from "./transcript.js";
 
@@ -44,6 +49,22 @@ export function threadSessionKey(threadKey: string): string {
   return `${threadKey}:@thread`;
 }
 
+/** A provenance epoch keeps unproved legacy bytes immutable and out of a
+ * fresh context. The key itself survives restart; no parallel state store. */
+export function contextSessionKey(base: string): string {
+  return `${base}:@context-v1`;
+}
+export function contextThreadSessionKey(threadKey: string): string {
+  return contextSessionKey(threadSessionKey(threadKey));
+}
+
+/** Registry lifetime only: this spelling never grants source access. */
+export function logicalThreadOfSession(key: string): string | undefined {
+  for (const suffix of [":@thread:@context-v1", ":@thread"])
+    if (key.endsWith(suffix)) return key.slice(0, -suffix.length);
+  return undefined;
+}
+
 /** A working session's lane: a unit's coding rounds continue one log, its
  *  review rounds another (item 13). */
 export type WorkingLane = "coding" | "review";
@@ -53,7 +74,7 @@ export type WorkingLane = "coding" | "review";
  *  `plan-<id>-<attempt>`, attempt ≥ 2); the key strips it, so a re-issue
  *  continues the prior instance's lanes rather than starting cold. */
 export function workingSessionKey(instance: { id: string; attempt?: number }, unit: string, lane: WorkingLane): string {
-  const suffix = instance.attempt !== undefined ? `-${instance.attempt}` : "";
+  const suffix = instance.attempt !== undefined && instance.attempt >= 2 ? `-${instance.attempt}` : "";
   const base =
     suffix !== "" && instance.id.endsWith(suffix)
       ? instance.id.slice(0, instance.id.length - suffix.length)
@@ -90,6 +111,7 @@ export function storedTurnRow(turn: {
   actor?: string;
   silent?: boolean;
   folded?: boolean;
+  context?: ContextDependencies;
 }): string {
   return JSON.stringify({
     role: turn.role,
@@ -97,6 +119,7 @@ export function storedTurnRow(turn: {
     ...(turn.actor !== undefined ? { actor: turn.actor } : {}),
     ...(turn.silent === true ? { silent: true } : {}),
     ...(turn.folded === true ? { folded: true } : {}),
+    ...(turn.context !== undefined ? { context: turn.context } : {}),
   });
 }
 
@@ -379,7 +402,8 @@ export function attachmentRefsOf(json: string): string[] {
   return refs;
 }
 
-/** These tool protocols have no reusable grant/revision receipt. The flag only removes replay authority. */
+/** Legacy readers cannot infer reusable source access from a protocol name.
+ * Modern readers separately revalidate the complete typed dependency envelope. */
 export function requiresFreshSourceTool(name: string): boolean {
   return (
     name.startsWith("github_") ||
@@ -399,4 +423,24 @@ export function storedRowRequiresFreshSources(json: string): boolean {
     typeof stored.part.name === "string" &&
     requiresFreshSourceTool(stored.part.name)
   );
+}
+
+/** The request metadata is the trusted append envelope. An embedded proof may
+ * match it exactly or be absent on a legacy row, but cannot upgrade it. */
+export function keyedAppendContextMatches(
+  rows: readonly { part: number; json: string }[],
+  context?: ContextDependencies,
+): boolean {
+  if (context !== undefined && !isContextDependencies(context)) return false;
+  const expected = JSON.stringify(context ?? UNKNOWN_CONTEXT_DEPENDENCIES);
+  return rows.every((row) => {
+    try {
+      const parsed: unknown = JSON.parse(row.json);
+      if (!parsed || typeof parsed !== "object") return false;
+      const embedded = (parsed as { context?: unknown }).context;
+      return embedded === undefined || (isContextDependencies(embedded) && JSON.stringify(embedded) === expected);
+    } catch {
+      return false;
+    }
+  });
 }

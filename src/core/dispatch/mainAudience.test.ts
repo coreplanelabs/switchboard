@@ -26,6 +26,26 @@ const verifiedReply = (...args: Parameters<typeof mainAudienceAtReply>) =>
   mainAudienceAtReply(args[0], args[1], args[2], args[3], args[4], args[5], true);
 
 describe("main conversation source audience", () => {
+  it("uses the checked full context for compacted notes and handoffs while keeping the private audience gate", () => {
+    const input = {
+      ...base,
+      session: {
+        ...seed("mcp__metrics__query"),
+        log: { from: 20, turns: 2 },
+        summary: "saved findings",
+        notepad: "working decisions",
+      },
+      parentSeed: true,
+      threadArtifacts: "verified report",
+      contextValidation: { ok: true as const },
+    };
+    expect(mainAudienceAtPrompt(input).ok).toBe(true);
+    expect(mainAudienceAtPrompt({ ...input, verifiedDirectAudience: false }).ok).toBe(false);
+    expect(
+      mainAudienceAtPrompt({ ...input, contextValidation: { ok: false, code: "saved-context-unproved" } }),
+    ).toEqual({ ok: false, code: "saved-context-unproved" });
+    expect(mainAudienceAtPrompt({ ...input, contextValidation: undefined }).ok).toBe(false);
+  });
   it("distinguishes missing identities, lost access and changed snapshots without source text", () => {
     const current = mainAudienceAtPrompt({ ...base, servers: [] });
     if (!current.ok) throw new Error("fixture must be admitted");

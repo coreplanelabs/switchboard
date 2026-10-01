@@ -19,7 +19,143 @@ import { channelOf, startRequestRoot } from "../requestTrace.js";
 import { createRunEnding } from "../runEnding.js";
 import { analyzeRunFriction } from "../runFriction.js";
 import type { ResumeContext } from "./admission.js";
+import { planContextCheckpoint } from "../references/contextCheckpoint.js";
+import { contextDependenciesHash } from "../references/contextDependencies.js";
 import type { IncomingMessage } from "../types.js";
+
+describe("durable source archive assembly", () => {
+  it("archives only the committed context checkpoint", async () => {
+    const meta = {
+      agent: "general",
+      userId: "cli:user",
+      channelId: "cli:main",
+      threadKey: "cli:thread",
+      channelVisibility: "public" as const,
+      session: { key: "cli:thread:general", seedFrom: 0, request: 0, range: { from: 0, to: 0 } },
+    };
+    const context = {
+      version: 1 as const,
+      status: "known" as const,
+      revision: 0,
+      origins: [{ runId: "checkpoint", requester: meta.userId, channelId: meta.channelId, threadKey: meta.threadKey }],
+      slack: [],
+      mcp: [],
+    };
+    const inputs = { transcriptHash: "a".repeat(64), systemHash: "b".repeat(64), notepadHash: "c".repeat(64) };
+    const receipt = (await planContextCheckpoint({
+      run: { runId: "checkpoint", meta, context },
+      ownerGen: "gen",
+      through: 0,
+      inputs,
+      expected: { beforeHash: await contextDependenciesHash(context), revision: 0, inputs },
+      sources: [],
+    }))!;
+    const row: LiveRunRow = {
+      runId: "checkpoint",
+      ownerGen: "gen",
+      threadKey: meta.threadKey,
+      meta,
+      phase: "live",
+      startedAt: 1,
+      leaseUntil: 100,
+      stop: null,
+      card: null,
+      system: "system",
+      tools: [],
+      state: { contextDependencies: receipt.normalized, pendingContextCheckpoint: receipt },
+    };
+    const archive = () => reclaimedRunRecord({ row, events: [], status: "interrupted", finishedAt: 10 });
+    expect(archive()).not.toHaveProperty("contextCheckpointReceipt");
+    row.state.contextCheckpointReceipt = receipt;
+    expect(archive().contextCheckpointReceipt).toEqual(receipt);
+    expect(isRunRecord(archive())).toBe(true);
+    row.state.contextCheckpointReceipt = { ...receipt, runId: "forged" };
+    expect(isRunRecord(archive())).toBe(false);
+  });
+
+  it("preserves original pending and unknown source state, context dependencies and child handoff through assembly and reclaim", () => {
+    const meta = { agent: "research", channelId: "slack:CX", userId: "slack:UX", threadKey: "slack:CX:2.0" };
+    const sourceReads: NonNullable<RunRecord["sourceReads"]> = {
+      version: 1,
+      owner: {
+        runId: "child",
+        requester: meta.userId,
+        agent: meta.agent,
+        channelId: meta.channelId,
+        threadKey: meta.threadKey,
+      },
+      recoverable: false,
+      records: ["pending", "unknown"].map((phase, i) => ({
+        actionId: `action-${i}`,
+        callIds: [`call-${i}`],
+        toolName: "reader",
+        serverId: "server",
+        connectionRevision: "v1",
+        sessionId: "session",
+        operationId: "read",
+        operationRevision: "v1",
+        query: { resource: {}, input: { text: "original source request" } },
+        phase: phase as "pending" | "unknown",
+        exposed: false,
+      })),
+    };
+    const contextDependencies: NonNullable<RunRecord["contextDependencies"]> = {
+      version: 1,
+      status: "unknown",
+      revision: 1,
+      reason: "legacy",
+      origins: [],
+      slack: [],
+      mcp: [],
+    };
+    const childHandoff: NonNullable<RunRecord["childHandoff"]> = {
+      version: 1,
+      source: { runId: "parent", requester: meta.userId, channelId: meta.channelId, threadKey: meta.threadKey },
+      session: { key: "slack:CX:2.0:research", from: 0, to: 0 },
+      assets: [],
+    };
+    const assembled = assembleRunRecord({
+      run: { id: "child" },
+      snap: null,
+      agent: meta.agent,
+      msg: meta,
+      channelVisibility: "unknown",
+      finishedAt: 5000,
+      status: "interrupted",
+      diagnosis: analyzeRunFriction([]),
+      sourceReads,
+      contextDependencies,
+      childHandoff,
+    });
+    const row: LiveRunRow = {
+      runId: "child",
+      threadKey: meta.threadKey,
+      ownerGen: "gen",
+      leaseUntil: 9000,
+      startedAt: 1000,
+      phase: "live",
+      stop: null,
+      meta: { ...meta, childHandoff },
+      card: null,
+      system: "sys",
+      tools: [],
+      state: { sourceReads, contextDependencies },
+    };
+    const reclaimed = reclaimedRunRecord({ row, events: [], status: "interrupted", finishedAt: 5000 });
+    for (const value of [assembled, reclaimed]) {
+      expect(isRunRecord(value)).toBe(true);
+      expect(value.sourceReads).toEqual(sourceReads);
+      expect(value.contextDependencies).toEqual(contextDependencies);
+      expect(value.childHandoff).toEqual(childHandoff);
+      expect(value.sourceReads?.records.map((read) => read.phase)).toEqual(["pending", "unknown"]);
+    }
+    sourceReads.records[0].query.input.text = "later mutation";
+    expect(assembled.sourceReads?.records[0].query.input.text).toBe("original source request");
+    expect(reclaimed.sourceReads?.records[0].query.input.text).toBe("original source request");
+    row.state.sourceReads = { ...sourceReads, owner: { ...sourceReads.owner, runId: "impostor" } };
+    expect(isRunRecord(reclaimedRunRecord({ row, events: [], status: "interrupted", finishedAt: 5000 }))).toBe(false);
+  });
+});
 
 // Feature: docs/reference/specs/run-history.md — the records the drain deadline
 // writes for the runs it abandons: `interruptedRunRecord` is the seam (one

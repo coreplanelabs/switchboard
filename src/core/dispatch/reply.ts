@@ -1,3 +1,5 @@
+import type { ContextDependencies } from "../references/contextDependencies.js";
+import type { MemoryRecord } from "../memory/types.js";
 import { answerOutcomeDetail, type AnswerOutcome } from "../answerOutcome.js";
 import {
   audienceRefusalText,
@@ -903,6 +905,8 @@ export interface AfterReplyContext {
   stopped: StopMode | undefined;
   answer: string;
   toolCalls: number;
+  producerContext?: ContextDependencies;
+  admitMemory?: (record: MemoryRecord) => Promise<AudienceCheck>;
 }
 
 /**
@@ -928,6 +932,8 @@ export function afterReply(deps: ReplyDeps, ctx: AfterReplyContext): void {
   if (stopped !== "hard")
     scheduleReflection({
       cfg: deps.config.config.memory,
+      context: ctx.producerContext,
+      ...(ctx.admitMemory ? { admitMemory: ctx.admitMemory } : {}),
       store: deps.memory,
       // The extractor's one call goes through pi's model library
       // (harness-pi.md item 13), never the loop's own provider adapters.

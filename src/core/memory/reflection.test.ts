@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
+import { memoryContent, validMemoryProvenance } from "./provenance.js";
+import type { ContextDependencies } from "../references/contextDependencies.js";
 import type { CompletionRequest, CompletionResult, Provider } from "../provider.js";
 import { REASONING_OUTPUT_TOKEN_ALLOWANCE } from "../dispatch/route.js";
 import { actor } from "../authz/testing.js";
@@ -50,10 +53,16 @@ const PROVENANCE = { sourceThreadKey: "slack:CX:1.0", sourceRunId: "run-1" };
  *  allowed (authorization.md item 8), so the routing tests keep today's
  *  expectations. The write-gate suite varies the origin. */
 const PRINCIPAL = actor("user", "slack:UALICE");
-const PUBLIC_ORIGIN = { actor: PRINCIPAL, originChannelVisibility: "public" as ChannelVisibility };
+const knownContext: ContextDependencies = { version: 1, status: "known", revision: 1, origins: [], slack: [], mcp: [] };
+const PUBLIC_ORIGIN = {
+  actor: PRINCIPAL,
+  originChannelVisibility: "public" as ChannelVisibility,
+  context: knownContext,
+  admitMemory: async () => ({ ok: true as const }),
+};
 
 function existing(over: Partial<MemoryRecord> = {}): MemoryRecord {
-  return {
+  const value: MemoryRecord = {
     id: "mem:org:acme:0",
     scopeKey: SCOPE,
     kind: "fact",
@@ -65,7 +74,95 @@ function existing(over: Partial<MemoryRecord> = {}): MemoryRecord {
     status: "active",
     ...over,
   };
+  if (!Object.hasOwn(over, "provenance"))
+    value.provenance = {
+      version: 1,
+      scopeKey: value.scopeKey,
+      contentHash: createHash("sha256")
+        .update(JSON.stringify(memoryContent(value.scopeKey, value)))
+        .digest("hex"),
+      dependencies: structuredClone(knownContext),
+    };
+  return value;
 }
+
+describe("reflection context dependencies", () => {
+  const base = {
+    scopeKeys: { org: SCOPE },
+    model: "cheap-model",
+    history: [] as HistoryItem[],
+    request: "deploy retry behavior",
+    answer: "use bounded retries",
+    ...PROVENANCE,
+    ...PUBLIC_ORIGIN,
+  };
+  const reply = JSON.stringify({
+    facts: [{ text: "Deploy retries need bounded backoff", confidence: 0.9 }],
+    summary: "Retry behavior explained.",
+  });
+
+  it("unions the producer with every admitted existing revision and checks snapshots before the model sees them", async () => {
+    const old = existing();
+    old.provenance!.dependencies = {
+      ...knownContext,
+      origins: [{ runId: "older", requester: "slack:UALICE", channelId: "slack:CX", threadKey: "slack:CX:9.9" }],
+    };
+    const denied = existing({ id: "denied", text: "deploy hidden source" });
+    const store = new InMemoryMemoryStore([old, denied]);
+    const provider = fakeProvider(reply);
+    const context: ContextDependencies = {
+      ...knownContext,
+      mcp: [{ runId: "producer", actionId: "action-1", callIds: ["call-1"], responseHash: "a".repeat(64) }],
+    };
+    await reflect({
+      ...base,
+      context,
+      store,
+      provider,
+      admitMemory: async (candidate) => {
+        expect(Object.isFrozen(candidate)).toBe(true);
+        return candidate.id === "denied" ? { ok: false, code: "saved-context-unproved" } : { ok: true };
+      },
+    });
+    expect(JSON.stringify(provider.requests)).not.toContain("hidden source");
+    const generated = (await store.list(SCOPE, 20)).filter((record) => record.sourceRunId === "run-1");
+    expect(generated.length).toBe(2);
+    for (const record of generated) {
+      expect(await validMemoryProvenance(record)).toBe(true);
+      expect(record.provenance!.dependencies.origins.map((origin) => origin.runId)).toEqual(["older"]);
+      expect(record.provenance!.dependencies.mcp.map((source) => source.runId)).toEqual(["producer"]);
+    }
+  });
+
+  it("omits legacy or unavailable existing memory and leaves unknown producer provenance unknown", async () => {
+    const legacy = existing({ provenance: undefined, text: "deploy hidden legacy" });
+    const provider = fakeProvider(reply);
+    const store = new InMemoryMemoryStore([legacy]);
+    await reflect({
+      ...base,
+      context: undefined,
+      store,
+      provider,
+      admitMemory: async () => {
+        throw new Error("unavailable");
+      },
+    });
+    expect(JSON.stringify(provider.requests)).not.toContain("hidden legacy");
+    const generated = (await store.list(SCOPE, 20)).filter((record) => record.sourceRunId === "run-1");
+    expect(generated.every((record) => record.provenance!.dependencies.status === "unknown")).toBe(true);
+  });
+
+  it("preserves a consumed user memory scope when its underlying producer was public", async () => {
+    const user = "user:slack:UALICE";
+    const old = existing({ scopeKey: user, text: "deploy uses a private user preference" });
+    const store = new InMemoryMemoryStore([old], { now: () => 2000 });
+    const provider = fakeProvider(reply);
+    await reflect({ ...base, scopeKeys: { org: SCOPE, user }, store, provider });
+    const generated = (await store.list(SCOPE, 20)).filter((record) => record.sourceRunId === "run-1");
+    expect(generated).toHaveLength(2);
+    for (const record of generated) expect(record.provenance?.dependencies.memoryScopes).toEqual([user]);
+  });
+});
 
 describe("shouldReflect", () => {
   it("qualifies a run that used tools", () => {

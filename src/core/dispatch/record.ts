@@ -239,6 +239,7 @@ export function reclaimedRunRecord(input: {
       sourceUrl: row.meta.sourceUrl,
       userName: row.meta.userName,
       authenticatedAs: row.meta.authenticatedAs,
+      postedBy: row.meta.postedBy,
     },
     channelVisibility: row.meta.channelVisibility ?? "unknown",
     repo: row.meta.repo,
@@ -246,6 +247,16 @@ export function reclaimedRunRecord(input: {
     // included); a row from before profiles existed leaves the record without one.
     ...(row.meta.profile && row.meta.agent ? { profile: { preset: row.meta.agent, ...row.meta.profile } } : {}),
     ...(row.meta.parentRunId !== undefined ? { parentRunId: row.meta.parentRunId } : {}),
+    ...(row.meta.childHandoff !== undefined ? { childHandoff: row.meta.childHandoff } : {}),
+    // Preserve unknown or malformed evidence too: the record's validator
+    // must reject it rather than laundering a failed archive as legacy.
+    ...(row.state.contextCheckpointReceipt !== undefined
+      ? { contextCheckpointReceipt: row.state.contextCheckpointReceipt as RunRecord["contextCheckpointReceipt"] }
+      : {}),
+    ...(row.state.sourceReads !== undefined ? { sourceReads: row.state.sourceReads as RunRecord["sourceReads"] } : {}),
+    ...(row.state.contextDependencies !== undefined
+      ? { contextDependencies: row.state.contextDependencies as RunRecord["contextDependencies"] }
+      : {}),
     ...(row.meta.route !== undefined ? { route: row.meta.route } : {}),
     ...(row.meta.seed !== undefined ? { seed: row.meta.seed } : {}),
     // The row's place in its session log (item 53): the range stays open on a
@@ -328,7 +339,15 @@ export function assembleRunRecord(input: {
   model?: string;
   msg: Pick<
     IncomingMessage,
-    "channelId" | "userId" | "threadKey" | "sourceUrl" | "userName" | "relayedBy" | "authenticatedAs"
+    | "channelId"
+    | "userId"
+    | "threadKey"
+    | "sourceUrl"
+    | "userName"
+    | "relayedBy"
+    | "authenticatedAs"
+    | "postedBy"
+    | "directAudience"
   >;
   /** The stamp taken at create (`channelVisibilityOf`) — the record carries what the run was stamped with. */
   channelVisibility: ChannelVisibility;
@@ -373,6 +392,10 @@ export function assembleRunRecord(input: {
   /** The run that spawned this one (run-history item 46). Omitted (not set
    *  undefined) for every run a person or a schedule started. */
   parentRunId?: string;
+  childHandoff?: RunRecord["childHandoff"];
+  sourceReads?: RunRecord["sourceReads"];
+  contextDependencies?: RunRecord["contextDependencies"];
+  contextCheckpointReceipt?: RunRecord["contextCheckpointReceipt"];
   /** The coordinator instance the run is a child of and the key its spawn
    *  carried (item 48). Omitted for every run no coordinator spawned. */
   coordinator?: CoordinatorTag;
@@ -438,6 +461,8 @@ export function assembleRunRecord(input: {
     userId: msg.userId,
     ...(msg.relayedBy !== undefined ? { relayedBy: msg.relayedBy } : {}),
     ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
+    ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
+    ...(msg.directAudience !== undefined ? { directAudience: structuredClone(msg.directAudience) } : {}),
     threadKey: msg.threadKey,
     channelVisibility: input.channelVisibility,
     ...(input.repo !== undefined && !privateMain ? { repo: input.repo } : {}),
@@ -476,6 +501,14 @@ export function assembleRunRecord(input: {
     ...(operator !== undefined ? { operator } : {}),
     ...(input.profile !== undefined ? { profile: input.profile } : {}),
     ...(input.parentRunId !== undefined ? { parentRunId: input.parentRunId } : {}),
+    ...(input.childHandoff !== undefined ? { childHandoff: structuredClone(input.childHandoff) } : {}),
+    ...(input.contextCheckpointReceipt !== undefined
+      ? { contextCheckpointReceipt: structuredClone(input.contextCheckpointReceipt) }
+      : {}),
+    ...(input.sourceReads !== undefined ? { sourceReads: structuredClone(input.sourceReads) } : {}),
+    ...(input.contextDependencies !== undefined
+      ? { contextDependencies: structuredClone(input.contextDependencies) }
+      : {}),
     ...coordinatorFields(input.coordinator),
     ...(instanceId !== undefined ? { instanceId } : {}),
     ...(decisionRecord !== undefined ? decisionRecord : {}),

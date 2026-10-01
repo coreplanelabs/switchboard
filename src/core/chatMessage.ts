@@ -9,6 +9,8 @@
 // native provider layer (docs/decisions/0032-pi-is-the-harness-the-native-loop-retires.md,
 // step 5 of the series).
 
+import type { SourceResultReceipt } from "./references/sourceResultContext.js";
+
 export type ContentPart =
   | { type: "text"; text: string }
   | { type: "image"; mediaType: string; data: string } // data is base64, no data: prefix
@@ -74,4 +76,6 @@ function base64Bytes(b64: string): number {
 export interface ChatMessage {
   role: "user" | "assistant";
   content: ContentPart[];
+  /** Internal persisted result proof; provider adapters use role/content only. */
+  sourceResults?: readonly SourceResultReceipt[];
 }

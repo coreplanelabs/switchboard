@@ -2491,9 +2491,23 @@ describe("artifact route (item 26)", () => {
         if (sourceOfReceipt === "reclaimed") expect(saved.events).toEqual([]);
         await h.runs.put(saved);
         // Even a copied valid receipt belongs only to its original run.
-        await h.runs.put(record("r2", [event], { publicationSettlement: event.settlement }));
+        const copied = record("r2", [event], { publicationSettlement: event.settlement });
+        expect(await h.runs.put(copied)).toMatchObject({ stored: false });
         await h.runs.put(record("r3", []));
-        await h.runs.put(
+        const savedRead = await h.runs.get("r1");
+        const refusesCorruptCheckpoint = async (corrupt: RunRecord) => {
+          // A rejected write leaves the valid record intact. Simulate a corrupt
+          // backing-store read separately to exercise the route's own boundary.
+          expect(await h.runs.put(corrupt)).toMatchObject({ stored: false });
+          expect(await h.runs.get("r1")).toEqual(savedRead);
+          const read = vi.spyOn(h.runs, "get").mockResolvedValueOnce(corrupt);
+          try {
+            expect((await get(h, `/runs/r1/artifacts/${key}`)).status).toBe(404);
+          } finally {
+            read.mockRestore();
+          }
+        };
+        await refusesCorruptCheckpoint(
           record("r1", [event], {
             ...meta,
             publicationSettlement: {
@@ -2505,9 +2519,8 @@ describe("artifact route (item 26)", () => {
             },
           }),
         );
-        expect((await get(h, `/runs/r1/artifacts/${key}`)).status).toBe(404);
         for (const field of ["instanceId", "step", "repo", "requester", "threadKey"]) {
-          await h.runs.put(
+          await refusesCorruptCheckpoint(
             record("r1", [event], {
               ...meta,
               publicationSettlement: {
@@ -2516,7 +2529,6 @@ describe("artifact route (item 26)", () => {
               },
             }),
           );
-          expect((await get(h, `/runs/r1/artifacts/${key}`)).status).toBe(404);
         }
         for (const canonical of [
           null,
@@ -2533,7 +2545,12 @@ describe("artifact route (item 26)", () => {
         expect((await get(h, `/runs/r1/artifacts/${key}`)).status).toBe(200);
         const nobody: LiveViewContext = { actor: accessActor({ sub: "nobody" }, () => NO_GRANTS) };
         expect((await get(h, `/runs/r1/artifacts/${key}`, nobody)).status).toBe(404);
-        expect((await get(h, `/runs/r2/artifacts/${key}`)).status).toBe(404);
+        const read = vi.spyOn(h.runs, "get").mockResolvedValueOnce(copied);
+        try {
+          expect((await get(h, `/runs/r2/artifacts/${key}`)).status).toBe(404);
+        } finally {
+          read.mockRestore();
+        }
         expect((await get(h, `/runs/r3/artifacts/${key}`)).status).toBe(404);
       },
     );

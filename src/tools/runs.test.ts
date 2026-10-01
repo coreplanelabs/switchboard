@@ -62,7 +62,11 @@ function ctxFor(
   over: Partial<ToolContext> & { runId?: string } = {},
 ): ToolContext {
   const { runId, ...rest } = over;
-  return { executor, runs: { service: w.service, actor, ...(runId !== undefined ? { runId } : {}) }, ...rest };
+  return {
+    executor,
+    runs: { service: w.service, actor, admitContext: async () => true, ...(runId !== undefined ? { runId } : {}) },
+    ...rest,
+  };
 }
 
 function persisted(id: string, over: Partial<RunRecord> = {}): RunRecord {
@@ -172,6 +176,47 @@ describe("list_runs — the runs the requester may see", () => {
 });
 
 describe("get_run_status — one run as the requester may see it", () => {
+  it.each(["missing", "throws"])("withholds a stored body when context admission is %s", async (mode) => {
+    const w = world();
+    await w.store.put(persisted("child"));
+    const ctx = ctxFor(w, alice);
+    ctx.runs!.admitContext =
+      mode === "missing"
+        ? undefined
+        : async () => {
+            throw new Error("source unavailable");
+          };
+    const row = JSON.parse(String(await getRunStatusTool.run({ id: "child" }, ctx)));
+    expect(row).toMatchObject({ id: "child", status: "completed", contextUnavailable: expect.any(String) });
+    expect(row.finalReply).toBeUndefined();
+  });
+
+  it.each([getRunStatusTool, awaitRunsTool])(
+    "$name omits stored answer and review details when current context admission fails",
+    async (tool) => {
+      const w = world();
+      await w.store.put(
+        persisted("child", {
+          agent: "review",
+          verdict: { verdict: "approve", summary: "source-derived result" },
+          reviewPost: { posted: false, reason: "source-derived skip" },
+        }),
+      );
+      const ctx = ctxFor(w, alice, { wait: waitFor(w).wait });
+      const admit = vi.fn(async () => false);
+      ctx.runs!.admitContext = admit;
+      const raw = JSON.parse(
+        String(await tool.run(tool.name === "await_runs" ? { ids: ["child"] } : { id: "child" }, ctx)),
+      );
+      const result = tool.name === "await_runs" ? raw.runs[0] : raw;
+      expect(result).toMatchObject({ id: "child", status: "completed", contextUnavailable: expect.any(String) });
+      expect(result.finalReply).toBeUndefined();
+      expect(result.reviewVerdict).toBeUndefined();
+      expect(result.reviewPost).toBeUndefined();
+      expect(admit).toHaveBeenCalledExactlyOnceWith("child");
+    },
+  );
+
   it("a review result is taken from the durable verdict and post record, not the closing prose", async () => {
     const w = world();
     const head = "a".repeat(40);
@@ -326,7 +371,7 @@ describe("spawn_run — the capability, called with the run's remaining wall clo
     expect(out).toContain("`coding`");
   });
 
-  it("its description renders from the registry: the presets a child can run are the siblings whose identity is not `write`, the repository presets are those whose machine carries a checkout, `spawn_identity` is named, and the child starts from this conversation's text plus the prompt rather than seeing none of the thread", () => {
+  it("its description renders from the registry: the presets a child can run are the siblings whose identity is not `write`, the repository presets are those whose machine carries a checkout, `spawn_identity` is named, and the child receives structured evidence and durable parent context", () => {
     const desc = spawnRunTool.description;
     const siblings = Object.values(AGENTS).filter((a) => a.name !== "conductor");
     const readers = siblings.filter((a) => a.identity !== "write").map((a) => a.name);
@@ -337,7 +382,9 @@ describe("spawn_run — the capability, called with the run's remaining wall clo
     for (const name of writers) expect(desc).toContain(name);
     expect(desc).toContain("spawn_identity");
     expect(desc).not.toMatch(/sees none of this thread/);
-    expect(desc).toMatch(/this conversation's text/);
+    expect(desc).toMatch(/structured evidence/);
+    expect(desc).toMatch(/completed tool results and attachments/);
+    expect(desc).toMatch(/durable parent recall/);
     const presetSchema = (spawnRunTool.inputSchema.properties as Record<string, { description: string }>).preset;
     expect(presetSchema.description).toContain(readers.join(", "));
   });
@@ -593,6 +640,30 @@ const report = (out: unknown) =>
   };
 
 describe("await_runs — the children's ends, as data, within the parent's budget", () => {
+  it("admits an earlier finished result only when the final report is ready to expose it", async () => {
+    const w = world();
+    await w.store.put(persisted("early"));
+    const { run } = liveChild(w, new ThreadAdmission<DispatchFollowUp>());
+    let allowed = true;
+    const control = new RunControl();
+    const { wait } = waitFor(w, {
+      control,
+      hooks: [
+        () => {
+          allowed = false;
+          control.requestStop("soft");
+        },
+      ],
+    });
+    const ctx = ctxFor(w, alice, { wait });
+    const admit = vi.fn(async () => allowed);
+    ctx.runs!.admitContext = admit;
+    const result = report(await awaitRunsTool.run({ ids: ["early", run.id] }, ctx));
+    expect(result.runs[0]).toMatchObject({ id: "early", status: "completed", contextUnavailable: expect.any(String) });
+    expect(result.runs[0].finalReply).toBeUndefined();
+    expect(admit).toHaveBeenCalledExactlyOnceWith("early");
+  });
+
   it("a review child returns its posted verdict even when its closing prose omits it", async () => {
     const w = world();
     const head = "b".repeat(40);

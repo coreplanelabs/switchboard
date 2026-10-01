@@ -5,6 +5,8 @@ import { recordingSink } from "../testing/recordingSink.js";
 import { configureInternalHosts, internalHostsOf, NO_INTERNAL_HOSTS } from "../trace/internalHosts.js";
 import { parseTraceparent } from "../trace/traceparent.js";
 import { createTracer } from "../trace/tracer.js";
+import { mintRecord } from "./engine.js";
+import { sealMemoryCandidate } from "./provenance.js";
 
 // Feature: docs/reference/specs/memory.md — the durable MemoryStore: an HTTPS
 // client to the Memory Worker, mirroring ResidentExecutor's remote plane. The
@@ -50,6 +52,26 @@ function store(fetchImpl: typeof fetch, warnings: string[] = []) {
 }
 
 describe("WorkerMemoryStore.retrieve", () => {
+  it("preserves memory provenance on the wire and rejects malformed envelopes individually", async () => {
+    const candidate = await sealMemoryCandidate("org:acme", cand, {
+      version: 1,
+      status: "known",
+      revision: 1,
+      origins: [],
+      slack: [],
+      mcp: [],
+    });
+    const valid = mintRecord("org:acme", 1, 100, candidate);
+    const { fetch, calls } = fakeFetch((call) =>
+      call.url.endsWith("/write")
+        ? jsonRes({ inserted: 1 })
+        : jsonRes({ records: [valid, { ...valid, provenance: { version: 2 } }] }),
+    );
+    const memory = store(fetch);
+    await memory.write("org:acme", [candidate]);
+    expect(JSON.parse(calls[0].init.body as string).records[0].provenance).toEqual(candidate.provenance);
+    expect(await memory.retrieve({ scopeKey: "org:acme", query: "x", limit: 10 })).toEqual([valid]);
+  });
   it("POSTs /retrieve with the bearer and the query, returns the Worker's ranked records", async () => {
     const { fetch, calls } = fakeFetch(() => jsonRes({ records: [record] }));
     const out = await store(fetch).retrieve({ scopeKey: "org:acme", query: "deploy", limit: 8 });

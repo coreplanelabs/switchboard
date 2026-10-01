@@ -4,6 +4,7 @@
 // bot and by `deploy/cloudflare-memory/worker.ts` alike, the way runRecord.ts is.
 
 import type { ChatMessage } from "../chatMessage.js";
+import type { ChildHandoff } from "../dispatch/handoff.js";
 import { PROVIDER_FAILURE_CAUSES, type ProviderFailureCause, type ToolDef } from "../provider.js";
 import type { Verbosity } from "../verbosity.js";
 import type { ChannelVisibility } from "../authz/types.js";
@@ -95,6 +96,8 @@ export interface LiveRunMeta {
   /** The run that spawned this one (item 46), so a reclaimed child's record
    *  still names its parent. Absent on every run a person or a schedule started. */
   parentRunId?: string;
+  /** Frozen parent context reference, retained independently of transcript compaction. */
+  childHandoff?: ChildHandoff;
   /** The run this claim restarts (record 0064; run-history item 54): set by
    *  the restart-from-request dispatch, so the plane knows the claim continues
    *  a run it saw end `restarting` — the object sends the waiting parent
@@ -105,6 +108,9 @@ export interface LiveRunMeta {
    *  carried (item 48) — stored at the claim, so a reclaimed child's record
    *  still sends the parent its event and a retried spawn finds its run. */
   parentInstanceId?: string;
+  /** Unit identity from admitted coordinator state, never parsed from a step key. */
+  coordinatorUnit?: string;
+  coordinatorAttempt?: number;
   idempotencyKey?: string;
   /** The original Ship unit cap carried by the claim, available before its tag event is retained. */
   costCapUsd?: number;

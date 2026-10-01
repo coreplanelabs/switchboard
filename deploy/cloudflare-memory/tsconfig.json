@@ -16,6 +16,8 @@
   "include": [
     "worker.ts",
     "worker.test.ts",
+    "runs.test.ts",
+    "sessionUnification.test.ts",
     "schedules.test.ts",
     "backgroundTasks.ts",
     "backgroundTasks.test.ts",

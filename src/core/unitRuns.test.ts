@@ -223,12 +223,12 @@ describe("unitFactsOf — private worker projection", () => {
 describe("unitSessionKeys — the unit page's working-session keys (session-log item 13)", () => {
   it("derives <instance>:<unit>:coding and <instance>:<unit>:review, and a re-issue's attempt suffix is stripped so it searches the lanes it continued", () => {
     expect(unitSessionKeys({ instanceId: "plan-p", id: "U16" })).toEqual({
-      coding: "plan-p:U16:coding",
-      review: "plan-p:U16:review",
+      coding: "plan-p:U16:coding:@context-v1",
+      review: "plan-p:U16:review:@context-v1",
     });
     expect(unitSessionKeys({ instanceId: "plan-p-2", id: "U16", instance: { attempt: 2 } })).toEqual({
-      coding: "plan-p:U16:coding",
-      review: "plan-p:U16:review",
+      coding: "plan-p:U16:coding:@context-v1",
+      review: "plan-p:U16:review:@context-v1",
     });
   });
 });

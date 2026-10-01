@@ -91,6 +91,68 @@ function expectNoToken(value: unknown): void {
 }
 
 describe("RunsService.getRun", () => {
+  it("never exposes internal source archives or handoff context through any persisted projection", async () => {
+    const { store, svc } = setup();
+    const base = record("archive", NOW);
+    const internal = {
+      sourceReads: {
+        version: 1 as const,
+        owner: {
+          runId: base.id,
+          requester: base.userId,
+          agent: base.agent!,
+          channelId: base.channelId,
+          threadKey: base.threadKey,
+        },
+        recoverable: false,
+        records: [],
+      },
+      contextDependencies: {
+        version: 1 as const,
+        status: "known" as const,
+        revision: 1,
+        origins: [
+          {
+            runId: "private-parent",
+            requester: "slack:PRIVATE",
+            channelId: "slack:PRIVATE",
+            threadKey: "slack:PRIVATE:1",
+          },
+        ],
+        slack: [],
+        mcp: [],
+      },
+      childHandoff: {
+        version: 1 as const,
+        source: {
+          runId: "private-parent",
+          requester: "slack:PRIVATE",
+          channelId: "slack:PRIVATE",
+          threadKey: "slack:PRIVATE:1",
+        },
+        session: { key: "slack:PRIVATE:1:general", from: 0, to: 0 },
+        notepad: { text: "raw private handoff notes", updatedAt: 1, hash: "a".repeat(64) },
+        assets: [],
+      },
+    };
+    await store!.put({ ...base, ...internal });
+    for (const view of [
+      await svc.getRun(base.id),
+      await svc.getRun(base.id, { include: "messages" }),
+      await svc.getRun(base.id, { requireFinalRecord: true, include: "messages" }),
+      await svc.listRuns({ status: "all", visibleTo: ALL }),
+    ]) {
+      const json = JSON.stringify(view);
+      for (const field of [
+        "sourceReads",
+        "childHandoff",
+        "contextDependencies",
+        "raw private handoff",
+        "slack:PRIVATE",
+      ])
+        expect(json).not.toContain(field);
+    }
+  });
   it.each(["local", "foreign", "finished-local", "stored"] as const)(
     "exposes only committed audience diagnostics from %s with explicit include",
     async (source) => {

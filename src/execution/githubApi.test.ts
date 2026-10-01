@@ -188,6 +188,27 @@ describe("RestGithubApi — reads use the read token", () => {
     ]);
   });
 
+  it("listRepos includes every connected repository beyond three pages", async () => {
+    const { api: gh, calls } = api(({ url }) => {
+      const page = Number(new URL(url).searchParams.get("page"));
+      return {
+        status: 200,
+        body: {
+          total_count: 400,
+          repositories: Array.from({ length: 100 }, (_, index) => ({
+            full_name: `acme/repo-${(page - 1) * 100 + index}`,
+            private: true,
+            default_branch: "main",
+          })),
+        },
+      };
+    });
+    const repos = await gh.listRepos();
+    expect(repos).toHaveLength(400);
+    expect(repos.at(-1)?.fullName).toBe("acme/repo-399");
+    expect(calls).toHaveLength(4);
+  });
+
   it("listIssues drops pull requests, passes state/labels/limit, and maps rows; getIssue fetches comments only when there are any and refuses a PR", async () => {
     const row = (n: number, extra: Record<string, unknown> = {}) => ({
       number: n,

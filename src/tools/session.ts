@@ -13,7 +13,19 @@
 // and its notepad write under this generation; without one — an untracked run,
 // a ship pipeline, a process with no ledger — the tools say they are not
 // available.
-import type { ChatMessage } from "../core/chatMessage.js";
+import type { ChatMessage, ContentPart, ToolResultContent } from "../core/chatMessage.js";
+import {
+  boundChildHandoff,
+  parentContextOf,
+  sameHandoffSource,
+  snapshotNotepad,
+  type ChildHandoff,
+  type HandoffSource,
+  type ParentContext,
+} from "../core/dispatch/handoff.js";
+import { contextDependenciesHash, type ContextDependencies } from "../core/references/contextDependencies.js";
+import { sourceHash } from "../core/references/receipts.js";
+import { SEED_BUDGET_BYTES } from "../core/dispatch/seed.js";
 import { safeBasename } from "../artifacts/keys.js";
 import { authorize } from "../core/authz/authorize.js";
 import { whereIs, type ThreadAsset } from "../core/dispatch/threadAssets.js";
@@ -30,6 +42,15 @@ import type { RunnableTool, ToolContext } from "./runnableTool.js";
 export interface SessionCapability {
   /** The run's place in the log: the key, where its seed began, its request, its range. */
   session: RunSession;
+  /** A frozen parent view; each read checks current source access again. */
+  parent?: ParentSessionCapability;
+  ancestors?: ParentSessionCapability[];
+  /** Snapshot durable references and a bounded structured working window. */
+  captureHandoff?: (
+    source: ChildHandoff["source"],
+    captureDependencies?: (snapshot: HandoffSource) => Promise<ContextDependencies>,
+    through?: number,
+  ) => Promise<ParentContext>;
   search(query: string, limit: number): Promise<{ hits: SessionHit[]; gaps: number[] }>;
   /** One turn whole by its log index, or undefined when the log has none there. */
   readTurn(idx: number): Promise<ChatMessage | undefined>;
@@ -50,6 +71,14 @@ export interface SessionCapability {
   workspacePathOf?: (key: string) => string | undefined;
 }
 
+export interface ParentSessionCapability {
+  handoff: HandoffSource;
+  search(query: string, limit: number): Promise<{ hits: SessionHit[]; gaps: number[] }>;
+  readTurn(idx: number): Promise<ChatMessage | undefined>;
+  readNotepad(): Promise<Notepad | null>;
+  assets(): Promise<ThreadAsset[]>;
+}
+
 /** The thread's files as the dispatcher hands them to the capability: the
  *  catalogue read and this run's workspace paths (`WorkspaceFiles`). */
 export interface SessionAssets {
@@ -60,19 +89,157 @@ export interface SessionAssets {
 /** The capability for a run with a session, over the write-through; nothing
  *  for a run without one. The thread's files join it only when the caller supplies
  *  an admitted catalogue reader. */
+export interface InheritedSessionContext {
+  handoff: ChildHandoff;
+  /** Includes the source run and the current destination audience. */
+  canRead: (source: HandoffSource) => Promise<boolean>;
+  /** Recover omitted inline data from canonical stored snapshots/artifact events. */
+  loadSource?: (source: HandoffSource) => Promise<HandoffSource | undefined>;
+}
+
 export function sessionCapabilityFor(
   run: Pick<LedgerRun, "session" | "runId"> | undefined,
-  ledger: Pick<LedgerWriteThrough, "readSession" | "searchSession" | "readNotepad" | "writeNotepad">,
+  ledger: Pick<LedgerWriteThrough, "readSession" | "searchSession" | "readNotepad" | "writeNotepad"> &
+    Partial<Pick<LedgerWriteThrough, "readSessionTail">>,
   assets?: SessionAssets,
+  inherited?: InheritedSessionContext,
+  /** Revalidate and persist current session dependencies after bytes are read. */
+  admitOwnContext?: () => Promise<boolean>,
 ): SessionCapability | undefined {
   const session = run?.session;
   if (!session) return undefined;
+  const admitRead = async (): Promise<boolean> => {
+    if (!admitOwnContext) return true;
+    try {
+      return await admitOwnContext();
+    } catch {
+      return false;
+    }
+  };
+  const resolvedSource = async (handoff: HandoffSource): Promise<HandoffSource> => {
+    if (!handoff.omitted?.assets && !handoff.omitted?.notepad) return handoff;
+    const resolved = await inherited?.loadSource?.(handoff);
+    if (!resolved) throw new Error("the retained parent context could not be retrieved from its source");
+    if (!sameHandoffSource(handoff, resolved))
+      throw new Error("the retained parent context no longer matches its frozen source");
+    if (resolved.notepad?.text !== undefined) {
+      const hash = (await snapshotNotepad({ text: resolved.notepad.text, updatedAt: resolved.notepad.updatedAt })).hash;
+      if (hash !== resolved.notepad.hash) throw new Error("the retained parent notes do not match their saved hash");
+    }
+    return resolved;
+  };
+  const parentCapability = (handoff: HandoffSource): ParentSessionCapability => ({
+    handoff,
+    search: async (query: string, limit: number) => {
+      if (!(await inherited!.canRead(handoff))) return { hits: [], gaps: [] };
+      const { key, from, to } = handoff.session;
+      const result = await ledger.searchSession(key, query, SEARCH_MAX_HITS);
+      return {
+        hits: result.hits.filter((h) => h.idx >= from && h.idx <= to).slice(0, limit),
+        gaps: result.gaps.filter((idx) => idx >= from && idx <= to),
+      };
+    },
+    readTurn: async (idx: number) => {
+      const { key, from, to } = handoff.session;
+      if (idx < from || idx > to || !(await inherited!.canRead(handoff))) return undefined;
+      return (await ledger.readSession(key, idx, idx)).messages[0];
+    },
+    readNotepad: async () => {
+      if (!(await inherited!.canRead(handoff))) return null;
+      const note = (await resolvedSource(handoff)).notepad;
+      return note?.text !== undefined ? { text: note.text, updatedAt: note.updatedAt } : null;
+    },
+    assets: async () =>
+      (await inherited!.canRead(handoff)) ? structuredClone((await resolvedSource(handoff)).assets) : [],
+  });
+  const parent = inherited ? parentCapability(inherited.handoff) : undefined;
+  const ancestors = inherited?.handoff.ancestors?.map(parentCapability);
   return {
     session,
-    search: (query, limit) => ledger.searchSession(session.key, query, limit),
-    readTurn: async (idx) => (await ledger.readSession(session.key, idx, idx)).messages[0],
-    readConversation: async () => (await ledger.readSession(session.key, session.seedFrom)).messages,
-    readNotepad: () => ledger.readNotepad(session.key),
+    search: async (query, limit) => {
+      const result = await ledger.searchSession(session.key, query, limit);
+      return (await admitRead()) ? result : { hits: [], gaps: [] };
+    },
+    readTurn: async (idx) => {
+      const transcript = await ledger.readSession(session.key, idx, idx);
+      return (await admitRead()) ? transcript.messages[0] : undefined;
+    },
+    readConversation: async () => {
+      const transcript = await ledger.readSession(session.key, session.seedFrom);
+      if (!(await admitRead())) throw new Error("the session context could not be admitted");
+      return transcript.messages;
+    },
+    readNotepad: async () => {
+      const note = await ledger.readNotepad(session.key);
+      if (note !== null) return (await admitRead()) ? note : null;
+      return (await parent?.readNotepad()) ?? null;
+    },
+    ...(parent ? { parent } : {}),
+    ...(ancestors ? { ancestors } : {}),
+    ...(ledger.readSessionTail
+      ? {
+          captureHandoff: async (
+            source: ChildHandoff["source"],
+            captureDependencies?: (snapshot: HandoffSource) => Promise<ContextDependencies>,
+            through?: number,
+          ): Promise<ParentContext> => {
+            if (source.runId !== run.runId) throw new Error("parent context source does not match its run");
+            // Freeze bytes first. A dependency union read before notes can miss
+            // a concurrent note's source, even when the transcript did not grow.
+            const tail = await ledger.readSessionTail!(session.key, SEED_BUDGET_BYTES);
+            if (through !== undefined && tail.from + tail.transcript.turns - 1 > through) {
+              // Other session appends cannot expand this run's committed source range.
+              tail.from = Math.min(tail.from, through + 1);
+              tail.transcript =
+                through < tail.from
+                  ? { complete: true, turns: 0, messages: [], compactions: [] }
+                  : await ledger.readSession(session.key, tail.from, through);
+            }
+            const notepad = await ledger.readNotepad(session.key);
+            const files = await (assets?.read() ?? Promise.resolve([]));
+            if (!tail.transcript.complete) throw new Error(`parent context could not be read: ${tail.transcript.gap}`);
+            const snapshot: ChildHandoff = {
+              version: 1,
+              source,
+              session: { key: session.key, from: 0, to: tail.from + tail.transcript.turns - 1 },
+              window: {
+                from: tail.from,
+                to: tail.from + tail.transcript.turns - 1,
+                hash: await sourceHash({ messages: tail.transcript.messages, actors: tail.transcript.actors ?? [] }),
+              },
+
+              ...(notepad ? { notepad: await snapshotNotepad(notepad) } : {}),
+              assets: files,
+              ...(tail.requiresFreshSources ? { requiresFreshSources: true as const } : {}),
+              ...(inherited
+                ? {
+                    ancestors: [
+                      {
+                        source: inherited.handoff.source,
+                        session: inherited.handoff.session,
+                        snapshotRunId: inherited.handoff.snapshotRunId ?? run.runId,
+                        ...(inherited.handoff.window ? { window: inherited.handoff.window } : {}),
+                        ...(inherited.handoff.dependencies ? { dependencies: inherited.handoff.dependencies } : {}),
+                        ...(inherited.handoff.notepad ? { notepad: inherited.handoff.notepad } : {}),
+                        assets: inherited.handoff.assets,
+                        ...(inherited.handoff.assetRuns ? { assetRuns: inherited.handoff.assetRuns } : {}),
+                        ...(inherited.handoff.omitted ? { omitted: inherited.handoff.omitted } : {}),
+                        ...(inherited.handoff.requiresFreshSources ? { requiresFreshSources: true as const } : {}),
+                      },
+                      ...(inherited.handoff.ancestors ?? []),
+                    ],
+                  }
+                : {}),
+            };
+            if (captureDependencies) {
+              const value = await captureDependencies(snapshot);
+              snapshot.dependencies = { value, hash: await contextDependenciesHash(value) };
+            }
+            const handoff = boundChildHandoff(snapshot);
+            return parentContextOf(tail.transcript.messages, handoff, tail.transcript.actors);
+          },
+        }
+      : {}),
     writeNotepad: (text) => ledger.writeNotepad(session.key, text, run.runId),
     ...(assets ? { assets: assets.read, workspacePathOf: assets.pathOf } : {}),
   };
@@ -128,10 +295,20 @@ export const recallTool: RunnableTool = {
     "message). Use it when you need something said or seen earlier that is not in front of you: a failing test's " +
     "name, a command's output, a decision. `limit` defaults to 5 (at most 50). A hit that names a file of this " +
     "thread carries the file's key and where it is for this run; `assets: true` lists every file the thread " +
-    "received or its runs produced instead of searching.",
+    'received or its runs produced instead of searching. Pass source: "parent" to read the frozen source log or files inherited at handoff.',
   inputSchema: {
     type: "object",
     properties: {
+      source: {
+        type: "string",
+        enum: ["session", "parent"],
+        description: "Read this session (default) or the frozen parent context inherited at handoff",
+      },
+      parentRunId: {
+        type: "string",
+        description:
+          "Select an earlier inherited source by its run ID; only registered ancestor references can be read",
+      },
       query: { type: "string", description: "Words to search for; matching is by word, in relevance order" },
       limit: { type: "integer", description: "How many turns to return (default 5, at most 50)" },
       turn: {
@@ -156,19 +333,28 @@ export const recallTool: RunnableTool = {
     if (!(await mayRead(ctx))) {
       return JSON.stringify(turn !== undefined ? { turn, content: null } : listAssets ? { assets: [] } : { hits: [] });
     }
+    const parent = input.source === "parent";
+    const selected = parent
+      ? typeof input.parentRunId === "string"
+        ? [ctx.session.parent, ...(ctx.session.ancestors ?? [])].find(
+            (p) => p?.handoff.source.runId === input.parentRunId,
+          )
+        : ctx.session.parent
+      : ctx.session;
+    if (!selected) return "no parent context is available in this session.";
     if (turn !== undefined) {
-      const message = turn >= 0 ? await ctx.session.readTurn(turn) : undefined;
+      const message = turn >= 0 ? await selected.readTurn(turn) : undefined;
       if (!message) return `no turn ${turn} in this session's log.`;
-      return JSON.stringify({ turn, role: message.role, content: message.content });
+      return recalledTurn(turn, message, parent ? "parent" : undefined);
     }
     if (listAssets) {
-      if (!ctx.session.assets) {
+      if (!selected.assets) {
         return JSON.stringify({
           assets: [],
           note: "the thread's file catalogue is not available to this run",
         });
       }
-      const assets = await ctx.session.assets();
+      const assets = await selected.assets();
       return JSON.stringify({
         assets: assets.map((a) => assetView(a, ctx.session!.workspacePathOf?.(a.key))),
         ...(assets.length === 0 ? { note: "no run of this thread has received or produced a file" } : {}),
@@ -178,16 +364,16 @@ export const recallTool: RunnableTool = {
       MAX_HITS,
       Math.max(1, typeof input.limit === "number" ? Math.trunc(input.limit) : DEFAULT_HITS),
     );
-    const { hits, gaps } = await ctx.session.search(query, limit);
+    const { hits, gaps } = await selected.search(query, limit);
     const notes: string[] = [];
     if (hits.length === 0)
       notes.push("no turn of this session's log matches; your notes (notes {}) may hold what you look for");
-    if (ctx.session.session.seedFrom === 0) notes.push("this is the first run of its session: the log begins with it");
+    if (!parent && ctx.session.session.seedFrom === 0)
+      notes.push("this is the first run of its session: the log begins with it");
     // A hit that names one of the thread's files — an attachments line, an
     // attach_file call — carries the file's key and where it is for this run;
     // the catalogue is read only when some hit can name one.
-    const catalogue =
-      ctx.session.assets && hits.some((h) => FILE_BEARING.test(h.text)) ? await ctx.session.assets() : [];
+    const catalogue = selected.assets && hits.some((h) => FILE_BEARING.test(h.text)) ? await selected.assets() : [];
     return JSON.stringify({
       hits: hits.map((h) => {
         const files = filesNamedIn(h.text, catalogue);
@@ -219,10 +405,35 @@ export const notesTool: RunnableTool = {
     "with `text` to write; with nothing to read.",
   inputSchema: {
     type: "object",
-    properties: { text: { type: "string", description: "The whole notepad as it should read from now on" } },
+    properties: {
+      text: { type: "string", description: "The whole notepad as it should read from now on" },
+      source: {
+        type: "string",
+        enum: ["session", "parent"],
+        description:
+          "Read this session (default) or the parent working notes frozen at handoff; parent notes are read-only",
+      },
+      parentRunId: {
+        type: "string",
+        description: "Select working notes from an earlier inherited source by its run ID",
+      },
+    },
   },
   async run(input, ctx) {
     if (!ctx.session) return UNAVAILABLE;
+    if (input.source === "parent") {
+      if (typeof input.text === "string")
+        return "parent notes are a read-only handoff snapshot; write your own notes instead.";
+      if (!(await mayRead(ctx))) return "(parent notes are unavailable)";
+      const selected =
+        typeof input.parentRunId === "string"
+          ? [ctx.session.parent, ...(ctx.session.ancestors ?? [])].find(
+              (p) => p?.handoff.source.runId === input.parentRunId,
+            )
+          : ctx.session.parent;
+      const current = await selected?.readNotepad();
+      return current?.text || "(parent notes are unavailable)";
+    }
     if (typeof input.text !== "string") {
       const current = await ctx.session.readNotepad();
       return current && current.text.length > 0 ? current.text : "(your notes for this thread are empty)";
@@ -237,6 +448,33 @@ export const notesTool: RunnableTool = {
     return `notes saved (${bytes} bytes); they ride your system prompt at the next run in this thread and reach you again after a compaction.`;
   },
 };
+
+/** Binary evidence remains a native tool-result part, never base64 buried in
+ * JSON text that a model cannot inspect. Metadata preserves the original IDs. */
+function recalledTurn(turn: number, message: ChatMessage, source?: "parent"): ToolResultContent {
+  const binary: Extract<ContentPart, { type: "image" | "document" }>[] = [];
+  const content = message.content
+    .filter((part) => part.type !== "thinking" && part.type !== "redacted_thinking")
+    .map((part) => {
+      if (part.type === "image" || part.type === "document") {
+        binary.push(part);
+        return { ...part, data: `[binary part ${binary.length}]` };
+      }
+      if (part.type === "tool_result" && Array.isArray(part.content)) {
+        return {
+          ...part,
+          content: part.content.map((p) => {
+            if (p.type === "text") return p;
+            binary.push(p);
+            return { ...p, data: `[binary part ${binary.length}]` };
+          }),
+        };
+      }
+      return part;
+    });
+  const text = JSON.stringify({ turn, ...(source ? { source } : {}), role: message.role, content });
+  return binary.length ? [{ type: "text", text }, ...binary] : text;
+}
 
 /** The two session tools, in the order the toolsets list them. */
 export const SESSION_TOOLS: readonly RunnableTool[] = [recallTool, notesTool];

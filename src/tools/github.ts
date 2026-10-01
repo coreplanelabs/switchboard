@@ -56,7 +56,10 @@ async function readGate(
   ctx: Parameters<RunnableTool["run"]>[1],
   repo: string,
 ): Promise<string | undefined> {
-  if (ctx.agentName !== "orchestrator") return undefined;
+  if (ctx.agentName !== "orchestrator") {
+    ctx.github?.recordRead?.(repo);
+    return undefined;
+  }
   try {
     const repos = await readableRepos(ctx);
     if (!repos?.some((r) => r.fullName.toLowerCase() === repo.toLowerCase())) return `${tool}: ${READ_REFUSED}`;
@@ -137,7 +140,7 @@ export const githubReposTool: RunnableTool = {
       if (ctx.agentName === "orchestrator" && !scoped)
         return "github_repos: repository access could not be verified for this requester.";
       const repos = scoped ?? (await ctx.github.api.listRepos());
-      if (ctx.agentName === "orchestrator") for (const repo of repos) ctx.github.recordRead?.(repo.fullName);
+      for (const repo of repos) ctx.github.recordRead?.(repo.fullName);
       if (repos.length === 0) return "github_repos: the installation covers no repositories.";
       return `Repositories reachable (${repos.length}):\n${repos.map((r) => `- ${r.fullName}${r.private ? " (private)" : ""} — default branch ${r.defaultBranch}${r.description ? ` — ${r.description}` : ""}`).join("\n")}`;
     } catch (err) {
@@ -253,6 +256,7 @@ export const githubSearchCodeTool: RunnableTool = {
       const hits = (await ctx.github.api.searchCode(query, repo, Number.isFinite(limit) ? limit : undefined)).filter(
         (hit) => ctx.agentName !== "orchestrator" || hit.repo.toLowerCase() === repo?.toLowerCase(),
       );
+      if (ctx.agentName !== "orchestrator") for (const hit of hits) ctx.github.recordRead?.(hit.repo);
       if (hits.length === 0) return `No code matches for "${query}"${repo ? ` in ${repo}` : ""}.`;
       return `Code matches for "${query}"${repo ? ` in ${repo}` : ""} (${hits.length}):\n\n${hits.map((h, i) => `${i + 1}. ${h.repo}:${h.path}\n   ${h.url}${h.fragments.length ? `\n   ${clip(h.fragments[0].replace(/\s+/g, " ").trim(), 240)}` : ""}`).join("\n\n")}`;
     } catch (err) {

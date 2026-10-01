@@ -13,6 +13,16 @@ import { isRunUsage, type RunUsage } from "./runUsage.js";
 import type { PushedBranch } from "../execution/residentRebind.js";
 import type { RunLiveState } from "./runLiveState.js";
 import { isHandoffShape, type Handoff } from "./ship/handoff.js";
+import { isChildHandoff, type ChildHandoff } from "./dispatch/handoff.js";
+import { contextReferencesOf, retainContextSources, type ContextReference } from "./runLedger/contextRetention.js";
+import { sourceReadState, type SourceReadState } from "../mcp/sourceReadState.js";
+import {
+  contextCheckpointMatchesRun,
+  isContextCheckpointReceipt,
+  type ContextCheckpointReceipt,
+} from "./references/contextCheckpoint.js";
+import { directAudienceStampOf, type DirectAudienceStamp } from "./runLedger/inboxMessage.js";
+import { isContextDependencies, type ContextDependencies } from "./references/contextDependencies.js";
 import {
   type FindingDisposition,
   isFindingDispositionsShape,
@@ -21,7 +31,7 @@ import {
   type ReviewPost,
   type ReviewVerdict,
 } from "./reviewVerdict.js";
-import { IDEMPOTENCY_KEY_PATTERN, INSTANCE_ID_PATTERN } from "./coordinator/contract.js";
+import { IDEMPOTENCY_KEY_PATTERN, INSTANCE_ID_PATTERN, UNIT_PATTERN } from "./coordinator/contract.js";
 import { isPipelineSummaryShape, type PipelineSummary } from "./pipelineStanding.js";
 import { RESTART_CLAIM_GRACE_MS } from "./budgets.js";
 import {
@@ -103,6 +113,9 @@ export interface RunRecord {
    *  names — the run is theirs, the grants were the credential's. Absent when
    *  the sender and the credential are one. */
   authenticatedAs?: string;
+  postedBy?: string;
+  /** Original private audience identity, retained for internal checkpoint verification. */
+  directAudience?: DirectAudienceStamp;
   threadKey: string;
   /** How the run's channel may travel (authorization): stamped at dispatch
    *  from the `ChannelDirectory`, read by `member-of` (a `public` run is
@@ -230,11 +243,25 @@ export interface RunRecord {
    *  `spawnChild()` names its parent, so a listing can draw the tree. Absent
    *  on every run a person or a schedule started. */
   parentRunId?: string;
+  /** The bounded source manifest used to seed this child and recall its
+   *  parent's context after compaction or restart (item 61). */
+  childHandoff?: ChildHandoff;
+  /** Original source action state, including bodies. Internal full-record
+   *  readers only; summaries and user-facing views must not expose it. */
+  sourceReads?: SourceReadState;
+  /** Flat dependency closure retained independently of source bodies. */
+  contextDependencies?: ContextDependencies;
+  /** Committed ordinary-history proof. Prepared state is never archived. */
+  contextCheckpointReceipt?: ContextCheckpointReceipt;
   /** The coordinator instance this run is a child of (item 48): the state
    *  Worker's finish sends that instance `run-finished-<id>` for a record
    *  carrying it, and `read-record` answers only for a matching instance.
    *  Absent on every run no coordinator spawned. */
   parentInstanceId?: string;
+  /** Canonical unit/attempt copied from admitted coordinator state. Zero names
+   * the original instance; reissues carry their durable attempt number. */
+  coordinatorUnit?: string;
+  coordinatorAttempt?: number;
   /** The key the coordinator's spawn carried (`<parentInstanceId>:<step>`,
    *  item 48), stored at the claim so a retried spawn finds its run. Present
    *  exactly when `parentInstanceId` is — both or neither, never one alone. */
@@ -508,7 +535,7 @@ export interface RunOperatorDecision {
     renewals?: number;
     verbosity?: Verbosity;
     repo?: string;
-    repoSource?: "request" | "attachment" | "thread" | "channel";
+    repoSource?: "request" | "attachment" | "thread" | "channel" | "context";
     prTarget?: { number: number; source: "request" | "thread"; quote: string };
     shipEntry?: "work" | "work_from_thread" | "review" | "plan" | "continue";
     workObjective?: string;
@@ -693,6 +720,9 @@ export const SESSION_KEY_PATTERN = /^[A-Za-z0-9_.:@+/-]{1,512}$/;
  *  ends short of what the model saw. */
 export interface RunSession {
   key: string;
+  /** Marks the thread's canonical session generation even when this run
+   *  writes a work unit's own log. Absent on legacy claims. */
+  threadSession?: string;
   seedFrom: number;
   request: number;
   range: { from: number; to?: number } | "broken";
@@ -704,6 +734,13 @@ export function isRunSession(v: unknown): v is RunSession {
   if (typeof v !== "object" || v === null) return false;
   const s = v as Record<string, unknown>;
   if (typeof s.key !== "string" || !SESSION_KEY_PATTERN.test(s.key)) return false;
+  if (
+    s.threadSession !== undefined &&
+    (typeof s.threadSession !== "string" ||
+      !SESSION_KEY_PATTERN.test(s.threadSession) ||
+      !(s.threadSession.endsWith(":@thread") || s.threadSession.endsWith(":@thread:@context-v1")))
+  )
+    return false;
   if (!isIndex(s.seedFrom) || !isIndex(s.request) || s.request < s.seedFrom) return false;
   if (s.range === "broken") return true;
   if (typeof s.range !== "object" || s.range === null) return false;
@@ -753,7 +790,9 @@ function isRunProfileRecord(v: unknown): v is RunProfileRecord {
  *  the friction ledger's `recent()` is served from this shape. `bytes` is
  *  the stored record's JSON size when the store knows it; retention treats a
  *  missing value as 0. */
-export type RunListItem = Omit<RunRecord, "events"> & { bytes?: number };
+export type RunListItem = Omit<RunRecord, "events" | "sourceReads" | "contextCheckpointReceipt" | "directAudience"> & {
+  bytes?: number;
+};
 
 /** A stored event with its `seq`: the registry's monotonic stamp (`RunRegistry.publish`),
  *  the SAME number the live stream and the persisted record use for this event —
@@ -1179,6 +1218,37 @@ export function isRunRecord(v: unknown): v is RunRecord {
   // The handoff is checked for shape, not bounds (docs/reference/specs/agent-ship.md
   // item 14): redaction may lengthen a stored string past the tool's limit.
   if (r.handoff !== undefined && !isHandoffShape(r.handoff)) return false;
+  if (r.childHandoff !== undefined && !isChildHandoff(r.childHandoff)) return false;
+  if (r.sourceReads !== undefined) {
+    if (
+      typeof r.agent !== "string" ||
+      typeof r.userId !== "string" ||
+      typeof r.channelId !== "string" ||
+      typeof r.threadKey !== "string"
+    )
+      return false;
+    if (
+      !sourceReadState(r.sourceReads, {
+        runId: r.id,
+        requester: r.userId,
+        agent: r.agent,
+        channelId: r.channelId,
+        threadKey: r.threadKey,
+      })
+    )
+      return false;
+  }
+  if (r.contextDependencies !== undefined) {
+    if (!isContextDependencies(r.contextDependencies)) return false;
+    if (
+      r.contextDependencies.origins.some(
+        (origin) =>
+          origin.runId === r.id &&
+          (origin.requester !== r.userId || origin.channelId !== r.channelId || origin.threadKey !== r.threadKey),
+      )
+    )
+      return false;
+  }
   // The review's verdict and head and the fix round's dispositions (item 2):
   // shape only, like the handoff — redaction may lengthen a stored string.
   if (r.verdict !== undefined && !isReviewVerdictShape(r.verdict)) return false;
@@ -1243,7 +1313,26 @@ export function isRunRecord(v: unknown): v is RunRecord {
   // Where the conversation started (item 52): one of the two words, or absent.
   if (r.seed !== undefined && !RUN_SEEDS.includes(r.seed as RunSeed)) return false;
   // The run's place in its session's log (item 53), or absent.
-  if (r.session !== undefined && !isRunSession(r.session)) return false;
+  if (r.session !== undefined) {
+    if (!isRunSession(r.session)) return false;
+    if (
+      r.session.threadSession !== undefined &&
+      ![`${r.threadKey}:@thread`, `${r.threadKey}:@thread:@context-v1`].includes(r.session.threadSession)
+    )
+      return false;
+  }
+  if (r.contextCheckpointReceipt !== undefined) {
+    if (
+      !isContextCheckpointReceipt(r.contextCheckpointReceipt) ||
+      !isContextDependencies(r.contextDependencies) ||
+      !contextCheckpointMatchesRun(r.contextCheckpointReceipt, {
+        runId: r.id as string,
+        meta: r as unknown as RunRecord,
+        context: r.contextDependencies,
+      })
+    )
+      return false;
+  }
   // The failure by name (item 57): one of the named kinds, or absent.
   if (r.failure !== undefined && !isRunFailure(r.failure)) return false;
   if (r.usage !== undefined && !isRunUsage(r.usage)) return false;
@@ -1258,6 +1347,18 @@ export function isRunRecord(v: unknown): v is RunRecord {
   if (
     r.idempotencyKey !== undefined &&
     (typeof r.idempotencyKey !== "string" || !IDEMPOTENCY_KEY_PATTERN.test(r.idempotencyKey))
+  )
+    return false;
+  if (
+    r.coordinatorUnit !== undefined &&
+    (r.parentInstanceId === undefined || typeof r.coordinatorUnit !== "string" || !UNIT_PATTERN.test(r.coordinatorUnit))
+  )
+    return false;
+  if (
+    r.coordinatorAttempt !== undefined &&
+    (r.coordinatorUnit === undefined ||
+      !Number.isSafeInteger(r.coordinatorAttempt) ||
+      (r.coordinatorAttempt as number) < 0)
   )
     return false;
   if (
@@ -1285,6 +1386,8 @@ export function isRunRecord(v: unknown): v is RunRecord {
   if (typeof r.channelId !== "string" || typeof r.userId !== "string" || typeof r.threadKey !== "string") return false;
   if (r.relayedBy !== undefined && typeof r.relayedBy !== "string") return false;
   if (r.authenticatedAs !== undefined && typeof r.authenticatedAs !== "string") return false;
+  if (r.postedBy !== undefined && typeof r.postedBy !== "string") return false;
+  if (r.directAudience !== undefined && directAudienceStampOf(r as unknown as RunRecord) === undefined) return false;
   // Absent on records written before the stamp existed (read as `unknown`); present → a known value.
   if (r.channelVisibility !== undefined && !CHANNEL_VISIBILITIES.includes(r.channelVisibility as ChannelVisibility))
     return false;
@@ -1322,6 +1425,8 @@ export function isRunRecord(v: unknown): v is RunRecord {
 export function isRunListItem(v: unknown): v is RunListItem {
   if (typeof v !== "object" || v === null) return false;
   const r = v as Record<string, unknown>;
+  if (r.sourceReads !== undefined || r.contextCheckpointReceipt !== undefined || r.directAudience !== undefined)
+    return false;
   if (r.bytes !== undefined && !isFiniteNumber(r.bytes)) return false;
   const { bytes: _bytes, ...rest } = r;
   return isRunRecord({ ...rest, events: [] });
@@ -1337,19 +1442,21 @@ export function newestFirst(a: RetentionKey, b: RetentionKey): number {
 
 /** What retention needs to know about a row — a `RunListItem` qualifies, and so
  *  does a bare `{ id, finishedAt, bytes }` projection from a SQL scan. */
-export type RetentionKey = Pick<RunListItem, "id" | "finishedAt" | "bytes">;
+export type RetentionKey = Pick<RunListItem, "id" | "finishedAt" | "bytes" | "childHandoff" | "contextDependencies">;
 
 /**
  * The one retention function both the bot and the Worker run, in this order:
  * (1) drop everything finished before `nowMs - retentionDays`; (2) keep the
  * newest `maxRuns`; (3) drop the oldest while the cumulative `bytes` of what is
- * kept exceeds `maxBytes` (missing `bytes` counts as 0). Returns the kept items
- * newest-first; never mutates `items`.
+ * kept exceeds `maxBytes` (missing `bytes` counts as 0); (4) retain existing
+ * sources referenced by those roots or live holders, without recursively
+ * promoting a pinned source. Returns newest-first; never mutates `items`.
  */
 export function applyRetention<T extends RetentionKey>(
   items: readonly T[],
   policy: RetentionPolicy,
   nowMs: number,
+  context: { references?: readonly ContextReference[]; liveHolderIds?: readonly string[] } = {},
 ): T[] {
   const cutoff = nowMs - policy.retentionDays * 86_400_000;
   const kept = items
@@ -1365,7 +1472,10 @@ export function applyRetention<T extends RetentionKey>(
       break;
     }
   }
-  return kept.slice(0, end);
+  const references =
+    context.references ??
+    items.flatMap((item) => contextReferencesOf(item.id, item.childHandoff, item.contextDependencies));
+  return retainContextSources(items, kept.slice(0, end), references, context.liveHolderIds).sort(newestFirst);
 }
 
 // ---- byte budget ------------------------------------------------------------

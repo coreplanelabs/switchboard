@@ -1,5 +1,5 @@
 {
-  "deploy/cloudflare-memory/worker.ts": 8,
+  "deploy/cloudflare-memory/worker.ts": 9,
   "deploy/cloudflare-resident/gc.ts": 2,
   "deploy/cloudflare-resident/shared.ts": 5,
   "deploy/cloudflare-resident/worker.ts": 7,

@@ -79,6 +79,10 @@ const KINDS = {
   refused: true,
 } satisfies Record<TerminalKind, true>;
 
+export function isShipOutcomeKind(value: unknown): value is ShipOutcome["kind"] {
+  return typeof value === "string" && Object.hasOwn(KINDS, value);
+}
+
 const FINDINGS_STOPS = {
   incomplete_outputs: true,
   unfinished: true,
@@ -101,8 +105,7 @@ export function isShipOutcome(value: unknown): value is ShipOutcome {
     !object(value) ||
     !only(value, ["schemaVersion", "kind", "reviewRounds", "terminalPr", "findings"]) ||
     value.schemaVersion !== 1 ||
-    typeof value.kind !== "string" ||
-    !Object.hasOwn(KINDS, value.kind) ||
+    !isShipOutcomeKind(value.kind) ||
     !count(value.reviewRounds)
   )
     return false;

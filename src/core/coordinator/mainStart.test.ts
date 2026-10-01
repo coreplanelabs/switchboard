@@ -8,6 +8,7 @@ import { createMainTaskStarter, type MainStartDeps, type MainStartInput } from "
 import { workStartTool } from "../../tools/mainStart.js";
 import type { ToolContext } from "../../tools/runnableTool.js";
 import { contractFor } from "./briefs.js";
+import { contextCapsuleOf } from "../dispatch/unitContext.js";
 
 const msg: IncomingMessage = {
   channelId: "slack:D123",
@@ -95,6 +96,30 @@ function harness(over: Partial<MainStartDeps> = {}) {
 }
 
 describe("main-agent private worker start", () => {
+  it("persists the original context capsule before worker creation and preserves it on replay", async () => {
+    const capsule = contextCapsuleOf({
+      version: 1,
+      source: { runId: "main-run-1", requester: msg.userId, channelId: msg.channelId, threadKey: msg.threadKey },
+      session: { key: `${msg.threadKey}:@thread`, from: 0, to: -1 },
+      assets: [],
+    });
+    const h = harness({
+      create: async (id) => {
+        const units = await h.instances.listUnits(id);
+        expect(units[0]?.context).toEqual(capsule);
+        return { kind: "created", id };
+      },
+    });
+    const first = await h.start({ ...h.input, context: capsule });
+    expect(first.kind).toBe("accepted");
+    if (first.kind !== "accepted") throw new Error("admission failed");
+    const original = (await h.instances.listUnits(first.instanceId))[0]!;
+    const changed = { ...capsule, handoff: { ...capsule.handoff, assets: [], requiresFreshSources: true as const } };
+    const replay = await h.start({ ...h.input, context: changed });
+    expect(replay).toMatchObject({ kind: "existing", instanceId: first.instanceId });
+    await h.instances.putUnits([{ ...original, context: changed }]);
+    expect((await h.instances.listUnits(first.instanceId))[0]?.context).toEqual(capsule);
+  });
   it("a lost create reply leaves one saved act and stays pending when same-id status alone cannot attribute private work", async () => {
     const created: string[] = [];
     let status: "unanswered" | "running" = "unanswered";

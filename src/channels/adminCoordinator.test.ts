@@ -42,6 +42,7 @@ import type { DispatchOutcome } from "../core/dispatch/outcome.js";
 import { REPLAY_EVERYTHING, RunRegistry } from "../core/runRegistry.js";
 import { InMemoryRunStore } from "../core/runStore.js";
 import { InMemoryRunLedger } from "../core/runLedger/inMemory.js";
+import { contextThreadSessionKey } from "../core/runLedger/sessionLog.js";
 import { createLedgerWriteThrough } from "../core/runLedger/writeThrough.js";
 import { hostKeyOf } from "../core/runLedger/hostKey.js";
 import {
@@ -344,6 +345,7 @@ function harness(
     runs,
     registry,
     ledgerRuns: () => writeThrough.liveRuns(),
+    reportLedger: ledger,
     dispatch: async (msg, dispatchIo, opts) => {
       dispatched.push({ msg, opts });
       return (over.script ?? registers("run-child"))(msg, dispatchIo, opts);
@@ -1954,6 +1956,7 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
         agent: "coding",
         threadKey: "slack:C1:2.0",
         parentInstanceId: INSTANCE.id,
+        idempotencyKey: `${INSTANCE.id}:U12/0/coding`,
         events: [{ type: "pr_description", description, seq: 1 } as unknown as RunRecord["events"][number]],
       });
     for (const [description, expectedWhy] of [
@@ -2064,6 +2067,7 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
         agent: "coding",
         threadKey: "slack:C1:2.0",
         parentInstanceId: INSTANCE.id,
+        idempotencyKey: `${INSTANCE.id}:U12/0/coding`,
         events: [
           {
             type: "pr_description",
@@ -2144,6 +2148,7 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
         agent: "coding",
         threadKey: "slack:C1:2.0",
         parentInstanceId: INSTANCE.id,
+        idempotencyKey: `${INSTANCE.id}:U12/0/coding`,
         events: [
           {
             type: "pr_description",
@@ -3120,6 +3125,82 @@ describe("createAdminCoordinatorHandler — the node adapter decides the door fr
 // finish that writes the parent's record. Every answer carries `at`, the bot's
 // clock — the machine's only time.
 describe("the plan runner's steps — plan, unit-start, branch, round, unit-end, finish (item 9)", () => {
+  it("does not let a refused settlement freeze the report of a later valid delivery", async () => {
+    const h = await planHarness();
+    const pr = { number: 7, url: "https://github.com/acme/api/pull/7" };
+    await h.instances.putUnits([unitRow("U10", { pr, threadKey: "slack:C1:2.0" })]);
+    const body = {
+      parentInstanceId: PLAN_INSTANCE.id,
+      unit: "U10",
+      deliveryId: "U10/0/end",
+      pr,
+      ending: {
+        kind: "aborted",
+        report: "accepted report",
+        outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 1 },
+      },
+    };
+    expect(
+      await call(h, "unit-end", {
+        ...body,
+        pr: { number: 99, url: "https://github.com/acme/api/pull/99" },
+        ending: { ...body.ending, report: "refused report" },
+      }),
+    ).toMatchObject({ status: 400 });
+    expect(await call(h, "unit-end", body)).toMatchObject({ status: 200 });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]?.ending?.report).toBe("accepted report");
+    expect(
+      JSON.stringify((await h.ledger.readSessionTail(contextThreadSessionKey("slack:C1:2.0"), 100_000)).transcript),
+    ).not.toContain("refused report");
+  });
+
+  it("freezes coordinator report text before publication and replays the original delivery", async () => {
+    const reports: string[] = [];
+    const threadKey = "slack:C1:2.0";
+    const h = await planHarness({
+      ioFor: () => ({
+        reply: async (text) => {
+          const tail = await h.ledger.readSessionTail(contextThreadSessionKey(threadKey), 100_000);
+          expect(JSON.stringify(tail.transcript.messages)).toContain("original full report");
+          expect(tail.transcript.contexts?.[0]?.status).toBe("unknown");
+          reports.push(text);
+        },
+        status: async () => ({ update: () => {}, done: async () => {} }),
+        history: async () => [],
+      }),
+    });
+    await hostParent(h);
+    await h.instances.putUnits([unitRow("U10", { threadKey })]);
+    const appended = vi.spyOn(h.ledger, "appendSession");
+    const published = vi.spyOn(h.registry, "publish");
+    const body = {
+      parentInstanceId: PLAN_INSTANCE.id,
+      unit: "U10",
+      deliveryId: "U10/end/1",
+      ending: { kind: "merge_ready", report: "original full report", threadReport: "original short report" },
+    };
+    expect((await call(h, "unit-end", body)).status).toBe(200);
+    expect(appended.mock.invocationCallOrder[0]).toBeLessThan(published.mock.invocationCallOrder[0]!);
+    expect(
+      (
+        await call(h, "unit-end", {
+          ...body,
+          ending: { ...body.ending, report: "later regenerated report", threadReport: "later verbosity" },
+        })
+      ).status,
+    ).toBe(200);
+    expect(reports).toEqual(["original short report", "original short report"]);
+    const shared = (await h.ledger.readSessionTail(contextThreadSessionKey(threadKey), 100_000)).transcript;
+    expect(shared.turns).toBe(2);
+    expect(shared.contexts?.map((context) => context?.status)).toEqual(["unknown", "known"]);
+    expect(JSON.stringify(shared.messages[1])).toContain("Recorded work status");
+    expect(JSON.stringify(shared.messages[1])).not.toContain("original full report");
+    h.deps.reportLedger = undefined;
+    const publicationCount = published.mock.calls.length;
+    expect((await call(h, "unit-end", body)).status).toBe(503);
+    expect(reports).toHaveLength(2);
+    expect(published.mock.calls).toHaveLength(publicationCount);
+  });
   const PLAN_INSTANCE: CoordinatorInstance = {
     ...INSTANCE,
     id: "plan-fixture",
@@ -3538,6 +3619,20 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
   });
 
   it("a main-agent worker starts and replies only through its durable private thread", async () => {
+    const context = {
+      version: 1 as const,
+      handoff: {
+        version: 1 as const,
+        source: {
+          runId: "main-source",
+          requester: INSTANCE.userId,
+          channelId: PRIVATE_AUDIENCE.channelId,
+          threadKey: PRIVATE_AUDIENCE.threadKey,
+        },
+        session: { key: "main-source-log", from: 0, to: -1 },
+        assets: [],
+      },
+    };
     const log = new InMemoryPrivateWorkerLog();
     const brief = {
       requesterId: INSTANCE.userId,
@@ -3581,6 +3676,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       dependsOn: [],
       rounds: [],
       workBrief: brief,
+      context,
     });
     const started = await call(h, "unit-start", { parentInstanceId: instance.id, unit: "U12" });
     expect(started).toMatchObject({ status: 200, body: { threadKey: `worker:${instance.id}:U12` } });
@@ -3610,6 +3706,16 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     });
     expect(spawned).toMatchObject({ status: 200, body: { threadKey: `worker:${instance.id}:U12` } });
     expect(h.dispatched[0]?.msg.threadKey).toBe(`worker:${instance.id}:U12`);
+    expect(h.dispatched[0]?.opts).toMatchObject({
+      childHandoff: context.handoff,
+      unitContextAdmission: {
+        instanceId: instance.id,
+        unit: "U12",
+        instanceAttempt: 0,
+        idempotencyKey: h.dispatched[0]?.opts?.coordinator.idempotencyKey,
+      },
+      coordinator: { unit: "U12", instanceAttempt: 0 },
+    });
     expect(h.threadsAsked).toEqual([{ threadKey: instance.threadKey, userId: instance.userId }]);
     expect((await log.list(`worker:${instance.id}:U12`)).map((event) => event.kind)).toEqual(["input", "reply"]);
     const row = (await h.instances.listUnits(instance.id))[0]!;
@@ -3916,6 +4022,93 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]).toEqual(newer);
   });
 
+  it("freezes only the winning proposal when same-delivery settlements race", async () => {
+    const h = await planHarness();
+    await h.instances.putUnits([unitRow("U10")]);
+    await hostParent(h);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let reached!: () => void;
+    const atCas = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const replace = h.instances.compareAndReplaceUnit.bind(h.instances);
+    vi.spyOn(h.instances, "compareAndReplaceUnit").mockImplementationOnce(async (before, after) => {
+      reached();
+      await held;
+      return replace(before, after);
+    });
+    const body = {
+      parentInstanceId: PLAN_INSTANCE.id,
+      unit: "U10",
+      deliveryId: "U10/end",
+      ending: {
+        kind: "aborted",
+        report: "losing report",
+        threadReport: "losing summary",
+        outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 1 },
+      },
+    };
+    const losing = call(h, "unit-end", body);
+    await atCas;
+    const winner = { ...body, ending: { ...body.ending, report: "winning report", threadReport: "winning summary" } };
+    expect(await call(h, "unit-end", winner)).toMatchObject({ status: 200 });
+    release();
+    expect(await losing).toMatchObject({ status: 409 });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]?.ending?.report).toBe("winning report");
+    expect(
+      await call(h, "unit-end", {
+        ...winner,
+        ending: { ...winner.ending, report: "changed retry rendering", threadReport: "changed summary" },
+      }),
+    ).toMatchObject({ status: 200 });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]?.ending?.report).toBe("winning report");
+  });
+
+  it.each(["idle", "continued"] as const)(
+    "replays the admitted %s proposal after report storage failed",
+    async (kind) => {
+      const h = await planHarness();
+      await h.instances.putUnits([unitRow("U10")]);
+      await hostParent(h);
+      const append = h.deps.reportLedger!.appendSession.bind(h.deps.reportLedger);
+      vi.spyOn(h.deps.reportLedger!, "appendSession").mockImplementationOnce(async () => ({
+        ok: false,
+        appended: false,
+      }));
+      const body = {
+        parentInstanceId: PLAN_INSTANCE.id,
+        unit: "U10",
+        deliveryId: "U10/end",
+        ending: {
+          kind,
+          report: "accepted detail",
+          threadReport: "accepted summary",
+          ...(kind === "idle" ? { why: "stopped", renewalsLeft: 1, spendUsd: null } : {}),
+        },
+        ...(kind === "continued" ? { segment: { index: 2 } } : {}),
+      };
+      expect(await call(h, "unit-end", body)).toMatchObject({
+        status: 503,
+        body: { error: "report_context_unavailable" },
+      });
+      const committed = (await h.instances.listUnits(PLAN_INSTANCE.id))[0]!;
+      expect(committed.reportDelivery).toBeDefined();
+      vi.mocked(h.deps.reportLedger!.appendSession).mockImplementation(append);
+      expect(
+        await call(h, "unit-end", { ...body, ending: { ...body.ending, threadReport: "different pending proposal" } }),
+      ).toMatchObject({ status: 409 });
+      expect(await call(h, "unit-end", body)).toMatchObject({ status: 200 });
+      expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]).toEqual(committed);
+      expect(
+        await call(h, "unit-end", { ...body, ending: { ...body.ending, threadReport: "changed verbosity" } }),
+      ).toMatchObject({ status: 200 });
+      expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]).toEqual(committed);
+    },
+  );
+
   it("does not let a legacy settlement erase a typed outcome committed while its row read was pending", async () => {
     const h = await planHarness();
     await h.instances.putUnits([unitRow("U10")]);
@@ -4022,7 +4215,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
           ...body,
           ending: { ...body.ending, report: "Different content" },
         }),
-      ).toMatchObject({ status: 409 });
+      ).toMatchObject({ status: 200 });
       expect(await call(h, "unit-end", body)).toMatchObject({ status: 200 });
       expect(
         (await log.list(`worker:${PLAN_INSTANCE.id}:U10`)).filter((event) => event.kind === "reply"),
@@ -4304,6 +4497,8 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(opts!.coordinator).toEqual({
       parentInstanceId: PLAN_INSTANCE.id,
       idempotencyKey: "plan-fixture:U10/1/review",
+      unit: "U10",
+      instanceAttempt: 0,
       branch: "plan/fixture/u10",
       base: "main",
     });
@@ -4455,6 +4650,8 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(opts!.coordinator).toEqual({
       parentInstanceId: PLAN_INSTANCE.id,
       idempotencyKey: "plan-fixture:U10/0/coding",
+      unit: "U10",
+      instanceAttempt: 0,
       branch: "plan/fixture/u10",
       base: "main",
     });
@@ -4507,6 +4704,8 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       coordinator: {
         parentInstanceId: PLAN_INSTANCE.id,
         idempotencyKey: "plan-fixture:U10/1/findings",
+        unit: "U10",
+        instanceAttempt: 0,
         branch: "plan/fixture/u10",
         base: "main",
         issuedFindingIds: ["F1"],
@@ -4590,7 +4789,9 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
 
   it("steer tells a superseded child to end without publishing, through its inbox rather than a stop", async () => {
     const h = await planHarness();
-    await h.store.put(record("run-r1", { parentInstanceId: PLAN_INSTANCE.id }));
+    await h.store.put(
+      record("run-r1", { parentInstanceId: PLAN_INSTANCE.id, idempotencyKey: `${PLAN_INSTANCE.id}:U10/1/review` }),
+    );
     const sent: Array<{ runId: string; text: string }> = [];
     h.deps.steerChild = async (runId, text) => {
       sent.push({ runId, text });
@@ -6222,16 +6423,15 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(u11.ending).toBeUndefined();
     expect(u11.segments).toEqual([{ index: 2, from: "a".repeat(40), runId: "run-c0", at: NOW }]);
     expect(segReplies.map((r) => r.text)).toEqual([continued.ending.report, continued.ending.report]);
-    // The thread's copy (routing-and-config item 28): posted when the driver
-    // sends one; an empty copy — a quiet segment boundary — posts nothing and
-    // still counts as told, since nothing was owed to the thread at that level.
+    // A delivery keeps the verbosity selected by its first durable append.
+    // Retrying the same segment with another rendering repeats that original.
     expect(await call(seg, "unit-end", { ...continued, ending: { ...continued.ending, threadReport: "" } })).toEqual({
       status: 200,
       body: { ok: true, told: true, at: NOW },
     });
-    expect(segReplies).toHaveLength(2);
+    expect(segReplies).toHaveLength(3);
     await call(seg, "unit-end", { ...continued, ending: { ...continued.ending, threadReport: "🔁 the short form" } });
-    expect(segReplies.at(-1)?.text).toBe("🔁 the short form");
+    expect(segReplies.at(-1)?.text).toBe(continued.ending.report);
     expect(
       (
         await call(seg, "unit-end", {
@@ -11112,6 +11312,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     ["different PR", { pr: { number: 999, url: "https://github.com/acme/api/pull/999" } }],
   ])("legacy binding repair refuses %s evidence without changing the original row", async (_name, over) => {
     const h = await legacyHarness();
+    if (_name === "missing finish") await h.store.delete("run-original-coding");
     await h.store.put(originalCoding(over));
     expect((await callRecovery(h)).status).toBe(409);
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual([legacyRow()]);
@@ -14021,7 +14222,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
             }),
             h.deps,
           ),
-        ).toMatchObject({ status: 409, body: { error: "settlement_conflict" } });
+        ).toMatchObject({ status: 200, body: { alreadySettled: true, told: true } });
         expect(
           await handleCoordinatorRequest(
             post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
@@ -14051,6 +14252,52 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         { kind: "reply", id: "U12/recovery/end", text: "ready at the recovered head" },
       ]);
     }
+  });
+
+  it("keeps the recovered delivery admission when immutable report storage fails after settlement", async () => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD), privateWorkerLog: new InMemoryPrivateWorkerLog() });
+    await privateRecovery(h);
+    const append = h.deps.reportLedger!.appendSession.bind(h.deps.reportLedger);
+    vi.spyOn(h.deps.reportLedger!, "appendSession").mockImplementationOnce(async () => ({
+      ok: false,
+      appended: false,
+    }));
+    const body = {
+      parentInstanceId: INSTANCE.id,
+      unit: "U12",
+      recoveryWorkflowId: "recovery-run-original-review",
+      deliveryId: "U12/recovery/end",
+      ending: {
+        kind: "aborted",
+        report: "recovered detail",
+        threadReport: "recovered summary",
+        outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 2 },
+      },
+      pr: PR,
+      headSha: HEAD,
+    };
+    expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps)).toMatchObject({
+      status: 503,
+      body: { error: "report_context_unavailable" },
+    });
+    const committed = (await h.instances.listUnits(INSTANCE.id))[0]!;
+    expect(committed.reportDelivery).toBeDefined();
+    expect(committed.recoveryReceipt?.workflowId).toBe(body.recoveryWorkflowId);
+    vi.mocked(h.deps.reportLedger!.appendSession).mockImplementation(append);
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+          ...body,
+          ending: { ...body.ending, threadReport: "different pending summary" },
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 409 });
+    expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps)).toMatchObject({
+      status: 200,
+      body: { alreadySettled: true },
+    });
+    expect((await h.instances.listUnits(INSTANCE.id))[0]).toEqual(committed);
   });
 
   it("refuses a legacy recovery replay that races a typed settlement before a lost CAS response", async () => {

@@ -320,6 +320,12 @@ export interface ClaimContext {
    *  the log the first messages of `messages` are, so the write-through
    *  appends only what follows them. */
   seedLog?: { from: number; turns: number };
+  /** The durable unit lane selected by the dispatcher; the seed reads this same key. */
+  sessionKey?: string;
+  /** Existing notes copied into a new canonical lane at its first claim. */
+  seedNotepad?: string;
+  seedContext?: import("../references/contextDependencies.js").ContextDependencies;
+  childHandoff?: ChildHandoff;
   /** The author of each seed message by index (record 0057): rides the open
    *  request so the write-through stores the actor on the rows it writes. */
   seedActors?: readonly (string | undefined)[];
@@ -438,6 +444,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
           readonly: profile.identity === "read",
           profile,
           ...(parentRunId !== undefined ? { parentRunId } : {}),
+          ...(ctx.childHandoff !== undefined ? { childHandoff: ctx.childHandoff } : {}),
           ...(ctx.restartOf !== undefined ? { restartOf: ctx.restartOf } : {}),
           ...coordinatorFields(coordinator),
           ...(seed !== undefined ? { seed } : {}),
@@ -474,6 +481,9 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
         // this run was admitted with, not on the preset's own number — and,
         // for a seed read from the log, the rows it reuses (session-log item 9).
         seed: {
+          ...(ctx.sessionKey !== undefined ? { key: ctx.sessionKey } : {}),
+          ...(ctx.seedNotepad !== undefined ? { notepad: ctx.seedNotepad } : {}),
+          ...(ctx.seedContext !== undefined ? { context: ctx.seedContext } : {}),
           messages,
           budgetMs: profile.minutes * 60_000,
           ...(seedLog ? { log: seedLog } : {}),
@@ -584,7 +594,7 @@ export const webCapability = () => (sharedWeb ??= makeWebCapability(processSecre
  *  repo's resident — so an issue write from a plain mention is authorized
  *  like a coding run on that repo. */
 let sharedGithubApi: GithubApi | undefined;
-export function githubCapabilityFor(deps: RunDeps, actor: Actor): GithubCapability {
+export function githubCapabilityFor(deps: Pick<RunDeps, "config" | "githubApi">, actor: Actor): GithubCapability {
   const api = deps.githubApi ?? (sharedGithubApi ??= new RestGithubApi());
   return {
     api,
@@ -618,3 +628,4 @@ export function shutdownNotice(): string | undefined {
 export function setShutdownNotice(next: string | undefined): void {
   notice = next;
 }
+import type { ChildHandoff } from "./handoff.js";

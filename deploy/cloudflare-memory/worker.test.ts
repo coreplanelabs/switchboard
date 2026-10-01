@@ -2,6 +2,9 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { fetchMemoryTest } from "./testFetch.ts";
 import { describe, expect, it } from "vitest";
 import type { MemoryDO } from "./worker.ts";
+import type { MemoryRecord } from "../../src/core/memory/types.ts";
+import { sealMemoryCandidate, validMemoryProvenance } from "../../src/core/memory/provenance.ts";
+import type { ContextDependencies } from "../../src/core/references/contextDependencies.ts";
 
 // Feature: docs/reference/specs/memory.md — the Memory Worker: the durable
 // backend behind WorkerMemoryStore. Runs in workerd against the real
@@ -911,5 +914,61 @@ describe("FTS hygiene", () => {
     expect(await runInDurableObject(memStub(s), (inst: MemoryDO) => inst.reconcileFts())).toBe(0);
     const r = await post("/retrieve", { scopeKey: s, query: "deploy", limit: 8 });
     expect((r.data.records as Array<{ text: string }>).map((x) => x.text)).toEqual(["live deploy fact"]);
+  });
+});
+
+describe("durable memory dependency revisions", () => {
+  const dependencies = (runId: string): ContextDependencies => ({
+    version: 1,
+    status: "known",
+    revision: 1,
+    slack: [],
+    mcp: [],
+    origins: [{ runId, requester: "slack:UA", channelId: "slack:CA", threadKey: "slack:CA:1.0" }],
+  });
+  it("persists and unions provenance through insert, dedup, restatement and replacement", async () => {
+    const s = scope();
+    const candidate = {
+      kind: "fact" as const,
+      text: "Deploy needs bounded retries",
+      sourceThreadKey: "slack:CA:1.0",
+      sourceRunId: "producer",
+    };
+    const write = async (value: typeof candidate & { restates?: string; supersedes?: string }, source: string) => {
+      const sealed = await sealMemoryCandidate(s, value, dependencies(source));
+      expect((await post("/write", { scopeKey: s, records: [sealed] })).status).toBe(200);
+    };
+    await write(candidate, "original");
+    await write(candidate, "dedup");
+    await write({ ...candidate, text: "Restated lesson", restates: `mem:${s}:0` }, "restatement");
+    const [refreshed] = (await post("/list", { scopeKey: s, limit: 10 })).data.records as MemoryRecord[];
+    expect(await validMemoryProvenance(refreshed)).toBe(true);
+    expect(refreshed.provenance!.dependencies.origins.map((origin) => origin.runId).sort()).toEqual([
+      "dedup",
+      "original",
+      "restatement",
+    ]);
+    await write({ ...candidate, text: "Deploy needs jitter", supersedes: refreshed.id }, "replacement");
+    const [replacement] = (await post("/retrieve", { scopeKey: s, query: "deploy", limit: 10 })).data
+      .records as MemoryRecord[];
+    expect(await validMemoryProvenance(replacement)).toBe(true);
+    expect(replacement.provenance!.dependencies.origins.map((origin) => origin.runId).sort()).toEqual([
+      "dedup",
+      "original",
+      "replacement",
+      "restatement",
+    ]);
+  });
+  it("keeps legacy provenance unknown on refresh and refuses malformed incoming metadata", async () => {
+    const s = scope();
+    const candidate = { kind: "fact" as const, text: "Deploy needs retries", sourceThreadKey: "slack:CA:1.0" };
+    await post("/write", { scopeKey: s, records: [candidate] });
+    const sealed = await sealMemoryCandidate(s, candidate, dependencies("current"));
+    await post("/write", { scopeKey: s, records: [sealed] });
+    const [legacy] = (await post("/list", { scopeKey: s, limit: 10 })).data.records as MemoryRecord[];
+    expect(legacy.provenance).toBeUndefined();
+    expect((await post("/write", { scopeKey: s, records: [{ ...sealed, provenance: { version: 2 } }] })).status).toBe(
+      400,
+    );
   });
 });

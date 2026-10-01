@@ -335,6 +335,14 @@ export function createSlackContextCapability(input: {
         );
       }
     },
+    async originAudience() {
+      if (!(await originAllowedFresh())) return undefined;
+      if (origin.startsWith("D")) return "dm";
+      const classification = await reader.classifyConversationFresh(originRef);
+      return classification.visibility !== "never" && (await originAllowedFresh())
+        ? classification.visibility
+        : undefined;
+    },
     async revalidateSource(receipt): Promise<boolean> {
       if (!sameSourceBinding(receipt, binding)) return false;
       const ref = receipt.source;

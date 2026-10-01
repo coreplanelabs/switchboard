@@ -171,6 +171,34 @@ const openBotPr = (over: Partial<PullRequestFacts> = {}): PullRequestFacts => ({
 });
 
 describe("runShipBranch — the agent:ship fork hands every admitted request to the plan runner", () => {
+  it("persists a spawning run's frozen context on its generated unit before workflow creation", async () => {
+    const s = setup("slack:UADMIN");
+    const context = {
+      version: 1 as const,
+      handoff: {
+        version: 1 as const,
+        source: {
+          runId: "run-parent",
+          requester: s.msg.userId,
+          channelId: s.msg.channelId,
+          threadKey: "slack:CX:parent",
+        },
+        session: { key: "parent-log", from: 0, to: -1 },
+        assets: [],
+      },
+    };
+    let persistedAtCreation = false;
+    const create = s.deps.createCoordinatorInstance!;
+    s.deps.createCoordinatorInstance = async (id) => {
+      expect((await s.instances.listUnits(id))[0]?.context).toEqual(context);
+      persistedAtCreation = true;
+      return create(id);
+    };
+    await runShipBranch(s.deps, s.msg, s.io, { ...s.ctx, context });
+    expect(s.refusals).toEqual([]);
+    expect(persistedAtCreation).toBe(true);
+  });
+
   it("a PR-citing work bind cannot borrow another person’s turn as its objective", async () => {
     const s = setup("slack:UADMIN", {
       text: `agent:ship review ${PR_URL}`,

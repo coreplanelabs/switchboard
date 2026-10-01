@@ -145,15 +145,19 @@ export function mainAudienceAtPrompt(input: {
   threadArtifacts?: string;
   /** A spawned parent's text turns have no durable source provenance. */
   parentSeed?: boolean;
+  /** Current check of every admitted component's durable dependency envelope. */
+  contextValidation?: AudienceCheck;
 }): AudienceDecision {
   const directSlack = /^slack:D[A-Z0-9_]+$/.test(input.channelId);
   if (directSlack && !input.verifiedDirectAudience) return { ok: false, code: "direct-audience-unavailable" };
   if (input.resumed && !provenPublicResume(input.resumed, input.requester, input.channelId))
     return { ok: false, code: "recovered-provenance-unproved" };
-  if (input.parentSeed) return { ok: false, code: "parent-context-unproved" };
+  if (input.contextValidation && !input.contextValidation.ok) return input.contextValidation;
+  const checkedContext = input.contextValidation?.ok === true;
+  if (input.parentSeed && !checkedContext) return { ok: false, code: "parent-context-unproved" };
   // Another agent's finished artifact has no durable source labels. Even in
   // the same DM, its sources cannot be rechecked before this model sees it.
-  if (input.threadArtifacts) return { ok: false, code: "artifact-context-unproved" };
+  if (input.threadArtifacts && !checkedContext) return { ok: false, code: "artifact-context-unproved" };
   const sources = servedSources(input.servers, input.requester);
   if (!sources) return { ok: false, code: "mcp-audience-unproved" };
   if (sources.length > 0 && (!directSlack || !input.verifiedDirectAudience))
@@ -162,9 +166,9 @@ export function mainAudienceAtPrompt(input: {
   const seed = input.session;
   // A failed ledger read falls back to channel history. Earlier bot words
   // have no source labels there, so they cannot safely seed this agent.
-  if (!seed && input.history.some((item) => item.role === "assistant"))
+  if (!checkedContext && !seed && input.history.some((item) => item.role === "assistant"))
     return { ok: false, code: "saved-context-unproved" };
-  if (seed) {
+  if (seed && !checkedContext) {
     if (seed.log.from !== 0 || seed.summary !== undefined) return { ok: false, code: "saved-context-unproved" };
     const calls = new Set<string>();
     for (const message of seed.messages) {
@@ -190,7 +194,7 @@ export function mainAudienceAtPrompt(input: {
   // Saved notes and another run's artifacts can contain a source's answer.
   // Their one-person audience is proven by the owning runs and each visible
   // human turn. Missing authors are unknown, so do not seed them.
-  if (sources.length > 0 || seed?.notepad) {
+  if (!checkedContext && (sources.length > 0 || seed?.notepad)) {
     if (!input.channelId.startsWith("slack:D")) return { ok: false, code: "mcp-audience-unproved" };
     if (input.history.some((item) => item.role === "user" && item.user !== input.requester))
       return { ok: false, code: "history-author-unproved" };

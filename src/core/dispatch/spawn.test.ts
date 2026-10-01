@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { AGENTS } from "../../agents/registry.js";
 import { ConfigStore } from "../../config.js";
 import type { ChatMessage } from "../chatMessage.js";
+import { parentContextOf } from "./handoff.js";
 import { RunRegistry } from "../runRegistry.js";
 import type { RunsService } from "../runsService.js";
 import type { ChannelIO, IncomingMessage, OpenedThread } from "../types.js";
@@ -484,10 +485,7 @@ describe("spawnChild — the one path a child run is born through", () => {
     }
   });
 
-  // docs/reference/specs/routing-and-config.md item 20: the child starts from
-  // what its parent's conversation SAID — the text of every turn, never the
-  // tool exchanges or the thinking the text rode beside.
-  it("the child's seed is the parent's conversation reduced to its text turns — user and assistant text in order, a turn's text parts joined, tool calls, tool results and thinking dropped, a turn with no text dropped whole — handed to dispatch() beside `parent`; a parent with no conversation to hand on seeds nothing", async () => {
+  it("the child receives structured parent context preserving tool results and attachments, with provider reasoning removed", async () => {
     const { dispatch, calls } = fakeDispatch(registers("run-child"));
     const ch = channel();
     const conversation: ChatMessage[] = [
@@ -513,15 +511,56 @@ describe("spawnChild — the one path a child run is born through", () => {
     await spawnChild(deps(dispatch), parent(ch.io, { conversation }), { preset: "research", prompt: "q" });
     expect(calls[0].opts).toEqual({
       parent: { runId: "run-p", depth: 1, remainingMs: 30 * 60_000 },
-      seed: [
-        { role: "user", text: "look into durable objects" },
-        { role: "assistant", text: "Splitting this into two children." },
-        { role: "assistant", text: "First,\n\nthe storage question." },
-      ],
+      parentContext: parentContextOf(conversation),
     });
     await spawnChild(deps(dispatch), parent(ch.io), { preset: "research", prompt: "q" });
     expect(calls[1].opts).toEqual({ parent: { runId: "run-p", depth: 1, remainingMs: 30 * 60_000 } });
   });
+
+  it.each(["research", "ship"])(
+    "uses the durable context callback for %s and never falls back to prose when its read fails",
+    async (preset) => {
+      const { dispatch, calls } = fakeDispatch(registers("run-child"));
+      const ch = channel();
+      const context = parentContextOf([
+        { role: "user", content: [{ type: "document", mediaType: "application/pdf", data: "cGRm" }] },
+      ]);
+      const capture = vi.fn(async () => context);
+      const prompt = preset === "ship" ? "https://github.com/acme/api/pull/7" : "q";
+      const selection =
+        preset === "ship"
+          ? { prBatch: { kind: "ship" as const, targets: [{ repo: "acme/api", number: 7, url: prompt }] } }
+          : {};
+      await spawnChild(deps(dispatch), parent(ch.io, { context: capture, ...selection }), {
+        preset,
+        prompt,
+        repo: "acme/api",
+      });
+      expect(capture).toHaveBeenCalledOnce();
+      expect(calls[0].opts).toMatchObject({ parentContext: context });
+      capture.mockClear();
+      const refused = await spawnChild(deps(dispatch), parent(ch.io, { context: capture }), {
+        preset: "coding",
+        prompt: "q",
+      });
+      expect(refused).toMatchObject({ kind: "refused", reason: "spawn_identity" });
+      expect(capture).not.toHaveBeenCalled();
+      const failed = await spawnChild(
+        deps(dispatch),
+        parent(ch.io, {
+          ...selection,
+          context: async () => {
+            throw new Error("source log unavailable");
+          },
+          conversation: [{ role: "user", content: [{ type: "text", text: "lossy fallback" }] }],
+        }),
+        { preset, prompt, repo: "acme/api" },
+      );
+      expect(failed).toMatchObject({ kind: "refused", reason: "spawn_context" });
+      expect(dispatch).toHaveBeenCalledOnce();
+      expect(ch.leads).toHaveLength(1);
+    },
+  );
 
   it("a dispatch that fails before any run exists is `spawn_failed` with the error's message; one that threw is too", async () => {
     const failed = fakeDispatch(async (_msg, io) => {
@@ -772,7 +811,7 @@ describe("spawnCapabilityFor — the capability a spawning run's tools hold", ()
     await cap.spawn({ preset: "research", prompt: "q" }, { remainingMs: 7 * 60_000, conversation });
     expect(dispatch.mock.calls[0][3]).toEqual({
       parent: { runId: "run-p", depth: 1, remainingMs: 7 * 60_000 },
-      seed: [{ role: "user", text: "look into durable objects" }],
+      parentContext: parentContextOf(conversation),
     });
     await cap.spawn({ preset: "research", prompt: "q" }, { remainingMs: 7 * 60_000 });
     expect(dispatch.mock.calls[1][3]).toEqual({ parent: { runId: "run-p", depth: 1, remainingMs: 7 * 60_000 } });

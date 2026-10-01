@@ -300,6 +300,36 @@ describe("isCoordinatorUnit — one unit's row", () => {
     startedAt: 900,
   };
 
+  it("rejects malformed or retargeted report delivery admission", () => {
+    const reportDelivery = {
+      version: 1,
+      owner: {
+        instanceId: unit.instanceId,
+        unit: unit.unit,
+        attempt: 0,
+        requester: "cli:user",
+        channelId: "cli:main",
+        threadKey: "cli:main:1",
+        deliveryId: "U12/end",
+      },
+      proposalHash: "a".repeat(64),
+    };
+    expect(isCoordinatorUnit({ ...unit, reportDelivery })).toBe(true);
+    expect(isCoordinatorUnit({ ...unit, reportDelivery: { ...reportDelivery, proposalHash: "unproved" } })).toBe(false);
+    expect(
+      isCoordinatorUnit({
+        ...unit,
+        reportDelivery: { ...reportDelivery, owner: { ...reportDelivery.owner, unit: "U13" } },
+      }),
+    ).toBe(false);
+    expect(
+      isCoordinatorUnit({
+        ...unit,
+        reportDelivery: { ...reportDelivery, owner: { ...reportDelivery.owner, attempt: -1 } },
+      }),
+    ).toBe(false);
+  });
+
   it("accepts a full row, its JSON round-trip and a bare one (the branch, the dependencies and no rounds)", () => {
     expect(isCoordinatorUnit(unit)).toBe(true);
     expect(isCoordinatorUnit(JSON.parse(JSON.stringify(unit)))).toBe(true);

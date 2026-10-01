@@ -9,6 +9,7 @@ import {
   briefFromSource,
   sourceResult,
   SOURCE,
+  SOURCE_QUERY,
   REQUESTER,
 } from "./testing/goldenFlow.js";
 import type { CompletionRequest } from "../core/provider.js";
@@ -56,13 +57,14 @@ describe("Slack golden flow", () => {
     };
     world.state.sourceResponse = initial;
     const process = goldenProcess(world, "generation-one", [
-      () => call("mcp__metrics__signups", { query: SOURCE.query }),
+      () => call("mcp__metrics__signups", SOURCE_QUERY),
       (req) => sourcedAnswer(req),
       (req) => {
         expect(JSON.stringify(req.messages)).toContain("How many signups failed?");
-        // A new turn must re-read the source, not replay an earlier private result.
-        expect(sourceResult(req, "mcp__metrics__signups")).toBeUndefined();
-        return call("mcp__metrics__signups", { query: SOURCE.query }, "fresh-query");
+        // The saved receipt remains usable after a current inspect. Read again
+        // to base the requested fix on the source's updated observations.
+        expect(sourceResult(req, "mcp__metrics__signups")).toEqual(initial);
+        return call("mcp__metrics__signups", SOURCE_QUERY, "fresh-query");
       },
       (req) => sourcedStart(req, "fresh-query", "start-one"),
       (req) => sourcedStart(req, "fresh-query", "retry-one"),
@@ -92,6 +94,12 @@ describe("Slack golden flow", () => {
     expect(instance).toMatchObject({ repo: "acme/api", userId: `slack:${REQUESTER}`, merge: "person" });
     expect(units).toHaveLength(1);
     expect(units[0]?.workBrief?.findings[0]).toMatchObject(refreshed);
+    expect(units[0]?.context?.handoff.dependencies?.value).toMatchObject({
+      status: "known",
+      mcp: expect.arrayContaining([expect.objectContaining({ callIds: ["fresh-query"] })]),
+    });
+    expect(units[0]?.context?.handoff.consumer).toBeUndefined();
+    expect(world.sourceInspects.length).toBeGreaterThan(0);
     const contract = await contractFor(instance!, units[0]!, {
       readRepoFile: async () => undefined,
     } as unknown as Parameters<typeof contractFor>[2]);
@@ -108,6 +116,14 @@ describe("Slack golden flow", () => {
     expect(process.workerCalls[0]).toMatchObject({
       hasOpenThread: false,
       message: { userId: `slack:${REQUESTER}`, threadKey: privateWorkerThreadKey(identity) },
+      options: {
+        childHandoff: units[0]!.context!.handoff,
+        unitContextAdmission: {
+          ...identity,
+          instanceAttempt: 0,
+          idempotencyKey: `${instance!.id}:${units[0]!.unit}/0/coding`,
+        },
+      },
     });
     for (const value of Object.values(refreshed)) expect(process.workerCalls[0]?.message.text).toContain(value);
     expect(world.posts).toHaveLength(postsBeforeWorker);
@@ -130,10 +146,10 @@ describe("Slack golden flow", () => {
   )("withholds missing $field evidence on the $turn", async ({ field, turn }) => {
     const world = goldenWorld(Date.now);
     const process = goldenProcess(world, "incomplete-source", [
-      () => call("mcp__metrics__signups", { query: SOURCE.query }),
+      () => call("mcp__metrics__signups", SOURCE_QUERY),
       (req) => sourcedAnswer(req),
       ...(turn === "fix reread"
-        ? [() => call("mcp__metrics__signups", { query: SOURCE.query }), (req: CompletionRequest) => sourcedStart(req)]
+        ? [() => call("mcp__metrics__signups", SOURCE_QUERY), (req: CompletionRequest) => sourcedStart(req)]
         : []),
     ]);
     if (turn === "initial read") delete world.state.sourceResponse[field];
@@ -154,9 +170,9 @@ describe("Slack golden flow", () => {
   it("reopens persisted conversation and task state before replaying the same fix", async () => {
     const world = goldenWorld(Date.now);
     const first = goldenProcess(world, "before-restart", [
-      () => call("mcp__metrics__signups", { query: SOURCE.query }),
+      () => call("mcp__metrics__signups", SOURCE_QUERY),
       (req) => sourcedAnswer(req),
-      () => call("mcp__metrics__signups", { query: SOURCE.query }),
+      () => call("mcp__metrics__signups", SOURCE_QUERY),
       (req) => sourcedStart(req),
       () => answer("The worker has the findings."),
     ]);
@@ -167,6 +183,8 @@ describe("Slack golden flow", () => {
     const instanceId = world.created[0]!;
     const originalInstance = await first.instances.get(instanceId);
     const originalUnits = await first.instances.listUnits(instanceId);
+    expect(originalUnits[0]?.context?.handoff.dependencies?.value?.status).toBe("known");
+    expect(originalUnits[0]?.context?.handoff.dependencies?.value?.mcp.length).toBeGreaterThan(0);
     expect(first.ledger.live.size).toBe(0);
 
     // Clear module-local Slack dedupe and create fresh admission, harness,
@@ -176,8 +194,8 @@ describe("Slack golden flow", () => {
     const second = reopen(world, "after-restart", [
       (req) => {
         expect(JSON.stringify(req.messages)).toContain("How many signups failed?");
-        expect(JSON.stringify(req.messages)).not.toContain(SOURCE.result);
-        return call("mcp__metrics__signups", { query: SOURCE.query });
+        expect(JSON.stringify(req.messages)).toContain(SOURCE.result);
+        return call("mcp__metrics__signups", SOURCE_QUERY);
       },
       (req) => sourcedStart(req),
       () => answer("The same worker still owns this request."),
@@ -242,7 +260,7 @@ describe("Slack golden flow", () => {
     const world = goldenWorld(Date.now);
     world.state.revokeOnRead = true;
     const process = goldenProcess(world, "source-revoked", [
-      () => call("mcp__metrics__signups", { query: SOURCE.query }),
+      () => call("mcp__metrics__signups", SOURCE_QUERY),
       () => answer(`Private count: ${SOURCE.result}`),
     ]);
     await process.deliver(world.event("How many signups failed?"));

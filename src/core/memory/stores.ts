@@ -89,11 +89,13 @@ export class InMemoryMemoryStore implements MemoryStore {
         plan.target.useCount += 1;
         plan.target.lastUsedAt = now;
         if (plan.confidence !== undefined) plan.target.confidence = plan.confidence;
+        plan.target.provenance = plan.provenance;
         counts.restated += 1;
         continue;
       }
       if (plan.action === "dedup") {
         plan.target.useCount += 1;
+        plan.target.provenance = plan.provenance;
         counts.deduped += 1;
         continue;
       }

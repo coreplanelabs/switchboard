@@ -1,4 +1,22 @@
-import type { SessionSources } from "../references/receipts.js";
+import {
+  applyContextCheckpoint,
+  isContextCheckpointReceipt,
+  type CanonicalCheckpointSource,
+  type ContextCheckpointResult,
+} from "../references/contextCheckpoint.js";
+import { mergeSessionSources, sourceBinding, sourceHash, type SessionSources } from "../references/receipts.js";
+import {
+  isSourceResultReceipt,
+  withSourceResults,
+  type SourceResultReceipt,
+} from "../references/sourceResultContext.js";
+import {
+  contextDependenciesOf,
+  contextDependenciesHash,
+  isContextDependencies,
+  mergeContextDependencies,
+  type ContextDependencies,
+} from "../references/contextDependencies.js";
 // The bot's write-through onto the run ledger (docs/reference/specs/run-history.md item
 // 35): one `LedgerRun` per dispatched run that mirrors what the process holds
 // in closures — the claim with the composed system prompt and tool
@@ -14,6 +32,7 @@ import type { SessionSources } from "../references/receipts.js";
 // where that lands.
 
 import { randomUUID } from "node:crypto";
+import type { SourceReadState } from "../../mcp/sourceReadState.js";
 import type { StepReport } from "./stepReport.js";
 import type { ChatMessage } from "../chatMessage.js";
 import type { ToolDef } from "../provider.js";
@@ -27,7 +46,7 @@ import { createAppendFlusher } from "./flusher.js";
 import type { HeartbeatFacts, RequesterTarget, RunLedger } from "./ledger.js";
 import type { PlaneAckOutcome, PlaneAskAnswer, PlaneEffect, PlaneOutcomePost } from "../plane/decide.js";
 import type { PlaneAdmitPost, PlaneLevelPost, PlaneObservePost } from "./ledger.js";
-import { requestIndex, sessionKey } from "./sessionLog.js";
+import { requestIndex, sessionKey, contextThreadSessionKey } from "./sessionLog.js";
 import {
   APPEND_FLUSH_EVENTS,
   APPEND_FLUSH_MS,
@@ -39,12 +58,14 @@ import {
   type IntakeReceipt,
   type IntakeWriteResult,
   type LiveRunMeta,
+  type LiveRunRow,
   type LiveStateAssignRequest,
   type LiveStateAssignResult,
   type RunState,
   type StepRecord,
   type StopMode,
   type TranscriptTurn,
+  type TranscriptRow,
   type InboxItem,
 } from "./types.js";
 
@@ -165,6 +186,11 @@ export interface OpenRunRequest {
    *  tracked for the live index and the finish but closes `interrupted` at a
    *  reclaim. */
   seed?: {
+    /** Canonical working lane selected from the persisted unit identity. */
+    key?: string;
+    /** Seeded notes for a new working lane. An established notepad always wins. */
+    notepad?: string;
+    context?: ContextDependencies;
     messages: ChatMessage[];
     /** The run's whole wall-clock budget (`agent.maxMinutes`), recorded as the
      *  seed record's `remainingMs` — paired with the messages so a seed can
@@ -261,6 +287,12 @@ export interface LedgerRun {
   commitState(patch: RunState): Promise<FinishingGate>;
   /** Persist trusted dependencies before source content reaches a model. */
   writeSources(sources: SessionSources): Promise<boolean>;
+  /** Persist one controller-admitted result before handing its bytes to a model. */
+  recordSourceResult(receipt: SourceResultReceipt): Promise<boolean>;
+  /** Freeze an acknowledged source cursor in the owned live row before handoff. */
+  checkpointSession(): Promise<{ key: string; through: number } | undefined>;
+  /** Once after the initial seed ACK, before provider execution. */
+  normalizeContextOrigins(): Promise<ContextCheckpointResult>;
   /** `live → finishing`, before the reply — the double-answer gate (D9). */
   finishing(): Promise<FinishingGate>;
   /** A reserved run that never started (item 42): the row goes with no record,
@@ -322,6 +354,8 @@ export interface AdoptRunRequest {
 }
 
 export interface LedgerWriteThrough {
+  /** False only for the explicit no-ledger implementation, never for an outage. */
+  readonly sessionPersistence: boolean;
   readonly gen: string;
   /** Current ledger owner receives a monotonic fence before resident attach. */
   claimResident(runId: string, threadKey: string): Promise<number | undefined>;
@@ -347,6 +381,9 @@ export interface LedgerWriteThrough {
   adopt(req: AdoptRunRequest): LedgerRun;
   /** The runs this generation is driving right now (opened or adopted, not yet finished). */
   liveRuns(): LedgerRun[];
+  /** Internal canonical rows for source checks; never a public diagnostic projection. */
+  readLiveRuns(): Promise<LiveRunRow[]>;
+  readContextCheckpoint(runId: string): Promise<CanonicalCheckpointSource | undefined>;
   /** A durable copy of a steered follow-up (run-history item 40), under the
    *  run's row whichever generation holds it: the ledger's inbox seq, or
    *  undefined (with a warning) when the ledger refuses — the row is gone — or
@@ -367,6 +404,7 @@ export interface LedgerWriteThrough {
   ): Promise<{ from: number; transcript: AssembledTranscript; sources?: SessionSources; requiresFreshSources?: true }>;
   /** The rows `[from, to]` of a session log as a conversation counted from `from` (item 3) — one turn when `to` is `from`. */
   readSession(key: string, from: number, to?: number): Promise<AssembledTranscript>;
+  readSessionEntry(key: string, rowId: string): Promise<readonly TranscriptRow[] | undefined>;
   /** The idempotent keyed append (session-log item 13): the parts of one turn
    *  at the log's tail under `rowId` — a fold row, a connector turn, a migrated
    *  row. A row id the log has seen appends nothing. Throws as the ledger does. */
@@ -374,6 +412,7 @@ export interface LedgerWriteThrough {
     key: string,
     rowId: string,
     rows: readonly { part: number; json: string }[],
+    context?: ContextDependencies,
   ): Promise<{ ok: boolean; appended: boolean }>;
   /** The full-text search `recall` makes (item 10): hits in relevance order, and the gap markers between them. */
   searchSession(key: string, query: string, limit: number): Promise<{ hits: SessionHit[]; gaps: number[] }>;
@@ -427,6 +466,7 @@ export interface LedgerWriteThrough {
  *  has nothing to adopt — a reclaim needs a ledger — and answers a detached run
  *  whose finish sink is the plain store, so a record can never vanish. */
 export class NullLedgerWriteThrough implements LedgerWriteThrough {
+  readonly sessionPersistence = false;
   constructor(
     readonly gen: string,
     private readonly fallback: RecordSink,
@@ -446,6 +486,12 @@ export class NullLedgerWriteThrough implements LedgerWriteThrough {
   liveRuns(): LedgerRun[] {
     return [];
   }
+  async readLiveRuns(): Promise<LiveRunRow[]> {
+    return [];
+  }
+  async readContextCheckpoint(_runId: string): Promise<undefined> {
+    return undefined;
+  }
   async pushInbox(_runId: string, _message: Record<string, unknown>): Promise<number | undefined> {
     return undefined;
   }
@@ -461,10 +507,14 @@ export class NullLedgerWriteThrough implements LedgerWriteThrough {
   async readSession(_key: string, _from: number, _to?: number): Promise<AssembledTranscript> {
     return { complete: true, turns: 0, messages: [], compactions: [] };
   }
+  async readSessionEntry(_key: string, _rowId: string): Promise<readonly TranscriptRow[] | undefined> {
+    return undefined;
+  }
   async appendSession(
     _key: string,
     _rowId: string,
     _rows: readonly { part: number; json: string }[],
+    _context?: ContextDependencies,
   ): Promise<{ ok: boolean; appended: boolean }> {
     return { ok: false, appended: false };
   }
@@ -512,6 +562,12 @@ export class NullLedgerWriteThrough implements LedgerWriteThrough {
 /** A run the null write-through was asked to adopt: untracked, not resumable,
  *  every mirror a no-op, its finish landing on the plain store. */
 export class NullLedgerRun implements LedgerRun {
+  async normalizeContextOrigins(): Promise<ContextCheckpointResult> {
+    return { ok: false, reason: "checkpoint-unavailable" };
+  }
+  async checkpointSession(): Promise<undefined> {
+    return undefined;
+  }
   readonly resumable = false;
   readonly handedOff = false;
   readonly session = undefined;
@@ -540,6 +596,9 @@ export class NullLedgerRun implements LedgerRun {
   async writeSources(_sources: SessionSources): Promise<boolean> {
     return false;
   }
+  async recordSourceResult(_receipt: SourceResultReceipt): Promise<boolean> {
+    return false;
+  }
   async setStateAndFlush(_patch: RunState): Promise<boolean> {
     return false;
   }
@@ -565,6 +624,28 @@ const RETRY_MS: readonly number[] = [200, 800];
  *  (item 54; the `landed` set): the newest ones, oldest out. A row naming an
  *  older finish is a stale row and is untracked in one claim. */
 export const LANDED_MAX = 256;
+
+/** The new producer retains inherited leaves and adds its own canonical origin. */
+function seedSources(req: OpenRunRequest): SessionSources | undefined {
+  const context = req.seed?.context ?? req.meta.childHandoff?.dependencies?.value;
+  if (context === undefined) return undefined;
+  return {
+    version: 1,
+    status: "known",
+    binding: sourceBinding(req.meta),
+    receipts: [],
+    context: mergeContextDependencies(context, {
+      version: 1,
+      status: "known",
+      revision: 0,
+      origins: [
+        { runId: req.runId, requester: req.meta.userId, channelId: req.meta.channelId, threadKey: req.meta.threadKey },
+      ],
+      slack: [],
+      mcp: [],
+    }),
+  };
+}
 
 /** How a run's finish ended (item 54): the row went (`landed`), the ledger
  *  refused it and the record went to the plain store (`refused`), or the
@@ -688,7 +769,12 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
    *  run's log. The three requests are one claim: any failure retries them all. */
   async function claim(
     req: Omit<OpenRunRequest, "seed" | "reservation">,
-    opts: { phase?: "attaching"; seed?: readonly ChatMessage[]; log?: { from: number; turns: number } } = {},
+    opts: {
+      phase?: "attaching";
+      seed?: readonly ChatMessage[];
+      key?: string;
+      log?: { from: number; turns: number };
+    } = {},
   ): Promise<Claimed> {
     // The one re-claim made after a `thread-live` naming a run this process
     // finished or is finishing, and — when its finish was waited for — how
@@ -711,7 +797,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       try {
         let session: RunSession | undefined;
         if (opts.seed) {
-          const key = sessionKey(req.threadKey, req.meta.agent);
+          const key = opts.key ?? sessionKey(req.meta.threadKey, req.meta.agent);
           const next = await ledger.sessionTail(key);
           // A seed read from the log (session-log item 9) begins at its cut when
           // the rows it names end exactly at the tail; otherwise the log moved
@@ -724,7 +810,13 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
                 `[ledger] ${req.threadKey} run ${req.runId}: the seed names log rows ${opts.log.from}..${opts.log.from + opts.log.turns - 1} but the log's tail is ${next} — the whole seed is written as new rows`,
               );
           }
-          session = { key, seedFrom, request: seedFrom + requestIndex(opts.seed), range: { from: next } };
+          session = {
+            key,
+            threadSession: contextThreadSessionKey(req.meta.threadKey),
+            seedFrom,
+            request: seedFrom + requestIndex(opts.seed),
+            range: { from: next },
+          };
         }
         const result = await ledger.claim({
           runId: req.runId,
@@ -825,12 +917,15 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     private detached = false;
     private finished = false;
     private seeded = false;
+    private seedSystem: string | undefined;
+    private seedNotepad: string | undefined;
     private adopted = false;
     handedOff = false;
     /** The run's place in its session log (session-log item 2); undefined for
      *  a run without a conversation of its own and for an adopted row claimed
      *  before the log existed. */
     private sessionRow: RunSession | undefined;
+    private childHandoff: LiveRunMeta["childHandoff"];
     get session(): RunSession | undefined {
       return this.sessionRow;
     }
@@ -888,6 +983,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     constructor(
       req: Pick<OpenRunRequest, "runId" | "threadKey" | "state" | "onStop" | "onFenced"> & {
         meta?: LiveRunMeta;
+        system?: string;
         startedAt?: number;
       },
       from: { stepNo: number; lastSeq: number; resumable?: boolean; session?: RunSession } = {
@@ -895,6 +991,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         lastSeq: 0,
       },
     ) {
+      this.seedSystem = req.system;
       this.hosted = req.meta?.hosted === true;
       this.coding = req.meta?.agent === "coding";
       this.runStartedAt = req.startedAt ?? 0;
@@ -909,11 +1006,33 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       this.lastSeq = from.lastSeq;
       this.adopted = from.resumable === true;
       this.sessionRow = from.session;
+      this.childHandoff = req.meta?.childHandoff;
+      const checkpoint = this.state.contextCheckpoint as { key?: unknown; through?: unknown } | undefined;
+      if (
+        this.adopted &&
+        this.sessionRow &&
+        this.sessionRow.range !== "broken" &&
+        checkpoint?.key === this.sessionRow.key &&
+        Number.isSafeInteger(checkpoint.through) &&
+        (checkpoint.through as number) >= this.sessionRow.seedFrom - 1
+      ) {
+        // This cursor was saved only after source rows landed. A shared log's
+        // current tail may include another producer and is never a substitute.
+        this.turnsWritten = (checkpoint.through as number) - this.sessionRow.seedFrom + 1;
+      }
     }
 
     /** A reservation learns its session when the prompt's claim promotes it. */
     bindSession(session: RunSession): void {
       this.sessionRow = session;
+    }
+
+    bindSeedSystem(system: string): void {
+      this.seedSystem = system;
+    }
+
+    bindHandoff(handoff: LiveRunMeta["childHandoff"]): void {
+      if (handoff !== undefined) this.childHandoff = handoff;
     }
 
     /** The state the promoting claim already wrote to the row, folded into this
@@ -990,7 +1109,40 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     private async land(plain: RunRecord): Promise<{ value: unknown; outcome: LandingOutcome }> {
       await this.close();
       const session = this.sessionOnRecord();
-      const record = session ? { ...plain, session } : plain;
+      // Row ingestion can taint dependencies independently of a source write.
+      // Archive the final store envelope before finish removes the live owner.
+      if (session && this.state.contextDependencies !== undefined) {
+        try {
+          const latest = await ledger.readSessionTail(session.key, 1);
+          this.state.contextDependencies = mergeContextDependencies(
+            this.state.contextDependencies as ContextDependencies,
+            contextDependenciesOf(latest.sources),
+          );
+        } catch {
+          this.state.contextDependencies = mergeContextDependencies(
+            this.state.contextDependencies as ContextDependencies,
+            contextDependenciesOf(undefined),
+          );
+        }
+      }
+      const record = {
+        ...plain,
+        ...(session ? { session } : {}),
+        ...(this.childHandoff ? { childHandoff: this.childHandoff } : {}),
+        ...(this.state.contextCheckpointReceipt !== undefined
+          ? {
+              contextCheckpointReceipt: structuredClone(
+                this.state.contextCheckpointReceipt,
+              ) as RunRecord["contextCheckpointReceipt"],
+            }
+          : {}),
+        ...(this.state.sourceReads !== undefined
+          ? { sourceReads: structuredClone(this.state.sourceReads) as SourceReadState }
+          : {}),
+        ...(this.state.contextDependencies !== undefined
+          ? { contextDependencies: structuredClone(this.state.contextDependencies) as ContextDependencies }
+          : {}),
+      };
       let result: Awaited<ReturnType<RunLedger["finish"]>>;
       try {
         result = await ledger.finish(this.runId, gen, record);
@@ -1031,9 +1183,107 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     async writeSources(sources: SessionSources): Promise<boolean> {
       if (this.detached || !this.sessionRow) return false;
       try {
-        return (await ledger.writeSessionSources(this.sessionRow.key, this.runId, gen, sources)).ok;
+        const receipt = this.state.contextCheckpointReceipt;
+        if (isContextCheckpointReceipt(receipt)) {
+          sources = { ...sources, context: applyContextCheckpoint(contextDependenciesOf(sources), receipt) };
+        }
+        const before = await ledger.readSessionTail(this.sessionRow.key, 1);
+        const merged = mergeSessionSources(before.sources, sources, before.from === 0 && before.transcript.turns === 0);
+        if (!(await ledger.writeSessionSources(this.sessionRow.key, this.runId, gen, merged)).ok) return false;
+        const saved = await ledger.readSessionTail(this.sessionRow.key, 1);
+        return await this.setStateAndFlush({ contextDependencies: contextDependenciesOf(saved.sources) });
       } catch {
         return false;
+      }
+    }
+
+    async recordSourceResult(receipt: SourceResultReceipt): Promise<boolean> {
+      if (!isSourceResultReceipt(receipt) || receipt.runId !== this.runId || !this.tracked()) return false;
+      const previous = Array.isArray(this.state.sourceResults)
+        ? this.state.sourceResults.filter(isSourceResultReceipt)
+        : [];
+      const same = previous.find((item) => item.callId === receipt.callId);
+      if (same)
+        return (
+          JSON.stringify(same) === JSON.stringify(receipt) && (await this.setStateAndFlush({ sourceResults: previous }))
+        );
+      if (previous.length >= 256) return false;
+      return this.setStateAndFlush({ sourceResults: [...previous, structuredClone(receipt)] });
+    }
+
+    async checkpointSession(): Promise<{ key: string; through: number } | undefined> {
+      if (
+        this.detached ||
+        this.finished ||
+        (!this.seeded && !this.adopted) ||
+        !this.sessionRow ||
+        this.sessionRow.range === "broken" ||
+        this.broken ||
+        this.turnsWritten === undefined
+      )
+        return undefined;
+      const checkpoint = { key: this.sessionRow.key, through: this.sessionRow.seedFrom + this.turnsWritten - 1 };
+      return (await this.setStateAndFlush({ contextCheckpoint: checkpoint })) ? checkpoint : undefined;
+    }
+
+    async normalizeContextOrigins(): Promise<ContextCheckpointResult> {
+      const unavailable: ContextCheckpointResult = { ok: false, reason: "checkpoint-unavailable" };
+      if (this.detached || this.finished) return unavailable;
+      const committed = this.state.contextCheckpointReceipt;
+      if (isContextCheckpointReceipt(committed)) return { ok: true, receipt: structuredClone(committed) };
+      if (
+        !this.seeded ||
+        this.adopted ||
+        this.stepNo !== 0 ||
+        this.seedSystem === undefined ||
+        !this.sessionRow ||
+        this.sessionRow.range === "broken" ||
+        this.broken ||
+        this.turnsWritten === undefined ||
+        !isContextDependencies(this.state.contextDependencies) ||
+        this.state.contextDependencies.status !== "known"
+      )
+        return unavailable;
+      try {
+        const checkpoint = await this.checkpointSession();
+        if (!checkpoint) return unavailable;
+        const through = checkpoint.through;
+        const transcript = await ledger.readSession(this.sessionRow.key, this.sessionRow.seedFrom, through);
+        if (!transcript.complete || transcript.turns !== this.turnsWritten) return unavailable;
+        const before = structuredClone(this.state.contextDependencies);
+        const result = await ledger.normalizeContextOrigins({
+          key: this.sessionRow.key,
+          runId: this.runId,
+          gen,
+          expected: {
+            beforeHash: await contextDependenciesHash(before),
+            revision: before.revision,
+            inputs: {
+              transcriptHash: await sourceHash(transcript),
+              systemHash: await sourceHash(this.seedSystem),
+              notepadHash: await sourceHash(this.seedNotepad ?? ""),
+            },
+          },
+        });
+        if (result.ok) {
+          if (
+            !isContextCheckpointReceipt(result.receipt) ||
+            result.receipt.runId !== this.runId ||
+            result.receipt.ownerGen !== gen ||
+            result.receipt.beforeHash !== (await contextDependenciesHash(before))
+          )
+            return unavailable;
+          // The store committed both the receipt and source metadata before ACK.
+          // Copy that state directly; a union would reintroduce covered origins.
+          this.state = {
+            ...this.state,
+            contextDependencies: structuredClone(result.receipt.normalized),
+            contextCheckpointReceipt: structuredClone(result.receipt),
+          };
+        }
+        return result;
+      } catch {
+        return unavailable;
       }
     }
 
@@ -1042,7 +1292,18 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
      *  to judge the transcript against (`transcriptCompleteness`) — a row with
      *  no record at all was killed before its conversation was stored and
      *  closes `interrupted`. */
-    async seed(messages: ChatMessage[], budgetMs: number, actors?: readonly (string | undefined)[]): Promise<void> {
+    async seed(
+      messages: ChatMessage[],
+      budgetMs: number,
+      actors?: readonly (string | undefined)[],
+      notepad?: string,
+      sources?: SessionSources,
+    ): Promise<void> {
+      this.seedNotepad = notepad;
+      if (sources !== undefined && !(await this.writeSources(sources))) {
+        this.detach("seed source dependencies could not be persisted");
+        return;
+      }
       // Every row at its log index (`rowIndex`). The messages the seed reused
       // from the log (item 9) — the rows between `seedFrom` and the range's
       // start — are there already and are skipped.
@@ -1056,6 +1317,18 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         ...(actors?.[reused + i] !== undefined ? { actor: actors[reused + i] } : {}),
       }));
       try {
+        if (
+          notepad !== undefined &&
+          this.sessionRow?.range !== "broken" &&
+          this.sessionRow?.range.from === 0 &&
+          !(await ledger.readNotepad(this.sessionRow.key))
+        ) {
+          const saved = await ledger.writeNotepad(this.sessionRow.key, gen, notepad, this.runId);
+          if (!saved.ok) {
+            this.detach(`seed notepad refused (${saved.reason})`, saved.reason === "fenced");
+            return;
+          }
+        }
         const seeded = await ledger.seed(this.runId, gen, turns, this.sessionRow?.key);
         if (!seeded.ok) {
           this.detach(`seed refused (${seeded.reason})`, seeded.reason === "fenced");
@@ -1092,10 +1365,12 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       // Every row at its log index (`rowIndex`). A compaction entry rides as
       // the row after the step's turns and counts as a turn, so the
       // completeness rule sees one index per row.
-      const turns: TranscriptTurn[] = report.turns.map((message, i) => ({
-        idx: this.rowIndex(report.firstIdx + i),
-        message,
-      }));
+      const turns: TranscriptTurn[] = await Promise.all(
+        report.turns.map(async (message, i) => ({
+          idx: this.rowIndex(report.firstIdx + i),
+          message: await withSourceResults(message, this.state.sourceResults),
+        })),
+      );
       if (report.compaction)
         turns.push({ idx: this.rowIndex(report.firstIdx + report.turns.length), compaction: report.compaction });
       const record: StepRecord = {
@@ -1374,6 +1649,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
 
   return {
     gen,
+    sessionPersistence: true,
     async claimResident(runId, threadKey) {
       const result = await ledger.residentClaim(runId, gen, threadKey);
       if (!result.ok) throw new Error(`resident claim refused: ${result.reason}`);
@@ -1410,7 +1686,10 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         // continue untracked after a failed claim; a coordinator child must
         // keep its acknowledged identity and fail setup instead.
         if (!reserved.tracked()) return { kind: "untracked", why: "the run's reservation is already untracked" };
-        const claimed = await claim(req, seed ? { seed, ...(req.seed?.log ? { log: req.seed.log } : {}) } : {});
+        const claimed = await claim(
+          req,
+          seed ? { seed, key: req.seed?.key, ...(req.seed?.log ? { log: req.seed.log } : {}) } : {},
+        );
         if (claimed.outcome === "fenced") {
           unpromoted.delete(reserved.runId); // the row is another generation's: nothing of ours to abandon
           reserved.detach("promotion refused (fenced)", true);
@@ -1433,14 +1712,26 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         }
         unpromoted.delete(reserved.runId); // promoted: no longer a reservation to abandon
         if (claimed.session) reserved.bindSession(claimed.session);
+        reserved.bindHandoff(req.meta.childHandoff);
+        reserved.bindSeedSystem(req.system);
         // The claim wrote the dispatcher's state onto the row (the workspace
         // binding, item 54); the reserved run merges it into its own, so the
         // first patch after the claim carries it on instead of writing over it.
         if (req.state) reserved.adoptState(req.state);
-        if (req.seed) await reserved.seed(req.seed.messages, req.seed.budgetMs, req.seed.actors);
+        if (req.seed)
+          await reserved.seed(
+            req.seed.messages,
+            req.seed.budgetMs,
+            req.seed.actors,
+            req.seed.notepad,
+            seedSources(req),
+          );
         return { kind: "tracked", run: reserved };
       }
-      const claimed = await claim(req, seed ? { seed, ...(req.seed?.log ? { log: req.seed.log } : {}) } : {});
+      const claimed = await claim(
+        req,
+        seed ? { seed, key: req.seed?.key, ...(req.seed?.log ? { log: req.seed.log } : {}) } : {},
+      );
       if (claimed.outcome === "fenced") {
         warn(`[ledger] ${req.threadKey} not tracked: run ${req.runId} is live under another generation`);
         return { kind: "fenced" };
@@ -1451,7 +1742,8 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         lastSeq: 0,
         ...(claimed.session ? { session: claimed.session } : {}),
       });
-      if (req.seed) await run.seed(req.seed.messages, req.seed.budgetMs, req.seed.actors);
+      if (req.seed)
+        await run.seed(req.seed.messages, req.seed.budgetMs, req.seed.actors, req.seed.notepad, seedSources(req));
       run.startHeartbeat();
       live.add(run);
       return { kind: "tracked", run };
@@ -1468,6 +1760,8 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       return run;
     },
     liveRuns: () => [...live],
+    readLiveRuns: () => ledger.listLive(),
+    readContextCheckpoint: (runId) => ledger.readContextCheckpoint(runId),
     async pushInbox(runId, message) {
       try {
         const result = await ledger.pushInbox(runId, message);
@@ -1494,7 +1788,8 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     },
     readSessionTail: (key, maxBytes) => ledger.readSessionTail(key, maxBytes),
     readSession: (key, from, to) => ledger.readSession(key, from, to),
-    appendSession: (key, rowId, rows) => ledger.appendSession(key, rowId, rows),
+    readSessionEntry: (key, rowId) => ledger.readSessionEntry(key, rowId),
+    appendSession: (key, rowId, rows, context) => ledger.appendSession(key, rowId, rows, context),
     searchSession: (key, query, limit) => ledger.searchSession(key, query, limit),
     readRequesterTarget: (key, actor) => ledger.readRequesterTarget(key, actor),
     checkpointRequesterTarget: (key, actor, target) => ledger.checkpointRequesterTarget(key, actor, target),

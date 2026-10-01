@@ -6,7 +6,7 @@
 // a child is a `dispatch()` run as the requesting user — the parent's user, in
 // the parent's channel — in a thread the parent's channel opens for it, with
 // `DispatchOptions.parent` naming the parent and depth. Read children inherit
-// the parent's remaining clock and conversation as text turns. An exact-PR
+// the parent's remaining clock and structured context with durable source references. An exact-PR
 // Ship child gets its own lease and no parent seed. What this
 // stage decides for itself it refuses by name before anything is opened: a
 // child cannot spawn (`spawn_depth`), a writer outside a typed Ship batch
@@ -42,7 +42,7 @@ import type { Clock } from "../trace/types.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
 import { defaultAdmission, steerRun, type DispatchFollowUp } from "./admission.js";
 import { waitCapabilityFor, type WaitCapability } from "./awaitChildren.js";
-import { textTurnsOf, type TextTurn } from "./textTurns.js";
+import { parentContextOf, type ParentContext } from "./handoff.js";
 import type { DispatchOutcome } from "./outcome.js";
 import type { OperationTarget } from "../repoContext.js";
 import type { PrBatchBinding } from "../prBatchBinding.js";
@@ -67,7 +67,7 @@ export const MAX_SPAWN_DEPTH = 1;
 
 /** What a parent asks for: the preset the child runs, the prompt it is
  *  handed (what it should do — it starts from the parent's conversation as
- *  text, and the prompt is its one new turn), the repository a repository
+ *  structured evidence, and the prompt is its one new turn), the repository a repository
  *  preset works in, and a narrower budget. */
 export interface SpawnRequest {
   preset: string;
@@ -131,7 +131,7 @@ export interface ParentRun {
  *  its thread lead names, the request whose user and channel the child acts as,
  *  the channel handle the child's thread is opened through, and its
  *  conversation so far — the runner's own array, read at the spawn — whose
- *  text turns are the child's seed. `conversation` is absent where the loop
+ *  structured turns are the child's seed. `conversation` is absent where the loop
  *  keeps none in this process (a unit context, a harness that holds the
  *  transcript elsewhere): the child then starts from its own thread. */
 export interface SpawnParent extends ParentRun {
@@ -143,6 +143,9 @@ export interface SpawnParent extends ParentRun {
   msg: IncomingMessage;
   io: ChannelIO;
   conversation?: readonly ChatMessage[];
+  parentContext?: ParentContext;
+  /** Read the durable context snapshot at the spawn, after the parent call lands. */
+  context?: () => Promise<ParentContext>;
 }
 
 /** How a spawn ended: the child registered — its run id, its thread and a
@@ -187,7 +190,7 @@ export interface SpawnDeps<D extends SpawnCoreDeps = SpawnCoreDeps> {
     deps: D,
     msg: IncomingMessage,
     io: ChannelIO,
-    opts?: { parent?: ParentRun; seed?: TextTurn[]; operationTarget?: OperationTarget },
+    opts?: { parent?: ParentRun; parentContext?: ParentContext; operationTarget?: OperationTarget },
   ) => Promise<DispatchOutcome>;
   registry: SpawnRegistry;
   clock: () => number;
@@ -368,6 +371,18 @@ export async function spawnChild<D extends SpawnCoreDeps>(
       `the ${platformOf(parent.msg.channelId)} channel cannot open a thread of its own, so a child run cannot be spawned from it`,
     );
   }
+  let parentContext: ParentContext | undefined;
+  try {
+    parentContext =
+      parent.parentContext ??
+      (parent.context
+        ? await parent.context()
+        : parent.conversation
+          ? parentContextOf(parent.conversation)
+          : undefined);
+  } catch (err) {
+    return refused("spawn_context", `the parent's context could not be handed over: ${describe(err)}`);
+  }
   // A channel that could not open the thread (a Slack answer without a `ts`,
   // a transport failure) is a spawn that failed, by name — never a throw into
   // the parent's tool call.
@@ -404,10 +419,6 @@ export async function spawnChild<D extends SpawnCoreDeps>(
       lastReply = text;
     },
   });
-  // The seed (routing-and-config item 20): what the parent's conversation
-  // said up to this call, as text — no tool exchanges, no thinking.
-  const seed =
-    request.preset === "ship" ? undefined : parent.conversation ? textTurnsOf(parent.conversation) : undefined;
   const settled = deps
     .dispatch(deps.core, child, io, {
       ...(selectedTarget !== undefined
@@ -420,7 +431,7 @@ export async function spawnChild<D extends SpawnCoreDeps>(
         depth: parent.depth + 1,
         ...(shipTarget === undefined ? { remainingMs: parent.remainingMs } : {}),
       },
-      ...(seed ? { seed } : {}),
+      ...(parentContext ? { parentContext } : {}),
     })
     .then(
       (outcome) => ({ kind: "ended" as const, outcome }),
@@ -459,12 +470,14 @@ export async function spawnChild<D extends SpawnCoreDeps>(
 
 /** What a spawn knows of the parent's present, read at the call: the wall
  *  clock it has left, and its conversation so far — the runner's own array,
- *  whose text turns become the child's seed. `conversation` is absent where
+ *  whose structured turns become the child's seed. `conversation` is absent where
  *  the loop keeps none in this process (a unit context, a harness that holds
  *  the transcript elsewhere): the child then starts from its own thread. */
 export interface SpawnMoment {
   remainingMs: number;
   conversation?: readonly ChatMessage[];
+  parentContext?: ParentContext;
+  context?: () => Promise<ParentContext>;
 }
 
 /** What a spawning run's tools hold (docs/reference/specs/agent-conductor.md

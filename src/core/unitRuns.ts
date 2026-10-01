@@ -1,5 +1,5 @@
 import { unitKeyOf, type CoordinatorInstance, type CoordinatorUnit } from "./coordinator/contract.js";
-import { workingSessionKey } from "./runLedger/sessionLog.js";
+import { contextSessionKey, workingSessionKey } from "./runLedger/sessionLog.js";
 import type { RunView } from "./runsService.js";
 
 // The unit is the reading unit (docs/reference/specs/agent-ship.md item 17;
@@ -83,8 +83,8 @@ export function unitSessionKeys(view: {
     ...(view.instance?.attempt !== undefined ? { attempt: view.instance.attempt } : {}),
   };
   return {
-    coding: workingSessionKey(instance, view.id, "coding"),
-    review: workingSessionKey(instance, view.id, "review"),
+    coding: contextSessionKey(workingSessionKey(instance, view.id, "coding")),
+    review: contextSessionKey(workingSessionKey(instance, view.id, "review")),
   };
 }
 

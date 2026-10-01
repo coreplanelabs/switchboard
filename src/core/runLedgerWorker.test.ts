@@ -1,3 +1,4 @@
+import { UNKNOWN_CONTEXT_DEPENDENCIES } from "./references/contextDependencies.js";
 import { testSessionSources } from "./testing/slackSources.js";
 import { describe, expect, it } from "vitest";
 import { secretsFrom } from "../secrets.js";
@@ -71,6 +72,34 @@ const claimReq: ClaimRequest = {
 };
 
 describe("WorkerRunLedger", () => {
+  it("reads one frozen keyed entry without substituting transcript tail or malformed rows", async () => {
+    const rows = [{ idx: 9, part: 0, json: '{"role":"assistant","part":{"type":"text","text":"original"}}' }];
+    const current = stubWorker((_path, body) => ({
+      status: 200,
+      data: { rows: body.rowId === "saved" ? rows : null },
+    }));
+    expect(await current.ledger.readSessionEntry("slack:C1:1.0:@thread", "saved")).toEqual(rows);
+    expect(current.calls[0]).toMatchObject({
+      path: "/runs/session/entry",
+      body: { key: "slack:C1:1.0:@thread", rowId: "saved" },
+    });
+    expect(await current.ledger.readSessionEntry("slack:C1:1.0:@thread", "missing")).toBeUndefined();
+    const malformed = stubWorker(() => ({ status: 200, data: { rows: [{ json: "wrong" }] } }));
+    expect(await malformed.ledger.readSessionEntry("slack:C1:1.0:@thread", "saved")).toBeUndefined();
+  });
+
+  it("requires the thread append's atomic context acknowledgment from the memory worker", async () => {
+    const rows = [{ part: 0, json: JSON.stringify({ role: "user", part: { type: "text", text: "request" } }) }];
+    const old = stubWorker(() => ({ status: 200, data: { ok: true, appended: true } }));
+    expect(await old.ledger.appendSession("slack:C1:1.0:@thread", "event", rows, UNKNOWN_CONTEXT_DEPENDENCIES)).toEqual(
+      { ok: false, appended: true },
+    );
+    const current = stubWorker(() => ({ status: 200, data: { ok: true, appended: true, contextSaved: true } }));
+    expect(
+      await current.ledger.appendSession("slack:C1:1.0:@thread", "event", rows, UNKNOWN_CONTEXT_DEPENDENCIES),
+    ).toEqual({ ok: true, appended: true });
+    expect(current.calls[0].body).toMatchObject({ storeKey: "runs:default", context: UNKNOWN_CONTEXT_DEPENDENCIES });
+  });
   it("requires explicit source metadata acknowledgment from the memory worker", async () => {
     const sources = testSessionSources({ channelId: "slack:D1", threadKey: "slack:D1:1.0", userId: "slack:UALICE" });
     const old = stubWorker();
@@ -83,6 +112,7 @@ describe("WorkerRunLedger", () => {
       ok: true,
     });
     expect(current.calls[0].body).toMatchObject({
+      storeKey: "runs:default",
       key: "slack:D1:1.0:orchestrator",
       sourceRunId: "r1",
       gen: "g1",

@@ -31,6 +31,9 @@ import {
 } from "./runRecord.js";
 import type { Predicate } from "./authz/types.js";
 import { RESTART_CLAIM_GRACE_MS } from "./budgets.js";
+import { planContextCheckpoint } from "./references/contextCheckpoint.js";
+import { contextDependenciesHash } from "./references/contextDependencies.js";
+import type { ChildHandoff } from "./dispatch/handoff.js";
 
 // Feature: docs/reference/specs/run-history.md — the node-free run-record contract shared
 // by the bot and the state Worker: the record shape + structural validator,
@@ -63,6 +66,134 @@ function record(over: Partial<RunRecord> = {}): RunRecord {
     ...over,
   };
 }
+
+function childHandoff(sourceRunId: string): ChildHandoff {
+  return {
+    version: 1,
+    source: {
+      runId: sourceRunId,
+      threadKey: "slack:C1:1.0",
+      channelId: "slack:C1",
+      requester: "slack:UALICE",
+    },
+    session: { key: "slack:C1:1.0:@thread", from: 0, to: 3 },
+    assets: [],
+  };
+}
+
+it("an inferred repository keeps context provenance through event projection and JSON storage", () => {
+  const event: RunEvent = {
+    type: "operator",
+    mode: "on",
+    outcome: "binds",
+    reason: "repository identified from the product brief",
+    binds: [{ line: "agent:ship fix retries", reason: "product brief", repo: "acme/api", repoSource: "context" }],
+  };
+  const stored = JSON.parse(JSON.stringify(record({ events: [event], operator: operatorOfEvents([event]) })));
+  expect(isRunRecord(stored)).toBe(true);
+  expect(stored.operator.binds[0]).toMatchObject({ repo: "acme/api", repoSource: "context" });
+});
+
+it("retained source archives remain bound to the original run owner", () => {
+  const archive = {
+    version: 1,
+    owner: {
+      runId: "run-1",
+      requester: "slack:UALICE",
+      agent: "review",
+      channelId: "slack:C1",
+      threadKey: "slack:C1:1.0",
+    },
+    recoverable: false,
+    records: [],
+  };
+  expect(isRunRecord({ ...record(), sourceReads: archive })).toBe(true);
+  expect(isRunRecord({ ...record(), sourceReads: { ...archive, owner: { ...archive.owner, runId: "other" } } })).toBe(
+    false,
+  );
+  expect(
+    isRunRecord({ ...record(), sourceReads: { ...archive, owner: { ...archive.owner, requester: "slack:UB" } } }),
+  ).toBe(false);
+  expect(isRunRecord({ ...record(), sourceReads: { ...archive, records: [{}] } })).toBe(false);
+  for (const changed of [{ agent: "coding" }, { channelId: "slack:OTHER" }, { threadKey: "slack:C1:other" }]) {
+    expect(isRunRecord({ ...record(), sourceReads: { ...archive, owner: { ...archive.owner, ...changed } } })).toBe(
+      false,
+    );
+  }
+  expect(isRunRecord({ ...record(), agent: undefined, sourceReads: archive })).toBe(false);
+  expect(isRunListItem({ ...item("run-1", 2_000), sourceReads: archive })).toBe(false);
+});
+
+it("retained context dependencies validate their canonical shape and local origin binding", () => {
+  const context = {
+    version: 1,
+    status: "known",
+    revision: 1,
+    origins: [{ runId: "run-1", requester: "slack:UALICE", channelId: "slack:C1", threadKey: "slack:C1:1.0" }],
+    slack: [],
+    mcp: [],
+  };
+  expect(isRunRecord({ ...record(), contextDependencies: context })).toBe(true);
+  expect(
+    isRunRecord({
+      ...record(),
+      contextDependencies: { ...context, origins: [{ ...context.origins[0], requester: "slack:OTHER" }] },
+    }),
+  ).toBe(false);
+  expect(
+    isRunRecord({
+      ...record(),
+      contextDependencies: {
+        ...context,
+        origins: [{ ...context.origins[0], runId: "ancestor", requester: "slack:OTHER" }],
+      },
+    }),
+  ).toBe(true);
+  expect(isRunRecord({ ...record(), contextDependencies: { ...context, mcp: [{}] } })).toBe(false);
+  expect(isRunRecord({ ...record(), contextDependencies: null })).toBe(false);
+});
+
+it("retained context checkpoints bind the exact canonical run and remain private", async () => {
+  const base = record({
+    channelVisibility: "public",
+    session: { key: "session", seedFrom: 0, request: 0, range: { from: 0, to: 0 } },
+  });
+  const context = {
+    version: 1 as const,
+    status: "known" as const,
+    revision: 0,
+    origins: [{ runId: base.id, requester: base.userId!, channelId: base.channelId!, threadKey: base.threadKey! }],
+    slack: [],
+    mcp: [],
+  };
+  const inputs = { transcriptHash: "a".repeat(64), systemHash: "b".repeat(64), notepadHash: "c".repeat(64) };
+  const receipt = (await planContextCheckpoint({
+    run: {
+      runId: base.id,
+      meta: { ...base, userId: base.userId!, channelId: base.channelId!, threadKey: base.threadKey! },
+      context,
+    },
+    ownerGen: "gen",
+    through: 0,
+    inputs,
+    expected: { beforeHash: await contextDependenciesHash(context), revision: 0, inputs },
+    sources: [],
+  }))!;
+  expect(receipt).toBeDefined();
+  const sealed = { ...base, contextDependencies: receipt.normalized, contextCheckpointReceipt: receipt };
+  expect(isRunRecord(sealed)).toBe(true);
+  for (const invalid of [
+    null,
+    {},
+    { ...receipt, runId: "other" },
+    { ...receipt, authority: { ...receipt.authority, requester: "other" } },
+    { ...receipt, session: { ...receipt.session, through: 1 } },
+  ]) {
+    expect(isRunRecord({ ...sealed, contextCheckpointReceipt: invalid })).toBe(false);
+  }
+  const { events: _events, ...summary } = sealed;
+  expect(isRunListItem(summary)).toBe(false);
+});
 
 it("a typed repository question survives the event-to-record projection and JSON storage", () => {
   const event: RunEvent = {
@@ -347,6 +478,82 @@ describe("applyRetention", () => {
     const kept = applyRetention(items, { ...policy, maxBytes: RETENTION_BOUNDS.maxBytes[0] }, 10);
     expect(kept.map((r) => r.id)).toEqual(["b", "a"]);
     expect(JSON.stringify(items)).toBe(snapshot);
+  });
+});
+
+describe("applyRetention — child context sources", () => {
+  const now = 100 * DAY;
+  const policy = { ...DEFAULT_RETENTION_POLICY };
+  const source = item("source", now - 40 * DAY);
+  const holder = (id: string, finishedAt = now): RunListItem => ({
+    ...item(id, finishedAt),
+    childHandoff: childHandoff("source"),
+  });
+
+  it("keeps an existing source while any retained child holds it and releases it after the last holder expires", () => {
+    const first = holder("first", now - 29 * DAY);
+    const last = holder("last");
+    expect(applyRetention([source, first, last], policy, now).map((r) => r.id)).toEqual(["last", "first", "source"]);
+    expect(applyRetention([source, first, last], policy, now + 2 * DAY).map((r) => r.id)).toEqual(["last", "source"]);
+    expect(applyRetention([source, first, last], policy, now + 31 * DAY)).toEqual([]);
+    expect(applyRetention([source], policy, now)).toEqual([]);
+  });
+
+  it("keeps a source for a live holder without a finished row and releases it when that holder leaves", () => {
+    const references = [{ holderRunId: "live-child", sourceRunId: "source", sessionKey: "slack:C1:1.0:@thread" }];
+    expect(applyRetention([source], policy, now, { references, liveHolderIds: ["live-child"] })).toEqual([source]);
+    expect(applyRetention([source], policy, now, { references, liveHolderIds: [] })).toEqual([]);
+  });
+
+  it("keeps referenced sources beyond count and byte limits without mutating inputs", () => {
+    const rows = [
+      { ...source, bytes: 100 },
+      { ...holder("child"), bytes: 20 },
+    ];
+    const before = JSON.stringify(rows);
+    expect(applyRetention(rows, { ...policy, maxRuns: 1, maxBytes: 20 }, now).map((r) => r.id)).toEqual([
+      "child",
+      "source",
+    ]);
+    expect(JSON.stringify(rows)).toBe(before);
+  });
+
+  it("does not recursively retain a pinned source's own ancestors", () => {
+    const grandparent = item("grandparent", now - 50 * DAY);
+    const parent = { ...source, childHandoff: childHandoff("grandparent") };
+    expect(applyRetention([grandparent, parent, holder("child")], policy, now).map((r) => r.id)).toEqual([
+      "child",
+      "source",
+    ]);
+  });
+
+  it("retains explicitly listed ancestors and never resurrects a missing source", () => {
+    const grandparent = item("grandparent", now - 50 * DAY);
+    const ancestor = childHandoff("grandparent");
+    const child = { ...holder("child"), childHandoff: { ...childHandoff("source"), ancestors: [ancestor] } };
+    expect(applyRetention([child, grandparent], policy, now).map((r) => r.id)).toEqual(["child", "grandparent"]);
+    expect(applyRetention([child], policy, now)).toEqual([child]);
+  });
+
+  it("retains original context origins and action archives without needing a child handoff", () => {
+    const origin = item("origin", now - 50 * DAY);
+    const child: RunListItem = {
+      ...item("child", now),
+      contextDependencies: {
+        version: 1,
+        status: "known",
+        revision: 1,
+        origins: [{ runId: "origin", requester: "slack:UA", channelId: "slack:CA", threadKey: "slack:CA:1" }],
+        slack: [],
+        mcp: [{ runId: "source", actionId: "action", callIds: ["call"], responseHash: "a".repeat(64) }],
+      },
+    };
+    expect(applyRetention([origin, source, child], policy, now).map((row) => row.id)).toEqual([
+      "child",
+      "source",
+      "origin",
+    ]);
+    expect(applyRetention([origin, source], policy, now)).toEqual([]);
   });
 });
 
@@ -925,6 +1132,22 @@ describe("isRunRecord — the coordinator fields (parentInstanceId, idempotencyK
     expect("idempotencyKey" in record()).toBe(false);
   });
 
+  it("accepts the original coordinator attempt zero and rejects invalid attempt identities", () => {
+    const child = record({
+      parentInstanceId: "plan-original-0",
+      idempotencyKey: "plan-original-0:U11/0/coding",
+      coordinatorUnit: "U11",
+      coordinatorAttempt: 0,
+    });
+    expect(isRunRecord(child)).toBe(true);
+    expect(isRunRecord(JSON.parse(JSON.stringify(child)))).toBe(true);
+    expect(isRunRecord({ ...child, coordinatorAttempt: 2 })).toBe(true);
+    for (const coordinatorAttempt of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1, "0", null]) {
+      expect(isRunRecord({ ...child, coordinatorAttempt })).toBe(false);
+    }
+    expect(isRunRecord({ ...child, coordinatorUnit: undefined })).toBe(false);
+  });
+
   it("refuses an instance id outside the platform's alphabet or over 100 characters, a key without its step or with a bad shape, and either field alone — the tag is both or neither", () => {
     const key = "ship_acme_api_1:u12/0/coding";
     expect(isRunRecord({ ...record(), parentInstanceId: 7, idempotencyKey: key })).toBe(false);
@@ -988,6 +1211,41 @@ describe("isRunRecord — the review's verdict and head, the fix round's disposi
 
 // docs/reference/specs/run-history.md item 53: a run is a range of its session's log;
 // the record names the log, where its seed began, its request row and its rows.
+describe("isRunRecord — the child context manifest", () => {
+  it("accepts a canonical manifest after JSON storage alongside the existing coding handoff", () => {
+    const manifest = childHandoff("parent");
+    const stored = JSON.parse(
+      JSON.stringify(
+        record({
+          childHandoff: manifest,
+          handoff: { deviations: [], followUps: [], unproven: [] },
+        }),
+      ),
+    );
+    expect(isRunRecord(stored)).toBe(true);
+    expect(stored.childHandoff).toEqual(manifest);
+    expect(isRunRecord(record())).toBe(true);
+  });
+
+  it("rejects malformed persisted manifests without throwing", () => {
+    const manifest = childHandoff("parent");
+    const malformed: unknown[] = [
+      null,
+      {},
+      { ...manifest, version: 2 },
+      { ...manifest, consumer: null },
+      { ...manifest, assets: undefined, omitted: { assets: true } },
+      { ...manifest, source: { ...manifest.source, runId: "" } },
+      { ...manifest, session: { ...manifest.session, from: 5, to: 1 } },
+      { ...manifest, ancestors: [manifest] },
+    ];
+    for (const childHandoff of malformed) {
+      expect(() => isRunRecord({ ...record(), childHandoff })).not.toThrow();
+      expect(isRunRecord({ ...record(), childHandoff })).toBe(false);
+    }
+  });
+});
+
 describe("isRunRecord — the session field", () => {
   const session = { key: "slack:C1:1.0:coding", seedFrom: 0, request: 2, range: { from: 0, to: 41 } };
   it("accepts a closed range, an open one and `broken` — also after a JSON round-trip — and a record without one carries no key", () => {
@@ -1005,6 +1263,22 @@ describe("isRunRecord — the session field", () => {
     expect(isRunRecord({ ...record(), session: { ...session, range: { from: 5, to: 4 } } })).toBe(false);
     expect(isRunRecord({ ...record(), session: { ...session, range: "gone" } })).toBe(false);
     expect(isRunRecord({ ...record(), session: "slack:C1:1.0:coding" })).toBe(false);
+  });
+
+  it("accepts the exact thread marker on canonical and work-unit sessions while preserving legacy rows", () => {
+    for (const key of ["slack:C1:1.0:@thread", "unit:work-1"]) {
+      const value = record({ session: { ...session, key, threadSession: "slack:C1:1.0:@thread" } });
+      expect(isRunRecord(JSON.parse(JSON.stringify(value)))).toBe(true);
+    }
+    expect(isRunRecord(record({ session }))).toBe(true);
+  });
+
+  it("rejects malformed or foreign thread markers even when the session is broken", () => {
+    for (const threadSession of ["", 7, null, "slack:C1:1.0:coding", "slack:C2:1.0:@thread", "bad key:@thread"]) {
+      for (const range of [session.range, "broken"]) {
+        expect(isRunRecord({ ...record(), session: { ...session, range, threadSession } })).toBe(false);
+      }
+    }
   });
 });
 

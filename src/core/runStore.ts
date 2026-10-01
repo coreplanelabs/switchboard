@@ -88,13 +88,13 @@ export interface RunStore {
   abandoned(record: RunRecord, why: string): void;
   /** The record, or null when unknown, expired, or the id is malformed — one not-found shape. */
   get(id: string): Promise<RunRecord | null>;
-  /** The record WITHOUT its events (the listing row, `bytes` included) — the
+  /** The record without events or internal source bodies (`bytes` included) — the
    *  same not-found shape as `get`. The read for a caller that needs identity,
    *  status, or the diagnosis but not the event set (`RunsService.getRun`
    *  without `include`, `getRunFriction`, `stopRun`), so a 5000-event run is
    *  never loaded whole to answer them. */
   getSummary(id: string): Promise<RunListItem | null>;
-  /** Newest first (`finishedAt` desc, `id` desc); never includes events. */
+  /** Newest first (`finishedAt` desc, `id` desc); never includes events or source bodies. */
   list(opts: RunListOptions): Promise<RunListItem[]>;
   /** A page of a run's events, or null when the run is unknown, expired, or the
    *  id is malformed (the same not-found as `get`). An existing run with no
@@ -229,7 +229,13 @@ export function pageEvents(events: readonly RunEvent[], opts: RunEventsOptions):
 }
 
 export function toListItem(record: RunRecord, bytes: number): RunListItem {
-  const { events: _events, ...rest } = record;
+  const {
+    events: _events,
+    sourceReads: _sourceReads,
+    contextCheckpointReceipt: _contextCheckpointReceipt,
+    directAudience: _directAudience,
+    ...rest
+  } = record;
   return { ...rest, bytes };
 }
 
@@ -267,7 +273,7 @@ export class InMemoryRunStore implements RunStore {
     // a store keeps nothing in flight per record (run-history item 54): nothing to settle
   }
   async put(record: RunRecord): Promise<PutResult> {
-    if (!isValidRunId(record.id)) return { ok: true, retained: this.records.size, stored: false, rewritten: false };
+    if (!isRunRecord(record)) return { ok: true, retained: this.records.size, stored: false, rewritten: false };
     const bytes = utf8ByteLength(JSON.stringify(record));
     const prev = this.records.get(record.id);
     const rewritten =
@@ -421,8 +427,7 @@ export class FileRunStore implements RunStore {
     // a store keeps nothing in flight per record (run-history item 54): nothing to settle
   }
   async put(record: RunRecord): Promise<PutResult> {
-    if (!isValidRunId(record.id))
-      return { ok: true, retained: this.readIndex().length, stored: false, rewritten: false };
+    if (!isRunRecord(record)) return { ok: true, retained: this.readIndex().length, stored: false, rewritten: false };
     this.ensureDir();
     const content = JSON.stringify(record);
     const bytes = utf8ByteLength(content);

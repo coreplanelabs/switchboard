@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { parseAppConfigText } from "../../config.js";
 import { NO_GRANTS } from "../authz/types.js";
 import { REASONING_OUTPUT_TOKEN_ALLOWANCE } from "../dispatch/route.js";
@@ -55,10 +55,45 @@ memory:
       history: [],
       request: "remember the durable lesson",
       answer: "the durable lesson",
+      context: {
+        version: 1,
+        status: "known",
+        revision: 1,
+        origins: [{ runId: "run-1", requester: "slack:U_TEST", channelId: "slack:C1", threadKey: "slack:C1:1" }],
+        slack: [],
+        mcp: [],
+      },
     });
     await drainReflections();
 
     expect(requests).toHaveLength(1);
     expect(requests[0]?.maxTokens).toBeGreaterThanOrEqual(REASONING_OUTPUT_TOKEN_ALLOWANCE + 1_024);
   });
+
+  it.each([undefined, "unknown", "revoked"] as const)(
+    "does not extract memory from %s producer dependencies",
+    async (status) => {
+      const get = vi.fn();
+      scheduleReflection({
+        cfg: { enabled: true },
+        store: undefined,
+        originChannelVisibility: "public",
+        providers: { get },
+        runModelRef: "acme/reflect",
+        gate: { toolCalls: 1, historyTurns: 0, agentName: "general" },
+        threadKey: "slack:C1:1",
+        runId: "run-1",
+        actor: { kind: "user", id: "slack:U_TEST", grants: NO_GRANTS },
+        organization: "acme",
+        userId: "slack:U_TEST",
+        channelId: "slack:C1",
+        history: [],
+        request: "remember",
+        answer: "derived text",
+        ...(status ? { context: { version: 1 as const, status, revision: 1, origins: [], slack: [], mcp: [] } } : {}),
+      });
+      await drainReflections();
+      expect(get).not.toHaveBeenCalled();
+    },
+  );
 });

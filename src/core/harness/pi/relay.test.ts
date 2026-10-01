@@ -1,3 +1,4 @@
+import { parentContextOf } from "../../dispatch/handoff.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Executor, PublicationTransport } from "../../../execution/executor.js";
 import type { ChatMessage } from "../../chatMessage.js";
@@ -897,11 +898,12 @@ describe("relayToolCall: a relayed call that outlives one request", () => {
       now: () => Date.now(),
       sleep: sleepUnlessAborted,
     };
+    const admitContext = vi.fn(async (runId: string) => runId === "run-child");
     const { harness } = live({ identity: "none" });
     harness.tools = [awaitRunsTool];
     harness.toolContext = {
       executor,
-      runs: { service, actor: admin, runId: "run-7" },
+      runs: { service, actor: admin, runId: "run-7", admitContext },
       wait,
       remainingMs: () => 60 * 60_000,
     };
@@ -929,6 +931,7 @@ describe("relayToolCall: a relayed call that outlives one request", () => {
         },
       ],
     });
+    expect(admitContext).toHaveBeenCalledWith("run-child");
     expect(report.waitedMs).toBeGreaterThanOrEqual(7 * 60_000);
     // A retry after the answer landed reads it again, with no second wait and no second run.
     expect(await relayToolCall(harness, calls, ask)).toEqual(progress);
@@ -1121,7 +1124,7 @@ describe("runRelayedTool: the conductor's spawn_run on pi", () => {
     return { harness, events, dispatched, leads, order };
   }
 
-  it("reaches spawnChild with the parent's text turns (the conversation the harness offers, read after the bridge has seen the call), so the child is dispatched with `seed` set to what was said, never the tool call", async () => {
+  it("reaches spawnChild with structured parent context read after the bridge has seen the call", async () => {
     const w = conducting(async () => log);
     const answer = await runRelayedTool(w.harness, {
       toolCallId: "t1",
@@ -1136,10 +1139,7 @@ describe("runRelayedTool: the conductor's spawn_run on pi", () => {
         text: "agent:research what is a Durable Object?",
         opts: {
           parent: { runId: "run-7", depth: 1, remainingMs: 30 * 60_000 },
-          seed: [
-            { role: "user", text: "look into durable objects" },
-            { role: "assistant", text: "Storage first: one research child." },
-          ],
+          parentContext: parentContextOf(log),
         },
       },
     ]);

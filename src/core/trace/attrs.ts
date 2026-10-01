@@ -48,7 +48,7 @@ export interface AttrDomain {
   /** The operator's decision, separate from the request's final outcome. */
   operatorOutcome: "binds" | "question" | "refusal" | "non_decision";
   /** Provenance of an accepted typed repository; the slug stays on the run event. */
-  operatorRepoSource: "request" | "attachment" | "thread" | "channel";
+  operatorRepoSource: "request" | "attachment" | "thread" | "channel" | "context";
   operatorAttempts: number;
   operatorRepoCatalog: "skipped" | "available" | "truncated" | "empty" | "unavailable";
   operatorRepoCandidates: number;

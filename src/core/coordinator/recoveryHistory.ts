@@ -310,6 +310,7 @@ export function planRecoveryTransition(
     "reviewThread",
     "pr",
     "workBrief",
+    "context",
     "generatedTask",
     "threadEvidence",
   ] as const)
@@ -373,6 +374,7 @@ export function planRecoveryTransition(
       input.request.threadKey !== (expected.threadKey ?? instance.threadKey) ||
       unit.branch !== expected.branch ||
       !same(unit.workBrief, expected.workBrief) ||
+      !same(unit.context, expected.context) ||
       !same(unit.generatedTask, expected.generatedTask) ||
       !same(unit.history, expected.history) ||
       claim.actionId !== undefined ||

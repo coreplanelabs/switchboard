@@ -166,6 +166,238 @@ describe("mintGeneration", () => {
 });
 
 describe("open — claim and seed", () => {
+  it("writes admitted GitHub result receipts with their exact mirrored bytes and preserves them in a later seed", async () => {
+    const { ledger, wt } = harness();
+    const req = openReq();
+    req.seed!.context = {
+      version: 1,
+      status: "known",
+      revision: 0,
+      origins: [],
+      slack: [],
+      mcp: [],
+      githubRepos: ["acme/api"],
+    };
+    const run = (await openRun(wt, req))!;
+    const { sourceHash } = await import("../references/receipts.js");
+    const receipt = {
+      version: 1 as const,
+      runId: "r1",
+      callId: "read",
+      tool: "github_file",
+      repos: ["acme/api"],
+      resultHash: await sourceHash("public source"),
+    };
+    await run.step(
+      step({
+        firstIdx: 3,
+        turns: [{ role: "assistant", content: [{ type: "tool_use", id: "read", name: "github_file", input: {} }] }],
+      }),
+    );
+    expect(await run.recordSourceResult(receipt)).toBe(true);
+    expect(ledger.live.get("r1")!.state.sourceResults).toEqual([receipt]);
+    await run.step(
+      step({
+        firstIdx: 4,
+        turns: [{ role: "user", content: [{ type: "tool_result", toolUseId: "read", content: "public source" }] }],
+      }),
+    );
+    const saved = await ledger.readSessionTail(run.session!.key, 100_000);
+    expect(saved.sources?.context?.status).toBe("known");
+    expect(saved.transcript.messages.at(-1)?.sourceResults).toEqual([receipt]);
+    await run.sink.put({ ...record("r1"), agent: "review" });
+    const next = openReq({
+      runId: "r2",
+      threadKey: "slack:C1:2.0",
+      meta: { ...req.meta, threadKey: "slack:C1:2.0" },
+      seed: { messages: saved.transcript.messages, budgetMs: 600_000, context: saved.sources!.context },
+    });
+    const child = (await openRun(wt, next))!;
+    expect((await ledger.readSessionTail(child.session!.key, 100_000)).sources?.context?.status).toBe("known");
+    await child.close();
+  });
+
+  it("merges retained session dependencies before a later run writes its own context", async () => {
+    const { ledger, wt } = harness();
+    const req = openReq();
+    req.seed!.context = { version: 1, status: "known", revision: 0, origins: [], slack: [], mcp: [] };
+    const first = (await openRun(wt, req))!;
+    const prior = (await ledger.readSessionTail(first.session!.key, 1)).sources!;
+    await first.sink.put({ ...record("r1"), agent: "review" });
+    const next = openReq({ runId: "r2" });
+    next.seed!.context = { ...req.seed!.context, origins: [] };
+    const second = (await openRun(wt, next))!;
+    expect(second.tracked()).toBe(true);
+    const saved = (await ledger.readSessionTail(second.session!.key, 1)).sources!;
+    expect(saved.context?.status).toBe("known");
+    expect(saved.context?.origins.map((origin) => origin.runId)).toEqual(["r1", "r2"]);
+    expect(
+      await second.writeSources({ ...prior, status: "revoked", context: { ...prior.context!, status: "revoked" } }),
+    ).toBe(true);
+    expect((ledger.live.get("r2")!.state.contextDependencies as { status: string }).status).toBe("revoked");
+    await second.close();
+  });
+
+  it("archives original source state and dependencies before deleting the live row", async () => {
+    const { ledger, wt } = harness();
+    const req = openReq();
+    req.seed!.context = { version: 1, status: "known", revision: 0, origins: [], slack: [], mcp: [] };
+    const run = (await openRun(wt, req))!;
+    const sourceReads = {
+      version: 1,
+      owner: {
+        runId: "r1",
+        requester: "slack:UALICE",
+        agent: "review",
+        channelId: "slack:C1",
+        threadKey: "slack:C1:1.0",
+      },
+      recoverable: false,
+      records: [],
+    };
+    const contextDependencies = structuredClone(ledger.live.get("r1")!.state.contextDependencies);
+    expect(await run.setStateAndFlush({ sourceReads })).toBe(true);
+    await run.sink.put({ ...record("r1"), agent: "review" });
+    expect(ledger.live.has("r1")).toBe(false);
+    expect(ledger.finished.get("r1")).toMatchObject({ sourceReads, contextDependencies });
+  });
+
+  it("persists inherited context before writing the child seed", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    let checked = false;
+    const { wt } = harness({
+      ledger: overriding(ledger, {
+        seed: async (runId, gen, turns, session) => {
+          const context = (await ledger.readSessionTail(session!, 1)).sources?.context;
+          expect(context?.status).toBe("known");
+          expect(context?.origins.map((origin) => origin.runId)).toEqual(["parent", "r1"]);
+          checked = true;
+          return ledger.seed(runId, gen, turns, session);
+        },
+      }),
+    });
+    const req = openReq();
+    req.seed!.context = {
+      version: 1,
+      status: "known",
+      revision: 1,
+      origins: [{ runId: "parent", requester: "slack:UALICE", channelId: "slack:C1", threadKey: "slack:C1:1.0" }],
+      slack: [],
+      mcp: [],
+    };
+    const run = (await openRun(wt, req))!;
+    expect(checked).toBe(true);
+    await run.close();
+  });
+
+  it("archives the final session dependency status even when a row write tainted it after the last state flush", async () => {
+    const { ledger, wt } = harness();
+    const req = openReq();
+    req.seed!.context = { version: 1, status: "known", revision: 0, origins: [], slack: [], mcp: [] };
+    const run = (await openRun(wt, req))!;
+    const key = run.session!.key;
+    const sources = (await ledger.readSessionTail(key, 1)).sources!;
+    expect((ledger.live.get("r1")!.state.contextDependencies as { status: string }).status).toBe("known");
+    await ledger.writeSessionSources(key, "r1", "gen-A", {
+      ...sources,
+      status: "revoked",
+      context: { ...sources.context!, status: "revoked" },
+    });
+    await run.sink.put({ ...record("r1"), agent: "review" });
+    expect(ledger.finished.get("r1")?.contextDependencies?.status).toBe("revoked");
+  });
+
+  it("keeps one committed checkpoint through later source changes, finish and facade restart", async () => {
+    const { ledger, wt } = harness();
+    const req = openReq();
+    req.meta.channelVisibility = "public";
+    req.seed!.notepad = "oldest fact retained only in working notes";
+    req.seed!.context = {
+      version: 1,
+      status: "known",
+      revision: 0,
+      origins: [],
+      slack: [],
+      mcp: [],
+      githubRepos: ["org/repo"],
+    };
+    const run = (await openRun(wt, req))!;
+    const committed = await run.normalizeContextOrigins();
+    expect(committed.ok).toBe(true);
+    if (!committed.ok) throw new Error("checkpoint not committed");
+    const sources = (await ledger.readSessionTail(run.session!.key, 1)).sources!;
+    expect(
+      await run.writeSources({ ...sources, context: { ...sources.context!, githubRepos: ["org/repo", "org/later"] } }),
+    ).toBe(true);
+    expect(await wt.writeNotepad(run.session!.key, "updated later", run.runId)).toEqual({ ok: true });
+    expect(await run.normalizeContextOrigins()).toEqual(committed);
+    await run.sink.put({ ...record("r1"), agent: "review", channelVisibility: "public" });
+    expect(ledger.finished.get("r1")?.contextCheckpointReceipt).toEqual(committed.receipt);
+    expect(ledger.finished.get("r1")?.contextDependencies?.githubRepos).toEqual(["org/later", "org/repo"]);
+    const restarted = harness({ ledger }).wt;
+    expect((await restarted.readContextCheckpoint("r1"))?.receipt).toEqual(committed.receipt);
+  });
+
+  it("keeps covered origins normalized when a source controller saves its earlier snapshot", async () => {
+    const { ledger, wt } = harness();
+    const req = openReq();
+    req.meta.channelVisibility = "public";
+    req.seed!.context = { version: 1, status: "known", revision: 0, origins: [], slack: [], mcp: [] };
+    const first = (await openRun(wt, req))!;
+    expect((await first.normalizeContextOrigins()).ok).toBe(true);
+    await first.sink.put({ ...record("r1"), agent: "review", channelVisibility: "public" });
+    const inherited = (await ledger.readSessionTail(first.session!.key, 1)).sources!.context!;
+    const second = (await openRun(wt, { ...req, runId: "r2", seed: { ...req.seed!, context: inherited } }))!;
+    const earlier = (await ledger.readSessionTail(second.session!.key, 1)).sources!;
+    expect((await second.normalizeContextOrigins()).ok).toBe(true);
+    expect(
+      await second.writeSources({ ...earlier, context: { ...earlier.context!, githubRepos: ["org/later"] } }),
+    ).toBe(true);
+    const saved = (await ledger.readSessionTail(second.session!.key, 1)).sources!.context!;
+    expect(saved.origins.map((origin) => origin.runId)).toEqual(["r2"]);
+    expect(saved.githubRepos).toEqual(["org/later"]);
+    await second.close();
+  });
+
+  it("normalizes only the committed initial seed and keeps failed attempts out of local state", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    let attempts = 0;
+    const { wt } = harness({
+      ledger: overriding(inner, {
+        normalizeContextOrigins: async (request) => {
+          attempts++;
+          expect(request).toMatchObject({ runId: "r1", gen: "gen-A", key: "slack:C1:1.0:review" });
+          expect(request.expected.inputs.systemHash).toMatch(/^[a-f0-9]{64}$/);
+          return { ok: false, reason: "checkpoint-unavailable" };
+        },
+      }),
+    });
+    const req = openReq();
+    req.seed!.context = { version: 1, status: "known", revision: 0, origins: [], slack: [], mcp: [] };
+    const run = (await openRun(wt, req))!;
+    expect(await run.normalizeContextOrigins()).toEqual({ ok: false, reason: "checkpoint-unavailable" });
+    expect(attempts).toBe(1);
+    expect(inner.live.get("r1")!.state.contextCheckpointReceipt).toBeUndefined();
+    await run.step(step());
+    expect(await run.normalizeContextOrigins()).toEqual({ ok: false, reason: "checkpoint-unavailable" });
+    expect(attempts).toBe(1);
+    await run.close();
+  });
+
+  it("checkpoints only acknowledged source rows under the current owner", async () => {
+    const { ledger, wt } = harness();
+    const run = (await openRun(wt, openReq()))!;
+    expect(await run.checkpointSession()).toEqual({ key: "slack:C1:1.0:review", through: 2 });
+    await ledger.appendSession("slack:C1:1.0:review", "foreign-row", [
+      { part: 0, json: storedTurnRow({ role: "assistant", text: "not this run's acknowledged step" }) },
+    ]);
+    expect(await run.checkpointSession()).toEqual({ key: "slack:C1:1.0:review", through: 2 });
+    expect((await wt.readLiveRuns())[0].state.contextCheckpoint).toEqual({ key: "slack:C1:1.0:review", through: 2 });
+    ledger.live.get("r1")!.ownerGen = "new-owner";
+    expect(await run.checkpointSession()).toBeUndefined();
+    await run.close();
+  });
+
   it("claims the thread with the run's prompt, tools, card and meta, and seeds the transcript", async () => {
     const { ledger, wt, warnings } = harness();
     const run = await openRun(wt, openReq());
@@ -1519,7 +1751,13 @@ describe("finishing and finish", () => {
     expect(ledger.live.has("r1")).toBe(false);
     expect(ledger.finished.get("r1")).toEqual({
       ...record("r1"),
-      session: { key: "slack:C1:1.0:review", seedFrom: 0, request: 2, range: { from: 0, to: 2 } },
+      session: {
+        key: "slack:C1:1.0:review",
+        threadSession: "slack:C1:1.0:@thread:@context-v1",
+        seedFrom: 0,
+        request: 2,
+        range: { from: 0, to: 2 },
+      },
     });
     expect(ledger.events.get("r1")).toHaveLength(1); // flushed before the finish, not dropped
     expect(fallbackPuts).toEqual([]);
@@ -1732,11 +1970,85 @@ describe("finishing and finish", () => {
 describe("the session log — a run is a range of it", () => {
   const KEY = "slack:C1:1.0:review";
 
+  it("an explicit working lane continues across rounds without borrowing the ordinary agent log", async () => {
+    const { ledger, wt, warnings } = harness();
+    const key = "plan-p:unit:review";
+    const first = (await openRun(
+      wt,
+      openReq({ seed: { key, messages: [user("first round")], budgetMs: 600_000, notepad: "prior lane decisions" } }),
+    ))!;
+    expect(await ledger.readNotepad(key)).toMatchObject({ text: "prior lane decisions" });
+    await first.step(step({ turns: [assistant("first report")], firstIdx: 1 }));
+    await first.sink.put(record("r1"));
+    const second = (await openRun(
+      wt,
+      openReq({
+        runId: "r2",
+        seed: {
+          key,
+          messages: [user("first round"), assistant("first report"), user("second round")],
+          budgetMs: 600_000,
+          log: { from: 0, turns: 2 },
+          notepad: "stale copy",
+        },
+      }),
+    ))!;
+    expect(second.session).toEqual({
+      key,
+      threadSession: "slack:C1:1.0:@thread:@context-v1",
+      seedFrom: 0,
+      request: 2,
+      range: { from: 2 },
+    });
+    expect((await ledger.readSession(key, 0)).messages).toEqual([
+      user("first round"),
+      assistant("first report"),
+      user("second round"),
+    ]);
+    expect(ledger.sessions.has(KEY)).toBe(false);
+    expect(await ledger.readNotepad(key)).toMatchObject({ text: "prior lane decisions" });
+    expect(warnings).toEqual([]);
+    await second.sink.put(record("r2"));
+  });
+
+  it("retains a child's structured source reference in the finish record across adoption", async () => {
+    const { ledger, wt } = harness();
+    const handoff = {
+      version: 1 as const,
+      source: { runId: "parent", threadKey: "slack:C1:1.0", channelId: "slack:C1", requester: "slack:UALICE" },
+      session: { key: "slack:C1:1.0:coding", from: 0, to: 5 },
+      assets: [],
+    };
+    const req = openReq();
+    req.meta.childHandoff = handoff;
+    await ledger.claimSession(handoff.session.key, "parent", "parent-gen");
+    await ledger.seed(
+      "parent",
+      "parent-gen",
+      Array.from({ length: 6 }, (_, idx) => ({ idx, message: user(`source ${idx}`) })),
+      handoff.session.key,
+    );
+    const first = (await openRun(wt, req))!;
+    await first.close();
+    const adopted = wt.adopt({
+      runId: "r1",
+      threadKey: req.threadKey,
+      meta: ledger.live.get("r1")!.meta,
+      session: first.session,
+      state: {},
+      lastSeq: 0,
+      lastStep: 0,
+    });
+    await adopted.sink.put(record("r1"));
+    expect(ledger.finished.get("r1")?.childHandoff).toEqual(handoff);
+  });
+
   it("a thread's first run of an agent starts the log at 0: the seed is rows 0..n-1, the row's session names the key, seedFrom 0, the request's index and range.from 0; the seed record lands under the same key so the run is tracked and resumable; the finish closes the range and clears nothing", async () => {
     const { ledger, wt, warnings } = harness();
     const run = (await openRun(wt, openReq()))!;
     expect(ledger.live.get("r1")!.meta.session).toEqual({
       key: KEY,
+      threadSession: "slack:C1:1.0:@thread:@context-v1",
       seedFrom: 0,
       request: 2,
       range: { from: 0 },
@@ -1754,7 +2066,13 @@ describe("the session log — a run is a range of it", () => {
     expect(warnings).toEqual([]);
     // The run knows its place in the log (item 10: what the session tools read and write by),
     // and the write-through reaches the log's search and notepad under this generation.
-    expect(run.session).toEqual({ key: KEY, seedFrom: 0, request: 2, range: { from: 0 } });
+    expect(run.session).toEqual({
+      key: KEY,
+      threadSession: "slack:C1:1.0:@thread:@context-v1",
+      seedFrom: 0,
+      request: 2,
+      range: { from: 0 },
+    });
     expect((await wt.searchSession(KEY, "earlier", 5)).hits.map((h) => h.idx)).toEqual([0]);
     expect((await wt.readSession(KEY, 1, 1)).messages).toEqual([assistant("sure")]);
     expect(await wt.readNotepad(KEY)).toBeNull();
@@ -1776,6 +2094,7 @@ describe("the session log — a run is a range of it", () => {
     await run.sink.put(record("r1"));
     expect(ledger.finished.get("r1")!.session).toEqual({
       key: KEY,
+      threadSession: "slack:C1:1.0:@thread:@context-v1",
       seedFrom: 0,
       request: 2,
       range: { from: 0, to: 5 },
@@ -1793,7 +2112,13 @@ describe("the session log — a run is a range of it", () => {
       wt,
       openReq({ runId: "r2", seed: { messages: [user("history"), user("follow up")], budgetMs: 600_000 } }),
     ))!;
-    expect(ledger.live.get("r2")!.meta.session).toEqual({ key: KEY, seedFrom: 3, request: 4, range: { from: 3 } });
+    expect(ledger.live.get("r2")!.meta.session).toEqual({
+      key: KEY,
+      threadSession: "slack:C1:1.0:@thread:@context-v1",
+      seedFrom: 3,
+      request: 4,
+      range: { from: 3 },
+    });
     expect(ledger.steps.get("r2")![0]).toMatchObject({ step: 0, turnIndex: 2 });
     await second.step(step({ turns: [assistant("on it")], firstIdx: 2 }));
     const own = await ledger.readSession(KEY, 3);
@@ -1802,6 +2127,7 @@ describe("the session log — a run is a range of it", () => {
     await second.sink.put(record("r2"));
     expect(ledger.finished.get("r2")!.session).toEqual({
       key: KEY,
+      threadSession: "slack:C1:1.0:@thread:@context-v1",
       seedFrom: 3,
       request: 4,
       range: { from: 3, to: 5 },
@@ -1828,7 +2154,13 @@ describe("the session log — a run is a range of it", () => {
         },
       }),
     ))!;
-    expect(ledger.live.get("r2")!.meta.session).toEqual({ key: KEY, seedFrom: 2, request: 5, range: { from: 4 } });
+    expect(ledger.live.get("r2")!.meta.session).toEqual({
+      key: KEY,
+      threadSession: "slack:C1:1.0:@thread:@context-v1",
+      seedFrom: 2,
+      request: 5,
+      range: { from: 4 },
+    });
     expect(ledger.steps.get("r2")![0]).toMatchObject({ step: 0, turnIndex: 4 });
     // Rows 2 and 3 were not written again; 4 and 5 are the new ones.
     const log = await ledger.readSession(KEY, 0);
@@ -1854,6 +2186,7 @@ describe("the session log — a run is a range of it", () => {
     await second.sink.put(record("r2"));
     expect(ledger.finished.get("r2")!.session).toEqual({
       key: KEY,
+      threadSession: "slack:C1:1.0:@thread:@context-v1",
       seedFrom: 2,
       request: 5,
       range: { from: 4, to: 6 },
@@ -1877,7 +2210,13 @@ describe("the session log — a run is a range of it", () => {
         },
       }),
     ))!;
-    expect(ledger.live.get("r2")!.meta.session).toEqual({ key: KEY, seedFrom: 3, request: 4, range: { from: 3 } });
+    expect(ledger.live.get("r2")!.meta.session).toEqual({
+      key: KEY,
+      threadSession: "slack:C1:1.0:@thread:@context-v1",
+      seedFrom: 3,
+      request: 4,
+      range: { from: 3 },
+    });
     expect((await ledger.readSession(KEY, 0)).turns).toBe(5);
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("log rows 2..3");
@@ -1908,7 +2247,13 @@ describe("the session log — a run is a range of it", () => {
         },
       }),
     ))!;
-    expect(second.session).toEqual({ key: KEY, seedFrom: 2, request: 4, range: { from: 4 } });
+    expect(second.session).toEqual({
+      key: KEY,
+      threadSession: "slack:C1:1.0:@thread:@context-v1",
+      seedFrom: 2,
+      request: 4,
+      range: { from: 4 },
+    });
     expect([0, 1, 2].map((i) => second.logIndexOf(i))).toEqual([2, 3, 4]);
     await second.step(step({ turns: [assistant("on it")], firstIdx: 3 }));
     expect(second.logIndexOf(3)).toBe(5);
@@ -1951,9 +2296,21 @@ describe("the session log — a run is a range of it", () => {
     const run = (await openRun(wt, openReq()))!;
     // The seed's own record write goes through `step` too: it is the detach here.
     expect(run.tracked()).toBe(false);
-    expect(ledger.live.get("r1")!.meta.session).toEqual({ key: KEY, seedFrom: 0, request: 2, range: { from: 0 } });
+    expect(ledger.live.get("r1")!.meta.session).toEqual({
+      key: KEY,
+      threadSession: "slack:C1:1.0:@thread:@context-v1",
+      seedFrom: 0,
+      request: 2,
+      range: { from: 0 },
+    });
     await run.sink.put(record("r1"));
-    expect(ledger.finished.get("r1")!.session).toEqual({ key: KEY, seedFrom: 0, request: 2, range: "broken" });
+    expect(ledger.finished.get("r1")!.session).toEqual({
+      key: KEY,
+      threadSession: "slack:C1:1.0:@thread:@context-v1",
+      seedFrom: 0,
+      request: 2,
+      range: "broken",
+    });
   });
 
   it("an adopted run continues its session: steps land at seedFrom + their local index and the record closes the range there; an adopted row without a session writes its own transcript object as before", async () => {
@@ -2189,6 +2546,18 @@ describe("intake receipts — the write-through's retry (run-history item 59)", 
 describe("appendSession — the thread session's idempotent keyed append (session-log item 13)", () => {
   const KEY = threadSessionKey("slack:C1:1.0");
 
+  it("forwards the complete dependency envelope before exposing a report", async () => {
+    const { ledger, wt } = harness();
+    const context = { version: 1 as const, status: "known" as const, revision: 0, origins: [], slack: [], mcp: [] };
+    await wt.appendSession(
+      KEY,
+      "report",
+      [{ part: 0, json: storedTurnRow({ role: "assistant", text: "report" }) }],
+      context,
+    );
+    expect((await ledger.readSessionTail(KEY, 100_000)).sources?.context).toMatchObject({ status: "known" });
+  });
+
   it("a fold that reads the same ship_unit event twice yields one row and never a second copy of the report", async () => {
     const { ledger, wt } = harness();
     const event = { unit: "U16", state: "ended", seq: 12 };
@@ -2237,5 +2606,35 @@ describe("appendSession — the thread session's idempotent keyed append (sessio
     expect(silentOfStoredRow(stored.json)).toBe(true);
     expect(actorOfStoredRow(stored.json)).toBe("slack:UALICE");
     expect(roleOfStoredRow(stored.json)).toBe("user");
+  });
+});
+
+describe("adopted context checkpoint", () => {
+  it("uses an acknowledged saved cursor and otherwise waits for a new committed step", async () => {
+    for (const hasSavedCursor of [false, true]) {
+      const { ledger, wt } = harness();
+      const original = (await openRun(wt, openReq()))!;
+      if (hasSavedCursor) await original.checkpointSession();
+      await original.close();
+      const row = ledger.live.get("r1")!;
+      await ledger.appendSession(row.meta.session!.key, "later-foreign-row", [
+        { part: 0, json: storedTurnRow({ role: "assistant", text: "later" }) },
+      ]);
+      const adopted = wt.adopt({
+        runId: row.runId,
+        threadKey: row.threadKey,
+        meta: row.meta,
+        state: row.state,
+        session: row.meta.session,
+        lastStep: 0,
+        lastSeq: 0,
+      });
+      expect(await adopted.checkpointSession()).toEqual(
+        hasSavedCursor ? { key: row.meta.session!.key, through: 2 } : undefined,
+      );
+      await adopted.step(step());
+      expect(await adopted.checkpointSession()).toEqual({ key: row.meta.session!.key, through: 3 });
+      await adopted.close();
+    }
   });
 });

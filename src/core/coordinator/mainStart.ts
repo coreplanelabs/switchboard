@@ -8,6 +8,7 @@ import { handOffToCoordinator, type HandOffDeps } from "./handOff.js";
 import { isMainTaskKey, type StoredWorkBriefDraft, type WorkBriefIssue } from "./contract.js";
 import { isMainTaskAuthority, type MainTaskAuthority } from "./requesterAuthority.js";
 import type { MainSourceFailureCode } from "../dispatch/mainSource.js";
+import { isUnitContext, type UnitContext } from "../dispatch/unitContext.js";
 
 /** Trusted dispatch context supplies the actor, message, gates and runner seams.
  * The model supplies only a repository and bounded evidence for one change. */
@@ -26,6 +27,8 @@ export interface MainStartInput {
   actor: Actor;
   msg: IncomingMessage;
   mainRunId: string;
+  /** Canonically captured by dispatch; absent on legacy callers only. */
+  context?: UnitContext;
   /** A trusted run fence checked again after async preflight and before start. */
   stillLive: () => boolean;
   /** Freshly proves the original Slack DM is still a one-person internal audience. */
@@ -49,6 +52,15 @@ const refuse = (reply: string): MainStartResult => ({ kind: "refused", reply });
 export function createMainTaskStarter(deps: MainStartDeps) {
   return async (input: MainStartInput): Promise<MainStartResult> => {
     const { actor, msg, brief } = input;
+    if (
+      input.context !== undefined &&
+      (!isUnitContext(input.context) ||
+        input.context.handoff.source.runId !== input.mainRunId ||
+        input.context.handoff.source.requester !== msg.userId ||
+        input.context.handoff.source.channelId !== msg.channelId ||
+        input.context.handoff.source.threadKey !== msg.threadKey)
+    )
+      return refuse("The original conversation context could not be verified; no worker started.");
     const stillLive = () => {
       if (typeof input.stillLive !== "function") return false;
       try {
@@ -122,6 +134,7 @@ export function createMainTaskStarter(deps: MainStartDeps) {
         entry: pre.entry,
         requestText: brief.requestedChange,
         mainTask: { ...mainTaskKey, brief, authority: input.authority },
+        ...(input.context !== undefined ? { context: input.context } : {}),
         privateWorkerReady: deps.privateWorkerAvailable,
         msg,
         runId: input.mainRunId,

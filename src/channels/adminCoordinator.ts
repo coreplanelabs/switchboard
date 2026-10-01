@@ -94,6 +94,17 @@ import { foldThreadAttachments } from "../core/dispatch/admission.js";
 import { attributedText, foldThreadEvents } from "../core/threadEvents.js";
 import { assembleRunRecord } from "../core/dispatch/record.js";
 import type { CoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
+import {
+  freezeCoordinatorReport,
+  freezeAdmittedCoordinatorReport,
+  coordinatorReportAdmission,
+  sameCoordinatorReportAdmission,
+  sameCoordinatorReportOwner,
+  readCoordinatorReport,
+  type CoordinatorReportOwner,
+  type CoordinatorReportLedger,
+} from "../core/coordinator/reportContext.js";
+import { appendCoordinatorStatus } from "../core/coordinator/unitStatus.js";
 import type { ArtifactStore } from "../artifacts/store.js";
 import type { PrivateWorkerLog } from "../core/privateWorkerLog.js";
 import { PRIVATE_WORKER_INTERNAL_READ } from "../core/runsService.js";
@@ -286,12 +297,17 @@ export interface AdminCoordinatorDeps {
    *  write renews (`hosting.until`) and whose sink `finish` seals the record
    *  through the ledger — releasing the host key with the row. */
   ledgerRuns: () => LedgerRun[];
+  /** Immutable coordinator deliveries share the same durable thread log as agent answers. */
+  reportLedger?: CoordinatorReportLedger;
   /** `dispatch()` bound over the process's deps: the child as the requesting
    *  user, tagged, with the unit's contract for a round-0 child. */
   dispatch: (
     msg: IncomingMessage,
     io: ChannelIO,
-    opts?: Pick<DispatchOptions, "coordinator" | "contract" | "operationTarget"> & { coordinator: CoordinatorTag },
+    opts?: Pick<
+      DispatchOptions,
+      "coordinator" | "contract" | "operationTarget" | "childHandoff" | "unitContextAdmission"
+    > & { coordinator: CoordinatorTag },
   ) => Promise<DispatchOutcome>;
   /** A terminal or moved pull request revokes a live child's authority. The
    * coordinator folds a fixed instruction into that run as the requester; it
@@ -1279,6 +1295,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   const tag: CoordinatorTag = {
     parentInstanceId: instance.id,
     idempotencyKey: key,
+    ...(row ? { unit: row.unit, instanceAttempt: instance.attempt ?? 0 } : {}),
     ...(instance.grant?.costCapUsd !== undefined ? { costCapUsd: instance.grant.costCapUsd } : {}),
     ...((row?.branch ?? instance.branch) !== undefined ? { branch: row?.branch ?? instance.branch } : {}),
     ...(row?.recovery !== undefined ? { transportWorkflowId: row.recovery.workflowId } : {}),
@@ -1309,6 +1326,17 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
         ...(req.preset === "coding" ? { ref: turn.ref ?? row?.branch ?? instance.branch } : {}),
       },
       coordinator: tag,
+      ...(row?.context
+        ? {
+            childHandoff: row.context.handoff,
+            unitContextAdmission: {
+              instanceId: instance.id,
+              unit: row.unit,
+              instanceAttempt: instance.attempt ?? 0,
+              idempotencyKey: key,
+            },
+          }
+        : {}),
       ...(row?.recovery !== undefined && row.publication !== undefined
         ? {
             recovery: {
@@ -5644,8 +5672,8 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   // renders it at the request's verbosity beside the full report the row and
   // the board keep; absent (an older driver), the full report is the thread's.
   // Empty means the level says nothing here — a quiet segment boundary.
-  const fullReport = ending.report as string;
-  const threadReport = typeof ending.threadReport === "string" ? ending.threadReport : ending.report;
+  let fullReport = ending.report as string;
+  let threadReport = typeof ending.threadReport === "string" ? ending.threadReport : ending.report;
   const at = (deps.clock ?? systemClock)();
   const instance = await deps.instances.get(id.value);
   if (!instance) return json(404, { ok: false, error: "unknown_instance" });
@@ -5653,6 +5681,53 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   const units = await deps.instances.listUnits(instance.id);
   const row = units.find((u) => u.unit === body.unit);
   if (!row) return json(404, { ok: false, error: "unit_not_found", unit: body.unit });
+  if (
+    body.deliveryId !== undefined &&
+    (typeof body.deliveryId !== "string" || !STEP_NAME_PATTERN.test(body.deliveryId))
+  )
+    return json(400, { ok: false, error: "deliveryId must be a step name", at });
+  const reportThread = unitThread(instance, row, units.length).threadKey ?? instance.threadKey;
+  if (!deps.reportLedger) return json(503, { ok: false, error: "report_context_unavailable", at });
+  const deliveryStep =
+    typeof body.deliveryId === "string"
+      ? body.deliveryId
+      : typeof body.recoveryWorkflowId === "string"
+        ? `recovery:${body.recoveryWorkflowId}`
+        : ending.kind === "continued"
+          ? `legacy-segment:${parseSegment(body.segment)?.index ?? "invalid"}`
+          : ending.kind === "idle"
+            ? `legacy-idle:${row.segments?.at(-1)?.index ?? 1}:${body.codingRunId ?? "none"}`
+            : `legacy-end:${ending.kind}`;
+  const reportDelivery =
+    typeof body.recoveryWorkflowId === "string" ? `recovery:${body.recoveryWorkflowId}:${deliveryStep}` : deliveryStep;
+  const reportOwner: CoordinatorReportOwner = {
+    instanceId: instance.id,
+    unit: row.unit,
+    attempt: instance.attempt ?? 0,
+    requester: instance.userId,
+    channelId: instance.channelId,
+    threadKey: reportThread,
+    deliveryId: reportDelivery,
+  };
+  const freezeReport = async (committed: CoordinatorUnit) => {
+    const frozen = await freezeAdmittedCoordinatorReport(deps.reportLedger!, committed.reportDelivery, reportOwner, {
+      text: fullReport,
+      threadText: threadReport as string,
+    });
+    fullReport = frozen.text;
+    threadReport = frozen.threadText;
+    ending.report = fullReport;
+  };
+  try {
+    const frozen = await readCoordinatorReport(deps.reportLedger, reportOwner);
+    if (frozen) {
+      fullReport = frozen.text;
+      threadReport = frozen.threadText;
+      ending.report = fullReport;
+    }
+  } catch {
+    return json(503, { ok: false, error: "report_context_unavailable", at });
+  }
   const pr = body.pr as { number?: unknown; url?: unknown } | undefined;
   if (
     outcome !== undefined &&
@@ -5721,6 +5796,17 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       return false;
     }
   };
+  const recordStatus = async (committed: CoordinatorUnit): Promise<boolean> => {
+    try {
+      await appendCoordinatorStatus(
+        { ledger: deps.reportLedger!, instances: deps.instances },
+        { owner: reportOwner, instance, unit: committed },
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  };
   const recoveryWorkflowId =
     typeof body.recoveryWorkflowId === "string" && INSTANCE_ID_PATTERN.test(body.recoveryWorkflowId)
       ? body.recoveryWorkflowId
@@ -5736,7 +5822,39 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     unit: row.unit,
     ...(settlementActionId !== undefined ? { recoveryActionId: settlementActionId } : {}),
   };
+  const reportAdmission = await coordinatorReportAdmission(reportOwner, {
+    text: fullReport,
+    threadText: threadReport as string,
+  });
+  const sameReport = await sameCoordinatorReportAdmission(row.reportDelivery, reportAdmission);
+  if (
+    row.reportDelivery !== undefined &&
+    !sameReport &&
+    (sameCoordinatorReportOwner(row.reportDelivery.owner, reportOwner) ||
+      (row.ending !== undefined && (row.ending.outcome !== undefined || row.history !== undefined)))
+  )
+    return json(409, { ok: false, error: "settlement_conflict", at });
   if (recoveryWorkflowId !== undefined && row.recoveryReceipt?.workflowId === recoveryWorkflowId) {
+    const committed = sameReport ? row : { ...row, reportDelivery: reportAdmission };
+    if (!sameReport) {
+      try {
+        const accepted = await deps.instances.compareAndReplaceUnit(row, committed);
+        if (!accepted.ok) return json(409, { ok: false, error: "settlement_conflict", at });
+      } catch {
+        const current = await deps.instances.listUnits(instance.id).catch(() => undefined);
+        if (
+          current?.filter((candidate) => candidate.unit === row.unit).length !== 1 ||
+          JSON.stringify(current.find((candidate) => candidate.unit === row.unit)) !== JSON.stringify(committed)
+        )
+          return json(503, { ok: false, error: "settlement_store_unavailable", at });
+      }
+    }
+    try {
+      await freezeReport(committed);
+    } catch {
+      return json(503, { ok: false, error: "report_context_unavailable", at });
+    }
+    if (!(await recordStatus(committed))) return json(503, { ok: false, error: "report_context_unavailable", at });
     if (row.workBrief !== undefined && !(await deliverPrivateReport()))
       return json(503, { ok: false, error: "private_worker_log_unavailable", at });
     if (row.pr !== undefined) {
@@ -5797,7 +5915,7 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   // stop is dropped with it, so the row says one thing about how the unit stands.
   const { idle: _idle, recovery: _recovery, ...rowWithoutLifecycle } = row;
   let updated: CoordinatorUnit =
-    row.ending !== undefined && (row.ending.outcome !== undefined || row.history !== undefined)
+    sameReport || (row.ending !== undefined && (row.ending.outcome !== undefined || row.history !== undefined))
       ? row
       : {
           ...(idle !== undefined || segment !== undefined ? row : rowWithoutLifecycle),
@@ -5828,7 +5946,7 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
               : {
                   ending: {
                     kind: ending.kind,
-                    report: ending.report,
+                    report: fullReport,
                     ...(outcome !== undefined ? { outcome } : {}),
                     ...((outcome !== undefined || row.history !== undefined) && row.workBrief !== undefined
                       ? { deliveryId: body.deliveryId as string }
@@ -5842,6 +5960,7 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
                   },
                 }),
         };
+  updated = { ...updated, reportDelivery: sameReport ? row.reportDelivery : reportAdmission };
   // Every caller participates, including an older driver's unprojected ending:
   // a stale legacy or idle write must not erase a newer typed settlement.
   const storeError = row.recovery !== undefined ? "recovery_store_unavailable" : "settlement_store_unavailable";
@@ -5868,9 +5987,10 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
           current[0]!.recovery === undefined &&
           current[0]!.recoveryReceipt?.workflowId === row.recovery.workflowId &&
           current[0]!.recoveryReceipt?.reviewRunId === row.recovery.reviewRunId))
-    )
+    ) {
       replaced = { ok: true };
-    else if (current?.length === 1 && JSON.stringify(current[0]) === JSON.stringify(row))
+      updated = current[0]!;
+    } else if (current?.length === 1 && JSON.stringify(current[0]) === JSON.stringify(row))
       return json(503, { ok: false, error: storeError, at });
     else return json(409, { ok: false, error: staleError, at });
   }
@@ -5880,6 +6000,12 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       error: replaced?.reason === "stale" ? staleError : storeError,
       at,
     });
+  try {
+    await freezeReport(updated);
+  } catch {
+    return json(503, { ok: false, error: "report_context_unavailable", at });
+  }
+  if (!(await recordStatus(updated))) return json(503, { ok: false, error: "report_context_unavailable", at });
   if (segment === undefined && idle === undefined && updated.pr !== undefined)
     deps.runnerOwnership?.release(instance.repo, updated.pr.number, settlementOwner);
   const thread = unitThread(instance, updated, units.length);
@@ -5894,7 +6020,7 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
           unit: updated.unit,
           state: ending.kind,
           ...(row.workBrief === undefined && thread.threadKey !== undefined ? { threadKey: thread.threadKey } : {}),
-          ...(row.workBrief === undefined ? { report: ending.report } : {}),
+          ...(row.workBrief === undefined ? { report: fullReport } : {}),
           ...(updated.pr !== undefined ? { pr: updated.pr.number } : {}),
           at,
         },
@@ -6602,6 +6728,31 @@ async function finish(body: Record<string, unknown>, deps: AdminCoordinatorDeps)
   const host = await hostRunOf(deps, instance);
   if (host.kind === "not_host") return json(409, { ok: false, error: "not_host", at });
   const units = await deps.instances.listUnits(instance.id);
+  if (!deps.reportLedger) return json(503, { ok: false, error: "report_context_unavailable", at });
+  let summaryText: string;
+  let summaryReply: string;
+  try {
+    const saved = await freezeCoordinatorReport(
+      deps.reportLedger,
+      {
+        instanceId: instance.id,
+        unit: "@plan",
+        attempt: instance.attempt ?? 0,
+        requester: instance.userId,
+        channelId: instance.channelId,
+        threadKey: instance.threadKey,
+        deliveryId: `finish:${body.outcome}`,
+      },
+      {
+        text: planSummary(units, isGenerated(instance)),
+        threadText: `Plan ${instance.plan?.id ?? ""} ended (${body.outcome}):\n${planSummary(units)}`,
+      },
+    );
+    summaryText = saved.text;
+    summaryReply = saved.threadText;
+  } catch {
+    return json(503, { ok: false, error: "report_context_unavailable", at });
+  }
   if (host.kind === "host") {
     const ledgerRun = deps.ledgerRuns().find((run) => run.runId === host.runId);
     let summary = deps.registry.getById(host.runId);
@@ -6624,7 +6775,7 @@ async function finish(body: Record<string, unknown>, deps: AdminCoordinatorDeps)
         throw new Error(`hosted wrap-up was not committed (${wrapping.ok ? "registry sequence" : wrapping.reason})`);
       summary = deps.registry.getById(host.runId);
       if (!summary) throw new Error("hosted run disappeared during wrap-up");
-      const answer: RunEvent = { type: "answer", text: planSummary(units, isGenerated(instance)), at };
+      const answer: RunEvent = { type: "answer", text: summaryText, at };
       const answerSeq = summary.eventCount + 1;
       const refreshed = await ledgerRun.assignLiveState({
         expectedSeq: summary.liveStateSeq ?? 0,
@@ -6649,7 +6800,7 @@ async function finish(body: Record<string, unknown>, deps: AdminCoordinatorDeps)
       if (!ended.ok || !deps.registry.commitLiveState(host.runId, ended))
         throw new Error(`hosted ending was not committed (${ended.ok ? "registry sequence" : ended.reason})`);
     } else {
-      deps.registry.publish(host.runId, { type: "answer", text: planSummary(units, isGenerated(instance)), at });
+      deps.registry.publish(host.runId, { type: "answer", text: summaryText, at });
     }
     deps.registry.finish(host.runId, body.outcome);
   }
@@ -6659,7 +6810,7 @@ async function finish(body: Record<string, unknown>, deps: AdminCoordinatorDeps)
   // (record 0055 item 3: the count decides, not the source).
   if (units.length >= 2 && !units.some((row) => row.workBrief !== undefined)) {
     const io = deps.ioFor({ threadKey: instance.threadKey, userId: instance.userId });
-    await io?.reply(`Plan ${instance.plan?.id ?? ""} ended (${body.outcome}):\n${planSummary(units)}`).catch(() => {});
+    await io?.reply(summaryReply).catch(() => {});
   }
   const runId = instance.runId ?? instance.id.slice(0, 64);
   if (host.kind === "host") {
