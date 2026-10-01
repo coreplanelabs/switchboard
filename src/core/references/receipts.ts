@@ -1,3 +1,4 @@
+import type { SlackSourceDenial } from "./denial.js";
 import type { ToolResultContent } from "../chatMessage.js";
 import type { ConversationRef, ReferencedConversation } from "./types.js";
 
@@ -26,7 +27,7 @@ export interface SlackSourceReceipt extends SourceBinding {
   file?: { id: string; hash: string };
 }
 export type SlackSourceRead =
-  { kind: "read"; content: ToolResultContent; receipt: SlackSourceReceipt } | { kind: "refused"; content: string };
+  { kind: "read"; content: ToolResultContent; receipt: SlackSourceReceipt } | SlackSourceDenial;
 
 /** Missing metadata means legacy/unknown, never a receipt inferred from prose. */
 export type SessionSources =

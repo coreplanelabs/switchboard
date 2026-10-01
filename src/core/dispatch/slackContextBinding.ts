@@ -112,7 +112,7 @@ export async function bindSlackContext(input: {
           const result = await source.readSource(request);
           if (!(await destinationStillPrivate()))
             return "slack_context: this private conversation is no longer available.";
-          if (result.kind === "refused") return result.content;
+          if (result.kind === "refused") return JSON.stringify(result);
           const next = addSourceReceipt(sources, result.receipt);
           if (!isSessionSources(next) || next.status !== "known" || !(await save(next))) {
             revoked = true;

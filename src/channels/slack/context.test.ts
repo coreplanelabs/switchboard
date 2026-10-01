@@ -1,4 +1,5 @@
 import { booleanAudienceVerifier } from "../../core/testing/audienceVerifier.js";
+import { WebAPIHTTPError, WebAPIRateLimitedError, WebAPIRequestError } from "@slack/web-api";
 import { InMemoryRunLedger } from "../../core/runLedger/inMemory.js";
 import { sessionSeed } from "../../core/dispatch/seed.js";
 import { bindSlackContext } from "../../core/dispatch/slackContextBinding.js";
@@ -164,6 +165,76 @@ function setup(
 }
 
 describe("Slack context adapter", () => {
+  it("keeps categorical source policy separate from temporary and unknown failures", async () => {
+    for (const isMember of [true, false, undefined]) {
+      const h = setup({
+        channels: isMember === undefined ? undefined : { D_OTHER: { is_im: true, is_member: isMember } },
+      });
+      const info = vi.spyOn(h.client.conversations, "info");
+      for (const request of [
+        { kind: "link" as const, url: url("D_OTHER") },
+        { kind: "file" as const, url: url("D_OTHER"), fileId: "FOTHER" },
+      ]) {
+        expect(await h.capability.readSource(request)).toMatchObject({
+          kind: "refused",
+          reason: "cross_dm_forbidden",
+          recovery: { action: "provide_content_here" },
+        });
+      }
+      expect(h.calls.replies).not.toHaveBeenCalled();
+      expect(info).not.toHaveBeenCalledWith({ channel: "D_OTHER" });
+    }
+    for (const error of [
+      new WebAPIRateLimitedError(1),
+      new WebAPIRequestError(new Error("connection reset")),
+      new WebAPIHTTPError(503, "Unavailable", {}),
+    ]) {
+      const temporary = setup();
+      vi.spyOn(temporary.client.conversations, "replies").mockRejectedValue(error);
+      expect(await temporary.capability.readSource({ kind: "thread" })).toMatchObject({
+        kind: "refused",
+        reason: "temporarily_unavailable",
+        recovery: { action: "retry_later" },
+      });
+    }
+    const unknown = setup();
+    vi.spyOn(unknown.client.conversations, "replies").mockRejectedValue(new Error("grant access to secret-name"));
+    const refused = await unknown.capability.readSource({ kind: "thread" });
+    expect(refused).toMatchObject({
+      kind: "refused",
+      reason: "unavailable",
+      recovery: { action: "provide_content_here" },
+    });
+    expect(JSON.stringify(refused)).not.toContain("secret-name");
+  });
+
+  it("does not expose hidden source classification in denial recovery", async () => {
+    const results = [];
+    for (const channels of [
+      undefined,
+      { C_HIDDEN: { is_private: true, is_member: true } },
+      { C_HIDDEN: { is_private: false, is_member: false } },
+      { C_HIDDEN: { is_shared: true, is_member: true } },
+    ]) {
+      const h = setup({ channels });
+      results.push(await h.capability.readSource({ kind: "link", url: url("C_HIDDEN") }));
+      expect(h.calls.replies).not.toHaveBeenCalled();
+    }
+    for (const result of results) expect(result).toEqual(results[0]);
+    expect(results[0]).toMatchObject({ reason: "unavailable", recovery: { action: "provide_content_here" } });
+  });
+
+  it("retains retry recovery for the reference rate limit", async () => {
+    const h = setup({ replies: { [`C_PUBLIC:${THREAD}`]: [{ ts: THREAD, user: "UALICE", text: "public fact" }] } });
+    for (let i = 0; i < 10; i++)
+      expect((await h.capability.readSource({ kind: "link", url: url("C_PUBLIC") })).kind).toBe("read");
+    expect(await h.capability.readSource({ kind: "link", url: url("C_PUBLIC") })).toMatchObject({
+      kind: "refused",
+      reason: "temporarily_unavailable",
+      recovery: { action: "retry_later" },
+    });
+  });
+
   it("persists every message from the full native reference window before delivery", async () => {
     const messages = Array.from({ length: 50 }, (_, i) => ({
       ts: i === 0 ? THREAD : `1790000001.${String(i).padStart(6, "0")}`,

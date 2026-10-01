@@ -297,7 +297,7 @@
     "src/tools/runs.ts": "393d3c71621018379aac237173e9e8fb12c7dab82b0909b70da00a445d30c8bf",
     "src/tools/session.ts": "964e2395d5443c7447c50bc71522d01e6fa12731477c9c590e0263ca2f9d66b7",
     "src/tools/skills.ts": "bafdd697375ff8e53be74a42386bf20ff3494a74cba41582674863c9a44ed28e",
-    "src/tools/slackContext.ts": "3496a06b74cd397be3b080e9c34911aa188b604828e0e90bb672f8202a9ba5d2",
+    "src/tools/slackContext.ts": "2eec8eee866461144f886bda6df4648b795eb7df87c2f639d2ea0d5af701b8e9",
     "src/tools/status.ts": "4f32d352c92d3e512cd5973aa75b7f46095bd90d85fc75bf121c361b76660276",
     "src/tools/submit.ts": "5784d55a45412078c24777a08d5cebdfb2fd623b6a0f29bfd129d33d844e9c94",
     "src/tools/threadWork.ts": "0c7dd5c51942be028e85fcc3f2ea63902cb2f2995774811b559eaa3f9107508c",

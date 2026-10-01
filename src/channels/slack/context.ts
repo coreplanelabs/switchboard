@@ -1,3 +1,8 @@
+import {
+  slackSourceDenial,
+  type SlackSourceDenial,
+  type SlackSourceDenialReason,
+} from "../../core/references/denial.js";
 import { sourceBinding, sameSourceBinding, sourceHash, type SlackSourceRead } from "../../core/references/receipts.js";
 import type { ToolResultContent } from "../../core/chatMessage.js";
 import type { Actor, ChannelDirectory } from "../../core/authz/types.js";
@@ -30,9 +35,21 @@ export const SLACK_CONTEXT_MAX_MESSAGES = 20;
 export const SLACK_CONTEXT_MAX_TEXT_CHARS = 16_000;
 export const SLACK_CONTEXT_MAX_FILE_BYTES = 2 * 1024 * 1024;
 export const SLACK_CONTEXT_MAX_FILE_TEXT_CHARS = 12_000;
-const REFUSED = "slack_context: I can't read that Slack source.";
-const FILE_REFUSED = "slack_context: I can't read that file from the linked message.";
 const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+
+/** Read only the SDK's structured error fields; this adapter is also bundled
+ * into the CLI package, which does not carry the Slack SDK at runtime. */
+function temporaryReadFailure(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const { code, statusCode } = error as { code?: unknown; statusCode?: unknown };
+  return (
+    code === "slack_webapi_rate_limited_error" ||
+    code === "slack_webapi_request_error" ||
+    (code === "slack_webapi_http_error" &&
+      typeof statusCode === "number" &&
+      (statusCode === 429 || (statusCode >= 500 && statusCode < 600)))
+  );
+}
 
 function clipped(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}\n…[truncated]` : text;
@@ -179,23 +196,27 @@ export function createSlackContextCapability(input: {
     return cls.visibility === "public" && cls.botIsMember && (await reader.requesterIsFullMember(actor.id));
   };
 
-  const allowedLink = async (url: string): Promise<{ ref: ConversationRef } | undefined> => {
+  const allowedLink = async (url: string, file: boolean): Promise<{ ref: ConversationRef } | SlackSourceDenial> => {
     const ref = await linkOf(url);
-    if (!ref) return undefined;
+    if (!ref) return slackSourceDenial("unavailable", file);
     if (ref.channelId === msg.channelId) return { ref };
-    // Public sources can be quoted into the destination; a private channel's
-    // membership alone says nothing about everyone in the destination.
+    // This is a scope limit from the supplied address, not a claim about the
+    // existence or membership of the other conversation.
+    if (ref.channelId.startsWith("slack:D")) return slackSourceDenial("cross_dm_forbidden", file);
+    // Hidden, missing and inaccessible channels keep one outward denial.
     const cls = await reader.classifyConversation(ref);
-    if (cls.visibility !== "public" || !cls.botIsMember) return undefined;
+    if (cls.visibility !== "public" || !cls.botIsMember) return slackSourceDenial("unavailable", file);
     const checked = await readReferences({ conversationReaders: [reader] }, { actor, msg: { ...msg, text: url } });
-    return checked.conversations.length === 1 && checked.refused.length === 0
-      ? { ref: checked.conversations[0].ref }
-      : undefined;
+    if (checked.conversations.length === 1 && checked.refused.length === 0)
+      return { ref: checked.conversations[0].ref };
+    const temporary = checked.refused.some((reason) => reason === "rate-limited" || reason === "timed-out");
+    return slackSourceDenial(temporary ? "temporarily_unavailable" : "unavailable", file);
   };
 
   const binding = sourceBinding(msg);
   const originRef = { channelId: msg.channelId, threadKey: msg.threadKey, url: msg.sourceUrl ?? msg.threadKey };
-  const refused = (file = false): SlackSourceRead => ({ kind: "refused", content: file ? FILE_REFUSED : REFUSED });
+  const refused = (file = false, reason: SlackSourceDenialReason = "unavailable"): SlackSourceDenial =>
+    slackSourceDenial(reason, file);
 
   async function quoteMessages(
     request: SlackContextRequest,
@@ -272,8 +293,10 @@ export function createSlackContextCapability(input: {
           );
         }
         const linked =
-          request.kind === "file" && request.url === undefined ? { ref: originRef } : await allowedLink(request.url!);
-        if (!linked) return refused(request.kind === "file");
+          request.kind === "file" && request.url === undefined
+            ? { ref: originRef }
+            : await allowedLink(request.url!, request.kind === "file");
+        if (!("ref" in linked)) return linked;
         const { ref } = linked;
         const channel = ref.channelId.slice(6);
         const threadTs = ref.threadKey.slice(ref.channelId.length + 1);
@@ -305,8 +328,11 @@ export function createSlackContextCapability(input: {
             coverage: { kind: "bounded", truncated: loaded.truncated },
           },
         };
-      } catch {
-        return refused(request.kind === "file");
+      } catch (error) {
+        return refused(
+          request.kind === "file",
+          temporaryReadFailure(error) ? "temporarily_unavailable" : "unavailable",
+        );
       }
     },
     async revalidateSource(receipt): Promise<boolean> {
