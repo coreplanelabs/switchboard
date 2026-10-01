@@ -269,7 +269,7 @@
     "src/execution/residentCredentials.ts": "4138bbc0ad7501f1e35378bfc15d1c333294ed47a900492baa2aa4abc03459fc",
     "src/execution/residentDisk.ts": "9fb95f5e533af830869f7a8049b8fc7b1a934e58332bc68f5f64851a24be0d7f",
     "src/execution/residentDiskBudget.ts": "102322313876fb3dcbb24918e54847df593819ce581220f34463d8aaf2b23565",
-    "src/execution/residentRefresh.ts": "ae7ad3d24d4216963a3117be14b16a088d57d262fc16ca61f36ffa9c76e6891b",
+    "src/execution/residentRefresh.ts": "2546f271e51a94ab7d62da39054b0d2f7bda4dc80766cd98684f76cefc0e393d",
     "src/execution/residentState.ts": "2e485a7b0999033d25a967f54289f0d14fc5694b24a20f9f2b7f3d7b1824bceb",
     "src/execution/residentStepTrace.ts": "48fd3c0fe8845317af1073428d76e1296429d65425d517485c3c0b7effdffc4c",
     "src/execution/residentText.ts": "cc21f5f39da012655d5b573c7f06a9eacab9eac28849d8a3bcf829472b526484",

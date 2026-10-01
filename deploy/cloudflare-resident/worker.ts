@@ -248,6 +248,8 @@ import {
   RESTORE_MAX_MS,
   RESTORE_POLL_MS,
   restoreArchivePath,
+  restoreProgressPaths,
+  accumulateRestoreProgress,
   withTimeout,
   type RefreshDisk,
   type RefreshPlan,
@@ -1998,16 +2000,18 @@ export class ResidentDO extends Sandbox<Env> {
    *  the restore is driven from this isolate, so nothing outlives it. */
   private readonly pendingRestores = new Set<Promise<unknown>>();
 
-  /** Run one R2 restore and judge it by the bytes arriving in its target
-   *  directory (judgeRestoreProgress): the SDK call takes no timeout, progress
+  /** Run one R2 restore and judge it by the bytes arriving in its backup work
+   *  directory and target (judgeRestoreProgress): the SDK call takes no timeout, progress
    *  callback or AbortSignal, and a fixed budget abandoned a restore that then
-   *  completed (481 s against 300 s). While `du` of the target keeps
+   *  completed (481 s against 300 s). While observed disk use keeps
    *  growing the wait continues; it ends on a stall (no growth for
    *  RESTORE_STALL_MS) or the RESTORE_MAX_MS cap, with the bytes and the timing
    *  in the error. On success the observed size and rate are logged so the
    *  budgets can be revisited from evidence. */
   private async restoreWithProgress(backup: DirectoryBackup, what: string, deadlineMs: number): Promise<void> {
+    const baselineKiB = await this.restoreProgressKiB(backup);
     const startedMs = systemClock();
+    let progress = { previousKiB: baselineKiB ?? 0, observedKiB: 0 };
     const p = this.restoreBackup(backup);
     this.pendingRestores.add(p);
     void p.then(
@@ -2028,7 +2032,9 @@ export class ResidentDO extends Sandbox<Env> {
         console.log(`${what}: ${size} in ${Math.round(ms / 1000)} s${rate}`);
         return;
       }
-      samples.push({ atMs: systemClock(), kiB: await this.restoreProgressKiB(backup) });
+      const currentKiB = await this.restoreProgressKiB(backup);
+      progress = accumulateRestoreProgress(progress, currentKiB);
+      samples.push({ atMs: systemClock(), kiB: currentKiB === null ? null : progress.observedKiB });
       const verdict = judgeRestoreProgress({ startedMs, nowMs: systemClock(), samples, deadlineMs });
       if (verdict.verdict !== "wait") {
         // The restore itself keeps running (its settle handlers are attached
@@ -2089,19 +2095,13 @@ export class ResidentDO extends Sandbox<Env> {
     }
   }
 
-  /** Where a running restore's bytes actually land, in KiB: the SDK downloads
-   *  the whole archive to `/var/backups/<backupId>.sqsh` FIRST and only then
-   *  extracts it into the target directory (`downloadBackupParallel` →
-   *  `restoreArchive`), so during the download the target stays empty. Judging
-   *  the target alone reads 0 for every sample while a 2 GiB archive
-   *  downloads, calls the restore stalled at ~2 minutes, and takes the resident
-   *  down — a false stall. Summing the archive and the target covers both
-   *  phases (the total only ever grows until the SDK deletes the archive,
-   *  which the judge's high-water mark ignores). One `du` for both paths;
-   *  a path that does not exist yet is simply absent from the output
+  /** Where a running restore's bytes land, in KiB: the SDK first downloads
+   *  parts under `/var/backups/download.*`, then assembles and moves the final
+   *  archive, and only then extracts into the target. Probe the work directory
+   *  and target in one `du`. A path that does not exist yet is absent from the output
    *  (`parseDu` skips du's error lines), and no readable path at all is null. */
   private async restoreProgressKiB(backup: DirectoryBackup): Promise<number | null> {
-    const r = await this.run(["du", "-xsk", restoreArchivePath(backup.id), backup.dir]);
+    const r = await this.run(["du", "-xsk", ...restoreProgressPaths(backup.dir)]);
     const parsed = parseDu(r.stdout);
     if (parsed.size === 0) return null;
     let total = 0;
