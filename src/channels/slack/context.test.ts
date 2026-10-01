@@ -1,3 +1,17 @@
+import { InMemoryRunLedger } from "../../core/runLedger/inMemory.js";
+import { sessionSeed } from "../../core/dispatch/seed.js";
+import { bindSlackContext } from "../../core/dispatch/slackContextBinding.js";
+import { revalidateSavedSlackContext } from "../../core/dispatch/privateAudience.js";
+import { readReferences } from "../../core/dispatch/references.js";
+import {
+  sourceBinding,
+  referenceReceipt,
+  isSessionSources,
+  type SessionSources,
+} from "../../core/references/receipts.js";
+import type { ChannelIO } from "../../core/types.js";
+import { sourceHash } from "../../core/references/receipts.js";
+import type { SlackContextRequest } from "../../tools/slackContext.js";
 import { describe, expect, it, vi } from "vitest";
 import type { Actor } from "../../core/authz/types.js";
 import { resetReferenceRate } from "../../core/dispatch/references.js";
@@ -73,11 +87,19 @@ function setup(
     ...over.channels,
   };
   const replies = over.replies ?? {};
-  const calls = { replies: vi.fn(), history: vi.fn() };
+  const calls = { replies: vi.fn(), history: vi.fn(), auth: vi.fn(), channel: vi.fn(), user: vi.fn() };
   const client: SlackContextClient = {
-    auth: { test: async () => ({ url: "https://team.example/", team_id: "TLOCAL" }) },
+    auth: {
+      test: async () => {
+        calls.auth();
+        return { url: "https://team.example/", team_id: "TLOCAL" };
+      },
+    },
     conversations: {
-      info: async ({ channel }) => ({ channel: channels[channel] }),
+      info: async ({ channel }) => {
+        calls.channel();
+        return { channel: channels[channel] };
+      },
       replies: async (args) => {
         calls.replies(args);
         over.onReplies?.();
@@ -87,11 +109,16 @@ function setup(
       },
       history: async (args) => {
         calls.history(args);
-        return { messages: over.nearby ?? [] };
+        return {
+          messages: args.oldest ? (over.nearby ?? []).filter((m) => m.ts === args.oldest) : (over.nearby ?? []),
+        };
       },
     },
     users: {
-      info: async () => ({ user: { team_id: "TLOCAL", is_restricted: over.guest ?? false, name: "alice" } }),
+      info: async () => {
+        calls.user();
+        return { user: { team_id: "TLOCAL", is_restricted: over.guest ?? false, name: "alice" } };
+      },
     },
   };
   const actor: Actor = {
@@ -112,12 +139,247 @@ function setup(
     actor,
     msg,
     directory: { isMember: async () => over.member ?? "unknown" },
-    ...(over.loadFile ? { loadFile: over.loadFile } : {}),
+    ...(over.loadFile
+      ? {
+          loadFile: async (file: { id?: string }) => {
+            const content = await over.loadFile!(file);
+            return { content, hash: await sourceHash(content), truncated: false };
+          },
+        }
+      : {}),
   });
-  return { capability, calls, actor, client, msg, channels };
+  return {
+    capability: {
+      ...capability,
+      read: async (request: SlackContextRequest) => (await capability.readSource(request)).content,
+    },
+    calls,
+    actor,
+    client,
+    msg,
+    channels,
+    reader,
+  };
 }
 
 describe("Slack context adapter", () => {
+  it("persists every message from the full native reference window before delivery", async () => {
+    const messages = Array.from({ length: 50 }, (_, i) => ({
+      ts: i === 0 ? THREAD : `1790000001.${String(i).padStart(6, "0")}`,
+      user: "UALICE",
+      text: `source ${i}`,
+    }));
+    const s = setup({ replies: { [`C_PUBLIC:${THREAD}`]: messages } });
+    await s.reader.ready();
+    const native = await readReferences(
+      { conversationReaders: [s.reader] },
+      { actor: s.actor, msg: { ...s.msg, text: url("C_PUBLIC") } },
+    );
+    expect(native.conversations[0].messages).toHaveLength(50);
+    const receipt = referenceReceipt(native.conversations[0], "public", sourceBinding(s.msg))!;
+    const sources: SessionSources = { version: 1, status: "known", binding: sourceBinding(s.msg), receipts: [receipt] };
+    expect(isSessionSources(sources)).toBe(true);
+    const ledger = new InMemoryRunLedger();
+    const key = `${s.msg.threadKey}:orchestrator`;
+    await ledger.claimSession(key, "r1", "g1");
+    expect(await ledger.writeSessionSources(key, "r1", "g1", sources)).toEqual({ ok: true });
+    expect((await ledger.readSessionTail(key, 100)).sources).toEqual(sources);
+    expect(await s.capability.revalidateSource(receipt)).toBe(true);
+  });
+
+  it.each([
+    [1, 20, 32, 2715],
+    [4, 20, 128, 10101],
+    [8, 10, 176, 11869],
+  ])(
+    "bounds metadata and adapter requests for %s retained nearby reads of %s messages",
+    async (count, messages, expectedRequests, expectedBytes) => {
+      const nearby = Array.from({ length: count * messages }, (_, i) => ({
+        ts: `1790000000.${String(i + 1).padStart(6, "0")}`,
+        user: "UALICE",
+        text: `source ${i}`,
+      }));
+      const s = setup({ nearby });
+      const first = await s.capability.readSource({ kind: "nearby" });
+      if (first.kind !== "read") throw new Error("expected native receipt");
+      const { slackMessageHash } = await import("./references.js");
+      const receipts = await Promise.all(
+        Array.from({ length: count }, async (_, n) => ({
+          ...first.receipt,
+          messages: await Promise.all(
+            nearby
+              .slice(n * messages, (n + 1) * messages)
+              .map(async (m) => ({ id: m.ts, hash: await slackMessageHash(m) })),
+          ),
+        })),
+      );
+      const state: SessionSources = { version: 1, status: "known", binding: sourceBinding(s.msg), receipts };
+      expect(isSessionSources(state)).toBe(true);
+      const bytes = new TextEncoder().encode(JSON.stringify(state)).byteLength;
+      expect(bytes).toBeLessThanOrEqual(32 * 1024);
+      for (const call of Object.values(s.calls)) call.mockClear();
+      for (const receipt of receipts) expect(await s.capability.revalidateSource(receipt)).toBe(true);
+      expect(Object.values(s.calls).reduce((sum, call) => sum + call.mock.calls.length, 0)).toBe(expectedRequests);
+      expect(bytes).toBe(expectedBytes);
+    },
+  );
+
+  it("persists native and tool read receipts through restart, compaction and a truncated log", async () => {
+    const raw = [{ ts: THREAD, user: "UALICE", text: "Referenced thread · #literal marker and trusted source" }];
+    const h = setup({ replies: { [`D_MAIN:${THREAD}`]: raw, [`C_PUBLIC:${THREAD}`]: raw } });
+    await h.reader.ready();
+    const refs = await readReferences(
+      { conversationReaders: [h.reader] },
+      { actor: h.actor, msg: { ...h.msg, text: url("C_PUBLIC") } },
+    );
+    const native = referenceReceipt(refs.conversations[0], refs.visibilities[0], sourceBinding(h.msg))!;
+    expect(native.messages[0].id).toBe(THREAD);
+    const ledger = new InMemoryRunLedger();
+    const key = `${h.msg.threadKey}:orchestrator`;
+    await ledger.claimSession(key, "read-run", "gen-one");
+    const directAudience = {
+      kind: "slack-unshared-im" as const,
+      channelId: h.msg.channelId,
+      threadKey: h.msg.threadKey,
+      userId: h.msg.userId,
+    };
+    const io = { directAudience: () => directAudience, verifyDirectAudience: async () => true } as unknown as ChannelIO;
+    const bound = (await bindSlackContext({
+      agentName: "orchestrator",
+      actor: h.actor,
+      msg: { ...h.msg, directAudience },
+      io,
+      visibility: "dm",
+      create: () => h.capability,
+    }))!;
+    const initial: SessionSources = { version: 1, status: "known", binding: sourceBinding(h.msg), receipts: [native] };
+    expect(
+      await bound.initialize(
+        initial,
+        async (state) => (await ledger.writeSessionSources(key, "read-run", "gen-one", state)).ok,
+      ),
+    ).toBe(true);
+    const content = await bound.capability.read({ kind: "thread" });
+    expect(String(content)).toContain("trusted source");
+    expect((await ledger.readSessionTail(key, 1000)).sources).toMatchObject({
+      status: "known",
+      receipts: [{ readKind: "reference" }, { readKind: "thread" }],
+    });
+    await ledger.seed(
+      "read-run",
+      "gen-one",
+      [
+        { idx: 0, message: { role: "user", content: [{ type: "text", text: "old".repeat(1000) }] } },
+        { idx: 1, compaction: { summary: "trusted source summary", tokensBefore: 100, firstKeptEntryId: "entry" } },
+        { idx: 2, message: { role: "user", content: [{ type: "text", text: "follow-up" }] } },
+      ],
+      key,
+    );
+    await ledger.releaseSession(key, "read-run", "gen-one");
+    const tail = await ledger.readSessionTail(key, 500);
+    expect(tail.from).toBeGreaterThan(0);
+    const seed = sessionSeed({ tail, previous: undefined, history: [], request: { text: "continue" } })!;
+    expect(seed.sources).toEqual(tail.sources);
+    expect(await revalidateSavedSlackContext(seed, (receipt) => h.capability.revalidateSource(receipt))).toBe(true);
+    await ledger.claimSession(key, "read-next", "gen-two");
+    const restored = (await bindSlackContext({
+      agentName: "orchestrator",
+      actor: h.actor,
+      msg: { ...h.msg, directAudience },
+      io,
+      visibility: "dm",
+      create: () => h.capability,
+    }))!;
+    expect(
+      await restored.initialize(
+        seed.sources!,
+        async (state) => (await ledger.writeSessionSources(key, "read-next", "gen-two", state)).ok,
+      ),
+    ).toBe(true);
+
+    // A changed source after the read seals publication, even with the same DM audience.
+    raw[0].text = "edited after read";
+    expect(await restored.sourcesStillValid()).toBe(false);
+    raw[0].text = "Referenced thread · #literal marker and trusted source";
+    expect(await restored.sourcesStillValid()).toBe(false);
+    expect((await ledger.readSessionTail(key, 500)).sources?.status).toBe("revoked");
+  });
+
+  it("rechecks nearby consumed IDs outside the newest window and rejects requester or destination changes", async () => {
+    const nearby = Array.from({ length: 20 }, (_, i) => ({
+      ts: `17900000${String(i).padStart(2, "0")}.000001`,
+      user: "UALICE",
+      text: `nearby ${i}`,
+    }));
+    const h = setup({ nearby });
+    const read = await h.capability.readSource({ kind: "nearby" });
+    if (read.kind !== "read") throw new Error("no receipt");
+    nearby.unshift({ ts: "1790000999.000001", user: "UALICE", text: "new" });
+    expect(await h.capability.revalidateSource(read.receipt)).toBe(true);
+    expect(h.calls.history).toHaveBeenCalledWith(
+      expect.objectContaining({
+        oldest: read.receipt.messages[0].id,
+        latest: read.receipt.messages[0].id,
+        inclusive: true,
+      }),
+    );
+    for (const receipt of [
+      { ...read.receipt, requester: "slack:UOTHER" },
+      { ...read.receipt, origin: { ...read.receipt.origin, threadKey: "slack:D_MAIN:2.0" } },
+      { ...read.receipt, destination: { ...read.receipt.destination, channelId: "slack:DOTHER" } },
+    ])
+      expect(await h.capability.revalidateSource(receipt)).toBe(false);
+    nearby.splice(
+      nearby.findIndex((m) => m.ts === read.receipt.messages[0].id),
+      1,
+    );
+    expect(await h.capability.revalidateSource(read.receipt)).toBe(false);
+  });
+
+  it("binds a file receipt to its original message, file identity and full content hash", async () => {
+    let data = "original bytes";
+    const file = {
+      id: "FREAD",
+      name: "source.txt",
+      size: 14,
+      mimetype: "text/plain",
+      url_private_download: "https://files.slack.com/file",
+    };
+    const raw = [
+      { ts: THREAD, user: "UALICE", text: "file", files: [file] },
+      { ts: REPLY, user: "UALICE", text: "other message", files: [] as (typeof file)[] },
+    ];
+    const h = setup({ replies: { [`D_MAIN:${THREAD}`]: raw }, loadFile: async () => data });
+    const read = await h.capability.readSource({ kind: "file", messageTs: THREAD, fileId: "FREAD" });
+    if (read.kind !== "read") throw new Error("no receipt");
+    expect(await h.capability.revalidateSource(read.receipt)).toBe(true);
+    data = "edited bytes";
+    expect(await h.capability.revalidateSource(read.receipt)).toBe(false);
+    data = "original bytes";
+    raw[0].files = [];
+    raw[1].files = [file];
+    expect(await h.capability.revalidateSource(read.receipt)).toBe(false);
+  });
+
+  it("records consumed message identities and rechecks them after a window shift", async () => {
+    const messages = Array.from({ length: 21 }, (_, i) => ({
+      ts: `17900000${String(i).padStart(2, "0")}.000001`,
+      user: "UALICE",
+      text: `message ${i}`,
+    }));
+    const replies = { [`D_MAIN:${THREAD}`]: messages.slice(0, 20) };
+    const { capability } = setup({ replies });
+    const result = await capability.readSource({ kind: "thread" });
+    expect(result.kind).toBe("read");
+    if (result.kind !== "read") throw new Error("expected receipt");
+    expect(result.receipt.messages.map((m) => m.id)).toEqual(messages.slice(0, 20).map((m) => m.ts));
+    replies[`D_MAIN:${THREAD}`] = messages;
+    expect(await capability.revalidateSource(result.receipt)).toBe(true);
+    replies[`D_MAIN:${THREAD}`] = messages.slice(1);
+    expect(await capability.revalidateSource(result.receipt)).toBe(false);
+    replies[`D_MAIN:${THREAD}`] = messages.map((m, i) => (i === 5 ? { ...m, text: "edited" } : m));
+    expect(await capability.revalidateSource(result.receipt)).toBe(false);
+  });
   it("refuses an external or unverifiable D origin before reading and after it changes", async () => {
     const external = setup({
       channels: { D_MAIN: { user: "UALICE", is_im: true, is_shared: true, is_ext_shared: true } },
@@ -258,13 +520,14 @@ describe("Slack context adapter", () => {
       replies: { [`C_PUBLIC:${THREAD}`]: [{ ts: THREAD, user: "UALICE", text: "public fact" }] },
     });
     const request = { kind: "link" as const, url: url("C_PUBLIC") };
-    for (let i = 0; i < 12; i++)
-      expect(String(await h.capability.read(request, "revalidate"))).toContain("public fact");
-    for (let i = 0; i < 10; i++) expect(String(await h.capability.read(request))).toContain("public fact");
+    const first = await h.capability.readSource(request);
+    if (first.kind !== "read") throw new Error("expected source receipt");
+    for (let i = 0; i < 12; i++) expect(await h.capability.revalidateSource(first.receipt)).toBe(true);
+    for (let i = 0; i < 9; i++) expect(String(await h.capability.read(request))).toContain("public fact");
     expect(String(await h.capability.read(request))).toContain("can't read");
-    expect(String(await h.capability.read(request, "revalidate"))).toContain("public fact");
+    expect(await h.capability.revalidateSource(first.receipt)).toBe(true);
     h.channels.C_PUBLIC.is_ext_shared = true;
-    expect(String(await h.capability.read(request, "revalidate"))).toContain("can't read");
+    expect(await h.capability.revalidateSource(first.receipt)).toBe(false);
   });
 
   it("reads only a file attached to the authorized message under caps", async () => {

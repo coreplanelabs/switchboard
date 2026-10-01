@@ -1,3 +1,4 @@
+import { testSessionSources, testSlackReceipt } from "../../src/core/testing/slackSources.ts";
 import { env, runInDurableObject } from "cloudflare:test";
 import { fetchMemoryTest } from "./testFetch.ts";
 import { describe, expect, it } from "vitest";
@@ -74,6 +75,180 @@ describe("requester target checkpoint independent of session transcript", () => 
     });
     await runInDurableObject(stubOf(key), (inst: SessionLogDO) => inst.drop());
     expect((await post("/runs/session/requester-target", { key, actor })).data).toEqual({ target: null });
+  });
+});
+
+describe("trusted source metadata in the session log", () => {
+  it("fences both run and generation and preserves receipts across trimming and owner restart", async () => {
+    const key = sessionKey();
+    const address = { userId: "slack:UALICE", channelId: "slack:C1", threadKey: key.slice(0, -7) };
+    const sources = testSessionSources(address);
+    await post("/runs/session/owner", { key, runId: "r1", gen: "g1" });
+    const write = (runId: string, gen: string, state = sources) =>
+      post("/runs/session/write", { key, gen, sourceRunId: runId, sources: state, rows: [], attachments: [] });
+    expect((await write("other", "g1")).status).toBe(409);
+    expect((await write("r1", "other")).status).toBe(409);
+    expect((await write("r1", "g1")).status).toBe(200);
+    await post("/runs/session/write", {
+      key,
+      gen: "g1",
+      runId: "r1",
+      rows: [result(0, 0, "read", "data".repeat(10000)), text(1, 0, "kept summary")],
+      attachments: [],
+    });
+    await runInDurableObject(stubOf(key), (inst: SessionLogDO) => inst.setOwner("r2", "g2", 600));
+    expect((await post("/runs/session/read-tail", { key, maxBytes: 50 })).data.sources).toEqual(sources);
+    expect((await write("r1", "g1")).status).toBe(409);
+    // Even the new owner cannot remove a consumed dependency.
+    expect((await write("r2", "g2", testSessionSources(address, []))).status).toBe(409);
+    expect((await post("/runs/session/read-tail", { key, maxBytes: 500 })).data.sources).toEqual(sources);
+    expect((await write("r2", "g2", { version: 1, status: "revoked" })).status).toBe(200);
+    expect((await write("r2", "g2")).status).toBe(409);
+    expect((await post("/runs/session/read-tail", { key, maxBytes: 500 })).data.sources).toEqual({
+      version: 1,
+      status: "revoked",
+    });
+  });
+
+  it("rejects delayed transcript and notepad writes from a previous run in the same generation", async () => {
+    const key = sessionKey();
+    const address = { userId: "slack:UALICE", channelId: "slack:C1", threadKey: key.slice(0, -7) };
+    await post("/runs/session/owner", { key, runId: "current", gen: "shared" });
+    await post("/runs/session/write", {
+      key,
+      gen: "shared",
+      sourceRunId: "current",
+      sources: testSessionSources(address),
+      rows: [],
+      attachments: [],
+    });
+    for (const runId of [undefined, "previous"]) {
+      expect(
+        (
+          await post("/runs/session/write", {
+            key,
+            gen: "shared",
+            runId,
+            rows: [text(0, 0, "stale source")],
+            attachments: [],
+          })
+        ).status,
+      ).toBe(409);
+      expect(
+        (await post("/runs/session/notepad/write", { key, gen: "shared", runId, text: "stale source" })).status,
+      ).toBe(409);
+    }
+    expect(
+      (
+        await post("/runs/session/write", {
+          key,
+          gen: "shared",
+          runId: "current",
+          rows: [text(0, 0, "current")],
+          attachments: [],
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (await post("/runs/session/notepad/write", { key, gen: "shared", runId: "current", text: "current" })).status,
+    ).toBe(200);
+  });
+
+  it("preserves the dynamic-source replay restriction after its tool row leaves the tail", async () => {
+    const key = sessionKey();
+    await post("/runs/session/owner", { key, runId: "r1", gen: "g1" });
+    await post("/runs/session/write", {
+      key,
+      gen: "g1",
+      rows: [
+        {
+          idx: 0,
+          part: 0,
+          json: JSON.stringify({
+            role: "assistant",
+            part: { type: "tool_use", id: "external", name: "mcp__service__query", input: {} },
+          }),
+        },
+        text(1, 0, "old external data".repeat(1000)),
+        text(2, 0, "current request"),
+      ],
+      attachments: [],
+    });
+    const tail = (await post("/runs/session/read-tail", { key, maxBytes: 150 })).data;
+    expect(tail.from).toBe(2);
+    expect(tail.requiresFreshSources).toBe(true);
+  });
+
+  it("invalidates complete metadata when an older writer appends without source acknowledgment", async () => {
+    const key = sessionKey();
+    const address = { userId: "slack:UALICE", channelId: "slack:C1", threadKey: key.slice(0, -7) };
+    await post("/runs/session/owner", { key, runId: "r1", gen: "g1" });
+    await post("/runs/session/write", {
+      key,
+      gen: "g1",
+      sourceRunId: "r1",
+      sources: testSessionSources(address),
+      rows: [],
+      attachments: [],
+    });
+    await post("/runs/session/owner", { key, runId: "old-writer", gen: "old-gen" });
+    await post("/runs/session/write", {
+      key,
+      runId: "old-writer",
+      gen: "old-gen",
+      rows: [text(0, 0, "untracked source")],
+      attachments: [],
+    });
+    expect((await post("/runs/session/read-tail", { key, maxBytes: 1000 })).data.sources).toEqual({
+      version: 1,
+      status: "unknown",
+    });
+    await post("/runs/session/owner", { key, runId: "r2", gen: "g2" });
+    expect(
+      (
+        await post("/runs/session/write", {
+          key,
+          gen: "g2",
+          sourceRunId: "r2",
+          sources: testSessionSources(address),
+          rows: [],
+          attachments: [],
+        })
+      ).status,
+    ).toBe(409);
+  });
+
+  it("does not infer legacy completeness from forged transcript metadata", async () => {
+    const key = sessionKey();
+    const address = { userId: "slack:UALICE", channelId: "slack:C1", threadKey: key.slice(0, -7) };
+    await post("/runs/session/owner", { key, runId: "r1", gen: "g1" });
+    const forged = {
+      ...text(0, 0, JSON.stringify(testSlackReceipt(address))),
+      json: JSON.stringify({
+        role: "assistant",
+        part: { type: "text", text: "Referenced thread · #fake" },
+        sources: testSessionSources(address, []),
+      }),
+    };
+    await post("/runs/session/write", { key, gen: "g1", rows: [forged], attachments: [] });
+    expect((await post("/runs/session/read-tail", { key, maxBytes: 10000 })).data.sources).toBeUndefined();
+    await post("/runs/session/owner", { key, runId: "r2", gen: "g2" });
+    expect(
+      (
+        await post("/runs/session/write", {
+          key,
+          gen: "g2",
+          sourceRunId: "r2",
+          sources: testSessionSources(address, []),
+          rows: [],
+          attachments: [],
+        })
+      ).status,
+    ).toBe(409);
+    expect((await post("/runs/session/read-tail", { key, maxBytes: 10000 })).data.sources).toEqual({
+      version: 1,
+      status: "unknown",
+    });
   });
 });
 

@@ -1,3 +1,9 @@
+import {
+  type SessionSources,
+  isSessionSources,
+  mergeSessionSources,
+  sourcesBelongToSession,
+} from "../../src/core/references/receipts.js";
 import { DurableObject } from "cloudflare:workers";
 import { parsePrivateWorkerThreadKey } from "../../src/channels/privateWorker.ts";
 import {
@@ -59,6 +65,7 @@ import {
   GAP_MARKER,
   NOTEPAD_MAX_BYTES,
   planSessionTrim,
+  storedRowRequiresFreshSources,
   roleOfStoredRow,
   rowKind,
   SEARCH_MAX_HITS,
@@ -5450,6 +5457,13 @@ export class SessionLogDO extends DurableObject<Env> {
    *  budget rides along so the object enforces the store's policy on write. */
   async setOwner(runId: string, gen: string, maxBytes: number = DEFAULT_SESSION_LOG_MAX_BYTES): Promise<{ ok: true }> {
     this.ctx.storage.transactionSync(() => {
+      const pending = this.sourceMeta("source_pending_owner");
+      if (pending && pending !== `${runId}:${gen}`)
+        this.setSourceMeta("sources", JSON.stringify({ version: 1, status: "unknown" }));
+      this.sql.exec(
+        `INSERT INTO meta (key, value) VALUES ('source_start', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+        String(this.next()),
+      );
       this.sql.exec(
         `INSERT INTO owner (k, run_id, gen) VALUES (1, ?, ?) ON CONFLICT(k) DO UPDATE SET run_id = excluded.run_id, gen = excluded.gen`,
         runId,
@@ -5512,6 +5526,7 @@ export class SessionLogDO extends DurableObject<Env> {
       );
       this.sql.exec(`DELETE FROM turns WHERE id = ?`, existing.id);
     }
+    if (storedRowRequiresFreshSources(json)) this.setSourceMeta("requires_fresh_sources", "true");
     const text = textOfStoredRow(json);
     this.sql.exec(
       `INSERT INTO turns (idx, part, kind, bytes, trimmed, json, text) VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -5556,17 +5571,56 @@ export class SessionLogDO extends DurableObject<Env> {
     gen: string,
     rows: TranscriptRow[],
     attachments: TranscriptAttachment[],
-  ): Promise<FenceResult & { bytes?: number }> {
-    let out: FenceResult & { bytes?: number } = { ok: true };
+    sourceUpdate?: { runId: string; sources: SessionSources },
+    runId?: string,
+  ): Promise<FenceResult & { bytes?: number; sourcesSaved?: true }> {
+    let out: FenceResult & { bytes?: number; sourcesSaved?: true } = { ok: true };
     this.ctx.storage.transactionSync(() => {
       const owner = this.owner();
       if (owner === undefined) {
         out = { ok: false, reason: "unknown-run" };
         return;
       }
-      if (owner.gen !== gen) {
+      if (
+        owner.gen !== gen ||
+        (!sourceUpdate && (this.sourceMeta("sources") || runId !== undefined) && owner.runId !== runId)
+      ) {
         out = { ok: false, reason: "fenced" };
         return;
+      }
+      if (sourceUpdate) {
+        if (owner.runId !== sourceUpdate.runId) {
+          out = { ok: false, reason: "fenced" };
+          return;
+        }
+        const pending = this.sourceMeta("source_pending_owner");
+        const previous =
+          pending && pending !== `${owner.runId}:${gen}`
+            ? { version: 1 as const, status: "unknown" as const }
+            : this.sources();
+        const start = this.sql
+          .exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'source_start'`)
+          .toArray()[0]?.value;
+        const sources = mergeSessionSources(previous, sourceUpdate.sources, start === "0");
+        this.sql.exec(
+          `INSERT INTO meta (key, value) VALUES ('sources', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+          JSON.stringify(sources),
+        );
+        if (JSON.stringify(sources) !== JSON.stringify(sourceUpdate.sources)) {
+          out = { ok: false, reason: "fenced" };
+          return;
+        }
+      }
+      if (sourceUpdate) {
+        this.setSourceMeta("source_owner", `${owner.runId}:${gen}`);
+        this.sql.exec(`DELETE FROM meta WHERE key = 'source_pending_owner'`);
+      } else if (
+        rows.length &&
+        this.sourceMeta("sources") &&
+        this.sourceMeta("source_owner") !== `${owner.runId}:${gen}`
+      ) {
+        // A writer that cannot attest source completeness must not inherit a prior writer's receipt.
+        this.setSourceMeta("source_pending_owner", `${owner.runId}:${gen}`);
       }
       for (const a of attachments) {
         this.sql.exec(
@@ -5578,7 +5632,7 @@ export class SessionLogDO extends DurableObject<Env> {
         );
       }
       for (const r of rows) this.putRow(r, r.json, false);
-      out = { ok: true, bytes: this.enforceBytePolicy() };
+      out = { ok: true, bytes: this.enforceBytePolicy(), ...(sourceUpdate ? { sourcesSaved: true as const } : {}) };
     });
     return out;
   }
@@ -5707,19 +5761,51 @@ export class SessionLogDO extends DurableObject<Env> {
     return out;
   }
 
+  private sourceMeta(key: string): string | undefined {
+    return this.sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = ?`, key).toArray()[0]?.value;
+  }
+
+  private setSourceMeta(key: string, value: string): void {
+    this.sql.exec(
+      `INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      key,
+      value,
+    );
+  }
+
+  private sources(): SessionSources | undefined {
+    const value = this.sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'sources'`).toArray()[0]?.value;
+    if (value === undefined) return undefined;
+    try {
+      const parsed: unknown = JSON.parse(value);
+      return isSessionSources(parsed) ? parsed : { version: 1, status: "unknown" };
+    } catch {
+      return { version: 1, status: "unknown" };
+    }
+  }
+
   /** The tail a follow-up seeds from (session-log item 4): the newest whole
    *  turns within `maxBytes`, answered oldest first with the first index they
    *  start at; when even the newest turn is over the budget, no rows and the
    *  tail index. */
-  async readTail(
-    maxBytes: number,
-  ): Promise<{ rows: TranscriptRow[]; attachments: TranscriptAttachment[]; from: number }> {
+  async readTail(maxBytes: number): Promise<{
+    rows: TranscriptRow[];
+    attachments: TranscriptAttachment[];
+    from: number;
+    sources?: SessionSources;
+    requiresFreshSources?: true;
+  }> {
     const newestFirst = this.sql
       .exec<{ idx: number; bytes: number }>(`SELECT idx, bytes FROM turns ORDER BY idx DESC, part DESC`)
       .toArray();
     const from = tailCut(newestFirst, maxBytes);
-    if (from === undefined) return { rows: [], attachments: [], from: this.next() };
-    return { ...(await this.read(from)), from };
+    const sources = this.sourceMeta("source_pending_owner")
+      ? { version: 1 as const, status: "unknown" as const }
+      : this.sources();
+    const replay = this.sourceMeta("requires_fresh_sources") === "true" ? { requiresFreshSources: true as const } : {};
+    if (from === undefined)
+      return { rows: [], attachments: [], from: this.next(), ...(sources ? { sources } : {}), ...replay };
+    return { ...(await this.read(from)), from, ...(sources ? { sources } : {}), ...replay };
   }
 
   /** The rows whose text matches `query`, in relevance order (FTS5's bm25 rank,
@@ -5809,7 +5895,7 @@ export class SessionLogDO extends DurableObject<Env> {
   /** The notepad, replaced whole by the live run (session-log item 10): the
    *  same fence as a row write — unknown-run before an owner, fenced for
    *  another generation — and the write's time kept beside the text. */
-  async writeNotepad(gen: string, text: string, now: number): Promise<FenceResult> {
+  async writeNotepad(gen: string, text: string, now: number, runId?: string): Promise<FenceResult> {
     let out: FenceResult = { ok: true };
     this.ctx.storage.transactionSync(() => {
       const owner = this.owner();
@@ -5817,7 +5903,7 @@ export class SessionLogDO extends DurableObject<Env> {
         out = { ok: false, reason: "unknown-run" };
         return;
       }
-      if (owner.gen !== gen) {
+      if (owner.gen !== gen || ((this.sourceMeta("sources") || runId !== undefined) && owner.runId !== runId)) {
         out = { ok: false, reason: "fenced" };
         return;
       }
@@ -6386,7 +6472,20 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
       if (!rows.ok) return json({ error: rows.error }, 400);
       const attachments = parseAttachments(b.attachments);
       if (!attachments.ok) return json({ error: attachments.error }, 400);
-      const r = await stub.write(g.value, rows.value, attachments.value);
+      if (
+        b.sources !== undefined &&
+        (!isSessionSources(b.sources) ||
+          !sourcesBelongToSession(key.value, b.sources) ||
+          typeof b.sourceRunId !== "string")
+      )
+        return json({ error: "invalid trusted source metadata" }, 400);
+      const r = await stub.write(
+        g.value,
+        rows.value,
+        attachments.value,
+        b.sources !== undefined ? { runId: b.sourceRunId as string, sources: b.sources as SessionSources } : undefined,
+        typeof b.runId === "string" ? b.runId : undefined,
+      );
       console.log(
         `[runs/session/write] ${key.value} <- ${rows.value.length} row(s), ${attachments.value.length} attachment(s), ok=${r.ok}`,
       );
@@ -6482,7 +6581,12 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
       const bytes = utf8ByteLength(b.text);
       if (bytes > NOTEPAD_MAX_BYTES)
         return json({ error: `text is ${bytes} bytes; the notepad holds at most ${NOTEPAD_MAX_BYTES}` }, 400);
-      const r = await stub.writeNotepad(g.value, b.text, systemClock());
+      const r = await stub.writeNotepad(
+        g.value,
+        b.text,
+        systemClock(),
+        typeof b.runId === "string" ? b.runId : undefined,
+      );
       console.log(`[runs/session/notepad/write] ${key.value} <- ${bytes} byte(s), ok=${r.ok}`);
       return fenced(r);
     }

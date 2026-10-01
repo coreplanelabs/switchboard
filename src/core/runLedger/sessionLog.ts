@@ -378,3 +378,25 @@ export function attachmentRefsOf(json: string): string[] {
   }
   return refs;
 }
+
+/** These tool protocols have no reusable grant/revision receipt. The flag only removes replay authority. */
+export function requiresFreshSourceTool(name: string): boolean {
+  return (
+    name.startsWith("github_") ||
+    name.startsWith("mcp__") ||
+    name === "plane_show" ||
+    name === "thread_work" ||
+    name === "work_progress"
+  );
+}
+
+/** Read protocol metadata, never natural-language source markers. */
+export function storedRowRequiresFreshSources(json: string): boolean {
+  const stored = parseStored(json);
+  if (!stored || "compaction" in stored) return false;
+  return (
+    stored.part?.type === "tool_use" &&
+    typeof stored.part.name === "string" &&
+    requiresFreshSourceTool(stored.part.name)
+  );
+}

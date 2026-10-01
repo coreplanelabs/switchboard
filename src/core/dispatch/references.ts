@@ -1,3 +1,4 @@
+import { SOURCE_READ_MESSAGE_MAX } from "../references/receipts.js";
 import type { RefusalCode } from "../refusal.js";
 import { authorize } from "../authz/authorize.js";
 import { pointingActor } from "../authz/pointingActor.js";
@@ -22,7 +23,7 @@ import type { IncomingMessage } from "../types.js";
 
 /** Bounds, sized to keep a worst-case request under 96 KB and one requester under a fifth of Slack's tier-3 bucket. */
 export const REFERENCE_MAX_PER_REQUEST = 3;
-export const REFERENCE_MAX_MESSAGES = 50;
+export const REFERENCE_MAX_MESSAGES = SOURCE_READ_MESSAGE_MAX;
 export const REFERENCE_MAX_BYTES = 32 * 1024;
 export const REFERENCE_PER_USER_PER_MINUTE = 10;
 /** The longest one adapter call may take; the directory's own bound (record.ts). Past it the answer is a refusal, never a guess. */
@@ -286,6 +287,22 @@ export async function readReferences(deps: ReferenceDeps, input: ReadReferencesI
       refuse(ref, read === TIMED_OUT ? "timed-out" : "fetch-failed");
       continue;
     }
+    if (reader.classifyConversationFresh) {
+      const fresh = await bounded(() => reader.classifyConversationFresh!(ref), timeoutMs);
+      const full =
+        ref.channelId === msg.channelId ||
+        (await bounded(() => (originReader ?? reader).requesterIsFullMember(msg.userId), timeoutMs)) === true;
+      if (
+        !fresh ||
+        fresh === TIMED_OUT ||
+        !fresh.botIsMember ||
+        fresh.visibility !== classification.visibility ||
+        !full
+      ) {
+        refuse(ref, "denied");
+        continue;
+      }
+    }
     const conversation = capped({
       ...read,
       channelName: classification.channelName ?? read.channelName,
@@ -304,7 +321,21 @@ export async function readReferences(deps: ReferenceDeps, input: ReadReferencesI
 function capped(rc: ReferencedConversation): ReferencedConversation {
   let messages = rc.messages.slice(-REFERENCE_MAX_MESSAGES);
   while (messages.length > 1 && utf8Bytes(renderBody(messages)) > REFERENCE_MAX_BYTES) messages = messages.slice(1);
-  return { ...rc, messages };
+  return {
+    ...rc,
+    messages,
+    ...(rc.coverage
+      ? {
+          coverage: {
+            kind: messages.length < rc.messages.length ? ("bounded" as const) : rc.coverage.kind,
+            truncated:
+              rc.coverage.truncated ||
+              messages.length < rc.messages.length ||
+              utf8Bytes(renderBody(messages)) > REFERENCE_MAX_BYTES,
+          },
+        }
+      : {}),
+  };
 }
 
 function utf8Bytes(s: string): number {

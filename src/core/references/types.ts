@@ -1,3 +1,4 @@
+import type { SourceCoverage } from "./receipts.js";
 // The vocabulary of record 0037: a URL in a request that a channel adapter
 // recognises as one of its conversations, what the adapter can say about that
 // conversation, and the text it hands back. Kept apart from `HistoryItem` on
@@ -33,6 +34,8 @@ export interface ReferencedMessage {
   readonly at?: number;
   /** Exact platform timestamp for correlating metadata without millisecond rounding. */
   readonly ts?: string;
+  /** Hash of the adapter source before rendering. */
+  readonly sourceHash?: string;
   /** A display name; an app's message carries its name with an `(app)` suffix. */
   readonly author: string;
   readonly text: string;
@@ -45,6 +48,7 @@ export interface ReferencedConversation {
   readonly channelName: string;
   readonly permalink: string;
   readonly messages: readonly ReferencedMessage[];
+  readonly coverage?: SourceCoverage;
 }
 
 /**
@@ -60,6 +64,8 @@ export interface ConversationReader {
   parseConversationUrl(url: string): ConversationRef | undefined;
   /** One fresh lookup per call (cached briefly by the adapter), never a guess. */
   classifyConversation(ref: ConversationRef): Promise<ConversationClassification>;
+  /** A source about to be consumed must not use cached audience facts. */
+  classifyConversationFresh?(ref: ConversationRef): Promise<ConversationClassification>;
   /** The conversation's text under the caller's caps; the adapter never returns files. */
   readConversation(
     ref: ConversationRef,

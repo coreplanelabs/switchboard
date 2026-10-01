@@ -1,3 +1,5 @@
+import { SOURCE_RECEIPT_MAX, SOURCE_METADATA_MAX_BYTES, isSessionSources } from "../references/receipts.js";
+import { testSlackCapability, testSlackReceipt, testSessionSources } from "../testing/slackSources.js";
 import { describe, expect, it, vi } from "vitest";
 import type { Actor } from "../authz/types.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
@@ -23,7 +25,7 @@ const actor: Actor = {
 
 describe("Slack context run binding", () => {
   it("registers Slack reads only for the requester's verified direct main conversation", async () => {
-    const create = vi.fn(() => ({ read: async () => "source", verifyDirectOrigin: async () => true }));
+    const create = vi.fn(() => testSlackCapability(msg, async () => "source"));
     const audience = {
       channelId: msg.channelId,
       userId: msg.userId,
@@ -62,7 +64,7 @@ describe("Slack context run binding", () => {
       msg,
       io,
       visibility: "dm",
-      create: () => ({ read, verifyDirectOrigin: async () => true }),
+      create: () => testSlackCapability(msg, read),
     });
     expect(await bound?.destinationStillPrivate()).toBe(true);
     current = { ...current, channelId: "slack:CCHANNEL" };
@@ -84,21 +86,12 @@ describe("Slack context run binding", () => {
       msg,
       io,
       visibility: "dm",
-      create: () => ({ read, verifyDirectOrigin: async () => true }),
+      create: () => testSlackCapability(msg, read),
     });
-    expect(
-      await bound?.capability.read(
-        { kind: "link", url: "https://team.example/archives/C_PUBLIC/p1790000000000001" },
-        "revalidate",
-      ),
-    ).toBe("private source");
-    expect(read).toHaveBeenCalledWith(
-      { kind: "link", url: "https://team.example/archives/C_PUBLIC/p1790000000000001" },
-      "revalidate",
-    );
+    expect(await bound?.revalidate(testSlackReceipt(msg))).toBe(true);
     available = false;
-    expect(await bound?.capability.read({ kind: "thread" }, "revalidate")).toContain("no longer available");
-    expect(read).toHaveBeenCalledTimes(1);
+    expect(await bound?.revalidate(testSlackReceipt(msg))).toBe(false);
+    expect(read).not.toHaveBeenCalled();
   });
 
   it("keeps a source revocation sealed even when Slack still reports the DM private", async () => {
@@ -112,14 +105,13 @@ describe("Slack context run binding", () => {
       msg,
       io,
       visibility: "dm",
-      create: () => ({
-        read: async () => {
+      create: () =>
+        testSlackCapability(msg, async () => {
           bound?.revoke();
           return "private source";
-        },
-        verifyDirectOrigin: async () => true,
-      }),
+        }),
     });
+    await bound?.initialize(testSessionSources(msg, []), async () => true);
     expect(await bound?.capability.read({ kind: "thread" })).toContain("no longer available");
     expect(await bound?.destinationStillPrivate()).toBe(false);
     expect(await bound?.capability.read({ kind: "thread" })).toContain("no longer available");
@@ -145,7 +137,7 @@ describe("Slack context run binding", () => {
       msg,
       io,
       visibility: "dm",
-      create: () => ({ read: async () => "private source", verifyDirectOrigin: async () => true }),
+      create: () => testSlackCapability(msg, async () => "private source"),
     });
     const checking = bound!.destinationStillPrivate();
     await started;
@@ -166,9 +158,88 @@ describe("Slack context run binding", () => {
         msg,
         io,
         visibility: "dm",
-        create: () => ({ read: async () => "source", verifyDirectOrigin: async () => verified === true }),
+        create: () => ({
+          ...testSlackCapability(msg, async () => "source"),
+          verifyDirectOrigin: async () => verified === true,
+        }),
       });
       expect(bound).toBeUndefined();
     }
+  });
+});
+
+describe("trusted source receipt persistence", () => {
+  const io = {
+    directAudience: () => msg.directAudience,
+    verifyDirectAudience: async () => true,
+  } as unknown as ChannelIO;
+  it("waits for the receipt write before delivering content and refuses a failed write", async () => {
+    let finish!: (ok: boolean) => void;
+    const pending = new Promise<boolean>((resolve) => {
+      finish = resolve;
+    });
+    let writes = 0;
+    const bound = (await bindSlackContext({
+      agentName: "orchestrator",
+      actor,
+      msg,
+      io,
+      visibility: "dm",
+      create: () => testSlackCapability(msg, async () => "source bytes"),
+    }))!;
+    expect(await bound.initialize(testSessionSources(msg, []), async () => (++writes === 1 ? true : pending))).toBe(
+      true,
+    );
+    let delivered = false;
+    const read = bound.capability.read({ kind: "thread" }).then((content) => {
+      delivered = true;
+      return content;
+    });
+    await vi.waitFor(() => expect(writes).toBe(2));
+    expect(delivered).toBe(false);
+    finish(false);
+    expect(await read).not.toContain("source bytes");
+    expect(await bound.destinationStillPrivate()).toBe(false);
+  });
+
+  it("fails closed at the cumulative receipt cap without evicting dependencies", async () => {
+    const sources = testSessionSources(
+      msg,
+      Array.from({ length: SOURCE_RECEIPT_MAX }, (_, i) => ({
+        ...testSlackReceipt(msg),
+        source: { ...testSlackReceipt(msg).source, url: `source-${i}` },
+      })),
+    );
+    const bound = (await bindSlackContext({
+      agentName: "orchestrator",
+      actor,
+      msg,
+      io,
+      visibility: "dm",
+      create: () => testSlackCapability(msg, async () => "source bytes"),
+    }))!;
+    const persist = vi.fn(async () => true);
+    expect(await bound.initialize(sources, persist)).toBe(true);
+    expect(await bound.capability.read({ kind: "thread" })).not.toContain("source bytes");
+    expect(await bound.sourcesStillValid()).toBe(false);
+    expect(persist).toHaveBeenLastCalledWith({ version: 1, status: "revoked" });
+  });
+});
+
+describe("source metadata bounds", () => {
+  it("rejects oversized metadata and cumulative message hashes without truncating them", () => {
+    const receipt = testSlackReceipt(msg);
+    expect(
+      isSessionSources(
+        testSessionSources(msg, [
+          { ...receipt, source: { ...receipt.source, url: "x".repeat(SOURCE_METADATA_MAX_BYTES) } },
+        ]),
+      ),
+    ).toBe(false);
+    const receipts = Array.from({ length: 3 }, (_, n) => ({
+      ...receipt,
+      messages: Array.from({ length: 40 }, (_, i) => ({ id: `${n}.${i}`, hash: "a".repeat(64) })),
+    }));
+    expect(isSessionSources(testSessionSources(msg, receipts))).toBe(false);
   });
 });

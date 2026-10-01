@@ -9,6 +9,7 @@ import type { SlackFile } from "./attachments.js";
 
 /** One message as `conversations.replies` returns it — the fields the mapping reads. */
 export interface SlackThreadMessage {
+  edited?: { ts?: string; user?: string };
   bot_id?: string;
   user?: string;
   text?: string;

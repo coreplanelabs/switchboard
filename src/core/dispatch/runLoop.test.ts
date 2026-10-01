@@ -1,3 +1,4 @@
+import { testSlackCapability } from "../testing/slackSources.js";
 import { depotCiAuthorizations } from "../../execution/depotCiAuthorization.js";
 import { buildReviewPostBody, parseVerdictInput } from "../reviewVerdict.js";
 import type { Verbosity } from "../verbosity.js";
@@ -568,7 +569,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       msg,
       io,
       visibility: "dm",
-      create: () => ({ read: sourceRead, verifyDirectOrigin: async () => true }),
+      create: () => testSlackCapability(msg, sourceRead),
     });
     expect(binding).toBeDefined();
     let result: unknown;
@@ -626,7 +627,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       msg,
       io,
       visibility: "dm",
-      create: () => ({ read: async () => "private source", verifyDirectOrigin: async () => true }),
+      create: () => testSlackCapability(msg, async () => "private source"),
     });
     const s = setup("private source", { agent: "orchestrator" });
     answered(
@@ -676,6 +677,9 @@ describe("runLoop — the model turn and everything that rides on it", () => {
         ...s.ctx,
         channelVisibility: "dm",
         slackContext: {
+          initialize: async () => true,
+          revalidate: async () => true,
+          sourcesStillValid: async () => true,
           capability: { read },
           destinationStillPrivate: async () => privateDestination,
           revoke: () => {},
