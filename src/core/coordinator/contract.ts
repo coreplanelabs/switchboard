@@ -118,7 +118,11 @@ export type WorkFinding =
       timeWindow?: undefined;
     };
 
-export interface WorkBrief {
+export interface LegacyWorkBrief {
+  schemaVersion?: undefined;
+  cause?: undefined;
+  evidence?: undefined;
+  requirements?: undefined;
   requesterId: string;
   mainThreadKey: string;
   actId: string;
@@ -131,7 +135,176 @@ export interface WorkBrief {
   acceptance?: string;
 }
 
-export function isWorkBrief(v: unknown): v is WorkBrief {
+/** Versioned admission data. Declared requirements are explicit, never inferred from prose. */
+export interface VersionedWorkBrief extends Omit<
+  LegacyWorkBrief,
+  "schemaVersion" | "suspectedCause" | "cause" | "evidence" | "requirements" | "acceptance"
+> {
+  schemaVersion: 1;
+  suspectedCause?: undefined;
+  cause: { kind: "hypothesis"; text: string; uncertainty: string } | { kind: "unknown"; reason: string };
+  evidence: { availability: "provided" } | { availability: "unavailable"; reason: string };
+  requirements: { analysis: "required" | "not_required"; evidence: "required" | "may_be_unavailable" };
+  acceptance: string;
+}
+export type WorkBrief = LegacyWorkBrief | VersionedWorkBrief;
+type BriefIdentity = "requesterId" | "mainThreadKey" | "actId" | "repo" | "base";
+export type WorkBriefDraft = Omit<VersionedWorkBrief, BriefIdentity>;
+/** Old callers may replay an already claimed act, but cannot admit new work. */
+export type StoredWorkBriefDraft = WorkBriefDraft | Omit<LegacyWorkBrief, BriefIdentity>;
+export type WorkBriefIssueCode =
+  | "schema_version"
+  | "question_required"
+  | "change_required"
+  | "acceptance_required"
+  | "cause_required"
+  | "requirements_required"
+  | "evidence_required"
+  | "analysis_required"
+  | "finding_shape"
+  | "identity_invalid"
+  | "brief_too_large";
+export interface WorkBriefIssue {
+  code: WorkBriefIssueCode;
+  path: string;
+}
+type BriefValidation<T> = { ok: true; brief: T } | { ok: false; issues: WorkBriefIssue[] };
+const briefText = (s: unknown, cap = 1000): s is string =>
+  typeof s === "string" && s.trim().length > 0 && s.length <= cap;
+const briefObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
+const onlyKeys = (v: Record<string, unknown>, keys: string[]) => Object.keys(v).every((key) => keys.includes(key));
+function isWorkFinding(value: unknown): value is WorkFinding {
+  if (!briefObject(value) || !briefText(value.text) || !briefText(value.sourceUrl, 2048)) return false;
+  try {
+    const url = new URL(value.sourceUrl);
+    if (url.protocol !== "https:" || !url.hostname || url.username || url.password) return false;
+  } catch {
+    return false;
+  }
+  if (value.kind === "analysis")
+    return (
+      onlyKeys(value, ["kind", "text", "sourceUrl", "query", "result", "timeWindow"]) &&
+      briefText(value.query, 3000) &&
+      briefText(value.result) &&
+      briefText(value.timeWindow, 256)
+    );
+  return value.kind === "observation" && onlyKeys(value, ["kind", "text", "sourceUrl"]);
+}
+
+/** One shape and completeness validator at both tool decoding and resolved admission.
+ * Source attribution is unverified: a valid label never proves a query was run. */
+export function validateWorkBriefDraft(value: unknown): BriefValidation<WorkBriefDraft> {
+  const b = briefObject(value) ? value : {};
+  const issues: WorkBriefIssue[] = [];
+  const issue = (code: WorkBriefIssueCode, path: string) => issues.push({ code, path });
+  if (b.schemaVersion !== 1) issue("schema_version", "schemaVersion");
+  if (!briefText(b.question)) issue("question_required", "question");
+  if (!briefText(b.requestedChange)) issue("change_required", "requestedChange");
+  if (!briefText(b.acceptance)) issue("acceptance_required", "acceptance");
+  const cause = b.cause;
+  if (
+    !briefObject(cause) ||
+    b.suspectedCause !== undefined ||
+    !(cause.kind === "hypothesis"
+      ? onlyKeys(cause, ["kind", "text", "uncertainty"]) && briefText(cause.text) && briefText(cause.uncertainty)
+      : cause.kind === "unknown" && onlyKeys(cause, ["kind", "reason"]) && briefText(cause.reason))
+  )
+    issue("cause_required", "cause");
+  const req = b.requirements;
+  if (
+    !briefObject(req) ||
+    !onlyKeys(req, ["analysis", "evidence"]) ||
+    (req.analysis !== "required" && req.analysis !== "not_required") ||
+    (req.evidence !== "required" && req.evidence !== "may_be_unavailable")
+  )
+    issue("requirements_required", "requirements");
+  const findings = Array.isArray(b.findings) ? b.findings : [];
+  if (!Array.isArray(b.findings) || findings.length > 6) issue("finding_shape", "findings");
+  findings.forEach((finding, index) => {
+    if (!isWorkFinding(finding)) issue("finding_shape", `findings.${index}`);
+  });
+  const evidence = b.evidence;
+  if (
+    !briefObject(evidence) ||
+    !(evidence.availability === "provided"
+      ? onlyKeys(evidence, ["availability"]) && findings.length > 0
+      : evidence.availability === "unavailable" &&
+        onlyKeys(evidence, ["availability", "reason"]) &&
+        briefText(evidence.reason) &&
+        findings.length === 0 &&
+        briefObject(req) &&
+        req.evidence === "may_be_unavailable")
+  )
+    issue("evidence_required", "evidence");
+  if (
+    briefObject(req) &&
+    req.analysis === "required" &&
+    !findings.some((f) => isWorkFinding(f) && f.kind === "analysis")
+  )
+    issue("analysis_required", "findings");
+  try {
+    if (JSON.stringify(value).length > 12_000) issue("brief_too_large", "brief");
+  } catch {
+    issue("brief_too_large", "brief");
+  }
+  if (issues.length > 0) return { ok: false, issues };
+  // Project known fields: model extras cannot become durable authority or a future proof.
+  return {
+    ok: true,
+    brief: {
+      schemaVersion: 1,
+      question: b.question,
+      requestedChange: b.requestedChange,
+      acceptance: b.acceptance,
+      cause,
+      evidence,
+      requirements: req,
+      findings,
+    } as WorkBriefDraft,
+  };
+}
+
+export function validateWorkBrief(value: unknown): BriefValidation<VersionedWorkBrief> {
+  const draft = validateWorkBriefDraft(value);
+  const b = briefObject(value) ? value : {};
+  const identityValid =
+    briefText(b.requesterId, 512) && isMainTaskKey(b) && briefText(b.repo, 256) && briefText(b.base, 512);
+  if (!draft.ok || !identityValid)
+    return {
+      ok: false,
+      issues: [
+        ...(!draft.ok ? draft.issues : []),
+        ...(!identityValid ? [{ code: "identity_invalid" as const, path: "identity" }] : []),
+      ],
+    };
+  return {
+    ok: true,
+    brief: {
+      ...draft.brief,
+      requesterId: b.requesterId,
+      mainThreadKey: b.mainThreadKey,
+      actId: b.actId,
+      repo: b.repo,
+      base: b.base,
+    } as VersionedWorkBrief,
+  };
+}
+
+/** Decode historical rows without upgrading their completeness. Admission uses validateWorkBrief. */
+export function isWorkBrief(value: unknown): value is WorkBrief {
+  if (!briefObject(value)) return false;
+  if (value.schemaVersion === 1) return validateWorkBrief(value).ok;
+  return (
+    value.schemaVersion === undefined &&
+    value.cause === undefined &&
+    value.evidence === undefined &&
+    value.requirements === undefined &&
+    isLegacyWorkBriefShape(value)
+  );
+}
+
+function isLegacyWorkBriefShape(v: unknown): v is LegacyWorkBrief {
   if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
   const b = v as Record<string, unknown>;
   const text = (s: unknown, cap: number) => typeof s === "string" && s.trim().length > 0 && s.length <= cap;

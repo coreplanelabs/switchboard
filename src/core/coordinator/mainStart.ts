@@ -5,7 +5,7 @@ import { shipPreflight, type ShipPreflightInput } from "../ship/preflight.js";
 import type { ShipCaps } from "../ship/coordinator.js";
 import type { IncomingMessage } from "../types.js";
 import { handOffToCoordinator, type HandOffDeps } from "./handOff.js";
-import { isMainTaskKey, isWorkBrief, type WorkBrief } from "./contract.js";
+import { isMainTaskKey, type StoredWorkBriefDraft, type WorkBriefIssue } from "./contract.js";
 import { isMainTaskAuthority, type MainTaskAuthority } from "./requesterAuthority.js";
 
 /** Trusted dispatch context supplies the actor, message, gates and runner seams.
@@ -34,11 +34,12 @@ export interface MainStartInput {
   authorizedRepo: string;
   /** Private durable requester revision, never supplied by the model. */
   authority?: MainTaskAuthority;
-  brief: Omit<WorkBrief, "requesterId" | "mainThreadKey" | "actId" | "repo" | "base">;
+  brief: StoredWorkBriefDraft;
 }
 
 export type MainStartResult =
-  { kind: "accepted"; actId: string; instanceId: string; reply: string } | { kind: "refused"; reply: string };
+  | { kind: "accepted"; actId: string; instanceId: string; reply: string }
+  | { kind: "refused"; reply: string; issues?: WorkBriefIssue[] };
 
 const refuse = (reply: string): MainStartResult => ({ kind: "refused", reply });
 
@@ -76,7 +77,11 @@ export function createMainTaskStarter(deps: MainStartDeps) {
     if (!stillLive())
       return refuse("I couldn't confirm this main run is active, so no work started. Ask me again here.");
     if (typeof brief?.requestedChange !== "string" || brief.requestedChange.trim().length === 0)
-      return refuse("I need a clear change to make before starting the fix.");
+      return {
+        kind: "refused",
+        reply: "The requested change is missing; no worker started.",
+        issues: [{ code: "change_required", path: "requestedChange" }],
+      };
     const actId = `m_${createHash("sha256").update(`${msg.threadKey}\n${msg.messageId}`).digest("hex").slice(0, 32)}`;
     const mainTaskKey = { mainThreadKey: msg.threadKey, actId };
     if (!isMainTaskKey(mainTaskKey)) return refuse("I can't identify this conversation's work safely.");
@@ -109,17 +114,6 @@ export function createMainTaskStarter(deps: MainStartDeps) {
       return refuse("I couldn't verify this private conversation; no work started.");
     }
     if (!pre.entry.base) return refuse("I can't verify the repository's base branch, so no worker started.");
-    if (
-      !isWorkBrief({
-        ...brief,
-        requesterId: msg.userId,
-        mainThreadKey: msg.threadKey,
-        actId,
-        repo,
-        base: pre.entry.base,
-      })
-    )
-      return refuse("I need a shorter, clear task and source evidence before starting the fix.");
     try {
       const out = await handOffToCoordinator(deps, {
         entry: pre.entry,
@@ -136,7 +130,7 @@ export function createMainTaskStarter(deps: MainStartDeps) {
       });
       return out.status === "completed" && out.instanceId
         ? { kind: "accepted", actId, instanceId: out.instanceId, reply: out.reply }
-        : refuse(out.reply);
+        : { ...refuse(out.reply), ...(out.issues ? { issues: out.issues } : {}) };
     } catch {
       return refuse("I couldn't confirm whether the worker started. I kept its task identity for a safe retry.");
     }

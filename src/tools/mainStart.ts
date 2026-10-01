@@ -1,5 +1,5 @@
 import type { Actor, ChannelVisibility } from "../core/authz/types.js";
-import type { WorkBrief } from "../core/coordinator/contract.js";
+import { validateWorkBriefDraft } from "../core/coordinator/contract.js";
 import type { MainStartInput, MainStartResult } from "../core/coordinator/mainStart.js";
 import type { MainTaskAuthority } from "../core/coordinator/requesterAuthority.js";
 import type { IncomingMessage, SlackDirectAudience } from "../core/types.js";
@@ -108,67 +108,97 @@ export function mainStartForRun(deps: {
 
 const text = (v: unknown, cap: number): v is string => typeof v === "string" && v.trim().length > 0 && v.length <= cap;
 
-function briefOf(input: Record<string, unknown>): Brief | undefined {
-  if (!text(input.question, 1000) || !text(input.requestedChange, 1000)) return undefined;
-  if (!Array.isArray(input.findings) || input.findings.length > 6) return undefined;
-  const findings: WorkBrief["findings"] = [];
-  for (const value of input.findings) {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
-    const f = value as Record<string, unknown>;
-    if (!text(f.text, 1000)) return undefined;
-    const analytic = f.query !== undefined || f.result !== undefined || f.timeWindow !== undefined;
-    if (analytic && (!text(f.query, 3000) || !text(f.result, 1000) || !text(f.timeWindow, 256))) return undefined;
-    if (!text(f.sourceUrl, 2048) || !f.sourceUrl.startsWith("https://")) return undefined;
-    findings.push(
-      analytic
-        ? {
-            kind: "analysis",
-            text: f.text,
-            query: f.query as string,
-            result: f.result as string,
-            timeWindow: f.timeWindow as string,
-            sourceUrl: f.sourceUrl,
-          }
-        : { kind: "observation", text: f.text, sourceUrl: f.sourceUrl },
-    );
-  }
-  if (input.suspectedCause !== undefined && !text(input.suspectedCause, 1000)) return undefined;
-  if (input.acceptance !== undefined && !text(input.acceptance, 1000)) return undefined;
-  return {
-    question: input.question,
-    findings,
-    requestedChange: input.requestedChange,
-    ...(input.suspectedCause !== undefined ? { suspectedCause: input.suspectedCause } : {}),
-    ...(input.acceptance !== undefined ? { acceptance: input.acceptance } : {}),
-  };
-}
-
 export const workStartTool: RunnableTool = {
   name: "work_start",
   description:
-    "When the latest person turn in a direct Slack DM asks you to fix or build something, start one private coding worker. Interpret the whole turn: later corrections or a request for explanation alone mean do not start work. If intent is unclear, ask once. Carry forward the question and evidence you found; keep the user here and report the work id. Set sourceMessage to a quote from that latest person turn.",
+    "When the latest person turn in a direct Slack DM asks you to fix or build something, start one private coding worker. Interpret the whole turn: later corrections or a request for explanation alone mean do not start work. If intent is unclear, ask once. Carry forward the question and evidence you found with explicit finding kinds, cause uncertainty, acceptance and evidence requirements. If evidence is unavailable, say why; never invent it. Typed field issues return to this turn for correction; keep the user here and report the work id. Set sourceMessage to a quote from that latest person turn.",
   inputSchema: {
     type: "object",
     properties: {
       repo: { type: "string", description: "Repository owner/name for the requested change" },
+      schemaVersion: { type: "integer", const: 1 },
       question: { type: "string", description: "The question that led to this change" },
+      requirements: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          analysis: {
+            type: "string",
+            enum: ["required", "not_required"],
+            description:
+              "Required for an analytics-derived repair; observations do not substitute for query/result/window evidence",
+          },
+          evidence: { type: "string", enum: ["required", "may_be_unavailable"] },
+        },
+        required: ["analysis", "evidence"],
+      },
+      evidence: {
+        oneOf: [
+          {
+            type: "object",
+            properties: { availability: { const: "provided", type: "string" } },
+            required: ["availability"],
+            additionalProperties: false,
+          },
+          {
+            type: "object",
+            properties: { availability: { const: "unavailable", type: "string" }, reason: { type: "string" } },
+            required: ["availability", "reason"],
+            additionalProperties: false,
+          },
+        ],
+      },
+      cause: {
+        oneOf: [
+          {
+            type: "object",
+            properties: {
+              kind: { const: "hypothesis", type: "string" },
+              text: { type: "string" },
+              uncertainty: { type: "string" },
+            },
+            required: ["kind", "text", "uncertainty"],
+            additionalProperties: false,
+          },
+          {
+            type: "object",
+            properties: { kind: { const: "unknown", type: "string" }, reason: { type: "string" } },
+            required: ["kind", "reason"],
+            additionalProperties: false,
+          },
+        ],
+      },
       findings: {
         type: "array",
         maxItems: 6,
         items: {
-          type: "object",
-          properties: {
-            text: { type: "string" },
-            query: { type: "string" },
-            result: { type: "string" },
-            timeWindow: { type: "string" },
-            sourceUrl: { type: "string" },
-          },
-          required: ["text", "sourceUrl"],
-          additionalProperties: false,
+          oneOf: [
+            {
+              type: "object",
+              properties: {
+                kind: { type: "string", const: "observation" },
+                text: { type: "string" },
+                sourceUrl: { type: "string" },
+              },
+              required: ["kind", "text", "sourceUrl"],
+              additionalProperties: false,
+            },
+            {
+              type: "object",
+              properties: {
+                kind: { type: "string", const: "analysis" },
+                text: { type: "string" },
+                sourceUrl: { type: "string" },
+                query: { type: "string" },
+                result: { type: "string" },
+                timeWindow: { type: "string" },
+              },
+              required: ["kind", "text", "sourceUrl", "query", "result", "timeWindow"],
+              additionalProperties: false,
+            },
+          ],
         },
       },
-      suspectedCause: { type: "string" },
       requestedChange: { type: "string", description: "The plain-language change to make" },
       acceptance: { type: "string", description: "How the person will know the fix worked" },
       sourceMessage: {
@@ -177,7 +207,18 @@ export const workStartTool: RunnableTool = {
           "A quote from the latest delivered person turn asking for this change; use a short phrase for long messages",
       },
     },
-    required: ["repo", "question", "findings", "requestedChange", "sourceMessage"],
+    required: [
+      "repo",
+      "schemaVersion",
+      "question",
+      "findings",
+      "requestedChange",
+      "sourceMessage",
+      "cause",
+      "evidence",
+      "requirements",
+      "acceptance",
+    ],
     additionalProperties: false,
   },
   failsInText: true,
@@ -186,12 +227,12 @@ export const workStartTool: RunnableTool = {
     if (!ctx.mainStart) return "error: Private work is unavailable in this deployment; nothing started.";
     if (!text(input.repo, 256) || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(input.repo))
       return "error: I need a repository owner/name before starting the fix.";
-    const brief = briefOf(input);
-    if (!brief) return "error: The question or evidence is too long or incomplete; nothing started.";
+    const checked = validateWorkBriefDraft(input);
+    if (!checked.ok) return `error: ${JSON.stringify({ kind: "invalid_brief", issues: checked.issues })}`;
     if (!text(input.sourceMessage, 1000)) return "error: I need a quote from the request message; nothing started.";
-    const result = await ctx.mainStart.start(input.repo, brief, input.sourceMessage);
+    const result = await ctx.mainStart.start(input.repo, checked.brief, input.sourceMessage);
     return result.kind === "accepted"
       ? `Started one private worker. Work id: ${result.actId}. The main conversation stays here while it works.`
-      : `error: ${result.reply}`;
+      : `error: ${result.issues ? JSON.stringify({ kind: "invalid_brief", issues: result.issues }) : result.reply}`;
   },
 };

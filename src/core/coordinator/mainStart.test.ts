@@ -1,10 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ALL_GRANTS } from "../authz/grants.js";
 import type { Actor } from "../authz/types.js";
 import type { IncomingMessage } from "../types.js";
 import { InMemoryPrivateWorkerLog } from "../privateWorkerLog.js";
 import { InMemoryCoordinatorInstanceStore } from "./instanceStore.js";
 import { createMainTaskStarter, type MainStartDeps, type MainStartInput } from "./mainStart.js";
+import { workStartTool } from "../../tools/mainStart.js";
+import type { ToolContext } from "../../tools/runnableTool.js";
+import { contractFor } from "./briefs.js";
 
 const msg: IncomingMessage = {
   channelId: "slack:D123",
@@ -26,6 +29,10 @@ const actor: Actor = {
   grants: ALL_GRANTS,
 };
 const brief = {
+  schemaVersion: 1 as const,
+  cause: { kind: "unknown" as const, reason: "The failure has not been investigated" },
+  evidence: { availability: "provided" as const },
+  requirements: { analysis: "required" as const, evidence: "required" as const },
   question: "How many signups failed yesterday?",
   findings: [
     {
@@ -88,6 +95,84 @@ function harness(over: Partial<MainStartDeps> = {}) {
 }
 
 describe("main-agent private worker start", () => {
+  it("preserves typed tool evidence through resolved admission storage and child rendering", async () => {
+    const h = harness();
+    let instanceId = "";
+    const finding = { ...brief.findings[0]!, query: "SELECT failures WHERE budget:900", result: "17 of 120" };
+    const result = await workStartTool.run(
+      { repo: h.input.repo, sourceMessage: "fix it", ...brief, findings: [finding] },
+      {
+        mainStart: {
+          start: async (repo: string, proposal: MainStartInput["brief"]) => {
+            const out = await h.start({ ...h.input, repo, brief: proposal });
+            if (out.kind === "accepted") instanceId = out.instanceId;
+            return out;
+          },
+        },
+      } as unknown as ToolContext,
+    );
+    expect(result).toContain("Started one private worker");
+    const instance = (await h.instances.get(instanceId))!;
+    const unit = (await h.instances.listUnits(instanceId))[0]!;
+    expect(unit.workBrief).toMatchObject({
+      schemaVersion: 1,
+      findings: [finding],
+      acceptance: brief.acceptance,
+      cause: brief.cause,
+    });
+    const child = await contractFor(instance, unit, { readRepoFile: async () => undefined } as unknown as Parameters<
+      typeof contractFor
+    >[2]);
+    expect(child.unit.section).toContain("17 of 120");
+    expect(child.unit.section).toContain(finding.timeWindow);
+    expect(child.unit.section).toContain(finding.sourceUrl);
+    expect(child.unit.section).not.toContain("budget:900");
+    expect(child.unit.section).toContain("Cause: unknown");
+  });
+  it("returns typed brief issues before claiming incomplete or mislabeled evidence", async () => {
+    for (const [patch, code] of [
+      [{ acceptance: undefined }, "acceptance_required"],
+      [{ cause: undefined }, "cause_required"],
+      [{ findings: [] }, "evidence_required"],
+      [{ findings: [{ ...brief.findings[0], kind: "observation" }] }, "finding_shape"],
+      [
+        { findings: [{ kind: "observation", text: "A failure", sourceUrl: "https://example.com/failure" }] },
+        "analysis_required",
+      ],
+      [{ evidence: { availability: "unavailable", reason: "Source offline" }, findings: [] }, "analysis_required"],
+      [{ schemaVersion: undefined }, "schema_version"],
+    ] as const) {
+      const h = harness();
+      const claim = vi.spyOn(h.instances, "claimMainTask");
+      const out = await h.start({ ...h.input, brief: { ...brief, ...patch } as unknown as MainStartInput["brief"] });
+      expect(out).toMatchObject({
+        kind: "refused",
+        issues: expect.arrayContaining([expect.objectContaining({ code })]),
+      });
+      expect(h.created).toEqual([]);
+      expect(claim).not.toHaveBeenCalled();
+    }
+  });
+
+  it("admits explicit unknown cause and unavailable evidence only under the declared policy", async () => {
+    const h = harness();
+    const out = await h.start({
+      ...h.input,
+      brief: {
+        ...brief,
+        findings: [],
+        evidence: { availability: "unavailable", reason: "No source evidence is needed for this code-only change" },
+        requirements: { analysis: "not_required", evidence: "may_be_unavailable" },
+      } as unknown as MainStartInput["brief"],
+    });
+    expect(out.kind).toBe("accepted");
+    if (out.kind !== "accepted") return;
+    expect((await h.instances.listUnits(out.instanceId))[0]?.workBrief).toMatchObject({
+      schemaVersion: 1,
+      cause: { kind: "unknown" },
+      evidence: { availability: "unavailable" },
+    });
+  });
   it("binds a plain-language fix and sourced findings to one fresh person-merged unit", async () => {
     const h = harness();
     const out = await h.start(h.input);

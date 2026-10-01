@@ -177,7 +177,7 @@ function actIdOf(input: Record<string, unknown>): string | undefined {
 export const workStatusTool: RunnableTool = {
   name: "work_status",
   description:
-    "Check the current status of work this main conversation started. Use the actId from its handoff; never invent one.",
+    "Check the current status and durable brief proof of work this main conversation started. Brief completeness is structural; source provenance remains unverified. Use the actId from its handoff; never invent one.",
   inputSchema: {
     type: "object",
     properties: {

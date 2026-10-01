@@ -28,9 +28,14 @@ const actor: Actor = {
 };
 
 const input = {
+  schemaVersion: 1,
+  cause: { kind: "unknown", reason: "Not investigated" },
+  evidence: { availability: "provided" },
+  requirements: { analysis: "not_required", evidence: "required" },
+  acceptance: "Regression test passes",
   repo: "acme/api",
   question: "Why did signup fail?",
-  findings: [{ text: "Five failed signups yesterday", sourceUrl: "https://example.com/signup" }],
+  findings: [{ kind: "observation", text: "Five failed signups yesterday", sourceUrl: "https://example.com/signup" }],
   requestedChange: "Fix signup and add a regression test",
   sourceMessage: "fix it",
 };
@@ -110,8 +115,13 @@ describe("work_start — plain-language private worker handoff", () => {
       repo: input.repo,
       authorizedRepo: input.repo,
       brief: {
+        schemaVersion: 1,
+        cause: input.cause,
+        evidence: input.evidence,
+        requirements: input.requirements,
+        acceptance: input.acceptance,
         question: input.question,
-        findings: [{ kind: "observation", ...input.findings[0] }],
+        findings: input.findings,
         requestedChange: input.requestedChange,
       },
       stillLive: expect.any(Function),

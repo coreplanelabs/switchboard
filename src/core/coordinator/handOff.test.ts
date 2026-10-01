@@ -116,6 +116,14 @@ function harness(
   return { deps, instances, created, statusAsked, reads };
 }
 
+const EMPTY_EVIDENCE = {
+  schemaVersion: 1,
+  cause: { kind: "unknown", reason: "Not investigated" },
+  evidence: { availability: "unavailable", reason: "Code-only task" },
+  requirements: { analysis: "not_required", evidence: "may_be_unavailable" },
+  acceptance: "Regression test passes",
+} as const;
+
 describe("main-agent work hand-off", () => {
   it("proves the durable private log before claiming a main task or starting a Workflow", async () => {
     const h = harness({ privateWorkerLog: new UnavailablePrivateWorkerLog() });
@@ -127,7 +135,12 @@ describe("main-agent work hand-off", () => {
         mainTask: {
           mainThreadKey: "slack:C1:1.0",
           actId: "act-private",
-          brief: { question: "How many signups failed?", findings: [], requestedChange: "Fix the failure" },
+          brief: {
+            ...EMPTY_EVIDENCE,
+            question: "How many signups failed?",
+            findings: [],
+            requestedChange: "Fix the failure",
+          },
         },
         privateWorkerReady: true,
         stillLive: () => true,
@@ -148,7 +161,12 @@ describe("main-agent work hand-off", () => {
       mainTask: {
         mainThreadKey: "slack:C1:1.0",
         actId: "act-private",
-        brief: { question: "How many signups failed?", findings: [], requestedChange: "Fix the failure" },
+        brief: {
+          ...EMPTY_EVIDENCE,
+          question: "How many signups failed?",
+          findings: [],
+          requestedChange: "Fix the failure",
+        },
       },
       privateWorkerReady: true,
       stillLive: () => true,
@@ -174,7 +192,7 @@ describe("main-agent work hand-off", () => {
       mainTask: {
         mainThreadKey: "slack:C1:1.0",
         actId: "act-private",
-        brief: { question: "Why?", findings: [], requestedChange: "Fix signup" },
+        brief: { ...EMPTY_EVIDENCE, question: "Why?", findings: [], requestedChange: "Fix signup" },
       },
       stillLive: () => true,
     });
@@ -202,7 +220,7 @@ describe("main-agent work hand-off", () => {
         mainTask: {
           mainThreadKey: "slack:C1:1.0",
           actId: "act-private",
-          brief: { question: "Why?", findings: [], requestedChange: "Fix signup" },
+          brief: { ...EMPTY_EVIDENCE, question: "Why?", findings: [], requestedChange: "Fix signup" },
         },
         stillLive: () => true,
         stillPrivate: async () => {
@@ -230,7 +248,7 @@ describe("main-agent work hand-off", () => {
       mainTask: {
         mainThreadKey: "slack:C1:1.0",
         actId: "act-private",
-        brief: { question: "Why?", findings: [], requestedChange: "Fix signup" },
+        brief: { ...EMPTY_EVIDENCE, question: "Why?", findings: [], requestedChange: "Fix signup" },
       },
       stillLive: () => true,
     });
@@ -265,7 +283,12 @@ describe("main-agent work hand-off", () => {
         mainTask: {
           mainThreadKey: "slack:C1:1.0",
           actId: "act-private",
-          brief: { question: "How many signups failed?", findings: [], requestedChange: "Fix the failure" },
+          brief: {
+            ...EMPTY_EVIDENCE,
+            question: "How many signups failed?",
+            findings: [],
+            requestedChange: "Fix the failure",
+          },
         },
         privateWorkerReady: true,
         stillLive: () => true,
@@ -290,6 +313,7 @@ describe("main-agent work hand-off", () => {
           mainThreadKey: "slack:C1:1.0",
           actId: "act-private",
           brief: {
+            ...EMPTY_EVIDENCE,
             question: "How many signups failed?",
             findings: [],
             requestedChange: "Fix the failure",
@@ -315,7 +339,12 @@ describe("main-agent work hand-off", () => {
         mainTask: {
           mainThreadKey: "slack:C1:1.0",
           actId: "act-private",
-          brief: { question: "How many signups failed?", findings: [], requestedChange: "Fix the failure" },
+          brief: {
+            ...EMPTY_EVIDENCE,
+            question: "How many signups failed?",
+            findings: [],
+            requestedChange: "Fix the failure",
+          },
         },
         privateWorkerReady: true,
         stillPrivate: async () => true,
@@ -336,7 +365,12 @@ describe("main-agent work hand-off", () => {
         mainTask: {
           mainThreadKey: "slack:C1:1.0",
           actId: "act-private",
-          brief: { question: "How many signups failed?", findings: [], requestedChange: "Fix the failure" },
+          brief: {
+            ...EMPTY_EVIDENCE,
+            question: "How many signups failed?",
+            findings: [],
+            requestedChange: "Fix the failure",
+          },
         },
         privateWorkerReady: true,
         stillLive: () => true,
@@ -1672,6 +1706,7 @@ describe("main-agent work hand-off", () => {
     mainThreadKey: "slack:C1:1.0",
     actId,
     brief: {
+      ...EMPTY_EVIDENCE,
       question: "How many signups failed yesterday?",
       findings: [
         {
@@ -1683,7 +1718,12 @@ describe("main-agent work hand-off", () => {
           sourceUrl: "https://example.com/metrics/signups",
         },
       ],
-      suspectedCause: "The callback may reject expired state",
+      cause: {
+        kind: "hypothesis" as const,
+        text: "The callback may reject expired state",
+        uncertainty: "The cause has not been reproduced",
+      },
+      evidence: { availability: "provided" as const },
       requestedChange: "Fix the callback and keep the failure visible",
       acceptance: "The regression test passes and a reviewed PR is ready",
     },
@@ -1691,6 +1731,44 @@ describe("main-agent work hand-off", () => {
 
   const mainInput = (over: Partial<HandOffInput>) =>
     input({ privateWorkerReady: true, stillLive: () => true, stillPrivate: async () => true, ...over });
+
+  it("retries a legacy checkpoint under its original act without upgrading or regenerating its brief", async () => {
+    const h = harness();
+    const request = mainInput({
+      entry: { repo: "acme/api", base: "main" },
+      requestText: "fix signup",
+      mainTask: mainTask("act-legacy"),
+    });
+    const first = await handOffToCoordinator(h.deps, request);
+    const instance = (await h.instances.get(first.instanceId!))!;
+    const unit = (await h.instances.listUnits(instance.id))[0]!;
+    const legacy = {
+      ...unit.workBrief!,
+      schemaVersion: undefined,
+      cause: undefined,
+      evidence: undefined,
+      requirements: undefined,
+      acceptance: undefined,
+    };
+    const restored = new InMemoryCoordinatorInstanceStore();
+    await restored.recordRequesterTurn({ threadKey: instance.threadKey, requesterId: instance.userId, messageId: "1" });
+    await restored.claimMainTask(request.mainTask!, instance, { ...unit, workBrief: legacy }, MAIN_AUTHORITY);
+    h.deps.instances = restored;
+    const retried = await handOffToCoordinator(h.deps, request);
+    expect(retried.status).toBe("completed");
+    expect(retried.instanceId).toBe(instance.id);
+    expect(h.created).toEqual([instance.id, instance.id]);
+    expect((await restored.listUnits(instance.id))[0]?.workBrief).toEqual(JSON.parse(JSON.stringify(legacy)));
+    const newAct = await handOffToCoordinator(h.deps, {
+      ...request,
+      mainTask: { ...request.mainTask!, actId: "act-new", brief: legacy },
+    });
+    expect(newAct).toMatchObject({
+      status: "aborted",
+      issues: expect.arrayContaining([{ code: "schema_version", path: "schemaVersion" }]),
+    });
+    expect(h.created).toHaveLength(2);
+  });
 
   it("an act replay keeps one durable unit and no second attempt despite changed text", async () => {
     const status: Record<string, InstanceStatusAnswer> = {};
@@ -1865,6 +1943,7 @@ describe("main-agent work hand-off", () => {
         mainTask: {
           ...mainTask("act-long-query"),
           brief: {
+            ...EMPTY_EVIDENCE,
             ...mainTask("act-long-query").brief,
             findings: [
               {

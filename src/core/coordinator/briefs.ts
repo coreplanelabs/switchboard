@@ -132,13 +132,31 @@ function generatedUnitOf(
     `Main thread: ${datum(brief.mainThreadKey)}`,
     `Question: ${datum(brief.question)}`,
     ...brief.findings.flatMap((fact) => [
-      `Finding: ${datum(fact.text)}`,
+      `Finding (${fact.kind}, source unverified): ${datum(fact.text)}`,
       ...(fact.query !== undefined ? [`Exact query: ${datum(fact.query)}`] : []),
       ...(fact.result !== undefined ? [`Query result: ${datum(fact.result)}`] : []),
       ...(fact.timeWindow !== undefined ? [`Time window: ${datum(fact.timeWindow)}`] : []),
       ...(fact.sourceUrl !== undefined ? [`Source: ${datum(fact.sourceUrl)}`] : []),
     ]),
-    ...(brief.suspectedCause ? [`Suspected cause (unverified): ${datum(brief.suspectedCause)}`] : []),
+    ...(brief.schemaVersion === 1
+      ? [
+          `Brief schema: 1; source provenance: unverified`,
+          `Evidence requirements: ${datum(JSON.stringify(brief.requirements))}`,
+          `Evidence availability: ${brief.evidence.availability}`,
+          ...(brief.evidence.availability === "unavailable"
+            ? [`Evidence unavailable reason: ${datum(brief.evidence.reason)}`]
+            : []),
+          ...(brief.cause.kind === "unknown"
+            ? [`Cause: unknown; ${datum(brief.cause.reason)}`]
+            : [
+                `Cause hypothesis (unverified): ${datum(brief.cause.text)}`,
+                `Cause uncertainty: ${datum(brief.cause.uncertainty)}`,
+              ]),
+        ]
+      : [
+          "Brief schema: legacy; completeness: unknown",
+          ...(brief.suspectedCause ? [`Suspected cause (unverified): ${datum(brief.suspectedCause)}`] : []),
+        ]),
     `Requested change: ${datum(brief.requestedChange)}`,
     ...(brief.acceptance ? [`Acceptance: ${datum(brief.acceptance)}`] : []),
   ];

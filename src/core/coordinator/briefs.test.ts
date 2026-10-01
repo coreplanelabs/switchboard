@@ -356,7 +356,14 @@ describe("composeChild — the child a brief names", () => {
             sourceUrl: "https://example.com/metrics",
           },
         ],
-        suspectedCause: "The callback may reject expired state",
+        schemaVersion: 1,
+        cause: {
+          kind: "hypothesis",
+          text: "The callback may reject expired state",
+          uncertainty: "Needs a reproduction",
+        },
+        evidence: { availability: "provided" },
+        requirements: { analysis: "required", evidence: "required" },
         requestedChange: "Fix the callback",
         acceptance: "A reviewed PR with a regression test",
       },
@@ -374,7 +381,9 @@ describe("composeChild — the child a brief names", () => {
     expect(child.prompt).toContain("SELECT failures");
     expect(child.prompt).toContain("17 of 120");
     expect(child.prompt).toContain("previous UTC day");
-    expect(child.prompt).toContain("Suspected cause (unverified)");
+    expect(child.prompt).toContain("Cause hypothesis (unverified)");
+    expect(child.prompt).toContain("Cause uncertainty");
+    expect(child.prompt).toContain("Brief schema: 1; source provenance: unverified");
     expect(child.contract?.unit.section).toContain("Fix the callback");
     expect(parseDirectives(child.prompt).budget).toBeUndefined();
     const noHost = await contractFor(generated, row, readers().r);

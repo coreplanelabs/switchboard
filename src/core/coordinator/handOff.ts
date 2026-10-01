@@ -44,6 +44,9 @@ import type { AgentSource } from "../runEvents.js";
 import {
   isMainTaskKey,
   isWorkBrief,
+  validateWorkBrief,
+  type WorkBriefIssue,
+  type StoredWorkBriefDraft,
   type CoordinatorInstance,
   type CoordinatorUnit,
   type MainTaskKey,
@@ -85,7 +88,7 @@ export interface HandOffInput {
   /** An opt-in main-agent decision. Its key is stable across message retries;
    * the brief is context for the existing Ship unit, not publication authority. */
   mainTask?: MainTaskKey & {
-    brief: Omit<WorkBrief, "requesterId" | "mainThreadKey" | "actId" | "repo" | "base">;
+    brief: StoredWorkBriefDraft;
     authority?: MainTaskAuthority;
   };
   /** Set by the trusted caller only when the private worker log is configured. */
@@ -182,6 +185,7 @@ export interface HandOffDeps {
 
 /** The ship outcome's shape, as the ship branch closes its card and replies from it. */
 export interface HandOffOutcome {
+  issues?: WorkBriefIssue[];
   status: "completed" | "aborted";
   reply: string;
   /** The instance the hand-off created — a completed outcome's alone (record
@@ -274,7 +278,9 @@ const ENDED = new Set(["complete", "errored", "terminated"]);
 async function plan(
   deps: HandOffDeps,
   input: HandOffInput,
-): Promise<{ ok: true; planned: Planned } | { ok: false; reply: string; code: RefusalCode }> {
+): Promise<
+  { ok: true; planned: Planned } | { ok: false; reply: string; code: RefusalCode; issues?: WorkBriefIssue[] }
+> {
   const { entry, msg } = input;
   const base = entry.base;
   if (base === undefined)
@@ -365,7 +371,7 @@ async function plan(
       input.mainTask !== undefined
         ? generatedPlanId(text, `${input.mainTask.mainThreadKey}:${input.mainTask.actId}`)
         : (input.reissuePlanId ?? generatedPlanId(text, msg.threadKey));
-    const workBrief =
+    const proposedBrief =
       input.mainTask !== undefined
         ? {
             ...input.mainTask.brief,
@@ -376,12 +382,15 @@ async function plan(
             base,
           }
         : undefined;
-    if (workBrief !== undefined && !isWorkBrief(workBrief))
+    const checked = proposedBrief === undefined ? undefined : validateWorkBrief(proposedBrief);
+    if (checked && !checked.ok)
       return {
         ok: false,
         code: "setup_failed",
-        reply: "🚫 The main agent's work brief is invalid or too long; no worker started.",
+        reply: "The work brief is incomplete; no worker started.",
+        issues: checked.issues,
       };
+    const workBrief = checked?.ok ? checked.brief : undefined;
     const graph: PlanGraph = {
       planId,
       units: [{ id: "U1", title: unitTitleOf(text), slug: "u1", branch: unitBranch(planId, "u1"), dependsOn: [] }],
@@ -681,7 +690,8 @@ async function handOffToCoordinatorUnchecked(deps: HandOffDeps, input: HandOffIn
     if (link !== null) return linkedTask(deps, input, link);
   }
   const planned = await plan(deps, input);
-  if (!planned.ok) return refused(planned.code, planned.reply);
+  if (!planned.ok)
+    return { ...refused(planned.code, planned.reply), ...(planned.issues ? { issues: planned.issues } : {}) };
   let p = planned.planned;
   // The instance's plan: a seeded one names its path; a generated one carries
   // only the id — the mark every reader keys on. A seeded plan's units are the
@@ -1004,7 +1014,7 @@ async function linkedTask(deps: HandOffDeps, input: HandOffInput, link: MainTask
   if (
     instance === null ||
     unit === undefined ||
-    brief === undefined ||
+    !isWorkBrief(brief) ||
     key === undefined ||
     brief.mainThreadKey !== key.mainThreadKey ||
     brief.actId !== key.actId ||
