@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.271.3](https://github.com/coreplanelabs/switchboard/compare/v1.271.2...v1.271.3) (2026-10-01)
+
+
+### Bug fixes
+
+* **dispatcher:** ignore PR fields on plain work binds ([#2560](https://github.com/coreplanelabs/switchboard/issues/2560)) ([4eaa613](https://github.com/coreplanelabs/switchboard/commit/4eaa61325608b3cf79bc6d9216e618c523a14700))
+* **ship:** distinguish merged PRs from closed ones ([#2559](https://github.com/coreplanelabs/switchboard/issues/2559)) ([dc8396d](https://github.com/coreplanelabs/switchboard/commit/dc8396dbb6a3a0de235928a3aef2f051474fece3))
+
 ## [1.271.2](https://github.com/coreplanelabs/switchboard/compare/v1.271.1...v1.271.2) (2026-10-01)
 
 
