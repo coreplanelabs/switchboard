@@ -354,3 +354,20 @@ An ordinary findings child also must not strand its owner after a successful lea
 **Budget boundary unchanged.** Unknown-budget refusals now identify their missing or contradictory fact through the deterministic response and the Ship refusal. Neither current configuration defaults nor today's grant can establish the historical round cap, lease or spend. This amendment introduces no extension grammar, renewal allowance, replacement identity, or cost-policy change. The separately authorized one-time clock extension requires its own reviewed durable entitlement and spend/cap provenance, serialized after this prerequisite; it cannot be hidden inside publication reconstruction. Record 0073's eventual retirement of person-facing recovery directives is unchanged. The [proposed serialized extension follow-up](../plans/2026-09-25-001-fix-original-unit-recovery-extension-plan.md) carries the exact seven-original scope, source reservations, durable entitlement/budget design, denial tests and live acceptance after this prerequisite merges; none is claimed implemented by this amendment.
 
 **Proof.** `src/channels/adminCoordinator.test.ts` covers binding-less findings, a retained coding checkpoint with a no-verdict review and no PR-created event, ambiguous/foreign/moved/active-owner/CAS-loss refusals, restart rollback, the ordinary findings rewrite, and a real recovery driver over the real coordinator handlers through publication authorization and exact-head re-review. `src/core/coordinator/contract.test.ts` checks the additive rollback receipt. `src/core/dispatch/ship.test.ts` checks that the exact unknown-budget reason reaches the requester. Live continuation of retained product lanes remains deployment- and original-requester-gated; fixture acceptance is not a claim that those lanes have resumed.
+
+## Amended 2026-10-01 — terminal pull requests do not idle findings
+
+*Re-evaluation.* The earlier rule that other terminal outcomes idle has one further exception:
+a findings abort that carries a typed merged or closed pull request observation
+stays ended. A reply cannot authorize another findings push into that terminal
+pull request. Ordinary findings aborts on an open pull request keep the idle
+behavior when configured.
+
+This exception preserves the original unit and publication authority. It does
+not credit an unaccepted push or treat missing findings results as completed;
+an older or unreadable merged source head cannot prove that the fix landed.
+The short report names the terminal outcome, and verbose output preserves the
+recorded commit and missing results with guidance for an authorized follow-up
+pull request. The terminal cases in `src/core/ship/coordinator.test.ts` prove
+this distinction with idle enabled; the behavioral contract is
+[agent-ship items 8 and 12a](../reference/specs/agent-ship.md).

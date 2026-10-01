@@ -973,6 +973,9 @@ export type UnitEnding =
       observedHead?: string;
       remoteHead?: string;
       missingOutputs?: string[];
+      /** A terminal PR cannot accept another findings push, even when missing
+       * outputs or an unverified source head prevent crediting the work. */
+      terminalPr?: Extract<PrCheck, { state: "merged" | "closed" }>;
       /** A round-0 end without a pull request that was judged for renewal and
        *  refused: the decision and the card's sentence (decision 0046). */
       renewal?: { decision: Extract<RenewalDecision, { renew: false }>; line: string };
@@ -1830,6 +1833,7 @@ function end(s: UnitPipelineState, ending: UnitEnding, notes: CoordinatorNote[] 
 function idleEnding(s: UnitPipelineState, ending: UnitEnding): Extract<UnitEnding, { kind: "idle" }> | undefined {
   if ((s.input.idleDays ?? 0) <= 0) return undefined;
   if (NEVER_IDLES.has(ending.kind)) return undefined;
+  if (ending.kind === "aborted" && ending.terminalPr !== undefined) return undefined;
   // A draft hold is not continued by a reply. A blocked hold (issue 2086)
   // waits for the person's word. Human-gated questions bypass this mapping:
   // `parkHumanGate` always parks them with their typed pending state.
@@ -2180,8 +2184,8 @@ function settleCoding(
     };
   }
   // A findings run must be completed before any remote state can make it
-  // review-ready. A failed run stays resumable even when its record says a
-  // push was attempted; no remote read upgrades an unfinished result.
+  // review-ready. While its PR remains open, a failed run stays resumable
+  // even after an attempted push; no remote read upgrades an unfinished result.
   if (round.kind === "findings")
     return end(
       next,
@@ -2811,21 +2815,17 @@ function finishSupersededChild(
   facts: Extract<ChildFacts, { finished: true }>,
 ): Transition {
   const supersession = phase.supersession;
-  if (supersession.reason === "merged") {
-    // A findings child can observe a merge before its own record is read. Fold
-    // that record through the same typed-output gate as an ordinary completion,
-    // then reconcile the merged PR's source head with the completed child head.
-    // Neither the earlier terminal observation nor steering the child proves
-    // that its final commit reached the pull request before the merge.
-    if (phase.round.kind === "findings") {
-      const settled = settleCoding(s, phase.round, phase.runId, facts);
-      const ready = settled.state.phase;
-      if (ready.at === "pr-check" && (ready.findingsReady === true || ready.findingsIncomplete !== undefined))
-        return settlePrCheck(settled.state, ready, supersession.pullRequest);
-      return settled;
-    }
-    return foundMerged({ ...s, spendUsd: addSpend(s.spendUsd, facts.costUsd) }, supersession.pullRequest);
+  if (phase.round.kind === "findings" && (supersession.reason === "merged" || supersession.reason === "closed")) {
+    // Terminal PR state decides the next action; the child's typed outputs
+    // and exact source head separately decide whether its work can be credited.
+    const settled = settleCoding(s, phase.round, phase.runId, facts);
+    const ready = settled.state.phase;
+    if (ready.at === "pr-check" && (ready.findingsReady === true || ready.findingsIncomplete !== undefined))
+      return settlePrCheck(settled.state, ready, supersession.pullRequest);
+    return retainTerminalFindings(settled, supersession.pullRequest);
   }
+  if (supersession.reason === "merged")
+    return foundMerged({ ...s, spendUsd: addSpend(s.spendUsd, facts.costUsd) }, supersession.pullRequest);
   // The superseded child still spent its lease and dollars. Its results do
   // not become findings dispositions or publication authority.
   const charged: UnitPipelineState = {
@@ -2879,6 +2879,19 @@ function restartSupersededReview(
   return enterRound(next, { ...round, kind: "review", attempt: reviewRestarts + 1 });
 }
 
+/** Preserve a terminal PR observation across the findings-output gate. That
+ * gate may already have wrapped its abort as idle; a terminal PR cannot wake
+ * another findings writer, and neither state proves the child's work landed. */
+function retainTerminalFindings(settled: Transition, pr: Extract<PrCheck, { state: "merged" | "closed" }>): Transition {
+  const ending = settled.state.ending?.kind === "idle" ? settled.state.ending.idled : settled.state.ending;
+  if (ending?.kind !== "aborted") return settled;
+  return end(
+    { ...settled.state, pr: { number: pr.prNumber, url: pr.url } },
+    { ...ending, terminalPr: pr },
+    settled.notes.filter((note) => note.type !== "ended"),
+  );
+}
+
 /** Reconcile the ending-time facts read. A person can merge or close after
  * the machine chose merge-ready but before the driver publishes it; terminal
  * state wins and becomes the unit's actual ending, not merely report prose. */
@@ -2898,6 +2911,8 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
       {
         kind: "aborted",
         reason: `${cap?.kind === "aborted" ? `${cap.reason} ` : ""}The completed findings work still lacks required results (${phase.findingsIncomplete?.join("; ")}); no review started.`,
+        observedHead: fullHead(phase.childHead),
+        missingOutputs: phase.findingsIncomplete,
         round,
         reviewRounds: verified.reviewRounds,
       },
@@ -2907,7 +2922,8 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
   // A completed findings run is not ready because it says it pushed. It is
   // ready only when this independent read sees the adopted pull request at the
   // exact full observed source head (and, while open, its live branch). Every
-  // other remote fact is a resumable stop with no review or merged success.
+  // other remote fact stops without review or merged success; a terminal PR
+  // cannot resume findings work.
   if (phase.findingsReady === true || phase.findingsIncomplete !== undefined) {
     const observedHead = fullHead(phase.childHead)!;
     const withPr = pr.state !== "none" ? { ...s, pr: { number: pr.prNumber, url: pr.url } } : s;
@@ -2920,6 +2936,8 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
             kind: "aborted",
             reason: "The merged pull request's exact source head could not be verified.",
             findingsStop: "remote_unreadable",
+            terminalPr: pr,
+            missingOutputs: phase.findingsIncomplete,
             observedHead,
             round,
             reviewRounds: withPr.reviewRounds,
@@ -2933,6 +2951,8 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
             kind: "aborted",
             reason: "The merged pull request does not hold the completed changes.",
             findingsStop: "head_mismatch",
+            terminalPr: pr,
+            missingOutputs: phase.findingsIncomplete,
             observedHead,
             remoteHead,
             round,
@@ -2941,7 +2961,7 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
           [roundNote(round, "aborted")],
         );
       if (phase.findingsIncomplete !== undefined)
-        return endIncompleteFindings({ ...withPr, lastReviewHead: remoteHead });
+        return retainTerminalFindings(endIncompleteFindings({ ...withPr, lastReviewHead: remoteHead }), pr);
       return foundMerged(withPr, pr, [roundNote(round, "completed")]);
     }
     if (pr.state !== "open" || pr.headBranchExists === false)
@@ -2951,6 +2971,7 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
           kind: "aborted",
           reason: "No open pull request and branch could be verified for the completed changes.",
           findingsStop: "missing_remote",
+          ...(pr.state === "closed" ? { terminalPr: pr, missingOutputs: phase.findingsIncomplete } : {}),
           observedHead,
           round,
           reviewRounds: withPr.reviewRounds,
@@ -3694,8 +3715,7 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
           reviewRounds: clocked.reviewRounds,
         });
       if (p.child !== undefined) {
-        if (r.pr.state === "closed") return foundClosed(clocked, r.pr);
-        const remoteHead = r.pr.state === "none" ? undefined : fullHead(r.pr.headSha);
+        const remoteHead = r.pr.state === "none" || r.pr.state === "closed" ? undefined : fullHead(r.pr.headSha);
         const reviewedHead = fullHead(clocked.lastReviewHead);
         const stillForeign =
           r.pr.state === "open" &&
@@ -3726,7 +3746,7 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
         const next = settled.state.phase;
         if (next.at === "pr-check" && (next.findingsReady === true || next.findingsIncomplete !== undefined))
           return settlePrCheck(settled.state, next, r.pr);
-        return settled;
+        return r.pr.state === "merged" || r.pr.state === "closed" ? retainTerminalFindings(settled, r.pr) : settled;
       }
       if (r.pr.state === "merged") return foundMerged(clocked, r.pr);
       if (r.pr.state === "closed") return foundClosed(clocked, r.pr);
@@ -4325,6 +4345,30 @@ function renderUnitReportWithWake(
         nextAction(e.checkpoint),
       ]);
     case "aborted":
+      if (e.terminalPr !== undefined) {
+        const pr = e.terminalPr;
+        if (!shows(verbosity, "verbose"))
+          return `⚠️ Review did not restart: pull request ${pr.state === "merged" ? "already merged" : "closed without merging"} — ${pr.url}`;
+        const sourceHead = pr.state === "merged" ? fullHead(pr.headSha) : undefined;
+        const observed = e.observedHead;
+        const terminal =
+          pr.state === "merged"
+            ? `already merged${sourceHead !== undefined ? ` at source commit \`${sourceHead.slice(0, 7)}\`` : " (source commit unverified)"}`
+            : "closed without merging";
+        return join([
+          `⚠️ Review did not restart: ${pr.url} ${terminal} and cannot accept these findings fixes.`,
+          e.reason,
+          e.missingOutputs !== undefined && e.findingsStop !== undefined
+            ? `Required results remain missing: ${e.missingOutputs.join("; ")}.`
+            : undefined,
+          observed !== undefined
+            ? sourceHead === observed
+              ? `Saved-work fact: the merged source matches the run's recorded commit \`${observed.slice(0, 7)}\`, but the findings results remain incomplete.`
+              : `Saved-work fact: the run recorded commit \`${observed.slice(0, 7)}\`; Switchboard has not verified that work as published or included in the merge.`
+            : "Saved-work fact: the run did not record a final commit; Switchboard cannot verify where its remaining work was saved.",
+          "Next action: carry any remaining fixes into an authorized follow-up pull request from the current base. This pull request cannot resume findings work.",
+        ]);
+      }
       if (e.findingsStop !== undefined) {
         const observed = e.observedHead?.slice(0, 7);
         const branch = s.input.unit.branch;
