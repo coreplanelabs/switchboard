@@ -1975,7 +1975,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       const publicationTool =
         toolPushGate &&
         harness.name === "pi" &&
-        executor.publishBranch &&
+        executor.execResult &&
+        executor.publishBranchResult &&
         deps.runBearers &&
         repoCtx.repo &&
         ctx.githubDoor

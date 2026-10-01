@@ -252,6 +252,63 @@ describe("ResidentExecutor.exec", () => {
     await expect(ex.exec("false")).resolves.toMatch(/^exit 2:\nboom/);
   });
 
+  it("keeps command facts separate from the human empty-output sentinel", async () => {
+    stubFetch({ body: { stdout: "", stderr: "", exitCode: 0, truncated: false } });
+    await expect(new ResidentExecutor(OPTS).execResult("git status --porcelain -uno")).resolves.toEqual({
+      stdout: "",
+      stderr: "",
+      exitCode: 0,
+      truncated: false,
+    });
+    stubFetch({ body: { stdout: "", stderr: "", exitCode: 0 } });
+    await expect(new ResidentExecutor(OPTS).execResult("git status --porcelain -uno")).rejects.toThrow(
+      "invalid command result",
+    );
+    stubFetch({ body: { stdout: "", stderr: "", exitCode: 0, truncated: false } });
+    await expect(new ResidentExecutor(OPTS).exec("git status --porcelain -uno")).resolves.toBe("(no output)");
+  });
+
+  it.each([
+    { stdout: null },
+    { stderr: null },
+    { exitCode: "0" },
+    { exitCode: 0.5 },
+    { exitCode: null },
+    { truncated: undefined },
+  ])("refuses malformed structured results without retry: %j", async (invalid) => {
+    const body = { stdout: "", stderr: "", exitCode: 0, truncated: false, ...invalid };
+    const command = stubFetch({ body });
+    await expect(new ResidentExecutor(OPTS).execResult("true")).rejects.toThrow("invalid command result");
+    expect(command.fn).toHaveBeenCalledTimes(1);
+    const publication = stubFetch({ body });
+    await expect(
+      new ResidentExecutor(OPTS).publishBranchResult({
+        repo: "jshttp/vary",
+        doorOrigin: "https://door.example",
+        branch: "fix/owned",
+        next: "a".repeat(40),
+        bearer: "effect-test-token",
+      }),
+    ).resolves.toMatchObject({ exitCode: 1, stderr: "publication refused: invalid transport result" });
+    expect(publication.fn).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves stderr, failure and truncation as separate facts", async () => {
+    const result = { stdout: "partial", stderr: "diagnostic", exitCode: 124, truncated: true };
+    stubFetch({ body: result });
+    await expect(new ResidentExecutor(OPTS).execResult("command")).resolves.toEqual(result);
+    stubFetch({ body: result });
+    await expect(
+      new ResidentExecutor(OPTS).publishBranchResult({
+        repo: "jshttp/vary",
+        doorOrigin: "https://door.example",
+        branch: "fix/owned",
+        next: "a".repeat(40),
+        bearer: "effect-test-token",
+      }),
+    ).resolves.toEqual(result);
+  });
+
   // docs/reference/specs/harness-pi.md item 4: a caller's extra environment
   // rides in the /exec body as `env` — the channel the pi harness hands the
   // run bearer through — and only when the caller gave one, so an older
@@ -994,7 +1051,7 @@ describe("ResidentExecutor trace context", () => {
     try {
       const { calls } = stubFetch(
         { raw: JSON.stringify(ATTACH_OK) },
-        { raw: JSON.stringify({ stdout: "ok", stderr: "", exitCode: 0 }) },
+        { raw: JSON.stringify({ stdout: "ok", stderr: "", exitCode: 0, truncated: false }) },
         { body: { state: "warm", reason: "" } },
       );
       const ex = new ResidentExecutor(OPTS);
@@ -1039,7 +1096,7 @@ describe("ResidentExecutor trace context — the recovery re-attach", () => {
         body: { error: "evicted: worktree was evicted", needs: "attach", stdout: "", stderr: "", exitCode: 127 },
       },
       { body: ATTACH_OK },
-      { raw: JSON.stringify({ stdout: "recovered", stderr: "", exitCode: 0 }) },
+      { raw: JSON.stringify({ stdout: "recovered", stderr: "", exitCode: 0, truncated: false }) },
     );
     await expect(new ResidentExecutor(OPTS).exec("echo recovered", { span: execSpan })).resolves.toBe("recovered");
     const clients = log.ends.filter((e) => e.name === "http.client");
@@ -2022,7 +2079,7 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
       { body: { ...refusal, transient: true } },
       status("warm"),
       { body: ATTACH_OK },
-      { body: { stdout: "recovered", stderr: "", exitCode: 0 } },
+      { body: { stdout: "recovered", stderr: "", exitCode: 0, truncated: false } },
     );
     await expect(new ResidentExecutor(OPTS).exec("true")).resolves.toBe("recovered");
     expect(calls.map(route)).toEqual(["/exec", "/status", "/attach", "/exec"]);

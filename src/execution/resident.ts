@@ -50,6 +50,7 @@ import {
   type ExecInfraReason,
   truncate,
   type ExecOptions,
+  type ExecResult,
   type Executor,
   type PublicationTransport,
   type ReleaseMode,
@@ -58,6 +59,11 @@ import {
 import { isDeadlineMiss, type ExecTraceOptions, type MoveOptions, type ReleaseOptions } from "./executor.js";
 import type { LeftBehind } from "./residentCleanliness.js";
 import type { ThreadDepsMechanism } from "./residentDepCache.js";
+
+function renderCommandResult(result: ExecResult): string {
+  const parts = [result.stdout, result.stderr].filter(Boolean).join("\n--- stderr ---\n");
+  return result.exitCode === 0 ? truncate(parts || "(no output)") : truncate(`exit ${result.exitCode}:\n${parts}`);
+}
 
 // Remote execution against a resident repo environment — the always-warm
 // per-repo service behind the resident Worker (deploy/cloudflare-resident/).
@@ -1939,6 +1945,10 @@ export class ResidentExecutor implements Executor {
   }
 
   async exec(command: string, opts?: ExecOptions): Promise<string> {
+    return renderCommandResult(await this.execResult(command, opts));
+  }
+
+  async execResult(command: string, opts?: ExecOptions): Promise<ExecResult> {
     // Per-call budget (docs/reference/specs/execution.md item 11). It rides in the body
     // only when the caller asked for one, so an older resident Worker sees the
     // body it always did (same convention as attach's readonly/sha); the
@@ -2002,13 +2012,26 @@ export class ResidentExecutor implements Executor {
         code: String(status),
       });
     }
-    const parts = [data.stdout, data.stderr].filter(Boolean).join("\n--- stderr ---\n");
-    const exitCode = Number(data.exitCode ?? 0);
-    if (exitCode !== 0) return truncate(`exit ${exitCode}:\n${parts}`);
-    return truncate(parts || "(no output)");
+    if (
+      typeof data.stdout !== "string" ||
+      typeof data.stderr !== "string" ||
+      !Number.isInteger(data.exitCode) ||
+      typeof data.truncated !== "boolean"
+    )
+      throw new ExecInfraError("resident /exec: invalid command result", "worker-unavailable");
+    return {
+      stdout: data.stdout,
+      stderr: data.stderr,
+      exitCode: data.exitCode as number,
+      truncated: data.truncated,
+    };
   }
 
   async publishBranch(input: PublicationTransport): Promise<string> {
+    return renderCommandResult(await this.publishBranchResult(input));
+  }
+
+  async publishBranchResult(input: PublicationTransport): Promise<ExecResult> {
     // No automatic reissue: a lost response may follow an accepted push. The
     // Git Door's durable outcome is reconciled by the caller before retry.
     const { status, data } = await this.call(
@@ -2026,10 +2049,25 @@ export class ResidentExecutor implements Executor {
       input.span,
     );
     if (status !== 200 || typeof data.error === "string")
-      return `exit 1: publication refused: ${redactSecrets(String(data.error ?? `HTTP ${status}`))}`;
-    const parts = [data.stdout, data.stderr].filter(Boolean).join("\n--- stderr ---\n");
-    const exitCode = Number(data.exitCode ?? 0);
-    return exitCode === 0 ? truncate(parts || "(no output)") : truncate(`exit ${exitCode}:\n${parts}`);
+      return {
+        stdout: "",
+        stderr: `publication refused: ${redactSecrets(String(data.error ?? `HTTP ${status}`))}`,
+        exitCode: 1,
+        truncated: false,
+      };
+    if (
+      typeof data.stdout !== "string" ||
+      typeof data.stderr !== "string" ||
+      !Number.isInteger(data.exitCode) ||
+      typeof data.truncated !== "boolean"
+    )
+      return { stdout: "", stderr: "publication refused: invalid transport result", exitCode: 1, truncated: false };
+    return {
+      stdout: data.stdout,
+      stderr: data.stderr,
+      exitCode: data.exitCode as number,
+      truncated: data.truncated,
+    };
   }
 
   async readFile(path: string, opts?: ExecTraceOptions): Promise<string> {
