@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.275.0](https://github.com/coreplanelabs/switchboard/compare/v1.274.0...v1.275.0) (2026-10-01)
+
+
+### Features
+
+* **ship:** retain outcomes across recovery attempts ([#2605](https://github.com/coreplanelabs/switchboard/issues/2605)) ([8d1eaaa](https://github.com/coreplanelabs/switchboard/commit/8d1eaaabaeb5b748f7210f588398f099f43c1c9c))
+* **tools:** read MCP sources with durable receipts ([#2609](https://github.com/coreplanelabs/switchboard/issues/2609)) ([91e0a67](https://github.com/coreplanelabs/switchboard/commit/91e0a6747b9f0b57b1111bd1bf70ad84d15d7214))
+
+
+### Bug fixes
+
+* **coding:** preserve checkpoints when publication fails ([#2606](https://github.com/coreplanelabs/switchboard/issues/2606)) ([d5ec3fa](https://github.com/coreplanelabs/switchboard/commit/d5ec3fa11f46066571b0941d77385144d2420112))
+* **review:** stop stalled checkout before the model run ([#2602](https://github.com/coreplanelabs/switchboard/issues/2602)) ([2fe1924](https://github.com/coreplanelabs/switchboard/commit/2fe1924f4d00dcc02a8bc33f179192f9f9a134b5))
+* **sandbox:** restore seeded dependencies at repository paths ([#2608](https://github.com/coreplanelabs/switchboard/issues/2608)) ([e6e3654](https://github.com/coreplanelabs/switchboard/commit/e6e36543ccb3c7fc4b40dbed277e844b55fc64f5))
+* **ship:** retain ownership during uncertain Workflow admission ([#2600](https://github.com/coreplanelabs/switchboard/issues/2600)) ([6c60ab1](https://github.com/coreplanelabs/switchboard/commit/6c60ab19d79f558013ff486634a410f827dc2139))
+
 ## [1.274.0](https://github.com/coreplanelabs/switchboard/compare/v1.273.0...v1.274.0) (2026-10-01)
 
 
