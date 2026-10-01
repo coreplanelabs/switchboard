@@ -2058,6 +2058,44 @@ describe("executor provisioning by agent resources", () => {
     expect(registry.listActive()).toEqual([]);
   });
 
+  it("a hard stop during PR review checkout closes the run before any model turn", async () => {
+    const headSha = "e8e43f480a09b76989b85ebe6a2a254d99a4d2a3";
+    const registry = new RunRegistry({ genId: () => "r1", genToken: () => "t1" });
+    const provider: Provider = {
+      name: "never",
+      complete: async () => {
+        throw new Error("review checkout never reached the model");
+      },
+    };
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha });
+    const release = vi.fn(async () => ({ released: true }));
+    let checkoutSignal: AbortSignal | undefined;
+    vi.mocked(makeExecutor).mockResolvedValueOnce({
+      executor: {
+        exec: (_command: string, options?: { signal?: AbortSignal }) =>
+          new Promise<string>((resolve) => {
+            checkoutSignal = options?.signal;
+            checkoutSignal?.addEventListener("abort", () => resolve("exit 143"), { once: true });
+          }),
+        readFile: async () => "",
+        writeFile: async () => "",
+        release,
+      } as never,
+      resident: false,
+    });
+    const { io, replies, statuses } = fakeIO();
+    const run = dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+    while (!checkoutSignal) await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(registry.requestStop("r1", "t1", "hard")).toEqual({ ok: true, mode: "hard" });
+    expect((await run).status).toBe("stopped");
+    expect(statuses.at(-1)?.title).toContain("⛔");
+    expect(replies).toEqual([]);
+    expect(release).toHaveBeenCalled();
+    expect(registry.listActive()).toEqual([]);
+  });
+
   it("a follow-up queued during the first attach's wait is dropped with the ⛔ note when the stop ends the attach — never handed on as a fresh run on the stopped thread", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("GITHUB_APP_ID", "");
@@ -12500,6 +12538,125 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     });
     expect(ledger.live.has("run-old")).toBe(false);
     expect((await log.list(threadKey)).some((event) => event.kind === "reply")).toBe(true);
+  });
+  it.each(["cold checkout", "seeded HEAD", "resident HEAD"])(
+    "a review fenced during %s leaves the card and row to the new owner",
+    async (phase) => {
+      const headSha = "e".repeat(40);
+      const provider = capturingProvider("must not run");
+      const { deps, ledger, writer, store } = wired(provider);
+      deps.admission = new ThreadAdmission<DispatchFollowUp>();
+      deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha });
+      const reserve = deps.runLedger.reserve.bind(deps.runLedger);
+      let fenced!: () => void;
+      deps.runLedger.reserve = async (request) => {
+        fenced = request.onFenced!;
+        return reserve(request);
+      };
+      let checkoutSignal: AbortSignal | undefined;
+      vi.mocked(makeExecutor).mockResolvedValueOnce({
+        executor: {
+          exec: (_command: string, options?: { signal?: AbortSignal }) =>
+            new Promise<string>((resolve) => {
+              checkoutSignal = options?.signal;
+              checkoutSignal?.addEventListener("abort", () => resolve("exit 143"), { once: true });
+            }),
+          readFile: async () => "",
+          writeFile: async () => "",
+          release: async () => ({ released: true }),
+        } as never,
+        resident: phase === "resident HEAD",
+        ...(phase === "seeded HEAD"
+          ? {
+              seeded: {
+                slug: "acme/api",
+                ref: "patch-1",
+                sha: headSha,
+                workspace: "/workspace/checkout",
+                cached: false,
+                ms: 12,
+              },
+            }
+          : {}),
+      });
+      const { io, replies } = ioWithCard();
+      const done = vi.fn(async () => {});
+      io.status = async () => ({ handle: { channel: "CX", ts: "1.2" }, update: () => {}, done });
+      const running = dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+      while (!checkoutSignal) await new Promise((resolve) => setTimeout(resolve, 5));
+      const unsaved = fakeIO();
+      const saved = fakeIO();
+      if (phase === "cold checkout") {
+        vi.spyOn(deps.runLedger, "pushInbox").mockResolvedValueOnce(undefined);
+        await dispatch(deps, msg("check the fence path too", "slack:UADMIN"), unsaved.io);
+        await dispatch(deps, msg("check the persisted path too", "slack:UADMIN"), saved.io);
+        expect(await ledger.readInbox("run-l", 0)).toHaveLength(1);
+      }
+      ledger.live.get("run-l")!.ownerGen = "gen-next";
+      fenced();
+      await running;
+      await writer.settled();
+      expect(done).not.toHaveBeenCalled();
+      expect(replies).toEqual([]);
+      expect(provider.requests).toEqual([]);
+      expect(ledger.live.get("run-l")?.ownerGen).toBe("gen-next");
+      expect(await store.get("run-l")).toBeNull();
+      if (phase === "cold checkout") {
+        expect(unsaved.replies).toContain("This reply was not saved with the run and will not be processed.");
+        expect(saved.replies).not.toContain("This reply was not saved with the run and will not be processed.");
+      }
+    },
+  );
+
+  it("a review fenced after a pre-reservation follow-up tells its sender it was not saved", async () => {
+    const headSha = "e".repeat(40);
+    const provider = capturingProvider("must not run");
+    const { deps, ledger, writer } = wired(provider);
+    deps.admission = new ThreadAdmission<DispatchFollowUp>();
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha });
+    const reserve = deps.runLedger.reserve.bind(deps.runLedger);
+    let reachedReserve!: () => void;
+    const atReserve = new Promise<void>((resolve) => (reachedReserve = resolve));
+    let releaseReserve!: () => void;
+    const heldReserve = new Promise<void>((resolve) => (releaseReserve = resolve));
+    let fenced!: () => void;
+    deps.runLedger.reserve = async (request) => {
+      fenced = request.onFenced!;
+      reachedReserve();
+      await heldReserve;
+      return reserve(request);
+    };
+    let checkoutSignal: AbortSignal | undefined;
+    vi.mocked(makeExecutor).mockResolvedValueOnce({
+      executor: {
+        exec: (_command: string, options?: { signal?: AbortSignal }) =>
+          new Promise<string>((resolve) => {
+            checkoutSignal = options?.signal;
+            checkoutSignal?.addEventListener("abort", () => resolve("exit 143"), { once: true });
+          }),
+        readFile: async () => "",
+        writeFile: async () => "",
+        release: async () => ({ released: true }),
+      } as never,
+      resident: false,
+    });
+    const original = ioWithCard();
+    const done = vi.fn(async () => {});
+    original.io.status = async () => ({ handle: { channel: "CX", ts: "1.2" }, update: () => {}, done });
+    const running = dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), original.io);
+    await atReserve;
+    const follow = fakeIO();
+    await dispatch(deps, msg("also check the setup path", "slack:UADMIN"), follow.io);
+    releaseReserve();
+    while (!checkoutSignal) await new Promise((resolve) => setTimeout(resolve, 5));
+    ledger.live.get("run-l")!.ownerGen = "gen-next";
+    fenced();
+    await running;
+    await writer.settled();
+    expect(follow.replies).toContain("This reply was not saved with the run and will not be processed.");
+    expect(done).not.toHaveBeenCalled();
+    expect(provider.requests).toEqual([]);
+    expect(ledger.live.get("run-l")?.ownerGen).toBe("gen-next");
   });
 
   it("carries a fresh accepted target from dispatch through reservation and claim", async () => {

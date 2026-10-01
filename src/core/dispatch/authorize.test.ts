@@ -6,6 +6,7 @@ import { ConfigStore } from "../../config.js";
 import { getAgent } from "../../agents/registry.js";
 import { declaredProfile } from "../../config/profile.js";
 import type { ExecutorSelection } from "../../execution/factory.js";
+import { BASH_TIMEOUT_MS } from "../../execution/bashTimeout.js";
 import { NO_CAPABILITIES } from "../capabilities.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
 import type { RepoContext } from "../repoContext.js";
@@ -617,6 +618,7 @@ describe("authorizeAttachedHead — every review workspace is at the PR head bef
       selection: sel,
       repoCtx,
       githubDoor: { baseUrl: "https://door.example" },
+      stopSignal: new AbortController().signal,
       root: s.root,
     };
   }
@@ -782,6 +784,60 @@ describe("authorizeAttachedHead — every review workspace is at the PR head bef
     expect(elsewhere.releases).toEqual(["always"]);
     expect(mismatched.replies[0]).toContain(`workspace-observed HEAD for feature/x is at ${SHA_B}`);
     expect(mismatched.replies[0]).toContain(`expected reviewed head is ${SHA_A}`);
+  });
+
+  it("a hard stop during cold review checkout ends setup without a retry or refusal", async () => {
+    const s = setup();
+    const cold = selection({ resident: false });
+    const stop = new AbortController();
+    const commands: string[] = [];
+    cold.selection.executor.exec = async (command, options) => {
+      expect(options?.signal).toBe(stop.signal);
+      expect(options?.timeoutMs).toBe(BASH_TIMEOUT_MS);
+      commands.push(command);
+      stop.abort(new Error("run stopped (hard) by operator"));
+      return "exit 143";
+    };
+
+    expect(await authorizeAttachedHead(s.deps, { ...ctx(s, cold.selection), stopSignal: stop.signal })).toEqual({
+      kind: "stopped",
+    });
+    expect(commands).toHaveLength(1);
+    expect(s.refusals).toEqual([]);
+    expect(s.replies).toEqual([]);
+  });
+
+  it("a hard stop during resident reprovision skips the retry HEAD probe", async () => {
+    const s = setup();
+    const { selection: sel, commands } = selection({ sha: SHA_B, observed: `${SHA_B}\n` });
+    const stop = new AbortController();
+    sel.executor.moveTo = async () => {
+      stop.abort();
+      return { sha: SHA_A };
+    };
+
+    expect(
+      await authorizeAttachedHead(
+        { ...s.deps, fetchPrHead: async () => SHA_C },
+        { ...ctx(s, sel), stopSignal: stop.signal },
+      ),
+    ).toEqual({ kind: "stopped" });
+    expect(commands.filter((command) => command === "git rev-parse HEAD")).toHaveLength(1);
+    expect(s.refusals).toEqual([]);
+    expect(s.replies).toEqual([]);
+  });
+
+  it("a checkout failure beside a pending stop remains a setup failure", async () => {
+    const s = setup();
+    const cold = selection({ resident: false });
+    const stop = new AbortController();
+    cold.selection.executor.exec = async () => {
+      stop.abort();
+      throw new Error("Git door credential unavailable");
+    };
+    await expect(authorizeAttachedHead(s.deps, { ...ctx(s, cold.selection), stopSignal: stop.signal })).rejects.toThrow(
+      "Git door credential unavailable",
+    );
   });
 
   it("a cold PR review with no Git door refuses before creating a GitHub checkout", async () => {
