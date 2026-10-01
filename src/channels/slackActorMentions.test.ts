@@ -1,4 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { ConfigStore } from "../config.js";
+import { chatErrorLine } from "../core/commandChat.js";
 import { mdToMrkdwn } from "./mrkdwn.js";
 import { SlackIO } from "./slack.js";
 import { childThreadLead } from "../core/dispatch/spawn.js";
@@ -7,6 +12,61 @@ import type { IncomingMessage } from "../core/types.js";
 import { RAW_ACTOR_ID, flushOutboundViolations, guardOutbound, installOutboundGuard } from "./testing/outboundGuard.js";
 
 installOutboundGuard();
+
+describe("shared permission guidance", () => {
+  it("config summaries and permission refusals never mention the admin roster", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "swb-admin-guidance-"));
+    const path = join(dir, "config.yaml");
+    writeFileSync(
+      path,
+      `
+organization: acme
+providers:
+  anthropic:
+    type: anthropic
+    apiKeyEnv: ANTHROPIC_API_KEY
+defaults:
+  agent: general
+  models:
+    general: anthropic/general-model
+grants:
+  "slack:UADMIN": { actions: all, channels: all, repos: all }
+  "slack:UOTHER": { actions: all, channels: all, repos: all }
+restrict:
+  agents: [coding]
+`,
+    );
+    const config = new ConfigStore(path, join(dir, "overrides.json"));
+    const adminsHint = config.adminsHint();
+    const messages = [
+      config.describe("slack:C1", "slack:UREADER"),
+      chatErrorLine("config.set", "unauthorized", "", config),
+      chatErrorLine("config.set", "unauthorized", "Channel config changes are restricted.", config, "handler"),
+      REFUSAL_SENTENCES.agent_allowlist({ agent: "coding", adminsHint }),
+      REFUSAL_SENTENCES.live_agent_allowlist({ agent: "coding", adminsHint }),
+      REFUSAL_SENTENCES.elsewhere_agent_allowlist({ agent: "coding", adminsHint }),
+      REFUSAL_SENTENCES.repo_access({ repo: "acme/api", adminsHint }),
+    ];
+    expect(messages[0]).toContain("*Note:* channel config changes are restricted (ask an admin)");
+    const postMessage = vi.fn(async () => ({ ok: true, ts: "9.1" }));
+    const client = guardOutbound({ chat: { postMessage } }) as unknown as ConstructorParameters<typeof SlackIO>[0];
+    const io = new SlackIO(client, {
+      channel: "C1",
+      user: "UREADER",
+      text: "config show",
+      ts: "1.0",
+      threadTs: "1.0",
+      botUserId: "UBOT",
+    });
+    for (const message of messages) await io.reply(message);
+    expect(postMessage).toHaveBeenCalledTimes(messages.length);
+    for (const call of postMessage.mock.calls) {
+      const payload = JSON.stringify(call);
+      expect(payload).toContain("an admin");
+      expect(payload).not.toMatch(/UADMIN|UOTHER|<@|<!/);
+    }
+  });
+});
 
 // Feature: docs/reference/specs/slack-channel.md item 16 — wherever the bot
 // prints a person's actor id into a Slack message, the adapter renders it as
@@ -34,8 +94,8 @@ describe("the actor-id mention renderer (mdToMrkdwn, docs/reference/specs/slack-
   });
 
   it("the produced mention survives the prose escape (it is structural, never `&lt;@U…&gt;`)", () => {
-    const out = mdToMrkdwn("🚫 `config set` is restricted. Ask slack:UADMIN.");
-    expect(out).toBe("🚫 `config set` is restricted. Ask <@UADMIN>.");
+    const out = mdToMrkdwn("Requested by slack:UREADER.");
+    expect(out).toBe("Requested by <@UREADER>.");
     expect(out).not.toMatch(RAW_ACTOR_ID);
   });
 
@@ -65,8 +125,8 @@ describe("the actor-id mention renderer (mdToMrkdwn, docs/reference/specs/slack-
   });
 
   it("the sibling composers' texts render clean: a refusal sentence and a child thread lead without a display name", () => {
-    const refusal = REFUSAL_SENTENCES.agent_allowlist({ agent: "coding", adminsHint: "slack:UADMIN, slack:UB2CD3" });
-    expect(mdToMrkdwn(refusal)).toContain("Ask <@UADMIN>, <@UB2CD3> for access.");
+    const refusal = REFUSAL_SENTENCES.agent_allowlist({ agent: "coding", adminsHint: "an admin" });
+    expect(mdToMrkdwn(refusal)).toContain("Ask an admin for access.");
     const lead = childThreadLead(
       { agentName: "ship", msg: PARENT_MSG },
       { preset: "coding", prompt: "implement the unit" },
@@ -104,10 +164,10 @@ describe("the outbound guard — no raw actor id in any text the Slack adapter s
     return { c, payloads };
   }
 
-  it("a refusal reply carrying the admins hint posts mentions, never raw ids", async () => {
+  it("a refusal reply carrying the admins hint posts a role, never mentions", async () => {
     const { c, payloads } = guardedClient();
-    await new SlackIO(c, ev).reply("🚫 `config set` is restricted. Ask slack:UADMIN, slack:UB2CD3.");
-    expect((payloads[0] as { text: string }).text).toBe("🚫 `config set` is restricted. Ask <@UADMIN>, <@UB2CD3>.");
+    await new SlackIO(c, ev).reply("🚫 `config set` is restricted. Ask an admin.");
+    expect((payloads[0] as { text: string }).text).toBe("🚫 `config set` is restricted. Ask an admin.");
   });
 
   it("a child thread's lead naming the requester by id opens with a mention, never a raw id", async () => {

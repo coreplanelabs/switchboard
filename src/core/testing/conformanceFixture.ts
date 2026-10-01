@@ -220,8 +220,7 @@ defaults:
     general: anthropic/general-model
 `;
 
-/** The generic fixture's deployment: one Slack admin and the HTTP power caller, both granted everything (`adminsHint`, folded by caller id in the
- *  cross-surface comparison, names Slack admins only, so the hint reads the same on every surface); the plain Slack user is granted
+/** The generic fixture's deployment: one Slack admin and the HTTP power caller, both granted everything; the plain Slack user is granted
  *  `config:write`, so the channel-scoped `config.*` happy inputs are admitted for them by the handler exactly as the table admits them. */
 export const CONFIG_YAML = `${BASE_YAML}grants:
   "${POWER}":

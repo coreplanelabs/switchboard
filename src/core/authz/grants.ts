@@ -266,8 +266,7 @@ export interface GrantsTable {
   grants: Map<string, Grants>;
   /** The `<ns>:*` entries by key: what every actor authenticated on that surface
    *  holds beyond its baseline, unioned into each of them at lookup — never
-   *  replacing an actor's own entry, never listed as an actor (a surface is not
-   *  someone `adminsHint` can name). */
+   *  replacing an actor's own entry, never listed as an actor. */
   surfaces: Map<string, Grants>;
   /** What every `slack:` user holds, listed or not: the open chat commands and `agent:run:<name>` for every unrestricted agent. */
   everyone: Grants;
