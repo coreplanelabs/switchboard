@@ -10769,6 +10769,98 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(owner);
   });
 
+  it.each([false, true])(
+    "ordinary checks-failed findings publish the approved round's exact head after retry %s",
+    async (retried) => {
+      const h = await ordinaryFindingsHarness();
+      await h.store.put(
+        reviewRecord({
+          verdict: { verdict: "approve", summary: "approved at the original head", findings: [] },
+          reviewPost: {
+            posted: true,
+            target: { repo: INSTANCE.repo, number: PR.number },
+            head: HEAD,
+            verdict: "approve",
+          },
+        }),
+      );
+      const [row] = await h.instances.listUnits(INSTANCE.id);
+      await h.instances.putUnits([
+        {
+          ...row!,
+          rounds: [
+            row!.rounds[0]!,
+            { index: 1, agent: "review", outcome: "approve", at: NOW - minutesToMs(30) },
+            ...(retried
+              ? [
+                  {
+                    index: 1,
+                    agent: "review" as const,
+                    outcome: "checks_restarted" as const,
+                    at: NOW - minutesToMs(27),
+                  },
+                ]
+              : []),
+            { index: 1, agent: "review", outcome: "checks_failed", at: NOW - minutesToMs(25) },
+          ],
+        },
+      ]);
+      expect(await ordinaryPrCheck(h)).toMatchObject({ status: 200, body: { headSha: "b".repeat(40) } });
+      expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
+        lastPush: "b".repeat(40),
+        publication: { ...publication, expectedHeadSha: "b".repeat(40) },
+      });
+    },
+  );
+
+  it.each(["ordinary", "superseded"] as const)(
+    "ordinary findings publication credits a %s check after a replayed checks-failed round note",
+    async (checkKind) => {
+      const h = await ordinaryFindingsHarness();
+      await h.store.put(
+        reviewRecord({
+          verdict: { verdict: "approve", summary: "approved at the original head", findings: [] },
+          reviewPost: {
+            posted: true,
+            target: { repo: INSTANCE.repo, number: PR.number },
+            head: HEAD,
+            verdict: "approve",
+          },
+        }),
+      );
+      const [row] = await h.instances.listUnits(INSTANCE.id);
+      await h.instances.putUnits([
+        {
+          ...row!,
+          rounds: [
+            row!.rounds[0]!,
+            { index: 1, agent: "review", outcome: "approve", at: NOW - minutesToMs(30) },
+            { index: 1, agent: "review", outcome: "checks_restarted", at: NOW - minutesToMs(28) },
+            { index: 1, agent: "review", outcome: "checks_failed", at: NOW - minutesToMs(25) },
+            { index: 1, agent: "review", outcome: "checks_failed", at: NOW - minutesToMs(24) },
+          ],
+        },
+      ]);
+      const checked =
+        checkKind === "ordinary"
+          ? ordinaryPrCheck(h)
+          : handleCoordinatorRequest(
+              post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+                parentInstanceId: INSTANCE.id,
+                unit: "U12",
+                pr: PR.number,
+                adopt: { runId: "run-original-findings", childStep: "U12/1/findings", previousHeadSha: HEAD },
+              }),
+              h.deps,
+            );
+      expect(await checked).toMatchObject({ status: 200, body: { headSha: "b".repeat(40) } });
+      expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
+        lastPush: "b".repeat(40),
+        publication: { ...publication, expectedHeadSha: "b".repeat(40) },
+      });
+    },
+  );
+
   it("a superseded check accepts a returned bound head without adopting or changing its push", async () => {
     const h = await ordinaryFindingsHarness();
     h.deps.fetchPrFacts = async () => exactRecoveryFacts(HEAD);
@@ -10850,6 +10942,111 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         publication: { ...publication, expectedHeadSha: childHead },
         lastPush: childHead,
       });
+    },
+  );
+
+  it.each(["ordinary", "superseded"] as const)(
+    "ordinary findings publication refuses checks-failed without the same review's preceding approval (%s check)",
+    async (checkKind) => {
+      const h = await ordinaryFindingsHarness();
+      const [row] = await h.instances.listUnits(INSTANCE.id);
+      await h.instances.putUnits([
+        {
+          ...row!,
+          rounds: [row!.rounds[0]!, { index: 1, agent: "review", outcome: "checks_failed", at: NOW - minutesToMs(25) }],
+        },
+      ]);
+      const before = (await h.instances.listUnits(INSTANCE.id))[0]!;
+      const check =
+        checkKind === "ordinary"
+          ? ordinaryPrCheck(h)
+          : handleCoordinatorRequest(
+              post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+                parentInstanceId: INSTANCE.id,
+                unit: "U12",
+                pr: PR.number,
+                adopt: { runId: "run-original-findings", childStep: "U12/1/findings", previousHeadSha: HEAD },
+              }),
+              h.deps,
+            );
+      expect(await check).toMatchObject({ status: 409, body: { error: "publication_facts_mismatch" } });
+      expect((await h.instances.listUnits(INSTANCE.id))[0]).toEqual(before);
+    },
+  );
+
+  it.each([
+    "other round",
+    "late approval",
+    "intervening review",
+    "intervening other round",
+    "intervening verdict",
+  ] as const)(
+    "ordinary findings publication refuses checks-failed with %s instead of the current review's approval",
+    async (scenario) => {
+      const h = await ordinaryFindingsHarness();
+      const [row] = await h.instances.listUnits(INSTANCE.id);
+      const approval = {
+        index: scenario === "other round" ? 2 : 1,
+        agent: "review" as const,
+        outcome: "approve" as const,
+        at: NOW - minutesToMs(scenario === "late approval" ? 20 : 35),
+      };
+      await h.instances.putUnits([
+        {
+          ...row!,
+          rounds: [
+            row!.rounds[0]!,
+            approval,
+            ...(scenario.startsWith("intervening")
+              ? [
+                  {
+                    index: scenario === "intervening other round" ? 2 : 1,
+                    agent: "review" as const,
+                    outcome: scenario === "intervening verdict" ? ("request_changes" as const) : ("started" as const),
+                    at: NOW - minutesToMs(30),
+                  },
+                ]
+              : []),
+            { index: 1, agent: "review", outcome: "checks_failed", at: NOW - minutesToMs(25) },
+          ],
+        },
+      ]);
+      const before = (await h.instances.listUnits(INSTANCE.id))[0]!;
+      expect(await ordinaryPrCheck(h)).toMatchObject({ status: 409, body: { error: "publication_facts_mismatch" } });
+      expect((await h.instances.listUnits(INSTANCE.id))[0]).toEqual(before);
+    },
+  );
+
+  it.each(["request_changes", "started", "other round", "other round restart"] as const)(
+    "ordinary findings publication refuses replayed checks-failed notes across %s",
+    async (intervening) => {
+      const h = await ordinaryFindingsHarness();
+      const [row] = await h.instances.listUnits(INSTANCE.id);
+      await h.instances.putUnits([
+        {
+          ...row!,
+          rounds: [
+            row!.rounds[0]!,
+            { index: 1, agent: "review", outcome: "approve", at: NOW - minutesToMs(35) },
+            { index: 1, agent: "review", outcome: "checks_failed", at: NOW - minutesToMs(30) },
+            {
+              index: intervening.startsWith("other round") ? 2 : 1,
+              agent: "review",
+              outcome:
+                intervening === "other round"
+                  ? "checks_failed"
+                  : intervening === "other round restart"
+                    ? "checks_restarted"
+                    : intervening,
+              at: NOW - minutesToMs(27),
+            },
+            { index: 1, agent: "review", outcome: "checks_failed", at: NOW - minutesToMs(25) },
+          ],
+        },
+      ]);
+      const before = (await h.instances.listUnits(INSTANCE.id))[0]!;
+      expect(await ordinaryPrCheck(h)).toMatchObject({ status: 409, body: { error: "publication_facts_mismatch" } });
+      expect((await h.instances.listUnits(INSTANCE.id))[0]).toEqual(before);
     },
   );
 
