@@ -66,6 +66,13 @@
 // callers instead of two copies of "ask GitHub when nothing else names a
 // base".
 
+import { saveCheckpointArtifact } from "./checkpointArtifact.js";
+import {
+  publicationReason,
+  redactPublicationSettlement,
+  type PublicationBinding,
+  type PublicationSettlement,
+} from "./publicationSettlement.js";
 import { shellQuote } from "../execution/shellQuote.js";
 import { SEED_CHECKOUT_DIR } from "../execution/seedPlan.js";
 import { outboundKey } from "../artifacts/keys.js";
@@ -172,7 +179,7 @@ export function workLeftBehindLabel(left: LeftBehind): string {
  */
 export async function observeCodingWorkspace(
   executor: { exec: (cmd: string, opts?: ExecTraceOptions) => Promise<string> },
-  opts: { probeRemote: boolean; pushedBranch?: string; checkout?: string },
+  opts: { probeRemote: boolean; pushedBranch?: string; checkout?: string; includeUntracked?: boolean },
   /** The step's span (`run.observe_workspace`, or the ship round): every probe's exec hangs under it (docs/reference/specs/tracing.md item 17). */
   span?: Span,
 ): Promise<WorkspaceObservation> {
@@ -191,7 +198,7 @@ export async function observeCodingWorkspace(
       // What the run leaves behind (item 17's clean-tree rule): tracked
       // changes only — untracked scratch is the run's own noise — and commits
       // no remote branch holds.
-      probe(`${git} status --porcelain -uno`),
+      probe(`${git} status --porcelain${opts.includeUntracked ? "" : " -uno"}`),
       probe(`${git} rev-list --count HEAD --not --remotes`),
     ]);
     const headSha = parseRevParseOutput(headOut);
@@ -325,6 +332,11 @@ export async function salvageBudgetPush(
     ) => Promise<{ release: () => void; publicationBearer: string } | (() => void) | undefined>;
     publicationDoor?: { repo: string; origin: string };
     unfinished?: { runId: string; baseHeadSha: string; store: ArtifactStore };
+    settlement?: {
+      binding: PublicationBinding;
+      store?: ArtifactStore;
+      record: (value: PublicationSettlement) => Promise<boolean>;
+    };
   },
   span?: Span,
 ): Promise<{
@@ -333,11 +345,32 @@ export async function salvageBudgetPush(
   head?: string;
   publicationBlocked?: string;
   patch?: SavedFindingsPatch;
+  settlement?: PublicationSettlement;
 }> {
+  let settlement: PublicationSettlement | undefined = opts.settlement && {
+    version: 1,
+    binding: opts.settlement.binding,
+    checkpoint: { kind: "pending" },
+    publication: { kind: "not_attempted" },
+    preservation: { kind: "pending" },
+    release: { kind: "pending" },
+  };
+  let checkpointStage: "observe" | "commit" = "observe";
+  const record = async () => {
+    if (settlement) settlement = redactPublicationSettlement(settlement);
+    if (settlement && opts.settlement && !(await opts.settlement.record(settlement)))
+      throw new Error("the checkpoint receipt could not be recorded durably");
+  };
+  const facts = () => ({
+    ...(settlement ? { settlement } : {}),
+    ...(settlement?.checkpoint.kind === "created" ? { head: settlement.checkpoint.head } : {}),
+  });
+  const detail = (error: unknown) => publicationReason(String(error instanceof Error ? error.message : error));
+  class CommandRejected extends Error {}
   const trace = span ? { span } : undefined;
   const run = async (cmd: string) => {
     const output = await executor.exec(cmd, trace);
-    if (parseExitPrefix(output).failed) throw new Error(output.trim());
+    if (parseExitPrefix(output).failed) throw new CommandRejected(output.trim());
     return output;
   };
   const probe = (cmd: string) => run(cmd).catch(() => "");
@@ -370,6 +403,7 @@ export async function salvageBudgetPush(
               failedLead: `the budget-end salvage push to \`${opts.branch}\` failed`,
             };
   try {
+    await record();
     // An ending checkpoint preserves every non-ignored workspace change,
     // including a new source or test file the child had not added yet. Git's
     // ignore rules still keep dependency caches, credentials and attachment
@@ -410,6 +444,7 @@ export async function salvageBudgetPush(
     }
     const dirty = status !== "" && status !== "(no output)";
     const endingCheckpoint = opts.cue !== "compaction" && opts.cue !== "completion";
+    checkpointStage = "commit";
     if (dirty) {
       await run(`${git} add -A`);
       await run(`${git} commit -m ${shellQuote(words.commit)}`);
@@ -420,8 +455,37 @@ export async function salvageBudgetPush(
       // head as salvage and the coordinator never reviews that work as final.
       await run(`${git} commit --allow-empty -m ${shellQuote(words.commit)}`);
     }
-    const unpushed = parseCountOutput(await run(`${git} rev-list --count HEAD --not --remotes`)) ?? 0;
-    if (!dirty && !endingCheckpoint && unpushed === 0) return { pushed: false, summary: words.nothing };
+    // A checkpoint just committed is work regardless of a tracking probe.
+    // Only a clean completion needs the count to prove there is nothing left.
+    const unpushed =
+      dirty || endingCheckpoint ? 1 : parseCountOutput(await run(`${git} rev-list --count HEAD --not --remotes`));
+    if (unpushed === undefined) throw new Error("the unpushed commit count could not be measured");
+    const checkpointHead = parseRevParseOutput(await run(`${git} rev-parse HEAD`));
+    if (settlement) {
+      if (!checkpointHead) throw new Error("the checkpoint source commit could not be read");
+      settlement = {
+        ...settlement,
+        checkpoint: {
+          kind: !dirty && !endingCheckpoint && unpushed === 0 ? "clean" : "created",
+          head: checkpointHead,
+        },
+      };
+      await record();
+    }
+    if (!dirty && !endingCheckpoint && unpushed === 0) return { pushed: false, summary: words.nothing, ...facts() };
+    if (settlement && checkpointHead) {
+      settlement = {
+        ...settlement,
+        preservation: await saveCheckpointArtifact({
+          run,
+          git,
+          binding: settlement.binding,
+          source: checkpointHead,
+          store: opts.settlement?.store,
+        }),
+      };
+      await record();
+    }
     const keepUnpublished = async (): Promise<{ patch?: SavedFindingsPatch; note: string }> => {
       const saved = opts.unfinished;
       if (saved === undefined)
@@ -469,7 +533,7 @@ export async function salvageBudgetPush(
         };
       } catch (error) {
         return {
-          note: `unfinished patch was not saved: ${error instanceof Error ? error.message : String(error)}`,
+          note: `unfinished patch was not saved: ${detail(error)}`,
         };
       }
     };
@@ -477,6 +541,7 @@ export async function salvageBudgetPush(
       const kept = await keepUnpublished();
       return {
         pushed: false,
+        ...facts(),
         summary: `${words.failedLead}: existing-PR publication is blocked (${opts.publication.blocked}) — the commit remains unpublished in the bound workspace; ${kept.note}; no alternate ref was created`,
         ...(kept.patch !== undefined ? { patch: kept.patch } : {}),
       };
@@ -485,12 +550,16 @@ export async function salvageBudgetPush(
       let release: (() => void) | undefined;
       let pushBearer: string | undefined;
       let source: string | undefined;
+      if (settlement) {
+        source = parseRevParseOutput(await run(`${git} rev-parse HEAD`));
+        if (source !== checkpointHead) throw new Error("the checkpoint source changed before publication admission");
+      }
       if (opts.admitPush) {
         if (!executor.publishBranch || !opts.publicationDoor)
           throw new Error("an isolated runner-owned publication transport is unavailable");
         if ((await run(`${git} symbolic-ref --quiet --short HEAD`)).trim() !== opts.branch)
           throw new Error("the checkpoint checkout is not on the owned branch");
-        source = parseRevParseOutput(await run(`${git} rev-parse HEAD`));
+        source ??= parseRevParseOutput(await run(`${git} rev-parse HEAD`));
         if (!source) throw new Error("the checkpoint source commit could not be read");
         const admitted = await opts.admitPush(source);
         if (!admitted) throw new Error("the Git door did not admit the checkpoint source commit");
@@ -498,6 +567,10 @@ export async function salvageBudgetPush(
         pushBearer = typeof admitted === "function" ? undefined : admitted.publicationBearer;
       }
       try {
+        if (settlement) {
+          settlement = { ...settlement, publication: { kind: "pending" } };
+          await record();
+        }
         if (pushBearer && source && opts.publicationDoor && executor.publishBranch) {
           const output = await executor.publishBranch({
             repo: opts.publicationDoor.repo,
@@ -509,7 +582,7 @@ export async function salvageBudgetPush(
               : {}),
             bearer: pushBearer,
           });
-          if (parseExitPrefix(output).failed) throw new Error(output.trim());
+          if (parseExitPrefix(output).failed) throw new CommandRejected(output.trim());
         } else if (opts.admitPush) {
           throw new Error("the admitted checkpoint has no isolated publication transport");
         } else {
@@ -517,28 +590,44 @@ export async function salvageBudgetPush(
             opts.publication !== undefined
               ? ` --force-with-lease=${shellQuote(`refs/heads/${opts.publication.ref}:${opts.publication.expectedHeadSha}`)}`
               : "";
-          await run(`${git} push${lease} origin ${shellQuote(`HEAD:refs/heads/${opts.branch}`)}`);
+          await run(`${git} push${lease} origin ${shellQuote(`${source ?? "HEAD"}:refs/heads/${opts.branch}`)}`);
         }
       } finally {
         release?.();
       }
     } catch (err) {
+      if (settlement) {
+        settlement = {
+          ...settlement,
+          publication: {
+            kind: settlement.publication.kind === "pending" ? "unknown" : "rejected",
+            reason: detail(err),
+          },
+        };
+        await record();
+      }
       if (opts.publication !== undefined) {
-        const detail = err instanceof Error ? err.message : String(err);
-        const publicationBlocked = `the atomic leased push was rejected: ${detail}`;
+        const reason = detail(err);
+        const publicationBlocked = `the atomic leased push did not return a confirmed result: ${reason}`;
         const kept = await keepUnpublished();
         return {
           pushed: false,
           publicationBlocked,
+          ...facts(),
           summary: `${words.failedLead}: existing-PR publication is blocked (${publicationBlocked}) — the commit remains unpublished in the bound workspace; ${kept.note}; no alternate ref was created`,
           ...(kept.patch !== undefined ? { patch: kept.patch } : {}),
         };
       }
       throw err;
     }
-    const head = parseRevParseOutput(await probe(`${git} rev-parse HEAD`));
+    const head = settlement ? checkpointHead : parseRevParseOutput(await probe(`${git} rev-parse HEAD`));
+    if (settlement && head) {
+      settlement = { ...settlement, publication: { kind: "accepted", head } };
+      await record();
+    }
     return {
       pushed: true,
+      ...facts(),
       ...(head !== undefined ? { head } : {}),
       summary: `${words.pushedLead} — ${
         dirty
@@ -549,9 +638,13 @@ export async function salvageBudgetPush(
       } to \`${opts.branch}\`${head !== undefined ? ` (${head.slice(0, 7)})` : ""}`,
     };
   } catch (err) {
+    if (settlement?.checkpoint.kind === "pending")
+      settlement = { ...settlement, checkpoint: { kind: "unknown", stage: checkpointStage, reason: detail(err) } };
+    await record().catch(() => {});
     return {
       pushed: false,
-      summary: `${words.failedLead}: ${err instanceof Error ? err.message : String(err)} — partial work may sit unpushed in the workspace`,
+      ...facts(),
+      summary: `${words.failedLead}: ${detail(err)} — partial work may sit unpushed in the workspace`,
     };
   }
 }

@@ -1844,6 +1844,7 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
       ...(record.handoff !== undefined ? { handoff: true } : {}),
       // The renewal's facts (decision 0046): progress is read off these.
       ...(record.pushed !== undefined ? { pushed: record.pushed } : {}),
+      ...(record.publicationSettlement !== undefined ? { publicationSettlement: record.publicationSettlement } : {}),
       ...(record.lease !== undefined ? { leaseStartedAt: record.lease.startedAt } : {}),
       // What the child cost, as the runs service prices it (costs.md item 4c):
       // null when unknown — no usage on the record, or a model without a price

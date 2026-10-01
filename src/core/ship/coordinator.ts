@@ -1,3 +1,8 @@
+import {
+  publicationHasNoWork,
+  publicationSettlementSummary,
+  type PublicationSettlement,
+} from "../publicationSettlement.js";
 // The plan runner's state machine (docs/decisions/0029-durable-objects-store-workflows-schedule.md,
 // docs/decisions/0031-the-coordinator-runs-a-plan-not-a-pull-request.md;
 // docs/reference/specs/agent-ship.md item 15): what the ship coordinator — a
@@ -631,6 +636,7 @@ export type ChildFacts =
        *  its lease began, what it cost (null when a model had no price) and
        *  the handoff's lists — progress is read off these, never asked. */
       pushed?: PushedHeadFact[];
+      publicationSettlement?: PublicationSettlement | null;
       leaseStartedAt?: number;
       costUsd?: number | null;
       handoffLists?: Handoff;
@@ -1249,6 +1255,7 @@ type Phase =
       finalReply?: string;
       /** The renewal's facts off the child's record (decision 0046): its pushed heads, its lease's start, its handoff. */
       childPushed?: PushedHeadFact[];
+      publicationSettlement?: PublicationSettlement | null;
       childLeaseStartedAt?: number;
       childHandoff?: Handoff;
       /** Open or recover a pull request from the branch. A completed round-zero
@@ -1322,6 +1329,7 @@ type Phase =
 
 export interface UnitPipelineState {
   readonly input: UnitPipelineInput;
+  readonly lastPublicationSettlement?: PublicationSettlement | null;
   readonly startedAt: number;
   /** The last `at` a step answered with. */
   readonly clock: number;
@@ -2092,6 +2100,7 @@ function settleCoding(
     spendUsd: costAlreadyCharged ? s.spendUsd : addSpend(s.spendUsd, facts.costUsd),
     // The continuation facts an idle ending reads off the state (record 0051).
     ...(facts.headSha !== undefined ? { lastChildHead: facts.headSha } : {}),
+    ...(facts.publicationSettlement !== undefined ? { lastPublicationSettlement: facts.publicationSettlement } : {}),
     ...(facts.handoffLists !== undefined ? { lastCodingHandoff: facts.handoffLists } : {}),
     ...(facts.pr !== undefined ? { pr: { number: facts.pr.number, url: facts.pr.url } } : {}),
     ...(round.kind === "findings" && facts.dispositions !== undefined
@@ -2237,6 +2246,7 @@ function settleCoding(
           round,
           runId,
           dead: "failed",
+          ...(facts.publicationSettlement !== undefined ? { publicationSettlement: facts.publicationSettlement } : {}),
           ...(facts.failure?.kind === "provider_transient" || facts.failure?.kind === "model_stream_incomplete"
             ? { transient: true as const }
             : {}),
@@ -3065,7 +3075,12 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
       // (issue 1932): the ledger row and the branch are untouched, so round 0
       // is re-run once — a fresh attempt under fresh step names — and only a
       // second transient in the same round is the ending, named `transient`.
-      if (phase.transient && round.kind === "coding" && pr.unrecovered === "no_commits") {
+      if (
+        phase.transient &&
+        round.kind === "coding" &&
+        pr.unrecovered === "no_commits" &&
+        publicationHasNoWork(phase.publicationSettlement)
+      ) {
         if ((round.attempt ?? 1) < 2) return enterRound(s, { ...round, attempt: 2 }, [roundNote(round, "transient")]);
         return end(
           s,
@@ -3083,7 +3098,7 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
       // no more than the answer carried.
       const why =
         pr.unrecovered === "no_commits"
-          ? `nothing heads \`${s.input.unit.branch}\`: no commits were pushed, so there was no work to recover`
+          ? `the remote branch \`${s.input.unit.branch}\` contains no changes against its base; ${publicationSettlementSummary(phase.publicationSettlement)}`
           : pr.unrecovered === "no_base"
             ? `\`${s.input.unit.branch}\` could not be given a pull request: the pipeline names no base branch to open it against, so whatever was pushed stays on the branch`
             : `the pr-check found no pull request heading \`${s.input.unit.branch}\`, so nothing was recovered`;
@@ -3581,6 +3596,27 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
           },
           notes: [],
         };
+      // An unfinished local checkpoint is never review-ready, even if an
+      // uncertain push later appears remotely. Preserve the original attempt
+      // for reconciliation instead of manufacturing a new PR or writer.
+      const settlement = r.run.publicationSettlement;
+      if (
+        p.round.kind !== "review" &&
+        settlement !== undefined &&
+        (settlement === null ||
+          (settlement.checkpoint.kind !== "clean" && settlement.publication.kind !== "accepted")) &&
+        stopMode(r.run.status) === undefined
+      )
+        return end(
+          { ...clocked, lastPublicationSettlement: settlement, lastCodingRunId: p.runId },
+          {
+            kind: "aborted",
+            reason: `The coding child ended with publication ${settlement === null ? "unverified" : settlement.publication.kind.replaceAll("_", " ")}: ${publicationSettlementSummary(settlement)}.`,
+            round: p.round,
+            reviewRounds: s.reviewRounds,
+          },
+          [roundNote(p.round, "aborted")],
+        );
       if (r.run.status === "interrupted") {
         const cause = r.run.interruption;
         const checkpoint = interruptedCheckpoint(clocked, r.run.pushed);
@@ -4138,6 +4174,13 @@ function renderUnitReportWithWake(
   const nextAction = (checkpoint?: { branch: string; sha: string }): string => {
     if (durableWake)
       return `The unit remains live; a reply in this thread is recorded as its continuation action${prUrl ? ` from the open pull request (${prUrl})` : " from the saved branch state"}.`;
+    if (
+      s.lastPublicationSettlement !== undefined &&
+      (s.lastPublicationSettlement === null ||
+        (!publicationHasNoWork(s.lastPublicationSettlement) &&
+          s.lastPublicationSettlement.publication.kind !== "accepted"))
+    )
+      return "Recovery is held on the original unit until its recorded checkpoint and remote branch are reconciled.";
     const cappedAction = spentCapAction();
     if (cappedAction !== undefined) return cappedAction;
     const reconcile = checkpoint

@@ -1,3 +1,4 @@
+import type { PublicationSettlement } from "../publicationSettlement.js";
 import { describe, expect, it } from "vitest";
 import { shipRoundHeader } from "../shipPipeline.js";
 import { ASKS } from "../budgets.js";
@@ -2960,7 +2961,8 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     failed.answer({ type: "pr-check", pr: { state: "none", unrecovered: "no_commits" }, at: T0 + 6 * MIN });
     expect(failed.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
     expect(renderUnitReport(failed.state)).toContain("ended `failed`");
-    expect(renderUnitReport(failed.state)).toContain("no commits were pushed, so there was no work to recover");
+    expect(renderUnitReport(failed.state)).toContain("local work preservation was not recorded");
+    expect(renderUnitReport(failed.state)).not.toContain("no work to recover");
 
     // The bot says WHY it recovered nothing, and the abort repeats it: an
     // instance with no base branch never claims nothing was pushed.
@@ -3282,11 +3284,56 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
 // child that died on a provider transient with nothing pushed re-runs round 0
 // once; a second transient in the same round is the `transient` ending.
 describe("the transient re-run — round 0 dies on a provider transient with nothing pushed (issue 1932)", () => {
-  const transientChild = finished({ status: "failed", failure: { kind: "provider_transient" } });
+  const clean: PublicationSettlement = {
+    version: 1,
+    binding: {
+      runId: "run-c0",
+      instanceId: "coord-p",
+      step: "U10/0/coding",
+      repo: REPO,
+      branch: input().unit.branch,
+      requester: "slack:UX",
+      threadKey: "slack:C1:1",
+      generation: "gen-1",
+    },
+    checkpoint: { kind: "clean", head: "a".repeat(40) },
+    publication: { kind: "not_attempted" },
+    preservation: { kind: "pending" },
+    release: { kind: "released" },
+  };
+  it("does not start a fresh writer from an empty remote when local work is unknown or preserved", () => {
+    for (const publicationSettlement of [
+      undefined,
+      null,
+      { ...clean, checkpoint: { kind: "created" as const, head: "b".repeat(40) } },
+    ]) {
+      const d = fresh(input({ merge: "person" }));
+      d.answer({ type: "branch", ok: true, at: T0 });
+      runChild(
+        d,
+        "run-c0",
+        finished({ status: "failed", failure: { kind: "provider_transient" }, publicationSettlement }),
+        T0 + 5 * MIN,
+      );
+      if (d.action.type === "pr-check")
+        d.answer({ type: "pr-check", pr: { state: "none", unrecovered: "no_commits" }, at: T0 + 6 * MIN });
+      expect(d.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
+      expect(renderUnitReport(d.state)).not.toContain("no work to recover");
+    }
+  });
+  const transientChild = finished({
+    status: "failed",
+    failure: { kind: "provider_transient" },
+    publicationSettlement: clean,
+  });
 
   it("an incomplete local model stream gets one round-0 retry without being reported as provider-down", () => {
     const d = fresh(input({ merge: "person" }));
-    const streamChild = finished({ status: "failed", failure: { kind: "model_stream_incomplete" } });
+    const streamChild = finished({
+      status: "failed",
+      failure: { kind: "model_stream_incomplete" },
+      publicationSettlement: clean,
+    });
     d.answer({ type: "branch", ok: true, at: T0 });
     runChild(d, "run-c0", streamChild, T0 + 5 * MIN);
     d.answer({ type: "pr-check", pr: { state: "none", unrecovered: "no_commits" }, at: T0 + 6 * MIN });

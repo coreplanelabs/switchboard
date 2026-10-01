@@ -389,6 +389,36 @@ describe("clampRetentionPolicy", () => {
 });
 
 describe("isRunRecord", () => {
+  it("binds checkpoint preservation to the original run and coordinator attempt", () => {
+    const original = record({ repo: "acme/api", parentInstanceId: "coord-p", idempotencyKey: "coord-p:U12/0/coding" });
+    const settlement = {
+      version: 1,
+      binding: {
+        runId: original.id,
+        instanceId: original.parentInstanceId,
+        step: original.idempotencyKey,
+        repo: original.repo,
+        branch: "unit-work",
+        requester: original.userId,
+        threadKey: original.threadKey,
+        generation: "gen-1",
+      },
+      checkpoint: { kind: "clean", head: "a".repeat(40) },
+      publication: { kind: "not_attempted" },
+      preservation: { kind: "pending" },
+      release: { kind: "released" },
+    };
+    expect(isRunRecord({ ...original, publicationSettlement: settlement })).toBe(true);
+    for (const key of ["runId", "instanceId", "step", "repo", "requester", "threadKey"]) {
+      expect(
+        isRunRecord({
+          ...original,
+          publicationSettlement: { ...settlement, binding: { ...settlement.binding, [key]: "foreign" } },
+        }),
+      ).toBe(false);
+    }
+  });
+
   it("keeps an uncertain Git publication owner and ref transition on a finished record", () => {
     const pending = {
       id: "intent-1",

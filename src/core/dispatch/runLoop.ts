@@ -13,6 +13,12 @@ import { audienceRefusalText, noteAudienceRefusal, type AudienceRefusalCode } fr
 // (harness-pi item 14) and is ended here after them. The stage's claim and
 // the tools' capabilities are run.ts.
 import { randomUUID } from "node:crypto";
+import {
+  isPublicationSettlement,
+  redactPublicationSettlement,
+  publicationSettlementSummary,
+  type PublicationSettlement,
+} from "../publicationSettlement.js";
 import { createCheckExecution } from "../checkExecution.js";
 import { ensureFirstTest, firstTestContext, FirstTestHeld, type FirstTestReceipt } from "../firstTest.js";
 import { GIT_PUBLICATION_SETTLE_TIMEOUT_MS } from "../budgets.js";
@@ -1057,7 +1063,33 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
    *  fact the answer names over the observation that preceded the push. */
   let salvagedTo: { branch: string; head?: string } | undefined;
   let workspaceObserved = false;
-  let workSalvageAttempted = false;
+  let publicationSettlement: PublicationSettlement | undefined =
+    isPublicationSettlement(resume?.row.state.publicationSettlement) &&
+    resume.row.state.publicationSettlement.binding.runId === run.id &&
+    resume.row.state.publicationSettlement.binding.instanceId === coordinator?.parentInstanceId &&
+    resume.row.state.publicationSettlement.binding.step === coordinator?.idempotencyKey &&
+    resume.row.state.publicationSettlement.binding.branch ===
+      (coordinator?.publication?.publicationRef ?? binding?.ref ?? repoCtx.ref) &&
+    resume.row.state.publicationSettlement.binding.repo === repoCtx.repo &&
+    resume.row.state.publicationSettlement.binding.requester === msg.userId &&
+    resume.row.state.publicationSettlement.binding.threadKey === msg.threadKey
+      ? resume.row.state.publicationSettlement
+      : undefined;
+  const resumedUnsettledCheckpoint =
+    resume?.row.state.publicationSettlement !== undefined &&
+    (publicationSettlement === undefined ||
+      (publicationSettlement.publication.kind !== "accepted" && publicationSettlement.checkpoint.kind !== "clean"));
+  let settlementDurable = publicationSettlement !== undefined;
+  const recordPublicationSettlement = async (value: PublicationSettlement): Promise<boolean> => {
+    value = redactPublicationSettlement(value);
+    publicationSettlement = value;
+    settlementDurable = false;
+    const recorded = ledgerRun?.tracked() ? await ledgerRun.setStateAndFlush({ publicationSettlement: value }) : false;
+    settlementDurable = recorded;
+    onEvent({ type: "publication_settlement", settlement: value });
+    return recorded || ledgerRun === undefined;
+  };
+  let workSalvageAttempted = resumedUnsettledCheckpoint;
   let endingSalvageAttempted = false;
   // A coordinator child publishes one owned ref. An auxiliary push must not
   // redirect its observation, completion checkpoint, or PR post-step.
@@ -1070,6 +1102,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         executor,
         {
           probeRemote: repoCtx.repo === undefined,
+          ...(coordinator !== undefined ? { includeUntracked: true } : {}),
           ...(pushedBranch !== undefined ? { pushedBranch } : {}),
           ...(currentCheckout !== undefined ? { checkout: currentCheckout } : {}),
         },
@@ -1123,7 +1156,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     };
   };
   const preserveCodingChildWork = async (cue: "budget" | "ending" | "completion"): Promise<void> => {
-    if (workSalvageAttempted || !isCodingPrRun || coordinator === undefined) return;
+    if (workSalvageAttempted || !isCodingPrRun || coordinator === undefined || commandInFlight || gateBypassed) return;
     await events.drain();
     retainPublicationReceipts();
     if (!workspaceObserved) await observeWorkspaceNow();
@@ -1136,9 +1169,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             ownedBranch: coordinatorBranch,
             base: repoCtx.baseRef ?? (await coordinatorBase),
           });
-    // The checkpoint measures for itself and includes untracked, non-ignored
-    // files. The ordinary workspace observation deliberately counts tracked
-    // dirt only and therefore cannot decide that a completed child is clean.
+    // The checkpoint measures again immediately before creating the commit,
+    // including new non-ignored files even if the earlier observation was clean.
     const salvaged =
       "skipped" in target
         ? { pushed: false, summary: target.skipped }
@@ -1153,6 +1185,27 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                 ...(currentCheckout !== undefined ? { checkout: currentCheckout } : {}),
                 ...(existingPrPublication !== undefined ? { publication: existingPrPublication } : {}),
                 ...checkpointAdmission(target.branch, existingPrPublication),
+                ...(repoCtx.repo !== undefined
+                  ? {
+                      settlement: {
+                        binding: {
+                          runId: run.id,
+                          instanceId: coordinator.parentInstanceId,
+                          step: coordinator.idempotencyKey,
+                          repo: repoCtx.repo,
+                          branch: target.branch,
+                          requester: msg.userId,
+                          threadKey: msg.threadKey,
+                          generation: deps.runLedger?.gen ?? "local",
+                          ...((coordinator.publication?.expectedHeadSha ?? binding?.sha) !== undefined
+                            ? { baseHeadSha: coordinator.publication?.expectedHeadSha ?? binding?.sha }
+                            : {}),
+                        },
+                        ...(deps.artifacts ? { store: deps.artifacts } : {}),
+                        record: recordPublicationSettlement,
+                      },
+                    }
+                  : {}),
                 ...(deps.artifacts !== undefined && coordinator?.publication !== undefined
                   ? {
                       unfinished: {
@@ -1171,8 +1224,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     const cleanCompletion =
       cue === "completion" &&
       !salvaged.pushed &&
-      (/ended with nothing to preserve/i.test(salvaged.summary) ||
-        ("skipped" in target && (observedUncommitted ?? 0) === 0 && (observedUnpushed ?? 0) === 0));
+      (("settlement" in salvaged && salvaged.settlement?.checkpoint.kind === "clean") ||
+        ("skipped" in target && observedUncommitted === 0 && observedUnpushed === 0));
     if (cleanCompletion) return;
     workSalvageAttempted = true;
     // A moved checkout was not checkpointed. The owned branch can still be
@@ -1189,8 +1242,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       onEvent({ type: "pushed_head", ref: target.branch, sha: salvaged.head, by: "salvage" });
       salvagedTo = { branch: target.branch, head: salvaged.head };
     } else if (salvaged.pushed && !("skipped" in target)) salvagedTo = { branch: target.branch };
-    if (salvaged.pushed) await observeWorkspaceNow();
-    else if (existingPrPublication !== undefined && "blocked" in existingPrPublication) {
+    if (salvaged.pushed || ("settlement" in salvaged && salvaged.settlement !== undefined)) {
+      await observeWorkspaceNow();
+      if ("head" in salvaged && salvaged.head !== undefined) observedHead ??= salvaged.head;
+    }
+    if (existingPrPublication !== undefined && "blocked" in existingPrPublication) {
       // The checkpoint commit is still local. Re-read it so the record/card can
       // name what is retained, and keep this workspace attached at release.
       await observeWorkspaceNow();
@@ -1290,23 +1346,61 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     !commandInFlight &&
     !gateBypassed &&
     ((observedUncommitted ?? 0) > 0 || (observedUnpushed ?? 0) > 0);
-  const releaseWorkspace = (span?: Span) => {
-    // A denied existing-PR publication may leave the only copy of a tested
-    // commit in this checkout. Do not detach and prove its deletion; keep the
-    // workspace available to the resident/sandbox retention policy and report
-    // that retention beyond this run is not guaranteed. Hard stops, live
-    // commands and gate bypasses retain their mandatory teardown.
-    if (keepBlockedPublicationWorkspace()) return Promise.resolve();
-    const events = recordEvents();
-    const pushed = pushedBranchesOf(events);
-    return round.release({
-      hardStopped: run.control.requested === "hard",
-      commandInFlight,
-      gateBypassed,
-      ...(span ? { span } : {}),
-      ...(pushed.length > 0 ? { pushed } : {}),
-    });
-  };
+  let workspaceRelease: Promise<void> | undefined;
+  const releaseWorkspace = (span?: Span): Promise<void> =>
+    (workspaceRelease ??= (async () => {
+      const mandatory = run.control.requested === "hard" || commandInFlight || gateBypassed;
+      const unpreserved =
+        (resumedUnsettledCheckpoint && publicationSettlement === undefined) ||
+        (publicationSettlement !== undefined &&
+          publicationSettlement.publication.kind !== "accepted" &&
+          publicationSettlement.checkpoint.kind !== "clean" &&
+          (!settlementDurable ||
+            publicationSettlement.preservation.kind !== "saved" ||
+            observedUncommitted !== 0 ||
+            publicationSettlement.checkpoint.kind !== "created" ||
+            observedHead !== publicationSettlement.checkpoint.head));
+      if (!mandatory && (unpreserved || (publicationSettlement === undefined && keepBlockedPublicationWorkspace()))) {
+        if (publicationSettlement)
+          await recordPublicationSettlement({
+            ...publicationSettlement,
+            release: {
+              kind: "kept",
+              reason: "destructive release deferred to the existing workspace retention policy",
+            },
+          }).catch(() => false);
+        return;
+      }
+      if (publicationSettlement) {
+        const recorded = await recordPublicationSettlement({
+          ...publicationSettlement,
+          release: { kind: "pending" },
+        }).catch(() => false);
+        if (!recorded && !mandatory && publicationSettlement.publication.kind !== "accepted") return;
+      }
+      const pushed = pushedBranchesOf(recordEvents());
+      const result = await round
+        .release({
+          hardStopped: run.control.requested === "hard",
+          commandInFlight,
+          gateBypassed,
+          ...(span ? { span } : {}),
+          ...(pushed.length > 0 ? { pushed } : {}),
+        })
+        .catch(() => undefined);
+      // Legacy false responses include transport failures, so they cannot
+      // prove the checkout was retained. Only our skipped detach is kept.
+      if (publicationSettlement)
+        await recordPublicationSettlement({
+          ...publicationSettlement,
+          release:
+            result === undefined
+              ? { kind: "unknown", reason: "workspace release returned no receipt" }
+              : result.released
+                ? { kind: "released", ...(result.leftBehind ? { leftBehind: result.leftBehind } : {}) }
+                : { kind: "unknown", reason: result.reason ?? "the workspace owner did not confirm release" },
+        }).catch(() => false);
+    })());
   // One tool context for the whole run: the first turn and any re-review
   // turn (settleReviewedHead) share it, so submit_pr_description and the
   // progress checklist keep flowing to the same hooks.
@@ -1661,6 +1755,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     });
   }
   try {
+    if (resumedUnsettledCheckpoint)
+      throw new Error(
+        `The original coding checkpoint needs reconciliation before another writer can run: ${publicationSettlementSummary(publicationSettlement ?? null)}`,
+      );
     const prBase = repoCtx.baseRef ?? (await coordinatorBase);
     if (coordinator?.publication !== undefined) {
       const original = coordinator.publication;
@@ -2651,7 +2749,13 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       if (!isCodingPrRun || tailSkipped()) return { workspace: { kind: "unread" } };
       const branch = observedBranch ?? observedCheckedOut;
       let workspace: WorkspaceAtEnd;
-      if (salvagedTo !== undefined) workspace = { kind: "salvaged", ...salvagedTo };
+      if (
+        publicationSettlement &&
+        publicationSettlement.checkpoint.kind !== "clean" &&
+        publicationSettlement.publication.kind !== "accepted"
+      )
+        workspace = { kind: "checkpoint", settlement: publicationSettlement };
+      else if (salvagedTo !== undefined) workspace = { kind: "salvaged", ...salvagedTo };
       else if (observedUncommitted === undefined || observedUnpushed === undefined) workspace = { kind: "unmeasured" };
       else if (observedUncommitted === 0 && observedUnpushed === 0)
         workspace = {
@@ -3005,6 +3109,18 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       await events.drain();
       retainPublicationReceipts();
       retainBranchReceipts();
+      // The release acknowledgment belongs to the same sealed record. Ordinary
+      // outputs still deliver before release; checkpoint endings settle here.
+      if (publicationSettlement) {
+        await root.span("post.workspace_release", (span) => releaseWorkspace(span));
+        events.publish({
+          type: "run_note",
+          kind: "work_salvage",
+          summary: publicationSettlementSummary(publicationSettlement),
+          at: clock(),
+        });
+      }
+      await events.drain();
       const status = statusNow();
       // The two final boundaries land before the registry closes. A tracked run
       // commits each boundary durably before fan-out; an untracked run keeps the
@@ -3101,6 +3217,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         root,
         ledgerRun,
         ...(observedHead !== undefined ? { headSha: observedHead } : {}),
+        ...(publicationSettlement !== undefined
+          ? { publicationSettlement }
+          : resumedUnsettledCheckpoint
+            ? { publicationSettlement: null }
+            : {}),
         ...((activeDoorPublication ?? resumedDoorPublication) !== undefined &&
         (coordinator?.publication?.repo ?? repoCtx.repo ?? deps.githubBindings?.get(run.id)?.repo) !== undefined
           ? {

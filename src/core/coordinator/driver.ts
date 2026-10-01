@@ -1,3 +1,4 @@
+import { isPublicationSettlement } from "../publicationSettlement.js";
 // The plan runner's driver (docs/reference/specs/http-ingress.md item 9;
 // docs/decisions/0031-the-coordinator-runs-a-plan-not-a-pull-request.md): the
 // `ShipCoordinator` Workflow's `run()` body, written over a structural step
@@ -358,7 +359,7 @@ function spawnReturn(step: string, a: BotAnswer): StepReturn {
   throw new UnreadableAnswer("spawn", a, "outcome");
 }
 
-function readRecordReturn(step: string, a: BotAnswer): StepReturn {
+function readRecordReturn(step: string, a: BotAnswer, owner: { runId: string; instanceId: string }): StepReturn {
   const run = a.body.run;
   if (a.body.ok !== true || !isRecord(run) || typeof run.finished !== "boolean")
     throw new UnreadableAnswer("read-record", a, "run");
@@ -387,6 +388,14 @@ function readRecordReturn(step: string, a: BotAnswer): StepReturn {
   if (typeof run.status !== "string") throw new UnreadableAnswer("read-record", a, "status");
   // The typed artifacts as the bot's record carries them — shape-checked where
   // they were written (the run record's validator), read here as they are.
+  if (
+    run.publicationSettlement !== undefined &&
+    run.publicationSettlement !== null &&
+    (!isPublicationSettlement(run.publicationSettlement) ||
+      run.publicationSettlement.binding.runId !== owner.runId ||
+      run.publicationSettlement.binding.instanceId !== owner.instanceId)
+  )
+    throw new UnreadableAnswer("read-record", a, "checkpoint ownership");
   const facts = run as unknown as Omit<Extract<ChildFacts, { finished: true }>, "finished" | "status">;
   const {
     finishedAt,
@@ -402,6 +411,7 @@ function readRecordReturn(step: string, a: BotAnswer): StepReturn {
     dispositions,
     handoff,
     pushed,
+    publicationSettlement,
     leaseStartedAt,
     costUsd,
     handoffLists,
@@ -415,6 +425,9 @@ function readRecordReturn(step: string, a: BotAnswer): StepReturn {
     ...(pullRequest !== undefined ? { pullRequest } : {}),
     run: {
       finished: true,
+      ...(publicationSettlement === null || isPublicationSettlement(publicationSettlement)
+        ? { publicationSettlement }
+        : {}),
       status: run.status as Extract<ChildFacts, { finished: true }>["status"],
       ...(typeof finishedAt === "number" ? { finishedAt } : {}),
       ...(typeof reviewAskedAt === "number" ? { reviewAskedAt } : {}),
@@ -823,6 +836,7 @@ async function perform(
       return readRecordReturn(
         action.step,
         answerOf("read-record", await readRecordStep(step, bot, action, { ...tag, runId: action.runId })),
+        { runId: action.runId, instanceId },
       );
     case "steer":
       return steerReturn(

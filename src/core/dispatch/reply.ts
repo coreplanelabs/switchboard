@@ -308,6 +308,8 @@ export function activityLine(e: RunEvent): string {
       return `📚 skill ${e.skill} loaded`;
     case "artifact":
       return e.direction === "out" ? `📎 ${e.name} sent` : `📎 ${e.name} received`;
+    case "publication_settlement":
+      return "checkpoint preservation recorded";
     case "unfinished_patch":
       return "unfinished patch saved privately";
     case "review_artifact": // published straight to the registry — never arrives here

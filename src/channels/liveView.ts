@@ -1,3 +1,4 @@
+import { publicationSettlementForRun, publicationSettlementOf } from "../core/publicationSettlement.js";
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { runDurationMs } from "../core/runDuration.js";
 import { normalizeSpans, SPAN_SCHEMA } from "../core/normalizeSpans.js";
@@ -429,8 +430,32 @@ export function createLiveViewHandler(
    *  syntax does not admit streams the whole object. The caller looks the key
    *  up (`artifactNamed`) so it can audit a read of a named key — served or
    *  expired — before serving, and audit nothing for a key the run never named. */
-  const artifactNamed = (events: readonly RunEvent[], key: string): ArtifactEvent | undefined =>
-    events.find((e): e is ArtifactEvent => e.type === "artifact" && e.key === key);
+  const artifactNamed = (
+    events: readonly RunEvent[],
+    key: string,
+    owner: unknown,
+    durableSettlement?: unknown,
+  ): ArtifactEvent | undefined => {
+    const attached = events.find((e): e is ArtifactEvent => e.type === "artifact" && e.key === key);
+    if (attached) return attached;
+    // Reclaim can preserve the flushed receipt without the later best-effort
+    // event. A present canonical receipt wins even when invalid or conflicting.
+    const checkpoint = publicationSettlementForRun(
+      durableSettlement === undefined ? publicationSettlementOf(events) : durableSettlement,
+      owner,
+    );
+    if (checkpoint?.preservation.kind !== "saved" || checkpoint.preservation.key !== key) return;
+    const saved = checkpoint.preservation;
+    return {
+      type: "artifact",
+      direction: "out",
+      key: saved.key,
+      size: saved.size,
+      name: "checkpoint.bundle",
+      contentType: "application/octet-stream",
+      callId: "runner-checkpoint",
+    };
+  };
   const serveArtifact = async (
     res: ServerResponse,
     named: ArtifactEvent | undefined,
@@ -753,14 +778,24 @@ export function createLiveViewHandler(
         return true;
       }
       // One of the run's files (item 26): the token that opens the page opens
-      // its files; the key must be one the run's own events name.
+      // its files; the key must be named by that run's attachment or checkpoint receipt.
       if (route.kind === "artifact") {
         const snap = access.snapshot();
         if (!snap) {
           text(res, 404, NOT_FOUND);
           return true;
         }
-        run(res, () => serveArtifact(res, artifactNamed(snap.events, route.key), rangeOf(req)));
+        run(res, () =>
+          serveArtifact(
+            res,
+            artifactNamed(
+              snap.events,
+              route.key,
+              index.listActive().find((row) => row.id === route.id),
+            ),
+            rangeOf(req),
+          ),
+        );
         return true;
       }
       // Read-only friction diagnosis of the run's retained backlog: works
@@ -911,7 +946,7 @@ export function createLiveViewHandler(
       if (route.kind === "artifact") {
         // Audited once the KEY is decided too: a 404 for a key the run never
         // named is not a read of anything, and must not log as one.
-        const named = artifactNamed(view.events ?? [], route.key);
+        const named = artifactNamed(view.events ?? [], route.key, view, view.publicationSettlement);
         if (named) audit({ route: "artifact", runId: route.id, identity: actor.id });
         await serveArtifact(res, named, rangeOf(req));
         return;

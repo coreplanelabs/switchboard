@@ -1,3 +1,4 @@
+import { publicationSettlementSummary, type PublicationSettlement } from "../publicationSettlement.js";
 // The wind-down wording (docs/reference/specs/harness-pi.md items 6 and 15):
 // what the harness tells the model and the thread when a run is warned, cut
 // off or stopped. Named once, so the steer pi is sent, the `run_note` the card
@@ -219,6 +220,7 @@ const noWriteUp = (failed: string | undefined, onTool?: true): string =>
 /** What the run's tail established about its workspace, in the words the
  *  answer may use — never a guess where a measure was taken. */
 export type WorkspaceAtEnd =
+  | { kind: "checkpoint"; settlement: PublicationSettlement }
   /** The run had no workspace (machine class `none`). */
   | { kind: "none" }
   /** The tree was not read: the run observes no tree, or its tail was skipped. */
@@ -320,6 +322,7 @@ function established(facts: EndingFacts | undefined): string {
   if (w?.kind === "unmeasured") tree = "The workspace could not be measured, so work may sit unpushed there.";
   else if (w?.kind === "clean")
     tree = `The tree was clean${w.branch ? ` and \`${w.branch}\` held no unpushed commits` : " with no unpushed commits"}${w.head ? ` — its head \`${shortSha(w.head)}\` is on the remote` : ""}.`;
+  else if (w?.kind === "checkpoint") tree = publicationSettlementSummary(w.settlement);
   else if (w?.kind === "salvaged")
     tree = `What the tree held was pushed to \`${w.branch}\`${w.head ? ` at \`${shortSha(w.head)}\`` : ""} by the budget salvage, unreviewed — a follow-up starts from it.`;
   else if (w?.kind === "left")

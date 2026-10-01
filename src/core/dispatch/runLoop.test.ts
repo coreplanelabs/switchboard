@@ -27,6 +27,7 @@ import { RunRegistry } from "../runRegistry.js";
 import type { RunEvent } from "../runEvents.js";
 import { createRunsService } from "../runsService.js";
 import { createLedgerWriteThrough, NullLedgerRun, NullLedgerWriteThrough } from "../runLedger/writeThrough.js";
+import type { PublicationSettlement } from "../publicationSettlement.js";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { planResume, transcriptSource } from "../runLedger/resume.js";
 import { localWorkspaceDir, type ExecutorSelection } from "../../execution/factory.js";
@@ -2430,6 +2431,106 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     end,
   });
 
+  it.each(["saved", "unavailable", "hard", "release-lost", "store-secret", "release-secret"] as const)(
+    "settles an unconfirmed first publication before sealing: %s",
+    async (mode) => {
+      const base = "a".repeat(40),
+        source = "b".repeat(40),
+        digest = "c".repeat(64),
+        branch = "unit-work";
+      const token = `ghp_${"z".repeat(24)}`;
+      const signature = "signed-url-secret";
+      const sensitiveReason = `${token} https://store.example/object?X-Amz-Signature=${signature}`;
+      const receipts: PublicationSettlement[] = [];
+      let committed = false;
+      let released = false;
+      const store = Object.assign(new InMemoryArtifactStore(), {
+        head: async () => ({ size: 7, contentType: "application/octet-stream" }),
+      });
+      if (mode === "store-secret")
+        store.presignPut = async () => {
+          throw new Error(sensitiveReason);
+        };
+      const s = endingIn(
+        async (_deps, run) => {
+          if (mode === "hard") run.control?.requestStop("hard");
+          throw new Error("unclassified model ending");
+        },
+        {
+          coding: true,
+          coordinator: WIP_COORDINATOR,
+          repoCtx: { repo: "o/r", ref: branch, baseRef: "main" } as RepoContext,
+          binding: { ref: branch, sha: base, workspace: "/srv/wt/u1" },
+          ...(mode !== "unavailable" && mode !== "hard" ? { artifacts: store } : {}),
+          executor: {
+            exec: async (cmd: string) => {
+              if (cmd.includes("symbolic-ref") || cmd.includes("rev-parse --abbrev-ref")) return branch;
+              if (cmd.includes("rev-parse HEAD") || cmd.includes("rev-parse 'refs/heads/"))
+                return committed ? source : base;
+              if (cmd.includes("status --porcelain")) return committed ? "" : " M tracked.ts\n?? new.test.ts";
+              if (cmd.includes("rev-list")) return committed ? "1" : "0";
+              if (cmd.includes("ls-remote")) return `${base}\trefs/heads/${branch}`;
+              if (cmd.includes(" commit ")) {
+                committed = true;
+                return "";
+              }
+              if (cmd.includes(" bundle list-heads ")) return `${source} refs/heads/${branch}`;
+              if (cmd.startsWith("sed -n")) return `# v2 git bundle\n-${base} base\n${source} refs/heads/${branch}\n\n`;
+              if (cmd.startsWith("wc -c")) return "7";
+              if (cmd.startsWith("sha256sum")) return `${digest}  checkpoint.bundle`;
+              if (cmd.includes(" push ")) {
+                expect(receipts.at(-1)).toMatchObject({
+                  checkpoint: { kind: "created", head: source },
+                  publication: { kind: "pending" },
+                });
+                return "exit 128: remote: not found";
+              }
+              return "";
+            },
+          },
+        },
+      );
+      const ledgerRun = new NullLedgerRun("run-l", { put: (value) => s.store.put(value), abandoned: () => {} });
+      ledgerRun.tracked = () => true;
+      ledgerRun.setStateAndFlush = async (state) => {
+        if (state.publicationSettlement)
+          receipts.push(structuredClone(state.publicationSettlement) as PublicationSettlement);
+        return true;
+      };
+      const round = {
+        ...s.ctx.round,
+        release: async () => {
+          expect(receipts.at(-1)?.release.kind).toBe("pending");
+          released = true;
+          if (mode === "release-lost") throw new Error("release response lost");
+          if (mode === "release-secret") return { released: false, reason: sensitiveReason };
+          return { released: true, leftBehind: { uncommittedChanges: 0, unpushedCommits: 1 } };
+        },
+      };
+      await expect(runLoop(s.deps, { ...s.ctx, ledgerRun, round })).rejects.toThrow("unclassified model ending");
+      s.ending.drain(undefined);
+      await s.writer.settled();
+      const record = (await s.store.get("run-l"))!;
+      expect(record.publicationSettlement).toMatchObject({
+        checkpoint: { kind: "created", head: source },
+        publication: { kind: "unknown" },
+      });
+      expect(record.publicationSettlement?.release.kind).toBe(
+        ["unavailable", "store-secret"].includes(mode)
+          ? "kept"
+          : ["release-lost", "release-secret"].includes(mode)
+            ? "unknown"
+            : "released",
+      );
+      expect(released).toBe(!["unavailable", "store-secret"].includes(mode));
+      const serialized = JSON.stringify({ receipts, record });
+      expect(serialized).not.toContain(token);
+      expect(serialized).not.toContain(signature);
+      expect(record.pushed).toBeUndefined();
+      expect(record.headSha).toBe(source);
+    },
+  );
+
   it("serializes every streamed event behind durable tool projection and still publishes a tool event when projection fails", async () => {
     const s = endingIn(async (_deps, run) => {
       run.onEvent?.({ type: "tool_call", tool: "bash", summary: "$ true", callId: "ordered" });
@@ -2872,7 +2973,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     });
     await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("retry budget ended");
     expect(commands).toContain("git -C '/srv/wt/u1' add -A");
-    expect(commands).toContain(`git -C '/srv/wt/u1' push origin 'HEAD:refs/heads/${BRANCH}'`);
+    expect(commands).toContain(`git -C '/srv/wt/u1' push origin '${HEAD}:refs/heads/${BRANCH}'`);
     expect(s.releases).toEqual(["paired"]);
     s.ending.drain(undefined);
     await s.writer.settled();
@@ -2954,7 +3055,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     const out = answered(await runLoop(s.deps, s.ctx));
     expect(out.answer).toBe("the contract handoff is complete");
     expect(commands).toContain("git -C '/srv/wt/u1' add -A");
-    expect(commands).toContain(`git -C '/srv/wt/u1' push origin 'HEAD:refs/heads/${BRANCH}'`);
+    expect(commands).toContain(`git -C '/srv/wt/u1' push origin '${HEAD}:refs/heads/${BRANCH}'`);
     expect(out.prNote).toBeUndefined();
     expect(JSON.stringify(s.closes)).not.toContain("discarded at the run's end");
     await out.releaseWorkspace();
@@ -2990,7 +3091,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
 
     const out = answered(await runLoop(s.deps, s.ctx));
     expect(out.answer).toBe("the contract handoff is complete");
-    expect(commands).toContain(`git -C '/srv/wt/u1' push origin 'HEAD:refs/heads/${BRANCH}'`);
+    expect(commands).toContain(`git -C '/srv/wt/u1' push origin '${HEAD}:refs/heads/${BRANCH}'`);
     expect(commands.some((cmd) => /^git(?: -C '[^']+')? commit --allow-empty/.test(cmd))).toBe(false);
     expect(JSON.stringify(s.closes)).not.toContain("discarded at the run's end");
     await out.releaseWorkspace();
@@ -3938,7 +4039,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
 
     const out = answered(await runLoop(s.deps, s.ctx));
     expect(commands).toContain(
-      `git -C '/srv/wt/existing' push --force-with-lease='refs/heads/${BRANCH}:${EXPECTED}' origin 'HEAD:refs/heads/${BRANCH}'`,
+      `git -C '/srv/wt/existing' push --force-with-lease='refs/heads/${BRANCH}:${EXPECTED}' origin '${LOCAL}:refs/heads/${BRANCH}'`,
     );
     expect(out.answer).toBe("the local fix is complete");
     await out.releaseWorkspace();
@@ -3950,7 +4051,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       expect.objectContaining({
         type: "run_note",
         kind: "publication_blocked",
-        summary: expect.stringContaining("atomic leased push was rejected"),
+        summary: expect.stringContaining("atomic leased push did not return a confirmed result"),
       }),
     );
     expect(record.pushed ?? []).toEqual([]);
@@ -4067,7 +4168,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     });
     const out = answered(await runLoop(s.deps, s.ctx));
     expect(out.answer).toContain("aborted by an operator");
-    expect(commands).toContain(`git -C '/srv/wt/u1' push origin 'HEAD:refs/heads/${BRANCH}'`);
+    expect(commands).toContain(`git -C '/srv/wt/u1' push origin '${HEAD}:refs/heads/${BRANCH}'`);
     await out.releaseWorkspace();
     expect(s.releases).toEqual(["hard"]);
     s.ending.drain(undefined);
@@ -4116,7 +4217,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     });
     const out = await runLoop(s.deps, s.ctx);
     expect(out).toMatchObject({ kind: "interrupted", refusal: "bot_restart" });
-    expect(commands).toContain(`git -C '/srv/wt/u1' push origin 'HEAD:refs/heads/${BRANCH}'`);
+    expect(commands).toContain(`git -C '/srv/wt/u1' push origin '${HEAD}:refs/heads/${BRANCH}'`);
     expect(JSON.stringify(s.closes)).not.toContain("left behind — discarded");
     s.ending.drain(undefined);
     await s.writer.settled();
@@ -4338,7 +4439,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       `⚠️ _Hit the ${ASKS.coding}-minute budget before finishing. What the tree held was pushed to \`${BRANCH}\` at \`${HEAD.slice(0, 7)}\` by the budget salvage, unreviewed — a follow-up starts from it. No PR description was submitted. Findings so far:_\n\nhalf done`,
     );
     expect(pushed.commands).toContain("git -C '/srv/wt/u1' add -A");
-    expect(pushed.commands).toContain(`git -C '/srv/wt/u1' push origin 'HEAD:refs/heads/${BRANCH}'`);
+    expect(pushed.commands).toContain(`git -C '/srv/wt/u1' push origin '${HEAD}:refs/heads/${BRANCH}'`);
     expect(pushed.salvage).toEqual([
       expect.objectContaining({
         summary: `the budget ended with work in the tree — committed the uncommitted work and pushed to \`${BRANCH}\` (${HEAD.slice(0, 7)})`,
@@ -4601,7 +4702,9 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     expect(answered(await runLoop(s.deps, s.ctx)).answer).toBe("done");
     expect(laterPush).toEqual({
       allow: false,
-      reason: expect.stringContaining("existing-PR publication blocked: the atomic leased push was rejected"),
+      reason: expect.stringContaining(
+        "existing-PR publication blocked: the atomic leased push did not return a confirmed result",
+      ),
     });
     expect(
       commands.filter((command) => command.startsWith("git -C '/srv/wt/existing' push --force-with-lease=")),
@@ -4699,7 +4802,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     ]);
     expect(notes.some((n) => n.kind === "description_turn")).toBe(true);
     expect(commands.some((c) => c.startsWith("git -C '/srv/wt/u1' commit --allow-empty -m"))).toBe(true);
-    expect(commands).toContain(`git -C '/srv/wt/u1' push origin 'HEAD:refs/heads/${BRANCH}'`);
+    expect(commands).toContain(`git -C '/srv/wt/u1' push origin '${HEAD}:refs/heads/${BRANCH}'`);
     // The quiet default (routing-and-config item 28): the link, not the head it was rendered at.
     expect(out.prNote).toContain("PR updated: https://github.com/o/r/pull/700");
     expect(out.prNote).not.toContain("re-rendered");
@@ -6754,6 +6857,57 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
 // model loop and runs the post-steps with that answer, the ending read back
 // from its notes, a verdict already posted never posted twice.
 describe("a resume with the answer in hand (the `finish` plan)", () => {
+  const checkpointCoordinator = { parentInstanceId: "coord-p", idempotencyKey: "coord-p:U12/0/coding", base: "main" };
+  it.each(["pending", "created", "unknown", "invalid"] as const)(
+    "does not replay an unsettled checkpoint after restart: %s",
+    async (stage) => {
+      const s = setup("", {
+        agent: "coding",
+        coding: true,
+        provider: neverCalled(),
+        coordinator: checkpointCoordinator,
+        repoCtx: { repo: "o/r", ref: "unit-work", baseRef: "main" } as RepoContext,
+        binding: { ref: "unit-work", sha: "a".repeat(40), workspace: "/srv/wt/u1" },
+        executor: {
+          exec: async () => {
+            throw new Error("checkpoint must not replay");
+          },
+        },
+      });
+      const receipt: PublicationSettlement = {
+        version: 1,
+        binding: {
+          runId: "run-l",
+          instanceId: checkpointCoordinator.parentInstanceId,
+          step: checkpointCoordinator.idempotencyKey,
+          repo: "o/r",
+          branch: "unit-work",
+          requester: s.ctx.msg.userId,
+          threadKey: s.ctx.msg.threadKey,
+          generation: "old-gen",
+          baseHeadSha: "a".repeat(40),
+        },
+        checkpoint: stage === "pending" ? { kind: "pending" } : { kind: "created", head: "b".repeat(40) },
+        publication:
+          stage === "unknown" ? { kind: "unknown", reason: "acknowledgment lost" } : { kind: "not_attempted" },
+        preservation: { kind: "pending" },
+        release: { kind: "pending" },
+      };
+      const resume = finishing("unfinished", {
+        agent: "coding",
+        state: { publicationSettlement: stage === "invalid" ? {} : receipt },
+      });
+      await expect(runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages })).rejects.toThrow(
+        "needs reconciliation",
+      );
+      expect(s.releases).toEqual([]);
+      if (stage === "invalid") {
+        s.ending.drain(undefined);
+        await s.writer.settled();
+        expect((await s.store.get("run-l"))?.publicationSettlement).toBeNull();
+      }
+    },
+  );
   const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
   const VERDICT = {
     verdict: "approve",
@@ -7348,8 +7502,11 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
         risk: "none",
         validation: { criteria: [{ criterion: "tests", proof: "green" }] },
       };
+      let checkoutReleased = false;
       const executor = {
         exec: async (cmd: string) => {
+          expect(checkoutReleased, "final verification must precede destructive release").toBe(false);
+          if (/rev-list --count/.test(cmd)) return "0\n";
           if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${BRANCH}\n`;
           if (/rev-parse HEAD/.test(cmd)) return `${HEAD}\n`;
           if (/rev-parse 'refs\/heads\//.test(cmd)) return `${HEAD}\n`;
@@ -7401,6 +7558,9 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       ).toBe(true);
       expect(bindings.setBranchRecorder("run-l", { begin: async () => true, finish: async () => true })).toBe(true);
       s.deps.githubBindings = bindings;
+      s.ctx.round.release = async () => {
+        checkoutReleased = true;
+      };
       const opened: Array<Record<string, unknown>> = [];
       let lateAdmission = false;
       s.deps.openPullRequest = async (target) => {
@@ -7429,6 +7589,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
         await runLoop(s.deps, { ...s.ctx, privateAudienceLatch, resume, messages: resume.plan.messages }),
       );
       expect(opened).toHaveLength(1);
+      expect(checkoutReleased).toBe(true);
       expect(lateAdmission).toBe(false);
       expect(opened[0]).toMatchObject({ repo: "o/r", headBranch: BRANCH, base: "feat/trunk" });
       expect(out.prNote).toContain("PR opened");
@@ -7581,6 +7742,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     };
     const executor = {
       exec: async (cmd: string) => {
+        if (/rev-list --count/.test(cmd)) return "0\n";
         if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${BRANCH}\n`;
         if (/rev-parse HEAD/.test(cmd)) return `${HEAD}\n`;
         if (/rev-parse 'refs\/heads\//.test(cmd)) return `${HEAD}\n`;
