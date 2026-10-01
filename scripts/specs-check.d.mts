@@ -14,11 +14,14 @@ export interface TestNode {
   leaf: boolean;
   /** The modifier that takes the block out of the run; absent when it runs. */
   mode?: "skip" | "only" | "todo";
+  /** Runtime-dependent selection cannot prove an exact active boundary test. */
+  conditional?: boolean;
+  parameterized?: boolean;
   /** The arguments after the title as written, whitespace collapsed. */
   body?: string;
 }
 export interface Problem {
-  kind?: "proof" | "header" | "gap";
+  kind?: "proof" | "header" | "gap" | "boundary";
   key?: string;
   line: number;
   raw: string;
@@ -27,6 +30,7 @@ export interface Problem {
 
 export const SPECS_DIR: string;
 export const BASELINE_FILE: string;
+export function boundaryRequirements(markdown: string): { id: string | undefined; line: number; raw: string }[];
 export function parseProofRefs(markdown: string): ProofRef[];
 export function titleReadings(titles: string[]): string[][];
 export function explicitSegment(segment: string, parts: string[]): string;

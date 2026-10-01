@@ -156,8 +156,8 @@
       "when": "Part of `check:consistency`."
     },
     "specs:check": {
-      "does": "Every `file::describe::it` proof in `docs/reference/specs/*.md` names a real test; header paths exist.",
-      "when": "After renaming a test or editing a spec; `-- --fix` makes truncated titles explicit."
+      "does": "Validates spec proofs, headers and typed decision-boundary declarations.",
+      "when": "After test/spec edits; `-- --fix` repairs titles. Schema/census flags: [spec coverage](docs/reference/specs/specs-coverage.md)."
     },
     "specs:coverage": {
       "does": "Maps a change's paths to the specs whose headers cover them, then lists paths no spec covers.",

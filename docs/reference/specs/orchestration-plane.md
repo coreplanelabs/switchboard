@@ -66,7 +66,7 @@ Switchboard can say **what is happening**: every live and recently ended run, ev
 | The decider: a free thread is admitted with a reservation written in the same decision; a live or reserved thread queues with `thread_free` and a position ranked per shared condition; an open window queues on `window_open` and a pending deploy on `deploy_settled`, each admitted on its lift; the seal deletes the reservation and admits oldest first, re-evaluating after each admission; a no-transition event returns the state unchanged; a withdraw closes the row; effects carry stable ids | `[unit]` `src/core/plane/decide.test.ts::decide — the plane's pure decider (orchestration-plane, record 0064)::an ask on a free thread is admitted: no queue row, a reservation on the thread written in the same decision, no effects`, `::two asks a second apart on one thread: the first is admitted with a reservation, the second queues with position 1 behind it`, `::an ask that meets an open window queues on window_open and is admitted by the window's lift`, `::an ask that meets a pending deploy queues on deploy_settled and deploy.landed flips it`, `::a reserved thread queues a second ask until the seal deletes the reservation and admits it`, `::position counts waiting rows sharing the unmet condition, per condition`, `::an ask on a live thread queues with a thread_free condition and position 1`, `::a second ask on the same live thread queues behind the first, position 2`, `::a thread_free condition flips on a seal and the oldest waiting row is admitted, with an effect carrying its id`, `::a queue walk admits oldest first and re-evaluates after each admission: the admitted run's thread is live again, so its follower keeps waiting`, `::two waiting rows on different threads are both admitted on their seals, oldest first`, `::an event with no transition returns the state unchanged: a seal nothing waits on`, `::a withdraw marks the waiting row withdrawn and a withdraw of an unknown run changes nothing`, `::a withdrawn row is never admitted by a later seal`, `::effects carry stable ids derived from the run they admit` |
 | Inside workerd: the plane's tables exist, and `planeApply` commits the state flip and the offered effect in one `transactionSync` | `[unit]` `deploy/cloudflare-memory/runs.test.ts::orchestration plane — the tables, the decider, shadow and the effects::a fresh object holds the plane's seven tables`, `::planeApply commits the queue row, then the seal's admitted state and its effect, together in transactionSync`, `::two child_sealed findings on one subject merge into ONE plane_findings row, the first filed_at kept` |
 | Shadow on the object: the decider's word is logged beside the bot's outcome, nothing queues, and a disagreement bumps the per-condition count; a malformed post is 400 before any object call | `[unit]` `deploy/cloudflare-memory/runs.test.ts::orchestration plane — the tables, the decider, shadow and the effects::shadow logs refused:thread-live beside queued for a second ask on a live thread, and persists nothing`, `::an agreeing proceeded post counts nothing; a proceeded post on a live thread bumps the per-condition disagreement count`, `::a bad stage, outcome word or ack word is 400 before any object call` |
-| The effects field: present and empty on every heartbeat and reclaim answer, an offer rides until acked `done` or `skipped`, `deferred` leaves it, an unknown ack id is a no-op | `[unit]` `deploy/cloudflare-memory/runs.test.ts::orchestration plane — the tables, the decider, shadow and the effects::a heartbeat answer and a reclaim answer carry effects: [], present even with nothing offered`, `::an offered effect rides the heartbeat answer; deferred leaves it offered, done closes it, an unknown id is a no-op` |
+| <a id="plane-effect-ack"></a> <!-- decision-boundary: plane.ack --> The effects field: present and empty on every heartbeat and reclaim answer, an offer rides until acked `done` or `skipped`, `deferred` leaves it, an unknown ack id is a no-op | `[unit]` `deploy/cloudflare-memory/runs.test.ts::orchestration plane — the tables, the decider, shadow and the effects::a heartbeat answer and a reclaim answer carry effects: [], present even with nothing offered`, `deploy/cloudflare-memory/runs.test.ts::orchestration plane — the tables, the decider, shadow and the effects::an offered effect rides the heartbeat answer; deferred leaves it offered, done closes it, an unknown id is a no-op` |
 | The client half: the write-through acks received effects `deferred` when nothing is wired, runs an `admit` through the wired executor — a draining generation defers it — and the outcome post fires and forgets: a failure is one warning | `[unit]` `src/core/runLedger/writeThrough.test.ts::events, state, heartbeat::plane effects on a heartbeat answer are each acked deferred — this generation executes none yet (orchestration-plane item 7)`, `::an admit effect runs through the wired executor and its word is the ack; a draining generation defers it instead (record 0064)`, `::planeOutcome fires the post and swallows a failure with one warning — the dispatch never waits on the plane (orchestration-plane item 8)` |
 | The admission stage under `plane.admission: on`: two asks a second apart answer `admitted` then `queued` at position 1; the claim promotes the reservation; the seal admits the queued run with its admit effect and its attaching row under the plane's id; a withdrawn row is never admitted; `deploy.landed` flips `deploy_settled`; a sealed run's open effects are dropped | `[unit]` `deploy/cloudflare-memory/runLedger.test.ts::the plane's admission stage — /plane/admit, reservations, the seal's walk (orchestration-plane; record 0064)::two asks a second apart on one thread: the first is admitted with a reservation, the second queued at position 1; the first's claim promotes the reservation; the seal admits the queued run with its attaching row`, `::a duplicate admit decision after a roll keeps the effect's first offer and the attaching row (INSERT OR IGNORE)`, `::runs stop on a queued id withdraws it: the row goes withdrawn, a second withdraw answers false, and the seal admits nothing`, `::a pending deploy queues an ask on deploy_settled and deploy.landed flips it, admitting the queued run`, `::effects for a sealed run are dropped at the seal: an admitted-then-finished run's open admit goes with its finish`, `::validates: a missing threadKey, requester or request is 400; a malformed withdraw run id is 400` |
 | The bot's door under `plane.admission: on`: a queued ask holds nothing — the slot released, no row reserved or adopted, no heartbeat — and every verbosity preserves the actionable position and withdraw lever because no run card exists; an admitted ask proceeds; `off`, a resume and a restart never ask | `[unit]` `src/core/dispatch/admission.test.ts::admit — the plane's admission ask under plane.admission: on (record 0064, "The queue")::an ask the plane queues holds nothing and $level preserves its actionable position and withdrawal command`, `::an admitted ask proceeds — asked once, the reservation is the object's to promote`, `::off — the default — never asks; a resume and a restart re-enter decided work and never ask either` |
@@ -86,6 +86,55 @@ Switchboard can say **what is happening**: every live and recently ended run, ev
 | 13: the merge refuses an unapproved head, a standing changes-requested at it, a red check, one still running and a head with no check reported, each by reason with nothing merged; GitHub's own refusal is answered in GitHub's words; the release pull request is answered with the handoff card on both commands and no merge is called | `[unit]` `src/core/commands/merge.test.ts::the merge refuses unapproved heads and hands the release to a person::*` |
 | 13: the enqueue is atomically pinned to the reviewed head and recorded under the person's name — the answer carries their id and bound login — a still-running check passes it (the queue's job), and it keeps the approval and red-check fences | `[unit]` `src/core/commands/merge.test.ts::the enqueue recorded under the person's name::*`, `src/execution/githubPulls.test.ts::githubPulls::the merge queue — the rule, the enqueue and the queue's outcome (issue 2011)::enqueuePullRequest pins the mutation to the reviewed head; already-queued is success, any other GraphQL error is an answer in GitHub's words` |
 | 13: a grant-less person is refused `pulls merge` by the policy table — the `merge:write` row admits the grant alone, never a chat or browser baseline | `[unit]` `src/core/authz/policy.test.ts::merge:write command [has-grant(merge:write)]::*` |
+
+The criterion marker requires the declaration below, which binds the existing acknowledgement criterion to its source and exact proof. Removing or disguising its fence fails the gate. It validates references and the closed outcome set; it does not prove every effect adapter or retry path.
+
+```json decision-boundary
+{
+  "id": "plane.ack",
+  "criterion": "plane-effect-ack",
+  "kind": "effect-result",
+  "input": {
+    "file": "src/core/plane/decide.ts",
+    "symbol": "PlaneAckOutcome",
+    "kind": "trusted-adapter-result"
+  },
+  "validator": {
+    "file": "deploy/cloudflare-memory/worker.ts",
+    "symbol": "handlePlane"
+  },
+  "consumer": {
+    "file": "deploy/cloudflare-memory/worker.ts",
+    "symbol": "RunHistoryDO.planeAck"
+  },
+  "terminal": [
+    "done",
+    "skipped"
+  ],
+  "retry": {
+    "kind": "same-effect-until-ack",
+    "owner": {
+      "file": "src/core/runLedger/writeThrough.ts",
+      "symbol": "createLedgerWriteThrough"
+    },
+    "identity": "effect-id",
+    "pending": [
+      "deferred"
+    ],
+    "outstandingCap": {
+      "file": "src/core/plane/decide.ts",
+      "symbol": "PLANE_EFFECTS_TOTAL_CAP"
+    }
+  },
+  "failure": {
+    "invalid": "refuse",
+    "transport": "ack-unconfirmed"
+  },
+  "proofs": [
+    "deploy/cloudflare-memory/runs.test.ts::orchestration plane \u2014 the tables, the decider, shadow and the effects::an offered effect rides the heartbeat answer; deferred leaves it offered, done closes it, an unknown id is a no-op"
+  ]
+}
+```
 
 ## Roadmap
 
