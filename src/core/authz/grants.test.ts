@@ -23,7 +23,7 @@ import { NO_GRANTS, type Grants } from "./types.js";
 // native `grants` block (what an actor holds) and `restrict` (which agents and
 // repos are closed unless granted). Baselines are what a namespace holds
 // unlisted: a Slack user the open chat commands and every unrestricted agent, a
-// browser session every group's read plus the two personal chat writes; a credential holds exactly its entry.
+// browser session every group's read plus the personal chat writes; a credential holds exactly its entry.
 
 const set = (...names: string[]) => new Set(names);
 const grants = (g: Partial<Grants>): Grants => ({ actions: set(), channels: set(), repos: set(), ...g });
@@ -153,8 +153,10 @@ describe("the baselines — what an id holds by its namespace, listed or not", (
       expect(namespaceBaseline(id, table), id).toBe(NO_GRANTS);
   });
 
-  it("browserActions is every `<group>:read` plus the two personal chat writes (record 0043), never another write or an exec; no groups → nothing (fail-closed)", () => {
-    expect(browserActions(["runs", "repo"])).toEqual(set("runs:read", "repo:read", "memory:write", "mcp:write"));
+  it("browserActions is every `<group>:read` plus personal writes including steer (record 0043), never another write or an exec; no groups → nothing (fail-closed)", () => {
+    expect(browserActions(["runs", "repo"])).toEqual(
+      set("runs:read", "repo:read", "memory:write", "mcp:write", "steer:write"),
+    );
     expect(browserActions([])).toEqual(set());
   });
 
@@ -192,12 +194,12 @@ describe("grantsTable / grantsIn / grantsFor — the lookup", () => {
     );
     expect(grantsFor("access:bob", source)).toEqual(
       grants({
-        actions: set("runs:write", "runs:read", "repo:read", "memory:write", "mcp:write"),
+        actions: set("runs:write", "runs:read", "repo:read", "memory:write", "mcp:write", "steer:write"),
         channels: set("slack:G1"),
       }),
     );
     expect(grantsFor("access:stranger", source)).toEqual(
-      grants({ actions: set("runs:read", "repo:read", "memory:write", "mcp:write") }),
+      grants({ actions: set("runs:read", "repo:read", "memory:write", "mcp:write", "steer:write") }),
     );
     expect(grantsFor("access:svc:ops", source)).toEqual(grants({ actions: set("runs:read"), channels: "all" }));
     expect(grantsFor("http:ci", source)).toEqual(grants({ actions: set("dispatch") }));
@@ -255,7 +257,7 @@ describe("surface entries — what every actor authenticated on a surface holds"
       grants({ actions: set(...CHAT_OPEN_ACTIONS, "agent:run:general", "runs:read"), channels: set("slack:C1") }),
     );
     expect(grantsFor("access:anyone", source)).toEqual(
-      grants({ actions: set("runs:read", "memory:write", "mcp:write", "runs:write"), channels: "all" }),
+      grants({ actions: set("runs:read", "memory:write", "mcp:write", "steer:write", "runs:write"), channels: "all" }),
     );
     expect(grantsFor("http:anyone", source)).toEqual(grants({ actions: set("dispatch") }));
     // A service token is a named credential: `access:*` is browser sessions only.

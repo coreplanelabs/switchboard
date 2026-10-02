@@ -9,6 +9,7 @@ import type { ChannelIO, IncomingMessage } from "../core/types.js";
 import { CommandRegistry, bindCommands } from "../core/commandRegistry.js";
 import { registerCoreCommands, type CoreCommandDeps } from "../core/commands/all.js";
 import { registerRunsCommands, type RunsCommandDeps } from "../core/commands/runs.js";
+import { registerSteerCommands, type SteerCommandDeps } from "../core/commands/steer.js";
 import type { RunEvent } from "../core/runEvents.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { RunRecord } from "../core/runRecord.js";
@@ -649,9 +650,57 @@ describe("toCaller — the Caller a tool call runs as carries the mcp: Actor", (
     });
     expect(toCaller(auth.tokens.tok, () => ALL_GRANTS).actor?.grants).toBe(ALL_GRANTS);
   });
+
+  it("a bound person is linked for the steer owner rule without lending the credential their grants", () => {
+    const auth = scoped(["steer:write"]);
+    const caller = toCaller(auth.tokens.tok, (id) => GRANTS.get(id) ?? NO_GRANTS, {
+      userId: "slack:UREQ",
+      authenticatedAs: "mcp:alice",
+    });
+    expect(caller.id).toBe("mcp:alice");
+    expect(caller.actor).toMatchObject({
+      id: "mcp:alice",
+      grants: GRANTS.get("mcp:alice"),
+      self: ["mcp:alice", "slack:UREQ"],
+      asUser: { id: "slack:UREQ" },
+    });
+  });
 });
 
 describe("handleMcpRequest — registry commands as tools", () => {
+  it("steer_run is exposed and passes the bound person's credential to the shared sender", async () => {
+    const sent: unknown[] = [];
+    const registry = new CommandRegistry<SteerCommandDeps>({ audit: () => {} });
+    registerSteerCommands(registry);
+    const commands = bindCommands(registry, {
+      steer: { send: async (...args) => (sent.push(args), "folded") },
+    });
+    const auth = scoped(["steer:write"]);
+    auth.tokens.tok.email = "alice@example.com";
+    const options = {
+      auth,
+      commands,
+      personByEmail: async () => ({ id: "slack:UREQ" }),
+    };
+    const listed = await handleMcpRequest(rpc("tools/list", {}), deps, options);
+    expect(((listed.body as RpcResult).result.tools as { name: string }[]).map((tool) => tool.name)).toContain(
+      "steer_run",
+    );
+    const result = await handleMcpRequest(
+      rpc("tools/call", { name: "steer_run", arguments: { id: "run-1", words: "also cover the docs" } }),
+      deps,
+      options,
+    );
+    expect(result.body).toMatchObject({ result: { content: [{ text: expect.stringContaining("steer.run: ok") }] } });
+    expect(sent).toMatchObject([["run-1", "also cover the docs", { actor: { self: ["mcp:alice", "slack:UREQ"] } }]]);
+    const denied = await handleMcpRequest(
+      rpc("tools/call", { name: "steer_run", arguments: { id: "run-1", words: "also cover the docs" } }),
+      deps,
+      { ...options, auth: scoped(["dispatch"]) },
+    );
+    expect(denied.body).toMatchObject({ error: { data: { code: "unauthorized" } } });
+    expect(sent).toHaveLength(1);
+  });
   it("tools/list = dispatch + every registered command with a derived inputSchema (runs_list has the status enum)", async () => {
     const { commands } = await commandFixture();
     const res = await handleMcpRequest(rpc("tools/list", {}), deps, { auth: good, commands });

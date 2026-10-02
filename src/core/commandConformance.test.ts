@@ -181,6 +181,15 @@ function foldCallers<T>(cmd: { id: string }, value: T, callerId: string): T {
 }
 
 describe("command conformance — catalogue fences", () => {
+  it("every chat-exposed command is exposed to CLI, HTTP and MCP", () => {
+    const gaps = CATALOGUE.filter((cmd) => CommandRegistry.exposedTo(cmd, "chat")).flatMap((cmd) =>
+      (["cli", "access", "mcp"] as const)
+        .filter((surface) => !CommandRegistry.exposedTo(cmd, surface))
+        .map((surface) => `${cmd.id}: hidden from ${surface === "access" ? "http" : surface}`),
+    );
+    expect(gaps).toEqual([]);
+  });
+
   it("the suite tests the catalogue the bot and the CLI bind (buildCoreCommands ≡ registerCoreCommands)", async () => {
     const f = await fixture();
     const real = buildCoreCommands(freshConfig().store, new InMemoryRunStore(), {
@@ -652,8 +661,6 @@ async function conformanceFailures(build: () => Promise<Fixture>): Promise<strin
       continue;
     }
     const happy = variants.find((v) => v.name === "required-only")!;
-    // A command chat alone exposes (`steer.run`) does not exist for the CLI
-    // reference caller: its happy path runs as the chat one.
     const caller = CommandRegistry.exposedTo(cmd, powerCaller.kind) ? powerCaller : chatPowerCaller;
     const res = await reference(f, cmd, happy.named, caller);
     if (!res.ok)
@@ -905,8 +912,7 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
         expect(f.executed).toEqual([]);
       }
     }
-    // A credential holding no grant at all is refused whatever the surface (fail-closed) — driven as a CLI
-    // caller where the command is exposed there, else as the chat kind (`steer.run` is chat-only).
+    // A credential holding no grant at all is refused whatever the surface (fail-closed).
     const bareKind = CommandRegistry.exposedTo(cmd, "cli") ? ("cli" as const) : ("chat" as const);
     const bare = await reference(await fixture(), cmd, happy.named, {
       kind: bareKind,
@@ -977,7 +983,6 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
         );
       f.recorded.length = 0;
       f.executed.length = 0;
-      // A chat-only command (`steer.run`) is driven as the chat reference caller.
       const capsCaller = CommandRegistry.exposedTo(cmd, powerCaller.kind) ? powerCaller : chatPowerCaller;
       const res = await reference(f, cmd, happy.named, capsCaller);
       if (enabled) expect(res.ok, `${where}: ${JSON.stringify(res)}`).toBe(true);

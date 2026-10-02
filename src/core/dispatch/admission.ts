@@ -824,7 +824,7 @@ export interface SteerSendCaller {
 function steerCredentialOf(caller: SteerSendCaller): { authenticatedAs?: string; postedBy?: string } {
   const actor = caller.actor;
   if (actor.onBehalfOf) return { postedBy: actor.id };
-  if (actor.asUser && actor.id !== caller.id) return { authenticatedAs: actor.id };
+  if (actor.asUser && actor.asUser.id !== actor.id) return { authenticatedAs: actor.id };
   return {};
 }
 
@@ -848,12 +848,12 @@ export function createSteerSender(deps: {
   config: Pick<ConfigStore, "canRunAgent" | "grantsFor">;
   runLedger: Pick<LedgerWriteThrough, "pushInbox">;
   /** The run the id names, as the process knows it (the registry's live row). */
-  runs: { getById(id: string): SteerableRun | null };
+  runs: { getById(id: string): SteerableRun | null | Promise<SteerableRun | null> };
   admission: Pick<ThreadAdmission<DispatchFollowUp>, "get">;
 }): { send(runId: string, words: string, caller: SteerSendCaller): Promise<string> } {
   return {
     async send(runId, words, caller) {
-      const run = deps.runs.getById(runId);
+      const run = await deps.runs.getById(runId);
       if (!run) throw new CommandError("not_found", `the run ${runId} is not known here.`);
       const owner = authorizeSteerOwner({
         caller: { ids: caller.actor.self ?? [caller.actor.id], grants: effectiveGrants(caller.actor) },
@@ -875,7 +875,7 @@ export function createSteerSender(deps: {
       const out = await steerRun(
         deps,
         {
-          userId: caller.id,
+          userId: caller.actor.asUser?.id ?? caller.id,
           ...(caller.name !== undefined ? { userName: caller.name } : {}),
           ...credential,
           channelId: caller.origin?.channelId ?? run.channelId ?? "",

@@ -7,9 +7,7 @@ import { CommandError, commandDefiner, type CommandRegistry } from "../commandRe
 // of the thread-reply steer admission does, and the line the operator binds
 // when a reply names a run in another thread (the plan's steer rule: a bind of `steer` names a
 // run and folds into it at its next boundary, whichever thread holds it).
-// Chat-only by design (`surfaces: { mcp: false, http: false, cli: false }`):
-// a steer is a person's words into a live conversation, and the machine
-// surfaces have `send_to_run` and the ingress for that. Write class: it
+// Every command surface carries the same typed steer. Write class: it
 // changes a live run's course. The sender seam is the dispatcher's — the
 // admission inbox lives there — and a process that has not wired one answers
 // `unavailable` by name; `createSteerSender` (src/core/dispatch/admission.ts)
@@ -56,7 +54,6 @@ export const steerRun = defineCommand({
   effect: "write",
   // Changes a live run's course; the words fold in and cannot be unsaid.
   annotations: { destructive: false, risk: () => "folds words into someone's live run at its next boundary" },
-  surfaces: { mcp: false, http: false, cli: false },
   describe: "Fold words into a live run at its next step boundary, by run id.",
   render: (o) => String((o as { text?: unknown }).text ?? ""),
   handler: async ({ args, caller, deps }) => {

@@ -12,6 +12,10 @@ import { samePrivateRequesterFollowUp } from "./privateAudience.js";
 import { ThreadAdmission, type LiveThread } from "../threadAdmission.js";
 import { ThreadsElsewhere } from "../runLedger/threadsElsewhere.js";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
+import { CLI_ACTOR } from "../authz/actor.js";
+import { RunRegistry } from "../runRegistry.js";
+import { InMemoryRunStore } from "../runStore.js";
+import { createRunsService } from "../runsService.js";
 import {
   NullLedgerRun,
   NullLedgerWriteThrough,
@@ -1374,6 +1378,68 @@ describe("createSteerSender — the wired sender behind `steer.run` (the one-doo
     expect(ledger.pushes[0].message).toMatchObject({ userId: "slack:UREQ", authenticatedAs: "http:t1" });
     const [item] = u2.live.inbox.drain();
     expect(item).toMatchObject({ userId: "slack:UREQ", authenticatedAs: "http:t1" });
+  });
+
+  it("an asynchronously resolved live run accepts its bound MCP requester and preserves the credential", async () => {
+    const { admission, ledger } = senderDeps();
+    const u2 = admission.claim(U2_THREAD, { agent: "general" });
+    u2.live.runId = "run-u2";
+    const sender = createSteerSender({
+      config: configStore(),
+      runLedger: ledger,
+      runs: { getById: async (id) => rows[id] ?? null },
+      admission,
+    });
+    const receipt = await sender.send("run-u2", "also cover the docs", {
+      kind: "mcp",
+      id: "mcp:alice",
+      actor: {
+        kind: "service",
+        id: "mcp:alice",
+        grants: { actions: new Set(["steer:write"]), channels: new Set<string>(), repos: new Set<string>() },
+        self: ["mcp:alice", "slack:UREQ"],
+        asUser: { id: "slack:UREQ" },
+      },
+    });
+    expect(receipt).toContain("Folded into the *general* run run-u2");
+    expect(ledger.pushes[0].message).toMatchObject({ userId: "slack:UREQ", authenticatedAs: "mcp:alice" });
+    expect(u2.live.inbox.drain()[0]).toMatchObject({ userId: "slack:UREQ", authenticatedAs: "mcp:alice" });
+  });
+
+  it("a separate CLI process steers a live run found on the durable ledger", async () => {
+    const ledger = new InMemoryRunLedger(() => NOW);
+    await ledger.claim({
+      runId: "run-far",
+      threadKey: U2_THREAD,
+      gen: "g-OTHER",
+      leaseMs: 30_000,
+      startedAt: NOW,
+      meta: { channelId: "slack:CX", userId: "slack:UREQ", threadKey: U2_THREAD, agent: "general" },
+      card: null,
+      system: "sys",
+      tools: [],
+    });
+    const service = createRunsService({ registry: new RunRegistry(), store: new InMemoryRunStore(), ledger });
+    const sender = createSteerSender({
+      config: configStore(),
+      runLedger: { pushInbox: async (id, message) => (await ledger.pushInbox(id, message)).seq },
+      runs: {
+        getById: async (id) => {
+          const result = await service.getRun(id);
+          return result.ok ? result.value : null;
+        },
+      },
+      admission: new ThreadAdmission<DispatchFollowUp>(),
+    });
+    const receipt = await sender.send("run-far", "also cover the docs", {
+      kind: "cli",
+      id: CLI_ACTOR.id,
+      actor: CLI_ACTOR,
+    });
+    expect(receipt).toContain("live on another bot generation, through its durable inbox");
+    expect(await ledger.readInbox("run-far", 0)).toMatchObject([
+      { message: { userId: "cli:local", channelId: "slack:CX", text: "also cover the docs" } },
+    ]);
   });
 
   it("a relay's caller (the app acting onBehalfOf the person, item 14) rides postedBy onto the live fold", async () => {

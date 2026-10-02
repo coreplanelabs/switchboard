@@ -80,7 +80,7 @@ One table per group, in registration order. "Surfaces" is where that command can
 
 | Command | What it does | Surfaces |
 |---|---|---|
-| `steer run <id> <words…>` | Fold words into a live run at its next step boundary, by run id. | Slack only |
+| `steer run <id> <words…>` | Fold words into a live run at its next step boundary, by run id. | every surface |
 
 ### `review`
 

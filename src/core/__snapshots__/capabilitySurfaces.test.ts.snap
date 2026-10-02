@@ -117,6 +117,7 @@ commands:
   runs children        — The runs one run spawned — a conductor's children, live and finished — oldest started first.
   runs findings        — A pull request's findings ledger — every review finding by id with its severity, where it was raised, what the coding run recorded against it and whether the next review agreed — read from the run records alone.
   runs search          — Search one session's log — a thread's conversation on one agent, every run of it — for words: the matching turns in relevance order, each with its run; snippets wrapped as untrusted content.
+  steer run            — Fold words into a live run at its next step boundary, by run id.
   review abridge       — Abridge a finished PR review's reading diff with meat.dev on the bot host (one Opus-class call) and store it on the run; idempotent — a stored one is answered, not recomputed.
   friction report      — Ranked recurring friction patterns across recent runs — read-only, GitHub never consulted.
   friction propose     — Clusters recent friction, deduplicates against open issues, and files the top proposals as labeled issues.
@@ -214,6 +215,7 @@ exports[`capability surfaces — cloud-full > HTTP catalogue: the /api/<id> rout
   "runs.unit",
   "schedule.list",
   "status.show",
+  "steer.run",
 ]
 `;
 
@@ -270,6 +272,7 @@ exports[`capability surfaces — cloud-full > MCP tools/list names 1`] = `
   "runs_unit",
   "schedule_list",
   "status_show",
+  "steer_run",
 ]
 `;
 
@@ -414,6 +417,7 @@ commands:
   runs children        — The runs one run spawned — a conductor's children, live and finished — oldest started first.
   runs findings        — A pull request's findings ledger — every review finding by id with its severity, where it was raised, what the coding run recorded against it and whether the next review agreed — read from the run records alone.
   runs search          — Search one session's log — a thread's conversation on one agent, every run of it — for words: the matching turns in relevance order, each with its run; snippets wrapped as untrusted content.
+  steer run            — Fold words into a live run at its next step boundary, by run id.
   friction report      — Ranked recurring friction patterns across recent runs — read-only, GitHub never consulted.
   friction propose     — Clusters recent friction, deduplicates against open issues, and files the top proposals as labeled issues.
   friction analyze     — Read-only friction diagnosis of a saved run-event stream (JSONL or an SSE capture) — the former frictionCli.
@@ -491,6 +495,7 @@ exports[`capability surfaces — local-full > HTTP catalogue: the /api/<id> rout
   "runs.stop",
   "runs.unit",
   "status.show",
+  "steer.run",
 ]
 `;
 
@@ -537,6 +542,7 @@ exports[`capability surfaces — local-full > MCP tools/list names 1`] = `
   "runs_stop",
   "runs_unit",
   "status_show",
+  "steer_run",
 ]
 `;
 
@@ -666,6 +672,7 @@ commands:
   runs unit            — A ship unit's runs in round order — its thread's, live and finished, each with its round — from one read.
   runs children        — The runs one run spawned — a conductor's children, live and finished — oldest started first.
   runs search          — Search one session's log — a thread's conversation on one agent, every run of it — for words: the matching turns in relevance order, each with its run; snippets wrapped as untrusted content.
+  steer run            — Fold words into a live run at its next step boundary, by run id.
   friction analyze     — Read-only friction diagnosis of a saved run-event stream (JSONL or an SSE capture) — the former frictionCli.
   repo test            — Executes the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
   repo build           — Executes the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
@@ -714,6 +721,7 @@ exports[`capability surfaces — minimal > HTTP catalogue: the /api/<id> routes 
   "runs.stop",
   "runs.unit",
   "status.show",
+  "steer.run",
 ]
 `;
 
@@ -745,6 +753,7 @@ exports[`capability surfaces — minimal > MCP tools/list names 1`] = `
   "runs_stop",
   "runs_unit",
   "status_show",
+  "steer_run",
 ]
 `;
 

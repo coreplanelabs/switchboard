@@ -367,7 +367,7 @@ export interface AppConfig {
    * repos }`, each a list of names or the explicit word `all`; an absent axis is
    * the empty set. A `slack:` entry adds to the baseline every Slack user holds
    * (the open chat commands, every unrestricted agent); a browser entry adds to
-   * its baseline (every group's read, the two personal chat writes); every
+   * its baseline (every group's read and personal chat writes); every
    * other entry is exactly what it declares; a
    * surface entry is unioned into every actor of that surface on top of its own.
    * `ConfigStore.grantsFor` is the one lookup.

@@ -78,8 +78,11 @@ import { startRequestRoot } from "./core/requestTrace.js";
 import { systemClock } from "./core/trace/clock.js";
 import { createRunHistoryWriter, NullRunHistoryWriter } from "./core/runHistoryWriter.js";
 import { defaultRunRegistry } from "./core/runRegistry.js";
+import { createRunsService } from "./core/runsService.js";
 import { buildRunStore, NullRunStore, type RunStore } from "./core/runStore.js";
+import { buildRunLedger } from "./core/runLedgerWorker.js";
 import { mintGeneration, NullLedgerWriteThrough } from "./core/runLedger/writeThrough.js";
+import { createSteerSender, defaultAdmission } from "./core/dispatch/admission.js";
 import { ThreadsElsewhere } from "./core/runLedger/threadsElsewhere.js";
 import { buildMemoryStore, NullMemoryStore } from "./core/memory/index.js";
 import { residentAdminFromConfig } from "./core/residentAdmin.js";
@@ -106,12 +109,12 @@ import { processSecrets, publicEnv, type EnvRecord, type Secret, type Secrets } 
 import { boundRequester, type Requester } from "./channels/requester.js";
 import { resolvePersonByEmail } from "./channels/slack/lookups.js";
 
-/** Who an `ask` is for (authorization.md item 15): the Slack person
+/** Who a CLI request is for (authorization.md item 15): the Slack person
  *  `SWITCHBOARD_CLI_EMAIL` names when the bot token can look them up —
  *  `userId` theirs, `authenticatedAs: cli:local`, the CLI's every grant kept —
  *  else `cli:local` itself, exactly as before the variable existed. The
- *  lookup client is built here and nowhere else in the CLI: `ask` is the one
- *  built-in that speaks as a person. */
+ *  lookup client is built here and nowhere else in the CLI: `ask` and
+ *  `steer run` can speak as a person. */
 async function cliRequester(email: string | undefined, botToken: Secret | undefined): Promise<Requester> {
   if (!email || !botToken) return { userId: CLI_ACTOR.id };
   const { webApi } = await import("@slack/bolt");
@@ -606,6 +609,37 @@ function wireCli(): CliWiring {
         const w = await mcpWiring();
         return w.service ?? { unavailable: w.unavailable ?? "MCP is not enabled" };
       },
+      steer: () => ({
+        send: async (id, words, caller) => {
+          const { config, runStore } = await bot();
+          const ledger = buildRunLedger(config.config.runHistory, processSecrets);
+          if (!ledger) throw new CommandError("unavailable", "Steering a live run requires the configured run ledger.");
+          const requester = await cliRequester(
+            process.env.SWITCHBOARD_CLI_EMAIL,
+            processSecrets.named("SLACK_BOT_TOKEN"),
+          );
+          const actor =
+            requester.userId === caller.id
+              ? caller.actor
+              : {
+                  ...caller.actor,
+                  self: [caller.actor.id, requester.userId],
+                  asUser: { id: requester.userId, ...(requester.userName ? { name: requester.userName } : {}) },
+                };
+          const runs = createRunsService({ registry: defaultRunRegistry, store: runStore, ledger });
+          return createSteerSender({
+            config,
+            runLedger: { pushInbox: async (runId, message) => (await ledger.pushInbox(runId, message)).seq },
+            runs: {
+              getById: async (runId) => {
+                const result = await runs.getRun(runId);
+                return result.ok ? result.value : null;
+              },
+            },
+            admission: defaultAdmission,
+          }).send(id, words, { ...caller, actor });
+        },
+      }),
     },
   );
   return { commands, bot, mcpWiring };

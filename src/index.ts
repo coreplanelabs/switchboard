@@ -884,7 +884,14 @@ export async function runBot(): Promise<void> {
       createSteerSender({
         config,
         runLedger,
-        runs: defaultRunRegistry,
+        runs: {
+          getById: async (id) => {
+            const local = defaultRunRegistry.getById(id);
+            if (local) return local;
+            const result = await runsService.getRun(id);
+            return result.ok ? result.value : null;
+          },
+        },
         admission: defaultAdmission,
       }),
     pulls: () => pullsWiring,
