@@ -7781,10 +7781,9 @@ describe("live run-view wiring (Area 2)", () => {
     for (const s of withLink)
       expect(s.link).toEqual({ url: "https://bot.example/runs/abc?t=secret", label: "Live run" });
     expect(statuses.some((s) => s.detail?.includes("/runs/"))).toBe(false);
-    // The FINAL ✅ frame keeps the link too — the run page outlives the run
-    // (it shows the final answer), so the closed card must still lead to it.
+    // The final frame keeps the link even when the tool was refused.
     const last = statuses[statuses.length - 1];
-    expect(last.title).toContain("✅");
+    expect(last.title).toContain("⚠️");
     expect(last.link?.url).toBe("https://bot.example/runs/abc?t=secret");
   });
 
@@ -7801,9 +7800,8 @@ describe("live run-view wiring (Area 2)", () => {
   });
 });
 
-// Feature: docs/reference/specs/run-visibility.md item 2 — the closed ✅ card keeps the
-// checklist with EVERY item checked off (the run completing is the proof they
-// happened), and an empty update_status never erases progress.
+// Feature: docs/reference/specs/run-visibility.md item 2 — the closed card keeps
+// the agent's actual checklist, and an empty update_status never erases progress.
 // Feature: docs/reference/specs/agent-review.md item 13 — the review verdict reply carries
 // the run link at the projection layer only: never in the `answer` event or
 // the GitHub post body.
@@ -7857,13 +7855,22 @@ describe("closed-card checklist and review verdict run link", () => {
     };
   }
 
-  it("the ✅ close checks every checklist item off — ✱/○ become ✓, ✓ stays", async () => {
+  it("an ordinary close keeps completed steps checked and unfinished steps open", async () => {
     const deps = reviewRunDeps(checklistProvider(["○ Read the diff\n○ Run tests", "✓ Read the diff\n✱ Run tests"]));
     const { io, statuses } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
     const last = statuses[statuses.length - 1];
-    expect(last.title).toContain("✅");
-    expect(last.detail).toBe("✓ Read the diff\n✓ Run tests");
+    expect(last.title).toContain("⚠️");
+    expect(last.detail).toBe("✓ Read the diff\n✱ Run tests");
+  });
+
+  it("a clean close with completed steps stays green", async () => {
+    const deps = reviewRunDeps(checklistProvider(["✓ Read the diff\n✓ Run tests"]));
+    const { io, statuses } = fakeIO();
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+    const last = statuses.at(-1);
+    expect(last?.title).toContain("✅");
+    expect(last?.detail).toBe("✓ Read the diff\n✓ Run tests");
   });
 
   it("debug paints typed activity beside the checklist, while quiet paints the checklist alone and every close drops activity", async () => {
@@ -7916,7 +7923,7 @@ describe("closed-card checklist and review verdict run link", () => {
     expect(verbose.statuses.some((s) => s.activity?.kind === "line" && s.activity.text === "→ bash")).toBe(true);
     expect(verbose.statuses.some((s) => s.activity?.kind === "command")).toBe(false);
     const last = statuses[statuses.length - 1];
-    expect(last.title).toContain("✅");
+    expect(last.title).toContain("⚠️");
     expect(last.activity).toBeUndefined();
   });
 
@@ -7925,8 +7932,8 @@ describe("closed-card checklist and review verdict run link", () => {
     const { io, statuses } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
     const last = statuses[statuses.length - 1];
-    expect(last.title).toContain("✅");
-    expect(last.detail).toBe("✓ Read the diff\n✓ Run tests");
+    expect(last.title).toContain("⚠️");
+    expect(last.detail).toBe("✱ Read the diff\n○ Run tests");
   });
 
   it("a failed run keeps the honest partial checklist — nothing is checked off", async () => {
@@ -18861,6 +18868,109 @@ workspaceDir: __WORKDIR__
     vi.unstubAllGlobals();
     vi.mocked(makeExecutor).mockClear();
     vi.mocked(runPiHarnessOpen).mockClear();
+  });
+
+  it("a refused Explore command keeps its unfinished step open", async () => {
+    recordingFetch();
+    let turn = 0;
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        const current = turn++;
+        if (current === 0)
+          return {
+            content: [
+              {
+                type: "tool_use",
+                id: "status",
+                name: "update_status",
+                input: { checklist: "✓ Read the repository head\n✱ Run one timeout drill" },
+              },
+            ],
+            stopReason: "tool_use",
+          };
+        if (current < 3)
+          return {
+            content: [
+              {
+                type: "tool_use",
+                id: `attempt-${current}`,
+                name: "bash",
+                input: { command: "sleep 300; git rev-parse HEAD", timeout: 310 },
+              },
+            ],
+            stopReason: "tool_use",
+          };
+        return {
+          content: [
+            { type: "text", text: "The drill did not run. The repository head was readable. I did not retry." },
+          ],
+          stopReason: "end_turn",
+        };
+      },
+    };
+    const { deps, store, writer } = exploreDeps("run-refused", provider);
+    const { io, statuses, replies } = fakeIO();
+    await dispatch(deps, inChannel("CX", "agent:explore budget:4 in acme/api: run one timeout drill"), io);
+    await writer.settled();
+
+    expect(replies.at(-1)).toContain("The drill did not run");
+    const last = statuses.at(-1);
+    expect(last?.title).toContain("⚠️");
+    expect(last?.detail).toContain("✓ Read the repository head\n✱ Run one timeout drill");
+    const events = (await store.get("run-refused"))!.events;
+    expect(events.filter((event) => event.type === "tool_call" && event.tool === "bash")).toHaveLength(2);
+    expect(events.filter((event) => event.type === "run_note" && event.kind === "tool_refused")).toHaveLength(2);
+    expect(events.filter((event) => event.type === "tool_result" && event.tool === "bash" && !event.ok)).toHaveLength(
+      2,
+    );
+  });
+
+  it("a typed refusal prevents a green card even if Explore checks every step", async () => {
+    recordingFetch();
+    let turn = 0;
+    const provider: Provider = {
+      name: "fake",
+      async complete(): Promise<CompletionResult> {
+        const current = turn++;
+        if (current === 0)
+          return {
+            content: [
+              {
+                type: "tool_use",
+                id: "status",
+                name: "update_status",
+                input: { checklist: "✓ Read the repository head\n✓ Run one timeout drill" },
+              },
+            ],
+            stopReason: "tool_use",
+          };
+        if (current === 1)
+          return {
+            content: [
+              {
+                type: "tool_use",
+                id: "refused",
+                name: "bash",
+                input: { command: "sleep 300; git rev-parse HEAD", timeout: 310 },
+              },
+            ],
+            stopReason: "tool_use",
+          };
+        return {
+          content: [{ type: "text", text: "The repository head was readable; the drill was unverified." }],
+          stopReason: "end_turn",
+        };
+      },
+    };
+    const { deps, writer } = exploreDeps("run-checked-refusal", provider);
+    const { io, statuses, replies } = fakeIO();
+    await dispatch(deps, inChannel("CX", "agent:explore budget:4 in acme/api: run one timeout drill"), io);
+    await writer.settled();
+    expect(replies.at(-1)).toContain("the drill was unverified");
+    const last = statuses.at(-1);
+    expect(last?.title).toContain("⚠️");
+    expect(last?.detail).toContain("✓ Read the repository head\n✓ Run one timeout drill");
   });
 
   it("agent:explore against a deployment with a resident fleet reaches the factory with `repo-cold` and identity `read`, vets the repository against GitHub once, and never calls the resident Worker", async () => {

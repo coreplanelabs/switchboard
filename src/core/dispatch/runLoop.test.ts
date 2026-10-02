@@ -493,7 +493,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
         card: s.ctx.card,
         shell: s.ctx.shell,
         checklistAsLeft: out.checklistAsLeft,
-        checklistCheckedOff: out.checklistCheckedOff,
+        hasIncompleteToolEffects: out.hasIncompleteToolEffects,
         answerOutcome: out.answerOutcome,
         doneLines: s.ctx.doneLines,
         runDiagnosis: out.runDiagnosis,
@@ -600,7 +600,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       card: s.ctx.card,
       shell: s.ctx.shell,
       checklistAsLeft: out.checklistAsLeft,
-      checklistCheckedOff: out.checklistCheckedOff,
+      hasIncompleteToolEffects: out.hasIncompleteToolEffects,
       answerOutcome: out.answerOutcome,
       doneLines: s.ctx.doneLines,
       runDiagnosis: out.runDiagnosis,
@@ -897,7 +897,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       card: s.ctx.card,
       shell: s.ctx.shell,
       checklistAsLeft: out.checklistAsLeft,
-      checklistCheckedOff: out.checklistCheckedOff,
+      hasIncompleteToolEffects: out.hasIncompleteToolEffects,
       doneLines: s.ctx.doneLines,
       runDiagnosis: out.runDiagnosis,
       releaseWorkspace: out.releaseWorkspace,
@@ -994,7 +994,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       card: s.ctx.card,
       shell: s.ctx.shell,
       checklistAsLeft: out.checklistAsLeft,
-      checklistCheckedOff: out.checklistCheckedOff,
+      hasIncompleteToolEffects: out.hasIncompleteToolEffects,
       doneLines: s.ctx.doneLines,
       runDiagnosis: out.runDiagnosis,
       releaseWorkspace: out.releaseWorkspace,
@@ -1276,7 +1276,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       card: s.ctx.card,
       shell: s.ctx.shell,
       checklistAsLeft: out.checklistAsLeft,
-      checklistCheckedOff: out.checklistCheckedOff,
+      hasIncompleteToolEffects: out.hasIncompleteToolEffects,
       doneLines: s.ctx.doneLines,
       runDiagnosis: out.runDiagnosis,
       releaseWorkspace: out.releaseWorkspace,
@@ -1374,7 +1374,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       card: s.ctx.card,
       shell: s.ctx.shell,
       checklistAsLeft: out.checklistAsLeft,
-      checklistCheckedOff: out.checklistCheckedOff,
+      hasIncompleteToolEffects: out.hasIncompleteToolEffects,
       doneLines: s.ctx.doneLines,
       runDiagnosis: out.runDiagnosis,
       releaseWorkspace: out.releaseWorkspace,
@@ -7738,7 +7738,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       card: s.ctx.card,
       shell: s.ctx.shell,
       checklistAsLeft: out.checklistAsLeft,
-      checklistCheckedOff: out.checklistCheckedOff,
+      hasIncompleteToolEffects: out.hasIncompleteToolEffects,
       answerOutcome: out.answerOutcome,
       doneLines: s.ctx.doneLines,
       runDiagnosis: out.runDiagnosis,
@@ -8370,7 +8370,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       card: s.ctx.card,
       shell: s.ctx.shell,
       checklistAsLeft: out.checklistAsLeft,
-      checklistCheckedOff: out.checklistCheckedOff,
+      hasIncompleteToolEffects: out.hasIncompleteToolEffects,
       answerOutcome: out.answerOutcome,
       doneLines: s.ctx.doneLines,
       runDiagnosis: out.runDiagnosis,
@@ -8382,6 +8382,45 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     expect(s.closes.at(-1)?.detail).toBe(
       "Answer completion unverified.\n\n✓ Verify one record\n✱ Read remaining records\n○ Deliver the full answer",
     );
+  });
+
+  it("a normally ended run retains a pre-restart tool refusal on its final card", async () => {
+    const s = setup("", { provider: neverCalled() });
+    const answerOutcome = { version: 1 as const, ending: "answered" as const, output: "present" as const };
+    const resume = finishing("One record was verified; the requested check did not run.", {
+      state: { answerOutcome, checklist: "✓ Verify one record\n✓ Run the requested check" },
+      events: [
+        { type: "input", messageId: "m1", text: "hello there", at: 1, seq: 1 },
+        { type: "tool_call", tool: "bash", summary: "run requested check", callId: "check-1", at: 2, seq: 2 },
+        note("tool_refused", "bash refused before execution", 3),
+        { type: "tool_result", tool: "bash", ok: false, summary: "refused", callId: "check-1", at: 4, seq: 4 },
+      ],
+    });
+    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+    await deliverAnswer({
+      msg: s.ctx.msg,
+      io: s.ctx.io,
+      agent: s.ctx.agent,
+      run: s.run,
+      answer: out.answer,
+      liveUrl: undefined,
+      prNote: out.prNote,
+      stopped: undefined,
+      ledgerRun: undefined,
+      ending: s.ending,
+      card: s.ctx.card,
+      shell: s.ctx.shell,
+      checklistAsLeft: out.checklistAsLeft,
+      hasIncompleteToolEffects: out.hasIncompleteToolEffects,
+      answerOutcome: out.answerOutcome,
+      doneLines: s.ctx.doneLines,
+      runDiagnosis: out.runDiagnosis,
+      releaseWorkspace: out.releaseWorkspace,
+      root: s.ctx.root,
+    });
+    expect(s.replies.at(-1)).toContain("One record was verified");
+    expect(s.closes.at(-1)?.title).toContain("⚠️");
+    expect(s.closes.at(-1)?.detail).toContain("✓ Verify one record\n✓ Run the requested check");
   });
 
   it.each(["absent", "present"] as const)(

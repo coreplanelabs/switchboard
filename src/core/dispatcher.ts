@@ -4624,7 +4624,7 @@ export async function dispatch(
       toolCalls,
       runDiagnosis,
       checklistAsLeft,
-      checklistCheckedOff,
+      hasIncompleteToolEffects,
       answerOutcome,
       releaseWorkspace,
     } = ran;
@@ -4657,7 +4657,7 @@ export async function dispatch(
       card,
       shell,
       checklistAsLeft,
-      checklistCheckedOff,
+      hasIncompleteToolEffects,
       answerOutcome,
       doneLines: privateAudienceRequired(msg) || slackContext !== undefined ? () => ({}) : doneLines,
       runDiagnosis,

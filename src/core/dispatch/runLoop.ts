@@ -206,8 +206,8 @@ export interface RunOutcome {
   runDiagnosis: FrictionDiagnosis | undefined;
   /** The agent's checklist exactly as it left it (○/✱ items still open) — what a failed or stopped card shows. */
   checklistAsLeft: () => string | undefined;
-  /** The same checklist with every open item ticked ✓ — what a completed card shows. */
-  checklistCheckedOff: () => string | undefined;
+  /** Typed failed, cut or unsettled tool work, including events carried through a restart. */
+  hasIncompleteToolEffects: () => boolean;
   /** A time-budget ending is not proof that the requested checklist was completed. */
   answerOutcome: AnswerOutcome;
   currentWorkCheck?: () => Promise<string | undefined>;
@@ -580,6 +580,22 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     for (const latest of byRef.values()) restoreAcceptedHead(latest);
   };
   let checklist: string | undefined = typeof restored.checklist === "string" ? restored.checklist : undefined;
+  const pendingToolCalls = new Set<string>();
+  let incompleteToolEffects = false;
+  const observeToolEffect = (event: RunEvent) => {
+    if (event.type === "tool_call" && event.tool !== "update_status" && event.callId)
+      pendingToolCalls.add(event.callId);
+    if (event.type === "tool_result") {
+      if (!event.ok || event.cut) incompleteToolEffects = true;
+      if (event.callId) pendingToolCalls.delete(event.callId);
+    }
+    if (
+      event.type === "run_note" &&
+      (event.kind === "tool_refused" || event.kind === "tool_cut" || event.kind === "work_source_refused")
+    )
+      incompleteToolEffects = true;
+  };
+  for (const event of resume?.events ?? []) observeToolEffect(event);
   // Typed (`StatusActivity`): a bash call rides as its full command, which
   // the Slack card draws as a code block; everything else as its one line.
   let lastActivity: StatusActivity | undefined;
@@ -635,15 +651,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               : compactActivity(lastActivity)
             : undefined,
     });
-  // The closed card keeps the run link (the run page outlives the run and
-  // shows the final answer) and the agent's checklist; only the transient
-  // activity trace is dropped. On a clean ✅ finish every item is marked ✓ —
-  // the run completing IS the proof they happened, and the model rarely
-  // re-posts the checklist after its last step; a stop/failure keeps the
-  // honest partial state.
+  // The closed card keeps the run link and the agent's checklist; only the
+  // transient activity trace is dropped. A run ending does not prove its open
+  // checklist items happened.
   const checklistAsLeft = () => (privateMain || privateRun ? undefined : checklist);
-  const checklistCheckedOff = () =>
-    privateMain || privateRun ? undefined : checklist?.replace(/^(\s*)[○✱](?=\s)/gm, "$1✓");
   // The runner's progress notes carry the 💭 thought line at each model turn
   // (docs/reference/specs/tracing.md): the card shows it as activity, as it showed the
   // `turn` event before spans replaced it.
@@ -740,6 +751,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     );
   };
   const onEvent = (e: RunEvent) => {
+    observeToolEffect(e);
     // Authorization precedes execution, while streamed results and their local
     // ref reads may lag behind it. Close both harness gates synchronously so
     // no later tool can move/delete the source before attribution finishes.
@@ -3557,7 +3569,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     planeReadUnknown,
     runDiagnosis,
     checklistAsLeft,
-    checklistCheckedOff,
+    hasIncompleteToolEffects: () => incompleteToolEffects || pendingToolCalls.size > 0,
     answerOutcome,
     releaseWorkspace,
     currentWorkCheck: workFreshness.beforePublish,

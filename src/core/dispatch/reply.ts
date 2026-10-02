@@ -706,7 +706,7 @@ export interface DeliveryContext {
   card: StatusHandle;
   shell: CardShell;
   checklistAsLeft: () => string | undefined;
-  checklistCheckedOff: () => string | undefined;
+  hasIncompleteToolEffects: () => boolean;
   /** Producer facts captured before rendering; independent of the delivery receipt. */
   answerOutcome?: AnswerOutcome;
   /** The done card's shape and queued lines, from the finish-site diagnosis (the dispatch's `doneLines`). */
@@ -741,7 +741,6 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
     card,
     shell,
     checklistAsLeft,
-    checklistCheckedOff,
     answerOutcome,
     doneLines,
     runDiagnosis,
@@ -749,6 +748,18 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
     root,
   } = ctx;
   const budgetEnded = answerOutcome?.ending === "time_budget";
+  const checklist = checklistAsLeft();
+  const openChecklist = /^[ \t]*[○✱](?=\s)/m.test(checklist ?? "");
+  const incompleteToolEffects = ctx.hasIncompleteToolEffects();
+  const incompleteEnd = answerOutcome !== undefined && answerOutcome.ending !== "answered";
+  const closeIcon =
+    stopped === "hard"
+      ? "⛔"
+      : stopped === "soft"
+        ? "⏹"
+        : budgetEnded || incompleteEnd || openChecklist || incompleteToolEffects
+          ? "⚠️"
+          : "✅";
   const privateRun = privateAudienceRequired(msg) || ctx.slackContext !== undefined;
   const privateCard = privateRun;
   const latch = ctx.privateAudienceLatch ?? { revoked: false };
@@ -857,12 +868,19 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
           card.done(
             shell.close({
               kind: "done",
-              icon: stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : budgetEnded ? "⚠️" : "✅",
+              icon: closeIcon,
               detail: privateCard
                 ? undefined
                 : answerOutcomeDetail(
                     answerOutcome,
-                    stopped || budgetEnded ? checklistAsLeft() : checklistCheckedOff(),
+                    [
+                      incompleteToolEffects && !budgetEnded
+                        ? "A tool request was refused or its result is unverified."
+                        : undefined,
+                      checklist,
+                    ]
+                      .filter(Boolean)
+                      .join("\n\n") || undefined,
                   ),
               ...(privateCard ? {} : doneLines(runDiagnosis)),
             }),
