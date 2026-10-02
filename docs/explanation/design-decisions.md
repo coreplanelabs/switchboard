@@ -92,6 +92,7 @@ Statuses: **proposed** (written, not yet agreed), **accepted** (agreed, being bu
 | 0081 | [Account linking proves both identities and revocation fences their use](../decisions/0081-account-linking-proves-both-identities-and-revocation-fences-their-use.md) | Dual authentication with a one-time intent; transactional binding and revision-fenced authorization | proposed | 2026-09-26 |
 | 0082 | [An explicit PR batch may start exact Ship children](../decisions/0082-an-explicit-pr-batch-may-start-exact-ship-children.md) | — | accepted | 2026-09-29 |
 | 0083 | [Context keeps its original sources across conversations and child work](../decisions/0083-context-keeps-its-original-sources-across-conversations-and-child-work.md) | Information-flow control and immutable snapshots | accepted | 2026-10-01 |
+| 0084 | [Execution images follow their build inputs across Worker releases](../decisions/0084-execution-images-follow-their-inputs.md) | Content-addressed deployment artifact | accepted | 2026-10-01 |
 
 <!-- /generated:decision-records -->
 

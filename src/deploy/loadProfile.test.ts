@@ -167,7 +167,7 @@ describe("renderWorkerConfigsOnHost", () => {
     ).toEqual([]);
     expect(lines).toEqual([`[deploy:all] rendered 4 Worker config(s) from ${PROFILE_EXAMPLE_PATH}`]);
     const example = await loadProfileOnHost(env);
-    const published = publishedImagesOnHost();
+    const published = await publishedImagesOnHost();
     if (!published.ok) throw new Error(published.problem);
     const rendered = renderWorkerConfigs(
       example.profile,

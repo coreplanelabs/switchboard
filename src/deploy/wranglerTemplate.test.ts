@@ -470,9 +470,9 @@ describe("the rendered wrangler.jsonc files", () => {
 
   it.skipIf(!generated)(
     "each generated file equals the render of its template with the profile in force, byte for byte",
-    () => {
+    async () => {
       // The files on disk were rendered by `deploy:gen` with THIS checkout's images (project.json at its version).
-      const published = publishedImagesOnHost();
+      const published = await publishedImagesOnHost();
       if (!published.ok) throw new Error(published.problem);
       const rendered = renderWorkerConfigs(profile!, readDisk, published.images);
       expect(rendered.ok, JSON.stringify(rendered)).toBe(true);

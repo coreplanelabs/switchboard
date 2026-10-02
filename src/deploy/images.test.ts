@@ -80,6 +80,44 @@ describe("the reference a Worker deploys", () => {
       `registry.cloudflare.com/${ACCOUNT}/switchboard:1.2.3`,
     );
   });
+
+  it("keeps the bot on the release tag and reuses execution images by their input tags", () => {
+    const published = {
+      ...TEST_PUBLISHED_IMAGES,
+      inputTags: { resident: "inputs-a1b2", sandbox: "inputs-c3d4" },
+    };
+    expect(IMAGE_KINDS.map((kind) => containerImage(kind, TEST_REGISTRY_PROFILE, published))).toEqual([
+      `registry.cloudflare.com/${ACCOUNT}/switchboard:1.2.3`,
+      `registry.cloudflare.com/${ACCOUNT}/switchboard-resident:inputs-a1b2`,
+      `registry.cloudflare.com/${ACCOUNT}/switchboard-sandbox:inputs-c3d4`,
+    ]);
+    const listed = [
+      { name: "switchboard-resident", tags: ["inputs-a1b2"] },
+      { name: "switchboard-sandbox", tags: ["inputs-c3d4"] },
+    ];
+    const copies = planImageCopies(published, ACCOUNT, listed);
+    expect(copies.copy).toEqual([
+      {
+        kind: "bot",
+        source: "ghcr.io/example/switchboard:1.2.3",
+        target: `registry.cloudflare.com/${ACCOUNT}/switchboard:1.2.3`,
+        name: "switchboard",
+        version: "1.2.3",
+      },
+    ]);
+    expect(copies.images.map((image) => image.present)).toEqual([false, true, true]);
+    const nextRelease = { ...published, version: "1.2.4" };
+    expect(planImageCopies(nextRelease, ACCOUNT, listed).copy.map((copy) => copy.kind)).toEqual(["bot"]);
+    expect(containerImage("resident", TEST_REGISTRY_PROFILE, nextRelease)).toBe(
+      containerImage("resident", TEST_REGISTRY_PROFILE, published),
+    );
+    expect(containerImage("bot", TEST_REGISTRY_PROFILE, nextRelease)).toContain(":1.2.4");
+    expect(planImageCopies(published, ACCOUNT, []).copy).toMatchObject([
+      { kind: "bot", version: "1.2.3" },
+      { kind: "resident", source: "ghcr.io/example/switchboard-resident:1.2.3", version: "inputs-a1b2" },
+      { kind: "sandbox", source: "ghcr.io/example/switchboard-sandbox:1.2.3", version: "inputs-c3d4" },
+    ]);
+  });
 });
 
 describe("the account registry listing", () => {

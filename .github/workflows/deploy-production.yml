@@ -23,7 +23,7 @@
 #
 # Images (`copy-images`): a profile whose Workers run the images the release
 # published (`images: registry`) needs them copied into its account's registry
-# once per version. `deploy all` copies what its Workers lack by itself; the
+# once per target tag. `deploy all` copies what its Workers lack by itself; the
 # `deploy images` step here, BEFORE the plan, pre-warms the registry so the
 # plan reads `present` and the deploy step is the deploy alone. The profile
 # decides, not this file: the command copies what a `registry` profile lacks
@@ -351,7 +351,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.DOOR_SMOKE_OPENAI_API_KEY }}
           DOOR_SMOKE_TRUSTED_ORIGIN: ${{ vars.DOOR_SMOKE_TRUSTED_ORIGIN }}
         run: npm run load -- route --smoke --profile-model
-      # Once per version, before the plan: the release's images into the account
+      # Once per target tag, before the plan: the release's images into the account
       # registry, registry to registry over HTTPS. `deploy all` below would make
       # the same copy itself; running it here first lets the plan read `present`.
       # The profile decides — a `build`-mode profile has nothing to copy and

@@ -189,6 +189,8 @@ jobs:
       contents: read
     with:
       targets: affected
+      # deploy all copies and verifies only images in the affected plan.
+      copy-images: never
       # Enable only after a dedicated production ingress bearer is configured.
       smoke: ${{ vars.SMOKE_INGRESS_ENABLED == 'true' }}
     secrets: inherit # zizmor: ignore[secrets-inherit]
@@ -265,6 +267,10 @@ jobs:
           tags: |
             ${{ steps.image.outputs.name }}:${{ steps.image.outputs.version }}
             ${{ steps.image.outputs.name }}:latest
+          # Depot runners can start without prior local BuildKit layers. Keep
+          # unchanged toolchains (especially Playwright) reusable across runs.
+          cache-from: type=registry,ref=${{ steps.image.outputs.name }}:buildcache
+          cache-to: type=registry,ref=${{ steps.image.outputs.name }}:buildcache,mode=min,ignore-error=true
           # SLSA provenance and an SPDX SBOM, attached to the image index in the
           # registry (`docker buildx imagetools inspect <image> --format '{{ json .Provenance }}'`).
           provenance: mode=max

@@ -30,6 +30,7 @@ import { formatAffectedText, type AffectedReport } from "./affected.js";
 import { RESIDENT_DRAIN_TOKEN_ENV } from "./residentDrain.js";
 import { BASE_CONFIG_DOCUMENT_KEY } from "../configDocument.js";
 import {
+  accountImageTag,
   accountRegistryImage,
   DOCKERFILES,
   IMAGE_KINDS,
@@ -424,7 +425,7 @@ export interface DeployHost {
 }
 
 /** The plan's image section: in `build` mode each step's Dockerfile, built by wrangler at deploy
- *  time; in `registry` mode each step's reference into the account registry at the version and
+ *  time; in `registry` mode each step's reference into the account registry at its tag and
  *  whether the registry holds it — `undefined` when the registry was not probed (the example
  *  profile, which nothing deploys). A step whose image is absent cannot deploy: `deploy plan`
  *  reports it, and `deploy all` copies it before the plan runs (src/core/commands/deploy.ts). */
@@ -459,10 +460,11 @@ export function planImages(steps: readonly { name: WorkerName }[], account: stri
     ...(registry ? {} : { unprobed: input.unprobed ?? "not read" }),
     images: kinds.map((kind) => {
       const name = registryName(published.names[kind]);
+      const tag = accountImageTag(kind, published);
       return {
         kind,
-        ref: accountRegistryImage(account, name, published.version),
-        present: registry ? registryHas(registry, name, published.version) : undefined,
+        ref: accountRegistryImage(account, name, tag),
+        present: registry ? registryHas(registry, name, tag) : undefined,
       };
     }),
   };
