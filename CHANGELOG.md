@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.275.3](https://github.com/coreplanelabs/switchboard/compare/v1.275.2...v1.275.3) (2026-10-02)
+
+
+### Bug fixes
+
+* **config:** show the base document loaded by this process ([#2617](https://github.com/coreplanelabs/switchboard/issues/2617)) ([250db87](https://github.com/coreplanelabs/switchboard/commit/250db8763137ccdf267e1a1b8dac2fe2f6a8b116))
+
 ## [1.275.2](https://github.com/coreplanelabs/switchboard/compare/v1.275.1...v1.275.2) (2026-10-01)
 
 
