@@ -46,6 +46,7 @@
 import type { RunnerPullOwner } from "../core/runnerOwnership.js";
 import {
   DEFAULT_GRANT,
+  carve,
   GRANT_RENEWALS_MAX,
   HOSTED_DEADLINE_MARGIN_MINUTES,
   IDLE_DAYS_DEFAULT,
@@ -58,6 +59,7 @@ import {
 } from "../core/budgets.js";
 import { DEFAULT_VERBOSITY, shows } from "../core/verbosity.js";
 import { mentionsGitPush, pairedPublicationPush } from "../core/publicationPush.js";
+import { publicationSettlementForRun } from "../core/publicationSettlement.js";
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { requestedByLine } from "../core/prDescription.js";
 import { threadPageLink } from "../core/dispatch/reply.js";
@@ -174,6 +176,7 @@ import {
   type RecoveryRequest,
   type RecoveryAction,
 } from "../core/coordinator/recoveryHistory.js";
+import { generatedTaskText } from "../core/coordinator/generatedTask.js";
 import type { ChannelIO, IncomingMessage } from "../core/types.js";
 import { authenticateIngressBearer } from "../deploy/restart.js";
 import type { GithubApi } from "../execution/githubApi.js";
@@ -336,6 +339,8 @@ export interface AdminCoordinatorDeps {
    *  required check passes first time). Absent, or unreadable, or failing the
    *  rule: the conventional fallback stands. */
   branchHeadSubject?: (repo: string, branch: string) => Promise<string | undefined>;
+  /** Exact original branch head required for a pre-PR recovery claim and every coding admission. */
+  fetchBranchHeadSha?: (repo: string, branch: string) => Promise<string | undefined>;
   /** The identity rewrite before the recover path's open (record 0062;
    *  agent-ship items 10 and 15): the same rewrite the coding post-step runs,
    *  over an EMPTY start state — every earlier round's commits were rewritten
@@ -520,7 +525,39 @@ function parseBrief(v: unknown): Parsed<Brief> {
       const r = b.rebase as Record<string, unknown> | undefined;
       if (typeof r !== "object" || r === null || typeof r.branch !== "string" || typeof r.onto !== "string")
         return invalid("brief.rebase must name the branch and what it is rebased onto");
-      return { ok: true, value: { kind: "contract", unit: b.unit, rebase: { branch: r.branch, onto: r.onto } } };
+      const c = b.continue as Record<string, unknown> | undefined;
+      if (
+        c !== undefined &&
+        (typeof c !== "object" ||
+          c === null ||
+          !Number.isSafeInteger(c.segment) ||
+          Number(c.segment) < 1 ||
+          (c.from !== undefined && !fullHead(c.from)) ||
+          (c.previousRunId !== undefined &&
+            (typeof c.previousRunId !== "string" || !RUN_ID_PATTERN.test(c.previousRunId))) ||
+          (c.texts !== undefined && (!Array.isArray(c.texts) || !c.texts.every((text) => typeof text === "string"))) ||
+          (c.recovery !== undefined && c.recovery !== true))
+      )
+        return invalid("brief.continue must name a valid prior coding attempt");
+      return {
+        ok: true,
+        value: {
+          kind: "contract",
+          unit: b.unit,
+          rebase: { branch: r.branch, onto: r.onto },
+          ...(c !== undefined
+            ? {
+                continue: {
+                  segment: c.segment as number,
+                  ...(c.from !== undefined ? { from: c.from as string } : {}),
+                  ...(c.previousRunId !== undefined ? { previousRunId: c.previousRunId as string } : {}),
+                  ...(c.texts !== undefined ? { texts: c.texts as string[] } : {}),
+                  ...(c.recovery === true ? { recovery: true as const } : {}),
+                },
+              }
+            : {}),
+        },
+      };
     }
     case "review": {
       const n = pr();
@@ -975,7 +1012,32 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   if (live) return answerForLive(live, key, threadKey, at);
   const done = await finishedWithKey(deps.runs, instance, threadKey, key);
   if (done) return json(200, { ok: true, runId: done.id, threadKey, alreadySpawned: true, at });
-  if (row?.recovery !== undefined) {
+  if (row?.recovery?.kind === "coding") {
+    if (
+      req.preset !== "coding" ||
+      req.brief?.kind !== "contract" ||
+      req.step !== row.recovery.step ||
+      req.brief.unit !== row.unit ||
+      req.brief.rebase.branch !== row.branch ||
+      req.brief.rebase.onto !== instance.base ||
+      req.brief.continue?.segment !== 1 ||
+      req.brief.continue.recovery !== true ||
+      req.brief.continue.from !== row.recovery.expectedHeadSha ||
+      req.brief.continue.previousRunId !== row.recovery.codingRunId ||
+      typeof req.budget !== "number" ||
+      req.budget > Math.floor((row.recovery.deadlineAt - at) / minutesToMs(1))
+    )
+      return json(409, { ok: false, error: "recovery_claim_mismatch", at });
+    const head = await deps.fetchBranchHeadSha?.(instance.repo, row.branch).catch(() => undefined);
+    if (head === undefined) return json(409, { ok: false, error: "recovery_ref_unavailable", at });
+    if (head !== row.recovery.expectedHeadSha) return json(409, { ok: false, error: "recovery_head_moved", at });
+    const [open, merged] = await Promise.all([
+      deps.findOpenPrByHead(instance.repo, row.branch).catch(() => undefined),
+      deps.findMergedPrByHead(instance.repo, row.branch).catch(() => undefined),
+    ]);
+    if (open === undefined || merged === undefined) return json(409, { ok: false, error: "github_unavailable", at });
+    if (open !== null || merged !== null) return json(409, { ok: false, error: "recovery_stage_changed", at });
+  } else if (row?.recovery !== undefined) {
     const expectedKind = req.preset === "coding" ? "findings" : "review";
     const stepMatch = new RegExp(`^${row.unit}/recovery/[1-9][0-9]*/${expectedKind}(?:/a[1-9][0-9]*)?$`).test(req.step);
     const briefHead =
@@ -1243,6 +1305,24 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
     } catch (err) {
       return json(503, { ok: false, error: "private_worker_log_unavailable", message: describe(err), at });
     }
+  }
+  if (row?.recovery?.kind === "coding") {
+    const [head, open, merged, rows] = await Promise.all([
+      deps.fetchBranchHeadSha?.(instance.repo, row.branch).catch(() => undefined),
+      deps.findOpenPrByHead(instance.repo, row.branch).catch(() => undefined),
+      deps.findMergedPrByHead(instance.repo, row.branch).catch(() => undefined),
+      deps.instances.listUnits(instance.id).catch(() => undefined),
+    ]);
+    if (
+      head !== row.recovery.expectedHeadSha ||
+      open === undefined ||
+      open !== null ||
+      merged === undefined ||
+      merged !== null ||
+      rows?.filter((candidate) => candidate.unit === row.unit).length !== 1 ||
+      JSON.stringify(rows.find((candidate) => candidate.unit === row.unit)) !== JSON.stringify(row)
+    )
+      return json(409, { ok: false, error: "recovery_claim_mismatch", at });
   }
   // The definitive drain fence sits beside dispatch, after every asynchronous
   // read. Its synchronous permit acquisition and dispatch call cannot have a
@@ -3438,6 +3518,270 @@ export interface OriginalUnitRecoveryCaller {
   messageId?: string;
 }
 
+/** A terminal first coding round has no PR owner to reserve. Its durable unit
+ * CAS is the writer claim; the accepted push and ref are independently read
+ * again before the new child starts. Local-only bytes provide no authority. */
+async function recoverOriginalCodingUnit(
+  deps: AdminCoordinatorDeps,
+  instance: CoordinatorInstance,
+  row: CoordinatorUnit,
+  request: RecoveryRequest | undefined,
+  savedAction: RecoveryAction | null,
+  requestedWorkflowId: string | undefined,
+  at: number,
+): Promise<IngressResponse> {
+  if (request === undefined && (requestedWorkflowId === undefined || row.recovery?.kind !== "coding"))
+    return json(409, { ok: false, error: "recovery_request_identity_required", at });
+  if (instance.stop !== undefined || row.publication !== undefined || row.resume !== undefined || row.pr !== undefined)
+    return json(409, { ok: false, error: "recovery_stage_ambiguous", at });
+  const branch = parsePlanBranch(row.branch);
+  if (
+    instance.base === undefined ||
+    branch === undefined ||
+    branch.planId !== instance.plan?.id ||
+    branch.unitSlug !== row.slug
+  )
+    return json(409, { ok: false, error: "recovery_binding_mismatch", at });
+  try {
+    generatedTaskText(row.generatedTask, instance);
+  } catch {
+    return json(409, { ok: false, error: "recovery_task_unverified", at });
+  }
+  const current = row.recovery;
+  if (current !== undefined && current.kind !== "coding")
+    return json(409, { ok: false, error: "recovery_stage_ambiguous", at });
+  if (current === undefined && (row.idle !== undefined || row.ending === undefined))
+    return json(409, { ok: false, error: "unit_not_terminal", at });
+  if (current === undefined && row.recoveryReceipt?.codingRunId !== undefined)
+    return json(409, { ok: false, error: "recovery_already_completed", at });
+  if (current === undefined && !["aborted", "stopped", "interrupted", "failed"].includes(row.ending!.kind))
+    return json(409, { ok: false, error: "recovery_ending_unsupported", at });
+  if (
+    row.segments?.length ||
+    Object.keys(row.wakes ?? {}).length ||
+    row.rounds.some((note) => note.agent !== "coding" || note.index !== 0)
+  )
+    return json(409, { ok: false, error: "recovery_stage_ambiguous", at });
+  const caps = instance.caps;
+  const grant = instance.grant;
+  if (
+    caps === undefined ||
+    grant === undefined ||
+    !Number.isSafeInteger(caps.maxRounds) ||
+    caps.maxRounds < 1 ||
+    !Number.isFinite(caps.maxMinutes) ||
+    caps.maxMinutes <= 0 ||
+    !Number.isSafeInteger(minutesToMs(caps.maxMinutes)) ||
+    !Number.isSafeInteger(grant.renewals) ||
+    grant.renewals < 0 ||
+    grant.renewals > GRANT_RENEWALS_MAX ||
+    (grant.costCapUsd !== undefined && (!Number.isFinite(grant.costCapUsd) || grant.costCapUsd <= 0)) ||
+    row.startedAt === undefined ||
+    !Number.isFinite(row.startedAt) ||
+    row.startedAt > at ||
+    (row.ending !== undefined && (row.ending.at < row.startedAt || row.ending.at > at))
+  )
+    return json(409, { ok: false, error: "recovery_budget_unknown", at });
+  const deadlineAt = row.startedAt + minutesToMs(caps.maxMinutes);
+  if (carve(deadlineAt - at, { kind: "coding", index: 0 }, { maxRounds: caps.maxRounds }).kind === "refused")
+    return json(409, { ok: false, error: "recovery_wall_clock_exhausted", at });
+
+  let claim = current;
+  if (claim === undefined) {
+    const listing = await deps.runs.listRuns({
+      privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
+      status: "all",
+      visibleTo: EVERY_RUN,
+      limit: RUN_LIST_MAX_LIMIT,
+      recoveryEvidence: { instanceId: instance.id, unit: row.unit, threadKeys: [row.threadKey ?? instance.threadKey] },
+    });
+    if (
+      listing.storeUnavailable ||
+      listing.ledgerUnavailable ||
+      listing.nextBefore !== undefined ||
+      listing.runs.length >= RUN_LIST_MAX_LIMIT
+    )
+      return json(409, { ok: false, error: "recovery_evidence_incomplete", at });
+    const key = `${instance.id}:${row.unit}/0/coding`;
+    const matching = listing.runs.filter((run) => run.idempotencyKey === key);
+    const coding = matching.length === 1 ? matching[0] : undefined;
+    const settlement =
+      coding === undefined ? undefined : publicationSettlementForRun(coding.publicationSettlement, coding);
+    if (
+      coding === undefined ||
+      listing.runs.some(
+        (run) =>
+          run.doorPublicationPending?.owner?.instanceId === instance.id &&
+          run.doorPublicationPending.owner.unit === row.unit,
+      ) ||
+      listing.runs.some(
+        (run) =>
+          !run.finished &&
+          (run.parentInstanceId === instance.id || run.idempotencyKey?.startsWith(`${instance.id}:${row.unit}/`)),
+      ) ||
+      coding.parentInstanceId !== instance.id ||
+      coding.agent !== "coding" ||
+      coding.userId !== instance.userId ||
+      coding.repo?.toLowerCase() !== instance.repo.toLowerCase() ||
+      coding.threadKey !== (row.threadKey ?? instance.threadKey) ||
+      !coding.finished ||
+      coding.headSha === undefined ||
+      !fullHead(coding.headSha) ||
+      coding.pushed?.filter((push) => push.ref === row.branch && push.sha === coding.headSha).length !== 1 ||
+      coding.pushed?.some((push) => push.ref !== row.branch) === true ||
+      settlement?.binding.branch !== row.branch ||
+      settlement?.checkpoint.kind !== "created" ||
+      settlement.checkpoint.head !== coding.headSha ||
+      settlement.publication.kind !== "accepted" ||
+      settlement.publication.head !== coding.headSha ||
+      settlement.release.kind !== "released" ||
+      settlement.release.leftBehind !== undefined ||
+      (row.lastPush !== undefined && row.lastPush !== coding.headSha)
+    )
+      return json(409, { ok: false, error: "recovery_work_unverified", at });
+    const spend = historicalRecoverySpend(instance, row, listing.runs);
+    if ("reason" in spend) return json(409, { ok: false, error: "recovery_budget_unknown", reason: spend.reason, at });
+    if (grant.costCapUsd !== undefined && spend.usd >= grant.costCapUsd)
+      return json(409, {
+        ok: false,
+        error: "recovery_cost_cap_exhausted",
+        spendUsd: spend.usd,
+        costCapUsd: grant.costCapUsd,
+        at,
+      });
+    claim = {
+      kind: "coding",
+      round: 0,
+      codingRunId: coding.id,
+      codingKey: key,
+      expectedHeadSha: coding.headSha,
+      accounting: { spendUsd: spend.usd, children: spend.children, grant: { ...grant }, renewalsSpent: 0 },
+      remainingMs: deadlineAt - at,
+      claimedAt: at,
+      step: `${row.unit}/recovery/0/coding`,
+      previousEnding: row.ending!,
+      ...(row.lastPush !== undefined ? {} : { previousBinding: {} }),
+      workflowId: `recovery-coding-${coding.id}`,
+      deadlineAt,
+    };
+  }
+  if (requestedWorkflowId !== undefined && requestedWorkflowId !== claim.workflowId)
+    return json(409, { ok: false, error: "recovery_claim_mismatch", at });
+  if (
+    savedAction !== null &&
+    (savedAction.codingRunId !== claim.codingRunId || savedAction.workflowId !== claim.workflowId)
+  )
+    return json(409, { ok: false, error: "recovery_claim_mismatch", at });
+  if (claim.accounting.grant.costCapUsd !== grant.costCapUsd || claim.accounting.grant.renewals !== grant.renewals)
+    return json(409, { ok: false, error: "recovery_budget_unknown", at });
+  const head = await deps.fetchBranchHeadSha?.(instance.repo, row.branch).catch(() => undefined);
+  if (head === undefined) return json(409, { ok: false, error: "recovery_ref_unavailable", at });
+  if (head !== claim.expectedHeadSha) return json(409, { ok: false, error: "recovery_head_moved", at });
+  const [open, merged] = await Promise.all([
+    deps.findOpenPrByHead(instance.repo, row.branch).catch(() => undefined),
+    deps.findMergedPrByHead(instance.repo, row.branch).catch(() => undefined),
+  ]);
+  if (open === undefined || merged === undefined) return json(409, { ok: false, error: "github_unavailable", at });
+  if (open !== null || merged !== null) return json(409, { ok: false, error: "recovery_stage_changed", at });
+  if (at >= claim.deadlineAt) return json(409, { ok: false, error: "recovery_wall_clock_exhausted", at });
+
+  let claimed = row;
+  if (current === undefined) {
+    const { ending: _ending, ...active } = row;
+    const replacement: CoordinatorUnit = {
+      ...active,
+      lastPush: head,
+      recovery: claim,
+    };
+    const result = await deps.instances
+      .transitionRecovery({ kind: "claim", expected: row, replacement, request: request! })
+      .catch(() => undefined);
+    if (result?.ok !== true)
+      return json(result?.reason === "stale" ? 409 : 503, {
+        ok: false,
+        error: result?.reason === "stale" ? "recovery_claim_stale" : "recovery_store_unavailable",
+        at,
+      });
+    claimed = result.unit;
+  }
+  const codingClaim = claimed.recovery;
+  if (codingClaim?.kind !== "coding") return json(409, { ok: false, error: "recovery_claim_mismatch", at });
+  const rollback = async (error: string, consumed = false): Promise<IngressResponse> => {
+    const { recovery: _claim, history: _history, ...rest } = claimed;
+    const replacement: CoordinatorUnit = {
+      ...rest,
+      ending: codingClaim.previousEnding,
+      ...(codingClaim.previousBinding !== undefined ? { lastPush: codingClaim.previousBinding.lastPush } : {}),
+      ...(consumed
+        ? { recoveryReceipt: { codingRunId: codingClaim.codingRunId, workflowId: codingClaim.workflowId, at } }
+        : {}),
+    };
+    const result = await deps.instances
+      .transitionRecovery({ kind: "refuse", expected: claimed, replacement, error, consumed })
+      .catch(() => undefined);
+    if (result?.ok !== true) return json(500, { ok: false, error: "recovery_rollback_failed", cause: error, at });
+    return json(409, { ok: false, error, at });
+  };
+  if (requestedWorkflowId !== undefined)
+    return json(200, {
+      ok: true,
+      parentInstanceId: instance.id,
+      unit: row.unit,
+      workflowId: codingClaim.workflowId,
+      at,
+    });
+  if (current !== undefined) {
+    const status = await deps.recoveryStatus?.(codingClaim.workflowId).catch(() => ({ kind: "unanswered" as const }));
+    if (status?.kind === "status") {
+      if (["complete", "errored", "terminated"].includes(status.status))
+        return rollback("recovery_workflow_terminal", true);
+      return json(200, {
+        ok: true,
+        outcome: "already_started",
+        parentInstanceId: instance.id,
+        unit: row.unit,
+        workflowId: codingClaim.workflowId,
+        at,
+      });
+    }
+    if (status?.kind !== "absent")
+      return json(200, {
+        ok: true,
+        outcome: "indeterminate",
+        parentInstanceId: instance.id,
+        unit: row.unit,
+        workflowId: codingClaim.workflowId,
+        at,
+      });
+  }
+  const reread = await deps.fetchBranchHeadSha?.(instance.repo, row.branch).catch(() => undefined);
+  if (reread !== codingClaim.expectedHeadSha) return rollback("recovery_head_moved");
+  const started = await deps
+    .startRecovery?.(codingClaim.workflowId, {
+      kind: "recover-original-unit",
+      parentInstanceId: instance.id,
+      unit: row.unit,
+    })
+    .catch(() => ({ kind: "unanswered" as const }));
+  if (started === undefined) return rollback("recovery_workflow_unavailable");
+  if (started.kind === "failed") return rollback("recovery_workflow_failed");
+  if (
+    started.kind === "duplicate" &&
+    started.status !== undefined &&
+    ["complete", "errored", "terminated"].includes(started.status)
+  )
+    return rollback("recovery_workflow_terminal", true);
+  return json(200, {
+    ok: true,
+    outcome:
+      started.kind === "created" ? "started" : started.kind === "duplicate" ? "already_started" : "indeterminate",
+    parentInstanceId: instance.id,
+    unit: row.unit,
+    workflowId: codingClaim.workflowId,
+    at,
+  });
+}
+
 export async function recoverOriginalUnit(
   body: Record<string, unknown>,
   deps: AdminCoordinatorDeps,
@@ -3510,6 +3854,9 @@ export async function recoverOriginalUnit(
   if (row.idle !== undefined && row.ending !== undefined)
     return json(409, { ok: false, error: "unit_lifecycle_ambiguous", at });
 
+  if (row.pr === undefined && (row.recovery === undefined || row.recovery.kind === "coding"))
+    return recoverOriginalCodingUnit(deps, instance, row, request, savedAction, requestedWorkflowId, at);
+
   const originalOwner = { instanceId: instance.id, unit: row.unit };
   let publication = row.publication;
   const pr = row.pr;
@@ -3549,7 +3896,7 @@ export async function recoverOriginalUnit(
       at,
     });
 
-  const existingClaim = row.recovery;
+  const existingClaim = row.recovery?.kind === "coding" ? undefined : row.recovery;
   let kind: "findings" | "review";
   let round: number;
   let patternContinuations: number;
@@ -5922,7 +6269,9 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
           ...(row.recovery !== undefined
             ? {
                 recoveryReceipt: {
-                  reviewRunId: row.recovery.reviewRunId,
+                  ...(row.recovery.kind === "coding"
+                    ? { codingRunId: row.recovery.codingRunId }
+                    : { reviewRunId: row.recovery.reviewRunId }),
                   ...(row.recovery.externalReview !== undefined ? { externalReview: row.recovery.externalReview } : {}),
                   ...(row.recovery.accounting !== undefined ? { accounting: row.recovery.accounting } : {}),
                   workflowId: row.recovery.workflowId,
@@ -5986,7 +6335,9 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
           row.recovery !== undefined &&
           current[0]!.recovery === undefined &&
           current[0]!.recoveryReceipt?.workflowId === row.recovery.workflowId &&
-          current[0]!.recoveryReceipt?.reviewRunId === row.recovery.reviewRunId))
+          (row.recovery.kind === "coding"
+            ? current[0]!.recoveryReceipt?.codingRunId === row.recovery.codingRunId
+            : current[0]!.recoveryReceipt?.reviewRunId === row.recovery.reviewRunId)))
     ) {
       replaced = { ok: true };
       updated = current[0]!;

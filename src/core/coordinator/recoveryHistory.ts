@@ -29,7 +29,8 @@ export interface RecoveryAction {
   workerThreadKey: string;
   predecessorId: string;
   workflowId: string;
-  reviewRunId: string;
+  reviewRunId?: string;
+  codingRunId?: string;
   externalReviewId?: number;
   expectedHeadSha: string;
   payloadDigest: string;
@@ -81,6 +82,9 @@ export const RECOVERY_HISTORY_LIMITS = {
 
 export const recoveryBytes = (value: unknown): number => new TextEncoder().encode(JSON.stringify(value)).byteLength;
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+const claimSourceRunId = (claim: NonNullable<CoordinatorUnit["recovery"]>): string =>
+  claim.kind === "coding" ? claim.codingRunId : claim.reviewRunId;
+const actionSourceRunId = (action: RecoveryAction): string | undefined => action.codingRunId ?? action.reviewRunId;
 const object = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const text = (v: unknown, max = 512): v is string => typeof v === "string" && v.length > 0 && v.length <= max;
 const canonical = (value: unknown): string =>
@@ -131,6 +135,7 @@ export function isRecoveryAction(v: unknown): v is RecoveryAction {
     "predecessorId",
     "workflowId",
     "reviewRunId",
+    "codingRunId",
     "externalReviewId",
     "expectedHeadSha",
     "payloadDigest",
@@ -154,8 +159,8 @@ export function isRecoveryAction(v: unknown): v is RecoveryAction {
       v.workerThreadKey,
       v.predecessorId,
       v.workflowId,
-      v.reviewRunId,
     ].every((value) => text(value)) &&
+    text(v.reviewRunId) !== text(v.codingRunId) &&
     (v.actId === undefined || text(v.actId, 128)) &&
     isRecoveryRequest(v.request) &&
     typeof v.expectedHeadSha === "string" &&
@@ -332,8 +337,9 @@ export function planRecoveryTransition(
   if (
     input.kind !== "claim" &&
     prior &&
+    expected.recovery !== undefined &&
     prior.workflowId === expected.recovery?.workflowId &&
-    prior.reviewRunId === expected.recovery.reviewRunId
+    actionSourceRunId(prior) === claimSourceRunId(expected.recovery)
   ) {
     const restored = input.kind === "settle" ? { ...unit, history: { version: 1, receiptId: actionId } } : unit;
     if (
@@ -381,7 +387,7 @@ export function planRecoveryTransition(
       journal.actions.some(
         (row) =>
           row.consumed &&
-          (row.reviewRunId === claim.reviewRunId ||
+          (actionSourceRunId(row) === claimSourceRunId(claim) ||
             (claim.externalReview !== undefined && row.externalReviewId === claim.externalReview.id)),
       )
     )
@@ -414,7 +420,7 @@ export function planRecoveryTransition(
       workerThreadKey: expected.threadKey ?? instance.threadKey,
       predecessorId,
       workflowId: claim.workflowId,
-      reviewRunId: claim.reviewRunId,
+      ...(claim.kind === "coding" ? { codingRunId: claim.codingRunId } : { reviewRunId: claim.reviewRunId }),
       ...(claim.externalReview ? { externalReviewId: claim.externalReview.id } : {}),
       expectedHeadSha: claim.expectedHeadSha,
       payloadDigest,
@@ -441,7 +447,7 @@ export function planRecoveryTransition(
       prior.state !== "pending" ||
       !claim ||
       prior.workflowId !== claim.workflowId ||
-      prior.reviewRunId !== claim.reviewRunId ||
+      actionSourceRunId(prior) !== claimSourceRunId(claim) ||
       expected.history?.receiptId !== prior.predecessorId ||
       unit.recovery !== undefined ||
       !same(unit.history, expected.history) ||
@@ -457,7 +463,7 @@ export function planRecoveryTransition(
       if (
         !unit.ending ||
         unit.recoveryReceipt?.workflowId !== prior.workflowId ||
-        unit.recoveryReceipt.reviewRunId !== prior.reviewRunId
+        (unit.recoveryReceipt.codingRunId ?? unit.recoveryReceipt.reviewRunId) !== actionSourceRunId(prior)
       )
         return { ok: false, reason: "conflict" };
       receipt = {

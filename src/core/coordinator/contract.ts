@@ -887,11 +887,9 @@ export interface RecoveryAccounting {
 /** One admitted continuation of an ended original unit. The claim replaces
  * the terminal interpretation before a child starts; its step remains under
  * the original instance/unit idempotency namespace. */
-export interface OriginalUnitRecovery {
+interface RecoveryClaimBase {
   /** The authenticated request's journal action; absent on older claims. */
   actionId?: string;
-  kind: "findings" | "review";
-  externalReview?: RecoveryReviewEvidence;
   accounting?: RecoveryAccounting;
   round: number;
   /** Credits earned in the original segment, checked against posted review pairs at claim time. */
@@ -903,7 +901,6 @@ export interface OriginalUnitRecovery {
   claimedAt: number;
   step: string;
   /** The original review record that authorizes this transition. */
-  reviewRunId: string;
   /** A completed findings child that already advanced the original unit before
    * recovery was claimed. Present only when recovery starts at re-review. */
   findingsRunId?: string;
@@ -928,13 +925,33 @@ export interface OriginalUnitRecovery {
    * replay cannot turn the claim's snapshot into fresh time. */
   deadlineAt: number;
   /** Exact durable child key of the review outcome that authorized recovery. */
+}
+
+export interface OriginalReviewRecovery extends RecoveryClaimBase {
+  kind: "findings" | "review";
+  externalReview?: RecoveryReviewEvidence;
+  reviewRunId: string;
   reviewKey: string;
 }
+
+export interface OriginalCodingRecovery extends RecoveryClaimBase {
+  kind: "coding";
+  round: 0;
+  codingRunId: string;
+  codingKey: string;
+  accounting: RecoveryAccounting;
+  reviewRunId?: never;
+  reviewKey?: never;
+  externalReview?: never;
+}
+
+export type OriginalUnitRecovery = OriginalReviewRecovery | OriginalCodingRecovery;
 
 export interface OriginalUnitRecoveryReceipt {
   externalReview?: RecoveryReviewEvidence;
   accounting?: RecoveryAccounting;
-  reviewRunId: string;
+  reviewRunId?: string;
+  codingRunId?: string;
   workflowId: string;
   at: number;
 }
@@ -1419,10 +1436,10 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
         (r.history !== undefined &&
           typeof r.recovery.actionId === "string" &&
           /^r_[a-f0-9]{64}$/.test(r.recovery.actionId))) &&
-      (r.recovery.kind === "findings" || r.recovery.kind === "review") &&
+      (r.recovery.kind === "findings" || r.recovery.kind === "review" || r.recovery.kind === "coding") &&
       typeof r.recovery.round === "number" &&
       Number.isInteger(r.recovery.round) &&
-      r.recovery.round >= 1 &&
+      (r.recovery.kind === "coding" ? r.recovery.round === 0 : r.recovery.round >= 1) &&
       (r.recovery.patternContinuations === undefined ||
         (Number.isSafeInteger(r.recovery.patternContinuations) &&
           (r.recovery.patternContinuations as number) >= 0 &&
@@ -1435,7 +1452,17 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
       isFinite(r.recovery.claimedAt) &&
       typeof r.recovery.step === "string" &&
       STEP_NAME_PATTERN.test(r.recovery.step) &&
-      isText(r.recovery.reviewRunId) &&
+      (r.recovery.kind === "coding"
+        ? isText(r.recovery.codingRunId) &&
+          isText(r.recovery.codingKey) &&
+          r.recovery.accounting !== undefined &&
+          r.recovery.externalReview === undefined &&
+          r.recovery.reviewRunId === undefined &&
+          r.recovery.reviewKey === undefined &&
+          r.recovery.findings === undefined &&
+          r.recovery.findingsRunId === undefined &&
+          r.recovery.patch === undefined
+        : isText(r.recovery.reviewRunId) && isText(r.recovery.reviewKey)) &&
       (r.recovery.accounting === undefined || isRecoveryAccounting(r.recovery.accounting)) &&
       (r.recovery.externalReview === undefined ||
         (isRecoveryReview(r.recovery.externalReview) &&
@@ -1471,14 +1498,14 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
       typeof r.recovery.workflowId === "string" &&
       INSTANCE_ID_PATTERN.test(r.recovery.workflowId) &&
       isFinite(r.recovery.deadlineAt) &&
-      isText(r.recovery.reviewKey)
+      (r.recovery.kind === "coding" ? isText(r.recovery.codingKey) : isText(r.recovery.reviewKey))
     )
   )
     return false;
   if (
     r.recoveryReceipt !== undefined &&
     (!isObject(r.recoveryReceipt) ||
-      !isText(r.recoveryReceipt.reviewRunId) ||
+      isText(r.recoveryReceipt.reviewRunId) === isText(r.recoveryReceipt.codingRunId) ||
       (r.recoveryReceipt.externalReview !== undefined && !isRecoveryReview(r.recoveryReceipt.externalReview)) ||
       (r.recoveryReceipt.accounting !== undefined && !isRecoveryAccounting(r.recoveryReceipt.accounting)) ||
       typeof r.recoveryReceipt.workflowId !== "string" ||

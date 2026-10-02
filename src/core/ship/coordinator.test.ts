@@ -116,6 +116,29 @@ const FIXED: FindingDisposition = { findingId: "F1", disposition: "fixed", note:
 const DECLINED: FindingDisposition = { findingId: "F1", disposition: "declined", note: "the loop is exclusive" };
 
 describe("original-unit recovery accounting", () => {
+  it("opens a pre-PR coding checkpoint with the original spend and no PR", () => {
+    const state = openRecoveredUnitPipeline(
+      input({
+        caps: { maxRounds: 2, maxMinutes: 240 },
+        merge: "person",
+        recovery: {
+          remainingMs: 180 * MIN,
+          unitKey: "plan-old:U10",
+          coding: { from: HEAD_A, previousRunId: "run-original-coding" },
+        },
+      }),
+      T0,
+      { kind: "coding", round: 0, expectedHeadSha: HEAD_A, codingRunId: "run-original-coding", spendUsd: 0.25 },
+    );
+    expect(state.pr).toBeUndefined();
+    expect(state.spendUsd).toBe(0.25);
+    expect(nextAction(state)).toMatchObject({
+      type: "spawn",
+      step: "U10/recovery/0/coding",
+      brief: { kind: "contract", continue: { from: HEAD_A, previousRunId: "run-original-coding", recovery: true } },
+    });
+  });
+
   it("compares the next widening with the posted prior table after recovery starts directly at review", () => {
     const prior: Finding = {
       ...FINDING,

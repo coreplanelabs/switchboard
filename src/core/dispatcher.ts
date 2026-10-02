@@ -413,7 +413,13 @@ async function answerUnitOwnedThread(
         const { recovery: _recovery, ...withoutRecovery } = owner.unit;
         const closed = {
           ...withoutRecovery,
-          recoveryReceipt: { reviewRunId: recovery.reviewRunId, workflowId: recovery.workflowId, at },
+          recoveryReceipt: {
+            ...(recovery.kind === "coding"
+              ? { codingRunId: recovery.codingRunId }
+              : { reviewRunId: recovery.reviewRunId }),
+            workflowId: recovery.workflowId,
+            at,
+          },
           ending: {
             kind: "terminated",
             report: `the original-unit recovery checkpoint is gone (${why}); no replacement pipeline was started`,
