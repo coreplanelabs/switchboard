@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { SlackDirectAudience } from "../../core/types.js";
 import { verifySlackDirectAudience } from "./directAudience.js";
 
@@ -26,6 +26,34 @@ const clientFor = (channel: object, peerTeam = "TLOCAL") => ({
 });
 
 describe("Slack direct audience verification", () => {
+  it("rechecks one unavailable provider read and requires a fresh positive result", async () => {
+    const info = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("temporary Slack failure"))
+      .mockResolvedValueOnce({ channel: safe });
+    const client = { ...clientFor(safe), conversations: { info } };
+    expect(await verifySlackDirectAudience(client, audience)).toEqual({ ok: true });
+    expect(info).toHaveBeenCalledTimes(2);
+
+    info.mockReset().mockRejectedValue(new Error("Slack remains unavailable"));
+    expect(await verifySlackDirectAudience(client, audience)).toEqual({
+      ok: false,
+      code: "direct-audience-unavailable",
+    });
+    expect(info).toHaveBeenCalledTimes(2);
+
+    info
+      .mockReset()
+      .mockRejectedValueOnce(new Error("temporary Slack failure"))
+      .mockResolvedValueOnce({ channel: { ...safe, is_shared: true } });
+    expect(await verifySlackDirectAudience(client, audience)).toEqual({ ok: false, code: "direct-audience-denied" });
+    expect(info).toHaveBeenCalledTimes(2);
+
+    info.mockReset().mockResolvedValue({ channel: { ...safe, is_shared: true } });
+    expect(await verifySlackDirectAudience(client, audience)).toEqual({ ok: false, code: "direct-audience-denied" });
+    expect(info).toHaveBeenCalledTimes(1);
+  });
+
   it("distinguishes a changed audience from unavailable verification without returning private facts", async () => {
     expect(await verifySlackDirectAudience(clientFor({ ...safe, is_shared: true }), audience)).toEqual({
       ok: false,
