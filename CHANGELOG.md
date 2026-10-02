@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.278.4](https://github.com/coreplanelabs/switchboard/compare/v1.278.3...v1.278.4) (2026-10-02)
+
+
+### Bug fixes
+
+* **ship:** resume original findings after pre-work setup refusal ([#2681](https://github.com/coreplanelabs/switchboard/issues/2681)) ([d6c1215](https://github.com/coreplanelabs/switchboard/commit/d6c12157d62f1855f6206862e3940ba5beb3668e))
+
 ## [1.278.3](https://github.com/coreplanelabs/switchboard/compare/v1.278.2...v1.278.3) (2026-10-02)
 
 
