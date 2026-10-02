@@ -3,8 +3,9 @@
 // resident-repos.md). Before the resident step's first `npm run deploy` the
 // runner closes the fleet to new runs with `POST /drain`, so the preflight's
 // wait ends when the runs already in flight end instead of when traffic
-// happens to pause; after the step — deployed, refused past the budget, or
-// failed — it reopens the fleet with `POST /undrain`, whatever happened. Pure
+// happens to pause. After a Worker-only upload, authenticated application and
+// registry reads can lift the drain without an image reconcile. A changed
+// application still takes the guarded reconcile path. Pure
 // helpers here (the request, the lines); the I/O is the runner's injected
 // `postJson`, so the loop is tested without a network.
 

@@ -42,6 +42,7 @@ const DEPLOYED = "Uploaded switchboard-resident\nCurrent Version ID: 0c48b341-f2
 const residentStep: DeployStep = {
   name: "resident",
   script: "switchboard-resident",
+  residentContainerApp: "switchboard-resident-residentdo",
   dir: "deploy/cloudflare-resident",
   command: ["npm", "run", "deploy"],
   unsetEnv: [],
@@ -53,6 +54,7 @@ const residentStep: DeployStep = {
   drain: { url: "https://switchboard-resident.example.test", tokenEnv: RESIDENT_DRAIN_TOKEN_ENV },
   why: "per-repo DOs",
 };
+const app = { value: { version: 17, image: "registry.example.test/resident:stable" } };
 const currentRegistry = {
   ok: true,
   draining: null,
@@ -75,6 +77,7 @@ function harness(env: Record<string, string>, posts: PostAnswer[] = [drained, li
   const calls: { dep: string; args: unknown[] }[] = [];
   const lines: string[] = [];
   let clock = 0;
+  let uploaded = false;
   const deps: SandboxGateDeps = {
     env,
     now: () => clock,
@@ -85,7 +88,8 @@ function harness(env: Record<string, string>, posts: PostAnswer[] = [drained, li
       url.endsWith("/residents")
         ? { status: 200, body: currentRegistry }
         : { status: 200, body: { ok: true, build: { commit: HEAD } } },
-    readAppState: async () => ({ error: "unscripted" }),
+    readAppState: async () =>
+      uploaded ? { value: { version: 18, image: "registry.example.test/resident:new" } } : app,
     readInstances: async () => ({ error: "unscripted" }),
     probeExec: async () => ({ body: { stdout: "", stderr: "", exitCode: 1 } }),
     postJson: async (...args) => {
@@ -96,7 +100,15 @@ function harness(env: Record<string, string>, posts: PostAnswer[] = [drained, li
   const io = { log: (l: string) => lines.push(l), warn: (l: string) => lines.push(`WARN ${l}`), stream: () => {} };
   /** The runner's own lines, without the span log lines. */
   const plain = () => lines.filter((l) => !l.startsWith("{"));
-  return { deps, io, calls, plain };
+  return {
+    deps,
+    io,
+    calls,
+    plain,
+    markUploaded: () => {
+      uploaded = true;
+    },
+  };
 }
 
 /** The step's command: `refusals` REFUSED exits, then the deploy. */
@@ -105,6 +117,7 @@ const exec =
   async () => {
     h.calls.push({ dep: "exec", args: [] });
     if (refusals-- > 0) return { code: 1, output: REFUSED };
+    h.markUploaded();
     return { code: 0, output: DEPLOYED };
   };
 
@@ -493,5 +506,154 @@ describe("resident deployment readiness", () => {
     expect(result.reason).toContain("reconcile");
     expect(h.calls.some((call) => call.args[0] === "https://switchboard-resident.example.test/undrain")).toBe(false);
     expect(h.plain().at(-1)).toContain("fleet stays closed");
+  });
+});
+
+describe("resident application target", () => {
+  it("unchanged named application skips image reconcile while retaining terminal workspaces", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained, lifted]);
+    const reads: string[] = [];
+    h.deps.readAppState = async (_dir, name) => {
+      reads.push(name);
+      return app;
+    };
+    const original = h.deps.readHealth;
+    const protectedThreads = ["first", "second", "third"].map((threadKey) => ({ threadKey, evicted: false }));
+    h.deps.readHealth = async (url, bearer, timeoutMs) =>
+      url.endsWith("/residents")
+        ? {
+            status: 200,
+            body: {
+              ...currentRegistry,
+              residents: [
+                { ...currentRegistry.residents[0], live: { imageReport: "current", threads: protectedThreads } },
+              ],
+            },
+          }
+        : original(url, bearer, timeoutMs);
+
+    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+    expect(result).toMatchObject({ ok: true, live: "live" });
+    expect(reads).toEqual([residentStep.residentContainerApp, residentStep.residentContainerApp]);
+    expect(h.calls.map((c) => c.args[0])).toEqual([
+      "https://switchboard-resident.example.test/drain",
+      undefined,
+      "https://switchboard-resident.example.test/undrain",
+    ]);
+    expect(h.plain().join("\n")).toContain("unchanged container application");
+    expect(protectedThreads.every((thread) => thread.evicted === false)).toBe(true);
+  });
+
+  it("changed application uses guarded reconcile", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained, reconciled, lifted]);
+    let reads = 0;
+    h.deps.readAppState = async () =>
+      reads++ === 0 ? app : { value: { version: 18, image: "registry.example.test/resident:new" } };
+    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+    expect(result).toMatchObject({ ok: true, live: "live" });
+    expect(h.calls.some((c) => c.args[0] === "https://switchboard-resident.example.test/reconcile")).toBe(true);
+  });
+
+  it("a changed image with protected registrations stays pending behind the reconcile guard", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained, pendingReconcile, held]);
+    const protectedThreads = ["first", "second", "third"].map((threadKey) => ({ threadKey, evicted: false }));
+    const original = h.deps.readHealth;
+    h.deps.readHealth = async (url, bearer, timeoutMs) =>
+      url.endsWith("/residents")
+        ? {
+            status: 200,
+            body: {
+              ...pendingRegistry,
+              residents: [
+                { ...pendingRegistry.residents[0], live: { imageReport: "pending", threads: protectedThreads } },
+              ],
+            },
+          }
+        : original(url, bearer, timeoutMs);
+    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("image report pending");
+    expect(h.calls.some((c) => c.args[0] === "https://switchboard-resident.example.test/reconcile")).toBe(true);
+    expect(h.calls.some((c) => c.args[0] === "https://switchboard-resident.example.test/undrain")).toBe(true);
+    expect(h.plain().some((line) => line.includes("fleet stays closed"))).toBe(true);
+    expect(protectedThreads.every((thread) => thread.evicted === false)).toBe(true);
+  });
+
+  it("a printed container change cannot be treated as Worker-only while the application read still looks unchanged", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained, reconciled, lifted]);
+    h.deps.readAppState = async () => app;
+    const upload: StepExec = async () => ({
+      code: 0,
+      output: `${DEPLOYED}\nContainer application changes\nEDIT switchboard-resident-residentdo\n+ "image": "registry.example.test/resident:new"`,
+    });
+    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, upload);
+    expect(result).toMatchObject({ ok: true, live: "live" });
+    expect(h.calls.some((c) => c.args[0] === "https://switchboard-resident.example.test/reconcile")).toBe(true);
+  });
+
+  it("unreadable application cannot lift the drain", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained]);
+    let reads = 0;
+    h.deps.readAppState = async () => (reads++ === 0 ? app : { error: "Cloudflare application unavailable" });
+    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("application");
+    expect(h.calls.some((c) => c.args[0] === "https://switchboard-resident.example.test/reconcile")).toBe(false);
+    expect(h.calls.some((c) => c.args[0] === "https://switchboard-resident.example.test/undrain")).toBe(false);
+  });
+
+  it("an unreadable application before upload refuses without sending the Worker", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained, lifted]);
+    h.deps.readAppState = async () => ({ error: "Cloudflare application unavailable" });
+    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+    expect(result).toMatchObject({ ok: false, live: "not deployed" });
+    expect(result.reason).toContain("container application");
+    expect(h.calls.map((c) => c.args[0])).toEqual([
+      "https://switchboard-resident.example.test/drain",
+      "https://switchboard-resident.example.test/undrain",
+    ]);
+  });
+
+  it("an incomplete or regressed application target cannot lift the drain", async () => {
+    for (const after of [
+      { error: "Cloudflare read timed out" },
+      { value: { version: 17, image: null } },
+      { value: { version: 16, image: app.value.image } },
+    ]) {
+      const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained]);
+      let reads = 0;
+      h.deps.readAppState = async () => (reads++ === 0 ? app : after);
+      const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+      expect(result.ok).toBe(false);
+      expect(result.reason).toContain("container application");
+      expect(h.calls.some((c) => c.args[0] === "https://switchboard-resident.example.test/reconcile")).toBe(false);
+      expect(h.calls.some((c) => c.args[0] === "https://switchboard-resident.example.test/undrain")).toBe(false);
+    }
+  });
+
+  it("an older pending image report blocks the Worker-only shortcut without touching the protected workspace", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained]);
+    h.deps.readAppState = async () => app;
+    const original = h.deps.readHealth;
+    const protectedThreads = ["first", "second", "third"].map((threadKey) => ({ threadKey, evicted: false }));
+    h.deps.readHealth = async (url, bearer, timeoutMs) =>
+      url.endsWith("/residents")
+        ? {
+            status: 200,
+            body: {
+              ...pendingRegistry,
+              residents: [
+                { ...pendingRegistry.residents[0], live: { imageReport: "pending", threads: protectedThreads } },
+              ],
+            },
+          }
+        : original(url, bearer, timeoutMs);
+
+    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("image report pending");
+    expect(h.calls.some((c) => c.args[0] === "https://switchboard-resident.example.test/reconcile")).toBe(false);
+    expect(h.calls.some((c) => c.args[0] === "https://switchboard-resident.example.test/undrain")).toBe(false);
+    expect(protectedThreads.every((thread) => thread.evicted === false)).toBe(true);
   });
 });

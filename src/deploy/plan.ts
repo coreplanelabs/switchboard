@@ -92,6 +92,7 @@ export interface CapabilityCheck {
  *  Containers application `<script>-<class lowercased>`. */
 export const BOT_CONTAINER_CLASS = "SwitchboardServer";
 export const SANDBOX_CONTAINER_CLASS = "SwitchboardSandbox";
+export const RESIDENT_CONTAINER_CLASS = "ResidentDO";
 /** The bearer every route on the sandbox Worker needs, `/healthz` included (execution.md item 13). */
 export const SANDBOX_BEARER_ENV = "SANDBOX_TOKEN";
 
@@ -172,6 +173,8 @@ export interface WorkerDef extends Omit<WorkerSpec, "preflight" | "liveGate"> {
   preflight?: { forceEnv: string; baseUrlEnv: string; healthUrl?: string };
   /** Present when "deployed" is not "live": the spec's gate bound to this installation's URLs. */
   liveGate?: LiveGate;
+  /** The named resident Containers application, read before and after its Worker upload. */
+  residentContainerApp?: string;
 }
 
 /** The three bearer scopes the resident preflight accepts (deploy/cloudflare-resident/preflight.mjs `TOKEN_ENV_VARS`); read is enough. */
@@ -321,6 +324,9 @@ export function workersFor(profile: DeploymentProfile): WorkerDef[] {
         // The bot preflight reads the same URL as its application + health live gate.
         ...(preflight ? { preflight: liveGate?.kind === "bot" ? { ...preflight, healthUrl } : preflight } : {}),
         ...(liveGate ? { liveGate: bindLiveGate(liveGate, script, healthUrl) } : {}),
+        ...(spec.name === "resident"
+          ? { residentContainerApp: containerApplicationName(script, RESIDENT_CONTAINER_CLASS) }
+          : {}),
       },
     ];
   });
@@ -372,6 +378,8 @@ export interface DeployStep {
   drain?: { url: string; tokenEnv: string };
   /** After the deploy, wait until the step's gate holds (the bot's application + exact health; the sandbox's rollout + probe). */
   liveGate?: LiveGate;
+  /** The named resident Containers application, needed for a Worker-only upload receipt. */
+  residentContainerApp?: string;
   why: string;
 }
 
@@ -506,6 +514,7 @@ export function planDeploy(
     ...(w.preflight?.healthUrl ? { healthUrl: w.preflight.healthUrl } : {}),
     ...(w.drain ? { drain: { url: w.baseUrl, tokenEnv: w.drain.tokenEnv } } : {}),
     ...(w.liveGate ? { liveGate: w.liveGate } : {}),
+    ...(w.residentContainerApp ? { residentContainerApp: w.residentContainerApp } : {}),
     ...(!w.liveGate && !w.healthBearerEnv ? { wakeUrl: w.healthUrl } : {}),
     // The plan says where a run's points will land (run-metrics.md item 6): the state Worker's
     // template binds the dataset the profile names, and the platform creates it on first write —

@@ -229,6 +229,7 @@ describe("WORKER_SPECS / workersFor / DEPLOY_ORDER", () => {
     });
     expect(SANDBOX_HEALTH_URL).toBe("https://switchboard-sandbox.example.test/healthz");
     expect(SANDBOX_BEARER_ENV).toBe(byName.sandbox.healthBearerEnv);
+    expect(byName.resident.residentContainerApp).toBe("switchboard-resident-residentdo");
     // The same rule names the bot's application (deploy/cloudflare/preflight.mjs APP_NAME).
     expect(containerApplicationName("switchboard", "SwitchboardServer")).toBe("switchboard-switchboardserver");
     expect(SANDBOX_CONTAINER_CLASS).toBe("SwitchboardSandbox");

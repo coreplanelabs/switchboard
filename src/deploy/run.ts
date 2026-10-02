@@ -20,6 +20,7 @@ import {
   RESIDENT_READY_WAIT_MS,
   residentWorkerProblem,
   residentRegistryProblem,
+  residentImageReportsProblem,
   reconciledResources,
 } from "./residentReadiness.js";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -955,6 +956,8 @@ async function deployStepTraced(
   // drained fleet (release-and-deploy item 31) waits past a run's whole lease
   // instead: the wait ends when the runs in flight end, and nothing new lands.
   const drain = await beginDrain(step, expectedCommit, io, deps);
+  let residentBefore: Read<AppState> | undefined;
+  let residentPrintedTarget: RolloutTarget | null | undefined;
   const waitMaxMs = drain.drained
     ? Math.max(step.waitMaxMs ?? plan.waitMaxMs, RESIDENT_DRAINED_WAIT_MAX_MS)
     : (step.waitMaxMs ?? plan.waitMaxMs);
@@ -962,9 +965,10 @@ async function deployStepTraced(
   let result: StepOutcome;
   let readyDeadline = 0;
   let resources: string[] = [];
+  let retryImageReconcile = true;
   // Once the resident command starts, its upload may have landed even if the
-  // command or health read fails. Only a proved preflight refusal or a
-  // successful reconcile makes an explicit lift safe.
+  // command or health read fails. Only a proved pre-upload refusal or an
+  // authenticated post-upload image decision makes an explicit lift safe.
   let safeToLift = true;
   try {
     result = await deployStepLoop(
@@ -984,6 +988,15 @@ async function deployStepTraced(
       (mayHaveUploaded) => {
         if (step.name === "resident") safeToLift = !mayHaveUploaded;
       },
+      async () => {
+        residentBefore = step.residentContainerApp
+          ? await deps.readAppState(step.dir, step.residentContainerApp)
+          : undefined;
+        return residentBefore;
+      },
+      (output) => {
+        residentPrintedTarget = rolloutTargetFromDeployOutput(output);
+      },
     );
     if (result.ok && step.name === "resident") {
       readyDeadline = deps.now() + RESIDENT_READY_WAIT_MS;
@@ -992,18 +1005,45 @@ async function deployStepTraced(
       const healthProblem = await waitForResident(step, expectedCommit, readyDeadline, io, deps);
       if (healthProblem) result = residentNotReady(result, healthProblem);
       else {
-        // Without this deploy's reconcile, an absent pending marker reads as
-        // current even on an old image. Missing reconcile capability fails closed.
-        const answer = await reconcileFleet(step, io, deps);
-        const reconciled = answer && reconciledResources(answer);
-        if (!reconciled)
-          result = residentNotReady(
-            result,
-            "reconcile did not confirm the affected fleet; image reports cannot be trusted",
-          );
-        else {
-          resources = reconciled;
-          safeToLift = true;
+        const residentAfter = step.residentContainerApp
+          ? await deps.readAppState(step.dir, step.residentContainerApp)
+          : undefined;
+        const application = residentApplicationChange(residentBefore, residentAfter, step.residentContainerApp);
+        if (application.kind === "unknown") result = residentNotReady(result, application.reason);
+        else if (application.kind === "unchanged" && residentPrintedTarget === null) {
+          const base = step.drain?.url ?? step.setEnv.RESIDENT_BASE_URL;
+          const bearer = RESIDENT_BEARER_ENVS.map((name) => deps.env[name]).find((value) => value?.trim());
+          const registry =
+            base && bearer && deps.now() < readyDeadline
+              ? await deps.readHealth(new URL("/residents", base).toString(), bearer, readyDeadline - deps.now())
+              : { error: "resident origin or read bearer missing" };
+          const problem = residentImageReportsProblem(registry);
+          if (problem) result = residentNotReady(result, problem);
+          else {
+            resources = (
+              "error" in registry ? [] : (registry.body as { residents: { resource: string }[] }).residents
+            ).map((row) => row.resource);
+            retryImageReconcile = false;
+            safeToLift = true;
+            io.log(
+              `[deploy:all] resident: unchanged container application ${step.residentContainerApp} at version ${application.version} and image ${shortImage(application.image)}; image reconcile skipped`,
+            );
+          }
+        } else {
+          // A changed application still uses the existing guarded image cycle.
+          // Without this deploy's reconcile, an absent pending marker reads as
+          // current even on an old image. Missing reconcile capability fails closed.
+          const answer = await reconcileFleet(step, io, deps);
+          const reconciled = answer && reconciledResources(answer);
+          if (!reconciled)
+            result = residentNotReady(
+              result,
+              "reconcile did not confirm the affected fleet; image reports cannot be trusted",
+            );
+          else {
+            resources = reconciled;
+            safeToLift = true;
+          }
         }
       }
     }
@@ -1015,12 +1055,52 @@ async function deployStepTraced(
       );
   }
   if (result.ok && step.name === "resident") {
-    const problem = await waitForResident(step, expectedCommit, readyDeadline, io, deps, resources);
+    const problem = await waitForResident(
+      step,
+      expectedCommit,
+      readyDeadline,
+      io,
+      deps,
+      resources,
+      retryImageReconcile,
+    );
     if (problem) return residentNotReady(result, problem);
     io.log("[deploy:all] resident: live — exact Worker commit, registry undrained, every image report current");
     return { ...result, live: "live" };
   }
   return result;
+}
+
+type ResidentApplicationChange =
+  { kind: "unchanged"; version: number; image: string } | { kind: "changed" } | { kind: "unknown"; reason: string };
+
+/** Only an authenticated read of the same named application on both sides can skip a container cycle. */
+function residentApplicationChange(
+  before: Read<AppState> | undefined,
+  after: Read<AppState> | undefined,
+  name: string | undefined,
+): ResidentApplicationChange {
+  if (!name || !before || !after) return { kind: "unknown", reason: "named resident container application missing" };
+  if ("error" in before)
+    return { kind: "unknown", reason: `container application ${name} unreadable before upload: ${before.error}` };
+  if ("error" in after)
+    return { kind: "unknown", reason: `container application ${name} unreadable after upload: ${after.error}` };
+  const prior = before.value;
+  const current = after.value;
+  if (
+    !Number.isSafeInteger(prior.version) ||
+    prior.version < 0 ||
+    !Number.isSafeInteger(current.version) ||
+    current.version < prior.version ||
+    typeof prior.image !== "string" ||
+    !prior.image.trim() ||
+    typeof current.image !== "string" ||
+    !current.image.trim()
+  )
+    return { kind: "unknown", reason: `container application ${name} target is incomplete or regressed` };
+  return prior.version === current.version && prior.image === current.image
+    ? { kind: "unchanged", version: current.version, image: current.image }
+    : { kind: "changed" };
 }
 
 function residentNotReady(result: StepOutcome, problem: string): StepOutcome {
@@ -1051,6 +1131,7 @@ async function waitForResident(
   io: DeployRunnerIO,
   deps: SandboxGateDeps,
   resources?: readonly string[],
+  retryImageReconcile = true,
 ): Promise<string | undefined> {
   const base = step.drain?.url ?? step.setEnv.RESIDENT_BASE_URL;
   if (!base) return "resident base URL missing";
@@ -1081,6 +1162,7 @@ async function waitForResident(
     // retries the pending fleet on the same Worker build, without re-uploading
     // the Worker or cycling residents whose reports are already current.
     if (
+      retryImageReconcile &&
       resources &&
       deps.now() >= nextReconcileAt &&
       deadline - deps.now() > 2 * LIVE_GATE_POLL_MS &&
@@ -1161,6 +1243,8 @@ async function deployStepLoop(
   root: Span,
   wait: { started: number; waitMaxMs: number; deadline: number; drained: boolean },
   uploadState: (mayHaveUploaded: boolean) => void = () => {},
+  readResidentBeforeUpload: () => Promise<Read<AppState> | undefined> = async () => undefined,
+  onResidentOutput: (output: string) => void = () => {},
 ): Promise<StepOutcome> {
   const { started, waitMaxMs, deadline } = wait;
   for (;;) {
@@ -1168,8 +1252,15 @@ async function deployStepLoop(
     const application = step.liveGate
       ? { before: await readAppBeforeUpload(step, step.liveGate, io, deps) }
       : undefined;
-    if (step.name === "resident") uploadState(true);
+    if (step.name === "resident") {
+      const beforeRead = await readResidentBeforeUpload();
+      const before = residentApplicationChange(beforeRead, beforeRead, step.residentContainerApp);
+      if (before.kind === "unknown")
+        return { ok: false, live: "not deployed", reason: `resident upload refused: ${before.reason}` };
+      uploadState(true);
+    }
     const r = await exec(step, io);
+    if (step.name === "resident") onResidentOutput(r.output);
     const outcome = classifyDeployOutput(r.code, r.output);
     if (outcome.kind === "deployed") {
       if (!step.liveGate) {
