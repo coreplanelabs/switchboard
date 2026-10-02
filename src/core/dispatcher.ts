@@ -17,6 +17,7 @@ import { readOperatorTailContext } from "./dispatch/operatorTail.js";
 import { isChildHandoff, type ChildHandoff, type HandoffConsumer, type ParentContext } from "./dispatch/handoff.js";
 import { validateChildHandoff } from "./dispatch/handoffValidation.js";
 import { contextCapsuleOf, type UnitContext, type UnitContextBinding } from "./dispatch/unitContext.js";
+import { capturePrivateWorkContext } from "./dispatch/mainContextCapture.js";
 import type { HandoffAccess, HandoffAccessFactory } from "./dispatch/handoffRuntime.js";
 import { isBudgetAnswer } from "./answerOutcome.js";
 import {
@@ -4489,18 +4490,24 @@ export async function dispatch(
         checkpoint.through,
       );
     };
-    const captureUnitContext = async (): Promise<UnitContext> => {
-      const parent = await captureParentContext();
-      const captured = await validateChildHandoff({
-        value: parent.handoff,
-        consumer: handoffConsumer!,
-        mode: "capture",
-        deps: handoffAccess!,
-        inline: parent,
+    const captureUnitContext = async (): Promise<UnitContext> =>
+      capturePrivateWorkContext({
+        run: ledgerRun,
+        capability: sessionTools,
+        captureDependencies: handoffAccess?.captureDependencies,
+        source: { runId, requester: msg.userId, channelId: msg.channelId, threadKey: msg.threadKey },
+        validate: async (parent) => {
+          if (!handoffAccess || !handoffConsumer) return "invalid";
+          const captured = await validateChildHandoff({
+            value: parent.handoff,
+            consumer: handoffConsumer,
+            mode: "capture",
+            deps: handoffAccess,
+            inline: parent,
+          });
+          return captured.kind === "valid" ? "valid" : "invalid";
+        },
       });
-      if (captured.kind !== "valid") throw new Error("The working context cannot be durably captured.");
-      return contextCapsuleOf(captured.context.handoff);
-    };
     // What this run may do to other runs (dispatch/spawn.ts; docs/reference/specs/
     // agent-conductor.md): spawn a child as this run, read the runs its
     // REQUESTER may, steer a child through the inbox a thread reply takes, and

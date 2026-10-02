@@ -52,6 +52,8 @@ import {
   type PrivateAudienceLatch,
 } from "./privateAudience.js";
 import { mainStartForRun } from "../../tools/mainStart.js";
+import { MainContextCaptureError } from "./mainContextCapture.js";
+import { contextRefusalsOf, isMainContextRefusalCode } from "../mainContextRefusal.js";
 import {
   HarnessContainerReplacedError,
   HarnessGateBypassedError,
@@ -1680,12 +1682,15 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     if (/^[^/\s]+\/[^/\s]+$/.test(repo)) githubReadRepos.add(repo.toLowerCase());
     else githubReadUnknown = true;
   };
+  // A run can refuse more than once; the live backlog and the eventual event
+  // budget are lossy, so keep each bounded reason for the finish record itself.
+  const contextRefusals = contextRefusalsOf(resume?.row.state.contextRefusals);
   const mainStart = mainStartForRun({
     agentName: agent.name,
     channelVisibility,
     initial: { actor: chatActorOf(deps.config, msg), msg },
     source: async (sourceMessage, repo) => {
-      const refuse = (reason: MainSourceFailureCode) => {
+      const refuse = (reason: MainSourceFailureCode, retryQuote?: string) => {
         events.publish({
           type: "run_note",
           kind: "work_source_refused",
@@ -1693,10 +1698,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           sourceReason: reason,
           at: clock(),
         });
-        return { kind: "refused" as const, reason };
+        return { kind: "refused" as const, reason, ...(retryQuote ? { retryQuote } : {}) };
       };
       const selected = mainSources.select(sourceMessage);
-      if (selected.kind === "refused") return refuse(selected.reason);
+      if (selected.kind === "refused") return refuse(selected.reason, selected.retryQuote);
       if (!deps.coordinatorInstances) return refuse("authority_store_unavailable");
       let turn;
       try {
@@ -1729,8 +1734,24 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     runId: run.id,
     ...(io.verifyDirectAudience ? { verifyDirectAudience: io.verifyDirectAudience.bind(io) } : {}),
     captureContext: async () => {
-      if (!ctx.captureUnitContext) throw new Error("durable context capture is unavailable");
+      if (!ctx.captureUnitContext) throw new MainContextCaptureError("precondition_capture_unavailable");
       return ctx.captureUnitContext();
+    },
+    onContextRefusal: async (contextReason) => {
+      const reason = isMainContextRefusalCode(contextReason) ? contextReason : "capture_unknown";
+      if (!contextRefusals.includes(reason)) {
+        contextRefusals.push(reason);
+        // A restart can lose both the live backlog and the current process's
+        // array. Commit the bounded receipt before returning the refusal.
+        await ledgerRun?.commitState({ contextRefusals: [...contextRefusals] });
+      }
+      events.publish({
+        type: "run_note",
+        kind: "work_context_refused",
+        summary: "Private work context refused.",
+        contextReason: reason,
+        at: clock(),
+      });
     },
     ...(deps.mainTaskStart ? { start: deps.mainTaskStart } : {}),
   });
@@ -3556,6 +3577,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       registerFinishRecord(deps, {
         answerOutcome,
         audience: privateAudienceLatch,
+        ...(contextRefusals.length ? { contextRefusals } : {}),
         ending,
         run,
         snap,

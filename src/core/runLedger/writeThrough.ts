@@ -1,3 +1,4 @@
+import type { SessionCheckpointFailure } from "../mainContextRefusal.js";
 import {
   applyContextCheckpoint,
   isContextCheckpointReceipt,
@@ -337,18 +338,7 @@ export interface LedgerRun {
   close(): Promise<void>;
 }
 
-export type SessionCheckpointFailure =
-  | "detached"
-  | "finished"
-  | "unseeded"
-  | "session-missing"
-  | "session-broken"
-  | "cursor-missing"
-  | "state-unavailable"
-  | "state-permanent"
-  | "state-route-missing"
-  | "state-unknown"
-  | "state-fenced";
+export type { SessionCheckpointFailure } from "../mainContextRefusal.js";
 
 /** A run this generation reclaimed at boot (docs/reference/specs/run-history.md item 37):
  *  its row is already ours — no claim, no seed — and its writes continue from

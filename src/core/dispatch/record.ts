@@ -8,6 +8,7 @@ import { audienceRefusalOf, type AudienceRefusalReceipt, type AudienceTrace } fr
 // a run the drain deadline abandons, a run a booting generation reclaims.
 import type { IncomingMessage } from "../types.js";
 import { directAudienceStampOf } from "../runLedger/inboxMessage.js";
+import { contextRefusalsOf } from "../mainContextRefusal.js";
 import { privateMainEvent } from "../privateMainEvent.js";
 import { refusalLine, type Refusal } from "../refusal.js";
 import { redactAndCap } from "../runEvents.js";
@@ -218,6 +219,7 @@ export function reclaimedRunRecord(input: {
   return assembleRunRecord({
     audienceRefusal: audienceRefusalOf(row.state.audienceRefusal),
     answerOutcome: answerOutcomeOf(row.state.answerOutcome),
+    contextRefusals: contextRefusalsOf(row.state.contextRefusals),
     ...(row.state.publicationSettlement !== undefined
       ? {
           publicationSettlement:
@@ -337,6 +339,8 @@ export function writeAbandonedRunRecords(
 export function assembleRunRecord(input: {
   audienceRefusal?: AudienceRefusalReceipt;
   answerOutcome?: AnswerOutcome;
+  /** Closed private capture categories, held outside the lossy live backlog. */
+  contextRefusals?: RunRecord["contextRefusals"];
   run: Pick<RunHandle, "id" | "label">;
   snap: RunSnapshot | null;
   agent?: string;
@@ -460,6 +464,7 @@ export function assembleRunRecord(input: {
     id: run.id,
     ...(input.answerOutcome ? { answerOutcome: input.answerOutcome } : {}),
     ...(input.audienceRefusal ? { audienceRefusal: input.audienceRefusal } : {}),
+    ...(privateMain && input.contextRefusals?.length ? { contextRefusals: [...input.contextRefusals] } : {}),
     ...(run.label !== undefined ? { label: run.label } : {}),
     ...(input.agent !== undefined ? { agent: input.agent } : {}),
     ...(input.model !== undefined ? { model: input.model } : {}),
@@ -707,6 +712,7 @@ export function finishChildSetup(
 export interface FinishRecordContext {
   answerOutcome?: AnswerOutcome;
   audience?: AudienceTrace;
+  contextRefusals?: RunRecord["contextRefusals"];
   ending: RunEnding;
   run: RunHandle;
   snap: RunSnapshot | null;
@@ -796,6 +802,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
         assembleRunRecord({
           audienceRefusal: ctx.audience?.refusal,
           answerOutcome: ctx.answerOutcome,
+          ...(ctx.contextRefusals?.length ? { contextRefusals: ctx.contextRefusals } : {}),
           run,
           snap,
           agent: agent.name,

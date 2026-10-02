@@ -28,7 +28,11 @@ const actor = (msg: IncomingMessage): Actor => ({
 describe("private main work source — admitted conversation messages", () => {
   it("reports a compromised source separately from a quote that is not in the latest turn", () => {
     const sources = new MainSourceTracker(initial, actor);
-    expect(sources.select("fix it")).toEqual({ kind: "refused", reason: "source_quote_mismatch" });
+    expect(sources.select("fix it")).toEqual({
+      kind: "refused",
+      reason: "source_quote_mismatch",
+      retryQuote: "Why did signup fail?",
+    });
     expect(sources.select(" ")).toEqual({ kind: "refused", reason: "source_quote_missing" });
     sources.accept([{ userId: "slack:UOTHER", directAudience, text: "fix it", messageId: "2", at: 2 }]);
     expect(sources.select("fix it")).toEqual({ kind: "refused", reason: "source_compromised" });

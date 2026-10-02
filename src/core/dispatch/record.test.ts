@@ -1,7 +1,7 @@
 import type { AudienceTrace } from "../audienceDecision.js";
 import { describe, expect, it } from "vitest";
 import { RunRegistry } from "../runRegistry.js";
-import { isRunRecord, type RunRecord } from "../runRecord.js";
+import { fitRecordToBudget, isRunRecord, type RunRecord } from "../runRecord.js";
 import {
   assembleRunRecord,
   interruptedRunRecord,
@@ -22,6 +22,92 @@ import type { ResumeContext } from "./admission.js";
 import { planContextCheckpoint } from "../references/contextCheckpoint.js";
 import { contextDependenciesHash } from "../references/contextDependencies.js";
 import type { IncomingMessage } from "../types.js";
+
+describe("private context refusal receipt on the finished run", () => {
+  it("retains the bounded refusal when a reclaimed run has no surviving note", () => {
+    const row: LiveRunRow = {
+      runId: "private-run",
+      threadKey: "slack:DPRIVATE:1.0",
+      ownerGen: "old-generation",
+      leaseUntil: 100,
+      startedAt: 1,
+      phase: "live",
+      stop: null,
+      meta: {
+        agent: "orchestrator",
+        channelId: "slack:DPRIVATE",
+        userId: "slack:UADMIN",
+        threadKey: "slack:DPRIVATE:1.0",
+        channelVisibility: "dm",
+        directAudience: {
+          kind: "slack-unshared-im",
+          channelId: "slack:DPRIVATE",
+          userId: "slack:UADMIN",
+          threadKey: "slack:DPRIVATE:1.0",
+        },
+      },
+      card: null,
+      system: "private system",
+      tools: [],
+      state: { contextRefusals: ["checkpoint_state-fenced"] },
+    };
+    const record = reclaimedRunRecord({ row, events: [], status: "interrupted", finishedAt: 10 });
+    expect(record.contextRefusals).toEqual(["checkpoint_state-fenced"]);
+    expect(isRunRecord(record)).toBe(true);
+    row.state.contextRefusals = ["private source / raw error"];
+    expect(
+      reclaimedRunRecord({ row, events: [], status: "interrupted", finishedAt: 10 }).contextRefusals,
+    ).toBeUndefined();
+  });
+
+  it("retains the bounded category even when the record budget drops its middle note", () => {
+    const msg = {
+      channelId: "slack:DPRIVATE",
+      userId: "slack:UADMIN",
+      threadKey: "slack:DPRIVATE:1.0",
+      directAudience: {
+        kind: "slack-unshared-im" as const,
+        channelId: "slack:DPRIVATE",
+        threadKey: "slack:DPRIVATE:1.0",
+        userId: "slack:UADMIN",
+      },
+    };
+    const registry = new RunRegistry({ genId: () => "private-run", genToken: () => "token" });
+    const run = registry.create(undefined, { ...msg, agent: "orchestrator" });
+    registry.publish(run.id, { type: "input", messageId: "1.0", text: "private request", at: 1 });
+    for (let i = 0; i < 30; i++) {
+      if (i === 15)
+        registry.publish(run.id, {
+          type: "run_note",
+          kind: "work_context_refused",
+          summary: "Private work context refused.",
+          contextReason: "checkpoint_state-fenced",
+          at: i + 2,
+        });
+      registry.publish(run.id, { type: "assistant", text: "later private prose", at: i + 3 });
+    }
+    registry.finish(run.id, "completed");
+    const record = assembleRunRecord({
+      run,
+      snap: registry.snapshot(run.id, run.token),
+      agent: "orchestrator",
+      msg,
+      channelVisibility: "dm",
+      finishedAt: 50,
+      status: "completed",
+      diagnosis: analyzeRunFriction([], { finished: true }),
+      contextRefusals: ["checkpoint_state-fenced"],
+    });
+    expect(record.events).toContainEqual(expect.objectContaining({ kind: "work_context_refused" }));
+    const capped = fitRecordToBudget(record, 1_400);
+    expect(capped.truncated).toBe(true);
+    expect(capped.events).not.toContainEqual(expect.objectContaining({ kind: "work_context_refused" }));
+    expect(capped.contextRefusals).toEqual(["checkpoint_state-fenced"]);
+    expect(JSON.stringify(capped)).not.toContain("later private prose");
+    expect(isRunRecord(capped)).toBe(true);
+    expect(isRunRecord({ ...capped, contextRefusals: ["private source / raw error"] })).toBe(false);
+  });
+});
 
 describe("durable source archive assembly", () => {
   it("archives only the committed context checkpoint", async () => {

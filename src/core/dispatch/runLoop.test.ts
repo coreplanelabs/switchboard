@@ -1,5 +1,6 @@
 import { parentContextOf } from "./handoff.js";
 import { contextCapsuleOf } from "./unitContext.js";
+import { MainContextCaptureError } from "./mainContextCapture.js";
 import type { AudienceCheck } from "../audienceDecision.js";
 import { booleanAudienceVerifier } from "../testing/audienceVerifier.js";
 import { testSlackCapability } from "../testing/slackSources.js";
@@ -282,8 +283,9 @@ function setup(
     userId?: string;
     channelId?: string;
     threadKey?: string;
-    /** The registry's per-run backlog bound in events, when a test needs the run's early events evicted. */
+    /** The registry's per-run backlog bound in events or bytes, when a test needs early events evicted. */
     backlogLimit?: number;
+    backlogBytes?: number;
   } = {},
 ) {
   const config = configStore(opts.yaml);
@@ -355,6 +357,7 @@ function setup(
     genId: () => "run-l",
     genToken: () => "tok",
     ...(opts.backlogLimit !== undefined ? { backlogLimit: opts.backlogLimit } : {}),
+    ...(opts.backlogBytes !== undefined ? { backlogBytes: opts.backlogBytes } : {}),
   });
   const run = registry.create(`${agentName} · #CX · UX`, {
     agent: agentName,
@@ -1670,6 +1673,147 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       messageId: "3.0",
       revision: 3,
     });
+  });
+
+  it("records a sanitized durable work context refusal without a child or private reply leak", async () => {
+    const channelId = "slack:DPRIVATE";
+    const threadKey = `${channelId}:1.0`;
+    const audience = { kind: "slack-unshared-im" as const, channelId, threadKey, userId: "slack:UADMIN" };
+    const instances = new InMemoryCoordinatorInstanceStore();
+    await instances.recordRequesterTurn({ threadKey, requesterId: audience.userId, messageId: "1.0" });
+    const started = vi.fn(async () => ({ kind: "accepted" as const, actId: "a", instanceId: "i", reply: "ok" }));
+    let result: unknown;
+    const watchedPi = watched(piHarness);
+    const s = setup("Done.", {
+      agent: "orchestrator",
+      userId: audience.userId,
+      io: { verifyDirectAudience: booleanAudienceVerifier(async () => true) } as Partial<ChannelIO>,
+      harness: {
+        harnesses: roster({
+          ...watchedPi.harness,
+          open: async (deps, run) => {
+            result = await run.toolContext.mainStart?.start(
+              "acme/api",
+              { question: "Why?", findings: [], requestedChange: "Fix it" },
+              "Fix it.",
+            );
+            return watchedPi.harness.open(deps, run);
+          },
+        }),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    });
+    s.deps.coordinatorInstances = instances;
+    s.deps.mainTaskStart = started;
+    const stateCommits: Record<string, unknown>[] = [];
+    const ledgerRun = new NullLedgerRun("run-l", {
+      put: async (record) => s.store.put(record),
+      abandoned: () => {},
+    });
+    ledgerRun.commitState = async (patch) => {
+      stateCommits.push(patch);
+      return "ok";
+    };
+    await runLoop(s.deps, {
+      ...s.ctx,
+      ledgerRun,
+      captureUnitContext: async () => {
+        throw new MainContextCaptureError("checkpoint_state-fenced");
+      },
+      configuredRepo: "acme/api",
+      msg: { ...s.ctx.msg, channelId, threadKey, directAudience: audience, messageId: "1.0", text: "Fix it." },
+      requestText: "Fix it.",
+      channelVisibility: "dm",
+    });
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    expect(result).toMatchObject({ kind: "refused", reply: expect.stringContaining("couldn't save") });
+    expect(JSON.stringify(result)).not.toContain("state-fenced");
+    expect(started).not.toHaveBeenCalled();
+    expect(stateCommits).toEqual([{ contextRefusals: ["checkpoint_state-fenced"] }]);
+    const events = (await s.store.get("run-l"))!.events;
+    const note = events.find((event) => event.type === "run_note" && event.kind === "work_context_refused");
+    expect(note).toMatchObject({
+      type: "run_note",
+      kind: "work_context_refused",
+      contextReason: "checkpoint_state-fenced",
+    });
+    expect(Object.keys(note ?? {}).sort()).toEqual(["at", "contextReason", "kind", "seq", "summary", "type"]);
+    expect(JSON.stringify(events)).not.toContain("Fix it.");
+  });
+
+  it("keeps every private context refusal category after the live backlog evicts its notes", async () => {
+    for (const bound of [{ backlogLimit: 2 }, { backlogBytes: 220 }]) {
+      const channelId = "slack:DPRIVATE";
+      const threadKey = `${channelId}:1.0`;
+      const audience = { kind: "slack-unshared-im" as const, channelId, threadKey, userId: "slack:UADMIN" };
+      const instances = new InMemoryCoordinatorInstanceStore();
+      await instances.recordRequesterTurn({ threadKey, requesterId: audience.userId, messageId: "1.0" });
+      const started = vi.fn(async () => ({ kind: "accepted" as const, actId: "a", instanceId: "i", reply: "ok" }));
+      const codes = [
+        "precondition_untracked",
+        "checkpoint_state-fenced",
+        "snapshot_failed",
+        "dependencies_failed",
+        "validation_failed",
+        "capsule_invalid",
+        "capture_unknown",
+      ] as const;
+      let index = 0;
+      const watchedPi = watched(piHarness);
+      const s = setup("Done.", {
+        agent: "orchestrator",
+        userId: audience.userId,
+        ...bound,
+        io: { verifyDirectAudience: booleanAudienceVerifier(async () => true) } as Partial<ChannelIO>,
+        harness: {
+          harnesses: roster({
+            ...watchedPi.harness,
+            open: async (deps, run) => {
+              for (const code of codes) {
+                const result = await run.toolContext.mainStart?.start(
+                  "acme/api",
+                  { question: "Why?", findings: [], requestedChange: "Fix it" },
+                  "Fix it.",
+                );
+                expect(result).toMatchObject({ kind: "refused", reply: expect.stringContaining("couldn't save") });
+                expect(JSON.stringify(result)).not.toContain(code);
+              }
+              for (let i = 0; i < 3; i++)
+                s.registry.publish(s.run.id, { type: "run_note", kind: "follow_up", summary: "later activity" });
+              return watchedPi.harness.open(deps, run);
+            },
+          }),
+          registry: new HarnessRegistry(),
+          harnessUrl: "https://bot.example.com",
+          loopbackUrl: "http://127.0.0.1:8080",
+          containerFor: () => new FakeHarnessContainer(),
+        },
+      });
+      s.deps.coordinatorInstances = instances;
+      s.deps.mainTaskStart = started;
+      await runLoop(s.deps, {
+        ...s.ctx,
+        captureUnitContext: async () => {
+          throw new MainContextCaptureError(codes[index++]);
+        },
+        configuredRepo: "acme/api",
+        msg: { ...s.ctx.msg, channelId, threadKey, directAudience: audience, messageId: "1.0", text: "Fix it." },
+        requestText: "Fix it.",
+        channelVisibility: "dm",
+      });
+      s.ending.drain(undefined);
+      await s.writer.settled();
+      expect(index).toBe(codes.length);
+      expect(started).not.toHaveBeenCalled();
+      const record = (await s.store.get("run-l"))!;
+      expect(record.events).not.toContainEqual(expect.objectContaining({ kind: "work_context_refused" }));
+      expect(record.contextRefusals).toEqual(codes);
+      expect(JSON.stringify(record)).not.toContain("Fix it.");
+    }
   });
 
   it("records the private start source predicate without exposing its message or target", async () => {
@@ -8257,6 +8401,33 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       inbox: [],
     };
   }
+  it("keeps a prior private capture refusal when a resumed run finishes after its note was lost", async () => {
+    const audience = {
+      kind: "slack-unshared-im" as const,
+      channelId: "slack:DPRIVATE",
+      threadKey: "slack:DPRIVATE:1.0",
+      userId: "slack:UADMIN",
+    };
+    const s = setup("", {
+      agent: "orchestrator",
+      userId: audience.userId,
+      channelId: audience.channelId,
+      threadKey: audience.threadKey,
+      directAudience: audience,
+      provider: neverCalled(),
+    });
+    const resume = finishing("Done.", {
+      agent: "orchestrator",
+      state: { contextRefusals: ["checkpoint_state-fenced"] },
+      events: [{ type: "input", messageId: "m1", text: "hello there", at: 1, seq: 1 }],
+    });
+    await runLoop(s.deps, { ...s.ctx, resume, channelVisibility: "dm" });
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    const record = (await s.store.get("run-l"))!;
+    expect(record.contextRefusals).toEqual(["checkpoint_state-fenced"]);
+    expect(record.events).not.toContainEqual(expect.objectContaining({ kind: "work_context_refused" }));
+  });
   const note = (kind: string, summary: string, seq: number, mode?: "soft" | "hard"): AppendableEvent => ({
     type: "run_note",
     kind: kind as "stopped",

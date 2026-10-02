@@ -5,6 +5,7 @@ import type { MainStartInput, MainStartResult } from "../core/coordinator/mainSt
 import type { MainTaskAuthority } from "../core/coordinator/requesterAuthority.js";
 import { isUnitContext, type UnitContext } from "../core/dispatch/unitContext.js";
 import type { MainSourceRefusal, MainSourceResolution } from "../core/dispatch/mainSource.js";
+import { MainContextCaptureError, type MainContextRefusalCode } from "../core/dispatch/mainContextCapture.js";
 import type { IncomingMessage, SlackDirectAudience } from "../core/types.js";
 import type { RunnableTool } from "./runnableTool.js";
 
@@ -57,6 +58,7 @@ export function mainStartForRun(deps: {
   runId: string;
   /** Supplied by dispatch, never model arguments. Failure leaves this call recoverable. */
   captureContext?: () => Promise<UnitContext>;
+  onContextRefusal?: (code: MainContextRefusalCode) => Promise<void> | void;
   verifyDirectAudience?: (audience: SlackDirectAudience) => Promise<AudienceCheck>;
   start?: (input: MainStartInput) => Promise<MainStartResult>;
 }): MainStartCapability | undefined {
@@ -72,12 +74,23 @@ export function mainStartForRun(deps: {
     start: async (repo, brief, sourceMessage) => {
       if (!deps.live()) return Promise.resolve({ kind: "refused", reply: "The main run stopped, so no work started." });
       const source = await deps.source(sourceMessage, repo);
-      if (source.kind === "refused")
+      if (source.kind === "refused") {
+        let retryQuote: string | undefined;
+        if (source.reason === "source_quote_mismatch" && source.retryQuote && deps.live()) {
+          try {
+            if ((await verifyDirectAudience(deps.initial.msg.directAudience!)).ok && deps.live())
+              retryQuote = source.retryQuote;
+          } catch {
+            // A failed audience read cannot release private request text.
+          }
+        }
         return {
           kind: "refused",
           sourceReason: source.reason,
+          ...(retryQuote ? { retryQuote } : {}),
           reply: "I couldn't verify this call's request source, so it did not start new work.",
         };
+      }
       if (!canOfferMainStart(deps.agentName, deps.channelVisibility, source.msg, source.actor, !!deps.start))
         return Promise.resolve({ kind: "refused", reply: "I can't start from that sender; nothing started." });
       let privateNow = false;
@@ -92,12 +105,12 @@ export function mainStartForRun(deps: {
       if (deps.captureContext) {
         try {
           captured = await deps.captureContext();
-          if (!isUnitContext(captured)) throw new Error("invalid captured context");
-        } catch {
+          if (!isUnitContext(captured)) throw new MainContextCaptureError("capsule_invalid");
+        } catch (error) {
+          await deps.onContextRefusal?.(error instanceof MainContextCaptureError ? error.code : "capture_unknown");
           return {
             kind: "refused",
-            reply:
-              "I couldn't save the conversation context for this worker. No work started; this call can be retried.",
+            reply: "I couldn't save the conversation context for this worker. No work started.",
           };
         }
         if (!deps.live()) return { kind: "refused", reply: "The main run stopped, so no work started." };
@@ -135,7 +148,7 @@ const text = (v: unknown, cap: number): v is string => typeof v === "string" && 
 export const workStartTool: RunnableTool = {
   name: "work_start",
   description:
-    "When the latest person turn in a direct Slack DM asks you to fix or build something, start one private coding worker. Interpret the whole turn: later corrections or a request for explanation alone mean do not start work. If intent is unclear, ask once. Carry forward the question and evidence you found with explicit finding kinds, cause uncertainty, acceptance and evidence requirements. If evidence is unavailable, say why; never invent it. Typed field issues return to this turn for correction; keep the user here and report the work id. Set sourceMessage to an exact quote from that latest person turn. A source_quote_mismatch may be retried here with an exact quote; other source-resolution codes mean this call started no new work and do not justify another DM or target guess. Preserve any earlier pending work id and its uncertain status.",
+    "When the latest person turn in a direct Slack DM asks you to fix or build something, start one private coding worker. Interpret the whole turn: later corrections or a request for explanation alone mean do not start work. If intent is unclear, ask once. Carry forward the question and evidence you found with explicit finding kinds, cause uncertainty, acceptance and evidence requirements. If evidence is unavailable, say why; never invent it. Typed field issues return to this turn for correction; keep the user here and report the work id. Set sourceMessage to a short exact quote copied from that latest person turn. If source_quote_mismatch returns retryQuote, re-read the latest turn and retry once with that literal only when it still asks for this work. Other source-resolution codes mean this call started no new work and do not justify another DM or target guess. Preserve any earlier pending work id and its uncertain status.",
   inputSchema: {
     type: "object",
     properties: {
@@ -241,6 +254,7 @@ export const workStartTool: RunnableTool = {
       "evidence",
       "requirements",
       "acceptance",
+      "sourceMessage",
     ],
     additionalProperties: false,
   },
@@ -263,7 +277,7 @@ export const workStartTool: RunnableTool = {
       case "pending":
         return `Work start is pending confirmation. Work id: ${result.actId}. ${result.reply}`;
       case "refused":
-        return `error: ${result.issues ? JSON.stringify({ kind: "invalid_brief", issues: result.issues }) : result.sourceReason ? JSON.stringify({ kind: "source_resolution", code: result.sourceReason }) : result.reply}`;
+        return `error: ${result.issues ? JSON.stringify({ kind: "invalid_brief", issues: result.issues }) : result.sourceReason ? JSON.stringify({ kind: "source_resolution", code: result.sourceReason, ...(result.retryQuote ? { retryQuote: result.retryQuote } : {}) }) : result.reply}`;
     }
   },
 };

@@ -1,4 +1,9 @@
 import { answerOutcomeOf, type AnswerOutcome } from "./answerOutcome.js";
+import {
+  isMainContextRefusalCode,
+  MAIN_CONTEXT_REFUSAL_CODES,
+  type MainContextRefusalCode,
+} from "./mainContextRefusal.js";
 import { publicationSettlementForRun, type PublicationSettlement } from "./publicationSettlement.js";
 import { audienceRefusalOf, type AudienceRefusalReceipt } from "./audienceDecision.js";
 import type { ChannelVisibility, Predicate } from "./authz/types.js";
@@ -167,6 +172,9 @@ export interface RunRecord {
    *  usage policy. Absent on a run that did not fail, on one that failed for
    *  a reason without a name here, and on records written before the field. */
   failure?: RunFailure;
+  /** Distinct private work capture refusals, independent of the bounded event backlog.
+   *  Closed vocabulary only: no requester text, source names or store errors. */
+  contextRefusals?: MainContextRefusalCode[];
   /** Events the run published in total — unchanged by truncation. */
   eventCount: number;
   /** Events actually present in `events` (= `events.length`). */
@@ -1352,6 +1360,15 @@ export function isRunRecord(v: unknown): v is RunRecord {
   }
   // The failure by name (item 57): one of the named kinds, or absent.
   if (r.failure !== undefined && !isRunFailure(r.failure)) return false;
+  if (
+    r.contextRefusals !== undefined &&
+    (!Array.isArray(r.contextRefusals) ||
+      r.contextRefusals.length === 0 ||
+      r.contextRefusals.length > MAIN_CONTEXT_REFUSAL_CODES.length ||
+      !r.contextRefusals.every(isMainContextRefusalCode) ||
+      new Set(r.contextRefusals).size !== r.contextRefusals.length)
+  )
+    return false;
   if (r.usage !== undefined && !isRunUsage(r.usage)) return false;
   // A coordinator's child (item 48): the instance id in the platform's alphabet
   // and the key `<instance>:<step>` — both or neither; one alone is no tag.

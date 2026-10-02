@@ -16,7 +16,7 @@ export type MainSourceFailureCode =
   | "repository_unconfigured"
   | "repository_mismatch";
 
-export type MainSourceRefusal = { kind: "refused"; reason: MainSourceFailureCode };
+export type MainSourceRefusal = { kind: "refused"; reason: MainSourceFailureCode; retryQuote?: string };
 export type MainSource = { actor: Actor; msg: IncomingMessage; selectableText: string };
 export type MainSourceSelection = { kind: "selected"; source: MainSource } | MainSourceRefusal;
 export type MainSourceResolution =
@@ -77,7 +77,20 @@ export class MainSourceTracker {
     if (this.compromised) return { kind: "refused", reason: "source_compromised" };
     if (!this.latest) return { kind: "refused", reason: "source_unavailable" };
     if (!quote) return { kind: "refused", reason: "source_quote_missing" };
-    if (!this.latest.selectableText.includes(quote)) return { kind: "refused", reason: "source_quote_mismatch" };
+    if (!this.latest.selectableText.includes(quote)) {
+      // A literal from the current delivered turn lets the private model
+      // correct a copy error without changing who or what authorized work.
+      const firstLine =
+        this.latest.selectableText
+          .split(/\r?\n/)
+          .find((line) => line.trim())
+          ?.trim() ?? "";
+      return {
+        kind: "refused",
+        reason: "source_quote_mismatch",
+        ...(firstLine ? { retryQuote: firstLine.slice(0, 64) } : {}),
+      };
+    }
     return { kind: "selected", source: this.latest };
   }
 
