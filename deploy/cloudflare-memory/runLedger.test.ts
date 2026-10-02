@@ -9,6 +9,42 @@ import { PRIVATE_WORKER_REPLY_MAX_CHARS } from "../../src/core/privateWorkerLog.
 import { assertNoPendingBackgroundTasks } from "./backgroundTasks.ts";
 import type { RunHistoryDO, SessionLogDO } from "./worker.ts";
 
+describe("run ledger — alarm retention of live events", () => {
+  it("keeps an unfinished run's events while pruning orphaned event rows", async () => {
+    const key = storeKey();
+    const runId = "alarm-live";
+    expect(await post("/runs/claim", claimBody(key, runId, "slack:C1:alarm-live"))).toMatchObject({ status: 200 });
+    expect(
+      await post("/runs/append", {
+        storeKey: key,
+        runId,
+        gen: "g1",
+        events: [{ type: "tool_call", tool: "bash", summary: "unsealed work", seq: 1 }],
+      }),
+    ).toMatchObject({ status: 200 });
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (_instance: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO run_events (run_id, seq, json) VALUES (?, ?, ?)`,
+        "alarm-orphan",
+        1,
+        JSON.stringify({ type: "tool_call", tool: "bash", summary: "orphan", seq: 1 }),
+      );
+    });
+
+    await runInDurableObject(stub, (instance: RunHistoryDO) => instance.alarm());
+
+    expect((await post("/runs/live", { storeKey: key })).data.runs).toEqual([expect.objectContaining({ runId })]);
+    expect((await post("/runs/live-events", { storeKey: key, runId })).data.events).toEqual([
+      expect.objectContaining({ seq: 1, summary: "unsealed work" }),
+    ]);
+    const orphan = await runInDurableObject(stub, async (_instance: RunHistoryDO, state) =>
+      state.storage.sql.exec(`SELECT seq FROM run_events WHERE run_id = ?`, "alarm-orphan").toArray(),
+    );
+    expect(orphan).toEqual([]);
+  });
+});
+
 // Feature: docs/reference/specs/run-history.md items 28–34 — the live-run ledger on the
 // RunHistoryDO: claim (one live run per thread), the fence on every owner
 // write, step records, the inbox, stop, handoff, finishing, finish in one

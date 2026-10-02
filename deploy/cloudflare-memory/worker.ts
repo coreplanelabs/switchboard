@@ -5451,9 +5451,11 @@ export class RunHistoryDO extends DurableObject<Env> {
       let candidates: { key: string; threadKey: string }[] = [];
       this.ctx.storage.transactionSync(() => {
         deleted = this.trim(policy, now, undefined).deleted;
-        // Orphan sweep: events whose run is gone (defensive — `deleteRuns` pairs
-        // the two deletes, so this is a periodic check, not a per-put cost).
-        this.sql.exec(`DELETE FROM run_events WHERE run_id NOT IN (SELECT run_id FROM runs)`);
+        // Orphan sweep: events whose run is gone. The table holds both live
+        // ledger events and finished history, so both owners must be absent.
+        this.sql.exec(`DELETE FROM run_events
+          WHERE NOT EXISTS (SELECT 1 FROM runs WHERE runs.run_id = run_events.run_id)
+            AND NOT EXISTS (SELECT 1 FROM live_runs WHERE live_runs.run_id = run_events.run_id)`);
         this.sql.exec(
           `DELETE FROM context_refs WHERE holder_run_id NOT IN (SELECT run_id FROM runs UNION SELECT run_id FROM live_runs UNION SELECT '@session:' || key FROM sessions UNION SELECT '@unit:' || instance_id || ':' || unit FROM coordinator_units)`,
         );
