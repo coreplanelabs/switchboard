@@ -1640,6 +1640,134 @@ describe("events, state, heartbeat", () => {
     });
   });
 
+  it("a later setState cannot revoke an acknowledged state commit", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    let acknowledge!: () => void;
+    const waiting = new Promise<void>((resolve) => (acknowledge = resolve));
+    let submitted!: () => void;
+    const started = new Promise<void>((resolve) => (submitted = resolve));
+    const ledger = overriding(inner, {
+      setState: async (...args) => {
+        submitted();
+        await waiting;
+        return inner.setState(...args);
+      },
+    });
+    const { wt } = harness({ ledger });
+    const run = (await openRun(wt, openReq()))!;
+    const first = run.commitState({ checklist: "saved" });
+    await started;
+    run.setState({ pushedBranch: "later" });
+    acknowledge();
+    expect(await first).toBe("ok");
+    await run.close();
+    expect(inner.live.get("r1")!.state).toEqual({ checklist: "saved", pushedBranch: "later" });
+  });
+
+  it("two concurrent state commits resolve against the snapshot that contains each patch", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const acknowledgments: (() => void)[] = [];
+    const ledger = overriding(inner, {
+      setState: async (...args) => {
+        await new Promise<void>((resolve) => acknowledgments.push(resolve));
+        return inner.setState(...args);
+      },
+    });
+    const { wt } = harness({ ledger });
+    const run = (await openRun(wt, openReq()))!;
+    const first = run.commitState({ checklist: "saved" });
+    await new Promise((r) => setImmediate(r)); // the first snapshot is in flight
+    const second = run.commitState({ pushedBranch: "later" });
+    let secondResult: string | undefined;
+    void second.then((result) => (secondResult = result));
+    acknowledgments.shift()!();
+    expect(await first).toBe("ok");
+    await new Promise((r) => setImmediate(r)); // the second snapshot is in flight
+    expect(secondResult).toBeUndefined();
+    expect(inner.live.get("r1")!.state).toEqual({ checklist: "saved" });
+    acknowledgments.shift()!();
+    expect(await second).toBe("ok");
+    expect(inner.live.get("r1")!.state).toEqual({ checklist: "saved", pushedBranch: "later" });
+  });
+
+  it("coalesced state commits share one acknowledged snapshot", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    let sends = 0;
+    const ledger = overriding(inner, {
+      setState: async (...args) => {
+        sends++;
+        return inner.setState(...args);
+      },
+    });
+    const { wt } = harness({ ledger });
+    const run = (await openRun(wt, openReq()))!;
+    const first = run.commitState({ checklist: "saved" });
+    const second = run.commitState({ pushedBranch: "together" });
+    expect(await Promise.all([first, second])).toEqual(["ok", "ok"]);
+    expect(sends).toBe(1);
+    expect(inner.live.get("r1")!.state).toEqual({ checklist: "saved", pushedBranch: "together" });
+  });
+
+  it("an acknowledged state commit survives a later failed write without crediting it", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    let firstSubmitted!: () => void;
+    const submitted = new Promise<void>((resolve) => (firstSubmitted = resolve));
+    let acknowledge!: () => void;
+    const waiting = new Promise<void>((resolve) => (acknowledge = resolve));
+    let writes = 0;
+    const ledger = overriding(inner, {
+      setState: async (...args) => {
+        if (++writes === 1) {
+          firstSubmitted();
+          await waiting;
+          return inner.setState(...args);
+        }
+        throw new PermanentStoreError("storage rejected later patch");
+      },
+    });
+    const { wt } = harness({ ledger });
+    const run = (await openRun(wt, openReq()))!;
+    const first = run.commitState({ checklist: "saved" });
+    await submitted;
+    const second = run.commitState({ pushedBranch: "not saved" });
+    acknowledge();
+    expect(await first).toBe("ok");
+    expect(await second).toBe("unavailable");
+    expect(inner.live.get("r1")!.state).toEqual({ checklist: "saved" });
+  });
+
+  it("a state commit waits for acknowledgment and cannot outlive a fence or finish", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    let submitted!: () => void;
+    const started = new Promise<void>((resolve) => (submitted = resolve));
+    let acknowledge!: () => void;
+    const waiting = new Promise<void>((resolve) => (acknowledge = resolve));
+    const ledger = overriding(inner, {
+      setState: async (...args) => {
+        submitted();
+        await waiting;
+        return inner.setState(...args);
+      },
+    });
+    const { wt } = harness({ ledger });
+    const run = (await openRun(wt, openReq()))!;
+    let result: string | undefined;
+    const commit = run.commitState({ checklist: "saved" });
+    void commit.then((value) => (result = value));
+    await started;
+    await new Promise((r) => setImmediate(r));
+    expect(result).toBeUndefined();
+    inner.live.get("r1")!.ownerGen = "gen-B";
+    acknowledge();
+    expect(await commit).toBe("fenced");
+    expect(inner.live.get("r1")!.state.checklist).toBeUndefined();
+
+    const plain = harness();
+    const finished = (await openRun(plain.wt, openReq()))!;
+    await finished.sink.put(record("r1"));
+    expect(await finished.commitState({ checklist: "too late" })).toBe("fenced");
+  });
+
   it("the heartbeat extends the lease and relays a stop another generation requested, once per mode", async () => {
     let clock = 10_000;
     const { ledger, wt, t } = harness({ now: () => clock });

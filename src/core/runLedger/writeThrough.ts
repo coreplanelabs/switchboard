@@ -951,6 +951,8 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     private state: RunState;
     private stateSending: Promise<void> = Promise.resolve();
     private stateDirty = false;
+    private stateVersion = 0;
+    private acknowledgedStateVersion = 0;
     private stopRelayed: StopMode | undefined;
     private heartbeat: { unref?(): void } | undefined;
     private readonly flusher = createAppendFlusher<AppendableEvent>({
@@ -1481,6 +1483,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       if (this.detached) return;
       this.state = { ...this.state, ...patch };
       this.stateDirty = true;
+      this.stateVersion++;
       this.stateSending = this.stateSending.then(() => this.sendState());
     }
 
@@ -1492,9 +1495,11 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       if (this.fencedOut || this.finished) return "fenced";
       if (this.detached) return "unavailable";
       this.setState(patch);
+      const requestedVersion = this.stateVersion;
       await this.stateSending;
       if (this.fencedOut || this.finished) return "fenced";
-      return this.detached || this.stateDirty ? "unavailable" : "ok";
+      // Later dirty patches cannot revoke this patch's acknowledged snapshot.
+      return this.detached || this.acknowledgedStateVersion < requestedVersion ? "unavailable" : "ok";
     }
 
     /** The merged snapshot, sent once per burst of patches; a transient failure
@@ -1504,10 +1509,13 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     private async sendState(): Promise<void> {
       if (!this.stateDirty || this.detached || this.finished) return;
       this.stateDirty = false;
+      const snapshot = { ...this.state };
+      const version = this.stateVersion;
       for (let attempt = 1; ; attempt++) {
         try {
-          const result = await ledger.setState(this.runId, gen, this.state);
+          const result = await ledger.setState(this.runId, gen, snapshot);
           if (!result.ok) this.detach(`state refused (${result.reason})`, true);
+          else this.acknowledgedStateVersion = version;
           return;
         } catch (err) {
           if (err instanceof RouteMissingError || err instanceof PermanentStoreError || attempt >= 2) {
