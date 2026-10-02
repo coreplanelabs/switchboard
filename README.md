@@ -20,7 +20,9 @@ Mention it in Slack and an agent reviews the PR, ships the fix, or answers the q
 
 ## Quick start
 
-Node 24 and an Anthropic API key; no Slack.
+Already have a team deployment? [Use the existing Switchboard](docs/tutorials/use-an-existing-deployment.md).
+
+To run your own: Node 24 and an Anthropic API key; no Slack.
 
 ```bash
 npx @coreplane/switchboard init --organization <your GitHub org> --anthropic-key <your key>

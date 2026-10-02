@@ -4,11 +4,12 @@ Switchboard is an agent gateway: you say what you want over Slack, the CLI, HTTP
 
 ## Pick your surface
 
-New here? [Get started](tutorials/get-started.md) first.
+New here? [Use an existing deployment](tutorials/use-an-existing-deployment.md) if your team already runs Switchboard, or [Get started](tutorials/get-started.md) to set up your own.
 
 | You are… | Start with | Then |
 |---|---|---|
-| talking to the bot in Slack | [Your first request in Slack](tutorials/first-request-in-slack.md) | [Configure your defaults](how-to/configure-your-defaults.md) |
+| joining an existing deployment | [Use an existing deployment](tutorials/use-an-existing-deployment.md) | [Your first request in Slack](tutorials/first-request-in-slack.md) |
+| trying more requests in Slack | [Your first request in Slack](tutorials/first-request-in-slack.md) | [Configure your defaults](how-to/configure-your-defaults.md) |
 | running it in production | [Deploy](how-to/deploy.md) | [Operate production](how-to/operate-production.md) |
 | watching runs or spend | [Watch a run](how-to/watch-a-run.md) | [Check spend](how-to/check-spend.md) |
 | locking it down | [Restrict who can do what](how-to/restrict-who-can-do-what.md) | [Security model](explanation/security-model.md) |
