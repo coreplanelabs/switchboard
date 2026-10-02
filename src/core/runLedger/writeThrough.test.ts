@@ -464,6 +464,29 @@ describe("open — claim and seed", () => {
     await run.close();
   });
 
+  it("logs a sanitized checkpoint refusal category for state timeouts and detached runs", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    let failState = false;
+    const { wt, warnings } = harness({
+      ledger: overriding(inner, {
+        setState: async (runId, gen, state) => {
+          if (failState) throw new TransientStoreError("state timeout");
+          return inner.setState(runId, gen, state);
+        },
+      }),
+    });
+    const run = (await openRun(wt, openReq()))!;
+    failState = true;
+    expect(await run.checkpointSession()).toBeUndefined();
+    expect(warnings).toContainEqual(expect.stringContaining("context checkpoint unavailable (state-unavailable)"));
+    expect(warnings.join(" ")).not.toContain("earlier");
+    inner.live.get("r1")!.ownerGen = "new-owner";
+    failState = false;
+    expect(await run.checkpointSession()).toBeUndefined();
+    expect(await run.checkpointSession()).toBeUndefined();
+    expect(warnings).toContainEqual(expect.stringContaining("context checkpoint unavailable (detached)"));
+  });
+
   it("claims the thread with the run's prompt, tools, card and meta, and seeds the transcript", async () => {
     const { ledger, wt, warnings } = harness();
     const run = await openRun(wt, openReq());

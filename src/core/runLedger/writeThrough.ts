@@ -291,6 +291,8 @@ export interface LedgerRun {
   recordSourceResult(receipt: SourceResultReceipt): Promise<boolean>;
   /** Freeze an acknowledged source cursor in the owned live row before handoff. */
   checkpointSession(): Promise<{ key: string; through: number } | undefined>;
+  /** Sanitized cause of the most recent failed checkpoint, for the run's failure event. */
+  readonly lastCheckpointFailure: SessionCheckpointFailure | undefined;
   /** Once after the initial seed ACK, before provider execution. */
   normalizeContextOrigins(): Promise<ContextCheckpointResult>;
   /** `live → finishing`, before the reply — the double-answer gate (D9). */
@@ -327,6 +329,16 @@ export interface LedgerRun {
   /** Stop the heartbeat and flush the events. Idempotent; `sink.put` does it too. */
   close(): Promise<void>;
 }
+
+export type SessionCheckpointFailure =
+  | "detached"
+  | "finished"
+  | "unseeded"
+  | "session-missing"
+  | "session-broken"
+  | "cursor-missing"
+  | "state-unavailable"
+  | "state-fenced";
 
 /** A run this generation reclaimed at boot (docs/reference/specs/run-history.md item 37):
  *  its row is already ours — no claim, no seed — and its writes continue from
@@ -562,6 +574,7 @@ export class NullLedgerWriteThrough implements LedgerWriteThrough {
 /** A run the null write-through was asked to adopt: untracked, not resumable,
  *  every mirror a no-op, its finish landing on the plain store. */
 export class NullLedgerRun implements LedgerRun {
+  readonly lastCheckpointFailure = undefined;
   async normalizeContextOrigins(): Promise<ContextCheckpointResult> {
     return { ok: false, reason: "checkpoint-unavailable" };
   }
@@ -944,6 +957,10 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     private turnsWritten: number | undefined;
     /** A detach left the log short of what the model saw: the record says `broken`. */
     private broken = false;
+    private checkpointFailure: SessionCheckpointFailure | undefined;
+    get lastCheckpointFailure(): SessionCheckpointFailure | undefined {
+      return this.checkpointFailure;
+    }
     private stepNo: number;
     /** The row is a hosted ship parent's (record 0060): `meta.hosted` at the claim. */
     private readonly hosted: boolean;
@@ -1220,18 +1237,22 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     }
 
     async checkpointSession(): Promise<{ key: string; through: number } | undefined> {
-      if (
-        this.detached ||
-        this.finished ||
-        (!this.seeded && !this.adopted) ||
-        !this.sessionRow ||
-        this.sessionRow.range === "broken" ||
-        this.broken ||
-        this.turnsWritten === undefined
-      )
+      const unavailable = (reason: SessionCheckpointFailure): undefined => {
+        this.checkpointFailure = reason;
+        warn(`[ledger] ${this.threadKey} run ${this.runId} context checkpoint unavailable (${reason})`);
         return undefined;
+      };
+      if (this.detached) return unavailable("detached");
+      if (this.finished) return unavailable("finished");
+      if (!this.seeded && !this.adopted) return unavailable("unseeded");
+      if (!this.sessionRow) return unavailable("session-missing");
+      if (this.sessionRow.range === "broken" || this.broken) return unavailable("session-broken");
+      if (this.turnsWritten === undefined) return unavailable("cursor-missing");
       const checkpoint = { key: this.sessionRow.key, through: this.sessionRow.seedFrom + this.turnsWritten - 1 };
-      return (await this.setStateAndFlush({ contextCheckpoint: checkpoint })) ? checkpoint : undefined;
+      const saved = await this.commitState({ contextCheckpoint: checkpoint });
+      if (saved !== "ok") return unavailable(saved === "fenced" ? "state-fenced" : "state-unavailable");
+      this.checkpointFailure = undefined;
+      return checkpoint;
     }
 
     async normalizeContextOrigins(): Promise<ContextCheckpointResult> {

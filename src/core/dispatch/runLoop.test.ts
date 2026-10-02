@@ -8479,6 +8479,97 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     });
   });
 
+  it.each([
+    ["general", false],
+    ["review", false],
+    ["general", true],
+    ["review", true],
+  ] as const)(
+    "keeps a %s answer behind its final context checkpoint (persistent failure: %s)",
+    async (agent, persistentFailure) => {
+      const posts: string[] = [];
+      const s = setup("", {
+        agent,
+        provider: neverCalled(),
+        ...(agent === "review"
+          ? {
+              ...prThread,
+              review: { head: HEAD, post: async (_target: ReviewCommentTarget, body: string) => void posts.push(body) },
+              executor: { exec: async (command: string) => (command.includes("rev-parse") ? `${HEAD}\n` : "") },
+            }
+          : {}),
+      });
+      const resume = finishing("Saved final answer.", {
+        agent,
+        ...(agent === "review" ? { state: { verdict: VERDICT }, repoCtx: prThread.repoCtx } : {}),
+      });
+      const inner = new InMemoryRunLedger(() => NOW);
+      let failState = false;
+      const setState = inner.setState.bind(inner);
+      inner.setState = async (runId, gen, state) => {
+        if (failState && state.contextCheckpoint) throw new Error("temporary state timeout");
+        return setState(runId, gen, state);
+      };
+      const ledger = createLedgerWriteThrough({
+        ledger: inner,
+        gen: "gen-T",
+        fallback: s.store,
+        warn: () => {},
+        sleep: async () => {},
+      });
+      s.deps.runLedger = ledger;
+      const opened = await ledger.open({
+        runId: s.run.id,
+        threadKey: s.ctx.msg.threadKey,
+        startedAt: NOW,
+        meta: { agent, channelId: s.ctx.msg.channelId, userId: s.ctx.msg.userId, threadKey: s.ctx.msg.threadKey },
+        card: null,
+        system: s.ctx.system,
+        tools: [],
+        seed: {
+          messages: resume.plan.messages,
+          budgetMs: 60_000,
+          context: { version: 1, status: "known", revision: 0, origins: [], slack: [], mcp: [] },
+        },
+      });
+      if (opened.kind !== "tracked") throw new Error("the run was not tracked");
+      const checkpoint = opened.run.checkpointSession.bind(opened.run);
+      let checkpoints = 0;
+      opened.run.checkpointSession = async () => {
+        checkpoints++;
+        failState = persistentFailure || checkpoints === 1;
+        return checkpoint();
+      };
+      const running = runLoop(s.deps, {
+        ...s.ctx,
+        ledgerRun: opened.run,
+        resume,
+        messages: resume.plan.messages,
+      });
+      if (persistentFailure) {
+        await expect(running).rejects.toThrow("answer context checkpoint was not persisted (state-unavailable)");
+        expect(checkpoints).toBe(2);
+        expect(s.published.some((event) => event.startsWith("answer:"))).toBe(false);
+        expect(posts).toHaveLength(0);
+        expect(s.registry.snapshot(s.run.id, "tok")!.events).toContainEqual(
+          expect.objectContaining({
+            type: "run_note",
+            kind: "run_failed",
+            summary: expect.stringContaining("state-unavailable"),
+          }),
+        );
+        return;
+      }
+      const out = answered(await running);
+      expect(out.answer).toBe("Saved final answer.");
+      expect(checkpoints).toBe(2);
+      const saved = await ledger.readSessionTail(opened.run.session!.threadSession!, 8192);
+      expect(JSON.stringify(saved.transcript)).toContain("Saved final answer.");
+      if (agent === "review") expect(posts).toHaveLength(1);
+      else expect(posts).toHaveLength(0);
+    },
+  );
+
   it("a review whose verdict a previous generation already posted (a `review_posted` event among the replayed events) posts nothing again: the settle does not run, the outcome on the record is the event's, and the reviewed head is the event's", async () => {
     const posts: Array<{ target: ReviewCommentTarget; body: string }> = [];
     const execs: string[] = [];
