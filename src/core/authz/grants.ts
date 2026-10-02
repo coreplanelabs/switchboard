@@ -41,9 +41,12 @@ export const SURFACE_GRANT_PREFIXES = ["slack", "http", "mcp", "access"] as cons
 
 /** The `<ns>:*` key for the surface `actorId` authenticated on — `slack:*` for
  *  `slack:U…`, `access:*` for a browser `access:<sub>` — or undefined when its
- *  namespace has none (`access:svc:`, `schedule:`, `cli:`, `agent:`, unknown). */
+ *  namespace has none (`access:svc:`, `schedule:`, `cli:`, `agent:`, unknown).
+ *  Browser-approved `mcp:personal:<sub>` uses its own `mcp:personal:*` family. */
 export function surfaceKeyFor(actorId: string): string | undefined {
   if (actorId.startsWith("access:svc:")) return undefined;
+  if (actorId === "mcp:personal:*" || (actorId.startsWith("mcp:personal:") && actorId.length > 13))
+    return "mcp:personal:*";
   const colon = actorId.indexOf(":");
   if (colon <= 0 || colon === actorId.length - 1) return undefined;
   const ns = actorId.slice(0, colon);
@@ -141,7 +144,7 @@ export function parseGrantsConfig(raw: unknown): ParsedGrantsConfig {
     const where = `grants["${actorId}"]`;
     if (actorId.includes("*") && surfaceKeyFor(actorId) !== actorId) {
       errors.push(
-        `${where}: "*" only ever stands for a whole surface — one of ${SURFACE_GRANT_PREFIXES.map((p) => `${p}:*`).join(", ")} (every actor authenticated there); a subject is never a pattern, and schedule:, access:svc:, agent: and cli: ids are named one by one`,
+        `${where}: "*" only stands for a whole surface (${SURFACE_GRANT_PREFIXES.map((p) => `${p}:*`).join(", ")}) or mcp:personal:*; other subject patterns are refused`,
       );
       continue;
     }

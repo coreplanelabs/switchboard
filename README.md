@@ -20,7 +20,7 @@ Mention it in Slack and an agent reviews the PR, ships the fix, or answers the q
 
 ## Quick start
 
-Already have a team deployment? [Use the existing Switchboard](docs/tutorials/use-an-existing-deployment.md).
+Already have a team deployment? [Connect the local CLI and MCP client](docs/tutorials/use-an-existing-deployment.md#connect-a-local-cli-and-mcp-client) or use it in Slack.
 
 To run your own: Node 24 and an Anthropic API key; no Slack.
 
@@ -29,7 +29,7 @@ npx @coreplane/switchboard init --organization <your GitHub org> --anthropic-key
 npx @coreplane/switchboard ask "what can you do?"
 ```
 
-`init` writes `.env` (mode 600) and `config/config.yaml` into `~/.switchboard`, so every command works from any directory; `ask` sends a request through the same dispatcher as Slack. `curl -fsSL https://openswitchboard.dev/install.sh | sh` is the same `init`.
+`init` writes `.env` (mode 600) and `config/config.yaml` into `~/.switchboard`, so every command works from any directory; `ask` sends a request through the same dispatcher as Slack. `curl -fsSL https://openswitchboard.dev/install.sh | sh` is the same `init`. To use a deployment your team already runs, run `npx -y @coreplane/switchboard connect <host>` instead.
 
 Next: [Get started](docs/tutorials/get-started.md).
 

@@ -18,6 +18,8 @@ import { SlackConversationReader } from "./channels/slack/references.js";
 import { createSlackContextCapability } from "./channels/slack/context.js";
 import { createIngressHandler, parseIngressTokens } from "./channels/http.js";
 import { createMcpHandler } from "./channels/mcp.js";
+import { FilePersonalTokenStore, WorkerPersonalTokenStore } from "./mcp/personalTokens.js";
+import { createPersonalMcpSetupHandler } from "./channels/personalMcpSetup.js";
 import { FAVICON_ICO_SVG, createLiveViewHandler } from "./channels/liveView.js";
 import { loadWebAssets, webDistDir } from "./channels/webAssets.js";
 import { PACKAGE_ROOT, packageVersion } from "./packageRoot.js";
@@ -1102,18 +1104,28 @@ export async function runBot(): Promise<void> {
   // Optional HTTP server. Slack traffic arrives over the outbound Socket Mode
   // websocket, so this port serves (a) a health probe for container platforms
   // (Cloudflare Containers, Fly, k8s) and the two authenticated universal
-  // ingress channels, both fed by the SAME SWITCHBOARD_INGRESS_TOKENS token map
-  // (one credential set, two surfaces) and both landing in the same dispatch()
-  // the Slack/CLI adapters use: (b) HTTP ingress (adapter #3): POST /ingress,
-  // and (c) MCP ingress (adapter #4): POST /mcp — a minimal MCP server over
-  // streamable-HTTP (JSON-RPC 2.0). With no tokens configured BOTH are
-  // fail-closed disabled.
+  // ingress channels. Static SWITCHBOARD_INGRESS_TOKENS work on both; personal
+  // browser-approved credentials work only on MCP. Both land in dispatch().
+  // HTTP ingress: POST /ingress; MCP ingress: POST /mcp (JSON-RPC 2.0).
+  // Without an authorized credential, each remains fail-closed.
   if (process.env.PORT) {
+    const personalTokenWorker = config.config.runtimeOverrides?.worker;
+    const personalTokenEnv = personalTokenWorker?.tokenEnv ?? "MEMORY_TOKEN";
+    const personalTokenSecret = personalTokenWorker ? processSecrets.named(personalTokenEnv) : undefined;
+    if (personalTokenWorker && !personalTokenSecret)
+      throw new Error(`runtimeOverrides.worker is configured but ${personalTokenEnv} is not set`);
+    const personalTokenStore = personalTokenWorker
+      ? new WorkerPersonalTokenStore({
+          baseUrl: personalTokenWorker.baseUrl,
+          token: personalTokenSecret!.reveal(),
+        })
+      : new FilePersonalTokenStore(join(DATA_DIR, "personal-mcp-tokens.json"));
     // A token entry's `email` binds it to a person (authorization.md item 15):
     // the same cached reverse lookup the dashboard link uses.
     const ingress = createIngressHandler(deps, { auth, publicBaseUrl: process.env.PUBLIC_BASE_URL, personByEmail });
     const mcp = createMcpHandler(deps, {
       auth,
+      personalTokens: personalTokenStore,
       commands,
       grantsFor: (id) => config.grantsFor(id),
       personByEmail,
@@ -1610,6 +1622,11 @@ export async function runBot(): Promise<void> {
       registry: () => mcpWiring.service,
       publicOrigin: publicBaseUrl ? new URL(publicBaseUrl).origin : undefined,
     });
+    const personalMcpSetup = createPersonalMcpSetupHandler({
+      store: personalTokenStore,
+      grantsFor: (id) => config.grantsFor(id),
+      publicOrigin: publicBaseUrl ? new URL(publicBaseUrl).origin : undefined,
+    });
     // --- end command registry over HTTP ---
     // A service token is a command-surface credential only (`serviceTokenAllowed`):
     // it can never load /runs* (live capability tokens), /residents* or /costs*.
@@ -1796,6 +1813,7 @@ export async function runBot(): Promise<void> {
             if (webChat(req, res, { actor, identity })) return;
             // --- /mcp/connect/<nonce>: the credential page, identity-bound. ---
             if (mcpConnectView(req, res, gate.identity)) return;
+            if (personalMcpSetup(req, res, gate.identity)) return;
             if (residentsView(req, res, { actor })) return;
             if (costsView(req, res, { identity, actor })) return;
             if (metricsView(req, res, { actor })) return;
@@ -1882,7 +1900,7 @@ export async function runBot(): Promise<void> {
       httpListeningAt = systemClock();
       console.log(
         `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp + model proxy (POST ${ANTHROPIC_MESSAGES_PATH}, POST ${OPENAI_CHAT_COMPLETIONS_PATH}, POST ${OPENAI_RESPONSES_PATH}) + ${liveViewState} + ${schedulesState} + ${residentsState} + ${costsState} + ${metricsState} + ${deliveryState} + GET /settings + GET /threads (+ POST /threads/<id>/send) + ${commandHttpState} + /docs → ${PROJECT_DOCS_URL}; ` +
-          `${tokenCount > 0 ? `${tokenCount} ingress token(s)` : "ingress + MCP DISABLED — no tokens configured"}; ${accessState})`,
+          `${tokenCount > 0 ? `${tokenCount} static ingress token(s)` : "static ingress tokens absent"}; personal MCP approval ${accessConfig ? "available with grant" : "unavailable without Access"}; ${accessState})`,
       );
     });
   }

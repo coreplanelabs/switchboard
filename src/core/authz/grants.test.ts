@@ -98,6 +98,15 @@ describe("parseGrantsConfig — the native `grants` block", () => {
     });
   });
 
+  it("mcp:personal:* grants browser-approved credentials without widening operator-created MCP tokens", () => {
+    const source = { grants: parsed({ "mcp:personal:*": { actions: ["dispatch", "runs:read"], channels: "all" } }) };
+    expect(surfaceKeyFor("mcp:personal:access-sub")).toBe("mcp:personal:*");
+    expect(grantsFor("mcp:personal:access-sub", source)).toEqual(
+      grants({ actions: set("dispatch", "runs:read"), channels: "all" }),
+    );
+    expect(grantsFor("mcp:deployer", source)).toBe(NO_GRANTS);
+  });
+
   it("`*` anywhere else fails naming the id: a partial subject, schedule:*, access:svc:*, agent:*, cli:*, a bare *", () => {
     for (const id of ["slack:U*", "slack:*U", "http:ci-*", "schedule:*", "access:svc:*", "agent:*", "cli:*", "*"]) {
       const p = parseGrantsConfig({ [id]: { actions: ["runs:read"] } });

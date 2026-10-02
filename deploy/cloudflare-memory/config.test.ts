@@ -185,6 +185,26 @@ describe("ConfigDO secrets + tickets (docs/reference/specs/mcp-tools.md items 15
   });
 });
 
+describe("ConfigDO personal MCP tokens", () => {
+  it("stores only a digest, lists by owner, and revokes only for that owner", async () => {
+    const token = { digest: "a".repeat(64), subject: `personal:${key()}`, email: "one@example.com", createdAt: 42 };
+    const other = { ...token, digest: "b".repeat(64), subject: `personal:${key()}` };
+    expect((await post("/config/personal-tokens/get", { digest: token.digest })).data).toEqual({ token: null });
+    expect((await post("/config/personal-tokens/put", { token })).data).toEqual({ ok: true });
+    await post("/config/personal-tokens/put", { token: other });
+    expect((await post("/config/personal-tokens/get", { digest: token.digest })).data).toEqual({ token });
+    expect((await post("/config/personal-tokens/list", { subject: token.subject })).data).toEqual({ tokens: [token] });
+    expect(
+      (await post("/config/personal-tokens/delete", { digest: token.digest, subject: other.subject })).data,
+    ).toEqual({ ok: true, removed: false });
+    expect(
+      (await post("/config/personal-tokens/delete", { digest: token.digest, subject: token.subject })).data,
+    ).toEqual({ ok: true, removed: true });
+    expect((await post("/config/personal-tokens/get", { digest: token.digest })).data).toEqual({ token: null });
+    expect((await post("/config/personal-tokens/put", { token: { ...token, digest: "bad" } })).status).toBe(400);
+  });
+});
+
 // Feature: docs/reference/specs/routing-and-config.md item 25 — the confirmation a
 // routed write is offered as: one row per thread in this object, consumed once
 // for its requester, expiry stamped and judged on the object's clock.

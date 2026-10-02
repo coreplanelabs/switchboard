@@ -15,6 +15,7 @@ import { startRequestRoot } from "../core/requestTrace.js";
 import { systemClock } from "../core/trace/clock.js";
 import type { IncomingMessage } from "../core/types.js";
 import { boundRequester, type PersonLookup, type Requester } from "./requester.js";
+import { digestBearer, type PersonalTokenStore } from "../mcp/personalTokens.js";
 import { dispatchSingleShot, SingleShotIO } from "./singleShotDispatch.js";
 import {
   authorizeRequest,
@@ -92,6 +93,8 @@ const AUTH_ERROR = -32001;
 
 export interface McpOptions {
   auth: IngressConfig;
+  /** Browser-approved personal credentials, stored by digest outside the static ingress map. */
+  personalTokens?: PersonalTokenStore;
   /** Defaults to the real core dispatch(); overridden in tests. */
   dispatch?: DispatchFn;
   /** Max body size in bytes (node wrapper enforces at read time). */
@@ -381,7 +384,7 @@ async function route(
  * (no socket). Ordering mirrors http.ts's handleIngressRequest and is
  * deliberate:
  *   1. non-POST                -> 405
- *   2. no tokens configured    -> 503 disabled   (FAIL-CLOSED: never open)
+ *   2. no static or personal credential -> 503/401 (FAIL-CLOSED: never open)
  *   3. missing/unknown token   -> 401 unauthorized
  *   4. malformed JSON          -> 200 + JSON-RPC parse error (-32700)
  *   5. not a JSON-RPC request  -> 200 + invalid request (-32600)
@@ -396,16 +399,36 @@ export async function handleMcpRequest(req: McpRequest, deps: CoreDeps, options:
   // uses — reuse authorizeRequest so both surfaces share one fail-closed,
   // constant-time gate with no duplicated logic; map its rejection to the
   // MCP-shaped JSON-RPC error.
-  const gate = authorizeRequest(req.method, req.headers, options);
-  if ("status" in gate) return mcpErrorForStatus(gate.status);
-  return handleMcpMessage(gate.identity, req.body, deps, options);
+  const gate = await authorizeMcpRequest(req.method, req.headers, options);
+  if (!("status" in gate)) return handleMcpMessage(gate.identity, req.body, deps, options);
+  return mcpErrorForStatus(gate.status);
+}
+
+async function authorizeMcpRequest(
+  method: string | undefined,
+  headers: IncomingHttpHeaders,
+  options: McpOptions,
+): Promise<{ identity: IngressIdentity } | { status: number }> {
+  const gate = authorizeRequest(method, headers, options);
+  if (!("status" in gate) || gate.status === 405 || !options.personalTokens) return gate;
+  const raw = headers.authorization;
+  const header = Array.isArray(raw) ? raw[0] : raw;
+  const bearer = typeof header === "string" ? /^Bearer ([a-f0-9]{64})$/.exec(header)?.[1] : undefined;
+  if (!bearer) return { status: 401 };
+  try {
+    const token = await options.personalTokens.get(digestBearer(bearer));
+    if (!token) return { status: 401 };
+    return { identity: { subject: token.subject, email: token.email } };
+  } catch {
+    return { status: 503 };
+  }
 }
 
 /** Map the shared (HTTP-shaped) authorizeRequest rejection status to the
  *  equivalent MCP JSON-RPC error response. */
 function mcpErrorForStatus(status: number): McpResponse {
   if (status === 405) return { status, body: err(null, INVALID_REQUEST, "method not allowed; POST only") };
-  if (status === 503) return { status, body: err(null, AUTH_ERROR, "disabled: no ingress tokens configured") };
+  if (status === 503) return { status, body: err(null, AUTH_ERROR, "MCP access unavailable") };
   return { status: 401, body: err(null, AUTH_ERROR, "unauthorized") };
 }
 
@@ -480,7 +503,7 @@ export function createMcpHandler(deps: CoreDeps, options: McpOptions): (req: Htt
         // Authorize from headers BEFORE reading the body (unified with the HTTP
         // ingress via authorizeRequest): an unauthorized/wrong-method/disabled
         // caller is rejected without buffering a body it has no right to send.
-        const gate = authorizeRequest(req.method, req.headers, options);
+        const gate = await authorizeMcpRequest(req.method, req.headers, options);
         if ("status" in gate) {
           const rejection = mcpErrorForStatus(gate.status);
           write(res, rejection.status, rejection.body);

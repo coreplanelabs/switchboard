@@ -49,11 +49,20 @@
 
 import "./loadEnv.js";
 import { createServer } from "node:http";
+import { createInterface } from "node:readline";
 import { Console } from "node:console";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { buildArtifactStore } from "./artifacts/buildStore.js";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import {
+  connectHosted,
+  hostedMcpCall,
+  mcpProxyError,
+  proxyHostedMcp,
+  readHostedProfile,
+} from "./setup/hostedClient.js";
+import { HOSTED_MCP_CALL_TIMEOUT_MS } from "./core/budgets.js";
 import { OPERATOR_ROOT } from "./deploy/host.js";
 import { installationPath } from "./deploy/operatorRoot.js";
 import { loadAppConfig, openConfigStore, type AppConfig, type ConfigStore } from "./config.js";
@@ -68,11 +77,20 @@ import {
   CommandRegistry,
   renderText,
   type Caller,
+  type CommandDef,
   type CommandInput,
   type CommandInvoker,
   type InvokeErrorCode,
+  type JsonValue,
 } from "./core/commandRegistry.js";
-import { catalogueText, cliWords, helpText, parseInvocation, type GrammarRejection } from "./core/commandSurface.js";
+import {
+  catalogueText,
+  cliWords,
+  helpText,
+  mcpToolName,
+  parseInvocation,
+  type GrammarRejection,
+} from "./core/commandSurface.js";
 import { dispatch, type CoreDeps } from "./core/dispatcher.js";
 import { startRequestRoot } from "./core/requestTrace.js";
 import { systemClock } from "./core/trace/clock.js";
@@ -130,6 +148,19 @@ const DATA_DIR = installationPath(OPERATOR_ROOT, "data");
 
 export const CLI_CALLER: Caller = { kind: "cli", id: CLI_ACTOR.id, actor: CLI_ACTOR };
 
+/** Translate CLI positionals to the MCP tool's named argument schema. */
+export function hostedCommandArguments(
+  cmd: Pick<CommandDef<unknown>, "args">,
+  input: CommandInput,
+): Record<string, unknown> {
+  return {
+    ...Object.fromEntries(
+      (cmd.args ?? []).map((arg, index) => [arg.name, input.args?.[index]]).filter(([, value]) => value !== undefined),
+    ),
+    ...input.options,
+  };
+}
+
 /** How the usage text spells this program: the checkout's `npx tsx src/cli.ts`
  *  when Node was started on a TypeScript file (tsx, `npm run cli`), else
  *  `switchboard` — the published package's bin and the image's entrypoint. */
@@ -145,6 +176,7 @@ export const USAGE = [
   `       ${PROGRAM} ask [--thread <key>] "[agent:name] [model:provider/model] your request"`,
   `       ${PROGRAM} start                            (the bot: Slack from the installation's .env and config/)`,
   `       ${PROGRAM} init [--option value…]          (= setup init: the installer)`,
+  `       ${PROGRAM} connect <host>                  (use an existing deployment)`,
   `       ${PROGRAM} help`,
 ].join("\n");
 
@@ -179,6 +211,8 @@ export function startHelpText(program: string): string {
 export const CLI_SHORTHANDS: Readonly<Record<string, string>> = { init: "setup.init" };
 
 export type CliInvocation =
+  | { kind: "connect"; url: string }
+  | { kind: "mcp-proxy" }
   /** A registry command, bound by the shared grammar. */
   | { kind: "command"; id: string; input: CommandInput; json: boolean }
   /** `<group> <verb> --help`: the command's derived help, naming the command as typed (`spelled`: `runs stop`, or the shorthand `init`). */
@@ -214,6 +248,16 @@ export function parseCliArgv(
     return { kind: "catalogue" };
   if (argv[0] === "ask") return parseAsk(argv.slice(1), now);
   if (argv[0] === "start") return parseStart(argv.slice(1));
+  if (argv[0] === "connect") {
+    const tail = argv.slice(1);
+    if (tail.length === 1 && !tail[0].startsWith("-")) return { kind: "connect", url: tail[0] };
+    if (tail.length === 2 && tail[0] === "--url") return { kind: "connect", url: tail[1] };
+    return { kind: "usage", error: `${USAGE}\n  connect needs <host>` };
+  }
+  if (argv[0] === "mcp-proxy")
+    return argv.length === 1
+      ? { kind: "mcp-proxy" }
+      : { kind: "usage", error: `${USAGE}\n  mcp-proxy takes no arguments` };
   // A shorthand is the long form to the grammar; help and usage hints keep the word as typed.
   const shorthand = CLI_SHORTHANDS[argv[0]];
   const spelledShort = shorthand === undefined ? undefined : argv[0];
@@ -332,7 +376,7 @@ export async function runCommand(
 /** What every invocation but the two processes (`ask`, `start`) prints — the pure half `main()` and the tests share. */
 export async function runCli(
   commands: CommandInvoker,
-  parsed: Exclude<CliInvocation, { kind: "ask" | "start" }>,
+  parsed: Exclude<CliInvocation, { kind: "ask" | "start" | "connect" | "mcp-proxy" }>,
   caller: Caller,
   opts: { now?: number } = {},
 ): Promise<CommandRunOutput> {
@@ -661,6 +705,26 @@ async function main(): Promise<void> {
   };
 
   const parsed = parseCliArgv(process.argv.slice(2), commands);
+  if (parsed.kind === "connect") {
+    await connectHosted(parsed.url);
+    return;
+  }
+  if (parsed.kind === "mcp-proxy") {
+    const profile = readHostedProfile();
+    if (!profile) throw new Error("No hosted connection is configured (`switchboard connect <host>`).");
+    const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
+    for await (const line of lines) {
+      try {
+        const result = await proxyHostedMcp(profile, line);
+        if (result) process.stdout.write(`${result}\n`);
+      } catch (error) {
+        console.error(`MCP proxy: ${error instanceof Error ? error.message : String(error)}`);
+        const response = mcpProxyError(line);
+        if (response) process.stdout.write(`${response}\n`);
+      }
+    }
+    return;
+  }
   if (parsed.kind === "start") {
     // The bot's entry, loaded here and not at the top, for two reasons: its
     // module-level state (the process start time, the event-loop histogram)
@@ -672,11 +736,37 @@ async function main(): Promise<void> {
     await runBot();
     return;
   }
+  const hosted = readHostedProfile();
+  const remoteCmd = parsed.kind === "command" ? commands.get(parsed.id) : undefined;
+  if (hosted && parsed.kind === "command" && remoteCmd && CommandRegistry.exposedTo(remoteCmd, "mcp")) {
+    const cmd = remoteCmd;
+    const parameters = hostedCommandArguments(cmd, parsed.input);
+    const reply = await hostedMcpCall(hosted, "tools/call", { name: mcpToolName(parsed.id), arguments: parameters });
+    if (reply.error) throw new Error(`hosted command failed: ${JSON.stringify(reply.error)}`);
+    const result = reply.result as { content?: { text?: string }[] } | undefined;
+    const value = JSON.parse(result?.content?.[0]?.text?.split("\n").slice(1).join("\n") ?? "null") as JsonValue;
+    console.log(parsed.json ? JSON.stringify(value, null, 2) : renderText(cmd, value));
+    return;
+  }
   if (parsed.kind !== "ask") {
     const out = await runCli(commands, parsed, CLI_CALLER);
     if (out.stdout) console.log(out.stdout);
     if (out.stderr) console.error(out.stderr);
     process.exit(out.exitCode);
+  }
+
+  if (hosted) {
+    const thread = parsed.threadKey.replace(/^cli:/, "");
+    const reply = await hostedMcpCall(
+      hosted,
+      "tools/call",
+      { name: "dispatch", arguments: { text: parsed.text, thread } },
+      HOSTED_MCP_CALL_TIMEOUT_MS,
+    );
+    if (reply.error) throw new Error(`hosted request failed: ${JSON.stringify(reply.error)}`);
+    const result = reply.result as { content?: { text?: string }[] } | undefined;
+    console.log(result?.content?.map((item) => item.text ?? "").join("\n") ?? "");
+    return;
   }
 
   const { bot, mcpWiring } = wiring();
