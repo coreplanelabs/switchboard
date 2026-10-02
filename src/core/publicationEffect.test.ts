@@ -1,4 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, renameSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ExecResult, Executor } from "../execution/executor.js";
 import { ResidentExecutor } from "../execution/resident.js";
 import { TracingExecutor } from "../execution/tracingExecutor.js";
@@ -24,6 +28,8 @@ function effect(
     unbound?: boolean;
     newBranch?: boolean;
     dirty?: boolean;
+    checkedOut?: string;
+    missingCheckout?: boolean;
     statusResult?: Partial<ExecResult>;
     pushResult?: Partial<ExecResult>;
     remoteResult?: Partial<ExecResult>;
@@ -42,26 +48,28 @@ function effect(
   const commands: Array<{ command: string }> = [];
   const publications: Array<{ branch: string; next: string; old?: string; bearer: string }> = [];
   let pushAttempts = 0;
+  const checkout = options.resident ? "/workspace/threads/t/wt" : "/workspace/checkout";
+  const git = (args: string) => `git -C '${checkout}' ${args}`;
   const executor: Executor = {
     exec: vi.fn(async () => "(no output)"),
     execResult: vi.fn(async (command) => {
       commands.push({ command });
       let stdout: string | undefined;
-      if (command === "git symbolic-ref --quiet --short HEAD") stdout = branch;
-      else if (command === "git status --porcelain -uno") stdout = options.dirty ? " M src/a.ts" : "";
-      else if (command.startsWith("git check-ref-format")) stdout = branch;
-      else if (command.startsWith("git rev-parse --verify")) stdout = next;
-      if (command === "git remote get-url origin")
+      if (command === git("symbolic-ref --quiet --short HEAD")) stdout = options.checkedOut ?? branch;
+      else if (command === git("status --porcelain -uno")) stdout = options.dirty ? " M src/a.ts" : "";
+      else if (command.startsWith(git("check-ref-format"))) stdout = branch;
+      else if (command.startsWith(git("rev-parse --verify"))) stdout = next;
+      if (command === git("remote get-url origin"))
         stdout = options.wrongRemote ? "https://other.example/o/r" : "https://door.example/git/o/r.git";
-      else if (command.startsWith("git ls-remote")) stdout = `${next}\t${source}`;
+      else if (command.startsWith(git("ls-remote"))) stdout = `${next}\t${source}`;
       else if (stdout === undefined) return { stdout: "", stderr: "unexpected command", exitCode: 1, truncated: false };
       return {
         stdout,
         stderr: "",
         exitCode: 0,
         truncated: false,
-        ...(command === "git status --porcelain -uno" ? options.statusResult : {}),
-        ...(command.startsWith("git ls-remote") ? options.remoteResult : {}),
+        ...(command === git("status --porcelain -uno") ? options.statusResult : {}),
+        ...(command.startsWith(git("ls-remote")) ? options.remoteResult : {}),
       };
     }),
     publishBranchResult: vi.fn(async (input) => {
@@ -118,6 +126,7 @@ function effect(
     repo: "o/r",
     doorUrl: "https://door.example",
     branch,
+    checkout: () => (options.missingCheckout ? undefined : checkout),
     protectedBranches: ["main"],
     bindings,
     bearers: { issue: () => ({ token, expiresAt: 100 }) } as unknown as RunBearerStore,
@@ -132,6 +141,91 @@ function effect(
 }
 
 describe("publish_branch — a runner-owned Git Door effect", () => {
+  it("publishes the owned branch from a cold /workspace checkout and refuses another owner or ref", async () => {
+    const root = mkdtempSync(join(tmpdir(), "switchboard-cold-publication-"));
+    const workspace = join(root, "workspace");
+    const checkout = join(workspace, "checkout");
+    mkdirSync(checkout, { recursive: true });
+    const git = (...args: string[]) => {
+      const result = spawnSync("git", ["-C", checkout, ...args], { encoding: "utf8" });
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout.trim();
+    };
+    try {
+      git("init", "--initial-branch", branch);
+      git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "source");
+      git("remote", "add", "origin", "https://door.example/git/o/r.git");
+      const sourceCommit = git("rev-parse", "HEAD");
+      const bindings = new GitBindings();
+      bindings.register("run", { repo: "o/r", ref: source }, undefined, async () => true, true);
+      bindings.setPublication("run", { ref: branch, expectedHeadSha: old });
+      bindings.setPublicationRecorder("run", { begin: async () => true, finish: async () => true });
+      bindings.requireToolPush("run");
+      const commands: string[] = [];
+      const publications: string[] = [];
+      const executor: Executor = {
+        exec: async () => "",
+        execResult: async (command) => {
+          commands.push(command);
+          if (command.includes("ls-remote"))
+            return { stdout: `${sourceCommit}\t${source}`, stderr: "", exitCode: 0, truncated: false };
+          const result = spawnSync("bash", ["-c", command.replaceAll("/workspace/checkout", checkout)], {
+            cwd: workspace,
+            encoding: "utf8",
+          });
+          return {
+            stdout: result.stdout,
+            stderr: result.stderr,
+            exitCode: result.status ?? 1,
+            truncated: false,
+          };
+        },
+        publishBranchResult: async (input) => {
+          publications.push(input.branch);
+          expect(input.next).toBe(sourceCommit);
+          expect(input.old).toBe(old);
+          expect(
+            bindings.takeToolPush("run", { ref: source, old, next: sourceCommit }, bearerHashOf(input.bearer)),
+          ).toBe(true);
+          const claim = await bindings.beginPublication("run", { ref: source, old, next: sourceCommit });
+          expect(await claim?.finish("accepted")).toBe(true);
+          return { stdout: "accepted", stderr: "", exitCode: 0, truncated: false };
+        },
+        readFile: async () => "",
+        writeFile: async () => "",
+      };
+      const makeTool = (runId: string) =>
+        publicationEffectTool({
+          runId,
+          repo: "o/r",
+          doorUrl: "https://door.example",
+          branch,
+          checkout: () => "/workspace/checkout",
+          protectedBranches: ["main"],
+          bindings,
+          bearers: { issue: () => ({ token, expiresAt: 100 }) } as unknown as RunBearerStore,
+        });
+      const call = (runId: string, selectedBranch: string) =>
+        makeTool(runId).run({ branch: selectedBranch }, { executor, callId: "owned-call" });
+      expect(await call("run", "other")).toContain("run's owned branch");
+      expect(await call("foreign", branch)).toContain("did not admit");
+      const hiddenCheckout = join(workspace, "hidden-checkout");
+      renameSync(checkout, hiddenCheckout);
+      try {
+        expect(await call("run", branch)).toContain("owned branch is not checked out");
+      } finally {
+        renameSync(hiddenCheckout, checkout);
+      }
+      expect(publications).toHaveLength(0);
+      expect(await call("run", branch)).toBe("accepted");
+      expect(publications).toEqual([branch]);
+      expect(bindings.publicationOf("run")).toEqual({ ref: branch, expectedHeadSha: sourceCommit });
+      expect(commands.some((command) => command.startsWith("git -C '/workspace/checkout' symbolic-ref"))).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("binds the one-use transport credential, source, endpoint, old head and result to the originating call", async () => {
     const { bindings, commands, publications, published, run } = effect();
     expect(await run(branch)).toContain(`To https://door.example/git/o/r.git`);
@@ -151,6 +245,12 @@ describe("publish_branch — a runner-owned Git Door effect", () => {
     const dirty = effect({ dirty: true });
     expect(await dirty.run(branch)).toContain("tracked tree is not clean");
     expect(dirty.publications).toHaveLength(0);
+    const wrongCheckout = effect({ checkedOut: "fix/other" });
+    expect(await wrongCheckout.run(branch)).toContain("owned branch is not checked out");
+    expect(wrongCheckout.publications).toHaveLength(0);
+    const missingCheckout = effect({ missingCheckout: true });
+    expect(await missingCheckout.run(branch)).toContain("selected checkout is unavailable");
+    expect(missingCheckout.commands).toHaveLength(0);
     const good = effect();
     expect(await good.run("main")).toContain("non-protected branch");
     expect(await good.run("other")).toContain("run's owned branch");
@@ -199,6 +299,7 @@ describe("publish_branch — a runner-owned Git Door effect", () => {
     expect(await good.run(branch)).toContain("To https://door.example");
     expect(good.bindings.publicationOf("run")).toEqual({ ref: branch, expectedHeadSha: next });
     expect(good.executor.exec).not.toHaveBeenCalled();
+    expect(good.commands[0]?.command).toBe("git -C '/workspace/threads/t/wt' symbolic-ref --quiet --short HEAD");
   });
 
   it.each([{ truncated: true }, { exitCode: 1, stdout: "accepted" }])(
@@ -207,7 +308,7 @@ describe("publish_branch — a runner-owned Git Door effect", () => {
       const bad = effect({ pushResult });
       expect(await bad.run(branch)).toContain("publication refused");
       expect(bad.bindings.hasToolPush("run", bearerHashOf(token))).toBe(false);
-      expect(bad.commands.some(({ command }) => command.startsWith("git ls-remote"))).toBe(false);
+      expect(bad.commands.some(({ command }) => command.includes("ls-remote"))).toBe(false);
     },
   );
 

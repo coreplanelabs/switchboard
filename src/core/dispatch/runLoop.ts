@@ -66,7 +66,7 @@ import { prepareRelaunch } from "./relaunch.js";
 import { harnessNamed } from "../harness/roster.js";
 import { harnessContainerFor } from "../harness/botHostContainer.js";
 import { checkoutOfSelection, workspaceBindingFor, type ReadyEnvironmentReason } from "../../execution/factory.js";
-import type { ReadyEnvironmentRequirement } from "../../execution/seedPlan.js";
+import { SEED_CHECKOUT_DIR, type ReadyEnvironmentRequirement } from "../../execution/seedPlan.js";
 import type { BranchStartState } from "../../execution/identityRewrite.js";
 import { isContainerGone } from "../harness/container.js";
 import {
@@ -2253,6 +2253,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               repo: repoCtx.repo,
               doorUrl: ctx.githubDoor.baseUrl,
               ...(ownBranch ? { branch: ownBranch } : {}),
+              checkout: () =>
+                currentCheckout ?? (workspaceBinding?.backend === "sandbox" ? SEED_CHECKOUT_DIR : undefined),
               protectedBranches,
               bindings: deps.githubBindings!,
               bearers: deps.runBearers,

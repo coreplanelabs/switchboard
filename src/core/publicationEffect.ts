@@ -13,6 +13,8 @@ export interface PublicationEffectBinding {
   repo: string;
   doorUrl: string;
   branch?: string;
+  /** Trusted selected checkout, reread after a same-run workspace reattach. */
+  checkout: () => string | undefined;
   protectedBranches: readonly string[];
   bindings: GitBindings;
   bearers: RunBearerStore;
@@ -60,21 +62,28 @@ export function publicationEffectTool(binding: PublicationEffectBinding): Runnab
       const executor: Executor = ctx.executor;
       if (!executor.execResult || !executor.publishBranchResult)
         return "error: this workspace has no structured publication transport";
+      const checkout = binding.checkout();
+      if (
+        checkout !== "/workspace/checkout" &&
+        (!checkout?.startsWith("/workspace/threads/") || checkout.split("/").includes(".."))
+      )
+        return "error: the selected checkout is unavailable for publication";
+      const git = (args: string) => `git -C ${shellQuote(checkout)} ${args}`;
       const inspect = async (command: string): Promise<string | undefined> => {
         const result = await executor.execResult!(command, { signal: ctx.signal });
         return result.exitCode === 0 && !result.truncated ? result.stdout.trim() : undefined;
       };
       const sourceRef = `refs/heads/${branch}`;
       const quotedRef = shellQuote(sourceRef);
-      const checkedOut = await inspect("git symbolic-ref --quiet --short HEAD");
+      const checkedOut = await inspect(git("symbolic-ref --quiet --short HEAD"));
       if (checkedOut !== branch) return "error: the owned branch is not checked out";
-      if ((await inspect("git status --porcelain -uno")) !== "")
+      if ((await inspect(git("status --porcelain -uno"))) !== "")
         return "error: the tracked tree is not clean and cannot be published";
-      if ((await inspect(`git check-ref-format --branch ${shellQuote(branch)}`)) !== branch)
+      if ((await inspect(git(`check-ref-format --branch ${shellQuote(branch)}`))) !== branch)
         return "error: invalid branch ref";
-      const next = await inspect(`git rev-parse --verify ${shellQuote(`${sourceRef}^{commit}`)}`);
+      const next = await inspect(git(`rev-parse --verify ${shellQuote(`${sourceRef}^{commit}`)}`));
       if (!next || !fullSha(next)) return "error: the owned source commit cannot be read";
-      const remote = await inspect("git remote get-url origin");
+      const remote = await inspect(git("remote get-url origin"));
       const expectedRemote = `${new URL(binding.doorUrl).origin}/git/${binding.repo}`;
       if (remote !== expectedRemote && remote !== `${expectedRemote}.git`)
         return "error: origin does not name the bound Git Door repository";
@@ -115,7 +124,7 @@ export function publicationEffectTool(binding: PublicationEffectBinding): Runnab
           (!old && after && "blocked" in after)
         )
           return "error: the Git Door did not commit an accepted publication outcome";
-        const remoteHead = await inspect(`git ls-remote --exit-code origin ${quotedRef}`);
+        const remoteHead = await inspect(git(`ls-remote --exit-code origin ${quotedRef}`));
         if (remoteHead?.split("\t")[0] !== next) return "error: the remote head cannot be verified after publication";
         return redactSecrets(
           [result.stdout, result.stderr].filter(Boolean).join("\n--- stderr ---\n") || "(no output)",
