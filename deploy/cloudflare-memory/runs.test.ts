@@ -2,6 +2,7 @@ import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test"
 import { fetchMemoryTest } from "./testFetch.ts";
 import { describe, expect, it } from "vitest";
 import type { RunRecord } from "../../src/core/runRecord.ts";
+import type { CoordinatorUnit } from "../../src/core/coordinator/contract.ts";
 import { FRICTION_CATEGORIES } from "../../src/core/runFriction.ts";
 import { LEASE_MS } from "../../src/core/runLedger/types.ts";
 import { blobOf, pointOf, type RunMetricsPoint } from "../../src/core/runMetrics.ts";
@@ -110,6 +111,155 @@ const putDirectMany = (key: string, records: RunRecord[]) =>
   runInDurableObject(stubOf(key), async (inst: RunHistoryDO) => {
     for (const rec of records) await inst.put(rec);
   });
+
+describe("unit context retention work", () => {
+  const unit = (name: string, context = false): CoordinatorUnit => ({
+    instanceId: "retention",
+    unit: name,
+    slug: "source",
+    branch: "plan/retention/source",
+    dependsOn: [],
+    rounds: [],
+    ...(context
+      ? {
+          context: {
+            version: 1 as const,
+            handoff: {
+              version: 1 as const,
+              source: {
+                runId: "source",
+                requester: "slack:UALICE",
+                channelId: "slack:C1",
+                threadKey: "slack:C1:1",
+              },
+              session: { key: "slack:C1:1:coding", from: 0, to: -1 },
+              assets: [],
+            },
+          },
+        }
+      : {}),
+  });
+
+  async function seed(key: string, size: number) {
+    await putDirectMany(
+      key,
+      ["source", "malformed-source", "invalid-source", "unheld-source", "latest"].map((id) => record(id, Date.now())),
+    );
+    await runInDurableObject(stubOf(key), (_inst: RunHistoryDO, state) => {
+      state.storage.transactionSync(() => {
+        for (let i = 0; i < size; i++) {
+          const value = unit(i === 0 ? "source:part" : `u${i}`, i === 0);
+          state.storage.sql.exec(
+            "INSERT INTO coordinator_units (instance_id, unit, json, updated_at) VALUES (?, ?, ?, 1)",
+            value.instanceId,
+            value.unit,
+            JSON.stringify(value),
+          );
+        }
+        for (const [name, json] of [
+          ["malformed", "{broken"],
+          ["invalid", JSON.stringify({ ...unit("invalid"), context: { version: 1 } })],
+        ])
+          state.storage.sql.exec(
+            "INSERT INTO coordinator_units (instance_id, unit, json, updated_at) VALUES ('retention', ?, ?, 1)",
+            name,
+            json,
+          );
+        for (const [name, source] of [
+          ["source:part", "source"],
+          ["malformed", "malformed-source"],
+          ["invalid", "invalid-source"],
+          ["u1", "unheld-source"],
+        ])
+          state.storage.sql.exec(
+            "INSERT INTO context_refs (holder_run_id, source_run_id) VALUES (?, ?)",
+            `@unit:retention:${name}`,
+            source,
+          );
+        state.storage.sql.exec("UPDATE runs SET finished_at = ? WHERE run_id != 'latest'", Date.now() - 40 * DAY);
+      });
+    });
+  }
+
+  async function countUnitReads<T>(inst: RunHistoryDO, work: () => Promise<T>) {
+    const real = (inst as unknown as { sql: SqlStorage }).sql;
+    const cursors: SqlStorageCursor<Record<string, SqlStorageValue>>[] = [];
+    Object.defineProperty(inst, "sql", {
+      configurable: true,
+      value: {
+        exec: (q: string, ...p: unknown[]) => {
+          const cursor = real.exec(q, ...p);
+          if (q.includes("coordinator_units")) cursors.push(cursor);
+          return cursor;
+        },
+      },
+    });
+    try {
+      const result = await work();
+      return { result, rows: cursors.reduce((sum, cursor) => sum + cursor.rowsRead, 0) };
+    } finally {
+      Object.defineProperty(inst, "sql", { value: real });
+    }
+  }
+
+  it.each([100, 1_000])("put, finish and sparse list read unit roots in linear work with %i units", async (size) => {
+    for (const operation of ["put", "finish", "list"] as const) {
+      const key = storeKey();
+      await seed(key, size);
+      const rec = record("latest", Date.now());
+      const observed = await runInDurableObject(stubOf(key), async (inst: RunHistoryDO) => {
+        if (operation === "finish")
+          await inst.claim(
+            {
+              runId: rec.id,
+              threadKey: rec.threadKey,
+              gen: "g1",
+              leaseMs: LEASE_MS,
+              startedAt: rec.startedAt,
+              meta: { threadKey: rec.threadKey, channelId: rec.channelId, userId: rec.userId },
+              card: null,
+              system: "work",
+              tools: [],
+            },
+            Date.now(),
+          );
+        return countUnitReads(inst, async () => {
+          if (operation === "list") return (await inst.list({ agent: "missing", limit: 10 })).items;
+          if (operation === "finish") return inst.finish(rec.id, "g1", rec);
+          return inst.put(rec);
+        });
+      });
+      if (operation === "list") expect(observed.result).toEqual([]);
+      else expect(observed.result).toMatchObject({ ok: true, stored: true });
+      // Include the reference query's unit-membership checks as well as the root pass.
+      expect.soft(observed.rows, operation).toBeLessThanOrEqual(6 * size + 64);
+      expect((await post("/runs/get", { storeKey: key, id: "source" })).data.record).not.toBeNull();
+      for (const id of ["malformed-source", "invalid-source", "unheld-source"])
+        expect((await post("/runs/get", { storeKey: key, id })).data.record).toBeNull();
+    }
+  });
+
+  it("a protected point read looks up one unit by its composite key without scanning other units", async () => {
+    const key = storeKey();
+    await seed(key, 1_000);
+    const observed = await runInDurableObject(stubOf(key), (inst: RunHistoryDO) =>
+      countUnitReads(inst, () => inst.get("source")),
+    );
+    expect(observed.result).toMatchObject({ id: "source" });
+    expect(observed.rows).toBeLessThanOrEqual(2);
+  });
+
+  it("an unchanged unit write looks up its existing context without scanning other units", async () => {
+    const key = storeKey();
+    await seed(key, 1_000);
+    const value = unit("source:part", true);
+    const observed = await runInDurableObject(stubOf(key), (inst: RunHistoryDO) =>
+      countUnitReads(inst, () => inst.putUnits([value], Date.now())),
+    );
+    expect(observed.result).toEqual({ ok: true });
+    expect(observed.rows).toBeLessThanOrEqual(10);
+  });
+});
 
 // docs/reference/specs/run-history.md item 56: the record's usage is stored beside
 // the row; `/runs/usage` answers one row per run with its thread, channel and

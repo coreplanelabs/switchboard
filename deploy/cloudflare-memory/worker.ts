@@ -4242,14 +4242,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     commit: () => T | Promise<T>,
   ): Promise<T> {
     holders = holders.filter((holder) => {
-      const unit = holder.id.startsWith("@unit:")
-        ? this.sql
-            .exec<{ json: string }>(
-              `SELECT json FROM coordinator_units WHERE '@unit:' || instance_id || ':' || unit = ?`,
-              holder.id,
-            )
-            .toArray()[0]
-        : undefined;
+      const unit = this.unitRowForHolder(holder.id);
       const archived = this.sql
         .exec<{ summary_json: string }>(`SELECT summary_json FROM runs WHERE run_id = ?`, holder.id)
         .toArray()[0];
@@ -4329,20 +4322,43 @@ export class RunHistoryDO extends DurableObject<Env> {
     if (unit.context) this.pinContext(holder, unit.context.handoff);
   }
 
-  private unitContextRootIsRetained(holder: string): boolean {
-    const row = this.sql
+  private unitRowForHolder(holder: string): { json: string } | undefined {
+    const prefix = "@unit:";
+    const separator = holder.indexOf(":", prefix.length);
+    if (!holder.startsWith(prefix) || separator === -1) return undefined;
+    // Instance IDs cannot contain a colon; the remaining text is the unit name.
+    return this.sql
       .exec<{ json: string }>(
-        `SELECT json FROM coordinator_units WHERE '@unit:' || instance_id || ':' || unit = ?`,
-        holder,
+        `SELECT json FROM coordinator_units WHERE instance_id = ? AND unit = ?`,
+        holder.slice(prefix.length, separator),
+        holder.slice(separator + 1),
       )
       .toArray()[0];
-    if (!row) return false;
+  }
+
+  private unitContextRootIsRetained(holder: string): boolean {
+    const row = this.unitRowForHolder(holder);
+    return row !== undefined && this.unitContextJsonIsRetained(row.json);
+  }
+
+  private unitContextJsonIsRetained(json: string): boolean {
     try {
-      const unit: unknown = JSON.parse(row.json);
+      const unit: unknown = JSON.parse(json);
       return isCoordinatorUnit(unit) && unit.context !== undefined;
     } catch {
       return false;
     }
+  }
+
+  private unitContextRoots(): string[] {
+    const holders: string[] = [];
+    // Stream each unit's JSON once instead of retaining all payloads or rereading each row.
+    for (const row of this.sql.exec<{ holder: string; json: string }>(
+      `SELECT '@unit:' || instance_id || ':' || unit AS holder, json FROM coordinator_units`,
+    )) {
+      if (this.unitContextJsonIsRetained(row.json)) holders.push(row.holder);
+    }
+    return holders;
   }
 
   private contextSourcesAvailable(
@@ -4422,15 +4438,7 @@ export class RunHistoryDO extends DurableObject<Env> {
               .filter(({ key }) => this.sessionContextRootIsRetained(key, policy, now))
               .map(({ key }) => `@session:${key}`),
           )
-          .concat(
-            this.sql
-              .exec<{ holder: string }>(
-                `SELECT '@unit:' || instance_id || ':' || unit AS holder FROM coordinator_units`,
-              )
-              .toArray()
-              .map(({ holder }) => holder)
-              .filter((holder) => this.unitContextRootIsRetained(holder)),
-          ),
+          .concat(this.unitContextRoots()),
       },
     );
     return new Set(kept.map((r) => r.id));
