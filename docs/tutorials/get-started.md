@@ -1,8 +1,13 @@
 ---
-description: Install Switchboard, get an answer in your terminal, then put it in a Slack channel. Ten minutes, one process, your keys on your machine.
+description: Install your own Switchboard, get an answer in your terminal, then put it in a Slack channel. Ten minutes, one process.
 ---
 
 # Get started
+
+> [!NOTE]
+> **Already using an existing deployment?** Follow [Use an existing deployment](use-an-existing-deployment.md). You do not need Node, a model key, or a server to use the Switchboard your team runs.
+
+This tutorial is for setting up your own Switchboard.
 
 Switchboard is an open-source agent gateway. You say what you want, in Slack or from a terminal, and it picks the agent: one answers the question, one reviews the pull request, one ships the fix, on the model you choose and with its tools running where you decide. You install it; you do not fork it.
 

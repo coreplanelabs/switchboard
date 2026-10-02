@@ -216,6 +216,7 @@ export default defineConfig({
         collapsed: false,
         items: [
           { text: "Get started", link: "/tutorials/get-started" },
+          { text: "Use an existing deployment", link: "/tutorials/use-an-existing-deployment" },
           { text: "Your first request in Slack", link: "/tutorials/first-request-in-slack" },
           { text: "Run it locally", link: "/tutorials/run-it-locally" },
         ],
