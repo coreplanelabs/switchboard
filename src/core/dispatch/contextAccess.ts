@@ -576,7 +576,8 @@ function buildContextAccess(deps: ContextAccessDeps, { msg, io }: { msg: Incomin
         throw new Error("artifact source access changed");
       const events = "meta" in row ? [] : row.events;
       if ("meta" in row) {
-        if (!deps.runs || throughSeq === undefined) throw new Error("live artifact source has no frozen cursor");
+        if (!deps.runs || typeof throughSeq !== "number" || !Number.isSafeInteger(throughSeq) || throughSeq < 0)
+          throw new Error("live artifact source has no frozen cursor");
         let afterSeq: number | undefined;
         for (;;) {
           const page = await deps.runs.getRunEvents(runId, {
@@ -587,7 +588,7 @@ function buildContextAccess(deps: ContextAccessDeps, { msg, io }: { msg: Incomin
           if (!page.ok) throw new Error("artifact source is incomplete");
           events.push(...page.value.events);
           const next = page.value.nextAfterSeq;
-          if (next === undefined || (throughSeq !== undefined && next >= throughSeq)) break;
+          if (next === undefined || next >= throughSeq) break;
           if (!Number.isSafeInteger(next) || next <= (afterSeq ?? -1))
             throw new Error("artifact source cursor did not advance");
           afterSeq = next;

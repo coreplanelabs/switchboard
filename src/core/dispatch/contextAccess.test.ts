@@ -837,5 +837,15 @@ describe("message-bound context access", () => {
     expect((await access.readAssets(source)).map((a) => a.seq)).toEqual([1, 2, 3]);
     expect(f.getRunEvents).toHaveBeenCalledTimes(2);
     expect(f.getRunEvents.mock.calls[1][1].afterSeq).toBe(1);
+    for (const assetRuns of [
+      [{ runId: origin.runId }],
+      [{ runId: origin.runId, throughSeq: "3" }],
+      [{ runId: origin.runId, throughSeq: -1 }],
+    ]) {
+      await expect(access.readAssets({ ...source, assetRuns } as unknown as HandoffSource)).rejects.toThrow(
+        "live artifact source has no frozen cursor",
+      );
+    }
+    expect(f.getRunEvents).toHaveBeenCalledTimes(2);
   });
 });

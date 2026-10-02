@@ -15,26 +15,22 @@ export function createWorkFreshness(input: {
   save: (state: { workReads?: readonly MainWorkReadReceipt[]; workRefreshUsed?: boolean }) => Promise<boolean>;
 }) {
   const receipts: MainWorkReadReceipt[] = [];
-  const reads = new Map<
-    string,
-    { observation: MainWorkReadReceipt["observation"]; refresh: () => Promise<MainWorkReadRefresh> }
-  >();
+  const reads: { observation: MainWorkReadReceipt["observation"]; refresh: () => Promise<MainWorkReadRefresh> }[] = [];
   let unavailable = false,
     refreshUsed = false;
   let admissions: Promise<void> = Promise.resolve();
-  const key = (r: MainWorkReadReceipt) => `${r.tool}:${r.observation.instanceId}:${r.observation.unit}`;
   const owned = (r: MainWorkReadReceipt) =>
     r.observation.requesterId === input.owner.requesterId &&
     r.observation.channelId === input.owner.channelId &&
     r.observation.mainThreadKey === input.owner.threadKey;
   const uncertain = () => {
-    const at = Math.max(0, ...[...reads.values()].map((r) => r.observation.observedAt));
+    const at = Math.max(0, ...reads.map((r) => r.observation.observedAt));
     return `The work's current state remains unconfirmed${at ? `; the last verified observation was at ${new Date(at).toISOString()}` : ""}. I could not confirm a stable current state before this answer.`;
   };
   const check = async () => {
     if (unavailable) return undefined;
     const changed: string[] = [];
-    for (const r of reads.values()) {
+    for (const r of reads) {
       const result = await r.refresh().catch(() => ({ kind: "unavailable" as const }));
       if (result.kind === "unavailable") {
         unavailable = true;
@@ -65,7 +61,7 @@ export function createWorkFreshness(input: {
         if (!isRunWorkEvidence({ workReads: next }) || !(await input.save({ workReads: next })))
           throw new Error("The work observation could not be saved.");
         receipts.push(receipt);
-        reads.set(key(receipt), { observation: structuredClone(receipt.observation), refresh });
+        reads.push({ observation: structuredClone(receipt.observation), refresh });
       });
       admissions = admission.catch(() => {
         unavailable = true;
@@ -109,7 +105,7 @@ export function createWorkFreshness(input: {
           continue;
         }
         receipts.push(structuredClone(raw));
-        reads.set(key(raw), { observation: structuredClone(raw.observation), refresh });
+        reads.push({ observation: structuredClone(raw.observation), refresh });
       }
       if (calls.some((c) => c.type === "tool_use" && !receipts.some((r) => r.callId === c.id))) unavailable = true;
     },

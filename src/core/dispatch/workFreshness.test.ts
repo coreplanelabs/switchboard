@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { sourceHash } from "../references/receipts.js";
-import type { MainWorkRead } from "../coordinator/mainWorkObservation.js";
+import { restoreMainWorkRead, type MainWorkRead } from "../coordinator/mainWorkObservation.js";
 import { createWorkFreshness } from "./workFreshness.js";
 
 const observation = {
@@ -98,6 +98,61 @@ describe("current work answer freshness", () => {
     await restored.restore(state.receipts(), messages, reads, false);
     expect(reads).toHaveBeenCalledTimes(2);
     expect(await restored.beforePublish()).toBeUndefined();
+  });
+  it("revises an answer based on an earlier status even after a later status for the same unit", async () => {
+    const state = tracker(),
+      first = await reading(),
+      second = {
+        ...(await reading()),
+        callId: "call-2",
+        content: "ended",
+        resultHash: await sourceHash("ended"),
+        observation: { ...observation, snapshotHash: "b".repeat(64), observedAt: 20 },
+      };
+    first.refresh = vi
+      .fn()
+      .mockResolvedValueOnce({
+        kind: "changed",
+        observation: second.observation,
+        resultHash: second.resultHash,
+        content: second.content,
+      })
+      .mockResolvedValue({ kind: "unchanged" });
+    await state.observe(first);
+    await state.observe(second);
+    const revise = vi.fn().mockResolvedValue("The work ended.");
+    expect(await state.finalize("The work is running.", revise)).toBe("The work ended.");
+    expect(revise).toHaveBeenCalledOnce();
+    expect(revise.mock.calls[0]?.[0]).toContain("ended");
+    expect(first.refresh).toHaveBeenCalledTimes(2);
+    expect(second.refresh).toHaveBeenCalledTimes(2);
+  });
+  it("restores both statuses for the same unit and detects the earlier result's transition", async () => {
+    const first = await reading(),
+      second = {
+        ...(await reading()),
+        callId: "call-2",
+        content: "ended",
+        resultHash: await sourceHash("ended"),
+        observation: { ...observation, snapshotHash: "b".repeat(64), observedAt: 20 },
+      };
+    const receipts = [first, second].map(({ refresh: _, content: __, ...receipt }) => receipt);
+    const messages = [first, second].flatMap((r) => [
+      {
+        role: "assistant" as const,
+        content: [{ type: "tool_use" as const, id: r.callId, name: r.tool, input: r.input }],
+      },
+      { role: "user" as const, content: [{ type: "tool_result" as const, toolUseId: r.callId, content: r.content }] },
+    ]);
+    const readCurrent = vi.fn().mockResolvedValue({ observation: second.observation, content: second.content });
+    const restored = vi.fn((receipt: (typeof receipts)[number]) => restoreMainWorkRead(receipt, readCurrent));
+    const state = tracker();
+    await state.restore(receipts, messages, restored, false);
+    const revise = vi.fn().mockResolvedValue("The work ended.");
+    expect(await state.finalize("The work is running.", revise)).toBe("The work ended.");
+    expect(revise.mock.calls[0]?.[0]).toContain("ended");
+    expect(restored).toHaveBeenCalledTimes(2);
+    expect(readCurrent).toHaveBeenCalledTimes(4);
   });
   it("refreshes a changed answer once then rechecks without treating change as an access revocation", async () => {
     const state = tracker(),
