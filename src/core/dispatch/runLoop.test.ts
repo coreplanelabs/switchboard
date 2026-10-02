@@ -6389,6 +6389,8 @@ describe("the pi harness — the container replaced under a living bot: the rela
       }),
     );
     await until(() => (inner.steps.get("run-l") ?? []).some((st) => st.inFlight.some((c) => c.callId === "c2")));
+    // The rejected call must be waiting before the bot dies, or no caller observes its failure.
+    await until(() => modelCalls === 2);
 
     // Death two: the bot rolls. The next generation reads the ledger as the boot reclaim does.
     const source = transcriptSource(inner.live.get("run-l")!.meta);
