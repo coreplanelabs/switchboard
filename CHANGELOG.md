@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.276.3](https://github.com/coreplanelabs/switchboard/compare/v1.276.2...v1.276.3) (2026-10-02)
+
+
+### Bug fixes
+
+* **memory:** pause scheduled history cleanup for MVP ([#2636](https://github.com/coreplanelabs/switchboard/issues/2636)) ([bc63da8](https://github.com/coreplanelabs/switchboard/commit/bc63da89b0de54afc2dfae6aa1ad420a67a7d500))
+
+
+### Performance
+
+* **deploy:** reuse execution images across releases ([#2632](https://github.com/coreplanelabs/switchboard/issues/2632)) ([e808a75](https://github.com/coreplanelabs/switchboard/commit/e808a759dc37607aa89625a4064080a553eb8fc9))
+
 ## [1.276.2](https://github.com/coreplanelabs/switchboard/compare/v1.276.1...v1.276.2) (2026-10-02)
 
 
