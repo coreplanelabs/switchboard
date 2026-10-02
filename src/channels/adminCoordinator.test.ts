@@ -13544,6 +13544,245 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     },
   );
 
+  const failedBeforeWork = (over: Partial<RunRecord> = {}): RunRecord => {
+    const setupSpans: RunEvent[] = Array.from({ length: 23 }, (_, index): RunEvent[] => [
+      { type: "span_start", spanId: `gate-${index}`, name: "dispatch.admission" },
+      {
+        type: "span_end",
+        spanId: `gate-${index}`,
+        name: "dispatch.admission",
+        startedAt: NOW - minutesToMs(20),
+        durationMs: 1,
+        status: "ok",
+      },
+    ]).flat();
+    const source: RunEvent[] = [
+      { type: "input", messageId: "m1", text: "address findings" },
+      { type: "run_meta", agent: "coding" },
+      ...setupSpans.slice(0, 10),
+      // The persisted setup refusal has five prior-thread context events at seq 13–17.
+      { type: "context", text: "user: prior findings", at: NOW - minutesToMs(120) },
+      { type: "context", text: "assistant: earlier fix", at: NOW - minutesToMs(110) },
+      { type: "context", text: "user: review reply", at: NOW - minutesToMs(100) },
+      { type: "context", text: "assistant: previous result", at: NOW - minutesToMs(90) },
+      { type: "context", text: "user: original request", at: NOW - minutesToMs(80) },
+      ...setupSpans.slice(10),
+      { type: "run_state", state: "admitted", since: NOW - minutesToMs(20), bound: NOW },
+      { type: "run_state", state: "waiting_repository", since: NOW - minutesToMs(19), bound: NOW },
+      { type: "run_state", state: "preparing", since: NOW - minutesToMs(19), bound: NOW },
+      { type: "span_start", spanId: "attach", name: "dispatch.workspace.attach" },
+      {
+        type: "span_end",
+        spanId: "attach",
+        name: "dispatch.workspace.attach",
+        startedAt: NOW - minutesToMs(19),
+        durationMs: 1,
+        status: "error",
+      },
+      { type: "refusal", code: "setup_failed", cause: "workspace", text: "setup refused" },
+    ];
+    const events = source.map((event, index) => ({ ...event, seq: index + 1 }));
+    return record("run-setup-refused-findings", {
+      parentInstanceId: INSTANCE.id,
+      idempotencyKey: `${INSTANCE.id}:U12/1/findings`,
+      repo: INSTANCE.repo,
+      startedAt: NOW - minutesToMs(20),
+      finishedAt: NOW - minutesToMs(15),
+      status: "failed",
+      liveState: { state: "preparing", since: NOW - minutesToMs(19), bound: NOW },
+      usage: { turns: 0, byModel: {} },
+      events,
+      eventCount: events.length,
+      storedEventCount: events.length,
+      ...over,
+    });
+  };
+  const setupRefusalRow = (): CoordinatorUnit => ({
+    ...requestChangesRow(),
+    rounds: [
+      ...requestChangesRow().rounds,
+      { index: 1, agent: "coding", outcome: "started", at: NOW - minutesToMs(18) },
+      { index: 1, agent: "coding", outcome: "aborted", at: NOW - minutesToMs(10) },
+    ],
+    ending: { kind: "aborted", report: "findings setup failed", at: NOW - minutesToMs(10) },
+  });
+
+  it("accounts a complete server setup refusal as $0 and resumes the original same-head findings without work credit", async () => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+    await h.instances.put({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 0.5 } });
+    await h.instances.putUnits([setupRefusalRow()]);
+    await h.store.put(reviewRecord());
+    const failed = failedBeforeWork();
+    expect(failed.eventCount).toBe(59);
+    expect(failed.events.slice(12, 17).map((event) => event.type)).toEqual(Array(5).fill("context"));
+    await h.store.put(failed);
+
+    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: "recovery-run-original-review" } });
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    expect(claimed?.recovery).toMatchObject({
+      kind: "findings",
+      round: 1,
+      expectedHeadSha: HEAD,
+      reviewRunId: "run-original-review",
+      remainingMs: minutesToMs(60),
+      accounting: {
+        spendUsd: 0.25,
+        grant: { renewals: 0, costCapUsd: 0.5 },
+        renewalsSpent: 0,
+        children: expect.arrayContaining([
+          { runId: "run-setup-refused-findings", key: `${INSTANCE.id}:U12/1/findings`, usd: 0 },
+        ]),
+      },
+    });
+    expect(claimed?.lastPush).toBe(HEAD);
+    expect(claimed?.recovery?.findingsRunId).toBeUndefined();
+    expect(h.recoveries).toHaveLength(1);
+    expect(h.dispatched).toHaveLength(0);
+  });
+
+  it.each([
+    ["missing usage", { usage: undefined }],
+    [
+      "unpriced usage",
+      {
+        usage: {
+          turns: 1,
+          byModel: { unknown: { turns: 1, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } },
+        },
+      },
+    ],
+    ["truncated record", { truncated: true }],
+    ["incomplete events", { storedEventCount: 5 }],
+    [
+      "model span",
+      { events: [...failedBeforeWork().events, { type: "span_start", spanId: "model", name: "model.turn" }] },
+    ],
+    [
+      "tool call",
+      { events: [...failedBeforeWork().events, { type: "tool_call", tool: "bash", summary: "git status" }] },
+    ],
+    [
+      "context after preparing",
+      {
+        events: failedBeforeWork().events.flatMap((event) =>
+          event.type === "run_state" && event.state === "preparing"
+            ? [event, { type: "context", text: "assistant: post-setup text" } as RunEvent]
+            : [event],
+        ),
+      },
+    ],
+    ["working state", { liveState: { state: "working", since: NOW - minutesToMs(19), bound: NOW } }],
+    [
+      "working event",
+      {
+        events: [
+          ...failedBeforeWork().events,
+          { type: "run_state", state: "working", since: NOW - minutesToMs(19), bound: NOW },
+        ],
+      },
+    ],
+    ["head", { headSha: HEAD }],
+    ["push", { pushed: [{ ref: INSTANCE.branch, sha: HEAD, by: "push" }] }],
+    ["PR", { pr: PR }],
+    [
+      "artifact",
+      {
+        events: [
+          ...failedBeforeWork().events,
+          {
+            type: "unfinished_patch",
+            runId: "other",
+            key: "patch",
+            size: 1,
+            sha256: HEAD,
+            baseHeadSha: HEAD,
+            sourceHeadSha: HEAD,
+            targetHeadSha: HEAD,
+          },
+        ],
+      },
+    ],
+  ] as const)("refuses %s as no-work setup evidence", async (_case, over) => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+    await h.instances.put({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 0.5 } });
+    const row = setupRefusalRow();
+    await h.instances.putUnits([row]);
+    await h.store.put(reviewRecord());
+    const candidate = failedBeforeWork(over as Partial<RunRecord>);
+    await h.store.put({
+      ...candidate,
+      events: candidate.events.map((event, index) => ({ ...event, seq: index + 1 })),
+      eventCount: candidate.events.length,
+      storedEventCount: candidate.storedEventCount === 5 ? 5 : candidate.events.length,
+    });
+    expect((await callRecovery(h)).status).toBe(409);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+    expect(h.recoveries).toEqual([]);
+  });
+
+  it("refuses a missing final event stream even when the complete summary reports zero usage", async () => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([setupRefusalRow()]);
+    await h.store.put(reviewRecord());
+    await h.store.put(failedBeforeWork());
+    const full = h.deps.runs.getRun.bind(h.deps.runs);
+    vi.spyOn(h.deps.runs, "getRun").mockImplementation(async (id, opts) =>
+      id === "run-setup-refused-findings" ? { ok: false, error: "not_found" } : full(id, opts),
+    );
+
+    expect(await callRecovery(h)).toMatchObject({ status: 409, body: { reason: "child_price_unknown" } });
+    expect(h.recoveries).toEqual([]);
+  });
+
+  it.each([
+    "moved head",
+    "moved ref",
+    "closed PR",
+    "rival child",
+    "foreign rival child",
+    "foreign requester",
+    "exhausted cap",
+  ])("refuses a setup-only recovery after %s without changing the original row", async (scenario) => {
+    const facts = exactRecoveryFacts(scenario === "moved head" ? "b".repeat(40) : HEAD);
+    if (scenario === "moved ref") facts.headRef = "plan/other/unit";
+    if (scenario === "closed PR") facts.state = "closed";
+    const h = harness({ prFacts: facts });
+    await h.instances.put({
+      ...recoveryInstance(),
+      grant: { renewals: 0, costCapUsd: scenario === "exhausted cap" ? 0.25 : 0.5 },
+    });
+    const row = setupRefusalRow();
+    await h.instances.putUnits([row]);
+    await h.store.put(reviewRecord());
+    await h.store.put(failedBeforeWork());
+    if (scenario === "rival child")
+      await h.store.put(failedBeforeWork({ id: "run-rival", idempotencyKey: `${INSTANCE.id}:U12/1/findings/a2` }));
+    if (scenario === "foreign rival child")
+      await h.store.put(
+        record("run-foreign-rival", {
+          parentInstanceId: "another-instance",
+          idempotencyKey: "another-instance:U12/1/findings",
+          agent: "coding",
+          repo: INSTANCE.repo,
+          startedAt: NOW - minutesToMs(20),
+          finishedAt: NOW - minutesToMs(15),
+        }),
+      );
+    const response =
+      scenario === "foreign requester"
+        ? await recoverOriginalUnit({ parentInstanceId: INSTANCE.id, unit: "U12" }, h.deps, {
+            userId: "slack:UOTHER",
+            threadKey: INSTANCE.threadKey,
+            messageId: "slack:C1:other",
+          })
+        : await callRecovery(h);
+
+    expect(response.status).toBe(scenario === "foreign requester" ? 403 : 409);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+    expect(h.recoveries).toEqual([]);
+  });
+
   it("treats completed same-head findings as consumed and resumes at read-only re-review", async () => {
     const h = harness({
       prFacts: {
