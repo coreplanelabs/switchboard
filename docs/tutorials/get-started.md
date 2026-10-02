@@ -88,10 +88,12 @@ Leave it running. This is the same process production runs in a container.
 
 ### 6. Mention it
 
-In Slack, `/invite @<your app>` into a channel, then:
+The manifest names the bot `@switchboard`. If you renamed it in Slack, use its current handle.
+
+In Slack, `/invite @switchboard` into a channel, then:
 
 ```
-@<your app> what can you do?
+@switchboard what can you do?
 ```
 
 You should see a 👀 reaction (the receipt), a status card that updates in place, and the answer in a thread. The card's first line names the agent it picked and why. Reply in the thread without the mention: it answers again, and the thread keeps its context. No 👀 means the bot is not in the channel.

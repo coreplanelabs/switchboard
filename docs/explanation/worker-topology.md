@@ -1,8 +1,8 @@
 # Worker topology
 
-One long-lived bot process plus three Cloudflare Workers, each solving a problem the bot structurally cannot; a fifth, assets-only Worker serves this documentation.
+One long-lived bot process plus three runtime Cloudflare Workers. A separate assets-only Worker serves this documentation.
 
-The bot opens an outbound websocket to Slack (Socket Mode), so there is no public URL or webhook to host; its one port serves the health probe, the dashboard and ingress ([decision 0003](../decisions/0003-outbound-only-slack-socket-mode.md)). State lives in thread history, the state Worker's Durable Objects, and disk; only the first two survive a restart.
+The bot opens an outbound websocket to Slack (Socket Mode); its port serves the health probe, dashboard and ingress ([decision 0003](../decisions/0003-outbound-only-slack-socket-mode.md)). Durable conversation and run state live in the state Worker's Durable Objects when configured; repository work lives in its execution workspace.
 
 | Piece | What it is | Why it exists |
 |---|---|---|
@@ -46,17 +46,17 @@ flowchart TB
     RUN <-->|"bash · read · write"| LX & EX & RX
     RX -->|"bearer"| RW
     EX -.->|"seed: the snapshot, restored from R2"| RW
-    D -->|"memory · run record after the reply · overrides"| SW
+    D -->|"conversation · live ledger · run history · overrides"| SW
     CR -.->|"reads"| SW
 ```
 
-A finished run is written to the state Worker after the reply ([Runs: live, then remembered](runs-live-and-history.md)); its Durable Object owns retention (`retentionDays`, `maxRuns`, `maxBytes`). Reads enforce the policy and writes trim history. Scheduled physical cleanup is paused for the MVP; the alarm still handles live-run deadlines and re-asks ([Known limits](known-limits.md)). Chat-set overrides persist there when `runtimeOverrides.worker` names it, otherwise in a file under `data/`.
+A configured ledger writes progress while a run is live; run history keeps its finished record ([Runs: live and recorded](runs-live-and-history.md)). The state Worker enforces retention on reads and trims history on writes. Scheduled physical cleanup is paused for the MVP ([Known limits](known-limits.md)). Chat-set overrides persist there when `runtimeOverrides.worker` names it, otherwise in a file under `data/`.
 
 ## How they talk to each other
 
 ```mermaid
 flowchart TB
-    BOT["Bot<br/>Slack + model keys only<br/>no GH_TOKEN, no tool execution"]
+    BOT["Bot<br/>Slack, model and GitHub API credentials<br/>no model workspace commands"]
 
     STATE[("State Worker<br/>ConfigDO · MemoryDO<br/>RunHistoryDO · ScheduleDO · DeliveryDO")]
     RESIDENT[["Resident Worker<br/>own GitHub App key<br/>mints 1h repo-scoped tokens"]]
@@ -75,13 +75,14 @@ flowchart TB
     RESIDENT --> RDO
     SANDBOX --> SDO
     RDO -->|"git push · per-attach credential file"| GH
-    SDO -->|"git push · GH_TOKEN in the sandbox"| GH
+    SDO -->|"git push · run bearer"| BOT
+    BOT -->|"Git door checks branch and repository"| GH
 ```
 
-- **The bot holds no long-lived repository credential.** On the resident path the resident mints its own, per repository and per attach; on the sandbox path the bot mints a short-lived, toolset-scoped installation token per call and forwards it in the command's body — the sandbox Worker stores nothing ([Execution and trust](execution-and-trust.md)).
+- **Model workspaces receive a revocable run bearer.** The trusted Git door exchanges it for repository-scoped GitHub access; the model does not receive an installation token ([Execution and trust](execution-and-trust.md)).
 - **A cold sandbox is seeded from the resident's snapshot** when the resident cannot take a run: the bot forwards the handle its `/status` probe carried, and the sandbox Worker restores the checkout and its dependency view from the resident's R2 bucket before the run's first command, so the run starts where a resident's would ([execution items 25–26](../reference/specs/execution.md)). A repository with no resident, or a resident with no snapshot yet, runs cold as before.
 - **The resident's GitHub credential is a second domain**: its own App key and its own short-lived tokens, unaffected by rotating the bot's ([decision 0009](../decisions/0009-residents-second-credential-domain.md)).
-- **The state Worker makes bot restarts free.** Conversation context rebuilds from Slack; everything else durable lives here, so a redeploy keeps runs in flight.
+- **The state Worker preserves configured run state.** The ledger can reclaim a live run after a bot restart; the channel and saved conversation provide later context.
 - **A resident redeploy is different**: it swaps the isolate under active threads, so it is preflighted and refuses while work is in flight ([Operate production](../how-to/operate-production.md)).
 - **Every hop carries the same trace id.** The bot sets `traceparent` on calls to these Workers only, each adopts it after the bearer checks out, and the public shim strips outside trace context ([tracing spec](../reference/specs/tracing.md)).
 

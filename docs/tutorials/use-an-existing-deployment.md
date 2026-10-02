@@ -6,7 +6,7 @@ description: Send your first request through a Switchboard your team already run
 
 By the end, you have sent a request to your team's Switchboard and followed up in the same conversation. Someone else already runs the service and manages its model keys, tools, and access rules.
 
-This walkthrough uses Slack. Other installations may expose [browser chat](../reference/dashboard-routes.md) or another channel.
+This walkthrough uses Slack and calls the app `@switchboard`. If your team renamed it, use the handle they gave you. Other installations may expose [browser chat](../reference/dashboard-routes.md) or another channel.
 
 **You need:** the Slack workspace and app name your team uses, plus a channel where the app is present or a direct message with it. Ask the person who runs your deployment for these if you do not have them. You do not need to install the CLI or start a server.
 
@@ -15,7 +15,7 @@ This walkthrough uses Slack. Other installations may expose [browser chat](../re
 In a channel with the app, mention it:
 
 ```text
-@<your Switchboard app> what can you help me with?
+@switchboard what can you help me with?
 ```
 
 In a direct message with the app, send the question without a mention. You should see a 👀 reaction, a status card, and then an answer. The card names the agent chosen for your request.
@@ -31,7 +31,7 @@ Can you give me a concrete example?
 The reply stays in that conversation. For a longer task, describe the outcome you want in plain words. For example, if your deployment has access to the repository and you have permission to use its review agent:
 
 ```text
-@<your Switchboard app> review https://github.com/<org>/<repo>/pull/<number>
+@switchboard review https://github.com/<org>/<repo>/pull/<number>
 ```
 
 The status card links to the run page, where you can watch the work. Your deployment may require a separate dashboard sign-in. [Your first request in Slack](first-request-in-slack.md) walks through more kinds of requests and follow-ups.

@@ -29,7 +29,7 @@ npx @coreplane/switchboard init --organization <your GitHub org> --anthropic-key
 npx @coreplane/switchboard ask "what can you do?"
 ```
 
-`init` writes `.env` (mode 600) and `config/config.yaml` into `~/.switchboard`, so every command works from any directory; `ask` runs the whole pipeline. `curl -fsSL https://openswitchboard.dev/install.sh | sh` is the same `init`.
+`init` writes `.env` (mode 600) and `config/config.yaml` into `~/.switchboard`, so every command works from any directory; `ask` sends a request through the same dispatcher as Slack. `curl -fsSL https://openswitchboard.dev/install.sh | sh` is the same `init`.
 
 Next: [Get started](docs/tutorials/get-started.md).
 
@@ -40,26 +40,12 @@ Four seams: Channel, Provider, Executor, Agent. Each is an interface with more t
 <!-- generated:four-seams · npm run docs:gen — drawn from docs/.vitepress/theme/seams.mjs and src/deploy/plan.ts, do not edit by hand -->
 
 ```mermaid
-flowchart LR
-    subgraph channel ["Channel — how a request arrives"]
-        C1["Slack"]
-        C2["CLI"]
-        C3["HTTP · MCP"]
-    end
-    D{"Dispatcher<br/>routing · config layers · authorization"}
-    subgraph agent ["Agent — what runs"]
-        AG["general · coding · review · ship · research · explore · conductor"]
-    end
-    subgraph provider ["Provider — the model"]
-        P["Anthropic · OpenAI-compatible"]
-    end
-    subgraph executor ["Executor — where tools run"]
-        E["local · sandbox · resident"]
-    end
-    C1 & C2 & C3 -->|"message"| D
-    D -->|"runs"| AG
-    AG <-->|"complete"| P
-    AG <-->|"bash · read · write"| E
+flowchart TB
+    C["Channel"] -->|"message"| D{"Dispatcher"}
+    D -->|"checks and selects"| AG["Agent"]
+    AG -->|"defines"| R["Run"]
+    R <-->|"model calls"| P["Provider"]
+    R <-->|"tool calls"| E["Executor"]
 ```
 
 <!-- /generated:four-seams -->

@@ -6,14 +6,14 @@ The contract is elsewhere: [`docs/reference/specs/`](../reference/specs/README.m
 
 ## The system
 
-- [Architecture](architecture.md) — the parts, in three diagrams.
-- [How a request flows](how-a-request-flows.md) — one pipeline for every entry point.
-- [What holds what](what-holds-what.md) — threads, runs, pipelines: the twelve nouns' containment.
-- [The agents and their toolsets](agents-and-toolsets.md) — five agents and what each may reach.
+- [Architecture](architecture.md) — the request path and where the parts run.
+- [How a request flows](how-a-request-flows.md) — text, model turns and code checks.
+- [Data model](what-holds-what.md) — threads, runs, pipelines and their durable records.
+- [What an agent is](agents-and-toolsets.md) — the eight work profiles and when to add one.
 - [Worker topology](worker-topology.md) — the bot plus three Workers.
 - [One definition, every surface](one-command-many-surfaces.md) — one command becomes chat, CLI, HTTP and MCP.
-- [Runs: live, then remembered](runs-live-and-history.md) — a run's two lives.
-- [A thread's conversation outlives its runs](a-thread-continues.md) — one agent per unit, a follow-up continues the transcript, compaction is a pointer.
+- [Runs: live and recorded](runs-live-and-history.md) — live progress and finished history.
+- [A thread outlives its runs](a-thread-continues.md) — the shared conversation and agent working logs.
 - [Why config is layered](config-layers.md) — six layers, effort included.
 
 ## Trust

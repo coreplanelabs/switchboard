@@ -18,11 +18,11 @@ The harness — which process drives a preset's runs, `pi` or `opencode` — rid
 
 When no layer above the installation defaults names the agent, the request router picks the preset before the defaults do — on unless the deployment sets `routing: { auto: false }`; a directive, the sticky preset, a user `agent` or a channel `agent` each skip it ([routing-and-config item 21](../reference/specs/routing-and-config.md)).
 
-## The thread layer has no storage
+## The thread layer follows the conversation
 
-The thread layer is derived, not set. A follow-up with no directive keeps what the last message in the thread used, read from the channel's history.
+The thread layer is derived, not set. A follow-up with no directive keeps what the earlier thread used. The dispatcher resolves that context from available channel history and durable thread records.
 
-Nothing to leak, clean up, or lose on restart: the next reply rebuilds the same behaviour by reading the thread again.
+The saved conversation and agent working logs are separate from the resolved setting. [A thread outlives its runs](a-thread-continues.md) explains those records.
 
 ## Agent and model resolve independently
 
