@@ -1,9 +1,9 @@
 import { ARTIFACT_DEFAULTS } from "../artifacts/config.js";
 import { referencesOn, type AppConfig } from "../config.js";
-import { DEFAULT_WINDOW_MS } from "../channels/slackCatchUp.js";
+import { DEFAULT_CATCH_UP_WINDOW_MS } from "./budgets.js";
 import type { Capabilities } from "./capabilities.js";
 import { parseDeliveryConfig, SNAPSHOT_EVERY_MINUTES } from "./delivery.js";
-import { maxChildrenOf } from "./dispatch/spawn.js";
+import { maxChildrenOf } from "./dispatch/spawnConfig.js";
 import { DEFAULT_SCOPE_CAP } from "./memory/engine.js";
 import { DEFAULT_MEMORY_LIMIT, DEFAULT_MEMORY_TOKENS } from "./memory/scorer.js";
 import { MEAT_TIMEOUT_S_DEFAULT } from "./readingDiff.js";
@@ -190,7 +190,7 @@ export function installationSettings(config: AppConfig, caps: Capabilities): Ins
     row(
       "slack.catchUp.windowMinutes",
       catchUp?.windowMinutes,
-      DEFAULT_WINDOW_MS / 60_000,
+      DEFAULT_CATCH_UP_WINDOW_MS / 60_000,
       "config",
       "how far back the reconnect catch-up reads",
     ),
