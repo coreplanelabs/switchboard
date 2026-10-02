@@ -162,7 +162,13 @@ import { createSourceReads } from "../mcp/sourceRead.js";
 import { readThreadWorkEvidence } from "../tools/threadWork.js";
 import { predicateFor } from "./authz/predicate.js";
 import { channelVisibilityOf, finishChildSetup, writeTombstone } from "./dispatch/record.js";
-import { namesOriginalUnitRecovery, runShipBranch, type ShipContext, type ShipDeps } from "./dispatch/ship.js";
+import {
+  namesOriginalUnitRecovery,
+  parseOriginalUnitRecoveryRequest,
+  runShipBranch,
+  type ShipContext,
+  type ShipDeps,
+} from "./dispatch/ship.js";
 import { fetchInstanceStatusViaShim, processShimOptions } from "./coordinator/instancesClient.js";
 import { shipPresetFor } from "./shipPipeline.js";
 import { resolveAddressSeverity } from "./reviewVerdict.js";
@@ -1759,11 +1765,24 @@ export async function dispatch(
     // is the live run's (admission steers below); a session or no owner follows
     // the ordinary sticky or door-bound path.
     if (thread && !threadLive && deps.coordinatorInstances !== undefined) {
-      let owner = pageOwner ?? (await ownerOf(thread, (id) => deps.coordinatorInstances!.listUnits(id), msg.threadKey));
+      let owner: ThreadOwner =
+        pageOwner ?? (await ownerOf(thread, (id) => deps.coordinatorInstances!.listUnits(id), msg.threadKey));
       if (owner.kind === "unavailable") {
-        await io.reply("This thread's work owner could not be verified, so no new work started.");
-        await recordPendingOperator();
-        return ended;
+        // Only the complete, typed recovery grammar can defer an unreadable
+        // unit owner to the original-unit boundary. That boundary verifies
+        // the original requester, thread, publication and lifetime budget;
+        // ordinary requests cannot treat an unreadable owner as unowned.
+        if (
+          originalUnitRecovery &&
+          parseOriginalUnitRecoveryRequest(directives.text) !== undefined &&
+          thread.every((run) => run.finished)
+        ) {
+          owner = { kind: "none" };
+        } else {
+          await io.reply("This thread's work owner could not be verified, so no new work started.");
+          await recordPendingOperator();
+          return ended;
+        }
       }
       if (
         !originalUnitRecovery &&
