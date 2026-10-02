@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.278.3](https://github.com/coreplanelabs/switchboard/compare/v1.278.2...v1.278.3) (2026-10-02)
+
+
+### Bug fixes
+
+* **core:** admit explicit original-unit recovery after owner read fails ([#2679](https://github.com/coreplanelabs/switchboard/issues/2679)) ([0a68a82](https://github.com/coreplanelabs/switchboard/commit/0a68a82b97fc4853e439e515aea26662b17cfc6f))
+* **core:** recover saved answers after state checkpoint timeouts ([#2672](https://github.com/coreplanelabs/switchboard/issues/2672)) ([c4ec3a2](https://github.com/coreplanelabs/switchboard/commit/c4ec3a2b4309b92c0eac029f372a1685f3b1dc9e))
+* **core:** route Ship unit recovery through MCP ([#2676](https://github.com/coreplanelabs/switchboard/issues/2676)) ([daef1b6](https://github.com/coreplanelabs/switchboard/commit/daef1b6f1e90064786807737dfb3e1de47fb97ae))
+* **memory:** read unit retention roots in one pass ([#2675](https://github.com/coreplanelabs/switchboard/issues/2675)) ([84a9efe](https://github.com/coreplanelabs/switchboard/commit/84a9efe08b646f62ce155277992edff3e523e871))
+* **runs:** honor retained context in run-history listing ([#2678](https://github.com/coreplanelabs/switchboard/issues/2678)) ([bc200d6](https://github.com/coreplanelabs/switchboard/commit/bc200d69d0c33f14041600a7731f526d36f6900b))
+
 ## [1.278.2](https://github.com/coreplanelabs/switchboard/compare/v1.278.1...v1.278.2) (2026-10-02)
 
 
