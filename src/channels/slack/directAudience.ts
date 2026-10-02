@@ -36,36 +36,41 @@ export async function verifySlackDirectAudience(
     !audience.threadKey.startsWith(`${audience.channelId}:`)
   )
     return { ok: false, code: "direct-address-unproved" };
-  try {
-    const channel = audience.channelId.slice("slack:".length);
-    const peer = audience.userId.slice("slack:".length);
-    const [c, installation, person] = await Promise.all([
-      client.conversations.info({ channel }).then((result) => result.channel),
-      client.auth.test(),
-      client.users.info({ user: peer }).then((result) => result.user),
-    ]);
-    const team = installation.team_id;
-    const allowed =
-      typeof team === "string" &&
-      team.length > 0 &&
-      person?.team_id === team &&
-      c?.user === peer &&
-      c.is_im === true &&
-      c.is_mpim !== true &&
-      c.is_private !== false &&
-      c.is_member !== false &&
-      c.is_shared !== true &&
-      c.is_ext_shared !== true &&
-      c.is_org_shared === false &&
-      c.is_pending_ext_shared !== true &&
-      (c.num_members === undefined || c.num_members === 2) &&
-      (c.shared_team_ids === undefined || (c.shared_team_ids.length === 1 && c.shared_team_ids[0] === team)) &&
-      (c.pending_connected_team_ids === undefined || c.pending_connected_team_ids.length === 0);
-    if (allowed) return { ok: true };
-    const missing =
-      !team || !person?.team_id || !c?.user || typeof c.is_im !== "boolean" || typeof c.is_org_shared !== "boolean";
-    return { ok: false, code: missing ? "direct-audience-unavailable" : "direct-audience-denied" };
-  } catch {
-    return { ok: false, code: "direct-audience-unavailable" };
-  }
+  const check = async (): Promise<AudienceCheck> => {
+    try {
+      const channel = audience.channelId.slice("slack:".length);
+      const peer = audience.userId.slice("slack:".length);
+      const [c, installation, person] = await Promise.all([
+        client.conversations.info({ channel }).then((result) => result.channel),
+        client.auth.test(),
+        client.users.info({ user: peer }).then((result) => result.user),
+      ]);
+      const team = installation.team_id;
+      const allowed =
+        typeof team === "string" &&
+        team.length > 0 &&
+        person?.team_id === team &&
+        c?.user === peer &&
+        c.is_im === true &&
+        c.is_mpim !== true &&
+        c.is_private !== false &&
+        c.is_member !== false &&
+        c.is_shared !== true &&
+        c.is_ext_shared !== true &&
+        c.is_org_shared === false &&
+        c.is_pending_ext_shared !== true &&
+        (c.num_members === undefined || c.num_members === 2) &&
+        (c.shared_team_ids === undefined || (c.shared_team_ids.length === 1 && c.shared_team_ids[0] === team)) &&
+        (c.pending_connected_team_ids === undefined || c.pending_connected_team_ids.length === 0);
+      if (allowed) return { ok: true };
+      const missing =
+        !team || !person?.team_id || !c?.user || typeof c.is_im !== "boolean" || typeof c.is_org_shared !== "boolean";
+      return { ok: false, code: missing ? "direct-audience-unavailable" : "direct-audience-denied" };
+    } catch {
+      return { ok: false, code: "direct-audience-unavailable" };
+    }
+  };
+  const first = await check();
+  // An unavailable read cannot publish; only a complete fresh re-read can recover it.
+  return !first.ok && first.code === "direct-audience-unavailable" ? check() : first;
 }

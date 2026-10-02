@@ -1,11 +1,13 @@
 import { booleanAudienceVerifier } from "../testing/audienceVerifier.js";
-import { testSessionSources, testSlackReceipt } from "../testing/slackSources.js";
+import { verifySlackDirectAudience } from "../../channels/slack/directAudience.js";
+import { testSessionSources, testSlackCapability, testSlackReceipt } from "../testing/slackSources.js";
 import { describe, expect, it, vi } from "vitest";
 import type { ChannelIO, IncomingMessage } from "../types.js";
 import {
   privateAudienceRefusal,
   privateAudienceRequired,
   privateAudienceStillValid,
+  privateRunAudienceDecision,
   recoveredPrivateAudienceLatch,
   revalidateSavedSlackContext,
   revalidateSourcesDecision,
@@ -13,6 +15,7 @@ import {
   samePrivateRequesterFollowUp,
   savedSlackContextNeedsRecheck,
 } from "./privateAudience.js";
+import { bindSlackContext } from "./slackContextBinding.js";
 
 const msg: IncomingMessage = {
   channelId: "slack:DMAIN",
@@ -28,6 +31,53 @@ const msg: IncomingMessage = {
 };
 
 describe("private audience publication gate", () => {
+  it("keeps a verified private answer after three reads and one recovered unavailable check", async () => {
+    let checks = 0;
+    let unavailable = false;
+    let shared = false;
+    const client = {
+      auth: { test: async () => ({ team_id: "TLOCAL" }) },
+      users: { info: async () => ({ user: { team_id: "TLOCAL" } }) },
+      conversations: {
+        info: async () => {
+          checks++;
+          if (unavailable) {
+            unavailable = false;
+            throw new Error("temporary Slack failure");
+          }
+          return { channel: { user: "UALICE", is_im: true, is_org_shared: false, is_shared: shared } };
+        },
+      },
+    };
+    const io = {
+      directAudience: () => msg.directAudience,
+      verifyDirectAudience: (audience: NonNullable<IncomingMessage["directAudience"]>) =>
+        verifySlackDirectAudience(client, audience),
+    } as ChannelIO;
+    const bound = await bindSlackContext({
+      agentName: "orchestrator",
+      actor: { kind: "user", id: msg.userId, grants: { actions: new Set(), channels: new Set(), repos: new Set() } },
+      msg,
+      io,
+      visibility: "dm",
+      create: () => testSlackCapability(msg, async () => "private source"),
+    });
+    expect(bound).toBeDefined();
+    expect(await bound!.initialize(testSessionSources(msg, []), async () => true)).toBe(true);
+    for (let read = 0; read < 3; read++)
+      expect(await bound!.capability.read({ kind: "thread" })).toBe("private source");
+    const beforeAnswer = checks;
+    unavailable = true;
+    expect(await privateRunAudienceDecision(msg, io, { revoked: false }, bound)).toEqual({ ok: true });
+    expect(checks).toBe(beforeAnswer + 3);
+    shared = true;
+    expect(await privateRunAudienceDecision(msg, io, { revoked: false })).toEqual({
+      ok: false,
+      code: "direct-audience-denied",
+    });
+    expect(checks).toBe(beforeAnswer + 4);
+  });
+
   it("refuses a timed out source check and never starts another receipt", async () => {
     vi.useFakeTimers();
     try {
