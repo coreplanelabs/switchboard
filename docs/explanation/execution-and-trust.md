@@ -15,6 +15,7 @@ flowchart TB
     subgraph ep ["Execution plane — ephemeral, one per thread"]
         S1["Sandbox: thread A<br/>repo checkout + revocable run bearer"]
         S2["Sandbox: thread B<br/>separate VM entirely"]
+        PC["Cold publisher<br/>fresh one-use sandbox VM"]
     end
 
     subgraph rp ["Resident plane — a second, isolated credential domain"]
@@ -24,6 +25,9 @@ flowchart TB
 
     GH(["GitHub"])
     BOT -->|"per tool call"| S1 & S2
+    BOT -->|"typed one-send publication via sandbox Worker"| PC
+    S1 & S2 -->|"bounded untrusted Git pack, no effect bearer"| PC
+    PC -->|"effect bearer · exact ref and expected previous branch head via Git Door"| BOT
     BOT -->|"operator bearer · per tool call"| RW --> RD
     S1 & S2 -->|"git and gh · run bearer"| BOT
     RD -->|"git and gh · run bearer"| BOT
@@ -37,7 +41,7 @@ flowchart TB
 | Execution (one sandbox per thread) | That thread's checkout and a revocable run bearer, with no App token | One sandbox and the run's bounded Git/gh capability until revocation |
 | Resident (always-warm repositories) | Its own App key for the root-owned mirror; writable thread trees use the Git door | Mirror access for its onboarded repositories; no Slack or model key |
 
-Sandboxes expire when idle (`execution.timeoutMinutes`, default 30) and are recreated on the next follow-up. Docker inside one runs within the same microVM and adds no privilege.
+Sandboxes expire when idle (`execution.timeoutMinutes`, default 30) and are recreated on the next follow-up. Docker inside one runs within the same microVM and adds no privilege. A cold model owns root in its own VM: no program running there can independently inspect or protect its environment. Cold credential inspection therefore stays incomplete. For runner-owned publication alone, the Worker allocates a fresh controller identity from a reserved namespace that model routes cannot select; it validates bounded untrusted Git objects in a clean repository with the image's Git before sending the exact typed ref and expected previous branch head through the Git Door. Only that short-lived controller receives the effect bearer, and it is destroyed after use. A response loss remains uncertain for the existing durable settlement, not a reason to resend. The extra VM consumes capacity from the existing sandbox fleet and may be refused; it does not attest inspection, revocation or adoption ([decision 0085](../decisions/0085-a-cold-publication-controller-is-a-fresh-sandbox-not-an-inspector.md)).
 
 Inside a resident, repository code runs unprivileged with a run bearer. The Worker scrubs older thread App credential files and keeps its mirror token root-only ([decision 0009](../decisions/0009-residents-second-credential-domain.md)).
 

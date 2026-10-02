@@ -25,6 +25,7 @@ import {
   Sandbox,
   StaleProcessHandleError,
   getSandbox,
+  streamFile,
   type DirectoryBackup,
   type SandboxCommand,
 } from "@cloudflare/sandbox";
@@ -106,6 +107,18 @@ import {
   type SeedStep,
 } from "../../src/execution/seedPlan.js";
 import { shellQuote } from "../../src/execution/shellQuote.js";
+import {
+  modelSandboxIdentity,
+  newControllerIdentity,
+  disposeColdController,
+} from "../../src/execution/coldPublicationBoundary.js";
+import {
+  COLD_PACK_MAX_BYTES,
+  coldPublicationInput,
+  controllerPublicationPlan,
+  parseColdPublication,
+  sourcePublicationPackCommand,
+} from "../../src/execution/coldPublication.js";
 import { classifyError } from "../../src/core/trace/classify.js";
 import { systemClock } from "../../src/core/trace/clock.js";
 import { createTracer } from "../../src/core/trace/tracer.js";
@@ -671,6 +684,98 @@ export class SwitchboardSandbox extends Sandbox<Env> {
     return seen ? total : null;
   }
 
+  /** Export untrusted object data, never a credential. The model owns this
+   * container and may replace Git, pack files, or output; only the fresh
+   * controller validates what it receives. The source's size is checked
+   * again after the read to close the stat/read race. */
+  async exportPublicationPack(next: string, old?: string, baseFetched = false): Promise<string | null> {
+    if (!/^[0-9a-f]{40}$/.test(next) || (old !== undefined && !/^[0-9a-f]{40}$/.test(old))) return null;
+    return this.idle.served(() =>
+      this.gate.through(
+        async () => {
+          const path = `/tmp/cold-pack-${crypto.randomUUID()}.pack`;
+          try {
+            const script = sourcePublicationPackCommand(next, old, path, WORKDIR, baseFetched);
+            const result = await this.runRoot(["bash", "-c", script], 60_000);
+            if (result.exitCode !== 0) return null;
+            // A model-root writer can swap the file after stat. Read the SDK's
+            // binary stream under an independent byte cap, never a whole-file RPC.
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            const read = async (): Promise<string | null> => {
+              const stream = await this.readFileStream(path);
+              let bytes = 0;
+              const parts: string[] = [];
+              for await (const chunk of streamFile(stream)) {
+                if (!(chunk instanceof Uint8Array) || (bytes += chunk.byteLength) > COLD_PACK_MAX_BYTES) {
+                  await stream.cancel().catch(() => undefined);
+                  return null;
+                }
+                for (let at = 0; at < chunk.length; at += 8192)
+                  parts.push(String.fromCharCode(...chunk.subarray(at, at + 8192)));
+              }
+              return btoa(parts.join(""));
+            };
+            try {
+              return await Promise.race([
+                read(),
+                new Promise<null>((resolve) => {
+                  timer = setTimeout(() => resolve(null), 30_000);
+                }),
+              ]);
+            } finally {
+              if (timer !== undefined) clearTimeout(timer);
+            }
+          } catch {
+            return null;
+          } finally {
+            await this.deleteFile(path).catch(() => undefined);
+          }
+        },
+        () => null,
+      ),
+    );
+  }
+
+  /** A missing old-head ancestor can only be replaced by a base fetched via
+   * this controller's own fixed Door URL and read grant. The returned SHA is
+   * immutable and is checked in this repository before the effect runs. */
+  async fetchPublicationBase(body: unknown, baseSource: "branch" | "default" = "branch"): Promise<string | null> {
+    const input = coldPublicationInput(body);
+    if (!input) return null;
+    return this.idle.served(async () => {
+      try {
+        const plan = controllerPublicationPlan(input, undefined, baseSource);
+        const fetched = await this.runRoot(["bash", "-c", plan.fetchCommand], 85_000, plan.env);
+        const base = fetched.stdout.trim();
+        return fetched.exitCode === 0 && /^[0-9a-f]{40}$/.test(base) ? base : null;
+      } catch {
+        return null;
+      }
+    });
+  }
+
+  /** Only a Worker-allocated fresh identity may receive an effect credential.
+   * The container runs the image's fixed Git and has no model filesystem. */
+  async publishControlled(body: unknown, base?: string): Promise<{ state: "accepted" | "refused" | "unknown" }> {
+    const parsed = parseColdPublication(body);
+    if (!parsed) return { state: "refused" };
+    return this.idle.served(async () => {
+      try {
+        const written = await this.writeFile("/workspace/transfer.pack", parsed.pack, { encoding: "base64" });
+        if (!written.success) return { state: "refused" };
+        const plan = controllerPublicationPlan(parsed.input, base);
+        const prepared = await this.runRoot(["bash", "-c", plan.prepareCommand], 125_000, plan.prepareEnv);
+        if (prepared.exitCode !== 0) return { state: "refused" };
+        // A lost answer or a nonzero Git exit after push may follow an accepted
+        // Door write; only the existing durable settlement can decide it.
+        const pushed = await this.runRoot(["bash", "-c", plan.pushCommand], 75_000, plan.env);
+        return { state: pushed.exitCode === 0 ? "accepted" : "unknown" };
+      } catch {
+        return { state: "unknown" };
+      }
+    });
+  }
+
   /** One process as root, collected inside this object — the seed's own
    *  commands, outside the /exec shape (no shell-level `timeout`, no WORKDIR). */
   private async runRoot(
@@ -874,7 +979,7 @@ function execRoot(startedAt: number, traceparent: string | undefined) {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const auth = request.headers.get("authorization");
     if (!env.SANDBOX_TOKEN || auth !== `Bearer ${env.SANDBOX_TOKEN}`) {
       return json({ error: "unauthorized" }, 401);
@@ -893,13 +998,15 @@ export default {
     }
     if (request.method !== "POST") return json({ error: "POST only" }, 405);
 
+    const url = new URL(request.url);
     const threadKey = request.headers.get("x-thread-key");
-    if (!threadKey) return json({ error: "missing X-Thread-Key" }, 400);
+    const modelIdentity = modelSandboxIdentity(url.pathname, threadKey);
+    if (!modelIdentity) return json({ error: "invalid route or thread identity" }, 400);
 
     // One sandbox per thread; the DO name is the thread key. The stub's own
     // methods (`runCommand`, `readText`, …) are what the routes call — the
     // work happens in the Durable Object, the data comes back over RPC.
-    const sandbox = getSandbox(env.Sandbox, threadKey, {
+    const sandbox = getSandbox(env.Sandbox, modelIdentity, {
       containerTimeouts: {
         // A refused instance grant is learned in seconds, not after the SDK's
         // 30 s default and its retries (63 s to "no container instance" under
@@ -910,8 +1017,82 @@ export default {
       },
     });
 
-    const url = new URL(request.url);
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    if (url.pathname === "/publish") {
+      const input = coldPublicationInput(body);
+      if (!input) return json({ error: "invalid typed publication request" }, 400);
+      // The controller is never selected from a header or body, or adopted
+      // from the thread's DO. Its one-use random name is in a reserved namespace.
+      const controller = getSandbox(env.Sandbox, newControllerIdentity());
+      // Keep the effect and teardown alive if the caller disconnects before
+      // the response; its own settlement will still call the outcome unknown.
+      const operation = (async (): Promise<Response> => {
+        let answer: Response;
+        try {
+          // Prefer the exact old-head shallow boundary for updates, or the
+          // bounded full graph for a new ref. If it exceeds the cap, fetch a
+          // trusted base without blobs; an initial ref or rebase can use
+          // default HEAD only when it is an ancestor of the new tip.
+          let pack = await sandbox.exportPublicationPack(input.next, input.old);
+          let base: string | undefined;
+          if (!pack) {
+            base = (await controller.fetchPublicationBase(input)) ?? undefined;
+            if (base) pack = await sandbox.exportPublicationPack(input.next, base, true);
+          }
+          if (!pack && input.old) {
+            base = (await controller.fetchPublicationBase(input, "default")) ?? undefined;
+            if (base) pack = await sandbox.exportPublicationPack(input.next, base, true);
+          }
+          if (!pack || !parseColdPublication({ ...input, pack })) {
+            answer = json(
+              {
+                error:
+                  base || input.old
+                    ? "cold-publication-graph-unavailable-or-over-limit"
+                    : "cold-publication-base-unavailable-or-over-limit",
+              },
+              409,
+            );
+          } else {
+            const result = await controller.publishControlled({ ...input, pack }, base);
+            answer =
+              result.state === "accepted"
+                ? json({ stdout: "", stderr: "", exitCode: 0, truncated: false })
+                : json(
+                    {
+                      error:
+                        result.state === "refused"
+                          ? "publication refused by cold controller"
+                          : "cold publication outcome unknown",
+                    },
+                    result.state === "refused" ? 409 : 503,
+                  );
+          }
+        } catch {
+          // An effect may have run. No SDK exception or command output crosses
+          // this route: the durable settlement, not a retry, resolves uncertainty.
+          answer = json({ error: "cold publication outcome unknown" }, 503);
+        }
+        // An incomplete teardown cannot be called an accepted publication. The
+        // background destroy continues under waitUntil if the bounded wait ends.
+        if (
+          !(await disposeColdController(
+            () => controller.destroy(),
+            (pending) => ctx.waitUntil(pending),
+            OUTPUT_AFTER_EXIT_MS,
+          ))
+        )
+          return json({ error: "cold publication outcome unknown" }, 503);
+        return answer;
+      })();
+      ctx.waitUntil(
+        operation.then(
+          () => undefined,
+          () => undefined,
+        ),
+      );
+      return operation;
+    }
 
     // Optional env passthrough (e.g. GH_TOKEN), read from the BODY's `env`
     // (docs/reference/specs/execution.md item 5). It then rides in the SDK's per-process
@@ -981,8 +1162,8 @@ export default {
       // exec path's), the object's id computed from the thread key it is
       // named by, since the error crossed the RPC boundary without it.
       if (isFleetBusyError(err)) {
-        const container = env.Sandbox.idFromName(threadKey).toString();
-        console.log(fleetBusyRefusedLine({ thread: threadKey, container, refusal: msg, route: url.pathname }));
+        const container = env.Sandbox.idFromName(modelIdentity).toString();
+        console.log(fleetBusyRefusedLine({ thread: modelIdentity, container, refusal: msg, route: url.pathname }));
         return json(fleetBusyAnswer(msg, container), 503);
       }
       return json({ error: msg }, 500);

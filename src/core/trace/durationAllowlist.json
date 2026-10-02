@@ -3,7 +3,7 @@
   "deploy/cloudflare-resident/gc.ts": 2,
   "deploy/cloudflare-resident/shared.ts": 5,
   "deploy/cloudflare-resident/worker.ts": 7,
-  "deploy/cloudflare-sandbox/worker.ts": 4,
+  "deploy/cloudflare-sandbox/worker.ts": 5,
   "deploy/cloudflare/preflight.mjs": 1,
   "deploy/cloudflare/worker.ts": 1,
   "scripts/load.ts": 6,

@@ -240,6 +240,7 @@ describe("E2BExecutor credential file refresh", () => {
       async () => ({}),
     );
     expect("publishBranch" in ex).toBe(false);
+    expect("publishBranchResult" in ex).toBe(false);
   });
 
   it("a run-bearer push refusal is returned once without an App credential source", async () => {

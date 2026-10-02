@@ -3,7 +3,7 @@ import {
   type CredentialInspection,
   type CredentialInspectionInput,
 } from "./credentialInspection.js";
-import { BASH_TIMEOUT_MS, EXEC_CALL_MARGIN_MS, clampBashTimeout } from "./bashTimeout.js";
+import { BASH_TIMEOUT_MAX_MS, BASH_TIMEOUT_MS, EXEC_CALL_MARGIN_MS, clampBashTimeout } from "./bashTimeout.js";
 import {
   ExecCapacityError,
   ExecInfraError,
@@ -16,6 +16,7 @@ import {
   type ExecOptions,
   type ExecResult,
   type Executor,
+  type PublicationTransport,
 } from "./executor.js";
 import type { ExecTraceOptions } from "./executor.js";
 import {
@@ -46,6 +47,7 @@ import { tracedFetch } from "../core/trace/tracedFetch.js";
 import { SANDBOX_CREDENTIAL_FILE } from "./sandboxCredentials.js";
 import { legacySandboxCredentialScrub } from "./legacySandboxCredentials.js";
 import type { Span } from "../core/trace/types.js";
+import { coldPublicationInput } from "./coldPublication.js";
 
 // Remote execution in a Cloudflare Sandbox, via the authenticated proxy Worker
 // in deploy/cloudflare-sandbox/ (the Sandbox SDK only runs inside Workers).
@@ -477,6 +479,87 @@ export class CloudflareSandboxExecutor implements Executor {
     )
       throw new ExecInfraError("sandbox /exec: invalid command result", "worker-unavailable");
     return { stdout: r.stdout, stderr: r.stderr, exitCode: r.exitCode as number, truncated: r.truncated };
+  }
+
+  /** The effect bearer goes to the Worker once, never through `call` (which
+   * resolves model envs and waits/re-sends). A lost answer is unknown, not an
+   * instruction to replay a potentially accepted Git push. */
+  async publishBranchResult(input: PublicationTransport): Promise<ExecResult> {
+    const refusal = { stdout: "", stderr: "publication refused by cold controller", exitCode: 1, truncated: false };
+    if (
+      !coldPublicationInput({
+        repo: input.repo,
+        doorOrigin: input.doorOrigin,
+        branch: input.branch,
+        next: input.next,
+        ...(input.old === undefined ? {} : { old: input.old }),
+        bearer: input.bearer,
+      })
+    )
+      return refusal;
+    // The bounded base fetch, source export, graph import and one push may
+    // outlive an ordinary command's budget; it remains a single HTTP send.
+    const signal = execDeadline(BASH_TIMEOUT_MAX_MS + EXEC_CALL_MARGIN_MS, input.signal);
+    let response: Response;
+    let text: string;
+    try {
+      // No generic tracedFetch here: it records transport exception messages
+      // before this boundary can replace them with a fixed unknown outcome.
+      response = await fetch(`${this.opts.url.replace(/\/$/, "")}/publish`, {
+        method: "POST",
+        redirect: "manual",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${this.opts.token}`,
+          "x-thread-key": this.opts.threadKey,
+        },
+        body: JSON.stringify({
+          repo: input.repo,
+          doorOrigin: input.doorOrigin,
+          branch: input.branch,
+          next: input.next,
+          ...(input.old === undefined ? {} : { old: input.old }),
+          bearer: input.bearer,
+        }),
+        signal,
+      });
+      text = await response.text();
+    } catch {
+      throw new ExecInfraError(
+        "cold publication outcome unknown; reconcile the durable effect before retry",
+        "worker-unavailable",
+      );
+    }
+    if (response.status >= 500)
+      throw new ExecInfraError(
+        "cold publication outcome unknown; reconcile the durable effect before retry",
+        "worker-unavailable",
+      );
+    if (!response.ok || text.length > 2048) return refusal;
+    let data: Record<string, unknown>;
+    try {
+      data = JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      throw new ExecInfraError(
+        "cold publication outcome unknown; reconcile the durable effect before retry",
+        "answered",
+      );
+    }
+    if (
+      data === null ||
+      typeof data !== "object" ||
+      Array.isArray(data) ||
+      Object.keys(data).sort().join(",") !== "exitCode,stderr,stdout,truncated" ||
+      data.stdout !== "" ||
+      data.stderr !== "" ||
+      data.exitCode !== 0 ||
+      data.truncated !== false
+    )
+      throw new ExecInfraError(
+        "cold publication outcome unknown; reconcile the durable effect before retry",
+        "answered",
+      );
+    return { stdout: "", stderr: "", exitCode: 0, truncated: false };
   }
 
   async inspectCredentials(_input: CredentialInspectionInput): Promise<CredentialInspection> {

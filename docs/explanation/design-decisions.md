@@ -93,6 +93,7 @@ Statuses: **proposed** (written, not yet agreed), **accepted** (agreed, being bu
 | 0082 | [An explicit PR batch may start exact Ship children](../decisions/0082-an-explicit-pr-batch-may-start-exact-ship-children.md) | — | accepted | 2026-09-29 |
 | 0083 | [Context keeps its original sources across conversations and child work](../decisions/0083-context-keeps-its-original-sources-across-conversations-and-child-work.md) | Information-flow control and immutable snapshots | accepted | 2026-10-01 |
 | 0084 | [Execution images follow their build inputs across Worker releases](../decisions/0084-execution-images-follow-their-inputs.md) | Content-addressed deployment artifact | accepted | 2026-10-01 |
+| 0085 | [A cold publication controller is a fresh sandbox, not an inspector](../decisions/0085-a-cold-publication-controller-is-a-fresh-sandbox-not-an-inspector.md) | One-use isolated effect domain | accepted | 2026-10-02 |
 
 <!-- /generated:decision-records -->
 
