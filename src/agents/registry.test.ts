@@ -1415,7 +1415,20 @@ describe("orchestrator agent (record 0070 — the plane's chat preset)", () => {
     expect(sys).toMatch(/`work_status` is the current source; cite its unit key/);
     expect(sys).toMatch(/These tools bind the person and this thread/);
     expect(sys).toMatch(/Do not ask the person to type a command or special syntax/);
-    expect(sys).toMatch(/You cannot edit code or merge yourself/);
+    expect(sys).toMatch(/This agent has no shell or merge tool/);
+  });
+
+  it("answers capability questions for Switchboard as a gateway, without confusing this preset's limits with other agent paths", () => {
+    const sys = AGENTS.orchestrator.system;
+    expect(sys).toContain("When asked what you or Switchboard can help with");
+    expect(sys).toContain("Agents line in the About block");
+    expect(sys).toContain("coding, review, Ship, research and explore");
+    expect(sys).toContain("current conversation");
+    expect(sys).toContain("available tools, channel and requester permissions");
+    expect(sys).toContain("Do not imply a plain follow-up here launches a specialist whose tool you do not hold");
+    expect(sys).toContain(
+      "Do not turn your lack of a shell into a claim that Switchboard cannot edit code or review pull requests",
+    );
   });
 
   it("starts requested private work only in a verified direct requester conversation", () => {
@@ -1425,7 +1438,7 @@ describe("orchestrator agent (record 0070 — the plane's chat preset)", () => {
       "When the latest person turn in a verified direct requester Slack DM asks you to fix or build something",
     );
     expect(sys).toContain("a later refusal or correction overrides an earlier fix phrase");
-    expect(sys).toMatch(/private worker follows the existing review and person-merge gates/);
+    expect(sys).toMatch(/private worker implements code changes under the existing review and person-merge gates/);
   });
 
   it("answers non-fleet questions in this same thread from authorized GitHub and explicitly scoped MCP reads, citing the source and time window", () => {
