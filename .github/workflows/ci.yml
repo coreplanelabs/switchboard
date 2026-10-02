@@ -41,6 +41,27 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  plan:
+    name: change plan
+    runs-on: depot-ubuntu-24.04
+    outputs:
+      bot_checks: ${{ steps.select.outputs.bot_checks }}
+      bot_tests: ${{ steps.select.outputs.bot_tests }}
+      web: ${{ steps.select.outputs.web }}
+      docs: ${{ steps.select.outputs.docs }}
+      package: ${{ steps.select.outputs.package }}
+      workers: ${{ steps.select.outputs.workers }}
+      images: ${{ steps.select.outputs.images }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: select
+        run: npm run ci:plan
+        env:
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+
   bot-checks:
     # One static check per job — typecheck, lint, and prettier each take 15–25 s
     # on a runner; in one chain they were the slowest half of the slowest job.
@@ -48,16 +69,17 @@ jobs:
     # vendored skills, licenses, generated docs tables, spec proof bindings) so they do not each pay
     # an install.
     name: bot / ${{ matrix.check }}
+    needs: plan
     runs-on: depot-ubuntu-24.04-4
     strategy:
       fail-fast: false
       matrix:
-        check: [check:consistency, typecheck, lint, format:check, check:dist]
+        check: ${{ fromJSON(needs.plan.outputs.bot_checks) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # `decisions:check` (in check:consistency) diffs accepted records against origin/main;
-          # a shallow clone has no origin/main and would skip that half.
+          # `decisions:check` (in check:consistency) diffs accepted records against the
+          # merge-base of HEAD and origin/main; a shallow clone has neither and would skip that half.
           fetch-depth: 0
           # No step here pushes or fetches after the checkout, so the token
           # never lands in .git/config (here and in every checkout below).
@@ -68,13 +90,17 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
       - run: npm ci
-      - run: npm run ${{ matrix.check }}
+      - run: npm run "$CHECK"
+        env:
+          CHECK: ${{ matrix.check }}
 
   bot-tests:
     # The vitest suite (every project in vitest.config.ts) split by file across
     # N shards; N is the length of the matrix and nothing else. A shard
     # reproduces locally as `npm test -- --shard=2/4`.
     name: bot / test ${{ matrix.shard }} of ${{ strategy.job-total }}
+    needs: plan
+    if: needs.plan.outputs.bot_tests == 'true'
     runs-on: depot-ubuntu-24.04-4
     strategy:
       fail-fast: false
@@ -98,7 +124,7 @@ jobs:
     # The required check `bot`: green only when every static check and every
     # test shard succeeded (scripts/ci-gate.mjs).
     name: bot
-    needs: [bot-checks, bot-tests]
+    needs: [plan, bot-checks, bot-tests]
     if: ${{ always() }}
     runs-on: depot-ubuntu-24.04
     env:
@@ -111,6 +137,8 @@ jobs:
 
   web:
     name: web
+    needs: plan
+    if: needs.plan.outputs.web == 'true'
     runs-on: depot-ubuntu-24.04-4
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -126,6 +154,8 @@ jobs:
 
   docs:
     name: docs
+    needs: plan
+    if: needs.plan.outputs.docs == 'true'
     runs-on: depot-ubuntu-24.04-4
     env:
       WRANGLER_SEND_METRICS: "false"
@@ -152,6 +182,8 @@ jobs:
     # directory, run the installed `switchboard`. A required check like the
     # others once the ruleset in docs/how-to/configure-the-repository.md is applied.
     name: package
+    needs: plan
+    if: needs.plan.outputs.package == 'true'
     runs-on: depot-ubuntu-24.04-4
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -172,22 +204,30 @@ jobs:
     # `deploy/<worker>` directories, and a check called `workers / deploy/…`
     # read as a deploy. Nothing here deploys; deploy-production.yml does.
     name: workers / verify ${{ matrix.worker }}
+    needs: plan
+    if: needs.plan.outputs.workers != '["none"]'
     runs-on: depot-ubuntu-24.04-4
     strategy:
       fail-fast: false
       matrix:
-        worker: [deploy/cloudflare, deploy/cloudflare-memory, deploy/cloudflare-resident, deploy/cloudflare-sandbox]
+        worker: ${{ fromJSON(needs.plan.outputs.workers) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: matrix.worker != 'none'
         with:
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: matrix.worker != 'none'
         with:
           node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: package-lock.json
-      - run: npm ci
-      - run: npm run verify -w ${{ matrix.worker }}
+      - if: matrix.worker != 'none'
+        run: npm ci
+      - if: matrix.worker != 'none'
+        run: npm run verify -w "$WORKER"
+        env:
+          WORKER: ${{ matrix.worker }}
       - name: upload memory test diagnostics
         if: ${{ always() && matrix.worker == 'deploy/cloudflare-memory' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -200,7 +240,7 @@ jobs:
   workers:
     # The required check `workers`: green only when every Worker's job succeeded.
     name: workers
-    needs: [workers-each]
+    needs: [plan, workers-each]
     if: ${{ always() }}
     runs-on: depot-ubuntu-24.04
     env:
@@ -223,13 +263,16 @@ jobs:
     # The runner's own npm is enough to invoke the script; whatever runs inside
     # an image comes from its Dockerfile.
     name: image / build ${{ matrix.worker }}
+    needs: plan
+    if: needs.plan.outputs.images != '["none"]'
     runs-on: depot-ubuntu-24.04-4
     strategy:
       fail-fast: false
       matrix:
-        worker: [deploy/cloudflare, deploy/cloudflare-resident, deploy/cloudflare-sandbox]
+        worker: ${{ fromJSON(needs.plan.outputs.images) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: matrix.worker != 'none'
         with:
           persist-credentials: false
       - uses: depot/use-action@9bda29f1fc3163c06fc15f375887a341096a5639 # v1
@@ -237,12 +280,15 @@ jobs:
         with:
           project: ${{ vars.DEPOT_PROJECT_ID }}
           version: 2.102.7
-      - run: npm run check:image -w ${{ matrix.worker }}
+      - if: matrix.worker != 'none'
+        run: npm run check:image -w "$WORKER"
+        env:
+          WORKER: ${{ matrix.worker }}
 
   image:
     # The required check `image`: green only when every image built.
     name: image
-    needs: [image-each]
+    needs: [plan, image-each]
     if: ${{ always() }}
     runs-on: depot-ubuntu-24.04
     env:
@@ -284,8 +330,8 @@ jobs:
   docs-deploy:
     name: deploy the docs site
     # Only after the site is proven to build, and only for main.
-    needs: docs
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [plan, docs]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.docs == 'true' && needs.docs.result == 'success'
     runs-on: depot-ubuntu-24.04-4
     # An assets-only Worker (deploy/cloudflare-docs/): no container, no Durable
     # Object, nothing that can be mid-rollout — which is why this one deploys on
@@ -305,11 +351,6 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
       - run: npm ci
-      # Deploy only when this push touched the docs or their build; the script
-      # fails OPEN (deploys) when the diff cannot be computed, so the published
-      # site is never silently older than main.
-      - id: touched
-        run: npm run docs:changed
       # The docs Worker's wrangler.jsonc is generated from the deployment
       # profile (account, hostname), and production's profile lives in the
       # installation's configuration repository (the SWITCHBOARD_DEPLOY_PROFILE
@@ -319,7 +360,7 @@ jobs:
       # without the token.
       - name: mint the App token that reads the configuration repository
         id: infra-token
-        if: steps.touched.outputs.docs == 'true' && env.CLOUDFLARE_API_TOKEN != '' && vars.SWITCHBOARD_DEPLOY_PROFILE != ''
+        if: env.CLOUDFLARE_API_TOKEN != '' && vars.SWITCHBOARD_DEPLOY_PROFILE != ''
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ secrets.CONFIG_REPO_APP_CLIENT_ID }}
@@ -328,7 +369,7 @@ jobs:
           repositories: ${{ vars.CONFIG_REPO_NAME }}
           permission-contents: read
       - name: build + deploy
-        if: steps.touched.outputs.docs == 'true' && env.CLOUDFLARE_API_TOKEN != '' && vars.SWITCHBOARD_DEPLOY_PROFILE != ''
+        if: env.CLOUDFLARE_API_TOKEN != '' && vars.SWITCHBOARD_DEPLOY_PROFILE != ''
         # `npm run deploy` in the docs Worker renders its wrangler.jsonc from
         # the profile and builds docs/ first, so the upload can never be a
         # stale dist or an example-valued config. CLOUDFLARE_ACCOUNT_ID is

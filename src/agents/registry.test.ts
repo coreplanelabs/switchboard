@@ -608,7 +608,7 @@ describe("coding prompts: checks by cost — push before the expensive ones (age
     expect(CHECKS_BY_COST).toMatch(/cheapest check that can prove it/);
     expect(CHECKS_BY_COST).toMatch(/unpushed tree does not survive the run's end/);
     expect(CHECKS_BY_COST).toMatch(/Never start an operation whose expected duration does not fit/);
-    expect(CHECKS_BY_COST).toMatch(/what did not run is CI's to gate/);
+    expect(CHECKS_BY_COST).toMatch(/CI judges the selected gates/);
     // decision 0046: at the wind-down note the tree is pushed before the answer, whatever state it is in
     expect(CHECKS_BY_COST).toMatch(
       /At the wind-down note, commit and push what compiles, say what does not, then answer/,
@@ -621,26 +621,22 @@ describe("coding prompts: checks by cost — push before the expensive ones (age
     for (const sys of codingPrompts()) expect(sys).toContain(CHECKS_BY_COST);
   });
 
-  it("the rule says the two things the shared resident needs: the full suite and full typecheck are not the run's criteria — CI's gate, the only place they run — and every check is scoped to the changed set", () => {
+  it("the rule keeps full gates out of the run and lets CI select checks from the changed set", () => {
     expect(CHECKS_BY_COST).toContain("Passing the full test suite and the full typecheck is NOT part of your criteria");
-    expect(CHECKS_BY_COST).toContain("CI is that gate and the only place they run");
-    // the principle, stated plainly: CI runs everything on the push; the run validates its own
-    // change before pushing, at the changed-set scope
-    expect(CHECKS_BY_COST).toContain(
-      "Every CI pipeline runs the tests, the types, the formatting and the full verification on your push",
-    );
+    expect(CHECKS_BY_COST).toContain("CI runs them when the change needs them");
+    expect(CHECKS_BY_COST).toContain("CI runs the tests, types, formatting and verification selected for your push");
     expect(CHECKS_BY_COST).toContain("at the changed-set scope");
     expect(CHECKS_BY_COST).toMatch(/changed set/);
     // judgement beyond the named checks, never a longer checklist
     expect(CHECKS_BY_COST).toMatch(/judgement/);
   });
 
-  it("every coding prompt's workflow proves the change with the cheapest checks, pushes, and hands the full suite to CI — the push step comes before the CI step, and no step tells the run to run the expensive checks itself", () => {
+  it("every coding prompt's workflow proves the change, pushes, then lets CI run selected checks", () => {
     for (const sys of codingPrompts()) {
       const cheap = sys.search(/Prove the change with the cheapest checks that can/);
       const push = sys.search(/Use the runner-owned `publish_branch` tool/);
       const expensive = sys.search(
-        /CI runs the full suite, the typecheck and the full verification on that push — you never run them yourself/,
+        /CI runs the selected tests, typecheck and verification on that push — you never run the full gates yourself/,
       );
       expect(sys).not.toMatch(/run the project's expensive checks/);
       expect(cheap).toBeGreaterThan(0);
@@ -680,8 +676,10 @@ describe("coding prompts: the fast gates before every push (agent-coding item 13
     // each scoped to the changed set; judgement beyond the list, never a longer checklist
     expect(FAST_GATES_BEFORE_PUSH).toContain("each scoped to the changed set, never the whole project");
     expect(FAST_GATES_BEFORE_PUSH).toContain("judgement");
-    // the full verification is CI's gate, named, and the head is pushed early for CI to judge
-    expect(FAST_GATES_BEFORE_PUSH).toContain("The full verification is CI's gate — `npm run verify` runs there");
+    // CI selects from the local full gate, and the head is pushed early for CI to judge
+    expect(FAST_GATES_BEFORE_PUSH).toContain(
+      "CI owns the full gate — it selects the relevant parts of `npm run verify`",
+    );
     expect(FAST_GATES_BEFORE_PUSH).toContain("push a head early and let CI judge it");
     expect(FAST_GATES_BEFORE_PUSH).toContain("In another repository, use its documented equivalents");
     expect(FAST_GATES_BEFORE_PUSH).toContain("An equivalent command is not a contract deviation");

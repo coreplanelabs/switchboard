@@ -1,12 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { failedJobs, parseNeeds } from "../scripts/ci-gate.mjs";
+import { failedJobs, parseNeeds, plannedSkips } from "../scripts/ci-gate.mjs";
 
-// `bot` and `workers` are required status checks that stand for a fan-out of
-// matrix jobs (.github/workflows/ci.yml). The gate job passes its `needs`
-// context to scripts/ci-gate.mjs; the gate is green only when every upstream
-// job succeeded — a leg that failed, was cancelled, or never ran fails it.
+// `bot`, `workers` and `image` stand for fan-outs. A gate accepts their
+// successful legs and only the skips a successful change plan declared.
 
 const script = fileURLToPath(new URL("../scripts/ci-gate.mjs", import.meta.url));
 
@@ -33,6 +31,22 @@ describe("failedJobs", () => {
 
   it("treats a job with no result as failed (never green by omission)", () => {
     expect(failedJobs({ ghost: undefined })).toEqual([{ id: "ghost", result: "missing" }]);
+  });
+
+  it("accepts only a planned skipped leg", () => {
+    expect(failedJobs({ plan: { result: "success" }, "bot-tests": { result: "skipped" } }, ["bot-tests"])).toEqual([]);
+    expect(failedJobs({ plan: { result: "failure" }, "bot-tests": { result: "skipped" } }, ["bot-tests"])).toEqual([
+      { id: "plan", result: "failure" },
+    ]);
+    expect(failedJobs({ other: { result: "skipped" } }, ["bot-tests"])).toEqual([{ id: "other", result: "skipped" }]);
+  });
+});
+
+describe("plannedSkips", () => {
+  it("allows only omissions declared by a successful plan", () => {
+    const plan = { result: "success", outputs: { bot_tests: "false", workers: '["none"]', images: '["none"]' } };
+    expect(plannedSkips({ plan })).toEqual(["bot-tests", "workers-each", "image-each"]);
+    expect(plannedSkips({ plan: { ...plan, result: "failure" } })).toEqual([]);
   });
 });
 
@@ -67,6 +81,12 @@ describe("npm run ci:gate", () => {
   it("exits 1 when a leg was skipped or cancelled", () => {
     expect(runGate(JSON.stringify({ x: { result: "skipped" } })).code).toBe(1);
     expect(runGate(JSON.stringify({ x: { result: "cancelled" } })).code).toBe(1);
+  });
+
+  it("passes a planned skipped fan-out and rejects an unplanned skip", () => {
+    const plan = { result: "success", outputs: { workers: '["none"]' } };
+    expect(runGate(JSON.stringify({ plan, "workers-each": { result: "skipped" } })).code).toBe(0);
+    expect(runGate(JSON.stringify({ plan, "image-each": { result: "skipped" } })).code).toBe(1);
   });
 
   it("exits 1 with NEEDS unset or empty", () => {

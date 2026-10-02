@@ -32,8 +32,8 @@
   "commands": {
     "$comment": "What each root npm script does and when to run it — the source of the Commands table in AGENTS.md (npm run agents:gen). A script without an entry fails agents:check, so a new script cannot ship undocumented.",
     "verify": {
-      "does": "The whole gate: every check, every workspace — exactly what CI runs.",
-      "when": "Local sessions, before requesting review. ~4 min. A pipeline agent leaves it to CI."
+      "does": "Runs every CI check across the repo and workspaces.",
+      "when": "Local sessions before review; CI selects affected checks on each push."
     },
     "verify:root": {
       "does": "The bot package's gate: consistency checks, typecheck, lint, format, tests, dist.",
@@ -45,7 +45,7 @@
     },
     "test": {
       "does": "The whole vitest suite from one entry, after `deploy:gen`.",
-      "when": "Local sessions, before pushing; a pipeline agent runs the changed set — the full suite is CI's."
+      "when": "Local sessions before pushing; CI runs it for relevant changes."
     },
     "typecheck": {
       "does": "TypeScript over the bot and its scripts, no emit.",
@@ -88,8 +88,12 @@
       "when": "Smoke tests, deploys, config, run history."
     },
     "ci:gate": {
-      "does": "Reads the `needs` context of a CI fan-out and passes only when every leg succeeded.",
-      "when": "CI only — the `bot` and `workers` gate jobs."
+      "does": "Reads the `needs` context of a CI fan-out and accepts only successful legs or an explicitly planned skip.",
+      "when": "CI only — the `bot`, `workers` and `image` gate jobs."
+    },
+    "ci:plan": {
+      "does": "Selects checks and builds from the full diff; uncertainty runs all.",
+      "when": "CI; locally with `-- --base <ref>`."
     },
     "check:lockfile": {
       "does": "Native packages carry Linux x64 and macOS arm64 variants; records mirror their `package.json`.",
@@ -124,8 +128,8 @@
       "when": "After touching a Dockerfile; needs Docker. One CI leg per image."
     },
     "check:project-facts": {
-      "does": "Every copy of the project's names, repository, docs URL and contact address equals `project.json`; its description, topics and npm package fit their rules.",
-      "when": "After editing `project.json` or a community file; part of `check:consistency`."
+      "does": "Checks project names, URLs, contact and package metadata against `project.json`.",
+      "when": "After project or community file changes; part of `check:consistency`."
     },
     "check:registry-drift": {
       "does": "Every example-config model ref still resolves against the pinned pi registry.",
@@ -156,16 +160,16 @@
       "when": "Part of `check:consistency`."
     },
     "specs:check": {
-      "does": "Validates spec proofs, headers and typed decision-boundary declarations.",
-      "when": "After test/spec edits; `-- --fix` repairs titles. Schema/census flags: [spec coverage](docs/reference/specs/specs-coverage.md)."
+      "does": "Checks spec proofs, headers and decision boundaries.",
+      "when": "After test/spec edits; see [spec coverage](docs/reference/specs/specs-coverage.md)."
     },
     "specs:coverage": {
-      "does": "Maps a change's paths to the specs whose headers cover them, then lists paths no spec covers.",
-      "when": "`-- --changed origin/main...HEAD [--test-guard]` before review; `-- --require` fails on an uncovered path; `-- --json` for machines."
+      "does": "Maps changed paths to specs and lists gaps.",
+      "when": "Before review: `-- --changed origin/main...HEAD`; `-- --require` fails on gaps."
     },
     "decisions:check": {
-      "does": "Every record under `docs/decisions/` and `docs/plans/` has a valid `status`, a superseded one names its successor, an accepted body only gains `## Amended`.",
-      "when": "Part of `check:consistency`; a failing record is superseded or amended, never edited."
+      "does": "Checks decision and plan status, succession and amendment rules.",
+      "when": "Part of `check:consistency`; supersede or amend failed records."
     },
     "hygiene:check": {
       "does": "The public tree's imprint (company, people, trackers, plan ids, ids, dates) equals the recorded list, which only shrinks.",
@@ -204,8 +208,8 @@
       "when": "Part of `check:consistency`."
     },
     "docs:changed": {
-      "does": "Says whether the last push touched the docs or their build (a CI job output).",
-      "when": "CI only — gates the docs deploy."
+      "does": "Reports whether HEAD^ changed a docs site input.",
+      "when": "Local one-commit diagnostics; CI uses `ci:plan`."
     },
     "deploy:gen": {
       "does": "Renders each Worker's gitignored `wrangler.jsonc` from its template and the profile in force.",
@@ -232,8 +236,8 @@
       "when": "After a `web/` change."
     },
     "screenshots:gen": {
-      "does": "Renders the dashboard screenshots whose inputs changed, both themes, recording input hashes in the manifest (`--force`: all).",
-      "when": "After a `web/` or fixture change; needs `npx playwright-core install chromium`, so not in `fix`."
+      "does": "Renders changed dashboard captures in both themes and records input hashes.",
+      "when": "After a `web/` or fixture change; needs Chromium."
     },
     "screenshots:check": {
       "does": "Each surface's inputs still hash to what its screenshots were rendered from — no browser.",

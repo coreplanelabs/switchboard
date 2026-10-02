@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import { describe, expect, it } from "vitest";
+import { BOT_CHECKS, IMAGES, WORKERS } from "../scripts/ci-plan.mjs";
 import { parseIngressTokenMap } from "./core/ingressTokens.js";
 import { DOCKERFILES, IMAGE_KINDS, VERSION, type ImageKind } from "./deploy/images.js";
 import { WORKER_DIRS } from "./deploy/plan.js";
@@ -31,6 +32,7 @@ interface Step {
   uses?: string;
   run?: string;
   if?: string;
+  env?: Record<string, string>;
   with?: Record<string, unknown>;
 }
 interface Job {
@@ -40,7 +42,7 @@ interface Job {
   needs?: string | string[];
   if?: string;
   env?: Record<string, string>;
-  strategy?: { matrix?: Record<string, unknown[]> };
+  strategy?: { matrix?: Record<string, unknown[] | string> };
 }
 interface Workflow {
   on: Record<string, unknown>;
@@ -65,13 +67,25 @@ const NPM_STEP = /^npm (ci( --[a-z-]+(=[^\s]+)?)*|run [a-z:-]+( -w [^\s]+)*( --[
  *  of the job's matrix (so a matrix step is checked once per leg) and
  *  `${{ strategy.job-total }}` to the number of legs. */
 function runLines(step: Step, job: Job): string[] {
-  const matrix = job.strategy?.matrix ?? {};
+  const matrix = Object.fromEntries(
+    Object.entries(job.strategy?.matrix ?? {}).map(([key, value]) => [
+      key,
+      Array.isArray(value) ? value : key === "check" ? BOT_CHECKS : value.includes("outputs.images") ? IMAGES : WORKERS,
+    ]),
+  );
   const legs = Object.values(matrix).reduce((n, values) => n * values.length, 1);
   const lines = (step.run ?? "")
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => l.length > 0 && !l.startsWith("#"))
-    .map((l) => l.replaceAll("${{ strategy.job-total }}", String(legs)));
+    .map((l) => l.replaceAll("${{ strategy.job-total }}", String(legs)))
+    .map((line) =>
+      Object.entries(step.env ?? {}).reduce(
+        (expanded, [name, value]) =>
+          /^\$\{\{ matrix\.[a-z-]+ \}\}$/.test(value) ? expanded.replaceAll(`"$${name}"`, value) : expanded,
+        line,
+      ),
+    );
   return lines.flatMap((line) => expandMatrix(line, matrix));
 }
 
@@ -161,6 +175,20 @@ describe("the gate workflows run only the repository's own scripts", () => {
     expect(github.jobs).toEqual(ci.jobs);
   });
 
+  it("the plan feeds each costly job and uses the repository's own script", () => {
+    expect(ci.jobs.plan.steps.map((step) => step.run).filter(Boolean)).toEqual(["npm run ci:plan"]);
+    expect(ci.jobs.plan.steps[0].with?.["fetch-depth"]).toBe(0);
+    expect(ci.jobs.plan.steps[1].env?.CI_BASE_SHA).toContain("github.event.pull_request.base.sha");
+    for (const id of ["bot-checks", "bot-tests", "web", "docs", "package", "workers-each", "image-each"]) {
+      expect(needsOf(ci.jobs[id])).toContain("plan");
+    }
+    expect(ci.jobs["bot-checks"].strategy?.matrix?.check).toBe("${{ fromJSON(needs.plan.outputs.bot_checks) }}");
+    expect(ci.jobs["workers-each"].strategy?.matrix?.worker).toBe("${{ fromJSON(needs.plan.outputs.workers) }}");
+    expect(ci.jobs["image-each"].strategy?.matrix?.worker).toBe("${{ fromJSON(needs.plan.outputs.images) }}");
+    for (const id of ["web", "docs", "package"]) expect(ci.jobs[id].if).toContain(`needs.plan.outputs.${id} == 'true'`);
+    expect(ci.jobs["bot-tests"].if).toContain("needs.plan.outputs.bot_tests == 'true'");
+  });
+
   it("uploads memory Worker diagnostics after green and red verify runs", () => {
     const workers = ci.jobs["workers-each"];
     const upload = workers.steps.find((step) => step.uses?.startsWith("actions/upload-artifact@"));
@@ -206,6 +234,29 @@ describe("the required status checks and their gates", () => {
     expect(gates.map(([, j]) => j.name).sort()).toEqual(["bot", "image", "workers"]);
   });
 
+  it("selects costly jobs from the change plan", () => {
+    for (const id of ["bot", "workers", "image"]) expect(needsOf(ci.jobs[id])).toContain("plan");
+    for (const id of ["workers-each", "image-each"]) {
+      const job = ci.jobs[id];
+      expect(
+        job.steps.filter((step) => step.run?.startsWith("npm ")).every((step) => step.if === "matrix.worker != 'none'"),
+      ).toBe(true);
+      expect(job.if).toContain(`needs.plan.outputs.${id === "workers-each" ? "workers" : "images"} != '["none"]'`);
+    }
+    expect(needsOf(ci.jobs["docs-deploy"])).toEqual(["plan", "docs"]);
+    expect(ci.jobs["docs-deploy"].if).toContain("needs.plan.outputs.docs == 'true'");
+  });
+
+  it("passes dynamic matrix values through quoted environment variables", () => {
+    for (const [jobId, run, variable, value] of [
+      ["bot-checks", 'npm run "$CHECK"', "CHECK", "${{ matrix.check }}"],
+      ["workers-each", 'npm run verify -w "$WORKER"', "WORKER", "${{ matrix.worker }}"],
+      ["image-each", 'npm run check:image -w "$WORKER"', "WORKER", "${{ matrix.worker }}"],
+    ]) {
+      expect(ci.jobs[jobId].steps).toContainEqual(expect.objectContaining({ run, env: { [variable]: value } }));
+    }
+  });
+
   it.each(gates)(
     "gate %s: needs existing jobs, runs even when a leg failed, and judges the needs context",
     (_id, job) => {
@@ -245,7 +296,9 @@ describe("the test shards", () => {
   it("the shard index comes from the matrix and the count from the matrix length — N lives in one place", () => {
     const [, job] = shards[0];
     expect(job.steps.map((s) => s.run?.trim()).filter((r) => r?.includes("--shard="))).toEqual([SHARD_STEP]);
-    const legs = job.strategy?.matrix?.shard ?? [];
+    const legs = job.strategy?.matrix?.shard;
+    expect(Array.isArray(legs)).toBe(true);
+    if (!Array.isArray(legs)) throw new Error("test shards must be a fixed matrix");
     expect(legs.length).toBeGreaterThan(1);
     expect(legs).toEqual(legs.map((_, i) => i + 1)); // 1..N, each file in exactly one shard
     expect(Object.keys(job.strategy?.matrix ?? {})).toEqual(["shard"]); // job-total IS the shard count
@@ -288,7 +341,7 @@ describe("the verify scripts", () => {
       .sort();
     const gate = Object.values(ci.jobs).find((j) => j.name === "bot")!;
     const ran: string[] = [];
-    for (const id of needsOf(gate)) {
+    for (const id of needsOf(gate).filter((id) => id !== "plan")) {
       const leg = ci.jobs[id];
       for (const step of leg.steps) {
         for (const line of runLines(step, leg)) {
@@ -657,7 +710,7 @@ describe("the image check builds every image the deploy builds", () => {
     const gate = Object.values(ci.jobs).find((j) => j.name === "image")!;
     expect(isGate(gate)).toBe(true);
     const built: string[] = [];
-    for (const id of needsOf(gate)) {
+    for (const id of needsOf(gate).filter((id) => id !== "plan")) {
       const leg = ci.jobs[id];
       expect(leg.strategy?.matrix?.worker, `${id} is not a matrix over the Workers`).toBeDefined();
       for (const step of leg.steps) {
