@@ -487,6 +487,33 @@ describe("open — claim and seed", () => {
     expect(warnings).toContainEqual(expect.stringContaining("context checkpoint unavailable (detached)"));
   });
 
+  it.each([
+    ["permanent", "state-permanent"],
+    ["missing route", "state-route-missing"],
+    ["unknown", "state-unknown"],
+  ] as const)("keeps a %s state refusal out of the recoverable timeout category", async (mode, category) => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    let failState = false;
+    const { wt, warnings } = harness({
+      ledger: overriding(inner, {
+        setState: async (runId, gen, state) => {
+          if (failState)
+            throw mode === "permanent"
+              ? new PermanentStoreError("invalid state")
+              : mode === "missing route"
+                ? new RouteMissingError("state route missing")
+                : new Error("unclassified state failure");
+          return inner.setState(runId, gen, state);
+        },
+      }),
+    });
+    const run = (await openRun(wt, openReq()))!;
+    failState = true;
+    expect(await run.checkpointSession()).toBeUndefined();
+    expect(run.lastCheckpointFailure).toBe(category);
+    expect(warnings).toContainEqual(expect.stringContaining(`context checkpoint unavailable (${category})`));
+  });
+
   it("claims the thread with the run's prompt, tools, card and meta, and seeds the transcript", async () => {
     const { ledger, wt, warnings } = harness();
     const run = await openRun(wt, openReq());

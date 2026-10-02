@@ -124,6 +124,9 @@ export type RunNoteKind =
    *  run failed even when the reply is never delivered (run-history.md).
    *  Published by the run loop's catch, before the finish. */
   | "run_failed"
+  /** The model answered, but the final context cursor could not be confirmed;
+   * the live row stays recoverable and no answer or review was published. */
+  | "checkpoint_deferred"
   /** An MCP server configured for this agent did not answer discovery
    *  (docs/reference/specs/mcp-tools.md item 8); the run proceeds without its tools. One
    *  note per server, published by the dispatcher before the first turn. */
@@ -356,6 +359,7 @@ export const RUN_NOTE_KINDS = [
   "spans_dropped",
   "head_moved",
   "run_failed",
+  "checkpoint_deferred",
   "mcp_unavailable",
   "follow_up",
   "resumed",

@@ -41,7 +41,7 @@ import type { RunRecord, RunSession } from "../runRecord.js";
 import type { RecordSink } from "../runHistoryWriter.js";
 import type { AssembledTranscript } from "./transcript.js";
 import type { FenceResult, Notepad, SessionHit } from "./types.js";
-import { PermanentStoreError, RouteMissingError } from "../runStoreWorker.js";
+import { PermanentStoreError, RouteMissingError, TransientStoreError } from "../runStoreWorker.js";
 import { createAppendFlusher } from "./flusher.js";
 import type { HeartbeatFacts, RequesterTarget, RunLedger } from "./ledger.js";
 import type { PlaneAckOutcome, PlaneAskAnswer, PlaneEffect, PlaneOutcomePost } from "../plane/decide.js";
@@ -338,6 +338,9 @@ export type SessionCheckpointFailure =
   | "session-broken"
   | "cursor-missing"
   | "state-unavailable"
+  | "state-permanent"
+  | "state-route-missing"
+  | "state-unknown"
   | "state-fenced";
 
 /** A run this generation reclaimed at boot (docs/reference/specs/run-history.md item 37):
@@ -357,6 +360,10 @@ export interface AdoptRunRequest {
   lastStep: number;
   /** The highest event `seq` on the ledger; the next append continues past it. */
   lastSeq: number;
+  /** Turn count from the boot-verified complete transcript, including a final
+   * turn whose step record did not land. Restores the cursor when its separate
+   * state acknowledgment was unavailable before handoff. */
+  durableTurns?: number;
   /** The row's place in its session log (session-log item 2): the adopted run
    *  appends at its indices and its record closes the range. Absent for a row
    *  claimed before the log existed, which keeps writing its own object. */
@@ -958,6 +965,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     /** A detach left the log short of what the model saw: the record says `broken`. */
     private broken = false;
     private checkpointFailure: SessionCheckpointFailure | undefined;
+    private stateWriteFailure: "state-permanent" | "state-route-missing" | "state-unknown" | undefined;
     get lastCheckpointFailure(): SessionCheckpointFailure | undefined {
       return this.checkpointFailure;
     }
@@ -1005,7 +1013,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         system?: string;
         startedAt?: number;
       },
-      from: { stepNo: number; lastSeq: number; resumable?: boolean; session?: RunSession } = {
+      from: { stepNo: number; lastSeq: number; resumable?: boolean; session?: RunSession; durableTurns?: number } = {
         stepNo: 0,
         lastSeq: 0,
       },
@@ -1038,6 +1046,20 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         // This cursor was saved only after source rows landed. A shared log's
         // current tail may include another producer and is never a substitute.
         this.turnsWritten = (checkpoint.through as number) - this.sessionRow.seedFrom + 1;
+      }
+      if (
+        this.adopted &&
+        this.sessionRow !== undefined &&
+        this.sessionRow.range !== "broken" &&
+        typeof from.durableTurns === "number" &&
+        Number.isSafeInteger(from.durableTurns) &&
+        from.durableTurns >= 0
+      ) {
+        // Boot checked every transcript row against the last step. A stale
+        // state cursor cannot hide later durable turns, and one ahead of the
+        // verified transcript is not safe to publish from.
+        if (this.turnsWritten !== undefined && this.turnsWritten > from.durableTurns) this.broken = true;
+        else this.turnsWritten = from.durableTurns;
       }
     }
 
@@ -1250,7 +1272,14 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       if (this.turnsWritten === undefined) return unavailable("cursor-missing");
       const checkpoint = { key: this.sessionRow.key, through: this.sessionRow.seedFrom + this.turnsWritten - 1 };
       const saved = await this.commitState({ contextCheckpoint: checkpoint });
-      if (saved !== "ok") return unavailable(saved === "fenced" ? "state-fenced" : "state-unavailable");
+      if (saved !== "ok")
+        return unavailable(
+          saved === "fenced"
+            ? "state-fenced"
+            : this.detached
+              ? "detached"
+              : (this.stateWriteFailure ?? "state-unavailable"),
+        );
       this.checkpointFailure = undefined;
       return checkpoint;
     }
@@ -1536,11 +1565,22 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         try {
           const result = await ledger.setState(this.runId, gen, snapshot);
           if (!result.ok) this.detach(`state refused (${result.reason})`, true);
-          else this.acknowledgedStateVersion = version;
+          else {
+            this.acknowledgedStateVersion = version;
+            this.stateWriteFailure = undefined;
+          }
           return;
         } catch (err) {
           if (err instanceof RouteMissingError || err instanceof PermanentStoreError || attempt >= 2) {
             this.stateDirty = true;
+            this.stateWriteFailure =
+              err instanceof RouteMissingError
+                ? "state-route-missing"
+                : err instanceof PermanentStoreError
+                  ? "state-permanent"
+                  : err instanceof TransientStoreError
+                    ? undefined
+                    : "state-unknown";
             warn(`[ledger] ${this.threadKey} state not written: ${describe(err)}`);
             return;
           }
@@ -1789,6 +1829,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         lastSeq: req.lastSeq,
         resumable: true,
         ...(req.session ? { session: req.session } : {}),
+        ...(req.durableTurns !== undefined ? { durableTurns: req.durableTurns } : {}),
       });
       run.startHeartbeat();
       live.add(run);

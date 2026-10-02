@@ -4560,6 +4560,7 @@ export async function dispatch(
     });
     if (ran.kind === "paused") {
       resumeRowRetained = true;
+      const checkpointPaused = ran.reason === "checkpoint_unavailable";
       if (ledgerRun?.tracked())
         deps.threadsElsewhere.remember(msg.threadKey, {
           runId: run.id,
@@ -4569,19 +4570,24 @@ export async function dispatch(
       await refuse(
         refusalOf(
           "setup_failed",
-          ran.reason === "first_test_required"
-            ? ran.message
-            : ran.handedOff
-              ? `${ran.message} This run is paused with its recorded workspace binding. After repairing the environment, restart the service to resume this run.`
-              : `${ran.message} The original run could not be marked for immediate recovery. No replacement started; an operator needs to check its saved workspace before a retry.`,
+          checkpointPaused
+            ? ran.handedOff
+              ? `${ran.message} The saved run is ready for recovery on the next service restart.`
+              : `${ran.message} Recovery could not be confirmed; the result remains unpublished.`
+            : ran.reason === "first_test_required"
+              ? ran.message
+              : ran.handedOff
+                ? `${ran.message} This run is paused with its recorded workspace binding. After repairing the environment, restart the service to resume this run.`
+                : `${ran.message} The original run could not be marked for immediate recovery. No replacement started; an operator needs to check its saved workspace before a retry.`,
         ),
         () =>
           card.done(
             shell.close({
               kind: "refused",
               icon: "⏸️",
-              reason:
-                ran.reason === "first_test_required"
+              reason: checkpointPaused
+                ? "final result awaiting storage recovery"
+                : ran.reason === "first_test_required"
                   ? "required first test held, original binding retained"
                   : "coding environment not ready, original binding retained",
               ...closeLines(clock(), false),

@@ -133,6 +133,8 @@ export const defaultAdmission = new ThreadAdmission<DispatchFollowUp>();
 export interface ResumeContext {
   row: LiveRunRow;
   lastStep: StepRecord;
+  /** Whole transcript row count proven complete during reclaim. */
+  durableTurns?: number;
   /** The plan the launcher made: `resume` re-enters the model loop, `finish` skips it (run-history item 37). */
   plan: Exclude<ResumePlan, { kind: "interrupted" }>;
   events: AppendableEvent[];
@@ -496,6 +498,7 @@ async function claimThread(deps: AdmissionDeps, ctx: AdmissionContext): Promise<
       state: resume.row.state,
       lastStep: resume.lastStep.step,
       lastSeq: resume.lastSeq,
+      durableTurns: resume.durableTurns,
       // The row's place in its session log, so the resumed run appends where it left off.
       ...(resume.row.meta.session ? { session: resume.row.meta.session } : {}),
     });
@@ -958,6 +961,7 @@ export async function adoptCarriedRun(deps: AdmissionDeps, ctx: AdmissionContext
       state: resume.row.state,
       lastStep: resume.lastStep.step,
       lastSeq: resume.lastSeq,
+      durableTurns: resume.durableTurns,
       // The row's place in its session log, so the resumed run appends where it left off.
       ...(resume.row.meta.session ? { session: resume.row.meta.session } : {}),
       ...ctx.hooks.adopt,
