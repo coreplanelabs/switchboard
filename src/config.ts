@@ -27,7 +27,14 @@ import {
   type RestrictConfig,
 } from "./core/authz/grants.js";
 import { isViewablePerson } from "./core/authz/viewAs.js";
-import { ConfigDocumentClient, parseConfigLocation, stateWorkerFrom } from "./configDocument.js";
+import {
+  ConfigDocumentClient,
+  loadedBaseConfigReceipt,
+  parseConfigLocation,
+  sha256Hex,
+  stateWorkerFrom,
+  type LoadedBaseConfigReceipt,
+} from "./configDocument.js";
 import type { EnvRecord, Secrets } from "./secrets.js";
 import type { Actor, Grants } from "./core/authz/types.js";
 import { isRunSchedule, SCHEDULES } from "./core/schedules.js";
@@ -861,12 +868,16 @@ export function loadAppConfig(configPath: string): AppConfig {
  * local dev reads the file. A missing document, variable, or Worker is a
  * startup error naming what to do — never a silent empty config.
  */
-export async function loadAppConfigFrom(
+export async function loadAppConfigWithReceiptFrom(
   location: string,
   opts: { env: EnvRecord; secrets: Secrets; warn: (message: string) => void; fetch?: typeof fetch },
-): Promise<AppConfig> {
+): Promise<{ config: AppConfig; receipt: LoadedBaseConfigReceipt }> {
   const parsed = parseConfigLocation(location);
-  if (parsed.kind === "file") return loadAppConfig(parsed.path);
+  if (parsed.kind === "file") {
+    const yaml = readFileSync(resolve(parsed.path), "utf8");
+    const config = parseAppConfigText(yaml);
+    return { config, receipt: loadedBaseConfigReceipt({ kind: "file" }, yaml) };
+  }
   const worker = stateWorkerFrom(opts.env, opts.secrets);
   if (!worker.ok) throw new Error(`SWITCHBOARD_CONFIG=${location}: ${worker.problem}`);
   const client = new ConfigDocumentClient({
@@ -880,12 +891,26 @@ export async function loadAppConfigFrom(
     throw new Error(
       `SWITCHBOARD_CONFIG=${location}: no "${parsed.key}" document on ${client.describe()} — push one with \`deploy config\``,
     );
+  const digest = sha256Hex(read.document.yaml);
+  if (digest !== read.document.sha256)
+    throw new Error(`SWITCHBOARD_CONFIG=${location}: base document "${parsed.key}" digest mismatch`);
   const config = parseAppConfigText(read.document.yaml);
   validateProductionConfig(config);
   opts.warn(
     `[config] base document "${parsed.key}" v${read.version} from ${read.document.source} (sha256 ${read.document.sha256.slice(0, 12)}, pushed ${read.document.pushedAt})`,
   );
-  return config;
+  return {
+    config,
+    receipt: loadedBaseConfigReceipt({ kind: "state", key: parsed.key, version: read.version }, read.document.yaml),
+  };
+}
+
+/** Config-only compatibility for callers that do not serve a process receipt. */
+export async function loadAppConfigFrom(
+  location: string,
+  opts: { env: EnvRecord; secrets: Secrets; warn: (message: string) => void; fetch?: typeof fetch },
+): Promise<AppConfig> {
+  return (await loadAppConfigWithReceiptFrom(location, opts)).config;
 }
 
 /** What the grants table needs beyond config.yaml: the registered command
@@ -895,6 +920,8 @@ export async function loadAppConfigFrom(
  *  groups at startup. */
 export interface ConfigStoreOptions {
   commandGroups?: readonly string[];
+  /** Set only by the bootstrap loader after a successful base read. */
+  loadedBase?: LoadedBaseConfigReceipt;
 }
 
 /** Open the store the way production does: parse + validate `config.yaml`,
@@ -912,19 +939,24 @@ export async function openConfigStore(
   } & ConfigStoreOptions,
 ): Promise<ConfigStore> {
   const warn = opts.warn ?? ((m: string) => console.warn(m));
-  const config = await loadAppConfigFrom(configPath, {
+  const loaded = await loadAppConfigWithReceiptFrom(configPath, {
     env: opts.env,
     secrets: opts.secrets,
     warn,
     ...(opts.fetch ? { fetch: opts.fetch } : {}),
   });
-  const backing = overridesBackingFor(config, opts);
+  const backing = overridesBackingFor(loaded.config, opts);
   const initial = await backing.load();
-  return new ConfigStore({ validated: config }, { backing, initial }, { commandGroups: opts.commandGroups });
+  return new ConfigStore(
+    { validated: loaded.config },
+    { backing, initial },
+    { commandGroups: opts.commandGroups, loadedBase: loaded.receipt },
+  );
 }
 
 export class ConfigStore {
   readonly config: AppConfig;
+  readonly loadedBase?: LoadedBaseConfigReceipt;
   private overrides: Overrides;
   private readonly backing: OverridesBacking;
   /** Writes run one at a time (see `write`); a rejected write does not hold the queue. */
@@ -941,6 +973,7 @@ export class ConfigStore {
     options: ConfigStoreOptions = {},
   ) {
     this.config = typeof config === "string" ? loadAppConfig(config) : config.validated;
+    this.loadedBase = options.loadedBase;
     // Both blocks already passed `validateConfig` (either path above); these parses just build the table.
     this.grants = grantsTable({
       grants: validateGrants(this.config.grants),

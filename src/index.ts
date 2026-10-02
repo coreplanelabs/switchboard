@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { OPERATOR_ROOT } from "./deploy/host.js";
 import { installationPath } from "./deploy/operatorRoot.js";
 import { openConfigStore } from "./config.js";
-import { parseConfigLocation } from "./configDocument.js";
+import { bindLoadedBaseConfigReceipt, parseConfigLocation } from "./configDocument.js";
 import { configRefusalReason, createConfigRefusalServer } from "./configBoot.js";
 import { intakeCompletion, intakeDecisionDeps } from "./intakeModel.js";
 import { providerModelsReader } from "./core/dispatch/providerModels.js";
@@ -454,6 +454,14 @@ export async function runBot(): Promise<void> {
   // pick it up. Worker-backed history only: a file store has no ledger, and a
   // process without one carries the null write-through (nothing claimed).
   const generation = mintGeneration();
+  const loadedBase = config.loadedBase
+    ? bindLoadedBaseConfigReceipt(config.loadedBase, {
+        commit: build.commit,
+        ...(build.builtAt !== undefined ? { builtAt: build.builtAt } : {}),
+        startedAt: PROCESS_STARTED_AT,
+        ...(capabilities.runLedger ? { generation } : {}),
+      })
+    : undefined;
   const ledgerClient = capabilities.runLedger
     ? buildRunLedger(runHistoryCfg, processSecrets, {
         ...(costsCfg?.prices ? { prices: costsCfg.prices } : {}),
@@ -862,6 +870,7 @@ export async function runBot(): Promise<void> {
       commit: build.commit,
       ...(build.builtAt !== undefined ? { builtAt: build.builtAt } : {}),
       startedAt: PROCESS_STARTED_AT,
+      ...(loadedBase ? { loadedBase } : {}),
       inFlight: inFlight(),
       draining,
     }),
@@ -1841,6 +1850,7 @@ export async function runBot(): Promise<void> {
               catchUp: getCatchUpStatus(),
               slack: getSocketStatus(),
               build,
+              ...(loadedBase ? { loadedBase } : {}),
               ...(capabilities.runLedger ? { generation } : {}),
               startedAt: PROCESS_STARTED_AT,
               httpListeningAt,

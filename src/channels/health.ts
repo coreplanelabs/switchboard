@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import type { ProcessLoadedBaseConfigReceipt } from "../configDocument.js";
 import { DRAIN_DEADLINE_MS, type HeldRun } from "../core/drain.js";
 import type { ProcessMetrics } from "./processMetrics.js";
 import type { CatchUpStatus } from "./slackCatchUpStatus.js";
@@ -75,6 +76,8 @@ export interface HealthState {
   slack?: SlackSocketStatus;
   /** The running build (`readBuildInfo`), when the entrypoint knows it. */
   build?: BuildInfo;
+  /** The validated base bytes this process installed at startup. */
+  loadedBase?: ProcessLoadedBaseConfigReceipt;
   /** The run ledger generation this process writes under (its fencing token,
    *  `mintGeneration` at boot; docs/reference/specs/run-history.md item 35) — the id the
    *  ledger's live rows name as `ownerGen`, so a row can be matched to the
@@ -121,6 +124,8 @@ export interface HealthPayload {
    *  passes `readBuildInfo(...)`, so on the live `/healthz` it is unconditionally
    *  present (`commit: "unknown"` for an image built without `build.json`). */
   build?: BuildInfo;
+  /** Sanitized, immutable identity of the base this process installed. */
+  loadedBase?: ProcessLoadedBaseConfigReceipt;
   /** The run ledger generation (present when the ledger is on). */
   generation?: string;
   /** ISO process start; present whenever `HealthState.startedAt` is given (always on the live `/healthz`). */
@@ -164,6 +169,7 @@ export function healthPayload(state: HealthState): HealthPayload {
       commit: state.build.commit,
       ...(state.build.builtAt !== undefined ? { builtAt: state.build.builtAt } : {}),
     };
+  if (state.loadedBase) payload.loadedBase = state.loadedBase;
   if (state.generation !== undefined) payload.generation = state.generation;
   if (state.startedAt !== undefined) payload.startedAt = new Date(state.startedAt).toISOString();
   if (state.httpListeningAt !== undefined) payload.httpListeningAt = new Date(state.httpListeningAt).toISOString();

@@ -58,6 +58,41 @@ export function sha256Hex(text: string): string {
   return createHash("sha256").update(text).digest("hex");
 }
 
+/** Identity of the base bytes installed by one successful config load. File
+ * mode deliberately omits the local path from public process diagnostics. */
+export interface LoadedBaseConfigReceipt {
+  readonly schema: 1;
+  readonly source: Readonly<{ kind: "state"; key: string; version: number } | { kind: "file" }>;
+  readonly sha256: string;
+}
+
+export interface ProcessLoadedBaseConfigReceipt extends LoadedBaseConfigReceipt {
+  readonly process: Readonly<{ commit: string; builtAt?: string; startedAt: string; generation?: string }>;
+}
+
+export function loadedBaseConfigReceipt(
+  source: LoadedBaseConfigReceipt["source"],
+  yaml: string,
+): LoadedBaseConfigReceipt {
+  return Object.freeze({ schema: 1, source: Object.freeze({ ...source }), sha256: sha256Hex(yaml) });
+}
+
+/** Bind one installed base to the process that serves it, once at boot. */
+export function bindLoadedBaseConfigReceipt(
+  loaded: LoadedBaseConfigReceipt,
+  process: { commit: string; builtAt?: string; startedAt: number; generation?: string },
+): ProcessLoadedBaseConfigReceipt {
+  return Object.freeze({
+    ...loaded,
+    process: Object.freeze({
+      commit: process.commit,
+      ...(process.builtAt !== undefined ? { builtAt: process.builtAt } : {}),
+      startedAt: new Date(process.startedAt).toISOString(),
+      ...(process.generation !== undefined ? { generation: process.generation } : {}),
+    }),
+  });
+}
+
 /** Pure: the document for a config text read from `source` at `now`. */
 export function baseConfigDocument(yaml: string, source: string, now: Date): BaseConfigDocument {
   return { yaml, sha256: sha256Hex(yaml), source, pushedAt: now.toISOString() };
@@ -96,8 +131,10 @@ export class ConfigDocumentClient {
   async readBase(key = BASE_CONFIG_DOCUMENT_KEY): Promise<ReadBaseOutcome> {
     const r = await this.post("/config/get", { key });
     if (!r.ok) return r;
-    const version = typeof r.body.version === "number" ? r.body.version : 0;
     const doc = r.body.document;
+    const version = r.body.version;
+    if (typeof version !== "number" || !Number.isSafeInteger(version) || version < (doc == null ? 0 : 1))
+      return { ok: false, problem: `${this.describe()}: the "${key}" document has an invalid version` };
     if (doc === null || doc === undefined) return { ok: true, document: null, version };
     if (!isBaseConfigDocument(doc))
       return { ok: false, problem: `${this.describe()}: the "${key}" document is not a base config document` };

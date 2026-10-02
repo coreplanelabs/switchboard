@@ -5,6 +5,7 @@ import {
   type JsonObject,
   type JsonValue,
 } from "../commandRegistry.js";
+import type { ProcessLoadedBaseConfigReceipt } from "../../configDocument.js";
 
 // `status.show`: which build this process is. The facts already existed — the
 // bot's `/healthz` serves `build.commit`, `startedAt`, `inFlight`, `draining`
@@ -33,6 +34,8 @@ export interface StatusSnapshot {
   inFlight: number;
   /** Whether the process is refusing new work while it hands off (a deploy or restart in progress). */
   draining: boolean;
+  /** The same startup base receipt `/healthz` serves, when this is a bot process. */
+  loadedBase?: ProcessLoadedBaseConfigReceipt;
 }
 
 export interface StatusCommandDeps {
@@ -52,17 +55,24 @@ function renderStatus(output: JsonValue): string {
   const started = typeof o.startedAt === "string" ? `started ${o.startedAt} · ` : "";
   const n = Number(o.inFlight);
   const inFlight = `${n} run${n === 1 ? "" : "s"} in flight`;
-  return [
+  const lines = [
     `Switchboard ${String(o.version)} · build ${shortCommit(String(o.commit))}${built}`,
     `${started}${inFlight} · ${o.draining === true ? "draining" : "not draining"}`,
-  ].join("\n");
+  ];
+  const loaded = o.loadedBase as JsonObject | undefined;
+  if (loaded) {
+    const source = loaded.source as JsonObject;
+    const where = source.kind === "state" ? `state ${String(source.key)} v${String(source.version)}` : "file";
+    lines.push(`Loaded base: ${where} · sha256 ${String(loaded.sha256)}`);
+  }
+  return lines.join("\n");
 }
 
 export const statusShow = defineCommand({
   id: "status.show",
   action: "status:read",
   effect: "read",
-  describe: "Which build this process runs: version, commit, when it was built and started, runs in flight, draining.",
+  describe: "Which build this process runs and, when known, the base config loaded at startup.",
   render: renderStatus,
   handler: async ({ deps }) => {
     const s = deps.status.snapshot();
@@ -73,6 +83,7 @@ export const statusShow = defineCommand({
       ...(s.startedAt !== undefined ? { startedAt: new Date(s.startedAt).toISOString() } : {}),
       inFlight: s.inFlight,
       draining: s.draining,
+      ...(s.loadedBase ? { loadedBase: s.loadedBase as unknown as JsonObject } : {}),
     };
   },
 });

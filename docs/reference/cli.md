@@ -43,7 +43,7 @@ One table per group, in registration order. "Surfaces" is where that command can
 
 | Command | What it does | Surfaces |
 |---|---|---|
-| `status show` | Which build this process runs: version, commit, when it was built and started, runs in flight, draining. | every surface |
+| `status show` | Which build this process runs and, when known, the base config loaded at startup. | every surface |
 
 ### `config`
 

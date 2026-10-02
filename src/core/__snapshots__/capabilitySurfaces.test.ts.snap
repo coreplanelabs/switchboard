@@ -100,7 +100,7 @@ exports[`capability surfaces — cloud-full > CLI catalogue 1`] = `
 commands:
   help show            — How to talk to this bot — the agents, forcing one, changing a route in the thread — for a person asking about the bot itself, never for a task or a thing to show.
   help commands        — Every chat command by group, the grammar, and the per-request directives.
-  status show          — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
+  status show          — Which build this process runs and, when known, the base config loaded at startup.
   config show          — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.
   config overrides     — Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; \`config show --channel <id>\` reads one.
   config channels      — The channels you may pick settings or MCP servers for, by name: the channels the bot is in that you may read, plus any that already carry a scope; \`listed: false\` says the bot could not list its channels and only the scoped ones are here.
@@ -282,7 +282,7 @@ exports[`capability surfaces — cloud-full > help commands on chat 1`] = `
 • \`help show\` — How to talk to this bot — the agents, forcing one, changing a route in the thread — for a person asking about the bot itself, never for a task or a thing to show.
 • \`help commands\` — Every chat command by group, the grammar, and the per-request directives.
 *status*
-• \`status show\` — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
+• \`status show\` — Which build this process runs and, when known, the base config loaded at startup.
 *config*
 • \`config show\` — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.
 • \`config overrides\` — Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; \`config show --channel <id>\` reads one.
@@ -397,7 +397,7 @@ exports[`capability surfaces — local-full > CLI catalogue 1`] = `
 commands:
   help show            — How to talk to this bot — the agents, forcing one, changing a route in the thread — for a person asking about the bot itself, never for a task or a thing to show.
   help commands        — Every chat command by group, the grammar, and the per-request directives.
-  status show          — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
+  status show          — Which build this process runs and, when known, the base config loaded at startup.
   config show          — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.
   config overrides     — Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; \`config show --channel <id>\` reads one.
   config channels      — The channels you may pick settings or MCP servers for, by name: the channels the bot is in that you may read, plus any that already carry a scope; \`listed: false\` says the bot could not list its channels and only the scoped ones are here.
@@ -549,7 +549,7 @@ exports[`capability surfaces — local-full > help commands on chat 1`] = `
 • \`help show\` — How to talk to this bot — the agents, forcing one, changing a route in the thread — for a person asking about the bot itself, never for a task or a thing to show.
 • \`help commands\` — Every chat command by group, the grammar, and the per-request directives.
 *status*
-• \`status show\` — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
+• \`status show\` — Which build this process runs and, when known, the base config loaded at startup.
 *config*
 • \`config show\` — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.
 • \`config overrides\` — Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; \`config show --channel <id>\` reads one.
@@ -650,7 +650,7 @@ exports[`capability surfaces — minimal > CLI catalogue 1`] = `
 commands:
   help show            — How to talk to this bot — the agents, forcing one, changing a route in the thread — for a person asking about the bot itself, never for a task or a thing to show.
   help commands        — Every chat command by group, the grammar, and the per-request directives.
-  status show          — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
+  status show          — Which build this process runs and, when known, the base config loaded at startup.
   config show          — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.
   config overrides     — Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; \`config show --channel <id>\` reads one.
   config channels      — The channels you may pick settings or MCP servers for, by name: the channels the bot is in that you may read, plus any that already carry a scope; \`listed: false\` says the bot could not list its channels and only the scoped ones are here.
@@ -757,7 +757,7 @@ exports[`capability surfaces — minimal > help commands on chat 1`] = `
 • \`help show\` — How to talk to this bot — the agents, forcing one, changing a route in the thread — for a person asking about the bot itself, never for a task or a thing to show.
 • \`help commands\` — Every chat command by group, the grammar, and the per-request directives.
 *status*
-• \`status show\` — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
+• \`status show\` — Which build this process runs and, when known, the base config loaded at startup.
 *config*
 • \`config show\` — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.
 • \`config overrides\` — Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; \`config show --channel <id>\` reads one.

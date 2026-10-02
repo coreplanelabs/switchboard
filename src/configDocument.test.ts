@@ -3,8 +3,10 @@ import { secretsFrom } from "./secrets.js";
 import {
   BASE_CONFIG_DOCUMENT_KEY,
   baseConfigDocument,
+  bindLoadedBaseConfigReceipt,
   ConfigDocumentClient,
   isBaseConfigDocument,
+  loadedBaseConfigReceipt,
   parseConfigLocation,
   STATE_CONFIG_LOCATION,
   stateWorkerFrom,
@@ -36,6 +38,27 @@ describe("baseConfigDocument / isBaseConfigDocument", () => {
     expect(isBaseConfigDocument(doc)).toBe(true);
     expect(isBaseConfigDocument({ yaml: "x" })).toBe(false);
     expect(isBaseConfigDocument(null)).toBe(false);
+  });
+});
+
+describe("loaded base receipt", () => {
+  it("binds a frozen byte digest to one process without exposing a file path or config contents", () => {
+    const loaded = loadedBaseConfigReceipt({ kind: "file" }, "providers: {}\n# private text\n");
+    const bound = bindLoadedBaseConfigReceipt(loaded, {
+      commit: "abc123",
+      startedAt: Date.UTC(2026, 9, 1),
+      generation: "gen-1",
+    });
+    expect(bound).toEqual({
+      schema: 1,
+      source: { kind: "file" },
+      sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      process: { commit: "abc123", startedAt: "2026-10-01T00:00:00.000Z", generation: "gen-1" },
+    });
+    expect(Object.isFrozen(bound)).toBe(true);
+    expect(Object.isFrozen(bound.source)).toBe(true);
+    expect(Object.isFrozen(bound.process)).toBe(true);
+    expect(JSON.stringify(bound)).not.toContain("private text");
   });
 });
 
@@ -101,6 +124,15 @@ describe("ConfigDocumentClient", () => {
       ok: false,
       problem: 'state Worker https://state.example: the "base" document is not a base config document',
     });
+  });
+
+  it("refuses an invalid version on the same base read", async () => {
+    for (const version of [0, -1, 1.5, Number.NaN]) {
+      expect(await fake({ document: DOC, version }).client.readBase()).toMatchObject({
+        ok: false,
+        problem: expect.stringContaining("invalid version"),
+      });
+    }
   });
 
   it("pushes over the current version (get, then put) and reports the new one; a concurrent push is a 409 said as such", async () => {

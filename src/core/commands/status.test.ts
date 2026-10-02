@@ -3,6 +3,7 @@ import { CHAT_OPEN_ACTIONS } from "../authz/grants.js";
 import { CommandRegistry, bindCommands, renderText, type Caller } from "../commandRegistry.js";
 import { callerWith } from "../testing/callers.js";
 import { registerStatusCommands, statusShow, type StatusCommandDeps, type StatusSnapshot } from "./status.js";
+import { bindLoadedBaseConfigReceipt, loadedBaseConfigReceipt } from "../../configDocument.js";
 
 // Feature: docs/reference/specs/command-registry.md item 20 (`status.show`) — the
 // process says which build it runs. Surfaced by the 1.16.0 release smoke: asked
@@ -19,6 +20,27 @@ function bound(snapshot: StatusSnapshot) {
 }
 
 describe("status.show", () => {
+  it("reports the same frozen loaded-base receipt with the full digest and process identity", async () => {
+    const loadedBase = bindLoadedBaseConfigReceipt(
+      loadedBaseConfigReceipt({ kind: "state", key: "base", version: 175 }, "providers: {}\n"),
+      { commit: "abc123", startedAt: Date.UTC(2026, 9, 1), generation: "gen-1" },
+    );
+    const commands = bound({
+      version: "1.275.1",
+      commit: "abc123",
+      startedAt: Date.UTC(2026, 9, 1),
+      inFlight: 0,
+      draining: false,
+      loadedBase,
+    });
+    const res = await commands.invoke("status.show", {}, chat);
+    if (!res.ok) throw new Error(res.message);
+    expect(res.value).toMatchObject({ loadedBase });
+    expect((res.value as { loadedBase: unknown }).loadedBase).toBe(loadedBase);
+    const text = renderText(commands.get("status.show")!, res.value);
+    expect(text).toContain("base v175");
+    expect(text).toContain(loadedBase.sha256);
+  });
   it("reports the version, the build commit and time, the process start, and the run counts the snapshot holds", async () => {
     const commands = bound({
       version: "1.16.0",
