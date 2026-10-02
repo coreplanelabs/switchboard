@@ -90,10 +90,9 @@ async function proxyResponse(res: ServerResponse, upstream: Response, doorOrigin
   res.end();
 }
 
-async function receivePrefix(req: IncomingMessage): Promise<{
-  parsed: PushPrefix;
-  body?: Readable;
-}> {
+async function receivePrefix(
+  req: IncomingMessage,
+): Promise<{ parsed: PushPrefix; body?: Readable; probe?: false } | { probe: true }> {
   const iterator = req[Symbol.asyncIterator]();
   const chunks: Buffer[] = [];
   let size = 0;
@@ -103,7 +102,16 @@ async function receivePrefix(req: IncomingMessage): Promise<{
     const chunk = Buffer.from(next.value as Uint8Array);
     chunks.push(chunk);
     size += chunk.length;
-    const parsed = inspectReceivePackPrefix(Buffer.concat(chunks, size));
+    const prefix = Buffer.concat(chunks, size);
+    // Git probes a large HTTP push with exactly one empty flush. Only EOF
+    // makes it a no-op; a flush followed by any bytes is not a push command.
+    if (size === 4 && prefix.equals(Buffer.from("0000"))) {
+      const trailing = await iterator.next();
+      return trailing.done
+        ? { probe: true }
+        : { parsed: { kind: "refused", reason: "receive-pack has no ref commands" } };
+    }
+    const parsed = inspectReceivePackPrefix(prefix);
     if (parsed.kind === "commands") {
       async function* remaining(): AsyncGenerator<Buffer> {
         yield* chunks;
@@ -365,6 +373,12 @@ export function createGithubDoorHandler(deps: GithubDoorDeps) {
       }
       if (action === "git-receive-pack") {
         const prefix = await receivePrefix(req);
+        if (prefix.probe) {
+          if (!stillAuthorized(recorded))
+            return answer(res, 403, "GitHub authority is no longer valid for this request");
+          res.writeHead(200, { "content-type": "application/x-git-receive-pack-result", "cache-control": "no-store" });
+          return void res.end("0000");
+        }
         parsed = prefix.parsed;
         body = prefix.body;
         const fallbackRef = refs.get(verdict.grant.runId);

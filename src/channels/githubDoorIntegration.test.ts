@@ -1,12 +1,13 @@
 import { spawn, execFile } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
-import { RunBearerStore } from "../core/modelProxy/runBearers.js";
+import { bearerHashOf, RunBearerStore } from "../core/modelProxy/runBearers.js";
 import { GitBindings } from "../core/modelProxy/gitBindings.js";
 import { createGithubDoorHandler } from "./githubDoor.js";
 
@@ -151,6 +152,187 @@ describe("GitHub door against a real Git smart HTTP peer", () => {
       rmSync(root, { recursive: true, force: true });
     }
   }, 30_000);
+
+  it.each(["new branch", "existing PR"])(
+    "accepts a large %s push after an empty probe without spending its one-use authority",
+    async (mode) => {
+      const root = mkdtempSync(join(tmpdir(), "switchboard-git-probe-"));
+      const repo = join(root, "o", "r.git");
+      const source = join(root, "source");
+      mkdirSync(join(root, "o"));
+      await git("init", "--bare", repo);
+      await git("-C", repo, "config", "http.receivepack", "true");
+      await git("init", "-b", "main", source);
+      await git("-C", source, "config", "user.name", "Test");
+      await git("-C", source, "config", "user.email", "test@example.invalid");
+      await git("-C", source, "commit", "--allow-empty", "-m", "start");
+      await git("-C", source, "remote", "add", "origin", repo);
+      await git("-C", source, "push", "origin", "main");
+      await git("-C", repo, "symbolic-ref", "HEAD", "refs/heads/main");
+      await git("-C", source, "checkout", "-b", "fix");
+      if (mode === "existing PR") {
+        await git("-C", source, "commit", "--allow-empty", "-m", "existing head");
+        await git("-C", source, "push", "origin", "fix");
+      }
+      const old = mode === "existing PR" ? await git("-C", repo, "rev-parse", "refs/heads/fix") : "0".repeat(40);
+      writeFileSync(join(source, "payload"), randomBytes(96 * 1024));
+      await git("-C", source, "add", "payload");
+      await git("-C", source, "commit", "-m", "large update");
+      const next = await git("-C", source, "rev-parse", "HEAD");
+      const runId = "12345678-1234-1234-1234-123456789abc";
+      const bearers = new RunBearerStore({ clock: () => 1_000 });
+      const bearer = bearers.mint({
+        runId,
+        modelRef: "x/y",
+        providerName: "x",
+        providerWire: "openai-chat",
+        model: "y",
+        maxTokens: 100,
+        maxTurns: 10,
+        expiresAt: 2_000,
+        span: {} as never,
+        publish: () => {},
+        github: { identity: "write", repo: "o/r", ...(mode === "existing PR" ? { ref: "fix" } : {}) },
+      });
+      const bindings = new GitBindings();
+      expect(
+        bindings.register(
+          runId,
+          { repo: "o/r", ...(mode === "existing PR" ? { ref: "fix" } : {}) },
+          mode === "existing PR" ? { repo: "o/r", ref: "refs/heads/fix", refConfirmed: true } : undefined,
+          async () => true,
+          mode === "existing PR",
+        ),
+      ).toBe(true);
+      if (mode === "existing PR")
+        expect(bindings.setPublication(runId, { ref: "fix", expectedHeadSha: old })).toBe(true);
+      const receipt: string[] = [];
+      const recorder = {
+        begin: async () => {
+          receipt.push("pending");
+          return true;
+        },
+        finish: async (_update: unknown, outcome: string) => {
+          receipt.push(outcome);
+          return true;
+        },
+      };
+      expect(
+        mode === "existing PR"
+          ? bindings.setPublicationRecorder(runId, recorder)
+          : bindings.setBranchRecorder(runId, recorder),
+      ).toBe(true);
+      expect(bindings.requireToolPush(runId)).toBe(true);
+      expect(bindings.allowToolPush(runId, "effect", { ref: "refs/heads/fix", old, next }, bearerHashOf(bearer))).toBe(
+        true,
+      );
+      let writeTokens = 0;
+      let forwarded = 0;
+      let loseResponse = false;
+      const seen: Array<{ contentLength: string | undefined; transferEncoding: string | undefined }> = [];
+      const handler = createGithubDoorHandler({
+        bearers,
+        bindings,
+        token: async (scope) => {
+          if (scope === "write") writeTokens++;
+          return "trusted-only";
+        },
+        fetcher: async (url, init) => {
+          if (url.startsWith("https://api.github.com/"))
+            return new Response(JSON.stringify({ default_branch: "main" }), {
+              headers: { "content-type": "application/json" },
+            });
+          if (url.endsWith("/git-receive-pack")) forwarded++;
+          const response = await gitBackend(root, url, init);
+          if (loseResponse && url.endsWith("/git-receive-pack"))
+            throw new Error("response lost after Git accepted update");
+          return response;
+        },
+      });
+      const server = createServer((req, res) => {
+        if (req.url?.endsWith("/git-receive-pack"))
+          seen.push({
+            contentLength: req.headers["content-length"],
+            transferEncoding: req.headers["transfer-encoding"],
+          });
+        void handler(req, res);
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      try {
+        const addr = server.address();
+        if (!addr || typeof addr === "string") throw new Error("missing port");
+        const url = `http://127.0.0.1:${addr.port}/git/o/r.git`;
+        const helper = `!f() { printf '%s\\n' 'username=x-access-token' 'password=${bearer}'; }; f`;
+        await git("-C", source, "remote", "set-url", "origin", url);
+        await git(
+          "-c",
+          `credential.helper=${helper}`,
+          "-c",
+          "http.postBuffer=65536",
+          "-C",
+          source,
+          "push",
+          "origin",
+          "fix",
+        );
+        expect(seen).toContainEqual({ contentLength: "4", transferEncoding: undefined });
+        expect(seen.some((request) => request.transferEncoding === "chunked")).toBe(true);
+        expect(await git("-C", repo, "rev-parse", "refs/heads/fix")).toBe(next);
+        expect(bindings.hasToolPush(runId, bearerHashOf(bearer))).toBe(false);
+        expect(bindings.get(runId)?.refConfirmed).toBe(true);
+        expect(receipt).toEqual(["pending", "accepted"]);
+        expect(writeTokens).toBe(1);
+        expect(forwarded).toBe(1);
+        await git("-C", source, "commit", "--allow-empty", "-m", "unauthorized next");
+        await expect(git("-c", `credential.helper=${helper}`, "-C", source, "push", "origin", "fix")).rejects.toThrow();
+        expect(forwarded).toBe(1);
+
+        if (mode === "existing PR") {
+          writeFileSync(join(source, "second-payload"), randomBytes(96 * 1024));
+          await git("-C", source, "add", "second-payload");
+          await git("-C", source, "commit", "-m", "unacknowledged update");
+          const later = await git("-C", source, "rev-parse", "HEAD");
+          expect(bindings.setPublication(runId, { ref: "fix", expectedHeadSha: next })).toBe(true);
+          expect(
+            bindings.allowToolPush(
+              runId,
+              "second effect",
+              { ref: "refs/heads/fix", old: next, next: later },
+              bearerHashOf(bearer),
+            ),
+          ).toBe(true);
+          loseResponse = true;
+          await expect(
+            git(
+              "-c",
+              `credential.helper=${helper}`,
+              "-c",
+              "http.postBuffer=65536",
+              "-C",
+              source,
+              "push",
+              "origin",
+              "fix",
+            ),
+          ).rejects.toThrow();
+          expect(await git("-C", repo, "rev-parse", "refs/heads/fix")).toBe(later);
+          expect(receipt).toEqual(["pending", "accepted", "pending"]);
+          expect(bindings.publicationOf(runId)).toEqual({ blocked: "publication outcome is uncertain" });
+          expect(bindings.hasToolPush(runId, bearerHashOf(bearer))).toBe(false);
+          expect(writeTokens).toBe(2);
+          expect(forwarded).toBe(2);
+          await expect(
+            git("-c", `credential.helper=${helper}`, "-C", source, "push", "origin", "fix"),
+          ).rejects.toThrow();
+          expect(forwarded).toBe(2);
+        }
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
 
   it("attributes an existing-PR push accepted by Git before its run is revoked", async () => {
     const root = mkdtempSync(join(tmpdir(), "switchboard-git-door-existing-"));
