@@ -839,7 +839,7 @@ describe("deliverAnswer — the answer reaches the thread", () => {
       card: { update: () => {}, done: async (f: StatusUpdate) => void closes.push(f) },
       shell,
       checklistAsLeft: () => "○ step",
-      checklistCheckedOff: () => "✓ step",
+      hasIncompleteToolEffects: () => false,
       doneLines: () => ({}),
       runDiagnosis: undefined,
       releaseWorkspace: async () => void releases.push(1),
@@ -909,12 +909,12 @@ describe("deliverAnswer — the answer reaches the thread", () => {
     if (result === "withheld") expect(s.replies.join(" ")).not.toContain("the findings");
   });
 
-  it("delivered: the card closes ✅ with the checked-off checklist, the reply carries the answer (a review's with its run link), the run is sealed replyOk, the workspace is released after", async () => {
+  it("delivered: the card keeps an open step amber, replies, seals the run and releases the workspace", async () => {
     const s = finishedRun();
     expect(await deliverAnswer(s.ctx)).toEqual({ kind: "delivered" });
     expect(s.closes).toHaveLength(1);
-    expect(JSON.stringify(s.closes[0])).toContain("✅");
-    expect(JSON.stringify(s.closes[0])).toContain("✓ step");
+    expect(JSON.stringify(s.closes[0])).toContain("⚠️");
+    expect(JSON.stringify(s.closes[0])).toContain("○ step");
     expect(s.replies).toEqual(["the findings\n\n[Live run](https://sb.example/runs/run-d?t=tok)"]);
     expect(s.sealed).toEqual(["replyOk=true"]);
     expect(s.releases).toEqual([1]);
@@ -928,7 +928,7 @@ describe("deliverAnswer — the answer reaches the thread", () => {
       shell: createCardShell({ label: "*main*", startedAt: NOW, now: () => NOW, verbosity: "debug" }),
       doneLines: () => ({ shape: "3 steps · 2 calls", queued: "queued 1m" }),
     });
-    expect(s.closes[0].detail).toContain("✓ step");
+    expect(s.closes[0].detail).toContain("○ step");
     expect(s.closes[0].detail).toContain("3 steps · 2 calls");
     expect(s.closes[0].detail).toContain("queued 1m");
   });
