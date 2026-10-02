@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.277.0](https://github.com/coreplanelabs/switchboard/compare/v1.276.4...v1.277.0) (2026-10-02)
+
+
+### Features
+
+* **sandbox:** isolate cold branch publication ([#2639](https://github.com/coreplanelabs/switchboard/issues/2639)) ([6b06765](https://github.com/coreplanelabs/switchboard/commit/6b0676584f0ac7b1ba8bcb639cb0d94b282989e6))
+
+
+### Bug fixes
+
+* **core:** preserve typed operator command inputs ([#2651](https://github.com/coreplanelabs/switchboard/issues/2651)) ([619efba](https://github.com/coreplanelabs/switchboard/commit/619efbaa6ac344eb0a78c92ecb1b8ccc1a88f7a6))
+* **sandbox:** wait for refresh before recycling spent UIDs ([#2653](https://github.com/coreplanelabs/switchboard/issues/2653)) ([64e0ff9](https://github.com/coreplanelabs/switchboard/commit/64e0ff983893c3b6b06f7b25f789cb9889589420))
+
+
+### Performance
+
+* **process:** run CI checks for affected inputs ([#2649](https://github.com/coreplanelabs/switchboard/issues/2649)) ([5698b7c](https://github.com/coreplanelabs/switchboard/commit/5698b7c20d6512ea14c69d05f14b468774fa47c9))
+
 ## [1.276.4](https://github.com/coreplanelabs/switchboard/compare/v1.276.3...v1.276.4) (2026-10-02)
 
 
