@@ -11612,6 +11612,120 @@ workspaceDir: __WORKDIR__
     expect(created).toEqual([]);
   });
 
+  const recoveryInstance = "plan-fix-the-login-6435ec";
+  const recoveryThread = "slack:CX:1.0";
+  const unavailableOwnerRecoverySetup = (yaml = SHIP_OPERATOR_YAML) => {
+    const { deps, instances } = shipDeps(yaml);
+    const operator = vi.fn<RouteModel>(async () => ({
+      tool: "ask",
+      input: { text: "Which action?", reason: "unnecessary" },
+    }));
+    deps.operatorModel = operator;
+    const shipParent = {
+      id: "original-ship-parent",
+      startedAt: 500,
+      finishedAt: 1_000,
+      finished: true,
+      status: "failed",
+      eventCount: 3,
+      agent: "ship",
+      repo: "acme/api",
+      threadKey: recoveryThread,
+      userId: "slack:UADMIN",
+      instanceId: recoveryInstance,
+    } satisfies RunView;
+    return { deps, instances, operator, shipParent };
+  };
+
+  it("admits typed original-unit recovery through a failed preliminary owner read without starting replacement work", async () => {
+    const s = unavailableOwnerRecoverySetup();
+    s.instances.listUnits = vi.fn(async () => {
+      throw new Error("coordinator units unavailable");
+    });
+    const recover = vi.fn(async () => ({
+      status: 200,
+      body: { ok: true, outcome: "started", workflowId: "original-checkpoint" },
+    }));
+    s.deps.recoverOriginalUnit = recover;
+    const { io, replies } = fakeIO();
+
+    await dispatch(s.deps, msg(`agent:ship recover unit ${recoveryInstance}:U12`, "slack:UADMIN"), io, {
+      thread: [s.shipParent],
+    });
+
+    expect(s.instances.listUnits).toHaveBeenCalled();
+    expect(recover).toHaveBeenCalledExactlyOnceWith(
+      { instanceId: recoveryInstance, unit: "U12" },
+      expect.objectContaining({ userId: "slack:UADMIN", threadKey: recoveryThread }),
+    );
+    expect(s.operator).not.toHaveBeenCalled();
+    expect(replies.join(" ")).toContain("original-checkpoint");
+    expect(s.deps.createCoordinatorInstance).not.toHaveBeenCalled();
+  });
+
+  it("does not turn a failed owner read into admission for malformed recovery or ordinary work", async () => {
+    for (const text of [`agent:ship recover unit ${recoveryInstance}:U12 extra`, "agent:ship fix the original task"]) {
+      const s = unavailableOwnerRecoverySetup();
+      s.instances.listUnits = vi.fn(async () => {
+        throw new Error("coordinator units unavailable");
+      });
+      const recover = vi.fn();
+      s.deps.recoverOriginalUnit = recover;
+      const { io, replies } = fakeIO();
+
+      await dispatch(s.deps, msg(text, "slack:UADMIN"), io, { thread: [s.shipParent] });
+
+      expect(recover, text).not.toHaveBeenCalled();
+      expect(replies.join(" "), text).toContain("work owner could not be verified");
+      expect(s.deps.createCoordinatorInstance, text).not.toHaveBeenCalled();
+    }
+  });
+
+  it("does not bypass an unreadable live thread owner for an original-unit command", async () => {
+    const s = unavailableOwnerRecoverySetup();
+    s.instances.listUnits = vi.fn(async () => {
+      throw new Error("coordinator units unavailable");
+    });
+    const recover = vi.fn();
+    s.deps.recoverOriginalUnit = recover;
+    const { io, replies } = fakeIO();
+
+    await dispatch(s.deps, msg(`agent:ship recover unit ${recoveryInstance}:U12`, "slack:UADMIN"), io, {
+      thread: [{ ...s.shipParent, finished: false, hosted: true }],
+    });
+
+    expect(recover).not.toHaveBeenCalled();
+    expect(replies.join(" ")).toContain("work owner could not be verified");
+  });
+
+  it("passes an authorized but foreign requester to the original-unit identity check", async () => {
+    const yaml = SHIP_OPERATOR_YAML.replace(
+      '  "slack:UADMIN": { actions: all, channels: all, repos: all }',
+      '  "slack:UADMIN": { actions: all, channels: all, repos: all }\n  "slack:UFOREIGN": { actions: all, channels: all, repos: all }',
+    );
+    const s = unavailableOwnerRecoverySetup(yaml);
+    s.instances.listUnits = vi.fn(async () => {
+      throw new Error("coordinator units unavailable");
+    });
+    const recover = vi.fn(async (_key, actor: { userId: string }) => ({
+      status: actor.userId === "slack:UADMIN" ? 200 : 403,
+      body: { error: "original requester mismatch" },
+    }));
+    s.deps.recoverOriginalUnit = recover;
+    const { io, replies } = fakeIO();
+
+    await dispatch(s.deps, msg(`agent:ship recover unit ${recoveryInstance}:U12`, "slack:UFOREIGN"), io, {
+      thread: [s.shipParent],
+    });
+
+    expect(recover).toHaveBeenCalledWith(
+      { instanceId: recoveryInstance, unit: "U12" },
+      expect.objectContaining({ userId: "slack:UFOREIGN", threadKey: recoveryThread }),
+    );
+    expect(replies.join(" ")).toContain("original requester mismatch");
+    expect(s.deps.createCoordinatorInstance).not.toHaveBeenCalled();
+  });
+
   it("keeps the shadow operator decision beside an MCP recover-unit command", async () => {
     const yaml = SHIP_YAML.replace("routing: { operator: off }", "routing: { operator: shadow }");
     const { deps } = shipDeps(yaml);
