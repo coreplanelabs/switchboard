@@ -32,6 +32,7 @@
 // item 9) — that check is now defense in depth behind this one.
 
 import { normalizeHead } from "./reviewedHead.js";
+import { toolResultText, type ChatMessage } from "./chatMessage.js";
 import { redactSecrets } from "./redact.js";
 import { shows, type Verbosity } from "./verbosity.js";
 
@@ -199,6 +200,32 @@ export function parseVerdictInput(
     }
   }
   return out;
+}
+
+/** Recover only a verdict whose tool result was recorded as accepted in the
+ * complete session transcript. A bare model call, an error result, or review
+ * prose cannot authorize a GitHub verdict after a restart. */
+export function recordedVerdictFromTranscript(
+  messages: readonly ChatMessage[],
+  opts: { addressSeverity?: AddressSeverity } = {},
+): ReviewVerdict | undefined {
+  const pending = new Map<string, unknown>();
+  let recorded: ReviewVerdict | undefined;
+  for (const message of messages) {
+    for (const part of message.content) {
+      if (message.role === "assistant" && part.type === "tool_use" && part.name === "submit_verdict")
+        pending.set(part.id, part.input);
+      if (message.role !== "user" || part.type !== "tool_result") continue;
+      const input = pending.get(part.toolUseId);
+      pending.delete(part.toolUseId);
+      if (part.isError || typeof input !== "object" || input === null || Array.isArray(input)) continue;
+      const verdict = parseVerdictInput(input as Record<string, unknown>, opts);
+      const receipt = verdict && `verdict recorded: ${verdict.verdict}`;
+      const result = toolResultText(part.content);
+      if (receipt && (result === receipt || result.startsWith(`${receipt} (`))) recorded = verdict;
+    }
+  }
+  return recorded;
 }
 
 /** Fail-closed per finding: each malformed entry drops with a note naming its

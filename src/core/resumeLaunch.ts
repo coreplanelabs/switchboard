@@ -331,6 +331,7 @@ export async function launchResumes(
     const ctx: ResumeContext = {
       row,
       lastStep: run.lastStep,
+      durableTurns: run.transcript.turns,
       plan,
       events: run.events,
       inbox: run.inbox,

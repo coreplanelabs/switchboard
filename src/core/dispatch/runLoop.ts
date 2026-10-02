@@ -111,6 +111,7 @@ import { parseHandoff, type Handoff } from "../ship/handoff.js";
 import {
   parseDispositionsInput,
   parseVerdictInput,
+  recordedVerdictFromTranscript,
   type AddressSeverity,
   type AddressSeveritySource,
   type FindingDisposition,
@@ -242,7 +243,7 @@ export interface RunInterrupted {
  * not be reattached. The durable row and binding remain for the same run. */
 export interface RunPaused {
   kind: "paused";
-  reason: ReadyEnvironmentReason | "relaunch_ceiling" | "first_test_required";
+  reason: ReadyEnvironmentReason | "relaunch_ceiling" | "first_test_required" | "checkpoint_unavailable";
   message: string;
   handedOff: boolean;
 }
@@ -914,12 +915,20 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // body (fail-closed: no call → not approving). See reviewVerdict.ts.
   // Ledger state is a system boundary: the row's verdict and description are
   // re-validated through the same parsers the tools use, never trusted as-is.
-  let verdict: ReviewVerdict | undefined =
+  const storedVerdict: ReviewVerdict | undefined =
     typeof restored.verdict === "object" && restored.verdict !== null
       ? (parseVerdictInput(restored.verdict as Record<string, unknown>, {
           addressSeverity: ctx.addressSeverity.level,
         }) ?? undefined)
       : undefined;
+  const recoveredVerdict =
+    agent.name === "review" && resume?.plan.kind === "finish"
+      ? recordedVerdictFromTranscript(resume.plan.messages, { addressSeverity: ctx.addressSeverity.level })
+      : undefined;
+  // The complete transcript orders accepted tool results. A state snapshot can
+  // predate its last accepted verdict when the final state write timed out.
+  let verdict: ReviewVerdict | undefined = recoveredVerdict ?? storedVerdict;
+  if (recoveredVerdict) ledgerRun?.setState({ verdict: recoveredVerdict });
   const onVerdict = (v: ReviewVerdict) => {
     verdict = v;
     ledgerRun?.setState({ verdict: v });
@@ -3197,6 +3206,24 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       // owned write can carry it through after a transient store interruption.
       if (!checkpoint && ledgerRun.tracked() && ledgerRun.lastCheckpointFailure === "state-unavailable")
         checkpoint = await ledgerRun.checkpointSession();
+      if (!checkpoint && ledgerRun.tracked() && ledgerRun.lastCheckpointFailure === "state-unavailable") {
+        events.publish({
+          type: "run_note",
+          kind: "checkpoint_deferred",
+          summary: "final context checkpoint unavailable; answer and review publication deferred",
+          at: clock(),
+        });
+        await events.drain();
+        const handedOff = await ledgerRun.pauseForRetry().catch(() => false);
+        pausedForRetry = true;
+        registry.discard(run.id);
+        return {
+          kind: "paused",
+          reason: "checkpoint_unavailable",
+          message: "The result could not be safely posted because its saved context was not confirmed.",
+          handedOff,
+        };
+      }
       if (!checkpoint)
         throw new Error(
           `answer context checkpoint was not persisted (${ledgerRun.lastCheckpointFailure ?? "unknown"})`,

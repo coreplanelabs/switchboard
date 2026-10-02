@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { ChatMessage } from "./chatMessage.js";
 import {
   ADDRESS_SEVERITIES,
   buildReviewChannelReply,
@@ -19,9 +20,59 @@ import {
   redactDispositions,
   redactReviewPost,
   redactVerdict,
+  recordedVerdictFromTranscript,
   severityAtOrAbove,
   verdictLine,
 } from "./reviewVerdict.js";
+
+describe("recordedVerdictFromTranscript", () => {
+  const call: ChatMessage = {
+    role: "assistant",
+    content: [{ type: "tool_use", id: "v1", name: "submit_verdict", input: { verdict: "approve", summary: "clear" } }],
+  };
+
+  it("restores only an accepted tool result, never a bare or failed verdict call", () => {
+    expect(recordedVerdictFromTranscript([call])).toBeUndefined();
+    const accepted: ChatMessage = {
+      role: "user",
+      content: [{ type: "tool_result", toolUseId: "v1", content: "verdict recorded: approve" }],
+    };
+    expect(recordedVerdictFromTranscript([call, accepted])).toMatchObject({ verdict: "approve", summary: "clear" });
+    expect(
+      recordedVerdictFromTranscript([
+        call,
+        { role: "user", content: [{ type: "tool_result", toolUseId: "v1", content: "error: no verdict recorded" }] },
+      ]),
+    ).toBeUndefined();
+    expect(
+      recordedVerdictFromTranscript([
+        call,
+        { role: "user", content: [{ type: "tool_result", toolUseId: "v1", content: "verdict recorded: approved" }] },
+      ]),
+    ).toBeUndefined();
+  });
+
+  it("returns the last accepted verdict and ignores a later failed call", () => {
+    const accepted = (id: string, verdict: string): ChatMessage[] => [
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id, name: "submit_verdict", input: { verdict, summary: verdict } }],
+      },
+      { role: "user", content: [{ type: "tool_result", toolUseId: id, content: `verdict recorded: ${verdict}` }] },
+    ];
+    expect(
+      recordedVerdictFromTranscript([
+        ...accepted("old", "approve"),
+        ...accepted("new", "request_changes"),
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "failed", name: "submit_verdict", input: { verdict: "approve" } }],
+        },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "failed", content: "error", isError: true }] },
+      ]),
+    ).toMatchObject({ verdict: "request_changes" });
+  });
+});
 
 // Feature: docs/reference/specs/run-history.md items 2 and 3 — the verdict and
 // the dispositions ride the finished run's record, checked for shape (never

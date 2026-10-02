@@ -29,6 +29,7 @@ import { RunRegistry } from "../runRegistry.js";
 import type { RunEvent } from "../runEvents.js";
 import { createRunsService } from "../runsService.js";
 import { createLedgerWriteThrough, NullLedgerRun, NullLedgerWriteThrough } from "../runLedger/writeThrough.js";
+import { TransientStoreError } from "../runStoreWorker.js";
 import type { PublicationSettlement } from "../publicationSettlement.js";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { planResume, transcriptSource } from "../runLedger/resume.js";
@@ -8029,6 +8030,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     return {
       row,
       lastStep,
+      durableTurns: messages.length,
       plan: { kind: "finish", messages, answer, inboxConsumedSeq: 0, step: 2, turn: 2, remainingMs: 240_000 },
       events,
       lastSeq: lastStep.seq,
@@ -8503,11 +8505,41 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
         agent,
         ...(agent === "review" ? { state: { verdict: VERDICT }, repoCtx: prThread.repoCtx } : {}),
       });
+      const laterVerdict = { ...VERDICT, verdict: "request_changes", summary: "needs correction" };
+      if (agent === "review" && resume.plan.kind === "finish") {
+        resume.plan.messages.splice(
+          1,
+          2,
+          { role: "assistant", content: [{ type: "tool_use", id: "c1", name: "submit_verdict", input: VERDICT }] },
+          {
+            role: "user",
+            content: [{ type: "tool_result", toolUseId: "c1", content: "verdict recorded: approve (1 finding)" }],
+          },
+          ...(persistentFailure
+            ? ([
+                {
+                  role: "assistant",
+                  content: [{ type: "tool_use", id: "c2", name: "submit_verdict", input: laterVerdict }],
+                },
+                {
+                  role: "user",
+                  content: [
+                    { type: "tool_result", toolUseId: "c2", content: "verdict recorded: request_changes (1 finding)" },
+                  ],
+                },
+              ] as ChatMessage[])
+            : []),
+        );
+        resume.durableTurns = resume.plan.messages.length;
+        resume.lastStep.turnIndex = resume.plan.messages.length;
+      }
       const inner = new InMemoryRunLedger(() => NOW);
       let failState = false;
+      let recoveredCheckpoint: unknown;
       const setState = inner.setState.bind(inner);
       inner.setState = async (runId, gen, state) => {
-        if (failState && state.contextCheckpoint) throw new Error("temporary state timeout");
+        if (failState && state.contextCheckpoint) throw new TransientStoreError("temporary state timeout");
+        if (gen === "gen-R" && state.contextCheckpoint) recoveredCheckpoint = state.contextCheckpoint;
         return setState(runId, gen, state);
       };
       const ledger = createLedgerWriteThrough({
@@ -8533,6 +8565,14 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
         },
       });
       if (opened.kind !== "tracked") throw new Error("the run was not tracked");
+      s.registry.subscribe(s.run.id, s.run.token, { onEvent: (event, seq) => opened.run.event(event, seq) });
+      if (persistentFailure)
+        expect(
+          await opened.run.setStateAndFlush({
+            ...(agent === "review" ? { verdict: parseVerdictInput(VERDICT)! } : {}),
+            contextCheckpoint: { key: opened.run.session!.key, through: opened.run.session!.seedFrom },
+          }),
+        ).toBe(true);
       const checkpoint = opened.run.checkpointSession.bind(opened.run);
       let checkpoints = 0;
       opened.run.checkpointSession = async () => {
@@ -8547,17 +8587,84 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
         messages: resume.plan.messages,
       });
       if (persistentFailure) {
-        await expect(running).rejects.toThrow("answer context checkpoint was not persisted (state-unavailable)");
+        expect(await running).toMatchObject({ kind: "paused", reason: "checkpoint_unavailable", handedOff: true });
         expect(checkpoints).toBe(2);
         expect(s.published.some((event) => event.startsWith("answer:"))).toBe(false);
         expect(posts).toHaveLength(0);
-        expect(s.registry.snapshot(s.run.id, "tok")!.events).toContainEqual(
-          expect.objectContaining({
-            type: "run_note",
-            kind: "run_failed",
-            summary: expect.stringContaining("state-unavailable"),
+        expect(s.registry.getById(s.run.id)).toBeNull();
+        expect(inner.live.has(s.run.id)).toBe(true);
+        expect(await s.store.get(s.run.id)).toBeNull();
+        failState = false;
+        const [taken] = await inner.reclaim("gen-R", NOW, 60_000);
+        expect(taken?.reclaimedFrom).toBe("handoff");
+        expect(await inner.readEvents(s.run.id)).toContainEqual(
+          expect.objectContaining({ type: "run_note", kind: "checkpoint_deferred" }),
+        );
+        if (!taken?.lastStep || !taken.row.meta.session) throw new Error("the final answer was not recoverable");
+        const transcript = await inner.readSession(taken.row.meta.session.key, taken.row.meta.session.seedFrom);
+        const plan = planResume({ transcript, lastStep: taken.lastStep, tools: [] });
+        expect(plan.kind).toBe("finish");
+        if (plan.kind !== "finish") return;
+        const resumed = setup("", {
+          agent,
+          provider: neverCalled(),
+          ...(agent === "review"
+            ? {
+                ...prThread,
+                review: {
+                  head: HEAD,
+                  post: async (_target: ReviewCommentTarget, body: string) => void posts.push(body),
+                },
+                executor: { exec: async (command: string) => (command.includes("rev-parse") ? `${HEAD}\n` : "") },
+              }
+            : {}),
+        });
+        const nextLedger = createLedgerWriteThrough({
+          ledger: inner,
+          gen: "gen-R",
+          fallback: resumed.store,
+          warn: () => {},
+          sleep: async () => {},
+        });
+        resumed.deps.runLedger = nextLedger;
+        const adopted = nextLedger.adopt({
+          runId: taken.row.runId,
+          threadKey: taken.row.threadKey,
+          meta: taken.row.meta,
+          startedAt: taken.row.startedAt,
+          state: taken.row.state,
+          lastStep: taken.lastStep.step,
+          lastSeq: 0,
+          session: taken.row.meta.session,
+          durableTurns: transcript.turns,
+        });
+        const out = answered(
+          await runLoop(resumed.deps, {
+            ...resumed.ctx,
+            ledgerRun: adopted,
+            resume: {
+              row: taken.row,
+              lastStep: taken.lastStep,
+              durableTurns: transcript.turns,
+              plan,
+              events: [],
+              inbox: [],
+              lastSeq: 0,
+              repoCtx: resume.repoCtx,
+            },
+            messages: plan.messages,
           }),
         );
+        expect(out.answer).toBe("Saved final answer.");
+        expect(resumed.published.filter((event) => event.startsWith("answer:"))).toHaveLength(1);
+        expect(recoveredCheckpoint).toEqual({
+          key: taken.row.meta.session.key,
+          through: taken.row.meta.session.seedFrom + transcript.turns - 1,
+        });
+        if (agent === "review") {
+          expect(posts).toHaveLength(1);
+          expect(posts[0]).toMatch(/^Changes requested:/);
+        }
         return;
       }
       const out = answered(await running);
