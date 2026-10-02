@@ -2425,7 +2425,8 @@ describe("executor provisioning by agent resources", () => {
     };
     vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fake });
     await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
-    expect(replies).toContain("answer");
+    expect(replies).toContainEqual(expect.stringContaining("Work report (agent-written"));
+    expect(replies).toContainEqual(expect.stringContaining("answer"));
   });
 
   it("acknowledges the thread with a 👀 card BEFORE executor selection (no silence while a workspace is prepared)", async () => {
@@ -2732,7 +2733,7 @@ describe("executor provisioning by agent resources", () => {
     const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
-    expect(replies).toContain("answer");
+    expect(replies).toContainEqual(expect.stringContaining("answer"));
     const { executor } = await vi.mocked(makeExecutor).mock.results[0].value;
     expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
   });
@@ -2953,7 +2954,7 @@ describe("resident repo dispatch", () => {
       const clickIO = fakeIO();
       const outcome = await dispatchClick(w.deps, { kind: "confirm", id, actor: requester, io: clickIO.io });
       expect(outcome).toEqual({ status: "completed" });
-      expect(clickIO.replies).toContain("answer");
+      expect(clickIO.replies).toContainEqual(expect.stringContaining("answer"));
       expect(w.provider.requests).toHaveLength(1); // the redispatched run's one model turn
       // The click's slot was handed over: one click is one run in flight, never two.
       expect(inFlight).toEqual([1]);
@@ -2980,7 +2981,7 @@ describe("resident repo dispatch", () => {
       const clickIO = fakeIO();
       const outcome = await dispatchClick(w.deps, { kind: "confirm", id, actor: requester, io: clickIO.io });
       expect(outcome).toEqual({ status: "completed" });
-      expect(clickIO.replies).toContain("answer");
+      expect(clickIO.replies).toContainEqual(expect.stringContaining("answer"));
       expect(w.provider.requests).toHaveLength(1); // the redispatched run's one model turn
     });
 
@@ -3163,7 +3164,7 @@ describe("resident repo dispatch", () => {
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "main" });
     const { io, replies, statuses } = fakeIO();
     await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
-    expect(replies).toContain("answer");
+    expect(replies).toContainEqual(expect.stringContaining("answer"));
     expect(fetchSpy.mock.calls.filter((c) => String(c[0]).includes("resident.example"))).toHaveLength(2);
     const coldNote = "resident restoring (rehydrating) after waiting for the resident's restore — using fresh sandbox";
     expect(statuses.some((s) => s.title.includes(coldNote))).toBe(true);
@@ -3502,7 +3503,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
     expect(attach?.body).toMatchObject({ resource: "repo:acme/api", refHint: "main" });
     expect(provider.requests).toHaveLength(1); // sticky agent:coding thread ran
     expect(provider.requests[0].model).toBe("coding-model");
-    expect(replies).toContain("answer");
+    expect(replies).toContainEqual(expect.stringContaining("answer"));
   });
 
   // docs/reference/specs/resident-repos.md items 16 and 29: a follow-up in a thread
@@ -3576,7 +3577,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
     ];
     const { io, replies, statuses } = fakeIO(history);
     await dispatch(deps, msg("add the tests' names to the PR description", "slack:UADMIN"), io);
-    expect(replies).toContain("answer");
+    expect(replies).toContainEqual(expect.stringContaining("answer"));
     const attach = calls.find((c) => c.path === "/attach");
     expect(attach?.body).toMatchObject({
       resource: "repo:acme/api",
@@ -3627,7 +3628,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
     });
     const { io, replies, statuses } = fakeIO();
     await dispatch(deps, msg("agent:coding add the tests' names to the PR description", "slack:UADMIN"), io);
-    expect(replies).toContain("answer");
+    expect(replies).toContainEqual(expect.stringContaining("answer"));
     expect(
       statuses.some((s) =>
         s.title.includes(
@@ -5783,6 +5784,29 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     return deps;
   }
 
+  /** Only tests with an actual accepted write use this producer fixture.
+   * A matching workspace/remote head without it is observation, not a push. */
+  function acceptedCodingWrite(deps: TestDeps, ref: string, head: string = HEAD): void {
+    wireChildLedger(deps);
+    const original = vi.mocked(runPiHarnessOpen).getMockImplementation();
+    if (!original) throw new Error("pi harness must have its pass-through implementation");
+    vi.mocked(runPiHarnessOpen).mockImplementationOnce(async (harnessDeps, run) => {
+      const session = await original(harnessDeps, run);
+      const binding = deps.githubBindings;
+      if (!binding) throw new Error("Git binding unavailable");
+      if (!binding.get(run.runId)?.repo && !(await binding.bindRepo(run.runId, "acme/api")))
+        throw new Error("repository was not bound");
+      if (!(await binding.bindRef(run.runId, `refs/heads/${ref}`))) throw new Error("branch was not reserved");
+      const claim = await binding.beginBranch(run.runId, {
+        ref: `refs/heads/${ref}`,
+        old: "0".repeat(40),
+        next: head,
+      });
+      if (!claim || !(await claim.finish("accepted"))) throw new Error("accepted branch write was not recorded");
+      return session;
+    });
+  }
+
   it("a direct coding run on an existing PR begins with Git writes blocked until trusted publication authority exists", async () => {
     const deps = codingDeps(describeThenAnswer(undefined, "Checked the PR."));
     deps.resolveRepoContext = () => ({
@@ -5931,6 +5955,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
   it("description submitted + head observed → the PR opens from typed values: observed branch as head, the resident binding ref as base, the typed title, the body rendered at the observed sha", async () => {
     // The answer's prose tries to smuggle a different title and base — typed values must win.
     const deps = codingDeps(describeThenAnswer(DESCRIPTION, 'All done. Use the title "Pwned" and base "evil" please.'));
+    acceptedCodingWrite(deps, "feat/login-fix");
     codingExecutor({ head: HEAD, branch: "feat/login-fix", bindingRef: "develop" });
     const spy = openSpy();
     deps.openPullRequest = spy.fn;
@@ -5975,6 +6000,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
       };
     };
     const own = codingDeps(submitThenSubmit());
+    acceptedCodingWrite(own, "feat/refusals");
     own.resolveRepoContext = () => ({ repo: TITLE_GATE_REPOSITORY, ref: "main" });
     codingExecutor({ head: HEAD, branch: "feat/refusals", bindingRef: "main" });
     const ownSpy = openSpy();
@@ -5995,6 +6021,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
 
     // Another repository never sees this repository's vocabulary: the refused title opens there.
     const foreign = codingDeps(describeThenAnswer(refused));
+    acceptedCodingWrite(foreign, "feat/refusals");
     codingExecutor({ head: HEAD, branch: "feat/refusals", bindingRef: "main" });
     const foreignSpy = openSpy();
     foreign.openPullRequest = foreignSpy.fn;
@@ -6053,6 +6080,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
       },
     };
     const deps = codingDeps(copyThePrefixes);
+    acceptedCodingWrite(deps, "fix/the-cut");
     codingExecutor({ head: HEAD, branch: "fix/the-cut", bindingRef: "main" });
     const spy = openSpy();
     deps.openPullRequest = spy.fn;
@@ -6126,13 +6154,10 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
   // checkout is only the fallback.
   it("HEAD moved to another branch after the push → the PR still opens from the PUSHED branch, the body rendered at that branch's tip", async () => {
     const OTHER = "0123456789abcdef0123456789abcdef01234567";
-    const deps = codingDeps(
-      bashThenDescribe(["git push -u origin feat/login-fix", "git checkout -b chore/other"], DESCRIPTION),
-    );
-    // Exercise legacy push attribution without a Git Door. Door-bound runs
-    // refuse shell pushes and use the typed publication effect instead.
-    deps.githubDoor = undefined;
-    // The checkout ended on chore/other at a different commit; feat/login-fix was pushed at HEAD.
+    const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    acceptedCodingWrite(deps, "feat/login-fix");
+    // The typed write was accepted on feat/login-fix before the checkout was
+    // observed on chore/other. The accepted ref, not HEAD, heads this PR.
     codingExecutor({
       head: OTHER,
       branch: "chore/other",
@@ -6286,10 +6311,9 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
   });
 
   // The block is read only from a `git push` call's
-  // own result, paired by callId — a transcript printed by another command is
-  // not a push, so the run falls back to the checkout exactly as if nothing
-  // had been pushed.
-  it("a push block printed by `cat push.log` (not a git push) is not a push → the checkout stays the head branch", async () => {
+  // A transcript printed by another command is not an accepted write. The
+  // checkout is observed, but no PR is opened from that observation alone.
+  it("a push block printed by `cat push.log` (not a git push) cannot authorize a PR", async () => {
     const deps = codingDeps(bashThenDescribe(["cat push.log", "git checkout -b chore/other"], DESCRIPTION));
     codingExecutor({
       head: HEAD,
@@ -6301,23 +6325,22 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     deps.openPullRequest = spy.fn;
     const { io } = fakeIO();
     await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
-    expect(spy.calls).toHaveLength(1);
-    expect(spy.calls[0].headBranch).toBe("chore/other"); // the checkout — the transcript named no push
+    expect(spy.calls).toHaveLength(0);
   });
 
-  it("no push observed in the run → the checkout is the head branch, exactly as before", async () => {
+  it("no push observed in the run → the checkout is observation, not a run-owned publication", async () => {
     const deps = codingDeps(bashThenDescribe(["git status --short"], DESCRIPTION));
     codingExecutor({ head: HEAD, branch: "feat/login-fix", bindingRef: "main" });
     const spy = openSpy();
     deps.openPullRequest = spy.fn;
     const { io } = fakeIO();
     await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
-    expect(spy.calls).toHaveLength(1);
-    expect(spy.calls[0].headBranch).toBe("feat/login-fix");
+    expect(spy.calls).toHaveLength(0);
   });
 
   it("an existing open PR is edited (open-or-edit): created:false → the reply says updated, not opened", async () => {
     const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    acceptedCodingWrite(deps, "feat/login-fix");
     codingExecutor({ head: HEAD, branch: "feat/login-fix", bindingRef: "main" });
     const spy = openSpy({ number: 7, htmlUrl: "https://github.com/acme/api/pull/7", created: false });
     deps.openPullRequest = spy.fn;
@@ -6332,6 +6355,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
 
   it("no resident binding → base falls back to the dispatch's resolved ref", async () => {
     const deps = codingDeps(describeThenAnswer(DESCRIPTION)); // resolves ref: "main"
+    acceptedCodingWrite(deps, "feat/x");
     codingExecutor({ head: HEAD, branch: "feat/x" }); // no bindingRef → cold path
     const spy = openSpy();
     deps.openPullRequest = spy.fn;
@@ -6350,7 +6374,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
   // opens against it.
   it("a coordinator's child dispatched at the unit branch (the resident binding ref IS the branch) with a tag carrying the plan's base → the PR opens against that base from the unit branch, pr_opened in the record", async () => {
     const deps = codingDeps(describeThenAnswer(DESCRIPTION));
-    wireChildLedger(deps);
+    acceptedCodingWrite(deps, "plan/p/u1");
     codingExecutor({ head: HEAD, branch: "plan/p/u1", bindingRef: "plan/p/u1" });
     const spy = openSpy();
     deps.openPullRequest = spy.fn;
@@ -6389,7 +6413,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
   // the PR. The PR's facts stay context.
   it("a coordinator's contract child whose request text cites a PR attaches on the contract branch — the PR-derived ref never rebinds the attach, so the push guard allows the unit branch (issue 1860)", async () => {
     const deps = codingDeps(describeThenAnswer(DESCRIPTION));
-    wireChildLedger(deps);
+    acceptedCodingWrite(deps, "plan/p/u1");
     // What the resolver yields when the child's request text cites an open
     // pull request: its head branch bound as the ref, pinned at its head sha.
     // (A merged PR yields no ref hint at the resolver — repoContext.test.ts —
@@ -6426,7 +6450,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     const ctx = vi.mocked(makeExecutor).mock.calls[0][1];
     expect(ctx).toMatchObject({ repo: "acme/api", ref: "plan/p/u1" });
     expect(ctx.headSha).toBeUndefined();
-    // Bound at the unit branch, the child's push heads the unit's pull request.
+    // The accepted write belongs to the contract branch, not the cited PR.
     expect(spy.calls).toHaveLength(1);
     expect(spy.calls[0].headBranch).toBe("plan/p/u1");
     expect(spy.calls[0].base).toBe("main");
@@ -6525,7 +6549,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
   // coat. A cited PR that did not bind the ref contributes no attach sha.
   it("a coordinator's contract child whose request text cites a MERGED PR attaches on the contract branch with NO expected commit — the merged PR's frozen headSha never rides the attach (issue 1860)", async () => {
     const deps = codingDeps(describeThenAnswer(DESCRIPTION));
-    wireChildLedger(deps);
+    acceptedCodingWrite(deps, "plan/p/u1");
     // What the resolver yields for a merged cited PR beside `on branch
     // plan/p/u1`: the phrase's ref stands, refFromPr unset, and the merged
     // PR's facts — its number and frozen head sha — ride as context
@@ -6570,6 +6594,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
   // warm attach (`stale-tip`) and send the run cold at the dead commit.
   it("a plain coding ask citing a merged PR attaches with no expected commit — the frozen headSha is context, never the attach's wantSha (issue 1860)", async () => {
     const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    acceptedCodingWrite(deps, "feat/follow-up");
     deps.resolveRepoContext = () => ({
       repo: "acme/api",
       pr: 91,
@@ -6596,6 +6621,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
   // follow-up can rebind onto it; a run that pushed nothing hands nothing.
   it("a coding run that opened a pull request releases its workspace with `pushed` naming the branch and the PR; a run that opened none releases without it", async () => {
     const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    acceptedCodingWrite(deps, "fix/x");
     const { executor } = codingExecutor({ head: HEAD, branch: "fix/x", bindingRef: "main" });
     const releases: Array<{ mode: string; pushed?: unknown }> = [];
     Object.assign(executor, {
@@ -6696,6 +6722,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
   // consulted before giving up.
   it("no ref/PR/binding resolves a base, but GitHub's default branch does → the PR opens against it", async () => {
     const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    acceptedCodingWrite(deps, "feat/x");
     deps.resolveRepoContext = () => ({ repo: "acme/api" }); // no ref resolved
     deps.fetchRepoShipInfo = vi.fn(async () => ({ defaultBranch: "main" }));
     codingExecutor({ head: HEAD, branch: "feat/x" }); // no bindingRef → no binding ref either
@@ -6714,6 +6741,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
   // compare URL (the push WAS proven), and no PR call.
   it("description submitted + pushed branch but NO base resolvable, even from GitHub → no PR call; the note says no base branch is known, with the compare URL", async () => {
     const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    acceptedCodingWrite(deps, "feat/x");
     deps.resolveRepoContext = () => ({ repo: "acme/api" }); // no ref resolved
     deps.fetchRepoShipInfo = vi.fn(async () => undefined); // the last resort also comes up empty
     codingExecutor({ head: HEAD, branch: "feat/x" }); // no bindingRef → no binding ref either
@@ -6730,6 +6758,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
 
   it("no description submitted but a pushed branch is observable → no PR call; the reply states it plainly with the compare URL", async () => {
     const deps = codingDeps(describeThenAnswer(undefined, "I implemented the fix on feat/login-fix."));
+    acceptedCodingWrite(deps, "feat/login-fix");
     codingExecutor({ head: HEAD, branch: "feat/login-fix", bindingRef: "main" });
     const spy = openSpy();
     deps.openPullRequest = spy.fn;
@@ -6738,8 +6767,9 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     expect(spy.calls).toHaveLength(0);
     // The compare URL is offered only after GitHub said no open PR heads the branch.
     expect(deps.findOpenPrByHead).toHaveBeenCalledWith("acme/api", "feat/login-fix");
-    const note = replies.find((r) => r.endsWith("https://github.com/acme/api/compare/feat/login-fix"));
+    const note = replies.find((r) => r.includes("No PR was opened"));
     expect(note).toBeDefined();
+    expect(note).toMatch(/https:\/\/github\.com\/acme\/api\/compare\/feat\/login-fix(?=\s|$)/);
     expect(note).toContain("no PR description");
     expect(note).toContain("No PR was opened");
   });
@@ -6749,8 +6779,9 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
   // its own judgement — submits no description, so the PR body is left alone.
   // The push updated that PR; the reader must be told that, not sent to open
   // a duplicate from a compare URL.
-  it("no description submitted, the pushed branch already heads an open PR → the reply names that PR as updated by the push, no compare URL, no PR call, pr_opened created:false in the record", async () => {
+  it("no description submitted, an accepted push on an existing PR updates its code; lookup does not emit a metadata edit", async () => {
     const deps = codingDeps(describeThenAnswer(undefined, "Refreshed the allowlist for the bumped action."));
+    acceptedCodingWrite(deps, "dependabot/github_actions/actions-4c45254bbe");
     codingExecutor({ head: HEAD, branch: "dependabot/github_actions/actions-4c45254bbe", bindingRef: "main" });
     const spy = openSpy();
     deps.openPullRequest = spy.fn;
@@ -6770,18 +6801,15 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     expect(note).toContain("description was not resubmitted"); // the missing resubmit is flagged, not accepted
     expect(note).not.toContain("No PR was opened");
     expect(note).not.toContain("/compare/");
-    // In the snapshot ⇒ published before finish() (a publish on a finished run is a silent no-op).
-    const opened = registry.snapshot("r700", "t700")?.events.find((e) => e.type === "pr_opened");
-    expect(opened).toMatchObject({
-      type: "pr_opened",
-      number: 700,
-      created: false,
-      url: "https://github.com/acme/api/pull/700",
-    });
+    // The branch receipt records the write; lookup never records an API edit.
+    const events = registry.snapshot("r700", "t700")?.events ?? [];
+    expect(events.some((e) => e.type === "pushed_head")).toBe(true);
+    expect(events.some((e) => e.type === "pr_opened")).toBe(false);
   });
 
   it("no description submitted and the open-PR lookup fails → the honest compare-URL note stands (never a throw, never a fabricated PR)", async () => {
     const deps = codingDeps(describeThenAnswer(undefined, "Pushed."));
+    acceptedCodingWrite(deps, "feat/login-fix");
     codingExecutor({ head: HEAD, branch: "feat/login-fix", bindingRef: "main" });
     const spy = openSpy();
     deps.openPullRequest = spy.fn;
@@ -6791,9 +6819,9 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     const { io, replies, statuses } = fakeIO();
     await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
     expect(spy.calls).toHaveLength(0);
-    const note = replies.find((r) => r.endsWith("https://github.com/acme/api/compare/feat/login-fix"));
+    const note = replies.find((r) => r.includes("No PR was opened"));
     expect(note).toBeDefined();
-    expect(note).toContain("No PR was opened");
+    expect(note).toMatch(/https:\/\/github\.com\/acme\/api\/compare\/feat\/login-fix(?=\s|$)/);
     expect(note).not.toContain("/pull/");
     expect(statuses[statuses.length - 1].title).toContain("✅"); // the run itself completed
   });
@@ -6824,6 +6852,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
   // and the post-step opens-or-edits exactly as for a run that had submitted.
   it("a description-less push onto a branch that heads an open PR → ONE description turn; its submitted description edits the PR (updated wording), and pr_description + pr_opened + the description_turn note land in the record", async () => {
     const deps = codingDeps(answerThenDescribeOnTurn(DESCRIPTION));
+    acceptedCodingWrite(deps, "dependabot/github_actions/actions-4c45254bbe");
     codingExecutor({ head: HEAD, branch: "dependabot/github_actions/actions-4c45254bbe", bindingRef: "main" });
     const spy = openSpy({ number: 700, htmlUrl: "https://github.com/acme/api/pull/700", created: false });
     deps.openPullRequest = spy.fn;
@@ -6858,6 +6887,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
   it("the description turn still submits nothing → the ⚠️ note says the turn was given; the note is published once", async () => {
     // Every completion is a bare answer: the first loop skips the description, and so does the turn.
     const deps = codingDeps(describeThenAnswer(undefined, "Pushed the fix."));
+    acceptedCodingWrite(deps, "dependabot/github_actions/actions-4c45254bbe");
     codingExecutor({ head: HEAD, branch: "dependabot/github_actions/actions-4c45254bbe", bindingRef: "main" });
     const spy = openSpy();
     deps.openPullRequest = spy.fn;
@@ -6875,12 +6905,14 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     const events = registry.snapshot("r702", "t702")?.events ?? [];
     expect(events.filter((e) => e.type === "run_note" && e.kind === "description_turn")).toHaveLength(1);
     expect(events.some((e) => e.type === "pr_description")).toBe(false);
-    expect(events.find((e) => e.type === "pr_opened")).toMatchObject({ number: 700, created: false });
+    expect(events.some((e) => e.type === "pushed_head")).toBe(true);
+    expect(events.some((e) => e.type === "pr_opened")).toBe(false); // A lookup is not an edit.
   });
 
   it("no description turn when a description was submitted, when the push is unproven, or when no open PR heads the branch", async () => {
     // (a) submitted: the first loop described → open-or-edit runs, no turn asked
     let deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    acceptedCodingWrite(deps, "feat/login-fix");
     codingExecutor({ head: HEAD, branch: "feat/login-fix", bindingRef: "main" });
     deps.openPullRequest = openSpy().fn;
     let registry = new RunRegistry({ genId: () => "ra", genToken: () => "ta" });
@@ -6903,6 +6935,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     ).toBe(false);
     // (c) proven push, no open PR: the compare-URL note, no turn
     deps = codingDeps(describeThenAnswer(undefined, "Pushed."));
+    acceptedCodingWrite(deps, "feat/login-fix");
     codingExecutor({ head: HEAD, branch: "feat/login-fix", bindingRef: "main" });
     deps.openPullRequest = openSpy().fn;
     registry = new RunRegistry({ genId: () => "rc", genToken: () => "tc" });
@@ -6917,6 +6950,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
 
   it("openPullRequest throws → the reply reports the failure with the compare URL; the run still completes normally", async () => {
     const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    acceptedCodingWrite(deps, "feat/login-fix");
     codingExecutor({ head: HEAD, branch: "feat/login-fix", bindingRef: "main" });
     const spy = openSpy(new Error("PR create failed: HTTP 422 Validation Failed"));
     deps.openPullRequest = spy.fn;
@@ -6927,7 +6961,11 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     expect(note).toBeDefined();
     expect(note).toContain("https://github.com/acme/api/compare/feat/login-fix");
     expect(note).not.toContain("/pull/"); // never a fabricated PR URL
-    expect(replies.some((r) => r.includes("Done — branch pushed."))).toBe(true); // the answer still lands
+    expect(
+      replies.some(
+        (r) => r.includes("Done — branch pushed.") && r.includes(`Published \`feat/login-fix\` at \`${HEAD}\``),
+      ),
+    ).toBe(true); // attributed report + confirmed write
     expect(statuses[statuses.length - 1].title).toContain("✅"); // the run itself completed
   });
 
@@ -7251,7 +7289,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     expect(firstUserTexts(plainProvider.requests)).toEqual(["fix it"]);
   });
 
-  it("a thread bound to an existing PR's head branch: the base is the PR's TRUE base ref, so a fix-round repush opens/edits instead of reading as 'nothing pushed'", async () => {
+  it("a thread bound to an existing PR's head branch cannot edit it without a trusted accepted write", async () => {
     const deps = makeDeps(YAML_FIXTURE, describeThenAnswer(DESCRIPTION));
     // The thread inherited PR acme/api#42 (head feat/x, true base main); the
     // resident binding follows the PR's HEAD branch — base === branch without
@@ -7262,10 +7300,8 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     deps.openPullRequest = spy.fn;
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:coding address the review findings", "slack:UADMIN"), io);
-    expect(spy.calls).toHaveLength(1);
-    expect(spy.calls[0].base).toBe("main"); // the PR's true base — never the bound head branch
-    expect(spy.calls[0].headBranch).toBe("feat/x");
-    expect(replies.some((r) => /PR updated/.test(r))).toBe(true);
+    expect(spy.calls).toHaveLength(0);
+    expect(replies.some((r) => /No push was confirmed|Publication was refused/.test(r))).toBe(true);
   });
 
   it("the remote has no such branch → the branch does not count as pushed: no PR call, an honest note, no compare URL", async () => {
@@ -7297,6 +7333,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
 
   it("cold path: the clone lives in a subdirectory of the workspace root — the probes discover it and the PR still opens", async () => {
     const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    acceptedCodingWrite(deps, "feat/login-fix");
     codingExecutor({ head: HEAD, branch: "feat/login-fix", cloneDir: "api" }); // no bindingRef → cold executor; root probes fail
     const spy = openSpy();
     deps.openPullRequest = spy.fn;
@@ -7323,6 +7360,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
 
   it("dispatch resolved no repo slug (agent-discovered repo): the PR-open repo comes from the workspace's origin remote", async () => {
     const deps = makeDeps(YAML_FIXTURE, describeThenAnswer(DESCRIPTION));
+    acceptedCodingWrite(deps, "feat/x");
     deps.resolveRepoContext = () => ({ ref: "main" }); // a ref but no repo — the run discovered the repo itself
     codingExecutor({ head: HEAD, branch: "feat/x", cloneDir: "api", remote: "git@github.com:Acme/API.git" });
     const spy = openSpy();
@@ -7356,6 +7394,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
 
   it("the PR outcome is a fact of the run: a typed pr_opened event (url/number/created) is published BEFORE the stream finishes", async () => {
     const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    acceptedCodingWrite(deps, "feat/x");
     codingExecutor({ head: HEAD, branch: "feat/x", bindingRef: "main" });
     deps.openPullRequest = openSpy({ number: 7, htmlUrl: "https://github.com/acme/api/pull/7", created: true }).fn;
     const registry = new RunRegistry({ genId: () => "r7", genToken: () => "t7" });
@@ -15575,7 +15614,8 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       },
     });
     await writer.settled();
-    expect(replies.at(-1)).toBe("resumed and done");
+    expect(replies.at(-1)).toContain("resumed and done");
+    expect(replies.at(-1)).toContain("No push was confirmed");
     const attaches = calls.filter((c) => c.path === "/status" || c.path === "/attach");
     expect(attaches.map((c) => c.path)).toEqual(["/status", "/attach"]);
     expect(attaches[1].body).toMatchObject({
@@ -15915,7 +15955,8 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       },
     });
     await continued.writer.settled();
-    expect(nextReplies.at(-1)).toBe("continued after repair");
+    expect(nextReplies.at(-1)).toContain("continued after repair");
+    expect(nextReplies.at(-1)).toContain("No push was confirmed");
     expect(calls.filter((c) => c.path === "/attach")).toHaveLength(2);
     expect(calls.filter((c) => c.path === "/attach").every((c) => c.body?.reuse === true)).toBe(true);
     expect(
@@ -16332,7 +16373,8 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(calls.every((c) => c.host === "resident.example")).toBe(true);
     expect(provider.requests).toHaveLength(1);
     expect(resolve.mock.calls.at(-1)?.[5]).toEqual(operationTarget);
-    expect(replies.at(-1)).toBe("started over and done");
+    expect(replies.at(-1)).toContain("started over and done");
+    expect(replies.at(-1)).toContain("No push was confirmed");
     // ONE run on the index beside the refusal's `door` record (record 0054):
     // the restarted run is `run-old` itself — the page a person opened for that
     // id serves the run, and no second id ever exists.
@@ -16734,7 +16776,8 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       callId: "c1",
     });
     expect(replies.some((r) => r.startsWith("❌"))).toBe(false);
-    expect(replies.at(-1)).toBe("started over and done");
+    expect(replies.at(-1)).toContain("started over and done");
+    expect(replies.at(-1)).toContain("No push was confirmed");
     // Nothing of the old process is judged, ended or removed in the replacement; the relaunched pi runs there.
     expect(containers).toHaveLength(2);
     expect(containers[0]!.killed).toEqual([]);
@@ -16902,7 +16945,8 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       role: "user",
       text: expect.stringContaining("fix it"),
     });
-    expect(replies.at(-1)).toBe("started over and done");
+    expect(replies.at(-1)).toContain("started over and done");
+    expect(replies.at(-1)).toContain("No push was confirmed");
     expect(registry.getById("run-2")).toBeNull();
     expect(registry.getById("run-1")).toMatchObject({ finished: true, status: "completed" });
     expect(inner.live.size).toBe(0);
@@ -16978,7 +17022,8 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     ]);
     expect(containers).toHaveLength(2);
     expect(provider.requests).toHaveLength(1);
-    expect(replies.at(-1)).toBe("started over and done");
+    expect(replies.at(-1)).toContain("started over and done");
+    expect(replies.at(-1)).toContain("No push was confirmed");
     // Tracked as its predecessor was: one record under the one id, completed, and the row is closed.
     expect(inner.finished.get("run-1")).toMatchObject({ status: "completed", threadKey: "slack:CX:1.0" });
     expect(inner.live.has("run-1")).toBe(false);
@@ -17361,7 +17406,8 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     // it says untracked: the run rode its own row the whole time.
     expect(containers).toHaveLength(2);
     expect(provider.requests).toHaveLength(1);
-    expect(replies.at(-1)).toBe("started over and done");
+    expect(replies.at(-1)).toContain("started over and done");
+    expect(replies.at(-1)).toContain("No push was confirmed");
     expect(registry.getById("run-2")).toBeNull();
     expect(registry.getById("run-1")).toMatchObject({ finished: true, status: "completed" });
     const stored = await store.get("run-1");
@@ -17650,7 +17696,8 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       { type: "tool_use", id: "c1", name: "bash", input: { command: "sleep 240" } },
     ]);
     expect(textTurnsOf(req).at(-1)?.text).toMatch(/^Continue where you left off/);
-    expect(replies.at(-1)).toBe("started over and done");
+    expect(replies.at(-1)).toContain("started over and done");
+    expect(replies.at(-1)).toContain("No push was confirmed");
     expect(replies.some((r) => r.startsWith("❌"))).toBe(false);
     // Nothing was pushed into the row and no other run was claimed: one run,
     // from the request to the answer; the map forgot it at the adopt.
@@ -21572,7 +21619,8 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     expect(systemOnPi).toContain("decided: keep the helper; head green at abc123");
     expect(notepadOnPi).toBe("decided: keep the helper; head green at abc123");
     expect(sessionTools).toEqual(["recall", "notes"]);
-    expect(replies.at(-1)).toBe("bumped");
+    expect(replies.at(-1)).toContain("bumped");
+    expect(replies.at(-1)).toContain("No push was confirmed");
     // The router was never asked and the scripted provider never called: the agent came from the thread's transcript.
     expect(t.provider.requests).toHaveLength(0);
     // The finish lands on the ledger (the history store in production); the plain store keeps the tombstone.

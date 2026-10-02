@@ -19,8 +19,8 @@
 // post-step's note then says the description was not resubmitted.
 //
 // Two pieces, so each is testable alone: `descriptionTurnTarget` decides — no
-// description, a push the remote confirms (and an accepted receipt for an
-// existing-PR Ship run), a branch that is not the base, an
+// description, a producer-owned accepted push still observed at its remote
+// ref/head (for both ordinary and existing-PR runs), a branch that is not the base, an
 // open PR heading it (the same lookup open-or-edit starts with; a failed
 // lookup means no turn, never a throw) — and `runDescriptionTurn` runs the
 // turn and reports what it submitted.
@@ -68,8 +68,8 @@ export interface DescriptionTurnTarget {
 /**
  * Whether a description turn is due, and for what. Due when ALL hold: no
  * description was submitted; a repo is known; the pushed branch is observed
- * and the remote holds it at the observed head (an existing-PR Ship run also
- * needs its accepted push receipt); the branch is not the base (nothing was
+ * and the remote holds it at the observed head, with an accepted write for
+ * every coding run (remote equality alone is not evidence); the branch is not the base (nothing was
  * pushed to open a PR from otherwise); and an open PR heads the branch. The
  * base is resolved from the target's three signals only — no GitHub fetch:
  * with no signal at all, an unknown base cannot equal the branch, so the
@@ -81,14 +81,14 @@ export async function descriptionTurnTarget(input: {
   observed: WorkspaceObservation;
   description: PrDescription | undefined;
   target: CodingPrTarget;
-  /** Existing-PR Ship runs need a durable accepted push receipt; matching the remote tip is insufficient. */
+  /** The recorder's accepted write at this ref/head; matching a remote tip is insufficient. */
   confirmedPush?: boolean;
   findOpenPr: (repo: string, branch: string) => Promise<OpenPrRef | null>;
   logKey: string;
 }): Promise<DescriptionTurnTarget | undefined> {
   const { observed, target } = input;
   if (input.description !== undefined) return undefined;
-  if (input.confirmedPush === false) return undefined;
+  if (input.confirmedPush !== true) return undefined;
   const repo = target.repo ?? observed.remoteRepo;
   const branch = observed.branch;
   const headSha = normalizeHead(observed.head);

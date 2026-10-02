@@ -3581,7 +3581,12 @@ export async function dispatch(
         carriedGithubBinding,
         async (binding) =>
           ledgerRun?.tracked() ? ledgerRun.setStateAndFlush({ githubDoorBinding: binding }) : deps.hostedRuns !== true,
-        coordinator?.publication !== undefined || repoCtx.pr !== undefined,
+        // A cited PR is context for a different owned unit branch, not its
+        // publication target. A direct open/head PR remains protected as before.
+        coordinator?.publication !== undefined ||
+          (coordinator === undefined &&
+            repoCtx.pr !== undefined &&
+            !(repoCtx.prFromMessage === true && repoCtx.refFromPr !== true)),
       );
       if (!registeredBinding) throw new Error("the resumed run's GitHub binding differs from its target");
       // Persist an initial contract target before provisioning. Otherwise a
