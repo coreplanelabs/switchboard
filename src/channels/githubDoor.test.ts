@@ -387,6 +387,82 @@ describe("GitHub run-bearer door", () => {
     }
   });
 
+  it("treats only an authorized exact EOF flush as a no-op and leaves command fences intact", async () => {
+    const bindings = new GitBindings();
+    const old = "1".repeat(40);
+    const next = "2".repeat(40);
+    expect(bindings.register(grant.runId, { repo: "o/r", ref: "fix" }, undefined, undefined, true)).toBe(true);
+    expect(bindings.setPublication(grant.runId, { ref: "fix", expectedHeadSha: old })).toBe(true);
+    const begin = vi.fn(async () => true);
+    const finish = vi.fn(async () => true);
+    expect(bindings.setPublicationRecorder(grant.runId, { begin, finish })).toBe(true);
+    expect(bindings.requireToolPush(grant.runId)).toBe(true);
+    const f = await fixture(bindings);
+    const effect = f.bearers.issue(grant.runId)!.token;
+    expect(
+      bindings.allowToolPush(grant.runId, "effect", { ref: "refs/heads/fix", old, next }, bearerHashOf(effect)),
+    ).toBe(true);
+    const path = `${f.url}/git/o/r.git/git-receive-pack`;
+    const auth = (bearer: string) => `Basic ${Buffer.from(`x-access-token:${bearer}`).toString("base64")}`;
+    const send = (body: BodyInit, credential = effect, target = path, duplex = false) =>
+      fetch(target, {
+        method: "POST",
+        headers: { authorization: auth(credential), "content-type": "application/x-git-receive-pack-request" },
+        body,
+        ...(duplex ? { duplex: "half" } : {}),
+      } as RequestInit);
+    const line = (from: string, to: string, ref: string) => {
+      const command = Buffer.from(`${from} ${to} ${ref}\0report-status`);
+      return Buffer.concat([
+        Buffer.from((command.length + 4).toString(16).padStart(4, "0")),
+        command,
+        Buffer.from("0000PACK"),
+      ]);
+    };
+    try {
+      expect((await send("0000", "wrong-secret")).status).toBe(401);
+      expect((await send("0000", f.bearer)).status).toBe(403); // same run, model credential
+      const readerId = "12345678-1234-1234-1234-123456789abd";
+      const reader = f.bearers.mint({ ...grant, runId: readerId, github: { identity: "read", repo: "o/r" } });
+      expect(bindings.register(readerId, { repo: "o/r" }, undefined)).toBe(true);
+      expect((await send("0000", reader)).status).toBe(403);
+      expect((await send("0000", effect, `${f.url}/git/o/other.git/git-receive-pack`)).status).toBe(403);
+      for (const trailing of ["0000PACK", "00000000", "00gg", "000", "0001"]) {
+        expect((await send(trailing)).status).toBe(400);
+      }
+      const split = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(Buffer.from("00"));
+          controller.enqueue(Buffer.from("00"));
+          controller.close();
+        },
+      });
+      const probe = await send(split, effect, path, true);
+      expect(probe.status).toBe(200);
+      expect(probe.headers.get("content-type")).toBe("application/x-git-receive-pack-result");
+      expect(await probe.text()).toBe("0000");
+      expect((await send("0000")).status).toBe(200);
+      for (const command of [line("3".repeat(40), next, "refs/heads/fix"), line(old, next, "refs/heads/other")]) {
+        const denied = await send(command);
+        expect(denied.status).toBe(200);
+        expect(await denied.text()).toContain("ng refs/heads/");
+      }
+      expect((await send(line(old, "4".repeat(40), "refs/heads/fix"))).status).toBe(403);
+      expect(bindings.hasToolPush(grant.runId, bearerHashOf(effect))).toBe(true);
+      expect(begin).not.toHaveBeenCalled();
+      expect(f.upstream.mock.calls.filter(([url]) => url.endsWith("/git-receive-pack"))).toHaveLength(0);
+      const revokedId = "12345678-1234-1234-1234-123456789abe";
+      const revoked = f.bearers.mint({ ...grant, runId: revokedId });
+      f.bearers.revoke(revokedId);
+      expect((await send("0000", revoked)).status).toBe(403);
+      bindings.setPublication(grant.runId, { blocked: "publication held" });
+      expect((await send("0000")).status).toBe(403);
+      expect(begin).not.toHaveBeenCalled();
+    } finally {
+      await f.close();
+    }
+  });
+
   it("refuses a concurrent model bearer even when a typed effect owns the same one-use ref/source slot", async () => {
     const bindings = new GitBindings();
     const old = "1".repeat(40);
