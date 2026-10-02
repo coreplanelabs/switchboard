@@ -3192,8 +3192,15 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     let rawAnswer = acceptedAnswer.ok && acceptedAnswer.changed ? answer : undefined;
     if (acceptedAnswer.ok) answer = acceptedAnswer.value;
     if (deps.runLedger.sessionPersistence && ledgerRun?.session) {
-      const checkpoint = await ledgerRun.checkpointSession();
-      if (!checkpoint) throw new Error("answer context checkpoint was not persisted");
+      let checkpoint = await ledgerRun.checkpointSession();
+      // A failed state ACK leaves the cursor dirty on this same run. One more
+      // owned write can carry it through after a transient store interruption.
+      if (!checkpoint && ledgerRun.tracked() && ledgerRun.lastCheckpointFailure === "state-unavailable")
+        checkpoint = await ledgerRun.checkpointSession();
+      if (!checkpoint)
+        throw new Error(
+          `answer context checkpoint was not persisted (${ledgerRun.lastCheckpointFailure ?? "unknown"})`,
+        );
       const saved = await deps.runLedger.readSessionTail(checkpoint.key, 1);
       const reported = await appendRunReport(
         deps.runLedger,
