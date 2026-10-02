@@ -22,16 +22,28 @@ export function residentRegistryProblem(
   read: { status: number; body: unknown } | { error: string },
   expectedResources: readonly string[] = [],
 ): string | undefined {
+  const imageProblem = residentImageReportsProblem(read, expectedResources);
+  if ("error" in read || read.status !== 200) return imageProblem;
+  const body = object(read.body);
+  const problems = imageProblem ? [imageProblem] : [];
+  if (body?.draining !== null) {
+    const held = object(body?.draining)?.holds;
+    problems.unshift(`registry not undrained${Array.isArray(held) ? `; held: ${held.join(", ")}` : ""}`);
+  }
+  return problems.length ? problems.join("; ") : undefined;
+}
+
+/** Registry image proof without judging the deploy's own drain, which is still in force. */
+export function residentImageReportsProblem(
+  read: { status: number; body: unknown } | { error: string },
+  expectedResources: readonly string[] = [],
+): string | undefined {
   if ("error" in read) return `registry unreadable: ${read.error}`;
   if (read.status !== 200) return `registry unreadable: HTTP ${read.status}`;
   const body = object(read.body);
   if (!body || !Array.isArray(body.residents) || body.count !== body.residents.length)
     return "registry listing missing or incomplete";
   const problems: string[] = [];
-  if (body.draining !== null) {
-    const held = object(body.draining)?.holds;
-    problems.push(`registry not undrained${Array.isArray(held) ? `; held: ${held.join(", ")}` : ""}`);
-  }
   const seen = new Set<string>();
   for (const value of body.residents) {
     const row = object(value);

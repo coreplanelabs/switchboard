@@ -106,6 +106,8 @@ Poll `/debug info` until `state` is `warm`, `lastRestore.at` is later than the r
 
 `poolUsersSpent` counts historical UID claims on this VM, not active work. The read-scoped resident status also lists `poolUserSpends` as `{user, owner}` rows, where owners begin with `thread:` or `op:`. A detached thread may reclaim its own UID after a clean disk inspection; a different thread or a new disposable operation cannot. When all UIDs are spent, the next attach or operation may recycle the VM itself only if it is warm, current, undrained, and has no other active work or live binding. The checked destroy keeps snapshots and restores before that request proceeds. A `pool-recycle-required` refusal means the idle proof did not pass; inspect the live rows and use the operator procedure above once the resident is idle. Never clear the spend ledger by hand.
 
+After a resident Worker upload that passes preflight, `deploy all` reads the named Containers application before and after the upload. An unchanged version and image, no printed container change, and current reports for every resident complete a Worker-only step without cycling containers. A changed application uses the guarded image reconcile. An unreadable pre-upload application refuses the upload; an unreadable post-upload application or an older pending image report leaves it partial and the fleet held. The existing preflight must still pass before any upload; this post-upload proof does not override it.
+
 ## For this installation
 
 The project's own production, not Switchboard:
