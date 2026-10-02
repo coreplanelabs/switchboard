@@ -2988,11 +2988,12 @@ const isStepAttempt = (key: string | undefined, step: string): boolean =>
  * per-turn meter total is historical price evidence; repricing old tokens with
  * the current operator table is not. This total is a lower bound until every
  * started round is accounted for, and is never used to mint a new budget. */
-function historicalRecoverySpend(
+async function historicalRecoverySpend(
   instance: CoordinatorInstance,
   row: CoordinatorUnit,
   runs: RunView[],
-): { usd: number; children: RecoveryAccounting["children"] } | { reason: string } {
+  service: RunsService,
+): Promise<{ usd: number; children: RecoveryAccounting["children"]; noWork: string[] } | { reason: string }> {
   const unitKey = `${instance.id}:${row.unit}`;
   const unitPrefix = `${unitKey}/`;
   // A bare unit key claims this unit but has no auditable step identity.
@@ -3006,6 +3007,7 @@ function historicalRecoverySpend(
   )
     return { reason: "child_identity_mismatch" };
   const pricedChildren: RecoveryAccounting["children"] = [];
+  const noWork: string[] = [];
   const stagedChildren: {
     run: RunView;
     segment: number;
@@ -3098,7 +3100,86 @@ function historicalRecoverySpend(
     const segmentEnd = row.segments?.find((segment) => segment.index === segmentIndex + 1)?.at ?? row.ending!.at;
     if (run.startedAt < segmentStart || run.finishedAt > segmentEnd) return { reason: "child_round_mismatch" };
     const models = Object.values(run.usage?.byModel ?? {});
-    if (
+    let childUsd: number;
+    if (run.usage?.turns === 0 && models.length === 0 && action === "findings") {
+      // Zero tokens are not a price receipt. Only a complete final server
+      // record that stopped in setup before any model/tool/work is $0 evidence.
+      const final = await service
+        .getRun(run.id, {
+          include: "messages",
+          requireFinalRecord: true,
+          privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
+        })
+        .catch(() => undefined);
+      const child = final?.ok === true ? final.value : undefined;
+      const events = child?.events;
+      const preparingIndex =
+        events?.findIndex((event) => event.type === "run_state" && event.state === "preparing") ?? -1;
+      if (
+        child === undefined ||
+        child.id !== run.id ||
+        child.idempotencyKey !== run.idempotencyKey ||
+        child.parentInstanceId !== run.parentInstanceId ||
+        child.userId !== run.userId ||
+        child.repo !== run.repo ||
+        child.agent !== run.agent ||
+        child.threadKey !== run.threadKey ||
+        child.startedAt !== run.startedAt ||
+        child.finishedAt !== run.finishedAt ||
+        run.status !== "failed" ||
+        run.liveState?.state !== "preparing" ||
+        child.status !== "failed" ||
+        child.liveState?.state !== "preparing" ||
+        child.truncated !== false ||
+        child.eventCount !== run.eventCount ||
+        child.storedEventCount !== run.eventCount ||
+        events === undefined ||
+        events.length !== run.eventCount ||
+        child.usage?.turns !== 0 ||
+        child.usage.byModel === undefined ||
+        Object.keys(child.usage.byModel).length !== 0 ||
+        run.headSha !== undefined ||
+        run.pushed !== undefined ||
+        run.pr !== undefined ||
+        child.headSha !== undefined ||
+        child.pushed !== undefined ||
+        child.pr !== undefined ||
+        child.verdict !== undefined ||
+        child.reviewPost !== undefined ||
+        child.reviewHead !== undefined ||
+        child.dispositions !== undefined ||
+        child.doorPublicationPending !== undefined ||
+        child.lease !== undefined ||
+        events.filter((event) => event.type === "refusal" && event.code === "setup_failed").length !== 1 ||
+        preparingIndex < 0 ||
+        events.some(
+          (event, index) =>
+            event.seq !== index + 1 ||
+            !(
+              event.type === "input" ||
+              event.type === "run_meta" ||
+              event.type === "coordinator_tag" ||
+              // The dispatcher records prior-thread context before setup; later
+              // narrative events cannot attest to a pre-model refusal.
+              (event.type === "context" && typeof event.text === "string" && index < preparingIndex) ||
+              (event.type === "refusal" && event.code === "setup_failed") ||
+              (event.type === "run_state" &&
+                ["admitted", "waiting_deploy", "waiting_repository", "falling_back", "preparing"].includes(
+                  event.state,
+                )) ||
+              ((event.type === "span_start" || event.type === "span_end") &&
+                (event.name === "request" ||
+                  event.name === "slack.receive" ||
+                  event.name === "post.card_close" ||
+                  event.name === "post.reply" ||
+                  event.name.startsWith("dispatch.")))
+            ),
+        )
+      )
+        return { reason: "child_price_unknown" };
+      childUsd = 0;
+      noWork.push(run.id);
+    } else if (
       models.length === 0 ||
       !Number.isSafeInteger(run.usage?.turns) ||
       run.usage!.turns < 1 ||
@@ -3113,7 +3194,7 @@ function historicalRecoverySpend(
       )
     )
       return { reason: "child_price_unknown" };
-    const childUsd = models.reduce((total, model) => total + model.usd!, 0);
+    else childUsd = models.reduce((total, model) => total + model.usd!, 0);
     pricedChildren.push({ runId: run.id, key: run.idempotencyKey!, usd: childUsd });
     stagedChildren.push({
       run,
@@ -3345,7 +3426,7 @@ function historicalRecoverySpend(
   // so a different listing order cannot change the fractional USD total.
   const usd = pricedChildren.reduce((sum, child) => sum + child.usd, 0);
   if (!Number.isFinite(usd)) return { reason: "child_price_unknown" };
-  return { usd, children: pricedChildren };
+  return { usd, children: pricedChildren, noWork };
 }
 
 /** Select exactly one later review from the complete GitHub list. A later
@@ -3639,7 +3720,7 @@ async function recoverOriginalCodingUnit(
       (row.lastPush !== undefined && row.lastPush !== coding.headSha)
     )
       return json(409, { ok: false, error: "recovery_work_unverified", at });
-    const spend = historicalRecoverySpend(instance, row, listing.runs);
+    const spend = await historicalRecoverySpend(instance, row, listing.runs, deps.runs);
     if ("reason" in spend) return json(409, { ok: false, error: "recovery_budget_unknown", reason: spend.reason, at });
     if (grant.costCapUsd !== undefined && spend.usd >= grant.costCapUsd)
       return json(409, {
@@ -4153,7 +4234,7 @@ export async function recoverOriginalUnit(
     )
       return json(409, { ok: false, error: "door_publication_unresolved", at });
     if (grant.costCapUsd !== undefined && histories.size === 0) return unknownBudget("cost_cap_spend_unknown");
-    const spend = historicalRecoverySpend(instance, row, [...histories.values()]);
+    const spend = await historicalRecoverySpend(instance, row, [...histories.values()], deps.runs);
     if ("reason" in spend) return unknownBudget(spend.reason);
     if (grant.costCapUsd !== undefined && spend.usd >= grant.costCapUsd)
       return json(409, {
@@ -4416,6 +4497,53 @@ export async function recoverOriginalUnit(
         lastPush: expectedHead,
         publication: { ...publication, expectedHeadSha: expectedHead },
       };
+    } else if (
+      kind === "findings" &&
+      row.ending.kind === "aborted" &&
+      !headMoved &&
+      spend.noWork.length === 1 &&
+      row.rounds.slice(boundaryPosition + 1).some((candidate) => candidate.agent === "coding")
+    ) {
+      const afterReview = row.rounds.slice(boundaryPosition + 1);
+      const attempts = unitRuns.filter((run) => isStepAttempt(run.idempotencyKey, findingsPrefix));
+      const child = attempts.length === 1 ? attempts[0] : undefined;
+      if (
+        row.lastPush !== reviewedHead ||
+        row.ending.cause !== undefined ||
+        row.ending.step !== undefined ||
+        child === undefined ||
+        child.id !== spend.noWork[0] ||
+        child.idempotencyKey !== findingsPrefix ||
+        review.finishedAt === undefined ||
+        child.startedAt < review.finishedAt ||
+        child.finishedAt === undefined ||
+        afterReview.length !== 2 ||
+        afterReview[0]?.agent !== "coding" ||
+        afterReview[0].index !== round ||
+        afterReview[0].outcome !== "started" ||
+        afterReview[0].at < child.startedAt ||
+        afterReview[0].at > child.finishedAt ||
+        afterReview[1]?.agent !== "coding" ||
+        afterReview[1].index !== round ||
+        afterReview[1].outcome !== "aborted" ||
+        afterReview[1].at < child.finishedAt ||
+        afterReview[1].at > row.ending.at ||
+        listing.runs.some(
+          (run) =>
+            run.id !== child.id &&
+            run.id !== review.id &&
+            ((!run.finished && (run.agent === "coding" || run.agent === "review")) ||
+              (run.startedAt >= review.finishedAt! &&
+                (run.agent === "coding" ||
+                  run.agent === "review" ||
+                  run.pushed !== undefined ||
+                  run.headSha !== undefined ||
+                  run.pr !== undefined))),
+        )
+      )
+        return json(409, { ok: false, error: "recovery_head_moved", at });
+      // The failed dispatch consumed neither a findings contract nor a review
+      // slot. Keep the posted review as the claim's identity and original lease.
     } else if (
       kind === "findings" &&
       row.ending.kind === "aborted" &&
