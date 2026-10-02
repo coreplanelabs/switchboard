@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.278.1](https://github.com/coreplanelabs/switchboard/compare/v1.278.0...v1.278.1) (2026-10-02)
+
+
+### Bug fixes
+
+* **deploy:** skip resident image cycles for Worker-only uploads ([#2662](https://github.com/coreplanelabs/switchboard/issues/2662)) ([8f63204](https://github.com/coreplanelabs/switchboard/commit/8f632045f75bcb7e3914c7ed0c74f788f8d0f75e))
+* **memory:** keep recent run history reads bounded ([#2659](https://github.com/coreplanelabs/switchboard/issues/2659)) ([7fe05c2](https://github.com/coreplanelabs/switchboard/commit/7fe05c2b097dce4da54936f30e7452d9fc807566))
+* **ship:** preserve rewritten-head private checkpoints ([#2660](https://github.com/coreplanelabs/switchboard/issues/2660)) ([f33b627](https://github.com/coreplanelabs/switchboard/commit/f33b62761419075cd5d26b93878ddbbddc9aa822))
+* **ship:** publish from the owned cold checkout ([#2657](https://github.com/coreplanelabs/switchboard/issues/2657)) ([a1f1d8c](https://github.com/coreplanelabs/switchboard/commit/a1f1d8c71507087bb817535687bfa0fe96b46615))
+* **ship:** resume a stopped coding unit before a pull request ([#2663](https://github.com/coreplanelabs/switchboard/issues/2663)) ([418387c](https://github.com/coreplanelabs/switchboard/commit/418387c17cc46d7a30ceb08f06bd12254991ed28))
+* **slack:** retry unavailable private DM audience check ([#2658](https://github.com/coreplanelabs/switchboard/issues/2658)) ([d9aef42](https://github.com/coreplanelabs/switchboard/commit/d9aef424393320345f1475ce86bff003d5f36c61))
+
 ## [1.278.0](https://github.com/coreplanelabs/switchboard/compare/v1.277.0...v1.278.0) (2026-10-02)
 
 
