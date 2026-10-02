@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.276.1](https://github.com/coreplanelabs/switchboard/compare/v1.276.0...v1.276.1) (2026-10-02)
+
+
+### Bug fixes
+
+* **runs:** resume retained runs through fenced setup ([#2625](https://github.com/coreplanelabs/switchboard/issues/2625)) ([b81a520](https://github.com/coreplanelabs/switchboard/commit/b81a520eee2845fd43971d2ce5a09b0312ff05eb))
+
 ## [1.276.0](https://github.com/coreplanelabs/switchboard/compare/v1.275.3...v1.276.0) (2026-10-02)
 
 
