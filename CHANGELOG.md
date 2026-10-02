@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.278.2](https://github.com/coreplanelabs/switchboard/compare/v1.278.1...v1.278.2) (2026-10-02)
+
+
+### Bug fixes
+
+* **agents:** keep unfinished steps open in completion cards ([#2665](https://github.com/coreplanelabs/switchboard/issues/2665)) ([6870fb8](https://github.com/coreplanelabs/switchboard/commit/6870fb848a37a6c45d0960ba14ad189620ec1e1f))
+* **deploy:** close resident upload admission gaps ([#2670](https://github.com/coreplanelabs/switchboard/issues/2670)) ([21f8ca9](https://github.com/coreplanelabs/switchboard/commit/21f8ca91735f86ae31afca5ae5c06303c29613a8))
+* **deploy:** close resident work during Worker swap ([#2669](https://github.com/coreplanelabs/switchboard/issues/2669)) ([baf2320](https://github.com/coreplanelabs/switchboard/commit/baf232075cde9eb80f740348a00fb0006ac26398))
+* **deploy:** fence resident reattach before Worker upload ([#2667](https://github.com/coreplanelabs/switchboard/issues/2667)) ([bc5794f](https://github.com/coreplanelabs/switchboard/commit/bc5794f349d0fb935625a5800ee224da4a4ff0fa))
+* **runs:** retry transient answer checkpoints before publication ([#2668](https://github.com/coreplanelabs/switchboard/issues/2668)) ([fb351e8](https://github.com/coreplanelabs/switchboard/commit/fb351e83bfed9b77e947fbc1fce21a729ca0e419))
+
 ## [1.278.1](https://github.com/coreplanelabs/switchboard/compare/v1.278.0...v1.278.1) (2026-10-02)
 
 
