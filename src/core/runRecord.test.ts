@@ -257,6 +257,7 @@ it("a preset question keeps its typed settings through the event-to-record proje
     question: "Summarize this run?",
     proposal: "agent:general Summarize this run",
     proposalSettings: { model: "openai/gpt-6-sol", effort: "high", budget: 25, verbosity: "debug" },
+    confirmablePreset: true,
   };
   const stored = JSON.parse(JSON.stringify(record({ events: [event], operator: operatorOfEvents([event]) })));
   expect(isRunRecord(stored)).toBe(true);
@@ -266,6 +267,22 @@ it("a preset question keeps its typed settings through the event-to-record proje
     budget: 25,
     verbosity: "debug",
   });
+  expect(stored.operator?.confirmablePreset).toBe(true);
+});
+
+it("a display-only registry proposal remains unconfirmable through event-to-record and JSON storage", () => {
+  const event: RunEvent = {
+    type: "operator",
+    mode: "on",
+    outcome: "question",
+    reason: "confirm",
+    question: "Abridge?\nProposed command (display only; yes cannot confirm it): `review abridge r-live`",
+    proposal: "review abridge r-live",
+  };
+  const stored = JSON.parse(JSON.stringify(record({ events: [event], operator: operatorOfEvents([event]) })));
+  expect(isRunRecord(stored)).toBe(true);
+  expect(stored.operator?.proposal).toBe("review abridge r-live");
+  expect(stored.operator?.confirmablePreset).toBeUndefined();
 });
 
 it("a verified single PR target survives the operator event and JSON storage", () => {

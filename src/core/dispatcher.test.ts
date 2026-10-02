@@ -57,6 +57,7 @@ import { InMemoryConfirmationStore, STORE_UNREACHABLE_LINE } from "./confirmatio
 import { OFFER_EXPIRED_LINE, QUESTION_EXPIRED_LINE } from "./dispatch/confirm.js";
 import { setShutdownNotice } from "./dispatch/run.js";
 import { HAND_BACK_PREFIX } from "./dispatch/handBack.js";
+import { operatorLine } from "./dispatch/operator.js";
 import {
   createSteerSender,
   defaultAdmission,
@@ -163,8 +164,9 @@ type TestDeps = CoreDeps & {
  *  again) — plus an invoke spy, so a test can assert which registry command a
  *  message reached. Every `makeDeps` wires it once: there is no chat command
  *  outside the registry. */
-function wireCommands(deps: TestDeps): { invoked: string[] } {
+function wireCommands(deps: TestDeps, capabilities?: TestDeps["capabilities"]): { invoked: string[] } {
   const bound = buildCoreCommands(deps.config, null, {
+    ...(capabilities ? { capabilities } : {}),
     registry: deps.runRegistry ?? new RunRegistry(),
     secrets: processSecrets,
     dataDir: deps.dataDir ?? mkdtempSync(join(tmpdir(), "swb-dispatch-cmds-")),
@@ -25520,7 +25522,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     const q = fakeIO();
     await dispatch(deps, msg("list them", "slack:UADMIN"), q.io);
     expect(q.replies).toHaveLength(1);
-    expect(q.replies[0]).toContain("Did you mean:");
+    expect(q.replies[0]).toContain("Proposed command (display only; yes cannot confirm it):");
     expect(q.replies[0]).toContain("`runs list --status all`");
   });
 
@@ -25548,12 +25550,14 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     expect((await store.get("r1"))?.contextDependencies?.status).toBe("known");
     const next = decides({ binds: [{ line: "help" }] });
     deps.operatorModel = next;
-    await dispatch(deps, { ...msg("yes", "slack:UADMIN"), messageId: "slack:CX:2.0" }, fakeIO().io);
+    const reply = fakeIO();
+    await dispatch(deps, { ...msg("yes", "slack:UADMIN"), messageId: "slack:CX:2.0" }, reply.io);
     expect(next).not.toHaveBeenCalled();
-    expect(deps.invoked).toEqual(["runs.list"]);
+    expect(deps.invoked).toEqual([]);
+    expect(reply.replies.join("\n")).toContain("cannot confirm");
   });
 
-  it("on: the next turn's \"yes\" binds the pending question's proposal with no model call; another answer binds fresh", async () => {
+  it("on: a registry proposal from a prior question never executes on yes; another answer binds fresh", async () => {
     const pendingThread = [
       {
         id: "prev",
@@ -25569,11 +25573,10 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("yes", "slack:UADMIN"), io, { thread: pendingThread });
     expect(deps.operatorModel).not.toHaveBeenCalled();
-    expect(deps.invoked).toEqual(["config.show"]);
-    expect(replies.some((r) => r.includes("bound: `config show`"))).toBe(true);
+    expect(deps.invoked).toEqual([]);
+    expect(replies.join("\n")).toContain("cannot confirm");
     expect(registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
-      outcome: "binds",
-      binds: [{ line: "config show", reason: "yes to the pending question's proposal" }],
+      outcome: "refusal",
     });
 
     // Anything but "yes" is a fresh decision: the model runs, the marker in view.
@@ -25583,6 +25586,38 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     await dispatch(fresh, msg("no, the runs one", "slack:UADMIN"), fakeIO().io, { thread: pendingThread });
     expect(fresh.operatorModel).toHaveBeenCalledTimes(1);
     expect(fresh.invoked).toEqual(["help.show"]);
+  });
+
+  it.each([
+    ["capped Unicode and whitespace", `config instructions me "${"long 🛠️  words\nwith\ttabs ".repeat(25)}"`],
+    ["redacted secret-like words", 'config instructions me "token=ghp_abcdefghijklmnopqrstuvwxyz1234567890"'],
+  ])("on: yes after restart refuses a %s registry proposal instead of executing its receipt", async (_case, raw) => {
+    const displayed = operatorLine(raw);
+    expect(displayed).not.toBe(raw);
+    const pendingThread = [
+      {
+        id: "prev",
+        startedAt: 0,
+        finished: true,
+        eventCount: 2,
+        operator: { mode: "on", outcome: "question", reason: "ambiguous", proposal: displayed },
+      },
+    ] as RunView[];
+    const { deps, registry } = operatorDeps(ON_YAML);
+    await savePendingQuestion(deps, pendingThread);
+    const model = decides({ binds: [{ line: "help" }] });
+    deps.operatorModel = model;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("yes", "slack:UADMIN"), io, { thread: pendingThread });
+    expect(model).not.toHaveBeenCalled();
+    expect(deps.invoked).toEqual([]);
+    expect(replies.join("\n")).toContain("cannot confirm");
+    expect(JSON.stringify(registry.snapshotById("r1")!.events)).not.toContain(
+      "ghp_abcdefghijklmnopqrstuvwxyz1234567890",
+    );
+    expect(registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
+      outcome: "refusal",
+    });
   });
 
   // The question path (issue 2046; routing-and-config item 29): a question the
@@ -25983,6 +26018,74 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     expect(replies.some((r) => r.includes("Folded into"))).toBe(false);
   });
 
+  it.each(["live", "durable"])(
+    "on: a typed steer delivers complete long quoted, multiline, Unicode and whitespace words to the %s inbox without exposing secrets",
+    async (inbox) => {
+      const { deps, registry } = operatorDeps(ON_YAML);
+      const pushInbox = vi.spyOn(deps.runLedger, "pushInbox").mockResolvedValue(1);
+      wireCommands(deps);
+      const run = registry.create("the requester's run", {
+        agent: "general",
+        channelId: "slack:CX",
+        userId: "slack:UADMIN",
+        threadKey: "slack:CX:22.0",
+      });
+      const slot = inbox === "live" ? deps.admission!.claim("slack:CX:22.0", { agent: "general" }).live : undefined;
+      if (slot) slot.runId = run.id;
+      const words = `First ghp_${"a".repeat(40)}  two\twords, "quoted".\nNext line: café 日本語 🧭 ${"last ".repeat(90)}FINISH`;
+      deps.operatorModel = vi.fn<RouteModel>(async () => ({
+        tool: "steer_run",
+        input: { id: run.id, words, intent: "write", reason: "send all the words" },
+      }));
+      const { io, replies } = fakeIO();
+      await dispatch(deps, msg("send this follow-up", "slack:UADMIN"), io);
+      expect(pushInbox).toHaveBeenCalledOnce();
+      expect(pushInbox.mock.calls[0][1]).toMatchObject({ text: words });
+      expect(pushInbox.mock.calls[0][1].text).not.toContain("«redacted");
+      if (slot) expect(slot.inbox.drain()).toEqual([expect.objectContaining({ text: words })]);
+      expect(replies.join(" ")).not.toContain(`ghp_${"a".repeat(40)}`);
+      expect(replies.join(" ")).not.toContain("FINISH");
+      const events = registry.listActive().flatMap((active) => registry.snapshotById(active.id)?.events ?? []);
+      const publicEvents = JSON.stringify(events.filter((event) => event.type === "operator"));
+      expect(publicEvents).not.toContain(`ghp_${"a".repeat(40)}`);
+      expect(publicEvents).not.toContain("FINISH");
+      expect(publicEvents).not.toContain('"invocation"');
+      expect(publicEvents).toContain("«redacted-github-token»");
+    },
+  );
+
+  it("on: a live-owner retarget preserves typed words but rewrites only the destination", async () => {
+    const { deps, registry } = operatorDeps(ON_YAML);
+    const pushInbox = vi.spyOn(deps.runLedger, "pushInbox").mockResolvedValue(1);
+    wireCommands(deps);
+    const run = registry.create("the live owner", {
+      agent: "general",
+      channelId: "slack:CX",
+      userId: "slack:UADMIN",
+      threadKey: "slack:CX:1.0",
+    });
+    const slot = deps.admission!.claim("slack:CX:1.0", { agent: "general" });
+    slot.live.runId = run.id;
+    const words = `keep  both\tspaces "quoted"\n日本語 ${"tail ".repeat(90)}END`;
+    deps.operatorModel = vi.fn<RouteModel>(async () => ({
+      tool: "steer_run",
+      input: { id: "stale-run", words, intent: "write", reason: "the active owner" },
+    }));
+    await dispatch(deps, msg("steer my live run", "slack:UADMIN"), fakeIO().io);
+    expect(pushInbox).toHaveBeenCalledOnce();
+    expect(pushInbox.mock.calls[0][0]).toBe(run.id);
+    expect(pushInbox.mock.calls[0][1]).toMatchObject({ text: words });
+    expect(slot.live.inbox.drain()).toEqual([expect.objectContaining({ text: words })]);
+    expect(registry.listActive().flatMap((active) => registry.snapshotById(active.id)?.events ?? [])).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "operator",
+          binds: [expect.objectContaining({ line: expect.stringContaining(`steer run ${run.id}`) })],
+        }),
+      ]),
+    );
+  });
+
   it("on: a member's steer bind into the requester's run is refused with the owner rule's reason, and nothing is folded in", async () => {
     const { deps, registry } = operatorDeps(ON_YAML);
     wireCommands(deps);
@@ -26117,6 +26220,30 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     const receipt = replies.find((r) => r.includes("bound: `config set me --agent review` — write — the ask"));
     expect(receipt).toBeDefined();
     expect(replies.some((r) => r.includes(HAND_BACK_PREFIX))).toBe(false);
+  });
+
+  it("on: confirmation stores typed quoted and multiline instructions through the click", async () => {
+    const { deps, store } = confirming();
+    const words = 'Keep  both spaces, "quotes", café\nand a new line';
+    deps.operatorModel = vi.fn<RouteModel>(async () => ({
+      tool: "config_instructions",
+      input: { scope: "me", text: words, intent: "write", reason: "set my instructions" },
+    }));
+    const { io, offers } = offering();
+    await dispatch(deps, msg("set my instructions", "slack:UADMIN"), io);
+    expect(offers).toHaveLength(1);
+    expect(store.rows.get(offers[0]!.id)).toMatchObject({
+      command: "config.instructions",
+      input: { args: ["me", words] },
+    });
+    const outcome = await dispatchClick(deps, {
+      kind: "confirm",
+      id: offers[0]!.id,
+      actor: requester,
+      io: fakeIO().io,
+    });
+    expect(outcome).toEqual({ status: "completed" });
+    expect((await deps.config.scopes("slack:CX", "slack:UADMIN")).user.instructions).toBe(words);
   });
 
   it("on: a channel config offer projects its resolved display name into the same stored and shown risk line", async () => {
@@ -26548,6 +26675,75 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     });
   });
 
+  it("on: yes to a review abridge proposal with saved empty settings refuses without parsing the display line", async () => {
+    const pendingThread = [
+      {
+        id: "prev",
+        startedAt: 0,
+        finished: true,
+        eventCount: 2,
+        operator: {
+          mode: "on",
+          outcome: "question",
+          reason: "confirm",
+          proposal: "review abridge r-live",
+          proposalSettings: {},
+        },
+      },
+    ] as RunView[];
+    const { deps, provider, registry } = operatorDeps(ON_YAML);
+    await savePendingQuestion(deps, pendingThread);
+    wireCommands(deps);
+    deps.operatorModel = decides({ reason: "never", binds: [{ line: "help", reason: "never" }] });
+    const { io, replies, offers } = offering();
+    await dispatch(deps, msg("yes", "slack:UADMIN"), io, { thread: pendingThread });
+    expect(deps.operatorModel).not.toHaveBeenCalled();
+    expect(deps.invoked).not.toContain("review.abridge");
+    expect(provider.requests).toHaveLength(0);
+    expect(offers).toHaveLength(0);
+    expect(replies.some((line) => line.includes("complete typed input was not saved"))).toBe(true);
+    expect(registry.getById("r1")?.agent).not.toBe("review");
+  });
+
+  it.each(["readingDiffAbridge", "runHistory"] as const)(
+    "on: yes to a saved review abridge proposal still refuses after %s is disabled",
+    async (capability) => {
+      const pendingThread = [
+        {
+          id: "prev",
+          startedAt: 0,
+          finished: true,
+          eventCount: 2,
+          operator: {
+            mode: "on",
+            outcome: "question",
+            reason: "confirm",
+            question:
+              "Abridge the review?\nProposed command (display only; yes cannot confirm it): `review abridge r-live`",
+            proposal: "review abridge r-live",
+            proposalSettings: {},
+          },
+        },
+      ] as RunView[];
+      const { deps, provider, registry } = operatorDeps(ON_YAML);
+      const available = { ...deps.capabilities, runHistory: true, readingDiffAbridge: true };
+      wireCommands(deps, available);
+      expect(deps.commands?.list().some((def) => def.id === "review.abridge")).toBe(true);
+      await savePendingQuestion(deps, pendingThread);
+      wireCommands(deps, { ...available, [capability]: false });
+      expect(deps.commands?.list().some((def) => def.id === "review.abridge")).toBe(false);
+      deps.operatorModel = decides({ reason: "never", binds: [{ line: "help", reason: "never" }] });
+      const { io, replies, offers } = offering();
+      await dispatch(deps, msg("yes", "slack:UADMIN"), io, { thread: pendingThread });
+      expect(deps.operatorModel).not.toHaveBeenCalled();
+      expect(deps.invoked).toHaveLength(0);
+      expect(provider.requests).toHaveLength(0);
+      expect(offers).toHaveLength(0);
+      expect(replies.some((line) => line.includes("complete typed input was not saved"))).toBe(true);
+      expect(registry.getById("r1")?.agent).not.toBe("review");
+    },
+  );
+
   it("on: yes to a pending question whose proposal is a preset line routes the proposal's tail as the request, not the word yes", async () => {
     const pendingThread = [
       {
@@ -26561,6 +26757,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
           reason: "ambiguous",
           proposal: "agent:general summarize acme/repo",
           proposalSettings: {},
+          confirmablePreset: true,
         },
       },
     ] as RunView[];
@@ -26601,6 +26798,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
           outcome: "question",
           reason: "confirm",
           proposal: "agent:general Summarize the run",
+          confirmablePreset: true,
           proposalSettings: { effort: "high", budget: 25, verbosity: "debug" },
           request: "Use high effort, a 25 minute budget, and debug detail to summarize the run",
         },
@@ -26632,6 +26830,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
           outcome: "question",
           reason: "confirm",
           proposal: "agent:general Summarize the run",
+          confirmablePreset: true,
           request: "Summarize the run with high effort",
         },
       },
@@ -26843,7 +27042,8 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("use the principle", "slack:UADMIN"), io);
     expect(replies).toHaveLength(1);
-    expect(replies[0]).toContain("Did you mean:");
+    expect(replies[0]).toContain("Deliver this to the coding run?");
+    expect(replies[0]).toContain("Proposed command (display only; yes cannot confirm it):");
     expect(replies[0]).toContain(`\`steer run ${live.id} use the principle\``);
     expect(slot.live.inbox.size).toBe(0);
   });
@@ -26929,6 +27129,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
           reason: "ambiguous",
           proposal: "agent:general summarize the incident",
           proposalSettings: {},
+          confirmablePreset: true,
         },
       },
       { id: "c1", startedAt: 0, finished: true, eventCount: 1, agent: "coding", parentInstanceId: INSTANCE },

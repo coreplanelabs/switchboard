@@ -397,6 +397,27 @@ describe("publication of an operator decision", () => {
     expect(write.mock.calls[0][0].contextDependencies).toMatchObject({ status: "unknown", githubRepos: ["acme/api"] });
   });
 
+  it.each([false, true])(
+    "does not execute or offer confirmation for a yes-bound review abridge display line (command removed: %s)",
+    async (removed) => {
+      const f = fixture();
+      if (removed) {
+        const enabled = f.deps.commands!;
+        f.deps.commands = { ...enabled, list: () => enabled.list().filter((def) => def.id !== "review.abridge") };
+      }
+      const event = eventOf({
+        outcome: "binds",
+        binds: [{ line: "review abridge r-live", reason: "yes to the pending question's proposal", confirmed: true }],
+      });
+      const result = await executeOperatorDecision(f.deps, { ...f.ctx, event, msg: { ...f.ctx.msg, text: "yes" } });
+      expect(result).toEqual({ kind: "answered" });
+      expect(f.invoke).not.toHaveBeenCalled();
+      expect(f.put).not.toHaveBeenCalled();
+      expect(f.offer).not.toHaveBeenCalled();
+      expect(f.reply).toHaveBeenCalledWith(expect.stringContaining("no longer run"));
+    },
+  );
+
   it("keeps an authorized question usable with and without the callback", async () => {
     for (const validateContext of [undefined, async (): Promise<AudienceCheck> => ({ ok: true })]) {
       const f = fixture();
@@ -3264,7 +3285,65 @@ describe("long asks and multi-call answers (issue 2099)", () => {
 });
 
 describe("the question and its answer-as-a-bind", () => {
-  it("a question decision renders with record 0054's marker and the proposed line", () => {
+  const reviewCommand = (): RoutableCommand => ({
+    id: "review.abridge",
+    effect: "write",
+    tool: tool("review_abridge"),
+    def: {
+      id: "review.abridge",
+      args: [{ name: "id", schema: z.string() }],
+      options: z.object({}),
+    } as unknown as CommandDef<unknown>,
+  });
+
+  it("a review abridge proposal with empty settings is display-only in the question and pending prompt", () => {
+    const commands = [reviewCommand()];
+    const turn = parseOperatorTurn(
+      {
+        tool: OPERATOR_ASK_TOOL,
+        input: {
+          reason: "confirm",
+          text: "Abridge the review?",
+          proposal: "review abridge r-live",
+          proposalSettings: {},
+        },
+      },
+      ctxOf({ presets: ["review"], commands }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "question") throw new Error("not a question");
+    expect(turn.decision.proposalSettings).toBeUndefined();
+    expect(turn.decision.confirmablePreset).toBeUndefined();
+    const saved = JSON.parse(
+      JSON.stringify(operatorEventOf("on", { decision: turn.decision, latencyMs: 0, outputTokens: 0 })),
+    );
+    expect(saved.confirmablePreset).toBeUndefined();
+    const pending = pendingQuestionOf([{ operator: saved }])!;
+    const rendered = renderOperatorQuestion(turn.decision);
+    expect(rendered).not.toContain(OPERATOR_QUESTION_MARKER);
+    expect(rendered).toContain("Proposed command (display only; yes cannot confirm it): `review abridge r-live`");
+    const prompt = buildOperatorPrompt(
+      input({
+        projection: operatorProjection({ presets: routablePresets(), commands, allowedPresets: ["review"] }),
+        pendingQuestion: pending,
+      }),
+    );
+    expect(prompt.user).toContain("proposed command (display only; yes cannot confirm it): `review abridge r-live`");
+    expect(prompt.user).not.toContain(OPERATOR_QUESTION_MARKER);
+    const afterGrantLoss = buildOperatorPrompt(
+      input({
+        projection: operatorProjection({ presets: routablePresets(), commands: [], allowedPresets: ["review"] }),
+        registryCommands: commands,
+        pendingQuestion: pending,
+      }),
+    );
+    expect(afterGrantLoss.user).toContain(
+      "proposed command (display only; yes cannot confirm it): `review abridge r-live`",
+    );
+    expect(afterGrantLoss.user).not.toContain(OPERATOR_QUESTION_MARKER);
+    expect(bindFromAnswer("yes", { ...pending, proposal: pending.proposal! }, [])).toBeUndefined();
+  });
+
+  it("a registry question labels its proposal as display-only, not a confirmable marker", () => {
     const turn = parseOperatorTurn(
       {
         tool: OPERATOR_ASK_TOOL,
@@ -3274,19 +3353,33 @@ describe("the question and its answer-as-a-bind", () => {
     );
     if (turn.kind !== "decision" || turn.decision.kind !== "question") throw new Error("not a question");
     const rendered = renderOperatorQuestion(turn.decision);
-    expect(rendered).toContain(OPERATOR_QUESTION_MARKER);
-    expect(rendered).toContain("`runs list`");
+    expect(rendered).not.toContain(OPERATOR_QUESTION_MARKER);
+    expect(rendered).toContain("Proposed command (display only; yes cannot confirm it): `runs list`");
   });
 
-  it('the next turn "yes" binds the proposed line; "no, the docs one" binds fresh', () => {
-    const pending = { proposal: "runs list --status all" };
-    expect(bindFromAnswer("yes", pending)).toMatchObject({ line: "runs list --status all" });
-    expect(bindFromAnswer("Yes.", pending)).toMatchObject({ line: "runs list --status all" });
-    expect(bindFromAnswer("no, the docs one", pending)).toBeUndefined();
+  it('the next turn "yes" never re-types a registry proposal from the public line', () => {
+    for (const proposal of [
+      "runs list --status all",
+      `steer run r1 "${"long 🛠️ quoted\n  words\t".repeat(30)}"`,
+      'config instructions me "token=ghp_abcdefghijklmnopqrstuvwxyz1234567890"',
+    ]) {
+      expect(bindFromAnswer("yes", { proposal })).toBeUndefined();
+      expect(bindFromAnswer("Yes.", { proposal })).toBeUndefined();
+      expect(bindFromAnswer("no, the docs one", { proposal })).toBeUndefined();
+    }
+    const commands = [reviewCommand()];
+    expect(
+      bindFromAnswer("yes", { proposal: "review abridge r-live", proposalSettings: {} }, commands),
+    ).toBeUndefined();
+    expect(bindFromAnswer("yes", { proposal: "review abridge r-live", proposalSettings: {} }, [])).toBeUndefined();
   });
 
   it("a yes-bound proposal is marked confirmed: the line, not the answer's word, carries the task", () => {
-    const bind = bindFromAnswer("yes", { proposal: "agent:general summarize the flaky test", proposalSettings: {} });
+    const bind = bindFromAnswer("yes", {
+      proposal: "agent:general summarize the flaky test",
+      proposalSettings: {},
+      confirmablePreset: true,
+    });
     expect(bind).toMatchObject({ line: "agent:general summarize the flaky test", confirmed: true });
     expect(bindFromAnswer("yes", { proposal: "agent:general summarize the flaky test" })).toBeUndefined();
   });
@@ -3309,6 +3402,7 @@ describe("the question and its answer-as-a-bind", () => {
     const bind = bindFromAnswer("yes", {
       proposal: turn.decision.proposal!,
       proposalSettings: turn.decision.proposalSettings,
+      confirmablePreset: turn.decision.confirmablePreset,
     });
     expect(bind).toMatchObject({ effort: "high", confirmed: true });
   });
@@ -3329,7 +3423,11 @@ describe("the question and its answer-as-a-bind", () => {
     if (turn.kind !== "decision" || turn.decision.kind !== "question") throw new Error("not a question");
     expect(turn.decision.proposalSettings).toEqual({ model: "openai/gpt-6-sol" });
     expect(
-      bindFromAnswer("yes", { proposal: turn.decision.proposal!, proposalSettings: turn.decision.proposalSettings }),
+      bindFromAnswer("yes", {
+        proposal: turn.decision.proposal!,
+        proposalSettings: turn.decision.proposalSettings,
+        confirmablePreset: turn.decision.confirmablePreset,
+      }),
     ).toMatchObject({
       model: "openai/gpt-6-sol",
       confirmed: true,
@@ -3360,11 +3458,13 @@ describe("the pending question's free-text answer joins the original ask (issue 
       mode: "on",
       outcome: "question",
       proposal: "agent:explore acme/company",
+      confirmablePreset: true as const,
       question: QUESTION,
       request: REQUEST,
     };
     expect(pendingQuestionOf([{ operator }])).toEqual({
       proposal: "agent:explore acme/company",
+      confirmablePreset: true,
       question: QUESTION,
       request: REQUEST,
     });
@@ -3722,11 +3822,16 @@ describe("the pending question's free-text answer joins the original ask (issue 
   });
 
   it("a pending question rides the user turn with the join rule — the marker line with a proposal, the pending sentence without one", () => {
-    const withProposal = buildOperatorPrompt(input({ pendingQuestion: { proposal: "agent:explore acme/company" } }));
+    const withProposal = buildOperatorPrompt(
+      input({ pendingQuestion: { proposal: "agent:explore acme/company", confirmablePreset: true } }),
+    );
     expect(withProposal.user).toContain(
       `A question is pending: ${OPERATOR_QUESTION_MARKER} \`agent:explore acme/company\``,
     );
     expect(withProposal.user).toContain("joined onto the original ask");
+    const commandProposal = buildOperatorPrompt(input({ pendingQuestion: { proposal: "runs list" } }));
+    expect(commandProposal.user).toContain("proposed command (display only; yes cannot confirm it): `runs list`");
+    expect(commandProposal.user).not.toContain(OPERATOR_QUESTION_MARKER);
     const withoutProposal = buildOperatorPrompt(input({ pendingQuestion: {} }));
     expect(withoutProposal.user).toContain("A question you asked is pending on this thread.");
     expect(withoutProposal.user).toContain("never call it unclear");
@@ -5065,6 +5170,35 @@ describe("the write-intent cell (issue 2088)", () => {
     const schema = list.inputSchema as { properties: Record<string, { enum?: string[] }>; required: string[] };
     expect(schema.properties.intent.enum).toEqual(["read", "write"]);
     expect(schema.required).toEqual(expect.arrayContaining(["intent", "reason"]));
+  });
+
+  it("a typed command retains its full argument while only its public line is capped and redacted", () => {
+    const words = `ghp_${"a".repeat(40)} ${"more words ".repeat(90)}END`;
+    const steer: RoutableCommand = {
+      id: "steer.run",
+      effect: "write",
+      tool: tool("steer_run"),
+      def: {
+        id: "steer.run",
+        args: [
+          { name: "id", schema: z.string() },
+          { name: "words", schema: z.string(), rest: true },
+        ],
+        options: z.object({}),
+      } as unknown as CommandDef<unknown>,
+    };
+    const turn = parseOperatorTurn(
+      { tool: "steer_run", input: { id: "r1", words, intent: "write", reason: "steer" } },
+      ctxOf({ commands: [steer] }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
+    expect(turn.decision.binds[0].invocation).toMatchObject({ id: "steer.run", input: { args: ["r1", words] } });
+    const event = operatorEventOf("on", { decision: turn.decision, latencyMs: 0, outputTokens: 0 });
+    expect(event.binds?.[0]?.line.length).toBeLessThanOrEqual(301); // 300 characters plus the truncation mark
+    expect(event.binds?.[0]?.line).toContain("«redacted-github-token»");
+    expect(JSON.stringify(event)).not.toContain(words);
+    expect(JSON.stringify(event)).not.toContain("END");
+    expect(JSON.stringify(event)).not.toContain("invocation");
   });
 
   it("a write intent bound to a read-class command is a violation the seam re-asks (record 0067's shape) — the read never runs", () => {

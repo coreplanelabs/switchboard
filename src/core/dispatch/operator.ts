@@ -92,7 +92,7 @@ import { effectiveConfirm } from "../../config/profile.js";
 import { boundBlastRadius, type CommandDef, type CommandInput } from "../commandRegistry.js";
 import { chatInvocation, cliWords, namedToInput, tokenize } from "../commandSurface.js";
 import { GRANT_RENEWALS_MAX, MINUTE_MS, STRUCTURED_RETRIES_MAX } from "../budgets.js";
-import { chatCallerFor, parseChatCommand, type ChatCommands } from "../commandChat.js";
+import { chatCallerFor, parseChatCommand, type ChatCommands, type ParsedChatCommand } from "../commandChat.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
 import type { RunEnding } from "../runEnding.js";
 import type { RequestTrace } from "../requestTrace.js";
@@ -183,8 +183,8 @@ export const OPERATOR_SCHEMA_REASKS_MAX = 4;
 /** The bound for the whole operator loop, including its reads and repairs.
  *  A local deadline is a transient no-lease failure, never a provider refusal. */
 export const OPERATOR_TIMEOUT_MS = MINUTE_MS;
-/** The question marker, record 0054's renderer's own words: the proposed line
- *  follows it as one code span, and the next turn's "yes" binds that line. */
+/** The question marker for confirmable preset proposals (record 0054).
+ *  Registry proposals are display-only and never use this marker. */
 export const OPERATOR_QUESTION_MARKER = "Did you mean:";
 /** How much of the original ask a question's event keeps for the join (issue
  *  2046): wider than the receipt cap, since the joined line IS the request the
@@ -265,6 +265,8 @@ export type OperatorDecision =
       text: string;
       proposal?: string;
       proposalSettings?: OperatorRequestSettings;
+      /** Set only after checking the proposed line against the command registry. */
+      confirmablePreset?: true;
       questionKind?: "target_repository";
       questionWriter?: string;
       reason: string;
@@ -285,6 +287,8 @@ export type OperatorDecision =
 export interface OperatorBind {
   line: string;
   reason: string;
+  /** Execution-only registry input. Never copied to a receipt or run event. */
+  invocation?: Extract<ParsedChatCommand, { kind: "invoke" }>;
   /** The model ref the run uses (the plain-words model unit): the request
    *  named a model in plain words ("with astra, …"), the loop resolved the
    *  word through `provider_models` to one ref this deployment can run, and
@@ -318,6 +322,9 @@ export interface OperatorBind {
    *  a preset line routes its own tail as the request (`presetRequestOf`),
    *  never the answer's word. A fresh bind never carries this. */
   confirmed?: true;
+  /** The saved question classified this as a preset before the answer. A
+   *  confirmed line without this evidence must never be parsed to run. */
+  confirmedPreset?: true;
 }
 
 type OperatorRequestSettings = Pick<
@@ -462,6 +469,9 @@ export function operatorProjection(input: {
 export interface OperatorInput {
   text: string;
   projection: OperatorProjection;
+  /** Full chat command catalogue for classifying an older pending proposal,
+   *  even if the author may no longer invoke that command. */
+  registryCommands?: readonly RoutableCommand[];
   /** Channel-normalized files on this request. Text bodies are bounded; other
    *  files still have visible metadata, never invented contents. */
   attachments?: readonly { name: string; mediaType: string; text?: string }[];
@@ -514,8 +524,8 @@ export interface OperatorInput {
   /** The channel-scope default repository, when configured. */
   channelRepo?: string;
   /** The pending question of the thread's last turn, when one is open: its
-   *  proposed line when it carries one, so "yes" binds it (`bindFromAnswer`). */
-  pendingQuestion?: { proposal?: string };
+   *  public proposal; yes binds a preset with saved settings, never a registry command. */
+  pendingQuestion?: { proposal?: string; confirmablePreset?: true };
   /** The thread's owner, when a live run, an idle unit or an ended pipeline
    *  holds it (issue 2027): the projection shown narrows to steers and reads
    *  (`ownedProjection`) and the prompt says the reply is the owner's
@@ -555,7 +565,7 @@ export function buildOperatorPrompt(input: OperatorInput): RoutePrompt {
     "A write ask binds the write preset even when a detail inside it is unresolved; the run resolves that detail with its repository and inherited context. Other speakers and model summaries provide context but never change the authenticated requester, grants or an existing unit's owner. A proposal must do the asked work, not substitute a listing or summary for a requested change.",
     "An explicit positive request to review or ship several linked pull requests uses `bind_pr_batch`, even when links span repositories or Slack flattens their bullets. Choose the action and every PR link destination in order; omit context, negated and quoted links. Supply `actionQuote` as an exact authored action span and one exact destination URL in `targetQuotes` for each chosen URL. If the action or list is ambiguous, ask. That typed choice starts the conductor with no single repository target. Each child is held to one selected URL at its spawn boundary.",
     "For one Ship request, choose `shipEntry` in `bind_preset`: `continue` only to resume this thread's unfinished Ship unit on its owned pull request; `review` when the person asks Ship to review an existing pull request without resuming its writer; `work` for a self-contained new change; `work_from_thread` when new work depends on earlier requester context; or `plan` for an explicit seeded plan. Every review bind, including Ship review, needs `prTarget` with its number and the exact authored PR identifier from this request or an actor-stamped turn by this requester. Quote only the identifier, excluding adjacent constraints or task text; preserve a PR URL unchanged. Ask when no such identifier exists. Omit `prTarget` for every non-review bind: a PR cited as context cannot select the write branch. Never invent or shorten a PR URL. A review starts in the review round of that exact PR; never turn the word 'review' or its URL into a coding task. If work cites a PR as evidence for a separate change, give `workObjective` as an exact quote of the requester's distinct code-change ask, from this turn or an earlier requester turn. Omit it for review or continuation. A request naming `agent:ship` still passes through this door. The runner verifies the PR, head, repository, owner and permissions after the bind.",
-    "A read command answers only a read intent: an ask to change, set, switch or update something is a write, and a listing or a show never answers it. Every command call declares its `intent`. When a write ask misses a required detail, or names a model provider this deployment does not have, read `provider_models` for the refs this deployment can run, then call `ask` with a proposal that would do the write built from them — the person's yes runs it, and their next words refine it.",
+    "A read command answers only a read intent: an ask to change, set, switch or update something is a write, and a listing or a show never answers it. Every command call declares its `intent`. When a write ask misses a required detail, or names a model provider this deployment does not have, read `provider_models` for the refs this deployment can run, then call `ask` with a suggested command built from them for display — a yes cannot confirm a registry proposal because its typed input is not saved; their next words refine the request.",
     "A question about whether the person has config overrides uses `config show`: it describes their own scope, this channel's scope and the effective settings. `config overrides` lists channels with scopes; use it only when they ask which channels have settings.",
     "When the request names a model in plain words — 'with astra, …', 'use sol for this', 'on gpt-6' — read `provider_models` to resolve the word to exactly ONE ref this deployment can run. Pass that ref as `bind_preset`'s `model` and one exact model-name word from the person's request as `modelWord` (such as 'astra', 'o3', or 'gpt-6'). When the person wrote the full `<provider>/<model>` ref, pass it as `model` and omit `modelWord`; the exact authored ref is its evidence. The run uses either at request precedence. The request still rides verbatim — never strip the model choice from it. A word that matches several refs, or none, is one `ask` naming the catalogue's candidate refs — never a guess and never a silent default; a request naming no model omits both fields.",
     "`bind_preset` runs the preset on the request as the author asked it — the author's own words ride by reference, so never re-type the request, write a flag form or paraphrase it. Bind effort, budget in whole minutes, and verbosity only when the person requests them. For review or Ship, bind severity only when requested; renewals apply only to Ship. These are typed settings, whether the person used a directive spelling or ordinary words. For each setting you bind, give an exact phrase that expresses the requested run setting in `settingsEvidence` under that setting's name; a word from task content is not a setting request. Omit the setting and its quote when unrequested. If the person requested a setting the selected preset cannot apply, choose a compatible preset that still does the requested action or ask; never silently drop the setting. The call also carries the preset, optional model and modelWord, and the reason. When `ask` proposes a preset line, include `proposalSettings` (an empty object when none were requested); put each requested setting and its exact quote from the original request there, including model and modelWord when requested, so a later yes carries the same settings.",
@@ -616,7 +626,14 @@ export function buildOperatorPrompt(input: OperatorInput): RoutePrompt {
     ...(input.pendingQuestion
       ? [
           input.pendingQuestion.proposal !== undefined
-            ? `A question is pending: ${OPERATOR_QUESTION_MARKER} \`${input.pendingQuestion.proposal}\``
+            ? input.pendingQuestion.confirmablePreset === true &&
+              confirmablePresetOf(
+                input.pendingQuestion.proposal,
+                operatorPresets().map((p) => p.name),
+                input.registryCommands ?? input.projection.commands,
+              ) !== undefined
+              ? `A question is pending: ${OPERATOR_QUESTION_MARKER} \`${input.pendingQuestion.proposal}\``
+              : `A question is pending: proposed command (display only; yes cannot confirm it): \`${input.pendingQuestion.proposal}\``
             : "A question you asked is pending on this thread.",
           "The request below may be the person's answer joined onto the original ask (`<request> — <question>: <answer>`): decide the whole line as one request — never call it unclear, and never ask again for what it already answers.",
           "",
@@ -817,7 +834,7 @@ export function operatorTools(input: OperatorInput): ToolDef[] {
       required: ["text", "reason"],
       properties: {
         text: { type: "string", description: "the question the person reads" },
-        proposal: { type: "string", description: "the best-guess line a yes would run" },
+        proposal: { type: "string", description: "a confirmable preset line or a display-only suggested command" },
         proposalSettings: {
           type: "object",
           additionalProperties: false,
@@ -1155,8 +1172,8 @@ export function unresolvableModelRefs(named: Record<string, unknown>, providers:
  *  in for the work, never a broken line the executor would mint or run. The
  *  text names what blocks the write and the providers that exist; when the
  *  block is an unresolvable ref, the proposal is the same line rebuilt on a
- *  provider this deployment has, so "yes" runs it through the click path and
- *  the person's next words refine it. */
+ *  provider this deployment has, as a display-only suggestion; a yes cannot
+ *  confirm it without saved typed input, and the person's next words refine it. */
 function writeIntentQuestion(
   command: RoutableCommand,
   ctx: OperatorTurnContext,
@@ -1490,13 +1507,18 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
         violation:
           "an ask whose proposal is not a runnable bind from this turn's commands, presets and repository facts",
       };
-    const proposedPreset = typeof proposal === "string" ? presetBindOf(proposal, ctx.presets) : undefined;
+    const proposedPreset =
+      typeof proposal === "string" ? confirmablePresetOf(proposal, ctx.presets, ctx.commands) : undefined;
     if (proposedPreset !== undefined && proposalSettings === undefined)
       return {
         kind: "violation",
         violation: "a preset proposal needs typed proposalSettings, empty when none were requested",
       };
-    if (proposalSettings !== undefined && proposedPreset === undefined)
+    if (
+      proposalSettings !== undefined &&
+      proposedPreset === undefined &&
+      (typeof proposalSettings !== "object" || proposalSettings === null || Object.keys(proposalSettings).length > 0)
+    )
       return { kind: "violation", violation: "proposalSettings are only for a preset proposal" };
     if (
       proposalSettings !== undefined &&
@@ -1523,7 +1545,7 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
         text: redactAndCap(text, ROUTE_RECEIPT_CAP),
         ...(typeof proposal === "string" && proposal.trim().length > 0 ? { proposal: operatorLine(proposal) } : {}),
         ...(checkedProposalSettings !== undefined && "settings" in checkedProposalSettings
-          ? { proposalSettings: checkedProposalSettings.settings }
+          ? { proposalSettings: checkedProposalSettings.settings, confirmablePreset: true as const }
           : {}),
         reason: tidy(reason),
       },
@@ -1565,7 +1587,14 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
         return { kind: "violation", violation: tidy(`the ${answer.tool} call did not validate: ${bound.error}`) };
       const line = operatorLine(chatInvocation(command.def, bound as CommandInput));
       const reason = tidy(why ?? "a registry command bound as typed");
-      return { kind: "decision", decision: { kind: "binds", binds: [{ line, reason }], reason } };
+      return {
+        kind: "decision",
+        decision: {
+          kind: "binds",
+          binds: [{ line, reason, invocation: { kind: "invoke", id: command.def.id, input: bound as CommandInput } }],
+          reason,
+        },
+      };
     } catch (err) {
       return {
         kind: "violation",
@@ -1578,15 +1607,15 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
   return { kind: "violation", violation: `the operator called tool "${answer.tool}", which this turn does not offer` };
 }
 
-/** A question may render only a line its Yes can execute now: a registry
- * command accepted by the projected grammar, or a preset with non-empty task
+/** A question may render only a runnable suggestion: a registry command
+ * accepted by the projected grammar (display-only), or a preset with non-empty task
  * words and (for repository machines) either an inline target or one of the
  * thread/channel repository facts. */
 function runnableProposal(proposal: string, ctx: OperatorTurnContext): boolean {
   const line = proposal.trim();
   const parsed = parseChatCommand(line, { list: () => ctx.commands.map((command) => command.def) });
   if (parsed?.kind === "invoke") return true;
-  const preset = presetBindOf(line, ctx.presets);
+  const preset = confirmablePresetOf(line, ctx.presets, ctx.commands);
   const request = preset === undefined ? undefined : presetRequestOf(line);
   if (preset === undefined || request === undefined) return false;
   const agent = AGENTS[preset];
@@ -1609,6 +1638,18 @@ function runnableProposal(proposal: string, ctx: OperatorTurnContext): boolean {
  *  no reply text. A question is normally the caller's to render before this
  *  is asked; an ended pipeline is the exception, because every action there
  *  folds to its deterministic continuation except an explicitly enabled review. */
+function boundCommandOf(
+  event: OperatorEventFields,
+  bind: OperatorBind,
+  commands?: ChatCommands,
+): ParsedChatCommand | null {
+  // A confirmed question has no saved command input. Never reconstruct one
+  // from its public (possibly capped or redacted) display line.
+  if (bind.confirmed) return null;
+  const typed = operatorInvocations.get(event);
+  return typed !== undefined ? typed : commands ? parseChatCommand(bind.line, commands) : null;
+}
+
 function ownedDecisionRuns(
   event: OperatorEventFields,
   owner: OperatorThreadOwner,
@@ -1624,13 +1665,13 @@ function ownedDecisionRuns(
       owner.allowReview === true &&
       bind !== undefined &&
       !bind.confirmed &&
-      (commands === undefined || parseChatCommand(bind.line, commands) === null) &&
+      (commands === undefined || boundCommandOf(event, bind, commands) === null) &&
       presetBindOf(bind.line, ["review"]) === "review"
     );
   }
   return (event.binds ?? []).every((bind) => {
-    const parsed = commands ? parseChatCommand(bind.line, commands) : null;
-    if (parsed?.kind !== "invoke") return false;
+    const parsed = boundCommandOf(event, bind, commands);
+    if (parsed?.kind !== "invoke" || commands === undefined) return false;
     const def = commands!.list().find((c) => c.id === parsed.id);
     if (!def) return false;
     // A live owner without a run id is a hosted pipeline runner (thread-
@@ -1651,15 +1692,15 @@ function ownedDecisionRuns(
 }
 
 /** Whether a reply is the bare assent "yes" — trimmed, any case, trailing
- *  punctuation tolerated — the one answer that binds a pending question's
- *  proposal with no model turn (`bindFromAnswer`). */
+ *  punctuation tolerated — confirms a saved preset or refuses a display-only
+ *  registry proposal without another model turn. */
 export function isYesAnswer(text: string): boolean {
   return /^yes[.!]?$/i.test(text.trim());
 }
 
 /** The pending question of a thread's newest record, when one is open (issue
  *  2046; routing-and-config item 29): an `on` question the operator asked, with
- *  its proposed line (what "yes" binds), its rendered question and the
+ *  its proposed line (confirmable by yes only for a preset), its rendered question and the
  *  original ask it interrupted (what a free-text answer joins back onto).
  *  Undefined on any other newest record — the question is pending only while
  *  it is the thread's last word. */
@@ -1672,6 +1713,7 @@ export function pendingQuestionOf(
           outcome: string;
           proposal?: string;
           proposalSettings?: OperatorRequestSettings;
+          confirmablePreset?: true;
           question?: string;
           questionKind?: "target_repository";
           questionWriter?: string;
@@ -1684,6 +1726,7 @@ export function pendingQuestionOf(
   | {
       proposal?: string;
       proposalSettings?: OperatorRequestSettings;
+      confirmablePreset?: true;
       question?: string;
       questionKind?: "target_repository";
       questionWriter?: string;
@@ -1698,6 +1741,7 @@ export function pendingQuestionOf(
   return {
     ...(operator.proposal !== undefined ? { proposal: operator.proposal } : {}),
     ...(operator.proposalSettings !== undefined ? { proposalSettings: operator.proposalSettings } : {}),
+    ...(operator.confirmablePreset === true ? { confirmablePreset: true as const } : {}),
     ...(operator.question !== undefined ? { question: operator.question } : {}),
     ...(operator.questionKind !== undefined ? { questionKind: operator.questionKind } : {}),
     ...(operator.questionWriter !== undefined ? { questionWriter: operator.questionWriter } : {}),
@@ -1769,37 +1813,44 @@ export function answeredRepositoryTarget(
       };
 }
 
-/** A yes to the pending question, as one bind of the proposed line (record
- *  0054's answer tool, replaced): "yes" (`isYesAnswer`) binds the proposal;
- *  anything else ("no, the docs one") is undefined, and the event is the
+/** A yes to a pending preset question binds its proposal (record 0054's
+ *  answer tool, replaced); a registry proposal has no saved typed input, so
+ *  no answer can bind it from public text. Anything else is undefined and the event is the
  *  question's free-text answer, joined onto the original ask
  *  (`joinedAnswerRequest`) and decided fresh. */
 export function bindFromAnswer(
   text: string,
-  pending: { proposal: string; proposalSettings?: OperatorRequestSettings },
+  pending: { proposal: string; proposalSettings?: OperatorRequestSettings; confirmablePreset?: true },
+  commands: readonly RoutableCommand[] = [],
 ): OperatorBind | undefined {
-  if (!isYesAnswer(text)) return undefined;
-  const preset = presetBindOf(
+  if (!isYesAnswer(text) || pending.confirmablePreset !== true || pending.proposalSettings === undefined)
+    return undefined;
+  const preset = confirmablePresetOf(
     pending.proposal,
     operatorPresets().map((p) => p.name),
+    commands,
   );
-  if (preset !== undefined && pending.proposalSettings === undefined) return undefined;
-  // Marked confirmed: the proposal's line is the one place the task lives —
-  // the answer itself says nothing — so a preset proposal routes the line's
-  // tail as the request instead of the word "yes".
+  // Only a preset proposal can safely bind from its display line. Registry
+  // commands need the complete typed input, which a public proposal never
+  // retains; even a short line may have lost whitespace or secrets.
+  if (preset === undefined) return undefined;
+  // Marked confirmed: the preset proposal's line carries the task, not "yes".
   return {
     line: operatorLine(pending.proposal),
     reason: "yes to the pending question's proposal",
     ...pending.proposalSettings,
     confirmed: true,
+    confirmedPreset: true,
   };
 }
 
-/** The question as the person reads it: the operator's text, then record
- *  0054's marker with the proposed line as one code span — the same bytes the
- *  refusal renderer sends, so the next turn's "yes" has one referent. */
+/** A preset proposal may be confirmed by yes; a registry proposal is only
+ *  a display suggestion, never an instruction recovered from public text. */
 export function renderOperatorQuestion(decision: Extract<OperatorDecision, { kind: "question" }>): string {
-  return decision.proposal ? `${decision.text}\n${OPERATOR_QUESTION_MARKER}\n\`${decision.proposal}\`` : decision.text;
+  if (!decision.proposal) return decision.text;
+  return decision.confirmablePreset === true
+    ? `${decision.text}\n${OPERATOR_QUESTION_MARKER}\n\`${decision.proposal}\``
+    : `${decision.text}\nProposed command (display only; yes cannot confirm it): \`${decision.proposal}\``;
 }
 
 /** What one operator turn answers beyond the decision: the wall-clock latency
@@ -2409,6 +2460,12 @@ export async function runOperator(
   }
 }
 
+// Execution arguments live only for this decision's in-process dispatch. The
+// event is durable and public: adding raw input to it would leak secrets even
+// when its displayed line is redacted. A saved question has no typed command
+// input and cannot execute its public proposal on a later yes.
+const operatorInvocations = new WeakMap<OperatorEventFields, Extract<ParsedChatCommand, { kind: "invoke" }>>();
+
 /** The decision as the run event carries it (`type: "operator"`): the shapes
  *  flattened onto the event's fields, every line already redacted and cut by
  *  the parse, with the intake gate's verdict when the gate was present. The
@@ -2439,12 +2496,14 @@ export function operatorEventOf(
     workObjective?: string;
     prBatch?: PrBatchBinding;
     confirmed?: true;
+    confirmedPreset?: true;
   }[];
   question?: string;
   questionKind?: "target_repository";
   questionWriter?: string;
   proposal?: string;
   proposalSettings?: OperatorRequestSettings;
+  confirmablePreset?: true;
   refusalCause?: string;
   refusalText?: string;
   providerFailure?: ProviderFailureCause;
@@ -2454,7 +2513,7 @@ export function operatorEventOf(
   outputTokens: number;
 } {
   const d = answer.decision;
-  return {
+  const event = {
     mode,
     outcome: d.kind,
     reason: d.reason,
@@ -2476,6 +2535,7 @@ export function operatorEventOf(
             ...(b.workObjective !== undefined ? { workObjective: b.workObjective } : {}),
             ...(b.prBatch !== undefined ? { prBatch: b.prBatch } : {}),
             ...(b.confirmed ? { confirmed: true as const } : {}),
+            ...(b.confirmedPreset ? { confirmedPreset: true as const } : {}),
           })),
         }
       : {}),
@@ -2484,13 +2544,17 @@ export function operatorEventOf(
     ...(d.kind === "question" && d.questionWriter !== undefined ? { questionWriter: d.questionWriter } : {}),
     ...(d.kind === "question" && d.proposal !== undefined ? { proposal: d.proposal } : {}),
     ...(d.kind === "question" && d.proposalSettings !== undefined ? { proposalSettings: d.proposalSettings } : {}),
+    ...(d.kind === "question" && d.confirmablePreset === true ? { confirmablePreset: true as const } : {}),
     ...(d.kind === "refusal" ? { refusalCause: d.cause, refusalText: d.text } : {}),
     ...(d.kind === "refusal" && d.cause === "provider" ? { providerFailure: d.providerFailure } : {}),
     ...(answer.attempts ? { attempts: answer.attempts } : {}),
     ...(intake ? { intake: { verdict: intake.verdict, reason: intake.reason } } : {}),
     latencyMs: answer.latencyMs,
     outputTokens: answer.outputTokens,
-  };
+  } satisfies ReturnType<typeof operatorEventOf>;
+  const invocation = d.kind === "binds" ? d.binds[0]?.invocation : undefined;
+  if (invocation) operatorInvocations.set(event, invocation);
+  return event;
 }
 
 // ————— The stage: what the dispatcher calls ahead of stage A. —————
@@ -2810,20 +2874,33 @@ export async function operatorStage(
   }
   // The pending question (routing-and-config item 29): when the thread's
   // newest run is an `on` question with a proposed line, this event may be its
-  // answer — "yes" binds the proposal with no model turn (`bindFromAnswer`);
-  // anything else binds fresh, the marker in the prompt so the model sees it.
+  // answer — "yes" binds a preset with saved settings or refuses a registry
+  // proposal without typed input; anything else binds fresh.
   const pending = ctx.pending;
+  const proposalCommands = deps.commands ? routableCommands(deps.commands) : [];
+  const proposedPreset =
+    pending?.proposal !== undefined && pending.confirmablePreset === true
+      ? confirmablePresetOf(
+          pending.proposal,
+          operatorPresets().map((p) => p.name),
+          proposalCommands,
+        )
+      : undefined;
   const legacyPresetProposal =
     pending?.proposal !== undefined &&
+    pending.confirmablePreset === true &&
     pending.proposalSettings === undefined &&
     isYesAnswer(msg.text) &&
-    presetBindOf(
-      pending.proposal,
-      operatorPresets().map((p) => p.name),
-    ) !== undefined;
+    proposedPreset !== undefined;
+  const unconfirmableCommandProposal =
+    pending?.proposal !== undefined && isYesAnswer(msg.text) && proposedPreset === undefined;
   const yes =
     pending?.proposal !== undefined
-      ? bindFromAnswer(msg.text, pending as { proposal: string; proposalSettings?: OperatorRequestSettings })
+      ? bindFromAnswer(
+          msg.text,
+          pending as { proposal: string; proposalSettings?: OperatorRequestSettings; confirmablePreset?: true },
+          proposalCommands,
+        )
       : undefined;
   const durableContext = requesterRepoContext(tail, msg.userId, requesterTarget);
   const provisionalTarget =
@@ -2834,57 +2911,74 @@ export async function operatorStage(
     durableContext.requesterRepo === undefined
       ? ctx.answeredTarget.target
       : undefined;
-  let answer: OperatorAnswer = legacyPresetProposal
-    ? {
-        decision: {
-          kind: "question",
-          text: "I cannot confirm that earlier proposal because its run settings were not saved. What would you like me to run?",
-          reason: "the pending preset proposal has no typed settings",
-        },
-        latencyMs: 0,
-        outputTokens: 0,
-      }
-    : yes
-      ? { decision: { kind: "binds", binds: [yes], reason: yes.reason }, latencyMs: 0, outputTokens: 0 }
-      : await runOperator(
-          {
-            text: msg.text,
-            projection,
-            tail,
-            context,
-            ...(repositoryBriefs ? { repositoryBriefs, briefs: renderRepositoryBriefs(repositoryBriefs) } : {}),
-            requesterId: msg.userId,
-            ...((provisionalTarget ?? requesterTarget)
-              ? { requesterTarget: provisionalTarget ?? requesterTarget }
-              : {}),
-            ...(targetStoreUnavailable ? { targetStoreUnavailable: true } : {}),
-            ...(typedTargetStoreUnavailable ? { typedTargetStoreUnavailable: true } : {}),
-            ...(attachments.length > 0 ? { attachments } : {}),
-            ...(repoCandidates && repoCandidates.length > 0 ? { repoCandidates: repoCandidates.slice(0, 50) } : {}),
-            organization: cfg.organization,
-            ...(residentRepos && residentRepos.length > 0 ? { residentRepos } : {}),
-            ...(candidateStatus === "truncated" && barePrCandidates ? { residentReposTruncated: true } : {}),
-            ...(newestFinishedRun !== undefined ? { newestFinishedRun } : {}),
-            ...(channelRepo !== undefined ? { channelRepo } : {}),
-            // The deployment's declared providers (issue 2088): what a write
-            // proposal may name, and what the parse holds a write's ref against.
-            // The catalogue-bearing blocks (a `baseUrl` of their own — the
-            // aggregators) lead the fallback proposal's choice.
-            providers: Object.keys(cfg.providers ?? {}),
-            catalogueProviders: Object.entries(cfg.providers ?? {})
-              .filter(([, block]) => typeof block.baseUrl === "string" && block.baseUrl.length > 0)
-              .map(([name]) => name),
-            ...(deps.providerModels !== undefined ? { providerModels: deps.providerModels } : {}),
-            ...(sources !== undefined ? { sources } : {}),
-            ...(sourceCatalogUnavailable !== undefined ? { sourceCatalogUnavailable } : {}),
-            ...(pending
-              ? { pendingQuestion: pending.proposal !== undefined ? { proposal: pending.proposal } : {} }
-              : {}),
-            ...(ctx.owner ? { owner: ctx.owner } : {}),
-          },
-          model,
-          maxOutputTokens !== undefined ? { maxOutputTokens } : {},
-        );
+  let answer: OperatorAnswer =
+    legacyPresetProposal || unconfirmableCommandProposal
+      ? {
+          decision: unconfirmableCommandProposal
+            ? {
+                kind: "refusal",
+                cause: "request",
+                text: "I cannot confirm that command because its complete typed input was not saved. No command ran.",
+                reason: "a display-only registry proposal has no saved typed input",
+              }
+            : {
+                kind: "question",
+                text: "I cannot confirm that earlier proposal because its run settings were not saved. What would you like me to run?",
+                reason: "the pending preset proposal has no typed settings",
+              },
+          latencyMs: 0,
+          outputTokens: 0,
+        }
+      : yes
+        ? { decision: { kind: "binds", binds: [yes], reason: yes.reason }, latencyMs: 0, outputTokens: 0 }
+        : await runOperator(
+            {
+              text: msg.text,
+              projection,
+              registryCommands: proposalCommands,
+              tail,
+              context,
+              ...(repositoryBriefs ? { repositoryBriefs, briefs: renderRepositoryBriefs(repositoryBriefs) } : {}),
+              requesterId: msg.userId,
+              ...((provisionalTarget ?? requesterTarget)
+                ? { requesterTarget: provisionalTarget ?? requesterTarget }
+                : {}),
+              ...(targetStoreUnavailable ? { targetStoreUnavailable: true } : {}),
+              ...(typedTargetStoreUnavailable ? { typedTargetStoreUnavailable: true } : {}),
+              ...(attachments.length > 0 ? { attachments } : {}),
+              ...(repoCandidates && repoCandidates.length > 0 ? { repoCandidates: repoCandidates.slice(0, 50) } : {}),
+              organization: cfg.organization,
+              ...(residentRepos && residentRepos.length > 0 ? { residentRepos } : {}),
+              ...(candidateStatus === "truncated" && barePrCandidates ? { residentReposTruncated: true } : {}),
+              ...(newestFinishedRun !== undefined ? { newestFinishedRun } : {}),
+              ...(channelRepo !== undefined ? { channelRepo } : {}),
+              // The deployment's declared providers (issue 2088): what a write
+              // proposal may name, and what the parse holds a write's ref against.
+              // The catalogue-bearing blocks (a `baseUrl` of their own — the
+              // aggregators) lead the fallback proposal's choice.
+              providers: Object.keys(cfg.providers ?? {}),
+              catalogueProviders: Object.entries(cfg.providers ?? {})
+                .filter(([, block]) => typeof block.baseUrl === "string" && block.baseUrl.length > 0)
+                .map(([name]) => name),
+              ...(deps.providerModels !== undefined ? { providerModels: deps.providerModels } : {}),
+              ...(sources !== undefined ? { sources } : {}),
+              ...(sourceCatalogUnavailable !== undefined ? { sourceCatalogUnavailable } : {}),
+              ...(pending
+                ? {
+                    pendingQuestion:
+                      pending.proposal !== undefined
+                        ? {
+                            proposal: pending.proposal,
+                            ...(pending.confirmablePreset ? { confirmablePreset: true as const } : {}),
+                          }
+                        : {},
+                  }
+                : {}),
+              ...(ctx.owner ? { owner: ctx.owner } : {}),
+            },
+            model,
+            maxOutputTokens !== undefined ? { maxOutputTokens } : {},
+          );
   const bind = answer.decision.kind === "binds" ? answer.decision.binds[0] : undefined;
   const preset = bind
     ? presetBindOf(
@@ -2937,15 +3031,13 @@ export async function operatorStage(
   const threadRepo =
     (targetStoreUnavailable ? undefined : requesterRepoContext(tail, msg.userId, requesterTarget).requesterRepo) ??
     newestFinishedRun?.repo;
-  const event: OperatorEventFields = {
-    ...operatorEventOf(mode, answer, ctx.intake),
-    repoContext: {
-      organization: cfg.organization,
-      ...(threadRepo ? { threadRepo } : {}),
-      ...(channelRepo ? { channelRepo } : {}),
-      candidateStatus,
-      candidateCount: residentRepos?.length ?? repoCandidates?.length ?? 0,
-    },
+  const event: OperatorEventFields = operatorEventOf(mode, answer, ctx.intake);
+  event.repoContext = {
+    organization: cfg.organization,
+    ...(threadRepo ? { threadRepo } : {}),
+    ...(channelRepo ? { channelRepo } : {}),
+    candidateStatus,
+    candidateCount: residentRepos?.length ?? repoCandidates?.length ?? 0,
   };
   // A question keeps the ask it interrupted (issue 2046): the person's next
   // words in the thread join back onto it (`joinedAnswerRequest`) and bind as
@@ -2974,6 +3066,21 @@ export function presetBindOf(line: string, presets: readonly string[]): string |
   const head = /^agent:(\S+)/.exec(trimmed);
   const name = head ? head[1] : /^(\S+)/.exec(trimmed)?.[1];
   return name !== undefined && presets.includes(name) ? name : undefined;
+}
+
+/** A bare preset head may also be a registered command group. Check the full
+ *  registry before treating any public proposal as a confirmable preset; the
+ *  parse here is classification only, never input for command execution. */
+function confirmablePresetOf(
+  line: string,
+  presets: readonly string[],
+  commands: readonly RoutableCommand[],
+): string | undefined {
+  if (parseChatCommand(line, { list: () => commands.map((command) => command.def) }) !== null) return undefined;
+  // Without a registry, a bare head cannot be distinguished from its command
+  // group. An explicit agent: head is unambiguous even when commands are absent.
+  if (commands.length === 0 && !/^agent:\S+/.test(line.trim())) return undefined;
+  return presetBindOf(line, presets);
 }
 
 /** The request's words for a preset bind, a typo'd directive head stripped:
@@ -3056,7 +3163,8 @@ export type OperatorExecution =
  * Under `on` the decision is what runs, and every outcome executes through
  * `decideExecution`'s cell (record 0069, as amended) — no caller renders an
  * outcome the table did not name. An `ask` is the `question` cell: record
- * 0054's marker renders (the next turn's "yes" binds the proposal) and the
+ * 0054's marker renders only for a confirmable preset; a registry proposal
+ * is display-only and a subsequent yes is refused. The
  * question parks as the thread's pending question on a door record. A
  * `bind_preset` is the `route` cell: the dispatcher routes the person's own
  * request through the preset (`kind: "route"`), the decision's event riding
@@ -3166,6 +3274,20 @@ export async function executeOperatorDecision(
       await recordDecision();
       return answered;
     }
+    const confirmed = event.binds?.find((bind) => bind.confirmed);
+    if (
+      confirmed &&
+      (confirmed.confirmedPreset !== true ||
+        confirmablePresetOf(
+          confirmed.line,
+          operatorPresets().map((preset) => preset.name),
+          deps.commands ? routableCommands(deps.commands) : [],
+        ) === undefined)
+    ) {
+      await reply("This proposal can no longer run; its complete typed input was not saved. Nothing ran.");
+      await recordDecision();
+      return answered;
+    }
     // Ownership already resolved this event to one ended pipeline. The operator
     // may select a separately requested review only when that owner allowed it.
     // Reads, writes, questions and stale steers still fold to continuation.
@@ -3233,7 +3355,7 @@ export async function executeOperatorDecision(
       // The registry is read first: a command whose group shares a preset's
       // name (`review abridge <run>`) is that command, never the preset. Only a
       // line no command parses can name a preset.
-      const parsed = commands ? parseChatCommand(bind.line, commands) : null;
+      const parsed = boundCommandOf(event, bind, commands);
       const def = parsed?.kind === "invoke" ? commands?.list().find((c) => c.id === parsed.id) : undefined;
       const bound =
         parsed?.kind === "invoke" && def
@@ -3275,8 +3397,8 @@ export async function executeOperatorDecision(
         };
       }
       if (!parsed || parsed.kind !== "invoke" || !def || !bound) {
-        // A residue only a confirmed proposal from an older record can reach:
-        // the loop's schema renders no unparseable line. A typed surface's
+        // An older record may hold an unparseable proposal; fresh typed binds
+        // never depend on the displayed line. A typed surface's
         // refusal names the typed form; a chat surface is never handed a line
         // to retype (record 0069), so it is asked to ask again.
         await reply(surface === "typed" ? renderHandBackLine(bind.line) : "this proposal can no longer run; ask again");
@@ -3292,9 +3414,9 @@ export async function executeOperatorDecision(
       let executedBind = bind;
       let executedEvent = event;
       if (def.id === "steer.run" && ctx.owner?.kind === "live" && ctx.owner.runId !== undefined) {
-        const args = [...(parsed.input.args ?? [])];
+        const args = [...(invocation.input.args ?? [])];
         args[0] = ctx.owner.runId;
-        const input = { ...parsed.input, args };
+        const input = { ...invocation.input, args };
         invocation = { ...parsed, input };
         executedBind = { ...bind, line: operatorLine(chatInvocation(def, input)) };
         executedEvent = {
@@ -3327,8 +3449,8 @@ export async function executeOperatorDecision(
                 msg,
                 origin: chatCallerFor(msg, deps.config).origin,
                 def: bound.def,
-                input: parsed.input,
-                receipt: routeReceipt(bound.def, parsed.input),
+                input: invocation.input,
+                receipt: routeReceipt(bound.def, invocation.input),
                 // The row's model is the decider's, as the routed offer stores
                 // the router's: the operator runs on `defaults.models.general`.
                 model: deps.config.config.defaults.models["general"] ?? "",
