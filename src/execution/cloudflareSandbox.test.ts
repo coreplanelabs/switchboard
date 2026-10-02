@@ -267,8 +267,9 @@ describe("CloudflareSandboxExecutor credential file refresh", () => {
     expect((err as ExecInfraError).message).toContain("credential refresh failed");
   });
 
-  it("does not expose a runner-owned publication transport in the model sandbox", () => {
+  it("exposes a typed runner-owned publication transport but never one in the model sandbox", () => {
     const ex = new CloudflareSandboxExecutor(OPTS);
+    expect(typeof ex.publishBranchResult).toBe("function");
     expect("publishBranch" in ex).toBe(false);
   });
 

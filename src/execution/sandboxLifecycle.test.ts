@@ -226,7 +226,10 @@ describe("sandbox Worker wiring (static)", () => {
   it("the credential goes through the exec env option, never through the command text", () => {
     expect(worker).toMatch(/env:\s*envVars/);
     expect(worker).not.toContain("base64 -d");
-    expect(worker).not.toContain("btoa(");
+    // The only base64 conversion is untrusted pack bytes, never the
+    // model-command env or the controller's effect bearer.
+    expect(worker.match(/btoa\(/g)).toHaveLength(1);
+    expect(worker).toContain('return btoa(parts.join(""))');
   });
 
   // Workers Logs record an invocation's request headers (redacted by a name
@@ -269,7 +272,7 @@ describe("sandbox Worker wiring (static)", () => {
       /if \(isFleetBusyError\(err\)\) \{\s*const container = this\.ctx\.id\.toString\(\);\s*console\.log\(fleetBusyRefusedLine\(\{ thread: this\.ctx\.id\.name \?\? container, container, refusal: raw \}\)\);\s*return fleetBusyExecAnswer\(raw, container\);/,
     );
     expect(worker).toMatch(
-      /if \(isFleetBusyError\(err\)\) \{\s*const container = env\.Sandbox\.idFromName\(threadKey\)\.toString\(\);\s*console\.log\(fleetBusyRefusedLine\(\{ thread: threadKey, container, refusal: msg, route: url\.pathname \}\)\);\s*return json\(fleetBusyAnswer\(msg, container\), 503\);/,
+      /if \(isFleetBusyError\(err\)\) \{\s*const container = env\.Sandbox\.idFromName\(modelIdentity\)\.toString\(\);\s*console\.log\(fleetBusyRefusedLine\(\{ thread: modelIdentity, container, refusal: msg, route: url\.pathname \}\)\);\s*return json\(fleetBusyAnswer\(msg, container\), 503\);/,
     );
   });
 
@@ -291,7 +294,9 @@ describe("sandbox Worker wiring (static)", () => {
     expect(worker).toMatch(/override async onActivityExpired\(\): Promise<void> \{\s*await this\.idle\.expired\(\);/);
     expect(worker).toMatch(/blockConcurrencyWhile\(\(\) => this\.idle\.wake\(\)\)/);
     // every route the fetch handler calls runs inside served() — the seed among them (item 25) — and so does the start gate's warm-up
-    expect(worker.match(/this\.idle\.served\(/g)).toHaveLength(6);
+    expect(worker.match(/this\.idle\.served\(/g)).toHaveLength(9);
+    expect(worker).toMatch(/async fetchPublicationBase\([\s\S]*?return this\.idle\.served\(/);
+    expect(worker).toMatch(/async publishControlled\([\s\S]*?return this\.idle\.served\(/);
   });
 
   // item 23: every route passes through the start gate, whose warm-up is one
@@ -300,12 +305,13 @@ describe("sandbox Worker wiring (static)", () => {
   it("the instance grant is asked for with a ten-second limit, so a refused start under a burst reaches the gate in seconds", () => {
     expect(worker).toMatch(/const INSTANCE_GET_TIMEOUT_MS = 10_000;/);
     expect(worker).toMatch(
-      /getSandbox\(env\.Sandbox, threadKey, \{\s*containerTimeouts: \{[\s\S]*?instanceGetTimeoutMS: INSTANCE_GET_TIMEOUT_MS,\s*\},\s*\}\)/,
+      /getSandbox\(env\.Sandbox, modelIdentity, \{\s*containerTimeouts: \{[\s\S]*?instanceGetTimeoutMS: INSTANCE_GET_TIMEOUT_MS,\s*\},\s*\}\)/,
     );
   });
 
   it("every route goes through the start gate; the warm-up is `true` through the SDK inside the idle ledger", () => {
-    expect(worker.match(/this\.gate\.through\(/g)).toHaveLength(5);
+    expect(worker.match(/this\.gate\.through\(/g)).toHaveLength(6);
+    expect(worker).toMatch(/async exportPublicationPack\([\s\S]*?this\.gate\.through\(/);
     expect(worker).toMatch(
       /warmUp: \(\) =>\s*this\.idle\.served\(async \(\) => \{\s*const proc = await createExtensionProcessSandbox\(this\)\.exec\(\["true"\]/,
     );
