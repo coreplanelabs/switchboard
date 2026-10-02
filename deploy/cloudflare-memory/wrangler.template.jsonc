@@ -46,8 +46,9 @@
       // session, a full-text index over them, and the notepad
       // (docs/reference/specs/session-log.md). Kept after a run finishes; the
       // retention sweep drops it once its last kept run is gone and no run is
-      // live on the thread. Runs claimed before it existed still finish on
-      // RunTranscriptDO, which stays bound until no such row is live.
+      // live on the thread, when scheduled maintenance is enabled. Runs claimed
+      // before it existed still finish on RunTranscriptDO, which stays bound
+      // until no such row is live.
       { "name": "SESSION_LOGS", "class_name": "SessionLogDO" }
     ]
   },
@@ -71,6 +72,14 @@
       "script_name": "{{bot.script}}"
     }
   ],
+  "vars": {
+    // Scheduled physical cleanup is paused for the MVP. Live plane alarms,
+    // foreground trimming and explicit deletion continue.
+    "RUN_HISTORY_MAINTENANCE": "paused",
+    // {{#if metrics}}
+    "RUN_METRICS_DATASET": "{{metrics.dataset}}"
+    // {{/if}}
+  },
   // {{#if metrics}}
   // The run-metrics dataset (docs/reference/specs/run-metrics.md): where RunHistoryDO
   // writes a turned-final run's point, bound only when the deployment profile names a
@@ -81,7 +90,6 @@
   // The dataset's name beside its binding (rendered together): /healthz `features`
   // says `runMetrics:<dataset>` from it, so the bot's boot probe can compare the
   // name its own config carries with the one this deploy bound.
-  "vars": { "RUN_METRICS_DATASET": "{{metrics.dataset}}" },
   // {{/if}}
   // SQLite-backed DOs (durable across restarts — AGENTS.md invariant 6).
   "migrations": [

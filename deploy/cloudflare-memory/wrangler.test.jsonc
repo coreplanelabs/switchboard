@@ -5,6 +5,9 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "switchboard-memory-test",
   "main": "worker.ts",
+  // Keep the existing sweep contract under test; the paused-mode test sets the
+  // production value on its own object before invoking the real alarm.
+  "vars": { "RUN_HISTORY_MAINTENANCE": "enabled" },
   "durable_objects": {
     "bindings": [
       { "name": "MEMORY", "class_name": "MemoryDO" },

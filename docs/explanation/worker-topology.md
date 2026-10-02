@@ -50,7 +50,7 @@ flowchart TB
     CR -.->|"reads"| SW
 ```
 
-A finished run is written to the state Worker after the reply ([Runs: live, then remembered](runs-live-and-history.md)); its Durable Object owns retention (`retentionDays`, `maxRuns`, `maxBytes`) and sweeps on an alarm. Chat-set overrides persist there when `runtimeOverrides.worker` names it, otherwise in a file under `data/`.
+A finished run is written to the state Worker after the reply ([Runs: live, then remembered](runs-live-and-history.md)); its Durable Object owns retention (`retentionDays`, `maxRuns`, `maxBytes`). Reads enforce the policy and writes trim history. Scheduled physical cleanup is paused for the MVP; the alarm still handles live-run deadlines and re-asks ([Known limits](known-limits.md)). Chat-set overrides persist there when `runtimeOverrides.worker` names it, otherwise in a file under `data/`.
 
 ## How they talk to each other
 

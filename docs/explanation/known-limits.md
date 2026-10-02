@@ -9,6 +9,7 @@ What is deliberately off, narrow on purpose, not yet proven, or a known wart, so
 
 ## Narrow on purpose
 
+- **Scheduled state Worker history cleanup is paused for the MVP.** Its alarm still handles live-run deadlines, re-asks and effects. History reads enforce the retention policy, and `put`/`finish` trim stored runs; explicit deletion and per-conversation byte trimming still run. Without the scheduled pass, old conversation histories, orphaned rows and reply decisions can accumulate; `runHistory.maxBytes` caps run records, not the whole database. Reply decisions remain readable and their keys can deduplicate longer than their original prune bound. Re-enable cleanup only after it can advance in bounded steps without holding the run-history input gate across conversation objects.
 - **Self-improvement proposes, never fixes.** Its only side effect is a labelled issue.
 - **A run's cost is list price, not the invoice.** Every finished run carries its tokens per model and is priced at `costs.prices` over the Anthropic list — on its page, in `runs get`, and summed by user, thread, channel, agent and model on the costs page. A model neither table knows reads `unpriced`, never $0; the per-run figure is never tied to the provider's bill (the costs page's reconciliation line does that per day, for the group).
 - **`review` is read-only by convention.** The hard boundary is the execution plane.
