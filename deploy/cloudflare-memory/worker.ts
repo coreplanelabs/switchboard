@@ -1897,6 +1897,8 @@ export class RunHistoryDO extends DurableObject<Env> {
       )
         this.sql.exec(`ALTER TABLE context_refs ADD COLUMN ${column} ${declaration}`);
     }
+    this.sql.exec(`CREATE INDEX IF NOT EXISTS context_refs_active ON context_refs(retention_pin, ordinary_pin)
+      WHERE retention_pin = 1 OR ordinary_pin = 1`);
 
     // The live-run ledger (run-history items 28–34): live runs never enter
     // `runs` — that table's finished_at drives retention and listing — they
@@ -5963,10 +5965,12 @@ export class RunHistoryDO extends DurableObject<Env> {
       .one();
     const boundExceeded = inPolicy.n > policy.maxRuns || inPolicy.b > policy.maxBytes;
     // A full page inside the age and size bounds does not need any protected
-    // older source to fill it. Check only for the existence of references
-    // here; materializing the graph on every ordinary page blocks this shared
-    // object’s live-ledger and point reads.
-    const hasContext = this.sql.exec(`SELECT 1 FROM context_refs LIMIT 1`).toArray().length > 0;
+    // older source to fill it. Only active pins can protect sources; ordinary
+    // manifest rows with neither pin are not edges. Check existence without
+    // materializing the graph (or scanning runs) on ordinary pages.
+    const hasContext =
+      this.sql.exec(`SELECT 1 FROM context_refs WHERE retention_pin = 1 OR ordinary_pin = 1 LIMIT 1`).toArray().length >
+      0;
     const before = q.before ?? Number.MAX_SAFE_INTEGER;
     const addFilters = (where: string[], params: (string | number)[]): void => {
       if (q.sinceMs !== undefined) {
@@ -6036,11 +6040,14 @@ export class RunHistoryDO extends DurableObject<Env> {
     if (q.recoveryEvidence !== undefined) {
       // Identity comparisons cannot prove an unreadable record is unrelated.
       // Use the same parser as the result loop, not a weaker SQL shape check.
+      // Pinned sources can be older than the cutoff and retained ids need not
+      // be contiguous: a policy-evicted row can sit between two kept rows.
+      const validationWhere = kept === null ? `finished_at >= ?` : `run_id IN (SELECT value FROM json_each(?))`;
+      const validationParam = kept === null ? cutoff : JSON.stringify([...kept]);
       for (const row of this.sql.exec<Pick<RunRow, "run_id" | "summary_json">>(
-        `SELECT run_id, summary_json FROM runs WHERE finished_at >= ? ORDER BY finished_at DESC, run_id DESC`,
-        cutoff,
+        `SELECT run_id, summary_json FROM runs WHERE ${validationWhere}`,
+        validationParam,
       )) {
-        if (kept !== null && !kept.has(row.run_id)) break; // only the retained newest-first prefix
         if (!parseSummary(row)) return { items: [], evidenceComplete: false };
       }
       const scope = q.recoveryEvidence;
