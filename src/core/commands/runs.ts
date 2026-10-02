@@ -21,6 +21,7 @@ import { formatUsd } from "../modelPricing.js";
 import type { RunEvent } from "../runEvents.js";
 import { SEARCH_MAX_HITS } from "../runLedger/sessionLog.js";
 import { PROVISIONAL_LABEL, RUN_ID_PATTERN, RUN_LIST_MAX_LIMIT, SESSION_KEY_PATTERN } from "../runRecord.js";
+import { TransientStoreError } from "../runStoreWorker.js";
 import {
   MAX_EVENTS_PAGE,
   runResource,
@@ -119,7 +120,14 @@ async function getVisibleRun(
   commandId: string,
   opts: { include?: "messages" | "audience" } = {},
 ): Promise<RunRecordView> {
-  const view = unwrap(await runs.getRun(id, opts));
+  let read: Awaited<ReturnType<RunsService["getRun"]>>;
+  try {
+    read = await runs.getRun(id, opts);
+  } catch (err) {
+    if (err instanceof TransientStoreError) throw new CommandError("unavailable", "History is temporarily unavailable");
+    throw err;
+  }
+  const view = unwrap(read);
   const actor: Actor = caller.actor;
   const decision = authorize(actor, action, runResource(view));
   if (!decision.allow) {

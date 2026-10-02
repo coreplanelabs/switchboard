@@ -1237,6 +1237,45 @@ describe("run history routes", () => {
     expect(((await post("/runs/get", { storeKey: key, id: "f06" })).data.record as { id: string }).id).toBe("f06");
   });
 
+  it("a full recent page stays bounded when an older source has a retention pin, and the next page still finds that source", async () => {
+    const key = storeKey();
+    const now = Date.now();
+    await putDirectMany(key, [
+      record("old-source", now - 3 * DAY, { channelId: "slack:C2" }),
+      record("recent-2", now - 2000),
+      record("recent-1", now - 1000),
+    ]);
+    await runInDurableObject(stubOf(key), async (_inst: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO context_refs (holder_run_id, source_run_id, retention_pin) VALUES (?, ?, 1)`,
+        "recent-1",
+        "old-source",
+      );
+      state.storage.sql.exec(
+        `INSERT INTO meta (key, value) VALUES ('policy', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+        JSON.stringify({ retentionDays: 1, maxRuns: 100, maxBytes: 64 * MIB, policyUpdatedAt: now }),
+      );
+    });
+    const first = await runInDurableObject(stubOf(key), async (inst: RunHistoryDO) => {
+      const seen = spySql(inst);
+      const page = await inst.list({ limit: 2, visibleTo: { kind: "channels-in", channelIds: ["slack:C1"] } });
+      return { seen, page };
+    });
+    expect(first.page.items.map((row) => row.id)).toEqual(["recent-1", "recent-2"]);
+    expect(first.page.nextBefore).toEqual({ finishedAt: now - 2000, id: "recent-2" });
+    expect(first.seen.some((q) => /ORDER BY finished_at ASC/.test(q))).toBe(false);
+    expect(first.seen.some((q) => /SELECT holder_run_id, source_run_id, session_key FROM context_refs/.test(q))).toBe(
+      false,
+    );
+    const second = await post("/runs/list", {
+      storeKey: key,
+      limit: 2,
+      before: first.page.nextBefore?.finishedAt,
+      beforeId: first.page.nextBefore?.id,
+    });
+    expect((second.data.items as Array<{ id: string }>).map((row) => row.id)).toEqual(["old-source"]);
+  });
+
   it("list with `visibleTo` (authorization.md item 6): channels-in compiles to an indexed IN filter on the ONE LIMITed page query; visibility-in / user-is / or / and follow the same truth table as the in-memory store; none is an empty page; a bad filter is 400, never `all`", async () => {
     const key = storeKey();
     const now = Date.now();

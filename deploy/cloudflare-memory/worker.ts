@@ -5926,14 +5926,13 @@ export class RunHistoryDO extends DurableObject<Env> {
    * `finished_at < before`. `nextBefore` is the last row's key when this page
    * was full.
    *
-   * Two paths, decided by ONE aggregate over the in-policy rows (`COUNT(*)`,
-   * `SUM(bytes)` where `finished_at >= cutoff`): when both are within
-   * `maxRuns`/`maxBytes` every in-cutoff row is kept, so the page is ONE indexed
-   * query (age cutoff, filters, cursor, order, `LIMIT`) — no table scan. Only
-   * when a bound is exceeded is the kept set computed (`retentionRows` +
-   * `applyRetention`, the same function `put`/`alarm` trim with) and the rows
-   * walked until the page fills; the kept set is the newest prefix of the
-   * in-cutoff order, so the walk stops at the first row outside it.
+   * An aggregate over the in-policy rows (`COUNT(*)`, `SUM(bytes)` where
+   * `finished_at >= cutoff`) chooses the ordinary path: when both bounds hold,
+   * every in-cutoff row is kept, so an indexed, filtered page needs no
+   * retention scan. Context references may protect older rows; a full page
+   * of in-cutoff rows still needs only that indexed query. A short page,
+   * exceeded bound, or recovery-evidence request computes the kept set with
+   * `applyRetention` before querying the page.
    *
    * Recovery evidence additionally streams every retained summary through the
    * record parser before trusting identity filters: valid JSON can still be
@@ -5963,13 +5962,66 @@ export class RunHistoryDO extends DurableObject<Env> {
       )
       .one();
     const boundExceeded = inPolicy.n > policy.maxRuns || inPolicy.b > policy.maxBytes;
-    const hasContext = this.contextReferences().length > 0;
+    // A full page inside the age and size bounds does not need any protected
+    // older source to fill it. Check only for the existence of references
+    // here; materializing the graph on every ordinary page blocks this shared
+    // object’s live-ledger and point reads.
+    const hasContext = this.sql.exec(`SELECT 1 FROM context_refs LIMIT 1`).toArray().length > 0;
+    const before = q.before ?? Number.MAX_SAFE_INTEGER;
+    const addFilters = (where: string[], params: (string | number)[]): void => {
+      if (q.sinceMs !== undefined) {
+        where.push(`finished_at >= ?`);
+        params.push(q.sinceMs);
+      }
+      if (q.agent !== undefined) {
+        where.push(`agent = ?`);
+        params.push(q.agent);
+      }
+      if (q.channel !== undefined) {
+        where.push(`channel_id = ?`);
+        params.push(q.channel);
+      }
+      if (q.threadKey !== undefined) {
+        where.push(`thread_key = ?`);
+        params.push(q.threadKey);
+      }
+      if (q.parentRunId !== undefined) {
+        where.push(`parent_run_id = ?`);
+        params.push(q.parentRunId);
+      }
+      if (q.pr !== undefined) {
+        where.push(`repo = ?`, `pr_number = ?`);
+        params.push(q.pr.repo, q.pr.number);
+      }
+      if (q.visibleTo !== undefined && q.visibleTo.kind !== "all") where.push(visibilitySql(q.visibleTo, params));
+    };
+    if (hasContext && !boundExceeded && q.recoveryEvidence === undefined) {
+      const recentWhere = [`(finished_at < ? OR (finished_at = ? AND run_id < ?))`, `finished_at >= ?`];
+      const recentParams: (string | number)[] = [before, before, q.beforeId ?? "", cutoff];
+      addFilters(recentWhere, recentParams);
+      const recentRows = this.sql
+        .exec<RunRow>(
+          `SELECT run_id, agent, channel_id, finished_at, bytes, event_count, summary_json FROM runs WHERE ${recentWhere.join(" AND ")} ORDER BY finished_at DESC, run_id DESC LIMIT ?`,
+          ...recentParams,
+          limit,
+        )
+        .toArray();
+      if (recentRows.length === limit) {
+        const items = recentRows.map((row) => {
+          const summary = parseSummary(row);
+          return summary ? { ...summary, bytes: row.bytes } : null;
+        });
+        if (items.every((item) => item !== null)) {
+          const last = items[items.length - 1];
+          return { items, nextBefore: { finishedAt: last.finishedAt, id: last.id } };
+        }
+      }
+    }
     const kept = hasContext
       ? this.contextKeptIds(this.retentionRows(), policy, now)
       : boundExceeded
         ? RunHistoryDO.keptIds(this.retentionRows(), policy, now)
         : null;
-    const before = q.before ?? Number.MAX_SAFE_INTEGER;
     const where = [
       `(finished_at < ? OR (finished_at = ? AND run_id < ?))`,
       hasContext ? `run_id IN (SELECT value FROM json_each(?))` : `finished_at >= ?`,
@@ -5979,28 +6031,8 @@ export class RunHistoryDO extends DurableObject<Env> {
       before,
       before,
       q.beforeId ?? "",
-      hasContext ? JSON.stringify([...kept!]) : Math.max(q.sinceMs ?? 0, cutoff),
+      hasContext ? JSON.stringify([...kept!]) : cutoff,
     ];
-    if (hasContext && q.sinceMs !== undefined) {
-      where.push(`finished_at >= ?`);
-      params.push(q.sinceMs);
-    }
-    if (q.agent !== undefined) {
-      where.push(`agent = ?`);
-      params.push(q.agent);
-    }
-    if (q.channel !== undefined) {
-      where.push(`channel_id = ?`);
-      params.push(q.channel);
-    }
-    if (q.threadKey !== undefined) {
-      where.push(`thread_key = ?`);
-      params.push(q.threadKey);
-    }
-    if (q.parentRunId !== undefined) {
-      where.push(`parent_run_id = ?`);
-      params.push(q.parentRunId);
-    }
     if (q.recoveryEvidence !== undefined) {
       // Identity comparisons cannot prove an unreadable record is unrelated.
       // Use the same parser as the result loop, not a weaker SQL shape check.
@@ -6024,22 +6056,16 @@ export class RunHistoryDO extends DurableObject<Env> {
       ) ELSE 1 END)`);
       params.push(scope.instanceId, unitKey, prefix.length, prefix, ...scope.threadKeys);
     }
-    if (q.pr !== undefined) {
-      // `namesPullRequest` in SQL: the row's repository and the number it names.
-      where.push(`repo = ?`, `pr_number = ?`);
-      params.push(q.pr.repo, q.pr.number);
-    }
-    if (q.visibleTo !== undefined && q.visibleTo.kind !== "all") where.push(visibilitySql(q.visibleTo, params));
+    addFilters(where, params);
     const select = `SELECT run_id, agent, channel_id, finished_at, bytes, event_count, summary_json FROM runs WHERE ${where.join(" AND ")} ORDER BY finished_at DESC, run_id DESC`;
-    // `LIMIT` holds on the over-bound path too: the kept set is the newest
-    // prefix of this same ordering, so the first `limit` rows are the page (or
-    // the walk stops early at the first evicted row) — never a full table load.
+    // The kept-id filter precedes `LIMIT`, including when protected older
+    // sources make the retained order discontinuous.
     const rows = this.sql.exec<RunRow>(`${select} LIMIT ?`, ...params, limit).toArray();
     const items: RunListItem[] = [];
     let malformed = false;
     for (const row of rows) {
       if (items.length >= limit) break;
-      if (kept !== null && !kept.has(row.run_id)) break; // kept is a newest-first prefix: nothing older is kept either
+      if (kept !== null && !kept.has(row.run_id)) break; // the SQL kept-id filter already excludes this row
       const summary = parseSummary(row);
       if (summary) items.push({ ...summary, bytes: row.bytes });
       else malformed = true;
