@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { recoveryEvidenceUrl, recoveryViewsAreIdle } from "./admissionRecovery";
 import {
   DRAIN_DEFAULT_MINUTES,
   DRAIN_MAX_MINUTES,
@@ -9,11 +10,56 @@ import {
   liftDrain,
   liveDrain,
   parseDrainRequest,
+  postUploadVersion,
   reportImageCurrent,
   staleHolds,
 } from "./drain";
 import { DRAIN } from "../../src/core/budgets";
 import { readSource } from "./testing/sourceScan";
+
+describe("targeted deploy admission recovery", () => {
+  const idle = { state: "warm", executingRuns: 0, unknownRuns: 0, activeProcesses: 0 };
+
+  it("requires settled residents with no executing or unknown runs and no container processes", () => {
+    expect(recoveryViewsAreIdle([idle, { ...idle, state: "degraded" }])).toBe(true);
+    expect(recoveryViewsAreIdle([{ ...idle, state: "refreshing" }])).toBe(false);
+    expect(recoveryViewsAreIdle([{ ...idle, state: "onboarding" }])).toBe(false);
+    expect(recoveryViewsAreIdle([{ ...idle, executingRuns: 1 }])).toBe(false);
+    expect(recoveryViewsAreIdle([{ ...idle, unknownRuns: 1 }])).toBe(false);
+    expect(recoveryViewsAreIdle([{ ...idle, activeProcesses: 1 }])).toBe(false);
+    expect(recoveryViewsAreIdle([{ ...idle, activeProcesses: null }])).toBe(false);
+    expect(recoveryViewsAreIdle([{ error: "probe failed" }])).toBe(false);
+  });
+
+  it("requires a link to an external request-end receipt", () => {
+    expect(recoveryEvidenceUrl("https://dash.cloudflare.com/audit/request-123")).toBe(
+      "https://dash.cloudflare.com/audit/request-123",
+    );
+    expect(recoveryEvidenceUrl("operator says request ended")).toBeNull();
+    expect(recoveryEvidenceUrl("http://example.com/receipt")).toBeNull();
+    expect(recoveryEvidenceUrl("https://user:pass@example.com/receipt")).toBeNull();
+  });
+});
+
+describe("deploy upload phase proof", () => {
+  const fence = {
+    since: "2026-10-02T17:00:00.000Z",
+    until: "2026-10-02T18:00:00.000Z",
+    by: "deploy",
+    reason: "release",
+    swapFence: true as const,
+    swapVersion: "old-version",
+    swapAt: "2026-10-02T17:05:00.000Z",
+  };
+
+  it("requires a distinct Worker version created after the upload fence", () => {
+    expect(postUploadVersion(fence, "old-version", "2026-10-02T17:10:00.000Z")).toBe(false);
+    expect(postUploadVersion(fence, "other-old-version", "2026-10-02T16:59:00.000Z")).toBe(false);
+    expect(postUploadVersion(fence, "other-old-version", "2026-10-02T17:03:00.000Z")).toBe(false);
+    expect(postUploadVersion(fence, "new-version", "2026-10-02T17:10:00.000Z")).toBe(true);
+    expect(postUploadVersion(fence, "new-version", null)).toBe(false);
+  });
+});
 
 // Feature: docs/reference/specs/resident-repos.md item 69 — the fleet drain: a
 // record in the registry Durable Object with an end, read by `POST /attach`
@@ -318,7 +364,8 @@ describe("the Worker's wiring (by scan)", () => {
     expect(source).toMatch(/const DRAIN_KEY = "drain";/);
     expect(source).toMatch(/async getDrain\(\): Promise<unknown>/);
     expect(source).toMatch(/async setDrain\(record: DrainRecord\): Promise<DrainRecord \| null>/);
-    expect(source).toMatch(/async clearDrain\(\): Promise<\{ cleared: boolean; held: string\[\]; error\?: string \}>/);
+    expect(source).toContain("async clearDrain(");
+    expect(source).toContain("versionTimestamp: string | null,");
     expect(source).toMatch(/async holdDrainFor\(resources: string\[\]\): Promise<void>/);
     expect(source).toMatch(/async reportContainerImageCurrent\(resource: string\): Promise<\{ lifted: boolean \}>/);
     // The lift with holds outstanding keeps the record standing (liftAsked);
@@ -375,7 +422,7 @@ describe("the Worker's wiring (by scan)", () => {
       source.indexOf("async function handleResidents("),
     );
     expect(handler).toMatch(/const residents = await registry\.list\(\)/);
-    expect(handler).toMatch(/drain\?\.swapFence && drain\.swapBuild === BUILD_ID/);
+    expect(handler).toMatch(/beginDeployReconcileAdmission\(workerVersionId\(env\), workerVersionTimestamp\(env\)\)/);
     expect(handler).toMatch(/residentStub\(env, record\.resource\)\.reconcileForDeploy\(record\.resource\)/);
     // A failing resident degrades to its own error row, never its neighbors'.
     expect(handler).toMatch(/Promise\.allSettled/);

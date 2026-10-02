@@ -70,6 +70,7 @@ export const RESIDENT_STEP_LABELS = {
   "boot-id": "reading the container's identity",
   touch: "touching a marker",
   nproc: "counting CPUs",
+  pgrep: "checking resident processes",
   mutex_wait: "waiting for the workspace",
   kill: "stopping the previous step",
 } as const satisfies Record<string, string>;

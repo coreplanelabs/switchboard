@@ -52,8 +52,8 @@ describe("deploy registration activity", () => {
     const route = source.slice(source.indexOf("async function handleDeployFence"));
     expect(start).toContain("swapFence: true");
     expect(start).toContain("deployFenceReady(fenced, now)");
-    expect(route.indexOf("registry.setDeployFence()")).toBeLessThan(route.indexOf("getResidentDeployInfo()"));
-    expect(route.indexOf("getResidentDeployInfo()")).toBeLessThan(route.indexOf("registry.getDrain()"));
+    expect(route.indexOf("registry.setDeployFence(versionId)")).toBeLessThan(route.indexOf("getResidentDeployInfo()"));
+    expect(route.indexOf("getResidentDeployInfo()")).toBeLessThan(route.indexOf("registry.verifyDeployFence("));
     expect(methodOf(registry, "verifyDeployFence")).toContain("deployFenceReady(current, now)");
     expect(attach).toContain("drain.swapFence || !registered");
     expect(activity).toContain("this.runsInFlightCount()");
@@ -75,7 +75,7 @@ describe("deploy registration activity", () => {
     expect(begin).toContain("DEPLOY_ADMISSION_KEY_PREFIX");
     expect(end).toContain("DEPLOY_ADMISSION_KEY_PREFIX");
     expect(verify).toContain("DEPLOY_ADMISSION_KEY_PREFIX");
-    expect(route).toContain("registry.verifyDeployFence(fence.since, fence.until)");
+    expect(route).toContain("registry.verifyDeployFence(fence.since, fence.until, versionId)");
     for (const name of ["attachThreadTraced", "detachThread", "runOpTraced", "withThreadBusy"]) {
       expect(method(name), `${name} must participate in the admission barrier`).toContain("withDeployAdmission");
     }
@@ -84,8 +84,65 @@ describe("deploy registration activity", () => {
     expect(source).toContain('case "/offboard":\n            return await withFleetAdmission');
     expect(source).toContain('case "/rebuild":\n            return await withFleetAdmission');
     expect(methodOf(registry, "setDrain")).toContain("swapFence");
-    expect(methodOf(registry, "clearDrain")).toContain("swapBuild === BUILD_ID");
-    expect(source.slice(source.indexOf("async function handleReconcile"))).toContain("drain.swapBuild === BUILD_ID");
+    expect(methodOf(registry, "clearDrain")).toContain("postUploadVersion(record, versionId, versionTimestamp)");
+    expect(methodOf(registry, "clearDrain")).toContain("DEPLOY_ADMISSION_KEY_PREFIX");
+    expect(source.slice(source.indexOf("async function handleReconcile"))).toContain("beginDeployReconcileAdmission");
+  });
+
+  it("admits scheduled refresh steps and watchdog lifecycle work before either can start after the quiet read", () => {
+    const step = method("runInstanceStep");
+    expect(step).toContain("beginDeployAdmission");
+    expect(step).toContain("endDeployAdmission");
+    expect(step.indexOf("beginDeployAdmission")).toBeLessThan(step.indexOf("refreshAdmissionsInFlight++"));
+    expect(step.indexOf("endDeployAdmission")).toBeGreaterThan(step.indexOf("fn({ count })"));
+    const watchdog = source.slice(source.indexOf("async function runWatchdog("), source.indexOf("function json("));
+    expect(watchdog).toContain("beginDeployAdmission");
+    expect(watchdog).toContain("endDeployAdmission");
+    expect(watchdog.indexOf("beginDeployAdmission")).toBeLessThan(watchdog.indexOf("createRefreshInstance("));
+  });
+
+  it("admits reconcile before its drain read and distinguishes the deployed Worker version", () => {
+    const registry = source.slice(
+      source.indexOf("export class ResidentRegistryDO"),
+      source.indexOf("export class ResidentDO"),
+    );
+    const reconcile = source.slice(
+      source.indexOf("async function handleReconcile("),
+      source.indexOf("async function handleResidents("),
+    );
+    expect(reconcile).toContain("beginDeployReconcileAdmission");
+    expect(reconcile.indexOf("beginDeployReconcileAdmission")).toBeLessThan(reconcile.indexOf("registry.list()"));
+    expect(reconcile).toContain("endDeployAdmission");
+    expect(methodOf(registry, "beginDeployReconcileAdmission")).toContain(
+      "postUploadVersion(record, versionId, versionTimestamp)",
+    );
+    expect(methodOf(registry, "setDeployFence")).toContain("swapVersion");
+    expect(methodOf(registry, "clearDrain")).toContain("postUploadVersion(record, versionId, versionTimestamp)");
+    expect(source).toContain("CF_VERSION_METADATA");
+  });
+
+  it("recovers one admin-selected orphan only under a fresh fence and independent idle probes", () => {
+    const registry = source.slice(
+      source.indexOf("export class ResidentRegistryDO"),
+      source.indexOf("export class ResidentDO"),
+    );
+    const handler = source.slice(
+      source.indexOf("async function handleRecoverAdmission("),
+      source.indexOf("/** POST /reconcile"),
+    );
+    expect(source).toContain('"/deploy-admissions": { scope: "admin", method: "GET" }');
+    expect(source).toContain('"/recover-admission": { scope: "admin", method: "POST" }');
+    expect(handler).toContain("recoveryEvidenceUrl(evidence)");
+    expect(handler.indexOf("registry.setDeployFence(versionId)")).toBeLessThan(
+      handler.indexOf("getResidentRecoveryProbe()"),
+    );
+    expect(handler.indexOf("getResidentRecoveryProbe()")).toBeLessThan(handler.indexOf("recoveryViewsAreIdle(views)"));
+    expect(handler.indexOf("recoveryViewsAreIdle(views)")).toBeLessThan(handler.indexOf("recoverDeployAdmission(id"));
+    expect(handler).toContain("registry.clearDeployFence(fence.since, fence.until, versionId)");
+    const recover = methodOf(registry, "recoverDeployAdmission")!;
+    expect(recover).toContain("this.ctx.storage.transaction");
+    expect(recover).toContain("fence.swapVersion !== versionId");
+    expect(recover).toContain("await txn.delete(key)");
   });
 });
 

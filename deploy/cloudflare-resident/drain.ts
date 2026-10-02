@@ -46,6 +46,10 @@ export interface DrainRecord {
   swapFence?: true;
   /** Build that closed admission; that same build cannot lift the fence. */
   swapBuild?: string;
+  /** Worker version that closed admission; unlike the build stamp, this changes on redeploy. */
+  swapVersion?: string;
+  /** The fence's own creation time; another version must be newer than this. */
+  swapAt?: string;
 }
 
 /** The longest a drain may run, and the default, from the one clock table
@@ -133,6 +137,8 @@ export function liveDrain(stored: unknown, now: number): DrainRecord | null {
     ...(r.liftAsked === true ? { liftAsked: true } : {}),
     ...(r.swapFence === true ? { swapFence: true } : {}),
     ...(typeof r.swapBuild === "string" ? { swapBuild: r.swapBuild } : {}),
+    ...(typeof r.swapVersion === "string" ? { swapVersion: r.swapVersion } : {}),
+    ...(typeof r.swapAt === "string" ? { swapAt: r.swapAt } : {}),
   };
 }
 
@@ -146,6 +152,25 @@ export function deployFenceReady(record: DrainRecord | null, now: number): boole
     Number.isFinite(Date.parse(record.since)) &&
     Date.parse(record.since) <= now &&
     Date.parse(record.until) - now >= minutesToMs(DRAIN.deployFenceMinRemainingMinutes)
+  );
+}
+
+/** A different version that already existed before the drain is not proof
+ * of this upload. Wrangler's version metadata identifies the invoked bundle
+ * even when two deployments use the same commit/build stamp. */
+export function postUploadVersion(
+  record: DrainRecord | null,
+  versionId: string | null,
+  versionTimestamp: string | null,
+): boolean {
+  if (!record?.swapFence || !record.swapVersion || !record.swapAt || !versionId || !versionTimestamp) return false;
+  const uploadedAt = Date.parse(versionTimestamp);
+  const fencedAt = Date.parse(record.swapAt);
+  return (
+    versionId !== record.swapVersion &&
+    Number.isFinite(uploadedAt) &&
+    Number.isFinite(fencedAt) &&
+    uploadedAt > fencedAt
   );
 }
 
