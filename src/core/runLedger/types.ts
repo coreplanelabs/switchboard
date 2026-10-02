@@ -194,11 +194,13 @@ export type LiveStateAssignRequest = AssignRunLiveStateInput & {
   sourceEvents?: AppendableEvent[];
   /** A new execution segment under the same run id starts after an ended predecessor. */
   restart?: boolean;
+  /** Reclaimed nonterminal run enters a new setup segment without replacing its identity or history. */
+  resumeSegment?: boolean;
 };
 export type LiveStateAssignResult =
   | (Extract<AssignRunLiveStateResult, { ok: true }> & { liveStateSeq: number })
   | Extract<AssignRunLiveStateResult, { ok: false }>
-  | { ok: false; reason: "fenced" | "unknown-run" };
+  | { ok: false; reason: "fenced" | "unknown-run" | "unavailable" };
 
 /** One tool call the step dispatched; `tool` decides how a resume settles it.
  *  `boundMs` is the bound the call declared (a bash `timeout`), when it stated

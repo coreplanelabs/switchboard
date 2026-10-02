@@ -35,6 +35,7 @@ import type { SpanSink, Tracer } from "./trace/types.js";
 import type { SpanLog } from "./trace/spanLog.js";
 import type { RunOwner } from "./trace/streamSpans.js";
 import { assignRunLiveState, type ResidentLiveStateObservation } from "./runLiveState.js";
+import { assignLedgerLiveState } from "./runLedger/decisions.js";
 import { liveStateWords } from "./plane/decide.js";
 import { channelOf, startRequestRoot, type RequestTrace } from "./requestTrace.js";
 import { cardShapeLineOf, queuedCaption } from "./runShape.js";
@@ -580,6 +581,20 @@ export interface DispatchOptions {
  *  spawning parent relays to its model as a named tool result. */
 export type { DispatchOutcome } from "./dispatch/outcome.js";
 
+type LiveCommitFailure = {
+  ok: false;
+  kind: "missing-run" | "durable-rejection" | "durable-unavailable" | "projection-rejection";
+  reason: string;
+};
+
+class LiveStateCommitError extends Error {
+  constructor(stage: string, failure: LiveCommitFailure) {
+    super(
+      `The ${stage} live state ${failure.kind === "durable-unavailable" ? "could not be confirmed" : "was refused"}: ${failure.kind} (${failure.reason}).`,
+    );
+  }
+}
+
 type ContinuationBudget =
   | { kind: "remaining"; caps: { maxRounds: number; maxMinutes: number } }
   | { kind: "exhausted"; budget: "wall-clock" | "review-round" }
@@ -927,7 +942,7 @@ export async function dispatch(
   // original checkout and row for recovery.
   let setupRound: RoundWorkspace | undefined;
   let attachedPilotResume = false;
-  let pausePilotAfterAttach: ((message: string) => Promise<void>) | undefined;
+  let pausePilotAfterAttach: ((message: string, options?: { nextAction?: string }) => Promise<void>) | undefined;
   // The ship fork ran, and whether its branch deliberately left its run live —
   // the hosted parent of a completed hand-off (record 0060). Read by the outer
   // finally's second net (run-history item 42), which finishes any run a
@@ -3382,6 +3397,8 @@ export async function dispatch(
     // assignment acknowledges before the registry exposes the boundary or
     // workspace attachment starts. Legacy resumed rows gain the same first
     // state before they continue; rows that already carry one keep it.
+    const resumeNeedsSegment =
+      resume !== undefined && (resume.row.liveState !== undefined || registry.getById(runId)?.liveState !== undefined);
     const admissionAt = clock();
     const admissionBound = resume
       ? admissionAt + resume.plan.remainingMs
@@ -3443,18 +3460,20 @@ export async function dispatch(
       });
     }
 
+    type LiveCommit = { ok: true } | LiveCommitFailure;
     const assignLive = async (
       next:
         | Pick<ResidentLiveStateObservation, "state" | "bound">
         | {
-            state: "preparing" | "working" | "falling_back" | "waiting_provider" | "wrapping_up";
+            state: "admitted" | "preparing" | "working" | "falling_back" | "waiting_provider" | "wrapping_up";
             bound: number;
           },
       at: number,
       detail?: string,
-    ): Promise<boolean> => {
-      if (typeof registry.commitLiveState !== "function") return true;
-      let accepted = false;
+      intent: "ordinary" | "resume-segment" = "ordinary",
+    ): Promise<LiveCommit> => {
+      if (typeof registry.commitLiveState !== "function") return { ok: true };
+      let result: LiveCommit = { ok: false, kind: "missing-run", reason: "registry row missing" };
       await events.write(async () => {
         const summary = registry.getById(runId);
         if (!summary) return;
@@ -3466,23 +3485,36 @@ export async function dispatch(
           state: next.state,
           bound: next.bound,
           ...(detail !== undefined ? { detail } : {}),
+          ...(intent === "resume-segment" ? { resumeSegment: true } : {}),
         };
         const tracked = ledgerRun ?? reserved;
-        if (tracked) {
-          const committed = await tracked.assignLiveState(assignment);
-          accepted = committed.ok && (registry.commitLiveState?.(runId, committed) ?? true);
+        const committed = tracked
+          ? await tracked.assignLiveState(assignment)
+          : (() => {
+              const local = assignLedgerLiveState(summary.liveState, summary.liveStateSeq ?? 0, assignment);
+              return local.ok
+                ? {
+                    ...local,
+                    ...(local.event ? { event: { ...local.event, seq: eventSeq } } : {}),
+                    liveStateSeq: local.event ? eventSeq : (summary.liveStateSeq ?? 0),
+                  }
+                : local;
+            })();
+        if (!committed.ok) {
+          result = {
+            ok: false,
+            kind: committed.reason === "unavailable" ? "durable-unavailable" : "durable-rejection",
+            reason: committed.reason,
+          };
           return;
         }
-        const local = assignRunLiveState(summary.liveState, summary.liveStateSeq ?? 0, assignment);
-        if (!local.ok) return;
-        accepted =
-          registry.commitLiveState?.(runId, {
-            ...local,
-            ...(local.event ? { event: { ...local.event, seq: eventSeq } } : {}),
-            liveStateSeq: local.event ? eventSeq : (summary.liveStateSeq ?? 0),
-          }) ?? true;
+        if (!registry.commitLiveState?.(runId, committed)) {
+          result = { ok: false, kind: "projection-rejection", reason: "registry sequence or sealed row" };
+          return;
+        }
+        result = { ok: true };
       });
-      return accepted;
+      return result;
     };
     let residentAttachAttempt = 0;
     const observeResidentLiveState = async (observation: ResidentLiveStateObservation): Promise<void> => {
@@ -3493,7 +3525,7 @@ export async function dispatch(
         clock(),
         liveStateWords(observation.state),
       );
-      if (!accepted) throw new Error("resident live-state observation was stale or could not be committed");
+      if (!accepted.ok) throw new LiveStateCommitError("resident observation", accepted);
       shell.setSetupLabel(`${liveStateWords(observation.state)}…`);
     };
 
@@ -3589,7 +3621,10 @@ export async function dispatch(
     // promotion in case the ledger detached during setup.
     if (preserveOnReattachRefusal && !(reserved ?? ledgerRun)?.tracked())
       throw new Error("The coding run could not be durably tracked. Restore the run ledger, then retry this task.");
-    const pauseResumedPilot = async (message: string, missingBinding = false): Promise<void> => {
+    const pauseResumedPilot = async (
+      message: string,
+      options: { missingBinding?: boolean; nextAction?: string } = {},
+    ): Promise<void> => {
       if (!resume || !ledgerRun) throw new Error("a readiness retry needs the resumed run's ledger row");
       resumeRowRetained = true;
       const handedOff = await ledgerRun.pauseForRetry().catch(() => false);
@@ -3599,11 +3634,19 @@ export async function dispatch(
           agent: resume.row.meta.agent,
           startedAt: resume.row.startedAt,
         });
+      const pausedWhere = options.missingBinding
+        ? "without starting a replacement"
+        : "with its recorded workspace binding";
+      const nextAction =
+        options.nextAction ??
+        (options.missingBinding
+          ? "After restoring the binding, restart the service to resume this run."
+          : "After repairing the environment, restart the service to resume this run.");
       await refuse(
         refusalOf(
           "setup_failed",
           handedOff
-            ? `${message} This run is paused ${missingBinding ? "without starting a replacement. After restoring the binding" : "with its recorded workspace binding. After repairing the environment"}, restart the service to resume this run.`
+            ? `${message} This run is paused ${pausedWhere}. ${nextAction}`
             : `${message} The original run could not be marked for immediate recovery. No replacement started; an operator needs to check its saved workspace before a retry.`,
         ),
         () =>
@@ -3611,7 +3654,7 @@ export async function dispatch(
             shell.close({
               kind: "not_started",
               icon: "⏸️",
-              reason: missingBinding
+              reason: options.missingBinding
                 ? "coding workspace binding missing, original run retained"
                 : "coding environment not ready, original binding retained",
               ...closeLines(clock(), false),
@@ -3623,9 +3666,42 @@ export async function dispatch(
     if (resume && preserveOnReattachRefusal && !hasPilotWorkspaceBinding(resume.row)) {
       await pauseResumedPilot(
         "The original coding workspace binding is missing or invalid. Repair the saved run record before resuming this task.",
-        true,
+        { missingBinding: true },
       );
       return ended;
+    }
+    // A resumed run re-enters admission on its existing row and remaining
+    // budget before attachment can report waits. Every later boundary follows
+    // the ordinary transition table, including post-attach preparation.
+    if (resumeNeedsSegment && typeof registry.commitLiveState === "function") {
+      const at = clock();
+      if (admissionBound <= at) {
+        const message = "The original run's time budget ended before its workspace could be reattached.";
+        if (preserveOnReattachRefusal) {
+          await pauseResumedPilot(message, {
+            nextAction: "Review the original run's expired grant before deciding on supported recovery.",
+          });
+          return ended;
+        }
+        throw new RefusalError(refusalOf("run_budget_exhausted", message));
+      }
+      const resumed = await assignLive(
+        { state: "admitted", bound: admissionBound },
+        at,
+        "reattaching the original workspace",
+        "resume-segment",
+      );
+      if (!resumed.ok) {
+        const error = new LiveStateCommitError("resume preparation", resumed);
+        if (preserveOnReattachRefusal) {
+          await pauseResumedPilot(error.message, {
+            nextAction:
+              "Reconcile the saved run state and owner, then resume this original run through the supported restart path.",
+          });
+          return ended;
+        }
+        throw error;
+      }
     }
     const control = registered?.control;
     const attach = await attachWorkspace(deps, {
@@ -3760,11 +3836,11 @@ export async function dispatch(
         (summary.liveState.state === "waiting_deploy" || summary.liveState.state === "waiting_repository") &&
         round.selection.backend !== "resident"
       ) {
-        if (!(await assignSetupLive("falling_back", "switching to a fallback workspace")))
-          throw new Error("fallback live state could not be committed");
+        const fallback = await assignSetupLive("falling_back", "switching to a fallback workspace");
+        if (!fallback.ok) throw new LiveStateCommitError("fallback", fallback);
       }
-      if (!(await assignSetupLive("preparing", "preparing the workspace")))
-        throw new Error("preparation live state could not be committed");
+      const preparing = await assignSetupLive("preparing", "preparing the workspace");
+      if (!preparing.ok) throw new LiveStateCommitError("preparation", preparing);
       shell.setSetupLabel(`${liveStateWords("preparing")}…`);
     }
     // A resumed row learns the binding it re-attached on, complete: a row
@@ -4251,8 +4327,8 @@ export async function dispatch(
         throw new Error("the coding workspace preservation policy could not be saved");
     }
     if (typeof registry.commitLiveState === "function") {
-      if (!(await assignSetupLive("working", "model turn")))
-        throw new Error("working live state could not be committed");
+      const working = await assignSetupLive("working", "model turn");
+      if (!working.ok) throw new LiveStateCommitError("working", working);
     }
     // The run's reach into its own session log (session-log item 10): the
     // `recall` and `notes` tools over the row's place in the log, once the
@@ -4687,7 +4763,15 @@ export async function dispatch(
     const errMsg = err instanceof Error ? err.message : String(err);
     if (attachedPilotResume && setupRound && pausePilotAfterAttach) {
       await pausePilotAfterAttach(
-        `The coding run failed during setup after reattaching its original workspace (${oneLine(redactAndCap(errMsg, 120))}).`,
+        err instanceof LiveStateCommitError
+          ? err.message
+          : `The coding run failed during setup after reattaching its original workspace (${oneLine(redactAndCap(errMsg, 120))}).`,
+        err instanceof LiveStateCommitError
+          ? {
+              nextAction:
+                "Reconcile the saved run state and owner, then resume this original run through the supported restart path.",
+            }
+          : undefined,
       );
       return ended;
     }

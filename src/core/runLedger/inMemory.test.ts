@@ -95,6 +95,57 @@ const record = (id: string): RunRecord =>
   }) as unknown as RunRecord;
 
 describe("InMemoryRunLedger", () => {
+  it("commits one fenced resume boundary after a provider hold without replacing its history", async () => {
+    const ledger = new InMemoryRunLedger(() => 100);
+    await ledger.claim(claimReq("resumed-state", "slack:C1:resume"));
+    for (const [expectedSeq, state] of [
+      [0, "admitted"],
+      [1, "working"],
+      [2, "waiting_provider"],
+    ] as const) {
+      expect(
+        await ledger.assignLiveState("resumed-state", "g1", {
+          expectedSeq,
+          eventSeq: expectedSeq + 1,
+          at: 100,
+          state,
+          bound: 1_000,
+        }),
+      ).toMatchObject({ ok: true });
+    }
+    await ledger.handoff("g1", ["resumed-state"]);
+    const [reclaimed] = await ledger.reclaim("g2", 100, LEASE_MS);
+    expect(reclaimed.row.runId).toBe("resumed-state");
+    const assignment = {
+      expectedSeq: 3,
+      eventSeq: 4,
+      at: 200,
+      state: "admitted" as const,
+      bound: 900,
+      resumeSegment: true,
+    };
+    expect(await ledger.assignLiveState("resumed-state", "g1", assignment)).toEqual({ ok: false, reason: "fenced" });
+    expect(await ledger.assignLiveState("resumed-state", "g2", { ...assignment, resumeSegment: false })).toEqual({
+      ok: false,
+      reason: "invalid-transition",
+    });
+    expect(await ledger.assignLiveState("resumed-state", "g2", assignment)).toMatchObject({
+      ok: true,
+      liveState: { state: "admitted", since: 200 },
+      liveStateSeq: 4,
+    });
+    expect(await ledger.assignLiveState("resumed-state", "g2", assignment)).toEqual({
+      ok: false,
+      reason: "stale-sequence",
+    });
+    expect((await ledger.readEvents("resumed-state")).map((event) => [event.seq, event.type])).toEqual([
+      [1, "run_state"],
+      [2, "run_state"],
+      [3, "run_state"],
+      [4, "run_state"],
+    ]);
+  });
+
   it("atomically commits a live-state boundary and row projection before registry subscribers see it", async () => {
     const ledger = new InMemoryRunLedger(() => 0);
     await ledger.claim(claimReq("state-1", "slack:C1:state"));

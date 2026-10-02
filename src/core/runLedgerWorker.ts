@@ -50,6 +50,7 @@ import { type SessionSources, isSessionSources } from "./references/receipts.js"
 //   POST /runs/intake/list      {storeKey, threadKey?, since?}           → {receipts: IntakeReceipt[]}
 
 import { RUN_ID_PATTERN, SESSION_KEY_PATTERN, type RunRecord } from "./runRecord.js";
+import { RUN_LIVE_STATE_NAMES } from "./runLiveState.js";
 import { pointOf } from "./runMetrics.js";
 import type { ModelPriceTable } from "./modelPricing.js";
 import type { Notepad, SessionHit } from "./runLedger/types.js";
@@ -155,6 +156,7 @@ export class WorkerRunLedger implements RunLedger {
   private async post(
     path: string,
     body: Record<string, unknown>,
+    acceptBadRequest = false,
   ): Promise<{ status: number; data: Record<string, unknown> }> {
     let res: Response;
     try {
@@ -177,7 +179,7 @@ export class WorkerRunLedger implements RunLedger {
     } catch {
       throw new PermanentStoreError(`run ledger ${path}: non-JSON body (HTTP ${res.status})`);
     }
-    if (res.status === 409 || res.ok) return { status: res.status, data };
+    if (res.status === 409 || res.ok || (acceptBadRequest && res.status === 400)) return { status: res.status, data };
     throw new PermanentStoreError(`run ledger ${path}: HTTP ${res.status} ${String(data.error ?? "")}`.trim());
   }
 
@@ -556,8 +558,35 @@ export class WorkerRunLedger implements RunLedger {
     assignment: LiveStateAssignRequest,
   ): Promise<LiveStateAssignResult> {
     this.checkIds(runId, gen);
-    const r = await this.post("/runs/live-state", { storeKey: this.opts.storeKey, runId, gen, assignment });
-    return r.data as unknown as LiveStateAssignResult;
+    const r = await this.post("/runs/live-state", { storeKey: this.opts.storeKey, runId, gen, assignment }, true);
+    const data = r.data;
+    if (data && !Array.isArray(data) && data.ok === false) {
+      const reason = data.reason;
+      if (
+        (r.status === 400 &&
+          (reason === "stale-sequence" ||
+            reason === "invalid-transition" ||
+            reason === "terminal" ||
+            reason === "bound-required" ||
+            reason === "invalid-bound" ||
+            reason === "cause-required")) ||
+        (r.status === 409 && (reason === "fenced" || reason === "unknown-run"))
+      )
+        return { ok: false, reason };
+    }
+    const liveState = data?.liveState as Record<string, unknown> | undefined;
+    if (
+      r.status === 200 &&
+      data?.ok === true &&
+      liveState &&
+      RUN_LIVE_STATE_NAMES.includes(liveState.state as (typeof RUN_LIVE_STATE_NAMES)[number]) &&
+      typeof liveState.since === "number" &&
+      Number.isFinite(liveState.since) &&
+      Number.isSafeInteger(data.liveStateSeq) &&
+      (data.liveStateSeq as number) >= 0
+    )
+      return data as unknown as LiveStateAssignResult;
+    throw new PermanentStoreError(`run ledger /runs/live-state: invalid acknowledgement (HTTP ${r.status})`);
   }
 
   async setState(runId: string, gen: string, state: RunState): Promise<FenceResult> {

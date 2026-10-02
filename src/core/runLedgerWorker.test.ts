@@ -206,6 +206,97 @@ describe("WorkerRunLedger", () => {
     expect(await unknown.ledger.heartbeat("r1", "g1", LEASE_MS)).toEqual({ ok: false, reason: "unknown-run" });
   });
 
+  it("keeps live-state refusals precise through the Worker transport and write-through", async () => {
+    const assignment = { expectedSeq: 7, at: 1_000, state: "admitted" as const, bound: 2_000, resumeSegment: true };
+    for (const reason of [
+      "stale-sequence",
+      "invalid-transition",
+      "terminal",
+      "bound-required",
+      "invalid-bound",
+      "cause-required",
+      "fenced",
+      "unknown-run",
+    ] as const) {
+      const status = reason === "fenced" || reason === "unknown-run" ? 409 : 400;
+      const w = stubWorker((path) =>
+        path === "/runs/live-state" ? { status, data: { ok: false, reason } } : { status: 200, data: { ok: true } },
+      );
+      expect(await w.ledger.assignLiveState("r1", "g1", assignment)).toEqual({ ok: false, reason });
+      const wt = createLedgerWriteThrough({
+        ledger: w.ledger,
+        gen: "g1",
+        fallback: { put: async () => ({}), abandoned: () => {} },
+        warn: () => {},
+        setInterval: () => ({ unref() {} }),
+        clearInterval: () => {},
+      });
+      const reserved = await wt.reserve({
+        runId: "r1",
+        threadKey: "slack:C1:1.0",
+        startedAt: 1_000,
+        meta: claimReq.meta,
+      });
+      expect(reserved.kind).toBe("tracked");
+      if (reserved.kind !== "tracked") continue;
+      expect(await reserved.run.assignLiveState(assignment)).toEqual({ ok: false, reason });
+      expect(reserved.run.tracked()).toBe(reason !== "fenced" && reason !== "unknown-run");
+    }
+  });
+
+  it("accepts a complete live-state commit acknowledgement", async () => {
+    const committed = {
+      ok: true,
+      liveState: { state: "admitted", since: 1_000, bound: 2_000 },
+      liveStateSeq: 8,
+      event: { type: "run_state", state: "admitted", since: 1_000, bound: 2_000, seq: 8 },
+    };
+    const w = stubWorker(() => ({ status: 200, data: committed }));
+    expect(
+      await w.ledger.assignLiveState("r1", "g1", {
+        expectedSeq: 7,
+        at: 1_000,
+        state: "admitted",
+        bound: 2_000,
+        resumeSegment: true,
+      }),
+    ).toEqual(committed);
+  });
+
+  it("does not mistake an unverified live-state acknowledgement for an unknown run", async () => {
+    const assignment = { expectedSeq: 7, at: 1_000, state: "admitted" as const, bound: 2_000, resumeSegment: true };
+    for (const answer of [
+      { status: 400, data: { ok: false, reason: "made-up" } },
+      { status: 400, data: { ok: true, reason: "terminal" } },
+      { status: 400, data: { error: "bad request" } },
+      { status: 409, data: { ok: false, reason: "terminal" } },
+      { status: 200, data: { ok: false, reason: "terminal" } },
+      { status: 200, data: { ok: true } },
+      { status: 503, data: { error: "unavailable" } },
+    ]) {
+      const w = stubWorker((path) => (path === "/runs/live-state" ? answer : { status: 200, data: { ok: true } }));
+      const wt = createLedgerWriteThrough({
+        ledger: w.ledger,
+        gen: "g1",
+        fallback: { put: async () => ({}), abandoned: () => {} },
+        warn: () => {},
+        setInterval: () => ({ unref() {} }),
+        clearInterval: () => {},
+      });
+      const reserved = await wt.reserve({
+        runId: "r1",
+        threadKey: "slack:C1:1.0",
+        startedAt: 1_000,
+        meta: claimReq.meta,
+      });
+      expect(reserved.kind).toBe("tracked");
+      if (reserved.kind !== "tracked") continue;
+      expect(await reserved.run.assignLiveState(assignment)).toEqual({ ok: false, reason: "unavailable" });
+      expect(reserved.run.tracked()).toBe(true);
+      expect(w.calls.filter((call) => call.path === "/runs/live-state")).toHaveLength(1);
+    }
+  });
+
   it("planeFenceSteer asks the object to atomically renew ownership before local delivery", async () => {
     const w = stubWorker(() => ({ status: 200, data: { accepted: true } }));
     await expect(w.ledger.planeFenceSteer("steer:r1:7", "r1", "g1", LEASE_MS)).resolves.toBe(true);
