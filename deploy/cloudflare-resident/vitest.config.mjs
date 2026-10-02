@@ -57,6 +57,7 @@ export default defineConfig({
       "legacyCredentials.test.ts",
       "rebindAttach.test.ts",
       "releaseAtRunEnd.test.ts",
+      "pausedWorkspace.test.ts",
       "runRegistration.test.ts",
       "dirtNeverKeeps.test.ts",
       "autoRebuild.test.ts",

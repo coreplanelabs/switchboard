@@ -5,6 +5,11 @@ import type { RunRecord } from "../../src/core/runRecord.ts";
 import { FRICTION_CATEGORIES } from "../../src/core/runFriction.ts";
 import { LEASE_MS } from "../../src/core/runLedger/types.ts";
 import type { CoordinatorInstance, CoordinatorUnit } from "../../src/core/coordinator/contract.ts";
+import {
+  checkpointKey,
+  type PublicationBinding,
+  type PublicationSettlement,
+} from "../../src/core/publicationSettlement.ts";
 import { PRIVATE_WORKER_REPLY_MAX_CHARS } from "../../src/core/privateWorkerLog.ts";
 import { assertNoPendingBackgroundTasks } from "./backgroundTasks.ts";
 import type { RunHistoryDO, SessionLogDO } from "./worker.ts";
@@ -121,6 +126,68 @@ describe("run ledger — alarm retention of live events", () => {
       state.storage.sql.exec(`SELECT seq FROM run_events WHERE run_id = ?`, "alarm-orphan").toArray(),
     );
     expect(orphan).toEqual([]);
+  });
+});
+
+describe("exact owner evidence for resident preservation", () => {
+  it("returns the live owner before a stored summary, then only a non-provisional terminal row", async () => {
+    const key = storeKey();
+    const runId = "resident-preservation-owner";
+    const threadKey = "slack:C1:resident-preservation";
+    const read = () => post("/runs/preservation-owner", { storeKey: key, runId });
+    expect((await read()).data).toEqual({ kind: "unknown" });
+    expect((await post("/runs/claim", claimBody(key, runId, threadKey))).status).toBe(200);
+    expect((await read()).data).toMatchObject({ kind: "live", row: { runId, threadKey, ownerGen: "g1" } });
+    const binding: PublicationBinding = {
+      runId,
+      instanceId: "instance-x",
+      step: "instance-x:unit-x",
+      repo: "owner/name",
+      branch: "codex/preserved",
+      requester: "slack:UALICE",
+      threadKey,
+      generation: "g1",
+      baseHeadSha: "a".repeat(40),
+    };
+    const settlement: PublicationSettlement = {
+      version: 1,
+      binding,
+      checkpoint: { kind: "created", head: "b".repeat(40) },
+      publication: { kind: "not_attempted" },
+      preservation: { kind: "saved", key: checkpointKey(binding, "b".repeat(40)), size: 128, sha256: "c".repeat(64) },
+      release: { kind: "pending" },
+    };
+    expect(
+      (
+        await post("/runs/put", {
+          storeKey: key,
+          record: {
+            ...record(runId, threadKey),
+            repo: binding.repo,
+            parentInstanceId: binding.instanceId,
+            idempotencyKey: binding.step,
+            publicationSettlement: settlement,
+          },
+        })
+      ).status,
+    ).toBe(200);
+    expect((await read()).data.kind).toBe("live");
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (_instance: RunHistoryDO, state) => {
+      state.storage.sql.exec(`DELETE FROM live_runs WHERE run_id = ?`, runId);
+    });
+    expect((await read()).data).toMatchObject({
+      kind: "terminal",
+      record: { id: runId, threadKey, status: "completed", publicationSettlement: settlement },
+    });
+    await runInDurableObject(stub, async (_instance: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        `UPDATE runs SET summary_json = json_set(summary_json, '$.provisional', json('true')) WHERE run_id = ?`,
+        runId,
+      );
+    });
+    expect((await read()).data).toEqual({ kind: "unknown" });
+    expect((await post("/runs/preservation-owner", { storeKey: key, runId: "../foreign" })).status).toBe(400);
   });
 });
 

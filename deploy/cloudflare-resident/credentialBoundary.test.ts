@@ -118,7 +118,9 @@ describe("resident model credential boundary", () => {
     expect(method("detachThread")).toContain('reason: "thread-cleanup-failed: pool user kept"');
     for (const caller of ["detachThread", "sweepWorktrees", "reclaimFinishedRefs"])
       expect(method(caller)).toContain("const activeNow = await this.isRuntimeActive().catch(() => true);");
-    expect(method("reclaimFinishedRefs")).toContain('why: eviction === "changed" ? "re-attached" : "cleanup-failed"');
+    expect(method("reclaimFinishedRefs")).toContain(
+      'eviction === "preserved" ? "preservation-held" : "cleanup-failed"',
+    );
   });
 
   it("scrubs a superseded named-ref checkout before the same pool user can enter the replacement", () => {

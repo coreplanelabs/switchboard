@@ -28,6 +28,74 @@
 
 import { shellQuote } from "./shellQuote.js";
 
+export interface PrivateTreeObservation {
+  present: true;
+  branch: string;
+  head: string;
+  uncommittedChanges: number;
+  untrackedNonIgnored: number;
+  unpushedCommits: number;
+}
+
+/** A separate strict probe for deletion authority. Reporting counts below
+ * intentionally retain their older meaning and cannot authorize removal. */
+export function privateTreeObservationScript(worktreePath: string, user: string): string {
+  const wt = shellQuote(worktreePath);
+  const inner = [
+    `cd ${wt} || exit 1`,
+    `branch=$(git symbolic-ref --quiet --short HEAD) || exit 1`,
+    `head=$(git rev-parse --verify HEAD) || exit 1`,
+    `status=$(git -c core.quotepath=true status --porcelain --untracked-files=all) || exit 1`,
+    `unpushed=$(git rev-list --count HEAD --not --remotes) || exit 1`,
+    `printf 'branch=%s\\nhead=%s\\n' "$branch" "$head"`,
+    `printf 'tracked=%s\\n' "$(printf '%s\\n' "$status" | sed '/^$/d' | grep -c -v '^?? ')"`,
+    `printf 'untracked=%s\\n' "$(printf '%s\\n' "$status" | sed '/^$/d' | grep -c '^?? ')"`,
+    `printf 'unpushed=%s\\n' "$unpushed"`,
+  ].join("\n");
+  return [
+    `if ! test -e ${shellQuote(`${worktreePath}/.git`)}; then echo present=no; exit 0; fi`,
+    `echo present=yes`,
+    `su -s /bin/bash ${shellQuote(user)} -c ${shellQuote(inner)}`,
+  ].join("\n");
+}
+
+export function parsePrivateTreeObservation(result: {
+  stdout: string;
+  exitCode: number;
+  timedOut: boolean;
+  truncated?: boolean;
+}): PrivateTreeObservation | null {
+  if (result.exitCode !== 0 || result.timedOut || result.truncated) return null;
+  const fields = new Map<string, string>();
+  for (const line of result.stdout.split("\n")) {
+    const match = /^(present|branch|head|tracked|untracked|unpushed)=(.*)$/.exec(line);
+    if (match) {
+      if (fields.has(match[1])) return null;
+      fields.set(match[1], match[2]);
+    }
+  }
+  if (fields.get("present") !== "yes" || !fields.get("branch") || !/^[a-f0-9]{40}$/.test(fields.get("head") ?? ""))
+    return null;
+  const number = (name: string): number | null => {
+    const value = fields.get(name);
+    if (!value || !/^(0|[1-9]\d*)$/.test(value)) return null;
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) ? parsed : null;
+  };
+  const uncommittedChanges = number("tracked");
+  const untrackedNonIgnored = number("untracked");
+  const unpushedCommits = number("unpushed");
+  if (uncommittedChanges === null || untrackedNonIgnored === null || unpushedCommits === null) return null;
+  return {
+    present: true,
+    branch: fields.get("branch")!,
+    head: fields.get("head")!,
+    uncommittedChanges,
+    untrackedNonIgnored,
+    unpushedCommits,
+  };
+}
+
 /** Build the one-spawn probe script. Run it via `sh -c` as root with the
  *  usual GIT_TERMINAL_PROMPT=0 injection; feed the result to
  *  `parseWorktreeCleanliness`. */
