@@ -108,6 +108,19 @@ Poll `/debug info` until `state` is `warm`, `lastRestore.at` is later than the r
 
 Before a resident Worker upload, `deploy all` drains new runs and the preflight asks the live Worker to fence registered reattach. Under that fence it reads executing runs separately from protected terminal workspaces. An active or unknown owner, missing fence, or provisioning resident refuses the upload. A refusal releases only the reattach fence; the drain remains until the runner lifts it or it expires. A Worker that predates `/deploy-fence` refuses safely, so its first upgrade needs a separately reviewed bootstrap procedure. After an upload that passes preflight, `deploy all` reads the named Containers application before and after the upload. An unchanged version and image, no printed container change, and current reports for every resident complete a Worker-only step without cycling containers. A changed application uses the guarded image reconcile. An unreadable pre-upload application refuses the upload; an unreadable post-upload application or an older pending image report leaves it partial and the fleet held.
 
+### Capture a retained resident tree for a reviewed rehearsal
+
+`npm run resident:archive` is a source-checkout operator harness for the **old** resident `/exec` route. It does not attach, detach, drain, deploy, or change a registration. Run it first on an isolated disposable resident with a verified Worker build and Container image. Its `capture` mode still calls `/exec`, which updates `lastAttachAt` and requires a valid Git Door run bearer for a writable binding. A separate reviewed ingress and Workflow freeze must allow only this maintenance caller during capture, then close it and prove zero admitted operations before any Worker upload. The harness does not establish that freeze or a Container image identity.
+
+Set `RESIDENT_READ_TOKEN`, `RESIDENT_OPERATOR_TOKEN`, and, for a writable Git Door binding, `GH_HOST` and `GH_ENTERPRISE_TOKEN` in the operator process. No credential is accepted as a command argument. Use the exact binding fields from the read-scoped `threads` view:
+
+```bash
+npm run resident:archive -- capture --url https://resident.example.com/ --resource repo:example/project --thread-key mcp:default:disposable --ref codex/disposable --sha <40-character-commit> --user worker2 --bound-at <binding-timestamp> --build <40-character-worker-commit> --out /secure/new-archive
+npm run resident:archive -- restore --archive /secure/new-archive --out /secure/new-restore
+```
+
+The output archive directory must not exist. Capture records `.git`, tracked, untracked and ignored files, empty directories, modes and symlink targets through bounded `/exec` responses (60 KiB raw chunks, below the old route's 100,000-character output cap). It writes `receipt.json` **last**, after exact binding and VM boot ID readbacks and a second full source manifest. A partial directory without that receipt is not an archive. The offline `restore` command needs no network or credentials; it refuses an unsafe path, missing or extra blob, or any changed byte and compares a fresh scan of the reconstructed tree with the source manifest. The result is evidence for the currently bound tree only; the historical run's owner/fence, production ingress coverage, and live first-install safety require separate receipts.
+
 ## For this installation
 
 The project's own production, not Switchboard:

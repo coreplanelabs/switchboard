@@ -88,6 +88,7 @@
   "src/mcp/secretStore.ts": 1,
   "src/mcp/service.ts": 1,
   "src/mcp/source.ts": 1,
+  "src/residentArchiveCli.ts": 2,
   "src/tools/runs.ts": 1,
   "web/src/components/settings/McpServersPanel.vue": 1,
   "web/src/lib/costs.ts": 1,

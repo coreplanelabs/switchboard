@@ -41,6 +41,7 @@ The repo's whole interface: deterministic, non-interactive, no credential unless
 | `npm run typecheck` | TypeScript over the bot and its scripts, no emit. | After type-level changes; `verify:root` runs it. A pipeline agent scopes it to the touched tsconfig. |
 | `npm run test` | The whole vitest suite from one entry, after `deploy:gen`. | Local sessions before pushing; CI runs it for relevant changes. |
 | `npm run cli` | The operator CLI over the command registry (`-- <group> <verb> …`), plus `ask` to drive the full pipeline without Slack. | Smoke tests, deploys, config, run history. |
+| `npm run resident:archive` | Captures a bounded retained resident tree through the old route and verifies an offline restore. | Reviewed disposable-resident rehearsal with exact binding and Worker build receipts. |
 | `npm run verify` | Runs every CI check across the repo and workspaces. | Local sessions before review; CI selects affected checks on each push. |
 | `npm run verify:root` | The bot package's gate: consistency checks, typecheck, lint, format, tests, dist. | When only the bot changed. |
 | `npm run check:consistency` | The sub-second checks that generated and declared things equal the code, this table included. | After touching a generated or declared artifact; one CI leg. |
