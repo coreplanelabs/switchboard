@@ -234,7 +234,8 @@ defaults:
 # `access:svc:<common_name>`, `schedule:<name>` — or by a whole surface,
 # `<ns>:*`: `access:*` is every Cloudflare Access browser session (the org,
 # granted once instead of enumerated), `slack:*` every workspace member the bot
-# hears, `http:*` / `mcp:*` every ingress token. Each entry has up to three
+# hears, `http:*` / `mcp:*` every ingress token. `mcp:personal:*` applies only
+# to credentials a signed-in person approved at /settings/connect. Each entry has up to three
 # axes; every axis is a list of names or the explicit word `all`, and an ABSENT
 # axis is the empty set (fail-closed). A `slack:` user holds the open chat
 # commands and every unrestricted agent whether listed or not — an entry ADDS to
@@ -246,7 +247,7 @@ defaults:
 # (channel config), `repo:write` (repo onboard/offboard/…, friction propose) and
 # every `runs:*` are never a baseline: nobody holds them until granted, and
 # nobody is an admin without an `all` entry. An unknown id prefix, a misspelled
-# `all` or a `*` that is not a whole surface (`slack:U*`, `schedule:*`,
+# `all` or a `*` that is neither a whole surface nor `mcp:personal:*` (`slack:U*`, `schedule:*`,
 # `agent:*`) fails the load, as does any top-level key this file does not document.
 # grants:
 #   access:*:                         # everyone in the org: every Access browser session
@@ -271,6 +272,9 @@ defaults:
 #   mcp:ci:                             # … and the same subject over MCP
 #     actions: [dispatch, runs:read]
 #     channels: [mcp:ops]
+#   "mcp:personal:*":                   # one policy for browser-approved client connections
+#     actions: [dispatch, runs:read, runs:write, status:read, help:read, repo:read, costs:read, config:read]
+#     channels: all
 #   http:cron:                          # the identity the shim fires schedules as
 #     actions: [friction:read, friction:write, repo:write]
 #     channels: all                     # the weekly pass analyzes the whole fleet

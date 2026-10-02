@@ -16,6 +16,7 @@ import type { RunRecord } from "../core/runRecord.js";
 import { RunRegistry } from "../core/runRegistry.js";
 import { InMemoryRunStore } from "../core/runStore.js";
 import { createRunsService } from "../core/runsService.js";
+import { digestBearer, InMemoryPersonalTokenStore } from "../mcp/personalTokens.js";
 
 // Feature: docs/reference/specs/mcp-ingress.md — adapter #4 (MCP). A minimal MCP server over
 // streamable-HTTP (JSON-RPC 2.0 over POST /mcp). It reuses http.ts's fail-closed,
@@ -343,6 +344,19 @@ describe("handleMcpRequest — tools/call", () => {
 });
 
 describe("handleMcpRequest — auth (fail-closed)", () => {
+  it("a dashboard-approved personal bearer authenticates by digest and revocation takes effect immediately", async () => {
+    const token = "c".repeat(64);
+    const digest = digestBearer(token);
+    const store = new InMemoryPersonalTokenStore();
+    grant("personal:sub-1", ["dispatch", "runs:read"]);
+    await store.put({ digest, subject: "personal:sub-1", email: "person@example.com", createdAt: 1 });
+    const opts = { auth: { tokens: {} }, personalTokens: store };
+    const accepted = await handleMcpRequest(rpc("initialize", {}, 1, bearer(token)), deps, opts);
+    expect(accepted.status).toBe(200);
+    expect((await handleMcpRequest(rpc("initialize", {}, 1, bearer("d".repeat(64))), deps, opts)).status).toBe(401);
+    await store.delete(digest, "personal:sub-1");
+    expect((await handleMcpRequest(rpc("initialize", {}, 1, bearer(token)), deps, opts)).status).toBe(401);
+  });
   it("no tokens configured → 503 disabled, dispatch never called", async () => {
     const d = fakeDispatch();
     const res = await handleMcpRequest(rpc("tools/list", {}), deps, { auth: authConfig({}), dispatch: d.fn });
@@ -502,6 +516,21 @@ describe("createMcpHandler (node:http wrapper)", () => {
     await vi.waitFor(() => expect(t.status()).toBe(200));
     expect(t.json().result).toEqual({ content: [{ type: "text", text: "wrapped" }] });
     expect(d.calls[0].msg.userId).toBe("mcp:alice");
+  });
+
+  it("authenticates a personal bearer before reading the request body", async () => {
+    const token = "e".repeat(64);
+    const store = new InMemoryPersonalTokenStore();
+    await store.put({
+      digest: digestBearer(token),
+      subject: "personal:sub-1",
+      email: "person@example.com",
+      createdAt: 1,
+    });
+    const t = fakeReqRes("POST", bearer(token), JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize" }));
+    createMcpHandler(deps, { auth: { tokens: {} }, personalTokens: store })(t.req, t.res);
+    await vi.waitFor(() => expect(t.status()).toBe(200));
+    expect(t.json().result.serverInfo.name).toBe("switchboard");
   });
 
   // An unauthorized caller is rejected from headers without

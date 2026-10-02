@@ -21,6 +21,7 @@ import {
   bindBotConfig,
   CLI_CALLER,
   ConsoleIO,
+  hostedCommandArguments,
   cliCapabilities,
   loadBotConfig,
   missingBotConfig,
@@ -211,6 +212,33 @@ describe("parseCliArgv — the `ask` built-in (the channel harness, not a regist
     expect(parseCliArgv(["ask", "hi", "--thread"], commands, now)).toMatchObject({
       kind: "usage",
       error: expect.stringContaining("--thread needs a value"),
+    });
+  });
+});
+
+describe("parseCliArgv — hosted client built-ins", () => {
+  it("connect takes one host or the existing --url form; mcp-proxy takes no arguments", async () => {
+    const { commands } = await fixture();
+    expect(parseCliArgv(["connect", "bot.example"], commands)).toEqual({ kind: "connect", url: "bot.example" });
+    expect(parseCliArgv(["connect", "--url", "https://bot.example"], commands)).toEqual({
+      kind: "connect",
+      url: "https://bot.example",
+    });
+    expect(parseCliArgv(["connect"], commands)).toMatchObject({ kind: "usage" });
+    expect(parseCliArgv(["mcp-proxy"], commands)).toEqual({ kind: "mcp-proxy" });
+    expect(parseCliArgv(["mcp-proxy", "extra"], commands)).toMatchObject({ kind: "usage" });
+  });
+});
+
+describe("hosted CLI command arguments", () => {
+  it("sends a positional run id under the MCP tool's declared name", async () => {
+    const { commands } = await fixture();
+    const parsed = parseCliArgv(["runs", "get", "run-42", "--include", "messages"], commands);
+    expect(parsed.kind).toBe("command");
+    if (parsed.kind !== "command") return;
+    expect(hostedCommandArguments(commands.get(parsed.id)!, parsed.input)).toEqual({
+      id: "run-42",
+      include: "messages",
     });
   });
 });

@@ -108,6 +108,10 @@ src/channels/mcp.test.ts	const res = await handleMcpRequest(rpc("initialize", { 
 src/channels/mcp.ts	const PROTOCOL_VERSION = "2025-06-18";
 src/mcp/client.ts	export const MCP_PROTOCOL_VERSION = "2025-06-18";
 
+# The published npm package name is required in the local Codex MCP command and the browser's setup hint.
+src/setup/hostedClient.ts	const next = `${kept ? `${kept}\n\n` : ""}${section}\ncommand = ${JSON.stringify(process.execPath)}\nargs = [${[npxScript, "--yes", "@coreplane/switchboard@latest", "mcp-proxy"].map((s) => JSON.stringify(s)).join(", ")}]\n`;
+src/channels/personalMcpSetup.ts	: "<p>Run <code>npx -y @coreplane/switchboard connect your-switchboard.example</code> on your computer. Sign in here and approve the matching code.</p>";
+
 # Cost-report fixture days: a per-day cost row is an ISO date by shape; the values are arbitrary.
 src/channels/costsView.test.ts	const days = [day("2026-08-27", 0.3, 4), day("2026-08-28", 1.3, 12.5), day("2026-08-29", 0.9, 3)];
 src/channels/costsView.test.ts	range: { from: "2026-08-27", to: "2026-08-29", days: 3, partialLastDay: true },
@@ -155,8 +159,6 @@ CONTRIBUTING.md	published CLI package in `packages/switchboard/` (what `npx @cor
 README.md	npx @coreplane/switchboard ask "what can you do?"
 README.md	npx @coreplane/switchboard init --organization <your GitHub org> --anthropic-key <your key>
 README.md	Off means the bot never offers it and the dashboard and the plan never show it ([Turn features on and off](docs/how-to/turn-features-on-and-off.md)). The bot is `npx @coreplane/switchboard start` on any machine with Node, or the published image `ghcr.io/coreplanelabs/switchboard`.
-docs/public/install.sh	# and can be run by hand: `npx @coreplane/switchboard init --help`.
-docs/public/install.sh	# runs the published installer — `npx @coreplane/switchboard init` — with every
 docs/public/install.sh	PACKAGE="@coreplane/switchboard"
 docs/reference/specs/README.md	| [packaging.md](packaging.md) | The npm package the release publishes (`@coreplane/switchboard`, the CLI bundled with the files it reads under `dist/assets/` — and the bot, which `start` runs from any directory with no Docker): one resolver finds those files in a checkout, the image and the package; the smoke test installs the tarball and runs it; one release-please component moves the version; `publish-npm` publishes through trusted publishing, no token and no provenance (npm signs from GitHub-hosted runners alone); the curl front door checks Node and hands off to `npx`; what stays clone-only and why |
 docs/reference/specs/packaging.md	Switchboard is installed, not forked ([one production target](../../decisions/0023-one-production-target.md)). The source stays one public monorepo; what an operator installs are the two artifacts each release publishes: the container image (`ghcr.io/<owner>/<repo>`, [release-and-deploy.md](release-and-deploy.md) item 21) that IS the bot, and the npm package this spec covers — the CLI and, through it, the bot: `npx --yes @coreplane/switchboard@<version> init` reaches a running `ask` from an empty directory with no clone, and `npx --yes @coreplane/switchboard@<version> start` runs the bot from that directory with no Docker (item 8). The package is the same CLI the checkout runs (`src/cli.ts`, bundled — and the bot's entry with it, since `start` runs it) and the same files it reads (the examples, the Worker templates, the manifests, the dashboard's build — copied), under one rule for finding them; nothing is a second implementation.
@@ -207,6 +209,12 @@ packages/switchboard/smoke.test.mts	const account = "0123456789abcdef0123456789a
 # `deploy plan` from the example profile prints the example's placeholder account inside each account-registry image reference.
 
 # The package README names the package once.
+
+# Hosted-client setup must name the published package people run locally; this is the public npm name.
+README.md	`init` writes `.env` (mode 600) and `config/config.yaml` into `~/.switchboard`, so every command works from any directory; `ask` sends a request through the same dispatcher as Slack. `curl -fsSL https://openswitchboard.dev/install.sh | sh` is the same `init`. To use a deployment your team already runs, run `npx -y @coreplane/switchboard connect <host>` instead.
+docs/reference/cli.md	To use a deployment your team already runs, `npx -y @coreplane/switchboard connect <host>` opens its signed-in approval page and configures Codex MCP. HTTPS is assumed; `connect --url https://<host>` still works. The connector saves its bearer only in `~/.switchboard/client.json` (mode 600); `ask` and MCP-exposed registry commands then call the hosted bot. `mcp-proxy` is the stdio bridge for Codex and other local MCP clients. [Hosted setup](../tutorials/use-an-existing-deployment.md#connect-a-local-cli-and-mcp-client) gives the steps. `init`, `start`, and deployment commands remain local operator actions.
+docs/tutorials/use-an-existing-deployment.md	npx -y @coreplane/switchboard connect switchboard.example.com
+docs/tutorials/use-an-existing-deployment.md	npx -y @coreplane/switchboard ask "what can you do?"
 
 # The plan snapshots print the example profile's placeholder account (32 zeros), not an account.
 src/core/__snapshots__/capabilitySurfaces.test.ts.snap	Images: registry (version 1.2.3) — not probed (the example profile) — bot: registry.cloudflare.com/00000000000000000000000000000000/switchboard:1.2.3

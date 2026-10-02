@@ -2,6 +2,8 @@
 
 `npx tsx src/cli.ts` (or `npm run cli --`) is the operator toolbox — every registered command, plus two built-ins: one for talking to the agent pipeline directly, one for running the bot.
 
+To use a deployment your team already runs, `npx -y @coreplane/switchboard connect <host>` opens its signed-in approval page and configures Codex MCP. HTTPS is assumed; `connect --url https://<host>` still works. The connector saves its bearer only in `~/.switchboard/client.json` (mode 600); `ask` and MCP-exposed registry commands then call the hosted bot. `mcp-proxy` is the stdio bridge for Codex and other local MCP clients. [Hosted setup](../tutorials/use-an-existing-deployment.md#connect-a-local-cli-and-mcp-client) gives the steps. `init`, `start`, and deployment commands remain local operator actions.
+
 ## Form
 
 ```

@@ -1,4 +1,5 @@
 import type { UnitSeedReceipt } from "../../src/core/coordinator/unitSeedReceipt.js";
+import { isPersonalToken } from "../../src/core/personalToken.js";
 import { preserveCheckpointState } from "../../src/core/runLedger/checkpointState.js";
 import {
   checkpointMembersOf,
@@ -920,6 +921,13 @@ export class ConfigDO extends DurableObject<Env> {
         expires_at INTEGER NOT NULL,
         ticket TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS personal_tokens (
+        digest TEXT PRIMARY KEY,
+        subject TEXT NOT NULL,
+        email TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS personal_tokens_subject ON personal_tokens(subject);
       CREATE TABLE IF NOT EXISTS confirmations (
         id TEXT PRIMARY KEY,
         thread_key TEXT NOT NULL,
@@ -1068,6 +1076,52 @@ export class ConfigDO extends DurableObject<Env> {
   async deleteSecret(serverId: string): Promise<boolean> {
     const had = this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM secrets WHERE server_id = ?`, serverId).one().n;
     this.sql.exec(`DELETE FROM secrets WHERE server_id = ?`, serverId);
+    return had > 0;
+  }
+
+  async putPersonalToken(token: { digest: string; subject: string; email: string; createdAt: number }): Promise<void> {
+    this.sql.exec(
+      `INSERT OR REPLACE INTO personal_tokens (digest, subject, email, created_at) VALUES (?, ?, ?, ?)`,
+      token.digest,
+      token.subject,
+      token.email,
+      token.createdAt,
+    );
+  }
+
+  async getPersonalToken(
+    digest: string,
+  ): Promise<{ digest: string; subject: string; email: string; createdAt: number } | null> {
+    const row = this.sql
+      .exec<{ digest: string; subject: string; email: string; created_at: number }>(
+        `SELECT digest, subject, email, created_at FROM personal_tokens WHERE digest = ?`,
+        digest,
+      )
+      .toArray()[0];
+    return row ? { digest: row.digest, subject: row.subject, email: row.email, createdAt: row.created_at } : null;
+  }
+
+  async listPersonalTokens(
+    subject: string,
+  ): Promise<{ digest: string; subject: string; email: string; createdAt: number }[]> {
+    return this.sql
+      .exec<{ digest: string; subject: string; email: string; created_at: number }>(
+        `SELECT digest, subject, email, created_at FROM personal_tokens WHERE subject = ? ORDER BY created_at DESC`,
+        subject,
+      )
+      .toArray()
+      .map((row) => ({ digest: row.digest, subject: row.subject, email: row.email, createdAt: row.created_at }));
+  }
+
+  async deletePersonalToken(digest: string, subject: string): Promise<boolean> {
+    const had = this.sql
+      .exec<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM personal_tokens WHERE digest = ? AND subject = ?`,
+        digest,
+        subject,
+      )
+      .one().n;
+    this.sql.exec(`DELETE FROM personal_tokens WHERE digest = ? AND subject = ?`, digest, subject);
     return had > 0;
   }
 
@@ -1450,6 +1504,10 @@ const CONFIG_ROUTES = new Set([
   "/config/tickets/put",
   "/config/tickets/get",
   "/config/tickets/transition",
+  "/config/personal-tokens/put",
+  "/config/personal-tokens/get",
+  "/config/personal-tokens/list",
+  "/config/personal-tokens/delete",
   "/config/confirmations/put",
   "/config/confirmations/consume",
   "/config/confirmations/cancel",
@@ -1473,6 +1531,31 @@ async function handleConfig(pathname: string, body: unknown, env: Env): Promise<
   const dO = env.CONFIG.get(env.CONFIG.idFromName(CONFIG_OBJECT));
   // MCP secrets + tickets (opaque to this Worker beyond shape).
   switch (pathname) {
+    case "/config/personal-tokens/put": {
+      if (!isPersonalToken(b.token)) return json({ error: "token malformed" }, 400);
+      await dO.putPersonalToken(b.token);
+      return json({ ok: true });
+    }
+    case "/config/personal-tokens/get": {
+      if (typeof b.digest !== "string" || !/^[a-f0-9]{64}$/.test(b.digest))
+        return json({ error: "digest malformed" }, 400);
+      return json({ token: await dO.getPersonalToken(b.digest) });
+    }
+    case "/config/personal-tokens/list": {
+      if (typeof b.subject !== "string" || !/^personal:.{1,256}$/.test(b.subject))
+        return json({ error: "subject malformed" }, 400);
+      return json({ tokens: await dO.listPersonalTokens(b.subject) });
+    }
+    case "/config/personal-tokens/delete": {
+      if (
+        typeof b.digest !== "string" ||
+        !/^[a-f0-9]{64}$/.test(b.digest) ||
+        typeof b.subject !== "string" ||
+        !/^personal:.{1,256}$/.test(b.subject)
+      )
+        return json({ error: "digest or subject malformed" }, 400);
+      return json({ ok: true, removed: await dO.deletePersonalToken(b.digest, b.subject) });
+    }
     case "/config/secrets/put": {
       if (!isSealedCredential(b.sealed)) return json({ error: "sealed must be a SealedCredential" }, 400);
       await dO.putSecret(b.sealed);

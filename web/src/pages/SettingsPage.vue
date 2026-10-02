@@ -19,6 +19,11 @@ const tab = computed(() => seed?.tab ?? "channels");
 
 <template>
   <AppShell v-if="seed" title="Settings" nav="settings">
+    <p class="mb-4 text-sm">
+      <a class="text-primary underline underline-offset-2" href="/settings/connect"
+        >Connect a local CLI or MCP client</a
+      >
+    </p>
     <SettingsTabs :current="tab" />
     <McpServersPanel
       v-if="tab === 'mcps' && seed.mcps"

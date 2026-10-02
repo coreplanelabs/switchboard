@@ -72,6 +72,12 @@ describe("docs/public/install.sh", () => {
     );
   });
 
+  it("routes connect to the hosted-client setup without running server init", () => {
+    const r = run({ nodeVersion: `${pinned}.1.0` }, "connect", "bot.example");
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toBe(`npx --yes ${facts.npmPackage}@latest connect bot.example\nengine-strict=true`);
+  });
+
   it("refuses an older Node, naming the version found and how to get a new one — and never installs Node itself", () => {
     const r = run({ nodeVersion: `${Number(pinned) - 2}.19.0` });
     expect(r.status).toBe(1);
