@@ -4336,9 +4336,12 @@ export class RunHistoryDO extends DurableObject<Env> {
         holder,
       )
       .toArray()[0];
-    if (!row) return false;
+    return row !== undefined && this.unitContextJsonIsRetained(row.json);
+  }
+
+  private unitContextJsonIsRetained(json: string): boolean {
     try {
-      const unit: unknown = JSON.parse(row.json);
+      const unit: unknown = JSON.parse(json);
       return isCoordinatorUnit(unit) && unit.context !== undefined;
     } catch {
       return false;
