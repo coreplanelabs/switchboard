@@ -34,6 +34,7 @@ describe("publication settlement", () => {
           if (cmd.includes("status")) return " M tracked.ts";
           if (cmd.includes("symbolic-ref")) return binding.branch;
           if (cmd.includes("rev-parse HEAD")) return moved ? "d".repeat(40) : source;
+          if (cmd.includes("ls-remote")) return `${source}\trefs/heads/${binding.branch}\n`;
           if (cmd.includes(" push ")) {
             expect(cmd).toContain(`${source}:refs/heads/${binding.branch}`);
             pushedSource = source;
@@ -51,7 +52,7 @@ describe("publication settlement", () => {
         ...(transport === "door"
           ? {
               publicationDoor: { repo: binding.repo, origin: "https://door.example" },
-              admitPush: async () => ({ release: () => {}, publicationBearer: "fixture-bearer" }),
+              admitPush: async () => ({ release: () => {}, publicationBearer: "fixture-bearer", accepted: () => true }),
             }
           : {}),
         settlement: {
@@ -98,7 +99,7 @@ describe("publication settlement", () => {
         ...(transport === "door"
           ? {
               publicationDoor: { repo: binding.repo, origin: "https://door.example" },
-              admitPush: async () => ({ release: () => {}, publicationBearer: "fixture-bearer" }),
+              admitPush: async () => ({ release: () => {}, publicationBearer: "fixture-bearer", accepted: () => true }),
             }
           : {}),
         settlement: { binding, record: async () => true },

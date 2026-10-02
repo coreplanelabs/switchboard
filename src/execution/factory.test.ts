@@ -17,6 +17,7 @@ import {
 } from "./resident.js";
 import {
   gitIdentityEnvs,
+  prepareColdPublicationCheckout,
   makeExecutor,
   resetResidentProbeCache,
   residentOnboardedProbe,
@@ -1922,7 +1923,11 @@ describe("makeExecutor resident selection", () => {
       expect(calls).toEqual(["/status", "/attach"]);
       expect(bodies[1]).toMatchObject({ reuse: true, refHint: "master" });
       expect(sel.binding?.container).toBe("vm-1");
-      expect(workspaceBindingFor(sel)).toEqual({ ...recorded, ref: "master" });
+      expect(workspaceBindingFor(sel)).toEqual({
+        ...recorded,
+        ref: "master",
+        publicationBaseSha: "1220b9c487f9538a6dd509ef11b6a5042d85bd05",
+      });
     });
 
     it("a fresh run (no reattach) never sends reuse: the body is the one every fresh attach always sent", async () => {
@@ -2704,6 +2709,232 @@ describe("residentSlugsLister", () => {
 // Feature: docs/reference/specs/run-history.md item 54: the binding the row
 // records at the claim (`state.binding`) and how the next generation reads it.
 describe("the workspace binding on the row", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it.each([true, false])(
+    "reattaches an unseeded cold clone without inventing a missing initial lease (recorded: %s)",
+    async (withHead) => {
+      vi.stubEnv("SANDBOX_TOKEN", "test-token");
+      const old = "a".repeat(40);
+      const current = "b".repeat(40);
+      const commands: string[] = [];
+      vi.spyOn(CloudflareSandboxExecutor.prototype, "execResult").mockImplementation(async (command) => {
+        commands.push(command);
+        return {
+          exitCode: 0,
+          truncated: false,
+          stderr: "",
+          stdout: `/workspace/checkout\nplan/p/u1\n${current}\n${current}\trefs/heads/plan/p/u1\nhttps://door.example/git/o/r.git\n`,
+        };
+      });
+      const recorded: WorkspaceBinding = {
+        backend: "sandbox",
+        ref: "plan/p/u1",
+        workspace: "/workspace/checkout",
+        ...(withHead ? { publicationBaseSha: old } : {}),
+      };
+      const selection = await makeExecutor(
+        { ...dirs(), execution: { type: "cloudflare", url: "https://sandbox.example" } },
+        {
+          ...ctx("coding"),
+          repo: "o/r",
+          ref: "plan/p/u1",
+          reattach: recorded,
+        },
+      );
+      expect(selection.cold).toEqual({ ref: "plan/p/u1", sha: current, workspace: "/workspace/checkout" });
+      expect(commands).toHaveLength(1);
+      expect(commands[0]).not.toContain("clone");
+      expect(workspaceBindingFor(selection, "repo-resident", recorded)?.publicationBaseSha).toBe(
+        withHead ? old : undefined,
+      );
+    },
+  );
+  it("clones a fresh precreated branch, verifies the remote tip and records its actual checkout", async () => {
+    const sha = "a".repeat(40);
+    const commands: string[] = [];
+    const selected = {
+      backend: "sandbox" as const,
+      executor: Object.assign(new LocalExecutor("/tmp/x"), {
+        execResult: vi.fn(async (command: string) => {
+          commands.push(command);
+          return {
+            exitCode: 0,
+            truncated: false,
+            stderr: "",
+            stdout: `/workspace/checkout\nplan/p/u1\n${sha}\n${sha}\trefs/heads/plan/p/u1\nhttps://door.example/git/o/r.git\n`,
+          };
+        }),
+      }),
+    };
+    const cold = await prepareColdPublicationCheckout(selected, {
+      repo: "o/r",
+      ref: "plan/p/u1",
+      doorUrl: "https://door.example",
+      expectedHeadSha: sha,
+    });
+    expect(cold).toEqual({ ref: "plan/p/u1", sha, workspace: "/workspace/checkout" });
+    expect(commands[0]).toContain("clone --quiet --single-branch --branch 'plan/p/u1'");
+    expect(commands[0]).toContain("ls-remote --exit-code origin 'refs/heads/plan/p/u1'");
+    expect(workspaceBindingFor({ ...selected, cold })).toMatchObject({
+      workspace: "/workspace/checkout",
+      ref: "plan/p/u1",
+      publicationBaseSha: sha,
+    });
+  });
+
+  it("rejects an unverified or moved cold branch without creating an initial lease", async () => {
+    const sha = "a".repeat(40);
+    const selected = {
+      backend: "sandbox" as const,
+      executor: Object.assign(new LocalExecutor("/tmp/x"), {
+        execResult: vi.fn(async () => ({
+          exitCode: 0,
+          truncated: false,
+          stderr: "",
+          stdout: `/workspace/checkout\nplan/p/u1\n${sha}\n${"b".repeat(40)}\trefs/heads/plan/p/u1\nhttps://door.example/git/o/r.git\n`,
+        })),
+      }),
+    };
+    await expect(
+      prepareColdPublicationCheckout(selected, { repo: "o/r", ref: "plan/p/u1", doorUrl: "https://door.example" }),
+    ).rejects.toThrow(/cold publication checkout/i);
+    expect(workspaceBindingFor(selected)?.publicationBaseSha).toBeUndefined();
+  });
+
+  it.each(["/workspace/../checkout", "/workspace/other", "/workspace/checkout/extra"])(
+    "refuses an untrusted cold checkout path before persisting the lease: %s",
+    async (path) => {
+      const sha = "a".repeat(40);
+      const selected = {
+        backend: "sandbox" as const,
+        executor: Object.assign(new LocalExecutor("/tmp/x"), {
+          execResult: vi.fn(async () => ({
+            exitCode: 0,
+            truncated: false,
+            stderr: "",
+            stdout: `${path}\nplan/p/u1\n${sha}\n${sha}\trefs/heads/plan/p/u1\nhttps://door.example/git/o/r.git\n`,
+          })),
+        }),
+      };
+      await expect(
+        prepareColdPublicationCheckout(selected, {
+          repo: "o/r",
+          ref: "plan/p/u1",
+          doorUrl: "https://door.example",
+        }),
+      ).rejects.toThrow(/cold publication checkout/i);
+    },
+  );
+
+  it("rechecks a recorded cold checkout without cloning or leasing its later local tip", async () => {
+    const old = "a".repeat(40);
+    const next = "b".repeat(40);
+    const commands: string[] = [];
+    const selected = {
+      backend: "sandbox" as const,
+      executor: Object.assign(new LocalExecutor("/tmp/x"), {
+        execResult: vi.fn(async (command: string) => {
+          commands.push(command);
+          return {
+            exitCode: 0,
+            truncated: false,
+            stderr: "",
+            stdout: `/workspace/checkout\nplan/p/u1\n${next}\n${next}\trefs/heads/plan/p/u1\nhttps://door.example/git/o/r.git\n`,
+          };
+        }),
+      }),
+    };
+    const recorded = {
+      backend: "sandbox" as const,
+      ref: "plan/p/u1",
+      workspace: "/workspace/checkout",
+      publicationBaseSha: old,
+    };
+    const cold = await prepareColdPublicationCheckout(selected, {
+      repo: "o/r",
+      ref: "plan/p/u1",
+      doorUrl: "https://door.example",
+      recorded,
+    });
+    expect(commands[0]).not.toContain("clone");
+    expect(workspaceBindingFor({ ...selected, cold }, "repo-cold", recorded)?.publicationBaseSha).toBe(old);
+    expect(
+      workspaceBindingFor({ ...selected, cold }, "repo-cold", {
+        backend: "sandbox",
+        ref: "plan/p/u1",
+        workspace: "/workspace/checkout",
+      })?.publicationBaseSha,
+    ).toBeUndefined();
+  });
+
+  it("keeps a recorded cold head on reattach and never derives one from a later local tip", () => {
+    const rebound = {
+      backend: "sandbox" as const,
+      executor: new LocalExecutor("/tmp/x"),
+      cold: { ref: "plan/p/u1", sha: "b".repeat(40), workspace: "/workspace/checkout" },
+    };
+    expect(
+      workspaceBindingFor(rebound, "repo-cold", {
+        backend: "sandbox",
+        ref: "plan/p/u1",
+        workspace: "/workspace/checkout",
+        publicationBaseSha: "a".repeat(40),
+      })?.publicationBaseSha,
+    ).toBe("a".repeat(40));
+    expect(
+      workspaceBindingFor(rebound, "repo-cold", {
+        backend: "sandbox",
+        ref: "plan/p/u1",
+        workspace: "/workspace/checkout",
+      })?.publicationBaseSha,
+    ).toBeUndefined();
+  });
+  it("keeps the fetched branch head apart from the resident snapshot source", () => {
+    const selected = workspaceBindingFor({
+      executor: new LocalExecutor("/tmp/x"),
+      backend: "sandbox",
+      seeded: {
+        slug: "o/r",
+        ref: "plan/p/u1",
+        sha: "a".repeat(40),
+        sourceSha: "b".repeat(40),
+        workspace: "/workspace/checkout",
+        cached: false,
+        ms: 100,
+      },
+    });
+    expect(selected?.publicationBaseSha).toBe("a".repeat(40));
+    expect(workspaceBindingOf(selected)?.publicationBaseSha).toBe("a".repeat(40));
+  });
+
+  it("retains the first fetched head when a resumed resident now reports a later local head", () => {
+    const rebound = workspaceBindingFor(
+      {
+        executor: new LocalExecutor("/tmp/x"),
+        backend: "resident",
+        binding: { ref: "plan/p/u1", sha: "b".repeat(40), workspace: "/workspace/threads/t/wt" },
+      },
+      "repo-resident",
+      { backend: "resident", ref: "plan/p/u1", publicationBaseSha: "a".repeat(40) },
+    );
+    expect(rebound?.publicationBaseSha).toBe("a".repeat(40));
+    expect(
+      workspaceBindingFor(
+        {
+          executor: new LocalExecutor("/tmp/x"),
+          backend: "resident",
+          binding: { ref: "plan/p/u1", sha: "b".repeat(40), workspace: "/workspace/threads/t/wt" },
+        },
+        "repo-resident",
+        { backend: "resident", ref: "plan/p/u1" },
+      )?.publicationBaseSha,
+    ).toBeUndefined();
+  });
+
   it("workspaceBindingFor names the backend and, from a resident attach, the worktree, the pool user and the container; nothing for a run without a backend", () => {
     expect(
       workspaceBindingFor({
@@ -2724,6 +2955,7 @@ describe("the workspace binding on the row", () => {
       workspace: "/workspace/threads/t/main",
       user: "worker3",
       container: "vm-9",
+      publicationBaseSha: "1220b9c487f9538a6dd509ef11b6a5042d85bd05",
     });
     expect(workspaceBindingFor({ executor: new LocalExecutor("/tmp/x"), backend: "sandbox" })).toEqual({
       backend: "sandbox",
@@ -2745,6 +2977,7 @@ describe("the workspace binding on the row", () => {
     ).toEqual({
       backend: "sandbox",
       workspace: "/workspace/checkout",
+      publicationBaseSha: "a".repeat(40),
       seeded: { slug: "jshttp/vary", ref: "fix/existing", workspace: "/workspace/checkout", sourceSha: "b".repeat(40) },
     });
     expect(workspaceBindingFor({ executor: new LocalExecutor("/tmp/x") })).toBeUndefined();

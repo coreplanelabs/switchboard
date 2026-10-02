@@ -258,6 +258,8 @@ function setup(
     binding?: ResidentBinding;
     /** The seeded sandbox's checked-out ref and head, when resident attach falls back. */
     seeded?: ExecutorSelection["seeded"];
+    /** The verified cold clone when attach and seed were unavailable. */
+    cold?: ExecutorSelection["cold"];
     /** The artifact store (record 0033), when the deployment configures one. */
     artifacts?: ArtifactStore;
     /** A pull-request review round: the head the dispatcher pinned and the seams the settle and the post-step call.
@@ -393,6 +395,7 @@ function setup(
         backend: "local" as const,
         ...(opts.binding ? { binding: opts.binding } : {}),
         ...(opts.seeded ? { seeded: opts.seeded } : {}),
+        ...(opts.cold ? { cold: opts.cold } : {}),
       },
       release: async (opts: { hardStopped: boolean; commandInFlight?: boolean; gateBypassed?: boolean }) =>
         void releases.push(
@@ -3475,6 +3478,9 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     };
     let dirty = false;
     let unpushed = false;
+    const checkpointHead = "c".repeat(40);
+    let localHead = HEAD;
+    let remoteHead = HEAD;
     const commands: string[] = [];
     const published: Array<Parameters<NonNullable<Executor["publishBranch"]>>[0]> = [];
     const bindings = new GitBindings();
@@ -3533,22 +3539,30 @@ describe("runLoop — the model turn and everything that rides on it", () => {
         exec: async (cmd: string) => {
           commands.push(cmd);
           if (/rev-parse --abbrev-ref HEAD|symbolic-ref --quiet --short HEAD/.test(cmd)) return `${BRANCH}\n`;
-          if (/rev-parse HEAD/.test(cmd)) return `${HEAD}\n`;
+          if (/rev-parse HEAD/.test(cmd)) return `${localHead}\n`;
           if (/rev-parse @\{u\}/.test(cmd)) return `${HEAD}\n`;
-          if (/ls-remote --exit-code origin/.test(cmd)) return `${HEAD}\trefs/heads/${BRANCH}\n`;
+          if (/ls-remote --exit-code origin/.test(cmd)) return `${remoteHead}\trefs/heads/${BRANCH}\n`;
           if (/remote get-url origin/.test(cmd)) return "https://github.com/o/r.git";
           if (/status --porcelain/.test(cmd)) return dirty ? " M src/work.ts\n" : "";
           if (/rev-list --count/.test(cmd)) return unpushed ? "1\n" : "0\n";
           if (/git(?: -C '[^']+')? commit -m/.test(cmd)) {
             dirty = false;
             unpushed = true;
+            localHead = checkpointHead;
             return "";
           }
           return "";
         },
         publishBranch: async (args: Parameters<NonNullable<Executor["publishBranch"]>>[0]) => {
           published.push(args);
+          const claim = await bindings.beginBranch("run-l", {
+            ref: `refs/heads/${BRANCH}`,
+            old: args.old ?? "",
+            next: args.next,
+          });
+          if (!claim || !(await claim.finish("accepted"))) throw new Error("checkpoint push was not recorded");
           unpushed = false;
+          remoteHead = args.next;
           return "To https://git.bot.test/git/o/r";
         },
       },
@@ -3560,10 +3574,10 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     s.deps.findOpenPrByHead = vi.fn(async () => ({ number: 700, htmlUrl: "https://github.com/o/r/pull/700" }));
 
     const out = answered(await runLoop(s.deps, { ...s.ctx, ledgerRun: tracked.run }));
-    expect(out.answer).toContain(`Published \`${BRANCH}\` at \`${HEAD}\``);
+    expect(out.answer).toContain(`Published \`${BRANCH}\` at \`${checkpointHead}\``);
     expect(commands).toContain("git -C '/srv/wt/u1' add -A");
     expect(published).toHaveLength(1);
-    expect(published[0]).toMatchObject({ repo: "o/r", branch: BRANCH, next: HEAD });
+    expect(published[0]).toMatchObject({ repo: "o/r", branch: BRANCH, old: HEAD, next: checkpointHead });
     expect(out.prNote).toBeUndefined();
     expect(JSON.stringify(s.closes)).not.toContain("discarded at the run's end");
     await out.releaseWorkspace();
@@ -3571,7 +3585,10 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     await s.writer.settled();
     const rec = inner.finished.get("run-l");
     if (!rec) throw new Error("tracked record missing");
-    expect(rec).toMatchObject({ headSha: HEAD, pushed: [{ ref: BRANCH, sha: HEAD, by: "salvage" }] });
+    expect(rec).toMatchObject({
+      headSha: checkpointHead,
+      pushed: [{ ref: BRANCH, sha: checkpointHead, by: "salvage" }],
+    });
     expect(rec.events).not.toContainEqual(expect.objectContaining({ type: "run_note", kind: "work_left_behind" }));
   });
 
@@ -3783,6 +3800,155 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       await s.writer.settled();
     },
   );
+
+  it("binds a precreated Ship branch publication to the fetched workspace head", async () => {
+    const branch = "plan/p/u1";
+    const initial = "a".repeat(40);
+    const next = "b".repeat(40);
+    const updates: Array<{ old?: string; next: string }> = [];
+    const bindings = new GitBindings();
+    bindings.register("run-l", { repo: "o/r", ref: `refs/heads/${branch}` }, undefined, async () => true);
+    const bearers = new RunBearerStore({ clock: () => NOW });
+    const s = endingIn(
+      async (_deps, run) => {
+        const tool = run.tools.find((candidate) => candidate.name === "publish_branch");
+        expect(tool).toBeDefined();
+        await tool!.run({ branch }, { ...run.toolContext, callId: "publish-one" });
+        return sessionAnswering("done");
+      },
+      {
+        repoCtx: { repo: "o/r", ref: branch, baseRef: "main" },
+        coordinator: { parentInstanceId: "p", idempotencyKey: "p:U12/0/coding", base: "main" },
+        binding: { ref: branch, sha: initial, workspace: "/workspace/threads/t/wt" },
+        executor: {
+          exec: async () => "",
+          execResult: async (command) => ({
+            stdout:
+              command.includes("symbolic-ref") || command.includes("check-ref-format")
+                ? branch
+                : command.includes("status")
+                  ? ""
+                  : command.includes("rev-parse")
+                    ? next
+                    : command.includes("remote get-url")
+                      ? "https://git.bot.test/git/o/r.git"
+                      : "",
+            stderr: "",
+            exitCode: 0,
+            truncated: false,
+          }),
+          publishBranchResult: async (input) => {
+            updates.push({ old: input.old, next: input.next });
+            return { stdout: "", stderr: "known refusal", exitCode: 1, truncated: false };
+          },
+        },
+      },
+    );
+    s.deps.githubBindings = bindings;
+    s.deps.runBearers = bearers;
+    const bearer = mintFor(bearers, s);
+    answered(await runLoop(s.deps, { ...s.ctx, bearer }));
+    expect(updates).toEqual([{ old: initial, next }]);
+    s.ending.drain(undefined);
+    await s.writer.settled();
+  });
+
+  it("leases the fetched head and selected path of an unseeded cold Ship clone", async () => {
+    const branch = "plan/p/u1";
+    const initial = "a".repeat(40);
+    const next = "b".repeat(40);
+    const commands: string[] = [];
+    const updates: Array<{ old?: string; next: string }> = [];
+    const bindings = new GitBindings();
+    bindings.register("run-l", { repo: "o/r", ref: `refs/heads/${branch}` }, undefined, async () => true);
+    const bearers = new RunBearerStore({ clock: () => NOW });
+    const s = endingIn(
+      async (_deps, run) => {
+        const result = await run.tools
+          .find((tool) => tool.name === "publish_branch")!
+          .run({ branch }, { ...run.toolContext, callId: "cold-write" });
+        expect(result).toContain("refused");
+        return sessionAnswering("done");
+      },
+      {
+        repoCtx: { repo: "o/r", ref: branch, baseRef: "main" },
+        coordinator: { parentInstanceId: "p", idempotencyKey: "p:U12/0/coding", base: "main" },
+        cold: { ref: branch, sha: initial, workspace: "/home/user/workspace/checkout" },
+        executor: {
+          exec: async () => "",
+          execResult: async (command) => {
+            commands.push(command);
+            return {
+              stdout:
+                command.includes("symbolic-ref") || command.includes("check-ref-format")
+                  ? branch
+                  : command.includes("status")
+                    ? ""
+                    : command.includes("rev-parse")
+                      ? next
+                      : command.includes("remote get-url")
+                        ? "https://git.bot.test/git/o/r.git"
+                        : "",
+              stderr: "",
+              exitCode: 0,
+              truncated: false,
+            };
+          },
+          publishBranchResult: async (input) => {
+            updates.push({ old: input.old, next: input.next });
+            return { stdout: "", stderr: "known refusal", exitCode: 1, truncated: false };
+          },
+        },
+      },
+    );
+    s.deps.githubBindings = bindings;
+    s.deps.runBearers = bearers;
+    const bearer = mintFor(bearers, s);
+    answered(await runLoop(s.deps, { ...s.ctx, bearer }));
+    expect(commands.length).toBeGreaterThan(0);
+    expect(commands.every((command) => command.startsWith("git -C '/home/user/workspace/checkout'"))).toBe(true);
+    expect(updates).toEqual([{ old: initial, next }]);
+    s.ending.drain(undefined);
+    await s.writer.settled();
+  });
+
+  it("verifies a cold cloned checkout against a precreated PR before granting publication", async () => {
+    const ref = "plan/p/u1";
+    const head = "a".repeat(40);
+    const publication = {
+      repo: "o/r",
+      pr: 7,
+      headRef: ref,
+      baseRef: "main",
+      expectedHeadSha: head,
+      publicationRef: ref,
+      owner: { instanceId: "coord-p", unit: "U12" },
+    };
+    const s = endingIn(
+      async (_deps, run) => {
+        expect(run.rules.publication).toEqual({ authority: { ref, expectedHeadSha: head } });
+        return sessionAnswering("done");
+      },
+      {
+        repoCtx: { repo: "o/r", pr: 7, ref, baseRef: "main", headSha: head },
+        coordinator: { parentInstanceId: "coord-p", idempotencyKey: "coord-p:U12/0/coding", base: "main", publication },
+        cold: { ref, sha: head, workspace: "/workspace/checkout" },
+        executor: { exec: async () => "" },
+      },
+    );
+    s.deps.fetchPrFacts = async () => ({
+      state: "open",
+      sameRepoHead: true,
+      headBranchExists: true,
+      headRef: ref,
+      baseRef: "main",
+      headSha: head,
+      verifiedHead: { repo: "o/r", ref, sha: head },
+    });
+    answered(await runLoop(s.deps, s.ctx));
+    s.ending.drain(undefined);
+    await s.writer.settled();
+  });
 
   it("refuses model-shell publication without opening a Door slot, including a literal owned push", async () => {
     const bindings = new GitBindings();

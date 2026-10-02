@@ -1687,6 +1687,34 @@ describe("observeCodingWorkspace", () => {
     expect(unread).not.toHaveProperty("unpushedCommits");
   });
 
+  it("uses an exact remote branch head when a clean sandbox has a stale tracking ref", async () => {
+    const ws = workspace([
+      [/abbrev-ref/, "feat/x\n"],
+      [/rev-parse HEAD/, `${HEAD}\n`],
+      [/ls-remote/, `${HEAD}\trefs/heads/feat/x\n`],
+      [/status --porcelain -uno/, ""],
+      [/rev-list --count HEAD --not --remotes/, "1\n"],
+    ]);
+    expect(await observeCodingWorkspace(ws, { probeRemote: false })).toMatchObject({
+      head: HEAD,
+      remoteHead: HEAD,
+      uncommittedChanges: 0,
+      unpushedCommits: 0,
+    });
+    const unreadRemote = workspace([
+      [/abbrev-ref/, "feat/x\n"],
+      [/@\{u\}/, `${HEAD}\n`],
+      [/rev-parse HEAD/, `${HEAD}\n`],
+      [/ls-remote/, "exit 128: remote unavailable\n"],
+      [/status --porcelain -uno/, ""],
+      [/rev-list --count HEAD --not --remotes/, "1\n"],
+    ]);
+    expect(await observeCodingWorkspace(unreadRemote, { probeRemote: false })).toMatchObject({
+      remoteHead: HEAD,
+      unpushedCommits: 1,
+    });
+  });
+
   it("the pushed branch is the checkout too → the same answer as the checkout path (its tip is HEAD)", async () => {
     const ws = workspace([
       [/abbrev-ref/, "feat/x\n"],
@@ -2333,6 +2361,64 @@ describe("salvageBudgetPush — a ship coding child pushes what it has at the bu
     expect(w.commands).toContain("git push origin 'HEAD:refs/heads/plan/p/u1'");
   });
 
+  it("leaves an accepted remote head clean when the sandbox tracking ref lags", async () => {
+    const head = "b".repeat(40);
+    const branch = "fix/change";
+    const w = fakeExecutor({
+      "git status": "\n",
+      "git rev-list": "1\n",
+      "git rev-parse HEAD": `${head}\n`,
+      "git remote get-url origin": "https://door.example/git/acme/api.git\n",
+      "git ls-remote": `${head}\trefs/heads/${branch}\n`,
+    });
+    const record = vi.fn(async () => true);
+    const out = await salvageBudgetPush(w.executor, {
+      branch,
+      repo: "acme/api",
+      cue: "completion",
+      publicationDoor: { repo: "acme/api", origin: "https://door.example" },
+      admitPush: async () => {
+        throw new Error("a clean accepted head needs no publication");
+      },
+      settlement: {
+        binding: {
+          runId: "run-child",
+          instanceId: "unit-change",
+          step: "unit-change:U12/1/findings",
+          repo: "acme/api",
+          branch,
+          requester: "slack:UX",
+          threadKey: "slack:C1:1",
+          generation: "gen-1",
+          baseHeadSha: "a".repeat(40),
+        },
+        record,
+      },
+    });
+    expect(out).toMatchObject({ pushed: false, settlement: { checkpoint: { kind: "clean", head } } });
+    expect(w.commands.some((command) => command.includes(" push "))).toBe(false);
+    expect(record).toHaveBeenCalledTimes(2);
+    const foreign = fakeExecutor({
+      "git status": "\n",
+      "git rev-list": "1\n",
+      "git rev-parse HEAD": `${head}\n`,
+      "git remote get-url origin": "https://door.example/git/acme/other.git\n",
+      "git ls-remote": `${head}\trefs/heads/${branch}\n`,
+    });
+    const refused = await salvageBudgetPush(foreign.executor, {
+      branch,
+      repo: "acme/api",
+      cue: "completion",
+      publicationDoor: { repo: "acme/api", origin: "https://door.example" },
+      admitPush: async () => {
+        throw new Error("foreign origin must not receive admission");
+      },
+    });
+    expect(refused.summary).toContain("isolated runner-owned publication transport is unavailable");
+    expect(foreign.commands.some((command) => command.includes("ls-remote"))).toBe(false);
+    expect(foreign.commands.some((command) => command.includes(" push "))).toBe(false);
+  });
+
   it("binds a runner-owned checkpoint to its checked-out source commit before Git can push", async () => {
     const head = "b".repeat(40);
     const w = fakeExecutor({
@@ -2359,6 +2445,7 @@ describe("salvageBudgetPush — a ship coding child pushes what it has at the bu
       "git rev-list": "1\n",
       "git rev-parse HEAD": head,
       "git symbolic-ref": "plan/p/u1\n",
+      "git ls-remote": `${head}\trefs/heads/plan/p/u1\n`,
     });
     const seenBearers: string[] = [];
     const verified = await salvageBudgetPush(
@@ -2372,12 +2459,41 @@ describe("salvageBudgetPush — a ship coding child pushes what it has at the bu
       {
         branch: "plan/p/u1",
         publicationDoor: { repo: "acme/api", origin: "https://door.example" },
-        admitPush: async () => ({ release: () => {}, publicationBearer: "effect-only" }),
+        admitPush: async () => ({ release: () => {}, publicationBearer: "effect-only", accepted: () => true }),
       },
     );
     expect(verified.pushed).toBe(true);
     expect(seenBearers).toEqual(["effect-only"]);
     expect(isolated.commands.some((command) => command.startsWith("git push"))).toBe(false);
+    const cold = fakeExecutor({
+      "git status": "\n",
+      "git rev-list": "1\n",
+      "git rev-parse HEAD": head,
+      "git symbolic-ref": "plan/p/u1\n",
+      "git ls-remote": `${head}\trefs/heads/plan/p/u1\n`,
+    });
+    const updates: Array<{ old?: string; next: string }> = [];
+    const coldResult = await salvageBudgetPush(
+      {
+        exec: cold.executor.exec,
+        publishBranchResult: async (input) => {
+          updates.push({ old: input.old, next: input.next });
+          return { stdout: "accepted", stderr: "", exitCode: 0, truncated: false };
+        },
+      },
+      {
+        branch: "plan/p/u1",
+        publicationDoor: { repo: "acme/api", origin: "https://door.example" },
+        admitPush: async () => ({
+          release: () => {},
+          publicationBearer: "effect-only",
+          old: "a".repeat(40),
+          accepted: () => true,
+        }),
+      },
+    );
+    expect(coldResult.pushed).toBe(true);
+    expect(updates).toEqual([{ old: "a".repeat(40), next: head }]);
     const wrong = fakeExecutor({
       "git status": "\n",
       "git rev-list": "1\n",

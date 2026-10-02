@@ -154,7 +154,7 @@ describe("GitHub door against a real Git smart HTTP peer", () => {
     }
   }, 30_000);
 
-  it.each(["new branch", "existing PR"])(
+  it.each(["new branch", "existing PR", "precreated Ship"])(
     "accepts a large %s push after an empty probe without spending its one-use authority",
     async (mode) => {
       const root = mkdtempSync(join(tmpdir(), "switchboard-git-probe-"));
@@ -171,11 +171,11 @@ describe("GitHub door against a real Git smart HTTP peer", () => {
       await git("-C", source, "push", "origin", "main");
       await git("-C", repo, "symbolic-ref", "HEAD", "refs/heads/main");
       await git("-C", source, "checkout", "-b", "fix");
-      if (mode === "existing PR") {
+      if (mode !== "new branch") {
         await git("-C", source, "commit", "--allow-empty", "-m", "existing head");
         await git("-C", source, "push", "origin", "fix");
       }
-      const old = mode === "existing PR" ? await git("-C", repo, "rev-parse", "refs/heads/fix") : "0".repeat(40);
+      const old = mode !== "new branch" ? await git("-C", repo, "rev-parse", "refs/heads/fix") : "0".repeat(40);
       writeFileSync(join(source, "payload"), randomBytes(96 * 1024));
       await git("-C", source, "add", "payload");
       await git("-C", source, "commit", "-m", "large update");
@@ -193,13 +193,13 @@ describe("GitHub door against a real Git smart HTTP peer", () => {
         expiresAt: 2_000,
         span: {} as never,
         publish: () => {},
-        github: { identity: "write", repo: "o/r", ...(mode === "existing PR" ? { ref: "fix" } : {}) },
+        github: { identity: "write", repo: "o/r", ...(mode !== "new branch" ? { ref: "fix" } : {}) },
       });
       const bindings = new GitBindings();
       expect(
         bindings.register(
           runId,
-          { repo: "o/r", ...(mode === "existing PR" ? { ref: "fix" } : {}) },
+          { repo: "o/r", ...(mode !== "new branch" ? { ref: "fix" } : {}) },
           mode === "existing PR" ? { repo: "o/r", ref: "refs/heads/fix", refConfirmed: true } : undefined,
           async () => true,
           mode === "existing PR",
@@ -317,12 +317,28 @@ describe("GitHub door against a real Git smart HTTP peer", () => {
         expectLargePushEffects();
         expect(await git("-C", repo, "rev-parse", "refs/heads/fix")).toBe(next);
         expect(bindings.hasToolPush(runId, bearerHashOf(bearer))).toBe(false);
-        expect(bindings.get(runId)?.refConfirmed).toBe(true);
+        expect(bindings.get(runId)?.refConfirmed).toBe(mode === "precreated Ship" ? undefined : true);
         expect(receipt).toEqual(["pending", "accepted"]);
         expect(forwarded).toBe(1);
+
+        if (mode === "precreated Ship") {
+          await git("-C", source, "commit", "--allow-empty", "-m", "second owned update");
+          const second = await git("-C", source, "rev-parse", "HEAD");
+          expect(
+            bindings.allowToolPush(
+              runId,
+              "second effect",
+              { ref: "refs/heads/fix", old: next, next: second },
+              bearerHashOf(bearer),
+            ),
+          ).toBe(true);
+          await git("-c", `credential.helper=${helper}`, "-C", source, "push", "origin", "fix");
+          expect(await git("-C", repo, "rev-parse", "refs/heads/fix")).toBe(second);
+          expect(receipt).toEqual(["pending", "accepted", "pending", "accepted"]);
+        }
         await git("-C", source, "commit", "--allow-empty", "-m", "unauthorized next");
         await expect(git("-c", `credential.helper=${helper}`, "-C", source, "push", "origin", "fix")).rejects.toThrow();
-        expect(forwarded).toBe(1);
+        expect(forwarded).toBe(mode === "precreated Ship" ? 2 : 1);
 
         if (mode === "existing PR") {
           writeFileSync(join(source, "second-payload"), randomBytes(96 * 1024));

@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { FIRST_ATTACH_WAIT_MS, minutesToMs } from "../core/budgets.js";
-import { RUN_DEADLINE_RESERVE_MS, attachBoundWithinRun } from "./bashTimeout.js";
+import { BASH_TIMEOUT_MS, RUN_DEADLINE_RESERVE_MS, attachBoundWithinRun } from "./bashTimeout.js";
 import { oneLine } from "../core/redact.js";
 import type { Backend } from "../core/trace/attrs.js";
 import type { Span } from "../core/trace/types.js";
@@ -194,6 +194,8 @@ export interface WorkspaceBinding {
   /** The identity of the container the workspace is in (docs/reference/specs/harness-pi.md
    *  item 8), when the attach answered one: the resident's is its VM's boot id. */
   container?: string;
+  /** Trusted fetched branch tip before this run can change its checkout. */
+  publicationBaseSha?: string;
   /** A resident fallback's seed identity, retained so re-attach can verify the same checkout. */
   seeded?: Pick<SeededSandbox, "slug" | "ref" | "workspace" | "sourceSha" | "depsBackupId">;
 }
@@ -235,14 +237,82 @@ export function workspaceBindingOf(value: unknown): WorkspaceBinding | undefined
     ...(typeof v.workspace === "string" && v.workspace ? { workspace: v.workspace } : {}),
     ...(typeof v.user === "string" && v.user ? { user: v.user } : {}),
     ...(typeof v.container === "string" && v.container ? { container: v.container } : {}),
+    ...(typeof v.publicationBaseSha === "string" && /^[0-9a-f]{40}$/.test(v.publicationBaseSha)
+      ? { publicationBaseSha: v.publicationBaseSha }
+      : {}),
     ...(seeded ? { seeded } : {}),
   };
 }
 
-/** The checkout supplied by attach or seed. A cold clone has no path until
- * the coding run discovers it in its workspace. */
+/** The checkout supplied by attach, seed or the verified pre-model cold clone. */
 export function checkoutOfSelection(selection: ExecutorSelection): string | undefined {
-  return selection.binding?.workspace ?? selection.seeded?.workspace;
+  return selection.binding?.workspace ?? selection.seeded?.workspace ?? selection.cold?.workspace;
+}
+
+const COLD_CHECKOUT_PATH = /^\/(?:[A-Za-z0-9._-]+\/)*checkout$/;
+const safeColdCheckout = (path: string): boolean =>
+  COLD_CHECKOUT_PATH.test(path) && !path.split("/").some((part) => part === "." || part === "..");
+
+/** Clone (or re-observe on resume) the coordinator's branch before model work.
+ * Only a structured successful command can establish an initial publication lease;
+ * a stale local HEAD, ambiguous directory or failed remote read establishes none. */
+export async function prepareColdPublicationCheckout(
+  selection: ExecutorSelection,
+  target: { repo: string; ref: string; doorUrl: string; expectedHeadSha?: string; recorded?: WorkspaceBinding },
+  signal?: AbortSignal,
+): Promise<NonNullable<ExecutorSelection["cold"]>> {
+  const fail = () => new Error("cold publication checkout or fetched branch head could not be verified");
+  if (
+    !selection.executor.execResult ||
+    !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(target.repo) ||
+    !/^[A-Za-z0-9._/-]+$/.test(target.ref) ||
+    target.ref.includes("..") ||
+    target.ref.startsWith("-") ||
+    (target.recorded &&
+      (!target.recorded.workspace ||
+        !safeColdCheckout(target.recorded.workspace) ||
+        (target.recorded.ref !== undefined && target.recorded.ref !== target.ref)))
+  )
+    throw fail();
+  const remote = seedDoorRemote(target.doorUrl, target.repo);
+  const helper = `!f() { test -n "$GH_ENTERPRISE_TOKEN" || exit 1; printf '%s\\n' 'username=x-access-token' "password=$GH_ENTERPRISE_TOKEN"; }; f`;
+  const checkout = target.recorded?.workspace ?? "checkout";
+  const git = `git -C ${shellQuote(checkout)}`;
+  const command = [
+    "set -eu",
+    `git check-ref-format --branch ${shellQuote(target.ref)} >/dev/null`,
+    ...(target.recorded
+      ? []
+      : [
+          `if test ! -e checkout; then git -c credential.helper= -c credential.helper=${shellQuote(helper)} clone --quiet --single-branch --branch ${shellQuote(target.ref)} ${shellQuote(remote)} checkout; fi`,
+        ]),
+    `${git} rev-parse --show-toplevel`,
+    `${git} symbolic-ref --quiet --short HEAD`,
+    `${git} rev-parse HEAD`,
+    `${git} -c credential.helper= -c credential.helper=${shellQuote(helper)} ls-remote --exit-code origin ${shellQuote(`refs/heads/${target.ref}`)}`,
+    `${git} remote get-url origin`,
+  ].join("\n");
+  const result = await selection.executor
+    .execResult(command, { timeoutMs: BASH_TIMEOUT_MS, signal })
+    .catch(() => undefined);
+  if (!result || result.exitCode !== 0 || result.truncated) throw fail();
+  const [path, ref, sha, remoteLine, origin, ...extra] = result.stdout.trim().split(/\r?\n/);
+  const remoteSha = remoteLine?.match(/^([0-9a-f]{40})\trefs\/heads\/(.+)$/);
+  if (
+    !path ||
+    !safeColdCheckout(path) ||
+    ref !== target.ref ||
+    !sha ||
+    !/^[0-9a-f]{40}$/.test(sha) ||
+    !remoteSha ||
+    remoteSha[2] !== target.ref ||
+    origin !== remote ||
+    extra.length > 0 ||
+    (!target.recorded &&
+      (remoteSha[1] !== sha || (target.expectedHeadSha !== undefined && target.expectedHeadSha !== sha)))
+  )
+    throw fail();
+  return { workspace: path, ref, sha };
 }
 
 /** The binding to record for a selection: the backend, any known checkout,
@@ -251,16 +321,24 @@ export function checkoutOfSelection(selection: ExecutorSelection): string | unde
 export function workspaceBindingFor(
   selection: ExecutorSelection,
   machine: MachineClass = "repo-resident",
+  recorded?: WorkspaceBinding | null,
 ): WorkspaceBinding | undefined {
   if (machine === "none" || selection.backend === undefined) return undefined;
   const b = selection.binding;
   const checkout = checkoutOfSelection(selection);
+  const publicationBaseSha =
+    recorded === undefined
+      ? (b?.sha ?? selection.seeded?.sha ?? selection.cold?.sha)
+      : recorded?.backend === selection.backend
+        ? recorded.publicationBaseSha
+        : undefined;
   return {
     backend: selection.backend,
-    ...(b?.ref !== undefined ? { ref: b.ref } : {}),
+    ...(b?.ref !== undefined || selection.cold?.ref !== undefined ? { ref: b?.ref ?? selection.cold?.ref } : {}),
     ...(checkout !== undefined ? { workspace: checkout } : {}),
     ...(b?.user !== undefined ? { user: b.user } : {}),
     ...(b?.container !== undefined ? { container: b.container } : {}),
+    ...(publicationBaseSha ? { publicationBaseSha } : {}),
     ...(selection.backend === "sandbox" && selection.seeded
       ? {
           seeded: {
@@ -451,6 +529,8 @@ export interface ExecutorSelection {
    *  what it is on — the dispatcher's seeded prompt variant and the card read
    *  it. Unset on every other path, the cold sandbox included. */
   seeded?: SeededSandbox;
+  /** Verified clone of a precreated branch, when neither attach nor seed supplied a checkout. */
+  cold?: { ref: string; sha: string; workspace: string };
   /** Where the run's commands execute (docs/reference/specs/tracing.md): recorded on its
    *  `exec.*` spans. Every production selection names one; a test double may
    *  leave it out. */
@@ -1052,7 +1132,25 @@ async function reattachWorkspace(
         ? { threadKey: ctx.threadKey, resolveEnvs: async () => ({}) }
         : perThreadCheckout(opts, ctx);
     const executor = await makePerThreadExecutor(opts, input);
-    if (!recorded.seeded) return { executor, backend: perThreadBackend(opts) };
+    if (!recorded.seeded) {
+      if (
+        recorded.workspace &&
+        safeColdCheckout(recorded.workspace) &&
+        ctx.repo &&
+        ctx.ref &&
+        ctx.githubDoor &&
+        executor.execResult &&
+        executor.publishBranchResult
+      ) {
+        const cold = await prepareColdPublicationCheckout(
+          { executor, backend: perThreadBackend(opts) },
+          { repo: ctx.repo, ref: ctx.ref, doorUrl: ctx.githubDoor.baseUrl, recorded },
+          ctx.stopSignal,
+        );
+        return { executor, backend: perThreadBackend(opts), cold };
+      }
+      return { executor, backend: perThreadBackend(opts) };
+    }
     if (recorded.backend !== "sandbox" || ctx.repo?.toLowerCase() !== recorded.seeded.slug.toLowerCase())
       throw refuse("the seeded checkout's repository does not match the recorded run");
     const git = `git -C ${shellQuote(recorded.seeded.workspace)}`;
