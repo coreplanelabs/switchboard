@@ -875,6 +875,73 @@ describe("run history routes", () => {
     expect(ordinary.data.evidenceComplete).toBeUndefined();
   });
 
+  it("recovery evidence refuses a malformed context-pinned row beyond a retention gap", async () => {
+    const key = storeKey();
+    const now = Date.now();
+    const recoveryEvidence = { instanceId: "original", unit: "U12", threadKeys: ["slack:C1:original"] };
+    await putDirectMany(key, [
+      record("pinned-child", now - 3000, {
+        parentInstanceId: "original",
+        idempotencyKey: "original:U12/0/coding",
+        threadKey: "slack:C1:foreign",
+      }),
+      record("evicted-middle", now - 2000),
+      record("original", now - 1000, { threadKey: "slack:C1:original" }),
+    ]);
+    await runInDurableObject(stubOf(key), async (_instance, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO context_refs (holder_run_id, source_run_id, retention_pin) VALUES (?, ?, 1)`,
+        "original",
+        "pinned-child",
+      );
+      state.storage.sql.exec(
+        `INSERT INTO meta (key, value) VALUES ('policy', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+        JSON.stringify({ retentionDays: 30, maxRuns: 1, maxBytes: 64 * MIB, policyUpdatedAt: now }),
+      );
+    });
+    const before = await post("/runs/list", { storeKey: key, recoveryEvidence });
+    expect((before.data.items as RunRecord[]).map((row) => row.id)).toEqual(["original", "pinned-child"]);
+    await runInDurableObject(stubOf(key), async (_instance, state) => {
+      state.storage.sql.exec("UPDATE runs SET summary_json = 'null' WHERE run_id = 'pinned-child'");
+    });
+    const result = await post("/runs/list", { storeKey: key, recoveryEvidence });
+    expect(result.status).toBe(200);
+    expect(result.data.evidenceComplete).toBe(false);
+  });
+
+  it("recovery evidence refuses a malformed pinned source older than the age cutoff", async () => {
+    const key = storeKey();
+    const now = Date.now();
+    const recoveryEvidence = { instanceId: "original", unit: "U12", threadKeys: ["slack:C1:original"] };
+    await putDirectMany(key, [
+      record("old-source", now - 3 * DAY, { threadKey: "slack:C1:foreign" }),
+      record("original", now - 1000, { threadKey: "slack:C1:original" }),
+    ]);
+    await runInDurableObject(stubOf(key), async (_instance, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO context_refs (holder_run_id, source_run_id, retention_pin) VALUES (?, ?, 1)`,
+        "original",
+        "old-source",
+      );
+      state.storage.sql.exec(
+        `INSERT INTO meta (key, value) VALUES ('policy', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+        JSON.stringify({ retentionDays: 1, maxRuns: 100, maxBytes: 64 * MIB, policyUpdatedAt: now }),
+      );
+    });
+    const before = await post("/runs/list", { storeKey: key, recoveryEvidence });
+    expect((before.data.items as RunRecord[]).map((row) => row.id)).toEqual(["original"]);
+    expect(before.data.evidenceComplete).toBe(true);
+    expect(((await post("/runs/get", { storeKey: key, id: "old-source" })).data.record as RunRecord).id).toBe(
+      "old-source",
+    );
+    await runInDurableObject(stubOf(key), async (_instance, state) => {
+      state.storage.sql.exec("UPDATE runs SET summary_json = 'null' WHERE run_id = 'old-source'");
+    });
+    const result = await post("/runs/list", { storeKey: key, recoveryEvidence });
+    expect(result.status).toBe(200);
+    expect(result.data.evidenceComplete).toBe(false);
+  });
+
   it("recovery evidence validates past the evidence cap but only within retention", async () => {
     const key = storeKey();
     const now = Date.now();
@@ -1235,6 +1302,27 @@ describe("run history routes", () => {
     // get agrees with list on what is hidden, so the two paths hide the same rows.
     expect((await post("/runs/get", { storeKey: key, id: "f07" })).data).toEqual({ record: null });
     expect(((await post("/runs/get", { storeKey: key, id: "f06" })).data.record as { id: string }).id).toBe("f06");
+  });
+
+  it("a sparse filtered page with only unpinned context rows avoids the full retention scan", async () => {
+    const key = storeKey();
+    const now = Date.now();
+    await putDirect(key, record("recent", now - 1000));
+    await runInDurableObject(stubOf(key), async (_instance, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO context_refs (holder_run_id, source_run_id, ordinary_member, retention_pin, ordinary_pin)
+         VALUES (?, ?, 1, 0, 0)`,
+        "recent",
+        "recent",
+      );
+    });
+    const result = await runInDurableObject(stubOf(key), async (inst: RunHistoryDO) => {
+      const seen = spySql(inst);
+      const page = await inst.list({ limit: 5, agent: "coding" });
+      return { seen, page };
+    });
+    expect(result.page.items).toEqual([]);
+    expect(result.seen.some((q) => /ORDER BY finished_at ASC/.test(q))).toBe(false);
   });
 
   it("a full recent page stays bounded when an older source has a retention pin, and the next page still finds that source", async () => {
