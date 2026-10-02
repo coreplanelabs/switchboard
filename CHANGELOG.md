@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.276.2](https://github.com/coreplanelabs/switchboard/compare/v1.276.1...v1.276.2) (2026-10-02)
+
+
+### Bug fixes
+
+* **memory:** preserve live-run events in the orphan sweep ([#2629](https://github.com/coreplanelabs/switchboard/issues/2629)) ([031bdc3](https://github.com/coreplanelabs/switchboard/commit/031bdc328481e4c2ba979138170cad2e3f41173a))
+
 ## [1.276.1](https://github.com/coreplanelabs/switchboard/compare/v1.276.0...v1.276.1) (2026-10-02)
 
 
