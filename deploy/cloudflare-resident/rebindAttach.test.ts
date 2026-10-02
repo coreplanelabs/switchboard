@@ -97,7 +97,9 @@ describe("a named ref replaces the sticky fallback before the worktree is provis
     );
     expect(create).toMatch(/let refChanged = input\.refChanged;/);
     expect(create).toMatch(/refChanged = true;/);
-    expect(create).toMatch(/\{\s*detached: target\.kind === "sha",\s*reuse,\s*refChanged,?\s*\}/);
+    expect(create).toMatch(
+      /\{\s*detached: target\.kind === "sha",\s*reuse,\s*refChanged,\s*priorBinding: input\.preservationSource,?\s*\}/,
+    );
     expect(method("ensureThreadWorktree")).toMatch(
       /decideWorktree\(\{[\s\S]*?reuse: opts\.reuse,[\s\S]*?modeSwitch,[\s\S]*?refChanged: opts\.refChanged,[\s\S]*?sha,[\s\S]*?worktreePath: wt,[\s\S]*?facts,[\s\S]*?\}\)/,
     );
@@ -302,9 +304,11 @@ describe("the attach after a rebind provisions the tree at the moved ref as it p
     expect(source).toMatch(/\| \{ kind: "rebound"; moved: ThreadBinding; rebound: Rebound \};/);
     for (const m of [body, create, ensure]) expect(m).not.toMatch(/keepTree/);
     expect(create).toMatch(
-      /this\.ensureThreadWorktree\(binding, sha, originUrl, mode\.modeSwitch, \{\s*detached: target\.kind === "sha",\s*reuse,\s*refChanged,?\s*\}\)/,
+      /this\.ensureThreadWorktree\(binding, sha, originUrl, mode\.modeSwitch, \{\s*detached: target\.kind === "sha",\s*reuse,\s*refChanged,\s*priorBinding: input\.preservationSource,?\s*\}\)/,
     );
-    expect(ensure).toMatch(/opts: \{ detached: boolean; reuse: boolean; refChanged: boolean \}/);
+    expect(ensure).toMatch(
+      /opts: \{ detached: boolean; reuse: boolean; refChanged: boolean; priorBinding\?: ThreadBinding \}/,
+    );
     expect(ensure).toMatch(
       /const decision = decideWorktree\(\{[\s\S]*?reuse: opts\.reuse,[\s\S]*?modeSwitch,[\s\S]*?refChanged: opts\.refChanged,[\s\S]*?sha,[\s\S]*?worktreePath: wt,[\s\S]*?facts,[\s\S]*?\}\);/,
     );

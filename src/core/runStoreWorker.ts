@@ -18,6 +18,8 @@ import type { PutResult, RunEventsOptions, RunEventsPage, RunStore } from "./run
 import { pointOf } from "./runMetrics.js";
 import type { ModelPriceTable } from "./modelPricing.js";
 import { isRunUsageRows, reportOfUsageRows, type RunUsageQuery, type RunUsageReport } from "./runUsage.js";
+import { RUN_STORE_TIMEOUT_MS } from "./runStoreConstants.js";
+export { RUN_STORE_KEY, RUN_STORE_TIMEOUT_MS } from "./runStoreConstants.js";
 
 // The DURABLE RunStore (docs/decisions/0006-runs-have-two-lives.md): an HTTPS client to the RunHistoryDO on the
 // state Worker (deploy/cloudflare-memory/ — one SQLite Durable Object per store
@@ -43,13 +45,8 @@ import { isRunUsageRows, reportOfUsageRows, type RunUsageQuery, type RunUsageRep
 // 5xx/408/429/network are transient (bounded retries), any other 4xx is
 // permanent (log and count).
 
-/** Per-request ceiling: `put` runs after the reply is sent and reads answer a
- *  command — neither may hang the process. */
-export const RUN_STORE_TIMEOUT_MS = 10_000;
 /** Env var holding the state Worker bearer when `runHistory.worker.tokenEnv` is unset. */
 export const DEFAULT_RUN_STORE_TOKEN_ENV = "MEMORY_TOKEN";
-/** The one store key (Durable Object name) the bot uses. */
-export const RUN_STORE_KEY = "runs:default";
 
 /** The `/runs/*` route answered 404: the Worker does not have this route yet. Never retried. */
 export class RouteMissingError extends Error {

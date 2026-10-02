@@ -68,7 +68,7 @@ describe("detachThread releases the tree whatever it holds, and names what it di
     const reread = detach.indexOf(
       "const current = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));",
     );
-    const evict = detach.indexOf('await this.evictBinding(current, activeNow, `detach`, "detach", tree)');
+    const evict = detach.indexOf('await this.evictBinding(current, activeNow, `detach`, "detach", tree, true)');
     expect(busyNow).toBeGreaterThan(measure);
     expect(reread).toBeGreaterThan(busyNow);
     expect(evict).toBeGreaterThan(reread);

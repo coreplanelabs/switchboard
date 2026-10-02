@@ -153,11 +153,13 @@ describe("a run's registration is held from attach to release", () => {
 });
 
 describe("the preflight-facing counts see registered runs the op counters miss", () => {
-  it("registeredRunsBeyondOps counts registrations whose thread has no op in flight and remains within its bounded protection window", () => {
+  it("registeredRunsBeyondOps retains durable owners beyond the execution deadline and bounds only legacy registrations", () => {
     const count = method("registeredRunsBeyondOps");
     expect(count).toMatch(/this\.ctx\.storage\.list<RunRegistration>\(\{ prefix: RUN_REG_KEY_PREFIX \}\)/);
     expect(count).toContain("registeredRunNeedsProtection(");
-    expect(count).toContain("this.threadOpsInFlight.get(r.threadKey) ?? 0");
+    expect(count).toContain("r?.runId");
+    expect(count).toContain("runFenceKey(binding.threadKey)");
+    expect(count).toContain("this.threadOpsInFlight.get(binding.threadKey) ?? 0");
     expect(count).toContain("r.deadlineAt + RUN_REGISTRATION_GRACE_MS");
     expect(count).toContain("systemClock() - CLEAN_IDLE_RELEASE_S * 1000");
   });

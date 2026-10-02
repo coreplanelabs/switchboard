@@ -96,6 +96,8 @@ import {
 } from "./legacyCredentials.js";
 import { hasUnexpectedOwnedThreadDir } from "./orphanThreadUsers.js";
 import { KeyedAsyncLock } from "./keyedAsyncLock.js";
+import { decideWorkspaceRemoval, type PreservationDecision } from "./workspacePreservation.js";
+import { RUN_STORE_KEY, RUN_STORE_TIMEOUT_MS } from "../../src/core/runStoreConstants.js";
 import { residentPublicationCommand, type ResidentPublicationInput } from "../../src/execution/residentPublication.js";
 import {
   nextDeployImageReconcile,
@@ -165,6 +167,8 @@ import {
   evictedTreeOf,
   evictedTreeSentence,
   parseWorktreeCleanliness,
+  parsePrivateTreeObservation,
+  privateTreeObservationScript,
   worktreeCleanlinessScript,
   type EvictedTree,
   type LeftBehind,
@@ -1218,15 +1222,14 @@ interface ThreadBinding {
    *  `detach`, `disk-pressure`, or a reclamation fate — `merged #N` /
    *  `closed #N` / `gone`. */
   evictedWhy?: string;
-  /** What the tree held when that eviction removed it (item 17: never a
-   *  reason to keep the tree, never discarded silently): the tracked changes
+  /** What the tree held when that eviction removed it: the tracked changes
    *  and unpushed commits measured as the thread user. Absent when the tree
    *  was clean, already gone with the disk, or not measured (a force detach). */
   evictedLeftBehind?: LeftBehind;
   /** Why the tree could not be measured before that eviction (git could not
    *  read it) — so an unreadable tree is never recorded as clean. */
   evictedUnmeasured?: string;
-  /** What the tree held when the last disk-full recycle (item 54) discarded
+  /** What the tree held when the last authorized disk-full recycle (item 54) discarded
    *  it with the disk — the same measurement as `evictedLeftBehind`, under its
    *  own name because the binding is not evicted: its user is kept and the
    *  next attach recreates the tree (`worktree-missing`). Both rewritten on
@@ -1235,10 +1238,13 @@ interface ThreadBinding {
   /** Why the tree could not be measured before that recycle (git could not
    *  read it) — still discarded with the disk, never recorded as clean. */
   recycledUnmeasured?: string;
+  /** Latest reason automatic cleanup deferred; never a release receipt. */
+  preservationBlocked?: string;
   /** How deps were last materialized (evidence that the per-branch reconciliation ran). */
   deps?: ThreadDepsMechanism;
   /** Commit the worktree was last attached at (the ref's tip in the mirror
-   *  at that moment). Display only — the tree itself is authoritative. */
+   *  at that moment). A terminal owner without a coding settlement can release
+   *  only when the current clean tree is still at this HEAD. */
   sha?: string;
   /** The mode the tree was last built for (item 50): true → no credential
    *  file, origin = the unreadable mirror. An attach in the other mode
@@ -3059,8 +3065,13 @@ export class ResidentDO extends Sandbox<Env> {
       } catch (err) {
         // Same exit as a stalled restore below: the stream is still running and
         // a rebuild is what follows a `down`, so the container goes with it.
-        this.swapIncarnation(); // deliberate incarnation swap
-        await this.stop().catch((stopErr) => console.log(`restore: stop failed: ${errMsg(stopErr)}`));
+        if (
+          !(await this.automaticContainerLoss("restore timeout", async () => {
+            this.swapIncarnation(); // deliberate incarnation swap
+            await this.stop().catch((stopErr) => console.log(`restore: stop failed: ${errMsg(stopErr)}`));
+          }))
+        )
+          throw new StepError("restore", "workspace-preservation: automatic VM stop deferred");
         throw await this.goDown(
           `r2-restore-failed: ${errMsg(err)} — container stopped so the transfer cannot land on a rebuild`,
         );
@@ -3141,8 +3152,13 @@ export class ResidentDO extends Sandbox<Env> {
       // every hardened entry file from 444 to 644. Stop
       // the container on the way down: the disk is ephemeral, the stream dies
       // with it, and the rebuild starts on an empty one.
-      this.swapIncarnation(); // deliberate incarnation swap
-      await this.stop().catch((stopErr) => console.log(`restore: stop failed: ${errMsg(stopErr)}`));
+      if (
+        !(await this.automaticContainerLoss("restore failure", async () => {
+          this.swapIncarnation(); // deliberate incarnation swap
+          await this.stop().catch((stopErr) => console.log(`restore: stop failed: ${errMsg(stopErr)}`));
+        }))
+      )
+        throw new StepError("restore", "workspace-preservation: automatic VM stop deferred");
       throw await this.goDown(disposition.reason);
     }
     await this.ensureGitSetup();
@@ -3302,8 +3318,13 @@ export class ResidentDO extends Sandbox<Env> {
       // offboard destroy. No prior row is evidence of a fresh VM; confirm
       // destruction here, after onboard returned, before any provision step.
       if (!parseSpentPoolUsers(await this.ctx.storage.get<unknown>(SPENT_POOL_USERS_KEY), THREAD_USERS)) {
-        this.swapIncarnation();
-        await this.destroyConfirmed();
+        if (
+          !(await this.automaticContainerLoss("provisioning VM reset", async () => {
+            this.swapIncarnation();
+            await this.destroyConfirmed();
+          }))
+        )
+          throw new StepError("provision", "workspace-preservation: automatic VM reset deferred");
       }
       const record = await this.registry().getRecord(resource);
       if (!record) throw new StepError("registry", "registry record missing (offboarded mid-onboard?)");
@@ -3998,7 +4019,8 @@ export class ResidentDO extends Sandbox<Env> {
       case "recreate":
         // The disk, not the repo: destroy the container, snapshots kept; the
         // next cycle's wake restores mirror, checkout and deps from R2.
-        await this.recreateContainer(infraStreakReason(row, "recreate"));
+        if (!(await this.recreateContainer(infraStreakReason(row, "recreate"))))
+          await this.setResidentState("degraded", "workspace-preservation: automatic VM replacement deferred");
         return;
       case "down": {
         // A recreated container failed the same way: the snapshot or the
@@ -4006,10 +4028,14 @@ export class ResidentDO extends Sandbox<Env> {
         // item 36's transition, the VM destroyed first so provisioning starts
         // on a fresh one.
         const reason = infraStreakReason(row, "down");
-        this.swapIncarnation(); // deliberate incarnation swap
-        await this.destroyConfirmed();
-        await this.ctx.storage.delete(INFRA_STREAK_KEY);
-        await this.goDown(reason);
+        const removed = await this.automaticContainerLoss(reason, async () => {
+          this.swapIncarnation(); // deliberate incarnation swap
+          await this.destroyConfirmed();
+          await this.ctx.storage.delete(INFRA_STREAK_KEY);
+        });
+        if (!removed)
+          await this.setResidentState("degraded", "workspace-preservation: automatic VM replacement deferred");
+        else await this.goDown(reason);
         return;
       }
     }
@@ -4115,20 +4141,31 @@ export class ResidentDO extends Sandbox<Env> {
         // SIGTERM (`stop()` signals and returns; it cannot kill), the
         // incarnation swapped: a runtime that still honours signals restarts
         // under the retry's exec on a fresh disk, and the wake path restores.
-        this.swapIncarnation(); // deliberate incarnation swap
-        await this.stop().catch((stopErr) => console.log(`runtime-unreachable: stop failed: ${errMsg(stopErr)}`));
+        if (
+          !(await this.automaticContainerLoss(reason, async () => {
+            this.swapIncarnation(); // deliberate incarnation swap
+            await this.stop().catch((stopErr) => console.log(`runtime-unreachable: stop failed: ${errMsg(stopErr)}`));
+          }))
+        )
+          return { status: "failed", reason: "workspace-preservation: automatic VM stop deferred" };
         await this.setResidentState("degraded", reason);
         throw err;
       case "recreate":
-        await this.recreateContainer(reason);
+        if (!(await this.recreateContainer(reason)))
+          return { status: "failed", reason: "workspace-preservation: automatic VM replacement deferred" };
         throw err;
       case "down":
         // A fresh VM did not answer either. Down with a rebuild-eligible reason
         // (REHYDRATION_FAILURE_RE) — goDown rebuilds on the transition, item 36 —
         // and the VM destroyed, so the rebuild's provisioning starts on a new one.
-        this.swapIncarnation(); // deliberate incarnation swap
-        await this.destroyConfirmed();
-        await this.clearInstanceLease(instance);
+        if (
+          !(await this.automaticContainerLoss(reason, async () => {
+            this.swapIncarnation(); // deliberate incarnation swap
+            await this.destroyConfirmed();
+            await this.clearInstanceLease(instance);
+          }))
+        )
+          return { status: "failed", reason: "workspace-preservation: automatic VM replacement deferred" };
         return { status: "failed", reason: (await this.goDown(reason)).reason };
     }
   }
@@ -4144,13 +4181,80 @@ export class ResidentDO extends Sandbox<Env> {
    *  rebuild (destroy plus reprovision from the code host) is the expensive
    *  one. The state stays `degraded` with the reason naming the pending
    *  restore, for the reason `escalateRuntimeUnreachable` gives. */
-  private async recreateContainer(reason: string): Promise<void> {
-    console.log(
-      `recreate: destroying the container — snapshots kept; the next exec restores from R2 (${reason.slice(0, 200)})`,
-    );
-    this.swapIncarnation(); // deliberate incarnation swap
-    await this.destroyConfirmed();
-    await this.setResidentState("degraded", reason);
+  private async automaticContainerLoss(
+    reason: string,
+    action: () => Promise<void>,
+    admissionHeld = false,
+    ownAdmissions = 0,
+  ): Promise<boolean> {
+    const checked = async () => {
+      const defer = async (detail: string) => {
+        await this.recordRefreshError(`${reason} — workspace-preservation: ${detail}`);
+        return false;
+      };
+      if (this.runsInFlightCount() > ownAdmissions || this.workspaceEvictionsInFlight.size > 0)
+        return defer("resident activity changed before VM loss check");
+      const runtimeActive = await this.isRuntimeActive().catch(() => false);
+      const bindings = (await this.liveBindings()).sort((a, b) => a.threadKey.localeCompare(b.threadKey));
+      const owners = await Promise.all(
+        bindings.map(async (binding) => ({
+          registration: await this.ctx.storage.get<RunRegistration>(runRegKey(binding.threadKey)),
+          fence: await this.ctx.storage.get<unknown>(runFenceKey(binding.threadKey)),
+        })),
+      );
+      for (const binding of bindings) {
+        const decision = await this.workspaceRemovalDecision(binding, runtimeActive);
+        if (decision.removable === false) {
+          await this.reportBlockedWorkspace({ binding, reason: decision.reason });
+          await this.recordRefreshError(`${reason} — workspace-preservation: ${binding.threadKey} ${decision.reason}`);
+          return false;
+        }
+      }
+      if (this.runsInFlightCount() > ownAdmissions || this.workspaceEvictionsInFlight.size > 0)
+        return defer("resident activity changed during VM loss check");
+      const latest = (await this.liveBindings()).sort((a, b) => a.threadKey.localeCompare(b.threadKey));
+      if (
+        latest.length !== bindings.length ||
+        latest.some((binding, index) => {
+          const before = bindings[index];
+          return (
+            binding.threadKey !== before.threadKey ||
+            binding.user !== before.user ||
+            binding.ref !== before.ref ||
+            binding.worktreePath !== before.worktreePath ||
+            binding.lastAttachAt !== before.lastAttachAt
+          );
+        })
+      )
+        return defer("workspace binding changed during VM loss check");
+      const latestOwners = await Promise.all(
+        latest.map(async (binding) => ({
+          registration: await this.ctx.storage.get<RunRegistration>(runRegKey(binding.threadKey)),
+          fence: await this.ctx.storage.get<unknown>(runFenceKey(binding.threadKey)),
+        })),
+      );
+      if (latestOwners.some((owner, index) => JSON.stringify(owner) !== JSON.stringify(owners[index])))
+        return defer("workspace owner changed during VM loss check");
+      await action();
+      return true;
+    };
+    if (admissionHeld) return checked();
+    const admission = await this.recreateAdmission.run(checked);
+    return admission.busy ? false : admission.value;
+  }
+
+  private async recreateContainer(reason: string, automatic = true, admissionHeld = false): Promise<boolean> {
+    const recreate = async () => {
+      console.log(
+        `recreate: destroying the container — snapshots kept; the next exec restores from R2 (${reason.slice(0, 200)})`,
+      );
+      this.swapIncarnation(); // deliberate incarnation swap
+      await this.destroyConfirmed();
+      await this.setResidentState("degraded", reason);
+    };
+    if (automatic) return this.automaticContainerLoss(reason, recreate, admissionHeld, admissionHeld ? 1 : 0);
+    await recreate();
+    return true;
   }
 
   /** Forget the SDK's stored runtime identity (`SDK_RUNTIME_RECORD_KEY`)
@@ -4721,15 +4825,14 @@ export class ResidentDO extends Sandbox<Env> {
     return classifyRefreshFailure({ step, message, freeKiB: await this.freeKiB() });
   }
 
-  /** The disk is a cache: stop the container so the next cycle attempt
+  /** Stop a safe container so the next cycle attempt
    *  restores mirror + checkout from R2 onto an empty disk — the same wake
    *  path as a platform sleep. Only when the pure plan allows it: no recycle
    *  within the cooldown, nothing in flight (`selfInFlight` excludes the
    *  calling refresh cycle from the count) and no live binding used within
    *  the idle floor and no live run registration — the idle-sleep gate's own
-   *  predicates, because a sleep and a recycle destroy the same disk: it may
-   *  go away when no run is using it, never for what the trees hold (item 17).
-   *  A recycle discards every live tree the way an eviction does, so each is measured
+   *  predicates. The shared preservation decision must also authorize every
+   *  live binding before the container can be stopped. Each tree is measured
    *  first, as its thread user, and its binding records what went
    *  (`recordRecycledTree`); the plan is decided again after those awaits,
    *  right before the stop. A refused recycle is written to
@@ -4756,8 +4859,8 @@ export class ResidentDO extends Sandbox<Env> {
     const live = await this.liveBindings();
     const first = await plan(live);
     if (first.action === "wait") return kept(first.why);
-    // What each live tree holds, for its record — never a reason to keep the
-    // container. Concurrent: each probe touches only its own tree, one spawn
+    // What each live tree holds, for its record. Preservation authority is
+    // checked separately before stop. Each probe touches its own tree, one spawn
     // each. Runtime down: the disk, and every tree with it, is already gone.
     const active = await this.isRuntimeActive().catch(() => false);
     const trees = active
@@ -4769,15 +4872,17 @@ export class ResidentDO extends Sandbox<Env> {
     // fresh facts — an attach or an op that landed meanwhile keeps the container.
     const verdict = await plan(await this.liveBindings());
     if (verdict.action === "wait") return kept(verdict.why);
-    console.log(
-      `disk-full: recycling the container — the next cycle restores mirror + checkout from R2 onto an empty disk (${reason})`,
-    );
-    for (const [binding, tree] of trees) await this.recordRecycledTree(binding, tree);
-    await this.ctx.storage.put(DISK_FULL_RECYCLE_KEY, systemClock());
-    await this.recordRefreshError(`${reason} — container recycled; restoring from R2 on the next cycle`);
-    this.swapIncarnation(); // deliberate incarnation swap
-    await this.stop().catch((err) => console.log(`disk-full: stop failed: ${errMsg(err)}`));
-    return true;
+    const recycled = await this.automaticContainerLoss(reason, async () => {
+      console.log(
+        `disk-full: recycling the container — the next cycle restores mirror + checkout from R2 onto an empty disk (${reason})`,
+      );
+      for (const [binding, tree] of trees) await this.recordRecycledTree(binding, tree);
+      await this.ctx.storage.put(DISK_FULL_RECYCLE_KEY, systemClock());
+      await this.recordRefreshError(`${reason} — container recycled; restoring from R2 on the next cycle`);
+      this.swapIncarnation(); // deliberate incarnation swap
+      await this.stop().catch((err) => console.log(`disk-full: stop failed: ${errMsg(err)}`));
+    });
+    return recycled || kept("workspace-preservation: automatic disk recycle deferred");
   }
 
   /** The disk-full recycle's record for one live tree (item 54), written the
@@ -4986,8 +5091,8 @@ export class ResidentDO extends Sandbox<Env> {
    *  is projected as `hardlink`, the common case. When it does not fit, the
    *  coldest idle trees go first (`orderEvictionCandidates`: never the
    *  requesting thread, a busy tree, the default branch, or one attached within
-   *  DISK_EVICT_MIN_IDLE_MS), whatever they hold — item 17: dirt never keeps a
-   *  tree; each is measured as its thread user for the eviction's record —
+   *  DISK_EVICT_MIN_IDLE_MS). The shared preservation decision admits each
+   *  candidate; each is measured as its thread user for the eviction's record —
    *  `df` re-probed after each; still
    *  short → `503 {reason:"disk-pressure"}` with the whole math in `error`, the
    *  same shape as `mirror-busy`, so the bot falls back cold legibly. Never a
@@ -5261,14 +5366,18 @@ export class ResidentDO extends Sandbox<Env> {
       );
       return "deferred";
     }
-    console.log(`image-stale (${where}): ${stale} — stopping so it restarts on the current image`);
-    this.swapIncarnation(); // deliberate incarnation swap
-    try {
-      await this.stop();
-    } catch (err) {
-      console.log(`image-stale: stop failed: ${errMsg(err)}`);
-      if (where === "deploy") return "deferred";
-    }
+    let deployStopFailed = false;
+    const restarted = await this.automaticContainerLoss(stale, async () => {
+      console.log(`image-stale (${where}): ${stale} — stopping so it restarts on the current image`);
+      this.swapIncarnation(); // deliberate incarnation swap
+      try {
+        await this.stop();
+      } catch (err) {
+        console.log(`image-stale: stop failed: ${errMsg(err)}`);
+        deployStopFailed = where === "deploy";
+      }
+    });
+    if (!restarted || deployStopFailed) return "deferred";
     // A successful stop proves only that the old process is gone. The pending
     // marker deliberately survives it: the replacement's own hydration reports
     // after reaching `warm`, so `imageReport: current` can never precede a
@@ -5775,7 +5884,7 @@ export class ResidentDO extends Sandbox<Env> {
             error: "pool-recycle-required: all UIDs spent and the resident is not idle for checked VM recycle",
             status: 503,
           };
-        await this.recreateContainer("pool-recycle: all UIDs spent; no other resident work owns this VM");
+        await this.recreateContainer("pool-recycle: all UIDs spent; no other resident work owns this VM", true, true);
         await this.ensureHydrated();
         const fresh = parseSpentPoolUsers(await this.ctx.storage.get<unknown>(SPENT_POOL_USERS_KEY), THREAD_USERS);
         const ready = await this.getStatus();
@@ -6078,6 +6187,8 @@ export class ResidentDO extends Sandbox<Env> {
         // count it so a concurrent refresh-cycle reconcileImage never stops the
         // container under it (and isIdle never parks the cycle mid-attach).
         this.attachesInFlight++;
+        const priorTree = !reuse ? await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey)) : undefined;
+        if (priorTree && !priorTree.evicted && priorTree.user) this.workspaceEvictionsInFlight.add(threadKey);
         try {
           const res = await this.attachThreadBody(
             threadKey,
@@ -6096,6 +6207,7 @@ export class ResidentDO extends Sandbox<Env> {
           if (!("error" in res)) await this.registerRun(threadKey, runBudgetMs, runId, ownerGen, ownerFence);
           return res;
         } finally {
+          if (priorTree && !priorTree.evicted && priorTree.user) this.workspaceEvictionsInFlight.delete(threadKey);
           this.attachesInFlight--;
         }
       });
@@ -6178,6 +6290,10 @@ export class ResidentDO extends Sandbox<Env> {
     if (!readonly && storedPrior?.githubDoorHost && !githubDoor)
       return { error: "Git door credential is required to reattach this writable tree", status: 403, cause: "request" };
     const namedRef = refHint !== null && !reason.refByDefault && reason.ownPr === null;
+    if (namedRef && storedPrior && !storedPrior.evicted && storedPrior.user && storedPrior.ref !== refHint) {
+      const preserved = await this.guardWorkspaceReplacement(storedPrior);
+      if (preserved) return preserved;
+    }
     // The own-PR rebind may run a branch probe as this UID before ordinary
     // allocation. Establish exact ownership first on a recycled VM.
     if (!namedRef && storedPrior && !storedPrior.evicted && storedPrior.user) {
@@ -6276,6 +6392,7 @@ export class ResidentDO extends Sandbox<Env> {
         facts,
         record,
         binding,
+        preservationSource: storedPrior,
         mode,
         githubDoor,
         rollback,
@@ -6322,6 +6439,10 @@ export class ResidentDO extends Sandbox<Env> {
     const plan = rebindPlan({ ownPr, reuse, binding: prior, defaultRef });
     if (plan.kind === "none" || prior === undefined) return { binding: prior };
     if (plan.kind === "refuse") return { binding: prior, rebindRefused: plan.refused };
+    if (!prior.evicted && prior.user) {
+      const preserved = await this.guardWorkspaceReplacement(prior);
+      if (preserved) return preserved;
+    }
     const key = threadBindingKey(prior.threadKey);
     // The tree is provisioned at the branch from the mirror, so the mirror
     // must hold it first: a branch pushed since the last refresh cycle is
@@ -6471,6 +6592,10 @@ export class ResidentDO extends Sandbox<Env> {
     const current = (await this.ctx.storage.get<ThreadBinding>(key)) ?? binding;
     const back = returnToDefault(current, defaultRef, new Date(systemClock()).toISOString());
     if (back === undefined) return { binding: current };
+    if (!current.evicted && current.user) {
+      const preserved = await this.guardWorkspaceReplacement(current);
+      if (preserved) throw new StepError("workspace-preserved", preserved.error);
+    }
     await this.putThreadBinding(back.binding);
     console.log(
       `attach ${binding.threadKey}: ${back.returned.from} is gone from the mirror (the thread's own pull request #${back.returned.pr}) — returned to ${back.returned.to}; the tree is provisioned there`,
@@ -6508,6 +6633,7 @@ export class ResidentDO extends Sandbox<Env> {
     facts: RepoFacts;
     record: ResidentRecord;
     binding: ThreadBinding;
+    preservationSource?: ThreadBinding;
     mode: ReturnType<typeof planReadonlyAttach>;
     githubDoor?: { baseUrl: string; bearer: string };
     rollback: () => Promise<void>;
@@ -6661,6 +6787,7 @@ export class ResidentDO extends Sandbox<Env> {
           detached: target.kind === "sha",
           reuse,
           refChanged,
+          priorBinding: input.preservationSource,
         });
         return { sha, threadLockKey, recreated };
       }, ATTACH_MUTEX_WAIT_MS);
@@ -6698,6 +6825,8 @@ export class ResidentDO extends Sandbox<Env> {
           cause: "system",
         };
       }
+      if (err instanceof StepError && err.step === "workspace-preserved")
+        return { error: err.message, status: 409, reason: "workspace-preserved" };
       return this.attachFailed(err);
     }
 
@@ -6824,7 +6953,7 @@ export class ResidentDO extends Sandbox<Env> {
      *  expected commit it still holds (item 51) — the tree is checked out at
      *  that commit, detached, instead of at a branch. `reuse`: a resumed
      *  run's attach (item 66): keep the tree as it stands, or refuse. */
-    opts: { detached: boolean; reuse: boolean; refChanged: boolean } = {
+    opts: { detached: boolean; reuse: boolean; refChanged: boolean; priorBinding?: ThreadBinding } = {
       detached: false,
       reuse: false,
       refChanged: false,
@@ -6875,6 +7004,16 @@ export class ResidentDO extends Sandbox<Env> {
     });
     if (decision.kind === "refuse") throw new ReuseRefusedError(decision.why);
     if (decision.kind === "reuse") return false;
+
+    if (
+      opts.priorBinding &&
+      !opts.priorBinding.evicted &&
+      opts.priorBinding.user &&
+      opts.priorBinding.worktreePath === wt
+    ) {
+      const preserved = await this.guardWorkspaceReplacement(opts.priorBinding);
+      if (preserved) throw new StepError("workspace-preserved", preserved.error);
+    }
 
     await this.runOk(["rm", "-rf", wt], "worktree-clean");
     if (opts.detached) {
@@ -7568,6 +7707,8 @@ export class ResidentDO extends Sandbox<Env> {
    *  binding, worktree actually on disk (the container may have slept since
    *  the last attach — disk is cache, re-attach recreates). */
   private async threadPreflight(threadKey: string): Promise<{ binding: ThreadBinding } | ThreadErr> {
+    if (this.workspaceEvictionsInFlight.has(threadKey))
+      return { error: "workspace-preservation: automatic release is checking this thread", status: 503 };
     if (await this.recreateAdmission.blocked()) return this.recreateRefusal();
     try {
       await this.ensureHydrated();
@@ -7619,6 +7760,9 @@ export class ResidentDO extends Sandbox<Env> {
    *  run's release can never yank a worktree out from under a concurrent
    *  command on the same thread (a queued follow-up message, two runs racing). */
   private threadOpsInFlight = new Map<string, number>();
+  /** A release holds the thread attach lock and refuses new file operations
+   *  until its final owner check and directory removal have settled. */
+  private workspaceEvictionsInFlight = new Set<string>();
 
   private async withThreadBusy<T>(threadKey: string, fn: () => Promise<T>): Promise<T> {
     this.threadOpsInFlight.set(threadKey, (this.threadOpsInFlight.get(threadKey) ?? 0) + 1);
@@ -7661,6 +7805,7 @@ export class ResidentDO extends Sandbox<Env> {
   ): Promise<CredentialInspection> {
     try {
       return await this.withThreadBusy(threadKey, async () => {
+        if (this.workspaceEvictionsInFlight.has(threadKey)) return emptyCredentialInspection();
         if (await this.memoryGate("exec")) return emptyCredentialInspection();
         // Inspection cannot hydrate, reattach or repair the selected runtime.
         const parsed = credentialInspectionInputSchema.safeParse(input);
@@ -7970,11 +8115,91 @@ export class ResidentDO extends Sandbox<Env> {
     return { ok: true, bytes: content.length };
   }
 
+  /** The state Worker answers one exact run, with live ownership taking
+   *  precedence over a provisional or retained history row. An unavailable
+   *  answer cannot authorize deletion. */
+  private async observeRunForEviction(registration: RunRegistration, _binding: ThreadBinding): Promise<unknown> {
+    const url = this.env.STATE_WORKER_URL;
+    const token = this.env.MEMORY_TOKEN;
+    if (!url || !token || !registration.runId) return null;
+    try {
+      const res = await fetch(new URL("/runs/preservation-owner", url), {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ storeKey: RUN_STORE_KEY, runId: registration.runId }),
+        signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
+      });
+      return res.ok ? await res.json() : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Strict current Git proof. The older cleanliness count is only a report:
+   *  it omits non-ignored untracked files and treats an absent tree as clean. */
+  private async observePrivateTree(binding: ThreadBinding) {
+    try {
+      const result = await this.run([
+        "/bin/sh",
+        "-c",
+        privateTreeObservationScript(binding.worktreePath, binding.user),
+      ]);
+      return parsePrivateTreeObservation(result);
+    } catch {
+      return null;
+    }
+  }
+
+  private async guardWorkspaceReplacement(binding: ThreadBinding): Promise<ThreadErr | null> {
+    if ((this.threadOpsInFlight.get(binding.threadKey) ?? 0) > 0) {
+      await this.reportBlockedWorkspace({ binding, reason: "thread-operation-in-flight" });
+      return { error: "workspace-preserved: thread-operation-in-flight", status: 409, reason: "workspace-preserved" };
+    }
+    const decision = await this.workspaceRemovalDecision(binding, await this.isRuntimeActive());
+    if (decision.removable) return null;
+    await this.reportBlockedWorkspace({ binding, reason: decision.reason });
+    return { error: `workspace-preserved: ${decision.reason}`, status: 409, reason: "workspace-preserved" };
+  }
+
+  /** One decision for every automatic loss path. A true legacy cache needs
+   *  no remote read; a known owner stays until exact terminal and current
+   *  private-tree evidence agree. */
+  private async workspaceRemovalDecision(binding: ThreadBinding, canObserveTree = true): Promise<PreservationDecision> {
+    const [registration, fence] = await Promise.all([
+      this.ctx.storage.get<RunRegistration>(runRegKey(binding.threadKey)),
+      this.ctx.storage.get<unknown>(runFenceKey(binding.threadKey)),
+    ]);
+    const input = { binding, registration, fence, owner: null as unknown, tree: null as unknown };
+    let decision = decideWorkspaceRemoval(input);
+    if (decision.removable || decision.reason !== "owner-unavailable") return decision;
+    input.owner = await this.observeRunForEviction(registration!, binding);
+    decision = decideWorkspaceRemoval(input);
+    if (decision.removable || decision.reason !== "private-tree-unverified" || !canObserveTree) return decision;
+    input.tree = await this.observePrivateTree(binding);
+    return decideWorkspaceRemoval(input);
+  }
+
+  /** A blocked release is visible on the binding, without changing owner or
+   *  claiming that any bytes were saved. */
+  private async reportBlockedWorkspace(input: { binding: ThreadBinding; reason: string }): Promise<void> {
+    const current = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(input.binding.threadKey));
+    if (
+      !current ||
+      current.evicted ||
+      current.user !== input.binding.user ||
+      current.lastAttachAt !== input.binding.lastAttachAt ||
+      current.ref !== input.binding.ref
+    )
+      return;
+    if (current.preservationBlocked !== input.reason)
+      await this.putThreadBinding({ ...current, preservationBlocked: input.reason });
+    console.log(`workspace-preservation: kept ${input.binding.threadKey} (${input.reason})`);
+  }
+
   /** Remove a thread's worktree (when the runtime is up — a slept container
    *  already lost it) and release its pool user; the binding is KEPT, marked
    *  evicted with the cause (`evictedWhy`) and with what the tree held
-   *  (`evictedLeftBehind`, or `evictedUnmeasured` when git could not read it
-   *  — item 17: never a reason to keep the tree, never discarded silently), so
+   *  (`evictedLeftBehind`, or `evictedUnmeasured` when git could not read it), so
    *  the ref stays sticky and the next attach recreates the tree with it.
    *  Shared by the inactivity sweep, the reclamation pass, the disk-pressure
    *  path and /detach. */
@@ -7987,70 +8212,109 @@ export class ResidentDO extends Sandbox<Env> {
      *  as the thread user with the runtime up); absent when the tree was clean,
      *  already gone with the disk, or not measured (a force detach). */
     tree?: EvictedTree,
-  ): Promise<"evicted" | "changed" | "cleanup-failed"> {
-    if (!(await this.poolUserOwnerMatches(binding.user, `thread:${binding.threadKey}`))) return "cleanup-failed";
-    const threadDir = parentDir(binding.worktreePath);
-    if (runtimeActive && !threadDir.startsWith(`${THREADS_DIR}/`)) return "cleanup-failed";
-    if (runtimeActive) {
-      try {
-        // Worktree removal counts as a mirror-adjacent mutation — same mutex.
-        await this.withMirrorLock(async () => {
-          if (!(await this.poolUserOwnerMatches(binding.user, `thread:${binding.threadKey}`)))
-            throw new Error("pool-owner-mismatch: eviction refused before directory removal");
-          await this.runOk(["rm", "-rf", threadDir], "evict");
-        });
-      } catch (err) {
-        console.log(`${logCtx}: rm failed for ${binding.threadKey}: ${errMsg(err)}`);
-        // The directory may still contain a credential file readable by this
-        // UID. Keep the binding live so the allocator cannot give it to a new
-        // thread; a later sweep or detach may retry the removal.
-        return "cleanup-failed";
-      }
-      // Item 55: what an `install` thread's package manager left OUTSIDE the
-      // tree — its pnpm store (the tree's hardlink source: 0 unique bytes while
-      // the tree lived, all of them now), npm/yarn/bun caches — goes with it.
-      // Pool users only, never the build user (its store backs the warm checkout).
-      if ((THREAD_USERS as readonly string[]).includes(binding.user)) {
-        if (!(await this.poolUserOwnerMatches(binding.user, `thread:${binding.threadKey}`))) return "cleanup-failed";
-        await this.run(threadUserCacheCleanArgv(`/home/${binding.user}`)).catch((err) =>
-          console.log(`${logCtx}: home cache rm failed for ${binding.user}: ${errMsg(err)}`),
-        );
-      }
-    }
-    // The rm above awaited the mirror lock; a re-attach that STARTED in that
-    // window has since bumped lastAttachAt (and will recreate the tree under
-    // the same lock). Writing `user:""` over it would free a user the
-    // re-attach is still holding — so re-read and give way instead.
-    const now = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(binding.threadKey));
-    if (!now || now.evicted || now.lastAttachAt !== binding.lastAttachAt) {
-      const why = !now ? "binding deleted" : now.evicted ? "already evicted (concurrent eviction)" : "re-attached";
-      console.log(`${logCtx}: ${binding.threadKey} ${why} during eviction — binding left as is`);
+    threadLockHeld = false,
+  ): Promise<"evicted" | "changed" | "cleanup-failed" | "preserved"> {
+    if (!threadLockHeld)
+      return this.threadAttaches.run(binding.threadKey, () =>
+        this.evictBinding(binding, runtimeActive, logCtx, why, tree, true),
+      );
+    const before = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(binding.threadKey));
+    if (
+      !before ||
+      before.evicted ||
+      before.user !== binding.user ||
+      before.ref !== binding.ref ||
+      before.lastAttachAt !== binding.lastAttachAt ||
+      before.worktreePath !== binding.worktreePath
+    )
       return "changed";
+    if ((this.threadOpsInFlight.get(binding.threadKey) ?? 0) > 0) return "changed";
+    this.workspaceEvictionsInFlight.add(binding.threadKey);
+    try {
+      const decision = await this.workspaceRemovalDecision(before, runtimeActive);
+      if (decision.removable === false) {
+        await this.reportBlockedWorkspace({ binding: before, reason: decision.reason });
+        return "preserved";
+      }
+      if (!(await this.poolUserOwnerMatches(binding.user, `thread:${binding.threadKey}`))) return "cleanup-failed";
+      const threadDir = parentDir(binding.worktreePath);
+      if (runtimeActive && !threadDir.startsWith(`${THREADS_DIR}/`)) return "cleanup-failed";
+      if (runtimeActive) {
+        try {
+          // Worktree removal counts as a mirror-adjacent mutation — same mutex.
+          const removed = await this.withMirrorLock(async () => {
+            if (!(await this.poolUserOwnerMatches(binding.user, `thread:${binding.threadKey}`)))
+              throw new Error("pool-owner-mismatch: eviction refused before directory removal");
+            const latest = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(binding.threadKey));
+            if (
+              !latest ||
+              latest.evicted ||
+              latest.user !== binding.user ||
+              latest.ref !== binding.ref ||
+              latest.lastAttachAt !== binding.lastAttachAt ||
+              latest.worktreePath !== binding.worktreePath ||
+              (this.threadOpsInFlight.get(binding.threadKey) ?? 0) > 0
+            )
+              return false;
+            await this.runOk(["rm", "-rf", threadDir], "evict");
+            return true;
+          });
+          if (!removed.value) return "changed";
+        } catch (err) {
+          console.log(`${logCtx}: rm failed for ${binding.threadKey}: ${errMsg(err)}`);
+          // The directory may still contain a credential file readable by this
+          // UID. Keep the binding live so the allocator cannot give it to a new
+          // thread; a later sweep or detach may retry the removal.
+          return "cleanup-failed";
+        }
+        // Item 55: what an `install` thread's package manager left OUTSIDE the
+        // tree — its pnpm store (the tree's hardlink source: 0 unique bytes while
+        // the tree lived, all of them now), npm/yarn/bun caches — goes with it.
+        // Pool users only, never the build user (its store backs the warm checkout).
+        if ((THREAD_USERS as readonly string[]).includes(binding.user)) {
+          if (!(await this.poolUserOwnerMatches(binding.user, `thread:${binding.threadKey}`))) return "cleanup-failed";
+          await this.run(threadUserCacheCleanArgv(`/home/${binding.user}`)).catch((err) =>
+            console.log(`${logCtx}: home cache rm failed for ${binding.user}: ${errMsg(err)}`),
+          );
+        }
+      }
+      // The rm above awaited the mirror lock; a re-attach that STARTED in that
+      // window has since bumped lastAttachAt (and will recreate the tree under
+      // the same lock). Writing `user:""` over it would free a user the
+      // re-attach is still holding — so re-read and give way instead.
+      const now = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(binding.threadKey));
+      if (!now || now.evicted || now.lastAttachAt !== binding.lastAttachAt) {
+        const why = !now ? "binding deleted" : now.evicted ? "already evicted (concurrent eviction)" : "re-attached";
+        console.log(`${logCtx}: ${binding.threadKey} ${why} during eviction — binding left as is`);
+        return "changed";
+      }
+      await this.putThreadBinding({
+        ...now,
+        user: "",
+        evicted: true,
+        evictedAt: new Date(systemClock()).toISOString(),
+        lastRunOwner: await this.ctx.storage.get<RunRegistration>(runRegKey(binding.threadKey)),
+        evictedWhy: why,
+        preservationBlocked: undefined,
+        evictedLeftBehind: tree && "leftBehind" in tree ? tree.leftBehind : undefined,
+        evictedUnmeasured: tree && "unmeasured" in tree ? tree.unmeasured : undefined,
+      } satisfies ThreadBinding);
+      // The run's registration goes with its binding (item 44): released here,
+      // never on a give-way above — a re-attach has re-registered it anyway.
+      await this.ctx.storage.delete(runRegKey(binding.threadKey));
+      if (tree) console.log(`${logCtx}: ${binding.threadKey} evicted (${why}) — ${evictedTreeSentence(tree)}`);
+      return "evicted";
+    } finally {
+      this.workspaceEvictionsInFlight.delete(binding.threadKey);
     }
-    await this.putThreadBinding({
-      ...now,
-      user: "",
-      evicted: true,
-      evictedAt: new Date(systemClock()).toISOString(),
-      lastRunOwner: await this.ctx.storage.get<RunRegistration>(runRegKey(binding.threadKey)),
-      evictedWhy: why,
-      evictedLeftBehind: tree && "leftBehind" in tree ? tree.leftBehind : undefined,
-      evictedUnmeasured: tree && "unmeasured" in tree ? tree.unmeasured : undefined,
-    } satisfies ThreadBinding);
-    // The run's registration goes with its binding (item 44): released here,
-    // never on a give-way above — a re-attach has re-registered it anyway.
-    await this.ctx.storage.delete(runRegKey(binding.threadKey));
-    if (tree) console.log(`${logCtx}: ${binding.threadKey} evicted (${why}) — ${evictedTreeSentence(tree)}`);
-    return "evicted";
   }
 
   /** POST /detach: a run has ended — release its live binding now instead of
    *  holding it until the TTL sweep. The UID remains spent for this VM
-   *  generation. A run starts from a clean tree (item 17), so the tree
-   *  goes whatever it holds: what it held — uncommitted changes, unpushed
-   *  commits — is measured once, as the thread user, and named in the answer
-   *  (`leftBehind`) so the loss is never silent. The one thing that keeps a
-   *  tree is an op still in flight in it (`busy`) — `force` (read-only agents,
+   *  generation. The shared preservation decision decides whether the tree
+   *  may go. What it held — uncommitted changes, unpushed commits — is
+   *  measured for the answer (`leftBehind`) and the eviction record.
+   *  An op in flight also keeps the tree (`busy`) — `force` (read-only agents,
    *  hard stops) KILLS that op first (the bot has already dropped its fetch,
    *  the command would otherwise run on and hold the user until the sweep)
    *  and measures nothing. No binding → 404-shaped error; already evicted → a
@@ -8095,8 +8359,8 @@ export class ResidentDO extends Sandbox<Env> {
         if (left > 0) return { released: false, reason: busyAfterKillReason(left), user: binding.user };
       }
       const active = await this.isRuntimeActive().catch(() => false);
-      // What the tree still holds, for the answer and the eviction's record —
-      // never a reason to keep it. Not measured on a force release: a read-only
+      // What the tree still holds, for the answer and the eviction's record.
+      // Not measured on a force release: a read-only
       // tree holds nothing, and a hard stop's tree is whatever the killed
       // command left. A probe that fails names nothing in the answer (never a
       // guess); the record and the log say it could not be measured.
@@ -8122,7 +8386,9 @@ export class ResidentDO extends Sandbox<Env> {
       // Same as the sweep: `active` was read before the measurement's awaits; a
       // container that woke meanwhile must get the rm, not an orphaned tree.
       const activeNow = await this.isRuntimeActive().catch(() => true);
-      const eviction = await this.evictBinding(current, activeNow, `detach`, "detach", tree);
+      const eviction = await this.evictBinding(current, activeNow, `detach`, "detach", tree, true);
+      if (eviction === "preserved")
+        return { released: false, reason: "workspace-preservation: owner or saved work is not verified", user };
       if (eviction === "cleanup-failed")
         return { released: false, reason: "thread-cleanup-failed: pool user kept", user };
       if (eviction === "changed") return { released: false, reason: "re-attached during eviction — kept", user };
@@ -8175,8 +8441,8 @@ export class ResidentDO extends Sandbox<Env> {
    *  would be refused by safe.directory and would be the exact repo-local-
    *  config execution vector safe.directory exists to block. Read by
    *  `measureTreeBeforeEviction` alone, for the record of an eviction or of
-   *  the disk-full recycle — never a reason to keep a tree or a container
-   *  (item 17). A tree that no longer exists (disk recycled by a sleep/wake)
+   *  the disk-full recycle. The preservation decision uses a separate strict
+   *  observation. A tree that no longer exists (disk recycled by a sleep/wake)
    *  is clean with nothing measured: there was nothing to discard.
    *
    *  ONE spawn: the presence test and both git probes fold
@@ -8291,21 +8557,34 @@ export class ResidentDO extends Sandbox<Env> {
       return { deadlineAt };
     });
   }
-  /** The registrations the op counters do not already see: a thread with an
-   *  op in flight is counted by `runsInFlightCount`, so its registration is
-   *  not counted again. The idle, image-reconcile and disk-recycle gates read
-   *  this bounded count alongside their op counters, so a live run protects
-   *  its container while a stale registration cannot pin it awake. */
+  /** Execution deadlines bound legacy registrations only. A binding with a
+   *  durable run identity stays protected until its files pass the shared
+   *  preservation decision and the binding is released. */
   private async registeredRunsBeyondOps(): Promise<number> {
     const regs = await this.ctx.storage.list<RunRegistration>({ prefix: RUN_REG_KEY_PREFIX });
+    const bindings = await this.liveBindings();
     const cutoff = systemClock() - CLEAN_IDLE_RELEASE_S * 1000;
     let n = 0;
-    for (const r of regs.values()) {
-      const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(r.threadKey));
+    for (const binding of bindings) {
+      const r = regs.get(runRegKey(binding.threadKey));
+      const fence = await this.ctx.storage.get<unknown>(runFenceKey(binding.threadKey));
+      if (
+        r?.runId ||
+        r?.ownerGen ||
+        r?.ownerFence !== undefined ||
+        fence !== undefined ||
+        binding.lastRunOwner?.runId ||
+        binding.lastRunOwner?.ownerGen ||
+        binding.lastRunOwner?.ownerFence !== undefined
+      ) {
+        if ((this.threadOpsInFlight.get(binding.threadKey) ?? 0) === 0) n++;
+        continue;
+      }
+      if (!r) continue;
       if (
         registeredRunNeedsProtection(
-          binding?.lastAttachAt,
-          this.threadOpsInFlight.get(r.threadKey) ?? 0,
+          binding.lastAttachAt,
+          this.threadOpsInFlight.get(binding.threadKey) ?? 0,
           cutoff,
           r.deadlineAt === undefined ? undefined : r.deadlineAt + RUN_REGISTRATION_GRACE_MS,
           systemClock(),
@@ -8353,14 +8632,8 @@ export class ResidentDO extends Sandbox<Env> {
       const last = Date.parse(binding.lastAttachAt);
       if (last >= cutoff) {
         // Not past the TTL. Still release it if it has been idle for an hour
-        // and nothing is running on it: the run that used it is over, and
-        // whatever its tree holds has no future — the next attach provisions
-        // a clean tree (item 17) — so there is nothing to keep it for. This is
-        // what drains the bindings of runs whose release never came (a
-        // resident that was sick at the run's end, a run older than
-        // `/detach`). A live run is protected by its budget above or an op
-        // in flight, not by its dirt. A slept container has no tree any more
-        // anyway (sleep destroys the disk).
+        // and nothing is running on it. The preservation decision below
+        // still needs the exact owner and current tree evidence before removal.
         const busy = this.threadOpsInFlight.get(binding.threadKey) ?? 0;
         if (last >= idleCutoff || busy > 0) {
           kept++;
@@ -8826,7 +9099,8 @@ export class ResidentDO extends Sandbox<Env> {
         kept.push({
           threadKey: binding.threadKey,
           ref: binding.ref,
-          why: eviction === "changed" ? "re-attached" : "cleanup-failed",
+          why:
+            eviction === "changed" ? "re-attached" : eviction === "preserved" ? "preservation-held" : "cleanup-failed",
         });
     }
     return { reclaimed, kept };
@@ -9008,6 +9282,7 @@ export class ResidentDO extends Sandbox<Env> {
           evictedUnmeasured,
           recycledLeftBehind,
           recycledUnmeasured,
+          preservationBlocked,
         }) => ({
           threadKey,
           ref,
@@ -9023,6 +9298,7 @@ export class ResidentDO extends Sandbox<Env> {
           evictedUnmeasured: evictedUnmeasured ?? null,
           recycledLeftBehind: recycledLeftBehind ?? null,
           recycledUnmeasured: recycledUnmeasured ?? null,
+          preservationBlocked: preservationBlocked ?? null,
         }),
       );
     // The runs whose process lives in the container between operator calls
@@ -9190,6 +9466,7 @@ export class ResidentDO extends Sandbox<Env> {
     }
     await this.recreateContainer(
       "runtime-unreachable: the container was recreated by an operator (recreate-container), snapshots kept — the restore from the snapshot is starting",
+      false,
     );
     const restoreStartedAt = new Date(systemClock()).toISOString();
     this.ctx.waitUntil(
@@ -9320,8 +9597,14 @@ export class ResidentDO extends Sandbox<Env> {
 
     // A failed destroy must leave the old snapshot and budget intact, and
     // must never arm provisioning against an unconfirmed old VM.
-    this.swapIncarnation();
-    await this.destroyConfirmed();
+    const destroy = async () => {
+      this.swapIncarnation();
+      await this.destroyConfirmed();
+    };
+    if (opts.auto) {
+      if (!(await this.automaticContainerLoss("auto-rebuild", destroy)))
+        return { error: "workspace-preservation: automatic rebuild deferred", status: 503 };
+    } else await destroy();
 
     // Old snapshot objects go before initResident wipes the stored handles,
     // and backups/<id>/ lives outside the resident/<resource>/ prefix — this

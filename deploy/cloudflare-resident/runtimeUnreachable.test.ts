@@ -154,7 +154,10 @@ describe("the ladder — each rung acts once, logs once and hands the step back 
   it("rung 3 (recreate): recreateContainer destroys the VM and keeps every snapshot, then the step is thrown so the retry's wake path restores", () => {
     const body = escalate();
     const recreate = body.slice(body.indexOf('case "recreate"'), body.indexOf('case "down"'));
-    expect(recreate).toMatch(/await this\.recreateContainer\(reason\);/);
+    expect(recreate).toMatch(/await this\.recreateContainer\(reason\)/);
+    expect(recreate).toContain(
+      'return { status: "failed", reason: "workspace-preservation: automatic VM replacement deferred" }',
+    );
     expect(recreate).toMatch(/throw err;/);
     const impl = method("recreateContainer");
     expect(impl).toMatch(/this\.swapIncarnation\(\);/);

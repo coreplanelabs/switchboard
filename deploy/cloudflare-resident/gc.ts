@@ -98,6 +98,7 @@ export type ReclaimWhy =
   | "fate-unknown"
   | "busy"
   | "run-held"
+  | "preservation-held"
   | "re-attached"
   | "cleanup-failed"
   | Extract<RefFate, "gone" | "merged" | "closed">;

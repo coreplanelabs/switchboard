@@ -16,11 +16,9 @@
  *  PROVISIONS (a fresh one). A reusing attach keeps a readable tree exactly
  *  as it stands, dirt and stale HEAD included, and refuses by name a tree it
  *  cannot keep (gone, unreadable, built for the other mode) without touching
- *  it. A provisioning attach keeps the dirty/stale discipline byte for byte:
- *  a run starts from a clean tree at the bound ref's tip, and what a run
- *  wants kept it commits and pushes (docs/reference/specs/resident-repos.md
- *  item 17) — so a tree left dirty, or on a branch the binding has since
- *  moved away from, is recreated, never repaired. */
+ *  it. A provisioning attach still asks for a clean tree at the bound ref's
+ *  tip. The resident's shared preservation decision must authorize removal
+ *  before it executes a recreate verdict (resident-repos.md item 71). */
 
 export type ParsedReuse = { reuse: boolean } | { error: string };
 

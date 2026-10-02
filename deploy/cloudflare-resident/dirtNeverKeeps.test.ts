@@ -191,9 +191,14 @@ describe("every eviction records what the tree held", () => {
   });
 
   it("evictBinding takes the measurement and stamps the counts, or the probe's failure, beside evictedWhy — both absent for a clean tree", () => {
-    expect(evict).toMatch(/tree\?: EvictedTree,\s*\): Promise<"evicted" \| "changed" \| "cleanup-failed"> \{/);
     expect(evict).toMatch(
-      /evictedWhy: why,\s*evictedLeftBehind: tree && "leftBehind" in tree \? tree\.leftBehind : undefined,\s*evictedUnmeasured: tree && "unmeasured" in tree \? tree\.unmeasured : undefined,\s*\} satisfies ThreadBinding\);/,
+      /tree\?: EvictedTree,\s*threadLockHeld = false,\s*\): Promise<"evicted" \| "changed" \| "cleanup-failed" \| "preserved"> \{/,
+    );
+    expect(evict.indexOf("workspaceRemovalDecision(before, runtimeActive)")).toBeLessThan(
+      evict.indexOf('["rm", "-rf", threadDir]'),
+    );
+    expect(evict).toMatch(
+      /evictedWhy: why,\s*preservationBlocked: undefined,\s*evictedLeftBehind: tree && "leftBehind" in tree \? tree\.leftBehind : undefined,\s*evictedUnmeasured: tree && "unmeasured" in tree \? tree\.unmeasured : undefined,\s*\} satisfies ThreadBinding\);/,
     );
     const binding = /interface ThreadBinding \{[\s\S]*?\n\}/.exec(source);
     expect(binding, "worker.ts declares ThreadBinding").not.toBeNull();
@@ -228,7 +233,7 @@ describe("every eviction records what the tree held", () => {
   it("the detach's one measurement feeds its answer and the record alike", () => {
     const detach = method("detachThread");
     expect(detach).toMatch(/if \(!force && active\) tree = await this\.measureTreeBeforeEviction\(binding\);/);
-    expect(detach).toMatch(/await this\.evictBinding\(current, activeNow, `detach`, "detach", tree\)/);
+    expect(detach).toMatch(/await this\.evictBinding\(current, activeNow, `detach`, "detach", tree, true\)/);
     expect(detach).toMatch(/const leftBehind = tree && "leftBehind" in tree \? tree\.leftBehind : undefined;/);
   });
 

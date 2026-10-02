@@ -4939,6 +4939,48 @@ export class RunHistoryDO extends DurableObject<Env> {
     return this.sql.exec<LiveRow>(`SELECT * FROM live_runs ORDER BY started_at ASC`).toArray().map(rowToLive);
   }
 
+  /** Exact owner evidence for resident cleanup. Read live first and bypass
+   * history retention: absence from a retained history view is not an ending. */
+  async preservationOwner(runId: string): Promise<unknown> {
+    const live = this.sql
+      .exec<Pick<LiveRow, "run_id" | "thread_key" | "owner_gen" | "phase" | "state_json">>(
+        `SELECT run_id, thread_key, owner_gen, phase, state_json FROM live_runs WHERE run_id = ?`,
+        runId,
+      )
+      .toArray()[0];
+    if (live) {
+      let binding: unknown;
+      try {
+        binding = (JSON.parse(live.state_json) as RunState).binding;
+      } catch {
+        return { kind: "unknown" };
+      }
+      return {
+        kind: "live",
+        row: { runId: live.run_id, threadKey: live.thread_key, ownerGen: live.owner_gen, phase: live.phase, binding },
+      };
+    }
+    const row = this.sql
+      .exec<{ summary_json: string }>(`SELECT summary_json FROM runs WHERE run_id = ?`, runId)
+      .toArray()[0];
+    if (!row) return { kind: "unknown" };
+    const record = parseSummary(row);
+    if (!record || record.provisional === true) return { kind: "unknown" };
+    return {
+      kind: "terminal",
+      record: {
+        id: record.id,
+        threadKey: record.threadKey,
+        status: record.status,
+        repo: record.repo,
+        userId: record.userId,
+        parentInstanceId: record.parentInstanceId,
+        idempotencyKey: record.idempotencyKey,
+        publicationSettlement: record.publicationSettlement,
+      },
+    };
+  }
+
   /** The events a live run has appended so far (item 30), in seq order — what
    *  a reclaim closes an unresumable run's record with. The finished-runs
    *  reads never see a live run, so this is the one way at its events. */
@@ -7383,6 +7425,7 @@ const LEDGER_ROUTES = new Set([
   "/runs/abandon",
   "/runs/reclaim",
   "/runs/live",
+  "/runs/preservation-owner",
   "/runs/live-events",
   "/runs/intake",
   "/runs/intake/read",
@@ -8114,6 +8157,11 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     return result.ok ? json(result) : json(result, 409);
   }
   if (pathname === "/runs/live") return json({ runs: await stub.listLive() });
+  if (pathname === "/runs/preservation-owner") {
+    const runId = parseRunId(b.runId);
+    if (!runId.ok) return json({ error: runId.error }, 400);
+    return json(await stub.preservationOwner(runId.value));
+  }
   if (pathname === "/runs/reclaim") {
     const g = gen(b.gen);
     if (!g.ok) return json({ error: g.error }, 400);
