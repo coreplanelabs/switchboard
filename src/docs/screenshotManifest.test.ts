@@ -87,6 +87,25 @@ describe("listInputs", () => {
     expect(inputs.filter((p) => p.endsWith(".test.ts") || p.startsWith("web/src/testing/"))).toEqual([]);
     expect(inputs.length).toBeGreaterThan(30);
   });
+
+  it("keeps execution wiring out of every screenshot manifest", () => {
+    const paths = listInputs(root);
+    expect(paths).toEqual(
+      expect.arrayContaining([
+        "src/core/installationSettings.ts",
+        "src/core/dispatch/spawnConfig.ts",
+        "src/core/budgets.ts",
+      ]),
+    );
+    expect(paths).not.toContain("src/execution/factory.ts");
+    const sources = paths.map((path) => ({ path, text: readFileSync(join(root, path), "utf8") }));
+    for (const surface of SURFACES) {
+      const before = currentSurfaceInputs(surface, sources);
+      const changed = [...sources, { path: "src/execution/factory.ts", text: "unrelated execution change" }];
+      expect(currentSurfaceInputs(surface, changed)).toEqual(before);
+      expect(before).not.toHaveProperty("src/execution/factory.ts");
+    }
+  });
 });
 
 describe("hashInputs", () => {
