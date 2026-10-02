@@ -12,7 +12,8 @@
 // note '/' rules the id out of hostname-based preview URLs, use tunnels).
 //
 // Route surface (JSON in/out; every route below requires a bearer secret):
-//   admin scope     POST /onboard /offboard /reconfigure /rebuild /debug (all ops)
+//   admin scope     POST /onboard /offboard /reconfigure /rebuild /debug (all ops) /recover-admission
+//                   GET /deploy-admissions
 //   drain scope     POST /drain /deploy-fence /reconcile /undrain (admin implied)
 //   read scope      GET /residents   POST /debug ops info|schedules|threads only (admin implied)
 //   operator scope  POST /attach /detach /exec /publish /read /write /op   GET /status (state, reason, inFlight)
@@ -397,6 +398,7 @@ import {
   type DepsStoreListing,
 } from "../../src/execution/residentDepsStore.js";
 import { buildId, injectedBuildStamp } from "../../src/deploy/buildStamp.js";
+import { recoveryEvidenceUrl, recoveryViewsAreIdle } from "./admissionRecovery.js";
 import { createRefreshInstance, createRefreshInstanceNow, type RefreshInstanceParams } from "./refresh";
 import {
   deployFenceReady,
@@ -405,6 +407,7 @@ import {
   liftDrain,
   liveDrain,
   parseDrainRequest,
+  postUploadVersion,
   reportImageCurrent,
   staleHolds,
   type DrainRecord,
@@ -459,6 +462,18 @@ const BUILD = injectedBuildStamp();
  *  the commit alone cannot tell two builds of one dirty tree apart. */
 const BUILD_ID = buildId(BUILD);
 
+/** Version metadata is the runtime's upload identity. A missing binding
+ * cannot prove whether an invocation predates the upload. */
+function workerVersionId(env: Env): string | null {
+  const id = env.CF_VERSION_METADATA?.id;
+  return typeof id === "string" && id.trim() !== "" ? id : null;
+}
+
+function workerVersionTimestamp(env: Env): string | null {
+  const timestamp = env.CF_VERSION_METADATA?.timestamp;
+  return typeof timestamp === "string" && Number.isFinite(Date.parse(timestamp)) ? timestamp : null;
+}
+
 // The Worker's own spans (docs/reference/specs/tracing.md item 22): the streamed routes
 // (/attach, /exec, /op) are rooted inside the DO where the work is, their
 // collector's steps as `resident.<step>` children; every other authenticated
@@ -489,6 +504,7 @@ function refusalOutcome(err: ThreadErr): string {
 }
 
 export interface Env {
+  CF_VERSION_METADATA?: { id: string; timestamp: string };
   RESIDENT: DurableObjectNamespace<ResidentDO>;
   REGISTRY: DurableObjectNamespace<ResidentRegistryDO>;
   BACKUP_BUCKET: R2Bucket;
@@ -1640,6 +1656,21 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     });
   }
 
+  /** Old-version reconciliation must enter before the fence read; a new
+   * Worker version may reconcile the uploaded image while the fence stands. */
+  async beginDeployReconcileAdmission(
+    versionId: string | null,
+    versionTimestamp: string | null,
+  ): Promise<string | null> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const record = liveDrain(await txn.get(DRAIN_KEY), systemClock());
+      if (record?.swapFence && !postUploadVersion(record, versionId, versionTimestamp)) return null;
+      const id = crypto.randomUUID();
+      await txn.put(`${DEPLOY_ADMISSION_KEY_PREFIX}${id}`, { startedAt: systemClock(), kind: "reconcile" });
+      return id;
+    });
+  }
+
   async endDeployAdmission(id: string): Promise<void> {
     await this.ctx.storage.delete(`${DEPLOY_ADMISSION_KEY_PREFIX}${id}`);
   }
@@ -1648,14 +1679,52 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     return (await this.ctx.storage.list({ prefix: DEPLOY_ADMISSION_KEY_PREFIX })).size;
   }
 
+  async listDeployAdmissions(): Promise<Array<{ id: string; startedAt: number; kind: string }>> {
+    const rows = await this.ctx.storage.list<{ startedAt?: number; kind?: string }>({
+      prefix: DEPLOY_ADMISSION_KEY_PREFIX,
+    });
+    return [...rows].map(([key, value]) => ({
+      id: key.slice(DEPLOY_ADMISSION_KEY_PREFIX.length),
+      startedAt: typeof value?.startedAt === "number" ? value.startedAt : 0,
+      kind: typeof value?.kind === "string" ? value.kind : "unknown",
+    }));
+  }
+
+  /** Delete one permit only while this recovery's fence still stands. The
+   * handler checks independent resident and process evidence before calling. */
+  async recoverDeployAdmission(
+    id: string,
+    since: string,
+    until: string,
+    versionId: string,
+    evidenceHash: string,
+  ): Promise<boolean> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const fence = liveDrain(await txn.get(DRAIN_KEY), systemClock());
+      if (!fence?.swapFence || fence.since !== since || fence.until !== until || fence.swapVersion !== versionId)
+        return false;
+      const key = `${DEPLOY_ADMISSION_KEY_PREFIX}${id}`;
+      if ((await txn.get(key)) === undefined) return false;
+      await txn.delete(key);
+      await txn.put(`deploy:recovered:${id}`, { recoveredAt: systemClock(), evidenceHash, versionId });
+      return true;
+    });
+  }
+
   /** The last pre-upload read is one registry transaction: an admitted call,
    * replaced drain, or expiring fence makes the answer fail closed. */
-  async verifyDeployFence(since: string, until: string): Promise<boolean> {
+  async verifyDeployFence(since: string, until: string, versionId: string | null): Promise<boolean> {
     return this.ctx.storage.transaction(async (txn) => {
       const now = systemClock();
       const current = liveDrain(await txn.get(DRAIN_KEY), now);
       const active = await txn.list({ prefix: DEPLOY_ADMISSION_KEY_PREFIX });
-      return deployFenceReady(current, now) && current?.since === since && current.until === until && active.size === 0;
+      return (
+        deployFenceReady(current, now) &&
+        current?.since === since &&
+        current.until === until &&
+        current.swapVersion === versionId &&
+        active.size === 0
+      );
     });
   }
 
@@ -1677,12 +1746,19 @@ export class ResidentRegistryDO extends DurableObject<Env> {
 
   /** Close the reattach exception before reading deploy activity. The same
    * durable drain survives the Worker isolate swap and expires by itself. */
-  async setDeployFence(): Promise<DrainRecord | null> {
+  async setDeployFence(versionId: string | null): Promise<DrainRecord | null> {
     return this.ctx.storage.transaction(async (txn) => {
+      if (!versionId) return null;
       const now = systemClock();
       const record = liveDrain(await txn.get(DRAIN_KEY), now);
       if (record === null || record.swapFence) return null;
-      const fenced = { ...record, swapFence: true, swapBuild: BUILD_ID } as const;
+      const fenced = {
+        ...record,
+        swapFence: true,
+        swapBuild: BUILD_ID,
+        swapVersion: versionId,
+        swapAt: new Date(now).toISOString(),
+      } as const;
       if (!deployFenceReady(fenced, now)) return null;
       await txn.put(DRAIN_KEY, fenced);
       return fenced;
@@ -1691,11 +1767,12 @@ export class ResidentRegistryDO extends DurableObject<Env> {
 
   /** A refused preflight reopens owned reattach, but cannot clear a newer
    * deployment's drain. */
-  async clearDeployFence(since: string, until: string): Promise<void> {
+  async clearDeployFence(since: string, until: string, versionId: string | null): Promise<void> {
     await this.ctx.storage.transaction(async (txn) => {
       const record = liveDrain(await txn.get(DRAIN_KEY), systemClock());
-      if (record?.since !== since || record.until !== until || !record.swapFence) return;
-      const { swapFence: _fence, swapBuild: _build, ...rest } = record;
+      if (record?.since !== since || record.until !== until || !record.swapFence || record.swapVersion !== versionId)
+        return;
+      const { swapFence: _fence, swapBuild: _build, swapVersion: _version, swapAt: _at, ...rest } = record;
       await txn.put(DRAIN_KEY, rest);
     });
   }
@@ -1706,11 +1783,16 @@ export class ResidentRegistryDO extends DurableObject<Env> {
    *  container still to report the deploy's image) the fleet STAYS closed:
    *  the record stands with `liftAsked` and the last container's report lifts
    *  it (`reportContainerImageCurrent`); `until` remains the backstop. */
-  async clearDrain(): Promise<{ cleared: boolean; held: string[]; error?: string }> {
+  async clearDrain(
+    versionId: string | null,
+    versionTimestamp: string | null,
+  ): Promise<{ cleared: boolean; held: string[]; error?: string }> {
     const result = await this.ctx.storage.transaction(async (txn) => {
       const record = liveDrain(await txn.get(DRAIN_KEY), systemClock());
-      if (record?.swapFence && record.swapBuild === BUILD_ID)
+      if (record?.swapFence && !postUploadVersion(record, versionId, versionTimestamp))
         return { cleared: false, held: [], error: "deploy-fence: the pre-upload Worker cannot reopen the fleet" };
+      if (record?.swapFence && (await txn.list({ prefix: DEPLOY_ADMISSION_KEY_PREFIX })).size > 0)
+        return { cleared: false, held: [], error: "deploy-fence: admitted work has not settled" };
       if (record !== null) {
         const lift = liftDrain(record);
         if (!lift.cleared) {
@@ -4553,6 +4635,12 @@ export class ResidentDO extends Sandbox<Env> {
   ): Promise<InstanceStepAnswer<T>> {
     const startedAt = systemClock();
     const trace = createStepTrace(startedAt);
+    const registry = this.registry();
+    const admission = await registry.beginDeployAdmission();
+    if (!admission) {
+      await this.yieldCycle(instance);
+      return { status: "stopped", why: "deploy-fence", startedAt, trace: trace.steps() };
+    }
     this.refreshAdmissionsInFlight++;
     let counted = false;
     const count = () => {
@@ -4634,6 +4722,7 @@ export class ResidentDO extends Sandbox<Env> {
       await this.recordInstanceStep(instance, step, outcome).catch((err) =>
         console.log(`refresh instance ${instance}: recording ${step} failed: ${errMsg(err)}`),
       );
+      await registry.endDeployAdmission(admission);
     }
   }
 
@@ -8751,6 +8840,19 @@ export class ResidentDO extends Sandbox<Env> {
       unknownRuns,
     };
   }
+
+  /** Independent container read for an operator's targeted permit recovery.
+   * A dormant container has no processes; an active one must answer the probe. */
+  async getResidentRecoveryProbe(): Promise<{ activeProcesses: number }> {
+    if (!(await this.isRuntimeActive())) return { activeProcesses: 0 };
+    const users = [BUILD_USER, ...THREAD_USERS].join(",");
+    const probe = await this.run(["pgrep", "-u", users]);
+    if (probe.exitCode === 1 && probe.stdout.trim() === "") return { activeProcesses: 0 };
+    if (probe.exitCode !== 0) throw new Error("resident process probe failed");
+    const pids = probe.stdout.trim().split(/\s+/);
+    if (!pids.every((pid) => /^\d+$/.test(pid))) throw new Error("resident process probe returned invalid PIDs");
+    return { activeProcesses: pids.length };
+  }
   private attachesInFlight = 0;
   /** Entry-to-answer admissions include hydration before attachesInFlight starts. */
   private attachAdmissionsInFlight = 0;
@@ -10077,6 +10179,8 @@ const ROUTES: Record<string, { scope: Scope; method: string }> = {
   "/rebuild": { scope: "admin", method: "POST" },
   "/drain": { scope: "drain", method: "POST" }, // close the fleet to new runs for a deploy (item 69; admin implied)
   "/deploy-fence": { scope: "drain", method: "POST" }, // fence reattach and read executing activity
+  "/deploy-admissions": { scope: "admin", method: "GET" }, // targeted recovery inventory, never a drain-bearer route
+  "/recover-admission": { scope: "admin", method: "POST" }, // exact permit plus independent operator evidence
   "/undrain": { scope: "drain", method: "POST" }, // reopen it
   "/reconcile": { scope: "drain", method: "POST" }, // reconcile every container onto the current image, inside the drain window
   "/residents": { scope: "read", method: "GET" }, // admin implied; read-only bearer allowed
@@ -10200,6 +10304,10 @@ export default {
             return await handleDrain(env, body);
           case "/deploy-fence":
             return await handleDeployFence(env);
+          case "/deploy-admissions":
+            return await handleDeployAdmissions(env);
+          case "/recover-admission":
+            return await handleRecoverAdmission(env, body);
           case "/undrain":
             return await handleUndrain(env);
           case "/reconcile":
@@ -10663,7 +10771,7 @@ async function handleDrain(env: Env, body: Record<string, unknown>): Promise<Res
  *  record stands with the lift asked, and the last container's report reopens
  *  the fleet — a fact, never a timer; the drain's `until` is the backstop. */
 async function handleUndrain(env: Env): Promise<Response> {
-  const lift = await registryStub(env).clearDrain();
+  const lift = await registryStub(env).clearDrain(workerVersionId(env), workerVersionTimestamp(env));
   if (lift.error) return json({ error: lift.error }, 409);
   if (!lift.cleared && lift.held.length > 0) {
     console.log(`[drain] fleet stays closed — containers still to report the deploy's image: ${lift.held.join(", ")}`);
@@ -10678,7 +10786,9 @@ async function handleUndrain(env: Env): Promise<Response> {
  * only this attempt's fence; the drain still protects new admissions. */
 async function handleDeployFence(env: Env): Promise<Response> {
   const registry = registryStub(env);
-  const fence = await registry.setDeployFence();
+  const versionId = workerVersionId(env);
+  if (!workerVersionTimestamp(env)) return json({ error: "Worker version timestamp is unavailable" }, 503);
+  const fence = await registry.setDeployFence(versionId);
   if (fence === null)
     return json({ error: "deploy-fence requires a live fleet drain with time for upload and readiness" }, 409);
   try {
@@ -10690,7 +10800,7 @@ async function handleDeployFence(env: Env): Promise<Response> {
       const result = settled[i];
       return { ...record, live: result.status === "fulfilled" ? result.value : { error: errMsg(result.reason) } };
     });
-    const sameFence = await registry.verifyDeployFence(fence.since, fence.until);
+    const sameFence = await registry.verifyDeployFence(fence.since, fence.until, versionId);
     const activeAdmissions = await registry.activeDeployAdmissions();
     const safe =
       sameFence &&
@@ -10704,7 +10814,7 @@ async function handleDeployFence(env: Env): Promise<Response> {
           ["warm", "degraded", "down", "refreshing", "restoring"].includes(String(state.state))
         );
       });
-    if (!safe) await registry.clearDeployFence(fence.since, fence.until);
+    if (!safe) await registry.clearDeployFence(fence.since, fence.until, versionId);
     return json({
       draining: safe ? fence : { ...fence, swapFence: false },
       fenceReady: safe,
@@ -10712,8 +10822,57 @@ async function handleDeployFence(env: Env): Promise<Response> {
       residents: enriched,
     });
   } catch (error) {
-    await registry.clearDeployFence(fence.since, fence.until);
+    await registry.clearDeployFence(fence.since, fence.until, versionId);
     return json({ error: `deploy-fence read failed: ${errMsg(error)}` }, 503);
+  }
+}
+
+/** Admin-only inventory for a permit that outlived its request. IDs are
+ * random and scoped to this registry; no customer resource names are stored. */
+async function handleDeployAdmissions(env: Env): Promise<Response> {
+  return json({ admissions: await registryStub(env).listDeployAdmissions() });
+}
+
+/** Targeted recovery is deliberately manual. The operator supplies an
+ * independent request-end receipt; the Worker fences new work, checks exact
+ * run ownership and pool-user processes, then removes only the named permit.
+ * The receipt is hashed for the audit row and never printed or stored raw. */
+async function handleRecoverAdmission(env: Env, body: Record<string, unknown>): Promise<Response> {
+  const id = body.id;
+  const evidence = body.evidence;
+  if (typeof id !== "string" || !/^[0-9a-f-]{36}$/.test(id)) return json({ error: "invalid admission id" }, 400);
+  const evidenceUrl = recoveryEvidenceUrl(evidence);
+  if (!evidenceUrl)
+    return json({ error: "an HTTPS link to an independently verified request-end receipt is required" }, 400);
+  const versionId = workerVersionId(env);
+  if (!versionId) return json({ error: "Worker version metadata is unavailable" }, 503);
+  const registry = registryStub(env);
+  if (!(await registry.listDeployAdmissions()).some((row) => row.id === id))
+    return json({ error: "admission id not found" }, 404);
+  const fence = await registry.setDeployFence(versionId);
+  if (!fence) return json({ error: "recovery requires an unfenced live fleet drain with upload time remaining" }, 409);
+  try {
+    const residents = await registry.list();
+    const settled = await Promise.allSettled(
+      residents.map(async (record) => ({
+        ...(await residentStub(env, record.resource).getResidentDeployInfo()),
+        ...(await residentStub(env, record.resource).getResidentRecoveryProbe()),
+      })),
+    );
+    const views = settled.map((result) =>
+      result.status === "fulfilled" ? result.value : { error: errMsg(result.reason) },
+    );
+    if (!recoveryViewsAreIdle(views))
+      return json({ error: "recovery refused: resident owner, lifecycle or process evidence is not idle" }, 409);
+    const bytes = new TextEncoder().encode(evidenceUrl);
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    const evidenceHash = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    const recovered = await registry.recoverDeployAdmission(id, fence.since, fence.until, versionId, evidenceHash);
+    if (!recovered) return json({ error: "recovery fence or admission changed; nothing removed" }, 409);
+    console.log(`[deploy] recovered one admission ${id} after an admin-supplied independent receipt and idle probes`);
+    return json({ recovered: id, evidenceSha256: evidenceHash });
+  } finally {
+    await registry.clearDeployFence(fence.since, fence.until, versionId);
   }
 }
 
@@ -10727,27 +10886,30 @@ async function handleDeployFence(env: Env): Promise<Response> {
  *  drain, so the fleet reopens only on that container's later report. */
 async function handleReconcile(env: Env): Promise<Response> {
   const registry = registryStub(env);
-  const drain = liveDrain(await registry.getDrain(), systemClock());
-  if (drain?.swapFence && drain.swapBuild === BUILD_ID)
-    return json({ error: "deploy-fence: reconcile waits for the uploaded Worker" }, 409);
-  const residents = await registry.list();
-  const settled = await Promise.allSettled(
-    residents.map((record) => residentStub(env, record.resource).reconcileForDeploy(record.resource)),
-  );
-  const reconciled = residents.map((record, i) => {
-    const s = settled[i];
-    return s.status === "fulfilled"
-      ? { resource: record.resource, result: s.value.result, verified: s.value.verified }
-      : { resource: record.resource, result: "error" as const, verified: false, error: errMsg(s.reason) };
-  });
-  // Each resident held ITSELF before its marker (reconcileForDeploy), so no
-  // report can outrun its hold; this pass is the backstop for a resident whose
-  // call rejected before it could — holdDrain deduplicates, so re-holding a
-  // deferred resident changes nothing.
-  const unverified = reconciled.filter((r) => !r.verified).map((r) => r.resource);
-  if (unverified.length > 0) await registryStub(env).holdDrainFor(unverified);
-  console.log(`[reconcile] deploy image reconcile: ${JSON.stringify(reconciled)}`);
-  return json({ reconciled });
+  const admission = await registry.beginDeployReconcileAdmission(workerVersionId(env), workerVersionTimestamp(env));
+  if (!admission) return json({ error: "deploy-fence: reconcile waits for the uploaded Worker" }, 409);
+  try {
+    const residents = await registry.list();
+    const settled = await Promise.allSettled(
+      residents.map((record) => residentStub(env, record.resource).reconcileForDeploy(record.resource)),
+    );
+    const reconciled = residents.map((record, i) => {
+      const s = settled[i];
+      return s.status === "fulfilled"
+        ? { resource: record.resource, result: s.value.result, verified: s.value.verified }
+        : { resource: record.resource, result: "error" as const, verified: false, error: errMsg(s.reason) };
+    });
+    // Each resident held ITSELF before its marker (reconcileForDeploy), so no
+    // report can outrun its hold; this pass is the backstop for a resident whose
+    // call rejected before it could — holdDrain deduplicates, so re-holding a
+    // deferred resident changes nothing.
+    const unverified = reconciled.filter((r) => !r.verified).map((r) => r.resource);
+    if (unverified.length > 0) await registryStub(env).holdDrainFor(unverified);
+    console.log(`[reconcile] deploy image reconcile: ${JSON.stringify(reconciled)}`);
+    return json({ reconciled });
+  } finally {
+    await registry.endDeployAdmission(admission);
+  }
 }
 
 async function handleResidents(env: Env): Promise<Response> {
@@ -11455,41 +11617,47 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
  *  due (item 7). */
 async function runWatchdog(env: Env, parent?: TraceSpan): Promise<WatchdogSummary> {
   const registry = registryStub(env);
-  const residents = await registry.list();
-  // Each check is a `resident.check` child of the firing's root when it has
-  // one (the cron path; the /debug op runs bare), ending with the action taken
-  // — never the resource, which names a repo.
-  const checkOne = async (record: { resource: string }, span?: TraceSpan) => {
-    const stub = residentStub(env, record.resource);
-    const check = await stub.watchdogCheck();
-    if (check.action === "provision-timed-out") {
-      // The DO already tried to release its own slot; this is the backstop.
-      await registry.remove(record.resource);
-    }
-    const instance = await createRefreshInstance(env, stub, record.resource, check.refresh);
-    span?.setAttrs({ outcome: check.action });
-    return { ...check, instance };
-  };
-  const settled = await Promise.allSettled(
-    residents.map((record) =>
-      parent ? parent.span("resident.check", (span) => checkOne(record, span)) : checkOne(record),
-    ),
-  );
-  const results: WatchdogSummary["results"][number][] = residents.map((record, i) => {
-    const s = settled[i];
-    return s.status === "fulfilled"
-      ? {
-          resource: record.resource,
-          state: s.value.state,
-          reason: s.value.reason,
-          action: s.value.action,
-          disk: s.value.disk,
-          memory: s.value.memory,
-          instance: s.value.instance,
-        }
-      : { resource: record.resource, error: errMsg(s.reason) };
-  });
-  return { cap: (await registry.limits()).cap, count: residents.length, results };
+  const admission = await registry.beginDeployAdmission();
+  if (!admission) throw new Error("deploy-fence: watchdog work is paused during Worker upload");
+  try {
+    const residents = await registry.list();
+    // Each check is a `resident.check` child of the firing's root when it has
+    // one (the cron path; the /debug op runs bare), ending with the action taken
+    // — never the resource, which names a repo.
+    const checkOne = async (record: { resource: string }, span?: TraceSpan) => {
+      const stub = residentStub(env, record.resource);
+      const check = await stub.watchdogCheck();
+      if (check.action === "provision-timed-out") {
+        // The DO already tried to release its own slot; this is the backstop.
+        await registry.remove(record.resource);
+      }
+      const instance = await createRefreshInstance(env, stub, record.resource, check.refresh);
+      span?.setAttrs({ outcome: check.action });
+      return { ...check, instance };
+    };
+    const settled = await Promise.allSettled(
+      residents.map((record) =>
+        parent ? parent.span("resident.check", (span) => checkOne(record, span)) : checkOne(record),
+      ),
+    );
+    const results: WatchdogSummary["results"][number][] = residents.map((record, i) => {
+      const s = settled[i];
+      return s.status === "fulfilled"
+        ? {
+            resource: record.resource,
+            state: s.value.state,
+            reason: s.value.reason,
+            action: s.value.action,
+            disk: s.value.disk,
+            memory: s.value.memory,
+            instance: s.value.instance,
+          }
+        : { resource: record.resource, error: errMsg(s.reason) };
+    });
+    return { cap: (await registry.limits()).cap, count: residents.length, results };
+  } finally {
+    await registry.endDeployAdmission(admission);
+  }
 }
 
 function json(data: unknown, status = 200): Response {
