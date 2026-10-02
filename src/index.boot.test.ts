@@ -74,11 +74,13 @@ describe("the production process boot fixture", () => {
 
     const health = await waitForHealth(`http://127.0.0.1:${botPort}/healthz`);
     expect(health.status).toBe(503);
-    expect(await health.json()).toMatchObject({
+    const body = await health.json();
+    expect(body).toMatchObject({
       ok: false,
       config: "missing base document — push one with `deploy config`",
       inFlight: 0,
     });
+    expect(body).not.toHaveProperty("loadedBase");
     expect(child.exitCode).toBeNull();
   }, 25_000);
 });

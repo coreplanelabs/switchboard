@@ -49,7 +49,7 @@ Every registered command has an HTTP twin behind the same dashboard gate, plus a
 |---|---|---|---|
 | `/api/help.show` | `GET`, `POST` | `help:read` | How to talk to this bot — the agents, forcing one, changing a route in the thread — for a person asking about the bot itself, never for a task or a thing to show. |
 | `/api/help.commands` | `GET`, `POST` | `help:read` | Every chat command by group, the grammar, and the per-request directives. |
-| `/api/status.show` | `GET`, `POST` | `status:read` | Which build this process runs: version, commit, when it was built and started, runs in flight, draining. |
+| `/api/status.show` | `GET`, `POST` | `status:read` | Which build this process runs and, when known, the base config loaded at startup. |
 | `/api/config.show` | `GET`, `POST` | `config:read` | The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel. |
 | `/api/config.overrides` | `GET`, `POST` | `config:read` | Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; `config show --channel <id>` reads one. |
 | `/api/config.channels` | `GET`, `POST` | `config:read` | The channels you may pick settings or MCP servers for, by name: the channels the bot is in that you may read, plus any that already carry a scope; `listed: false` says the bot could not list its channels and only the scoped ones are here. |

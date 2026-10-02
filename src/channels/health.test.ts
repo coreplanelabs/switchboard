@@ -1,12 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { DRAIN_DEADLINE_MS } from "../core/drain.js";
 import { healthPayload, readBuildInfo, UNKNOWN_BUILD } from "./health.js";
+import { bindLoadedBaseConfigReceipt, loadedBaseConfigReceipt } from "../configDocument.js";
 
 // Feature: docs/reference/specs/slack-channel.md item 8 — deployed ≠ live: `/healthz`
 // carries the build identity (`build: { commit, builtAt }`) baked into the
 // image by `deploy/cloudflare/write-build.mjs`, so `deploy:all`'s live gate can
 // tell the NEW container from the old one still draining.
 describe("build identity on /healthz", () => {
+  it("projects the same frozen startup loaded-base receipt and no config values", () => {
+    const loadedBase = bindLoadedBaseConfigReceipt(
+      loadedBaseConfigReceipt({ kind: "state", key: "base", version: 175 }, "secret: do-not-expose\n"),
+      { commit: "abc123", startedAt: Date.UTC(2026, 9, 1), generation: "gen-1" },
+    );
+    const payload = healthPayload({ inFlight: 0, draining: false, loadedBase });
+    expect(payload.loadedBase).toBe(loadedBase);
+    expect(JSON.stringify(payload)).not.toContain("do-not-expose");
+    expect(healthPayload({ inFlight: 0, draining: false })).not.toHaveProperty("loadedBase");
+  });
   it("readBuildInfo parses build.json; a missing/malformed file or a blank commit is `unknown`, never a throw", () => {
     const files: Record<string, string> = {
       good: JSON.stringify({ commit: "e6af1aa0b7c3", builtAt: "2026-08-30T05:00:00.000Z" }),

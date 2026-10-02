@@ -44,7 +44,7 @@ Combine freely: `agent:ship model:<provider>/<model> effort:high in acme/api: fi
 
 | Command | What it does | Who can run it |
 |---|---|---|
-| `status show` | Which build this process runs: version, commit, when it was built and started, runs in flight, draining. | anyone |
+| `status show` | Which build this process runs and, when known, the base config loaded at startup. | anyone |
 
 ### `config`
 

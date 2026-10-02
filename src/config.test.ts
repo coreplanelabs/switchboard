@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { AssistantMessage as PiAssistantMessage, ProviderStreams } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { secretsFrom, type Secrets } from "./secrets.js";
+import { sha256Hex } from "./configDocument.js";
 import {
   ConfigStore,
   defaultIntakeMode,
@@ -12,6 +13,7 @@ import {
   InMemoryOverridesBacking,
   intakeModelRef,
   loadAppConfigFrom,
+  loadAppConfigWithReceiptFrom,
   openConfigStore,
   operatorModeOf,
   OverridesConflictError,
@@ -1993,7 +1995,7 @@ runHistory:
 `;
   const pushed = {
     yaml: productionYaml,
-    sha256: "a".repeat(64),
+    sha256: sha256Hex(productionYaml),
     source: "config/config.production.yaml",
     pushedAt: "2026-09-08T00:00:00.000Z",
   };
@@ -2003,6 +2005,9 @@ runHistory:
     writeFileSync(cfg, YAML_FIXTURE);
     const config = await loadAppConfigFrom(cfg, { env: {}, secrets: secretsFrom({}), warn: () => {} });
     expect(config.defaults.agent).toBe("general");
+    const loaded = await loadAppConfigWithReceiptFrom(cfg, { env: {}, secrets: secretsFrom({}), warn: () => {} });
+    expect(loaded.receipt).toEqual({ schema: 1, source: { kind: "file" }, sha256: sha256Hex(YAML_FIXTURE) });
+    expect(JSON.stringify(loaded.receipt)).not.toContain(cfg);
   });
 
   it("state://base reads the pushed document from the state Worker, validates its YAML, and says which version it started on", async () => {
@@ -2015,6 +2020,78 @@ runHistory:
     });
     expect(config.defaults.models.general).toBe("anthropic/general-model");
     expect(warnings.some((w) => w.includes('base document "base" v3 from config/config.production.yaml'))).toBe(true);
+  });
+
+  it("records the exact validated state document bytes and version from one read", async () => {
+    const loaded = await loadAppConfigWithReceiptFrom("state://base", {
+      env,
+      secrets,
+      warn: () => {},
+      fetch: stateWorker(pushed, 175),
+    });
+    expect(loaded.config.defaults.models.general).toBe("anthropic/general-model");
+    expect(loaded.receipt).toEqual({
+      schema: 1,
+      source: { kind: "state", key: "base", version: 175 },
+      sha256: sha256Hex(productionYaml),
+    });
+    expect(Object.isFrozen(loaded.receipt)).toBe(true);
+    expect(Object.isFrozen(loaded.receipt.source)).toBe(true);
+    expect(JSON.stringify(loaded.receipt)).not.toContain(pushed.source);
+  });
+
+  it("refuses a claimed digest mismatch and malformed document version before a receipt exists", async () => {
+    await expect(
+      loadAppConfigWithReceiptFrom("state://base", {
+        env,
+        secrets,
+        warn: () => {},
+        fetch: stateWorker({ ...pushed, sha256: "a".repeat(64) }),
+      }),
+    ).rejects.toThrow(/digest mismatch/);
+    for (const version of [0, 1.5, -1, Number.NaN]) {
+      await expect(
+        loadAppConfigWithReceiptFrom("state://base", {
+          env,
+          secrets,
+          warn: () => {},
+          fetch: stateWorker(pushed, version),
+        }),
+      ).rejects.toThrow(/version/);
+    }
+  });
+
+  it("keeps a running store's receipt after a later push and reads the new version only on a new load", async () => {
+    let version = 175;
+    let document = pushed;
+    const fetchState = stateWorker;
+    const fetchMutable: typeof fetch = async (input, init) => fetchState(document, version)(input, init);
+    const overridesPath = join(mkdtempSync(join(tmpdir(), "swb-config-receipt-")), "overrides.json");
+    const options = { overridesPath, env, secrets, warn: () => {}, fetch: fetchMutable };
+    const first = await openConfigStore("state://base", options);
+    expect(first.loadedBase?.source).toEqual({ kind: "state", key: "base", version: 175 });
+    const firstReceipt = first.loadedBase;
+    version = 176;
+    const yaml = `${productionYaml}\n# later push\n`;
+    document = { ...pushed, yaml, sha256: sha256Hex(yaml) };
+    expect(first.loadedBase).toBe(firstReceipt);
+    expect(first.loadedBase?.sha256).toBe(sha256Hex(productionYaml));
+    const second = await openConfigStore("state://base", options);
+    expect(second.loadedBase?.source).toEqual({ kind: "state", key: "base", version: 176 });
+    expect(second.loadedBase?.sha256).toBe(sha256Hex(yaml));
+  });
+
+  it("does not return a loaded receipt when the overrides backing fails to initialize", async () => {
+    const yaml = `${productionYaml}\nruntimeOverrides:\n  worker:\n    baseUrl: https://state.example\n`;
+    await expect(
+      openConfigStore("state://base", {
+        overridesPath: "unused",
+        env,
+        secrets,
+        warn: () => {},
+        fetch: stateWorker({ ...pushed, yaml, sha256: sha256Hex(yaml) }),
+      }),
+    ).rejects.toThrow();
   });
 
   it("no document yet is a startup error naming `deploy config`; a wrong-shaped one, a missing variable, and an unreachable Worker name the cause", async () => {
@@ -2042,7 +2119,8 @@ runHistory:
   });
 
   it("a pushed document whose YAML does not validate fails startup with the validation error, never a silent partial config", async () => {
-    const broken = { ...pushed, yaml: "defaults:\n  agent: general\n  models: {}\n" };
+    const yaml = "defaults:\n  agent: general\n  models: {}\n";
+    const broken = { ...pushed, yaml, sha256: sha256Hex(yaml) };
     await expect(
       loadAppConfigFrom("state://base", { env, secrets, warn: () => {}, fetch: stateWorker(broken) }),
     ).rejects.toThrow();
@@ -2059,7 +2137,7 @@ runHistory:
           env,
           secrets,
           warn: () => {},
-          fetch: stateWorker({ ...pushed, yaml }),
+          fetch: stateWorker({ ...pushed, yaml, sha256: sha256Hex(yaml) }),
         }),
       ).rejects.toThrow(problem);
     }
