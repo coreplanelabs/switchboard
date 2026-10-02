@@ -43,6 +43,40 @@ describe("the readers' router is retired", () => {
 });
 
 describe("mintConfirmationOffer — risk projection", () => {
+  it("stores the operator's exact dependencies and cannot mint an operator row with missing proof", async () => {
+    const msg: IncomingMessage = {
+      channelId: "slack:CX",
+      userId: "slack:UREQ",
+      threadKey: "slack:CX:1",
+      text: "change my setting",
+    };
+    const store = new InMemoryConfirmationStore({ clock: () => 1_000 });
+    const args = {
+      io: { offer: async () => {} } as unknown as ChannelIO,
+      store,
+      msg,
+      def: configSet,
+      input: { args: ["me"], options: { verbosity: "verbose" } },
+      receipt: "config set me --verbosity verbose",
+      model: "anthropic/general-model",
+    };
+    const context = {
+      version: 1 as const,
+      status: "known" as const,
+      revision: 1,
+      origins: [],
+      slack: [],
+      mcp: [],
+      memoryScopes: ["user:slack:UREQ"],
+    };
+    expect(await mintConfirmationOffer({ ...args, source: "operator", context })).toMatchObject({ kind: "offered" });
+    expect(await store.pendingByThread(msg.threadKey)).toMatchObject({ derivation: { kind: "operator", context } });
+    await store.cancelByThread(msg.threadKey, [msg.userId]);
+    expect(await mintConfirmationOffer({ ...args, source: "operator" } as never)).toEqual({
+      kind: "context_unavailable",
+    });
+    expect(await store.pendingByThread(msg.threadKey)).toBeUndefined();
+  });
   it("renders config risk from accepted input and the caller origin, then stores and offers the same line", async () => {
     const msg: IncomingMessage = {
       channelId: "slack:CX",

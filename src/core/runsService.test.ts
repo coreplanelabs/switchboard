@@ -94,7 +94,28 @@ describe("RunsService.getRun", () => {
   it("never exposes internal source archives or handoff context through any persisted projection", async () => {
     const { store, svc } = setup();
     const base = record("archive", NOW);
+    const workReads: NonNullable<RunRecord["workReads"]> = [
+      {
+        tool: "work_status",
+        callId: "status-call",
+        input: { actId: "private-work-act" },
+        resultHash: "a".repeat(64),
+        observation: {
+          version: 1,
+          actId: "private-work-act",
+          instanceId: "instance",
+          unit: "U11",
+          attempt: 0,
+          requesterId: base.userId,
+          channelId: base.channelId,
+          mainThreadKey: base.threadKey,
+          snapshotHash: "b".repeat(64),
+          observedAt: 1000,
+        },
+      },
+    ];
     const internal = {
+      workReads,
       sourceReads: {
         version: 1 as const,
         owner: {
@@ -145,6 +166,8 @@ describe("RunsService.getRun", () => {
       const json = JSON.stringify(view);
       for (const field of [
         "sourceReads",
+        "workReads",
+        "private-work-act",
         "childHandoff",
         "contextDependencies",
         "raw private handoff",

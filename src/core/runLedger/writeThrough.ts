@@ -1139,6 +1139,12 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         ...(this.state.sourceReads !== undefined
           ? { sourceReads: structuredClone(this.state.sourceReads) as SourceReadState }
           : {}),
+        ...(this.state.workReads !== undefined
+          ? { workReads: structuredClone(this.state.workReads) as RunRecord["workReads"] }
+          : {}),
+        ...(this.state.unitSeedReceipt !== undefined
+          ? { unitSeedReceipt: structuredClone(this.state.unitSeedReceipt) as RunRecord["unitSeedReceipt"] }
+          : {}),
         ...(this.state.contextDependencies !== undefined
           ? { contextDependencies: structuredClone(this.state.contextDependencies) as ContextDependencies }
           : {}),

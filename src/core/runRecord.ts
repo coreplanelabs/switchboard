@@ -22,6 +22,8 @@ import {
   type ContextCheckpointReceipt,
 } from "./references/contextCheckpoint.js";
 import { directAudienceStampOf, type DirectAudienceStamp } from "./runLedger/inboxMessage.js";
+import { isMainWorkReadReceipt, type MainWorkReadReceipt } from "./coordinator/mainWorkObservation.js";
+import { isUnitSeedReceipt, type UnitSeedReceipt } from "./coordinator/unitSeedReceipt.js";
 import { isContextDependencies, type ContextDependencies } from "./references/contextDependencies.js";
 import {
   type FindingDisposition,
@@ -249,6 +251,10 @@ export interface RunRecord {
   /** Original source action state, including bodies. Internal full-record
    *  readers only; summaries and user-facing views must not expose it. */
   sourceReads?: SourceReadState;
+  /** Exact controller status/progress observations; internal full records only. */
+  workReads?: readonly MainWorkReadReceipt[];
+  /** Exact persisted unit input acknowledgment; internal full records only. */
+  unitSeedReceipt?: UnitSeedReceipt;
   /** Flat dependency closure retained independently of source bodies. */
   contextDependencies?: ContextDependencies;
   /** Committed ordinary-history proof. Prepared state is never archived. */
@@ -790,7 +796,10 @@ function isRunProfileRecord(v: unknown): v is RunProfileRecord {
  *  the friction ledger's `recent()` is served from this shape. `bytes` is
  *  the stored record's JSON size when the store knows it; retention treats a
  *  missing value as 0. */
-export type RunListItem = Omit<RunRecord, "events" | "sourceReads" | "contextCheckpointReceipt" | "directAudience"> & {
+export type RunListItem = Omit<
+  RunRecord,
+  "events" | "sourceReads" | "workReads" | "unitSeedReceipt" | "contextCheckpointReceipt" | "directAudience"
+> & {
   bytes?: number;
 };
 
@@ -1219,6 +1228,10 @@ export function isRunRecord(v: unknown): v is RunRecord {
   // item 14): redaction may lengthen a stored string past the tool's limit.
   if (r.handoff !== undefined && !isHandoffShape(r.handoff)) return false;
   if (r.childHandoff !== undefined && !isChildHandoff(r.childHandoff)) return false;
+  if (
+    !workEvidenceBelongsToRun({ workReads: r.workReads, unitSeedReceipt: r.unitSeedReceipt }, r as unknown as RunRecord)
+  )
+    return false;
   if (r.sourceReads !== undefined) {
     if (
       typeof r.agent !== "string" ||
@@ -1425,7 +1438,13 @@ export function isRunRecord(v: unknown): v is RunRecord {
 export function isRunListItem(v: unknown): v is RunListItem {
   if (typeof v !== "object" || v === null) return false;
   const r = v as Record<string, unknown>;
-  if (r.sourceReads !== undefined || r.contextCheckpointReceipt !== undefined || r.directAudience !== undefined)
+  if (
+    r.sourceReads !== undefined ||
+    r.workReads !== undefined ||
+    r.unitSeedReceipt !== undefined ||
+    r.contextCheckpointReceipt !== undefined ||
+    r.directAudience !== undefined
+  )
     return false;
   if (r.bytes !== undefined && !isFiniteNumber(r.bytes)) return false;
   const { bytes: _bytes, ...rest } = r;
@@ -1482,6 +1501,68 @@ export function applyRetention<T extends RetentionKey>(
 
 /** The stored size of one record's JSON, after which events are dropped from the middle. */
 export const MAX_RECORD_BYTES = 1.5 * MIB;
+
+export function workEvidenceBelongsToRun(
+  evidence: { workReads?: unknown; unitSeedReceipt?: unknown },
+  owner: Pick<
+    RunRecord,
+    | "id"
+    | "userId"
+    | "channelId"
+    | "threadKey"
+    | "parentInstanceId"
+    | "coordinatorUnit"
+    | "coordinatorAttempt"
+    | "idempotencyKey"
+    | "session"
+  >,
+): boolean {
+  if (!isRunWorkEvidence(evidence)) return false;
+  const reads = evidence.workReads as readonly MainWorkReadReceipt[] | undefined;
+  if (
+    reads?.some(
+      (read) =>
+        read.observation.requesterId !== owner.userId ||
+        read.observation.channelId !== owner.channelId ||
+        read.observation.mainThreadKey !== owner.threadKey,
+    )
+  )
+    return false;
+  const receipt = evidence.unitSeedReceipt as UnitSeedReceipt | undefined;
+  if (!receipt) return true;
+  const session = owner.session;
+  return (
+    receipt.child.runId === owner.id &&
+    receipt.child.requester === owner.userId &&
+    receipt.child.channelId === owner.channelId &&
+    receipt.child.threadKey === owner.threadKey &&
+    receipt.binding.instanceId === owner.parentInstanceId &&
+    receipt.binding.unit === owner.coordinatorUnit &&
+    receipt.binding.instanceAttempt === (owner.coordinatorAttempt ?? 0) &&
+    receipt.binding.idempotencyKey === owner.idempotencyKey &&
+    isRunSession(session) &&
+    receipt.seed.key === session.key &&
+    receipt.seed.from === session.seedFrom &&
+    (session.range === "broken" || session.range.to === undefined || receipt.seed.through <= session.range.to)
+  );
+}
+
+/** The controller checks this before exposing a verified read. Private proof
+ * bytes share the existing archive budget and are never silently truncated. */
+export function isRunWorkEvidence(value: { workReads?: unknown; unitSeedReceipt?: unknown }): boolean {
+  if (
+    value.workReads !== undefined &&
+    (!Array.isArray(value.workReads) ||
+      !value.workReads.every(isMainWorkReadReceipt) ||
+      new Set(value.workReads.map((read) => read.callId)).size !== value.workReads.length)
+  )
+    return false;
+  if (value.unitSeedReceipt !== undefined && !isUnitSeedReceipt(value.unitSeedReceipt)) return false;
+  return (
+    utf8ByteLength(JSON.stringify({ workReads: value.workReads, unitSeedReceipt: value.unitSeedReceipt })) <=
+    MAX_RECORD_BYTES
+  );
+}
 /** The JSON size of one event, after which its `text`/`summary` is truncated. */
 export const MAX_EVENT_BYTES = 64 * KIB;
 

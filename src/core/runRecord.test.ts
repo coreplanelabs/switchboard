@@ -124,6 +124,39 @@ it("retained source archives remain bound to the original run owner", () => {
   expect(isRunListItem({ ...item("run-1", 2_000), sourceReads: archive })).toBe(false);
 });
 
+it("keeps work-read receipts private and bound to their producing conversation", () => {
+  const base = record();
+  const receipt = {
+    tool: "work_status" as const,
+    callId: "status-call",
+    input: { actId: "private-act" },
+    resultHash: "a".repeat(64),
+    observation: {
+      version: 1 as const,
+      actId: "private-act",
+      instanceId: "instance",
+      unit: "U11",
+      attempt: 0,
+      requesterId: base.userId!,
+      channelId: base.channelId!,
+      mainThreadKey: base.threadKey!,
+      snapshotHash: "b".repeat(64),
+      observedAt: 1000,
+    },
+  };
+  expect(isRunRecord({ ...base, workReads: [receipt] })).toBe(true);
+  expect(isRunRecord({ ...base, workReads: [{ ...receipt, resultHash: "invalid" }] })).toBe(false);
+  expect(isRunRecord({ ...base, workReads: [receipt, receipt] })).toBe(false);
+  for (const field of ["requesterId", "channelId", "mainThreadKey"])
+    expect(
+      isRunRecord({
+        ...base,
+        workReads: [{ ...receipt, observation: { ...receipt.observation, [field]: "foreign" } }],
+      }),
+    ).toBe(false);
+  expect(isRunListItem({ ...item("run-1", 2000), workReads: [receipt] })).toBe(false);
+});
+
 it("retained context dependencies validate their canonical shape and local origin binding", () => {
   const context = {
     version: 1,

@@ -121,11 +121,33 @@ function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION
         slack: [],
         mcp: [{ runId: "source-parent", actionId: "action-1", callIds: ["call-1"], responseHash: "a".repeat(64) }],
       };
-      await store.put({ ...base, sourceReads, contextDependencies });
+      const workReads: NonNullable<RunRecord["workReads"]> = [
+        {
+          tool: "work_status",
+          callId: "status-call",
+          input: { actId: "private-work-act" },
+          resultHash: "a".repeat(64),
+          observation: {
+            version: 1,
+            actId: "private-work-act",
+            instanceId: "instance",
+            unit: "U11",
+            attempt: 0,
+            requesterId: base.userId,
+            channelId: base.channelId,
+            mainThreadKey: base.threadKey,
+            snapshotHash: "b".repeat(64),
+            observedAt: 1000,
+          },
+        },
+      ];
+      await store.put({ ...base, sourceReads, contextDependencies, workReads });
+      expect((await store.get(base.id))?.workReads).toEqual(workReads);
       expect((await store.get(base.id))?.sourceReads).toEqual(sourceReads);
       for (const summary of [await store.getSummary(base.id), ...(await store.list({}))]) {
         expect(summary?.contextDependencies).toEqual(contextDependencies);
         expect(summary).not.toHaveProperty("sourceReads");
+        expect(summary).not.toHaveProperty("workReads");
         expect(JSON.stringify(summary)).not.toContain("original private source");
       }
     });

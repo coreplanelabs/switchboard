@@ -78,6 +78,11 @@ const context: ContextDependencies = {
 };
 
 describe("source result context at the persisted row boundary", () => {
+  it("keeps a saved work status opaque without a current source receipt", () => {
+    expect(uncoveredSourceResult([use("work_status")], [result("running")], { ...context, mcp: [] }, "current")).toBe(
+      true,
+    );
+  });
   it("does not taint announced calls or covered original seed results", () => {
     expect(uncoveredSourceResult([], [use()], context, "current")).toBe(false);
     expect(uncoveredSourceResult([], [use(), result()], context)).toBe(false);

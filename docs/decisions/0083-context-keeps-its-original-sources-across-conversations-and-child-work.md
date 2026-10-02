@@ -45,3 +45,9 @@ This decision does not create a second dependency database, replace the authoriz
 - **Store permission booleans:** avoids fresh reads but becomes stale after a grant, source or destination changes.
 
 The behavioral contracts are [saved operator context](../reference/specs/operator-context.md), [session log](../reference/specs/session-log.md), [run history](../reference/specs/run-history.md), [memory](../reference/specs/memory.md), and [child runs](../reference/specs/agent-conductor.md).
+
+## Amended
+
+Ordinary checkpoints retain the latest 128 sealed identity aliases. Alias edges do not pin predecessor archives or copy predecessor reference indexes. Each current seed retains its explicit external dependencies, while independent frozen child ranges keep their own pins. Normal archive expiry preserves an alias only while its checkpoint holder remains; explicit deletion invalidates dependent proof. Context beyond the retained window is omitted, and expired memory sources remain unavailable under the existing source-lifetime contract.
+
+Current work observations and exact child-seed acknowledgements are private metadata on existing live and archived run rows. Simultaneous observations serialize their durable admission before model exposure. Current-state reads compare canonical state again before publication, with at most one tool-free revision in the same session and remaining budget. Restart checks bind original call/result bytes and do not reset that allowance. Historical committed status keeps its original meaning. A seed receipt binds the canonical brief, capsule, child, attempt and acknowledged seed bytes; it proves receipt of that seed, not that the provider executed it.

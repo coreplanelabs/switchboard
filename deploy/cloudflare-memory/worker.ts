@@ -1,10 +1,14 @@
+import type { UnitSeedReceipt } from "../../src/core/coordinator/unitSeedReceipt.js";
 import { preserveCheckpointState } from "../../src/core/runLedger/checkpointState.js";
 import {
   checkpointMembersOf,
+  checkpointMemberHashesOf,
+  ORDINARY_CONTEXT_HISTORY_RUNS,
   planContextCheckpoint,
   validateContextCheckpoint,
   isContextCheckpointReceipt,
   applyContextCheckpoint,
+  applyContextCheckpointAliases,
   type CanonicalCheckpointSource,
   type ContextCheckpointReceipt,
   type ContextCheckpointRequest,
@@ -73,6 +77,7 @@ import {
   applyRetention,
   clampRetentionPolicy,
   isRunRecord,
+  workEvidenceBelongsToRun,
   isRunListItem,
   isRecoveryEvidenceScope,
   isRunSession,
@@ -1626,6 +1631,7 @@ type RunRow = {
   event_count: number;
   summary_json: string;
   source_reads_json?: string | null;
+  work_evidence_json?: string | null;
   context_checkpoint_json?: string | null;
   direct_audience_json?: string | null;
 };
@@ -1769,6 +1775,10 @@ export class RunHistoryDO extends DurableObject<Env> {
         source_run_id TEXT NOT NULL,
         session_key TEXT NOT NULL DEFAULT '',
         ordinary_member INTEGER NOT NULL DEFAULT 0,
+        ordinary_order INTEGER NOT NULL DEFAULT 0,
+        ordinary_checkpoint TEXT NOT NULL DEFAULT '',
+        retention_pin INTEGER NOT NULL DEFAULT 1,
+        ordinary_pin INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (holder_run_id, source_run_id, session_key)
       );
       CREATE INDEX IF NOT EXISTS context_refs_source ON context_refs(source_run_id, holder_run_id);
@@ -1788,6 +1798,20 @@ export class RunHistoryDO extends DurableObject<Env> {
         .some((column) => column.name === "ordinary_member")
     )
       this.sql.exec(`ALTER TABLE context_refs ADD COLUMN ordinary_member INTEGER NOT NULL DEFAULT 0`);
+    for (const [column, declaration] of [
+      ["ordinary_order", "INTEGER NOT NULL DEFAULT 0"],
+      ["ordinary_checkpoint", "TEXT NOT NULL DEFAULT ''"],
+      ["retention_pin", "INTEGER NOT NULL DEFAULT 1"],
+      ["ordinary_pin", "INTEGER NOT NULL DEFAULT 0"],
+    ]) {
+      if (
+        !this.sql
+          .exec<{ name: string }>(`PRAGMA table_info(context_refs)`)
+          .toArray()
+          .some((value) => value.name === column)
+      )
+        this.sql.exec(`ALTER TABLE context_refs ADD COLUMN ${column} ${declaration}`);
+    }
 
     // The live-run ledger (run-history items 28–34): live runs never enter
     // `runs` — that table's finished_at drives retention and listing — they
@@ -3680,6 +3704,21 @@ export class RunHistoryDO extends DurableObject<Env> {
     return r ? rowToLive(r) : undefined;
   }
 
+  private checkpointMembership(runId: string): Pick<CanonicalCheckpointSource, "members" | "memberCheckpoints"> {
+    const rows = this.sql
+      .exec<{ source_run_id: string; ordinary_checkpoint: string }>(
+        `SELECT source_run_id, ordinary_checkpoint FROM context_refs
+       WHERE holder_run_id = ? AND ordinary_member = 1 ORDER BY ordinary_order LIMIT ?`,
+        runId,
+        ORDINARY_CONTEXT_HISTORY_RUNS + 1,
+      )
+      .toArray();
+    return {
+      members: rows.map((row) => row.source_run_id),
+      memberCheckpoints: Object.fromEntries(rows.map((row) => [row.source_run_id, row.ordinary_checkpoint])),
+    };
+  }
+
   private async checkpointSource(runId: string): Promise<CanonicalCheckpointSource | undefined> {
     const live = this.liveRow(runId);
     const archived = live ? undefined : await this.get(runId);
@@ -3704,13 +3743,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         ? {
             receipt,
             transcriptHash,
-            members: this.sql
-              .exec<{ source_run_id: string }>(
-                `SELECT source_run_id FROM context_refs WHERE holder_run_id = ? AND ordinary_member = 1 ORDER BY source_run_id`,
-                runId,
-              )
-              .toArray()
-              .map((member) => member.source_run_id),
+            ...this.checkpointMembership(runId),
           }
         : {}),
     };
@@ -3720,6 +3753,14 @@ export class RunHistoryDO extends DurableObject<Env> {
     return this.ctx.blockConcurrencyWhile(async () => {
       await this.recoverPendingCheckpoint(record.id);
       const live = this.liveRow(record.id);
+      for (const field of ["workReads", "unitSeedReceipt"] as const) {
+        const canonical = live?.state[field];
+        if (canonical === undefined) continue;
+        if (record[field] !== undefined && JSON.stringify(record[field]) !== JSON.stringify(canonical))
+          throw new Error("work evidence is not canonical");
+        record = { ...record, [field]: structuredClone(canonical) };
+      }
+      if (!workEvidenceBelongsToRun(record, record)) throw new Error("work evidence does not match its canonical run");
       const receipt = live?.state.contextCheckpointReceipt;
       if (!isContextCheckpointReceipt(receipt)) return record;
       if (
@@ -3761,13 +3802,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       context: receipt.normalized,
       receipt,
       transcriptHash: await sourceHash(assembleTranscript(data.rows, data.attachments, receipt.session.seedFrom)),
-      members: this.sql
-        .exec<{ source_run_id: string }>(
-          `SELECT source_run_id FROM context_refs WHERE holder_run_id = ? AND ordinary_member = 1 ORDER BY source_run_id`,
-          runId,
-        )
-        .toArray()
-        .map((member) => member.source_run_id),
+      ...this.checkpointMembership(runId),
     };
     if (
       !(await validateContextCheckpoint(receipt, source)) ||
@@ -3788,6 +3823,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         JSON.stringify({ ...state, contextDependencies: receipt.normalized, contextCheckpointReceipt: receipt }),
         runId,
       );
+      this.replaceOrdinaryCheckpointPins(runId, receipt);
     });
   }
 
@@ -3872,25 +3908,22 @@ export class RunHistoryDO extends DurableObject<Env> {
         });
         if (!receipt) return unavailable();
         const members = checkpointMembersOf(row.runId, receipt.coveredOrigins, sources);
+        const memberHashes = checkpointMemberHashesOf(row.runId, receipt.coveredOrigins, sources);
         this.ctx.storage.transactionSync(() => {
-          for (const covered of receipt!.coveredOrigins)
+          // Preserve predecessor pins until the source object ACKs installation.
+          // A crash before that ACK still resumes from the original closure.
+          for (const [order, member] of members.entries())
             this.sql.exec(
-              `INSERT OR IGNORE INTO context_refs (holder_run_id, source_run_id, session_key, ordinary_member) SELECT ?, source_run_id, session_key, 0 FROM context_refs WHERE holder_run_id = ?`,
-              row.runId,
-              covered.runId,
-            );
-          for (const member of members)
-            this.sql.exec(
-              `INSERT INTO context_refs (holder_run_id, source_run_id, session_key, ordinary_member) VALUES (?, ?, '', 1) ON CONFLICT(holder_run_id, source_run_id, session_key) DO UPDATE SET ordinary_member = 1`,
+              `INSERT INTO context_refs (holder_run_id, source_run_id, session_key, ordinary_member, ordinary_order, ordinary_checkpoint, retention_pin)
+               VALUES (?, ?, '', 1, ?, ?, 0)
+               ON CONFLICT(holder_run_id, source_run_id, session_key) DO UPDATE SET
+                 ordinary_member = 1, ordinary_order = excluded.ordinary_order, ordinary_checkpoint = excluded.ordinary_checkpoint`,
               row.runId,
               member,
+              order,
+              memberHashes[member],
             );
-          this.sql.exec(
-            `INSERT OR IGNORE INTO context_refs (holder_run_id, source_run_id, session_key) VALUES (?, ?, ?)`,
-            row.runId,
-            row.runId,
-            request.key,
-          );
+          this.pinReference(row.runId, row.runId, request.key, true);
           row.state.pendingContextCheckpoint = receipt;
           this.sql.exec(`UPDATE live_runs SET state_json = ? WHERE run_id = ?`, JSON.stringify(row.state), row.runId);
         });
@@ -3900,6 +3933,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         const { pendingContextCheckpoint: _pending, ...prior } = row.state;
         row.state = { ...prior, contextDependencies: receipt!.normalized, contextCheckpointReceipt: receipt };
         this.sql.exec(`UPDATE live_runs SET state_json = ? WHERE run_id = ?`, JSON.stringify(row.state), row.runId);
+        this.replaceOrdinaryCheckpointPins(row.runId, receipt!);
       });
       return { ok: true, receipt };
     });
@@ -3975,6 +4009,15 @@ export class RunHistoryDO extends DurableObject<Env> {
         );
       }
     }
+    if (!columns.has("work_evidence_json")) {
+      this.sql.exec(`ALTER TABLE runs ADD COLUMN work_evidence_json TEXT`);
+      for (const field of ["workReads", "unitSeedReceipt"]) {
+        this.sql
+          .exec(`UPDATE runs SET work_evidence_json = json_set(COALESCE(work_evidence_json, '{"version":1}'), '$.${field}', json_extract(summary_json, '$.${field}')),
+          summary_json = json_remove(summary_json, '$.${field}')
+          WHERE json_valid(summary_json) AND json_type(summary_json, '$.${field}') IS NOT NULL`);
+      }
+    }
     if (!columns.has("source_reads_json")) {
       this.sql.exec(`ALTER TABLE runs ADD COLUMN source_reads_json TEXT`);
       this.sql.exec(`UPDATE runs SET source_reads_json = json_extract(summary_json, '$.sourceReads'),
@@ -4014,40 +4057,95 @@ export class RunHistoryDO extends DurableObject<Env> {
   /** A claim naming a session log registers it (session-log item 7), so the
    *  sweep knows the object exists and which thread it belongs to. Inside the
    *  claim's transaction. */
+  private pinReference(holder: string, source: string, session: string, ordinary = false): void {
+    this.sql.exec(
+      `INSERT INTO context_refs (holder_run_id, source_run_id, session_key, retention_pin, ordinary_pin)
+       VALUES (?, ?, ?, ?, ?) ON CONFLICT(holder_run_id, source_run_id, session_key) DO UPDATE SET
+         retention_pin = MAX(retention_pin, excluded.retention_pin), ordinary_pin = MAX(ordinary_pin, excluded.ordinary_pin)`,
+      holder,
+      source,
+      session,
+      ordinary ? 0 : 1,
+      ordinary ? 1 : 0,
+    );
+  }
+
+  private replaceOrdinaryCheckpointPins(runId: string, receipt: ContextCheckpointReceipt): void {
+    this.sql.exec(`UPDATE context_refs SET retention_pin = 0, ordinary_pin = 0 WHERE holder_run_id = ?`, runId);
+    this.sql.exec(`DELETE FROM context_refs WHERE holder_run_id = ? AND ordinary_member = 0`, runId);
+    this.pinContext(runId, undefined, receipt.normalized);
+    this.pinReference(runId, runId, receipt.session.key, true);
+  }
+
+  private committedCheckpointReceipt(runId: string): ContextCheckpointReceipt | undefined {
+    const live = this.liveRow(runId);
+    const archived = live
+      ? undefined
+      : this.sql
+          .exec<{ context_checkpoint_json: string | null }>(
+            `SELECT context_checkpoint_json FROM runs WHERE run_id = ?`,
+            runId,
+          )
+          .toArray()[0];
+    let raw: unknown = live?.state.contextCheckpointReceipt;
+    try {
+      if (!raw && archived?.context_checkpoint_json) raw = JSON.parse(archived.context_checkpoint_json);
+    } catch {
+      return undefined;
+    }
+    return isContextCheckpointReceipt(raw) ? raw : undefined;
+  }
+
   private pinContext(runId: string, handoff: ChildHandoff | undefined, context?: ContextDependencies): void {
+    const ordinary = new Set<string>();
     for (const origin of context?.origins ?? []) {
       if (!origin.checkpoint) continue;
-      const live = this.liveRow(origin.runId);
-      const archived = live
-        ? undefined
-        : this.sql
-            .exec<{ context_checkpoint_json: string | null }>(
-              `SELECT context_checkpoint_json FROM runs WHERE run_id = ?`,
-              origin.runId,
-            )
-            .toArray()[0];
-      let raw: unknown = live?.state.contextCheckpointReceipt;
-      try {
-        if (!raw && archived?.context_checkpoint_json) raw = JSON.parse(archived.context_checkpoint_json);
-      } catch {
-        continue;
-      }
-      if (isContextCheckpointReceipt(raw) && raw.hash === origin.checkpoint)
+      const raw = this.committedCheckpointReceipt(origin.runId);
+      if (!raw || raw.hash !== origin.checkpoint) continue;
+      ordinary.add(origin.runId);
+      let superseded = false;
+      if (runId.startsWith("@session:")) {
+        const roots = this.sql
+          .exec<{ source_run_id: string }>(
+            `SELECT DISTINCT source_run_id FROM context_refs WHERE holder_run_id = ? AND ordinary_pin = 1`,
+            runId,
+          )
+          .toArray();
+        for (const root of roots) {
+          const prior = this.committedCheckpointReceipt(root.source_run_id);
+          const sameLane =
+            prior &&
+            prior.session.key === raw.session.key &&
+            JSON.stringify(prior.authority) === JSON.stringify(raw.authority);
+          if (sameLane && prior.session.through > raw.session.through) superseded = true;
+          if (
+            (sameLane && prior.session.through < raw.session.through) ||
+            raw.coveredOrigins.some((covered) => covered.runId === root.source_run_id)
+          )
+            this.sql.exec(
+              `UPDATE context_refs SET ordinary_pin = 0 WHERE holder_run_id = ? AND source_run_id = ?`,
+              runId,
+              root.source_run_id,
+            );
+        }
         this.sql.exec(
-          `INSERT OR IGNORE INTO context_refs (holder_run_id, source_run_id, session_key) SELECT ?, source_run_id, session_key FROM context_refs WHERE holder_run_id = ?`,
+          `DELETE FROM context_refs WHERE holder_run_id = ? AND ordinary_member = 0 AND retention_pin = 0 AND ordinary_pin = 0`,
           runId,
-          origin.runId,
         );
+      }
+      if (!superseded) this.pinReference(runId, origin.runId, raw.session.key, true);
+      // Keep exact external leaves; ordinary aliases are not archives to retain.
+      for (const ref of contextReferencesOf(runId, undefined, {
+        ...raw.normalized,
+        origins: raw.normalized.origins.filter((value) => value.runId !== origin.runId),
+      }))
+        this.pinReference(runId, ref.sourceRunId, ref.sessionKey ?? "");
     }
-
-    for (const ref of contextReferencesOf(runId, handoff, context)) {
-      this.sql.exec(
-        `INSERT OR IGNORE INTO context_refs (holder_run_id, source_run_id, session_key) VALUES (?, ?, ?)`,
-        ref.holderRunId,
-        ref.sourceRunId,
-        ref.sessionKey ?? "",
-      );
-    }
+    const external = context
+      ? { ...context, origins: context.origins.filter((origin) => !ordinary.has(origin.runId)) }
+      : undefined;
+    for (const ref of contextReferencesOf(runId, handoff, external))
+      this.pinReference(runId, ref.sourceRunId, ref.sessionKey ?? "");
   }
 
   /** Keep source objects pinned across their ACK and the canonical holder commit.
@@ -4114,7 +4212,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     for (const key of new Set(sessions)) {
       const holders = this.sql
         .exec<{ holder_run_id: string }>(
-          `SELECT DISTINCT holder_run_id FROM context_refs WHERE session_key = ?
+          `SELECT DISTINCT holder_run_id FROM context_refs WHERE session_key = ? AND (retention_pin = 1 OR ordinary_pin = 1)
          AND source_run_id IN (SELECT run_id FROM runs UNION SELECT run_id FROM live_runs)`,
           key,
         )
@@ -4123,12 +4221,12 @@ export class RunHistoryDO extends DurableObject<Env> {
         .filter((holder) => {
           if (this.contextHolderIsLiveOrKept(holder, policy, now)) return true;
           const record = this.sql
-            .exec<RetentionRow & { context_checkpoint_json: string | null }>(
-              `SELECT run_id, finished_at, bytes, context_checkpoint_json FROM runs WHERE run_id = ?`,
+            .exec<RetentionRow & { context_checkpoint_json: string | null; work_evidence_json: string | null }>(
+              `SELECT run_id, finished_at, bytes, context_checkpoint_json, work_evidence_json FROM runs WHERE run_id = ?`,
               holder,
             )
             .toArray()[0];
-          return !!record?.context_checkpoint_json && this.isKept(record, policy, now);
+          return !!(record?.context_checkpoint_json || record?.work_evidence_json) && this.isKept(record, policy, now);
         });
       await this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(key)).retainRangePins(holders);
     }
@@ -4209,7 +4307,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     return this.sql
       .exec<{ holder_run_id: string; source_run_id: string; session_key: string }>(
         `SELECT holder_run_id, source_run_id, session_key FROM context_refs
-       WHERE holder_run_id IN (SELECT run_id FROM runs UNION SELECT run_id FROM live_runs UNION SELECT '@session:' || key FROM sessions UNION SELECT '@unit:' || instance_id || ':' || unit FROM coordinator_units)`,
+       WHERE (retention_pin = 1 OR ordinary_pin = 1) AND holder_run_id IN (SELECT run_id FROM runs UNION SELECT run_id FROM live_runs UNION SELECT '@session:' || key FROM sessions UNION SELECT '@unit:' || instance_id || ':' || unit FROM coordinator_units)`,
       )
       .toArray()
       .map((r) => ({
@@ -4331,6 +4429,8 @@ export class RunHistoryDO extends DurableObject<Env> {
         const existing = this.liveByThread(req.threadKey);
         if (!preserveCheckpointState(existing?.state ?? {}, req.state ?? {}))
           throw new Error("checkpoint state is immutable");
+        if (!workEvidenceBelongsToRun(req.state ?? {}, { id: req.runId, ...req.meta }))
+          throw new Error("work evidence does not match its canonical run");
         out = decideClaim(
           existing
             ? {
@@ -4508,7 +4608,10 @@ export class RunHistoryDO extends DurableObject<Env> {
         out = { ok: false, reason: "unknown-run" };
         return;
       }
-      if (!preserveCheckpointState(row.state, assignment.statePatch ?? {})) {
+      if (
+        !preserveCheckpointState(row.state, assignment.statePatch ?? {}) ||
+        !workEvidenceBelongsToRun({ ...row.state, ...assignment.statePatch }, { id: row.runId, ...row.meta })
+      ) {
         out = { ok: false, reason: "fenced" };
         return;
       }
@@ -4579,21 +4682,47 @@ export class RunHistoryDO extends DurableObject<Env> {
   }
 
   async setState(runId: string, gen: string, state: RunState): Promise<FenceResult> {
-    let out: FenceResult = { ok: true };
-    this.ctx.storage.transactionSync(() => {
-      out = checkFence(this.liveRow(runId), gen);
-      if (!out.ok) return;
-      const preserved = preserveCheckpointState(this.liveRow(runId)!.state, state);
-      if (!preserved) {
-        out = { ok: false, reason: "fenced" };
-        return;
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const row = this.liveRow(runId);
+      const fence = checkFence(row, gen);
+      if (!fence.ok) return fence;
+      if (!row) return { ok: false, reason: "unknown-run" };
+      const mintSeed = state.unitSeedReceipt !== undefined && row.state.unitSeedReceipt === undefined;
+      const preserved = preserveCheckpointState(row.state, state, mintSeed);
+      if (!preserved || !workEvidenceBelongsToRun(preserved, { id: row.runId, ...row.meta }))
+        return { ok: false, reason: "fenced" };
+      const receipt = preserved.unitSeedReceipt as UnitSeedReceipt | undefined;
+      if (mintSeed && receipt) {
+        const checkpoint = row.state.contextCheckpoint as { key?: string; through?: number } | undefined;
+        const lastJson = this.sql
+          .exec<{ json: string }>(`SELECT json FROM run_steps WHERE run_id = ? ORDER BY step DESC LIMIT 1`, runId)
+          .toArray()[0]?.json;
+        const last = lastJson ? (JSON.parse(lastJson) as StepRecord) : undefined;
+        if (
+          receipt.ownerGen !== gen ||
+          checkpoint?.key !== receipt.seed.key ||
+          checkpoint.through !== receipt.seed.through ||
+          !last ||
+          last.step !== 0 ||
+          last.inFlight.length ||
+          receipt.seed.through !== receipt.seed.from + last.turnIndex - 1
+        )
+          return { ok: false, reason: "fenced" };
+        const log = this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(receipt.seed.key));
+        if (
+          (await sourceHash(row.system)) !== receipt.seed.systemHash ||
+          !(await log.acknowledgeUnitSeed(runId, gen, receipt)).ok
+        )
+          return { ok: false, reason: "fenced" };
       }
-      state = preserved;
-      if (isContextDependencies(state.contextDependencies))
-        this.pinContext(runId, undefined, state.contextDependencies);
-      this.sql.exec(`UPDATE live_runs SET state_json = ? WHERE run_id = ?`, JSON.stringify(state), runId);
+      this.ctx.storage.transactionSync(() => {
+        if (isContextDependencies(preserved.contextDependencies))
+          this.pinContext(runId, undefined, preserved.contextDependencies);
+        if (receipt) this.pinReference(runId, runId, receipt.seed.key);
+        this.sql.exec(`UPDATE live_runs SET state_json = ? WHERE run_id = ?`, JSON.stringify(preserved), runId);
+      });
+      return { ok: true };
     });
-    return out;
   }
 
   /** Any generation: a steer arrives on whichever container is up. */
@@ -4982,7 +5111,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     if (this.isKeptByPolicy(row, policy, now)) return true;
     const holders = this.sql
       .exec<{ holder_run_id: string }>(
-        `SELECT DISTINCT holder_run_id FROM context_refs WHERE source_run_id = ?`,
+        `SELECT DISTINCT holder_run_id FROM context_refs WHERE source_run_id = ? AND (retention_pin = 1 OR ordinary_pin = 1)`,
         row.run_id,
       )
       .toArray();
@@ -5016,11 +5145,18 @@ export class RunHistoryDO extends DurableObject<Env> {
     return ahead.n < policy.maxRuns && ahead.b + row.bytes <= policy.maxBytes;
   }
 
-  private deleteRuns(ids: readonly string[]): void {
+  private deleteRuns(ids: readonly string[], explicit = false): void {
     for (let i = 0; i < ids.length; i += RUN_DELETE_BATCH) {
       const batch = ids.slice(i, i + RUN_DELETE_BATCH);
       const marks = batch.map(() => "?").join(",");
-      this.sql.exec(`DELETE FROM context_refs WHERE source_run_id IN (${marks})`, ...batch);
+      if (explicit) this.sql.exec(`DELETE FROM context_refs WHERE source_run_id IN (${marks})`, ...batch);
+      else {
+        this.sql.exec(`DELETE FROM context_refs WHERE source_run_id IN (${marks}) AND ordinary_member = 0`, ...batch);
+        this.sql.exec(
+          `UPDATE context_refs SET retention_pin = 0, ordinary_pin = 0 WHERE source_run_id IN (${marks})`,
+          ...batch,
+        );
+      }
       this.sql.exec(`DELETE FROM context_refs WHERE holder_run_id IN (${marks})`, ...batch);
       this.sql.exec(`DELETE FROM run_events WHERE run_id IN (${marks})`, ...batch);
       this.sql.exec(`DELETE FROM runs WHERE run_id IN (${marks})`, ...batch);
@@ -5139,8 +5275,30 @@ export class RunHistoryDO extends DurableObject<Env> {
         JSON.stringify(stored.contextCheckpointReceipt) !== JSON.stringify(priorReceipt)
       )
         throw new Error("checkpoint receipt is not canonical");
+      const priorWork = this.sql
+        .exec<{ work_evidence_json: string | null }>(`SELECT work_evidence_json FROM runs WHERE run_id = ?`, stored.id)
+        .toArray()[0]?.work_evidence_json;
+      const canonicalWork = this.liveRow(stored.id)?.state ?? (priorWork ? JSON.parse(priorWork) : {});
+      if (
+        stored.unitSeedReceipt !== undefined &&
+        JSON.stringify(stored.unitSeedReceipt) !== JSON.stringify(canonicalWork.unitSeedReceipt)
+      )
+        throw new Error("unit seed receipt is not canonical");
+      for (const field of ["workReads", "unitSeedReceipt"] as const) {
+        if (stored[field] === undefined && canonicalWork[field] !== undefined)
+          Object.assign(stored, { [field]: structuredClone(canonicalWork[field]) });
+      }
+      if (
+        !preserveCheckpointState(canonicalWork, {
+          workReads: stored.workReads,
+          unitSeedReceipt: stored.unitSeedReceipt,
+        })
+      )
+        throw new Error("work evidence is not canonical");
+      if (!workEvidenceBelongsToRun(stored, stored)) throw new Error("work evidence does not match its canonical run");
       this.pinContext(stored.id, stored.childHandoff, stored.contextDependencies);
-      const { events, sourceReads, contextCheckpointReceipt, directAudience, ...summary } = stored;
+      const { events, sourceReads, workReads, unitSeedReceipt, contextCheckpointReceipt, directAudience, ...summary } =
+        stored;
       const bytes = utf8ByteLength(JSON.stringify(stored));
       const existing = this.sql
         .exec<{ event_count: number; finished_at: number; bytes: number; summary_json: string }>(
@@ -5174,8 +5332,8 @@ export class RunHistoryDO extends DurableObject<Env> {
         );
       this.sql.exec(
         `INSERT INTO runs (run_id, label, agent, model, channel_id, user_id, thread_key, channel_visibility, repo, started_at, finished_at, stored_at, status,
-                           event_count, stored_event_count, truncated, bytes, diagnosis_json, summary_json, session_key, usage_json, parent_run_id, pr_number, source_reads_json, context_checkpoint_json, direct_audience_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           event_count, stored_event_count, truncated, bytes, diagnosis_json, summary_json, session_key, usage_json, parent_run_id, pr_number, source_reads_json, context_checkpoint_json, direct_audience_json, work_evidence_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(run_id) DO UPDATE SET
            label = excluded.label, agent = excluded.agent, model = excluded.model, channel_id = excluded.channel_id,
            user_id = excluded.user_id, thread_key = excluded.thread_key, channel_visibility = excluded.channel_visibility,
@@ -5186,7 +5344,7 @@ export class RunHistoryDO extends DurableObject<Env> {
            session_key = excluded.session_key,
            usage_json = COALESCE(excluded.usage_json, runs.usage_json),
            parent_run_id = excluded.parent_run_id,
-           pr_number = excluded.pr_number, source_reads_json = excluded.source_reads_json, context_checkpoint_json = excluded.context_checkpoint_json, direct_audience_json = excluded.direct_audience_json`,
+           pr_number = excluded.pr_number, source_reads_json = excluded.source_reads_json, context_checkpoint_json = excluded.context_checkpoint_json, direct_audience_json = excluded.direct_audience_json, work_evidence_json = excluded.work_evidence_json`,
         stored.id,
         stored.label ?? null,
         stored.agent ?? null,
@@ -5213,6 +5371,9 @@ export class RunHistoryDO extends DurableObject<Env> {
         sourceReads === undefined ? null : JSON.stringify(sourceReads),
         contextCheckpointReceipt === undefined ? null : JSON.stringify(contextCheckpointReceipt),
         directAudience === undefined ? null : JSON.stringify(directAudience),
+        workReads === undefined && unitSeedReceipt === undefined
+          ? null
+          : JSON.stringify({ version: 1, workReads, unitSeedReceipt }),
       );
       // The session's registry row learns its newest finish (session-log item
       // 7); a record that reaches the store without a claim (the plain put
@@ -5273,7 +5434,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       let deleted = false;
       this.ctx.storage.transactionSync(() => {
         deleted = this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM runs WHERE run_id = ?`, id).one().n === 1;
-        this.deleteRuns([id]);
+        this.deleteRuns([id], true);
       });
       await this.syncRangePins();
       return deleted;
@@ -5378,7 +5539,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     if (this.sessionContextRootIsRetained(key, policy, now)) return true;
     return this.sql
       .exec<{ holder_run_id: string }>(
-        `SELECT DISTINCT holder_run_id FROM context_refs WHERE session_key = ?
+        `SELECT DISTINCT holder_run_id FROM context_refs WHERE session_key = ? AND (retention_pin = 1 OR ordinary_pin = 1)
        AND source_run_id IN (SELECT run_id FROM runs UNION SELECT run_id FROM live_runs)`,
         key,
       )
@@ -5441,7 +5602,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     const now = systemClock();
     const row = this.sql
       .exec<RunRow>(
-        `SELECT run_id, agent, channel_id, finished_at, bytes, event_count, summary_json, source_reads_json, context_checkpoint_json, direct_audience_json FROM runs WHERE run_id = ?`,
+        `SELECT run_id, agent, channel_id, finished_at, bytes, event_count, summary_json, source_reads_json, context_checkpoint_json, direct_audience_json, work_evidence_json FROM runs WHERE run_id = ?`,
         id,
       )
       .toArray()[0];
@@ -5450,10 +5611,28 @@ export class RunHistoryDO extends DurableObject<Env> {
     if (!summary) return null;
     const events: RunEvent[] = parseEventRows(this.eventRows(id, 0, Number.MAX_SAFE_INTEGER));
     let sourceReads: unknown;
+    let workReads: unknown;
+    let unitSeedReceipt: unknown;
     let contextCheckpointReceipt: unknown;
     let directAudience: unknown;
     try {
       sourceReads = row.source_reads_json == null ? undefined : JSON.parse(row.source_reads_json);
+      if (row.work_evidence_json != null) {
+        const evidence: unknown = JSON.parse(row.work_evidence_json);
+        if (
+          !evidence ||
+          typeof evidence !== "object" ||
+          Array.isArray(evidence) ||
+          (evidence as { version?: unknown }).version !== 1 ||
+          Object.keys(evidence).some(
+            (field) => field !== "version" && field !== "workReads" && field !== "unitSeedReceipt",
+          )
+        )
+          return null;
+        workReads = (evidence as { workReads?: unknown }).workReads;
+        unitSeedReceipt = (evidence as { unitSeedReceipt?: unknown }).unitSeedReceipt;
+      }
+
       contextCheckpointReceipt =
         row.context_checkpoint_json == null ? undefined : JSON.parse(row.context_checkpoint_json);
       directAudience = row.direct_audience_json == null ? undefined : JSON.parse(row.direct_audience_json);
@@ -5464,6 +5643,8 @@ export class RunHistoryDO extends DurableObject<Env> {
       ...summary,
       events,
       ...(sourceReads === undefined ? {} : { sourceReads }),
+      ...(workReads === undefined ? {} : { workReads }),
+      ...(unitSeedReceipt === undefined ? {} : { unitSeedReceipt }),
       ...(contextCheckpointReceipt === undefined ? {} : { contextCheckpointReceipt }),
       ...(directAudience === undefined ? {} : { directAudience }),
     };
@@ -6534,6 +6715,39 @@ export class SessionLogDO extends DurableObject<Env> {
     });
   }
 
+  async acknowledgeUnitSeed(runId: string, gen: string, receipt: UnitSeedReceipt): Promise<FenceResult> {
+    const { from, through, messagesHash } = receipt.seed;
+    const snapshot = await this.checkpointSnapshot(from, through);
+    if (
+      snapshot.owner?.runId !== runId ||
+      snapshot.owner.gen !== gen ||
+      (await sourceHash(assembleTranscript(snapshot.rows, snapshot.attachments, from))) !== messagesHash
+    )
+      return { ok: false, reason: "fenced" };
+    return this.ctx.storage.transactionSync(() => {
+      const owner = this.owner();
+      const rows = this.sql
+        .exec<{ idx: number; part: number; json: string; trimmed: number }>(
+          `SELECT idx, part, json, trimmed FROM turns WHERE idx >= ? AND idx <= ? ORDER BY idx, part`,
+          from,
+          through,
+        )
+        .toArray();
+      if (
+        owner?.runId !== runId ||
+        owner.gen !== gen ||
+        !sessionRangesAvailable(rows, [{ from, to: through }]) ||
+        JSON.stringify(rows.map(({ idx, part, json }) => ({ idx, part, json }))) !== JSON.stringify(snapshot.rows) ||
+        JSON.stringify(this.attachmentsOf(rows)) !== JSON.stringify(snapshot.attachments)
+      )
+        return { ok: false, reason: "fenced" };
+      const pins = this.rangePins();
+      pins[runId] = [...(pins[runId] ?? []), { from, to: through }];
+      this.setSourceMeta("range_pins", JSON.stringify(pins));
+      return { ok: true };
+    });
+  }
+
   private rangePins(): SessionRangePins {
     const stored = this.sourceMeta("range_pins");
     return stored ? (JSON.parse(stored) as SessionRangePins) : {};
@@ -6634,7 +6848,7 @@ export class SessionLogDO extends DurableObject<Env> {
     rowId: string,
     rows: Array<{ part: number; json: string }>,
     context?: ContextDependencies,
-    checkpoints: readonly ContextCheckpointReceipt[] = [],
+    checkpoints: readonly CanonicalCheckpointSource[] = [],
   ): Promise<{ ok: boolean; appended: boolean }> {
     if (!keyedAppendContextMatches(rows, context)) return { ok: false, appended: false };
     const hash = await sourceHash({ rows, context: context ?? UNKNOWN_CONTEXT_DEPENDENCIES });
@@ -6650,9 +6864,12 @@ export class SessionLogDO extends DurableObject<Env> {
         return;
       }
       const idx = this.next();
-      const merged = appendSessionContext(this.sources(), context, idx === 0);
+      const previous = this.sources();
       for (const checkpoint of checkpoints)
-        if (merged.context) merged.context = applyContextCheckpoint(merged.context, checkpoint);
+        if (previous?.context) previous.context = applyContextCheckpointAliases(previous.context, checkpoint);
+      const merged = appendSessionContext(previous, context, idx === 0);
+      for (const checkpoint of checkpoints)
+        if (merged.context) merged.context = applyContextCheckpointAliases(merged.context, checkpoint);
       this.setSourceMeta("sources", JSON.stringify(merged));
       for (const [i, r] of rows.entries()) {
         this.putRow({ idx, part: r.part, json: r.json }, r.json, false);
@@ -7722,12 +7939,12 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
       )
         return json({ ok: false, appended: false, reason: "context-index-unavailable" }, 409);
       const context = b.context as ContextDependencies | undefined;
-      const checkpoints: ContextCheckpointReceipt[] = [];
+      const checkpoints: CanonicalCheckpointSource[] = [];
       if (store?.ok)
         for (const origin of context?.origins ?? []) {
           if (!origin.checkpoint) continue;
           const source = await env.RUNS.get(env.RUNS.idFromName(store.value)).readContextCheckpoint(origin.runId);
-          if (source?.receipt?.hash === origin.checkpoint) checkpoints.push(source.receipt);
+          if (source?.receipt?.hash === origin.checkpoint) checkpoints.push(source);
         }
       const r = await stub.appendKeyed(rowId.value, rows.value, context, checkpoints);
       if (r.ok && store?.ok && logicalThreadOfSession(key.value) !== undefined) {

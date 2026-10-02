@@ -1,4 +1,4 @@
-import { contextDependenciesHash } from "../../src/core/references/contextDependencies.ts";
+import { contextDependenciesHash, mergeContextDependencies } from "../../src/core/references/contextDependencies.ts";
 import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { fetchMemoryTest } from "./testFetch.ts";
@@ -13,7 +13,12 @@ import type { ChildHandoff } from "../../src/core/dispatch/handoff.ts";
 import type { RunRecord } from "../../src/core/runRecord.ts";
 import type { ContextDependencies } from "../../src/core/references/contextDependencies.ts";
 import { sourceHash, type SessionSources } from "../../src/core/references/receipts.ts";
-import type { RunHistoryDO } from "./worker.ts";
+import { RunHistoryDO } from "./worker.ts";
+import {
+  ORDINARY_CONTEXT_HISTORY_RUNS,
+  type CanonicalCheckpointSource,
+  type ContextCheckpointReceipt,
+} from "../../src/core/references/contextCheckpoint.ts";
 
 let seq = 0;
 const unique = () => `${Date.now()}-${seq++}`;
@@ -88,6 +93,309 @@ const writeOne = async (key: string, runId: string) => {
 };
 
 describe("unified sessions — durable owner and retention lifecycle", () => {
+  it("acknowledges only exact committed unit input and keeps its private receipt immutable through adoption and finish", async () => {
+    const id = unique(),
+      storeKey = `runs:unit-seed-${id}`,
+      threadKey = `slack:C1:${id}`,
+      key = `${threadKey}:coding`;
+    const coordinator = {
+      parentInstanceId: "instance",
+      coordinatorUnit: "U11",
+      coordinatorAttempt: 0,
+      idempotencyKey: "instance:U11/coding",
+    };
+    expect(
+      (await claim(storeKey, "unit-child", threadKey, { ...coordinator, session: session(key, threadKey) })).data.ok,
+    ).toBe(true);
+    await writeOne(key, "unit-child");
+    const data = (await post("/runs/session/read", { key, from: 0, to: 0 })).data;
+    const receipt: NonNullable<RunRecord["unitSeedReceipt"]> = {
+      version: 1,
+      binding: { instanceId: "instance", unit: "U11", instanceAttempt: 0, idempotencyKey: coordinator.idempotencyKey },
+      child: { runId: "unit-child", requester: "slack:UALICE", channelId: "slack:C1", threadKey },
+      ownerGen: "g1",
+      workBriefHash: "a".repeat(64),
+      capsuleHash: "b".repeat(64),
+      contractHash: "c".repeat(64),
+      seed: {
+        key,
+        from: 0,
+        through: 0,
+        messagesHash: await sourceHash(
+          assembleTranscript(data.rows as Parameters<typeof assembleTranscript>[0], [], 0),
+        ),
+        systemHash: await sourceHash("work"),
+      },
+      acknowledgedAt: Date.now(),
+    };
+    const save = (unitSeedReceipt: unknown, gen = "g1") =>
+      post("/runs/state", {
+        storeKey,
+        runId: "unit-child",
+        gen,
+        state: { contextCheckpoint: { key, through: 0 }, unitSeedReceipt },
+      });
+    expect((await save(receipt)).data.ok).toBe(false);
+    await post("/runs/step", {
+      storeKey,
+      runId: "unit-child",
+      gen: "g1",
+      record: {
+        step: 0,
+        seq: 0,
+        turnIndex: 1,
+        inFlight: [],
+        inboxConsumedSeq: 0,
+        remainingMs: 1000,
+        turn: 0,
+        iteration: 0,
+      },
+    });
+    await post("/runs/state", {
+      storeKey,
+      runId: "unit-child",
+      gen: "g1",
+      state: { contextCheckpoint: { key, through: 0 } },
+    });
+    for (const invalid of [
+      { ...receipt, ownerGen: "stale" },
+      { ...receipt, child: { ...receipt.child, requester: "foreign" } },
+      { ...receipt, seed: { ...receipt.seed, messagesHash: "f".repeat(64) } },
+      { ...receipt, seed: { ...receipt.seed, systemHash: "f".repeat(64) } },
+    ])
+      expect((await save(invalid)).data.ok).toBe(false);
+    expect((await save(receipt)).data.ok).toBe(true);
+    expect((await save({ ...receipt, capsuleHash: "f".repeat(64) })).data.ok).toBe(false);
+    expect(
+      (
+        await post("/runs/session/write", {
+          key,
+          gen: "g1",
+          runId: "unit-child",
+          rows: [
+            { idx: 0, part: 0, json: JSON.stringify({ role: "user", part: { type: "text", text: "rewritten" } }) },
+          ],
+          attachments: [],
+        })
+      ).data.ok,
+    ).toBe(false);
+    await sql(storeKey, "UPDATE live_runs SET owner_gen = 'g2' WHERE run_id = 'unit-child'");
+    await post("/runs/session/owner", { key, runId: "unit-child", gen: "g2" });
+    expect((await post("/runs/state", { storeKey, runId: "unit-child", gen: "g2", state: {} })).data.ok).toBe(true);
+    expect(
+      (
+        await post("/runs/finish", {
+          storeKey,
+          runId: "unit-child",
+          gen: "g2",
+          record: { ...record("unit-child", threadKey), ...coordinator, session: session(key, threadKey) },
+        })
+      ).data.ok,
+    ).toBe(true);
+    expect(
+      ((await post("/runs/get", { storeKey, id: "unit-child" })).data.record as RunRecord).unitSeedReceipt,
+    ).toEqual(receipt);
+    expect(JSON.stringify((await post("/runs/summary", { storeKey, id: "unit-child" })).data)).not.toContain(
+      "unitSeedReceipt",
+    );
+  });
+
+  it("bounds 384 ordinary continuations across retention and reconstruction while frozen units keep their originals", async () => {
+    const id = unique();
+    const storeKey = `runs:bounded-${id}`,
+      threadKey = `slack:C1:${id}`;
+    const key = `${threadKey}:coding`,
+      sharedKey = contextThreadSessionKey(threadKey);
+    const stub = env.RUNS.get(env.RUNS.idFromName(storeKey));
+    const started = Date.now() - 10_000,
+      maxRuns = 4;
+    const clean: ContextDependencies = { version: 1, status: "known", revision: 0, origins: [], slack: [], mcp: [] };
+    let previous: ContextCheckpointReceipt | undefined;
+    await post("/runs/put", { storeKey, record: record("external-reader", "slack:C1:external") });
+    for (let turn = 0; turn < ORDINARY_CONTEXT_HISTORY_RUNS * 3; turn++) {
+      const runId = `ordinary-${turn}`;
+      const binding = { key, threadSession: sharedKey, seedFrom: turn, request: turn, range: { from: turn, to: turn } };
+      expect((await claim(storeKey, runId, threadKey, { channelVisibility: "public", session: binding })).data.ok).toBe(
+        true,
+      );
+      expect((await post("/runs/session/owner", { key, runId, gen: "g1" })).data.ok).toBe(true);
+      const context = mergeContextDependencies(
+        previous?.normalized ?? {
+          ...clean,
+          mcp: [{ runId: "external-reader", actionId: "read", callIds: ["call"], responseHash: "a".repeat(64) }],
+        },
+        { ...clean, origins: [{ runId, requester: "slack:UALICE", channelId: "slack:C1", threadKey }] },
+      );
+      const rows = [
+        {
+          idx: turn,
+          part: 0,
+          json: JSON.stringify({
+            role: "user",
+            part: { type: "text", text: `Summary of turn ${turn - 1}; preserve the original requirement.` },
+          }),
+        },
+      ];
+      expect(
+        (
+          await post("/runs/session/write", {
+            storeKey,
+            key,
+            gen: "g1",
+            sourceRunId: runId,
+            sources: {
+              ...testSessionSources({ channelId: "slack:C1", threadKey, userId: "slack:UALICE" }, []),
+              context,
+            },
+            rows,
+            attachments: [],
+          })
+        ).data.ok,
+      ).toBe(true);
+      expect(
+        (
+          await post("/runs/state", {
+            storeKey,
+            runId,
+            gen: "g1",
+            state: { contextDependencies: context, contextCheckpoint: { key, through: turn } },
+          })
+        ).data.ok,
+      ).toBe(true);
+      expect(
+        (
+          await post("/runs/step", {
+            storeKey,
+            runId,
+            gen: "g1",
+            record: {
+              step: 0,
+              seq: 0,
+              turnIndex: 1,
+              inFlight: [],
+              inboxConsumedSeq: 0,
+              remainingMs: 1000,
+              turn: 0,
+              iteration: 0,
+            },
+          })
+        ).data.ok,
+      ).toBe(true);
+      const result = await post("/runs/session/checkpoint", {
+        storeKey,
+        key,
+        runId,
+        gen: "g1",
+        expected: {
+          beforeHash: await contextDependenciesHash(context),
+          revision: context.revision,
+          inputs: {
+            transcriptHash: await sourceHash(assembleTranscript(rows, [], turn)),
+            systemHash: await sourceHash("work"),
+            notepadHash: await sourceHash(""),
+          },
+        },
+      });
+      expect(result.data.ok, `checkpoint ${turn}`).toBe(true);
+      previous = result.data.receipt as ContextCheckpointReceipt;
+      expect(previous.membershipCount).toBe(Math.min(turn + 1, ORDINARY_CONTEXT_HISTORY_RUNS));
+      // Missing intermediate reports cannot keep an old ordinary root pinned forever.
+      if (turn % 3 === 0 || turn === ORDINARY_CONTEXT_HISTORY_RUNS * 3 - 1)
+        expect(
+          (
+            await post("/runs/session/append", {
+              storeKey,
+              key: sharedKey,
+              rowId: runId,
+              context: previous.normalized,
+              rows: [
+                {
+                  part: 0,
+                  json: JSON.stringify({
+                    role: "assistant",
+                    part: { type: "text", text: `answer ${turn}` },
+                    context: previous.normalized,
+                  }),
+                },
+              ],
+            })
+          ).data.ok,
+        ).toBe(true);
+      if (turn === 0) {
+        const unit: CoordinatorUnit = {
+          instanceId: `unit-${id}`,
+          unit: "U11",
+          slug: "frozen",
+          branch: "plan/frozen",
+          dependsOn: [],
+          rounds: [],
+          context: {
+            version: 1,
+            handoff: {
+              version: 1,
+              source: { runId, requester: "slack:UALICE", channelId: "slack:C1", threadKey },
+              session: { key, from: 0, to: 0 },
+              assets: [],
+            },
+          },
+        };
+        expect((await post("/runs/coordinator/units/put", { storeKey, units: [unit] })).data.ok).toBe(true);
+      }
+      expect(
+        (
+          await post("/runs/finish", {
+            storeKey,
+            runId,
+            gen: "g1",
+            policy: { maxRuns },
+            policyUpdatedAt: Date.now(),
+            record: {
+              ...record(runId, threadKey),
+              startedAt: started + turn,
+              finishedAt: started + turn + 1,
+              session: binding,
+              contextDependencies: previous.normalized,
+            },
+          })
+        ).data.stored,
+      ).toBe(true);
+      if (turn % 64 === 63) {
+        expect((await post("/runs/session/read-tail", { key: sharedKey, maxBytes: 1 })).data.sources).toMatchObject({
+          context: { status: "known", origins: [expect.anything()] },
+        });
+        await runDurableObjectAlarm(stub);
+        const restored = await runInDurableObject(stub, async (_instance, state) =>
+          new RunHistoryDO(state, env).readContextCheckpoint(runId),
+        );
+        expect(restored?.members).toHaveLength(Math.min(turn + 1, ORDINARY_CONTEXT_HISTORY_RUNS));
+        expect(restored?.members?.[0]).toBe(runId);
+        expect((await sql<{ n: number }>(storeKey, "SELECT COUNT(*) AS n FROM runs"))[0].n).toBeLessThanOrEqual(
+          maxRuns + 2,
+        );
+        expect((await sql<{ n: number }>(storeKey, "SELECT COUNT(*) AS n FROM context_refs"))[0].n).toBeLessThanOrEqual(
+          (maxRuns + 2) * (ORDINARY_CONTEXT_HISTORY_RUNS + 4),
+        );
+      }
+    }
+    expect((await post("/runs/get", { storeKey, id: "ordinary-1" })).data.record).toBeNull();
+    expect((await post("/runs/get", { storeKey, id: "ordinary-0" })).data.record).not.toBeNull();
+    expect((await post("/runs/get", { storeKey, id: "external-reader" })).data.record).not.toBeNull();
+    const source = (await post("/runs/context-checkpoint", { storeKey, runId: "ordinary-383" })).data
+      .source as CanonicalCheckpointSource;
+    expect(source.members).toHaveLength(ORDINARY_CONTEXT_HISTORY_RUNS);
+    expect(source.members).not.toContain("ordinary-0");
+    expect(source.receipt?.normalized.mcp).toHaveLength(1);
+    expect(JSON.stringify((await post("/runs/session/read", { key, from: 383, to: 383 })).data)).toContain(
+      "Summary of turn 382",
+    );
+    expect(JSON.stringify((await post("/runs/session/read", { key, from: 0, to: 0 })).data)).toContain(
+      "original requirement",
+    );
+    // Expiry preserves aliases; explicit deletion revokes them even after the archive expires.
+    await post("/runs/delete", { storeKey, id: "ordinary-300" });
+    expect((await post("/runs/context-checkpoint", { storeKey, runId: "ordinary-383" })).data.source).toBeNull();
+  }, 60_000);
+
   it("commits an exact ordinary checkpoint, archives it privately, and rejects stale input seals", async () => {
     const id = unique();
     const storeKey = `runs:checkpoint-${id}`;

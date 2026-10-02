@@ -410,7 +410,8 @@ export function requiresFreshSourceTool(name: string): boolean {
     name.startsWith("mcp__") ||
     name === "plane_show" ||
     name === "thread_work" ||
-    name === "work_progress"
+    name === "work_progress" ||
+    name === "work_status"
   );
 }
 

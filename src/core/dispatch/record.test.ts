@@ -114,6 +114,26 @@ describe("durable source archive assembly", () => {
       session: { key: "slack:CX:2.0:research", from: 0, to: 0 },
       assets: [],
     };
+    const workReads: NonNullable<RunRecord["workReads"]> = [
+      {
+        tool: "work_status",
+        callId: "status-call",
+        input: { actId: "private-work-act" },
+        resultHash: "a".repeat(64),
+        observation: {
+          version: 1,
+          actId: "private-work-act",
+          instanceId: "instance",
+          unit: "U11",
+          attempt: 0,
+          requesterId: meta.userId,
+          channelId: meta.channelId,
+          mainThreadKey: meta.threadKey,
+          snapshotHash: "b".repeat(64),
+          observedAt: 1000,
+        },
+      },
+    ];
     const assembled = assembleRunRecord({
       run: { id: "child" },
       snap: null,
@@ -124,6 +144,7 @@ describe("durable source archive assembly", () => {
       status: "interrupted",
       diagnosis: analyzeRunFriction([]),
       sourceReads,
+      workReads,
       contextDependencies,
       childHandoff,
     });
@@ -139,12 +160,13 @@ describe("durable source archive assembly", () => {
       card: null,
       system: "sys",
       tools: [],
-      state: { sourceReads, contextDependencies },
+      state: { sourceReads, workReads, contextDependencies },
     };
     const reclaimed = reclaimedRunRecord({ row, events: [], status: "interrupted", finishedAt: 5000 });
     for (const value of [assembled, reclaimed]) {
       expect(isRunRecord(value)).toBe(true);
       expect(value.sourceReads).toEqual(sourceReads);
+      expect(value.workReads).toEqual(workReads);
       expect(value.contextDependencies).toEqual(contextDependencies);
       expect(value.childHandoff).toEqual(childHandoff);
       expect(value.sourceReads?.records.map((read) => read.phase)).toEqual(["pending", "unknown"]);

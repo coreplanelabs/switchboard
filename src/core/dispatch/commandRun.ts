@@ -1,6 +1,10 @@
 import type { AudienceRefusalReceipt } from "../audienceDecision.js";
 import { appendThreadTurn } from "../runLedger/threadSession.js";
-import { UNKNOWN_CONTEXT_DEPENDENCIES } from "../references/contextDependencies.js";
+import {
+  mergeContextDependencies,
+  UNKNOWN_CONTEXT_DEPENDENCIES,
+  type ContextDependencies,
+} from "../references/contextDependencies.js";
 import type { LedgerWriteThrough } from "../runLedger/writeThrough.js";
 // A registry command run from the dispatcher, as a run (docs/decisions/0008-one-command-definition-every-surface.md;
 // docs/reference/specs/command-registry.md item 18): the machinery the two fast
@@ -59,6 +63,10 @@ export interface CommandRunOptions {
    *  the run's `route` event, never acted on here. */
   operator?: OperatorEventFields;
   source?: "route" | "confirm";
+  /** Recheck the exact model input before publishing its decision or invoking its action. */
+  beforePublish?: () => Promise<void>;
+  /** Internal provenance for later reuse of the saved decision, never a public event field. */
+  contextDependencies?: ContextDependencies;
 }
 
 /** `runInlineCommandRun`'s options: the command's, plus whether the channel is
@@ -112,6 +120,7 @@ export async function runChatCommand(
   if (!commands) return { ok: false, text: "" };
   const persistText = async (text: string, suffix = "") => {
     if (text && deps.runLedger?.sessionPersistence) {
+      await opts.beforePublish?.();
       const ledger = deps.runLedger;
       if (!ledger.appendSession) throw new Error("conversation storage is unavailable");
       await appendThreadTurn(
@@ -128,6 +137,7 @@ export async function runChatCommand(
   };
   const persistResult = async (result: ChatCommandResult): Promise<ChatCommandResult> => {
     await persistText(result.text);
+    await opts.beforePublish?.();
     const followUp = result.followUp;
     return followUp
       ? {
@@ -142,8 +152,9 @@ export async function runChatCommand(
   };
   const resolveRepo = async (): Promise<string | undefined> =>
     (await resolveRepoForCommand(deps, msg, await io.history())).repo;
-  const invoke = (span: Span) =>
-    invokeChatCommand({
+  const invoke = async (span: Span) => {
+    await opts.beforePublish?.();
+    return invokeChatCommand({
       commands,
       parsed,
       msg,
@@ -152,6 +163,7 @@ export async function runChatCommand(
       span,
       ...(opts.source ? { source: opts.source } : {}),
     });
+  };
   if (parsed.kind === "invoke") {
     const inline = isInlineRunCommand(parsed.id);
     // An operator shadow decision needs a record to ride (record 0057): a
@@ -224,12 +236,14 @@ async function recordDoorDecision(
   ending: RunEnding,
   trace: RequestTrace,
   audienceRefusal?: AudienceRefusalReceipt,
+  opts: Pick<CommandRunOptions, "beforePublish" | "contextDependencies"> = {},
 ): Promise<void> {
   const registry = deps.runRegistry ?? defaultRunRegistry;
   const root = trace.root;
   const clock = deps.clock ?? systemClock;
   const threadKey = msg.threadKey || msg.channelId;
   const channelVisibility = await channelVisibilityOf(deps, msg.channelId);
+  await opts.beforePublish?.();
   const run = registry.create(
     composeRunLabel({
       agent: decision.kind === "refusal" ? decision.refusal.code : `operator_${decision.operator.outcome}`,
@@ -287,6 +301,7 @@ async function recordDoorDecision(
       deps.runHistoryWriter.write(
         assembleRunRecord({
           audienceRefusal,
+          contextDependencies: opts.contextDependencies,
           run,
           snap,
           agent: DOOR_RUN_AGENT,
@@ -330,8 +345,9 @@ export async function recordOperatorDecision(
   event: OperatorEventFields,
   ending: RunEnding,
   trace: RequestTrace,
+  opts: Pick<CommandRunOptions, "beforePublish" | "contextDependencies"> = {},
 ): Promise<void> {
-  await recordDoorDecision(deps, msg, { kind: "operator", operator: event }, ending, trace);
+  await recordDoorDecision(deps, msg, { kind: "operator", operator: event }, ending, trace, undefined, opts);
 }
 
 /**
@@ -388,6 +404,7 @@ export async function runInlineCommandRun<
   const channelVisibility = await root.span("dispatch.channel_visibility", () =>
     channelVisibilityOf(deps, msg.channelId),
   );
+  await opts.beforePublish?.();
   const run = registry.create(
     composeRunLabel({
       agent: command,
@@ -434,7 +451,11 @@ export async function runInlineCommandRun<
     result = await root.span(
       "run.command",
       async (span) => {
-        const r = await execute(span);
+        const r = await execute(span).catch(async (error: unknown) => {
+          await opts.beforePublish?.();
+          throw error;
+        });
+        await opts.beforePublish?.();
         const steps = sanitizeGraftedSteps(r.trace);
         if (steps.length > 0)
           graftResidentSteps(steps, {
@@ -448,12 +469,14 @@ export async function runInlineCommandRun<
       },
       { attrs: { command } },
     );
+    await opts.beforePublish?.();
     registry.publish(run.id, { type: "answer", text: redactSecrets(result.text), at: clock() });
     return result;
   } catch (err) {
     // A thrown command still gets an `answer`: the same `⚠️ <error>` line the
     // dispatcher's outer handler replies with, so the record explains its
     // `failed` status and the channel reply stays a projection of it.
+    await opts.beforePublish?.();
     registry.publish(run.id, { type: "answer", text: redactSecrets(errorReply(err)), at: clock() });
     throw err;
   } finally {
@@ -479,6 +502,10 @@ export async function runInlineCommandRun<
       write: (seal) =>
         deps.runHistoryWriter.write(
           assembleRunRecord({
+            // The decision's inputs do not prove newly read command output.
+            contextDependencies: opts.contextDependencies
+              ? mergeContextDependencies(UNKNOWN_CONTEXT_DEPENDENCIES, opts.contextDependencies)
+              : undefined,
             run,
             snap,
             agent: COMMAND_RUN_AGENT,

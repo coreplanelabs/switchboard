@@ -39,6 +39,7 @@ import {
 } from "../confirmations.js";
 import type { StructuredAttempt } from "./structured.js";
 import type { TurnEffortRequest } from "./turnEffort.js";
+import { isContextDependencies, type ContextDependencies } from "../references/contextDependencies.js";
 
 /** A reasoning wire's cap must leave room for hidden reasoning before the
  * visible structured answer. These canonical cap fields bound both on their
@@ -537,6 +538,7 @@ export type ConfirmationMint =
   | { kind: "offered"; shown: ConfirmationOffer }
   | { kind: "no_click" }
   | { kind: "unshowable" }
+  | { kind: "context_unavailable" }
   | { kind: "store_unreachable" };
 
 /**
@@ -551,18 +553,24 @@ export type ConfirmationMint =
  * and the same expiry answer both, and the plain `To run this:` text remains
  * only where no channel can show a click.
  */
-export async function mintConfirmationOffer(args: {
-  io: ChannelIO;
-  store: ConfirmationStore | undefined;
-  msg: IncomingMessage;
-  origin?: Caller["origin"];
-  def: CommandDef<unknown>;
-  input: CommandInput;
-  receipt: string;
-  model: string;
-}): Promise<ConfirmationMint> {
+export async function mintConfirmationOffer(
+  args: {
+    io: ChannelIO;
+    store: ConfirmationStore | undefined;
+    msg: IncomingMessage;
+    origin?: Caller["origin"];
+    def: CommandDef<unknown>;
+    input: CommandInput;
+    receipt: string;
+    model: string;
+  } & ({ source: "operator"; context: ContextDependencies } | { source?: "route"; context?: never }),
+): Promise<ConfirmationMint> {
   const { io, store, msg, origin, def, input, receipt, model } = args;
   if (!io.offer || !store) return { kind: "no_click" };
+  if (args.source === "operator" && (!isContextDependencies(args.context) || args.context.status !== "known"))
+    return { kind: "context_unavailable" };
+  const derivation =
+    args.source === "operator" ? { kind: "operator" as const, context: structuredClone(args.context) } : undefined;
   const line = chatInvocation(def, input);
   if (redactSecrets(line) !== line) return { kind: "unshowable" };
   const risk = def.annotations?.risk?.(input, origin) ?? "";
@@ -578,6 +586,7 @@ export async function mintConfirmationOffer(args: {
         receipt,
         risk,
         model,
+        ...(derivation ? { derivation } : {}),
       },
       CONFIRMATION_TTL_MS,
     );

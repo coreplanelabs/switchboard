@@ -262,6 +262,72 @@ describe("open — claim and seed", () => {
     expect(ledger.finished.get("r1")).toMatchObject({ sourceReads, contextDependencies });
   });
 
+  it("archives acknowledged unit input and exact work reads from live state at the real finish seam", async () => {
+    const { ledger, wt } = harness();
+    const { sourceHash } = await import("../references/receipts.js");
+    const req = openReq();
+    const coordinator = {
+      parentInstanceId: "instance",
+      coordinatorUnit: "U11",
+      coordinatorAttempt: 0,
+      idempotencyKey: "instance:U11/coding",
+    };
+    req.meta = { ...req.meta, ...coordinator };
+    const run = (await openRun(wt, req))!;
+    const workReads: NonNullable<RunRecord["workReads"]> = [
+      {
+        tool: "work_status",
+        callId: "status-call",
+        input: { actId: "private-act" },
+        resultHash: "a".repeat(64),
+        observation: {
+          version: 1,
+          actId: "private-act",
+          instanceId: "instance",
+          unit: "U11",
+          attempt: 0,
+          requesterId: req.meta.userId,
+          channelId: req.meta.channelId,
+          mainThreadKey: req.meta.threadKey,
+          snapshotHash: "b".repeat(64),
+          observedAt: 1000,
+        },
+      },
+    ];
+    const unitSeedReceipt: NonNullable<RunRecord["unitSeedReceipt"]> = {
+      version: 1,
+      binding: {
+        instanceId: coordinator.parentInstanceId,
+        unit: coordinator.coordinatorUnit,
+        instanceAttempt: 0,
+        idempotencyKey: coordinator.idempotencyKey,
+      },
+      child: { runId: "r1", requester: req.meta.userId, channelId: req.meta.channelId, threadKey: req.meta.threadKey },
+      ownerGen: "gen-A",
+      workBriefHash: "a".repeat(64),
+      capsuleHash: "b".repeat(64),
+      contractHash: "c".repeat(64),
+      seed: {
+        key: run.session!.key,
+        from: run.session!.seedFrom,
+        through: (await ledger.sessionTail(run.session!.key)) - 1,
+        messagesHash: await sourceHash(await ledger.readSession(run.session!.key, run.session!.seedFrom)),
+        systemHash: await sourceHash(req.system),
+      },
+      acknowledgedAt: 1000,
+    };
+    expect(await run.checkpointSession()).toBeDefined();
+    expect(await run.setStateAndFlush({ workReads, unitSeedReceipt })).toBe(true);
+    expect(await ledger.setState("r1", "gen-A", { workReads: [] })).toEqual({ ok: false, reason: "fenced" });
+    expect(
+      await ledger.setState("r1", "gen-A", { workReads: [{ ...workReads[0]!, resultHash: "f".repeat(64) }] }),
+    ).toEqual({ ok: false, reason: "fenced" });
+    expect(await ledger.setState("r1", "gen-A", {})).toEqual({ ok: true });
+    await run.sink.put({ ...record("r1"), ...coordinator, agent: "review" });
+    expect(ledger.live.has("r1")).toBe(false);
+    expect(ledger.finished.get("r1")).toMatchObject({ workReads, unitSeedReceipt });
+  });
+
   it("persists inherited context before writing the child seed", async () => {
     const ledger = new InMemoryRunLedger(() => 10_000);
     let checked = false;

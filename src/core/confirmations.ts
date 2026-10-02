@@ -7,6 +7,7 @@ import { systemClock } from "./trace/clock.js";
 import type { Clock } from "./trace/types.js";
 import type { ConfirmationOffer, IncomingMessage } from "./types.js";
 import type { PrWorkBinding } from "./ship/prWorkBinding.js";
+import { isContextDependencies, type ContextDependencies } from "./references/contextDependencies.js";
 
 // The confirmation a routed write is offered as (docs/decisions/0044-a-routed-write-is-confirmed-in-proportion-to-its-blast-radius.md;
 // docs/reference/specs/routing-and-config.md item 25). The router bound a
@@ -46,6 +47,8 @@ export interface RunConfirmation {
   receipt: string;
   risk: string;
   model: string;
+  /** Original operator inputs travel with the exact command they derived. */
+  derivation?: { kind: "operator"; context: ContextDependencies };
   expiresAt: number;
 }
 
@@ -220,6 +223,14 @@ function isRedispatchShape(v: Record<string, unknown>): boolean {
  *  stamped on the way out (record 0054: old rows still parse). */
 export function parsePendingConfirmation(v: unknown): PendingConfirmation | undefined {
   if (!isRecord(v)) return undefined;
+  if (
+    "derivation" in v &&
+    (v.kind === "redispatch" ||
+      !isRecord(v.derivation) ||
+      v.derivation.kind !== "operator" ||
+      !isContextDependencies(v.derivation.context))
+  )
+    return undefined;
   if (v.kind === "redispatch")
     return isRedispatchShape(v) ? (v as unknown as Omit<RedispatchConfirmation, "expiresAt">) : undefined;
   if (v.kind !== undefined && v.kind !== "run") return undefined;

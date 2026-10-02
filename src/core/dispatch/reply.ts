@@ -716,6 +716,7 @@ export interface DeliveryContext {
   root: Span;
   /** A source-bearing answer is rechecked before any channel publication. */
   publicationCheck?: () => Promise<AudienceCheck>;
+  currentWorkCheck?: () => Promise<string | undefined>;
   audience?: AudienceTrace;
 }
 
@@ -875,7 +876,8 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
           if (!privateDecision.ok) return refusal(privateDecision);
           if (publication && !publication.ok) return refusal(publication);
           if (audience.refusal?.withheldAt) return refusal({ ok: false, code: audience.refusal.code });
-          return io.reply(prNote ? `${channelAnswer}\n\n${prNote}` : channelAnswer);
+          const currentWork = await ctx.currentWorkCheck?.();
+          return io.reply(currentWork ?? (prNote ? `${channelAnswer}\n\n${prNote}` : channelAnswer));
         }),
       // A null channel's reply resolves but reaches nobody: the seal says
       // `replyOk: false` with the reason (run-history.md item 38).

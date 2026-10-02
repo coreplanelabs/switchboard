@@ -1,7 +1,8 @@
 import { preserveCheckpointState } from "./checkpointState.js";
 import {
   checkpointMembersOf,
-  applyContextCheckpoint,
+  checkpointMemberHashesOf,
+  applyContextCheckpointAliases,
   planContextCheckpoint,
   validateContextCheckpoint,
   isContextCheckpointReceipt,
@@ -36,7 +37,8 @@ import {
 // also documents the storage shape in the plainest form.
 
 import { INTAKE_DELIVERY_CLAIM_MS } from "../budgets.js";
-import { utf8ByteLength, type RunRecord } from "../runRecord.js";
+import { utf8ByteLength, workEvidenceBelongsToRun, type RunRecord } from "../runRecord.js";
+import type { UnitSeedReceipt } from "../coordinator/unitSeedReceipt.js";
 import { assignRunLiveState } from "../runLiveState.js";
 import {
   checkFence,
@@ -206,6 +208,8 @@ export class InMemoryRunLedger implements RunLedger {
     const existing = this.byThread(req.threadKey);
     if (!preserveCheckpointState(existing?.state ?? {}, req.state ?? {}))
       throw new Error("checkpoint state is immutable");
+    if (!workEvidenceBelongsToRun(req.state ?? {}, { id: req.runId, ...req.meta }))
+      throw new Error("work evidence does not match its canonical run");
     const decision = decideClaim(
       existing
         ? {
@@ -337,6 +341,7 @@ export class InMemoryRunLedger implements RunLedger {
   }
 
   readonly checkpointMembers = new Map<string, readonly string[]>();
+  readonly checkpointMemberHashes = new Map<string, Readonly<Record<string, string>>>();
 
   private async checkpointSource(runId: string): Promise<CanonicalCheckpointSource | undefined> {
     const live = this.live.get(runId);
@@ -357,6 +362,7 @@ export class InMemoryRunLedger implements RunLedger {
               await this.readSession(receipt.session.key, receipt.session.seedFrom, receipt.session.through),
             ),
             members: [...(this.checkpointMembers.get(runId) ?? [])],
+            memberCheckpoints: { ...(this.checkpointMemberHashes.get(runId) ?? {}) },
           }
         : {}),
     };
@@ -433,6 +439,7 @@ export class InMemoryRunLedger implements RunLedger {
     )
       return unavailable();
     this.checkpointMembers.set(row.runId, checkpointMembersOf(row.runId, receipt.coveredOrigins, sources));
+    this.checkpointMemberHashes.set(row.runId, checkpointMemberHashesOf(row.runId, receipt.coveredOrigins, sources));
     log.rangePins ??= {};
     log.rangePins[row.runId] = [{ from: session.seedFrom, to: through }];
     log.sources = { ...log.sources, context: structuredClone(receipt.normalized) };
@@ -609,6 +616,8 @@ export class InMemoryRunLedger implements RunLedger {
     if (!fence.ok) return fence;
     if (!row) return { ok: false, reason: "unknown-run" };
     if (!preserveCheckpointState(row.state, assignment.statePatch ?? {})) return { ok: false, reason: "fenced" };
+    if (!workEvidenceBelongsToRun({ ...row.state, ...assignment.statePatch }, { id: row.runId, ...row.meta }))
+      return { ok: false, reason: "fenced" };
     const result = assignRunLiveState(
       assignment.restart ? undefined : row.liveState,
       row.liveStateSeq ?? 0,
@@ -655,8 +664,43 @@ export class InMemoryRunLedger implements RunLedger {
     const row = this.live.get(runId);
     const fence = checkFence(row, gen);
     if (!fence.ok || !row) return fence;
-    const preserved = preserveCheckpointState(row.state, state);
+    const mintSeed = state.unitSeedReceipt !== undefined && row.state.unitSeedReceipt === undefined;
+    const preserved = preserveCheckpointState(row.state, state, mintSeed);
     if (!preserved) return { ok: false, reason: "fenced" };
+    if (!workEvidenceBelongsToRun(preserved, { id: row.runId, ...row.meta })) return { ok: false, reason: "fenced" };
+    if (mintSeed) {
+      const receipt = preserved.unitSeedReceipt as UnitSeedReceipt;
+      const checkpoint = row.state.contextCheckpoint as { key?: string; through?: number } | undefined;
+      const last = this.steps.get(runId)?.at(-1);
+      const log = this.sessions.get(receipt.seed.key);
+      if (
+        receipt.ownerGen !== gen ||
+        checkpoint?.key !== receipt.seed.key ||
+        checkpoint.through !== receipt.seed.through ||
+        !last ||
+        last.step !== 0 ||
+        last.inFlight.length ||
+        receipt.seed.through !== receipt.seed.from + last.turnIndex - 1 ||
+        log?.owner?.runId !== runId ||
+        log.owner.gen !== gen
+      )
+        return { ok: false, reason: "fenced" };
+      const before = JSON.stringify({ row, log });
+      const transcript = await this.readSession(receipt.seed.key, receipt.seed.from, receipt.seed.through);
+      if (
+        (await sourceHash(transcript)) !== receipt.seed.messagesHash ||
+        (await sourceHash(row.system)) !== receipt.seed.systemHash ||
+        this.live.get(runId) !== row ||
+        before !== JSON.stringify({ row, log }) ||
+        !sessionRangesAvailable(
+          log.rows.map((part) => ({ ...part, trimmed: log.trimmed.has(`${part.idx}:${part.part}`) })),
+          [{ from: receipt.seed.from, to: receipt.seed.through }],
+        )
+      )
+        return { ok: false, reason: "fenced" };
+      log.rangePins ??= {};
+      log.rangePins[runId] = [...(log.rangePins[runId] ?? []), { from: receipt.seed.from, to: receipt.seed.through }];
+    }
     row.state = preserved;
     return { ok: true };
   }
@@ -705,6 +749,20 @@ export class InMemoryRunLedger implements RunLedger {
   async finish(runId: string, gen: string, record: RunRecord): Promise<FinishResult> {
     const fence = this.fence(runId, gen);
     if (!fence.ok) return fence;
+    const canonicalWork = this.live.get(runId)?.state ?? this.finished.get(runId) ?? {};
+    if (
+      record.unitSeedReceipt !== undefined &&
+      JSON.stringify(record.unitSeedReceipt) !== JSON.stringify(canonicalWork.unitSeedReceipt)
+    )
+      return { ok: false, reason: "fenced" };
+    for (const field of ["workReads", "unitSeedReceipt"] as const) {
+      const canonical = canonicalWork[field];
+      if (canonical === undefined) continue;
+      if (record[field] !== undefined && JSON.stringify(record[field]) !== JSON.stringify(canonical))
+        return { ok: false, reason: "fenced" };
+      record = { ...record, [field]: structuredClone(canonical) };
+    }
+    if (!workEvidenceBelongsToRun(record, record)) return { ok: false, reason: "fenced" };
     const priorReceipt =
       this.live.get(runId)?.state.contextCheckpointReceipt ?? this.finished.get(runId)?.contextCheckpointReceipt;
     if (
@@ -768,7 +826,7 @@ export class InMemoryRunLedger implements RunLedger {
     ).flatMap((source) =>
       source?.receipt &&
       context?.origins.some((origin) => origin.runId === source.runId && origin.checkpoint === source.receipt!.hash)
-        ? [source.receipt]
+        ? [source]
         : [],
     );
     const log = this.session(key);
@@ -776,9 +834,11 @@ export class InMemoryRunLedger implements RunLedger {
     log.rowHashes ??= new Map();
     if (log.rowIds.has(rowId)) return { ok: log.rowHashes.get(rowId) === hash, appended: false };
     const idx = log.rows.length === 0 ? 0 : Math.max(...log.rows.map((r) => r.idx)) + 1;
+    for (const source of receipts)
+      if (log.sources?.context) log.sources.context = applyContextCheckpointAliases(log.sources.context, source);
     log.sources = structuredClone(appendSessionContext(log.sources, context, idx === 0));
-    for (const receipt of receipts)
-      if (log.sources.context) log.sources.context = applyContextCheckpoint(log.sources.context, receipt);
+    for (const source of receipts)
+      if (log.sources.context) log.sources.context = applyContextCheckpointAliases(log.sources.context, source);
     for (const r of rows) log.rows.push({ idx, part: r.part, json: r.json });
     log.rowIds.set(rowId, idx);
     log.rowHashes.set(rowId, hash);

@@ -232,6 +232,8 @@ export function toListItem(record: RunRecord, bytes: number): RunListItem {
   const {
     events: _events,
     sourceReads: _sourceReads,
+    workReads: _workReads,
+    unitSeedReceipt: _unitSeedReceipt,
     contextCheckpointReceipt: _contextCheckpointReceipt,
     directAudience: _directAudience,
     ...rest

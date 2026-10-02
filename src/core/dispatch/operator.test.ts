@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import {
   answerOperatorRead,
+  executeOperatorDecision,
   operatorStage,
   bindFromAnswer,
   buildOperatorPrompt,
@@ -40,6 +41,8 @@ import {
   unresolvableModelRefs,
   type OperatorInput,
   type OperatorTurnContext,
+  type OperatorEventFields,
+  type OperatorThreadOwner,
 } from "./operator.js";
 import {
   MultiToolCallError,
@@ -51,6 +54,7 @@ import {
   type RouteToolCall,
 } from "./route.js";
 import { ConfigStore } from "../../config.js";
+import { processSecrets } from "../../secrets.js";
 import { InMemoryGithubApi } from "../../execution/githubApi.js";
 import {
   classifyProviderFailure,
@@ -60,7 +64,15 @@ import {
   type Provider,
   type ToolDef,
 } from "../provider.js";
-import type { IncomingMessage } from "../types.js";
+import type { ChannelIO, IncomingMessage } from "../types.js";
+import { audienceRefusalText, type AudienceCheck } from "../audienceDecision.js";
+import { STATIC_CHANNEL_DIRECTORY } from "../authz/channelDirectory.js";
+import { buildCoreCommands } from "../commandCatalogue.js";
+import { InMemoryConfirmationStore } from "../confirmations.js";
+import { startRequestRoot } from "../requestTrace.js";
+import { createRunEnding } from "../runEnding.js";
+import { NullRunHistoryWriter } from "../runHistoryWriter.js";
+import { RunRegistry } from "../runRegistry.js";
 import type { CommandDef } from "../commandRegistry.js";
 import { mcpToolName } from "../commandSurface.js";
 import { verifyPrTargetEvidence } from "./targetEvidence.js";
@@ -93,6 +105,309 @@ const ctxOf = (over: Partial<OperatorTurnContext> = {}): OperatorTurnContext => 
   presets: ["general", "research"],
   commands: [command("runs.list"), command("repo.test")],
   ...over,
+});
+
+describe("publication of an operator decision", () => {
+  const denied: AudienceCheck = { ok: false, code: "github-access-lost" };
+  const eventOf = (fields: Partial<OperatorEventFields> = {}): OperatorEventFields => ({
+    mode: "on",
+    outcome: "question",
+    reason: "Saved repository details",
+    question: "Should I change the confidential retry threshold?",
+    ...fields,
+  });
+  function fixture() {
+    const dir = mkdtempSync(join(tmpdir(), "swb-operator-publication-"));
+    const path = join(dir, "config.yaml");
+    writeFileSync(
+      path,
+      `organization: acme\nproviders:\n  anthropic:\n    type: anthropic\ndefaults:\n  agent: general\n  models:\n    general: anthropic/general-model\ngrants:\n  "slack:UADMIN": { actions: all, channels: all, repos: all }\n`,
+    );
+    const config = new ConfigStore(path, join(dir, "overrides.json"));
+    const registry = new RunRegistry({ genId: () => "operator-run", genToken: () => "token" });
+    const commands = buildCoreCommands(config, null, {
+      registry,
+      dataDir: dir,
+      secrets: processSecrets,
+      warn: () => {},
+    });
+    const invoke = vi.spyOn(commands, "invoke");
+    const confirmations = new InMemoryConfirmationStore({ clock: () => 100 });
+    const put = vi.spyOn(confirmations, "put");
+    const appendReply = vi.fn(async (_text: string) => {});
+    const reply = vi.fn(async (_text: string) => {});
+    const offer = vi.fn(async () => {});
+    const requestFailed = vi.fn();
+    const io: ChannelIO = {
+      reply,
+      offer,
+      requestFailed,
+      status: async () => ({ update: () => {}, done: async () => {} }),
+      history: async () => [],
+    };
+    const msg: IncomingMessage = {
+      channelId: "slack:CX",
+      userId: "slack:UADMIN",
+      threadKey: "slack:CX:1.0",
+      text: "Please handle that",
+    };
+    const ctx = {
+      contextDependencies: freshContext(),
+      io,
+      msg,
+      appendReply,
+      trace: startRequestRoot({ clock: () => 100 }, { channel: "slack", receivedAt: 100 }),
+      ending: createRunEnding({ registry }),
+      event: eventOf(),
+    };
+    const deps = {
+      config,
+      commands,
+      confirmations,
+      runRegistry: registry,
+      runHistoryWriter: new NullRunHistoryWriter(),
+    };
+    return { deps, ctx, registry, appendReply, reply, offer, requestFailed, invoke, put };
+  }
+
+  it.each([
+    { name: "question", event: eventOf(), owner: undefined },
+    { name: "refusal", event: eventOf({ outcome: "refusal", refusalText: "Confidential reason" }), owner: undefined },
+    {
+      name: "route",
+      event: eventOf({ outcome: "binds", binds: [{ line: "agent:general", reason: "Confidential reason" }] }),
+      owner: undefined,
+    },
+    {
+      name: "owned fold",
+      event: eventOf({ outcome: "binds", binds: [{ line: "agent:general", reason: "Confidential reason" }] }),
+      owner: { kind: "live", runId: "owned-run" } as OperatorThreadOwner,
+    },
+    {
+      name: "command",
+      event: eventOf({ outcome: "binds", binds: [{ line: "runs list", reason: "Confidential reason" }] }),
+      owner: undefined,
+    },
+    {
+      name: "steer",
+      event: eventOf({
+        outcome: "binds",
+        binds: [{ line: "steer run owned-run change the threshold", reason: "Confidential reason" }],
+      }),
+      owner: undefined,
+    },
+    {
+      name: "confirmation",
+      event: eventOf({
+        outcome: "binds",
+        binds: [{ line: "config set channel --verbosity verbose", reason: "Confidential reason" }],
+      }),
+      owner: undefined,
+    },
+  ])("withholds a $name when a consumed source was revoked during completion", async ({ event, owner }) => {
+    const f = fixture();
+    const validateContext = vi.fn(async () => denied);
+    expect(await executeOperatorDecision(f.deps, { ...f.ctx, event, owner, validateContext })).toEqual({
+      kind: "answered",
+    });
+    expect(validateContext).toHaveBeenCalled();
+    expect(f.appendReply).not.toHaveBeenCalled();
+    expect(f.invoke).not.toHaveBeenCalled();
+    expect(f.put).not.toHaveBeenCalled();
+    expect(f.offer).not.toHaveBeenCalled();
+    expect(f.registry.snapshotById("operator-run")).toBeNull();
+    expect(f.reply).toHaveBeenCalledExactlyOnceWith(audienceRefusalText(denied.code));
+    expect(f.requestFailed).toHaveBeenCalledOnce();
+  });
+
+  it("rechecks after saving reply text and does not park or publish a revoked question", async () => {
+    const f = fixture();
+    let allowed = true;
+    f.appendReply.mockImplementation(async () => {
+      allowed = false;
+    });
+    expect(
+      await executeOperatorDecision(f.deps, {
+        ...f.ctx,
+        validateContext: async () => (allowed ? { ok: true } : denied),
+      }),
+    ).toEqual({ kind: "answered" });
+    expect(f.appendReply).toHaveBeenCalledExactlyOnceWith(f.ctx.event.question);
+    expect(f.reply).toHaveBeenCalledExactlyOnceWith(audienceRefusalText(denied.code));
+    expect(f.registry.snapshotById("operator-run")).toBeNull();
+  });
+
+  it.each(["question", "command"])("rechecks after the awaited channel lookup before recording a %s", async (kind) => {
+    const f = fixture();
+    let allowed = true;
+    const deps = {
+      ...f.deps,
+      channelDirectory: {
+        ...STATIC_CHANNEL_DIRECTORY,
+        info: async () => {
+          allowed = false;
+          return { visibility: "public" as const };
+        },
+      },
+    };
+    const event =
+      kind === "question"
+        ? eventOf()
+        : eventOf({ outcome: "binds", binds: [{ line: "runs list", reason: "Saved details" }] });
+    expect(
+      await executeOperatorDecision(deps, {
+        ...f.ctx,
+        event,
+        validateContext: async () => (allowed ? { ok: true } : denied),
+      }),
+    ).toEqual({ kind: "answered" });
+    expect(f.registry.snapshotById("operator-run")).toBeNull();
+    expect(f.invoke).not.toHaveBeenCalled();
+  });
+
+  it("cancels an unshown confirmation when access changes during its storage write", async () => {
+    const f = fixture();
+    let allowed = true;
+    const put = InMemoryConfirmationStore.prototype.put.bind(f.deps.confirmations);
+    f.put.mockImplementation(async (...args) => {
+      const row = await put(...args);
+      allowed = false;
+      return row;
+    });
+    const event = eventOf({
+      outcome: "binds",
+      binds: [{ line: "config set channel --verbosity verbose", reason: "Saved details" }],
+    });
+    expect(
+      await executeOperatorDecision(f.deps, {
+        ...f.ctx,
+        event,
+        validateContext: async () => (allowed ? { ok: true } : denied),
+      }),
+    ).toEqual({ kind: "answered" });
+    expect(f.put).toHaveBeenCalledOnce();
+    expect(f.offer).not.toHaveBeenCalled();
+    expect(await f.deps.confirmations.pendingByThread(f.ctx.msg.threadKey)).toBeUndefined();
+    expect(f.registry.snapshotById("operator-run")).toBeNull();
+  });
+
+  it("fails closed when the current-reader check is unavailable", async () => {
+    const f = fixture();
+    await executeOperatorDecision(f.deps, {
+      ...f.ctx,
+      validateContext: async () => {
+        throw new Error("source unavailable");
+      },
+    });
+    expect(f.appendReply).not.toHaveBeenCalled();
+    expect(f.reply).toHaveBeenCalledExactlyOnceWith(audienceRefusalText("saved-context-unproved"));
+  });
+
+  it("does not route after access changes while the generated receipt is being saved", async () => {
+    const f = fixture();
+    let allowed = true;
+    f.appendReply.mockImplementation(async () => {
+      allowed = false;
+    });
+    const event = eventOf({
+      outcome: "binds",
+      binds: [{ line: "agent:general", reason: "Saved details", verbosity: "verbose" }],
+    });
+    expect(
+      await executeOperatorDecision(f.deps, {
+        ...f.ctx,
+        event,
+        validateContext: async () => (allowed ? { ok: true } : denied),
+      }),
+    ).toEqual({ kind: "answered" });
+    expect(f.appendReply).toHaveBeenCalledOnce();
+    expect(f.reply).toHaveBeenCalledExactlyOnceWith(audienceRefusalText(denied.code));
+  });
+
+  it("withholds a command result when source access changes during the action", async () => {
+    const f = fixture();
+    let allowed = true;
+    f.invoke.mockImplementation(async () => {
+      allowed = false;
+      return { ok: true, value: { text: "Confidential result" } };
+    });
+    const event = eventOf({ outcome: "binds", binds: [{ line: "runs list", reason: "Saved details" }] });
+    await executeOperatorDecision(f.deps, {
+      ...f.ctx,
+      event,
+      validateContext: async () => (allowed ? { ok: true } : denied),
+    });
+    expect(f.invoke).toHaveBeenCalledOnce();
+    expect(f.reply).toHaveBeenCalledExactlyOnceWith(audienceRefusalText(denied.code));
+    expect(JSON.stringify(f.registry.snapshotById("operator-run")?.events)).not.toContain("Confidential result");
+    expect(f.appendReply).not.toHaveBeenCalled();
+  });
+
+  it("withholds command failure details when source access changes during the action", async () => {
+    const f = fixture();
+    let allowed = true;
+    f.invoke.mockImplementation(async () => {
+      allowed = false;
+      throw new Error("Confidential failure details");
+    });
+    const event = eventOf({ outcome: "binds", binds: [{ line: "runs list", reason: "Saved details" }] });
+    await executeOperatorDecision(f.deps, {
+      ...f.ctx,
+      event,
+      validateContext: async () => (allowed ? { ok: true } : denied),
+    });
+    expect(f.invoke).toHaveBeenCalledOnce();
+    expect(f.reply).toHaveBeenCalledExactlyOnceWith(audienceRefusalText(denied.code));
+    expect(JSON.stringify(f.registry.snapshotById("operator-run")?.events)).not.toContain(
+      "Confidential failure details",
+    );
+  });
+
+  it("stores the exact admitted question context internally without exposing it on the event", async () => {
+    const f = fixture();
+    const write = vi.spyOn(f.deps.runHistoryWriter, "write");
+    const contextDependencies = { ...freshContext(), githubRepos: ["acme/api"] };
+    await executeOperatorDecision(f.deps, {
+      ...f.ctx,
+      contextDependencies,
+      validateContext: async () => ({ ok: true }),
+    });
+    contextDependencies.githubRepos.push("acme/unconsumed");
+    f.ctx.ending.drain(true);
+    expect(write).toHaveBeenCalledOnce();
+    expect(write.mock.calls[0][0].contextDependencies).toEqual({ ...freshContext(), githubRepos: ["acme/api"] });
+    const event = f.registry.snapshotById("operator-run")?.events.find((entry) => entry.type === "operator");
+    expect(event).not.toHaveProperty("contextDependencies");
+  });
+
+  it("preserves command input dependencies without claiming newly read output is proved", async () => {
+    const f = fixture();
+    const write = vi.spyOn(f.deps.runHistoryWriter, "write");
+    const contextDependencies = { ...freshContext(), githubRepos: ["acme/api"] };
+    f.invoke.mockResolvedValue({ ok: true, value: { text: "Command result" } });
+    const event = eventOf({ outcome: "binds", binds: [{ line: "runs list", reason: "Saved details" }] });
+    await executeOperatorDecision(f.deps, {
+      ...f.ctx,
+      event,
+      contextDependencies,
+      validateContext: async () => ({ ok: true }),
+    });
+    f.ctx.ending.drain(true);
+    expect(write).toHaveBeenCalledOnce();
+    expect(write.mock.calls[0][0].contextDependencies).toMatchObject({ status: "unknown", githubRepos: ["acme/api"] });
+  });
+
+  it("keeps an authorized question usable with and without the callback", async () => {
+    for (const validateContext of [undefined, async (): Promise<AudienceCheck> => ({ ok: true })]) {
+      const f = fixture();
+      await executeOperatorDecision(f.deps, { ...f.ctx, validateContext });
+      expect(f.reply).toHaveBeenCalledExactlyOnceWith(f.ctx.event.question);
+      expect(f.registry.snapshotById("operator-run")?.events).toEqual(
+        expect.arrayContaining([expect.objectContaining({ type: "operator", question: f.ctx.event.question })]),
+      );
+      expect(f.requestFailed).not.toHaveBeenCalled();
+    }
+  });
 });
 
 describe("explicit PR directives at the operator stage", () => {
@@ -1252,6 +1567,37 @@ channels:
       if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
       expect(turn.decision.binds[0]).not.toHaveProperty("prTarget");
     }
+  });
+
+  it("keeps an explicit matching repository on work that depends on the requester's established thread", () => {
+    const requestText = "In acme/api, fix the issue we investigated earlier.";
+    const answer = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "ship",
+          shipEntry: "work_from_thread",
+          repo: "acme/api",
+          reason: "The requested fix uses the earlier investigation",
+        },
+      },
+      ctxOf({
+        requestText,
+        presets: ["ship"],
+        requesterId: "slack:UOWNER",
+        requesterRepo: "acme/api",
+        threadRepo: "acme/api",
+      }),
+    );
+    expect(answer).toMatchObject({
+      kind: "decision",
+      decision: {
+        kind: "binds",
+        binds: [
+          { line: `agent:ship ${requestText}`, repo: "acme/api", repoSource: "request", shipEntry: "work_from_thread" },
+        ],
+      },
+    });
   });
 
   it("a same-thread fix reaches Ship work with the requester's issue despite historical PR context", async () => {

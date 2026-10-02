@@ -12,6 +12,8 @@ import { reflectionActor } from "../memory/reflection.js";
 import { readCoordinatorStatus } from "../coordinator/unitStatus.js";
 import type { UnitStatusReference } from "../references/unitStatusReference.js";
 import {
+  applyContextCheckpointAliases,
+  checkpointOutsideOrdinaryWindow,
   normalizeCheckpointContexts,
   validateContextCheckpoint,
   type CanonicalCheckpointSource,
@@ -25,7 +27,7 @@ import type { CoreDeps } from "../dispatcher.js";
 import { chatActorOf } from "../authz/actor.js";
 import { authorize } from "../authz/authorize.js";
 import type { AudienceCheck } from "../audienceDecision.js";
-import { RUN_EVENTS_MAX_PAGE, type RunRecord } from "../runRecord.js";
+import { RUN_EVENTS_MAX_PAGE, operatorOfEvents, type RunOperatorDecision, type RunRecord } from "../runRecord.js";
 import type { LiveRunRow } from "../runLedger/types.js";
 import {
   isContextDependencies,
@@ -93,6 +95,9 @@ export interface MessageContextAccess {
   ): Promise<ContextDependencies[]>;
   canReadOrigin(origin: ContextOrigin): Promise<boolean>;
   readRunDependencies(runId: string): Promise<ContextDependencies | undefined>;
+  readOperatorDecision(
+    runId: string,
+  ): Promise<{ operator: RunOperatorDecision; context: ContextDependencies } | undefined>;
   authorizeMemory(candidate: MemoryRecord): Promise<AudienceCheck>;
 }
 
@@ -411,23 +416,53 @@ function buildContextAccess(deps: ContextAccessDeps, { msg, io }: { msg: Incomin
   ): Promise<ContextDependencies[]> => {
     const sources: CanonicalCheckpointSource[] = [];
     const seen = new Set<string>();
+    const expired = new Set<string>();
     for (const context of [...candidates, ...contexts]) {
       if (!isContextDependencies(context)) continue;
       for (const origin of context.origins) {
         const identity = `${origin.runId}:${origin.checkpoint}`;
-        if (!origin.checkpoint || seen.has(identity)) continue;
+        if (seen.has(identity)) continue;
         seen.add(identity);
+        const identityContext: ContextDependencies = {
+          version: 1,
+          status: "known",
+          revision: 0,
+          origins: [origin],
+          slack: [],
+          mcp: [],
+        };
+        if (sources.some((source) => applyContextCheckpointAliases(identityContext, source) !== identityContext))
+          continue;
         try {
           if (!(await canReadOrigin(origin))) continue;
           const source = await deps.runLedger.readContextCheckpoint(origin.runId);
-          if (source?.receipt?.hash !== origin.checkpoint) continue;
+          if (
+            !source?.receipt ||
+            source.runId !== origin.runId ||
+            source.meta.userId !== origin.requester ||
+            source.meta.channelId !== origin.channelId ||
+            source.meta.threadKey !== origin.threadKey ||
+            (origin.checkpoint !== undefined && source.receipt.hash !== origin.checkpoint) ||
+            !(await validateContextCheckpoint(source.receipt, source))
+          )
+            continue;
+          if (sources.some((latest) => checkpointOutsideOrdinaryWindow(source, latest))) {
+            expired.add(identity);
+            continue;
+          }
           sources.push(source);
         } catch {
           // Normalization is optional; original admitted dependencies remain.
         }
       }
     }
-    return normalizeCheckpointContexts(contexts, sources);
+    const normalized = await normalizeCheckpointContexts(contexts, sources);
+    return normalized.map((context, index) =>
+      context.status === "known" &&
+      contexts[index]!.origins.some((origin) => expired.has(`${origin.runId}:${origin.checkpoint}`))
+        ? { ...context, status: "unknown", reason: "legacy" }
+        : context,
+    );
   };
   const readRunDependencies = async (runId: string): Promise<ContextDependencies | undefined> => {
     try {
@@ -464,6 +499,43 @@ function buildContextAccess(deps: ContextAccessDeps, { msg, io }: { msg: Incomin
       return validate(mergeContextDependencies(context, memoryScopeDependencies([candidate.scopeKey])));
     } catch {
       return denied();
+    }
+  };
+  const readOperatorDecision = async (
+    runId: string,
+  ): Promise<{ operator: RunOperatorDecision; context: ContextDependencies } | undefined> => {
+    try {
+      const stored = await load(runId);
+      if (!stored || "meta" in stored) return undefined;
+      // Snapshot the actual immutable event before any asynchronous source
+      // check. List projections and incomplete/live records cannot supply it.
+      const record = structuredClone(stored);
+      if (
+        record.id !== runId ||
+        record.agent !== "door" ||
+        record.provisional ||
+        !Number.isFinite(record.finishedAt) ||
+        record.channelId !== msg.channelId ||
+        record.threadKey !== msg.threadKey ||
+        !admitted(record) ||
+        record.events.filter((event) => event.type === "operator").length !== 1
+      )
+        return undefined;
+      const operator = operatorOfEvents(record.events);
+      const raw = record.contextDependencies;
+      if (!operator || !isContextDependencies(raw) || raw.status !== "known") return undefined;
+      const context = mergeContextDependencies(raw, {
+        version: 1,
+        status: "known",
+        revision: 0,
+        slack: [],
+        mcp: [],
+        origins: [{ runId, requester: record.userId, channelId: record.channelId, threadKey: record.threadKey }],
+      });
+      if (!(await validate(context)).ok) return undefined;
+      return { operator, context };
+    } catch {
+      return undefined;
     }
   };
   const captureDependencies = async (source: HandoffSource): Promise<ContextDependencies> => {
@@ -619,6 +691,7 @@ function buildContextAccess(deps: ContextAccessDeps, { msg, io }: { msg: Incomin
       normalizeDependencies,
       canReadOrigin,
       readRunDependencies,
+      readOperatorDecision,
       authorizeMemory,
     },
   };

@@ -58,6 +58,22 @@ export async function readOperatorTailContext(input: {
                   : [],
               ),
           });
+      const rowContexts = snapshot.transcript.messages.map((_, i) =>
+        shared ? snapshot.transcript.contexts?.[i] : legacy,
+      );
+      if (input.normalizeDependencies) {
+        const known = rowContexts.flatMap((context, i) =>
+          isContextDependencies(context) && context.status === "known" ? [{ context, i }] : [],
+        );
+        if (known.length) {
+          const normalized = await input.normalizeDependencies(
+            known.map(({ context }) => context),
+            candidates,
+          );
+          if (normalized.length !== known.length) throw new Error("saved-context-unproved");
+          for (const [index, { i }] of known.entries()) rowContexts[i] = normalized[index];
+        }
+      }
       const checks = new Map<string, Promise<AudienceCheck>>();
       const turns: OperatorTailTurn[] = [];
       let omitted = false;
@@ -69,7 +85,7 @@ export async function readOperatorTailContext(input: {
         if (!text) continue;
         // Shared rows are atomically written with their own explicit closure.
         // An unproved command result cannot taint a separately proved request.
-        const context = shared ? snapshot.transcript.contexts?.[i] : legacy;
+        const context = rowContexts[i];
         let code = "saved-context-unproved";
         let admitted = false;
         if (isContextDependencies(context) && context.status === "known") {
@@ -127,13 +143,5 @@ export async function readOperatorTailContext(input: {
     for (const key of keys) turns.push(...(await read(key)).turns);
   }
   turns.push(...shared.turns);
-  let admitted = contexts;
-  if (input.normalizeDependencies) {
-    try {
-      admitted = await input.normalizeDependencies(contexts, candidates);
-    } catch {
-      unavailable.push("Saved conversation checkpoint is unavailable.");
-    }
-  }
-  return { turns: operatorTail(turns), context: mergeContextDependencies(...admitted), unavailable };
+  return { turns: operatorTail(turns), context: mergeContextDependencies(...contexts), unavailable };
 }

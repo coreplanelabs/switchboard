@@ -3,7 +3,10 @@ import type { Actor } from "../authz/types.js";
 import { createPlaneService, type PlaneService } from "../planeService.js";
 import { unitNudgeEventType, type CoordinatorInstance, type CoordinatorUnit, type WorkflowSender } from "./contract.js";
 import { InMemoryCoordinatorInstanceStore, WorkerCoordinatorInstanceStore } from "./instanceStore.js";
-import { createMainTaskActions } from "./mainActions.js";
+import { createMainTaskActions, unitSeedProofFor } from "./mainActions.js";
+import { sourceHash } from "../references/receipts.js";
+import { privateWorkerThreadKey } from "../privateWorkerLog.js";
+import type { UnitSeedEvidence } from "./unitSeedReceipt.js";
 
 const THREAD = "slack:CMAIN:1.0";
 const ACT = "act-fix-signup";
@@ -107,6 +110,160 @@ async function fixture(over: Partial<CoordinatorUnit> = {}) {
 }
 
 describe("main task actions", () => {
+  it("distinguishes a stored complete brief and captured context from an acknowledged child seed", async () => {
+    const contextual: CoordinatorUnit = {
+      ...UNIT,
+      context: {
+        version: 1,
+        handoff: {
+          version: 1,
+          source: { runId: "main-run", requester: INSTANCE.userId, channelId: INSTANCE.channelId, threadKey: THREAD },
+          session: { key: `${THREAD}:orchestrator`, from: 0, to: 0 },
+          assets: [],
+        },
+      },
+      workBrief: {
+        ...UNIT.workBrief!,
+        schemaVersion: 1,
+        suspectedCause: undefined,
+        cause: { kind: "unknown", reason: "Not independently verified" },
+        evidence: { availability: "provided" },
+        requirements: { analysis: "required", evidence: "required" },
+        acceptance: "The existing sign-up test passes",
+      },
+    };
+    const child = {
+      runId: "coding-child",
+      requester: INSTANCE.userId,
+      channelId: INSTANCE.channelId,
+      threadKey: privateWorkerThreadKey({ instanceId: INSTANCE.id, unit: UNIT.unit }),
+    };
+    const binding = {
+      instanceId: INSTANCE.id,
+      unit: UNIT.unit,
+      instanceAttempt: 0,
+      idempotencyKey: `${INSTANCE.id}:${UNIT.unit}/0/coding`,
+    };
+    const evidence: UnitSeedEvidence = {
+      role: "coding",
+      child,
+      binding,
+      contractHash: "c".repeat(64),
+      receipt: {
+        version: 1,
+        binding,
+        child,
+        ownerGen: "original-generation",
+        workBriefHash: await sourceHash(contextual.workBrief),
+        capsuleHash: await sourceHash(contextual.context),
+        contractHash: "c".repeat(64),
+        seed: { key: "task:coding", from: 0, through: 3, messagesHash: "d".repeat(64), systemHash: "e".repeat(64) },
+        acknowledgedAt: 40,
+      },
+    };
+    expect(await unitSeedProofFor(INSTANCE, contextual, contextual.workBrief)).toEqual({
+      brief: "stored",
+      context: "captured",
+      childSeed: { state: "unproved" },
+      providerExecution: "unknown",
+    });
+    expect(
+      await unitSeedProofFor(INSTANCE, contextual, contextual.workBrief, async () =>
+        JSON.parse(JSON.stringify(evidence)),
+      ),
+    ).toEqual({
+      brief: "stored",
+      context: "captured",
+      childSeed: { state: "acknowledged", role: "coding", runId: child.runId, acknowledgedAt: 40 },
+      providerExecution: "unknown",
+    });
+    expect(
+      await unitSeedProofFor(INSTANCE, contextual, contextual.workBrief, async () => ({ ...evidence, role: "review" })),
+    ).toMatchObject({ childSeed: { state: "acknowledged", role: "review" }, providerExecution: "unknown" });
+    expect(
+      await unitSeedProofFor(INSTANCE, contextual, contextual.workBrief, async () => ({
+        ...evidence,
+        role: undefined as never,
+      })),
+    ).toMatchObject({ childSeed: { state: "unproved" } });
+    for (const receipt of [
+      { ...evidence.receipt, child: { ...child, runId: "another-child" } },
+      { ...evidence.receipt, binding: { ...binding, instanceAttempt: 1 } },
+      { ...evidence.receipt, workBriefHash: "f".repeat(64) },
+      { ...evidence.receipt, capsuleHash: "f".repeat(64) },
+      { ...evidence.receipt, contractHash: "f".repeat(64) },
+    ]) {
+      expect(
+        await unitSeedProofFor(INSTANCE, contextual, contextual.workBrief, async () => ({ ...evidence, receipt })),
+      ).toMatchObject({ childSeed: { state: "unproved" }, providerExecution: "unknown" });
+    }
+    expect(
+      await unitSeedProofFor({ ...INSTANCE, attempt: 1 }, contextual, contextual.workBrief, async () => evidence),
+    ).toMatchObject({ childSeed: { state: "unproved" } });
+    expect(
+      await unitSeedProofFor(INSTANCE, contextual, contextual.workBrief, async () => {
+        throw new Error("seed storage unavailable");
+      }),
+    ).toMatchObject({ childSeed: { state: "unproved" } });
+    const { context: _context, ...withoutContext } = contextual;
+    expect(await unitSeedProofFor(INSTANCE, withoutContext, contextual.workBrief, async () => evidence)).toMatchObject({
+      context: "missing",
+      childSeed: { state: "unproved" },
+    });
+  });
+
+  it("refreshes status when the canonical unit ends during the audience check", async () => {
+    const { instances, stop } = await fixture({ startedAt: 1_100 });
+    let checks = 0;
+    const actions = createMainTaskActions({
+      instances,
+      plane: { stop },
+      clock: () => 2_000,
+      liveAuthority: {
+        active: () => true,
+        verify: async () => {
+          if (++checks === 1)
+            await instances.putUnits([
+              { ...UNIT, startedAt: 1_100, ending: { kind: "aborted", report: "Stopped", at: 1_500 } },
+            ]);
+          return true;
+        },
+      },
+    });
+    expect(await actions.status(actor(), ACT)).toMatchObject({
+      kind: "found",
+      unit: { state: "ended", ending: { kind: "aborted", at: 1_500 } },
+      observation: {
+        version: 1,
+        actId: ACT,
+        instanceId: INSTANCE.id,
+        unit: UNIT.unit,
+        attempt: 0,
+        observedAt: 2_000,
+        snapshotHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
+    });
+  });
+
+  it("bounds status refresh when canonical work keeps changing", async () => {
+    const { instances, stop } = await fixture({ startedAt: 1_100 });
+    let checks = 0;
+    const actions = createMainTaskActions({
+      instances,
+      plane: { stop },
+      clock: () => 2_000,
+      liveAuthority: {
+        active: () => true,
+        verify: async () => {
+          await instances.putUnits([{ ...UNIT, startedAt: 1_100 + ++checks }]);
+          return true;
+        },
+      },
+    });
+    expect(await actions.status(actor(), ACT)).toEqual({ kind: "unavailable" });
+    expect(checks).toBe(2);
+  });
+
   it("classifies a corrupt brief through the HTTP store without relaxing ordinary unit decoding", async () => {
     const corrupt = { ...UNIT, workBrief: { ...UNIT.workBrief, findings: "corrupt" } };
     let rows: unknown[] = [corrupt];
@@ -196,6 +353,12 @@ describe("main task actions", () => {
     expect(result).toMatchObject({
       kind: "found",
       unit: {
+        seedProof: {
+          brief: "stored",
+          context: "missing",
+          childSeed: { state: "unproved" },
+          providerExecution: "unknown",
+        },
         briefProof: {
           state: "complete",
           schemaVersion: 1,
@@ -263,8 +426,19 @@ describe("main task actions", () => {
     const result = await actions.status(actor(), ACT);
     expect(result).toEqual({
       kind: "found",
+      observation: expect.objectContaining({
+        actId: ACT,
+        observedAt: 2_000,
+        snapshotHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
       unit: {
         key: "ship_signup_1:task",
+        seedProof: {
+          brief: "stored",
+          context: "missing",
+          childSeed: { state: "unproved" },
+          providerExecution: "unknown",
+        },
         briefProof: {
           briefId: "ship_signup_1:task",
           actId: ACT,

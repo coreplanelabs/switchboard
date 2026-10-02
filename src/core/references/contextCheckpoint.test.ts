@@ -4,6 +4,8 @@ import { testSlackReceipt } from "../testing/slackSources.js";
 import { sourceHash } from "./receipts.js";
 import {
   checkpointMembersOf,
+  checkpointMemberHashesOf,
+  checkpointOutsideOrdinaryWindow,
   normalizeCheckpointContexts,
   planContextCheckpoint,
   validateContextCheckpoint,
@@ -46,6 +48,52 @@ async function seal(
 }
 
 describe("ordinary context checkpoint", () => {
+  it("rolls ordinary identity evidence after 128 runs without growing a restored checkpoint", async () => {
+    let previous: CanonicalCheckpointSource | undefined;
+    let original: CanonicalCheckpointSource | undefined;
+    for (let turn = 0; turn < 384; turn++) {
+      const runId = `bounded-${turn}`;
+      const run: CanonicalCheckpointSource = {
+        runId,
+        meta: meta(turn),
+        context: mergeContextDependencies(previous?.context ?? clean, { ...clean, origins: [origin(runId)] }),
+      };
+      const sources = previous ? [previous] : [];
+      const receipt = await seal(run, sources);
+      expect(receipt, `continuation ${turn}`).toBeDefined();
+      const members = checkpointMembersOf(runId, receipt!.coveredOrigins, sources);
+      expect(members).toEqual(
+        Array.from({ length: Math.min(turn + 1, 128) }, (_, offset) => `bounded-${turn - offset}`),
+      );
+      previous = JSON.parse(
+        JSON.stringify({
+          ...run,
+          context: receipt!.normalized,
+          receipt,
+          members,
+          memberCheckpoints: checkpointMemberHashesOf(runId, receipt!.coveredOrigins, sources),
+          transcriptHash: receipt!.inputs.transcriptHash,
+        }),
+      );
+      expect(await validateContextCheckpoint(receipt, previous!)).toBe(true);
+      if (turn === 0) original = structuredClone(previous);
+    }
+    expect(previous!.members).not.toContain("bounded-0");
+    expect(checkpointOutsideOrdinaryWindow(original!, previous!)).toBe(true);
+    expect(checkpointOutsideOrdinaryWindow(previous!, original!)).toBe(false);
+    expect(
+      checkpointOutsideOrdinaryWindow(
+        {
+          ...original!,
+          receipt: { ...original!.receipt!, authority: { ...original!.receipt!.authority, repo: "foreign/repo" } },
+        },
+        previous!,
+      ),
+    ).toBe(false);
+    const altered = { ...previous!, members: [...previous!.members!].reverse() };
+    expect(await validateContextCheckpoint(previous!.receipt, altered)).toBe(false);
+  });
+
   it("keeps more than 64 sealed continuations bounded across serialized checkpoint restoration", async () => {
     let previous: CanonicalCheckpointSource | undefined;
     const frozenRows: ContextDependencies[] = [];
@@ -65,6 +113,7 @@ describe("ordinary context checkpoint", () => {
           receipt,
           transcriptHash: receipt!.inputs.transcriptHash,
           members: checkpointMembersOf(runId, receipt!.coveredOrigins, previous ? [previous] : []),
+          memberCheckpoints: checkpointMemberHashesOf(runId, receipt!.coveredOrigins, previous ? [previous] : []),
         }),
       );
       expect(await validateContextCheckpoint(receipt, previous!)).toBe(true);
@@ -207,6 +256,7 @@ describe("ordinary context checkpoint", () => {
       receipt,
       transcriptHash: receipt.inputs.transcriptHash,
       members: checkpointMembersOf(run.runId, receipt.coveredOrigins, [first, foreign]),
+      memberCheckpoints: checkpointMemberHashesOf(run.runId, receipt.coveredOrigins, [first, foreign]),
     };
     expect(await validateContextCheckpoint(receipt, source)).toBe(true);
     expect(await validateContextCheckpoint(receipt, { ...source, members: [...source.members, "extra"] })).toBe(false);

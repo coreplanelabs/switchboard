@@ -1,3 +1,4 @@
+import { createWorkFreshness } from "./workFreshness.js";
 import { appendRunReport } from "../runLedger/threadSession.js";
 import { contextDependenciesOf, type ContextDependencies } from "../references/contextDependencies.js";
 import { GITHUB_READ_TOOLS } from "../../tools/github.js";
@@ -27,7 +28,7 @@ import {
 } from "../publicationSettlement.js";
 import { createCheckExecution } from "../checkExecution.js";
 import { ensureFirstTest, firstTestContext, FirstTestHeld, type FirstTestReceipt } from "../firstTest.js";
-import { GIT_PUBLICATION_SETTLE_TIMEOUT_MS } from "../budgets.js";
+import { MINUTE_MS, GIT_PUBLICATION_SETTLE_TIMEOUT_MS } from "../budgets.js";
 import type { ResolvedRequest } from "../../config.js";
 import type { AgentDef } from "../../agents/registry.js";
 import { chatActorOf } from "../authz/actor.js";
@@ -42,6 +43,7 @@ import { isReissueSteerText } from "../plane/decide.js";
 import type { ModelCard } from "../modelCard.js";
 import { filterUnavailableTools, mergeTools, toolsForRun } from "../../tools/toolsets.js";
 import { createMainWorkEffectGate, mainWorkForRun, type DirectAudience } from "../../tools/mainWork.js";
+import { readUnitSeedProof } from "./unitSeedProof.js";
 import { type SlackContextBinding } from "./slackContextBinding.js";
 import {
   privateAudienceRequired,
@@ -208,6 +210,7 @@ export interface RunOutcome {
   checklistCheckedOff: () => string | undefined;
   /** A time-budget ending is not proof that the requested checklist was completed. */
   answerOutcome: AnswerOutcome;
+  currentWorkCheck?: () => Promise<string | undefined>;
   releaseWorkspace: (span?: Span) => Promise<void>;
 }
 
@@ -1548,12 +1551,27 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         },
       }
     : undefined;
+  const workFreshness = createWorkFreshness({
+    owner: { requesterId: msg.userId, channelId: msg.channelId, threadKey: msg.threadKey },
+    save: async (state) => ledgerRun?.tracked() === true && (await ledgerRun.setStateAndFlush(state)),
+  });
+  const readSeedReceipt = deps.coordinatorInstances
+    ? (input: Parameters<typeof readUnitSeedProof>[1]) =>
+        readUnitSeedProof(
+          { runLedger: deps.runLedger, runStore: deps.runStore, instances: deps.coordinatorInstances! },
+          input,
+        )
+    : undefined;
+  const progressSourceTrusted = privateProgressSourceTrusted(msg.userId, admitted.inbox, resume?.events);
   const mainWork = mainWorkForRun({
+    observeRead: workFreshness.observe,
+    readTrusted: () => !privateAudienceLatch.revoked && progressSourceTrusted(),
     agentName: agent.name,
     actor: chatActorOf(deps.config, msg),
     message: msg,
     channelVisibility,
     runId: run.id,
+    ...(readSeedReceipt ? { readSeedReceipt } : {}),
     ...(deps.coordinatorInstances ? { instances: deps.coordinatorInstances } : {}),
     ...(deps.workflow ? { workflow: deps.workflow } : {}),
     ...(deps.plane ? { plane: deps.plane } : {}),
@@ -1626,14 +1644,22 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     },
     ...(deps.mainTaskStart ? { start: deps.mainTaskStart } : {}),
   });
-  const progressSourceTrusted = privateProgressSourceTrusted(msg.userId, admitted.inbox, resume?.events);
   const mainWorker = await mainWorkerCapabilityFor(
     deps,
     agent.name,
     msg,
     io,
     () => !privateAudienceLatch.revoked && progressSourceTrusted(),
+    workFreshness.observe,
+    readSeedReceipt,
   );
+  if (resume)
+    await workFreshness.restore(
+      resume.row.state.workReads,
+      messages,
+      (receipt) => mainWorker?.restoreRead?.(receipt) ?? mainWork?.restoreRead?.(receipt),
+      resume.row.state.workRefreshUsed === true,
+    );
   const checkExecution =
     agent.name === "coding" && profile.identity === "write"
       ? createCheckExecution({
@@ -2716,6 +2742,20 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // post-step and before the workspace it runs in can be released; what its
     // ending left running is read off the record once it has — here, once,
     // whatever the post-step does next.
+    answer = await workFreshness.finalize(
+      answer,
+      harnessSession && !tailSkipped() && harnessSession.remainingMs() > 0
+        ? (text) =>
+            harnessSession!.followUp({
+              text,
+              maxTurns: 1,
+              maxMinutes: Math.min(agent.maxMinutes, harnessSession!.remainingMs() / MINUTE_MS),
+              tools: [],
+              toolContext,
+              span: root,
+            })
+        : undefined,
+    );
     await endHarness();
     // The last model turn and its checkpoint are finished. Close the Git door
     // before any PR lookup or edit: a delayed receive-pack request otherwise
@@ -3004,6 +3044,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         ledgerRun?.setState({ audienceRefusal: receipt });
         answer = audienceRefusalText(receipt.code);
         publicationWithheld = true;
+        return false;
+      }
+      const currentWork = await workFreshness.beforePublish();
+      if (currentWork !== undefined) {
+        answer = currentWork;
         return false;
       }
       return true;
@@ -3392,6 +3437,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     checklistCheckedOff,
     answerOutcome,
     releaseWorkspace,
+    currentWorkCheck: workFreshness.beforePublish,
   };
 }
 

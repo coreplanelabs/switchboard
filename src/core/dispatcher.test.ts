@@ -589,7 +589,7 @@ describe("dispatch", () => {
     expect(replies).toContain("The answer is 17.");
   });
 
-  it("keeps ordinary conversation context known across 66 runs and fresh process facades", async () => {
+  it("keeps ordinary conversation context known across 256 runs and fresh process facades", async () => {
     let turn = 0;
     const provider = capturingProvider("The conversation continues.");
     const deps = makeDeps(mainDmYaml, provider);
@@ -598,7 +598,7 @@ describe("dispatch", () => {
     deps.runStore = ledgerBackedStore(ledger, store);
     deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
     deps.slackContextForRun = (_actor, origin) => testSlackCapability(origin, async () => "source");
-    for (turn = 0; turn < 66; turn++) {
+    for (turn = 0; turn < 256; turn++) {
       // Reconstruct the process-facing readers each turn: no in-memory proof
       // from the prior dispatcher may authorize the next continuation.
       const registry = new RunRegistry({ genId: () => `conversation-${turn}` });
@@ -628,11 +628,12 @@ describe("dispatch", () => {
       ).toEqual({ ok: true });
       if (turn > 0) expect(JSON.stringify(provider.requests.at(-1)?.messages)).toContain("The conversation continues.");
     }
-    expect(provider.requests).toHaveLength(66);
-    const source = await ledger.readContextCheckpoint("conversation-65");
-    expect(source?.members).toContain("conversation-0");
-    expect(source?.members).toHaveLength(66);
-  }, 60_000);
+    expect(provider.requests).toHaveLength(256);
+    const source = await ledger.readContextCheckpoint("conversation-255");
+    expect(source?.members).not.toContain("conversation-0");
+    expect(source?.members).toContain("conversation-128");
+    expect(source?.members).toHaveLength(128);
+  }, 180_000);
 
   it("does not infer a work target from question wording", async () => {
     const deps = makeDeps(mainDmYaml, capturingProvider("The answer is 17."));
@@ -24757,6 +24758,25 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     return { deps, provider, registry };
   }
 
+  /** List rows locate a saved decision; only its finished record supplies the
+   * question and the dependencies admitted when the question was produced. */
+  async function savePendingQuestion(deps: TestDeps, thread: RunView[]) {
+    const pending = thread[0]!;
+    if (!pending.operator) throw new Error("Expected a question fixture");
+    pending.userId ??= "slack:UADMIN";
+    const events: RunEvent[] = [{ type: "operator", ...pending.operator }];
+    await threadWithFinishedRun(deps, "door", {
+      id: pending.id,
+      userId: pending.userId,
+      session: undefined,
+      events,
+      eventCount: events.length,
+      storedEventCount: events.length,
+      contextDependencies: { version: 1, status: "known", revision: 0, origins: [], slack: [], mcp: [] },
+    });
+    deps.slackContextForRun = (_actor, incoming) => testSlackCapability(incoming, async () => "source");
+  }
+
   it("on: typed effort, budget and verbosity reach the run without rewriting the request", async () => {
     const { deps, provider, registry } = operatorDeps(ON_YAML);
     const request = "Use high effort, a 25 minute budget, and debug detail to answer this.";
@@ -25252,6 +25272,11 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
 
   it("on: a question leaves a door record carrying the decision as its operator event — the parked pending question", async () => {
     const { deps, registry } = operatorDeps(ON_YAML);
+    const store = new InMemoryRunStore();
+    deps.runStore = store;
+    deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
+    deps.runs = createRunsService({ registry, store });
+    deps.slackContextForRun = (_actor, incoming) => testSlackCapability(incoming, async () => "source");
     deps.operatorModel = decides({
       reason: "ambiguous",
       question: { text: "Which listing?", proposal: "runs list --status all" },
@@ -25265,6 +25290,13 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       outcome: "question",
       proposal: "runs list --status all",
     });
+    await deps.runHistoryWriter.settled();
+    expect((await store.get("r1"))?.contextDependencies?.status).toBe("known");
+    const next = decides({ binds: [{ line: "help" }] });
+    deps.operatorModel = next;
+    await dispatch(deps, { ...msg("yes", "slack:UADMIN"), messageId: "slack:CX:2.0" }, fakeIO().io);
+    expect(next).not.toHaveBeenCalled();
+    expect(deps.invoked).toEqual(["runs.list"]);
   });
 
   it("on: the next turn's \"yes\" binds the pending question's proposal with no model call; another answer binds fresh", async () => {
@@ -25278,6 +25310,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       },
     ] as RunView[];
     const { deps, registry } = operatorDeps(ON_YAML);
+    await savePendingQuestion(deps, pendingThread);
     deps.operatorModel = decides({ reason: "never", binds: [{ line: "help", reason: "never" }] });
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("yes", "slack:UADMIN"), io, { thread: pendingThread });
@@ -25291,6 +25324,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
 
     // Anything but "yes" is a fresh decision: the model runs, the marker in view.
     const { deps: fresh } = operatorDeps(ON_YAML);
+    await savePendingQuestion(fresh, pendingThread);
     fresh.operatorModel = decides({ reason: "fresh", binds: [{ line: "help", reason: "the menu" }] });
     await dispatch(fresh, msg("no, the runs one", "slack:UADMIN"), fakeIO().io, { thread: pendingThread });
     expect(fresh.operatorModel).toHaveBeenCalledTimes(1);
@@ -25323,13 +25357,43 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       },
     ] as RunView[];
 
+  it.each(["missing record", "missing dependencies"] as const)(
+    "on: a pending question with %s cannot supply saved words or assent",
+    async (missing) => {
+      const { deps, provider } = operatorDeps(ON_YAML);
+      const thread = questionThread();
+      if (missing === "missing dependencies") {
+        await savePendingQuestion(deps, thread);
+        const saved = await deps.runStore.get(thread[0]!.id);
+        if (!saved) throw new Error("Expected the saved question fixture");
+        const { contextDependencies: _unproved, ...legacy } = saved;
+        await deps.runStore.put(legacy);
+      }
+      const operator = vi.fn<RouteModel>(async () => ({
+        tool: "ask",
+        input: { text: "What should the new request cover?", reason: "request preference" },
+      }));
+      deps.operatorModel = operator;
+      const channel = fakeIO();
+      await dispatch(deps, msg("yes", "slack:UADMIN"), channel.io, { thread });
+      expect(operator).toHaveBeenCalledOnce();
+      const exposed = JSON.stringify({ prompts: operator.mock.calls, replies: channel.replies });
+      expect(exposed).not.toContain(QUESTION_REQUEST);
+      expect(exposed).not.toContain(QUESTION_TEXT);
+      expect(deps.invoked).toEqual([]);
+      expect(provider.requests).toHaveLength(0);
+    },
+  );
+
   it("on: a free-text answer to a pending question joins the original ask — the operator decides the joined line, no mention needed, and its preset bind routes it (issue 2046)", async () => {
     const { deps, registry, provider } = operatorDeps(ON_YAML);
+    const thread = questionThread();
+    await savePendingQuestion(deps, thread);
     const operator = decides({ reason: "the ask", binds: [{ line: `agent:general ${JOINED}`, reason: "the ask" }] });
     deps.operatorModel = operator;
     const { io } = fakeIO();
     // The reply is the answer's bare words: no mention, no directive, no repeat of the ask.
-    await dispatch(deps, msg("acme/tools is the repo", "slack:UADMIN"), io, { thread: questionThread() });
+    await dispatch(deps, msg("acme/tools is the repo", "slack:UADMIN"), io, { thread });
     // The operator's turn was asked the JOINED line, never the fragment.
     const prompt: RoutePrompt = operator.mock.calls[0]![0];
     expect(prompt.user).toContain(JOINED);
@@ -25374,6 +25438,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
         return next;
       });
     const joined = `${request} — ${question}: acme/examples`;
+    await savePendingQuestion(deps, pending);
     const operator = decides({ binds: [{ line: `agent:general ${joined}`, repo: "acme/examples" }] });
     deps.operatorModel = operator;
     await dispatch(deps, msg("acme/examples", "slack:UADMIN"), fakeIO().io, { thread: pending });
@@ -25416,6 +25481,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
         return next;
       });
     const reply = "acme/infrastructure, and double the alert budget";
+    await savePendingQuestion(deps, pending);
     const joined = `${request} — ${question}: ${reply}`;
     deps.operatorModel = decides({
       binds: [{ line: `agent:ship ${joined}`, repo: "acme/infrastructure", shipEntry: "work" }],
@@ -25437,9 +25503,11 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
   it("on: a pending question's no-call answer is re-asked once, then stops without a reader hand-off (issue 2046)", async () => {
     const FALLBACK_YAML = YAML_FIXTURE.replace("routing: { operator: off }\n", "routing: { operator: on }\n");
     const { deps, provider, registry } = operatorDeps(FALLBACK_YAML);
+    const thread = questionThread();
+    await savePendingQuestion(deps, thread);
     deps.operatorModel = vi.fn<RouteModel>(async () => "sure, acme/tools it is");
     const { io, replies } = fakeIO();
-    await dispatch(deps, msg("acme/tools is the repo", "slack:UADMIN"), io, { thread: questionThread() });
+    await dispatch(deps, msg("acme/tools is the repo", "slack:UADMIN"), io, { thread });
     expect(deps.operatorModel).toHaveBeenCalledTimes(2);
     expect(provider.requests).toHaveLength(0);
     expect(replies).toContain("I couldn't bind this request to an action, so nothing started.");
@@ -26243,6 +26311,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       },
     ] as RunView[];
     const { deps, registry, provider } = operatorDeps(ON_YAML);
+    await savePendingQuestion(deps, pendingThread);
     wireCommands(deps);
     deps.operatorModel = decides({ reason: "never", binds: [{ line: "help", reason: "never" }] });
     const { io } = fakeIO();
@@ -26284,6 +26353,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       },
     ] as RunView[];
     const { deps, provider, registry } = operatorDeps(ON_YAML);
+    await savePendingQuestion(deps, pendingThread);
     deps.operatorModel = decides({ reason: "never", binds: [{ line: "help", reason: "never" }] });
 
     await dispatch(deps, msg("yes", "slack:UADMIN"), fakeIO().io, { thread: pendingThread });
@@ -26313,6 +26383,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       },
     ] as RunView[];
     const { deps, provider } = operatorDeps(ON_YAML);
+    await savePendingQuestion(deps, pendingThread);
     deps.operatorModel = decides({ reason: "never", binds: [{ line: "help", reason: "never" }] });
     const { io, replies } = fakeIO();
 
@@ -26464,6 +26535,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       ...questionThread(),
       { id: "c1", startedAt: 0, finished: true, eventCount: 1, agent: "coding", parentInstanceId: INSTANCE },
     ] as RunView[];
+    await savePendingQuestion(deps, thread);
     deps.operatorModel = decides({
       reason: "reads as guidance for the door",
       binds: [{ line: "agent:general summarize the answer", reason: "a rival" }],
@@ -26607,6 +26679,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       },
       { id: "c1", startedAt: 0, finished: true, eventCount: 1, agent: "coding", parentInstanceId: INSTANCE },
     ] as RunView[];
+    await savePendingQuestion(deps, thread);
     deps.operatorModel = decides({ reason: "never", binds: [{ line: "help", reason: "never" }] });
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("yes", "slack:UADMIN"), io, { thread });
@@ -26828,6 +26901,228 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
 });
 
 describe("durable structured child context", () => {
+  it.each([
+    { acknowledge: true, workBrief: true },
+    { acknowledge: false, workBrief: true },
+    { acknowledge: true, workBrief: false },
+  ])(
+    "requires the applicable coding seed acknowledgment before the first provider call (brief=$workBrief, ACK=$acknowledge)",
+    async ({ acknowledge, workBrief }) => {
+      const { contractFor } = await import("./coordinator/briefs.js");
+      const { contextAccessForRun } = await import("./dispatch/contextAccess.js");
+      const { canonicalHandoffRunOf } = await import("./dispatch/handoffValidation.js");
+      const { contextDependenciesHash } = await import("./references/contextDependencies.js");
+      const { turnRows } = await import("./runLedger/transcript.js");
+      const { isUnitSeedReceipt } = await import("./coordinator/unitSeedReceipt.js");
+      const provider = capturingProvider("The private work is ready.");
+      const deps = makeDeps(YAML_FIXTURE, provider);
+      const ledger = new InMemoryRunLedger();
+      const store = new InMemoryRunStore();
+      deps.runStore = store;
+      deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
+      deps.runLedger = createLedgerWriteThrough({ ledger, gen: "seed-generation", fallback: store, warn: () => {} });
+      const instance: CoordinatorInstance = {
+        id: "ship_seed",
+        kind: "ship",
+        userId: "slack:UADMIN",
+        channelId: workBrief ? "slack:DALICE" : "slack:CX",
+        threadKey: workBrief ? "slack:DALICE:1.0" : "slack:CX:1.0",
+        repo: "acme/api",
+        base: "main",
+        branch: unitBranch("seed", "task"),
+        plan: { id: "seed" },
+        createdAt: 1,
+      };
+      const source = {
+        runId: "seed-parent",
+        requester: instance.userId,
+        channelId: instance.channelId,
+        threadKey: instance.threadKey,
+      };
+      const evidence: ChatMessage[] = [
+        { role: "user", content: [{ type: "text", text: "Exact evidence for the saved task" }] },
+      ];
+      const dependencies: ContextDependencies = {
+        version: 1,
+        status: "known",
+        revision: 1,
+        origins: [source],
+        slack: [],
+        mcp: [],
+      };
+      expect(
+        await ledger.appendSession("seed-parent-log", "parent-evidence", turnRows(0, evidence[0]!).rows, dependencies),
+      ).toMatchObject({ ok: true });
+      const handoff = {
+        version: 1 as const,
+        source,
+        session: { key: "seed-parent-log", from: 0, to: 0 },
+        window: { from: 0, to: 0, hash: await sourceHash({ messages: evidence, actors: [] }) },
+        assets: [],
+        dependencies: { value: dependencies, hash: await contextDependenciesHash(dependencies) },
+      };
+      const unit: CoordinatorUnit = {
+        instanceId: instance.id,
+        unit: "task",
+        slug: "task",
+        branch: instance.branch,
+        dependsOn: [],
+        rounds: [],
+        threadKey: workBrief ? `worker:${instance.id}:task` : "slack:CX:unit",
+        workBrief: {
+          requesterId: instance.userId,
+          mainThreadKey: instance.threadKey,
+          actId: "original-request",
+          repo: instance.repo,
+          base: "main",
+          question: "Why did this fail?",
+          findings: [],
+          requestedChange: "Fix the linked issue",
+        },
+        context: { version: 1, handoff },
+      };
+      if (!workBrief) {
+        delete unit.workBrief;
+        instance.runId = source.runId;
+        const { generatedTaskOf } = await import("./coordinator/generatedTask.js");
+        unit.generatedTask = generatedTaskOf("Fix the linked issue", {
+          runId: source.runId,
+          requesterId: instance.userId,
+          threadKey: instance.threadKey,
+          repo: instance.repo,
+        });
+      }
+      const binding = {
+        instanceId: instance.id,
+        unit: unit.unit,
+        instanceAttempt: 0,
+        idempotencyKey: `${instance.id}:${unit.unit}/0/coding`,
+      };
+      const instances = new InMemoryCoordinatorInstanceStore();
+      expect(await instances.put(instance)).toEqual({ ok: true });
+      expect(await instances.putUnits([unit])).toEqual({ ok: true });
+      deps.coordinatorInstances = instances;
+      const contract = await contractFor(instance, unit, {
+        readRepoFile: async () => undefined,
+        readRunFacts: async () => undefined,
+      });
+      deps.handoffAccessForRun = async (input) => ({
+        loadRun: async (runId) => {
+          if (runId === source.runId)
+            return {
+              ...source,
+              session: { key: "seed-parent-log", seedFrom: 0, request: 0, range: { from: 0, to: 0 } },
+              writtenThrough: 0,
+              dependencies,
+            };
+          const row = (await ledger.listLive()).find((candidate) => candidate.runId === runId);
+          return row ? canonicalHandoffRunOf(row, 100, dependencies) : undefined;
+        },
+        readSession: async () => ({ complete: true, turns: 1, messages: evidence, compactions: [] }),
+        readNotepad: async () => null,
+        loadAdmission: !workBrief
+          ? (await contextAccessForRun(deps)(input)).loadAdmission
+          : async () => ({
+              binding,
+              context: unit.context!,
+              requester: instance.userId,
+              channelId: instance.channelId,
+              threadKey: unit.threadKey!,
+            }),
+        canRead: async () => true,
+        readAssets: async () => [],
+        validateDependencies: async () => true,
+        captureDependencies: async () => dependencies,
+        loadSource: async () => undefined,
+      });
+      let attemptedAck = 0;
+      const setState = ledger.setState.bind(ledger);
+      vi.spyOn(ledger, "setState").mockImplementation(async (runId, gen, state) => {
+        if (state.unitSeedReceipt !== undefined && ledger.live.get(runId)?.state.unitSeedReceipt === undefined) {
+          attemptedAck++;
+          if (!acknowledge) return { ok: false, reason: "fenced" };
+        }
+        return setState(runId, gen, state);
+      });
+      let provedBeforeProvider = false;
+      const complete = provider.complete.bind(provider);
+      vi.spyOn(provider, "complete").mockImplementation(async (request) => {
+        const row = (await ledger.listLive()).find(
+          (candidate) => candidate.meta.idempotencyKey === binding.idempotencyKey,
+        );
+        const receipt = row?.state.unitSeedReceipt;
+        if (!workBrief) {
+          expect(receipt).toBeUndefined();
+          expect(row?.meta.childHandoff?.source).toEqual(source);
+          expect(row?.meta.childHandoff?.consumer?.attempt).toBe(binding.idempotencyKey);
+          expect(row?.state.contextCheckpoint).toBeDefined();
+          return complete(request);
+        }
+        expect(isUnitSeedReceipt(receipt)).toBe(true);
+        if (!isUnitSeedReceipt(receipt)) throw new Error("The first provider call has no acknowledged seed.");
+        expect(receipt.binding).toEqual(binding);
+        expect(receipt.contractHash).toBe(await sourceHash(contract.unit));
+        expect(receipt.capsuleHash).toBe(await sourceHash(unit.context));
+        expect(
+          await sourceHash(await deps.runLedger.readSession(receipt.seed.key, receipt.seed.from, receipt.seed.through)),
+        ).toBe(receipt.seed.messagesHash);
+        provedBeforeProvider = true;
+        return complete(request);
+      });
+      const io = privateWorkerIO(
+        new InMemoryPrivateWorkerLog(),
+        { instanceId: instance.id, unit: unit.unit },
+        {
+          clock: () => Date.now(),
+          currentInputId: binding.idempotencyKey,
+          audience: {
+            actId: "original-request",
+            requester: {
+              kind: "slack-unshared-im",
+              userId: instance.userId,
+              channelId: instance.channelId,
+              threadKey: instance.threadKey,
+            },
+            spawnKey: binding.idempotencyKey,
+            verify: async () => ({ ok: true }),
+          },
+        },
+      );
+      const outcome = await dispatch(
+        deps,
+        {
+          userId: instance.userId,
+          channelId: instance.channelId,
+          threadKey: unit.threadKey!,
+          messageId: binding.idempotencyKey,
+          text: "agent:coding Fix the linked issue in acme/api",
+        },
+        workBrief ? io : fakeIO().io,
+        {
+          coordinator: {
+            parentInstanceId: instance.id,
+            unit: unit.unit,
+            instanceAttempt: 0,
+            idempotencyKey: binding.idempotencyKey,
+            base: "main",
+            branch: unit.branch,
+          },
+          childHandoff: handoff,
+          unitContextAdmission: binding,
+          contract,
+        },
+      );
+      expect(attemptedAck, JSON.stringify(outcome)).toBe(workBrief ? 1 : 0);
+      expect(provider.requests).toHaveLength(acknowledge ? 1 : 0);
+      expect(provedBeforeProvider).toBe(acknowledge && workBrief);
+      if (acknowledge) expect(outcome.status, JSON.stringify(outcome)).toBe("completed");
+      await deps.runHistoryWriter.settled();
+      const record = [...ledger.finished.values()][0];
+      if (acknowledge && workBrief) expect(record?.unitSeedReceipt?.binding).toEqual(binding);
+      else expect(record?.unitSeedReceipt).toBeUndefined();
+    },
+  );
+
   it.each(["direct", "queued unit", "Ship"])(
     "persists the %s source before seeding and reconstructs tool evidence from canonical rows",
     async (kind) => {
@@ -26986,6 +27281,98 @@ describe("durable structured child context", () => {
   });
 });
 describe("durable operator conversation without an agent run", () => {
+  it.each(["question", "route", "command"] as const)(
+    "revalidates admitted operator memory before publishing or acting (%s)",
+    async (decision) => {
+      const { contextThreadSessionKey } = await import("./runLedger/sessionLog.js");
+      for (const revoke of [false, true]) {
+        const secret = "private deployment detail orchid-seven";
+        const provider = capturingProvider("The requested answer is ready.");
+        const deps = memoryDeps(
+          MEMORY_ON_YAML.replace("routing: { operator: off }", "routing: { operator: on }"),
+          provider,
+        );
+        deps.memory = new InMemoryMemoryStore([memRecord()]);
+        let visible = true;
+        deps.slackContextForRun = (_actor, incoming) => ({
+          ...testSlackCapability(incoming, async () => "source"),
+          originAudience: async () =>
+            incoming.threadKey === MEMORY_PRODUCER.threadKey && !visible ? undefined : "public",
+        });
+        deps.operatorModel = vi.fn<RouteModel>(async () => {
+          if (revoke) visible = false;
+          return decision === "question"
+            ? { tool: "ask", input: { text: secret, reason: "a preference" } }
+            : decision === "route"
+              ? { tool: "bind_preset", input: { preset: "general", reason: secret } }
+              : { tool: mcpToolName("runs.list"), input: { reason: secret } };
+        });
+        const channel = fakeIO();
+        await dispatch(deps, msg("What is the deploy command?", "slack:UADMIN"), channel.io);
+        await deps.runHistoryWriter.settled();
+        expect(deps.operatorModel).toHaveBeenCalledOnce();
+        expect(JSON.stringify(vi.mocked(deps.operatorModel).mock.calls)).toContain(
+          "the deploy command is npm run deploy",
+        );
+        const tail = await deps.runLedger.readSessionTail(contextThreadSessionKey("slack:CX:1.0"), 100_000);
+        const records = await Promise.all((await deps.runStore.list({})).map((row) => deps.runStore.get(row.id)));
+        if (revoke) {
+          expect(JSON.stringify({ replies: channel.replies, statuses: channel.statuses, tail, records })).not.toContain(
+            secret,
+          );
+          expect(provider.requests).toHaveLength(0);
+          expect(deps.invoked).toEqual([]);
+          expect(channel.replies.join(" ")).toContain("ask me to check the source again");
+        } else if (decision === "question") {
+          expect(channel.replies.join(" ")).toContain(secret);
+        } else if (decision === "route") {
+          expect(provider.requests.length).toBeGreaterThan(0);
+        } else {
+          expect(deps.invoked).toEqual(["runs.list"]);
+        }
+      }
+    },
+  );
+
+  it.each(["yes", "all services"])(
+    "revalidates a pending decision before joining an answer or binding assent (%s)",
+    async (answer) => {
+      const secret = "Should the orchid-seven deployment detail guide the report?";
+      const deps = memoryDeps(
+        MEMORY_ON_YAML.replace("routing: { operator: off }", "routing: { operator: on }"),
+        capturingProvider("ready"),
+      );
+      deps.memory = new InMemoryMemoryStore([memRecord()]);
+      let visible = true;
+      deps.slackContextForRun = (_actor, incoming) => ({
+        ...testSlackCapability(incoming, async () => "source"),
+        originAudience: async () =>
+          incoming.threadKey === MEMORY_PRODUCER.threadKey && !visible ? undefined : "public",
+      });
+      const prompts: unknown[] = [];
+      deps.operatorModel = vi.fn<RouteModel>(async (request) => {
+        prompts.push(structuredClone(request));
+        return prompts.length === 1
+          ? { tool: "ask", input: { text: secret, proposal: "runs list", reason: "a preference" } }
+          : { tool: "ask", input: { text: "What should the new report cover?", reason: "a preference" } };
+      });
+      const first = fakeIO();
+      await dispatch(
+        deps,
+        { ...msg("What is the deploy command?", "slack:UADMIN"), messageId: "slack:CX:2.0" },
+        first.io,
+      );
+      await deps.runHistoryWriter.settled();
+      expect(first.replies.join(" ")).toContain(secret);
+      visible = false;
+      const second = fakeIO();
+      await dispatch(deps, { ...msg(answer, "slack:UADMIN"), messageId: "slack:CX:3.0" }, second.io);
+      expect(JSON.stringify(prompts.slice(1))).not.toContain(secret);
+      expect(deps.invoked).toEqual([]);
+      expect(second.replies.join(" ")).not.toContain(secret);
+    },
+  );
+
   it("keeps a question and its reply across a new dispatcher facade", async () => {
     const { contextThreadSessionKey } = await import("./runLedger/sessionLog.js");
     const yaml = YAML_FIXTURE.replace("routing: { operator: off }", "routing: { operator: on }");

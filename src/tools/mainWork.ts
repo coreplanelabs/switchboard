@@ -1,7 +1,15 @@
 import { createHash } from "node:crypto";
 import type { Actor, ChannelVisibility } from "../core/authz/types.js";
 import { MAIN_TASK_ACT_ID_PATTERN, type WorkflowSender } from "../core/coordinator/contract.js";
-import { createMainTaskActions } from "../core/coordinator/mainActions.js";
+import { createMainTaskActions, type UnitSeedReader } from "../core/coordinator/mainActions.js";
+import {
+  isMainWorkReadReceipt,
+  recordMainWorkRead,
+  restoreMainWorkRead,
+  type MainWorkReadObserver,
+  type MainWorkReadReceipt,
+  type MainWorkReadRefresh,
+} from "../core/coordinator/mainWorkObservation.js";
 import type { CoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import type { PlaneService } from "../core/planeService.js";
 import type { IncomingMessage } from "../core/types.js";
@@ -55,6 +63,13 @@ export function mainWorkAudienceAllowed({ agentName, actor, message, channelVisi
  * input supplies only an act address and the words to add. */
 export interface MainWorkCapability {
   status(actId: string): ReturnType<Actions["status"]>;
+  recordRead?(
+    actId: string,
+    callId: string,
+    result: Extract<Awaited<ReturnType<Actions["status"]>>, { kind: "found" }>,
+    content: string,
+  ): Promise<void>;
+  restoreRead?(receipt: MainWorkReadReceipt): (() => Promise<MainWorkReadRefresh>) | undefined;
   steer(actId: string, words: string, toolCallId: string): ReturnType<Actions["steer"]>;
   stop(actId: string): ReturnType<Actions["stop"]>;
 }
@@ -103,8 +118,12 @@ export function mainWorkForRun(
     clock: () => number;
     effectGate: MainWorkEffectGate;
     trusted?: () => boolean;
+    /** Recovered read receipts may be refreshed without restoring effect authority. */
+    readTrusted?: () => boolean;
     verifiedAtOpen?: boolean;
     verify?: (audience: DirectAudience) => Promise<boolean>;
+    observeRead?: MainWorkReadObserver;
+    readSeedReceipt?: UnitSeedReader;
   },
 ): MainWorkCapability | undefined {
   if (
@@ -118,36 +137,84 @@ export function mainWorkForRun(
   )
     return undefined;
   const trusted = deps.trusted;
+  const instances = deps.instances;
   const verify = deps.verify;
   const audience = deps.message.directAudience;
-  const canAct = async () => {
-    if (!trusted()) return false;
+  const audienceAllowed = async (sourceTrusted: () => boolean) => {
+    if (!sourceTrusted()) return false;
     try {
-      return (await verify(audience)) && trusted();
+      return (await verify(audience)) && sourceTrusted();
     } catch {
       return false;
     }
   };
-  const actions = createMainTaskActions({
-    instances: deps.instances,
-    ...(deps.workflow ? { workflow: deps.workflow } : {}),
-    plane: {
-      stop: async (id, actor, visibleTo, binding) => {
-        const plane = await deps.plane!();
-        if (!(await canAct()) || !trusted())
-          return { kind: "unavailable" as const, reason: "direct audience changed before stop" };
-        return plane.stop(id, actor, visibleTo, binding);
+  const canAct = () => audienceAllowed(trusted);
+  const actionsFor = (liveAuthority: { verify(): Promise<boolean>; active(): boolean }) =>
+    createMainTaskActions({
+      instances,
+      ...(deps.workflow ? { workflow: deps.workflow } : {}),
+      plane: {
+        stop: async (id, actor, visibleTo, binding) => {
+          const plane = await deps.plane!();
+          if (!(await canAct()) || !trusted())
+            return { kind: "unavailable" as const, reason: "direct audience changed before stop" };
+          return plane.stop(id, actor, visibleTo, binding);
+        },
       },
-    },
-    clock: deps.clock,
-    liveAuthority: { verify: canAct, active: trusted },
-  });
+      clock: deps.clock,
+      liveAuthority,
+      readSeedReceipt: deps.readSeedReceipt,
+    });
+  const actions = actionsFor({ verify: canAct, active: trusted });
+  const readTrusted = deps.readTrusted ?? trusted;
+  const canRead = () => audienceAllowed(readTrusted);
+  const readActions = deps.readTrusted ? actionsFor({ verify: canRead, active: readTrusted }) : actions;
+  const status: MainWorkCapability["status"] = async (actId) => {
+    if (!(await canAct())) return { kind: "unavailable" as const };
+    const result = await actions.status(deps.actor, actId);
+    return trusted() ? result : { kind: "unavailable" as const };
+  };
   return {
-    status: async (actId) => {
-      if (!(await canAct())) return { kind: "unavailable" as const };
-      const result = await actions.status(deps.actor, actId);
-      return (await canAct()) ? result : { kind: "unavailable" as const };
+    status,
+    restoreRead: (receipt) => {
+      if (
+        !isMainWorkReadReceipt(receipt) ||
+        receipt.tool !== "work_status" ||
+        receipt.observation.requesterId !== deps.message.userId ||
+        receipt.observation.channelId !== deps.message.channelId ||
+        receipt.observation.mainThreadKey !== deps.message.threadKey
+      )
+        return undefined;
+      const input = structuredClone(receipt.input);
+      return restoreMainWorkRead(receipt, async () => {
+        if (!(await canRead())) return undefined;
+        const current = await readActions.status(deps.actor, input.actId);
+        return readTrusted() && current.kind === "found"
+          ? { observation: current.observation, content: renderWorkStatus(current) }
+          : undefined;
+      });
     },
+    ...(deps.observeRead
+      ? {
+          recordRead: async (
+            actId: string,
+            callId: string,
+            result: Extract<Awaited<ReturnType<Actions["status"]>>, { kind: "found" }>,
+            content: string,
+          ) => {
+            await recordMainWorkRead(
+              deps.observeRead!,
+              { tool: "work_status", callId, input: { actId }, observation: result.observation, content },
+              async () => {
+                const current = await status(actId);
+                return current.kind === "found"
+                  ? { observation: current.observation, content: renderWorkStatus(current) }
+                  : undefined;
+              },
+            );
+          },
+        }
+      : {}),
     steer: async (actId, words, toolCallId) => {
       if (!(await canAct())) return { kind: "unavailable" as const };
       // A provider call id may repeat in another run. Both durable identities
@@ -169,6 +236,13 @@ export function mainWorkForRun(
 const UNAVAILABLE = "error: Saved work is unavailable in this deployment. Try again shortly; nothing changed.";
 const NOT_FOUND = "error: I couldn't find that work in this conversation. Check the original thread; nothing changed.";
 const FORBIDDEN = "error: This requester cannot access or change that work. Nothing changed.";
+
+export function renderWorkStatus(result: Extract<Awaited<ReturnType<Actions["status"]>>, { kind: "found" }>): string {
+  return JSON.stringify({
+    ...result.unit,
+    asOf: { observedAt: result.observation.observedAt, snapshotHash: result.observation.snapshotHash },
+  });
+}
 
 function actIdOf(input: Record<string, unknown>): string | undefined {
   return typeof input.actId === "string" && MAIN_TASK_ACT_ID_PATTERN.test(input.actId) ? input.actId : undefined;
@@ -194,8 +268,11 @@ export const workStatusTool: RunnableTool = {
     if (!actId) return "error: I need the work id from the earlier handoff to check its status.";
     const result = await ctx.mainWork.status(actId);
     switch (result.kind) {
-      case "found":
-        return JSON.stringify(result.unit);
+      case "found": {
+        const content = renderWorkStatus(result);
+        if (ctx.callId) await ctx.mainWork.recordRead?.(actId, ctx.callId, result, content);
+        return content;
+      }
       case "not_found":
         return NOT_FOUND;
       case "forbidden":

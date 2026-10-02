@@ -60,7 +60,7 @@ import {
   type ResumeContext,
 } from "./dispatch/admission.js";
 import { answerChatCommand, type FastPathDeps } from "./dispatch/fastPath.js";
-import { actorIdsOf, cancelPending, consumeAndRun, REFUSED_REASON } from "./dispatch/confirm.js";
+import { actorIdsOf, cancelPending, consumeAndRun, OFFER_CONTEXT_LINE, REFUSED_REASON } from "./dispatch/confirm.js";
 import type { PrWorkBinding } from "./ship/prWorkBinding.js";
 import {
   postSettledOutcome,
@@ -168,6 +168,7 @@ import { resolveAddressSeverity } from "./reviewVerdict.js";
 import { closedReviewPreflight, type RoundWorkspace } from "./reviewRound.js";
 import { DEFAULT_CONTRACT_MAX_CHARS, renderContract, type ChildContract } from "./ship/contract.js";
 import { withContractInFirstUserTurn } from "./ship/codingChild.js";
+import { acknowledgeUnitSeed } from "./dispatch/unitSeedProof.js";
 import { prepareFreshTurn, settleThread, tellDropped } from "./dispatch/settle.js";
 import {
   abandonLostWorkspace,
@@ -1304,7 +1305,14 @@ export async function dispatch(
       // have been — mention or not, never reduced to a bare answer. The joined
       // line is what the operator decides, so the fragment
       // never becomes a request by itself.
-      const pendingQuestion = operatorMode === "on" ? pendingQuestionOf(operatorThread, msg.userId) : undefined;
+      const pendingDecision =
+        operatorMode === "on" && operatorThread?.[0]?.operator?.outcome === "question"
+          ? await contextReader.readOperatorDecision(operatorThread[0].id)
+          : undefined;
+      const pendingQuestion = pendingDecision
+        ? pendingQuestionOf([{ userId: operatorThread?.[0]?.userId, operator: pendingDecision.operator }], msg.userId)
+        : undefined;
+      const pendingContext = pendingQuestion ? pendingDecision?.context : undefined;
       const joinedAnswer =
         pendingQuestion !== undefined && !(pendingQuestion.proposal !== undefined && isYesAnswer(msg.text))
           ? joinedAnswerRequest(pendingQuestion, msg.text)
@@ -1356,8 +1364,9 @@ export async function dispatch(
           {
             msg: doorMsg,
             mode: operatorMode,
+            pending: pendingQuestion,
             onContext: (context) => {
-              operatorContext = context;
+              operatorContext = mergeContextDependencies(context, ...(pendingContext ? [pendingContext] : []));
             },
             readTail: () =>
               readOperatorTailContext({
@@ -1448,6 +1457,8 @@ export async function dispatch(
             ending,
             trace,
             event: operatorEvent!,
+            contextDependencies: structuredClone(operatorContext),
+            validateContext: () => revalidateAdmittedContext(() => operatorContext, contextReader.validateDependencies),
             appendReply: async (text) => {
               if (!deps.runLedger.sessionPersistence) return;
               await appendThreadTurn(deps.runLedger, {
@@ -4179,7 +4190,8 @@ export async function dispatch(
     if (boundHandoff) {
       if (!ledgerRun?.tracked() || !handoffAccess || !handoffConsumer)
         throw new Error("The child context was not durably claimed.");
-      if (!(await ledgerRun.checkpointSession())) throw new Error("The child context checkpoint could not be saved.");
+      const childCheckpoint = await ledgerRun.checkpointSession();
+      if (!childCheckpoint) throw new Error("The child context checkpoint could not be saved.");
       const consumed = await validateChildHandoff({
         value: boundHandoff,
         consumer: handoffConsumer,
@@ -4188,6 +4200,24 @@ export async function dispatch(
       });
       if (consumed.kind !== "valid")
         throw new Error(consumed.kind === "invalid" ? consumed.reason : "The persisted child context is missing.");
+      if (opts.unitContextAdmission && deps.coordinatorInstances) {
+        const proof = await acknowledgeUnitSeed(
+          { runLedger: deps.runLedger, runStore: deps.runStore, instances: deps.coordinatorInstances },
+          {
+            run: ledgerRun,
+            binding: opts.unitContextAdmission,
+            handoff: boundHandoff,
+            contract: opts.contract,
+            contractBlock,
+            messages,
+            actors: seedActors,
+            system,
+            checkpoint: childCheckpoint,
+            acknowledgedAt: clock(),
+          },
+        );
+        if (proof.kind === "unavailable") throw new Error("The unit's saved seed could not be acknowledged.");
+      }
     }
     handoffConsumer ??= {
       runId,
@@ -4546,6 +4576,7 @@ export async function dispatch(
       runDiagnosis,
       releaseWorkspace,
       root,
+      currentWorkCheck: ran.currentWorkCheck,
       publicationCheck: revalidateAdmitted,
       ...(mainAudience?.ok
         ? {
@@ -4617,7 +4648,7 @@ export async function dispatch(
           }
         : {}),
     });
-    if (delivery.kind === "fenced") return ended;
+    if (delivery.kind === "fenced" || (await ran.currentWorkCheck?.()) !== undefined) return ended;
 
     // After the reply (dispatch/reply.ts): the memory reflection pass. The
     // review post-step ran inside the run loop, before the stream finished.
@@ -5049,10 +5080,21 @@ export async function dispatchClick(deps: CoreDeps, click: ClickRequest): Promis
     // A question's Yes (record 0054): the consumed `redispatch` row goes back
     // through `dispatch()` whole — the proposal as the requester's own message,
     // the click's drain slot handed over, the question's code on the record.
-    const res = await consumeAndRun(deps, { id: click.id, actorIds }, io, ending, trace, (row) =>
-      dispatch(deps, row.message, io, {
-        redispatch: { code: row.code, ...(row.binding ? { binding: row.binding } : {}) },
-      }),
+    const res = await consumeAndRun(
+      deps,
+      { id: click.id, actorIds },
+      io,
+      ending,
+      trace,
+      (row) =>
+        dispatch(deps, row.message, io, {
+          redispatch: { code: row.code, ...(row.binding ? { binding: row.binding } : {}) },
+        }),
+      (context, message) =>
+        revalidateAdmittedContext(
+          () => context,
+          contextAccessForMessage(deps, { msg: message, io }).validateDependencies,
+        ),
     );
     if (res.kind === "redispatched") {
       redispatched = res.outcome;
@@ -5107,7 +5149,11 @@ export async function dispatchClick(deps: CoreDeps, click: ClickRequest): Promis
     // typed line's does; the receipt leads, the command's text follows.
     await ending.sealAfterReply(
       async () => {},
-      () => root.span("post.reply", () => io.reply(res.text)),
+      () =>
+        root.span("post.reply", async () => {
+          const current = await res.publicationCheck?.();
+          return io.reply(current && !current.ok ? OFFER_CONTEXT_LINE : res.text);
+        }),
     );
     if (res.result.ok && res.result.followUp) postSettledOutcome(res.result.followUp, io, root);
     return ended;

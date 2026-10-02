@@ -1,10 +1,22 @@
 import { wrapUntrusted } from "../core/untrusted.js";
+import type {
+  MainWorkReadInput,
+  MainWorkReadReceipt,
+  MainWorkReadRefresh,
+} from "../core/coordinator/mainWorkObservation.js";
 import type { MainWorkerRelayResult } from "../core/coordinator/mainWorkerRelay.js";
 import type { RunnableTool } from "./runnableTool.js";
 
 /** The run-bound capability owns the actor and main thread; model input is only an address and cursor. */
 export interface MainWorkerCapability {
-  read(input: { actId: string; afterSeq?: number; afterHistory?: number }): Promise<MainWorkerRelayResult>;
+  read(input: MainWorkReadInput): Promise<MainWorkerRelayResult>;
+  recordRead?(
+    input: MainWorkReadInput,
+    callId: string,
+    result: Extract<MainWorkerRelayResult, { kind: "found" }>,
+    content: string,
+  ): Promise<void>;
+  restoreRead?(receipt: MainWorkReadReceipt): (() => Promise<MainWorkReadRefresh>) | undefined;
 }
 
 const ACT_ID = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$/;
@@ -44,27 +56,36 @@ export const workProgressTool: RunnableTool = {
     )
       return "error: invalid history cursor";
     if (!ctx.mainWorker) return "error: work progress is not available in this context";
-    const result = await ctx.mainWorker.read({
+    const request = {
       actId: input.actId,
       ...(input.afterSeq !== undefined ? { afterSeq: input.afterSeq as number } : {}),
       ...(input.afterHistory !== undefined ? { afterHistory: input.afterHistory as number } : {}),
-    });
+    };
+    const result = await ctx.mainWorker.read(request);
     if (result.kind !== "found") return JSON.stringify(result);
-    return JSON.stringify({
-      ...result,
-      progress: result.progress.map((event) => ({ ...event, title: wrapUntrusted(event.title) })),
-      ...(result.final ? { final: { ...result.final, report: wrapUntrusted(result.final.report) } } : {}),
-      ...(result.history
-        ? {
-            history: {
-              ...result.history,
-              receipts: result.history.receipts.map((receipt) => ({
-                ...receipt,
-                report: wrapUntrusted(receipt.report),
-              })),
-            },
-          }
-        : {}),
-    });
+    const content = renderWorkProgress(result);
+    if (ctx.callId) await ctx.mainWorker.recordRead?.(request, ctx.callId, result, content);
+    return content;
   },
 };
+
+export function renderWorkProgress(result: Extract<MainWorkerRelayResult, { kind: "found" }>): string {
+  const { observation, ...projection } = result;
+  return JSON.stringify({
+    ...projection,
+    asOf: { observedAt: observation.observedAt, snapshotHash: observation.snapshotHash },
+    progress: result.progress.map((event) => ({ ...event, title: wrapUntrusted(event.title) })),
+    ...(result.final ? { final: { ...result.final, report: wrapUntrusted(result.final.report) } } : {}),
+    ...(result.history
+      ? {
+          history: {
+            ...result.history,
+            receipts: result.history.receipts.map((receipt) => ({
+              ...receipt,
+              report: wrapUntrusted(receipt.report),
+            })),
+          },
+        }
+      : {}),
+  });
+}

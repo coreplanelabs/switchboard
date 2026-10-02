@@ -1,4 +1,7 @@
+import { OFFER_CONTEXT_LINE } from "./confirm.js";
+import { audienceRefusalText, type AudienceCheck } from "../audienceDecision.js";
 import {
+  UNKNOWN_CONTEXT_DEPENDENCIES,
   githubRepositoryDependencies,
   isContextDependencies,
   mergeContextDependencies,
@@ -2597,6 +2600,8 @@ export async function operatorStage(
     readMemory?: () => Promise<{ memory?: string; unavailable: readonly string[]; context?: ContextDependencies }>;
     readTail?: () => Promise<OperatorTailContext>;
     onContext?: (context: ContextDependencies) => void;
+    /** Canonical saved decision already admitted by the current context reader. */
+    pending?: ReturnType<typeof pendingQuestionOf>;
     /** The thread's runs, newest first: the agents for the tail's session keys
      *  and each record's operator decision for a pending question. */
     thread?: readonly {
@@ -2807,7 +2812,7 @@ export async function operatorStage(
   // newest run is an `on` question with a proposed line, this event may be its
   // answer — "yes" binds the proposal with no model turn (`bindFromAnswer`);
   // anything else binds fresh, the marker in the prompt so the model sees it.
-  const pending = pendingQuestionOf(ctx.thread, msg.userId);
+  const pending = ctx.pending;
   const legacyPresetProposal =
     pending?.proposal !== undefined &&
     pending.proposalSettings === undefined &&
@@ -3089,6 +3094,10 @@ export async function executeOperatorDecision(
     event: OperatorEventFields;
     /** Persist generated text with the exact consumed context before publishing it. */
     appendReply?: (text: string) => Promise<void>;
+    /** Validate the exact context consumed by this decision against the current reader. */
+    validateContext?: () => Promise<AudienceCheck>;
+    /** The immutable consumed envelope saved with a reusable decision. */
+    contextDependencies?: ContextDependencies;
     /** The thread's runs, newest first (the dispatcher's one read). */
     thread?: readonly { agent?: string }[];
     /** The thread's owner, when a live run, an idle unit or an ended pipeline
@@ -3098,228 +3107,284 @@ export async function executeOperatorDecision(
   },
 ): Promise<OperatorExecution> {
   const { event, io, msg } = ctx;
+  const withheld = new Error("The decision's source access could not be verified.");
+  let refusal: Extract<AudienceCheck, { ok: false }> | undefined;
+  const checkContext = async () => {
+    if (refusal !== undefined) throw withheld;
+    if (ctx.validateContext === undefined) return;
+    let check: AudienceCheck;
+    try {
+      check = await ctx.validateContext();
+    } catch {
+      check = { ok: false, code: "saved-context-unproved" };
+    }
+    if (!check.ok) {
+      refusal = check;
+      throw withheld;
+    }
+  };
+  const decisionOptions = {
+    ...(ctx.validateContext !== undefined ? { beforePublish: checkContext } : {}),
+    ...(ctx.contextDependencies !== undefined ? { contextDependencies: structuredClone(ctx.contextDependencies) } : {}),
+  };
+  const recordDecision = async () => {
+    await checkContext();
+    await recordOperatorDecision(deps, msg, event, ctx.ending, ctx.trace, decisionOptions);
+  };
   const reply = async (text: string) => {
+    await checkContext();
     await ctx.appendReply?.(text);
+    await checkContext();
     return io.reply(text);
   };
-  // The surface (record 0069's table): a channel that can show a click is a
-  // chat surface; the rest (the CLI, HTTP) are typed, whose native act is
-  // typing, so their refusals may name the line — chat's never do.
-  const surface: Surface = io.offer ? "chat" : "typed";
-  // The receipt (`bound:`) is the system's word on what it did for the person
-  // — `verbose` material (routing-and-config item 28), resolved like the
-  // stages that speak before a request resolves.
-  const receiptBind = event.binds?.[0];
-  const routedPreset =
-    receiptBind !== undefined &&
-    presetBindOf(
-      receiptBind.line,
-      operatorPresets().map((preset) => preset.name),
-    ) !== undefined;
-  const verbosity = deps.config.verbosityFor(
-    msg.channelId,
-    msg.userId,
-    routedPreset ? receiptBind?.verbosity : parseDirectives(msg.text).verbosity,
-  );
-  const verbose = shows(verbosity, "verbose");
-  const answered: OperatorExecution = { kind: "answered" };
-  if (event.outcome === "non_decision") {
-    io.requestFailed?.();
-    await reply("I couldn't bind this request to an action, so nothing started.");
-    await recordOperatorDecision(deps, msg, event, ctx.ending, ctx.trace);
-    return answered;
-  }
-  // Ownership already resolved this event to one ended pipeline. The operator
-  // may select a separately requested review only when that owner allowed it.
-  // Reads, writes, questions and stale steers still fold to continuation.
-  if (ctx.owner?.kind === "pipeline" && !ownedDecisionRuns(event, ctx.owner, deps.commands, msg.text))
-    return { kind: "fold" };
-  if (event.outcome === "question") {
-    // The `question` cell: rendered, then parked as the thread's pending
-    // question on a door record — the person's next words are its answer.
-    await reply(event.question ?? "");
-    await recordOperatorDecision(deps, msg, event, ctx.ending, ctx.trace);
-    return answered;
-  }
-  if (event.providerFailure !== undefined || event.refusalCause === "timeout") {
-    // A failed door call is an availability fact, not a routing decision. It
-    // renders once and ends at the door even in an owned thread; falling
-    // through would silently reinterpret the request as general or a steer.
-    io.requestFailed?.();
-    await reply(
-      event.refusalText ??
-        (event.providerFailure !== undefined
-          ? renderProviderFailure(event.providerFailure, "ended")
-          : "The routing request timed out; nothing started."),
+  const execute = async (): Promise<OperatorExecution> => {
+    await checkContext();
+    // The surface (record 0069's table): a channel that can show a click is a
+    // chat surface; the rest (the CLI, HTTP) are typed, whose native act is
+    // typing, so their refusals may name the line — chat's never do.
+    const surface: Surface = io.offer ? "chat" : "typed";
+    // The receipt (`bound:`) is the system's word on what it did for the person
+    // — `verbose` material (routing-and-config item 28), resolved like the
+    // stages that speak before a request resolves.
+    const receiptBind = event.binds?.[0];
+    const routedPreset =
+      receiptBind !== undefined &&
+      presetBindOf(
+        receiptBind.line,
+        operatorPresets().map((preset) => preset.name),
+      ) !== undefined;
+    const verbosity = deps.config.verbosityFor(
+      msg.channelId,
+      msg.userId,
+      routedPreset ? receiptBind?.verbosity : parseDirectives(msg.text).verbosity,
     );
-    await recordOperatorDecision(deps, msg, event, ctx.ending, ctx.trace);
-    return answered;
-  }
-  // An owned thread accepts no prose answer (issue 2027; thread-admission item
-  // 9): a decision that is not a steer, a read or the question above is the
-  // steer of the whole message — the `steer_owned` row's fold — and no reply
-  // text is posted here.
-  if (ctx.owner !== undefined && !ownedDecisionRuns(event, ctx.owner, deps.commands, msg.text)) {
-    // A confirmed "yes" to a question minted before the thread became owned
-    // folds the proposal's own words — a preset line's tail, the whole line
-    // otherwise — never the literal "yes" (review F2 of the owned-thread fold).
-    const confirmed = (event.binds ?? []).find((b) => b.confirmed);
-    const request =
-      confirmed !== undefined
-        ? presetBindOf(
-            confirmed.line,
-            operatorPresets().map((p) => p.name),
-          ) !== undefined
-          ? (presetRequestOf(confirmed.line) ?? confirmed.line)
-          : confirmed.line
-        : undefined;
-    return { kind: "fold", ...(request !== undefined ? { request } : {}) };
-  }
-  if (event.outcome === "refusal") {
-    // The `policy_refusal` row: a refusal only the policy table made (a
-    // durable record from before the loop, or a deterministic gate) — its
-    // sentence carried whole, naming the row it stands on.
-    await reply(event.refusalText ?? "");
-    await recordOperatorDecision(deps, msg, event, ctx.ending, ctx.trace);
-    return answered;
-  }
-  const commands = deps.commands;
-  // The presets a bind may name: the author's own projection (`operatorStage`
-  // offered the model the same set, so a preset outside it names nothing).
-  const actor = chatActorOf(deps.config, msg);
-  const presets = operatorPresets().filter((p) => deps.config.canRunAgent(actor, p.name));
-  const presetNames = presets.map((p) => p.name);
-  const confirm = effectiveConfirm(deps.config.boundaryLayers(msg.channelId, msg.userId));
-  let carried = false;
-  const bind = (event.binds ?? [])[0];
-  if (bind !== undefined) {
-    // The registry is read first: a command whose group shares a preset's
-    // name (`review abridge <run>`) is that command, never the preset. Only a
-    // line no command parses can name a preset.
-    const parsed = commands ? parseChatCommand(bind.line, commands) : null;
-    const def = parsed?.kind === "invoke" ? commands?.list().find((c) => c.id === parsed.id) : undefined;
-    const bound =
-      parsed?.kind === "invoke" && def
-        ? { def: def as CommandDef<unknown>, radius: boundBlastRadius(def as CommandDef<unknown>, parsed.input) }
-        : undefined;
-    const preset = bound ? undefined : presetBindOf(bind.line, presetNames);
-    if (preset !== undefined) {
-      // The `bind_preset` row: resolution runs the preset on the person's own
-      // request — a confirmed proposal's tail is the one
-      // exception, the person's message being the word "yes".
-      const requestWords = !bind.confirmed ? stripDirectiveHead(msg.text, preset) : undefined;
-      const identity = presets.find((p) => p.name === preset)?.identity;
-      const radius = identity === "write" ? "write" : "read";
-      // Below `verbose` the receipt posts nothing: the run's card — its
-      // preset word — is the receipt, exactly as a routed run's card is.
-      if (verbose) await reply(renderOperatorReceipt(bind.line, radius, bind.reason));
-      const request = bind.confirmed
-        ? presetRequestOf(bind.line)
-        : requestWords !== undefined && requestWords !== msg.text
-          ? requestWords
-          : undefined;
-      return {
-        kind: "route",
-        preset,
-        ...(request !== undefined ? { request } : {}),
-        ...(bind.model !== undefined ? { model: bind.model } : {}),
-        ...(bind.effort !== undefined ? { effort: bind.effort } : {}),
-        ...(bind.budget !== undefined ? { budget: bind.budget } : {}),
-        ...(bind.severity !== undefined ? { severity: bind.severity } : {}),
-        ...(bind.renewals !== undefined ? { renewals: bind.renewals } : {}),
-        ...(bind.verbosity !== undefined ? { verbosity: bind.verbosity } : {}),
-        ...(bind.repo !== undefined ? { repo: bind.repo } : {}),
-        ...(bind.repoSource !== undefined ? { repoSource: bind.repoSource } : {}),
-        ...(bind.prTarget !== undefined ? { prTarget: bind.prTarget } : {}),
-        ...(bind.shipEntry !== undefined ? { shipEntry: bind.shipEntry } : {}),
-        ...(bind.prBatch !== undefined ? { prBatch: bind.prBatch } : {}),
-        carried,
-      };
-    }
-    if (!parsed || parsed.kind !== "invoke" || !def || !bound) {
-      // A residue only a confirmed proposal from an older record can reach:
-      // the loop's schema renders no unparseable line. A typed surface's
-      // refusal names the typed form; a chat surface is never handed a line
-      // to retype (record 0069), so it is asked to ask again.
-      await reply(surface === "typed" ? renderHandBackLine(bind.line) : "this proposal can no longer run; ask again");
-      await recordOperatorDecision(deps, msg, event, ctx.ending, ctx.trace);
+    const verbose = shows(verbosity, "verbose");
+    const answered: OperatorExecution = { kind: "answered" };
+    if (event.outcome === "non_decision") {
+      io.requestFailed?.();
+      await reply("I couldn't bind this request to an action, so nothing started.");
+      await recordDecision();
       return answered;
     }
-    // A plain reply's steer is addressed to the thread's live owner, not to an
-    // id the model copied from an older transcript turn. An explicitly typed
-    // `steer run …` never enters the operator and keeps its named target; this
-    // fence applies only to the operator's bind. The command run records the
-    // resolved line, so its receipt and audit agree with the inbox it changed.
-    let invocation = parsed;
-    let executedBind = bind;
-    let executedEvent = event;
-    if (def.id === "steer.run" && ctx.owner?.kind === "live" && ctx.owner.runId !== undefined) {
-      const args = [...(parsed.input.args ?? [])];
-      args[0] = ctx.owner.runId;
-      const input = { ...parsed.input, args };
-      invocation = { ...parsed, input };
-      executedBind = { ...bind, line: operatorLine(chatInvocation(def, input)) };
-      executedEvent = {
-        ...event,
-        binds: (event.binds ?? []).map((candidate, index) => (index === 0 ? executedBind : candidate)),
-      };
+    // Ownership already resolved this event to one ended pipeline. The operator
+    // may select a separately requested review only when that owner allowed it.
+    // Reads, writes, questions and stale steers still fold to continuation.
+    if (ctx.owner?.kind === "pipeline" && !ownedDecisionRuns(event, ctx.owner, deps.commands, msg.text))
+      return { kind: "fold" };
+    if (event.outcome === "question") {
+      // The `question` cell: rendered, then parked as the thread's pending
+      // question on a door record — the person's next words are its answer.
+      await reply(event.question ?? "");
+      await recordDecision();
+      return answered;
     }
-    const radius = boundBlastRadius(def as CommandDef<unknown>, invocation.input);
-    // A bind of `steer` is admission's, not the paste ladder's (the one-door
-    // plan's admission unit; thread-admission item 1): the fold is the act a
-    // thread reply performs with no confirmation, and its fence is the owner
-    // rule the wired sender asks (`authorizeSteerOwner`, authorization item
-    // 16a) plus the live agent's allowlist.
-    const runsNow =
-      def.id === "steer.run" || routedRunsAtOnce(def as CommandDef<unknown>, confirm.value, invocation.input);
-    const receipt = renderOperatorReceipt(executedBind.line, radius, executedBind.reason);
-    if (!runsNow) {
-      // The `run_command at_or_above` row. On chat, record 0044's one click
-      // (routing-and-config item 25): the same row, the same Yes handler, the
-      // same ten-minute expiry as a routed write. The cell decides what a
-      // failure names — the mint's failure on chat, the typed form elsewhere.
-      const mint =
-        surface === "chat"
-          ? await mintConfirmationOffer({
-              io,
-              store: deps.confirmations,
-              msg,
-              origin: chatCallerFor(msg, deps.config).origin,
-              def: bound.def,
-              input: parsed.input,
-              receipt: routeReceipt(bound.def, parsed.input),
-              // The row's model is the decider's, as the routed offer stores
-              // the router's: the operator runs on `defaults.models.general`.
-              model: deps.config.config.defaults.models["general"] ?? "",
-            })
+    if (event.providerFailure !== undefined || event.refusalCause === "timeout") {
+      // A failed door call is an availability fact, not a routing decision. It
+      // renders once and ends at the door even in an owned thread; falling
+      // through would silently reinterpret the request as general or a steer.
+      io.requestFailed?.();
+      await reply(
+        event.refusalText ??
+          (event.providerFailure !== undefined
+            ? renderProviderFailure(event.providerFailure, "ended")
+            : "The routing request timed out; nothing started."),
+      );
+      await recordDecision();
+      return answered;
+    }
+    // An owned thread accepts no prose answer (issue 2027; thread-admission item
+    // 9): a decision that is not a steer, a read or the question above is the
+    // steer of the whole message — the `steer_owned` row's fold — and no reply
+    // text is posted here.
+    if (ctx.owner !== undefined && !ownedDecisionRuns(event, ctx.owner, deps.commands, msg.text)) {
+      // A confirmed "yes" to a question minted before the thread became owned
+      // folds the proposal's own words — a preset line's tail, the whole line
+      // otherwise — never the literal "yes" (review F2 of the owned-thread fold).
+      const confirmed = (event.binds ?? []).find((b) => b.confirmed);
+      const request =
+        confirmed !== undefined
+          ? presetBindOf(
+              confirmed.line,
+              operatorPresets().map((p) => p.name),
+            ) !== undefined
+            ? (presetRequestOf(confirmed.line) ?? confirmed.line)
+            : confirmed.line
           : undefined;
-      if (mint !== undefined && mint.kind === "offered") {
-        if (verbose) await reply(receipt);
-        await renderConfirmationOffer(io, mint.shown);
-        await recordOperatorDecision(deps, msg, event, ctx.ending, ctx.trace);
+      return { kind: "fold", ...(request !== undefined ? { request } : {}) };
+    }
+    if (event.outcome === "refusal") {
+      // The `policy_refusal` row: a refusal only the policy table made (a
+      // durable record from before the loop, or a deterministic gate) — its
+      // sentence carried whole, naming the row it stands on.
+      await reply(event.refusalText ?? "");
+      await recordDecision();
+      return answered;
+    }
+    const commands = deps.commands;
+    // The presets a bind may name: the author's own projection (`operatorStage`
+    // offered the model the same set, so a preset outside it names nothing).
+    const actor = chatActorOf(deps.config, msg);
+    const presets = operatorPresets().filter((p) => deps.config.canRunAgent(actor, p.name));
+    const presetNames = presets.map((p) => p.name);
+    const confirm = effectiveConfirm(deps.config.boundaryLayers(msg.channelId, msg.userId));
+    let carried = false;
+    const bind = (event.binds ?? [])[0];
+    if (bind !== undefined) {
+      // The registry is read first: a command whose group shares a preset's
+      // name (`review abridge <run>`) is that command, never the preset. Only a
+      // line no command parses can name a preset.
+      const parsed = commands ? parseChatCommand(bind.line, commands) : null;
+      const def = parsed?.kind === "invoke" ? commands?.list().find((c) => c.id === parsed.id) : undefined;
+      const bound =
+        parsed?.kind === "invoke" && def
+          ? { def: def as CommandDef<unknown>, radius: boundBlastRadius(def as CommandDef<unknown>, parsed.input) }
+          : undefined;
+      const preset = bound ? undefined : presetBindOf(bind.line, presetNames);
+      if (preset !== undefined) {
+        // The `bind_preset` row: resolution runs the preset on the person's own
+        // request — a confirmed proposal's tail is the one
+        // exception, the person's message being the word "yes".
+        const requestWords = !bind.confirmed ? stripDirectiveHead(msg.text, preset) : undefined;
+        const identity = presets.find((p) => p.name === preset)?.identity;
+        const radius = identity === "write" ? "write" : "read";
+        // Below `verbose` the receipt posts nothing: the run's card — its
+        // preset word — is the receipt, exactly as a routed run's card is.
+        if (verbose) await reply(renderOperatorReceipt(bind.line, radius, bind.reason));
+        const request = bind.confirmed
+          ? presetRequestOf(bind.line)
+          : requestWords !== undefined && requestWords !== msg.text
+            ? requestWords
+            : undefined;
+        await checkContext();
+        return {
+          kind: "route",
+          preset,
+          ...(request !== undefined ? { request } : {}),
+          ...(bind.model !== undefined ? { model: bind.model } : {}),
+          ...(bind.effort !== undefined ? { effort: bind.effort } : {}),
+          ...(bind.budget !== undefined ? { budget: bind.budget } : {}),
+          ...(bind.severity !== undefined ? { severity: bind.severity } : {}),
+          ...(bind.renewals !== undefined ? { renewals: bind.renewals } : {}),
+          ...(bind.verbosity !== undefined ? { verbosity: bind.verbosity } : {}),
+          ...(bind.repo !== undefined ? { repo: bind.repo } : {}),
+          ...(bind.repoSource !== undefined ? { repoSource: bind.repoSource } : {}),
+          ...(bind.prTarget !== undefined ? { prTarget: bind.prTarget } : {}),
+          ...(bind.shipEntry !== undefined ? { shipEntry: bind.shipEntry } : {}),
+          ...(bind.prBatch !== undefined ? { prBatch: bind.prBatch } : {}),
+          carried,
+        };
+      }
+      if (!parsed || parsed.kind !== "invoke" || !def || !bound) {
+        // A residue only a confirmed proposal from an older record can reach:
+        // the loop's schema renders no unparseable line. A typed surface's
+        // refusal names the typed form; a chat surface is never handed a line
+        // to retype (record 0069), so it is asked to ask again.
+        await reply(surface === "typed" ? renderHandBackLine(bind.line) : "this proposal can no longer run; ask again");
+        await recordDecision();
         return answered;
       }
-      // The mint failed or this is a typed surface: the cell names what the
-      // refusal must say — the mint's failure on chat, the typed form elsewhere.
-      const cell = decideExecution({ kind: "run_command", confirm: "at_or_above", mintable: false }, surface);
-      const text =
-        cell.cell === "refuse" && cell.names === "typed_form"
-          ? renderHandBackLine(bind.line)
-          : mint !== undefined && mint.kind === "unshowable"
-            ? UNSHOWABLE_LINE
-            : STORE_UNREACHABLE_LINE;
-      await reply(`${verbose ? `${receipt}\n` : ""}${text}`);
-      await recordOperatorDecision(deps, msg, event, ctx.ending, ctx.trace);
-      return answered;
+      // A plain reply's steer is addressed to the thread's live owner, not to an
+      // id the model copied from an older transcript turn. An explicitly typed
+      // `steer run …` never enters the operator and keeps its named target; this
+      // fence applies only to the operator's bind. The command run records the
+      // resolved line, so its receipt and audit agree with the inbox it changed.
+      let invocation = parsed;
+      let executedBind = bind;
+      let executedEvent = event;
+      if (def.id === "steer.run" && ctx.owner?.kind === "live" && ctx.owner.runId !== undefined) {
+        const args = [...(parsed.input.args ?? [])];
+        args[0] = ctx.owner.runId;
+        const input = { ...parsed.input, args };
+        invocation = { ...parsed, input };
+        executedBind = { ...bind, line: operatorLine(chatInvocation(def, input)) };
+        executedEvent = {
+          ...event,
+          binds: (event.binds ?? []).map((candidate, index) => (index === 0 ? executedBind : candidate)),
+        };
+      }
+      const radius = boundBlastRadius(def as CommandDef<unknown>, invocation.input);
+      // A bind of `steer` is admission's, not the paste ladder's (the one-door
+      // plan's admission unit; thread-admission item 1): the fold is the act a
+      // thread reply performs with no confirmation, and its fence is the owner
+      // rule the wired sender asks (`authorizeSteerOwner`, authorization item
+      // 16a) plus the live agent's allowlist.
+      const runsNow =
+        def.id === "steer.run" || routedRunsAtOnce(def as CommandDef<unknown>, confirm.value, invocation.input);
+      const receipt = renderOperatorReceipt(executedBind.line, radius, executedBind.reason);
+      if (!runsNow) {
+        // The `run_command at_or_above` row. On chat, record 0044's one click
+        // (routing-and-config item 25): the same row, the same Yes handler, the
+        // same ten-minute expiry as a routed write. The cell decides what a
+        // failure names — the mint's failure on chat, the typed form elsewhere.
+        await checkContext();
+        const mint =
+          surface === "chat"
+            ? await mintConfirmationOffer({
+                source: "operator",
+                context: ctx.contextDependencies ?? UNKNOWN_CONTEXT_DEPENDENCIES,
+                io,
+                store: deps.confirmations,
+                msg,
+                origin: chatCallerFor(msg, deps.config).origin,
+                def: bound.def,
+                input: parsed.input,
+                receipt: routeReceipt(bound.def, parsed.input),
+                // The row's model is the decider's, as the routed offer stores
+                // the router's: the operator runs on `defaults.models.general`.
+                model: deps.config.config.defaults.models["general"] ?? "",
+              })
+            : undefined;
+        if (mint !== undefined && mint.kind === "offered") {
+          try {
+            await checkContext();
+            if (verbose) await reply(receipt);
+            await checkContext();
+          } catch (err) {
+            // A row whose offer never reached the reader must not remain clickable.
+            await deps.confirmations?.cancel(mint.shown.id, [msg.userId]).catch(() => undefined);
+            throw err;
+          }
+          await renderConfirmationOffer(io, mint.shown);
+          await recordDecision();
+          return answered;
+        }
+        // The mint failed or this is a typed surface: the cell names what the
+        // refusal must say — the mint's failure on chat, the typed form elsewhere.
+        const cell = decideExecution({ kind: "run_command", confirm: "at_or_above", mintable: false }, surface);
+        const text =
+          cell.cell === "refuse" && cell.names === "typed_form"
+            ? renderHandBackLine(bind.line)
+            : mint !== undefined && mint.kind === "unshowable"
+              ? UNSHOWABLE_LINE
+              : mint?.kind === "context_unavailable"
+                ? OFFER_CONTEXT_LINE
+                : STORE_UNREACHABLE_LINE;
+        await reply(`${verbose ? `${receipt}\n` : ""}${text}`);
+        await recordDecision();
+        return answered;
+      }
+      // The `run_command below` row: the run cell, through the class ladder.
+      if (verbose) await reply(receipt);
+      await checkContext();
+      const res = await runChatCommand(deps, msg, io, invocation, ctx.ending, ctx.trace, {
+        ...decisionOptions,
+        operator: executedEvent,
+      });
+      carried = true;
+      await checkContext();
+      if (res.text.length > 0) await replyCommandOutput(io, invocation, res.text, { verbosity, ok: res.ok });
     }
-    // The `run_command below` row: the run cell, through the class ladder.
-    if (verbose) await reply(receipt);
-    const res = await runChatCommand(deps, msg, io, invocation, ctx.ending, ctx.trace, { operator: executedEvent });
-    carried = true;
-    if (res.text.length > 0) await replyCommandOutput(io, invocation, res.text, { verbosity, ok: res.ok });
+    // A decision nothing ran from records on a door record of its own, or the
+    // shadow-vs-on ledger would have a hole.
+    if (!carried) await recordDecision();
+    return answered;
+  };
+  try {
+    return await execute();
+  } catch (err) {
+    if (err !== withheld || refusal === undefined) throw err;
+    io.requestFailed?.();
+    await io.reply(audienceRefusalText(refusal.code));
+    return { kind: "answered" };
   }
-  // A decision nothing ran from records on a door record of its own, or the
-  // shadow-vs-on ledger would have a hole.
-  if (!carried) await recordOperatorDecision(deps, msg, event, ctx.ending, ctx.trace);
-  return answered;
 }

@@ -10,6 +10,10 @@ import {
   type ContextOrigin,
 } from "./contextDependencies.js";
 
+/** Recent ordinary rows may reuse a sealed checkpoint's authority. Older
+ * identities age out; frozen handoffs and external source obligations do not. */
+export const ORDINARY_CONTEXT_HISTORY_RUNS = 128;
+
 export interface CheckpointAuthority {
   requester: string;
   channelId: string;
@@ -42,10 +46,10 @@ export interface ContextCheckpointReceipt {
   inputs: ContextCheckpointInputs;
   beforeHash: string;
   beforeRevision: number;
-  /** Seals the canonical ordinary-member edges in the existing retention index. */
+  /** Seals the newest-first ordinary aliases in the existing index. Aliases do not pin archives. */
   membershipHash: string;
   membershipCount: number;
-  /** Only the immediately covered origins. Canonical retention flattens their older membership. */
+  /** Only the immediately covered origins. The alias window retains bounded older membership. */
   coveredOrigins: readonly ContextOrigin[];
   normalized: ContextDependencies;
   normalizedHash: string;
@@ -86,6 +90,8 @@ export interface CanonicalCheckpointSource {
   receipt?: ContextCheckpointReceipt;
   /** Canonical ordinary-member edges read with the committed receipt; never an envelope field. */
   members?: readonly string[];
+  /** Exact original marker for each alias; an empty self marker avoids a hash cycle. */
+  memberCheckpoints?: Readonly<Record<string, string>>;
 }
 
 const hash = (v: unknown): v is string => typeof v === "string" && /^[a-f0-9]{64}$/.test(v);
@@ -132,6 +138,7 @@ export function isContextCheckpointReceipt(value: unknown): value is ContextChec
       hash(r.membershipHash) &&
       Number.isSafeInteger(r.membershipCount) &&
       r.membershipCount > 0 &&
+      r.membershipCount <= ORDINARY_CONTEXT_HISTORY_RUNS &&
       Number.isSafeInteger(r.beforeRevision) &&
       r.beforeRevision >= 0 &&
       !!r.authority &&
@@ -199,6 +206,7 @@ export async function validateContextCheckpoint(receipt: unknown, source: Canoni
   if (!isContextCheckpointReceipt(receipt) || source.receipt?.hash !== receipt.hash) return false;
   const authority = checkpointAuthorityOf(source.meta);
   const session = source.meta.session;
+  const memberHashes = source.memberCheckpoints ?? (source.members?.length === 1 ? { [source.runId]: "" } : {});
   if (
     !authority ||
     !session ||
@@ -211,8 +219,11 @@ export async function validateContextCheckpoint(receipt: unknown, source: Canoni
     (session.range.to !== undefined && receipt.session.through > session.range.to) ||
     source.transcriptHash !== receipt.inputs.transcriptHash ||
     !source.members ||
+    source.members.length !== receipt.membershipCount ||
     new Set(source.members).size !== receipt.membershipCount ||
-    (await checkpointMembershipHash(source.members)) !== receipt.membershipHash ||
+    Object.keys(memberHashes).length !== receipt.membershipCount ||
+    source.members.some((id) => (id === source.runId ? memberHashes[id] !== "" : !hash(memberHashes[id]))) ||
+    (await checkpointMembershipHash(source.members, memberHashes)) !== receipt.membershipHash ||
     !source.members.includes(source.runId) ||
     (await sourceHash(authority)) !== (await sourceHash(receipt.authority)) ||
     (await contextDependenciesHash(receipt.normalized)) !== receipt.normalizedHash ||
@@ -300,7 +311,10 @@ export async function planContextCheckpoint(input: {
     inputs: structuredClone(inputs),
     beforeHash: expected.beforeHash,
     beforeRevision: expected.revision,
-    membershipHash: await checkpointMembershipHash(members),
+    membershipHash: await checkpointMembershipHash(
+      members,
+      checkpointMemberHashesOf(run.runId, coveredOrigins, input.sources),
+    ),
     membershipCount: members.length,
     coveredOrigins: structuredClone(coveredOrigins),
     normalized: base,
@@ -324,10 +338,48 @@ export function checkpointMembersOf(
       runId,
       ...covered.flatMap((origin) => [origin.runId, ...(sources.find((s) => s.runId === origin.runId)?.members ?? [])]),
     ]),
-  ].sort();
+  ].slice(0, ORDINARY_CONTEXT_HISTORY_RUNS);
 }
-export function checkpointMembershipHash(members: readonly string[]): Promise<string> {
-  return sourceHash([...new Set(members)].sort());
+export function checkpointMemberHashesOf(
+  runId: string,
+  covered: readonly ContextOrigin[],
+  sources: readonly CanonicalCheckpointSource[],
+): Record<string, string> {
+  const values: Record<string, string> = { [runId]: "" };
+  for (const origin of covered) {
+    const source = sources.find((candidate) => candidate.runId === origin.runId);
+    if (!source?.receipt) continue;
+    for (const member of [source.runId, ...(source.members ?? [])])
+      if (!(member in values))
+        values[member] = member === source.runId ? source.receipt.hash : (source.memberCheckpoints?.[member] ?? "");
+  }
+  return Object.fromEntries(checkpointMembersOf(runId, covered, sources).map((id) => [id, values[id] ?? ""]));
+}
+export function checkpointMembershipHash(
+  members: readonly string[],
+  hashes: Readonly<Record<string, string>>,
+): Promise<string> {
+  return sourceHash([...new Set(members)].map((id) => [id, hashes[id]]));
+}
+
+/** Both inputs must be canonically validated first. Session offsets order one
+ * ordinary lane; a different lane or authority remains an independent source. */
+export function checkpointOutsideOrdinaryWindow(
+  source: CanonicalCheckpointSource,
+  latest: CanonicalCheckpointSource,
+): boolean {
+  const older = source.receipt,
+    current = latest.receipt;
+  return (
+    !!older &&
+    !!current &&
+    current.membershipCount === ORDINARY_CONTEXT_HISTORY_RUNS &&
+    older.session.key === current.session.key &&
+    older.session.through < current.session.through &&
+    JSON.stringify(older.authority) === JSON.stringify(current.authority) &&
+    latest.members !== undefined &&
+    !latest.members.includes(source.runId)
+  );
 }
 
 /** Applied only with a canonically committed receipt by the storage path. */
@@ -377,8 +429,9 @@ export function contextCheckpointMatchesRun(
   );
 }
 
-/** Normalize already admitted frozen row closures through committed canonical
- * membership. Callers must apply current audience checks to each source first.
+/** Normalize frozen row identities through committed canonical membership.
+ * Callers check each checkpoint's current audience first, then validate the
+ * resulting row's complete dependency closure before exposing its bytes.
  * This changes the aggregate read only; historical row metadata stays immutable. */
 export async function normalizeCheckpointContexts(
   contexts: readonly ContextDependencies[],
@@ -389,20 +442,30 @@ export async function normalizeCheckpointContexts(
     if (source.receipt && (await validateContextCheckpoint(source.receipt, source))) proved.push(source);
   proved.sort((a, b) => b.receipt!.membershipCount - a.receipt!.membershipCount);
   return contexts.map((context) => {
-    if (context.status !== "known") return context;
     let normalized = context;
-    for (const source of proved) {
-      const receipt = source.receipt!;
-      const members = new Set(source.members);
-      const covered = (origin: ContextOrigin) =>
-        members.has(origin.runId) &&
-        origin.requester === receipt.authority.requester &&
-        origin.channelId === receipt.authority.channelId &&
-        origin.threadKey === receipt.authority.threadKey;
-      if (!normalized.origins.some(covered)) continue;
-      const current = receipt.normalized.origins.find((origin) => origin.runId === receipt.runId)!;
-      normalized = { ...normalized, origins: [...normalized.origins.filter((origin) => !covered(origin)), current] };
-    }
+    for (const source of proved) normalized = applyContextCheckpointAliases(normalized, source);
     return normalized;
   });
+}
+
+/** The storage boundary validates this source's canonical receipt first. Apply
+ * its sealed alias window before a union can overflow; external leaves stay exact. */
+export function applyContextCheckpointAliases(
+  context: ContextDependencies,
+  source: CanonicalCheckpointSource,
+): ContextDependencies {
+  const receipt = source.receipt;
+  if (context.status !== "known" || !receipt) return context;
+  const members = new Set(source.members);
+  const covered = (origin: ContextOrigin) =>
+    members.has(origin.runId) &&
+    origin.requester === receipt.authority.requester &&
+    origin.channelId === receipt.authority.channelId &&
+    origin.threadKey === receipt.authority.threadKey &&
+    (origin.checkpoint === undefined ||
+      origin.checkpoint === (origin.runId === source.runId ? receipt.hash : source.memberCheckpoints?.[origin.runId]));
+  if (!context.origins.some(covered)) return context;
+  const current = receipt.normalized.origins.find((origin) => origin.runId === receipt.runId);
+  if (!current) return context;
+  return { ...context, origins: [...context.origins.filter((origin) => !covered(origin)), current] };
 }

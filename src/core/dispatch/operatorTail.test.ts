@@ -26,7 +26,7 @@ const transcript = {
 const sources = { version: 1 as const, status: "unknown" as const, context };
 
 describe("operator source-aware tail", () => {
-  it("normalizes only admitted rows with the latest metadata before merging a long shared history", async () => {
+  it("normalizes canonical recent row identities before access checks and merging a long shared history", async () => {
     const contexts = Array.from({ length: 65 }, (_, i) => ({
       ...context,
       origins: [{ ...context.origins[0]!, runId: `run-${i}` }],
@@ -50,8 +50,8 @@ describe("operator source-aware tail", () => {
     const validateDependencies = vi.fn(async () => ({ ok: true as const }));
     const normalizeDependencies = vi.fn(
       async (admitted: readonly ContextDependencies[], candidates: readonly ContextDependencies[]) => {
-        expect(validateDependencies).toHaveBeenCalledTimes(65);
-        expect(admitted.slice(1)).toEqual(contexts);
+        expect(validateDependencies).not.toHaveBeenCalled();
+        expect(admitted).toEqual(contexts);
         expect(candidates).toContainEqual(latest);
         return admitted.map(() => latest);
       },
@@ -64,8 +64,35 @@ describe("operator source-aware tail", () => {
       normalizeDependencies,
     });
     expect(normalizeDependencies).toHaveBeenCalledTimes(1);
+    expect(validateDependencies).toHaveBeenCalledExactlyOnceWith(latest);
     expect(result.context?.status).toBe("known");
     expect(result.context?.origins).toEqual(latest.origins);
+  });
+
+  it("omits a row outside the proved identity window without tainting its recent neighbor", async () => {
+    const latest = { ...context, origins: [{ ...context.origins[0]!, runId: "latest", checkpoint: "a".repeat(64) }] };
+    const ancient = { ...context, origins: [{ ...context.origins[0]!, runId: "expired" }] };
+    const readSessionTail = vi.fn<RunLedger["readSessionTail"]>().mockResolvedValue({
+      from: 0,
+      transcript: {
+        ...transcript,
+        messages: [transcript.messages[0], { role: "user", content: [{ type: "text", text: "recent summary" }] }],
+        contexts: [ancient, context],
+      },
+      sources: { ...sources, context: latest },
+    });
+    const result = await readOperatorTailContext({
+      ledger: { readSessionTail },
+      runs: [],
+      msg,
+      normalizeDependencies: async () => [ancient, latest],
+      validateDependencies: async (value) =>
+        value.origins[0]?.runId === "latest" ? { ok: true } : { ok: false, code: "saved-context-unproved" },
+    });
+    expect(result.turns.map((turn) => turn.text)).toEqual(["user: recent summary"]);
+    expect(result.context?.status).toBe("known");
+    expect(result.context?.origins).toEqual(latest.origins);
+    expect(result.unavailable).toHaveLength(1);
   });
   it("does not infer a shared row's provenance from its role or clean aggregate metadata", async () => {
     const readSessionTail = vi

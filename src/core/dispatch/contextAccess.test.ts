@@ -16,7 +16,12 @@ import type { RunRecord } from "../runRecord.js";
 import type { LiveRunRow } from "../runLedger/types.js";
 import { type ContextOrigin, type ContextDependencies } from "../references/contextDependencies.js";
 import { sourceHash } from "../references/receipts.js";
-import { planContextCheckpoint, type CanonicalCheckpointSource } from "../references/contextCheckpoint.js";
+import {
+  checkpointMembersOf,
+  checkpointMemberHashesOf,
+  planContextCheckpoint,
+  type CanonicalCheckpointSource,
+} from "../references/contextCheckpoint.js";
 import { contextDependenciesHash } from "../references/contextDependencies.js";
 import { createSourceReads, type SourceReadOperation, type SourceReadState } from "../../mcp/sourceRead.js";
 import { sourceReadContract } from "../../mcp/sourceReadProtocol.js";
@@ -108,7 +113,7 @@ function setup() {
     directAudience: () => msg.directAudience,
     verifyDirectAudience: vi.fn(async () => ({ ok: true })),
   } as unknown as ChannelIO;
-  const originAudience = vi.fn(async () => "dm");
+  const originAudience = vi.fn(async (): Promise<"public" | "private" | "dm" | undefined> => "dm");
   const getRunEvents = vi.fn();
   const deps = {
     config: { grantsFor: () => ALL_GRANTS },
@@ -362,7 +367,189 @@ describe("canonical unit context access", () => {
   });
 });
 
+describe("canonical saved operator decisions", () => {
+  function pending() {
+    const f = setup();
+    Object.assign(f.record, {
+      agent: "door",
+      status: "completed",
+      finishedAt: 2,
+      events: [
+        {
+          type: "operator",
+          mode: "on",
+          outcome: "question",
+          reason: "clarify",
+          question: "Which branch?",
+          request: "Check the build",
+          seq: 1,
+          at: 1,
+        },
+      ],
+      operator: { mode: "on", outcome: "question", reason: "forged view", request: "untrusted projection" },
+      contextDependencies: clean,
+    });
+    return f;
+  }
+
+  it("reads the canonical event before checking its full context and retains the original producer", async () => {
+    const f = pending();
+    f.originAudience.mockImplementation(async () => {
+      f.record.events = [];
+      return "dm";
+    });
+    const saved = await f.access.readOperatorDecision(origin.runId);
+    expect(saved?.operator).toMatchObject({ reason: "clarify", request: "Check the build", question: "Which branch?" });
+    expect(saved?.operator).not.toHaveProperty("seq");
+    expect(saved?.context.origins).toEqual([origin]);
+  });
+
+  it("allows a current public reader while preserving the original requester", async () => {
+    const f = pending();
+    f.record.channelVisibility = "public";
+    f.originAudience.mockResolvedValue("public");
+    const reader = contextAccessForMessage(f.deps, {
+      msg: { ...msg, userId: "slack:UB", directAudience: undefined },
+      io: f.io,
+    });
+    const saved = await reader.readOperatorDecision(origin.runId);
+    expect(saved?.operator.request).toBe("Check the build");
+    expect(saved?.context.origins).toEqual([origin]);
+  });
+
+  it.each([
+    "missing",
+    "live",
+    "wrong-thread",
+    "wrong-channel",
+    "non-door",
+    "provisional",
+    "no-event",
+    "unknown",
+    "revoked",
+    "private-other",
+    "scope-revoked",
+  ])("withholds a saved decision with %s proof", async (failure) => {
+    const f = pending();
+    let reader = f.access;
+    if (failure === "missing") f.records.clear();
+    if (failure === "live") f.live.push({ runId: f.record.id, meta: f.record, state: {} } as unknown as LiveRunRow);
+    if (failure === "wrong-thread") f.record.threadKey = "slack:DA:other";
+    if (failure === "wrong-channel") f.record.channelId = "slack:DB";
+    if (failure === "non-door") f.record.agent = "coding";
+    if (failure === "provisional") f.record.provisional = true;
+    if (failure === "no-event") f.record.events = [];
+    if (failure === "unknown") f.record.contextDependencies = { ...clean, status: "unknown", reason: "legacy" };
+    if (failure === "revoked") f.originAudience.mockResolvedValue(undefined);
+    if (failure === "private-other")
+      reader = contextAccessForMessage(f.deps, { msg: { ...msg, userId: "slack:UB" }, io: f.io });
+    if (failure === "scope-revoked") f.record.contextDependencies = { ...clean, memoryScopes: ["user:slack:UB"] };
+    expect(await reader.readOperatorDecision(origin.runId)).toBeUndefined();
+  });
+});
+
 describe("message-bound context access", () => {
+  it("normalizes retained identity aliases before access without erasing mismatched checkpoint hashes or external leaves", async () => {
+    const f = setup();
+    const source: CanonicalCheckpointSource = {
+      runId: origin.runId,
+      meta: {
+        userId: msg.userId,
+        channelId: msg.channelId,
+        threadKey: msg.threadKey,
+        channelVisibility: "dm",
+        session: { key: "saved", seedFrom: 0, request: 0, range: { from: 0, to: 0 } },
+      },
+      context: closure,
+    };
+    const seal = async (run: CanonicalCheckpointSource, sources: CanonicalCheckpointSource[]) => {
+      const inputs = {
+        transcriptHash: await sourceHash(run.runId),
+        systemHash: await sourceHash("system"),
+        notepadHash: await sourceHash("notes"),
+      };
+      const receipt = (await planContextCheckpoint({
+        run,
+        ownerGen: "gen",
+        through: run.meta.session!.seedFrom,
+        inputs,
+        expected: { beforeHash: await contextDependenciesHash(run.context), revision: run.context.revision, inputs },
+        sources,
+      }))!;
+      expect(receipt).toBeDefined();
+      return {
+        ...run,
+        receipt,
+        context: receipt.normalized,
+        transcriptHash: inputs.transcriptHash,
+        members: checkpointMembersOf(run.runId, receipt.coveredOrigins, sources),
+        memberCheckpoints: checkpointMemberHashesOf(run.runId, receipt.coveredOrigins, sources),
+      };
+    };
+    const first = await seal(source, []);
+    const latest = await seal(
+      {
+        ...source,
+        runId: "latest",
+        meta: { ...source.meta, session: { key: "saved", seedFrom: 1, request: 1, range: { from: 1, to: 1 } } },
+        context: { ...first.context, origins: [...first.context.origins, { ...origin, runId: "latest" }] },
+      },
+      [first],
+    );
+    f.records.clear();
+    f.records.set("latest", { ...f.record, id: "latest", contextDependencies: latest.context });
+    Object.assign(f.deps.runLedger, {
+      readContextCheckpoint: async (id: string) => (id === "latest" ? latest : undefined),
+    });
+    const get = vi.spyOn(f.deps.runStore, "get");
+    const repeated = await f.access.normalizeDependencies(
+      Array.from({ length: 128 }, () => first.context),
+      [latest.context],
+    );
+    expect(repeated.every((context) => context.origins[0]?.runId === "latest")).toBe(true);
+    expect(get.mock.calls.every(([id]) => id === "latest")).toBe(true);
+    get.mockClear();
+    const external = { ...first.context, memoryScopes: ["user:slack:UB"] };
+    const forged = { ...first.context, origins: [{ ...origin, checkpoint: "f".repeat(64) }] };
+    const normalized = await f.access.normalizeDependencies(
+      [closure, first.context, forged, external],
+      [latest.context],
+    );
+    expect(normalized[0]!.origins).toEqual(latest.context.origins);
+    expect(normalized[1]!.origins).toEqual(latest.context.origins);
+    expect(normalized[2]).toEqual(forged);
+    expect(normalized[3]!.memoryScopes).toEqual(external.memoryScopes);
+    expect(await f.access.validateDependencies(normalized[0]!)).toEqual({ ok: true });
+    expect(await f.access.validateDependencies(normalized[2]!)).toMatchObject({ ok: false });
+    expect(await f.access.validateDependencies(normalized[3]!)).toMatchObject({ ok: false });
+    let bounded = latest;
+    for (let turn = 2; turn <= 130; turn++) {
+      const runId = `retained-${turn}`;
+      bounded = await seal(
+        {
+          ...source,
+          runId,
+          meta: {
+            ...source.meta,
+            session: { key: "saved", seedFrom: turn, request: turn, range: { from: turn, to: turn } },
+          },
+          context: { ...bounded.context, origins: [...bounded.context.origins, { ...origin, runId }] },
+        },
+        [bounded],
+      );
+    }
+    f.records.set(origin.runId, f.record);
+    f.records.set(bounded.runId, { ...f.record, id: bounded.runId, contextDependencies: bounded.context });
+    Object.assign(f.deps.runLedger, {
+      readContextCheckpoint: async (id: string) =>
+        id === bounded.runId ? bounded : id === origin.runId ? first : undefined,
+    });
+    expect(await f.access.validateDependencies(first.context)).toEqual({ ok: true });
+    const expired = await f.access.normalizeDependencies([first.context, closure], [bounded.context]);
+    expect(expired.map((context) => context.status)).toEqual(["unknown", "unknown"]);
+    f.originAudience.mockResolvedValue(undefined);
+    expect(await f.access.normalizeDependencies([closure], [latest.context])).toEqual([closure]);
+  });
   it("requires a committed canonical checkpoint with unchanged seed proof before accepting its marker", async () => {
     const f = setup();
     const source: CanonicalCheckpointSource = {

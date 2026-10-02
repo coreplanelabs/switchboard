@@ -15,8 +15,75 @@ import {
   type MainTaskBinding,
   type WorkflowSender,
 } from "./contract.js";
-import type { CoordinatorInstanceStore } from "./instanceStore.js";
+import type { CoordinatorInstanceStore, MainTaskLink } from "./instanceStore.js";
 import { isMainTaskAuthority } from "./requesterAuthority.js";
+import { observeWorkState, workStateHash, type WorkStateObservation } from "./mainWorkObservation.js";
+import { shipSettlementOf, type ShipSettlement } from "./shipOutcome.js";
+import { isUnitSeedReceipt, type UnitSeedEvidence } from "./unitSeedReceipt.js";
+import { isUnitContext, sameUnitContextBinding } from "../dispatch/unitContext.js";
+import { sourceHash } from "../references/receipts.js";
+import { privateWorkerThreadKey } from "../privateWorkerLog.js";
+
+export type UnitSeedReader = (input: {
+  instance: CoordinatorInstance;
+  unit: CoordinatorUnit;
+}) => Promise<UnitSeedEvidence | undefined>;
+export interface UnitSeedProof {
+  brief: "stored" | "missing" | "invalid";
+  context: "captured" | "missing";
+  childSeed:
+    { state: "unproved" } | { state: "acknowledged"; role: "coding" | "review"; runId: string; acknowledgedAt: number };
+  providerExecution: "unknown";
+}
+
+export async function unitSeedProofFor(
+  instance: CoordinatorInstance,
+  unit: CoordinatorUnit,
+  brief: unknown,
+  read?: UnitSeedReader,
+): Promise<UnitSeedProof> {
+  const proof: UnitSeedProof = {
+    brief: brief === undefined ? "missing" : isWorkBrief(brief) ? "stored" : "invalid",
+    context: isUnitContext(unit.context) ? "captured" : "missing",
+    childSeed: { state: "unproved" },
+    providerExecution: "unknown",
+  };
+  if (!read || proof.brief !== "stored" || proof.context !== "captured") return proof;
+  try {
+    const evidence = await read({ instance: structuredClone(instance), unit: structuredClone(unit) });
+    if (!evidence || !isUnitSeedReceipt(evidence.receipt) || (evidence.role !== "coding" && evidence.role !== "review"))
+      return proof;
+    const { receipt, binding, child } = evidence;
+    if (
+      binding.instanceId !== instance.id ||
+      binding.unit !== unit.unit ||
+      binding.instanceAttempt !== (instance.attempt ?? 0) ||
+      !sameUnitContextBinding(receipt.binding, binding) ||
+      child.runId !== receipt.child.runId ||
+      child.requester !== receipt.child.requester ||
+      child.channelId !== receipt.child.channelId ||
+      child.threadKey !== receipt.child.threadKey ||
+      child.requester !== instance.userId ||
+      child.channelId !== instance.channelId ||
+      child.threadKey !== privateWorkerThreadKey({ instanceId: instance.id, unit: unit.unit }) ||
+      receipt.contractHash !== evidence.contractHash ||
+      receipt.workBriefHash !== (await sourceHash(brief)) ||
+      receipt.capsuleHash !== (await sourceHash(unit.context))
+    )
+      return proof;
+    return {
+      ...proof,
+      childSeed: {
+        state: "acknowledged",
+        role: evidence.role,
+        runId: child.runId,
+        acknowledgedAt: receipt.acknowledgedAt,
+      },
+    };
+  } catch {
+    return proof;
+  }
+}
 
 /** The tool integration supplies only a resolved actor and a stable act id.
  * The actor's origin, never model text, selects the main conversation. */
@@ -28,6 +95,7 @@ export interface MainTaskActionsDeps {
   clock: () => number;
   /** A live model turn may lose requester authority while joined records load. */
   liveAuthority?: { verify(): Promise<boolean>; active(): boolean };
+  readSeedReceipt?: UnitSeedReader;
 }
 
 /** No private values or source URLs cross this projection. Completeness is structural,
@@ -70,13 +138,17 @@ function briefProofOf(unit: CoordinatorUnit, actId: string, brief: unknown): Bri
 export interface MainTaskStatus {
   key: string;
   briefProof: BriefProof;
+  seedProof: UnitSeedProof;
   repo: string;
   branch: string;
   state: "queued" | "running" | "idle" | "recovering" | "ended" | "stopped";
   pr?: { number: number; url: string };
+  ending?: { kind: string; at: number; settlement: ShipSettlement };
 }
 
-type ReadResult = { kind: "found"; unit: MainTaskStatus } | { kind: "not_found" | "forbidden" | "unavailable" };
+export type MainTaskReadResult =
+  | { kind: "found"; unit: MainTaskStatus; observation: WorkStateObservation }
+  | { kind: "not_found" | "forbidden" | "unavailable" };
 type SteerResult =
   | { kind: "queued"; seq: number; nudge: "sent" | "pending" }
   | { kind: "not_found" | "forbidden" | "unavailable" | "invalid" | "conflict" | "ended" };
@@ -85,6 +157,7 @@ type StopResult =
   | { kind: "not_found" | "forbidden" | "unavailable" };
 
 interface BoundUnit {
+  link: MainTaskLink;
   brief: unknown;
   instance: CoordinatorInstance;
   unit: CoordinatorUnit;
@@ -180,35 +253,49 @@ export function createMainTaskActions(deps: MainTaskActionsDeps) {
         unit.dependsOn.length !== 0
       )
         return { kind: "not_found" };
-      return { kind: "bound", value: { instance, unit, brief } };
+      return { kind: "bound", value: { link, instance, unit, brief } };
     } catch {
       return { kind: "unavailable" };
     }
   }
 
-  async function status(actor: Actor, actId: string): Promise<ReadResult> {
+  async function status(actor: Actor, actId: string): Promise<MainTaskReadResult> {
     if (actor.viewingAs) return { kind: "not_found" };
-    const found = await bound(actor, actId, true);
-    if (found.kind !== "bound") return found;
-    const { instance, unit } = found.value;
-    if (!authorize(actor, "runs:read", runResource(instance)).allow) return { kind: "forbidden" };
-    try {
-      if (!deps.liveAuthority || !(await deps.liveAuthority.verify()) || !deps.liveAuthority.active())
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const found = await bound(actor, actId, true);
+      if (found.kind !== "bound") return found;
+      const { instance, unit } = found.value;
+      if (!authorize(actor, "runs:read", runResource(instance)).allow) return { kind: "forbidden" };
+      const seedProof = await unitSeedProofFor(instance, unit, found.value.brief, deps.readSeedReceipt);
+      try {
+        if (!deps.liveAuthority || !(await deps.liveAuthority.verify()) || !deps.liveAuthority.active())
+          return { kind: "unavailable" };
+      } catch {
         return { kind: "unavailable" };
-    } catch {
-      return { kind: "unavailable" };
+      }
+      const current = await bound(actor, actId, true);
+      if (current.kind !== "bound") return current;
+      if (!authorize(actor, "runs:read", runResource(current.value.instance)).allow) return { kind: "forbidden" };
+      if ((await workStateHash(found.value)) !== (await workStateHash(current.value))) continue;
+      if (!deps.liveAuthority.active()) return { kind: "unavailable" };
+      return {
+        kind: "found",
+        observation: await observeWorkState(actId, current.value, deps.clock(), seedProof),
+        unit: {
+          key: unitKeyOf(unit),
+          briefProof: briefProofOf(unit, actId, found.value.brief),
+          seedProof,
+          repo: instance.repo,
+          branch: unit.branch,
+          state: stateOf(instance, unit),
+          ...(unit.pr ? { pr: { number: unit.pr.number, url: unit.pr.url } } : {}),
+          ...(unit.ending
+            ? { ending: { kind: unit.ending.kind, at: unit.ending.at, settlement: shipSettlementOf(unit.ending) } }
+            : {}),
+        },
+      };
     }
-    return {
-      kind: "found",
-      unit: {
-        key: unitKeyOf(unit),
-        briefProof: briefProofOf(unit, actId, found.value.brief),
-        repo: instance.repo,
-        branch: unit.branch,
-        state: stateOf(instance, unit),
-        ...(unit.pr ? { pr: { number: unit.pr.number, url: unit.pr.url } } : {}),
-      },
-    };
+    return { kind: "unavailable" };
   }
 
   async function steer(actor: Actor, input: { actId: string; eventId: string; words: string }): Promise<SteerResult> {

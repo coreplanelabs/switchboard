@@ -6,8 +6,15 @@ import { visibilityOf } from "../authz/channelDirectory.js";
 import { createMainWorkerRelay } from "../coordinator/mainWorkerRelay.js";
 import type { CoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import type { PrivateWorkerLog } from "../privateWorkerLog.js";
-import type { MainWorkerCapability } from "../../tools/mainWorker.js";
+import { renderWorkProgress, type MainWorkerCapability } from "../../tools/mainWorker.js";
+import {
+  isMainWorkReadReceipt,
+  recordMainWorkRead,
+  restoreMainWorkRead,
+  type MainWorkReadObserver,
+} from "../coordinator/mainWorkObservation.js";
 import type { FollowUpInbox } from "../threadAdmission.js";
+import type { UnitSeedReader } from "../coordinator/mainActions.js";
 
 /** A main run's actor and origin are resolved once from its admitted request.
  * Neither the model nor a worker supplies them to the private relay. */
@@ -48,11 +55,14 @@ export async function mainWorkerCapabilityFor(
     config: Pick<ConfigStore, "grantsFor">;
     coordinatorInstances?: CoordinatorInstanceStore;
     privateWorkerLog?: PrivateWorkerLog;
+    clock?: () => number;
   },
   agentName: string,
   msg: IncomingMessage & { directAudience?: DirectAudience },
   io?: DirectAudienceIO,
   sourceTrusted?: () => boolean,
+  observeRead?: MainWorkReadObserver,
+  readSeedReceipt?: UnitSeedReader,
 ): Promise<MainWorkerCapability | undefined> {
   if (agentName !== "orchestrator" || !deps.coordinatorInstances || !deps.privateWorkerLog) return undefined;
   // Tool results persist in the main run's event log. A D-prefix cannot prove
@@ -79,16 +89,52 @@ export async function mainWorkerCapabilityFor(
   const relay = createMainWorkerRelay({
     instances: deps.coordinatorInstances,
     privateWorkerLog: deps.privateWorkerLog,
+    clock: deps.clock,
+    liveAuthority: { verify: () => verifiedDirectAudience(io, audience), active: sourceTrusted },
+    readSeedReceipt,
   });
+  const read: MainWorkerCapability["read"] = async (input) => {
+    if (!sourceTrusted()) return { kind: "unavailable" };
+    if (!(await verifiedDirectAudience(io, audience))) return { kind: "unavailable" };
+    if (!sourceTrusted()) return { kind: "unavailable" };
+    const result = await relay.read(actor, input);
+    if (!sourceTrusted()) return { kind: "unavailable" };
+    return result;
+  };
   return {
-    read: async (input) => {
-      if (!sourceTrusted()) return { kind: "unavailable" };
-      if (!(await verifiedDirectAudience(io, audience))) return { kind: "unavailable" };
-      if (!sourceTrusted()) return { kind: "unavailable" };
-      const result = await relay.read(actor, input);
-      if (!sourceTrusted() || !(await verifiedDirectAudience(io, audience)) || !sourceTrusted())
-        return { kind: "unavailable" };
-      return result;
+    read,
+    restoreRead: (receipt) => {
+      if (
+        !isMainWorkReadReceipt(receipt) ||
+        receipt.tool !== "work_progress" ||
+        receipt.observation.requesterId !== msg.userId ||
+        receipt.observation.channelId !== msg.channelId ||
+        receipt.observation.mainThreadKey !== msg.threadKey
+      )
+        return undefined;
+      const input = structuredClone(receipt.input);
+      return restoreMainWorkRead(receipt, async () => {
+        const current = await read(input);
+        return current.kind === "found"
+          ? { observation: current.observation, content: renderWorkProgress(current) }
+          : undefined;
+      });
     },
+    ...(observeRead
+      ? ({
+          recordRead: async (input, callId, result, content) => {
+            await recordMainWorkRead(
+              observeRead,
+              { tool: "work_progress", callId, input, observation: result.observation, content },
+              async () => {
+                const current = await read(input);
+                return current.kind === "found"
+                  ? { observation: current.observation, content: renderWorkProgress(current) }
+                  : undefined;
+              },
+            );
+          },
+        } satisfies Pick<MainWorkerCapability, "recordRead">)
+      : {}),
   };
 }

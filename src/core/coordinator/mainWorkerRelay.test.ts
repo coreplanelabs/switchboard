@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Actor } from "../authz/types.js";
 import { privateWorkerThreadKey } from "../../channels/privateWorker.js";
 import { InMemoryPrivateWorkerLog, UnavailablePrivateWorkerLog } from "../privateWorkerLog.js";
@@ -76,6 +76,47 @@ async function fixture() {
 }
 
 describe("main worker relay", () => {
+  it("refreshes the canonical ending after an awaited progress read", async () => {
+    const { instances, log } = await fixture();
+    const listAfter = log.listAfter.bind(log);
+    vi.spyOn(log, "listAfter").mockImplementationOnce(async (...args) => {
+      const page = await listAfter(...args);
+      await instances.putUnits([
+        { ...unit, ending: { kind: "aborted", report: "Stopped while progress loaded", at: 9 } },
+      ]);
+      return page;
+    });
+    const relay = createMainWorkerRelay({ instances, privateWorkerLog: log, clock: () => 10 });
+    expect(await relay.read(actor(), { actId })).toMatchObject({
+      kind: "found",
+      final: { kind: "aborted", at: 9 },
+      observation: {
+        version: 1,
+        actId,
+        instanceId: instance.id,
+        unit: unit.unit,
+        observedAt: 10,
+        snapshotHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
+    });
+    expect(log.listAfter).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not return a mixed observation when progress readback keeps changing the unit", async () => {
+    const { instances, log } = await fixture();
+    const listAfter = log.listAfter.bind(log);
+    let reads = 0;
+    vi.spyOn(log, "listAfter").mockImplementation(async (...args) => {
+      const page = await listAfter(...args);
+      await instances.putUnits([{ ...unit, startedAt: ++reads }]);
+      return page;
+    });
+    expect(await createMainWorkerRelay({ instances, privateWorkerLog: log }).read(actor(), { actId })).toEqual({
+      kind: "unavailable",
+    });
+    expect(reads).toBe(2);
+  });
+
   it("reads bounded recovery history after restart only through the original act", async () => {
     const { instances, log } = await fixture();
     const ended: CoordinatorUnit = { ...unit, ending: { kind: "aborted", report: "original", at: 5 } };
@@ -202,6 +243,18 @@ describe("main worker relay", () => {
     const read = await relay.read(actor(), { actId, afterSeq: 0 });
     expect(read).toEqual({
       kind: "found",
+      seedProof: {
+        brief: "stored",
+        context: "missing",
+        childSeed: { state: "unproved" },
+        providerExecution: "unknown",
+      },
+      observation: expect.objectContaining({
+        actId,
+        instanceId: instance.id,
+        unit: unit.unit,
+        snapshotHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
       cursor: 3,
       more: false,
       progress: [{ seq: 3, phase: "start", title: "Investigating", at: 4 }],
@@ -214,7 +267,7 @@ describe("main worker relay", () => {
       },
     });
     expect(JSON.stringify(read)).not.toMatch(
-      /private input|private coding transcript|private details|secret|internal detail|ship_signup_1/,
+      /private input|private coding transcript|private details|secret|internal detail/,
     );
     expect(await relay.read(actor(), { actId, afterSeq: 3 })).toMatchObject({
       kind: "found",

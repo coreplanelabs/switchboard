@@ -1914,6 +1914,59 @@ describe("run metrics — the point, the guard and the emission rule", () => {
 });
 
 describe("retained source archive storage", () => {
+  it("keeps exact work-read evidence out of summaries and rejects corrupt private evidence", async () => {
+    const key = storeKey(),
+      base = record("work-evidence", Date.now());
+    const workReads: NonNullable<RunRecord["workReads"]> = [
+      {
+        tool: "work_status",
+        callId: "status-call",
+        input: { actId: "private-work-act" },
+        resultHash: "a".repeat(64),
+        observation: {
+          version: 1,
+          actId: "private-work-act",
+          instanceId: "instance",
+          unit: "U11",
+          attempt: 0,
+          requesterId: base.userId,
+          channelId: base.channelId,
+          mainThreadKey: base.threadKey,
+          snapshotHash: "b".repeat(64),
+          observedAt: 1000,
+        },
+      },
+    ];
+    expect((await post("/runs/put", { storeKey: key, record: { ...base, workReads } })).status).toBe(200);
+    expect(((await post("/runs/get", { storeKey: key, id: base.id })).data.record as RunRecord).workReads).toEqual(
+      workReads,
+    );
+    for (const result of [
+      await post("/runs/summary", { storeKey: key, id: base.id }),
+      await post("/runs/list", { storeKey: key }),
+    ])
+      expect(JSON.stringify(result.data)).not.toContain("private-work-act");
+    await runInDurableObject(stubOf(key), async (_inst: RunHistoryDO, state) => {
+      const row = state.storage.sql
+        .exec<{ summary_json: string; work_evidence_json: string }>(
+          "SELECT summary_json, work_evidence_json FROM runs WHERE run_id = ?",
+          base.id,
+        )
+        .one();
+      expect(row.summary_json).not.toContain("workReads");
+      expect(JSON.parse(row.work_evidence_json)).toEqual({ version: 1, workReads });
+      state.storage.sql.exec(
+        "UPDATE runs SET work_evidence_json = ? WHERE run_id = ?",
+        JSON.stringify({
+          version: 1,
+          workReads: [{ ...workReads[0], observation: { ...workReads[0].observation, requesterId: "foreign" } }],
+        }),
+        base.id,
+      );
+    });
+    expect((await post("/runs/get", { storeKey: key, id: base.id })).data.record).toBeNull();
+  });
+
   function archived(base: RunRecord): NonNullable<RunRecord["sourceReads"]> {
     const query = { resource: { repository: "acme/private" }, input: { query: "private archive query" } };
     return {

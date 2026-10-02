@@ -6,6 +6,10 @@ import type { CoordinatorInstance, CoordinatorUnit } from "../coordinator/contra
 import { InMemoryCoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import { InMemoryPrivateWorkerLog } from "../privateWorkerLog.js";
 import { FollowUpInbox } from "../threadAdmission.js";
+import { workProgressTool } from "../../tools/mainWorker.js";
+import type { ToolContext } from "../../tools/runnableTool.js";
+import { sourceHash } from "../references/receipts.js";
+import type { MainWorkRead } from "../coordinator/mainWorkObservation.js";
 import {
   mainWorkerCapabilityFor as bindMainWorkerCapabilityFor,
   privateProgressSourceTrusted,
@@ -76,6 +80,74 @@ async function claimLinkedWork(
 }
 
 describe("main worker capability", () => {
+  it("restores the exact progress observation and refreshes a later canonical settlement", async () => {
+    const instances = new InMemoryCoordinatorInstanceStore();
+    await claimLinkedWork(instances);
+    const deps = {
+      config: { grantsFor: () => ALL_GRANTS },
+      coordinatorInstances: instances,
+      privateWorkerLog: new InMemoryPrivateWorkerLog(),
+      clock: () => 20,
+    };
+    const message = {
+      userId: instance.userId,
+      channelId: instance.channelId,
+      threadKey,
+      text: "status?",
+      directAudience: {
+        kind: "slack-unshared-im" as const,
+        channelId: instance.channelId,
+        userId: instance.userId,
+        threadKey,
+      },
+    };
+    let audience = true;
+    const io = { verifyDirectAudience: booleanAudienceVerifier(async () => audience) };
+    const reads: MainWorkRead[] = [];
+    const capability = await bindMainWorkerCapabilityFor(
+      deps,
+      "orchestrator",
+      message,
+      io,
+      () => true,
+      (read) => {
+        reads.push(read);
+      },
+    );
+    const content = await workProgressTool.run(
+      { actId: "fix-signups", afterSeq: 0 },
+      { executor: {} as ToolContext["executor"], mainWorker: capability, callId: "progress-call" },
+    );
+    expect(reads).toHaveLength(1);
+    expect(reads[0]).toMatchObject({
+      tool: "work_progress",
+      callId: "progress-call",
+      input: { actId: "fix-signups", afterSeq: 0 },
+      content,
+      resultHash: await sourceHash(content),
+    });
+    const { refresh: _refresh, content: _content, ...receipt } = reads[0]!;
+    const restarted = (await bindMainWorkerCapabilityFor(deps, "orchestrator", message, io, () => true))!.restoreRead!(
+      JSON.parse(JSON.stringify(receipt)),
+    )!;
+    expect(await restarted()).toEqual({ kind: "unchanged" });
+    await instances.putUnits([{ ...unit, ending: { kind: "aborted", report: "New ending", at: 19 } }]);
+    const changed = await restarted();
+    expect(changed.kind).toBe("changed");
+    if (changed.kind !== "changed") throw new Error("Expected a fresh settlement");
+    expect(JSON.parse(changed.content)).toMatchObject({ final: { kind: "aborted" }, asOf: { observedAt: 20 } });
+    expect(changed.resultHash).toBe(await sourceHash(changed.content));
+    expect(await restarted()).toEqual({ kind: "unchanged" });
+    audience = false;
+    expect(await restarted()).toEqual({ kind: "unavailable" });
+    expect(
+      capability!.restoreRead!({
+        ...receipt,
+        observation: { ...receipt.observation, mainThreadKey: "slack:DOTHER:1.0" },
+      }),
+    ).toBeUndefined();
+  });
+
   it("keeps private worker reports out of shared and web conversation run events", async () => {
     const deps = {
       config: { grantsFor: () => ALL_GRANTS },

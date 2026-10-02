@@ -254,6 +254,10 @@ export function reclaimedRunRecord(input: {
       ? { contextCheckpointReceipt: row.state.contextCheckpointReceipt as RunRecord["contextCheckpointReceipt"] }
       : {}),
     ...(row.state.sourceReads !== undefined ? { sourceReads: row.state.sourceReads as RunRecord["sourceReads"] } : {}),
+    ...(row.state.workReads !== undefined ? { workReads: row.state.workReads as RunRecord["workReads"] } : {}),
+    ...(row.state.unitSeedReceipt !== undefined
+      ? { unitSeedReceipt: row.state.unitSeedReceipt as RunRecord["unitSeedReceipt"] }
+      : {}),
     ...(row.state.contextDependencies !== undefined
       ? { contextDependencies: row.state.contextDependencies as RunRecord["contextDependencies"] }
       : {}),
@@ -394,6 +398,8 @@ export function assembleRunRecord(input: {
   parentRunId?: string;
   childHandoff?: RunRecord["childHandoff"];
   sourceReads?: RunRecord["sourceReads"];
+  workReads?: RunRecord["workReads"];
+  unitSeedReceipt?: RunRecord["unitSeedReceipt"];
   contextDependencies?: RunRecord["contextDependencies"];
   contextCheckpointReceipt?: RunRecord["contextCheckpointReceipt"];
   /** The coordinator instance the run is a child of and the key its spawn
@@ -506,6 +512,8 @@ export function assembleRunRecord(input: {
       ? { contextCheckpointReceipt: structuredClone(input.contextCheckpointReceipt) }
       : {}),
     ...(input.sourceReads !== undefined ? { sourceReads: structuredClone(input.sourceReads) } : {}),
+    ...(input.workReads !== undefined ? { workReads: structuredClone(input.workReads) } : {}),
+    ...(input.unitSeedReceipt !== undefined ? { unitSeedReceipt: structuredClone(input.unitSeedReceipt) } : {}),
     ...(input.contextDependencies !== undefined
       ? { contextDependencies: structuredClone(input.contextDependencies) }
       : {}),

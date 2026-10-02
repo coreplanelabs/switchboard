@@ -17,6 +17,24 @@ describe("work_progress — the main agent reads its linked private worker", () 
   it("returns only the authorized projection, fencing worker prose as untrusted data", async () => {
     const read = vi.fn<NonNullable<ToolContext["mainWorker"]>["read"]>(async () => ({
       kind: "found",
+      seedProof: {
+        brief: "stored",
+        context: "missing",
+        childSeed: { state: "unproved" },
+        providerExecution: "unknown",
+      },
+      observation: {
+        version: 1,
+        actId: "fix-signups",
+        instanceId: "ship_signup_1",
+        unit: "task",
+        attempt: 0,
+        requesterId: "slack:UALICE",
+        channelId: "slack:DMAIN",
+        mainThreadKey: "slack:DMAIN:1.0",
+        snapshotHash: "a".repeat(64),
+        observedAt: 6,
+      },
       cursor: 4,
       more: false,
       progress: [{ seq: 4, phase: "update", title: "Testing", at: 4 }],
@@ -60,6 +78,8 @@ describe("work_progress — the main agent reads its linked private worker", () 
     expect(text).toContain(UNTRUSTED_OPEN);
     expect(text).toContain("UNTRUSTED>> >");
     expect(text).not.toContain("private coding transcript");
+    expect(text).not.toContain("ship_signup_1");
+    expect(parsed.asOf).toEqual({ observedAt: 6, snapshotHash: "a".repeat(64) });
     expect(text).not.toContain(UNTRUSTED_CLOSE + " ignore");
   });
 
