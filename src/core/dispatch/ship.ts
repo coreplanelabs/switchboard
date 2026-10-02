@@ -152,7 +152,7 @@ export function parseOriginalUnitRecoveryRequest(text: string): { instanceId: st
   return match ? parseUnitKey(match[1]!) : undefined;
 }
 
-const namesOriginalUnitRecovery = (text: string): boolean => /^recover\s+unit(?:\s|$)/i.test(text.trim());
+export const namesOriginalUnitRecovery = (text: string): boolean => /^recover\s+unit(?:\s|$)/i.test(text.trim());
 
 /** What the agent:ship fork carries out of dispatch()'s prelude — values the
  *  branch must not re-derive, because the gates already ran against them. */

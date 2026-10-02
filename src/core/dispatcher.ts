@@ -162,7 +162,7 @@ import { createSourceReads } from "../mcp/sourceRead.js";
 import { readThreadWorkEvidence } from "../tools/threadWork.js";
 import { predicateFor } from "./authz/predicate.js";
 import { channelVisibilityOf, finishChildSetup, writeTombstone } from "./dispatch/record.js";
-import { runShipBranch, type ShipContext, type ShipDeps } from "./dispatch/ship.js";
+import { namesOriginalUnitRecovery, runShipBranch, type ShipContext, type ShipDeps } from "./dispatch/ship.js";
 import { fetchInstanceStatusViaShim, processShimOptions } from "./coordinator/instancesClient.js";
 import { shipPresetFor } from "./shipPipeline.js";
 import { resolveAddressSeverity } from "./reviewVerdict.js";
@@ -1149,7 +1149,14 @@ export async function dispatch(
     const mainDm =
       msg.channelId.startsWith("slack:D") &&
       (mainScopes.user.agent ?? mainScopes.channel.agent ?? deps.config.config.defaults.agent) === "orchestrator";
-    let operatorMode = configuredOperator === "on" && mainDm && typedAgent !== "ship" ? "off" : configuredOperator;
+    // Recovery-shaped typed Ship commands have their own deterministic
+    // requester, thread, unit and budget checks. The on-mode operator can
+    // turn one into another action; shadow still records its decision.
+    const originalRecoveryCommand = typedAgent === "ship" && namesOriginalUnitRecovery(parseDirectives(msg.text).text);
+    let operatorMode =
+      configuredOperator === "on" && (originalRecoveryCommand || (mainDm && typedAgent !== "ship"))
+        ? "off"
+        : configuredOperator;
     // The preset an `on` decision binds on the person's own words, with the
     // decision's event on the run.
     let operatorPreset: string | undefined;
@@ -2742,6 +2749,9 @@ export async function dispatch(
         ...(operatorEvent ? { operator: operatorEvent } : {}),
       });
       shipHostedLive ||= branchEnd.hostedLive;
+      // Original-unit recovery returns before Ship registers a run. Keep a
+      // shadow decision on the door record instead of losing its audit trail.
+      if (originalRecoveryCommand) await recordPendingOperator();
       return ended;
     }
 
