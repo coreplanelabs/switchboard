@@ -14,7 +14,7 @@ import { dispatch as realDispatch, type CoreDeps } from "../core/dispatcher.js";
 import { startRequestRoot } from "../core/requestTrace.js";
 import { systemClock } from "../core/trace/clock.js";
 import type { IncomingMessage } from "../core/types.js";
-import { boundRequester, type PersonLookup } from "./requester.js";
+import { boundRequester, type PersonLookup, type Requester } from "./requester.js";
 import { dispatchSingleShot, SingleShotIO } from "./singleShotDispatch.js";
 import {
   authorizeRequest,
@@ -144,16 +144,25 @@ function mcpExposed(commands: CommandInvoker | undefined): CommandDef<unknown>[]
 }
 
 /** The Caller an MCP bearer identity resolves to — the `service` Actor
- *  `mcp:<subject>` with the grants config names for it (its `channels` name the
- *  runs it may read, in the `mcp:<channel>` namespace `toIncomingMessage` gives a
- *  dispatch's channelId); a token with no entry holds nothing and sees no run
+ *  `mcp:<subject>` with the grants config names for it. A verified email link
+ *  adds the person's id to `self` for owner checks, without adding grants.
+ *  A token with no entry holds nothing and sees no run
  *  (authorization.md item 9). Nothing here decides what it may do
  *  (docs/decisions/0007-authorization-policy-table.md). */
-export function toCaller(identity: IngressIdentity, lookup: GrantsLookup): Caller {
+export function toCaller(identity: IngressIdentity, lookup: GrantsLookup, requester?: Requester): Caller {
+  const actor = resolveActor({ surface: "mcp", subjectId: identity.subject }, lookup);
+  const personId = requester?.userId;
   return {
     kind: "mcp",
-    id: `${PLATFORM}:${identity.subject}`,
-    actor: resolveActor({ surface: "mcp", subjectId: identity.subject }, lookup),
+    id: actor.id,
+    actor:
+      personId && personId !== actor.id
+        ? {
+            ...actor,
+            self: [actor.id, personId],
+            asUser: { id: personId, ...(requester?.userName ? { name: requester.userName } : {}) },
+          }
+        : actor,
   };
 }
 
@@ -286,7 +295,12 @@ async function route(
         // schemas live there), the returned object straight back out.
         const input = namedToInput(command, args, "camel");
         if ("error" in input) return err(id, INVALID_PARAMS, input.error, { code: "invalid_input" });
-        const result = await options.commands!.invoke(command.id, input, toCaller(identity, lookup));
+        const requester = await boundRequester(
+          `${PLATFORM}:${identity.subject}`,
+          identity.email,
+          options.personByEmail,
+        );
+        const result = await options.commands!.invoke(command.id, input, toCaller(identity, lookup, requester));
         if (!result.ok) return err(id, RPC_CODE_FOR[result.error], result.message, { code: result.error });
         return ok(id, { content: [{ type: "text", text: `${command.id}: ok\n${JSON.stringify(result.value)}` }] });
       }

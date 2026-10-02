@@ -1936,6 +1936,9 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     "resource": "command",
     "surfaces": [
       "chat",
+      "cli",
+      "http",
+      "mcp",
     ],
   },
 ]

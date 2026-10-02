@@ -136,19 +136,27 @@ describe("resolveActor — kind, id, grants, origin per surface", () => {
     });
   });
 
-  it("Access browser sub → user; granted every group's read + write everywhere → holds them; unlisted → the browser baseline (every group's read, the two personal chat writes), no channel", () => {
+  it("Access browser sub → user; granted every group's read + write everywhere → holds them; unlisted → the browser baseline (every group's read and personal writes), no channel", () => {
     expect(resolveActor({ surface: "access-browser", subjectId: "op-1" }, lookup)).toEqual({
       kind: "user",
       id: "access:op-1",
       grants: grants({
-        actions: set("runs:read", "runs:write", "friction:read", "friction:write", "memory:write", "mcp:write"),
+        actions: set(
+          "runs:read",
+          "runs:write",
+          "friction:read",
+          "friction:write",
+          "memory:write",
+          "mcp:write",
+          "steer:write",
+        ),
         channels: "all",
       }),
     });
     expect(resolveActor({ surface: "access-browser", subjectId: "viewer" }, lookup)).toEqual({
       kind: "user",
       id: "access:viewer",
-      grants: grants({ actions: set("runs:read", "friction:read", "memory:write", "mcp:write") }),
+      grants: grants({ actions: set("runs:read", "friction:read", "memory:write", "mcp:write", "steer:write") }),
     });
   });
 

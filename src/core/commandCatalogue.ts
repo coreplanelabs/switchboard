@@ -263,17 +263,19 @@ export function buildCoreCommands(
   const cfg = once(config);
   const runStore = once(store);
   const ledger = once(async () => wiring.frictionLedger ?? selectFrictionLedger(await runStore()));
-  // A process binding its own service (the CLI) reads a unit's rows and a
-  // session's log from the same Worker its run store names — the bot hands
-  // its one service in with the ledger it drives runs on.
+  // A process binding its own service (the CLI) reads live runs, unit rows and
+  // session logs from the same Worker its run store names. The bot hands its
+  // one service in with the ledger it drives runs on.
   const runs = once(async () => {
     if (wiring.runs) return wiring.runs;
     const config = (await cfg()).config;
     const history = config.runHistory;
+    const workerLedger = buildRunLedger(history, wiring.secrets);
     return createRunsService({
       registry: wiring.registry,
       store: await runStore(),
-      sessions: buildRunLedger(history, wiring.secrets),
+      ledger: workerLedger,
+      sessions: workerLedger,
       units: buildCoordinatorInstanceStore(history, wiring.secrets),
       // A finished run's tokens are priced through `costs.prices` (costs.md item 4c), the list alone without one.
       prices: parseCostsConfig(config.costs)?.prices,

@@ -144,7 +144,7 @@ export const ACTORS = {
   identityAdmin: actor("user", "slack:UJAN", { actions: new Set([...CHAT_OPEN_ACTIONS, "identity:write"]) }),
   /** A plain Slack user: the `open` chat commands alone (`config:write` is never a baseline). */
   chatUserGated: actor("user", "slack:UGUS", { actions: new Set(CHAT_OPEN_ACTIONS) }),
-  /** An unlisted Access browser session: every group's read and the two personal chat writes, nothing else. */
+  /** An unlisted Access browser session: every group's read and personal chat writes, nothing else. */
   browser: actor("user", "access:viewer", { actions: browserActions(COMMAND_GROUPS) }),
   /** The same session linked to its person (record 0042): the same grants, a second self id. */
   linkedBrowser: actor(

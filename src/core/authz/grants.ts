@@ -72,23 +72,21 @@ export const CHAT_OPEN_ACTIONS: readonly string[] = [
   "schedule:read",
   "memory:write",
   "mcp:write",
-  // `steer.run` (chat-only): the door admits every chat user because the real
+  // `steer.run`: the door admits every chat user because the real
   // fence is the steer OWNER rule at the wired sender — the named run's
   // requester, an id their identity record links, or a `runs:write` grant
-  // (authorization item 16a) — which the command door cannot see. Never held
-  // by a token: the machine surfaces have `send_to_run` and the ingress.
+  // (authorization item 16a) — which the command door cannot see. Machine
+  // credentials need an explicit `steer:write` grant at the command door.
   "steer:write",
 ];
 
-/** The two writes a browser session holds beside its reads (record 0043): the
- *  same personal writes every Slack user holds (`CHAT_OPEN_ACTIONS`), because
- *  the web chat makes a browser session a chat user — `memory remember` and
- *  `mcp add` for its own tier. The tier rows still decide the target: a shared
- *  tier needs the grant it always needed. */
-export const BROWSER_WRITE_ACTIONS: readonly string[] = ["memory:write", "mcp:write"];
+/** The personal writes a browser session holds beside its reads (record 0043):
+ *  its own memory and MCP entries, plus a steer subject to the named run's
+ *  owner rule. The tier rows still decide shared memory and MCP targets. */
+export const BROWSER_WRITE_ACTIONS: readonly string[] = ["memory:write", "mcp:write", "steer:write"];
 
 /** What an Access browser session holds implicitly: every registered group's
- *  read plus the two personal chat writes — never another write, never an exec.
+ *  read plus the personal chat writes — never another write, never an exec.
  *  No groups known (a process that registered no commands) → nothing at all,
  *  fail-closed: the writes ride with the catalogue they belong to. */
 export function browserActions(commandGroups: readonly string[]): Set<string> {
@@ -271,7 +269,7 @@ export interface GrantsTable {
   /** What every `slack:` user holds, listed or not: the open chat commands and `agent:run:<name>` for every unrestricted agent. */
   everyone: Grants;
   /** What every Access browser session (`access:<sub>`, never `access:svc:`) holds:
-   *  each registered group's read and the two personal chat writes. */
+   *  each registered group's read and personal chat writes. */
   browser: Grants;
   restrict: Restriction;
 }
