@@ -476,6 +476,7 @@ export async function salvageBudgetPush(
     }
     if (!dirty && !endingCheckpoint && unpushed === 0) return { pushed: false, summary: words.nothing, ...facts() };
     if (settlement && checkpointHead) {
+      const boundRepo = settlement.binding.repo.toLowerCase();
       settlement = {
         ...settlement,
         preservation: await saveCheckpointArtifact({
@@ -484,6 +485,8 @@ export async function salvageBudgetPush(
           binding: settlement.binding,
           source: checkpointHead,
           store: opts.settlement?.store,
+          originMatchesBinding: async () =>
+            parseOriginRemoteOutput(await run(`${git} remote get-url origin`)) === boundRepo,
         }),
       };
       await record();
