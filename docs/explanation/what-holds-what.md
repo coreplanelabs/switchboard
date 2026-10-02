@@ -1,21 +1,29 @@
-# What holds what: threads, runs, pipelines
+# Data model: threads, runs and units
 
-The product's twelve nouns nest: each holds the next, and every surface names them by these words alone. The words themselves — one meaning each, and the internal words no surface prints — are the [Vocabulary](../reference/vocabulary.md); this page is the containment.
-
-A [thread](../reference/vocabulary.md#thread) is where you talk, and it holds [runs](../reference/vocabulary.md#run) — one live model run at a time. Each run is one piece of work by one [agent](../reference/vocabulary.md#agent), gets a [card](../reference/vocabulary.md#card) the thread keeps updating, spends a [budget](../reference/vocabulary.md#budget) of minutes, and ends in an [outcome](../reference/vocabulary.md#outcome). A [follow-up](../reference/vocabulary.md#follow-up) is a reply in the thread, during or after a run. The person behind it all is the [requester](../reference/vocabulary.md#requester).
-
-A [pipeline](../reference/vocabulary.md#pipeline) is ship's job on a plan: asked in one thread, reporting there at the end. It is itself a run, but its own hosted life occupies no thread — what it holds is [units](../reference/vocabulary.md#unit), and each unit gets a thread of its own, with its own branch and its own [pull request](../reference/vocabulary.md#pull-request). A unit advances in [rounds](../reference/vocabulary.md#round) — coding, review, findings, merge. The first three each spawn a child run into the unit's thread; the review round produces a [verdict](../reference/vocabulary.md#verdict), and the merge round spawns nothing — it waits on the guards.
+**Every request that starts work has a run.** A run records who asked, which agent worked, the thread it belongs to and how it ended. A unit is a durable code deliverable, not a wrapper around every request.
 
 ```mermaid
 flowchart TB
-  AT["the asking thread"] -- holds --> P["pipeline — a run with no thread of its own"]
-  P -- holds --> U["unit"]
-  U -- "has its own" --> UT["unit thread"]
-  U -- holds --> R["rounds: coding · review · findings · merge"]
-  R -- "spawn child runs (all but merge)" --> CR["child runs"]
-  CR -- into --> UT
+    T["Thread"] -->|"ordinary request"| R["Agent run"]
+    T -->|"code delivery"| P["Ship pipeline"]
+    R -->|"orchestrator starts work"| P
+    P -->|"owns one or more"| U["Unit"]
+    U -->|"starts"| C["Coding and review runs"]
+    U -->|"opens when ready"| PR["Pull request"]
 ```
 
-So one request for a two-unit plan reads, in the nouns: the requester asks in a thread; the pipeline starts and holds two units; each unit opens its own thread, where rounds spawn child runs until the verdict and the checks make the unit merge-ready; each run's card tracks its budget; and the pipeline's report lands back in the asking thread with every unit's outcome.
+A question can be one `general` or `research` run with no unit. A code request handled by `ship` creates a pipeline with at least one unit. That unit uses `coding` and `review` runs. The `orchestrator` agent is also an ordinary run: it can answer directly or, for an eligible private request, start work through a checked tool. The pipeline itself has a run record, but it has no model turns of its own.
 
-Budgets nest the same way the nouns do: a unit's budget is carved from the pipeline's, a run's from the unit's, and a renewal spends from the layer above — the surface says "budget renewed", and the internal arithmetic stays behind the seam.
+| Word | Plain meaning |
+| --- | --- |
+| **Thread** | The conversation and its follow-ups. It can hold many runs over time. |
+| **Run** | One request handled by one agent, with a recorded outcome. |
+| **Agent** | A definition of instructions, tools and limits used by a run. |
+| **Pipeline** | `ship`'s work on a task or plan. It owns one or more units. |
+| **Unit** | One code deliverable with its own branch, rounds and pull request when opened. |
+
+A run may exchange several prompts and tool results with the model. Those steps stay inside the same run. A single-task unit uses the asking thread; a plan unit gets its own thread. A reply during a live run is a **follow-up** to that run; a later reply can start another run in the same thread. The [vocabulary](../reference/vocabulary.md) defines the remaining user-facing terms, including card, budget and verdict.
+
+A run's live progress can be saved in a ledger; its finished record keeps the result. The conversation text is kept separately so a later run can continue with the right context. [How a request flows](how-a-request-flows.md) shows where text is checked before it reaches a model or a reply.
+
+[Decision 0073](../decisions/0073-the-ship-pipeline-dissolves-into-the-orchestrator-the-unit-machine-is-the-deterministic-atom-and-judgement-composes-units.md) calls for the orchestrator to sequence units itself and retire Ship's plan workflow. The diagram shows the current implementation; that change has not replaced it.

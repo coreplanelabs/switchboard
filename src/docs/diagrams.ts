@@ -3,7 +3,7 @@
 // Every diagram in the tree is a ```mermaid fence, drawn by the site in its own
 // palette (theme/MermaidDiagram.vue) and by GitHub in its defaults, so a fence
 // carries structure and words only. Two diagrams are drawn in more than one
-// place — the four seams (README, Architecture, How a request flows) and the
+// place — the four seams (README, Architecture) and the
 // deploy order (Worker topology, Ship a release) — and a copy is where drift
 // starts, so both are rendered here from one source each and written into
 // generated regions by `npm run docs:gen`, the way the reference tables are.
@@ -64,42 +64,24 @@ const seam = (seams: ReadonlyArray<Seam>, id: SeamId): Seam => {
   return found;
 };
 
-/** `subgraph channel ["Channel — how a request arrives"]` — a seam as a titled cluster. */
-const cluster = (s: Seam) => `    subgraph ${s.id} ["${s.name} — ${s.role}"]`;
-
 /**
  * The four-seam diagram: a request crosses the channel, the dispatcher, the
- * agent, and from the agent the provider and the executor, left to right. The
- * channel's implementations are separate nodes because each is a way in; the
- * other seams list theirs in one node. No reply edges: a back-edge in an LR
- * flowchart folds under the forward ones on GitHub, and the prose beside every
- * copy says the reply travels the same path back.
+ * agent definition, and from the configured run the provider and executor.
+ * The diagram names only the seams; their full implementation lists live on
+ * the landing page. This keeps the labels readable in the docs column.
  */
 export function renderFourSeams(seams: ReadonlyArray<Seam>, dispatcher: Dispatcher): string {
   const channel = seam(seams, "channel");
   const agent = seam(seams, "agent");
   const provider = seam(seams, "provider");
   const executor = seam(seams, "executor");
-  const ways = channel.implementations.map((label, i) => ({ id: `C${i + 1}`, label }));
   return fence([
-    "flowchart LR",
-    cluster(channel),
-    ...ways.map((w) => `        ${w.id}["${w.label}"]`),
-    "    end",
-    `    D{"${dispatcher.name}<br/>${listed(dispatcher.does)}"}`,
-    cluster(agent),
-    `        AG["${listed(agent.implementations)}"]`,
-    "    end",
-    cluster(provider),
-    `        P["${listed(provider.implementations)}"]`,
-    "    end",
-    cluster(executor),
-    `        E["${listed(executor.implementations)}"]`,
-    "    end",
-    `    ${ways.map((w) => w.id).join(" & ")} -->|"message"| D`,
-    '    D -->|"runs"| AG',
-    '    AG <-->|"complete"| P',
-    '    AG <-->|"bash · read · write"| E',
+    "flowchart TB",
+    `    C["${channel.name}"] -->|"message"| D{"${dispatcher.name}"}`,
+    `    D -->|"checks and selects"| AG["${agent.name}"]`,
+    '    AG -->|"defines"| R["Run"]',
+    `    R <-->|"model calls"| P["${provider.name}"]`,
+    `    R <-->|"tool calls"| E["${executor.name}"]`,
   ]);
 }
 
@@ -129,7 +111,6 @@ export const DIAGRAM_REGIONS: Readonly<Record<string, Readonly<Record<string, (s
   {
     "../README.md": { "four-seams": fourSeams },
     "explanation/architecture.md": { "four-seams": fourSeams },
-    "explanation/how-a-request-flows.md": { "four-seams": fourSeams },
     "explanation/worker-topology.md": { "deploy-order": deployOrder },
     "how-to/ship-a-release.md": { "deploy-order": deployOrder },
   };

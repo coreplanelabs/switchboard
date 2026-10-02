@@ -1,6 +1,6 @@
 {
   "docs/explanation/a-thread-continues.md": {
-    "session": 3
+    "session": 1
   },
   "docs/explanation/design-decisions.md": {
     "admission": 2,
@@ -12,9 +12,6 @@
     "intake": 1,
     "hosted": 2,
     "attempt": 1
-  },
-  "docs/explanation/how-a-request-flows.md": {
-    "admission": 1
   },
   "docs/how-to/check-spend.md": {
     "attempt": 1

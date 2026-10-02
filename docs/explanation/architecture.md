@@ -1,109 +1,34 @@
 # Architecture
 
-Switchboard is an agent gateway: a message arrives over a channel, a dispatcher routes it to an agent, the agent runs on a model provider and executes tools through an executor.
+Switchboard receives text from a channel, checks the request, chooses an agent and starts a run. The run calls a model and tools; the answer returns through the channel.
 
-## The four seams
-
-The seams are Channel, Provider, Executor and Agent, each an interface with more than one implementation. The dispatcher sits between them as the core and the only orchestrator, importing none of the platforms behind them. A new implementation goes behind its seam, never into the core.
+## The four parts around the dispatcher
 
 <!-- generated:four-seams · npm run docs:gen — drawn from docs/.vitepress/theme/seams.mjs and src/deploy/plan.ts, do not edit by hand -->
 
 ```mermaid
-flowchart LR
-    subgraph channel ["Channel — how a request arrives"]
-        C1["Slack"]
-        C2["CLI"]
-        C3["HTTP · MCP"]
-    end
-    D{"Dispatcher<br/>routing · config layers · authorization"}
-    subgraph agent ["Agent — what runs"]
-        AG["general · coding · review · ship · research · explore · conductor"]
-    end
-    subgraph provider ["Provider — the model"]
-        P["Anthropic · OpenAI-compatible"]
-    end
-    subgraph executor ["Executor — where tools run"]
-        E["local · sandbox · resident"]
-    end
-    C1 & C2 & C3 -->|"message"| D
-    D -->|"runs"| AG
-    AG <-->|"complete"| P
-    AG <-->|"bash · read · write"| E
+flowchart TB
+    C["Channel"] -->|"message"| D{"Dispatcher"}
+    D -->|"checks and selects"| AG["Agent"]
+    AG -->|"defines"| R["Run"]
+    R <-->|"model calls"| P["Provider"]
+    R <-->|"tool calls"| E["Executor"]
 ```
 
 <!-- /generated:four-seams -->
 
-The reply travels the same path back, through the dispatcher to the channel that asked. What each seam does and refuses to know: [How a request flows](how-a-request-flows.md).
+A channel (Slack, CLI, HTTP or MCP) moves messages. An agent is a work definition. A provider supplies the model. An executor supplies a place for tools to run. The dispatcher connects them and enforces routing and access rules.
 
-## One request, end to end
-
-The same sequence runs from Slack, a terminal or HTTP; only the implementations differ.
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant C as Channel
-    participant D as Dispatcher
-    participant P as Provider
-    participant E as Executor
-    U->>C: "in acme/api, add a retry to the webhook sender and open a PR"
-    C->>D: message
-    D->>D: route → agent (a directive wins) · config layers → model, effort · authorize · history
-    loop until the model stops or the budget runs out
-        D->>P: complete(messages, tools)
-        P-->>D: text, or a tool call
-        D->>E: run the tool (read a file, run the tests, push)
-        E-->>D: result
-    end
-    D->>C: status updates along the way, then the answer
-    C->>U: reply in the thread, a pull request on GitHub
-```
-
-Agent, model and effort resolve independently through [layered config](config-layers.md). A thread runs [one agent at a time](how-a-request-flows.md#one-run-per-thread-replying-while-it-works), so a reply mid-run is folded in.
-
-Every step is a span in one trace. A run is live in a registry, then a [durable record](runs-live-and-history.md) read by identity.
-
-![A finished coding run on the dashboard](../public/screenshots/run-page-light.png)
-
-*Fixture preview; the repository and people are made up.*
-
-## Context and storage
-
-One reader composes the run ledger, finished run records, memory and artifact stores. Content travels with a typed dependency envelope naming its original sources and scopes. The next consumer checks current access; notes, compaction and delegation to a child cannot erase that obligation.
-
-A shared conversation log keeps the operator's thread context, while execution retains separate working indices and unit lanes. A typed context snapshot identifies frozen source rows, notes and files. See [Durable context across conversations and children](durable-context.md) for the data model, flow and remaining integration boundaries.
-
-## Where it runs
-
-One long-lived process plus Workers, each solving a problem the process cannot: outliving restarts, running untrusted commands elsewhere, keeping a repository warm, serving docs without a rollover.
+## Where work and state live
 
 ```mermaid
 flowchart TB
-    SLACK(["Slack"])
-    GH(["GitHub"])
-    BOT["Bot — one always-on container<br/>Slack + model keys · dispatcher · dashboards"]
-    STATE[("State Worker<br/>config document · overrides · run history and ledger<br/>memory · schedule firings")]
-    RES[["Resident Worker<br/>own GitHub App key"]]
-    RDO[("one Durable Object per onboarded repository<br/>mirror · warm checkout · per-thread worktrees")]
-    SBX[["Sandbox Worker<br/>proxy, no state"]]
-    SDO["one container per thread"]
-    DOCS[["Docs Worker<br/>assets only"]]
-    SLACK <-->|"outbound websocket"| BOT
-    BOT -->|"bearer"| STATE
-    BOT -->|"bearer · per tool call"| RES --> RDO
-    BOT -->|"bearer · per tool call"| SBX --> SDO
-    BOT -->|"App token · opens and edits the PR"| GH
-    RDO -->|"git push · per-attach credential"| GH
-    SDO -->|"git push · scoped token"| GH
-    BOT -.->|"/docs redirects"| DOCS
+    B["Bot"] -->|"runs and context"| S[("State Worker")]
+    B -->|"repository tools"| R[["Resident Worker"]]
+    B -->|"workspace tools"| X[["Sandbox Worker"]]
+    B -->|"pull requests"| G(["GitHub"])
 ```
 
-The bot dials out to Slack and needs no inbound address; its HTTP server serves the health probe, the gated dashboards and ingress. Each arrow to a Worker carries a bearer and the same trace id.
+The bot process handles requests and holds provider credentials. The state Worker stores durable run, conversation and work records when configured. Repository work can use a resident checkout or a sandbox; local development can run tools on the bot host. [Worker topology](worker-topology.md) gives the deployment detail.
 
-Durable state lives in Durable Objects, so a bot restart loses nothing and a live run is reclaimed from the ledger. Workers deploy in one order (state, bot, resident, sandbox); a release deploys only those whose inputs changed.
-
-## Read next
-
-- [Worker topology](worker-topology.md) — what each Worker owns and why the order.
-- [Security model](security-model.md) — what each piece holds and what a compromise yields.
-- [Design decisions](design-decisions.md) — what was decided and what was rejected.
+For the human view of the system, start with [Data model](what-holds-what.md), then [How a request flows](how-a-request-flows.md). [Execution and trust](execution-and-trust.md) explains why tools run behind a separate boundary.

@@ -1,66 +1,32 @@
 # Add an agent
 
-Add a specialist agent (a prompt, a toolset and budgets) reachable as `agent:<name>` on every surface, with the same config layering, authorization and run tracking as the built-in ones.
+Add an agent when a recurring kind of work needs a distinct work profile: instructions, tools, execution machine, identity or budget. [What an agent is](../explanation/agents-and-toolsets.md) explains how a definition differs from a run.
 
-**You need:**
+An agent is code-reviewed data in the repository, not a runtime config entry. It becomes available on the supported channels through the existing dispatcher.
 
-- A checkout of the repository and the [contributing](../../CONTRIBUTING.md) loop. An agent is data in the tree, so this is a pull request, not a config change.
-- A toolset for it (`full`, `readonly`, `web`, `assistant`, `explore`, `conductor`, `none`), the machine class its tools run on, the identity its runs act as, and its turn, token and wall-clock budgets.
+## Define the work
 
-## Define it
+1. Add the name to `LOOP_PRESETS` and its defaults to `ASKS`, `PRESET_FLOORS` and `POST_STEP_MINUTES` in [`src/core/budgets.ts`](../../src/core/budgets.ts). These tables are typed against the preset list.
+2. Add the definition to `AGENTS` in [`src/agents/registry.ts`](../../src/agents/registry.ts). Set its prompt, `toolset`, `machine`, `identity`, allowed model choices, `maxTokens` and budget. For a model-loop agent, derive its turn guard with `runawayTurnCap(ASKS.<name>)`; the wall clock is the actual budget.
+3. Choose its entry path. A normal definition can be routed from a plain request. Set `routable: false` for an agent that requires `agent:<name>`. The compound route is reserved for `conductor`.
+4. Reuse a toolset from [`src/tools/toolsets.ts`](../../src/tools/toolsets.ts), or add one when the tools truly differ. Workspace tools also depend on the run's identity and machine; a toolset name alone does not grant host or repository access.
 
-Add an entry to `AGENTS` in `src/agents/registry.ts`:
+| Choice | Meaning |
+| --- | --- |
+| `machine: none` | No workspace; bot-side tools only |
+| `machine: repo-resident` | Onboarded repository workspace when available, with sandbox fallback |
+| `machine: repo-cold` | Cold per-thread repository sandbox |
+| `machine: blank` | Empty per-thread sandbox |
+| `identity: none / read / write` | No minted repository credential, read-scoped credential, or write-scoped credential |
 
-```ts
-docs: {
-  name: "docs",
-  description: "Answers questions about a repository's documentation; read-only.",
-  system: DOCS_SYSTEM,        // the prompt
-  toolset: "readonly",
-  machine: "repo-resident",   // the repository's resident, else a cold sandbox; "none" for an agent without a workspace
-  identity: "read",           // the credential its sandbox holds: a read-scoped token and a read-only worktree
-  maxTokens: 24000,
-  ...loopBudget(10),          // the wall clock, and the turn guard derived from it (six turns a minute)
-},
-```
+The requester's permissions and configured boundaries still apply to every run. If only the model or effort changes, use [configuration](configure-your-defaults.md) instead of adding an agent.
 
-Every field is documented on `AgentDef` in the same file. The turn cap is never set by hand: `loopBudget(minutes)` gives the preset its `maxMinutes` and a `maxTurns` of six times that, a pace only a looping run sustains ([the pi harness](../reference/specs/harness-pi.md) item 15).
+## Give it a contract and a model default
 
-| Field | What it decides |
-|---|---|
-| `toolset` | what the model may ask for ([The agents and their toolsets](../explanation/agents-and-toolsets.md) lists each) |
-| `machine` | where a run's tools execute: `repo-resident` provisions the target repository's resident when it is serviceable, else a cold sandbox with the checkout; `repo-cold` always the cold sandbox with the checkout, the repository vetted against GitHub and the resident never consulted; `blank` an empty sandbox with no repository and no credential; `none` provisions nothing |
-| `identity` | whom a run acts as: `write` mints the write-scoped GitHub token a run needs to push and open pull requests; `read` a read-scoped token and a read-only worktree; `none` no credential at all (a `none` machine, or a checkout cloned anonymously) |
-| `effort` (optional) | the agent's built-in effort, which every config layer beats |
+Add a behavioral spec under [`docs/reference/specs/`](../reference/specs/README.md), with proof for its distinct behavior. Add or update focused tests for routing, authorization, budget and tool reach as needed.
 
-## Give it a default model
+A configured `defaults.models.<name>` chooses its usual model; without one, the agent falls back to `defaults.models.general`. Model refs use `<provider>/<model>` and remain separate from the agent definition. Decide whether `restrict.agents` should limit who can invoke the new name.
 
-```yaml
-defaults:
-  models:
-    docs: <provider>/<model>
-```
+## Verify
 
-Without an entry, the agent falls back to `defaults.models.general`.
-
-## Write its contract
-
-Add a spec under `docs/reference/specs/` beside `agent-general.md` and `agent-review.md`, each criterion bound to a test. `npm run specs:check` requires every proof to resolve.
-
-## Decide who may run it
-
-A new agent is open to everyone unless it is listed under `restrict.agents` ([Restrict who can do what](restrict-who-can-do-what.md)).
-
-## Try it
-
-```bash
-npm run cli -- ask "agent:docs where is the deploy order specified?"
-```
-
-`help` lists the agent from the registry; there is no separate registration for Slack, the CLI, HTTP or MCP.
-
-## Next
-
-- [The dispatcher is the only orchestrator](../decisions/0002-dispatcher-is-the-only-orchestrator.md): why an agent is data.
-- [Add a model provider](add-a-provider.md): the other seam you extend without touching the dispatcher.
-- [How a request flows](../explanation/how-a-request-flows.md).
+Run `npm run fix`, then the changed test files by name with `npx vitest run <file>`. Check `npm run specs:check` and the changed documentation. For local work, run `npm run verify` before requesting review. The [contributing guide](../../CONTRIBUTING.md) explains the complete change and review loop.

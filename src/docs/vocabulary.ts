@@ -9,7 +9,8 @@
 // hand-edited table fails `docs:check` naming the file.
 //
 // Pure: rows in, markdown out. No fs, no clock.
-import type { Grant, Preset, RoundKind } from "../core/budgets.js";
+import type { AgentDef } from "../agents/registry.js";
+import type { Grant, RoundKind } from "../core/budgets.js";
 import type { CoordinatorInstance, CoordinatorUnit } from "../core/coordinator/contract.js";
 import type { PlanePullRequestRow } from "../core/plane/table.js";
 import type { ReviewVerdict } from "../core/reviewVerdict.js";
@@ -30,7 +31,7 @@ interface Carriers {
   RunSummary: RunSummary;
   RunRecord: RunRecord;
   RunLiveState: RunLiveState;
-  Preset: Preset;
+  AgentDef: AgentDef;
   CoordinatorInstance: CoordinatorInstance;
   CoordinatorUnit: CoordinatorUnit;
   RoundKind: RoundKind;
@@ -79,7 +80,7 @@ export const VOCABULARY_ROWS: readonly VocabularyRow[] = [
     noun: "thread",
     anchor: "thread",
     meaning:
-      "Where you talk — a Slack thread or a web thread. One live model run at a time; a pipeline's own hosted run occupies no thread.",
+      "Where a request and its replies belong. One model run works in it at a time; a pipeline can report there while its units work.",
     holds: "runs",
     belongsTo: "a channel",
     carriedBy: ["the thread key on ", ref("RunSummary", "src/core/runRegistry/projections.ts")],
@@ -97,16 +98,16 @@ export const VOCABULARY_ROWS: readonly VocabularyRow[] = [
   {
     noun: "agent",
     anchor: "agent",
-    meaning: "The kind of run: general, coding, review, ship, research, explore, conductor.",
+    meaning: "The kind of work a run does, selected from the agent registry.",
     holds: "—",
     belongsTo: "a run",
-    carriedBy: [ref("Preset", "src/core/budgets.ts")],
+    carriedBy: [ref("AgentDef", "src/agents/registry.ts"), " and the run's agent name"],
     printedBy: "cards, the runs index, command summaries",
   },
   {
     noun: "pipeline",
     anchor: "pipeline",
-    meaning: "Ship's job on a plan: asked in one thread, ending with a report there.",
+    meaning: "Ship's job on a task or plan: it owns units and reports to the asking thread.",
     holds: "units",
     belongsTo: "the asking thread",
     carriedBy: [ref("CoordinatorInstance", "src/core/coordinator/contract.ts")],
@@ -115,7 +116,8 @@ export const VOCABULARY_ROWS: readonly VocabularyRow[] = [
   {
     noun: "unit",
     anchor: "unit",
-    meaning: "One deliverable of a pipeline: its own branch, its own pull request, its own thread.",
+    meaning:
+      "One deliverable of a pipeline: its own branch, rounds and pull request when opened; it uses the asking thread for a single task or a separate thread for a plan unit.",
     holds: "rounds",
     belongsTo: "a pipeline",
     carriedBy: [ref("CoordinatorUnit", "src/core/coordinator/contract.ts")],

@@ -1,51 +1,41 @@
-# The agents and their toolsets
+# What an agent is
 
-An agent is data (a system prompt, a named toolset, a machine class, an identity, budgets); every agent runs the same dispatcher loop, and the toolset, the machine and the identity distinguish them.
+An agent is a named **kind of work**, not a separate service or a fixed model. Its definition chooses the instructions, available tools, execution machine, credential scope and time budget. A **run** is one use of that definition for one request. The dispatcher selects the agent, checks the requester's access and starts the run; the configured model handles its turns.
 
-The loop: call the model, run the tool calls it asks for, append the results, repeat until it stops or a budget runs out. The [config layers](config-layers.md) choose the model, so any agent runs on any provider.
+```mermaid
+flowchart LR
+    P(["Requester"]) -->|"asks"| D{"Dispatcher"}
+    A["Agent definition<br/>instructions · tools · machine · identity · budget"] -->|"defines"| R["Run<br/>one request · one outcome"]
+    D -->|"selects and authorizes"| R
+    R -->|"model calls"| M["Provider and model"]
+    R -->|"tool calls"| E["Executor and workspace"]
+```
 
-## The seven agents
+The model and its effort resolve through [configuration layers](config-layers.md). The agent definition controls what work the run can do; the requester's grants and configured boundaries may narrow it further. A `review` run, for example, gets a read-scoped repository identity, while a `coding` run may push a branch. A toolset alone is not a security boundary: a shell can change local files even when the agent has no file-write tool. [Execution and trust](execution-and-trust.md) explains the machine boundary.
 
-| Agent | What it does | Toolset | Machine | Identity | Budget |
-|---|---|---|---|---|---|
-| `general` | The default. Answers directly, reads repositories and manages issues, reads a URL; refers code, reviews and research onward. | `assistant`: GitHub reads and issue writes, URL fetch, status. No shell, no workspace. | `none` | `none` | 60 min |
-| `coding` | Implements a change and pushes a branch; Switchboard renders its typed description and opens the PR. | `full`: bash, file read and write, a file attached into the conversation (a screenshot, a PDF), URL fetch, diff digest, PR description, skills, GitHub reads, issue writes. | `repo-resident` | `write` | 90 min |
-| `review` | Reviews a pull request with full-repository context; ranked findings and a verdict. | `readonly`: bash, file read, verdict, URL fetch, diff digest, skills, GitHub reads. | `repo-resident` | `read` | 25 min, effort `medium` |
-| `ship` | Coding, review, fixes, until LGTM; on a plan branch the pipeline merges, elsewhere a person does. | Never sent to a model; the pipeline runs each round as a child `coding` or `review` run in a thread of its own. | `repo-resident` | `write` | 240 min (`ship.maxMinutes` in config); each round clipped to what remains |
-| `research` | Web search and URL reading, plus repository and issue reads; no workspace. | `web`: search, URL fetch, status, GitHub reads. | `none` | `none` | 8 min, effort `medium` |
-| `explore` | A long, read-only investigation of a repository: clones it into a cold sandbox, runs builds, suites and pipelines, searches the web, and reports a claim table with commands and numbers. Never a pull request. | `explore`: bash, file read, status, URL fetch, search, skills, GitHub reads. | `repo-cold` | `read` | 120 min |
-| `conductor` | Coordinates other runs: spawns child runs as the person who asked — each an ordinary run in a thread of its own, under their permissions — steers them, waits for their ends within its own budget, and compiles the write-ups into one answer. | `conductor`: spawn_run, send_to_run, await_runs, list_runs, get_run_status, URL fetch, status, GitHub reads. No shell, no workspace. | `none` | `none` | 120 min |
+## The built-in agents
 
-A plain message picks its own preset through the fast model and the card says why — the router is on by default, and `routing: { auto: false }` turns it off ([Turn features on and off](../how-to/turn-features-on-and-off.md)); `agent:<name>` in a message forces one of them, and you rarely need to. `ship` is never routed, and the `conductor` is reached only as a compound request with several independent read-only asks; an ask that needs `coding` makes the whole message one coding run instead of a part ([routing-and-config item 21](../reference/specs/routing-and-config.md)).
+| Agent | Use it for | Reach |
+| --- | --- | --- |
+| `general` | Answer questions, read repositories and URLs, manage issues | No workspace or shell; GitHub issue writes |
+| `coding` | Make a code change and prepare a pull request | Repository workspace; write-scoped identity; direct `agent:coding` request only |
+| `review` | Review a pull request and return findings | Repository workspace; read-scoped identity |
+| `ship` | Run coding, review and findings rounds for a pull request | A pipeline that starts `coding` and `review` runs; no model receives a `ship` prompt |
+| `research` | Search the web and answer with sources | No workspace or shell |
+| `explore` | Investigate a repository with commands and web research | Cold repository workspace; read-scoped identity |
+| `orchestrator` | Read fleet status and coordinate linked private work | Scoped status and work tools; no workspace or shell |
+| `conductor` | Split independent read-only asks into child runs and report back | Can start and follow permitted child runs; no workspace or shell |
 
-The budget is the wall clock. Each agent also carries a turn cap, but it is derived, not chosen: six turns a minute over the wall clock (540 for `coding`, 150 for `review`), a pace only a run stuck re-issuing the same call sustains. A run that reaches it is told so — `Stopped after 540 model turns in 80 minutes — that pace looks like a loop` — and writes up what it has; a run doing real work is ended by the clock, never by the count ([the pi harness](../reference/specs/harness-pi.md) item 15).
+A plain request is routed to a suitable agent. `coding` is only selected by an explicit `agent:coding` directive; a plain code-change request can route to `ship` so it receives a review loop. A compound request can route to `conductor`. `agent:<name>` explicitly selects an agent when the requester has access to it. The registry defines these entry paths, and the [routing spec](../reference/specs/routing-and-config.md) covers the exact rules.
 
-A child the conductor spawns is exactly the run its requester could start by hand with `agent:<preset>`: it passes the same gates as that person, lives in a thread of its own, and its wall clock is capped by what the parent has left. A child is a reader of the conductor's conversation: it starts from the text said so far — every user and assistant turn, never a tool call or its result — plus the prompt the conductor hands it, and a preset that writes (`coding`, `ship`) is refused as a child by name, so nothing a child does pushes a branch or opens a pull request. A child cannot spawn, and a run may have at most `spawn.maxChildren` children live at once ([conductor spec](../reference/specs/agent-conductor.md)). The conductor steers a live child the way a reply in its thread would (`send_to_run`) and waits for its children (`await_runs`), which hand their ends back as data — a finished child with its reply, one still running when the parent's own clock nears its end, one a restart interrupted, reported and never restarted. No other agent can start, steer or await a run.
+`ship` is the unusual agent: its definition selects the pipeline and its limits, but the pipeline starts ordinary child runs rather than sending its own prompt to a model. A single-task pipeline keeps its unit in the asking thread; units from a plan have their own threads. [Data model](what-holds-what.md) shows the relationship.
 
-GitHub *read* tools need no workspace and are in every tool loop; issue *writes* are only in `assistant` and `full`. The identity is the credential a run's machine holds: `write` mints the write-scoped GitHub token that pushes and opens pull requests, `read` a read-scoped token with a read-only worktree, `none` nothing at all. The machine class is where the tools execute: `none` provisions nothing, and `repo-resident` is the onboarded repository's resident when it is serviceable, else a cold per-thread sandbox with the checkout. `repo-cold` is a per-thread sandbox with the checkout that never touches the resident (the repository is vetted against GitHub instead) — `explore` runs there, so a two-hour job shares no container with the reviews that depend on the resident. A fourth class, `blank`, an empty per-thread sandbox with no repository and no credential, exists for presets to come ([Execution and sandboxes](../reference/specs/execution.md)).
+The `orchestrator` is a model-backed agent for an ongoing conversation. It can answer general questions and read fresh fleet or source facts in each run. In a verified private Slack DM, its current work tools can start, inspect, steer and stop a linked Ship unit. It has no general child-agent spawn tool; `conductor` uses those tools for permitted read-only child runs. [A thread outlives its runs](a-thread-continues.md) explains follow-ups and saved context.
 
-A command in a sandbox runs for at most twenty minutes; a job that needs longer is started detached with `setsid -f` and polled across tool calls — the explore prompt carries the recipe, and the sandbox's own timeout message names it.
+## When to add an agent
 
-## The toolset is the boundary, not the wall
+Add one when a recurring kind of work needs its own instructions **and** a distinct set of tools, machine access, identity or limits. If only the model, effort or instructions for an existing kind of work need to vary by person or channel, use [configuration](../how-to/configure-your-defaults.md). If the new capability belongs to every agent using an existing toolset, extend that toolset instead.
 
-A toolset decides what the model can ask for. `review` has no write-file tool but has `bash`, which writes files by other means. Read-only is a toolset-and-prompt contract; the wall is the executor ([Execution and trust](execution-and-trust.md)).
+An agent is [added in the repository](../how-to/add-an-agent.md): declare its definition and budgets, give it a behavioral spec, and decide how it is routed and who may run it. The channel adapters and dispatcher do not need a new branch for its name.
 
-## The clock is the budget
-
-A budget stop ends the run without proving the question was answered. The saved result keeps the stop reason and whether a write-up exists separately from delivery. Completed source steps stay on the card; a missing write-up is shown explicitly. A same-requester `continue` uses the saved budget result and original question under fresh access checks. If a restart interrupts final delivery, the recovered card reports that delivery is unconfirmed.
-
-The turn count is a backstop; the clock ends a long run, and at the deadline the agent is cut off to write up what it has. Effort rides the config layers because it decides how much of the clock goes to thinking; `review` ships with `medium`, `coding` leaves it to the request.
-
-## Tools from outside
-
-External MCP servers add tools as `mcp__<server>__<tool>`: descriptions and results are untrusted data, every call is budgeted and recorded, and only organization-level servers reach `coding`, `review` or `ship` ([Connect an MCP server](../how-to/connect-an-mcp-server.md)).
-
-## Onboarded repositories
-
-A coding or review run against an onboarded repository starts in its always-warm resident: a worktree on the thread's branch with dependencies installed. Other runs get a cold per-thread workspace on first use; follow-ups reuse it ([Onboard a repo](../how-to/onboard-a-repo.md)).
-
-## Read next
-
-- Specs: [general](../reference/specs/agent-general.md), [coding](../reference/specs/agent-coding.md), [review](../reference/specs/agent-review.md), [ship](../reference/specs/agent-ship.md), [research](../reference/specs/web-tools.md), [explore](../reference/specs/agent-explore.md), [conductor](../reference/specs/agent-conductor.md), [GitHub tools](../reference/specs/github-tools.md).
-- [Add an agent](../how-to/add-an-agent.md) — one registry entry ([decision 0002](../decisions/0002-dispatcher-is-the-only-orchestrator.md)).
-- [How a request flows](how-a-request-flows.md) — the loop itself.
+The current definitions are in [`src/agents/registry.ts`](../../src/agents/registry.ts), toolsets in [`src/tools/toolsets.ts`](../../src/tools/toolsets.ts), and budget defaults in [`src/core/budgets.ts`](../../src/core/budgets.ts).

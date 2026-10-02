@@ -32,6 +32,8 @@ The tree follows [Diataxis](https://diataxis.fr): four jobs, never mixed on one 
 
 [`reference/vocabulary.md`](reference/vocabulary.md) is the product's words: the twelve nouns every surface prints, one meaning each — read it before the code map.
 
+For the system picture, start with [Architecture](explanation/architecture.md), [Data model](explanation/what-holds-what.md) and [What an agent is](explanation/agents-and-toolsets.md).
+
 [`reference/specs/`](reference/specs/README.md) is the contract: one file per feature, every criterion bound to a test or a procedure. When a page here disagrees with a spec, the spec is right.
 
 [`README.md`](../README.md) is the front door; [`AGENTS.md`](../AGENTS.md) is for whoever changes Switchboard.

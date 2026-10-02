@@ -43,17 +43,15 @@ const read = (rel: string) => readFileSync(`${DOCS}/${rel}`, "utf8");
 describe("renderFourSeams", () => {
   const out = renderFourSeams(SEAMS, DISPATCHER);
 
-  it("draws the channel's ways in as separate nodes, every other seam as one node, and the dispatcher between them, from the seams' one statement", () => {
-    expect(out.startsWith("```mermaid\nflowchart LR\n")).toBe(true);
+  it("draws the four seams and the dispatcher with short labels from the seams' one statement", () => {
+    expect(out.startsWith("```mermaid\nflowchart TB\n")).toBe(true);
     expect(out.endsWith("\n```")).toBe(true);
-    for (const seam of SEAMS) expect(out).toContain(`subgraph ${seam.id} ["${seam.name} — ${seam.role}"]`);
-    const channel = SEAMS.find((s) => s.id === "channel")!;
-    for (const way of channel.implementations) expect(out).toContain(`["${way}"]`);
-    expect(out).toContain('AG["general · coding · review · ship · research · explore · conductor"]');
-    expect(out).toContain('E["local · sandbox · resident"]');
-    expect(out).toContain('D{"Dispatcher<br/>routing · config layers · authorization"}');
-    expect(out).toContain('C1 & C2 & C3 -->|"message"| D');
-    expect(out).toContain('AG <-->|"complete"| P');
+    expect(out).toContain('C["Channel"]');
+    expect(out).toContain('D{"Dispatcher"}');
+    expect(out).toContain('AG["Agent"]');
+    expect(out).toContain('R["Run"]');
+    expect(out).toContain('P["Provider"]');
+    expect(out).toContain('E["Executor"]');
   });
 
   it("keeps the visual system it asks of every other diagram", () => {
