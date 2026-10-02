@@ -29,7 +29,7 @@ npx --yes @coreplane/switchboard@<version> deploy all --affected
 | Preflight | Refuses while |
 |---|---|
 | bot | the container is mid-rollout |
-| resident | any resident has work in flight (needs `RESIDENT_READ_TOKEN`); with `RESIDENT_DRAIN_TOKEN` the step first drains the fleet — new runs wait at their attach, the runs in flight finish — and waits up to 60 min for them instead of 30 min for a quiet minute |
+| resident | `RESIDENT_DRAIN_TOKEN` drains the fleet, fences registered reattach, and checks actual run ownership before upload; an executing or unverified owner refuses, while a terminal registration stays protected. The post-deploy readiness gate uses `RESIDENT_READ_TOKEN`. |
 
 ## Roll back the bot image
 
@@ -106,7 +106,7 @@ Poll `/debug info` until `state` is `warm`, `lastRestore.at` is later than the r
 
 `poolUsersSpent` counts historical UID claims on this VM, not active work. The read-scoped resident status also lists `poolUserSpends` as `{user, owner}` rows, where owners begin with `thread:` or `op:`. A detached thread may reclaim its own UID after a clean disk inspection; a different thread or a new disposable operation cannot. When all UIDs are spent, the next attach or operation may recycle the VM itself only if it is warm, current, undrained, and has no other active work or live binding. The checked destroy keeps snapshots and restores before that request proceeds. A `pool-recycle-required` refusal means the idle proof did not pass; inspect the live rows and use the operator procedure above once the resident is idle. Never clear the spend ledger by hand.
 
-After a resident Worker upload that passes preflight, `deploy all` reads the named Containers application before and after the upload. An unchanged version and image, no printed container change, and current reports for every resident complete a Worker-only step without cycling containers. A changed application uses the guarded image reconcile. An unreadable pre-upload application refuses the upload; an unreadable post-upload application or an older pending image report leaves it partial and the fleet held. The existing preflight must still pass before any upload; this post-upload proof does not override it.
+Before a resident Worker upload, `deploy all` drains new runs and the preflight asks the live Worker to fence registered reattach. Under that fence it reads executing runs separately from protected terminal workspaces. An active or unknown owner, missing fence, or provisioning resident refuses the upload. A refusal releases only the reattach fence; the drain remains until the runner lifts it or it expires. A Worker that predates `/deploy-fence` refuses safely, so its first upgrade needs a separately reviewed bootstrap procedure. After an upload that passes preflight, `deploy all` reads the named Containers application before and after the upload. An unchanged version and image, no printed container change, and current reports for every resident complete a Worker-only step without cycling containers. A changed application uses the guarded image reconcile. An unreadable pre-upload application refuses the upload; an unreadable post-upload application or an older pending image report leaves it partial and the fleet held.
 
 ## For this installation
 
@@ -114,7 +114,7 @@ The project's own production, not Switchboard:
 
 - Deploys run from CI, which refuses any ref but `main`: `gh workflow run deploy-production.yml --ref main -f targets=affected` (also `-f targets=bot,resident`; `-f force=true` bypasses the preflights).
 - The profile and config live in a private repository named by the variable `SWITCHBOARD_DEPLOY_PROFILE`, read with an App token minted as `CONFIG_REPO_TOKEN`.
-- CI holds `CLOUDFLARE_DEPLOY_TOKEN`, `RESIDENT_READ_TOKEN`, `RESIDENT_DRAIN_TOKEN` (drain and undrain only; the resident step drains the fleet with it; without it the step waits for a quiet minute and says so) and `SANDBOX_TOKEN`; the docs deploy uses `CLOUDFLARE_API_TOKEN`.
+- CI holds `CLOUDFLARE_DEPLOY_TOKEN`, `RESIDENT_READ_TOKEN`, `RESIDENT_DRAIN_TOKEN` (drain, deploy fence, and undrain; a normal resident upload requires it) and `SANDBOX_TOKEN`; the docs deploy uses `CLOUDFLARE_API_TOKEN`.
 
 ## Findings work after a pull request merges
 

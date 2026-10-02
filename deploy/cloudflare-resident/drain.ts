@@ -42,6 +42,8 @@ export interface DrainRecord {
    *  the record then clears itself on the last hold's report instead of
    *  waiting for a second lift. */
   liftAsked?: boolean;
+  /** During the isolate swap, even a registered owner must wait to reattach. */
+  swapFence?: true;
 }
 
 /** The longest a drain may run, and the default, from the one clock table
@@ -127,7 +129,21 @@ export function liveDrain(stored: unknown, now: number): DrainRecord | null {
     ...(holds.length > 0 ? { holds } : {}),
     ...(holds.length > 0 && holdsUntil !== undefined ? { holdsUntil } : {}),
     ...(r.liftAsked === true ? { liftAsked: true } : {}),
+    ...(r.swapFence === true ? { swapFence: true } : {}),
   };
+}
+
+/** A fenced read needs enough of the same drain left for upload and image
+ * readiness; a pending lift or old image hold cannot authorize another swap. */
+export function deployFenceReady(record: DrainRecord | null, now: number): boolean {
+  return (
+    record?.swapFence === true &&
+    !record.liftAsked &&
+    !record.holds?.length &&
+    Number.isFinite(Date.parse(record.since)) &&
+    Date.parse(record.since) <= now &&
+    Date.parse(record.until) - now >= minutesToMs(DRAIN.deployFenceMinRemainingMinutes)
+  );
 }
 
 /** The stale containers of a stored record whose hold bound has passed while
@@ -200,7 +216,7 @@ export function drainRefusal(drain: DrainRecord): {
 } {
   return {
     error:
-      `draining: the resident fleet is closed to new runs for ${drain.reason} (asked by ${drain.by} at ${drain.since}, ` +
+      `draining: the resident fleet is closed to ${drain.swapFence ? "all attaches" : "new runs"} for ${drain.reason} (asked by ${drain.by} at ${drain.since}, ` +
       `ends by ${drain.until}) — the run waits at its attach and starts when the fleet reopens`,
     status: 503,
     draining: drain,

@@ -5,8 +5,8 @@
 // Sandbox SDK process handles held by in-flight runs ("Process handle refers
 // to a previous runtime incarnation") — the container-restart deferral in
 // `reconcileImage` cannot protect against a Worker deploy. So `npm run deploy`
-// runs this first: it asks the live Worker's `GET /residents` for every
-// resident's in-flight count and exits non-zero while anything is running.
+// runs this first: it asks the live Worker to fence reattach and distinguish
+// executing runs from terminal registrations retained for workspace safety.
 //
 // Fail closed: no bearer, unreachable Worker, or a resident whose live view
 // errored all refuse — a deploy never proceeds blind. `RESIDENT_DEPLOY_FORCE=1`
@@ -20,12 +20,12 @@ import { pathToFileURL } from "node:url";
 /** The env var naming this Worker's origin. `deploy all` sets it from the deployment profile; the
  *  preflight has no address of its own (deploy/profile.json is the only place the fleet's hostnames live). */
 export const BASE_URL_ENV = "RESIDENT_BASE_URL";
-export const TOKEN_ENV_VARS = ["RESIDENT_ADMIN_TOKEN", "RESIDENT_OPERATOR_TOKEN", "RESIDENT_READ_TOKEN"];
+export const TOKEN_ENV_VARS = ["RESIDENT_DRAIN_TOKEN"];
 
 const HOW_TO_SET_TOKEN =
-  `set one of ${TOKEN_ENV_VARS.join(" / ")} in the environment (the same bearer ` +
-  "`npm run secrets` put on the Worker; any scope may read /residents), e.g. " +
-  "`RESIDENT_ADMIN_TOKEN=… npm run deploy`";
+  `set ${TOKEN_ENV_VARS.join(" / ")} in the environment (the same bearer ` +
+  "`npm run secrets` put on the Worker; drain scope fences attach), e.g. " +
+  "`RESIDENT_DRAIN_TOKEN=… npm run deploy`";
 const HOW_TO_FORCE =
   "to deploy anyway (this WILL kill in-flight runs): `RESIDENT_DEPLOY_FORCE=1 npm run deploy` (`node preflight.mjs --force` checks alone)";
 /** Lifecycle states in which NOTHING is executing on the resident — the only
@@ -58,24 +58,25 @@ export function readToken(env) {
   return null;
 }
 
-/** GET /residents. Never throws: `{ok:true,payload}` or `{ok:false,error}`. */
+/** POST /deploy-fence closes registered reattach and reads activity. Never throws. */
 export async function fetchResidents(baseUrl, token, { timeoutMs = 15_000 } = {}) {
   if (!token) return { ok: false, error: "no bearer in the environment" };
-  const url = new URL("/residents", baseUrl).toString();
+  const url = new URL("/deploy-fence", baseUrl).toString();
   try {
     const res = await fetch(url, {
+      method: "POST",
       headers: { authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(timeoutMs),
     });
     const text = await res.text();
-    if (!res.ok) return { ok: false, error: `GET ${url} → HTTP ${res.status}: ${text.slice(0, 200)}` };
+    if (!res.ok) return { ok: false, error: `POST ${url} → HTTP ${res.status}: ${text.slice(0, 200)}` };
     try {
       return { ok: true, payload: JSON.parse(text) };
     } catch {
-      return { ok: false, error: `GET ${url} → non-JSON body: ${text.slice(0, 200)}` };
+      return { ok: false, error: `POST ${url} → non-JSON body: ${text.slice(0, 200)}` };
     }
   } catch (err) {
-    return { ok: false, error: `GET ${url} failed: ${err instanceof Error ? err.message : String(err)}` };
+    return { ok: false, error: `POST ${url} failed: ${err instanceof Error ? err.message : String(err)}` };
   }
 }
 
@@ -89,10 +90,23 @@ export function decide(fetched, { force = false } = {}) {
   const interrupting = [];
   const unknown = [];
   const problems = [];
+  let retained = 0;
 
   if (!fetched || fetched.ok !== true) {
     problems.push(`resident Worker not consulted: ${fetched?.error ?? "unknown error"}`);
   } else {
+    const drain = fetched.payload?.draining;
+    if (
+      drain?.swapFence !== true ||
+      typeof drain.since !== "string" ||
+      typeof drain.until !== "string" ||
+      !Number.isFinite(Date.parse(drain.since)) ||
+      !Number.isFinite(Date.parse(drain.until)) ||
+      Date.parse(drain.until) <= Date.parse(drain.since)
+    )
+      problems.push("deploy fence is missing or invalid (registered owners may reattach)");
+    if (fetched.payload?.fenceReady !== true)
+      problems.push("deploy fence has insufficient verified time for upload and readiness");
     const residents = fetched.payload?.residents;
     if (!Array.isArray(residents)) {
       problems.push("resident Worker answered without a `residents` array (malformed /residents payload)");
@@ -105,8 +119,7 @@ export function decide(fetched, { force = false } = {}) {
         } else if (typeof live.inFlight !== "number") {
           unknown.push({
             resource,
-            error:
-              "live view carries no inFlight count (Worker predates the preflight — deploy once with RESIDENT_DEPLOY_FORCE=1)",
+            error: "live view carries no inFlight count",
           });
         } else if (!Number.isInteger(live.inFlight) || live.inFlight < 0) {
           // A count that is not a non-negative integer can only come from a
@@ -114,22 +127,33 @@ export function decide(fetched, { force = false } = {}) {
           // idle from busy, so it is unknown — never an implicit "0 busy".
           unknown.push({ resource, error: `live view carries an impossible inFlight=${live.inFlight} (counter bug)` });
         } else if (
-          live.runsInFlight !== undefined &&
-          (typeof live.runsInFlight !== "number" || !Number.isInteger(live.runsInFlight) || live.runsInFlight < 0)
+          typeof live.runsInFlight !== "number" ||
+          !Number.isInteger(live.runsInFlight) ||
+          live.runsInFlight < 0
         ) {
           unknown.push({
             resource,
             error: `live view carries an impossible runsInFlight=${live.runsInFlight} (counter bug)`,
           });
+        } else if (
+          ![live.executingRuns, live.retainedRuns, live.unknownRuns].every(
+            (count) => Number.isSafeInteger(count) && count >= 0,
+          )
+        ) {
+          unknown.push({ resource, error: "deploy activity counts are missing or invalid" });
+        } else if (live.executingRuns + live.retainedRuns + live.unknownRuns < live.runsInFlight) {
+          // A thread operation may overlap a retained registration, so the
+          // categorized total can exceed the deduplicated operator count.
+          // Fewer categorized claims than that count means work went unseen.
+          unknown.push({ resource, error: "deploy activity misses a protected run or operation" });
+        } else if (live.unknownRuns > 0) {
+          unknown.push({ resource, error: `${live.unknownRuns} run owner(s) unverified` });
         } else {
-          // `inFlight` counts the refresh cycle itself along with the runs, so a
-          // resident that is merely refreshing reads ≥ 1. The busy decision is
-          // about what a swap kills for a USER — the runs — which a Worker since
-          // item 44's revision reports apart as `runsInFlight`; an older Worker
-          // without the field is judged on `inFlight` as before (over-refusing,
-          // never under). Runs and cycles are independent facts; report BOTH so
-          // an operator who waits for the runs is not surprised by a second refusal.
-          const runs = typeof live.runsInFlight === "number" ? live.runsInFlight : live.inFlight;
+          retained += live.retainedRuns;
+          // The fenced read separates executing work from terminal registrations
+          // whose workspaces remain protected. The old runsInFlight count still
+          // includes those registrations for cleanup and operator visibility.
+          const runs = live.executingRuns;
           if (runs > 0) busy.push({ resource, inFlight: runs });
           if (PROVISIONING_STATES.has(live.state)) {
             // Provisioning is mid-flight. An isolate swap kills it just like a
@@ -174,7 +198,7 @@ export function decide(fetched, { force = false } = {}) {
       provisioning,
       interrupting,
       unknown,
-      message: `preflight ok: ${count} residents, no resident has work in flight or a provision running${warningText}`,
+      message: `preflight ok: ${count} residents, no resident has work in flight or a provision running; ${retained} retained terminal registration(s) remain protected${warningText}`,
     };
   }
   const detail = problems.map((p) => `  - ${p}`).join("\n");

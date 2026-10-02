@@ -3,6 +3,7 @@ import {
   DRAIN_DEFAULT_MINUTES,
   DRAIN_MAX_MINUTES,
   HOLD_CYCLE_BOUND_MINUTES,
+  deployFenceReady,
   drainRefusal,
   holdDrain,
   liftDrain,
@@ -11,6 +12,7 @@ import {
   reportImageCurrent,
   staleHolds,
 } from "./drain";
+import { DRAIN } from "../../src/core/budgets";
 import { readSource } from "./testing/sourceScan";
 
 // Feature: docs/reference/specs/resident-repos.md item 69 — the fleet drain: a
@@ -20,6 +22,21 @@ import { readSource } from "./testing/sourceScan";
 // (testing/sourceScan.ts), as every scan in this directory does.
 
 const NOW = Date.parse("2026-09-18T05:00:00.000Z");
+
+describe("deploy fence lifetime", () => {
+  it("refuses a drain that expires before upload and readiness can finish", () => {
+    const parsed = parseDrainRequest({ minutes: DRAIN.maxMinutes }, NOW);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const fenced = { ...parsed.record, swapFence: true } as const;
+    const latestStart = Date.parse(fenced.until) - DRAIN.deployFenceMinRemainingMinutes * 60_000;
+    expect(deployFenceReady(fenced, latestStart)).toBe(true);
+    expect(deployFenceReady(fenced, latestStart + 1)).toBe(false);
+    expect(deployFenceReady({ ...fenced, liftAsked: true }, NOW)).toBe(false);
+    expect(deployFenceReady({ ...fenced, holds: ["repo:x/y"] }, NOW)).toBe(false);
+    expect(deployFenceReady({ ...parsed.record }, NOW)).toBe(false);
+  });
+});
 
 describe("parseDrainRequest — the record a drain asks for", () => {
   it("defaults: an empty body drains for the default minutes as `admin` for `a deploy`, since now", () => {
@@ -332,7 +349,7 @@ describe("the Worker's wiring (by scan)", () => {
     expect(attach).toMatch(
       /const registration = await this\.ctx\.storage\.get<RunRegistration>\(runRegKey\(threadKey\)\);\s*const registered = registeredRunAllowsReattach\(\s*registration,\s*runId,\s*systemClock\(\),\s*RUN_REGISTRATION_GRACE_MS,\s*ownerGen,\s*ownerFence,\s*\);/,
     );
-    expect(attach).toMatch(/if \(drain && !registered\) \{/);
+    expect(attach).toMatch(/if \(drain && \(drain\.swapFence \|\| !registered\)\) \{/);
     expect(attach).toMatch(/drainRefusal\(drain\)/);
     const handler = source.slice(
       source.indexOf("async function handleAttach("),

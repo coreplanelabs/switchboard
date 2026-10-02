@@ -61,11 +61,10 @@
 #                         checks these capabilities before any Worker deploys.
 #   CLOUDFLARE_API_TOKEN  fallback while CLOUDFLARE_DEPLOY_TOKEN is unset (the
 #                         docs Worker's narrower token)
-#   RESIDENT_READ_TOKEN   the resident preflight and readiness gate read GET /residents with it;
-#                         read scope is enough (any of the three bearers works)
-#   RESIDENT_DRAIN_TOKEN  the resident step drains and reconciles the fleet with it
-#                         (POST /drain, /reconcile, /undrain) so the deploy lands once
-#                         the runs in flight end; optional when resident is not selected.
+#   RESIDENT_READ_TOKEN   the post-deploy readiness gate reads GET /residents with it
+#   RESIDENT_DRAIN_TOKEN  the resident step drains, fences reattach, and reconciles
+#                         the fleet with it (POST /drain, /deploy-fence, /reconcile,
+#                         /undrain); required when resident is selected.
 #                         Without it a resident upload cannot prove image readiness
 #                         and ends as a partial deployment, never live.
 #   MEMORY_TOKEN          the state Worker's bearer: `deploy all` pushes the
@@ -320,8 +319,8 @@ jobs:
           if [ -z "$CLOUDFLARE_API_TOKEN" ]; then echo "::error::no Cloudflare token — add CLOUDFLARE_DEPLOY_TOKEN as a repository secret (see the header of this workflow)"; exit 1; fi
           echo "Cloudflare credential: $DEPLOY_TOKEN_SOURCE"
           if [ "${DEPLOY_TOKEN_SOURCE#CLOUDFLARE_API_TOKEN}" != "$DEPLOY_TOKEN_SOURCE" ]; then echo "::warning::deploying with the docs Worker's token — it may lack the Containers/R2 scopes; deploy all checks before touching a Worker"; fi
-          if [ -z "$RESIDENT_READ_TOKEN" ]; then echo "::warning::RESIDENT_READ_TOKEN is not set — a resident step would be refused before anything deploys"; fi
-          if [ -z "$RESIDENT_DRAIN_TOKEN" ]; then echo "::warning::RESIDENT_DRAIN_TOKEN is not set — the resident step cannot drain the fleet and waits for a quiet minute instead (new runs keep landing); add the secret so a release lands once the runs in flight end"; fi
+          if [ -z "$RESIDENT_READ_TOKEN" ]; then echo "::warning::RESIDENT_READ_TOKEN is not set — the post-deploy resident readiness gate cannot read the registry"; fi
+          if [ -z "$RESIDENT_DRAIN_TOKEN" ]; then echo "::warning::RESIDENT_DRAIN_TOKEN is not set — a resident step is refused before any Worker upload"; fi
           if [ -z "$MEMORY_TOKEN" ]; then echo "::warning::MEMORY_TOKEN is not set — a bot step would be refused before anything deploys (deploy all pushes the bot's config to the state Worker with it)"; fi
           if [ -z "$SANDBOX_TOKEN" ]; then echo "::warning::SANDBOX_TOKEN is not set — a sandbox step would be refused before anything deploys, and --affected judges the sandbox against the last release tag, not what it serves"; fi
           if [ "$SMOKE" = "true" ] && [ -z "$SMOKE_INGRESS_TOKEN" ]; then echo "::error::SMOKE_INGRESS_TOKEN is not set — add the dedicated ingress bearer before deploying a release"; exit 1; fi

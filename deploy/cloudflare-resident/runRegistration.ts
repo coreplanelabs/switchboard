@@ -66,3 +66,53 @@ export function registeredRunOwnsRelease(
     registration.ownerFence === ownerFence
   );
 }
+
+/** A retained workspace is not an executing run. Unknown ownership still
+ * refuses a deploy; this decision never authorizes removal of the binding. */
+export function deployRegistrationState(input: {
+  threadKey: string;
+  registration: { threadKey: string; runId?: string; ownerGen?: string; ownerFence?: number } | undefined;
+  fence: unknown;
+  lastRunOwner?: { runId?: string; ownerGen?: string; ownerFence?: number };
+  owner: unknown;
+}): "none" | "executing" | "retained" | "unknown" {
+  const { threadKey, registration, fence, lastRunOwner, owner } = input;
+  if (!registration && fence === undefined && !lastRunOwner) return "none"; // legacy idle binding, no run claim
+  if (
+    !registration?.runId ||
+    !registration.ownerGen ||
+    !Number.isSafeInteger(registration.ownerFence) ||
+    Number(registration.ownerFence) < 0 ||
+    registration.threadKey !== threadKey ||
+    typeof fence !== "object" ||
+    fence === null
+  )
+    return "unknown";
+  const f = fence as Record<string, unknown>;
+  if (
+    f.runId !== registration.runId ||
+    f.ownerGen !== registration.ownerGen ||
+    f.ownerFence !== registration.ownerFence
+  )
+    return "unknown";
+  if (typeof owner !== "object" || owner === null) return "unknown";
+  const observed = owner as Record<string, unknown>;
+  if (observed.kind === "live") {
+    const row = observed.row;
+    if (typeof row !== "object" || row === null) return "unknown";
+    const r = row as Record<string, unknown>;
+    return r.runId === registration.runId && r.threadKey === threadKey && r.ownerGen === registration.ownerGen
+      ? "executing"
+      : "unknown";
+  }
+  if (observed.kind !== "terminal") return "unknown";
+  const row = observed.record;
+  if (typeof row !== "object" || row === null) return "unknown";
+  const r = row as Record<string, unknown>;
+  return r.id === registration.runId &&
+    r.threadKey === threadKey &&
+    r.provisional !== true &&
+    ["completed", "stopped_soft", "stopped_hard", "failed", "interrupted"].includes(String(r.status))
+    ? "retained"
+    : "unknown";
+}

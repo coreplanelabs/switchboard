@@ -177,7 +177,7 @@ export interface WorkerDef extends Omit<WorkerSpec, "preflight" | "liveGate"> {
   residentContainerApp?: string;
 }
 
-/** The three bearer scopes the resident preflight accepts (deploy/cloudflare-resident/preflight.mjs `TOKEN_ENV_VARS`); read is enough. */
+/** The post-upload registry read accepts these bearer scopes. The upload itself separately requires the drain bearer. */
 export const RESIDENT_BEARER_ENVS = ["RESIDENT_ADMIN_TOKEN", "RESIDENT_OPERATOR_TOKEN", "RESIDENT_READ_TOKEN"] as const;
 
 /** The resident step's own wait budget (release-and-deploy item 13). The
@@ -263,14 +263,14 @@ export const WORKER_SPECS: readonly WorkerSpec[] = [
       lockfile: [{ workspace: "deploy/cloudflare-resident", includeDev: false }],
     },
     preflight: { forceEnv: "RESIDENT_DEPLOY_FORCE", baseUrlEnv: "RESIDENT_BASE_URL" },
-    requiredEnv: [{ anyOf: RESIDENT_BEARER_ENVS }],
+    requiredEnv: [{ anyOf: RESIDENT_BEARER_ENVS }, { anyOf: [RESIDENT_DRAIN_TOKEN_ENV] }],
     // A container image like the bot's — checked here too, since an --affected
     // release can select the resident without the bot — plus the BACKUP_BUCKET
     // R2 binding wrangler validates on deploy.
     capabilities: [CONTAINERS_CAPABILITY, R2_CAPABILITY],
     waitMaxMs: RESIDENT_WAIT_MAX_MS,
     drain: { tokenEnv: RESIDENT_DRAIN_TOKEN_ENV },
-    why: "per-repo DOs — the fleet is drained for the deploy when the drain bearer is present (new runs wait at their attach; the runs in flight finish), and the preflight refuses while a resident has a run in flight or is provisioning (a refresh or restore mid-cycle only warns: it resumes after the swap)",
+    why: "per-repo DOs — the runner drains new admissions, then preflight fences registered reattach and refuses executing or unknown owners while retained terminal workspaces stay protected; provisioning refuses and interruptible refresh or restore only warns",
   },
   {
     name: "sandbox",

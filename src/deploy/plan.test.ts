@@ -72,7 +72,7 @@ describe("WORKER_SPECS / workersFor / DEPLOY_ORDER", () => {
     expect(new Set(WORKERS.map((w) => w.script)).size).toBe(4);
   });
 
-  it("names which steps are preflighted and how each preflight is forced; the resident needs any one of its three bearers — read is enough; the sandbox needs SANDBOX_TOKEN (its live gate reads everything with it)", () => {
+  it("names which steps are preflighted and how each preflight is forced; the resident needs its drain bearer to fence reattach; the sandbox needs SANDBOX_TOKEN", () => {
     const byName = Object.fromEntries(WORKERS.map((w) => [w.name, w]));
     expect(byName.memory.preflight).toBeUndefined();
     expect(byName.sandbox.preflight).toBeUndefined();
@@ -97,14 +97,12 @@ describe("WORKER_SPECS / workersFor / DEPLOY_ORDER", () => {
       "https://switchboard-resident.example.test",
       "https://switchboard-sandbox.example.test",
     ]);
-    // The same three the resident's preflight.mjs reads (TOKEN_ENV_VARS): CI holds the read token and nothing more.
     expect(byName.resident.requiredEnv).toEqual([
       { anyOf: ["RESIDENT_ADMIN_TOKEN", "RESIDENT_OPERATOR_TOKEN", "RESIDENT_READ_TOKEN"] },
+      { anyOf: ["RESIDENT_DRAIN_TOKEN"] },
     ]);
     expect(RESIDENT_BEARER_ENVS).toEqual(["RESIDENT_ADMIN_TOKEN", "RESIDENT_OPERATOR_TOKEN", "RESIDENT_READ_TOKEN"]);
-    expect(formatPlan(plan())).toContain(
-      "needs one of RESIDENT_ADMIN_TOKEN / RESIDENT_OPERATOR_TOKEN / RESIDENT_READ_TOKEN",
-    );
+    expect(formatPlan(plan())).toContain("RESIDENT_READ_TOKEN, RESIDENT_DRAIN_TOKEN");
     expect(byName.sandbox.requiredEnv).toEqual([{ anyOf: ["SANDBOX_TOKEN"] }]);
     expect(byName.memory.requiredEnv).toBeUndefined();
     expect(byName.bot.requiredEnv).toBeUndefined();

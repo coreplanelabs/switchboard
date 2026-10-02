@@ -124,7 +124,7 @@ const exec =
 describe("the pure pieces", () => {
   it("the drain asks for the drained wait plus the margin, named by the commit; `drainSet` and `drainUntil` read the answer", () => {
     expect(drainBody(RESIDENT_DRAINED_WAIT_MAX_MS, HEAD)).toEqual({
-      minutes: 65,
+      minutes: 90,
       reason: "deploy 62e4e9a",
       by: "deploy all",
     });
@@ -151,7 +151,7 @@ describe("the pure pieces", () => {
     // drain — and the line names every way it reopens: the container's own
     // report (a cycle, a rebuild, a fresh provision), the cycle bound past
     // which the fleet reopens anyway with the stale container named, and the
-    // record's `until` as the last resort. A 65-minute silence on a report
+    // record's `until` as the last resort. A 90-minute silence on a report
     // nothing sends was the incident this line must foreclose.
     expect(drainLiftedLine("resident", { status: 200, body: { cleared: false, held: ["repo:acme/api"] } }, stood)).toBe(
       `[deploy:all] resident: fleet stays closed — repo:acme/api still reports the pre-deploy image; it reopens on each container's new-image report (a cycle, a rebuild or a fresh provision), or within ${DRAIN.cycleBoundMinutes} min anyway with the stale container named in a warning (backstop ${UNTIL})`,
@@ -212,7 +212,7 @@ describe("deployStep (resident) drains the fleet", () => {
     expect(h.calls[0].args).toEqual([
       "https://switchboard-resident.example.test/drain",
       "drn",
-      { minutes: 65, reason: "deploy 62e4e9a", by: "deploy all" },
+      { minutes: 90, reason: "deploy 62e4e9a", by: "deploy all" },
     ]);
     // The reconcile runs while the fleet is still drained; the lift follows it.
     expect(h.calls[4].args).toEqual(["https://switchboard-resident.example.test/reconcile", "drn", {}]);

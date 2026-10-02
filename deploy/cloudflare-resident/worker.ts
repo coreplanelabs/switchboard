@@ -13,7 +13,7 @@
 //
 // Route surface (JSON in/out; every route below requires a bearer secret):
 //   admin scope     POST /onboard /offboard /reconfigure /rebuild /debug (all ops)
-//   drain scope     POST /drain /undrain (admin implied) — the deploy's bearer, nothing else
+//   drain scope     POST /drain /deploy-fence /reconcile /undrain (admin implied)
 //   read scope      GET /residents   POST /debug ops info|schedules|threads only (admin implied)
 //   operator scope  POST /attach /detach /exec /publish /read /write /op   GET /status (state, reason, inFlight)
 //   unauthenticated GET /healthz (deploy wake ping; touches no DO)
@@ -105,6 +105,7 @@ import {
   type DeployImageReconcileState,
 } from "./imageReconcileState.js";
 import {
+  deployRegistrationState,
   registeredRunAllowsClaim,
   registeredRunAllowsReattach,
   registeredRunNeedsProtection,
@@ -398,6 +399,7 @@ import {
 import { buildId, injectedBuildStamp } from "../../src/deploy/buildStamp.js";
 import { createRefreshInstance, createRefreshInstanceNow, type RefreshInstanceParams } from "./refresh";
 import {
+  deployFenceReady,
   drainRefusal,
   holdDrain,
   liftDrain,
@@ -1634,6 +1636,27 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     await this.pushDrainPost("above");
     await this.ctx.storage.setAlarm(Date.parse(record.until));
     return record;
+  }
+
+  /** Close the reattach exception before reading deploy activity. The same
+   * durable drain survives the Worker isolate swap and expires by itself. */
+  async setDeployFence(): Promise<DrainRecord | null> {
+    const now = systemClock();
+    const record = liveDrain(await this.ctx.storage.get(DRAIN_KEY), now);
+    if (record === null || record.swapFence) return null;
+    const fenced = { ...record, swapFence: true } as const;
+    if (!deployFenceReady(fenced, now)) return null;
+    await this.ctx.storage.put(DRAIN_KEY, fenced);
+    return fenced;
+  }
+
+  /** A refused preflight reopens owned reattach, but cannot clear a newer
+   * deployment's drain. */
+  async clearDeployFence(since: string, until: string): Promise<void> {
+    const record = liveDrain(await this.ctx.storage.get(DRAIN_KEY), systemClock());
+    if (record?.since !== since || record.until !== until || !record.swapFence) return;
+    const { swapFence: _fence, ...rest } = record;
+    await this.ctx.storage.put(DRAIN_KEY, rest);
   }
 
   /** Admin-only by construction (POST /undrain): `cleared` when a record was
@@ -6167,7 +6190,7 @@ export class ResidentDO extends Sandbox<Env> {
           ownerGen,
           ownerFence,
         );
-        if (drain && !registered) {
+        if (drain && (drain.swapFence || !registered)) {
           const refusal: ThreadErr & { draining: DrainRecord } = drainRefusal(drain);
           return refusal;
         }
@@ -8606,6 +8629,39 @@ export class ResidentDO extends Sandbox<Env> {
     }
     return n;
   }
+
+  /** Deployment activity is distinct from workspace retention. A terminal
+   * run's unsaved tree remains held, while only a live owner or command can
+   * be interrupted by an isolate swap. Unknown ownership refuses the swap. */
+  async getResidentDeployInfo(): Promise<Record<string, unknown>> {
+    const bindings = await this.liveBindings();
+    const regs = await this.ctx.storage.list<RunRegistration>({ prefix: RUN_REG_KEY_PREFIX });
+    let executingRuns = 0;
+    let retainedRuns = 0;
+    let unknownRuns = 0;
+    for (const binding of bindings) {
+      const registration = regs.get(runRegKey(binding.threadKey));
+      const fence = await this.ctx.storage.get<unknown>(runFenceKey(binding.threadKey));
+      const owner = registration?.runId ? await this.observeRunForEviction(registration, binding) : null;
+      const state = deployRegistrationState({
+        threadKey: binding.threadKey,
+        registration,
+        fence,
+        lastRunOwner: binding.lastRunOwner,
+        owner,
+      });
+      // An operator call on this thread is already in runsInFlightCount().
+      if (state === "executing" && (this.threadOpsInFlight.get(binding.threadKey) ?? 0) === 0) executingRuns++;
+      else if (state === "retained") retainedRuns++;
+      else if (state === "unknown") unknownRuns++;
+    }
+    return {
+      ...(await this.getResidentInfo()),
+      executingRuns: executingRuns + this.runsInFlightCount(),
+      retainedRuns,
+      unknownRuns,
+    };
+  }
   private attachesInFlight = 0;
   /** Entry-to-answer admissions include hydration before attachesInFlight starts. */
   private attachAdmissionsInFlight = 0;
@@ -9927,6 +9983,7 @@ const ROUTES: Record<string, { scope: Scope; method: string }> = {
   "/reconfigure": { scope: "admin", method: "POST" },
   "/rebuild": { scope: "admin", method: "POST" },
   "/drain": { scope: "drain", method: "POST" }, // close the fleet to new runs for a deploy (item 69; admin implied)
+  "/deploy-fence": { scope: "drain", method: "POST" }, // fence reattach and read executing activity
   "/undrain": { scope: "drain", method: "POST" }, // reopen it
   "/reconcile": { scope: "drain", method: "POST" }, // reconcile every container onto the current image, inside the drain window
   "/residents": { scope: "read", method: "GET" }, // admin implied; read-only bearer allowed
@@ -10034,6 +10091,8 @@ export default {
             return await handleRebuild(env, body);
           case "/drain":
             return await handleDrain(env, body);
+          case "/deploy-fence":
+            return await handleDeployFence(env);
           case "/undrain":
             return await handleUndrain(env);
           case "/reconcile":
@@ -10502,6 +10561,46 @@ async function handleUndrain(env: Env): Promise<Response> {
   }
   console.log(`[drain] fleet reopened (${lift.cleared ? "a drain stood" : "no drain stood"})`);
   return json({ draining: null, cleared: lift.cleared, planeOutbox: await registryStub(env).getDrainOutbox() });
+}
+
+/** Fence registered reattach, then read every resident. A refusal removes
+ * only this attempt's fence; the drain still protects new admissions. */
+async function handleDeployFence(env: Env): Promise<Response> {
+  const registry = registryStub(env);
+  const fence = await registry.setDeployFence();
+  if (fence === null)
+    return json({ error: "deploy-fence requires a live fleet drain with time for upload and readiness" }, 409);
+  try {
+    const residents = await registry.list();
+    const settled = await Promise.allSettled(
+      residents.map((record) => residentStub(env, record.resource).getResidentDeployInfo()),
+    );
+    const enriched = residents.map((record, i) => {
+      const result = settled[i];
+      return { ...record, live: result.status === "fulfilled" ? result.value : { error: errMsg(result.reason) } };
+    });
+    const now = systemClock();
+    const current = liveDrain(await registry.getDrain(), now);
+    const sameFence =
+      deployFenceReady(current, now) && current?.since === fence.since && current?.until === fence.until;
+    const safe =
+      sameFence &&
+      enriched.every(({ live }) => {
+        const state = live as Record<string, unknown>;
+        return (
+          Number.isSafeInteger(state.executingRuns) &&
+          Number(state.executingRuns) === 0 &&
+          Number.isSafeInteger(state.unknownRuns) &&
+          Number(state.unknownRuns) === 0 &&
+          ["warm", "degraded", "down", "refreshing", "restoring"].includes(String(state.state))
+        );
+      });
+    if (!safe) await registry.clearDeployFence(fence.since, fence.until);
+    return json({ draining: safe ? fence : { ...fence, swapFence: false }, fenceReady: safe, residents: enriched });
+  } catch (error) {
+    await registry.clearDeployFence(fence.since, fence.until);
+    return json({ error: `deploy-fence read failed: ${errMsg(error)}` }, 503);
+  }
 }
 
 /** POST /reconcile (drain scope): reconcile every resident's container onto
