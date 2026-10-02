@@ -510,12 +510,15 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   const restored = resume?.row.state ?? {};
   // An intent without a completed outcome is a possible remote write. A
   // restart never guesses that it was harmless from an absent local event.
+  // The recorder's same durable intent carries a terminal no-write outcome.
+  // A missing receipt alone cannot distinguish rejection from no request.
+  const restoredDoorIntent = restored.doorPublicationPending as
+    { id: string; update: GitPublicationUpdate; outcome?: "rejected" | "not_forwarded" } | null | undefined;
   const unresolvedDoorPublication =
-    restored.doorPublicationPending !== undefined && restored.doorPublicationPending !== null;
-  const resumedDoorPublication = unresolvedDoorPublication
-    ? (restored.doorPublicationPending as { id: string; update: GitPublicationUpdate })
-    : undefined;
+    restoredDoorIntent !== undefined && restoredDoorIntent !== null && !restoredDoorIntent.outcome;
+  const resumedDoorPublication = unresolvedDoorPublication ? restoredDoorIntent : undefined;
   let activeDoorPublication: { id: string; update: GitPublicationUpdate } | undefined;
+  let lastDoorRefusal = restoredDoorIntent?.outcome === "rejected" ? restoredDoorIntent : undefined;
   // The bounded display backlog may trim a push during a long test run. Its
   // small typed receipts also ride the durable state, atomically with results.
   const restoredReceipts = publicationReceiptsFromState(restored.publicationReceipts);
@@ -539,22 +542,42 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     )
       ? (restored.branchPushReceipts as Array<Extract<RunEvent, { type: "pushed_head" }>>)
       : [];
+  const pushedEventsOn = (ref: string): Extract<RunEvent, { type: "pushed_head" }>[] =>
+    (registry.snapshot(run.id, run.token)?.events ?? []).filter(
+      (event): event is Extract<RunEvent, { type: "pushed_head" }> => event.type === "pushed_head" && event.ref === ref,
+    );
+  const restoreAcceptedHead = (latest: Extract<RunEvent, { type: "pushed_head" }> | undefined) => {
+    if (!latest) return;
+    const lastEvent = pushedEventsOn(latest.ref).at(-1);
+    if (lastEvent?.sha === latest.sha || (rewrittenHead?.ref === latest.ref && rewrittenHead.sha === lastEvent?.sha))
+      return;
+    // A retained event is history, not a write receipt: it cannot supersede
+    // the recorder's durable acceptance, even when its ref and tip match Git.
+    // The typed identity rewrite is the exception: it records a later write.
+    registry.publish(run.id, latest);
+  };
   const retainPublicationReceipts = () => {
-    const history = registry.snapshot(run.id, run.token)?.events ?? [];
-    const latest = publicationReceipts.at(-1);
-    // Rehydrate only the final projected head, never append an older receipt
-    // behind a newer mechanical salvage or identity-rewrite push.
-    if (latest !== undefined && !history.some((e) => e.type === "pushed_head" && e.ref === latest.ref))
-      registry.publish(run.id, latest);
+    restoreAcceptedHead(publicationReceipts.at(-1));
   };
   const retainBranchReceipts = () => {
-    const history = registry.snapshot(run.id, run.token)?.events ?? [];
-    for (const receipt of branchReceipts) {
-      if (
-        !history.some((event) => event.type === "pushed_head" && event.ref === receipt.ref && event.sha === receipt.sha)
-      )
-        registry.publish(run.id, receipt);
-    }
+    const checkpoint =
+      publicationSettlement?.publication.kind === "accepted" &&
+      publicationSettlement.binding.branch === observedBranch &&
+      publicationSettlement.publication.head === observedHead &&
+      observedHead === observedRemoteHead
+        ? ({
+            type: "pushed_head" as const,
+            ref: publicationSettlement.binding.branch,
+            sha: publicationSettlement.publication.head,
+            by: "salvage" as const,
+          } satisfies Extract<RunEvent, { type: "pushed_head" }>)
+        : undefined;
+    // Each ref has its own projection. Restore only its final durable head;
+    // the checkpoint's acceptance supersedes older receipts on its owned ref.
+    const byRef = new Map<string, Extract<RunEvent, { type: "pushed_head" }>>();
+    for (const receipt of branchReceipts) byRef.set(receipt.ref, receipt);
+    if (checkpoint) byRef.set(checkpoint.ref, checkpoint);
+    for (const latest of byRef.values()) restoreAcceptedHead(latest);
   };
   let checklist: string | undefined = typeof restored.checklist === "string" ? restored.checklist : undefined;
   // Typed (`StatusActivity`): a bash call rides as its full command, which
@@ -791,6 +814,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           // with its result. A later state patch must never promote a failed
           // commit into restart authority or the run's pushed projection.
           publicationReceipts.push(receipt);
+          acceptedSalvageHead = undefined;
           publishEvent(receipt, false);
           existingPrPublication = { ref: receipt.ref, expectedHeadSha: receipt.sha };
           if (existingPrPublicationFence !== undefined) existingPrPublicationFence.authority = existingPrPublication;
@@ -969,6 +993,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // runs BEFORE the stream finishes, so its outcome is a fact of the run —
   // and appended to the channel reply at the end.
   let prNote: string | undefined;
+  // The post-step emits a new head only for a typed identity rewrite now;
+  // an observed remote tip never manufactures a push event.
+  let rewrittenHead: { ref: string; sha: string } | undefined;
   // How the review post-step ended (agent-review.md item 18) — the record's fact.
   let reviewPost: ReviewPostOutcome | undefined;
   // Set when the head moved during the run by a rebase of the same commits
@@ -1077,6 +1104,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   /** Where the ending salvage pushed what the tree held, when it did: the
    *  fact the answer names over the observation that preceded the push. */
   let salvagedTo: { branch: string; head?: string } | undefined;
+  // A checkpoint takes precedence only until a later producer commits an
+  // accepted push receipt. Pending and rejected writes never retire it.
+  let acceptedSalvageHead: { ref: string; sha: string } | undefined;
   let workspaceObserved = false;
   let publicationSettlement: PublicationSettlement | undefined =
     isPublicationSettlement(resume?.row.state.publicationSettlement) &&
@@ -1104,14 +1134,17 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     onEvent({ type: "publication_settlement", settlement: value });
     return recorded || ledgerRun === undefined;
   };
-  let workSalvageAttempted = resumedUnsettledCheckpoint;
+  let workSalvageAttempted = resumedUnsettledCheckpoint || publicationSettlement?.publication.kind === "accepted";
   let endingSalvageAttempted = false;
   // A coordinator child publishes one owned ref. An auxiliary push must not
   // redirect its observation, completion checkpoint, or PR post-step.
   const coordinatorBranch =
     coordinator?.publication?.publicationRef ?? (coordinator !== undefined ? (binding?.ref ?? repoCtx.ref) : undefined);
   const observeWorkspaceNow = async () => {
-    const pushedBranch = coordinator !== undefined ? coordinatorBranch : pushes.branch();
+    // The accepted recorder owns the ref even when the model checked out
+    // another branch and the tool result's display block was truncated.
+    const pushedBranch =
+      coordinator !== undefined ? coordinatorBranch : (branchReceipts.at(-1)?.ref ?? pushes.branch());
     const observed = await root.span("run.observe_workspace", (span) =>
       observeCodingWorkspace(
         executor,
@@ -1255,6 +1288,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     });
     if (salvaged.pushed && "head" in salvaged && salvaged.head !== undefined && !("skipped" in target)) {
       onEvent({ type: "pushed_head", ref: target.branch, sha: salvaged.head, by: "salvage" });
+      acceptedSalvageHead = { ref: target.branch, sha: salvaged.head };
       salvagedTo = { branch: target.branch, head: salvaged.head };
     } else if (salvaged.pushed && !("skipped" in target)) salvagedTo = { branch: target.branch };
     if (salvaged.pushed || ("settlement" in salvaged && salvaged.settlement !== undefined)) {
@@ -1919,14 +1953,21 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                 });
                 if (committed) {
                   activeDoorPublication = undefined;
+                  lastDoorRefusal = undefined;
                   publicationReceipts.push(receipt);
+                  acceptedSalvageHead = undefined;
                   publishEvent(receipt, false);
                   existingPrPublication = { ref: original.publicationRef, expectedHeadSha: update.next };
                   if (existingPrPublicationFence) existingPrPublicationFence.authority = existingPrPublication;
                 }
               } else {
-                committed = await ledgerRun.setStateAndFlush({ doorPublicationPending: null });
-                if (committed) activeDoorPublication = undefined;
+                committed = await ledgerRun.setStateAndFlush({
+                  doorPublicationPending: { ...pending, outcome },
+                });
+                if (committed) {
+                  activeDoorPublication = undefined;
+                  lastDoorRefusal = outcome === "rejected" ? { ...pending, outcome } : undefined;
+                }
               }
               if (!committed)
                 blockExistingPrPublication("the Git door publication outcome could not be committed durably");
@@ -1976,7 +2017,14 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         });
       }
     }
-    if (ctx.githubDoor && deps.githubBindings && coordinator?.publication === undefined && repoCtx.pr === undefined) {
+    if (
+      ctx.githubDoor &&
+      deps.githubBindings &&
+      coordinator?.publication === undefined &&
+      (coordinator !== undefined ||
+        repoCtx.pr === undefined ||
+        (repoCtx.prFromMessage === true && repoCtx.refFromPr !== true))
+    ) {
       if (!unresolvedDoorPublication)
         deps.githubBindings.setBranchRecorder(run.id, {
           begin: async (update) => {
@@ -2014,12 +2062,19 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                 });
                 if (committed) {
                   activeDoorPublication = undefined;
+                  lastDoorRefusal = undefined;
                   branchReceipts.push(receipt);
+                  acceptedSalvageHead = undefined;
                   publishEvent(receipt, false);
                 }
               } else {
-                committed = await ledgerRun.setStateAndFlush({ doorPublicationPending: null });
-                if (committed) activeDoorPublication = undefined;
+                committed = await ledgerRun.setStateAndFlush({
+                  doorPublicationPending: { ...pending, outcome },
+                });
+                if (committed) {
+                  activeDoorPublication = undefined;
+                  lastDoorRefusal = outcome === "rejected" ? { ...pending, outcome } : undefined;
+                }
               }
             });
             return committed;
@@ -2336,8 +2391,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                       summary: `the compaction failed (${redactAndCap(why, 200)}); ${salvaged.summary}`,
                     });
                     // The salvaged head is a fact of the run (run-history item 2): what renewal reads.
-                    if (salvaged.pushed && salvaged.head !== undefined)
+                    if (salvaged.pushed && salvaged.head !== undefined) {
                       onEvent({ type: "pushed_head", ref: branch, sha: salvaged.head, by: "salvage" });
+                      acceptedSalvageHead = { ref: branch, sha: salvaged.head };
+                    }
                   },
                 }
               : {}),
@@ -2692,11 +2749,29 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // and asks nothing — the post-step's note then says the description was
     // not resubmitted.
     let descriptionTurnRan = false;
-    const confirmedPublicationPush = (): boolean | undefined =>
-      coordinator?.publication === undefined
-        ? undefined
-        : publicationReceipts.some((receipt) => receipt.ref === observedBranch && receipt.sha === observedHead) ||
-          (salvagedTo?.branch === observedBranch && salvagedTo?.head === observedHead);
+    // Auxiliary refs have their own receipts and refusals. A settled checkpoint
+    // at the observed owned head supersedes an older ordinary receipt for it.
+    const observedBranchReceipt = () => branchReceipts.filter((receipt) => receipt.ref === observedBranch).at(-1);
+    const observedAcceptedCheckpoint = () =>
+      publicationSettlement?.publication.kind === "accepted" &&
+      publicationSettlement.binding.branch === observedBranch &&
+      publicationSettlement.publication.head === observedHead
+        ? { ref: publicationSettlement.binding.branch, sha: publicationSettlement.publication.head }
+        : undefined;
+    const observedPublicationAuthority = () =>
+      observedAcceptedCheckpoint() ??
+      (coordinator?.publication !== undefined
+        ? publicationReceipts.filter((receipt) => receipt.ref === observedBranch).at(-1)
+        : observedBranchReceipt());
+    const refusalOnObservedBranch = () =>
+      lastDoorRefusal !== undefined &&
+      (observedBranch === undefined || lastDoorRefusal.update.ref === `refs/heads/${observedBranch}`);
+    const confirmedPublicationPush = (): boolean => {
+      if (!observedBranch || !observedHead || observedHead !== observedRemoteHead || refusalOnObservedBranch())
+        return false;
+      const salvaged = acceptedSalvageHead?.ref === observedBranch && acceptedSalvageHead.sha === observedHead;
+      return observedPublicationAuthority()?.sha === observedHead || salvaged;
+    };
     if (isCodingPrRun && !tailSkipped() && !endingSalvageAttempted && prDescription === undefined) {
       const turnTarget = await descriptionTurnTarget({
         observed: {
@@ -2762,7 +2837,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // could begin after the post-step's one-time pending check. A forwarded
     // request still gets its bounded chance to commit an accepted or uncertain
     // outcome to this run before the PR observes the remote branch.
-    let doorPostStepBlocked = false;
+    let doorPostStepBlocked = refusalOnObservedBranch();
     if (ctx.githubDoor && deps.githubBindings) {
       if (existingPrPublication !== undefined)
         deps.githubBindings.setPublication(run.id, { blocked: "the model turn has ended" });
@@ -2776,7 +2851,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         // a snapshot of activeDoorPublication alone would miss it. Re-read
         // after closing admission even when no claim is pending now.
         await observeWorkspaceNow();
-        const accepted = existingPrPublication !== undefined ? publicationReceipts.at(-1) : branchReceipts.at(-1);
+        doorPostStepBlocked = refusalOnObservedBranch();
+        const accepted = observedPublicationAuthority();
         if (
           accepted !== undefined &&
           (observedBranch !== accepted.ref || observedHead !== accepted.sha || observedRemoteHead !== accepted.sha)
@@ -2944,6 +3020,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             remoteRepo: observedRemoteRepo,
           },
           confirmedPush: confirmedPublicationPush(),
+          requireConfirmedPush: coordinator?.publication !== undefined,
           description: prDescription,
           requestedBy: {
             name: requester.userName?.trim() || requestedLogin || requester.userId,
@@ -2971,7 +3048,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             events.publish(event);
             // The bot's identity rewrite is a second push after workspace
             // observation. Carry its verified tip into the child's record.
-            if (event.type === "pushed_head" && event.ref === observedBranch) observedHead = event.sha;
+            if (event.type === "pushed_head" && event.ref === observedBranch) {
+              rewrittenHead = { ref: event.ref, sha: event.sha };
+              observedHead = event.sha;
+            }
           },
           logKey: msg.threadKey,
         }),
@@ -3014,6 +3094,47 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // post-turn put in its place (a review's re-review at a moved head) stands.
     if (windDownEnding !== undefined && answer === windDownAnswer(windDownEnding, agent.maxMinutes))
       answer = windDownAnswer(windDownEnding, agent.maxMinutes, endingFacts());
+    // The answer is a work report, not evidence of a Git write. Project the
+    // recorder's latest outcome first, then the API's actual PR result, and
+    // preserve the report as explicitly attributed prose. This one answer is
+    // published, stored and delivered; none of those paths parses model text.
+    if (
+      agent.name === "coding" &&
+      isCodingPrRun &&
+      windDownEnding === undefined &&
+      !run.control.requested &&
+      !tailSkipped()
+    ) {
+      const accepted =
+        observedPublicationAuthority() ??
+        (coordinator?.publication !== undefined ? publicationReceipts.at(-1) : branchReceipts.at(-1)) ??
+        acceptedSalvageHead;
+      const observedAccepted = observedPublicationAuthority() ?? accepted;
+      const confirmed =
+        rewrittenHead ?? acceptedSalvageHead ?? (confirmedPublicationPush() ? observedAccepted : undefined);
+      const uncertain =
+        unresolvedDoorPublication ||
+        activeDoorPublication ||
+        (doorPostStepBlocked && !refusalOnObservedBranch()) ||
+        publicationSettlement?.publication.kind === "unknown" ||
+        publicationSettlement?.publication.kind === "pending";
+      const refused =
+        refusalOnObservedBranch() ||
+        (publicationSettlement?.publication.kind === "rejected" &&
+          (observedBranch === undefined || publicationSettlement.binding.branch === observedBranch)) ||
+        (existingPrPublication !== undefined && "blocked" in existingPrPublication);
+      const earlier = accepted ? ` An earlier push to \`${accepted.ref}\` at \`${accepted.sha}\` was confirmed.` : "";
+      const publication = uncertain
+        ? `⚠️ Publication outcome is unknown; the latest push did not confirm the current branch head.${earlier}`
+        : refused
+          ? `⚠️ Publication was refused; no new head was confirmed.${earlier}`
+          : confirmed
+            ? `Published \`${confirmed.ref}\` at \`${confirmed.sha}\` (confirmed by the runner).`
+            : "No push was confirmed by this run.";
+      const report = answer.trim();
+      answer = `${publication}${prNote ? `\n\n${prNote}` : ""}${report ? `\n\nWork report (agent-written; publication claims here are unverified):\n${report}` : ""}`;
+      prNote = undefined; // Every projection sees the same PR result once.
+    }
     // A source lookup without a write-up cannot turn a budget sentence into
     // claimed findings. The next reply in this thread starts a new, authorized
     // run from the session's question; never reuse a cut tool's result.

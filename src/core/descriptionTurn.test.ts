@@ -58,10 +58,11 @@ const DESCRIPTION: PrDescription = {
 };
 
 describe("descriptionTurnTarget — when a description turn is due", () => {
-  it("no description + a push the remote proves + an open PR heading the branch → the turn's target (repo, branch, head, PR)", async () => {
+  it("no description + an accepted push at the remote head + an open PR → the turn's target", async () => {
     const findOpenPr = vi.fn(async () => PR);
     const t = await descriptionTurnTarget({
       observed: observation(),
+      confirmedPush: true,
       description: undefined,
       target,
       findOpenPr,
@@ -137,6 +138,7 @@ describe("descriptionTurnTarget — when a description turn is due", () => {
     const findOpenPr = vi.fn(async () => PR);
     const t = await descriptionTurnTarget({
       observed: observation({ remoteRepo: "acme/discovered" }),
+      confirmedPush: true,
       description: undefined,
       target: { ...target, repo: undefined },
       findOpenPr,

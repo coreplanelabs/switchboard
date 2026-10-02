@@ -25,9 +25,11 @@
 // pushed branch's LOCAL tip (`refs/heads/<branch>`) is the head the body
 // renders at — never HEAD, which is another branch's commit.
 //
-// "Pushed" is OBSERVED, never inferred: the branch counts as pushed only when
-// the remote's own `refs/heads/<branch>` (git ls-remote) is that observed tip.
-// The clone's tracking state (`@{u}`) is NOT the proof — a `--depth` /
+// "Pushed by this run" needs a producer-owned accepted write AND a remote
+// observation at that ref/head. Matching tips alone prove neither a write nor
+// a PR edit; the recorder already emits the accepted head, so this post-step
+// never emits one from an observation. The clone's tracking state (`@{u}`)
+// is NOT the remote observation — a `--depth` /
 // `--single-branch` clone, the cold sandbox's usual shape, never creates the
 // remote-tracking ref for a pushed branch, so `@{u}` fails after a successful
 // `git push -u` (a real push reported as "no pushed upstream", no PR
@@ -36,8 +38,8 @@
 // compare URL is offered only when the remote match proved the branch exists.
 // A proven push with NO description first asks GitHub whether the branch
 // already heads an open PR (a follow-up on an existing PR repushes that PR's
-// own branch): if so the note names that PR as updated by the push and the
-// record gets `pr_opened` with `created: false`; only a branch with no open
+// own branch): if so the note names code updated by the accepted push but
+// emits no `pr_opened` for a lookup; only an API open/edit records one. A branch with no open
 // PR gets the compare URL and "open manually". A description from a workspace
 // sitting on the base is refused ("the branch is the base") — unless the
 // thread's own pull request is known (`CodingPrTarget.ownPr` — open, or merged
@@ -939,8 +941,10 @@ export async function runCodingPrPostStep(input: {
    *  and state are for everyone; the head it was rendered at is `verbose`. */
   verbosity: Verbosity;
   observed: WorkspaceObservation;
-  /** Existing-PR Ship runs count a push only when this run has its accepted publication receipt. */
+  /** Producer-owned accepted write at the observed ref/head, not remote equality. */
   confirmedPush?: boolean;
+  /** An adopted existing-PR run may not edit its bound PR without its accepted write. */
+  requireConfirmedPush?: boolean;
   description: PrDescription | undefined;
   target: CodingPrTarget;
   openPullRequest: (target: PullRequestTarget) => Promise<OpenedPullRequest>;
@@ -1018,15 +1022,12 @@ export async function runCodingPrPostStep(input: {
   const headSha = normalizeHead(observed.head);
   const branch = observed.branch;
   const remoteHead = normalizeHead(observed.remoteHead);
-  const pushed =
-    input.confirmedPush !== false &&
-    headSha !== undefined &&
-    remoteHead !== undefined &&
-    sameCommit(remoteHead, headSha);
-  // Existing-PR Ship runs have a durable push recorder. Without its accepted
-  // receipt, even a submitted description cannot edit the pre-existing PR:
-  // every later branch can reach an open-or-edit path from remote equality.
-  if (input.confirmedPush === false) {
+  // Remote equality observes the branch, never proves this run wrote it.
+  const remoteMatches = headSha !== undefined && remoteHead !== undefined && sameCommit(remoteHead, headSha);
+  const pushed = input.confirmedPush === true && remoteMatches;
+  // An adopted existing-PR run has a stricter publication binding. Ordinary
+  // runs may still edit metadata on a PR they own without a code push.
+  if (input.requireConfirmedPush && !pushed) {
     if (prDescription === undefined) return undefined;
     input.publish({
       type: "run_note",
@@ -1043,9 +1044,11 @@ export async function runCodingPrPostStep(input: {
   // branch names both, so a reader can tell which branch was asked about.
   const moved = branch !== undefined && observed.checkedOut !== undefined && observed.checkedOut !== branch;
   const branchNote = moved
-    ? ` (the branch the run's push named; the workspace was checked out on \`${observed.checkedOut}\`)`
+    ? ` (the ${pushed ? "branch the run pushed" : "observed branch"}; the workspace was checked out on \`${observed.checkedOut}\`)`
     : "";
-  const branchLog = moved ? `${branch} (pushed; checkout on ${observed.checkedOut})` : (branch ?? "unknown");
+  const branchLog = moved
+    ? `${branch} (${pushed ? "pushed" : "observed"}; checkout on ${observed.checkedOut})`
+    : (branch ?? "unknown");
   if (repo === undefined) {
     // Neither the dispatch nor the workspace names a repository — nowhere a
     // PR could be opened. Said plainly when a description was submitted;
@@ -1087,39 +1090,12 @@ export async function runCodingPrPostStep(input: {
   const base = prDescription
     ? await resolveBaseRefLazy(candidates, repo, input.fetchRepoInfo)
     : resolveBaseRef(candidates, undefined);
-  // `pushed` above is the BRANCH's state, not the run's act: the remote holds
-  // the branch at the observed head, which a checkout at the remote's tip
-  // reads exactly like a push — a resident tree provisioned on the default
-  // sits at origin's tip before the run types a thing. So "pushed" is said
-  // only of a branch the run could have pushed: one other than the base
-  // (`pushedBranch` — the gate's `protectedBranches`, src/core/harness/pi/
-  // toolRules.ts, refuse a run's push to the base its pull request would
-  // target and to the repository's default), or the thread's own pull
-  // request's head branch (`pushedPastOwnPr`), never the base by the base's
-  // name. Existing-PR Ship runs have an accepted push receipt and require it;
-  // ordinary runs have no such receipt, so a matching remote tip alone still
-  // cannot distinguish their push from a checkout.
+  // A confirmed run-owned write and a matching remote tip are both required
+  // to publish this run's head. The checkout's equality is only observation;
+  // the base is never a pushed PR head.
   const pushedBranch = branch !== undefined && branch !== base && pushed;
-  // The pushed head is a fact of the run before anything a pull request adds
-  // (run-history item 2; decision 0046): the branch the run pushed and the sha
-  // the remote holds — never a checkout sitting at the base's own tip —
-  // published whether or not a description or a pull request follows.
-  if (pushedBranch && branch !== undefined && headSha !== undefined) {
-    // The `clean` fact (record 0064): no uncommitted or unpushed work at the
-    // push, from the same observation — absent when either measure is missing.
-    const clean =
-      observed.uncommittedChanges !== undefined && observed.unpushedCommits !== undefined
-        ? observed.uncommittedChanges === 0 && observed.unpushedCommits === 0
-        : undefined;
-    input.publish({
-      type: "pushed_head",
-      ref: branch,
-      sha: headSha,
-      by: "push",
-      ...(clean !== undefined ? { clean } : {}),
-      at: systemClock(),
-    });
-  }
+  // The recorder already emitted the accepted write into the canonical run
+  // stream. Do not emit a second, receipt-less pushed_head from observation.
   const ownPr = target.ownPr;
   // Every open and edit renders the same request provenance.
   const requestedBy = input.requestedBy;
@@ -1366,20 +1342,24 @@ export async function runCodingPrPostStep(input: {
     const why =
       remoteHead === undefined
         ? "was not found on the remote"
-        : `has unpushed commits (the remote branch is at ${remoteHead.slice(0, 7)}, the workspace at ${headSha.slice(0, 7)})`;
+        : remoteMatches
+          ? "is visible on the remote, but this run has no confirmed push"
+          : `has unpushed commits (the remote branch is at ${remoteHead.slice(0, 7)}, the workspace at ${headSha.slice(0, 7)})`;
     if (remoteHead !== undefined) {
       // The remote holds the branch, so an open PR may head it (issue 1807);
       // a branch the remote said is absent heads nothing and is never asked.
       const note = await editOpenPrHeadedBy(
         branch,
-        `the branch \`${branch}\`${branchNote} has unpushed commits the pull request does not carry (the remote is at ${remoteHead.slice(0, 7)}, the workspace at ${headSha.slice(0, 7)})`,
+        remoteMatches
+          ? `the branch \`${branch}\`${branchNote} is visible on the remote, but no push by this run was confirmed`
+          : `the branch \`${branch}\`${branchNote} has unpushed commits the pull request does not carry (the remote is at ${remoteHead.slice(0, 7)}, the workspace at ${headSha.slice(0, 7)})`,
       );
       if (note !== undefined) return note;
     }
     console.log(
       `[pr-post] ${logKey} skipped: push not observed (repo ${repo}, branch ${branchLog}, head ${headSha.slice(0, 7)}, remote ${remoteHead?.slice(0, 7) ?? "none"})`,
     );
-    return `⚠️ A PR description was submitted but the branch \`${branch}\`${branchNote} ${why}, so no PR was opened.`;
+    return `⚠️ A PR description was submitted but no push by this run was confirmed for \`${branch}\`${branchNote} (${why}), so no PR was opened.`;
   }
   if (prDescription && pushedBranch && branch !== undefined && headSha?.length === 40 && base) {
     // The identity rewrite before the open or edit (record 0062;
@@ -1557,9 +1537,9 @@ export async function runCodingPrPostStep(input: {
     // updated the PR; "no PR was opened, compare & open manually" would send
     // the reader to duplicate it. The lookup is the same one open-or-edit
     // uses (githubPulls.findOpenPrByHead); the PR body is NOT touched — there
-    // is no description to render — so the note says the push updated it and
-    // the record carries the fact as `pr_opened` with `created: false`. The
-    // note is a warning, not an info line: the coding prompt requires a
+    // is no description to render — so the note says the accepted push
+    // changed its code, but lookup alone never emits `pr_opened`: only an
+    // actual API open/edit proves a metadata change. The note is a warning: the coding prompt requires a
     // resubmitted description after EVERY push to an existing PR
     // (docs/reference/specs/agent-coding.md item 3), so a push without one left the PR
     // possibly describing an earlier state of its branch — a defect of the
@@ -1574,14 +1554,6 @@ export async function runCodingPrPostStep(input: {
       console.log(
         `[pr-post] ${logKey} no description submitted; the push updated the open ${repo}#${existing.number} (${branchLog} @ ${headSha.slice(0, 7)})`,
       );
-      input.publish({
-        type: "pr_opened",
-        url: existing.htmlUrl,
-        number: existing.number,
-        created: false,
-        head: branch,
-        at: systemClock(),
-      });
       const asked = input.descriptionTurnRan
         ? "submit_pr_description was never called, even in the dedicated description turn this run was given"
         : "submit_pr_description was never called";

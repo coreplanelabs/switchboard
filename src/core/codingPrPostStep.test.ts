@@ -90,10 +90,11 @@ function openSpy(result: Partial<OpenedPullRequest> | Error = {}) {
 describe("runCodingPrPostStep (callable with explicit inputs)", () => {
   // Feature: docs/reference/specs/run-history.md item 2 — the pushed head is a fact of the run
   // (decision 0046): what renewal reads, whether or not a pull request opens.
-  it("a proven push publishes `pushed_head` with the branch and the sha before anything else, whether or not a description or a pull request follows; an unpushed tree publishes none", async () => {
+  it("an accepted write is already recorded before the post-step; remote equality alone never emits another pushed head", async () => {
     const events: RunEvent[] = [];
     const common = {
       target: { repo: "acme/api", baseRef: undefined, bindingRef: "main", resolvedRef: "main" },
+      confirmedPush: true, // The recorder already published the accepted write.
       openPullRequest: openSpy().fn,
       fetchRepoInfo: unreachable,
       findOpenPr: noOpenPr,
@@ -104,13 +105,11 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     };
     // pushed, no description: the head is recorded even though no pull request opens
     await runCodingPrPostStep({ ...common, observed: observation(), description: undefined });
-    expect(events.filter((e) => e.type === "pushed_head")).toEqual([
-      { type: "pushed_head", ref: "feat/x", sha: HEAD, by: "push", at: expect.any(Number) },
-    ]);
+    expect(events).toEqual([]);
     // pushed, with a description: the head first, then the pull request
     events.length = 0;
     await runCodingPrPostStep({ ...common, observed: observation(), description: DESCRIPTION });
-    expect(events.map((e) => e.type).slice(0, 2)).toEqual(["pushed_head", "pr_opened"]);
+    expect(events.map((e) => e.type)).toEqual(["pr_opened", "review_artifact"]);
     // not pushed (the remote never saw the head): no pushed_head
     events.length = 0;
     await runCodingPrPostStep({ ...common, observed: observation({ remoteHead: undefined }), description: undefined });
@@ -126,6 +125,64 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     expect(events).toEqual([]);
   });
 
+  it("an observed remote tip without a run-owned push never emits a pushed head or calls the PR writer", async () => {
+    const events: RunEvent[] = [];
+    const openPullRequest = openSpy();
+    const findOpenPr = vi.fn(async (): Promise<OpenPrRef | null> => null);
+    const common = {
+      observed: observation(),
+      confirmedPush: false,
+      target: { repo: "acme/api", baseRef: "main", bindingRef: undefined, resolvedRef: "main" },
+      openPullRequest: openPullRequest.fn,
+      findOpenPr,
+      updatePullRequest: noUpdate,
+      fetchRepoInfo: unreachable,
+      publish: (e: RunEvent) => events.push(e),
+      logKey: "t",
+      verbosity: "quiet" as const,
+    };
+    await runCodingPrPostStep({ ...common, description: undefined });
+    expect(events).toEqual([]);
+    expect(findOpenPr).not.toHaveBeenCalled();
+    // A metadata-only edit is a separate API operation, not a push. Without a
+    // usable PR head the lookup cannot authorize an edit.
+    await runCodingPrPostStep({ ...common, description: DESCRIPTION });
+    expect(events.some((e) => e.type === "pushed_head" || e.type === "pr_opened")).toBe(false);
+    expect(openPullRequest.calls).toHaveLength(0);
+  });
+
+  it("a description alone edits existing PR metadata only when the API succeeds, without inventing a push", async () => {
+    const events: RunEvent[] = [];
+    const updatePullRequest = vi.fn(async () => {});
+    const findOpenPr = vi.fn(async (): Promise<OpenPrRef | null> => ({
+      number: 7,
+      htmlUrl: "https://github.com/acme/api/pull/7",
+      headSha: HEAD,
+    }));
+    const input = {
+      observed: observation(),
+      confirmedPush: false,
+      description: DESCRIPTION,
+      target: { repo: "acme/api", baseRef: "main", bindingRef: undefined, resolvedRef: "main" },
+      openPullRequest: openSpy().fn,
+      findOpenPr,
+      updatePullRequest,
+      fetchRepoInfo: unreachable,
+      publish: (e: RunEvent) => events.push(e),
+      logKey: "t",
+      verbosity: "quiet" as const,
+    };
+    const note = await runCodingPrPostStep(input);
+    expect(note).toContain("PR updated");
+    expect(note).toContain("no push by this run was confirmed");
+    expect(updatePullRequest).toHaveBeenCalledOnce();
+    expect(events.map((e) => e.type)).toEqual(["pr_opened", "review_artifact"]);
+    events.length = 0;
+    updatePullRequest.mockRejectedValueOnce(new Error("HTTP 422"));
+    expect(await runCodingPrPostStep(input)).toContain("HTTP 422");
+    expect(events).toEqual([]);
+  });
+
   it("an existing-PR run without an accepted push cannot edit its PR even after submitting a description", async () => {
     const events: RunEvent[] = [];
     const findOpenPr = vi.fn(async () => ({ number: 7, htmlUrl: "https://github.com/acme/api/pull/7" }));
@@ -134,6 +191,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     const note = await runCodingPrPostStep({
       observed: observation(),
       confirmedPush: false,
+      requireConfirmedPush: true,
       description: DESCRIPTION,
       target: { repo: "acme/api", baseRef: "main", bindingRef: "feat/x", resolvedRef: "feat/x" },
       findOpenPr,
@@ -151,12 +209,13 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     expect(events).toEqual([expect.objectContaining({ type: "run_note", kind: "pr_not_opened" })]);
   });
 
-  it("description + observed pushed branch → PR opened from typed values, pr_opened published, note carries the URL", async () => {
+  it("description + accepted push → PR opened from typed values, pr_opened published, note carries the URL", async () => {
     const spy = openSpy();
     const events: RunEvent[] = [];
     const fetchRepoInfo = vi.fn(unreachable);
     const note = await runCodingPrPostStep({
       observed: observation(),
+      confirmedPush: true,
       description: DESCRIPTION,
       target: { repo: "acme/api", baseRef: undefined, bindingRef: "main", resolvedRef: "main" },
       openPullRequest: spy.fn,
@@ -193,6 +252,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     const events: RunEvent[] = [];
     await runCodingPrPostStep({
       observed: observation(),
+      confirmedPush: true,
       description: golden,
       target: { repo: "acme/api", baseRef: "main", bindingRef: undefined, resolvedRef: undefined },
       openPullRequest: spy.fn,
@@ -203,8 +263,8 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       logKey: "t",
       verbosity: "verbose" as const,
     });
-    expect(events.map((e) => e.type)).toEqual(["pushed_head", "pr_opened", "review_artifact"]);
-    const artifact = events[2];
+    expect(events.map((e) => e.type)).toEqual(["pr_opened", "review_artifact"]);
+    const artifact = events[1];
     if (artifact.type !== "review_artifact" || artifact.artifact !== "pr_description") throw new Error("no artifact");
     expect(artifact).toMatchObject({
       origin: "submitted",
@@ -228,6 +288,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     const events: RunEvent[] = [];
     await runCodingPrPostStep({
       observed: observation(),
+      confirmedPush: true,
       description: DESCRIPTION,
       target: { repo: "acme/api", baseRef: "main", bindingRef: undefined, resolvedRef: undefined },
       openPullRequest: openSpy(new Error("boom")).fn,
@@ -257,6 +318,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     const spy = openSpy();
     await runCodingPrPostStep({
       observed: observation(),
+      confirmedPush: true,
       description: DESCRIPTION,
       target: { repo: "acme/api", baseRef: "main", bindingRef: "feat/x", resolvedRef: "feat/x" },
       openPullRequest: spy.fn,
@@ -284,6 +346,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     });
     const note = await runCodingPrPostStep({
       observed: observation(),
+      confirmedPush: true,
       description: DESCRIPTION,
       target: { repo: "acme/api", baseRef: undefined, bindingRef: undefined, resolvedRef: undefined },
       openPullRequest: spy.fn,
@@ -374,6 +437,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     const fetchRepoInfo = vi.fn(unreachable);
     const published: RunEvent[] = [];
     const note = await runCodingPrPostStep({
+      confirmedPush: true,
       observed: observation({ branch: "plan/p/u1", checkedOut: "plan/p/u1" }),
       description: DESCRIPTION,
       target: {
@@ -534,6 +598,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     const update = vi.fn(noUpdate);
     const note = await runCodingPrPostStep({
       observed: observation({ branch: "feat/x", checkedOut: "feat/x" }),
+      confirmedPush: true,
       description: DESCRIPTION,
       target: {
         repo: "acme/api",
@@ -648,6 +713,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     const update = vi.fn(noUpdate);
     const published: RunEvent[] = [];
     const note = await runCodingPrPostStep({
+      confirmedPush: true,
       observed: observation({ head: HEAD, remoteHead: HEAD, branch: "fix/x", checkedOut: "fix/x" }),
       description: DESCRIPTION,
       target: {
@@ -738,6 +804,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     const update = vi.fn(noUpdate);
     const published: RunEvent[] = [];
     const note = await runCodingPrPostStep({
+      confirmedPush: true,
       observed: observation({ head: HEAD, remoteHead: HEAD, branch: "feat/y", checkedOut: "feat/y" }),
       description: DESCRIPTION,
       target: {
@@ -758,9 +825,8 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     expect(update).not.toHaveBeenCalled();
     expect(spy.calls).toHaveLength(1);
     expect(spy.calls[0]).toMatchObject({ repo: "acme/api", headBranch: "feat/y", base: "main" });
-    expect(published.map((e) => e.type)).toEqual(["pushed_head", "pr_opened", "review_artifact"]);
-    expect(published[0]).toMatchObject({ type: "pushed_head", ref: "feat/y", by: "push" });
-    expect(published[1]).toMatchObject({ type: "pr_opened", number: 52, created: true, head: "feat/y" });
+    expect(published.map((e) => e.type)).toEqual(["pr_opened", "review_artifact"]);
+    expect(published[0]).toMatchObject({ type: "pr_opened", number: 52, created: true, head: "feat/y" });
     expect(note).toMatch(/^🔀 PR opened: \S+\/pull\/52 /);
     expect(note).not.toMatch(/pushed past|\/pull\/41(?!\d)|\/compare\//);
   });
@@ -837,6 +903,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
   it("no explicit base signal AND the GitHub fetch also comes back empty → no PR call, the note names the missing base with the compare URL", async () => {
     const spy = openSpy();
     const note = await runCodingPrPostStep({
+      confirmedPush: true,
       observed: observation(),
       description: DESCRIPTION,
       target: { repo: "acme/api", baseRef: undefined, bindingRef: undefined, resolvedRef: undefined },
@@ -856,6 +923,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
   it("a failing GitHub fetch degrades honestly — no PR call, same note as a genuinely empty answer", async () => {
     const spy = openSpy();
     const note = await runCodingPrPostStep({
+      confirmedPush: true,
       observed: observation(),
       description: DESCRIPTION,
       target: { repo: "acme/api", baseRef: undefined, bindingRef: undefined, resolvedRef: undefined },
@@ -907,9 +975,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       verbosity: "verbose" as const,
     });
     expect(spy.calls).toHaveLength(0);
-    expect(note).toBe(
-      "⚠️ A PR description was submitted but the branch `feat/x` was not found on the remote, so no PR was opened.",
-    );
+    expect(note).toContain("`feat/x` (was not found on the remote), so no PR was opened.");
   });
 
   // The budget wind-down ends a run exactly here (issue 1807): the tree holds
@@ -1109,7 +1175,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
   // and submitted no description (a dependabot PR whose body should stay, a
   // fix round that only pushed). The push updated that PR — the note must say
   // so, and never send the reader to open a duplicate from a compare URL.
-  it("no description + proven push + the branch heads an open PR → note names that PR as updated by the push, pr_opened created:false, no open/edit call, no compare URL", async () => {
+  it("no description + accepted push + an existing PR lookup → note names changed code without claiming a metadata edit", async () => {
     const spy = openSpy();
     const events: RunEvent[] = [];
     const findOpenPr = vi.fn(async (): Promise<OpenPrRef | null> => ({
@@ -1118,6 +1184,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     }));
     const note = await runCodingPrPostStep({
       observed: observation({ branch: "dependabot/github_actions/actions-4c45254bbe" }),
+      confirmedPush: true,
       description: undefined,
       target: { repo: "acme/api", baseRef: "main", bindingRef: undefined, resolvedRef: "main" },
       openPullRequest: spy.fn,
@@ -1137,32 +1204,17 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     expect(note).toContain("earlier state of its branch");
     expect(note).not.toContain("/compare/");
     expect(note).not.toContain("No PR was opened");
-    // the pushed head is on the record before the pull request it updated
-    expect(events[0]).toEqual({
-      type: "pushed_head",
-      ref: expect.any(String),
-      sha: HEAD,
-      by: "push",
-      at: expect.any(Number),
-    });
-    expect(events.slice(1)).toEqual([
-      expect.objectContaining({
-        type: "pr_opened",
-        url: "https://github.com/acme/api/pull/700",
-        number: 700,
-        created: false,
-        // The branch the push landed on rides the event (resident-repos item
-        // 16): the run's release hands it to the resident as the thread's own.
-        head: "dependabot/github_actions/actions-4c45254bbe",
-      }),
-    ]);
+    // The accepted branch receipt was emitted by its producer; a PR lookup
+    // is only observation, never a successful metadata edit.
+    expect(events).toEqual([]);
   });
 
-  it("no description + proven push + no open PR heads the branch → the compare-URL note, the pushed head its only event", async () => {
+  it("no description + proven push + no open PR heads the branch → the compare-URL note, no additional pushed head event", async () => {
     const spy = openSpy();
     const events: RunEvent[] = [];
     const findOpenPr = vi.fn(noOpenPr);
     const note = await runCodingPrPostStep({
+      confirmedPush: true,
       observed: observation(),
       description: undefined,
       target: { repo: "acme/api", baseRef: undefined, bindingRef: "main", resolvedRef: "main" },
@@ -1178,8 +1230,8 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     expect(spy.calls).toHaveLength(0);
     expect(note).toContain("No PR was opened");
     expect(note).toContain("https://github.com/acme/api/compare/feat/x");
-    // no pull request event; the push itself is still a fact of the run
-    expect(events.map((e) => e.type)).toEqual(["pushed_head"]);
+    // No second push event: the recorder owns the accepted write.
+    expect(events).toEqual([]);
   });
 
   it("no description + proven push + no open PR, and the branch has no commits over the base → the note says there is nothing to open and offers no compare link (issue 1699); a count over zero, an unread compare or no reader keeps the compare-URL note", async () => {
@@ -1188,6 +1240,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       const events: RunEvent[] = [];
       const note = await runCodingPrPostStep({
         observed: observation(),
+        confirmedPush: true,
         description: undefined,
         target: { repo: "acme/api", baseRef: undefined, bindingRef: "main", resolvedRef: "main" },
         openPullRequest: spy.fn,
@@ -1200,7 +1253,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
         verbosity: "verbose" as const,
       });
       expect(spy.calls).toHaveLength(0);
-      expect(events.map((e) => e.type)).toEqual(["pushed_head"]);
+      expect(events).toEqual([]);
       return note;
     };
     const asked: Array<[string, string, string]> = [];
@@ -1228,6 +1281,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     const spy = openSpy();
     const events: RunEvent[] = [];
     const note = await runCodingPrPostStep({
+      confirmedPush: true,
       observed: observation(),
       description: undefined,
       target: { repo: "acme/api", baseRef: undefined, bindingRef: "main", resolvedRef: "main" },
@@ -1245,12 +1299,13 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     expect(note).toContain("No PR was opened");
     expect(note).toContain("https://github.com/acme/api/compare/feat/x");
     expect(note).not.toContain("/pull/");
-    expect(events.map((e) => e.type)).toEqual(["pushed_head"]);
+    expect(events).toEqual([]);
   });
 
   it("the open-PR lookup is never asked when open-or-edit will do its own (a proven push with a description), when the remote lacks the branch (no open PR can head it), or when the workspace sat on the base", async () => {
     const findOpenPr = vi.fn(noOpenPr);
     const common = {
+      confirmedPush: true,
       target: { repo: "acme/api", baseRef: undefined, bindingRef: "main", resolvedRef: "main" },
       openPullRequest: openSpy().fn,
       findOpenPr,
@@ -1306,6 +1361,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
   it("HEAD moved to another branch after the push → the PR still opens from the PUSHED branch, the body rendered at its tip", async () => {
     const spy = openSpy();
     const note = await runCodingPrPostStep({
+      confirmedPush: true,
       observed: observation({ branch: "feat/x", checkedOut: "chore/other", head: HEAD, remoteHead: HEAD }),
       description: DESCRIPTION,
       target: { repo: "acme/api", baseRef: undefined, bindingRef: "main", resolvedRef: "main" },
@@ -1339,9 +1395,8 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       verbosity: "verbose" as const,
     });
     expect(spy.calls).toHaveLength(0);
-    expect(note).toBe(
-      "⚠️ A PR description was submitted but the branch `feat/x` (the branch the run's push named; the workspace was checked out on `chore/other`) was not found on the remote, so no PR was opened.",
-    );
+    expect(note).toContain("the observed branch; the workspace was checked out on `chore/other`");
+    expect(note).toContain("was not found on the remote");
   });
 
   it("the pushed branch has no local tip to observe (HEAD moved and the branch is gone locally) → honest note naming both, no PR call, no compare URL", async () => {
@@ -2575,6 +2630,7 @@ describe("runCodingPrPostStep — the identity rewrite before the open (record 0
 
   const common = (events: RunEvent[], spy: ReturnType<typeof openSpy>) => ({
     observed: observation(),
+    confirmedPush: true, // The rewrite runs after a producer-confirmed branch write.
     description: DESCRIPTION,
     target: {
       repo: "acme/api",
@@ -2631,7 +2687,6 @@ describe("runCodingPrPostStep — the identity rewrite before the open (record 0
     expect(seam.rewrite).toHaveBeenCalledTimes(1);
     expect(note).toContain("1 commit(s) re-authored");
     expect(events.filter((event) => event.type === "pushed_head")).toEqual([
-      expect.objectContaining({ ref: "feat/x", sha: HEAD, by: "push" }),
       expect.objectContaining({ ref: "feat/x", sha: REBUILT, by: "push" }),
     ]);
     expect(events).toContainEqual(expect.objectContaining({ type: "pr_opened", number: 7, rewritten: 1 }));
