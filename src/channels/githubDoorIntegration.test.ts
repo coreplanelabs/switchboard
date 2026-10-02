@@ -1,4 +1,5 @@
 import { spawn, execFile } from "node:child_process";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createServer } from "node:http";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
@@ -206,9 +207,12 @@ describe("GitHub door against a real Git smart HTTP peer", () => {
       ).toBe(true);
       if (mode === "existing PR")
         expect(bindings.setPublication(runId, { ref: "fix", expectedHeadSha: old })).toBe(true);
+      const requestEffects = new AsyncLocalStorage<{ writeTokens: number; claims: number; forwarded: number }>();
       const receipt: string[] = [];
       const recorder = {
         begin: async () => {
+          const effects = requestEffects.getStore();
+          if (effects) effects.claims++;
           receipt.push("pending");
           return true;
         },
@@ -226,15 +230,24 @@ describe("GitHub door against a real Git smart HTTP peer", () => {
       expect(bindings.allowToolPush(runId, "effect", { ref: "refs/heads/fix", old, next }, bearerHashOf(bearer))).toBe(
         true,
       );
-      let writeTokens = 0;
       let forwarded = 0;
       let loseResponse = false;
-      const seen: Array<{ contentLength: string | undefined; transferEncoding: string | undefined }> = [];
+      const seen: Array<{
+        url: string | undefined;
+        contentLength: string | undefined;
+        transferEncoding: string | undefined;
+        writeTokens: number;
+        claims: number;
+        forwarded: number;
+        authorityBefore: boolean;
+        authorityAfter?: boolean;
+      }> = [];
       const handler = createGithubDoorHandler({
         bearers,
         bindings,
         token: async (scope) => {
-          if (scope === "write") writeTokens++;
+          const effects = requestEffects.getStore();
+          if (scope === "write" && effects) effects.writeTokens++;
           return "trusted-only";
         },
         fetcher: async (url, init) => {
@@ -242,7 +255,11 @@ describe("GitHub door against a real Git smart HTTP peer", () => {
             return new Response(JSON.stringify({ default_branch: "main" }), {
               headers: { "content-type": "application/json" },
             });
-          if (url.endsWith("/git-receive-pack")) forwarded++;
+          if (url.endsWith("/git-receive-pack")) {
+            forwarded++;
+            const effects = requestEffects.getStore();
+            if (effects) effects.forwarded++;
+          }
           const response = await gitBackend(root, url, init);
           if (loseResponse && url.endsWith("/git-receive-pack"))
             throw new Error("response lost after Git accepted update");
@@ -250,13 +267,35 @@ describe("GitHub door against a real Git smart HTTP peer", () => {
         },
       });
       const server = createServer((req, res) => {
-        if (req.url?.endsWith("/git-receive-pack"))
-          seen.push({
-            contentLength: req.headers["content-length"],
-            transferEncoding: req.headers["transfer-encoding"],
-          });
-        void handler(req, res);
+        const effects: (typeof seen)[number] = {
+          url: req.url,
+          contentLength: req.headers["content-length"],
+          transferEncoding: req.headers["transfer-encoding"],
+          writeTokens: 0,
+          claims: 0,
+          forwarded: 0,
+          authorityBefore: bindings.hasToolPush(runId, bearerHashOf(bearer)),
+        };
+        seen.push(effects);
+        void requestEffects.run(effects, async () => {
+          await handler(req, res);
+          effects.authorityAfter = bindings.hasToolPush(runId, bearerHashOf(bearer));
+        });
       });
+      const expectLargePushEffects = (start = 0) => {
+        const requests = seen.slice(start);
+        // Git's advertisement uses a write token; the empty probe must not.
+        expect(
+          requests.filter((request) => request.url?.includes("info/refs") && request.writeTokens > 0),
+        ).toMatchObject([{ writeTokens: 1, claims: 0, forwarded: 0, authorityBefore: true, authorityAfter: true }]);
+        expect(requests.filter((request) => request.contentLength === "4")).toMatchObject([
+          { writeTokens: 0, claims: 0, forwarded: 0, authorityBefore: true, authorityAfter: true },
+        ]);
+        expect(requests.filter((request) => request.transferEncoding === "chunked")).toMatchObject([
+          { writeTokens: 1, claims: 1, forwarded: 1, authorityBefore: true, authorityAfter: false },
+        ]);
+        expect(requests.reduce((total, request) => total + request.writeTokens, 0)).toBe(2);
+      };
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
       try {
         const addr = server.address();
@@ -275,13 +314,11 @@ describe("GitHub door against a real Git smart HTTP peer", () => {
           "origin",
           "fix",
         );
-        expect(seen).toContainEqual({ contentLength: "4", transferEncoding: undefined });
-        expect(seen.some((request) => request.transferEncoding === "chunked")).toBe(true);
+        expectLargePushEffects();
         expect(await git("-C", repo, "rev-parse", "refs/heads/fix")).toBe(next);
         expect(bindings.hasToolPush(runId, bearerHashOf(bearer))).toBe(false);
         expect(bindings.get(runId)?.refConfirmed).toBe(true);
         expect(receipt).toEqual(["pending", "accepted"]);
-        expect(writeTokens).toBe(1);
         expect(forwarded).toBe(1);
         await git("-C", source, "commit", "--allow-empty", "-m", "unauthorized next");
         await expect(git("-c", `credential.helper=${helper}`, "-C", source, "push", "origin", "fix")).rejects.toThrow();
@@ -302,6 +339,7 @@ describe("GitHub door against a real Git smart HTTP peer", () => {
             ),
           ).toBe(true);
           loseResponse = true;
+          const requestStart = seen.length;
           await expect(
             git(
               "-c",
@@ -315,11 +353,11 @@ describe("GitHub door against a real Git smart HTTP peer", () => {
               "fix",
             ),
           ).rejects.toThrow();
+          expectLargePushEffects(requestStart);
           expect(await git("-C", repo, "rev-parse", "refs/heads/fix")).toBe(later);
           expect(receipt).toEqual(["pending", "accepted", "pending"]);
           expect(bindings.publicationOf(runId)).toEqual({ blocked: "publication outcome is uncertain" });
           expect(bindings.hasToolPush(runId, bearerHashOf(bearer))).toBe(false);
-          expect(writeTokens).toBe(2);
           expect(forwarded).toBe(2);
           await expect(
             git("-c", `credential.helper=${helper}`, "-C", source, "push", "origin", "fix"),
