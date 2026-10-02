@@ -39,6 +39,7 @@ export default defineConfig({
       "runLedger.test.ts",
       "runTranscript.test.ts",
       "sessionLog.test.ts",
+      "sessionUnification.test.ts",
       "delivery.test.ts",
       "costs.test.ts",
     ],

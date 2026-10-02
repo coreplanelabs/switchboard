@@ -1,3 +1,10 @@
+import type {
+  CanonicalCheckpointSource,
+  ContextCheckpointRequest,
+  ContextCheckpointResult,
+} from "../references/contextCheckpoint.js";
+export type { ContextCheckpointRequest, ContextCheckpointResult } from "../references/contextCheckpoint.js";
+import type { ContextDependencies } from "../references/contextDependencies.js";
 import type { SessionSources } from "../references/receipts.js";
 // The ledger seam (docs/reference/specs/run-history.md item 28): what the bot calls, with
 // two implementations — `WorkerRunLedger` (HTTPS to the state Worker; the
@@ -80,6 +87,7 @@ import type {
   StepRecord,
   StopMode,
   TranscriptTurn,
+  TranscriptRow,
 } from "./types.js";
 
 export interface HeartbeatResult {
@@ -117,6 +125,9 @@ export function mergeRequesterTarget(prior: RequesterTarget | null, next: Reques
 }
 
 export interface RunLedger {
+  /** Replace equivalent ordinary origins only through a verified durable checkpoint. */
+  normalizeContextOrigins(request: ContextCheckpointRequest): Promise<ContextCheckpointResult>;
+  readContextCheckpoint(runId: string): Promise<CanonicalCheckpointSource | undefined>;
   /** Atomically mint a monotonic resident attachment fence for the live ledger owner. */
   residentClaim(
     runId: string,
@@ -151,6 +162,7 @@ export interface RunLedger {
     key: string,
     rowId: string,
     rows: readonly { part: number; json: string }[],
+    context?: ContextDependencies,
   ): Promise<{ ok: boolean; appended: boolean }>;
   /** Own the session log for the run: its writes land, other source-tracked writers are fenced.
    *  Taken after the history claim, so a refused claim never steals a live run's log.
@@ -161,6 +173,8 @@ export interface RunLedger {
   releaseSession(key: string, runId: string, gen: string): Promise<FenceResult>;
   /** The rows `[from, to]` (the tail when `to` is absent) as a conversation counted from `from`. */
   readSession(key: string, from: number, to?: number): Promise<AssembledTranscript>;
+  /** Exact keyed parts for immutable report replay; absent or trimmed entries yield no bytes. */
+  readSessionEntry(key: string, rowId: string): Promise<readonly TranscriptRow[] | undefined>;
   /** The newest whole turns within `maxBytes` and the index they start at (item 4). */
   readSessionTail(
     key: string,

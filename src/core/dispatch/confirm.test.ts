@@ -99,7 +99,7 @@ const noRedispatch = async (): Promise<DispatchOutcome> => {
   throw new Error("a run row must not redispatch");
 };
 
-const pending = (id: string, user = "slack:UADMIN"): PendingConfirmation => ({
+const pending = (id: string, user = "slack:UADMIN"): Omit<RunConfirmation, "expiresAt"> => ({
   kind: "run",
   id,
   message: message(user),
@@ -155,6 +155,135 @@ describe("the named lines and the clicker's ids", () => {
 });
 
 describe("consumeAndRun — the stored input runs once, as the requester, through the typed path (record 0044)", () => {
+  it("revalidates operator context after consuming the saved bytes before any effect or decision event", async () => {
+    const d = deps();
+    const context = {
+      version: 1 as const,
+      status: "known" as const,
+      revision: 1,
+      origins: [],
+      slack: [],
+      mcp: [],
+      memoryScopes: ["user:slack:UADMIN"],
+    };
+    await d.store.put({ ...pending("c1"), derivation: { kind: "operator", context } }, CONFIRMATION_TTL_MS);
+    let revoked = false;
+    const consume = d.store.consume.bind(d.store);
+    vi.spyOn(d.store, "consume").mockImplementation(async (...args) => {
+      const value = await consume(...args);
+      revoked = true;
+      return value;
+    });
+    const validate = vi.fn(async () =>
+      revoked ? { ok: false as const, code: "saved-context-unproved" as const } : { ok: true as const },
+    );
+    const { io, ending, trace } = request(d);
+    const res = await consumeAndRun(
+      d,
+      { id: "c1", actorIds: ["slack:UADMIN"] },
+      io,
+      ending,
+      trace,
+      noRedispatch,
+      validate,
+    );
+    expect(res).toMatchObject({ kind: "refused", refusal: "confirmation_unreadable" });
+    expect(res).not.toHaveProperty("row");
+    expect(validate).toHaveBeenCalledWith(context, message());
+    expect(codingModelIn(d)).toBe("anthropic/coding-model");
+    expect(d.audits).toEqual([]);
+    expect(d.runRegistry.snapshotById("run-1")).toBeNull();
+  });
+
+  it("runs an unchanged operator offer and carries a fresh publication check to the reply boundary", async () => {
+    const d = deps();
+    const context = { version: 1 as const, status: "known" as const, revision: 0, origins: [], slack: [], mcp: [] };
+    await d.store.put({ ...pending("c1"), derivation: { kind: "operator", context } }, CONFIRMATION_TTL_MS);
+    let revoked = false;
+    const validate = vi.fn(async () =>
+      revoked ? { ok: false as const, code: "saved-context-unproved" as const } : { ok: true as const },
+    );
+    const { io, ending, trace } = request(d);
+    const res = await consumeAndRun(
+      d,
+      { id: "c1", actorIds: ["slack:UADMIN"] },
+      io,
+      ending,
+      trace,
+      noRedispatch,
+      validate,
+    );
+    expect(res.kind).toBe("ran");
+    expect(codingModelIn(d)).toBe("anthropic/claude-opus-5");
+    if (res.kind !== "ran") throw new Error("expected command");
+    expect(await res.publicationCheck?.()).toEqual({ ok: true });
+    revoked = true;
+    expect(await res.publicationCheck?.()).toMatchObject({ ok: false });
+  });
+
+  it.each(["missing-validator", "corrupt", "unknown"])(
+    "withholds an operator offer with %s context",
+    async (failure) => {
+      const d = deps();
+      const row = {
+        ...pending("c1"),
+        derivation: {
+          kind: "operator",
+          context: {
+            version: 1,
+            status: failure === "unknown" ? "unknown" : "known",
+            revision: 0,
+            origins: [],
+            slack: [],
+            mcp: [],
+          },
+        },
+      };
+      if (failure === "corrupt") row.derivation.context = {} as never;
+      await d.store.put(row as PendingConfirmation, CONFIRMATION_TTL_MS);
+      const { io, ending, trace } = request(d);
+      const res = await consumeAndRun(
+        d,
+        { id: "c1", actorIds: ["slack:UADMIN"] },
+        io,
+        ending,
+        trace,
+        noRedispatch,
+        failure === "missing-validator" ? undefined : async () => ({ ok: true }),
+      );
+      expect(res).toMatchObject({ kind: "refused" });
+      expect(res).not.toHaveProperty("row");
+      expect(codingModelIn(d)).toBe("anthropic/coding-model");
+      expect(d.runRegistry.snapshotById("run-1")).toBeNull();
+    },
+  );
+
+  it("withholds command output and answer events when source access changes during execution", async () => {
+    const d = deps();
+    const context = { version: 1 as const, status: "known" as const, revision: 0, origins: [], slack: [], mcp: [] };
+    await d.store.put({ ...pending("c1"), derivation: { kind: "operator", context } }, CONFIRMATION_TTL_MS);
+    let revoked = false;
+    const invoke = d.commands!.invoke.bind(d.commands);
+    vi.spyOn(d.commands!, "invoke").mockImplementation(async (...args) => {
+      const result = await invoke(...args);
+      revoked = true;
+      return result;
+    });
+    const { io, ending, trace } = request(d);
+    const res = await consumeAndRun(
+      d,
+      { id: "c1", actorIds: ["slack:UADMIN"] },
+      io,
+      ending,
+      trace,
+      noRedispatch,
+      async () => (revoked ? { ok: false, code: "saved-context-unproved" } : { ok: true }),
+    );
+    expect(res).toMatchObject({ kind: "refused" });
+    expect(JSON.stringify(res)).not.toContain("claude-opus-5");
+    expect(res).not.toHaveProperty("row");
+    expect(d.runRegistry.snapshotById("run-1")?.events.some((event) => event.type === "answer")).toBe(false);
+  });
   it("runs the row's command with its input as the requester: source confirm on the audit line, one record with outcome confirmed, the reply's first line the receipt, the setting changed", async () => {
     const d = deps();
     await d.store.put(pending("c1"), CONFIRMATION_TTL_MS);

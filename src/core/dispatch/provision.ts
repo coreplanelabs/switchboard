@@ -31,7 +31,11 @@ import { isRunStopError } from "../../execution/executor.js";
 import type { ResidentStep } from "../../execution/residentStepTrace.js";
 import { graftResidentSteps, residentTraceOf } from "../../execution/residentTrace.js";
 import { ResidentNeedsRefError } from "../../execution/resident.js";
-import { memoryContextBlock, type MemoryStore } from "../memory/index.js";
+import { reflectionActor, type MemoryStore, type MemoryRecord } from "../memory/index.js";
+import type { AudienceCheck } from "../audienceDecision.js";
+import type { ContextDependencies } from "../references/contextDependencies.js";
+import { authorize } from "../authz/authorize.js";
+import { readOperatorMemory } from "./operatorMemory.js";
 import { provisionalBearerExpiresAt } from "../budgets.js";
 import type { RunBearerStore } from "../modelProxy/runBearers.js";
 import type { GitBindings } from "../modelProxy/gitBindings.js";
@@ -164,40 +168,50 @@ export interface ProvisionDeps
 
 /**
  * The memory read, STARTED: a promise the caller awaits when the prompt is
- * composed, so the memory Worker round trip overlaps the repo/PR resolution and
- * the workspace attach. Never before the agent gate (a refused request must not
+ * composed, so the memory Worker round trip overlaps the workspace attach.
+ * Never before the agent gate (a refused request must not
  * touch memory); with memory off it resolves to no block and the request is
  * byte-identical to memory-off.
  */
 export function startMemoryRead(
   deps: ProvisionDeps,
-  ctx: { msg: IncomingMessage; directives: RequestDirectives; repoCtxP: Promise<RepoContext>; root: Span },
-): ReturnType<typeof memoryContextBlock> {
+  ctx: {
+    msg: IncomingMessage;
+    directives: RequestDirectives;
+    repoCtxP: Promise<RepoContext>;
+    root: Span;
+    authorizeMemory?: (candidate: MemoryRecord) => Promise<AudienceCheck>;
+    onContext?: (dependencies: ContextDependencies) => void;
+  },
+): Promise<string | undefined> {
   const { msg, directives, repoCtxP, root } = ctx;
-  // Cross-session memory — READ path, STARTED here and awaited
-  // below, so the memory Worker round trip (up to 5 s) overlaps the repo/PR
-  // resolution and the executor attach instead of adding to them. Its scopes
-  // are the org, this channel, this user, and — once resolution settles —
-  // the bound repo; the read never depends on the repo GATE, only on
-  // the repo NAME, and a failed resolution simply means no repo scope.
-  // Started after the agent gate, never before: a refused request must not
-  // touch memory (retrieval bumps usage counters). Flag-gated: with memory
-  // disabled (default) this resolves to undefined via a NullMemoryStore,
-  // leaving `messages` and `system` byte-identical to memory-off. The no-op
-  // catch keeps an early return (repo refusal, ask-once) from leaving the
-  // rejection unhandled; the real await below still surfaces a failure where
-  // it did.
-  const memoryBlockP = root.span("dispatch.memory_read", (span) =>
-    memoryContextBlock(
-      deps.config.config.organization,
-      deps.config.config.memory,
-      deps.memory,
-      directives.text,
-      msg.userId,
-      { channelId: msg.channelId, repo: repoCtxP.then((ctx) => ctx.repo) },
+  // Source admission precedes rendering. A failed repo resolution omits that
+  // scope, and an unavailable saved revision costs only that candidate.
+  // Attach owns setup errors; the catch keeps its early return from leaving
+  // the independently started memory promise unhandled.
+  const memoryBlockP = root.span("dispatch.memory_read", async (span) => {
+    const repo = await repoCtxP.then((value) => value.repo).catch(() => undefined);
+    const actor = reflectionActor(chatActorOf(deps.config, msg), { channelId: msg.channelId });
+    const context = await readOperatorMemory({
+      organization: deps.config.config.organization,
+      requester: msg.userId,
+      channelId: msg.channelId,
+      text: directives.text,
+      repo,
+      memoryConfig: deps.config.config.memory,
+      memory: deps.memory,
       span,
-    ),
-  );
+      canReadScope: (key) => {
+        const kind = key.split(":", 1)[0];
+        if (kind !== "org" && kind !== "user" && kind !== "repo" && kind !== "channel") return false;
+        return authorize(actor, "memory:read", { type: "memory-scope", key, kind }).allow;
+      },
+      authorizeSource: ({ candidate }) =>
+        ctx.authorizeMemory?.(candidate) ?? Promise.resolve({ ok: false, code: "saved-context-unproved" }),
+    });
+    if (context.context) ctx.onContext?.(context.context);
+    return context.memory;
+  });
   memoryBlockP.catch(() => {});
   return memoryBlockP;
 }
@@ -730,6 +744,7 @@ export interface ReserveContext {
   root: Span;
   /** The run that spawned this one (run-history item 46), when it is a child. */
   parentRunId?: string;
+  childHandoff?: ChildHandoff;
   /** The coordinator's instance and key (item 48), when a coordinator spawned it. */
   coordinator?: CoordinatorTag;
   /** Where the run's conversation starts (item 52), on the row so a reclaim keeps it. */
@@ -809,6 +824,7 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
             readonly: profile.identity === "read",
             profile,
             ...(parentRunId !== undefined ? { parentRunId } : {}),
+            ...(ctx.childHandoff !== undefined ? { childHandoff: ctx.childHandoff } : {}),
             ...(ctx.restartOf !== undefined ? { restartOf: ctx.restartOf } : {}),
             ...coordinatorFields(coordinator),
             ...(seed !== undefined ? { seed } : {}),
@@ -823,7 +839,7 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
         if (!coordinator) throw err;
         throw new RefusalError(refusalOf("child_reservation_failed", "The child could not be durably reserved."));
       });
-    if (coordinator && reserved.kind !== "tracked")
+    if ((coordinator || ctx.childHandoff !== undefined) && reserved.kind !== "tracked")
       throw new RefusalError(
         refusalOf(
           "child_reservation_failed",
@@ -1306,7 +1322,7 @@ export interface PromptContext {
   /** The attach's answer: the resident flag and the binding's worktree path. */
   selection: ExecutorSelection;
   isPrReview: boolean;
-  memoryBlockP: ReturnType<typeof memoryContextBlock>;
+  memoryBlockP: ReturnType<typeof startMemoryRead>;
   verifiedAtAttach: boolean;
   resume: ResumeContext | undefined;
   root: Span;
@@ -1498,3 +1514,4 @@ export async function composePrompt(deps: ProvisionDeps, ctx: PromptContext): Pr
 /** Floor between two edits of a run's status card (see `coalesceStatus`). Below
  *  the 5 s heartbeat so a heartbeat frame is never held back by it. */
 export const STATUS_UPDATE_MIN_MS = 3000;
+import type { ChildHandoff } from "./handoff.js";

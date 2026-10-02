@@ -705,9 +705,11 @@ it("the session search derives the unit's working keys <instance>:<unit>:coding 
       [{ ...run("c0"), session: undefined }],
     ),
   });
-  answer({ "/api/runs.search": () => json({ session: "plan-p-1:U16:coding", hits: [], gaps: [] }) });
+  answer({ "/api/runs.search": () => json({ session: "plan-p-1:U16:coding:@context-v1", hits: [], gaps: [] }) });
   await w.find("#search-words").setValue("lockfile");
   await w.find("#search form").trigger("submit");
   await flush();
-  expect(fetchMock.mock.calls[0][0]).toBe("/api/runs.search?session=plan-p-1%3AU16%3Acoding&query=lockfile&limit=20");
+  expect(fetchMock.mock.calls[0][0]).toBe(
+    "/api/runs.search?session=plan-p-1%3AU16%3Acoding%3A%40context-v1&query=lockfile&limit=20",
+  );
 });

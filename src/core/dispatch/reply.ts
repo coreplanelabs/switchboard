@@ -1,3 +1,5 @@
+import type { ContextDependencies } from "../references/contextDependencies.js";
+import type { MemoryRecord } from "../memory/types.js";
 import { answerOutcomeDetail, type AnswerOutcome } from "../answerOutcome.js";
 import {
   audienceRefusalText,
@@ -714,6 +716,7 @@ export interface DeliveryContext {
   root: Span;
   /** A source-bearing answer is rechecked before any channel publication. */
   publicationCheck?: () => Promise<AudienceCheck>;
+  currentWorkCheck?: () => Promise<string | undefined>;
   audience?: AudienceTrace;
 }
 
@@ -873,7 +876,8 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
           if (!privateDecision.ok) return refusal(privateDecision);
           if (publication && !publication.ok) return refusal(publication);
           if (audience.refusal?.withheldAt) return refusal({ ok: false, code: audience.refusal.code });
-          return io.reply(prNote ? `${channelAnswer}\n\n${prNote}` : channelAnswer);
+          const currentWork = await ctx.currentWorkCheck?.();
+          return io.reply(currentWork ?? (prNote ? `${channelAnswer}\n\n${prNote}` : channelAnswer));
         }),
       // A null channel's reply resolves but reaches nobody: the seal says
       // `replyOk: false` with the reason (run-history.md item 38).
@@ -903,6 +907,8 @@ export interface AfterReplyContext {
   stopped: StopMode | undefined;
   answer: string;
   toolCalls: number;
+  producerContext?: ContextDependencies;
+  admitMemory?: (record: MemoryRecord) => Promise<AudienceCheck>;
 }
 
 /**
@@ -928,6 +934,8 @@ export function afterReply(deps: ReplyDeps, ctx: AfterReplyContext): void {
   if (stopped !== "hard")
     scheduleReflection({
       cfg: deps.config.config.memory,
+      context: ctx.producerContext,
+      ...(ctx.admitMemory ? { admitMemory: ctx.admitMemory } : {}),
       store: deps.memory,
       // The extractor's one call goes through pi's model library
       // (harness-pi.md item 13), never the loop's own provider adapters.

@@ -45,6 +45,9 @@ export interface RunsReadCapability {
   service: RunsService;
   actor: Actor;
   runId?: string;
+  /** Persist the original producer's validated dependency closure before any
+   * stored answer or review details enter this run's model context. */
+  admitContext?(runId: string): Promise<boolean>;
   /** A successful exact-thread read must be revalidated before the main reply. */
   recordThreadWorkRead?: (result: string) => void;
 }
@@ -93,6 +96,23 @@ function reviewFactsOf(view: RunView) {
       : {}),
     ...(view.reviewPost !== undefined ? { reviewPost: view.reviewPost } : {}),
   };
+}
+
+/** The record was read already. A result may have waited while other children
+ * ran, so current source admission happens immediately before tool exposure. */
+async function admittedResult(
+  capability: RunsReadCapability,
+  runId: string,
+  row: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  if (row.finalReply === undefined && row.reviewVerdict === undefined && row.reviewPost === undefined) return row;
+  try {
+    if (await capability.admitContext?.(runId)) return row;
+  } catch {
+    // An unavailable source check withholds only the derived result.
+  }
+  const { finalReply: _reply, reviewVerdict: _verdict, reviewPost: _post, ...metadata } = row;
+  return { ...metadata, contextUnavailable: "The stored result's source access could not be verified." };
 }
 
 /** A child is its thread (agent-conductor item 10): the run now speaking for a
@@ -190,7 +210,8 @@ export const spawnRunTool: RunnableTool = {
   description:
     "Start a child run as the person who asked you: an ordinary Switchboard run of the named preset, in a thread of its own in this " +
     "channel, under their permissions — what they could start by hand with `agent:<preset>`. A read child sees this conversation: " +
-    "it starts from this conversation's text so far (every user and assistant turn, never your tool calls or their results) plus " +
+    "it starts from this conversation's structured evidence, including completed tool results and attachments, plus " +
+    "durable parent recall and working notes when a session exists. Provider reasoning is omitted. " +
     `\`prompt\`, its one new turn — so say what it should do. Presets a child can run: ${CHILD_PRESETS().join(", ")}. ` +
     "For an explicit 'ship these' request listing at least two PR URLs, `ship` is also allowed only with one listed PR's bare URL as `prompt` and its exact repository as `repo`; each Ship unit gets its own full lease and does not consume the read-child cap. Other write spawns are refused `spawn_identity`. " +
     `\`repo\` (owner/name) for a preset that works in a ` +
@@ -211,7 +232,7 @@ export const spawnRunTool: RunnableTool = {
       },
       prompt: {
         type: "string",
-        description: "What the child should do — its one new turn after this conversation's text",
+        description: "What the child should do — its one new turn after the inherited context",
       },
       repo: { type: "string", description: "owner/name of the repository the child works in, for a repository preset" },
       budget: { type: "integer", description: "The child's wall clock in whole minutes, at least 2 (optional)" },
@@ -233,7 +254,7 @@ export const spawnRunTool: RunnableTool = {
     if (!Object.hasOwn(AGENTS, preset))
       return `error: unknown preset "${preset}" — one of ${CHILD_PRESETS().join(", ")}`;
     const prompt = String(input.prompt ?? "").trim();
-    if (!prompt) return "error: prompt is required — what the child should do, after this conversation's text";
+    if (!prompt) return "error: prompt is required — what the child should do, after the inherited context";
     const request: SpawnRequest = { preset, prompt };
     if (input.repo !== undefined && String(input.repo).trim()) request.repo = String(input.repo).trim();
     if (input.budget !== undefined) {
@@ -258,6 +279,7 @@ export const spawnRunTool: RunnableTool = {
     const out = await spawn.spawn(request, {
       remainingMs: ctx.remainingMs?.() ?? Number.POSITIVE_INFINITY,
       ...(conversation ? { conversation } : {}),
+      ...(ctx.sourceContext ? { context: ctx.sourceContext } : {}),
     });
     if (out.kind === "refused") return `spawn refused (${out.reason}): ${out.message}`;
     return (
@@ -519,11 +541,22 @@ export const awaitRunsTool: RunnableTool = {
       });
       if (decision.kind === "end") {
         const running = watch.pending();
+        const rows: Record<string, unknown>[] = [];
+        for (const id of ids) {
+          const state = watch.get(id)!;
+          rows.push(
+            await admittedResult(
+              ctx.runs,
+              state.kind === "ended" ? (state.continuedBy ?? id) : id,
+              childRow(id, state, views.get(id)),
+            ),
+          );
+        }
         return JSON.stringify({
           ended: decision.why,
           waitedMs: now - startedAt,
           note: waitNote(decision.why, running),
-          runs: ids.map((id) => childRow(id, watch.get(id)!, views.get(id))),
+          runs: rows,
         });
       }
       const ms = Math.min(AWAIT_POLL_MS, Math.max(0, decision.until - now));
@@ -616,11 +649,13 @@ export const getRunStatusTool: RunnableTool = {
     const current = await currentRunOf(ctx.runs, view);
     const full = current.id === view.id ? res : await service.getRun(current.id, { include: "messages" });
     const finalReply = current.finished && full.ok ? finalReplyOf(full.value) : undefined;
-    return JSON.stringify({
-      ...rowFollowing(view, current),
-      ...(finalReply !== undefined ? { finalReply } : {}),
-      ...(current.finished ? reviewFactsOf(current) : {}),
-    });
+    return JSON.stringify(
+      await admittedResult(ctx.runs, current.id, {
+        ...rowFollowing(view, current),
+        ...(finalReply !== undefined ? { finalReply } : {}),
+        ...(current.finished ? reviewFactsOf(current) : {}),
+      }),
+    );
   },
 };
 
@@ -637,5 +672,5 @@ export const RUN_TOOLS: readonly RunnableTool[] = [
  *  field docs and the tools that read them sit together. */
 export type RunToolsContext = Pick<
   ToolContext,
-  "spawn" | "runs" | "steer" | "wait" | "remainingMs" | "conversation" | "signal"
+  "spawn" | "runs" | "steer" | "wait" | "remainingMs" | "conversation" | "sourceContext" | "signal"
 >;

@@ -1,5 +1,46 @@
+import type { UnitSeedReceipt } from "../../src/core/coordinator/unitSeedReceipt.js";
+import { preserveCheckpointState } from "../../src/core/runLedger/checkpointState.js";
+import {
+  checkpointMembersOf,
+  checkpointMemberHashesOf,
+  ORDINARY_CONTEXT_HISTORY_RUNS,
+  planContextCheckpoint,
+  validateContextCheckpoint,
+  isContextCheckpointReceipt,
+  applyContextCheckpoint,
+  applyContextCheckpointAliases,
+  type CanonicalCheckpointSource,
+  type ContextCheckpointReceipt,
+  type ContextCheckpointRequest,
+  type ContextCheckpointResult,
+} from "../../src/core/references/contextCheckpoint.js";
+import {
+  contextDependenciesHash,
+  contextDependenciesContain,
+  mergeContextDependencies,
+} from "../../src/core/references/contextDependencies.js";
+import { assembleTranscript } from "../../src/core/runLedger/transcript.js";
+import {
+  handoffRangePins,
+  sessionRangesAvailable,
+  sessionRowIsPinned,
+  type SessionRangePin,
+  type SessionRangePins,
+} from "../../src/core/runLedger/sessionRangePins.js";
+import { uncoveredSourceResult, verifiedSourceResults } from "../../src/core/references/sourceResultContext.js";
+import {
+  isContextDependencies,
+  UNKNOWN_CONTEXT_DEPENDENCIES,
+  type ContextDependencies,
+} from "../../src/core/references/contextDependencies.js";
+import { contextReferencesOf, type ContextReference } from "../../src/core/runLedger/contextRetention.js";
+import { isChildHandoff, type ChildHandoff } from "../../src/core/dispatch/handoff.js";
 import {
   type SessionSources,
+  type SessionSourceOwner,
+  appendSessionContext,
+  sourceHash,
+  taintSessionSources,
   isSessionSources,
   mergeSessionSources,
   sourcesBelongToSession,
@@ -12,6 +53,7 @@ import {
   type PrivateWorkerEventInput,
 } from "../../src/core/privateWorkerLog.ts";
 import type { MemoryCandidate, MemoryRecord } from "../../src/core/memory/types.ts";
+import { isMemoryProvenance } from "../../src/core/memory/provenance.ts";
 import {
   DEFAULT_SCOPE_CAP,
   mintRecord,
@@ -35,6 +77,8 @@ import {
   applyRetention,
   clampRetentionPolicy,
   isRunRecord,
+  workEvidenceBelongsToRun,
+  isRunListItem,
   isRecoveryEvidenceScope,
   isRunSession,
   isRunVisibilityFilter,
@@ -70,8 +114,10 @@ import {
   rowKind,
   SEARCH_MAX_HITS,
   sessionsToDrop,
+  keyedAppendContextMatches,
   tailCut,
   textOfStoredRow,
+  logicalThreadOfSession,
 } from "../../src/core/runLedger/sessionLog.ts";
 import { mergeRequesterTarget, type RequesterTarget } from "../../src/core/runLedger/ledger.ts";
 import type { RunEvent } from "../../src/core/runEvents.ts";
@@ -364,6 +410,7 @@ type Row = {
   keywords: string;
   source_thread_key: string;
   source_run_id: string | null;
+  provenance_json: string | null;
   created_at: number;
   last_used_at: number | null;
   use_count: number;
@@ -397,6 +444,7 @@ export class MemoryDO extends DurableObject<Env> {
         keywords TEXT NOT NULL,
         source_thread_key TEXT NOT NULL,
         source_run_id TEXT,
+        provenance_json TEXT,
         created_at INTEGER NOT NULL,
         last_used_at INTEGER,
         use_count INTEGER NOT NULL DEFAULT 0,
@@ -409,6 +457,14 @@ export class MemoryDO extends DurableObject<Env> {
       CREATE INDEX IF NOT EXISTS records_active_used ON records(status, last_used_at DESC, created_at DESC);
       CREATE VIRTUAL TABLE IF NOT EXISTS records_fts USING fts5(id UNINDEXED, body);
     `);
+    if (
+      !this.sql
+        .exec<{ name: string }>(`PRAGMA table_info(records)`)
+        .toArray()
+        .some((column) => column.name === "provenance_json")
+    ) {
+      this.sql.exec(`ALTER TABLE records ADD COLUMN provenance_json TEXT`);
+    }
     this.reconcileFts();
   }
 
@@ -526,16 +582,21 @@ export class MemoryDO extends DurableObject<Env> {
           // The shown record is refreshed in place; COALESCE keeps the stored
           // confidence when the plan carries none (neither side had a value).
           this.sql.exec(
-            `UPDATE records SET use_count = use_count + 1, last_used_at = ?, confidence = COALESCE(?, confidence) WHERE id = ?`,
+            `UPDATE records SET use_count = use_count + 1, last_used_at = ?, confidence = COALESCE(?, confidence), provenance_json = ? WHERE id = ?`,
             now,
             plan.confidence ?? null,
+            plan.provenance ? JSON.stringify(plan.provenance) : null,
             plan.target.id,
           );
           counts.restated++;
           continue;
         }
         if (plan.action === "dedup") {
-          this.sql.exec(`UPDATE records SET use_count = use_count + 1 WHERE id = ?`, plan.target.id);
+          this.sql.exec(
+            `UPDATE records SET use_count = use_count + 1, provenance_json = ? WHERE id = ?`,
+            plan.provenance ? JSON.stringify(plan.provenance) : null,
+            plan.target.id,
+          );
           counts.deduped++;
           continue;
         }
@@ -549,8 +610,8 @@ export class MemoryDO extends DurableObject<Env> {
         const r = plan.record;
         this.sql.exec(
           `INSERT INTO records (id, seq, scope_key, kind, text, norm, keywords, source_thread_key, source_run_id,
-                                created_at, last_used_at, use_count, confidence, supersedes, status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?, 'active')`,
+                                created_at, last_used_at, use_count, confidence, supersedes, status, provenance_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?, 'active', ?)`,
           r.id,
           seq - 1,
           r.scopeKey,
@@ -563,6 +624,7 @@ export class MemoryDO extends DurableObject<Env> {
           r.createdAt,
           r.confidence ?? null,
           r.supersedes ?? null,
+          r.provenance ? JSON.stringify(r.provenance) : null,
         );
         this.sql.exec(`INSERT INTO records_fts (id, body) VALUES (?, ?)`, r.id, `${r.text} ${r.keywords.join(" ")}`);
         counts.inserted++;
@@ -698,6 +760,14 @@ function toRecord(row: Row): MemoryRecord {
     status: row.status as MemoryRecord["status"],
   };
   if (row.source_run_id !== null) r.sourceRunId = row.source_run_id;
+  if (row.provenance_json) {
+    try {
+      const provenance: unknown = JSON.parse(row.provenance_json);
+      if (isMemoryProvenance(provenance) && provenance.scopeKey === row.scope_key) r.provenance = provenance;
+    } catch {
+      /* Malformed legacy metadata remains unknown to source readers. */
+    }
+  }
   if (row.last_used_at !== null) r.lastUsedAt = row.last_used_at;
   if (row.confidence !== null) r.confidence = row.confidence;
   if (row.supersedes !== null) r.supersedes = row.supersedes;
@@ -1560,6 +1630,10 @@ type RunRow = {
   bytes: number;
   event_count: number;
   summary_json: string;
+  source_reads_json?: string | null;
+  work_evidence_json?: string | null;
+  context_checkpoint_json?: string | null;
+  direct_audience_json?: string | null;
 };
 
 interface StoredPolicy {
@@ -1696,6 +1770,19 @@ export class RunHistoryDO extends DurableObject<Env> {
     // SESSION_LOGS namespace, so this is how it knows which objects exist and
     // which thread's live row would block a drop.
     this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS context_refs (
+        holder_run_id TEXT NOT NULL,
+        source_run_id TEXT NOT NULL,
+        session_key TEXT NOT NULL DEFAULT '',
+        ordinary_member INTEGER NOT NULL DEFAULT 0,
+        ordinary_order INTEGER NOT NULL DEFAULT 0,
+        ordinary_checkpoint TEXT NOT NULL DEFAULT '',
+        retention_pin INTEGER NOT NULL DEFAULT 1,
+        ordinary_pin INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (holder_run_id, source_run_id, session_key)
+      );
+      CREATE INDEX IF NOT EXISTS context_refs_source ON context_refs(source_run_id, holder_run_id);
+      CREATE INDEX IF NOT EXISTS context_refs_session ON context_refs(session_key, holder_run_id);
       CREATE TABLE IF NOT EXISTS sessions (
         key TEXT PRIMARY KEY,
         thread_key TEXT NOT NULL,
@@ -1704,6 +1791,28 @@ export class RunHistoryDO extends DurableObject<Env> {
         bytes INTEGER NOT NULL DEFAULT 0
       );
     `);
+    if (
+      !this.sql
+        .exec<{ name: string }>(`PRAGMA table_info(context_refs)`)
+        .toArray()
+        .some((column) => column.name === "ordinary_member")
+    )
+      this.sql.exec(`ALTER TABLE context_refs ADD COLUMN ordinary_member INTEGER NOT NULL DEFAULT 0`);
+    for (const [column, declaration] of [
+      ["ordinary_order", "INTEGER NOT NULL DEFAULT 0"],
+      ["ordinary_checkpoint", "TEXT NOT NULL DEFAULT ''"],
+      ["retention_pin", "INTEGER NOT NULL DEFAULT 1"],
+      ["ordinary_pin", "INTEGER NOT NULL DEFAULT 0"],
+    ]) {
+      if (
+        !this.sql
+          .exec<{ name: string }>(`PRAGMA table_info(context_refs)`)
+          .toArray()
+          .some((value) => value.name === column)
+      )
+        this.sql.exec(`ALTER TABLE context_refs ADD COLUMN ${column} ${declaration}`);
+    }
+
     // The live-run ledger (run-history items 28–34): live runs never enter
     // `runs` — that table's finished_at drives retention and listing — they
     // live here until `finish` moves them across in one transaction.
@@ -2887,102 +2996,108 @@ export class RunHistoryDO extends DurableObject<Env> {
         reason: "conflict";
       }
   > {
-    let out:
-      | { ok: true; created: boolean; link: { instanceId: string; unit: string; authority: MainTaskAuthority } }
-      | {
-          ok: false;
-          reason: "conflict";
-        } = {
-      ok: false,
-      reason: "conflict",
-    };
-    this.ctx.storage.transactionSync(() => {
-      const prior = this.sql
-        .exec<{
-          instance_id: string;
-          unit: string;
-          requester_id: string | null;
-          source_message_id: string | null;
-          revision: number | null;
-          repo: string | null;
-        }>(
-          `SELECT l.instance_id, l.unit, a.requester_id, a.source_message_id, a.revision, a.repo
+    return this.withRangePins(
+      [{ id: `@unit:${unit.instanceId}:${unit.unit}`, handoff: unit.context?.handoff }],
+      async () => {
+        let out:
+          | { ok: true; created: boolean; link: { instanceId: string; unit: string; authority: MainTaskAuthority } }
+          | {
+              ok: false;
+              reason: "conflict";
+            } = {
+          ok: false,
+          reason: "conflict",
+        };
+        this.ctx.storage.transactionSync(() => {
+          const prior = this.sql
+            .exec<{
+              instance_id: string;
+              unit: string;
+              requester_id: string | null;
+              source_message_id: string | null;
+              revision: number | null;
+              repo: string | null;
+            }>(
+              `SELECT l.instance_id, l.unit, a.requester_id, a.source_message_id, a.revision, a.repo
            FROM coordinator_main_task_links l LEFT JOIN coordinator_main_task_authority a
            ON a.main_thread_key = l.main_thread_key AND a.act_id = l.act_id
            WHERE l.main_thread_key = ? AND l.act_id = ?`,
-          key.mainThreadKey,
-          key.actId,
-        )
-        .toArray()[0];
-      if (prior) {
-        const saved =
-          prior.requester_id && prior.source_message_id && prior.revision && prior.repo
-            ? {
-                requesterId: prior.requester_id,
-                sourceMessageId: prior.source_message_id,
-                revision: prior.revision,
-                repo: prior.repo,
-              }
-            : undefined;
-        if (sameMainTaskAuthority(saved, authority))
-          out = {
-            ok: true,
-            created: false,
-            link: { instanceId: prior.instance_id, unit: prior.unit, authority },
-          };
-        return;
-      }
-      const current = this.sql
-        .exec<{ message_id: string; revision: number }>(
-          `SELECT message_id, revision FROM coordinator_requester_turns
+              key.mainThreadKey,
+              key.actId,
+            )
+            .toArray()[0];
+          if (prior) {
+            const saved =
+              prior.requester_id && prior.source_message_id && prior.revision && prior.repo
+                ? {
+                    requesterId: prior.requester_id,
+                    sourceMessageId: prior.source_message_id,
+                    revision: prior.revision,
+                    repo: prior.repo,
+                  }
+                : undefined;
+            if (sameMainTaskAuthority(saved, authority))
+              out = {
+                ok: true,
+                created: false,
+                link: { instanceId: prior.instance_id, unit: prior.unit, authority },
+              };
+            return;
+          }
+          const current = this.sql
+            .exec<{ message_id: string; revision: number }>(
+              `SELECT message_id, revision FROM coordinator_requester_turns
            WHERE thread_key = ? AND requester_id = ? ORDER BY revision DESC LIMIT 1`,
-          key.mainThreadKey,
-          authority.requesterId,
-        )
-        .toArray()[0];
-      if (
-        !current ||
-        current.message_id !== authority.sourceMessageId ||
-        current.revision !== authority.revision ||
-        authority.requesterId !== instance.userId ||
-        authority.repo.toLowerCase() !== instance.repo.toLowerCase() ||
-        unit.instanceId !== instance.id ||
-        this.sql.exec(`SELECT 1 FROM coordinator_instances WHERE instance_id = ?`, instance.id).toArray().length > 0
-      )
-        return;
-      this.sql.exec(
-        `INSERT INTO coordinator_instances (instance_id, json, created_at) VALUES (?, ?, ?)`,
-        instance.id,
-        JSON.stringify(instance),
-        instance.createdAt,
-      );
-      this.sql.exec(
-        `INSERT INTO coordinator_units (instance_id, unit, json, updated_at) VALUES (?, ?, ?, ?)`,
-        unit.instanceId,
-        unit.unit,
-        JSON.stringify(unit),
-        now,
-      );
-      this.sql.exec(
-        `INSERT INTO coordinator_main_task_links (main_thread_key, act_id, instance_id, unit) VALUES (?, ?, ?, ?)`,
-        key.mainThreadKey,
-        key.actId,
-        instance.id,
-        unit.unit,
-      );
-      this.sql.exec(
-        `INSERT INTO coordinator_main_task_authority
+              key.mainThreadKey,
+              authority.requesterId,
+            )
+            .toArray()[0];
+          if (
+            !current ||
+            current.message_id !== authority.sourceMessageId ||
+            current.revision !== authority.revision ||
+            authority.requesterId !== instance.userId ||
+            authority.repo.toLowerCase() !== instance.repo.toLowerCase() ||
+            unit.instanceId !== instance.id ||
+            this.sql.exec(`SELECT 1 FROM coordinator_instances WHERE instance_id = ?`, instance.id).toArray().length > 0
+          )
+            return;
+          this.pinUnitContext(unit, undefined, now);
+          this.sql.exec(
+            `INSERT INTO coordinator_instances (instance_id, json, created_at) VALUES (?, ?, ?)`,
+            instance.id,
+            JSON.stringify(instance),
+            instance.createdAt,
+          );
+          this.sql.exec(
+            `INSERT INTO coordinator_units (instance_id, unit, json, updated_at) VALUES (?, ?, ?, ?)`,
+            unit.instanceId,
+            unit.unit,
+            JSON.stringify(unit),
+            now,
+          );
+          this.sql.exec(
+            `INSERT INTO coordinator_main_task_links (main_thread_key, act_id, instance_id, unit) VALUES (?, ?, ?, ?)`,
+            key.mainThreadKey,
+            key.actId,
+            instance.id,
+            unit.unit,
+          );
+          this.sql.exec(
+            `INSERT INTO coordinator_main_task_authority
          (main_thread_key, act_id, requester_id, source_message_id, revision, repo) VALUES (?, ?, ?, ?, ?, ?)`,
-        key.mainThreadKey,
-        key.actId,
-        authority.requesterId,
-        authority.sourceMessageId,
-        authority.revision,
-        authority.repo,
-      );
-      out = { ok: true, created: true, link: { instanceId: instance.id, unit: unit.unit, authority } };
-    });
-    return out;
+            key.mainThreadKey,
+            key.actId,
+            authority.requesterId,
+            authority.sourceMessageId,
+            authority.revision,
+            authority.repo,
+          );
+          out = { ok: true, created: true, link: { instanceId: instance.id, unit: unit.unit, authority } };
+        });
+        return out;
+      },
+    );
   }
 
   /** Idempotent for the same record; a different record under a taken id is refused. */
@@ -3011,35 +3126,43 @@ export class RunHistoryDO extends DurableObject<Env> {
    *  dropped, in one transaction — an attempt starting over: the leftover of one
    *  whose Workflow instance was never created, once the shim said so. */
   async replaceInstance(instance: CoordinatorInstance): Promise<{ ok: true } | { ok: false; reason: "exists" }> {
-    let out: { ok: true } | { ok: false; reason: "exists" } = { ok: true };
-    this.ctx.storage.transactionSync(() => {
-      if (
-        this.sql.exec(`SELECT 1 FROM coordinator_main_task_links WHERE instance_id = ?`, instance.id).toArray().length >
-          0 ||
-        this.sql
-          .exec<{ json: string }>(`SELECT json FROM coordinator_units WHERE instance_id = ?`, instance.id)
-          .toArray()
-          .some(
-            (row) =>
-              (JSON.parse(row.json) as CoordinatorUnit).ending?.outcome !== undefined ||
-              (JSON.parse(row.json) as CoordinatorUnit).history !== undefined,
-          ) ||
-        this.sql.exec(`SELECT 1 FROM coordinator_recovery_journal WHERE instance_id = ? LIMIT 1`, instance.id).toArray()
-          .length > 0
-      ) {
-        out = { ok: false, reason: "exists" };
-        return;
-      }
-      this.sql.exec(
-        `INSERT INTO coordinator_instances (instance_id, json, created_at) VALUES (?, ?, ?)
+    return this.ctx.blockConcurrencyWhile(async () => {
+      let out: { ok: true } | { ok: false; reason: "exists" } = { ok: true };
+      this.ctx.storage.transactionSync(() => {
+        if (
+          this.sql.exec(`SELECT 1 FROM coordinator_main_task_links WHERE instance_id = ?`, instance.id).toArray()
+            .length > 0 ||
+          this.sql
+            .exec<{ json: string }>(`SELECT json FROM coordinator_units WHERE instance_id = ?`, instance.id)
+            .toArray()
+            .some(
+              (row) =>
+                (JSON.parse(row.json) as CoordinatorUnit).ending?.outcome !== undefined ||
+                (JSON.parse(row.json) as CoordinatorUnit).history !== undefined,
+            ) ||
+          this.sql
+            .exec(`SELECT 1 FROM coordinator_recovery_journal WHERE instance_id = ? LIMIT 1`, instance.id)
+            .toArray().length > 0
+        ) {
+          out = { ok: false, reason: "exists" };
+          return;
+        }
+        this.sql.exec(
+          `INSERT INTO coordinator_instances (instance_id, json, created_at) VALUES (?, ?, ?)
          ON CONFLICT(instance_id) DO UPDATE SET json = excluded.json, created_at = excluded.created_at`,
-        instance.id,
-        JSON.stringify(instance),
-        instance.createdAt,
-      );
-      this.sql.exec(`DELETE FROM coordinator_units WHERE instance_id = ?`, instance.id);
+          instance.id,
+          JSON.stringify(instance),
+          instance.createdAt,
+        );
+        this.sql.exec(
+          `DELETE FROM context_refs WHERE holder_run_id IN (SELECT '@unit:' || instance_id || ':' || unit FROM coordinator_units WHERE instance_id = ?)`,
+          instance.id,
+        );
+        this.sql.exec(`DELETE FROM coordinator_units WHERE instance_id = ?`, instance.id);
+      });
+      await this.syncRangePins();
+      return out;
     });
-    return out;
   }
 
   /** Confirm only the exact record whose create returned success. Keep its unit
@@ -3210,26 +3333,33 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   /** Each row replaced whole under its (instance, unit); a replace keeps the row's place. */
   async putUnits(units: CoordinatorUnit[], now: number): Promise<{ ok: true } | { ok: false; reason: "settled" }> {
-    return this.writeUnfencedUnit(() => {
-      for (const u of units) {
-        const row = this.sql
-          .exec<{ json: string }>(
-            `SELECT json FROM coordinator_units WHERE instance_id = ? AND unit = ?`,
-            u.instanceId,
-            u.unit,
-          )
-          .toArray()[0];
-        const updated = prepareUnfencedUnitWrite(row ? (JSON.parse(row.json) as CoordinatorUnit) : undefined, u);
-        this.sql.exec(
-          `INSERT INTO coordinator_units (instance_id, unit, json, updated_at) VALUES (?, ?, ?, ?)
+    return this.withRangePins(
+      units.map((unit) => ({ id: `@unit:${unit.instanceId}:${unit.unit}`, handoff: unit.context?.handoff })),
+      async () => {
+        return this.writeUnfencedUnit(() => {
+          for (const u of units) {
+            const row = this.sql
+              .exec<{ json: string }>(
+                `SELECT json FROM coordinator_units WHERE instance_id = ? AND unit = ?`,
+                u.instanceId,
+                u.unit,
+              )
+              .toArray()[0];
+            const current = row ? (JSON.parse(row.json) as CoordinatorUnit) : undefined;
+            const updated = prepareUnfencedUnitWrite(current, u);
+            this.pinUnitContext(updated, current, now);
+            this.sql.exec(
+              `INSERT INTO coordinator_units (instance_id, unit, json, updated_at) VALUES (?, ?, ?, ?)
            ON CONFLICT(instance_id, unit) DO UPDATE SET json = excluded.json, updated_at = excluded.updated_at`,
-          u.instanceId,
-          u.unit,
-          JSON.stringify(updated),
-          now,
-        );
-      }
-    });
+              u.instanceId,
+              u.unit,
+              JSON.stringify(updated),
+              now,
+            );
+          }
+        });
+      },
+    );
   }
 
   /** One compare-and-replace transaction updates a unit for exactly one
@@ -3253,9 +3383,11 @@ export class RunHistoryDO extends DurableObject<Env> {
         out = { ok: false, reason: "stale" };
         return;
       }
+      const preserved = preserveWorkBrief(expected, replacement);
+      this.pinUnitContext(preserved, expected, now);
       this.sql.exec(
         `UPDATE coordinator_units SET json = ?, updated_at = ? WHERE instance_id = ? AND unit = ?`,
-        JSON.stringify(preserveWorkBrief(expected, replacement)),
+        JSON.stringify(preserved),
         now,
         expected.instanceId,
         expected.unit,
@@ -3312,6 +3444,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         result = planned;
         return;
       }
+      this.pinUnitContext(planned.unit, saved ? (JSON.parse(saved.json) as CoordinatorUnit) : undefined, now);
       if (planned.receipt)
         this.sql.exec(
           `INSERT INTO coordinator_recovery_journal (instance_id, unit, kind, id, json) VALUES (?, ?, 'receipt', ?, ?)`,
@@ -3542,12 +3675,15 @@ export class RunHistoryDO extends DurableObject<Env> {
           unit.unit,
         )
         .toArray()[0];
+      const current = row ? (JSON.parse(row.json) as CoordinatorUnit) : undefined;
+      const prepared = prepareUnfencedUnitWrite(current, updated);
+      this.pinUnitContext(prepared, current, now);
       this.sql.exec(
         `INSERT INTO coordinator_units (instance_id, unit, json, updated_at) VALUES (?, ?, ?, ?)
          ON CONFLICT(instance_id, unit) DO UPDATE SET json = excluded.json, updated_at = excluded.updated_at`,
         unit.instanceId,
         unit.unit,
-        JSON.stringify(prepareUnfencedUnitWrite(row ? (JSON.parse(row.json) as CoordinatorUnit) : undefined, updated)),
+        JSON.stringify(prepared),
         now,
       );
       for (const seq of seqs)
@@ -3566,6 +3702,248 @@ export class RunHistoryDO extends DurableObject<Env> {
   private liveRow(runId: string): LiveRunRow | undefined {
     const r = this.sql.exec<LiveRow>(`SELECT * FROM live_runs WHERE run_id = ?`, runId).toArray()[0];
     return r ? rowToLive(r) : undefined;
+  }
+
+  private checkpointMembership(runId: string): Pick<CanonicalCheckpointSource, "members" | "memberCheckpoints"> {
+    const rows = this.sql
+      .exec<{ source_run_id: string; ordinary_checkpoint: string }>(
+        `SELECT source_run_id, ordinary_checkpoint FROM context_refs
+       WHERE holder_run_id = ? AND ordinary_member = 1 ORDER BY ordinary_order LIMIT ?`,
+        runId,
+        ORDINARY_CONTEXT_HISTORY_RUNS + 1,
+      )
+      .toArray();
+    return {
+      members: rows.map((row) => row.source_run_id),
+      memberCheckpoints: Object.fromEntries(rows.map((row) => [row.source_run_id, row.ordinary_checkpoint])),
+    };
+  }
+
+  private async checkpointSource(runId: string): Promise<CanonicalCheckpointSource | undefined> {
+    const live = this.liveRow(runId);
+    const archived = live ? undefined : await this.get(runId);
+    const meta = live?.meta ?? archived;
+    const context = live?.state.contextDependencies ?? archived?.contextDependencies;
+    if (!meta || !isContextDependencies(context)) return undefined;
+    const raw = live?.state.contextCheckpointReceipt ?? archived?.contextCheckpointReceipt;
+    const receipt = isContextCheckpointReceipt(raw) ? raw : undefined;
+    let transcriptHash: string | undefined;
+    if (receipt) {
+      const data = await this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(receipt.session.key)).read(
+        receipt.session.seedFrom,
+        receipt.session.through,
+      );
+      transcriptHash = await sourceHash(assembleTranscript(data.rows, data.attachments, receipt.session.seedFrom));
+    }
+    return {
+      runId,
+      meta,
+      context,
+      ...(receipt
+        ? {
+            receipt,
+            transcriptHash,
+            ...this.checkpointMembership(runId),
+          }
+        : {}),
+    };
+  }
+
+  private async archiveCheckpoint(record: RunRecord): Promise<RunRecord> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      await this.recoverPendingCheckpoint(record.id);
+      const live = this.liveRow(record.id);
+      for (const field of ["workReads", "unitSeedReceipt"] as const) {
+        const canonical = live?.state[field];
+        if (canonical === undefined) continue;
+        if (record[field] !== undefined && JSON.stringify(record[field]) !== JSON.stringify(canonical))
+          throw new Error("work evidence is not canonical");
+        record = { ...record, [field]: structuredClone(canonical) };
+      }
+      if (!workEvidenceBelongsToRun(record, record)) throw new Error("work evidence does not match its canonical run");
+      const receipt = live?.state.contextCheckpointReceipt;
+      if (!isContextCheckpointReceipt(receipt)) return record;
+      if (
+        record.contextCheckpointReceipt !== undefined &&
+        JSON.stringify(record.contextCheckpointReceipt) !== JSON.stringify(receipt)
+      )
+        throw new Error("checkpoint receipt is not canonical");
+      const context = applyContextCheckpoint(
+        mergeContextDependencies(
+          record.contextDependencies ?? (live!.state.contextDependencies as ContextDependencies),
+          receipt.normalized,
+        ),
+        receipt,
+      );
+      const sealed = { ...record, contextDependencies: context, contextCheckpointReceipt: receipt };
+      if (!isRunRecord(sealed)) throw new Error("checkpoint archive does not match its canonical run");
+      return sealed;
+    });
+  }
+
+  private async recoverPendingCheckpoint(runId: string): Promise<void> {
+    const row = this.liveRow(runId);
+    const receipt = row?.state.pendingContextCheckpoint;
+    if (
+      !row ||
+      !isContextCheckpointReceipt(receipt) ||
+      row.state.contextCheckpointReceipt !== undefined ||
+      !isContextDependencies(row.state.contextDependencies)
+    )
+      return;
+    const before = await contextDependenciesHash(row.state.contextDependencies);
+    if (before !== receipt.beforeHash && before !== receipt.normalizedHash) return;
+    if ((await sourceHash(row.system)) !== receipt.inputs.systemHash) return;
+    const log = this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(receipt.session.key));
+    const data = await log.checkpointSnapshot(receipt.session.seedFrom, receipt.session.through);
+    const source: CanonicalCheckpointSource = {
+      runId,
+      meta: row.meta,
+      context: receipt.normalized,
+      receipt,
+      transcriptHash: await sourceHash(assembleTranscript(data.rows, data.attachments, receipt.session.seedFrom)),
+      ...this.checkpointMembership(runId),
+    };
+    if (
+      !(await validateContextCheckpoint(receipt, source)) ||
+      !(await log.installCheckpoint(runId, row.ownerGen, receipt)).ok
+    )
+      return;
+    this.ctx.storage.transactionSync(() => {
+      const current = this.liveRow(runId);
+      if (
+        !current ||
+        current.ownerGen !== row.ownerGen ||
+        JSON.stringify(current.state.pendingContextCheckpoint) !== JSON.stringify(receipt)
+      )
+        return;
+      const { pendingContextCheckpoint: _pending, ...state } = current.state;
+      this.sql.exec(
+        `UPDATE live_runs SET state_json = ? WHERE run_id = ?`,
+        JSON.stringify({ ...state, contextDependencies: receipt.normalized, contextCheckpointReceipt: receipt }),
+        runId,
+      );
+      this.replaceOrdinaryCheckpointPins(runId, receipt);
+    });
+  }
+
+  async readContextCheckpoint(runId: string): Promise<CanonicalCheckpointSource | undefined> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      await this.recoverPendingCheckpoint(runId);
+      const source = await this.checkpointSource(runId);
+      return source?.receipt && (await validateContextCheckpoint(source.receipt, source)) ? source : undefined;
+    });
+  }
+
+  async normalizeContextOrigins(request: ContextCheckpointRequest): Promise<ContextCheckpointResult> {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      await this.recoverPendingCheckpoint(request.runId);
+      const row = this.liveRow(request.runId);
+      const fence = checkFence(row, request.gen);
+      if (!fence.ok) return fence;
+      if (!row) return { ok: false, reason: "unknown-run" };
+      const unavailable = (): ContextCheckpointResult => ({ ok: false, reason: "checkpoint-unavailable" });
+      const committed = await this.checkpointSource(request.runId);
+      if (committed?.receipt && (await validateContextCheckpoint(committed.receipt, committed)))
+        return { ok: true, receipt: committed.receipt };
+      const session = row.meta.session;
+      const lastJson = this.sql
+        .exec<{ json: string }>(`SELECT json FROM run_steps WHERE run_id = ? ORDER BY step DESC LIMIT 1`, row.runId)
+        .toArray()[0]?.json;
+      const last = lastJson ? (JSON.parse(lastJson) as StepRecord) : undefined;
+      if (
+        !session ||
+        session.key !== request.key ||
+        session.range === "broken" ||
+        !last ||
+        last.step !== 0 ||
+        last.inFlight.length
+      )
+        return unavailable();
+      const through = session.seedFrom + last.turnIndex - 1;
+      const checkpoint = row.state.contextCheckpoint as { key?: string; through?: number } | undefined;
+      if (checkpoint && (checkpoint.key !== request.key || checkpoint.through !== through)) return unavailable();
+      const log = this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(request.key));
+      const snapshot = await log.checkpointSnapshot(session.seedFrom, through);
+      if (
+        snapshot.next !== through + 1 ||
+        snapshot.owner?.runId !== row.runId ||
+        snapshot.owner.gen !== request.gen ||
+        !isContextDependencies(snapshot.context) ||
+        !isContextDependencies(row.state.contextDependencies)
+      )
+        return unavailable();
+      const inputs = {
+        transcriptHash: await sourceHash(assembleTranscript(snapshot.rows, snapshot.attachments, session.seedFrom)),
+        systemHash: await sourceHash(row.system),
+        notepadHash: await sourceHash(snapshot.notepad),
+      };
+      let receipt = isContextCheckpointReceipt(row.state.pendingContextCheckpoint)
+        ? row.state.pendingContextCheckpoint
+        : undefined;
+      if (receipt) {
+        if (
+          receipt.runId !== row.runId ||
+          receipt.session.key !== request.key ||
+          receipt.session.through !== through ||
+          (await sourceHash(inputs)) !== (await sourceHash(receipt.inputs))
+        )
+          return unavailable();
+      } else {
+        if (!contextDependenciesContain(snapshot.context, row.state.contextDependencies)) return unavailable();
+        const sources = (
+          await Promise.all(
+            snapshot.context.origins
+              .filter((origin) => origin.runId !== row.runId)
+              .map((origin) => this.checkpointSource(origin.runId)),
+          )
+        ).filter((source): source is CanonicalCheckpointSource => source !== undefined);
+        receipt = await planContextCheckpoint({
+          run: { runId: row.runId, meta: row.meta, context: snapshot.context },
+          ownerGen: request.gen,
+          through,
+          inputs,
+          expected: request.expected,
+          sources,
+        });
+        if (!receipt) return unavailable();
+        const members = checkpointMembersOf(row.runId, receipt.coveredOrigins, sources);
+        const memberHashes = checkpointMemberHashesOf(row.runId, receipt.coveredOrigins, sources);
+        this.ctx.storage.transactionSync(() => {
+          // Preserve predecessor pins until the source object ACKs installation.
+          // A crash before that ACK still resumes from the original closure.
+          for (const [order, member] of members.entries())
+            this.sql.exec(
+              `INSERT INTO context_refs (holder_run_id, source_run_id, session_key, ordinary_member, ordinary_order, ordinary_checkpoint, retention_pin)
+               VALUES (?, ?, '', 1, ?, ?, 0)
+               ON CONFLICT(holder_run_id, source_run_id, session_key) DO UPDATE SET
+                 ordinary_member = 1, ordinary_order = excluded.ordinary_order, ordinary_checkpoint = excluded.ordinary_checkpoint`,
+              row.runId,
+              member,
+              order,
+              memberHashes[member],
+            );
+          this.pinReference(row.runId, row.runId, request.key, true);
+          row.state.pendingContextCheckpoint = receipt;
+          this.sql.exec(`UPDATE live_runs SET state_json = ? WHERE run_id = ?`, JSON.stringify(row.state), row.runId);
+        });
+      }
+      if (!(await log.installCheckpoint(row.runId, request.gen, receipt)).ok) return unavailable();
+      this.ctx.storage.transactionSync(() => {
+        const { pendingContextCheckpoint: _pending, ...prior } = row.state;
+        row.state = { ...prior, contextDependencies: receipt!.normalized, contextCheckpointReceipt: receipt };
+        this.sql.exec(`UPDATE live_runs SET state_json = ? WHERE run_id = ?`, JSON.stringify(row.state), row.runId);
+        this.replaceOrdinaryCheckpointPins(row.runId, receipt!);
+      });
+      return { ok: true, receipt };
+    });
+  }
+
+  /** A source write proves its canonical session through the claimed row. */
+  async sourceSessionOwner(runId: string, gen: string, key: string): Promise<SessionSourceOwner | null> {
+    const row = this.liveRow(runId);
+    if (!row || row.ownerGen !== gen || row.meta.session?.key !== key) return null;
+    return { key, threadKey: row.meta.threadKey, channelId: row.meta.channelId, requester: row.meta.userId };
   }
 
   /** A later ledger owner gets a larger attachment fence, even for the same run ID. */
@@ -3620,6 +3998,32 @@ export class RunHistoryDO extends DurableObject<Env> {
     if (!columns.has("channel_visibility"))
       this.sql.exec(`ALTER TABLE runs ADD COLUMN channel_visibility TEXT NOT NULL DEFAULT 'unknown'`);
     if (!columns.has("session_key")) this.sql.exec(`ALTER TABLE runs ADD COLUMN session_key TEXT`);
+    for (const [column, field] of [
+      ["context_checkpoint_json", "contextCheckpointReceipt"],
+      ["direct_audience_json", "directAudience"],
+    ] as const) {
+      if (!columns.has(column)) {
+        this.sql.exec(`ALTER TABLE runs ADD COLUMN ${column} TEXT`);
+        this.sql.exec(
+          `UPDATE runs SET ${column} = json_extract(summary_json, '$.${field}'), summary_json = json_remove(summary_json, '$.${field}') WHERE json_valid(summary_json) AND json_type(summary_json, '$.${field}') IS NOT NULL`,
+        );
+      }
+    }
+    if (!columns.has("work_evidence_json")) {
+      this.sql.exec(`ALTER TABLE runs ADD COLUMN work_evidence_json TEXT`);
+      for (const field of ["workReads", "unitSeedReceipt"]) {
+        this.sql
+          .exec(`UPDATE runs SET work_evidence_json = json_set(COALESCE(work_evidence_json, '{"version":1}'), '$.${field}', json_extract(summary_json, '$.${field}')),
+          summary_json = json_remove(summary_json, '$.${field}')
+          WHERE json_valid(summary_json) AND json_type(summary_json, '$.${field}') IS NOT NULL`);
+      }
+    }
+    if (!columns.has("source_reads_json")) {
+      this.sql.exec(`ALTER TABLE runs ADD COLUMN source_reads_json TEXT`);
+      this.sql.exec(`UPDATE runs SET source_reads_json = json_extract(summary_json, '$.sourceReads'),
+        summary_json = json_remove(summary_json, '$.sourceReads')
+        WHERE json_valid(summary_json) AND json_type(summary_json, '$.sourceReads') IS NOT NULL`);
+    }
     if (!columns.has("usage_json")) this.sql.exec(`ALTER TABLE runs ADD COLUMN usage_json TEXT`);
     if (!columns.has("parent_run_id")) {
       this.sql.exec(`ALTER TABLE runs ADD COLUMN parent_run_id TEXT`);
@@ -3653,102 +4057,461 @@ export class RunHistoryDO extends DurableObject<Env> {
   /** A claim naming a session log registers it (session-log item 7), so the
    *  sweep knows the object exists and which thread it belongs to. Inside the
    *  claim's transaction. */
+  private pinReference(holder: string, source: string, session: string, ordinary = false): void {
+    this.sql.exec(
+      `INSERT INTO context_refs (holder_run_id, source_run_id, session_key, retention_pin, ordinary_pin)
+       VALUES (?, ?, ?, ?, ?) ON CONFLICT(holder_run_id, source_run_id, session_key) DO UPDATE SET
+         retention_pin = MAX(retention_pin, excluded.retention_pin), ordinary_pin = MAX(ordinary_pin, excluded.ordinary_pin)`,
+      holder,
+      source,
+      session,
+      ordinary ? 0 : 1,
+      ordinary ? 1 : 0,
+    );
+  }
+
+  private replaceOrdinaryCheckpointPins(runId: string, receipt: ContextCheckpointReceipt): void {
+    this.sql.exec(`UPDATE context_refs SET retention_pin = 0, ordinary_pin = 0 WHERE holder_run_id = ?`, runId);
+    this.sql.exec(`DELETE FROM context_refs WHERE holder_run_id = ? AND ordinary_member = 0`, runId);
+    this.pinContext(runId, undefined, receipt.normalized);
+    this.pinReference(runId, runId, receipt.session.key, true);
+  }
+
+  private committedCheckpointReceipt(runId: string): ContextCheckpointReceipt | undefined {
+    const live = this.liveRow(runId);
+    const archived = live
+      ? undefined
+      : this.sql
+          .exec<{ context_checkpoint_json: string | null }>(
+            `SELECT context_checkpoint_json FROM runs WHERE run_id = ?`,
+            runId,
+          )
+          .toArray()[0];
+    let raw: unknown = live?.state.contextCheckpointReceipt;
+    try {
+      if (!raw && archived?.context_checkpoint_json) raw = JSON.parse(archived.context_checkpoint_json);
+    } catch {
+      return undefined;
+    }
+    return isContextCheckpointReceipt(raw) ? raw : undefined;
+  }
+
+  private pinContext(runId: string, handoff: ChildHandoff | undefined, context?: ContextDependencies): void {
+    const ordinary = new Set<string>();
+    for (const origin of context?.origins ?? []) {
+      if (!origin.checkpoint) continue;
+      const raw = this.committedCheckpointReceipt(origin.runId);
+      if (!raw || raw.hash !== origin.checkpoint) continue;
+      ordinary.add(origin.runId);
+      let superseded = false;
+      if (runId.startsWith("@session:")) {
+        const roots = this.sql
+          .exec<{ source_run_id: string }>(
+            `SELECT DISTINCT source_run_id FROM context_refs WHERE holder_run_id = ? AND ordinary_pin = 1`,
+            runId,
+          )
+          .toArray();
+        for (const root of roots) {
+          const prior = this.committedCheckpointReceipt(root.source_run_id);
+          const sameLane =
+            prior &&
+            prior.session.key === raw.session.key &&
+            JSON.stringify(prior.authority) === JSON.stringify(raw.authority);
+          if (sameLane && prior.session.through > raw.session.through) superseded = true;
+          if (
+            (sameLane && prior.session.through < raw.session.through) ||
+            raw.coveredOrigins.some((covered) => covered.runId === root.source_run_id)
+          )
+            this.sql.exec(
+              `UPDATE context_refs SET ordinary_pin = 0 WHERE holder_run_id = ? AND source_run_id = ?`,
+              runId,
+              root.source_run_id,
+            );
+        }
+        this.sql.exec(
+          `DELETE FROM context_refs WHERE holder_run_id = ? AND ordinary_member = 0 AND retention_pin = 0 AND ordinary_pin = 0`,
+          runId,
+        );
+      }
+      if (!superseded) this.pinReference(runId, origin.runId, raw.session.key, true);
+      // Keep exact external leaves; ordinary aliases are not archives to retain.
+      for (const ref of contextReferencesOf(runId, undefined, {
+        ...raw.normalized,
+        origins: raw.normalized.origins.filter((value) => value.runId !== origin.runId),
+      }))
+        this.pinReference(runId, ref.sourceRunId, ref.sessionKey ?? "");
+    }
+    const external = context
+      ? { ...context, origins: context.origins.filter((origin) => !ordinary.has(origin.runId)) }
+      : undefined;
+    for (const ref of contextReferencesOf(runId, handoff, external))
+      this.pinReference(runId, ref.sourceRunId, ref.sessionKey ?? "");
+  }
+
+  /** Keep source objects pinned across their ACK and the canonical holder commit.
+   * No source object calls back into this history object while the input gate is held. */
+  private async withRangePins<T>(
+    holders: readonly { id: string; handoff?: ChildHandoff }[],
+    commit: () => T | Promise<T>,
+  ): Promise<T> {
+    holders = holders.filter((holder) => {
+      const unit = holder.id.startsWith("@unit:")
+        ? this.sql
+            .exec<{ json: string }>(
+              `SELECT json FROM coordinator_units WHERE '@unit:' || instance_id || ':' || unit = ?`,
+              holder.id,
+            )
+            .toArray()[0]
+        : undefined;
+      const archived = this.sql
+        .exec<{ summary_json: string }>(`SELECT summary_json FROM runs WHERE run_id = ?`, holder.id)
+        .toArray()[0];
+      const existing = unit
+        ? (JSON.parse(unit.json) as CoordinatorUnit).context?.handoff
+        : (this.liveRow(holder.id)?.meta.childHandoff ??
+          (archived ? (JSON.parse(archived.summary_json) as RunRecord).childHandoff : undefined));
+      return JSON.stringify(existing) !== JSON.stringify(holder.handoff);
+    });
+    if (!holders.some((holder) => handoffRangePins(holder.handoff).size)) return commit();
+    const outcome = await this.ctx.blockConcurrencyWhile(async () => {
+      const touched = new Set<string>();
+      try {
+        const { policy } = this.policyState();
+        for (const holder of holders) {
+          if (!this.contextSourcesAvailable(holder.handoff, undefined, policy, systemClock()))
+            throw new Error("unit context source is unavailable");
+          for (const [key, ranges] of handoffRangePins(holder.handoff)) {
+            touched.add(key);
+            const source = this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(key));
+            if (!(await source.protectRanges(holder.id, ranges)).ok)
+              throw new Error("context source range is unavailable");
+          }
+        }
+        const value = await commit();
+        await this.syncRangePins([...touched]);
+        return { ok: true as const, value };
+      } catch (error) {
+        await this.syncRangePins([...touched]);
+        return { ok: false as const, error };
+      }
+    });
+    if (!outcome.ok) throw outcome.error;
+    return outcome.value;
+  }
+
+  /** Source pins are an index of canonical retained holders, never new roots. */
+  private async syncRangePins(keys?: readonly string[]): Promise<void> {
+    const sessions =
+      keys ??
+      this.sql
+        .exec<{ key: string }>(`SELECT key FROM sessions`)
+        .toArray()
+        .map((row) => row.key);
+    const { policy } = this.policyState();
+    const now = systemClock();
+    for (const key of new Set(sessions)) {
+      const holders = this.sql
+        .exec<{ holder_run_id: string }>(
+          `SELECT DISTINCT holder_run_id FROM context_refs WHERE session_key = ? AND (retention_pin = 1 OR ordinary_pin = 1)
+         AND source_run_id IN (SELECT run_id FROM runs UNION SELECT run_id FROM live_runs)`,
+          key,
+        )
+        .toArray()
+        .map((row) => row.holder_run_id)
+        .filter((holder) => {
+          if (this.contextHolderIsLiveOrKept(holder, policy, now)) return true;
+          const record = this.sql
+            .exec<RetentionRow & { context_checkpoint_json: string | null; work_evidence_json: string | null }>(
+              `SELECT run_id, finished_at, bytes, context_checkpoint_json, work_evidence_json FROM runs WHERE run_id = ?`,
+              holder,
+            )
+            .toArray()[0];
+          return !!(record?.context_checkpoint_json || record?.work_evidence_json) && this.isKept(record, policy, now);
+        });
+      await this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(key)).retainRangePins(holders);
+    }
+  }
+
+  private pinUnitContext(unit: CoordinatorUnit, current: CoordinatorUnit | undefined, now: number): void {
+    if (JSON.stringify(unit.context) === JSON.stringify(current?.context)) return;
+    const { policy } = this.policyState();
+    if (unit.context && !this.contextSourcesAvailable(unit.context.handoff, undefined, policy, now))
+      throw new Error("unit context source is unavailable");
+    const holder = `@unit:${unit.instanceId}:${unit.unit}`;
+    this.sql.exec(`DELETE FROM context_refs WHERE holder_run_id = ?`, holder);
+    if (unit.context) this.pinContext(holder, unit.context.handoff);
+  }
+
+  private unitContextRootIsRetained(holder: string): boolean {
+    const row = this.sql
+      .exec<{ json: string }>(
+        `SELECT json FROM coordinator_units WHERE '@unit:' || instance_id || ':' || unit = ?`,
+        holder,
+      )
+      .toArray()[0];
+    if (!row) return false;
+    try {
+      const unit: unknown = JSON.parse(row.json);
+      return isCoordinatorUnit(unit) && unit.context !== undefined;
+    } catch {
+      return false;
+    }
+  }
+
+  private contextSourcesAvailable(
+    handoff: ChildHandoff | undefined,
+    context: ContextDependencies | undefined,
+    policy: RetentionPolicy,
+    now: number,
+  ): boolean {
+    const origins = [
+      ...(context?.origins ?? []),
+      ...(handoff
+        ? [handoff, ...(handoff.ancestors ?? [])].flatMap(({ source, dependencies }) => [
+            {
+              runId: source.runId,
+              requester: source.requester,
+              channelId: source.channelId,
+              threadKey: source.threadKey,
+            },
+            ...(dependencies?.value?.origins ?? []),
+          ])
+        : []),
+    ];
+    for (const ref of contextReferencesOf("@pending", handoff, context)) {
+      const live = this.liveRow(ref.sourceRunId);
+      const archived = this.sql
+        .exec<RetentionRow & { summary_json: string }>(
+          `SELECT run_id, finished_at, bytes, summary_json FROM runs WHERE run_id = ?`,
+          ref.sourceRunId,
+        )
+        .toArray()[0];
+      if (!live && (!archived || !this.isKept(archived, policy, now))) return false;
+      const facts = live?.meta ?? (JSON.parse(archived!.summary_json) as RunListItem);
+      if (ref.sessionKey !== undefined && facts.session?.key !== ref.sessionKey) return false;
+      if (
+        origins.some(
+          (origin) =>
+            origin.runId === ref.sourceRunId &&
+            (origin.requester !== facts.userId ||
+              origin.channelId !== facts.channelId ||
+              origin.threadKey !== facts.threadKey),
+        )
+      )
+        return false;
+    }
+    return true;
+  }
+
+  private contextReferences(): ContextReference[] {
+    return this.sql
+      .exec<{ holder_run_id: string; source_run_id: string; session_key: string }>(
+        `SELECT holder_run_id, source_run_id, session_key FROM context_refs
+       WHERE (retention_pin = 1 OR ordinary_pin = 1) AND holder_run_id IN (SELECT run_id FROM runs UNION SELECT run_id FROM live_runs UNION SELECT '@session:' || key FROM sessions UNION SELECT '@unit:' || instance_id || ':' || unit FROM coordinator_units)`,
+      )
+      .toArray()
+      .map((r) => ({
+        holderRunId: r.holder_run_id,
+        sourceRunId: r.source_run_id,
+        ...(r.session_key ? { sessionKey: r.session_key } : {}),
+      }));
+  }
+
+  private contextKeptIds(rows: readonly RetentionRow[], policy: RetentionPolicy, now: number): Set<string> {
+    const kept = applyRetention(
+      rows.map((r) => ({ id: r.run_id, finishedAt: r.finished_at, bytes: r.bytes })),
+      policy,
+      now,
+      {
+        references: this.contextReferences(),
+        liveHolderIds: this.sql
+          .exec<{ run_id: string }>(`SELECT run_id FROM live_runs`)
+          .toArray()
+          .map((r) => r.run_id)
+          .concat(
+            this.sql
+              .exec<{ key: string }>(`SELECT key FROM sessions`)
+              .toArray()
+              .filter(({ key }) => this.sessionContextRootIsRetained(key, policy, now))
+              .map(({ key }) => `@session:${key}`),
+          )
+          .concat(
+            this.sql
+              .exec<{ holder: string }>(
+                `SELECT '@unit:' || instance_id || ':' || unit AS holder FROM coordinator_units`,
+              )
+              .toArray()
+              .map(({ holder }) => holder)
+              .filter((holder) => this.unitContextRootIsRetained(holder)),
+          ),
+      },
+    );
+    return new Set(kept.map((r) => r.id));
+  }
+
+  /** A connector/question-only conversation follows the same retention clock.
+   * Indexing follows the idempotent row commit and completes before its ACK.
+   * A missing source is an explicit gap, never resurrected from a reference. */
+  async registerThreadSession(
+    key: string,
+    threadKey: string,
+    now: number,
+    context?: ContextDependencies,
+  ): Promise<{ ok: boolean; reason?: string }> {
+    if (logicalThreadOfSession(key) !== threadKey) return { ok: false, reason: "invalid-thread-session" };
+    let result: { ok: boolean; reason?: string } = { ok: true };
+    this.ctx.storage.transactionSync(() => {
+      const { policy } = this.policyState();
+      if (!this.contextSourcesAvailable(undefined, context, policy, now)) {
+        result = { ok: false, reason: "context-source-unavailable" };
+        return;
+      }
+      this.sql.exec(
+        `INSERT INTO sessions (key, thread_key, agent, last_finished_at) VALUES (?, ?, NULL, ?)
+         ON CONFLICT(key) DO UPDATE SET last_finished_at = MAX(sessions.last_finished_at, excluded.last_finished_at)`,
+        key,
+        threadKey,
+        now,
+      );
+      this.pinContext(`@session:${key}`, undefined, context);
+    });
+    if (result.ok && (await this.ctx.storage.getAlarm()) === null)
+      await this.ctx.storage.setAlarm(now + RUN_SWEEP_INTERVAL_MS);
+    return result;
+  }
+
+  /** Shared logs are roots only through their own ordinary lifetime. Pinned
+   * source records cannot keep their consuming conversation alive in a cycle. */
+  private sessionContextRootIsRetained(key: string, policy: RetentionPolicy, now: number): boolean {
+    const session = this.sql
+      .exec<{ thread_key: string; last_finished_at: number }>(
+        `SELECT thread_key, last_finished_at FROM sessions WHERE key = ?`,
+        key,
+      )
+      .toArray()[0];
+    if (!session || logicalThreadOfSession(key) !== session.thread_key) return false;
+    if (session.last_finished_at >= now - policy.retentionDays * 86_400_000) return true;
+    if (
+      this.sql
+        .exec(
+          `SELECT 1 FROM live_runs WHERE thread_key = ? OR json_extract(meta_json, '$.threadKey') = ? LIMIT 1`,
+          session.thread_key,
+          session.thread_key,
+        )
+        .toArray().length
+    )
+      return true;
+    return this.sql
+      .exec<RetentionRow>(`SELECT run_id, finished_at, bytes FROM runs WHERE thread_key = ?`, session.thread_key)
+      .toArray()
+      .some((row) => this.isKeptByPolicy(row, policy, now));
+  }
+
   private registerSession(req: ClaimRequest): void {
+    this.pinContext(req.runId, req.meta.childHandoff);
+    if (isContextDependencies(req.state?.contextDependencies))
+      this.pinContext(req.runId, undefined, req.state.contextDependencies);
     const session = req.meta.session;
     if (!session) return;
     this.sql.exec(
       `INSERT INTO sessions (key, thread_key, agent) VALUES (?, ?, ?)
        ON CONFLICT(key) DO UPDATE SET thread_key = excluded.thread_key, agent = excluded.agent`,
       session.key,
-      req.threadKey,
+      req.meta.threadKey,
       req.meta.agent ?? null,
     );
   }
 
   async claim(req: ClaimRequest, now: number): Promise<ClaimResult> {
-    let out: ClaimResult = { ok: true };
-    this.ctx.storage.transactionSync(() => {
-      const existing = this.liveByThread(req.threadKey);
-      out = decideClaim(
-        existing
-          ? {
-              runId: existing.runId,
-              agent: existing.meta.agent,
-              startedAt: existing.startedAt,
-              ownerGen: existing.ownerGen,
-              idempotencyKey: existing.meta.idempotencyKey,
-            }
-          : undefined,
-        req,
-      );
-      if (!out.ok) return;
-      // The claim promotes the thread's reservation (record 0064, "The queue"):
-      // the live row holds the thread from here, so the reservation row retires
-      // in the same transaction that writes the claim.
-      this.sql.exec(`DELETE FROM plane_reservations WHERE kind = 'thread' AND key = ?`, req.threadKey);
-      switch (decideClaimWrite(existing, req)) {
-        case "keep":
-          return;
-        case "refresh":
-          this.sql.exec(`UPDATE live_runs SET lease_until = ? WHERE run_id = ?`, now + req.leaseMs, req.runId);
-          return;
-        case "promote":
-          // The prompt landed on the owner's own attaching row (item 42): the
-          // claim the dispatcher always made, applied in place — identity,
-          // thread and start stay; the row goes live.
-          this.sql.exec(
-            `UPDATE live_runs SET lease_until = ?, phase = 'live', meta_json = ?, card_json = ?, system_text = ?, tools_json = ?, state_json = ? WHERE run_id = ?`,
-            now + req.leaseMs,
-            JSON.stringify(req.meta),
-            req.card ? JSON.stringify(req.card) : null,
-            req.system,
-            JSON.stringify(req.tools),
-            JSON.stringify({ ...existing!.state, ...(req.state ?? {}) }),
-            req.runId,
-          );
-          this.registerSession(req);
-          return;
-        case "insert":
-          break;
-      }
-      this.registerSession(req);
-      this.sql.exec(
-        `INSERT INTO live_runs (run_id, thread_key, owner_gen, lease_until, started_at, phase, stop, meta_json, card_json, system_text, tools_json, state_json)
+    return this.withRangePins([{ id: req.runId, handoff: req.meta.childHandoff }], async () => {
+      let out: ClaimResult = { ok: true };
+      this.ctx.storage.transactionSync(() => {
+        const existing = this.liveByThread(req.threadKey);
+        if (!preserveCheckpointState(existing?.state ?? {}, req.state ?? {}))
+          throw new Error("checkpoint state is immutable");
+        if (!workEvidenceBelongsToRun(req.state ?? {}, { id: req.runId, ...req.meta }))
+          throw new Error("work evidence does not match its canonical run");
+        out = decideClaim(
+          existing
+            ? {
+                runId: existing.runId,
+                agent: existing.meta.agent,
+                startedAt: existing.startedAt,
+                ownerGen: existing.ownerGen,
+                idempotencyKey: existing.meta.idempotencyKey,
+              }
+            : undefined,
+          req,
+        );
+        if (!out.ok) return;
+        // The claim promotes the thread's reservation (record 0064, "The queue"):
+        // the live row holds the thread from here, so the reservation row retires
+        // in the same transaction that writes the claim.
+        this.sql.exec(`DELETE FROM plane_reservations WHERE kind = 'thread' AND key = ?`, req.threadKey);
+        switch (decideClaimWrite(existing, req)) {
+          case "keep":
+            return;
+          case "refresh":
+            this.sql.exec(`UPDATE live_runs SET lease_until = ? WHERE run_id = ?`, now + req.leaseMs, req.runId);
+            return;
+          case "promote":
+            // The prompt landed on the owner's own attaching row (item 42): the
+            // claim the dispatcher always made, applied in place — identity,
+            // thread and start stay; the row goes live.
+            this.sql.exec(
+              `UPDATE live_runs SET lease_until = ?, phase = 'live', meta_json = ?, card_json = ?, system_text = ?, tools_json = ?, state_json = ? WHERE run_id = ?`,
+              now + req.leaseMs,
+              JSON.stringify(req.meta),
+              req.card ? JSON.stringify(req.card) : null,
+              req.system,
+              JSON.stringify(req.tools),
+              JSON.stringify({ ...existing!.state, ...(req.state ?? {}) }),
+              req.runId,
+            );
+            this.registerSession(req);
+            return;
+          case "insert":
+            break;
+        }
+        this.registerSession(req);
+        this.sql.exec(
+          `INSERT INTO live_runs (run_id, thread_key, owner_gen, lease_until, started_at, phase, stop, meta_json, card_json, system_text, tools_json, state_json)
          VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
-        req.runId,
-        req.threadKey,
-        req.gen,
-        now + req.leaseMs,
-        req.startedAt,
-        req.phase ?? "live",
-        JSON.stringify(req.meta),
-        req.card ? JSON.stringify(req.card) : null,
-        req.system,
-        JSON.stringify(req.tools),
-        JSON.stringify(req.state ?? {}),
-      );
-    });
-    if (out.ok) {
-      // A `restartOf` claim under a coordinator (record 0064): the plane
-      // tells the waiting parent the child resumed — best effort, beside the
-      // bot's own announcement; a duplicate is consumed and re-armed, harmless.
-      if (req.meta.restartOf !== undefined && req.meta.parentInstanceId !== undefined) {
-        const recoveryTransport = this.recoveryTransport(req.meta.parentInstanceId, req.meta.idempotencyKey);
-        const sent = await sendChildSignal(this.env.SHIP_COORDINATOR, {
-          runId: req.runId,
-          parentInstanceId: req.meta.parentInstanceId,
-          ...(recoveryTransport !== undefined ? { transportWorkflowId: recoveryTransport } : {}),
-          kind: "resumed",
-          reason: `restarted from run ${req.meta.restartOf}`,
-          at: now,
-        });
-        if (sent.kind === "failed")
-          console.warn(`[runs/claim] ${req.runId} → ${sent.type} not delivered to ${sent.instance}: ${sent.reason}`);
+          req.runId,
+          req.threadKey,
+          req.gen,
+          now + req.leaseMs,
+          req.startedAt,
+          req.phase ?? "live",
+          JSON.stringify(req.meta),
+          req.card ? JSON.stringify(req.card) : null,
+          req.system,
+          JSON.stringify(req.tools),
+          JSON.stringify(req.state ?? {}),
+        );
+      });
+      if (out.ok) {
+        // A `restartOf` claim under a coordinator (record 0064): the plane
+        // tells the waiting parent the child resumed — best effort, beside the
+        // bot's own announcement; a duplicate is consumed and re-armed, harmless.
+        if (req.meta.restartOf !== undefined && req.meta.parentInstanceId !== undefined) {
+          const recoveryTransport = this.recoveryTransport(req.meta.parentInstanceId, req.meta.idempotencyKey);
+          const sent = await sendChildSignal(this.env.SHIP_COORDINATOR, {
+            runId: req.runId,
+            parentInstanceId: req.meta.parentInstanceId,
+            ...(recoveryTransport !== undefined ? { transportWorkflowId: recoveryTransport } : {}),
+            kind: "resumed",
+            reason: `restarted from run ${req.meta.restartOf}`,
+            at: now,
+          });
+          if (sent.kind === "failed")
+            console.warn(`[runs/claim] ${req.runId} → ${sent.type} not delivered to ${sent.instance}: ${sent.reason}`);
+        }
+        // The lease end joins the plane's alarm (record 0064): armed at the earliest due.
+        await this.ensurePlaneAlarm(now);
       }
-      // The lease end joins the plane's alarm (record 0064): armed at the earliest due.
-      await this.ensurePlaneAlarm(now);
-    }
-    return out;
+      return out;
+    });
   }
 
   /** Extends the lease iff the caller owns the run; answers what another generation asked for. */
@@ -3845,6 +4608,13 @@ export class RunHistoryDO extends DurableObject<Env> {
         out = { ok: false, reason: "unknown-run" };
         return;
       }
+      if (
+        !preserveCheckpointState(row.state, assignment.statePatch ?? {}) ||
+        !workEvidenceBelongsToRun({ ...row.state, ...assignment.statePatch }, { id: row.runId, ...row.meta })
+      ) {
+        out = { ok: false, reason: "fenced" };
+        return;
+      }
       const result = assignRunLiveState(
         assignment.restart ? undefined : row.liveState,
         row.liveStateSeq ?? 0,
@@ -3889,7 +4659,18 @@ export class RunHistoryDO extends DurableObject<Env> {
           JSON.stringify({ ...result.event, seq: liveStateSeq }),
         );
       }
-      const state = { ...row.state, ...assignment.statePatch, liveState: result.liveState, liveStateSeq };
+      const state = preserveCheckpointState(row.state, {
+        ...row.state,
+        ...assignment.statePatch,
+        liveState: result.liveState,
+        liveStateSeq,
+      });
+      if (!state) {
+        out = { ok: false, reason: "fenced" };
+        return;
+      }
+      if (isContextDependencies(state.contextDependencies))
+        this.pinContext(runId, undefined, state.contextDependencies);
       this.sql.exec(`UPDATE live_runs SET state_json = ? WHERE run_id = ?`, JSON.stringify(state), runId);
       out = {
         ...result,
@@ -3901,13 +4682,47 @@ export class RunHistoryDO extends DurableObject<Env> {
   }
 
   async setState(runId: string, gen: string, state: RunState): Promise<FenceResult> {
-    let out: FenceResult = { ok: true };
-    this.ctx.storage.transactionSync(() => {
-      out = checkFence(this.liveRow(runId), gen);
-      if (!out.ok) return;
-      this.sql.exec(`UPDATE live_runs SET state_json = ? WHERE run_id = ?`, JSON.stringify(state), runId);
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const row = this.liveRow(runId);
+      const fence = checkFence(row, gen);
+      if (!fence.ok) return fence;
+      if (!row) return { ok: false, reason: "unknown-run" };
+      const mintSeed = state.unitSeedReceipt !== undefined && row.state.unitSeedReceipt === undefined;
+      const preserved = preserveCheckpointState(row.state, state, mintSeed);
+      if (!preserved || !workEvidenceBelongsToRun(preserved, { id: row.runId, ...row.meta }))
+        return { ok: false, reason: "fenced" };
+      const receipt = preserved.unitSeedReceipt as UnitSeedReceipt | undefined;
+      if (mintSeed && receipt) {
+        const checkpoint = row.state.contextCheckpoint as { key?: string; through?: number } | undefined;
+        const lastJson = this.sql
+          .exec<{ json: string }>(`SELECT json FROM run_steps WHERE run_id = ? ORDER BY step DESC LIMIT 1`, runId)
+          .toArray()[0]?.json;
+        const last = lastJson ? (JSON.parse(lastJson) as StepRecord) : undefined;
+        if (
+          receipt.ownerGen !== gen ||
+          checkpoint?.key !== receipt.seed.key ||
+          checkpoint.through !== receipt.seed.through ||
+          !last ||
+          last.step !== 0 ||
+          last.inFlight.length ||
+          receipt.seed.through !== receipt.seed.from + last.turnIndex - 1
+        )
+          return { ok: false, reason: "fenced" };
+        const log = this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(receipt.seed.key));
+        if (
+          (await sourceHash(row.system)) !== receipt.seed.systemHash ||
+          !(await log.acknowledgeUnitSeed(runId, gen, receipt)).ok
+        )
+          return { ok: false, reason: "fenced" };
+      }
+      this.ctx.storage.transactionSync(() => {
+        if (isContextDependencies(preserved.contextDependencies))
+          this.pinContext(runId, undefined, preserved.contextDependencies);
+        if (receipt) this.pinReference(runId, runId, receipt.seed.key);
+        this.sql.exec(`UPDATE live_runs SET state_json = ? WHERE run_id = ?`, JSON.stringify(preserved), runId);
+      });
+      return { ok: true };
     });
-    return out;
   }
 
   /** Any generation: a steer arrives on whichever container is up. */
@@ -3994,6 +4809,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     proposal?: RunPolicyProposal,
     point?: RunMetricsPoint,
   ): Promise<FenceResult & { stored?: boolean; event?: RunFinishedSend["kind"] }> {
+    record = await this.archiveCheckpoint(record);
     let out: FenceResult & { stored?: boolean } = { ok: true };
     let turnedFinal = false;
     this.ctx.storage.transactionSync(() => {
@@ -4044,18 +4860,21 @@ export class RunHistoryDO extends DurableObject<Env> {
   /** The live rows go with no record (item 42): a reserved run that never
    *  started. Fenced. */
   async abandon(runId: string, gen: string): Promise<FenceResult> {
-    let out: FenceResult = { ok: true };
-    let threadKey: string | undefined;
-    this.ctx.storage.transactionSync(() => {
-      const row = this.liveRow(runId);
-      out = checkFence(row, gen);
-      if (!out.ok) return;
-      threadKey = row?.threadKey;
-      this.deleteLiveRows([runId]);
+    return this.ctx.blockConcurrencyWhile(async () => {
+      let out: FenceResult = { ok: true };
+      let threadKey: string | undefined;
+      this.ctx.storage.transactionSync(() => {
+        const row = this.liveRow(runId);
+        out = checkFence(row, gen);
+        if (!out.ok) return;
+        threadKey = row?.threadKey;
+        this.deleteLiveRows([runId]);
+      });
+      // An abandoned reservation seals like a finish does: the thread frees and the queue walks.
+      if (out.ok && threadKey !== undefined) this.planeSealed(runId, threadKey, systemClock());
+      await this.syncRangePins();
+      return out;
     });
-    // An abandoned reservation seals like a finish does: the thread frees and the queue walks.
-    if (out.ok && threadKey !== undefined) this.planeSealed(runId, threadKey, systemClock());
-    return out;
   }
 
   private deleteLiveRows(runIds: string[]): void {
@@ -4289,6 +5108,28 @@ export class RunHistoryDO extends DurableObject<Env> {
    * order is the JS string order `newestFirst` uses.
    */
   private isKept(row: RetentionRow, policy: RetentionPolicy, now: number): boolean {
+    if (this.isKeptByPolicy(row, policy, now)) return true;
+    const holders = this.sql
+      .exec<{ holder_run_id: string }>(
+        `SELECT DISTINCT holder_run_id FROM context_refs WHERE source_run_id = ? AND (retention_pin = 1 OR ordinary_pin = 1)`,
+        row.run_id,
+      )
+      .toArray();
+    return holders.some(({ holder_run_id }) => this.contextHolderIsLiveOrKept(holder_run_id, policy, now));
+  }
+
+  private contextHolderIsLiveOrKept(runId: string, policy: RetentionPolicy, now: number): boolean {
+    if (runId.startsWith("@session:"))
+      return this.sessionContextRootIsRetained(runId.slice("@session:".length), policy, now);
+    if (runId.startsWith("@unit:")) return this.unitContextRootIsRetained(runId);
+    if (this.liveRow(runId)) return true;
+    const holder = this.sql
+      .exec<RetentionRow>(`SELECT run_id, finished_at, bytes FROM runs WHERE run_id = ?`, runId)
+      .toArray()[0];
+    return holder !== undefined && this.isKeptByPolicy(holder, policy, now);
+  }
+
+  private isKeptByPolicy(row: RetentionRow, policy: RetentionPolicy, now: number): boolean {
     const cutoff = now - policy.retentionDays * 86_400_000;
     if (row.finished_at < cutoff) return false;
     const ahead = this.sql
@@ -4304,10 +5145,19 @@ export class RunHistoryDO extends DurableObject<Env> {
     return ahead.n < policy.maxRuns && ahead.b + row.bytes <= policy.maxBytes;
   }
 
-  private deleteRuns(ids: readonly string[]): void {
+  private deleteRuns(ids: readonly string[], explicit = false): void {
     for (let i = 0; i < ids.length; i += RUN_DELETE_BATCH) {
       const batch = ids.slice(i, i + RUN_DELETE_BATCH);
       const marks = batch.map(() => "?").join(",");
+      if (explicit) this.sql.exec(`DELETE FROM context_refs WHERE source_run_id IN (${marks})`, ...batch);
+      else {
+        this.sql.exec(`DELETE FROM context_refs WHERE source_run_id IN (${marks}) AND ordinary_member = 0`, ...batch);
+        this.sql.exec(
+          `UPDATE context_refs SET retention_pin = 0, ordinary_pin = 0 WHERE source_run_id IN (${marks})`,
+          ...batch,
+        );
+      }
+      this.sql.exec(`DELETE FROM context_refs WHERE holder_run_id IN (${marks})`, ...batch);
       this.sql.exec(`DELETE FROM run_events WHERE run_id IN (${marks})`, ...batch);
       this.sql.exec(`DELETE FROM runs WHERE run_id IN (${marks})`, ...batch);
     }
@@ -4328,7 +5178,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     first?: string,
   ): { deleted: number; kept: Set<string> } {
     const rows = this.retentionRows();
-    const kept = RunHistoryDO.keptIds(rows, policy, now);
+    const kept = this.contextKeptIds(rows, policy, now);
     const outside = rows.map((r) => r.run_id).filter((id) => !kept.has(id) && id !== first);
     const firstDoomed = first !== undefined && !kept.has(first);
     const doomed = firstDoomed ? [first, ...outside] : outside;
@@ -4358,30 +5208,35 @@ export class RunHistoryDO extends DurableObject<Env> {
     proposal?: RunPolicyProposal,
     point?: RunMetricsPoint,
   ): Promise<{ ok: true; retained: number; stored: boolean; rewritten: boolean; turnedFinal: boolean }> {
-    let result = { ok: true as const, retained: 0, stored: false, rewritten: false, turnedFinal: false };
-    this.ctx.storage.transactionSync(() => {
-      result = this.upsertInTransaction(record, proposal);
-    });
-    this.writeMetricsPoint(record.id, point, result.turnedFinal && result.stored);
-    // A coordinator child closed OUTSIDE the ledger's finish — the run loop or
-    // a reclaim writing an `interrupted` record, the pi harness's typed restart,
-    // a resume abandoning a lost workspace — still wakes its parent's wait at
-    // once (run-history item 47): the same `run-finished-<runId>` event rides
-    // this commit. The tombstone a run writes at its start is excluded (its
-    // `finishedAt` equals `startedAt`); the parent confirms by `read-record`
-    // before it acts, so a duplicate send is harmless.
-    if (result.stored && record.parentInstanceId !== undefined && record.finishedAt > record.startedAt) {
-      const transportWorkflowId = record.events.find((event) => event.type === "coordinator_tag")?.transportWorkflowId;
-      const event = await sendRunFinished(this.env.SHIP_COORDINATOR, {
-        ...record,
-        ...(transportWorkflowId !== undefined ? { transportWorkflowId } : {}),
+    record = await this.archiveCheckpoint(record);
+    return this.withRangePins([{ id: record.id, handoff: record.childHandoff }], async () => {
+      let result = { ok: true as const, retained: 0, stored: false, rewritten: false, turnedFinal: false };
+      this.ctx.storage.transactionSync(() => {
+        result = this.upsertInTransaction(record, proposal);
       });
-      if (event.kind === "failed")
-        console.warn(`[runs/put] ${record.id} → ${event.type} not delivered to ${event.instance}: ${event.reason}`);
-    }
-    if ((await this.ctx.storage.getAlarm()) === null)
-      await this.ctx.storage.setAlarm(systemClock() + RUN_SWEEP_INTERVAL_MS);
-    return result;
+      this.writeMetricsPoint(record.id, point, result.turnedFinal && result.stored);
+      // A coordinator child closed OUTSIDE the ledger's finish — the run loop or
+      // a reclaim writing an `interrupted` record, the pi harness's typed restart,
+      // a resume abandoning a lost workspace — still wakes its parent's wait at
+      // once (run-history item 47): the same `run-finished-<runId>` event rides
+      // this commit. The tombstone a run writes at its start is excluded (its
+      // `finishedAt` equals `startedAt`); the parent confirms by `read-record`
+      // before it acts, so a duplicate send is harmless.
+      if (result.stored && record.parentInstanceId !== undefined && record.finishedAt > record.startedAt) {
+        const transportWorkflowId = record.events.find(
+          (event) => event.type === "coordinator_tag",
+        )?.transportWorkflowId;
+        const event = await sendRunFinished(this.env.SHIP_COORDINATOR, {
+          ...record,
+          ...(transportWorkflowId !== undefined ? { transportWorkflowId } : {}),
+        });
+        if (event.kind === "failed")
+          console.warn(`[runs/put] ${record.id} → ${event.type} not delivered to ${event.instance}: ${event.reason}`);
+      }
+      if ((await this.ctx.storage.getAlarm()) === null)
+        await this.ctx.storage.setAlarm(systemClock() + RUN_SWEEP_INTERVAL_MS);
+      return result;
+    });
   }
 
   /** The body of `put`, for a caller already inside `transactionSync` — the
@@ -4404,7 +5259,46 @@ export class RunHistoryDO extends DurableObject<Env> {
           : {}),
         ...(record.sealedAt !== undefined ? { sealedAt: Math.min(record.sealedAt, now + RUN_MAX_FUTURE_MS) } : {}),
       };
-      const { events, ...summary } = stored;
+      const priorReceipt =
+        this.liveRow(stored.id)?.state.contextCheckpointReceipt ??
+        (() => {
+          const previous = this.sql
+            .exec<{ context_checkpoint_json: string | null }>(
+              `SELECT context_checkpoint_json FROM runs WHERE run_id = ?`,
+              stored.id,
+            )
+            .toArray()[0];
+          return previous?.context_checkpoint_json ? JSON.parse(previous.context_checkpoint_json) : undefined;
+        })();
+      if (
+        stored.contextCheckpointReceipt !== undefined &&
+        JSON.stringify(stored.contextCheckpointReceipt) !== JSON.stringify(priorReceipt)
+      )
+        throw new Error("checkpoint receipt is not canonical");
+      const priorWork = this.sql
+        .exec<{ work_evidence_json: string | null }>(`SELECT work_evidence_json FROM runs WHERE run_id = ?`, stored.id)
+        .toArray()[0]?.work_evidence_json;
+      const canonicalWork = this.liveRow(stored.id)?.state ?? (priorWork ? JSON.parse(priorWork) : {});
+      if (
+        stored.unitSeedReceipt !== undefined &&
+        JSON.stringify(stored.unitSeedReceipt) !== JSON.stringify(canonicalWork.unitSeedReceipt)
+      )
+        throw new Error("unit seed receipt is not canonical");
+      for (const field of ["workReads", "unitSeedReceipt"] as const) {
+        if (stored[field] === undefined && canonicalWork[field] !== undefined)
+          Object.assign(stored, { [field]: structuredClone(canonicalWork[field]) });
+      }
+      if (
+        !preserveCheckpointState(canonicalWork, {
+          workReads: stored.workReads,
+          unitSeedReceipt: stored.unitSeedReceipt,
+        })
+      )
+        throw new Error("work evidence is not canonical");
+      if (!workEvidenceBelongsToRun(stored, stored)) throw new Error("work evidence does not match its canonical run");
+      this.pinContext(stored.id, stored.childHandoff, stored.contextDependencies);
+      const { events, sourceReads, workReads, unitSeedReceipt, contextCheckpointReceipt, directAudience, ...summary } =
+        stored;
       const bytes = utf8ByteLength(JSON.stringify(stored));
       const existing = this.sql
         .exec<{ event_count: number; finished_at: number; bytes: number; summary_json: string }>(
@@ -4438,8 +5332,8 @@ export class RunHistoryDO extends DurableObject<Env> {
         );
       this.sql.exec(
         `INSERT INTO runs (run_id, label, agent, model, channel_id, user_id, thread_key, channel_visibility, repo, started_at, finished_at, stored_at, status,
-                           event_count, stored_event_count, truncated, bytes, diagnosis_json, summary_json, session_key, usage_json, parent_run_id, pr_number)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           event_count, stored_event_count, truncated, bytes, diagnosis_json, summary_json, session_key, usage_json, parent_run_id, pr_number, source_reads_json, context_checkpoint_json, direct_audience_json, work_evidence_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(run_id) DO UPDATE SET
            label = excluded.label, agent = excluded.agent, model = excluded.model, channel_id = excluded.channel_id,
            user_id = excluded.user_id, thread_key = excluded.thread_key, channel_visibility = excluded.channel_visibility,
@@ -4450,7 +5344,7 @@ export class RunHistoryDO extends DurableObject<Env> {
            session_key = excluded.session_key,
            usage_json = COALESCE(excluded.usage_json, runs.usage_json),
            parent_run_id = excluded.parent_run_id,
-           pr_number = excluded.pr_number`,
+           pr_number = excluded.pr_number, source_reads_json = excluded.source_reads_json, context_checkpoint_json = excluded.context_checkpoint_json, direct_audience_json = excluded.direct_audience_json, work_evidence_json = excluded.work_evidence_json`,
         stored.id,
         stored.label ?? null,
         stored.agent ?? null,
@@ -4474,6 +5368,12 @@ export class RunHistoryDO extends DurableObject<Env> {
         stored.usage ? JSON.stringify(stored.usage) : null,
         stored.parentRunId ?? null,
         pullRequestNumberOf(stored) ?? null,
+        sourceReads === undefined ? null : JSON.stringify(sourceReads),
+        contextCheckpointReceipt === undefined ? null : JSON.stringify(contextCheckpointReceipt),
+        directAudience === undefined ? null : JSON.stringify(directAudience),
+        workReads === undefined && unitSeedReceipt === undefined
+          ? null
+          : JSON.stringify({ version: 1, workReads, unitSeedReceipt }),
       );
       // The session's registry row learns its newest finish (session-log item
       // 7); a record that reaches the store without a claim (the plain put
@@ -4530,12 +5430,15 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   /** Remove a run and its events. Returns whether a run row existed. */
   async delete(id: string): Promise<boolean> {
-    let deleted = false;
-    this.ctx.storage.transactionSync(() => {
-      deleted = this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM runs WHERE run_id = ?`, id).one().n === 1;
-      this.deleteRuns([id]);
+    return this.ctx.blockConcurrencyWhile(async () => {
+      let deleted = false;
+      this.ctx.storage.transactionSync(() => {
+        deleted = this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM runs WHERE run_id = ?`, id).one().n === 1;
+        this.deleteRuns([id], true);
+      });
+      await this.syncRangePins();
+      return deleted;
     });
-    return deleted;
   }
 
   /** Every 6 h: delete everything outside policy (no fence — this is where a
@@ -4555,6 +5458,9 @@ export class RunHistoryDO extends DurableObject<Env> {
         // Orphan sweep: events whose run is gone (defensive — `deleteRuns` pairs
         // the two deletes, so this is a periodic check, not a per-put cost).
         this.sql.exec(`DELETE FROM run_events WHERE run_id NOT IN (SELECT run_id FROM runs)`);
+        this.sql.exec(
+          `DELETE FROM context_refs WHERE holder_run_id NOT IN (SELECT run_id FROM runs UNION SELECT run_id FROM live_runs UNION SELECT '@session:' || key FROM sessions UNION SELECT '@unit:' || instance_id || ':' || unit FROM coordinator_units)`,
+        );
         // Intake receipts past their bound (item 59): each row carries its own
         // `prune_after`, stamped at the insert from the writer's window.
         receipts = this.sql
@@ -4575,6 +5481,7 @@ export class RunHistoryDO extends DurableObject<Env> {
           .toArray()
           .map((r) => ({ key: r.key, threadKey: r.thread_key }));
       });
+      await this.ctx.blockConcurrencyWhile(() => this.syncRangePins());
       const dropped = await this.sweepSessions(candidates);
       console.log(
         `[runs/alarm] swept ${deleted} rows outside policy, pruned ${receipts} intake receipt(s), dropped ${dropped} session log(s)`,
@@ -4625,20 +5532,42 @@ export class RunHistoryDO extends DurableObject<Env> {
    *  key on what the object reads right before that key's drop, never on the
    *  list the transaction produced. A candidate a live run or a fresh record
    *  has overtaken is skipped and keeps its registry row. Returns how many dropped. */
+  private sessionIsRetained(key: string, _threadKey: string): boolean {
+    if (this.sql.exec(`SELECT 1 FROM runs WHERE session_key = ? LIMIT 1`, key).toArray().length > 0) return true;
+    const now = systemClock();
+    const { policy } = this.policyState();
+    if (this.sessionContextRootIsRetained(key, policy, now)) return true;
+    return this.sql
+      .exec<{ holder_run_id: string }>(
+        `SELECT DISTINCT holder_run_id FROM context_refs WHERE session_key = ? AND (retention_pin = 1 OR ordinary_pin = 1)
+       AND source_run_id IN (SELECT run_id FROM runs UNION SELECT run_id FROM live_runs)`,
+        key,
+      )
+      .toArray()
+      .some(({ holder_run_id }) => this.contextHolderIsLiveOrKept(holder_run_id, policy, now));
+  }
+
   async sweepSessions(candidates: readonly { key: string; threadKey: string }[]): Promise<number> {
     let dropped = 0;
     for (const { key, threadKey } of candidates) {
       const [{ decision }] = sessionsToDrop([
         {
           key,
-          hasKeptRun: this.sql.exec(`SELECT 1 FROM runs WHERE session_key = ? LIMIT 1`, key).toArray().length > 0,
+          hasKeptRun: this.sessionIsRetained(key, threadKey),
           threadLive:
-            this.sql.exec(`SELECT 1 FROM live_runs WHERE thread_key = ? LIMIT 1`, threadKey).toArray().length > 0,
+            this.sql
+              .exec(
+                `SELECT 1 FROM live_runs WHERE thread_key = ? OR json_extract(meta_json, '$.threadKey') = ? LIMIT 1`,
+                threadKey,
+                threadKey,
+              )
+              .toArray().length > 0,
         },
       ]);
       if (decision !== "drop") continue;
       try {
         await this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(key)).drop();
+        this.sql.exec(`DELETE FROM context_refs WHERE holder_run_id = ?`, `@session:${key}`);
         this.sql.exec(`DELETE FROM sessions WHERE key = ?`, key);
         dropped++;
       } catch (err) {
@@ -4673,7 +5602,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     const now = systemClock();
     const row = this.sql
       .exec<RunRow>(
-        `SELECT run_id, agent, channel_id, finished_at, bytes, event_count, summary_json FROM runs WHERE run_id = ?`,
+        `SELECT run_id, agent, channel_id, finished_at, bytes, event_count, summary_json, source_reads_json, context_checkpoint_json, direct_audience_json, work_evidence_json FROM runs WHERE run_id = ?`,
         id,
       )
       .toArray()[0];
@@ -4681,7 +5610,45 @@ export class RunHistoryDO extends DurableObject<Env> {
     const summary = parseSummary(row);
     if (!summary) return null;
     const events: RunEvent[] = parseEventRows(this.eventRows(id, 0, Number.MAX_SAFE_INTEGER));
-    return { ...summary, events };
+    let sourceReads: unknown;
+    let workReads: unknown;
+    let unitSeedReceipt: unknown;
+    let contextCheckpointReceipt: unknown;
+    let directAudience: unknown;
+    try {
+      sourceReads = row.source_reads_json == null ? undefined : JSON.parse(row.source_reads_json);
+      if (row.work_evidence_json != null) {
+        const evidence: unknown = JSON.parse(row.work_evidence_json);
+        if (
+          !evidence ||
+          typeof evidence !== "object" ||
+          Array.isArray(evidence) ||
+          (evidence as { version?: unknown }).version !== 1 ||
+          Object.keys(evidence).some(
+            (field) => field !== "version" && field !== "workReads" && field !== "unitSeedReceipt",
+          )
+        )
+          return null;
+        workReads = (evidence as { workReads?: unknown }).workReads;
+        unitSeedReceipt = (evidence as { unitSeedReceipt?: unknown }).unitSeedReceipt;
+      }
+
+      contextCheckpointReceipt =
+        row.context_checkpoint_json == null ? undefined : JSON.parse(row.context_checkpoint_json);
+      directAudience = row.direct_audience_json == null ? undefined : JSON.parse(row.direct_audience_json);
+    } catch {
+      return null;
+    }
+    const record = {
+      ...summary,
+      events,
+      ...(sourceReads === undefined ? {} : { sourceReads }),
+      ...(workReads === undefined ? {} : { workReads }),
+      ...(unitSeedReceipt === undefined ? {} : { unitSeedReceipt }),
+      ...(contextCheckpointReceipt === undefined ? {} : { contextCheckpointReceipt }),
+      ...(directAudience === undefined ? {} : { directAudience }),
+    };
+    return isRunRecord(record) && record.id === id ? record : null;
   }
 
   private eventRows(id: string, afterSeq: number, limit: number): EventRow[] {
@@ -4870,11 +5837,28 @@ export class RunHistoryDO extends DurableObject<Env> {
       )
       .one();
     const boundExceeded = inPolicy.n > policy.maxRuns || inPolicy.b > policy.maxBytes;
-    const kept = boundExceeded ? RunHistoryDO.keptIds(this.retentionRows(), policy, now) : null;
+    const hasContext = this.contextReferences().length > 0;
+    const kept = hasContext
+      ? this.contextKeptIds(this.retentionRows(), policy, now)
+      : boundExceeded
+        ? RunHistoryDO.keptIds(this.retentionRows(), policy, now)
+        : null;
     const before = q.before ?? Number.MAX_SAFE_INTEGER;
-    const where = [`(finished_at < ? OR (finished_at = ? AND run_id < ?))`, `finished_at >= ?`];
+    const where = [
+      `(finished_at < ? OR (finished_at = ? AND run_id < ?))`,
+      hasContext ? `run_id IN (SELECT value FROM json_each(?))` : `finished_at >= ?`,
+    ];
     // no beforeId → no row satisfies `run_id < ''`: the equality branch is inert
-    const params: (string | number)[] = [before, before, q.beforeId ?? "", Math.max(q.sinceMs ?? 0, cutoff)];
+    const params: (string | number)[] = [
+      before,
+      before,
+      q.beforeId ?? "",
+      hasContext ? JSON.stringify([...kept!]) : Math.max(q.sinceMs ?? 0, cutoff),
+    ];
+    if (hasContext && q.sinceMs !== undefined) {
+      where.push(`finished_at >= ?`);
+      params.push(q.sinceMs);
+    }
     if (q.agent !== undefined) {
       where.push(`agent = ?`);
       params.push(q.agent);
@@ -5048,12 +6032,10 @@ function identityOfSummary(raw: string): {
   }
 }
 
-function parseSummary(row: Pick<RunRow, "summary_json">): Omit<RunRecord, "events"> | null {
+function parseSummary(row: Pick<RunRow, "summary_json">): RunListItem | null {
   try {
     const parsed: unknown = JSON.parse(row.summary_json);
-    return isRunRecord({ ...(parsed as object), events: [] })
-      ? normalizeStored(parsed as Omit<RunRecord, "events">)
-      : null;
+    return isRunListItem(parsed) ? normalizeStored(parsed) : null;
   } catch {
     return null;
   }
@@ -5395,6 +6377,10 @@ function parseCandidate(v: unknown, i: number): Validated<MemoryCandidate> {
     return invalid(`${at}.sourceThreadKey must be a non-empty string`);
   }
   const out: MemoryCandidate = { kind: c.kind, text: c.text, sourceThreadKey: c.sourceThreadKey };
+  if (c.provenance !== undefined) {
+    if (!isMemoryProvenance(c.provenance)) return invalid(`${at}.provenance must be a bounded memory revision`);
+    out.provenance = c.provenance;
+  }
   if (c.keywords !== undefined) {
     if (
       !Array.isArray(c.keywords) ||
@@ -5610,6 +6596,7 @@ export class SessionLogDO extends DurableObject<Env> {
         .map((r) => r.name),
     );
     if (!columns.has("row_id")) this.sql.exec(`ALTER TABLE turns ADD COLUMN row_id TEXT`);
+    if (!columns.has("row_hash")) this.sql.exec(`ALTER TABLE turns ADD COLUMN row_hash TEXT`);
     this.sql.exec(`CREATE UNIQUE INDEX IF NOT EXISTS turns_row_id ON turns(row_id) WHERE row_id IS NOT NULL`);
   }
 
@@ -5631,7 +6618,7 @@ export class SessionLogDO extends DurableObject<Env> {
     this.ctx.storage.transactionSync(() => {
       const pending = this.sourceMeta("source_pending_owner");
       if (pending && pending !== `${runId}:${gen}`)
-        this.setSourceMeta("sources", JSON.stringify({ version: 1, status: "unknown" }));
+        this.setSourceMeta("sources", JSON.stringify(taintSessionSources(this.sources())));
       this.sql.exec(
         `INSERT INTO meta (key, value) VALUES ('source_start', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
         String(this.next()),
@@ -5653,6 +6640,143 @@ export class SessionLogDO extends DurableObject<Env> {
     const row = this.sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'max_bytes'`).toArray()[0];
     const n = row ? Number(row.value) : Number.NaN;
     return Number.isFinite(n) && n > 0 ? n : DEFAULT_SESSION_LOG_MAX_BYTES;
+  }
+
+  async checkpointSnapshot(from: number, to: number) {
+    const rows = this.sql
+      .exec<{ idx: number; part: number; json: string }>(
+        `SELECT idx, part, json FROM turns WHERE idx >= ? AND idx <= ? ORDER BY idx, part`,
+        from,
+        to,
+      )
+      .toArray();
+    return {
+      rows,
+      attachments: this.attachmentsOf(rows),
+      owner: this.owner(),
+      next: this.next(),
+      context: this.sources()?.context,
+      notepad: this.sql.exec<{ text: string }>(`SELECT text FROM notepad WHERE k = 1`).toArray()[0]?.text ?? "",
+    };
+  }
+
+  async installCheckpoint(runId: string, gen: string, receipt: ContextCheckpointReceipt): Promise<FenceResult> {
+    const { seedFrom, through } = receipt.session;
+    const snapshot = await this.checkpointSnapshot(seedFrom, through);
+    if (snapshot.owner?.runId !== runId || snapshot.owner.gen !== gen) return { ok: false, reason: "fenced" };
+    if (
+      snapshot.next !== through + 1 ||
+      !isContextDependencies(snapshot.context) ||
+      snapshot.context.status !== "known"
+    )
+      return { ok: false, reason: "fenced" };
+    const digest = await contextDependenciesHash(snapshot.context);
+    if (digest !== receipt.beforeHash && digest !== receipt.normalizedHash) return { ok: false, reason: "fenced" };
+    if (
+      (await sourceHash(assembleTranscript(snapshot.rows, snapshot.attachments, seedFrom))) !==
+        receipt.inputs.transcriptHash ||
+      (await sourceHash(snapshot.notepad)) !== receipt.inputs.notepadHash
+    )
+      return { ok: false, reason: "fenced" };
+    const current = await this.checkpointSnapshot(seedFrom, through);
+    if (JSON.stringify(current) !== JSON.stringify(snapshot)) return { ok: false, reason: "fenced" };
+    return this.ctx.storage.transactionSync(() => {
+      const owner = this.owner();
+      if (
+        owner?.runId !== runId ||
+        owner.gen !== gen ||
+        this.next() !== through + 1 ||
+        JSON.stringify(this.sources()?.context) !== JSON.stringify(snapshot.context)
+      )
+        return { ok: false, reason: "fenced" };
+      const raw = this.sql
+        .exec<{ idx: number; part: number; json: string; trimmed: number }>(
+          `SELECT idx, part, json, trimmed FROM turns WHERE idx >= ? AND idx <= ? ORDER BY idx, part`,
+          seedFrom,
+          through,
+        )
+        .toArray();
+      if (
+        !sessionRangesAvailable(raw, [{ from: seedFrom, to: through }]) ||
+        JSON.stringify(raw.map(({ idx, part, json }) => ({ idx, part, json }))) !== JSON.stringify(snapshot.rows)
+      )
+        return { ok: false, reason: "fenced" };
+      if (
+        (this.sql.exec<{ text: string }>(`SELECT text FROM notepad WHERE k = 1`).toArray()[0]?.text ?? "") !==
+          snapshot.notepad ||
+        JSON.stringify(this.attachmentsOf(raw)) !== JSON.stringify(snapshot.attachments)
+      )
+        return { ok: false, reason: "fenced" };
+      const pins = this.rangePins();
+      pins[runId] = [...(pins[runId] ?? []), { from: seedFrom, to: through }];
+      this.setSourceMeta("range_pins", JSON.stringify(pins));
+      this.setSourceMeta("sources", JSON.stringify({ ...this.sources(), context: receipt.normalized }));
+      return { ok: true };
+    });
+  }
+
+  async acknowledgeUnitSeed(runId: string, gen: string, receipt: UnitSeedReceipt): Promise<FenceResult> {
+    const { from, through, messagesHash } = receipt.seed;
+    const snapshot = await this.checkpointSnapshot(from, through);
+    if (
+      snapshot.owner?.runId !== runId ||
+      snapshot.owner.gen !== gen ||
+      (await sourceHash(assembleTranscript(snapshot.rows, snapshot.attachments, from))) !== messagesHash
+    )
+      return { ok: false, reason: "fenced" };
+    return this.ctx.storage.transactionSync(() => {
+      const owner = this.owner();
+      const rows = this.sql
+        .exec<{ idx: number; part: number; json: string; trimmed: number }>(
+          `SELECT idx, part, json, trimmed FROM turns WHERE idx >= ? AND idx <= ? ORDER BY idx, part`,
+          from,
+          through,
+        )
+        .toArray();
+      if (
+        owner?.runId !== runId ||
+        owner.gen !== gen ||
+        !sessionRangesAvailable(rows, [{ from, to: through }]) ||
+        JSON.stringify(rows.map(({ idx, part, json }) => ({ idx, part, json }))) !== JSON.stringify(snapshot.rows) ||
+        JSON.stringify(this.attachmentsOf(rows)) !== JSON.stringify(snapshot.attachments)
+      )
+        return { ok: false, reason: "fenced" };
+      const pins = this.rangePins();
+      pins[runId] = [...(pins[runId] ?? []), { from, to: through }];
+      this.setSourceMeta("range_pins", JSON.stringify(pins));
+      return { ok: true };
+    });
+  }
+
+  private rangePins(): SessionRangePins {
+    const stored = this.sourceMeta("range_pins");
+    return stored ? (JSON.parse(stored) as SessionRangePins) : {};
+  }
+
+  async protectRanges(holder: string, ranges: readonly SessionRangePin[]): Promise<{ ok: boolean }> {
+    return this.ctx.storage.transactionSync(() => {
+      const rows = this.sql
+        .exec<{ idx: number; part: number; json: string; trimmed: number }>(
+          `SELECT idx, part, json, trimmed FROM turns`,
+        )
+        .toArray();
+      if (!sessionRangesAvailable(rows, ranges)) return { ok: false };
+      const pins = this.rangePins();
+      pins[holder] = [
+        ...new Map([...(pins[holder] ?? []), ...ranges].map((range) => [`${range.from}:${range.to}`, range])).values(),
+      ];
+      this.setSourceMeta("range_pins", JSON.stringify(pins));
+      return { ok: true };
+    });
+  }
+
+  async retainRangePins(holders: readonly string[]): Promise<void> {
+    this.ctx.storage.transactionSync(() => {
+      const pins = this.rangePins();
+      const allowed = new Set(holders);
+      for (const holder of Object.keys(pins)) if (!allowed.has(holder)) delete pins[holder];
+      this.setSourceMeta("range_pins", JSON.stringify(pins));
+    });
   }
 
   private owner(): { runId: string; gen: string } | undefined {
@@ -5723,20 +6847,45 @@ export class SessionLogDO extends DurableObject<Env> {
   async appendKeyed(
     rowId: string,
     rows: Array<{ part: number; json: string }>,
-  ): Promise<{ ok: true; appended: boolean }> {
+    context?: ContextDependencies,
+    checkpoints: readonly CanonicalCheckpointSource[] = [],
+  ): Promise<{ ok: boolean; appended: boolean }> {
+    if (!keyedAppendContextMatches(rows, context)) return { ok: false, appended: false };
+    const hash = await sourceHash({ rows, context: context ?? UNKNOWN_CONTEXT_DEPENDENCIES });
     let appended = false;
+    let ok = true;
     this.ctx.storage.transactionSync(() => {
-      const seen = this.sql.exec(`SELECT 1 FROM turns WHERE row_id = ? LIMIT 1`, rowId).toArray().length > 0;
-      if (seen) return;
+      const seen = this.sql
+        .exec<{ row_hash: string | null }>(`SELECT row_hash FROM turns WHERE row_id = ? LIMIT 1`, rowId)
+        .toArray()[0];
+      if (seen) {
+        // A historical row without a hash has no immutable replay proof.
+        ok = seen.row_hash === hash;
+        return;
+      }
       const idx = this.next();
+      const previous = this.sources();
+      for (const checkpoint of checkpoints)
+        if (previous?.context) previous.context = applyContextCheckpointAliases(previous.context, checkpoint);
+      const merged = appendSessionContext(previous, context, idx === 0);
+      for (const checkpoint of checkpoints)
+        if (merged.context) merged.context = applyContextCheckpointAliases(merged.context, checkpoint);
+      this.setSourceMeta("sources", JSON.stringify(merged));
       for (const [i, r] of rows.entries()) {
         this.putRow({ idx, part: r.part, json: r.json }, r.json, false);
-        if (i === 0) this.sql.exec(`UPDATE turns SET row_id = ? WHERE idx = ? AND part = ?`, rowId, idx, r.part);
+        if (i === 0)
+          this.sql.exec(
+            `UPDATE turns SET row_id = ?, row_hash = ? WHERE idx = ? AND part = ?`,
+            rowId,
+            hash,
+            idx,
+            r.part,
+          );
       }
       appended = true;
       this.enforceBytePolicy();
     });
-    return { ok: true, appended };
+    return { ok, appended };
   }
 
   async write(
@@ -5745,7 +6894,13 @@ export class SessionLogDO extends DurableObject<Env> {
     attachments: TranscriptAttachment[],
     sourceUpdate?: { runId: string; sources: SessionSources },
     runId?: string,
+    seed = false,
   ): Promise<FenceResult & { bytes?: number; sourcesSaved?: true }> {
+    const frozen = structuredClone({ rows, attachments, sourceUpdate });
+    rows = frozen.rows;
+    attachments = frozen.attachments;
+    sourceUpdate = frozen.sourceUpdate;
+    const verified = await verifiedSourceResults(rows);
     let out: FenceResult & { bytes?: number; sourcesSaved?: true } = { ok: true };
     this.ctx.storage.transactionSync(() => {
       const owner = this.owner();
@@ -5767,9 +6922,7 @@ export class SessionLogDO extends DurableObject<Env> {
         }
         const pending = this.sourceMeta("source_pending_owner");
         const previous =
-          pending && pending !== `${owner.runId}:${gen}`
-            ? { version: 1 as const, status: "unknown" as const }
-            : this.sources();
+          pending && pending !== `${owner.runId}:${gen}` ? taintSessionSources(this.sources()) : this.sources();
         const start = this.sql
           .exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'source_start'`)
           .toArray()[0]?.value;
@@ -5794,6 +6947,36 @@ export class SessionLogDO extends DurableObject<Env> {
         // A writer that cannot attest source completeness must not inherit a prior writer's receipt.
         this.setSourceMeta("source_pending_owner", `${owner.runId}:${gen}`);
       }
+      const pins = this.rangePins();
+      for (const row of rows) {
+        if (!sessionRowIsPinned(pins, row.idx)) continue;
+        const original = this.sql
+          .exec<{ json: string }>(`SELECT json FROM turns WHERE idx = ? AND part = ?`, row.idx, row.part)
+          .toArray()[0];
+        if (original?.json !== row.json) {
+          out = { ok: false, reason: "fenced" };
+          return;
+        }
+      }
+      for (const attachment of attachments) {
+        const original = this.sql
+          .exec<{ media_type: string; data: string }>(
+            `SELECT media_type, data FROM attachments WHERE ref = ?`,
+            attachment.ref,
+          )
+          .toArray()[0];
+        if (
+          original &&
+          (original.data !== attachment.data || original.media_type !== attachment.mediaType) &&
+          this.sql
+            .exec<{ idx: number; json: string }>(`SELECT idx, json FROM turns`)
+            .toArray()
+            .some((row) => sessionRowIsPinned(pins, row.idx) && attachmentRefsOf(row.json).includes(attachment.ref))
+        ) {
+          out = { ok: false, reason: "fenced" };
+          return;
+        }
+      }
       for (const a of attachments) {
         this.sql.exec(
           `INSERT OR REPLACE INTO attachments (ref, media_type, data, bytes) VALUES (?, ?, ?, ?)`,
@@ -5802,6 +6985,22 @@ export class SessionLogDO extends DurableObject<Env> {
           a.data,
           utf8ByteLength(a.data),
         );
+      }
+      const tracked = this.sources();
+      if (tracked?.context && rows.some((r) => rowKind(r.json) === "tool_result")) {
+        const indices = [...new Set(rows.map((r) => r.idx))];
+        const old = this.sql
+          .exec<{ idx: number; part: number; json: string }>(
+            `SELECT idx, part, json FROM turns WHERE kind = 'tool_use' OR idx IN (SELECT value FROM json_each(?)) ORDER BY idx, part`,
+            JSON.stringify(indices),
+          )
+          .toArray();
+        if (uncoveredSourceResult(old, rows, tracked.context, seed ? undefined : owner.runId, verified))
+          this.setSourceMeta("sources", JSON.stringify(taintSessionSources(tracked)));
+      }
+      if (sourceUpdate && JSON.stringify(this.sources()) !== JSON.stringify(sourceUpdate.sources)) {
+        out = { ok: false, reason: "fenced" };
+        return;
       }
       for (const r of rows) this.putRow(r, r.json, false);
       out = { ok: true, bytes: this.enforceBytePolicy(), ...(sourceUpdate ? { sourcesSaved: true as const } : {}) };
@@ -5855,17 +7054,18 @@ export class SessionLogDO extends DurableObject<Env> {
     let total = this.totalBytes();
     while (total > max) {
       const candidates = this.sql
-        .exec<{ id: number; bytes: number; json: string }>(
-          `SELECT id, bytes, json FROM turns WHERE kind = 'tool_result' AND trimmed = 0 ORDER BY idx ASC, part ASC`,
+        .exec<{ id: number; idx: number; bytes: number; json: string }>(
+          `SELECT id, idx, bytes, json FROM turns WHERE kind = 'tool_result' AND trimmed = 0 ORDER BY idx ASC, part ASC`,
         )
         .toArray()
+        .filter((c) => !sessionRowIsPinned(this.rangePins(), c.idx))
         .map((c) => ({ id: c.id, bytes: c.bytes + this.soleAttachmentBytes(c) }));
       const ids = planSessionTrim(candidates, total - max, TRIM_MARKER_BYTES_ESTIMATE);
       if (ids.length === 0) break;
       for (const id of ids) {
         const row = this.sql
-          .exec<SessionTurnRow & { row_id: string | null }>(
-            `SELECT id, idx, part, json, text, row_id FROM turns WHERE id = ?`,
+          .exec<SessionTurnRow & { row_id: string | null; row_hash: string | null }>(
+            `SELECT id, idx, part, json, text, row_id, row_hash FROM turns WHERE id = ?`,
             id,
           )
           .toArray()[0];
@@ -5882,7 +7082,13 @@ export class SessionLogDO extends DurableObject<Env> {
         // the old row, so without this the partial unique index forgets the id
         // and a replayed migration or fold would re-append the trimmed turn.
         if (row.row_id !== null)
-          this.sql.exec(`UPDATE turns SET row_id = ? WHERE idx = ? AND part = ?`, row.row_id, row.idx, row.part);
+          this.sql.exec(
+            `UPDATE turns SET row_id = ?, row_hash = ? WHERE idx = ? AND part = ?`,
+            row.row_id,
+            row.row_hash,
+            row.idx,
+            row.part,
+          );
         // The marker references nothing, so an attachment only this row showed is now orphaned.
         for (const ref of refs) {
           if (!this.referencedElsewhere(ref, -1)) this.sql.exec(`DELETE FROM attachments WHERE ref = ?`, ref);
@@ -5899,6 +7105,20 @@ export class SessionLogDO extends DurableObject<Env> {
       .exec<{ ref: string }>(`SELECT ref FROM attachments ORDER BY ref`)
       .toArray()
       .map((r) => r.ref);
+  }
+
+  /** Read frozen keyed parts, never replacement bytes from a trimmed row. */
+  async readEntry(rowId: string): Promise<TranscriptRow[] | undefined> {
+    const seen = this.sql.exec<{ idx: number }>(`SELECT idx FROM turns WHERE row_id = ? LIMIT 1`, rowId).toArray()[0];
+    if (!seen) return undefined;
+    const rows = this.sql
+      .exec<{ idx: number; part: number; json: string; trimmed: number }>(
+        `SELECT idx, part, json, trimmed FROM turns WHERE idx = ? ORDER BY part`,
+        seen.idx,
+      )
+      .toArray();
+    if (!rows.length || rows.some((row) => row.trimmed === 1)) return undefined;
+    return rows.map(({ idx, part, json }) => ({ idx, part, json }));
   }
 
   /** The rows from `from` to `to` (inclusive; the tail when `to` is absent), in
@@ -5971,9 +7191,7 @@ export class SessionLogDO extends DurableObject<Env> {
       .exec<{ idx: number; bytes: number }>(`SELECT idx, bytes FROM turns ORDER BY idx DESC, part DESC`)
       .toArray();
     const from = tailCut(newestFirst, maxBytes);
-    const sources = this.sourceMeta("source_pending_owner")
-      ? { version: 1 as const, status: "unknown" as const }
-      : this.sources();
+    const sources = this.sourceMeta("source_pending_owner") ? taintSessionSources(this.sources()) : this.sources();
     const replay = this.sourceMeta("requires_fresh_sources") === "true" ? { requiresFreshSources: true as const } : {};
     if (from === undefined)
       return { rows: [], attachments: [], from: this.next(), ...(sources ? { sources } : {}), ...replay };
@@ -6122,6 +7340,8 @@ export class SessionLogDO extends DurableObject<Env> {
 }
 
 const LEDGER_ROUTES = new Set([
+  "/runs/context-checkpoint",
+  "/runs/session/checkpoint",
   "/runs/private-worker/append",
   "/runs/private-worker/list",
   "/runs/private-worker/list-after",
@@ -6177,6 +7397,7 @@ const LEDGER_ROUTES = new Set([
   "/runs/session/write",
   "/runs/session/append",
   "/runs/session/read",
+  "/runs/session/entry",
   "/runs/session/read-tail",
   "/runs/session/clear-owner",
   "/runs/session/search",
@@ -6476,6 +7697,8 @@ function parseClaim(b: Record<string, unknown>): Validated<ClaimRequest> {
   // by the finish's send and the refusal a second claim meets: shaped or
   // refused, and both fields or neither — one alone is no tag.
   const meta = r.meta as Record<string, unknown>;
+  if (meta.childHandoff !== undefined && !isChildHandoff(meta.childHandoff))
+    return invalid("run.meta.childHandoff must be a valid bounded handoff");
   if (meta.session !== undefined && !isRunSession(meta.session))
     return invalid("run.meta.session must name a session log and the run's range in it");
   if ((meta.parentInstanceId === undefined) !== (meta.idempotencyKey === undefined))
@@ -6631,6 +7854,29 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     const key = parseSessionKey(b.key);
     if (!key.ok) return json({ error: key.error }, 400);
     const stub = env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(key.value));
+    if (pathname === "/runs/session/checkpoint") {
+      const store = parseStoreKey(b);
+      if (!store.ok) return json({ error: store.error }, 400);
+      const run = parseRunId(b.runId);
+      if (!run.ok) return json({ error: run.error }, 400);
+      const owner = gen(b.gen);
+      if (!owner.ok) return json({ error: owner.error }, 400);
+      const request = {
+        key: key.value,
+        runId: run.value,
+        gen: owner.value,
+        expected: b.expected,
+      } as ContextCheckpointRequest;
+      if (
+        !request.expected ||
+        typeof request.expected.beforeHash !== "string" ||
+        !Number.isSafeInteger(request.expected.revision) ||
+        !request.expected.inputs
+      )
+        return json({ error: "invalid checkpoint request" }, 400);
+      const result = await env.RUNS.get(env.RUNS.idFromName(store.value)).normalizeContextOrigins(request);
+      return json(result, result.ok ? 200 : 409);
+    }
     if (pathname === "/runs/session/tail") return json(await stub.nextIndex());
     if (pathname === "/runs/session/owner") {
       const runId = parseRunId(b.runId);
@@ -6648,19 +7894,29 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
       if (!rows.ok) return json({ error: rows.error }, 400);
       const attachments = parseAttachments(b.attachments);
       if (!attachments.ok) return json({ error: attachments.error }, 400);
-      if (
-        b.sources !== undefined &&
-        (!isSessionSources(b.sources) ||
-          !sourcesBelongToSession(key.value, b.sources) ||
-          typeof b.sourceRunId !== "string")
-      )
-        return json({ error: "invalid trusted source metadata" }, 400);
+      if (b.sources !== undefined) {
+        if (!isSessionSources(b.sources) || typeof b.sourceRunId !== "string")
+          return json({ error: "invalid trusted source metadata" }, 400);
+        let owner: SessionSourceOwner | null | undefined;
+        if (b.storeKey !== undefined) {
+          const store = parseStoreKey(b);
+          if (!store.ok) return json({ error: store.error }, 400);
+          owner = await env.RUNS.get(env.RUNS.idFromName(store.value)).sourceSessionOwner(
+            b.sourceRunId,
+            g.value,
+            key.value,
+          );
+        }
+        if (!sourcesBelongToSession(key.value, b.sources, owner))
+          return json({ error: "source metadata does not belong to the claimed session" }, 409);
+      }
       const r = await stub.write(
         g.value,
         rows.value,
         attachments.value,
         b.sources !== undefined ? { runId: b.sourceRunId as string, sources: b.sources as SessionSources } : undefined,
         typeof b.runId === "string" ? b.runId : undefined,
+        b.seed === true,
       );
       console.log(
         `[runs/session/write] ${key.value} <- ${rows.value.length} row(s), ${attachments.value.length} attachment(s), ok=${r.ok}`,
@@ -6672,11 +7928,43 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
       if (!rowId.ok) return json({ error: rowId.error }, 400);
       const rows = parseKeyedRows(b.rows);
       if (!rows.ok) return json({ error: rows.error }, 400);
-      const r = await stub.appendKeyed(rowId.value, rows.value);
+      if (b.context !== undefined && !isContextDependencies(b.context))
+        return json({ error: "invalid context dependencies" }, 400);
+      const store = b.storeKey !== undefined ? parseStoreKey(b) : undefined;
+      if (store && !store.ok) return json({ error: store.error }, 400);
+      if (
+        !store &&
+        logicalThreadOfSession(key.value) !== undefined &&
+        contextReferencesOf("@pending", undefined, b.context as ContextDependencies | undefined).length
+      )
+        return json({ ok: false, appended: false, reason: "context-index-unavailable" }, 409);
+      const context = b.context as ContextDependencies | undefined;
+      const checkpoints: CanonicalCheckpointSource[] = [];
+      if (store?.ok)
+        for (const origin of context?.origins ?? []) {
+          if (!origin.checkpoint) continue;
+          const source = await env.RUNS.get(env.RUNS.idFromName(store.value)).readContextCheckpoint(origin.runId);
+          if (source?.receipt?.hash === origin.checkpoint) checkpoints.push(source);
+        }
+      const r = await stub.appendKeyed(rowId.value, rows.value, context, checkpoints);
+      if (r.ok && store?.ok && logicalThreadOfSession(key.value) !== undefined) {
+        const indexed = await env.RUNS.get(env.RUNS.idFromName(store.value)).registerThreadSession(
+          key.value,
+          logicalThreadOfSession(key.value)!,
+          systemClock(),
+          b.context as ContextDependencies | undefined,
+        );
+        if (!indexed.ok) return json({ ok: false, appended: r.appended, reason: indexed.reason }, 409);
+      }
       console.log(
         `[runs/session/append] ${key.value} <- ${rows.value.length} row(s) under ${rowId.value}, appended=${r.appended}`,
       );
-      return json(r);
+      return json({ ...r, ...(r.ok && b.context !== undefined ? { contextSaved: true } : {}) });
+    }
+    if (pathname === "/runs/session/entry") {
+      const rowId = parseRowId(b.rowId);
+      if (!rowId.ok) return json({ error: rowId.error }, 400);
+      return json({ rows: (await stub.readEntry(rowId.value)) ?? null });
     }
     if (pathname === "/runs/session/read") {
       const from = parseLogIndex(b.from, "from");
@@ -6800,6 +8088,11 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
   const stub = env.RUNS.get(env.RUNS.idFromName(key.value));
   const now = systemClock();
 
+  if (pathname === "/runs/context-checkpoint") {
+    const run = parseRunId(b.runId);
+    if (!run.ok) return json({ error: run.error }, 400);
+    return json({ source: (await stub.readContextCheckpoint(run.value)) ?? null });
+  }
   if (pathname === "/runs/claim") {
     const req = parseClaim(b);
     if (!req.ok) return json({ error: req.error }, 400);
@@ -7223,7 +8516,10 @@ async function handleRuns(pathname: string, body: unknown, env: Env): Promise<Re
   if (pathname === "/runs/get") {
     const parsed = parseRunTarget(body);
     if (!parsed.ok) return json({ error: parsed.error }, 400);
-    const record = await stub(parsed.value.storeKey).get(parsed.value.id);
+    // The stored record is JSON data; avoid recursively expanding the RPC
+    // mapped type for every nested archive leaf at this transport boundary.
+    const target = stub(parsed.value.storeKey) as unknown as Pick<RunHistoryDO, "get">;
+    const record = await target.get(parsed.value.id);
     console.log(
       `[runs/get] ${parsed.value.storeKey} ${parsed.value.id} -> ${record ? `${record.events.length} events` : "not found"}`,
     );

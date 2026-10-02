@@ -1269,6 +1269,7 @@ export async function runBot(): Promise<void> {
       // publish to the parent's registry row and renew its ledger deadline.
       registry: defaultRunRegistry,
       ledgerRuns: () => runLedger.liveRuns(),
+      ...(ledgerClient ? { reportLedger: ledgerClient } : {}),
       dispatch: (msg, io, opts) => dispatch(deps, msg, io, opts),
       steerChild: async (runId, text, instance) => {
         const run = defaultRunRegistry.getById(runId);

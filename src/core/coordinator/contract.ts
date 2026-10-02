@@ -19,6 +19,8 @@ import {
 } from "../ship/coordinator.js";
 import { isHandoffShape, type Handoff } from "../ship/handoff.js";
 import { isShipOutcome, type ShipOutcome } from "./shipOutcome.js";
+import { isUnitContext, type UnitContext } from "../dispatch/unitContext.js";
+import { isCoordinatorReportAdmission, type CoordinatorReportAdmission } from "./reportAdmission.js";
 
 // A coordinator is a Workflow instance in the shim Worker whose children are
 // ordinary `dispatch()` runs as the requesting user. It holds no credential of
@@ -650,6 +652,11 @@ export interface SavedFindingsPatch {
  *  spawn key and admitted cost cap, plus the base for its PR post-step. */
 export interface CoordinatorTag {
   parentInstanceId: string;
+  /** Canonical unit identity copied from its admitted durable row. */
+  unit?: string;
+  /** The admitted durable instance attempt, used for stable lane identity.
+   * Zero identifies the original instance whose durable attempt is absent. */
+  instanceAttempt?: number;
   idempotencyKey: string;
   /** The unit's original dollar limit, fixed at admission; absent means no cost cap. */
   costCapUsd?: number;
@@ -694,12 +701,20 @@ export interface CoordinatorTag {
  *  a row, summary and record agree. The base never rides here. */
 export function coordinatorFields(tag: CoordinatorTag | undefined): {
   parentInstanceId?: string;
+  coordinatorUnit?: string;
+  coordinatorAttempt?: number;
   idempotencyKey?: string;
   costCapUsd?: number;
 } {
   return tag
     ? {
         parentInstanceId: tag.parentInstanceId,
+        ...(tag.unit !== undefined
+          ? {
+              coordinatorUnit: tag.unit,
+              ...(tag.instanceAttempt !== undefined ? { coordinatorAttempt: tag.instanceAttempt } : {}),
+            }
+          : {}),
         idempotencyKey: tag.idempotencyKey,
         ...(tag.costCapUsd !== undefined ? { costCapUsd: tag.costCapUsd } : {}),
       }
@@ -942,6 +957,8 @@ export interface CoordinatorUnit {
   dependsOn: string[];
   /** The optional main conversation's evidence and request, frozen at admission. */
   workBrief?: WorkBrief;
+  /** Frozen source evidence; never repository, requester or task authority. */
+  context?: UnitContext;
   /** The generated task's authenticated, immutable request. A child never
    * reconstructs this from a bounded transcript or an unreadable host run. */
   generatedTask?: {
@@ -1003,6 +1020,8 @@ export interface CoordinatorUnit {
    *  (null once any run's cost is unknown), `handoff` that child's lists, and
    *  `wakes` how many wakes this idle has answered — zero at the write. */
   idle?: UnitIdle;
+  /** Exact display proposal admitted with the latest settlement CAS. */
+  reportDelivery?: CoordinatorReportAdmission;
   /** Answers to indexed idle waits, keyed by the wait step's durable identity. */
   wakes?: Record<string, UnitWakeAnswer>;
   /** The round boundaries the coordinator reported, oldest first (the `ship_round`
@@ -1053,6 +1072,7 @@ export function preserveWorkBrief(current: CoordinatorUnit | undefined, replacem
     ...replacement,
     ...(current?.workBrief !== undefined ? { workBrief: current.workBrief } : {}),
     ...(current?.threadEvidence !== undefined ? { threadEvidence: current.threadEvidence } : {}),
+    ...(current !== undefined ? { context: current.context } : {}),
   };
 }
 
@@ -1070,6 +1090,8 @@ export function prepareUnfencedUnitWrite(
   replacement: CoordinatorUnit,
 ): CoordinatorUnit {
   const updated = preserveWorkBrief(current, replacement);
+  if (JSON.stringify(current?.reportDelivery) !== JSON.stringify(updated.reportDelivery))
+    throw new CoordinatorUnitWriteConflict();
   if (!permitsRecoveryMetadataWrite(current, updated)) throw new CoordinatorUnitWriteConflict();
   if (current?.ending?.outcome !== undefined && JSON.stringify(current) !== JSON.stringify(updated))
     throw new CoordinatorUnitWriteConflict();
@@ -1347,6 +1369,14 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
   if (!Array.isArray(r.dependsOn) || !r.dependsOn.every((d) => isText(d, 32))) return false;
   if (r.workBrief !== undefined && r.generatedTask !== undefined) return false;
   if (r.workBrief !== undefined && !isWorkBrief(r.workBrief)) return false;
+  if (r.context !== undefined && !isUnitContext(r.context)) return false;
+  if (
+    r.reportDelivery !== undefined &&
+    (!isCoordinatorReportAdmission(r.reportDelivery) ||
+      r.reportDelivery.owner.instanceId !== r.instanceId ||
+      r.reportDelivery.owner.unit !== r.unit)
+  )
+    return false;
   if (r.generatedTask !== undefined && !isGeneratedTask(r.generatedTask)) return false;
   if (r.threadEvidence !== undefined && !isText(r.threadEvidence, 6_000)) return false;
   if (!isOptionalText(r.threadKey) || !isOptionalText(r.sourceUrl)) return false;

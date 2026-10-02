@@ -277,6 +277,7 @@ describe("run history routes", () => {
       {
         type: "input",
         text: "please review",
+        messageId: "1.0",
         source: { url: "https://x.slack.com/archives/C1/p1", channel: "general", user: "alice" },
         at: 1,
       },
@@ -1909,5 +1910,163 @@ describe("run metrics — the point, the guard and the emission rule", () => {
     expect(
       featuresOf({ RUN_METRICS: { writeDataPoint() {} } as AnalyticsEngineDataset, RUN_METRICS_DATASET: "swb_runs" }),
     ).toEqual(["memory", "schedules", "runs", "config", "delivery", "costs", "plane", "runMetrics:swb_runs"]);
+  });
+});
+
+describe("retained source archive storage", () => {
+  it("keeps exact work-read evidence out of summaries and rejects corrupt private evidence", async () => {
+    const key = storeKey(),
+      base = record("work-evidence", Date.now());
+    const workReads: NonNullable<RunRecord["workReads"]> = [
+      {
+        tool: "work_status",
+        callId: "status-call",
+        input: { actId: "private-work-act" },
+        resultHash: "a".repeat(64),
+        observation: {
+          version: 1,
+          actId: "private-work-act",
+          instanceId: "instance",
+          unit: "U11",
+          attempt: 0,
+          requesterId: base.userId,
+          channelId: base.channelId,
+          mainThreadKey: base.threadKey,
+          snapshotHash: "b".repeat(64),
+          observedAt: 1000,
+        },
+      },
+    ];
+    expect((await post("/runs/put", { storeKey: key, record: { ...base, workReads } })).status).toBe(200);
+    expect(((await post("/runs/get", { storeKey: key, id: base.id })).data.record as RunRecord).workReads).toEqual(
+      workReads,
+    );
+    for (const result of [
+      await post("/runs/summary", { storeKey: key, id: base.id }),
+      await post("/runs/list", { storeKey: key }),
+    ])
+      expect(JSON.stringify(result.data)).not.toContain("private-work-act");
+    await runInDurableObject(stubOf(key), async (_inst: RunHistoryDO, state) => {
+      const row = state.storage.sql
+        .exec<{ summary_json: string; work_evidence_json: string }>(
+          "SELECT summary_json, work_evidence_json FROM runs WHERE run_id = ?",
+          base.id,
+        )
+        .one();
+      expect(row.summary_json).not.toContain("workReads");
+      expect(JSON.parse(row.work_evidence_json)).toEqual({ version: 1, workReads });
+      state.storage.sql.exec(
+        "UPDATE runs SET work_evidence_json = ? WHERE run_id = ?",
+        JSON.stringify({
+          version: 1,
+          workReads: [{ ...workReads[0], observation: { ...workReads[0].observation, requesterId: "foreign" } }],
+        }),
+        base.id,
+      );
+    });
+    expect((await post("/runs/get", { storeKey: key, id: base.id })).data.record).toBeNull();
+  });
+
+  function archived(base: RunRecord): NonNullable<RunRecord["sourceReads"]> {
+    const query = { resource: { repository: "acme/private" }, input: { query: "private archive query" } };
+    return {
+      version: 1,
+      owner: {
+        runId: base.id,
+        requester: base.userId,
+        agent: base.agent!,
+        channelId: base.channelId,
+        threadKey: base.threadKey,
+      },
+      recoverable: false,
+      records: [
+        {
+          actionId: "action",
+          callIds: ["call"],
+          toolName: "reader",
+          serverId: "server",
+          connectionRevision: "v1",
+          sessionId: "session",
+          operationId: "read",
+          operationRevision: "v1",
+          query,
+          phase: "settled",
+          exposed: true,
+          response: {
+            version: 1,
+            status: "succeeded",
+            actionId: "action",
+            operationId: "read",
+            operationRevision: "v1",
+            binding: {
+              id: "binding",
+              revision: "v1",
+              subjectId: base.userId,
+              sessionId: "session",
+              ...query,
+              expiresAt: "2030-01-01T00:00:00Z",
+            },
+            attempt: "completed",
+            observedAt: "2026-01-01T00:00:00Z",
+            truncation: "none",
+            result: { body: "private archive body" },
+          },
+        },
+      ],
+    };
+  }
+  it("stores original bodies separately from summaries and validates them on full reads", async () => {
+    const key = storeKey();
+    const base = record("archive", Date.now());
+    const sourceReads = archived(base);
+    expect((await post("/runs/put", { storeKey: key, record: { ...base, sourceReads } })).status).toBe(200);
+    expect(((await post("/runs/get", { storeKey: key, id: base.id })).data.record as RunRecord).sourceReads).toEqual(
+      sourceReads,
+    );
+    for (const result of [
+      await post("/runs/summary", { storeKey: key, id: base.id }),
+      await post("/runs/list", { storeKey: key }),
+    ]) {
+      expect(JSON.stringify(result.data)).not.toContain("sourceReads");
+      expect(JSON.stringify(result.data)).not.toContain("private archive");
+    }
+    await runInDurableObject(stubOf(key), async (_inst: RunHistoryDO, state) => {
+      const row = state.storage.sql
+        .exec<{ summary_json: string; source_reads_json: string }>(
+          `SELECT summary_json, source_reads_json FROM runs WHERE run_id = ?`,
+          base.id,
+        )
+        .one();
+      expect(row.summary_json).not.toContain("private archive");
+      expect(JSON.parse(row.source_reads_json)).toEqual(sourceReads);
+      state.storage.sql.exec(
+        `UPDATE runs SET source_reads_json = ? WHERE run_id = ?`,
+        JSON.stringify({ ...sourceReads, owner: { ...sourceReads.owner, runId: "foreign" } }),
+        base.id,
+      );
+    });
+    expect((await post("/runs/get", { storeKey: key, id: base.id })).data.record).toBeNull();
+  });
+  it("migrates legacy inline archives into the internal column without changing evidence", async () => {
+    const key = storeKey();
+    const base = record("legacy-archive", Date.now());
+    const sourceReads = archived(base);
+    await post("/runs/put", { storeKey: key, record: { ...base, sourceReads } });
+    await runInDurableObject(stubOf(key), async (inst: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        `UPDATE runs SET summary_json = json_set(summary_json, '$.sourceReads', json(?)) WHERE run_id = ?`,
+        JSON.stringify(sourceReads),
+        base.id,
+      );
+      state.storage.sql.exec(`ALTER TABLE runs DROP COLUMN source_reads_json`);
+      inst.migrateRunsTable();
+      inst.migrateRunsTable();
+    });
+    expect(((await post("/runs/get", { storeKey: key, id: base.id })).data.record as RunRecord).sourceReads).toEqual(
+      sourceReads,
+    );
+    expect(JSON.stringify((await post("/runs/summary", { storeKey: key, id: base.id })).data)).not.toContain(
+      "private archive",
+    );
   });
 });

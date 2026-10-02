@@ -3,6 +3,7 @@ import type { ChatMessage } from "../chatMessage.js";
 import type { AssembledTranscript } from "../runLedger/transcript.js";
 import type { HistoryItem } from "../types.js";
 import type { RunView } from "../runsService.js";
+import type { SessionSources } from "../references/receipts.js";
 import {
   OPERATOR_TAIL_BYTES,
   operatorTail,
@@ -292,6 +293,90 @@ describe("sessionSeedFor — the seed read from the ledger, with the notepad", (
   });
   const input = { threadKey: "slack:C1:1.0", agent: "coding", thread: [], history, request };
 
+  it("captures the cumulative dependency envelope after reading mutable notes", async () => {
+    let sources: SessionSources = {
+      version: 1,
+      status: "unknown",
+      context: { version: 1, status: "known", revision: 0, origins: [], slack: [], mcp: [] },
+    };
+    const ledger = {
+      readSessionTail: async () => ({ ...complete(tail4, 0), sources: structuredClone(sources) }),
+      readNotepad: async () => {
+        sources = { version: 1, status: "revoked", context: { ...sources.context!, status: "revoked", revision: 1 } };
+        return { text: "notes updated during the read", updatedAt: 5 };
+      },
+    };
+    const { seed } = await sessionSeedFor({ ...input, ledger });
+    expect(seed?.notepad).toBe("notes updated during the read");
+    expect(seed?.sources?.context?.status).toBe("revoked");
+  });
+
+  it("reads an explicit working lane and ignores another session's refused request indices", async () => {
+    const key = "plan-p:unit:coding";
+    const calls: string[] = [];
+    const ledger = {
+      readSessionTail: async (readKey: string) => {
+        calls.push(readKey);
+        return complete(tail4, 0);
+      },
+      readNotepad: async (readKey: string) => {
+        calls.push(readKey);
+        return { text: "lane decisions", updatedAt: 5 };
+      },
+    };
+    const thread: RunView[] = [
+      {
+        id: "other",
+        agent: "coding",
+        startedAt: 1,
+        finished: true,
+        eventCount: 0,
+        finishedAt: 2,
+        failure: { kind: "policy_refusal" },
+        session: { key: "slack:C1:1.0:coding", seedFrom: 0, request: 0, range: { from: 0, to: 3 } },
+      },
+    ];
+    const { seed } = await sessionSeedFor({ ...input, thread, ledger, sessionKey: key });
+    expect(calls).toEqual([key, key, key]);
+    expect(seed?.messages[0]).toEqual(tail4[0]);
+    expect(seed?.notepad).toBe("lane decisions");
+  });
+
+  it("copies a legacy working seed once without reusing its row indices in the new lane", async () => {
+    const key = "plan-p:unit:coding";
+    const legacy = "slack:C1:1.0:coding";
+    const calls: string[] = [];
+    const ledger = {
+      readSessionTail: async (readKey: string) => {
+        calls.push(readKey);
+        return readKey === key
+          ? complete([], 0)
+          : {
+              ...complete(tail4, 10),
+              transcript: {
+                ...complete(tail4, 10).transcript,
+                actors: ["slack:UALICE", undefined, undefined, undefined],
+              },
+            };
+      },
+      readNotepad: async () => ({ text: "keep the helper", updatedAt: 5 }),
+    };
+    const migrated = await sessionSeedFor({ ...input, ledger, sessionKey: key, legacySessionKey: legacy });
+    expect(calls).toEqual([key, legacy, legacy]);
+    expect(migrated.seed?.messages.slice(0, 4)).toEqual(tail4);
+    expect(migrated.seed?.log).toEqual({ from: 0, turns: 0 });
+    expect(migrated.seed?.notepad).toBe("keep the helper");
+    expect(migrated.seed?.actors?.[0]).toBe("slack:UALICE");
+    expect(migrated.notes).toContain(`working context: copied legacy log ${legacy} into ${key}`);
+    calls.length = 0;
+    ledger.readSessionTail = async (readKey: string) => {
+      calls.push(readKey);
+      return complete(tail4, 0);
+    };
+    await sessionSeedFor({ ...input, ledger, sessionKey: key, legacySessionKey: legacy });
+    expect(calls).toEqual([key, key]);
+  });
+
   it("reads the log's tail under the budget by the thread-and-agent key, then the notepad, which rides the seed for the prompt and never as a row", async () => {
     const calls: string[] = [];
     const ledger = {
@@ -305,7 +390,11 @@ describe("sessionSeedFor — the seed read from the ledger, with the notepad", (
       },
     };
     const { seed, notes } = await sessionSeedFor({ ledger, ...input });
-    expect(calls).toEqual([`tail slack:C1:1.0:coding ${SEED_BUDGET_BYTES}`, "notepad slack:C1:1.0:coding"]);
+    expect(calls).toEqual([
+      `tail slack:C1:1.0:coding ${SEED_BUDGET_BYTES}`,
+      "notepad slack:C1:1.0:coding",
+      "tail slack:C1:1.0:coding 1",
+    ]);
     expect(seed!.notepad).toBe("decided: keep the helper");
     expect(seed!.messages).toEqual([...tail4, user("and bump the version")]); // no thread page: no previous end, no lines since
     expect(notes).toEqual([expect.stringContaining("lines written since")]);

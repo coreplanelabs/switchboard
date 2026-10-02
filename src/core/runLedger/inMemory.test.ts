@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { sourceHash } from "../references/receipts.js";
+import { testSessionSources } from "../testing/slackSources.js";
 import type { ChatMessage } from "../chatMessage.js";
 import type { RunRecord } from "../runRecord.js";
 import { InMemoryRunLedger } from "./inMemory.js";
@@ -29,6 +31,24 @@ const claimReq = (runId: string, threadKey: string, gen = "g1"): ClaimRequest =>
 });
 
 describe("resident attachment claims", () => {
+  it("accepts source metadata for the claimed unit lane and refuses another requester or session", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    const thread = "slack:C1:1.0";
+    const key = "plan-p:unit:coding";
+    const req = claimReq("run-1", thread);
+    req.meta.session = { key, seedFrom: 0, request: 0, range: { from: 0 } };
+    await ledger.claim(req);
+    await ledger.claimSession(key, "run-1", "g1");
+    const sources = testSessionSources({ channelId: req.meta.channelId, threadKey: thread, userId: req.meta.userId });
+    expect(await ledger.writeSessionSources(key, "run-1", "g1", sources)).toEqual({ ok: true });
+    const foreign = testSessionSources({ channelId: req.meta.channelId, threadKey: thread, userId: "slack:OTHER" });
+    expect(await ledger.writeSessionSources(key, "run-1", "g1", foreign)).toEqual({ ok: false, reason: "fenced" });
+    await ledger.claimSession(`${thread}:coding`, "run-1", "g1");
+    expect(await ledger.writeSessionSources(`${thread}:coding`, "run-1", "g1", sources)).toEqual({
+      ok: false,
+      reason: "fenced",
+    });
+  });
   it("mints increasing fences only for the current ledger owner, including same-second reclaims", async () => {
     const ledger = new InMemoryRunLedger(() => 0);
     const thread = "slack:C1:1.0";
@@ -931,5 +951,198 @@ describe("intake receipts (run-history item 59)", () => {
     await expect(ledger.listIntake({})).rejects.toThrow("intake read failed");
     ledger.intakeFailure.read = false;
     expect(await ledger.readIntake("slack:C1:2.0")).toEqual(receipt());
+  });
+});
+
+describe("keyed append context and immutable replay", () => {
+  it("rejects a conflicting embedded proof and preserves exact replay after trimming", async () => {
+    const ledger = new InMemoryRunLedger();
+    const context = { version: 1 as const, status: "known" as const, revision: 0, origins: [], slack: [], mcp: [] };
+    const key = "slack:C1:1.0:@thread:@context-v1";
+    const forged = [
+      { part: 0, json: JSON.stringify({ role: "assistant", part: { type: "text", text: "secret" }, context }) },
+    ];
+    expect(await ledger.appendSession(key, "forged", forged, { ...context, status: "unknown" })).toEqual({
+      ok: false,
+      appended: false,
+    });
+    expect(await ledger.sessionTail(key)).toBe(0);
+    await ledger.claimSession(key, "writer", "g", 600);
+    const rows = [
+      {
+        part: 0,
+        json: JSON.stringify({
+          role: "user",
+          part: { type: "tool_result", toolUseId: "c", content: "x".repeat(1200) },
+        }),
+      },
+    ];
+    expect(await ledger.appendSession(key, "result", rows)).toEqual({ ok: true, appended: true });
+    expect((await ledger.readSession(key, 0)).messages[0].content[0]).toMatchObject({
+      content: expect.stringContaining("dropped"),
+    });
+    expect(await ledger.appendSession(key, "result", rows)).toEqual({ ok: true, appended: false });
+    expect(
+      await ledger.appendSession(key, "result", [{ part: 0, json: rows[0].json.replace("xxxx", "fake") }]),
+    ).toEqual({ ok: false, appended: false });
+    ledger.sessions.get(key)!.rowHashes!.clear();
+    expect(await ledger.appendSession(key, "result", rows)).toEqual({ ok: false, appended: false });
+  });
+});
+
+describe("keyed session entry read", () => {
+  it("returns the frozen original row by identity and omits a trimmed entry", async () => {
+    const ledger = new InMemoryRunLedger();
+    const key = "slack:C1:1.0:@thread:@context-v1";
+    const json = JSON.stringify({ role: "assistant", part: { type: "text", text: "frozen original report" } });
+    await ledger.appendSession(key, "report", [{ part: 0, json }]);
+    await ledger.appendSession(key, "later", [{ part: 0, json: json.replace("original", "later") }]);
+    expect(await ledger.readSessionEntry(key, "report")).toEqual([{ idx: 0, part: 0, json }]);
+    const copy = await ledger.readSessionEntry(key, "report");
+    copy![0].json = "mutated";
+    expect((await ledger.readSessionEntry(key, "report"))![0].json).toBe(json);
+    expect(await ledger.readSessionEntry(key, "missing")).toBeUndefined();
+    await ledger.claimSession(key, "writer", "g", 600);
+    await ledger.appendSession(key, "trim", [
+      {
+        part: 0,
+        json: JSON.stringify({
+          role: "user",
+          part: { type: "tool_result", toolUseId: "c", content: "x".repeat(1200) },
+        }),
+      },
+    ]);
+    expect(await ledger.readSessionEntry(key, "trim")).toBeUndefined();
+  });
+});
+
+describe("public repository result receipts", () => {
+  it("keeps an exact covered result known and taints a reused receipt with changed bytes", async () => {
+    const ledger = new InMemoryRunLedger();
+    const key = "slack:C1:1.0:coding:@context-v1";
+    const request = claimReq("writer", "slack:C1:1.0");
+    request.meta.session = { key, seedFrom: 0, request: 0, range: { from: 0 } };
+    await ledger.claim(request);
+    await ledger.claimSession(key, "writer", "g1");
+    const sources = {
+      ...testSessionSources({ channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:1.0" }, []),
+      context: {
+        version: 1 as const,
+        status: "known" as const,
+        revision: 0,
+        origins: [],
+        slack: [],
+        mcp: [],
+        githubRepos: ["acme/api"],
+      },
+    };
+    await ledger.writeSessionSources(key, "writer", "g1", sources);
+    const receipt = {
+      version: 1 as const,
+      runId: "writer",
+      callId: "read",
+      tool: "github_file",
+      repos: ["acme/api"],
+      resultHash: await sourceHash("actual source"),
+    };
+    const turns = (idx: number, callId: string, content: string) => [
+      {
+        idx,
+        message: {
+          role: "assistant" as const,
+          content: [{ type: "tool_use" as const, id: callId, name: "github_file", input: {} }],
+        },
+      },
+      {
+        idx: idx + 1,
+        message: {
+          role: "user" as const,
+          content: [{ type: "tool_result" as const, toolUseId: callId, content }],
+          sourceResults: [{ ...receipt, callId }],
+        },
+      },
+    ];
+    expect(await ledger.step("writer", "g1", stepRecord(1, 1), turns(0, "read", "actual source"), key)).toEqual({
+      ok: true,
+    });
+    expect((await ledger.readSessionTail(key, 100_000)).sources?.context?.status).toBe("known");
+    await ledger.step("writer", "g1", stepRecord(2, 3), turns(2, "changed", "different private bytes"), key);
+    expect((await ledger.readSessionTail(key, 100_000)).sources?.context?.status).toBe("unknown");
+  });
+});
+
+describe("ordinary context checkpoints at the storage boundary", () => {
+  it("requires a live owner and never normalizes an uncommitted seed", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    const key = "slack:C1:checkpoint:coding:@context-v1";
+    const request = {
+      key,
+      runId: "checkpoint",
+      gen: "g1",
+      expected: {
+        beforeHash: "a".repeat(64),
+        revision: 0,
+        inputs: { transcriptHash: "b".repeat(64), systemHash: "c".repeat(64), notepadHash: "d".repeat(64) },
+      },
+    };
+    expect(await ledger.normalizeContextOrigins(request)).toMatchObject({ ok: false, reason: "unknown-run" });
+    const claimed = claimReq("checkpoint", "slack:C1:checkpoint");
+    claimed.meta.session = { key, seedFrom: 0, request: 0, range: { from: 0 } };
+    await ledger.claim(claimed);
+    await ledger.claimSession(key, "checkpoint", "g1");
+    expect(await ledger.normalizeContextOrigins({ ...request, gen: "stale" })).toMatchObject({
+      ok: false,
+      reason: "fenced",
+    });
+    expect(await ledger.normalizeContextOrigins(request)).toMatchObject({
+      ok: false,
+      reason: "checkpoint-unavailable",
+    });
+    expect(ledger.live.get("checkpoint")!.state).not.toHaveProperty("contextCheckpointReceipt");
+    expect(await ledger.setState("checkpoint", "g1", { pendingContextCheckpoint: { version: 1 } })).toEqual({
+      ok: false,
+      reason: "fenced",
+    });
+  });
+});
+
+describe("frozen child source ranges", () => {
+  it("retains source result bytes while the child lives and releases them on abandonment", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    const source = claimReq("source", "slack:C1:source");
+    const key = `${source.threadKey}:review`;
+    source.meta.session = { key, seedFrom: 0, request: 0, range: { from: 0 } };
+    await ledger.claim(source);
+    await ledger.claimSession(key, "source", "g1", 100_000);
+    const content = "source evidence ".repeat(500);
+    const turn = (idx: number, text: string) => ({
+      idx,
+      message: {
+        role: "user" as const,
+        content: [{ type: "tool_result" as const, toolUseId: `tool-${idx}`, content: text }],
+      },
+    });
+    await ledger.seed("source", "g1", [turn(0, content)], key);
+    const child = claimReq("child", "slack:C1:child");
+    child.meta.childHandoff = {
+      version: 1,
+      source: {
+        runId: "source",
+        requester: source.meta.userId,
+        channelId: source.meta.channelId,
+        threadKey: source.meta.threadKey,
+      },
+      session: { key, from: 0, to: 0 },
+      assets: [],
+    };
+    await ledger.claim(child);
+    ledger.sessions.get(key)!.maxBytes = 1_000;
+    await ledger.step("source", "g1", stepRecord(1, 2), [turn(1, content)], key);
+    expect(JSON.stringify((await ledger.readSession(key, 0, 0)).messages)).toContain(content);
+    expect(await ledger.seed("source", "g1", [turn(0, "changed")], key)).toEqual({ ok: false, reason: "fenced" });
+    await ledger.abandon("child", "g1");
+    await ledger.step("source", "g1", stepRecord(2, 3), [turn(2, content)], key);
+    expect(JSON.stringify((await ledger.readSession(key, 0, 0)).messages)).not.toContain(content);
+    await expect(ledger.claim(child)).rejects.toThrow("context source range is unavailable");
   });
 });

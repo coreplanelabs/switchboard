@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { createSourceReads, type SourceReadOperation, type SourceReadState } from "./sourceRead.js";
+import {
+  createSourceReads,
+  inspectStoredSourceRead,
+  type SourceReadOperation,
+  type SourceReadState,
+} from "./sourceRead.js";
+import { sourceHash } from "../core/references/receipts.js";
 import { sourceReadContract } from "./sourceReadProtocol.js";
 import { readQuery, readResponse, readTool } from "./testing/sourceRead.js";
 import fixture from "./testing/source-read-v1.json" with { type: "json" };
@@ -73,6 +79,41 @@ function setup(previous?: unknown) {
 }
 
 describe("bound source reads", () => {
+  it("inspects the original stored action for a new consumer without creating or rewriting source authority", async () => {
+    const f = setup();
+    await f.create().run(f.operation.toolName, readQuery, "call-1");
+    const stored = f.saved()!;
+    const entry = stored.records[0];
+    const before = JSON.stringify(stored);
+    const saves = f.save.mock.calls.length;
+    const reference = {
+      runId: owner.runId,
+      actionId: entry.actionId,
+      callIds: ["call-1"],
+      responseHash: await sourceHash(entry.response),
+    };
+    const request = {
+      state: stored,
+      owner,
+      reference,
+      requester: owner.requester,
+      operations: [f.operation],
+      now,
+      audience: async () => true,
+    };
+    expect(await inspectStoredSourceRead(request)).toEqual({ ok: true });
+    expect(f.calls).toEqual(["execute", "inspect"]);
+    expect(f.save).toHaveBeenCalledTimes(saves);
+    expect(JSON.stringify(stored)).toBe(before);
+    expect(await inspectStoredSourceRead({ ...request, requester: "slack:UB" })).toMatchObject({ ok: false });
+    expect(
+      await inspectStoredSourceRead({ ...request, reference: { ...reference, responseHash: "0".repeat(64) } }),
+    ).toMatchObject({ ok: false });
+    expect(f.calls).toEqual(["execute", "inspect"]);
+    f.revoke();
+    expect(await inspectStoredSourceRead(request)).toMatchObject({ ok: false });
+  });
+
   it("consumes the producer wire fixture through the production client and a fresh recovery adapter", async () => {
     expect(sourceReadResponseSchema.safeParse(fixture.response).success).toBe(true);
     let stored: SourceReadState | undefined;

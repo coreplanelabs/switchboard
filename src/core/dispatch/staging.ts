@@ -8,6 +8,8 @@
 // `curl`. Pure command builders and the line the model reads live here so
 // the shell-injection and quoting cases are unit tests; `stageIntoWorkspace`
 // runs the two halves in order for one turn.
+import type { ThreadArtifact } from "../../artifacts/types.js";
+export type { ThreadArtifact } from "../../artifacts/types.js";
 import { inboundKey, safeBasename } from "../../artifacts/keys.js";
 import type { ArtifactStore } from "../../artifacts/store.js";
 import { BASH_TIMEOUT_MAX_MS } from "../../execution/bashTimeout.js";
@@ -211,18 +213,6 @@ export async function pullStaged(outcomes: readonly StagedOutcome[], deps: PullD
     const { error: _dropped, ...landedOutcome } = o;
     return landedOutcome;
   });
-}
-
-/** A file the thread received on an earlier message, as a prior run's record
- *  names it and as the thread's catalogue read (`readThreadAssets`) answers:
- *  `held` says whether the store still has it — false once its retention
- *  passed, undefined when the store could not be asked. */
-export interface ThreadArtifact {
-  key: string;
-  name: string;
-  size: number;
-  contentType: string;
-  held?: boolean;
 }
 
 export interface ThreadStageDeps {

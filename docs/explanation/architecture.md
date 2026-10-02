@@ -67,6 +67,12 @@ Every step is a span in one trace. A run is live in a registry, then a [durable 
 
 *Fixture preview; the repository and people are made up.*
 
+## Context and storage
+
+One reader composes the run ledger, finished run records, memory and artifact stores. Content travels with a typed dependency envelope naming its original sources and scopes. The next consumer checks current access; notes, compaction and delegation to a child cannot erase that obligation.
+
+A shared conversation log keeps the operator's thread context, while execution retains separate working indices and unit lanes. A typed context snapshot identifies frozen source rows, notes and files. See [Durable context across conversations and children](durable-context.md) for the data model, flow and remaining integration boundaries.
+
 ## Where it runs
 
 One long-lived process plus Workers, each solving a problem the process cannot: outliving restarts, running untrusted commands elsewhere, keeping a repository warm, serving docs without a rollover.

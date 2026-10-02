@@ -84,7 +84,8 @@ export function surfaceFor(path) {
  * `all`: every string and template literal (a template contributes its static
  * chunks; expressions inside it are visited for their own literals). Never an
  * identifier, never a comment (the AST walk sees neither), never an import or
- * export specifier — a module path is what the code says to itself.
+ * export specifier, erased type syntax or a literal used only in a strict
+ * comparison — these are what the code says to itself.
  * `describe`: only literals under a `describe:` property — the registry's
  * summaries, which the CLI's help and the MCP tool list print verbatim.
  */
@@ -96,10 +97,40 @@ export function extractTypeScriptStrings(path, text, mode) {
     for (const [i, piece] of value.split("\n").entries())
       if (piece.trim() !== "") out.push({ line: line + 1 + i, text: piece.trim() });
   };
+  const isStrictComparisonOperand = (node) => {
+    let parent = node.parent;
+    while (
+      parent &&
+      (ts.isParenthesizedExpression(parent) ||
+        ts.isAsExpression(parent) ||
+        ts.isTypeAssertionExpression(parent) ||
+        ts.isSatisfiesExpression(parent) ||
+        ts.isNonNullExpression(parent))
+    ) {
+      node = parent;
+      parent = node.parent;
+    }
+    return (
+      parent &&
+      ts.isBinaryExpression(parent) &&
+      (parent.left === node || parent.right === node) &&
+      (parent.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken ||
+        parent.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken)
+    );
+  };
   const literals = (node) => {
     if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) return;
-    if (ts.isStringLiteralLike(node)) push(node, node.text);
-    else if (ts.isTemplateExpression(node)) {
+    // Class heritage can execute an expression; its type arguments are still
+    // skipped when visited. Interface declarations have no runtime counterpart.
+    if (
+      ts.isInterfaceDeclaration(node) ||
+      ts.isTypeAliasDeclaration(node) ||
+      (ts.isTypeNode(node) && !ts.isExpressionWithTypeArguments(node))
+    )
+      return;
+    if (ts.isStringLiteralLike(node)) {
+      if (!isStrictComparisonOperand(node)) push(node, node.text);
+    } else if (ts.isTemplateExpression(node)) {
       push(node.head, node.head.text);
       for (const span of node.templateSpans) push(span.literal, span.literal.text);
     }

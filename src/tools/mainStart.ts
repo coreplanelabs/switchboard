@@ -3,6 +3,7 @@ import type { Actor, ChannelVisibility } from "../core/authz/types.js";
 import { validateWorkBriefDraft } from "../core/coordinator/contract.js";
 import type { MainStartInput, MainStartResult } from "../core/coordinator/mainStart.js";
 import type { MainTaskAuthority } from "../core/coordinator/requesterAuthority.js";
+import { isUnitContext, type UnitContext } from "../core/dispatch/unitContext.js";
 import type { MainSourceRefusal, MainSourceResolution } from "../core/dispatch/mainSource.js";
 import type { IncomingMessage, SlackDirectAudience } from "../core/types.js";
 import type { RunnableTool } from "./runnableTool.js";
@@ -54,6 +55,8 @@ export function mainStartForRun(deps: {
   ) => Promise<ReadySource | MainSourceRefusal> | ReadySource | MainSourceRefusal;
   live: () => boolean;
   runId: string;
+  /** Supplied by dispatch, never model arguments. Failure leaves this call recoverable. */
+  captureContext?: () => Promise<UnitContext>;
   verifyDirectAudience?: (audience: SlackDirectAudience) => Promise<AudienceCheck>;
   start?: (input: MainStartInput) => Promise<MainStartResult>;
 }): MainStartCapability | undefined {
@@ -85,10 +88,31 @@ export function mainStartForRun(deps: {
       }
       if (!privateNow) return { kind: "refused", reply: "This is no longer a private conversation; nothing started." };
       if (!deps.live()) return { kind: "refused", reply: "The main run stopped, so no work started." };
+      let captured: UnitContext | undefined;
+      if (deps.captureContext) {
+        try {
+          captured = await deps.captureContext();
+          if (!isUnitContext(captured)) throw new Error("invalid captured context");
+        } catch {
+          return {
+            kind: "refused",
+            reply:
+              "I couldn't save the conversation context for this worker. No work started; this call can be retried.",
+          };
+        }
+        if (!deps.live()) return { kind: "refused", reply: "The main run stopped, so no work started." };
+        try {
+          if (!(await verifyDirectAudience(source.msg.directAudience!)).ok)
+            return { kind: "refused", reply: "This is no longer a private conversation; nothing started." };
+        } catch {
+          return { kind: "refused", reply: "I couldn't verify this private conversation; no work started." };
+        }
+      }
       return deps.start!({
         actor: source.actor,
         msg: source.msg,
         mainRunId: deps.runId,
+        ...(captured !== undefined ? { context: captured } : {}),
         repo,
         authorizedRepo: source.authorizedRepo,
         authority: source.authority,

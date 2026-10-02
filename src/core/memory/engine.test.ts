@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { mintRecord, normalizeText, planEviction, planWrite, rankRecords, rejectionMarkers } from "./engine.js";
 import type { MemoryCandidate, MemoryRecord } from "./types.js";
+import { sealMemoryCandidate, validMemoryProvenance } from "./provenance.js";
+import type { ContextDependencies } from "../references/contextDependencies.js";
 
 // Feature: docs/reference/specs/memory.md — the store-agnostic engine shared by the
 // in-process store and the Memory Worker's Durable Object. The
@@ -30,6 +32,72 @@ const cand = (text: string, over: Partial<MemoryCandidate> = {}): MemoryCandidat
   ...over,
 });
 const mint = (c: MemoryCandidate) => mintRecord(SCOPE, 99, NOW, c);
+
+describe("memory dependency revisions", () => {
+  const context = (runId: string): ContextDependencies => ({
+    version: 1,
+    status: "known",
+    revision: 1,
+    origins: [],
+    slack: [],
+    mcp: [{ runId, actionId: `action-${runId}`, callIds: ["call-1"], responseHash: "a".repeat(64) }],
+  });
+
+  it("binds immutable content and scope while usage metadata may change", async () => {
+    const sealed = await sealMemoryCandidate(
+      SCOPE,
+      cand("Use retry backoff", { sourceRunId: "run-current" }),
+      context("run-source"),
+    );
+    const record = mint(sealed);
+    expect(await validMemoryProvenance(record)).toBe(true);
+    expect(await validMemoryProvenance({ ...record, useCount: 9, lastUsedAt: NOW + 1 })).toBe(true);
+    for (const changed of [
+      { text: "Different fact" },
+      { scopeKey: "org:other" },
+      { sourceRunId: "other" },
+      { keywords: ["other"] },
+    ]) {
+      expect(await validMemoryProvenance({ ...record, ...changed })).toBe(false);
+    }
+    expect(mintRecord("org:other", 1, NOW, sealed).provenance).toBeUndefined();
+  });
+
+  it("unions both dependency sets for dedup, restatement and replacement without changing the old revision", async () => {
+    const old = mint(await sealMemoryCandidate(SCOPE, cand("Use retry backoff"), context("old-source")));
+    const before = JSON.stringify(old);
+    for (const pointers of [{}, { restates: old.id }, { supersedes: old.id }]) {
+      const candidate = await sealMemoryCandidate(
+        SCOPE,
+        cand(pointers.supersedes ? "Use bounded retries" : old.text, pointers),
+        context("new-source"),
+      );
+      const plan = planWrite([old], candidate, mint);
+      const provenance = plan.action === "insert" ? plan.record.provenance : plan.provenance;
+      expect(provenance?.dependencies.mcp.map((ref) => ref.runId).sort()).toEqual(["new-source", "old-source"]);
+      expect(provenance!.dependencies.revision).toBeGreaterThan(old.provenance!.dependencies.revision);
+      expect(JSON.stringify(old)).toBe(before);
+    }
+  });
+
+  it("does not turn legacy or unknown dependencies into a known-empty envelope", async () => {
+    const legacy = rec();
+    const candidate = await sealMemoryCandidate(
+      SCOPE,
+      cand(legacy.text, { supersedes: legacy.id }),
+      context("new-source"),
+    );
+    const plan = planWrite([legacy], candidate, mint);
+    expect(plan.action).toBe("dedup");
+    expect(plan.action !== "insert" && plan.provenance).toBeUndefined();
+    const replacement = planWrite(
+      [legacy],
+      await sealMemoryCandidate(SCOPE, { ...candidate, text: "Different fact" }, context("new-source")),
+      mint,
+    );
+    expect(replacement.action === "insert" && replacement.record.provenance?.dependencies.status).toBe("unknown");
+  });
+});
 
 describe("normalizeText", () => {
   it("trims, lowercases, collapses whitespace", () => {

@@ -11,6 +11,7 @@ import { shapeToolSchemasForWire } from "../providerToolSchemas.js";
 import type { IncomingMessage } from "../types.js";
 import {
   OPERATOR_ASK_REPO_TOOL,
+  OPERATOR_READ_TOOLS,
   OPERATOR_BATCH_TOOL,
   operatorMaxOutputTokens,
   operatorPresets,
@@ -151,7 +152,8 @@ describe("the direct operator on the Responses wire", () => {
       })),
     };
 
-    expect(tools).toHaveLength(54);
+    expect(tools).toHaveLength(55);
+    expect(tools.filter((tool) => tool.name === OPERATOR_READ_TOOLS.repositoryBrief)).toHaveLength(1);
     expect(tools.map((tool) => tool.name)).toContain(OPERATOR_BATCH_TOOL);
     expect(tools.map((tool) => tool.name)).not.toContain(OPERATOR_ASK_REPO_TOOL);
     expect(lookaroundPatterns(unpatchedWire.tools)).toHaveLength(4);

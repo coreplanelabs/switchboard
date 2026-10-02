@@ -1,3 +1,10 @@
+import { createWorkFreshness } from "./workFreshness.js";
+import { appendRunReport } from "../runLedger/threadSession.js";
+import { contextDependenciesOf, type ContextDependencies } from "../references/contextDependencies.js";
+import { GITHUB_READ_TOOLS } from "../../tools/github.js";
+import { githubReadWithContext } from "./githubReadContext.js";
+import type { ParentContext } from "./handoff.js";
+import type { UnitContext } from "./unitContext.js";
 import { answerOutcomeOf, captureAnswerOutcome, type AnswerOutcome } from "../answerOutcome.js";
 import { audienceRefusalText, noteAudienceRefusal, type AudienceRefusalCode } from "../audienceDecision.js";
 // The run stage's loop (docs/decisions/0024-dispatcher-as-a-staged-pipeline.md):
@@ -21,7 +28,7 @@ import {
 } from "../publicationSettlement.js";
 import { createCheckExecution } from "../checkExecution.js";
 import { ensureFirstTest, firstTestContext, FirstTestHeld, type FirstTestReceipt } from "../firstTest.js";
-import { GIT_PUBLICATION_SETTLE_TIMEOUT_MS } from "../budgets.js";
+import { MINUTE_MS, GIT_PUBLICATION_SETTLE_TIMEOUT_MS } from "../budgets.js";
 import type { ResolvedRequest } from "../../config.js";
 import type { AgentDef } from "../../agents/registry.js";
 import { chatActorOf } from "../authz/actor.js";
@@ -36,6 +43,7 @@ import { isReissueSteerText } from "../plane/decide.js";
 import type { ModelCard } from "../modelCard.js";
 import { filterUnavailableTools, mergeTools, toolsForRun } from "../../tools/toolsets.js";
 import { createMainWorkEffectGate, mainWorkForRun, type DirectAudience } from "../../tools/mainWork.js";
+import { readUnitSeedProof } from "./unitSeedProof.js";
 import { type SlackContextBinding } from "./slackContextBinding.js";
 import {
   privateAudienceRequired,
@@ -202,6 +210,7 @@ export interface RunOutcome {
   checklistCheckedOff: () => string | undefined;
   /** A time-budget ending is not proof that the requested checklist was completed. */
   answerOutcome: AnswerOutcome;
+  currentWorkCheck?: () => Promise<string | undefined>;
   releaseWorkspace: (span?: Span) => Promise<void>;
 }
 
@@ -292,6 +301,8 @@ export interface RunLoopContext {
   channelVisibility: ChannelVisibility;
   slackContext?: SlackContextBinding;
   privateAudienceLatch?: PrivateAudienceLatch;
+  publicationContextCheck?: () => Promise<import("../audienceDecision.js").AudienceCheck>;
+  admitSourceContext?: (context: ContextDependencies) => Promise<boolean>;
   /** The severity to address in force for this run (agent-review.md item 5a),
    *  resolved by the dispatcher — directive > user > channel > org — for the
    *  verdict parser: a submitted or restored approve carrying a finding at or
@@ -312,6 +323,8 @@ export interface RunLoopContext {
    *  item 10) for the `recall` and `notes` tools and the notepad the pi harness
    *  steers after a compaction; absent for a run without a session. */
   session?: SessionCapability;
+  captureParentContext?: () => Promise<ParentContext>;
+  captureUnitContext?: () => Promise<UnitContext>;
   /** The run's staging counter (record 0033), shared with the request's
    *  staging in the dispatcher so a steer's files never reuse a workspace
    *  path. Absent (a loop driven outside `dispatch()`) → a counter of its own. */
@@ -1538,12 +1551,27 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         },
       }
     : undefined;
+  const workFreshness = createWorkFreshness({
+    owner: { requesterId: msg.userId, channelId: msg.channelId, threadKey: msg.threadKey },
+    save: async (state) => ledgerRun?.tracked() === true && (await ledgerRun.setStateAndFlush(state)),
+  });
+  const readSeedReceipt = deps.coordinatorInstances
+    ? (input: Parameters<typeof readUnitSeedProof>[1]) =>
+        readUnitSeedProof(
+          { runLedger: deps.runLedger, runStore: deps.runStore, instances: deps.coordinatorInstances! },
+          input,
+        )
+    : undefined;
+  const progressSourceTrusted = privateProgressSourceTrusted(msg.userId, admitted.inbox, resume?.events);
   const mainWork = mainWorkForRun({
+    observeRead: workFreshness.observe,
+    readTrusted: () => !privateAudienceLatch.revoked && progressSourceTrusted(),
     agentName: agent.name,
     actor: chatActorOf(deps.config, msg),
     message: msg,
     channelVisibility,
     runId: run.id,
+    ...(readSeedReceipt ? { readSeedReceipt } : {}),
     ...(deps.coordinatorInstances ? { instances: deps.coordinatorInstances } : {}),
     ...(deps.workflow ? { workflow: deps.workflow } : {}),
     ...(deps.plane ? { plane: deps.plane } : {}),
@@ -1610,16 +1638,28 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       registry.getById(run.id)?.finished === false,
     runId: run.id,
     ...(io.verifyDirectAudience ? { verifyDirectAudience: io.verifyDirectAudience.bind(io) } : {}),
+    captureContext: async () => {
+      if (!ctx.captureUnitContext) throw new Error("durable context capture is unavailable");
+      return ctx.captureUnitContext();
+    },
     ...(deps.mainTaskStart ? { start: deps.mainTaskStart } : {}),
   });
-  const progressSourceTrusted = privateProgressSourceTrusted(msg.userId, admitted.inbox, resume?.events);
   const mainWorker = await mainWorkerCapabilityFor(
     deps,
     agent.name,
     msg,
     io,
     () => !privateAudienceLatch.revoked && progressSourceTrusted(),
+    workFreshness.observe,
+    readSeedReceipt,
   );
+  if (resume)
+    await workFreshness.restore(
+      resume.row.state.workReads,
+      messages,
+      (receipt) => mainWorker?.restoreRead?.(receipt) ?? mainWork?.restoreRead?.(receipt),
+      resume.row.state.workRefreshUsed === true,
+    );
   const checkExecution =
     agent.name === "coding" && profile.identity === "write"
       ? createCheckExecution({
@@ -1656,6 +1696,14 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         })
       : undefined;
   const toolContext = {
+    ...(ctx.captureParentContext
+      ? {
+          sourceContext: async () => {
+            if (privateAudienceLatch.revoked) throw new Error("the source context is no longer readable");
+            return ctx.captureParentContext!();
+          },
+        }
+      : {}),
     executor,
     ...(ctx.sourceReads ? { sourceReads: ctx.sourceReads } : {}),
     ...(checkExecution ? { checkExecution } : {}),
@@ -2238,6 +2286,14 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                   mcpForRun?.tools,
                 ),
                 mainWorker ? [] : ["work_progress"],
+              ).map((tool) =>
+                GITHUB_READ_TOOLS.includes(tool) && ctx.admitSourceContext && ledgerRun?.tracked()
+                  ? githubReadWithContext(tool, {
+                      runId: run.id,
+                      commit: async (receipt, context) =>
+                        (await ctx.admitSourceContext!(context)) && (await ledgerRun!.recordSourceResult(receipt)),
+                    })
+                  : tool,
               ),
               ...(publicationTool ? [publicationTool] : []),
             ],
@@ -2686,6 +2742,20 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // post-step and before the workspace it runs in can be released; what its
     // ending left running is read off the record once it has — here, once,
     // whatever the post-step does next.
+    answer = await workFreshness.finalize(
+      answer,
+      harnessSession && !tailSkipped() && harnessSession.remainingMs() > 0
+        ? (text) =>
+            harnessSession!.followUp({
+              text,
+              maxTurns: 1,
+              maxMinutes: Math.min(agent.maxMinutes, harnessSession!.remainingMs() / MINUTE_MS),
+              tools: [],
+              toolContext,
+              span: root,
+            })
+        : undefined,
+    );
     await endHarness();
     // The last model turn and its checkpoint are finished. Close the Git door
     // before any PR lookup or edit: a delayed receive-pack request otherwise
@@ -2961,17 +3031,60 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // canonicalized ONCE here, so the event text, the channel reply, the
     // GitHub post, and memory all read one Markdown dialect; the model's raw
     // text rides on the event only when normalization changed it.
-    if (privateRun) {
-      const checked = await privateRunAudienceDecision(msg, io, privateAudienceLatch, slackContext);
+    let publicationWithheld = false;
+    const publicationAllowed = async (): Promise<boolean> => {
+      if (publicationWithheld) return false;
+      const checked = privateRun
+        ? await privateRunAudienceDecision(msg, io, privateAudienceLatch, slackContext)
+        : ctx.publicationContextCheck
+          ? await ctx.publicationContextCheck()
+          : { ok: true as const };
       if (!checked.ok) {
         const receipt = noteAudienceRefusal(privateAudienceLatch, checked.code, "answer-event", "answer-event");
         ledgerRun?.setState({ audienceRefusal: receipt });
         answer = audienceRefusalText(receipt.code);
+        publicationWithheld = true;
+        return false;
       }
-    }
+      const currentWork = await workFreshness.beforePublish();
+      if (currentWork !== undefined) {
+        answer = currentWork;
+        return false;
+      }
+      return true;
+    };
     const acceptedAnswer = markdownOutput.parse(answer);
-    const rawAnswer = acceptedAnswer.ok && acceptedAnswer.changed ? answer : undefined;
+    let rawAnswer = acceptedAnswer.ok && acceptedAnswer.changed ? answer : undefined;
     if (acceptedAnswer.ok) answer = acceptedAnswer.value;
+    if (deps.runLedger.sessionPersistence && ledgerRun?.session) {
+      const checkpoint = await ledgerRun.checkpointSession();
+      if (!checkpoint) throw new Error("answer context checkpoint was not persisted");
+      const saved = await deps.runLedger.readSessionTail(checkpoint.key, 1);
+      const reported = await appendRunReport(
+        deps.runLedger,
+        {
+          runId: run.id,
+          threadKey: msg.threadKey,
+          requester: msg.userId,
+          channelId: msg.channelId,
+          text: answer,
+          ...(parentRunId !== undefined ? { parentRunId } : {}),
+          ...(parentRunId !== undefined || coordinator !== undefined ? { folded: true } : {}),
+          context: contextDependenciesOf(saved.sources),
+          canPublish: publicationAllowed,
+        },
+        async (id) => registry.getById(id) ?? (await deps.runStore.getSummary(id)),
+      );
+      if (reported.parent === "unavailable")
+        events.publish({
+          type: "context",
+          text: "The parent conversation is unavailable; this report remains in the child's conversation.",
+          at: clock(),
+        });
+    }
+    // Report writes await storage and may also await the canonical parent.
+    // A late revocation withholds every later exposure of the original answer.
+    if (!(await publicationAllowed())) rawAnswer = undefined;
     publishText("answer", answer, undefined, rawAnswer);
     // Deterministic review post-step (runReviewPostStep in reviewRound.ts;
     // agent-review.md items 8, 10, 12, 15 and 18): a `review` run against a
@@ -3324,6 +3437,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     checklistCheckedOff,
     answerOutcome,
     releaseWorkspace,
+    currentWorkCheck: workFreshness.beforePublish,
   };
 }
 

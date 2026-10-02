@@ -163,6 +163,18 @@ describe("hasPilotWorkspaceBinding", () => {
 // so the plan's base survives a bot roll instead of living only in the
 // spawning process's dispatch options.
 describe("carriedCoordinatorTag: the tag a resumed run carries forward", () => {
+  it("recovers only the persisted typed unit association, never a parsed event label", () => {
+    const legacy = {
+      ...row(),
+      meta: { ...row().meta, parentInstanceId: "plan-p-2", idempotencyKey: "plan-p-2:U11/0/coding" },
+    };
+    expect(
+      carriedCoordinatorTag(legacy, [{ type: "coordinator_tag", parentInstanceId: "plan-p-2", unit: "U11", at: 1 }]),
+    ).not.toHaveProperty("unit");
+    expect(carriedCoordinatorTag({ ...legacy, meta: { ...legacy.meta, coordinatorUnit: "U11" } }, [])).toMatchObject({
+      unit: "U11",
+    });
+  });
   const tagged = row({}, { parentInstanceId: "plan-p-2", idempotencyKey: "plan-p-2:U16/1/coding" });
 
   it("rebuilds the tag from the row's meta with the base the coordinator_tag event carried", () => {

@@ -64,6 +64,113 @@ interface Harness {
 
 function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION_POLICY>) => Harness) {
   describe(`${name} — RunStore contract`, () => {
+    it("archives source bodies only in full records and preserves the dependency references in summaries", async () => {
+      const { store } = make();
+      const base = record("archive", NOW);
+      const query = { resource: { repository: "acme/private" }, input: { query: "original private source query" } };
+      const sourceReads: RunRecord["sourceReads"] = {
+        version: 1,
+        owner: {
+          runId: base.id,
+          requester: base.userId,
+          agent: base.agent!,
+          channelId: base.channelId,
+          threadKey: base.threadKey,
+        },
+        recoverable: false,
+        records: [
+          {
+            actionId: "action-1",
+            callIds: ["call-1"],
+            toolName: "reader",
+            serverId: "server",
+            connectionRevision: "v1",
+            sessionId: "session",
+            operationId: "read",
+            operationRevision: "v1",
+            query,
+            phase: "settled",
+            exposed: true,
+            response: {
+              version: 1,
+              status: "succeeded",
+              actionId: "action-1",
+              operationId: "read",
+              operationRevision: "v1",
+              binding: {
+                id: "binding",
+                revision: "v1",
+                subjectId: base.userId,
+                sessionId: "session",
+                ...query,
+                expiresAt: "2030-01-01T00:00:00Z",
+              },
+              attempt: "completed",
+              observedAt: "2026-01-01T00:00:00Z",
+              truncation: "none",
+              result: { body: "original private source body" },
+            },
+          },
+        ],
+      };
+      const contextDependencies: RunRecord["contextDependencies"] = {
+        version: 1,
+        status: "known",
+        revision: 1,
+        origins: [],
+        slack: [],
+        mcp: [{ runId: "source-parent", actionId: "action-1", callIds: ["call-1"], responseHash: "a".repeat(64) }],
+      };
+      const workReads: NonNullable<RunRecord["workReads"]> = [
+        {
+          tool: "work_status",
+          callId: "status-call",
+          input: { actId: "private-work-act" },
+          resultHash: "a".repeat(64),
+          observation: {
+            version: 1,
+            actId: "private-work-act",
+            instanceId: "instance",
+            unit: "U11",
+            attempt: 0,
+            requesterId: base.userId,
+            channelId: base.channelId,
+            mainThreadKey: base.threadKey,
+            snapshotHash: "b".repeat(64),
+            observedAt: 1000,
+          },
+        },
+      ];
+      await store.put({ ...base, sourceReads, contextDependencies, workReads });
+      expect((await store.get(base.id))?.workReads).toEqual(workReads);
+      expect((await store.get(base.id))?.sourceReads).toEqual(sourceReads);
+      for (const summary of [await store.getSummary(base.id), ...(await store.list({}))]) {
+        expect(summary?.contextDependencies).toEqual(contextDependencies);
+        expect(summary).not.toHaveProperty("sourceReads");
+        expect(summary).not.toHaveProperty("workReads");
+        expect(JSON.stringify(summary)).not.toContain("original private source");
+      }
+    });
+
+    it("refuses malformed source archives without storing a source-free fallback", async () => {
+      const { store } = make();
+      const base = record("invalid-archive", NOW);
+      const sourceReads = {
+        version: 1 as const,
+        owner: {
+          runId: "foreign",
+          requester: base.userId,
+          agent: base.agent!,
+          channelId: base.channelId,
+          threadKey: base.threadKey,
+        },
+        recoverable: false,
+        records: [],
+      };
+      expect((await store.put({ ...base, sourceReads })).stored).toBe(false);
+      expect(await store.get(base.id)).toBeNull();
+      expect(await store.getSummary(base.id)).toBeNull();
+    });
     it("round-trips a 2 MB record and lists without events", async () => {
       const { store } = make();
       const big = record("big", NOW, { events: events(40, 50_000) });

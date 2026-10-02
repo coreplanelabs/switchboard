@@ -1,4 +1,4 @@
-import { testSessionSources, testSlackReceipt } from "../../src/core/testing/slackSources.ts";
+import { testSessionSources, testSlackReceipt } from "../../src/core/testing/slackReceipts.ts";
 import { env, runInDurableObject } from "cloudflare:test";
 import { fetchMemoryTest } from "./testFetch.ts";
 import { describe, expect, it } from "vitest";
@@ -774,6 +774,20 @@ describe("session log object — the keyed append (session-log item 13)", () => 
     expect(String(part.content)).toMatch(/dropped/);
     // A replayed migration (a restart mid-cutover) re-appends nothing.
     expect((await post("/runs/session/append", { key, rowId, rows })).data).toEqual({ ok: true, appended: false });
+    expect(
+      (
+        await post("/runs/session/append", {
+          key,
+          rowId,
+          rows: [{ part: 0, json: rows[0].json.replace("XXXX", "fake") }],
+        })
+      ).data,
+    ).toEqual({ ok: false, appended: false });
+    // An old stored row without an immutable digest cannot attest a retry.
+    await runInDurableObject(stubOf(key), (_inst, state) => {
+      state.storage.sql.exec(`UPDATE turns SET row_hash = NULL`);
+    });
+    expect((await post("/runs/session/append", { key, rowId, rows })).data).toEqual({ ok: false, appended: false });
     expect(await post("/runs/session/tail", { key })).toEqual({ status: 200, data: { next: 1 } });
   });
 

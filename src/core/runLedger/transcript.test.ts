@@ -11,6 +11,36 @@ import { ATTACHMENT_REF_BYTES, TRANSCRIPT_PART_BYTES } from "./types.js";
 
 const text = (t: string) => ({ type: "text" as const, text: t });
 
+describe("explicit context metadata on shared conversation rows", () => {
+  it("aligns contexts across compactions and leaves absent or conflicting metadata unknown", () => {
+    const context = { version: 1, status: "known", revision: 0, origins: [], slack: [], mcp: [] };
+    const row = (idx: number, part: number, envelope?: unknown) => ({
+      idx,
+      part,
+      json: JSON.stringify({
+        role: "user",
+        actor: "slack:UALICE",
+        part: text("same bytes"),
+        ...(envelope ? { context: envelope } : {}),
+      }),
+    });
+    const read = assembleTranscript(
+      [
+        row(0, 0, context),
+        { idx: 1, part: 0, json: JSON.stringify({ compaction: { summary: "summary" } }) },
+        row(2, 0),
+        row(3, 0, { ...context, status: "unknown" }),
+        row(4, 0, context),
+        row(4, 1, { ...context, revision: 1 }),
+      ],
+      [],
+    );
+    expect(read.contexts?.map((entry) => entry?.status)).toEqual(["known", undefined, "unknown", undefined]);
+    expect(read.messages).toHaveLength(4);
+    expect(read.compactions[0]?.before).toBe(1);
+  });
+});
+
 describe("turnRows — one row per content part, attachments by reference", () => {
   it("splits a turn into part rows carrying idx/part and the part's JSON verbatim", () => {
     const message: ChatMessage = {

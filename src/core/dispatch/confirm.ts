@@ -12,12 +12,19 @@
 // a later request may mint a new offer, but this click never delegates recovery.
 import type { Actor } from "../authz/types.js";
 import type { ChatCommandResult } from "../commandChat.js";
-import type { Confirmation, ConfirmationRefusal, RedispatchConfirmation } from "../confirmations.js";
+import {
+  parseConfirmation,
+  type Confirmation,
+  type ConfirmationRefusal,
+  type RedispatchConfirmation,
+} from "../confirmations.js";
+import type { ContextDependencies } from "../references/contextDependencies.js";
+import type { AudienceCheck } from "../audienceDecision.js";
 import type { DispatchOutcome } from "./outcome.js";
 import { COMMAND_RUN_AGENT } from "../runOwner.js";
 import type { RunEnding } from "../runEnding.js";
 import type { RequestTrace } from "../requestTrace.js";
-import type { ChannelIO } from "../types.js";
+import type { ChannelIO, IncomingMessage } from "../types.js";
 import { runChatCommand } from "./commandRun.js";
 import type { FastPathDeps } from "./fastPath.js";
 import { redactedInput, ROUTED_RECEIPT_PREFIX } from "./route.js";
@@ -33,6 +40,7 @@ export const OFFER_USED_LINE = "this offer was already used";
 export const OFFER_UNREADABLE_LINE =
   "this is a bug: the confirmation could not be read, so nothing ran and no replacement offer was minted";
 export const OFFER_CANCELLED_LINE = "Cancelled; nothing ran";
+export const OFFER_CONTEXT_LINE = "This confirmation's saved context is no longer available.";
 
 /** The reason a confirmed run's `route` event gives on the record. */
 export const CONFIRMED_REASON = "confirmed after offer";
@@ -72,7 +80,7 @@ export type ClickResult =
    *  the refusal can be recorded against the command that was bound. */
   | { kind: "refused"; refusal: ClickRefusal; text: string; row?: Confirmation }
   /** The row ran: the command's result, and the reply — the receipt line first, the command's own text under it. */
-  | { kind: "ran"; result: ChatCommandResult; text: string }
+  | { kind: "ran"; result: ChatCommandResult; text: string; publicationCheck?: () => Promise<AudienceCheck> }
   /** A question's Yes (record 0054): the consumed `redispatch` row went back
    *  through `dispatch()` as the requester — the caller's `redispatch` ran it
    *  and this is how it ended. The reply is the redispatched request's own. */
@@ -112,6 +120,7 @@ export async function consumeAndRun(
   ending: RunEnding,
   trace: RequestTrace,
   redispatch: (row: RedispatchConfirmation) => Promise<DispatchOutcome>,
+  validateContext?: (context: ContextDependencies, message: IncomingMessage) => Promise<AudienceCheck>,
 ): Promise<ClickResult> {
   const store = deps.confirmations;
   if (!store) return UNREADABLE;
@@ -124,35 +133,87 @@ export async function consumeAndRun(
     );
     return UNREADABLE;
   }
-  if (!consumed.ok) return refused(consumed.refused, consumed.row);
-  const row = consumed.row;
+  if (!consumed.ok)
+    return refused(consumed.refused, consumed.row && "derivation" in consumed.row ? undefined : consumed.row);
+  const row = parseConfirmation(structuredClone(consumed.row));
+  if (!row) return UNREADABLE;
   // A question's Yes (record 0054): the row holds no bound command — it holds
   // the proposal, the person's message with the fix applied — so the click
   // hands it back to `dispatch()` whole, as the requester, through the
   // caller's `redispatch`. The store already judged the requester and the
   // expiry, exactly as it judges record 0044's Run.
   if (row.kind === "redispatch") return { kind: "redispatched", row, outcome: await redispatch(row) };
-  const result = await runChatCommand(
-    deps,
-    row.message,
-    io,
-    { kind: "invoke", id: row.command, input: row.input },
-    ending,
-    trace,
-    {
-      source: "confirm",
-      route: {
-        preset: COMMAND_RUN_AGENT,
-        reason: CONFIRMED_REASON,
-        model: row.model,
-        command: row.command,
-        input: redactedInput(row.input),
-        receipt: row.receipt,
-        outcome: "confirmed",
+  const derivation = row.derivation;
+  const contextUnavailable = { ...UNREADABLE, text: OFFER_CONTEXT_LINE };
+  let denied = false;
+  const publicationCheck = async (): Promise<AudienceCheck> => {
+    if (!derivation) return { ok: true };
+    if (!denied && derivation.context.status === "known" && validateContext) {
+      try {
+        if ((await validateContext(structuredClone(derivation.context), structuredClone(row.message))).ok)
+          return { ok: true };
+      } catch {
+        /* Unavailable source proof cannot authorize the saved command. */
+      }
+    }
+    denied = true;
+    return { ok: false, code: "saved-context-unproved" };
+  };
+  const withheld = new Error(OFFER_CONTEXT_LINE);
+  const beforePublish = async () => {
+    if (!(await publicationCheck()).ok) throw withheld;
+  };
+  if (!(await publicationCheck()).ok) return contextUnavailable;
+  let result: ChatCommandResult;
+  try {
+    result = await runChatCommand(
+      deps,
+      row.message,
+      io,
+      { kind: "invoke", id: row.command, input: row.input },
+      ending,
+      trace,
+      {
+        source: "confirm",
+        ...(derivation ? { beforePublish, contextDependencies: derivation.context } : {}),
+        route: {
+          preset: COMMAND_RUN_AGENT,
+          reason: CONFIRMED_REASON,
+          model: row.model,
+          command: row.command,
+          input: redactedInput(row.input),
+          receipt: row.receipt,
+          outcome: "confirmed",
+        },
       },
-    },
-  );
-  return { kind: "ran", result, text: `${ROUTED_RECEIPT_PREFIX} ${row.receipt}\n${result.text}` };
+    );
+  } catch (error) {
+    if (denied || error === withheld) return contextUnavailable;
+    throw error;
+  }
+  if (!(await publicationCheck()).ok) return contextUnavailable;
+  if (derivation && result.followUp) {
+    const followUp = result.followUp;
+    result = {
+      ...result,
+      followUp: async () => {
+        if (!(await publicationCheck()).ok) return undefined;
+        try {
+          const outcome = await followUp();
+          return (await publicationCheck()).ok ? outcome : undefined;
+        } catch (error) {
+          if (denied || error === withheld) return undefined;
+          throw error;
+        }
+      },
+    };
+  }
+  return {
+    kind: "ran",
+    result,
+    text: `${ROUTED_RECEIPT_PREFIX} ${row.receipt}\n${result.text}`,
+    ...(derivation ? { publicationCheck } : {}),
+  };
 }
 
 /** The other button: delete the row under the same requester check; nothing runs. */

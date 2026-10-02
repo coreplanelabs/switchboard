@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ChatMessage } from "../core/chatMessage.js";
+import { snapshotNotepad, type ChildHandoff } from "../core/dispatch/handoff.js";
 import type { RunEvent } from "../core/runEvents.js";
 import { NOTEPAD_MAX_BYTES } from "../core/runLedger/sessionLog.js";
 import type { FenceResult, Notepad, SessionHit } from "../core/runLedger/types.js";
@@ -366,6 +367,62 @@ describe("notes — the agent's notepad for this thread", () => {
 });
 
 describe("sessionCapabilityFor — the capability the dispatcher builds for a run with a session", () => {
+  const dynamicSession = { key: "slack:C1:1.0:coding", seedFrom: 0, request: 0, range: { from: 1 } };
+  function dynamicFixture() {
+    const order: string[] = [];
+    const message = say("newly appended source evidence");
+    const note = { text: "newly appended source note", updatedAt: 2 };
+    const hits: SessionHit[] = [
+      { idx: 1, part: 0, role: "user", kind: "text", text: "newly appended source evidence" },
+    ];
+    const wt = {
+      readSession: async () => {
+        order.push("turns");
+        return { complete: true as const, turns: 1, messages: [message], compactions: [] };
+      },
+      searchSession: async () => {
+        order.push("search");
+        return { hits, gaps: [] };
+      },
+      readNotepad: async () => {
+        order.push("notes");
+        return note;
+      },
+      writeNotepad: async () => ({ ok: true as const }),
+    };
+    return { order, message, note, hits, wt };
+  }
+
+  it("admits dynamic own-session bytes after reading and before exposing them", async () => {
+    const { order, message, note, hits, wt } = dynamicFixture();
+    const admit = vi.fn(async () => {
+      order.push("admitted");
+      return true;
+    });
+    const cap = sessionCapabilityFor({ session: dynamicSession, runId: "run-1" }, wt, undefined, undefined, admit)!;
+    expect(await cap.readTurn(1)).toEqual(message);
+    expect(await cap.search("evidence", 5)).toEqual({ hits, gaps: [] });
+    expect(await cap.readConversation()).toEqual([message]);
+    expect(await cap.readNotepad()).toEqual(note);
+    expect(order).toEqual(["turns", "admitted", "search", "admitted", "turns", "admitted", "notes", "admitted"]);
+  });
+
+  it("withholds dynamic own-session bytes when dependency admission fails or throws", async () => {
+    for (const throws of [false, true]) {
+      const { wt } = dynamicFixture();
+      const admit = async () => {
+        if (throws) throw new Error("source unavailable");
+        return false;
+      };
+      const cap = sessionCapabilityFor({ session: dynamicSession, runId: "run-1" }, wt, undefined, undefined, admit)!;
+      expect(await cap.readTurn(1)).toBeUndefined();
+      expect(await cap.search("evidence", 5)).toEqual({ hits: [], gaps: [] });
+      expect(await cap.readNotepad()).toBeNull();
+      await expect(cap.readConversation()).rejects.toThrow("session context could not be admitted");
+      expect(await cap.writeNotepad("current run's own notes")).toEqual({ ok: true });
+    }
+  });
+
   it("wraps the run's session and the write-through's session reads and the notepad write; nothing for a run without a session", async () => {
     const wt = {
       readSession: vi.fn(async () => ({
@@ -403,5 +460,223 @@ describe("sessionCapabilityFor — the capability the dispatcher builds for a ru
     expect(await withFiles.assets!()).toEqual([clip]);
     expect(withFiles.workspacePathOf!(CLIP)).toBe("attachments/1-clip.mp4");
     expect(withFiles.workspacePathOf!("other")).toBeUndefined();
+  });
+});
+
+describe("inherited session context", () => {
+  const source = {
+    runId: "run-parent",
+    threadKey: "slack:C1:parent",
+    channelId: "slack:C1",
+    requester: "slack:UALICE",
+  };
+  const childSession = { key: "slack:C1:child:@thread", seedFrom: 0, request: 1, range: { from: 2 } };
+  const parentNote = { text: "The exact failure is in the original tool result", updatedAt: 7 };
+  const fixture = async () => {
+    const handoff: ChildHandoff = {
+      version: 1,
+      source,
+      session: { key: "slack:C1:parent:@thread", from: 2, to: 8 },
+      notepad: await snapshotNotepad(parentNote),
+      assets: [sheet],
+    };
+    const wt = {
+      readSession: vi.fn(async () => ({
+        complete: true as const,
+        turns: 1,
+        messages: [say("original output")],
+        compactions: [],
+      })),
+      readSessionTail: vi.fn(async () => ({
+        from: 6,
+        transcript: {
+          complete: true as const,
+          turns: 3,
+          messages: [say("before compaction"), say("after compaction")],
+          compactions: [{ before: 1, entry: { summary: "a lossy summary", tokensBefore: 100 } }],
+          actors: ["slack:UALICE", undefined],
+        },
+      })),
+      searchSession: vi.fn(async () => ({
+        hits: [1, 4, 9].map((idx) => ({ idx, part: 0, kind: "text", text: `output ${idx}` })),
+        gaps: [1, 7, 10],
+      })),
+      readNotepad: vi.fn(async (): Promise<Notepad | null> => parentNote),
+      writeNotepad: vi.fn(async () => ({ ok: true as const })),
+    };
+    return { handoff, wt };
+  };
+
+  it("captures typed log references, notes, assets and actors across compaction", async () => {
+    const { wt } = await fixture();
+    const cap = sessionCapabilityFor({ session: childSession, runId: source.runId }, wt, {
+      read: async () => [sheet],
+      pathOf: () => undefined,
+    })!;
+    const captured = await cap.captureHandoff!(source);
+    expect(captured.handoff).toMatchObject({
+      source,
+      session: { key: childSession.key, from: 0, to: 8 },
+      notepad: parentNote,
+      assets: [sheet],
+    });
+    expect(captured.handoff!.notepad!.hash).toMatch(/^[a-f0-9]{64}$/);
+    expect(captured.messages).toContainEqual(say("before compaction"));
+    expect(captured.messages).toContainEqual(say("after compaction"));
+    expect(JSON.stringify(captured.messages)).not.toContain("a lossy summary");
+    expect(captured.actors).toEqual([undefined, "slack:UALICE", undefined]);
+    await expect(cap.captureHandoff!({ ...source, runId: "someone-else" })).rejects.toThrow("does not match");
+  });
+
+  it("freezes only the committed range and captures dependencies after notes and assets", async () => {
+    const { wt } = await fixture();
+    const order: string[] = [];
+    wt.readSessionTail.mockImplementation(async () => {
+      order.push("body");
+      return {
+        from: 6,
+        transcript: { complete: true, turns: 3, messages: [say("later")], compactions: [], actors: [] },
+      };
+    });
+    wt.readSession.mockImplementation(async () => {
+      order.push("frozen-body");
+      return { complete: true, turns: 1, messages: [say("committed")], compactions: [] };
+    });
+    wt.readNotepad.mockImplementation(async () => {
+      order.push("note");
+      return parentNote;
+    });
+    const cap = sessionCapabilityFor({ session: childSession, runId: source.runId }, wt, {
+      read: async () => {
+        order.push("assets");
+        return [sheet];
+      },
+      pathOf: () => undefined,
+    })!;
+    const captured = await cap.captureHandoff!(
+      source,
+      async (snapshot) => {
+        order.push("dependencies");
+        expect(snapshot.notepad?.text).toBe(parentNote.text);
+        return { version: 1, status: "known", revision: 1, origins: [source], slack: [], mcp: [] };
+      },
+      6,
+    );
+    expect(order).toEqual(["body", "frozen-body", "note", "assets", "dependencies"]);
+    expect(captured.handoff?.session.to).toBe(6);
+    expect(captured.handoff?.dependencies?.value?.revision).toBe(1);
+    expect(wt.readSession).toHaveBeenCalledWith(childSession.key, 6, 6);
+    expect(JSON.stringify(captured.messages)).not.toContain("later");
+  });
+
+  it("rechecks access on every inherited read and never reads outside the frozen range", async () => {
+    const { handoff, wt } = await fixture();
+    let allowed = true;
+    const canRead = vi.fn(async () => allowed);
+    const cap = sessionCapabilityFor({ session: childSession, runId: "run-1" }, wt, undefined, { handoff, canRead })!;
+    expect(await cap.parent!.readTurn(1)).toBeUndefined();
+    expect(await cap.parent!.readTurn(9)).toBeUndefined();
+    expect(wt.readSession).not.toHaveBeenCalled();
+    expect(await cap.parent!.readTurn(4)).toEqual(say("original output"));
+    expect(wt.readSession).toHaveBeenCalledWith(handoff.session.key, 4, 4);
+    expect(await cap.parent!.search("output", 5)).toEqual({
+      hits: [{ idx: 4, part: 0, kind: "text", text: "output 4" }],
+      gaps: [7],
+    });
+    expect(await cap.parent!.readNotepad()).toEqual(parentNote);
+    expect(await cap.parent!.assets()).toEqual([sheet]);
+    allowed = false;
+    wt.readSession.mockClear();
+    wt.searchSession.mockClear();
+    expect(await cap.parent!.readTurn(4)).toBeUndefined();
+    expect(await cap.parent!.search("output", 5)).toEqual({ hits: [], gaps: [] });
+    expect(await cap.parent!.readNotepad()).toBeNull();
+    expect(await cap.parent!.assets()).toEqual([]);
+    expect(wt.readSession).not.toHaveBeenCalled();
+    expect(wt.searchSession).not.toHaveBeenCalled();
+    expect(canRead).toHaveBeenCalledWith(handoff);
+  });
+
+  it("retains original source snapshots through two handoffs and a JSON restart", async () => {
+    const { handoff, wt } = await fixture();
+    const parent = sessionCapabilityFor({ session: childSession, runId: "run-middle" }, wt, undefined, {
+      handoff,
+      canRead: async () => true,
+    })!;
+    const captured = await parent.captureHandoff!({ ...source, runId: "run-middle", threadKey: "slack:C1:middle" });
+    const restored = JSON.parse(JSON.stringify(captured.handoff)) as ChildHandoff;
+    const canRead = vi.fn(async () => true);
+    const child = sessionCapabilityFor({ session: childSession, runId: "run-1" }, wt, undefined, {
+      handoff: restored,
+      canRead,
+    })!;
+    expect(restored.ancestors![0]).toMatchObject({
+      source,
+      session: handoff.session,
+      snapshotRunId: "run-middle",
+      notepad: handoff.notepad,
+    });
+    expect(await notesTool.run({ source: "parent", parentRunId: "run-parent" }, ctxWith(child))).toBe(parentNote.text);
+    expect(canRead).toHaveBeenLastCalledWith(restored.ancestors![0]);
+    const result = String(
+      await recallTool.run({ source: "parent", parentRunId: "run-parent", turn: 4 }, ctxWith(child)),
+    );
+    expect(result).toContain("original output");
+    expect(wt.readSession).toHaveBeenLastCalledWith(handoff.session.key, 4, 4);
+    expect(
+      String(await recallTool.run({ source: "parent", parentRunId: "unregistered", turn: 4 }, ctxWith(child))),
+    ).toContain("no parent context");
+  });
+
+  it("recalls image and document evidence as native tool parts and keeps parent notes read-only", async () => {
+    const { handoff, wt } = await fixture();
+    const image = { type: "image" as const, mediaType: "image/png", data: "aW1hZ2U=" };
+    wt.readSession.mockResolvedValueOnce({
+      complete: true,
+      turns: 1,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", toolUseId: "old-call", content: [{ type: "text", text: "exact result" }, image] },
+          ],
+        },
+      ],
+      compactions: [],
+    });
+    const cap = sessionCapabilityFor({ session: childSession, runId: "run-1" }, wt, undefined, {
+      handoff,
+      canRead: async () => true,
+    })!;
+    const result = await recallTool.run({ source: "parent", turn: 4 }, ctxWith(cap));
+    expect(result).toEqual([
+      expect.objectContaining({ type: "text", text: expect.stringContaining("old-call") }),
+      image,
+    ]);
+    expect(String(await notesTool.run({ source: "parent", text: "change" }, ctxWith(cap)))).toContain("read-only");
+    expect(wt.writeNotepad).not.toHaveBeenCalled();
+  });
+
+  it("recovers omitted notes by snapshot reference and rejects mismatched frozen data", async () => {
+    const { handoff, wt } = await fixture();
+    const { text: _text, ...note } = handoff.notepad!;
+    const compact: ChildHandoff = {
+      ...handoff,
+      snapshotRunId: "run-middle",
+      notepad: note,
+      omitted: { notepad: true },
+    };
+    const loadSource = vi.fn(async () => handoff);
+    const cap = sessionCapabilityFor({ session: childSession, runId: "run-1" }, wt, undefined, {
+      handoff: compact,
+      canRead: async () => true,
+      loadSource,
+    })!;
+    expect(await cap.parent!.readNotepad()).toEqual(parentNote);
+    expect(loadSource).toHaveBeenCalledWith(compact);
+    loadSource.mockResolvedValueOnce({ ...handoff, session: { ...handoff.session, to: 99 } });
+    await expect(cap.parent!.readNotepad()).rejects.toThrow("no longer matches");
+    loadSource.mockResolvedValueOnce({ ...handoff, notepad: { ...handoff.notepad!, text: "tampered" } });
+    await expect(cap.parent!.readNotepad()).rejects.toThrow("saved hash");
   });
 });

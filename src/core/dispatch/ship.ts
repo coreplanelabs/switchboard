@@ -71,6 +71,7 @@ import { refusalOf, RefusalError, type Refusal } from "../refusal.js";
 import { renderRefusal, replyAck } from "./reply.js";
 import { shows, type Verbosity } from "../verbosity.js";
 import { REFUSAL_SENTENCES } from "./reply.js";
+import type { UnitContext } from "./unitContext.js";
 
 /** What the ship branch reads: the run slice (the config, the registry and
  *  history writers, the GitHub client the hand-off reads the plan with), the
@@ -156,6 +157,8 @@ const namesOriginalUnitRecovery = (text: string): boolean => /^recover\s+unit(?:
 /** What the agent:ship fork carries out of dispatch()'s prelude — values the
  *  branch must not re-derive, because the gates already ran against them. */
 export interface ShipContext {
+  /** A spawning run's validated, frozen evidence for the admitted units. */
+  context?: UnitContext;
   /** The ship preset as this deployment declares it (`shipPresetFor`: its
    *  budget is the `ship.maxMinutes` knob) — labels and run meta only. */
   agent: AgentDef;
@@ -182,7 +185,7 @@ export interface ShipContext {
   /** Only a Yes on the stored PR-work question can grant this continuation. */
   confirmedPrWork?: PrWorkBinding;
   /** The validated source of the operator's repository slot. */
-  shipRepoSource?: "request" | "attachment" | "thread" | "channel";
+  shipRepoSource?: "request" | "attachment" | "thread" | "channel" | "context";
   /** The stable generated plan this ended thread is re-issuing. */
   reissuePlanId?: string;
   /** Deferred legacy repair and ownership reservation, after every hand-off
@@ -702,6 +705,7 @@ export async function runShipBranch(
             {
               entry,
               requestText: directives.text,
+              ...(ctx.context ? { context: ctx.context } : {}),
               ...(ctx.shipEntry !== undefined ? { intent: ctx.shipEntry } : {}),
               ...(threadEvidence !== undefined ? { threadEvidence } : {}),
               ...(requiresThreadEvidence ? { requiresThreadEvidence: true } : {}),

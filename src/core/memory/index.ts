@@ -1,3 +1,5 @@
+import type { ContextDependencies } from "../references/contextDependencies.js";
+import type { AudienceCheck } from "../audienceDecision.js";
 import { parseModelRef, type Provider, type ProviderConfig } from "../provider.js";
 import { turnEffort } from "../dispatch/turnEffort.js";
 import { installedModelRegistry } from "../installedModelRegistry.js";
@@ -124,8 +126,10 @@ export function scheduleReflection(input: {
   history: HistoryItem[];
   request: string;
   answer: string;
+  context?: ContextDependencies;
+  admitMemory?: (record: MemoryRecord) => Promise<AudienceCheck>;
 }): void {
-  if (!input.cfg?.enabled || !shouldReflect(input.gate)) return;
+  if (!input.cfg?.enabled || !shouldReflect(input.gate) || input.context?.status !== "known") return;
   const warn = (m: string) => console.warn(`[memory] ${input.threadKey} ${m}`);
   const info = (m: string) => console.log(`[memory] ${input.threadKey} ${m}`);
   let provider: Provider;
@@ -161,6 +165,8 @@ export function scheduleReflection(input: {
       answer: input.answer,
       sourceThreadKey: input.threadKey,
       sourceRunId: input.runId,
+      context: input.context,
+      ...(input.admitMemory ? { admitMemory: input.admitMemory } : {}),
       onWarn: warn,
       onInfo: info,
     }),

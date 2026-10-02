@@ -1,11 +1,64 @@
 import { describe, expect, it } from "vitest";
 import type { MemoryCandidate, MemoryRecord } from "./types.js";
 import { InMemoryMemoryStore, NullMemoryStore, selectMemoryStore } from "./stores.js";
+import { sealMemoryCandidate, validMemoryProvenance } from "./provenance.js";
+import type { ContextDependencies } from "../references/contextDependencies.js";
 
 // Feature: docs/reference/specs/memory.md — the two MemoryStore implementations (AGENTS.md
 // invariant 2) and the store selector.
 
 const NOW = 1_700_000_000_000;
+
+describe("memory dependency persistence", () => {
+  const context = (runId: string): ContextDependencies => ({
+    version: 1,
+    status: "known",
+    revision: 1,
+    slack: [],
+    mcp: [],
+    origins: [{ runId, requester: "slack:UA", channelId: "slack:CA", threadKey: "slack:CA:1.0" }],
+  });
+  it("persists unions through deduplication, restatement and supersession while preserving content digests", async () => {
+    const store = new InMemoryMemoryStore();
+    const scope = "org:acme";
+    const candidate: MemoryCandidate = {
+      kind: "fact",
+      text: "Deploy uses bounded retries",
+      sourceRunId: "producer",
+      sourceThreadKey: "slack:CA:1.0",
+    };
+    await store.write(scope, [await sealMemoryCandidate(scope, candidate, context("original"))]);
+    const [first] = await store.list(scope, 10);
+    const oldSnapshot = structuredClone(first);
+    await store.write(scope, [await sealMemoryCandidate(scope, candidate, context("dedup"))]);
+    await store.write(scope, [
+      await sealMemoryCandidate(scope, { ...candidate, text: "same lesson", restates: first.id }, context("restate")),
+    ]);
+    const [refreshed] = await store.list(scope, 10);
+    expect(refreshed.provenance!.dependencies.origins.map((origin) => origin.runId).sort()).toEqual([
+      "dedup",
+      "original",
+      "restate",
+    ]);
+    expect(await validMemoryProvenance(refreshed)).toBe(true);
+    expect(await validMemoryProvenance(oldSnapshot)).toBe(true);
+    await store.write(scope, [
+      await sealMemoryCandidate(
+        scope,
+        { ...candidate, text: "Deploy needs jitter", supersedes: first.id },
+        context("replacement"),
+      ),
+    ]);
+    const [replacement] = await store.list(scope, 10);
+    expect(replacement.provenance!.dependencies.origins.map((origin) => origin.runId).sort()).toEqual([
+      "dedup",
+      "original",
+      "replacement",
+      "restate",
+    ]);
+    expect(await validMemoryProvenance(replacement)).toBe(true);
+  });
+});
 
 function rec(over: Partial<MemoryRecord> = {}): MemoryRecord {
   return {

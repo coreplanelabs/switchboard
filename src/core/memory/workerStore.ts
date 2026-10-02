@@ -8,6 +8,7 @@ import type {
   WriteCounts,
 } from "./types.js";
 import { tracedFetch } from "../trace/tracedFetch.js";
+import { isMemoryProvenance } from "./provenance.js";
 import type { Span, TraceOptions } from "../trace/types.js";
 
 // The durable MemoryStore: an HTTPS client to the Memory Worker
@@ -218,6 +219,7 @@ function isMemoryRecord(v: unknown): v is MemoryRecord {
     typeof r.text === "string" &&
     Array.isArray(r.keywords) &&
     typeof r.sourceThreadKey === "string" &&
+    (r.provenance === undefined || (isMemoryProvenance(r.provenance) && r.provenance.scopeKey === r.scopeKey)) &&
     typeof r.createdAt === "number" &&
     typeof r.useCount === "number" &&
     (r.status === "active" ||

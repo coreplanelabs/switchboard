@@ -7,6 +7,8 @@
 // a 20 MB part row.
 
 import type { ChatMessage, ContentPart } from "../chatMessage.js";
+import { isSourceResultReceipt, type SourceResultReceipt } from "../references/sourceResultContext.js";
+import { isContextDependencies, type ContextDependencies } from "../references/contextDependencies.js";
 import { utf8ByteLength } from "../runRecord.js";
 import {
   ATTACHMENT_REF_BYTES,
@@ -30,6 +32,11 @@ export interface StoredPart {
   role: ChatMessage["role"];
   part: ContentPart | (ContentPart & { dataRef: string });
   actor?: string;
+  silent?: true;
+  folded?: true;
+  /** Explicit append-producer metadata; never inferred from message content. */
+  context?: ContextDependencies;
+  sourceResult?: SourceResultReceipt;
 }
 
 /** The stored form of a compaction row: no role, no part — the entry alone. */
@@ -83,6 +90,10 @@ export function turnRows(
       role: message.role,
       part: stored,
       ...(actor !== undefined ? { actor } : {}),
+      ...(part.type === "tool_result" &&
+      message.sourceResults?.find((r) => isSourceResultReceipt(r) && r.callId === part.toolUseId)
+        ? { sourceResult: message.sourceResults.find((r) => isSourceResultReceipt(r) && r.callId === part.toolUseId) }
+        : {}),
     } satisfies StoredPart);
     const bytes = utf8ByteLength(json);
     if (bytes > partBytes) {
@@ -134,6 +145,8 @@ export type AssembledTranscript =
        *  present only when at least one row carries one — the verifier selects
        *  the author's own turns by it (record 0057). */
       actors?: (string | undefined)[];
+      marks?: Array<{ silent?: true; folded?: true }>;
+      contexts?: (ContextDependencies | undefined)[];
     }
   | {
       complete: false;
@@ -141,6 +154,8 @@ export type AssembledTranscript =
       messages: ChatMessage[];
       compactions: AssembledCompaction[];
       actors?: (string | undefined)[];
+      marks?: Array<{ silent?: true; folded?: true }>;
+      contexts?: (ContextDependencies | undefined)[];
       gap: string;
     };
 
@@ -167,7 +182,13 @@ export function assembleTranscript(
   const messages: ChatMessage[] = [];
   const compactions: AssembledCompaction[] = [];
   const actorList: (string | undefined)[] = [];
-  const actorsOrNone = () => (actorList.some((a) => a !== undefined) ? { actors: actorList } : {});
+  const marks: Array<{ silent?: true; folded?: true }> = [];
+  const contexts: (ContextDependencies | undefined)[] = [];
+  const actorsOrNone = () => ({
+    ...(actorList.some((a) => a !== undefined) ? { actors: actorList } : {}),
+    ...(marks.some((mark) => mark.silent || mark.folded) ? { marks } : {}),
+    ...(contexts.some((context) => context !== undefined) ? { contexts } : {}),
+  });
   /** The `messages` index each turn index landed at (a compaction row lands nowhere). */
   const messageIndexOf = new Map<number, number>();
   const gap = (why: string): AssembledTranscript => ({
@@ -188,12 +209,14 @@ export function assembleTranscript(
       continue;
     }
     const content: ContentPart[] = [];
+    const sourceResults: SourceResultReceipt[] = [];
     let role: ChatMessage["role"] | undefined;
     const partCount = Math.max(...parts.keys()) + 1;
     for (let p = 0; p < partCount; p++) {
       const stored = parts.get(p);
       if (!stored || "compaction" in stored) return gap(`turn ${idx} is missing part ${p}`);
       role = stored.role;
+      if (isSourceResultReceipt(stored.sourceResult)) sourceResults.push(stored.sourceResult);
       const part = stored.part as ContentPart & { dataRef?: string };
       if (part.dataRef !== undefined) {
         const att = byRef.get(part.dataRef);
@@ -205,8 +228,25 @@ export function assembleTranscript(
       }
     }
     messageIndexOf.set(idx, messages.length);
-    messages.push({ role: role ?? "user", content });
+    messages.push({ role: role ?? "user", content, ...(sourceResults.length ? { sourceResults } : {}) });
     actorList.push(first && !("compaction" in first) ? first.actor : undefined);
+    const context = first && !("compaction" in first) ? first.context : undefined;
+    contexts.push(
+      isContextDependencies(context) &&
+        [...parts.values()].every(
+          (part) => !("compaction" in part) && JSON.stringify(part.context) === JSON.stringify(context),
+        )
+        ? context
+        : undefined,
+    );
+    marks.push(
+      first && !("compaction" in first)
+        ? {
+            ...(first.silent === true ? { silent: true as const } : {}),
+            ...(first.folded === true ? { folded: true as const } : {}),
+          }
+        : {},
+    );
   }
   for (const c of compactions) {
     if (c.entry.keptFrom === undefined) continue;

@@ -13,6 +13,12 @@ import {
   type MainWorkCapability,
 } from "./mainWork.js";
 import type { ToolContext } from "./runnableTool.js";
+import {
+  isMainWorkReadReceipt,
+  type MainWorkRead,
+  type MainWorkReadObserver,
+} from "../core/coordinator/mainWorkObservation.js";
+import { sourceHash } from "../core/references/receipts.js";
 
 const THREAD = "slack:DMAIN:1.0";
 const ACT = "fix-signup";
@@ -102,11 +108,17 @@ async function fixture(over: Partial<CoordinatorUnit> = {}) {
   const bind = (
     actor: Actor = requester(),
     runId = "run-main-1",
-    message = { channelId: INSTANCE.channelId, threadKey: THREAD, userId: INSTANCE.userId },
+    message: Parameters<typeof mainWorkForRun>[0]["message"] = {
+      channelId: INSTANCE.channelId,
+      threadKey: THREAD,
+      userId: INSTANCE.userId,
+    },
     trusted = () => true,
     verify = async () => true,
     loadPlane: typeof plane = plane,
     effectGate = createMainWorkEffectGate(),
+    observeRead?: MainWorkReadObserver,
+    readTrusted?: () => boolean,
   ) =>
     mainWorkForRun({
       agentName: "orchestrator",
@@ -130,6 +142,8 @@ async function fixture(over: Partial<CoordinatorUnit> = {}) {
       trusted,
       verifiedAtOpen: true,
       verify,
+      observeRead,
+      readTrusted,
     });
   const context = (capability: MainWorkCapability | null = bind() ?? null, callId = "tool-call-1"): ToolContext => ({
     executor: {} as ToolContext["executor"],
@@ -140,6 +154,146 @@ async function fixture(over: Partial<CoordinatorUnit> = {}) {
 }
 
 describe("main work tools", () => {
+  it("restores a current authorized status without restoring mutation authority", async () => {
+    const { bind, instances, context, sent, stop } = await fixture({ startedAt: 1_100 });
+    const reads: MainWorkRead[] = [];
+    const original = bind(undefined, undefined, undefined, undefined, undefined, undefined, undefined, (read) => {
+      reads.push(read);
+    });
+    await workStatusTool.run({ actId: ACT }, context(original, "saved-status"));
+    const { refresh: _refresh, content: _content, ...receipt } = reads[0]!;
+    let sourceTrusted = true;
+    let audience = true;
+    const resumed = bind(
+      requester(),
+      "resumed-run",
+      undefined,
+      () => false,
+      async () => audience,
+      undefined,
+      undefined,
+      undefined,
+      () => sourceTrusted,
+    )!;
+    const refresh = resumed.restoreRead!(JSON.parse(JSON.stringify(receipt)))!;
+    await instances.putUnits([
+      { ...UNIT, startedAt: 1_100, ending: { kind: "aborted", report: "Stopped", at: 1_900 } },
+    ]);
+    expect(await refresh()).toMatchObject({ kind: "changed", content: expect.stringContaining('"state":"ended"') });
+    expect(await resumed.steer(ACT, "Change the work", "resumed-steer")).toEqual({ kind: "unavailable" });
+    expect(await resumed.stop(ACT)).toEqual({ kind: "unavailable" });
+    expect(sent).toEqual([]);
+    expect(stop).not.toHaveBeenCalled();
+    sourceTrusted = false;
+    expect(await refresh()).toEqual({ kind: "unavailable" });
+    sourceTrusted = true;
+    audience = false;
+    expect(await refresh()).toEqual({ kind: "unavailable" });
+    expect(
+      bind(
+        requester({ id: "slack:UBOB" }),
+        "foreign-run",
+        undefined,
+        () => false,
+        async () => true,
+        undefined,
+        undefined,
+        undefined,
+        () => true,
+      ),
+    ).toBeUndefined();
+    expect(
+      bind(
+        requester(),
+        "app-run",
+        { channelId: INSTANCE.channelId, threadKey: THREAD, userId: INSTANCE.userId, postedBy: "slack:bot:B1" },
+        () => false,
+        async () => true,
+        undefined,
+        undefined,
+        undefined,
+        () => true,
+      ),
+    ).toBeUndefined();
+  });
+
+  it("records exact status bytes and refreshes the canonical ending after completion", async () => {
+    const { bind, instances, context } = await fixture({ startedAt: 1_100 });
+    const reads: MainWorkRead[] = [];
+    let audience = true;
+    const capability = bind(
+      requester(),
+      "run-status",
+      undefined,
+      () => true,
+      async () => audience,
+      undefined,
+      undefined,
+      (read) => {
+        reads.push(read);
+      },
+    );
+    const content = await workStatusTool.run({ actId: ACT }, context(capability, "status-call"));
+    expect(reads).toHaveLength(1);
+    expect(reads[0]).toMatchObject({
+      tool: "work_status",
+      callId: "status-call",
+      input: { actId: ACT },
+      content,
+      resultHash: await sourceHash(content),
+    });
+    expect(JSON.parse(content as string)).toMatchObject({ state: "running", asOf: { observedAt: 2_000 } });
+    const { refresh: _refresh, content: _content, ...receipt } = reads[0]!;
+    expect(isMainWorkReadReceipt(receipt)).toBe(true);
+    const restarted = bind(
+      requester(),
+      "new-run",
+      undefined,
+      () => true,
+      async () => audience,
+    )!.restoreRead!(JSON.parse(JSON.stringify(receipt)))!;
+    expect(await restarted()).toEqual({ kind: "unchanged" });
+    await instances.putUnits([
+      { ...UNIT, startedAt: 1_100, ending: { kind: "aborted", report: "Stopped", at: 1_900 } },
+    ]);
+    const changed = await restarted();
+    expect(changed.kind).toBe("changed");
+    if (changed.kind !== "changed") throw new Error("Expected a changed canonical observation");
+    expect(JSON.parse(changed.content)).toMatchObject({ state: "ended", ending: { kind: "aborted" } });
+    expect(changed.resultHash).toBe(await sourceHash(changed.content));
+    expect(await restarted()).toEqual({ kind: "unchanged" });
+    audience = false;
+    expect(await restarted()).toEqual({ kind: "unavailable" });
+    expect(
+      capability!.restoreRead!({ ...receipt, observation: { ...receipt.observation, requesterId: "slack:UBOB" } }),
+    ).toBeUndefined();
+  });
+
+  it("waits for the observation storage acknowledgement before exposing the status", async () => {
+    const { bind, context } = await fixture();
+    let acknowledge!: () => void;
+    let observing!: () => void;
+    const started = new Promise<void>((resolve) => {
+      observing = resolve;
+    });
+    const stored = new Promise<void>((resolve) => {
+      acknowledge = resolve;
+    });
+    const capability = bind(undefined, undefined, undefined, undefined, undefined, undefined, undefined, async () => {
+      observing();
+      await stored;
+    });
+    let exposed = false;
+    const reading = Promise.resolve(workStatusTool.run({ actId: ACT }, context(capability))).then((value) => {
+      exposed = true;
+      return value;
+    });
+    await started;
+    expect(exposed).toBe(false);
+    acknowledge();
+    expect(await reading).toContain("asOf");
+  });
+
   it("a delayed unit lookup cannot steer after authority is revoked", async () => {
     const { bind, instances, sent } = await fixture();
     let trusted = true;

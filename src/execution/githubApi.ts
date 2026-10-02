@@ -295,7 +295,7 @@ export class RestGithubApi implements GithubApi {
 
   async listRepos(): Promise<InstallationRepo[]> {
     const out: InstallationRepo[] = [];
-    for (let page = 1; page <= 3; page++) {
+    for (let page = 1; ; page++) {
       const res = await this.request(
         "read",
         "GET",
@@ -312,7 +312,11 @@ export class RestGithubApi implements GithubApi {
           description: typeof r.description === "string" ? r.description : null,
         });
       }
-      if ((body.repositories ?? []).length < 100) break;
+      if (
+        (body.repositories ?? []).length < 100 ||
+        (typeof body.total_count === "number" && out.length >= body.total_count)
+      )
+        break;
     }
     return out;
   }

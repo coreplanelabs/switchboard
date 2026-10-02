@@ -12,18 +12,9 @@
 import type { ArtifactStore } from "../../artifacts/store.js";
 import type { RunEvent } from "../runEvents.js";
 import { PRIVATE_WORKER_INTERNAL_READ, type RunListCursor, type RunView, type RunsService } from "../runsService.js";
-import { formatSize, type ThreadArtifact } from "./staging.js";
-
-/** One file of the thread: received on one of its messages (`in`) or produced
- *  by one of its runs (`out`), as the run records name it, and whether the
- *  store still holds it (`held`, from `ThreadArtifact`). */
-export interface ThreadAsset extends ThreadArtifact {
-  direction: "in" | "out";
-  /** The run whose record first names the key (a re-pulled file is named again by later runs). */
-  runId: string;
-  /** The run's `artifact` event's position in its record, when the record has one. */
-  seq?: number;
-}
+import { formatSize } from "./staging.js";
+import type { ThreadAsset } from "../../artifacts/types.js";
+export type { ThreadAsset } from "../../artifacts/types.js";
 
 /** How many of the thread's runs one page of the catalogue read brings back. */
 export const THREAD_ASSETS_PAGE = 50;

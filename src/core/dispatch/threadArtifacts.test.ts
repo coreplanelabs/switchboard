@@ -251,6 +251,33 @@ describe("threadArtifactsFor — the records read off the thread's page", () => 
     }),
   });
 
+  it("admits artifact bytes only after their producer dependencies and carries the consumed union", async () => {
+    const runs = service();
+    const context = {
+      version: 1 as const,
+      status: "known" as const,
+      revision: 2,
+      origins: [{ runId: "r-review", requester: "u", channelId: "c", threadKey: "t" }],
+      slack: [],
+      mcp: [],
+    };
+    const readContext = vi.fn(async (id: string) => {
+      expect(runs.getRun).toHaveBeenCalledWith(id, { include: "messages" });
+      return context;
+    });
+    const out = await threadArtifactsFor({ runs, thread: page, agent: "coding", readContext });
+    expect(out.block?.runs).toEqual(["r-review"]);
+    expect(out.context?.origins).toEqual(context.origins);
+    const denied = await threadArtifactsFor({
+      runs,
+      thread: page,
+      agent: "coding",
+      readContext: async () => undefined,
+    });
+    expect(denied.block).toBeUndefined();
+    expect(denied.notes.join(" ")).toContain("could not be verified");
+  });
+
   it("a coding follow-up reads the runs newer than its previous run — the runner's review child included — with their events, and hands the block and one seed note naming them", async () => {
     const runs = service();
     const out = await threadArtifactsFor({ runs, thread: page, agent: "coding" });

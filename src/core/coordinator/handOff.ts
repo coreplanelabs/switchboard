@@ -16,6 +16,7 @@
 // its seams: the file read, the instance store, the create and the status read.
 
 import { refusalOf, type Refusal, type RefusalCode } from "../refusal.js";
+import { isUnitContext, type UnitContext } from "../dispatch/unitContext.js";
 import { DEFAULT_GRANT, IDLE_DAYS_DEFAULT, type Grant, type GrantSource } from "../budgets.js";
 import { DEFAULT_VERBOSITY, type Verbosity } from "../verbosity.js";
 import { parsePlanUnit, PLAN_MAX_CHARS, unitTitleOf } from "../ship/contract.js";
@@ -74,6 +75,8 @@ export type BeforeCoordinatorStart = () => Promise<
 >;
 
 export interface HandOffInput {
+  /** Trusted source snapshot, independent of the model's task and target. */
+  context?: UnitContext;
   entry: ShipEntry;
   /** The request's directive-stripped text (the preflight's input). */
   requestText: string;
@@ -229,6 +232,7 @@ type Planned = {
   /** Stable task keys for units whose own brief asks to write a decision record. */
   recordTasks?: Readonly<Record<string, string>>;
   workBrief?: WorkBrief;
+  context?: UnitContext;
   generatedTask?: NonNullable<CoordinatorUnit["generatedTask"]>;
   threadEvidence?: string;
 };
@@ -472,6 +476,7 @@ async function plan(
         identity,
         merge: "person",
         ...(workBrief !== undefined ? { workBrief } : {}),
+        ...(input.context !== undefined ? { context: input.context } : {}),
         ...(workBrief === undefined && entry.resume === undefined
           ? {
               generatedTask: generatedTaskOf(text, {
@@ -560,6 +565,7 @@ async function plan(
       selected,
       identity,
       merge: "runner",
+      ...(input.context !== undefined ? { context: input.context } : {}),
       ...(entry.baseFallback !== undefined ? { baseFallback: entry.baseFallback } : {}),
       recordTasks: Object.fromEntries(
         graph.units.flatMap((unit) => {
@@ -587,6 +593,7 @@ async function rowsFor(
       lastPush?: string;
       record?: string;
       generatedTask?: CoordinatorUnit["generatedTask"];
+      context?: UnitContext;
       threadEvidence?: string;
     }
   >,
@@ -622,6 +629,9 @@ async function rowsFor(
           branch,
           dependsOn: u.dependsOn,
           ...(p.workBrief !== undefined ? { workBrief: p.workBrief } : {}),
+          ...((previous === undefined ? p.context : previous.context) !== undefined
+            ? { context: previous === undefined ? p.context : previous.context }
+            : {}),
           ...((previous === undefined ? p.generatedTask : previous.generatedTask) !== undefined
             ? { generatedTask: previous === undefined ? p.generatedTask : previous.generatedTask }
             : {}),
@@ -706,6 +716,8 @@ function planWhere(
  * attempts did not merge.
  */
 export async function handOffToCoordinator(deps: HandOffDeps, input: HandOffInput): Promise<HandOffOutcome> {
+  if (input.context !== undefined && !isUnitContext(input.context))
+    return refused("setup_failed", "The conversation context could not be saved; no worker started.");
   if (input.mainTask !== undefined && !isMainTaskAuthority(input.mainTask.authority))
     return refused("setup_failed", "I couldn't verify the request that started this work; no worker started.");
   if (input.mainTask !== undefined && (!input.privateWorkerReady || input.stillPrivate === undefined))
@@ -841,6 +853,7 @@ async function handOffToCoordinatorUnchecked(deps: HandOffDeps, input: HandOffIn
       lastPush?: string;
       record?: string;
       generatedTask?: CoordinatorUnit["generatedTask"];
+      context?: UnitContext;
       threadEvidence?: string;
     }
   >();
@@ -855,6 +868,7 @@ async function handOffToCoordinatorUnchecked(deps: HandOffDeps, input: HandOffIn
         ...(row.lastPush !== undefined ? { lastPush: row.lastPush } : {}),
         ...(row.record !== undefined ? { record: row.record } : {}),
         ...(row.generatedTask !== undefined ? { generatedTask: row.generatedTask } : {}),
+        ...(row.context !== undefined ? { context: row.context } : {}),
         ...(row.threadEvidence !== undefined ? { threadEvidence: row.threadEvidence } : {}),
       });
     }

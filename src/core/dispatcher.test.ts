@@ -1,6 +1,8 @@
 import { booleanAudienceVerifier } from "./testing/audienceVerifier.js";
 import { testSlackCapability, testSessionSources } from "./testing/slackSources.js";
 import { sourceHash, type SessionSources } from "./references/receipts.js";
+import { createHash } from "node:crypto";
+import { memoryContent } from "./memory/provenance.js";
 import { readQuery, readResponse, readTool } from "../mcp/testing/sourceRead.js";
 import { createSourceReads, type SourceReadState } from "../mcp/sourceRead.js";
 import { sourceReadContract } from "../mcp/sourceReadProtocol.js";
@@ -587,6 +589,52 @@ describe("dispatch", () => {
     expect(replies).toContain("The answer is 17.");
   });
 
+  it("keeps ordinary conversation context known across 256 runs and fresh process facades", async () => {
+    let turn = 0;
+    const provider = capturingProvider("The conversation continues.");
+    const deps = makeDeps(mainDmYaml, provider);
+    const ledger = new InMemoryRunLedger();
+    const store = new InMemoryRunStore();
+    deps.runStore = ledgerBackedStore(ledger, store);
+    deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
+    deps.slackContextForRun = (_actor, origin) => testSlackCapability(origin, async () => "source");
+    for (turn = 0; turn < 256; turn++) {
+      // Reconstruct the process-facing readers each turn: no in-memory proof
+      // from the prior dispatcher may authorize the next continuation.
+      const registry = new RunRegistry({ genId: () => `conversation-${turn}` });
+      deps.runRegistry = registry;
+      deps.runLedger = createLedgerWriteThrough({ ledger, gen: `generation-${turn}`, fallback: store, warn: () => {} });
+      deps.runs = createRunsService({ registry, store: deps.runStore, ledger });
+      const { io, replies } = mainDmIO();
+      const outcome = await dispatch(
+        deps,
+        { ...mainDm(`Continue the conversation, turn ${turn}.`), messageId: `${turn + 1}`, threadReply: turn > 0 },
+        io,
+      );
+      expect(outcome.refusal, `turn ${turn}`).toBeUndefined();
+      expect(replies, `turn ${turn}`).toContain("The conversation continues.");
+      const saved = ledger.finished.get(`conversation-${turn}`);
+      expect(saved?.contextDependencies?.status, `turn ${turn}`).toBe("known");
+      expect(saved?.contextCheckpointReceipt?.runId, `turn ${turn}`).toBe(`conversation-${turn}`);
+      expect(saved?.contextDependencies?.origins, `turn ${turn}`).toHaveLength(1);
+      expect(saved?.contextDependencies?.origins[0]?.checkpoint).toMatch(/^[a-f0-9]{64}$/);
+      expect(await ledger.readContextCheckpoint(`conversation-${turn}`), `canonical checkpoint ${turn}`).toBeDefined();
+      const { contextAccessForMessage } = await import("./dispatch/contextAccess.js");
+      expect(
+        await contextAccessForMessage(deps, { msg: mainDm("continue"), io }).validateDependencies(
+          saved!.contextDependencies!,
+        ),
+        `current reader ${turn}`,
+      ).toEqual({ ok: true });
+      if (turn > 0) expect(JSON.stringify(provider.requests.at(-1)?.messages)).toContain("The conversation continues.");
+    }
+    expect(provider.requests).toHaveLength(256);
+    const source = await ledger.readContextCheckpoint("conversation-255");
+    expect(source?.members).not.toContain("conversation-0");
+    expect(source?.members).toContain("conversation-128");
+    expect(source?.members).toHaveLength(128);
+  }, 180_000);
+
   it("does not infer a work target from question wording", async () => {
     const deps = makeDeps(mainDmYaml, capturingProvider("The answer is 17."));
     const instances = new InMemoryCoordinatorInstanceStore();
@@ -647,61 +695,102 @@ describe("dispatch", () => {
     }
   });
 
-  it("uses the configured pilot repository for a later main-run fix", async () => {
-    let turns = 0;
-    const provider: Provider = {
-      name: "fake",
-      async complete(): Promise<CompletionResult> {
-        turns++;
-        return turns === 1
-          ? {
+  it.each([false, true])(
+    "uses the configured pilot repository for a later main-run fix after a GitHub read: %s",
+    async (readGithub) => {
+      let turns = 0;
+      const provider: Provider = {
+        name: "fake",
+        async complete(): Promise<CompletionResult> {
+          turns++;
+          if (readGithub && turns === 1)
+            return {
               content: [
                 {
                   type: "tool_use",
-                  id: "start-fix",
-                  name: "work_start",
-                  input: {
-                    repo: "acme/api",
-                    question: "Why did signup fail?",
-                    schemaVersion: 1,
-                    cause: { kind: "unknown", reason: "Not investigated" },
-                    evidence: { availability: "unavailable", reason: "Code-only change" },
-                    requirements: { analysis: "not_required", evidence: "may_be_unavailable" },
-                    acceptance: "Regression test passes",
-                    findings: [],
-                    requestedChange: "Fix signup",
-                    sourceMessage: "fix it",
-                  },
+                  id: "read-evidence",
+                  name: "github_file",
+                  input: { repo: "acme/api", path: "README.md" },
                 },
               ],
               stopReason: "tool_use",
-            }
-          : { content: [{ type: "text", text: "I started the fix." }], stopReason: "end_turn" };
-      },
-    };
-    const deps = makeDeps(pilotMainDmYaml, provider);
-    const instances = new InMemoryCoordinatorInstanceStore();
-    await instances.recordRequesterTurn({
-      threadKey: directMainAudience.threadKey,
-      requesterId: directMainAudience.userId,
-      messageId: "1",
-    });
-    deps.coordinatorInstances = instances;
-    const starts: unknown[] = [];
-    deps.mainTaskStart = async (input) => {
-      starts.push(input);
-      return { kind: "accepted", actId: "work-one", instanceId: "unit-one", reply: "started" };
-    };
-    const { io } = mainDmIO([{ role: "user", user: "slack:UADMIN", text: "Why did signup fail in acme/api?" }]);
-    await dispatch(deps, { ...mainDm("fix it"), messageId: "2" }, io);
-    expect(starts).toHaveLength(1);
-    expect(starts[0]).toMatchObject({
-      authorizedRepo: "acme/api",
-      repo: "acme/api",
-      msg: { text: "fix it", messageId: "2" },
-      authority: { revision: 2, sourceMessageId: "2", requesterId: "slack:UADMIN" },
-    });
-  });
+            };
+          return turns === (readGithub ? 2 : 1)
+            ? {
+                content: [
+                  {
+                    type: "tool_use",
+                    id: "start-fix",
+                    name: "work_start",
+                    input: {
+                      repo: "acme/api",
+                      question: "Why did signup fail?",
+                      schemaVersion: 1,
+                      cause: { kind: "unknown", reason: "Not investigated" },
+                      evidence: { availability: "unavailable", reason: "Code-only change" },
+                      requirements: { analysis: "not_required", evidence: "may_be_unavailable" },
+                      acceptance: "Regression test passes",
+                      findings: [],
+                      requestedChange: "Fix signup",
+                      sourceMessage: "fix it",
+                    },
+                  },
+                ],
+                stopReason: "tool_use",
+              }
+            : { content: [{ type: "text", text: "I started the fix." }], stopReason: "end_turn" };
+        },
+      };
+      const deps = makeDeps(pilotMainDmYaml, provider);
+      wireChildLedger(deps);
+      deps.githubApi = new InMemoryGithubApi({
+        "acme/api": { private: false, files: { "README.md": "original GitHub source evidence" } },
+      });
+      deps.slackContextForRun = (_actor, origin) => testSlackCapability(origin, async () => "source");
+      const instances = new InMemoryCoordinatorInstanceStore();
+      await instances.recordRequesterTurn({
+        threadKey: directMainAudience.threadKey,
+        requesterId: directMainAudience.userId,
+        messageId: "1",
+      });
+      deps.coordinatorInstances = instances;
+      const starts: unknown[] = [];
+      deps.mainTaskStart = async (input) => {
+        starts.push(input);
+        return { kind: "accepted", actId: "work-one", instanceId: "unit-one", reply: "started" };
+      };
+      const { io } = mainDmIO([{ role: "user", user: "slack:UADMIN", text: "Why did signup fail in acme/api?" }]);
+      await dispatch(deps, { ...mainDm("fix it"), messageId: "2" }, io);
+      expect(starts).toHaveLength(1);
+      expect(starts[0]).toMatchObject({
+        authorizedRepo: "acme/api",
+        repo: "acme/api",
+        msg: { text: "fix it", messageId: "2" },
+        authority: { revision: 2, sourceMessageId: "2", requesterId: "slack:UADMIN" },
+        context: {
+          version: 1,
+          handoff: {
+            source: { requester: "slack:UADMIN", threadKey: directMainAudience.threadKey },
+            dependencies: { value: { status: "known" } },
+          },
+        },
+      });
+      const captured = (starts[0] as { context: { handoff: { session: { key: string; from: number; to: number } } } })
+        .context.handoff;
+      const transcript = await deps.runLedger!.readSession(
+        captured.session.key,
+        captured.session.from,
+        captured.session.to,
+      );
+      expect(transcript.complete).toBe(true);
+      if (readGithub) {
+        expect(JSON.stringify(transcript.messages)).toContain("original GitHub source evidence");
+        expect(starts[0]).toMatchObject({
+          context: { handoff: { dependencies: { value: { githubRepos: ["acme/api"] } } } },
+        });
+      }
+    },
+  );
 
   it("does not promote raw Slack history into a cross-run work target", async () => {
     let turns = 0;
@@ -861,7 +950,11 @@ describe("dispatch", () => {
           expect(content).not.toContain("accepted source evidence");
           expect(content).not.toContain("denied source secret");
           expect(request.tools?.map((tool) => tool.name)).toContain("slack_context");
-          expect(committed).toHaveLength(1);
+          expect(committed.at(-1)).toMatchObject({
+            status: "known",
+            receipts: [],
+            context: { status: "known", origins: [expect.objectContaining({ requester: question.userId })] },
+          });
           expect([...ledger.live.values()][0]?.tools.map((tool) => tool.name)).toContain("slack_context");
         }
         if (content.includes("accepted source evidence"))
@@ -1149,10 +1242,23 @@ describe("dispatch", () => {
   it("keeps a main DM usable after a specialist review recorded a verdict and review post", async () => {
     const provider = capturingProvider("I will check the review before starting work.");
     const deps = makeDeps(mainDmYaml, provider);
+    const context: ContextDependencies = {
+      version: 1,
+      status: "known",
+      revision: 0,
+      slack: [],
+      mcp: [],
+      origins: [
+        { runId: "run-prev", requester: "slack:UADMIN", channelId: "slack:DALICE", threadKey: "slack:DALICE:1.0" },
+      ],
+    };
+    deps.slackContextForRun = (_actor, origin) => testSlackCapability(origin, async () => "source");
     await threadWithFinishedRun(deps, "orchestrator", {
       channelId: "slack:DALICE",
       threadKey: "slack:DALICE:1.0",
       channelVisibility: "private",
+      contextDependencies: context,
+      session: { key: "slack:DALICE:1.0:orchestrator:@context-v1", seedFrom: 0, request: 0, range: { from: 0, to: 1 } },
     });
     const prior = (await deps.runStore.get("run-prev"))!;
     await deps.runStore.put({
@@ -1171,19 +1277,39 @@ describe("dispatch", () => {
         verdict: "request_changes",
       },
     });
-    deps.runLedger.readSessionTail = async () => ({
-      from: 0,
-      sources: testSessionSources(mainDm("fix it"), []),
-      transcript: {
-        complete: true,
-        turns: 2,
+    deps.runLedger = createLedgerWriteThrough({
+      ledger: new InMemoryRunLedger(),
+      gen: "gen-main",
+      fallback: deps.runStore,
+      warn: () => {},
+    });
+    const previous = await deps.runLedger.open({
+      runId: prior.id,
+      threadKey: prior.threadKey,
+      startedAt: prior.startedAt,
+      meta: {
+        agent: "orchestrator",
+        channelId: prior.channelId,
+        userId: prior.userId,
+        threadKey: prior.threadKey,
+        channelVisibility: "private",
+      },
+      system: "",
+      tools: [],
+      card: null,
+      seed: {
+        key: prior.session!.key,
+        context,
+        budgetMs: 600_000,
         messages: [
           { role: "user", content: [{ type: "text", text: "how many signups failed?" }] },
           { role: "assistant", content: [{ type: "text", text: "17 failed signups." }] },
         ],
-        compactions: [],
       },
     });
+    expect(previous.kind).toBe("tracked");
+    if (previous.kind !== "tracked") throw new Error("prior session not claimed");
+    await previous.run.sink.put(prior);
     const { io, replies } = mainDmIO([
       { role: "user", user: "slack:UADMIN", text: "how many signups failed?", at: Date.now() - 20_000 },
       { role: "assistant", text: "17 failed signups.", at: Date.now() - 10_000 },
@@ -1404,6 +1530,64 @@ describe("dispatch", () => {
     expect(replies.join(" ")).not.toContain("17 failed signups");
     expect(replies.join(" ")).toContain("ask me to check the source again");
   });
+
+  it.each(["general", "orchestrator", "general-dm"] as const)(
+    "withholds inherited-memory answers and reports after source revocation during generation (%s)",
+    async (agent) => {
+      const { contextThreadSessionKey } = await import("./runLedger/sessionLog.js");
+      const secret = "inherited deployment code is orchid-seven";
+      const requests: CompletionRequest[] = [];
+      let sourceVisible = true;
+      const provider: Provider = {
+        name: "fake",
+        async complete(request): Promise<CompletionResult> {
+          requests.push(structuredClone(request));
+          sourceVisible = false;
+          return { content: [{ type: "text", text: secret }], stopReason: "end_turn" };
+        },
+      };
+      const deps = memoryDeps(
+        agent === "orchestrator" ? mainDmYaml + "\nmemory: { enabled: true }\n" : MEMORY_ON_YAML,
+        provider,
+      );
+      deps.memory = new InMemoryMemoryStore([memRecord()]);
+      deps.slackContextForRun = (_actor, incoming) => ({
+        ...testSlackCapability(incoming, async () => "source"),
+        originAudience: async () =>
+          incoming.threadKey === MEMORY_PRODUCER.threadKey && !sourceVisible
+            ? undefined
+            : incoming.channelId.startsWith("slack:D")
+              ? "dm"
+              : "public",
+      });
+      const channel = agent !== "general" ? mainDmIO() : fakeIO();
+      const question =
+        agent !== "general"
+          ? mainDm(`${agent === "general-dm" ? "agent:general " : ""}what is the deploy command?`)
+          : msg("what is the deploy command?", "slack:UADMIN");
+      let runId: string | undefined;
+      channel.io.runStarted = ({ id }) => {
+        runId = id;
+      };
+      await dispatch(deps, question, channel.io);
+      await deps.runHistoryWriter.settled();
+      expect(requests).toHaveLength(1);
+      expect(requests[0].system).toContain("the deploy command is npm run deploy");
+      expect(runId).toBeTruthy();
+      const record = await deps.runStore.get(runId!);
+      expect(record).not.toBeNull();
+      const report = await deps.runLedger.readSessionTail(contextThreadSessionKey(question.threadKey), 100_000);
+      expect(
+        JSON.stringify({
+          replies: channel.replies,
+          statuses: channel.statuses,
+          answers: record?.events.filter((event) => event.type === "answer"),
+          report: report.transcript.messages,
+        }),
+      ).not.toContain(secret);
+      expect(channel.replies.length).toBeGreaterThan(0);
+    },
+  );
 
   it("rechecks a GitHub read at publication and withholds its answer after requester repo access is revoked", async () => {
     for (const revoke of [false, true]) {
@@ -7922,27 +8106,105 @@ memory:
   enabled: true
 `;
 
+const MEMORY_PRODUCER = {
+  runId: "memory-producer",
+  requester: "slack:UX",
+  channelId: "slack:CX",
+  threadKey: "slack:CX:9.9",
+};
+const MEMORY_DEPENDENCIES = {
+  version: 1 as const,
+  status: "known" as const,
+  revision: 1,
+  origins: [MEMORY_PRODUCER],
+  slack: [],
+  mcp: [],
+};
+
+/** Memory is derived from canonical retained runs, including in composition tests. */
+function memoryDeps(yaml: string, provider: Provider): TestDeps {
+  const deps = makeDeps(yaml, provider);
+  const store = new InMemoryRunStore();
+  const ledger = new InMemoryRunLedger();
+  const registry = new RunRegistry();
+  ledger.finished.set(MEMORY_PRODUCER.runId, {
+    id: MEMORY_PRODUCER.runId,
+    agent: "general",
+    model: "anthropic/general-model",
+    userId: MEMORY_PRODUCER.requester,
+    channelId: MEMORY_PRODUCER.channelId,
+    threadKey: MEMORY_PRODUCER.threadKey,
+    channelVisibility: "public",
+    startedAt: Date.now() - 20000,
+    finishedAt: Date.now() - 10000,
+    status: "completed",
+    eventCount: 0,
+    storedEventCount: 0,
+    truncated: false,
+    events: [],
+    diagnosis: analyzeRunFriction([]),
+    contextDependencies: MEMORY_DEPENDENCIES,
+  });
+  deps.runRegistry = registry;
+  deps.runLedger = createLedgerWriteThrough({ ledger, gen: "memory-test", fallback: store, warn: () => {} });
+  deps.runStore = ledgerBackedStore(ledger, store);
+  deps.runs = createRunsService({ registry, store: deps.runStore, ledger });
+  deps.runHistoryWriter = createRunHistoryWriter({
+    store,
+    warn: () => {},
+    sleep: async () => {},
+    onPersisted: (id) => registry.markPersisted(id),
+  });
+  deps.slackContextForRun = (_actor, incoming) => testSlackCapability(incoming, async () => "fixture source");
+  return deps;
+}
+
 function memRecord(over: Partial<MemoryRecord> = {}): MemoryRecord {
-  return {
+  const record: MemoryRecord = {
     id: "mem:org:acme:0",
     scopeKey: "org:acme",
     kind: "fact",
     text: "the deploy command is npm run deploy",
     keywords: ["deploy", "command", "npm"],
-    sourceThreadKey: "slack:CX:9.9",
+    sourceThreadKey: MEMORY_PRODUCER.threadKey,
+    sourceRunId: MEMORY_PRODUCER.runId,
     createdAt: Date.now(),
     useCount: 0,
     status: "active",
     ...over,
   };
+  if (!Object.hasOwn(over, "provenance"))
+    record.provenance = {
+      version: 1,
+      scopeKey: record.scopeKey,
+      contentHash: createHash("sha256")
+        .update(JSON.stringify(memoryContent(record.scopeKey, record)))
+        .digest("hex"),
+      dependencies: MEMORY_DEPENDENCIES,
+    };
+  return record;
 }
 
 describe("cross-session memory READ path", () => {
   const ask = "what is the deploy command?";
 
+  it("omits unproved memory revisions while retaining independently admitted stored context", async () => {
+    const provider = capturingProvider();
+    const deps = memoryDeps(MEMORY_ON_YAML, provider);
+    deps.memory = new InMemoryMemoryStore([
+      memRecord(),
+      memRecord({ id: "legacy", text: "deploy hidden legacy", provenance: undefined }),
+      memRecord({ id: "missing-source", text: "deploy hidden missing source", sourceRunId: "no-such-source" }),
+    ]);
+    const result = await dispatch(deps, msg(ask), fakeIO().io);
+    expect(result.status).toBe("completed");
+    expect(provider.requests[0].system).toContain("the deploy command is npm run deploy");
+    expect(provider.requests[0].system).not.toContain("hidden");
+  });
+
   it("disabled path is byte-identical to memory-off (NullMemoryStore guarantee)", async () => {
     const off = capturingProvider();
-    const offDeps = makeDeps(YAML_FIXTURE, off);
+    const offDeps = memoryDeps(YAML_FIXTURE, off);
     await dispatch(offDeps, msg(ask), fakeIO().io);
 
     const on = capturingProvider();
@@ -7950,7 +8212,7 @@ describe("cross-session memory READ path", () => {
     // truthful sentence; what this test pins is that the memory BLOCK
     // contributes nothing, so both runs describe the same installation.
     const onDeps: CoreDeps = {
-      ...makeDeps(MEMORY_ON_YAML, on),
+      ...memoryDeps(MEMORY_ON_YAML, on),
       memory: new NullMemoryStore(),
       capabilities: offDeps.capabilities,
     };
@@ -7967,7 +8229,7 @@ describe("cross-session memory READ path", () => {
 
   it("memory off (default) injects nothing onto the system prompt", async () => {
     const provider = capturingProvider();
-    await dispatch(makeDeps(YAML_FIXTURE, provider), msg(ask), fakeIO().io);
+    await dispatch(memoryDeps(YAML_FIXTURE, provider), msg(ask), fakeIO().io);
     const sys = provider.requests[0].system;
     expect(sys).not.toContain("Background memory");
     // The config block + the agent's own prompt, nothing else ahead of them.
@@ -7978,7 +8240,7 @@ describe("cross-session memory READ path", () => {
   it("enabled with a seeded store prepends the advisory block, preserving the agent prompt", async () => {
     const provider = capturingProvider();
     const store = new InMemoryMemoryStore([memRecord()]);
-    const deps: CoreDeps = { ...makeDeps(MEMORY_ON_YAML, provider), memory: store };
+    const deps: CoreDeps = { ...memoryDeps(MEMORY_ON_YAML, provider), memory: store };
     await dispatch(deps, msg(ask), fakeIO().io);
 
     const sys = provider.requests[0].system;
@@ -7996,20 +8258,20 @@ describe("cross-session memory READ path", () => {
   it("keeps the block out of history — it never appears in the messages array", async () => {
     const provider = capturingProvider();
     const store = new InMemoryMemoryStore([memRecord()]);
-    const deps: CoreDeps = { ...makeDeps(MEMORY_ON_YAML, provider), memory: store };
+    const deps: CoreDeps = { ...memoryDeps(MEMORY_ON_YAML, provider), memory: store };
     await dispatch(deps, msg(ask), fakeIO().io);
     expect(JSON.stringify(provider.requests[0].messages)).not.toContain("Background memory");
   });
 
   it("enabled but nothing relevant → no block, request identical to memory-off", async () => {
     const off = capturingProvider();
-    const offDeps = makeDeps(YAML_FIXTURE, off);
+    const offDeps = memoryDeps(YAML_FIXTURE, off);
     await dispatch(offDeps, msg("tell me a joke"), fakeIO().io);
 
     const on = capturingProvider();
     const store = new InMemoryMemoryStore([memRecord()]); // has a deploy fact, irrelevant here
     // Same installation described (see above): only the memory block is under test.
-    const onDeps: CoreDeps = { ...makeDeps(MEMORY_ON_YAML, on), memory: store, capabilities: offDeps.capabilities };
+    const onDeps: CoreDeps = { ...memoryDeps(MEMORY_ON_YAML, on), memory: store, capabilities: offDeps.capabilities };
     await dispatch(onDeps, msg("tell me a joke"), fakeIO().io);
 
     expect(JSON.stringify(on.requests[0])).toBe(JSON.stringify(off.requests[0]));
@@ -8174,10 +8436,68 @@ const longHistory: HistoryItem[] = Array.from({ length: REFLECT_MIN_TURNS }, (_,
 }));
 
 describe("cross-session memory WRITE path", () => {
+  it("the main agent reads admitted memory and reflects with the same durable dependency closure", async () => {
+    const requests: CompletionRequest[] = [];
+    let toolAsked = false;
+    const provider: Provider = {
+      name: "fake",
+      complete: async (request) => {
+        requests.push(request);
+        if (request.system === REFLECTION_SYSTEM)
+          return { content: [{ type: "text", text: REFLECTION_REPLY }], stopReason: "end_turn" };
+        if (!toolAsked) {
+          toolAsked = true;
+          return {
+            content: [
+              {
+                type: "tool_use",
+                id: "status",
+                name: "update_status",
+                input: { checklist: "✓ checked the saved deployment note" },
+              },
+            ],
+            stopReason: "tool_use",
+          };
+        }
+        return { content: [{ type: "text", text: "the deploy command is npm run deploy" }], stopReason: "end_turn" };
+      },
+    };
+    const deps = memoryDeps(MEMORY_WRITE_YAML + '\nchannels:\n  "slack:DMEM": { agent: orchestrator }\n', provider);
+    const memory = new InMemoryMemoryStore([memRecord()]);
+    deps.memory = memory;
+    const audience = {
+      kind: "slack-unshared-im" as const,
+      channelId: "slack:DMEM",
+      userId: "slack:UX",
+      threadKey: "slack:DMEM:1.0",
+    };
+    const { io } = fakeIO();
+    io.directAudience = () => audience;
+    io.verifyDirectAudience = booleanAudienceVerifier(async () => true);
+    const result = await dispatch(
+      deps,
+      { ...audience, text: "what is the deploy command?", directAudience: audience },
+      io,
+    );
+    expect(result.status).toBe("completed");
+    expect(requests[0].system).toContain("the deploy command is npm run deploy");
+    await drainReflections();
+    expect(requests.filter((request) => request.system === REFLECTION_SYSTEM)).toHaveLength(1);
+    const records = await memory.list("user:slack:UX", 10);
+    expect(records.length).toBeGreaterThan(0);
+    expect(records[0].provenance?.dependencies.status).toBe("known");
+    expect(records[0].provenance?.dependencies.origins).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ channelId: "slack:DMEM", threadKey: audience.threadKey }),
+        MEMORY_PRODUCER,
+      ]),
+    );
+  });
+
   async function run(yaml: string, history: HistoryItem[], opts: Parameters<typeof runThenReflect>[0] = {}) {
     const { provider, requests, order } = runThenReflect(opts);
     const store = new InMemoryMemoryStore();
-    const deps: CoreDeps = { ...makeDeps(yaml, provider), memory: store, channelDirectory: PUBLIC_CHANNEL };
+    const deps: CoreDeps = { ...memoryDeps(yaml, provider), memory: store, channelDirectory: PUBLIC_CHANNEL };
     const { io, replies } = fakeIO(history);
     await dispatch(deps, msg("how do we deploy?"), io);
     await drainReflections();
@@ -8243,7 +8563,7 @@ describe("cross-session memory WRITE path", () => {
     };
     const store = new InMemoryMemoryStore();
     const deps: CoreDeps = {
-      ...makeDeps(MEMORY_WRITE_YAML, provider),
+      ...memoryDeps(MEMORY_WRITE_YAML, provider),
       completions: {
         get: (name) => {
           asked.push(name);
@@ -8270,7 +8590,7 @@ describe("cross-session memory WRITE path", () => {
   it("a `review` run that used tools in a long thread does NOT reflect — no extra model call, nothing written", async () => {
     const { provider, requests } = runThenReflect({ toolFirst: true });
     const store = new InMemoryMemoryStore();
-    const deps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: store };
+    const deps: CoreDeps = { ...memoryDeps(MEMORY_WRITE_YAML, provider), memory: store };
     await dispatch(deps, msg("agent:review how do we deploy?"), fakeIO(longHistory).io);
     await drainReflections();
     expect(requests.filter((r) => r.system === REFLECTION_SYSTEM)).toHaveLength(0);
@@ -8280,7 +8600,7 @@ describe("cross-session memory WRITE path", () => {
   it("a `coding` run that used tools still reflects", async () => {
     const { provider, requests } = runThenReflect({ toolFirst: true });
     const store = new InMemoryMemoryStore();
-    const deps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: store };
+    const deps: CoreDeps = { ...memoryDeps(MEMORY_WRITE_YAML, provider), memory: store };
     await dispatch(deps, msg("agent:coding how do we deploy?", "slack:UADMIN"), fakeIO().io);
     await drainReflections();
     expect(requests.filter((r) => r.system === REFLECTION_SYSTEM)).toHaveLength(1);
@@ -8321,7 +8641,7 @@ describe("cross-session memory WRITE path", () => {
       },
     };
     const store = new InMemoryMemoryStore();
-    const deps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: store, runRegistry: registry };
+    const deps: CoreDeps = { ...memoryDeps(MEMORY_WRITE_YAML, provider), memory: store, runRegistry: registry };
     const { io, replies } = fakeIO(longHistory);
     const run = dispatch(deps, msg("how do we deploy?"), io);
     while (!hardSignal) await new Promise((r) => setTimeout(r, 5));
@@ -8356,7 +8676,7 @@ describe("cross-session memory WRITE path", () => {
     };
     const store = new InMemoryMemoryStore();
     const deps: CoreDeps = {
-      ...makeDeps(MEMORY_WRITE_YAML, provider),
+      ...memoryDeps(MEMORY_WRITE_YAML, provider),
       memory: store,
       channelDirectory: PUBLIC_CHANNEL,
     };
@@ -8379,7 +8699,9 @@ describe("cross-session memory WRITE path", () => {
     expect(u1System).toContain("the deploy command is npm run deploy");
 
     requests.length = 0;
-    await dispatch(deps, msg("deploy preview link?", "slack:UBOB"), fakeIO().io);
+    const bobIO = fakeIO();
+    const bob = await dispatch(deps, msg("deploy preview link?", "slack:UBOB"), bobIO.io);
+    expect(bob, JSON.stringify(bobIO.replies)).toMatchObject({ status: "completed" });
     const u2System = requests[0].system!;
     expect(u2System).toContain("Background memory for org:acme + channel:slack:CX + user:slack:UBOB");
     expect(u2System).not.toContain("preview link before every deploy");
@@ -8410,7 +8732,7 @@ describe("cross-session memory WRITE path", () => {
       },
     };
     const store = new InMemoryMemoryStore();
-    const deps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: store };
+    const deps: CoreDeps = { ...memoryDeps(MEMORY_WRITE_YAML, provider), memory: store };
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const dm = { channelId: "slack:D0AB", userId: "slack:UALICE", threadKey: "slack:D0AB:1.0" };
     await dispatch(
@@ -8437,7 +8759,7 @@ describe("cross-session memory WRITE path", () => {
 
     const pub = new InMemoryMemoryStore();
     const publicDeps: CoreDeps = {
-      ...makeDeps(MEMORY_WRITE_YAML, provider),
+      ...memoryDeps(MEMORY_WRITE_YAML, provider),
       memory: pub,
       channelDirectory: PUBLIC_CHANNEL,
     };
@@ -8472,7 +8794,7 @@ describe("cross-session memory WRITE path", () => {
     };
     const store = new InMemoryMemoryStore();
     const deps: CoreDeps = {
-      ...makeDeps(MEMORY_WRITE_YAML, provider),
+      ...memoryDeps(MEMORY_WRITE_YAML, provider),
       memory: store,
       channelDirectory: PUBLIC_CHANNEL,
     };
@@ -8539,7 +8861,7 @@ describe("cross-session memory WRITE path", () => {
     };
     const store = new InMemoryMemoryStore();
     const deps: CoreDeps = {
-      ...makeDeps(MEMORY_WRITE_YAML, provider),
+      ...memoryDeps(MEMORY_WRITE_YAML, provider),
       memory: store,
       channelDirectory: PUBLIC_CHANNEL,
     };
@@ -8556,7 +8878,7 @@ describe("cross-session memory WRITE path", () => {
   it("the run stays counted in flight through the reply and reflection scheduling (drain cannot see 0/0 in between)", async () => {
     const { provider } = runThenReflect();
     const store = new InMemoryMemoryStore();
-    const deps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: store };
+    const deps: CoreDeps = { ...memoryDeps(MEMORY_WRITE_YAML, provider), memory: store };
     const seen: Array<{ runs: number; reflections: number }> = [];
     const io: ChannelIO = {
       ...fakeIO(longHistory).io,
@@ -8580,7 +8902,7 @@ describe("cross-session memory WRITE path", () => {
   // in flight". A dispatch is in flight from its first line.
   it("a dispatch is counted in flight from entry — before history, the setup card or any attach (drain race)", async () => {
     const { provider } = runThenReflect();
-    const deps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: new InMemoryMemoryStore() };
+    const deps: CoreDeps = { ...memoryDeps(MEMORY_WRITE_YAML, provider), memory: new InMemoryMemoryStore() };
     let releaseHistory!: () => void;
     const historyGate = new Promise<void>((r) => (releaseHistory = r));
     const base = fakeIO(longHistory);
@@ -8600,7 +8922,7 @@ describe("cross-session memory WRITE path", () => {
 
   it("an early-return path (config command) releases the count: 0 after dispatch", async () => {
     const { provider } = runThenReflect();
-    const deps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: new InMemoryMemoryStore() };
+    const deps: CoreDeps = { ...memoryDeps(MEMORY_WRITE_YAML, provider), memory: new InMemoryMemoryStore() };
     const running = dispatch(deps, msg("config show"), fakeIO(longHistory).io);
     expect(activeRunCount()).toBe(1); // held synchronously, even on the fast path
     await running;
@@ -8610,7 +8932,7 @@ describe("cross-session memory WRITE path", () => {
 
   it("config-command fast path never reflects", async () => {
     const { provider, requests } = runThenReflect();
-    const deps: CoreDeps = { ...makeDeps(MEMORY_WRITE_YAML, provider), memory: new InMemoryMemoryStore() };
+    const deps: CoreDeps = { ...memoryDeps(MEMORY_WRITE_YAML, provider), memory: new InMemoryMemoryStore() };
     await dispatch(deps, msg("config show"), fakeIO(longHistory).io);
     await dispatch(deps, msg("help"), fakeIO(longHistory).io);
     await drainReflections();
@@ -8920,7 +9242,7 @@ channels:
   it("does not regress the memory or skills blocks: memory still leads, skills still trail", async () => {
     const provider = capturingProvider();
     const deps: CoreDeps = {
-      ...makeDeps(MEMORY_ON_YAML, provider),
+      ...memoryDeps(MEMORY_ON_YAML, provider),
       memory: new InMemoryMemoryStore([memRecord()]),
       skills: skillStore(),
     };
@@ -12726,6 +13048,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         ],
         { factory: () => client },
       );
+      t.deps.slackContextForRun = (_actor, origin) => testSlackCapability(origin, async () => "source");
       const { io, replies } = ioWithCard(() => {
         deliveredState = t.ledger.live.get("run-l")?.state.sourceReads as SourceReadState;
       });
@@ -13250,7 +13573,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       async complete(req): Promise<CompletionResult> {
         if (n++ === 0) {
           seen.rowAtFirstCall = structuredClone(ledger.live.get("run-l"));
-          seen.transcriptAtFirstCall = (await ledger.readSession("slack:CX:1.0:general", 0)).turns;
+          seen.transcriptAtFirstCall = (await ledger.readSession("slack:CX:1.0:general:@context-v1", 0)).turns;
           seen.firstRequestTurns = req.messages.length;
           return {
             content: [
@@ -13261,7 +13584,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
           };
         }
         seen.stepsAtSecondCall = structuredClone(ledger.steps.get("run-l"));
-        seen.transcriptAtSecondCall = await ledger.readSession("slack:CX:1.0:general", 0);
+        seen.transcriptAtSecondCall = await ledger.readSession("slack:CX:1.0:general:@context-v1", 0);
         seen.stateAtSecondCall = structuredClone(ledger.live.get("run-l")?.state);
         return { content: [{ type: "text", text: "all done" }], stopReason: "end_turn" };
       },
@@ -13290,7 +13613,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         selection: "sandbox",
         // The run's place in its session log (session-log item 2): a thread's
         // first run of the agent starts the log at 0 and appends from there.
-        session: { key: "slack:CX:1.0:general", seedFrom: 0, range: { from: 0 } },
+        session: { key: "slack:CX:1.0:general:@context-v1", seedFrom: 0, range: { from: 0 } },
       },
     });
     expect(row.system.length).toBeGreaterThan(0);
@@ -13330,12 +13653,13 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     // results turn and the final answer — the mirror writes every turn pi
     // finished as a row (harness-pi item 8) — closed at finish, kept in the log.
     expect(ledger.finished.get("run-l")!.session).toEqual({
-      key: "slack:CX:1.0:general",
+      key: "slack:CX:1.0:general:@context-v1",
+      threadSession: "slack:CX:1.0:@thread:@context-v1",
       seedFrom: 0,
       request: seedTurns - 1,
       range: { from: 0, to: seedTurns + 2 },
     });
-    expect((await ledger.readSession("slack:CX:1.0:general", 0)).turns).toBe(seedTurns + 3); // every finished turn a row
+    expect((await ledger.readSession("slack:CX:1.0:general:@context-v1", 0)).turns).toBe(seedTurns + 3); // every finished turn a row
     const appended = ledger.events.get("run-l")!;
     expect(appended.map((e) => e.type)).toEqual(
       expect.arrayContaining(["input", "run_meta", "context", "tool_call", "tool_result", "answer"]),
@@ -14146,6 +14470,8 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
           status: "failed",
           profile: { minutes: 10 },
           parentInstanceId: h.instance.id,
+          coordinatorUnit: "U12",
+          coordinatorAttempt: 0,
           idempotencyKey: `${h.instance.id}:U12/0/coding`,
         });
         expect(record!.events).toContainEqual(
@@ -17253,10 +17579,70 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
   // routing-and-config item 20: a redispatch is a request of its own, but the
   // same message — a spawned child that takes the boot-gap path stays its
   // parent's child.
-  it("a spawned child whose thread the boot-gap map names with a row the ledger no longer has is redispatched WITH its parent and its seed: the fresh run carries parentRunId, the parent's clock as its boundary, and starts from the parent's turns", async () => {
+  it("a spawned child whose thread the boot-gap map names with a row the ledger no longer has is redispatched WITH its parent and frozen context: the fresh run carries parentRunId, the parent's clock as its boundary, and starts from canonical parent turns", async () => {
+    const { parentContextOf } = await import("./dispatch/handoff.js");
+    const { contextDependenciesHash } = await import("./references/contextDependencies.js");
     const ledger = new InMemoryRunLedger(() => 10_000);
     const provider = capturingProvider("child answer");
     const { deps, registry, store, writer } = wired(provider, { ledger });
+    deps.runStore = ledgerBackedStore(ledger, store);
+    deps.slackContextForRun = (_actor, origin) => testSlackCapability(origin, async () => "source");
+    const source = { runId: "run-p", requester: "slack:UX", channelId: "slack:CX", threadKey: "slack:CX:1.0" };
+    const dependencies = {
+      version: 1 as const,
+      status: "known" as const,
+      revision: 1,
+      origins: [source],
+      slack: [],
+      mcp: [],
+    };
+    const evidence: ChatMessage[] = [{ role: "user", content: [{ type: "text", text: "look into durable objects" }] }];
+    const actors = [source.requester];
+    const sourceKey = "boot-gap-parent-session";
+    expect(
+      await ledger.appendSession(
+        sourceKey,
+        "original-request",
+        [
+          {
+            part: 0,
+            json: JSON.stringify({
+              role: "user",
+              part: evidence[0].content[0],
+              actor: source.requester,
+              context: dependencies,
+            }),
+          },
+        ],
+        dependencies,
+      ),
+    ).toMatchObject({ ok: true });
+    await store.put({
+      id: source.runId,
+      agent: "conductor",
+      userId: source.requester,
+      channelId: source.channelId,
+      threadKey: source.threadKey,
+      channelVisibility: "public",
+      startedAt: Date.now() - 20000,
+      finishedAt: Date.now() - 10000,
+      status: "completed",
+      eventCount: 0,
+      storedEventCount: 0,
+      truncated: false,
+      events: [],
+      diagnosis: analyzeRunFriction([]),
+      contextDependencies: dependencies,
+      session: { key: sourceKey, seedFrom: 0, request: 0, range: { from: 0, to: 0 } },
+    });
+    const handoff = {
+      version: 1 as const,
+      source,
+      session: { key: sourceKey, from: 0, to: 0 },
+      assets: [],
+      window: { from: 0, to: 0, hash: await sourceHash({ messages: evidence, actors }) },
+      dependencies: { value: dependencies, hash: await contextDependenciesHash(dependencies) },
+    };
     const elsewhere = new ThreadsElsewhere();
     // A stale entry for the child's thread: the row is gone, so the durable push
     // is refused and the message runs fresh (the redispatch).
@@ -17272,7 +17658,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       io.io,
       {
         parent: { runId: "run-p", depth: 1, remainingMs: 5 * 60_000 },
-        seed: [{ role: "user", text: "look into durable objects" }],
+        parentContext: parentContextOf(evidence, handoff, actors),
       },
     );
     await writer.settled();
@@ -17282,12 +17668,14 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       parentRunId: "run-p",
       seed: "parent",
       profile: { preset: "research", machine: "none", identity: "none", minutes: 5, boundedBy: "parent" },
+      childHandoff: { source, consumer: { runId: "run-l", requester: "slack:UX", threadKey: "slack:CX:9.0" } },
     });
-    // The redispatch carried the seed: the fresh run's model started from the parent's turn, then the request.
+    // Redispatch carries the frozen source; the new request remains the child's own turn.
     expect(provider.requests).toHaveLength(1);
-    // The two text parts reach pi as one prompt, joined with a blank line (harness-pi item 9).
-    const opening = provider.requests[0].messages[0].content as Array<{ type: string; text?: string }>;
-    expect(opening.map((p) => p.text)).toEqual(["look into durable objects\n\nwhat changed?"]);
+    const opening = JSON.stringify(provider.requests[0].messages);
+    expect(opening).toContain("look into durable objects");
+    expect(opening).toContain("what changed?");
+    expect(opening).toContain("Parent context from run run-p");
     expect(elsewhere.get("slack:CX:9.0")).toBeUndefined();
   });
 
@@ -18431,8 +18819,10 @@ workspaceDir: __WORKDIR__
             stopReason: "tool_use",
           };
         }
-        if (conducts)
+        if (conducts) {
+          if (admission) await vi.waitFor(() => expect(slotsAtChildTurn.child).toBe("research"));
           return { content: [{ type: "text", text: toolResultTexts(req).join("\n") }], stopReason: "end_turn" };
+        }
         if (admission) {
           slotsAtChildTurn.parent = admission.get(PARENT_THREAD)?.agent;
           slotsAtChildTurn.child = admission.get(CHILD_THREAD)?.agent;
@@ -18479,6 +18869,7 @@ workspaceDir: __WORKDIR__
     deps.admission = admission;
     // The one runs service every surface reads, over the store the writer
     // writes — the run tools' reads reach a finished child's record through it.
+    deps.slackContextForRun = (_actor, incoming) => testSlackCapability(incoming, async () => "fixture source");
     deps.runStore = store;
     // The session log: what a conductor's spawn hands its child as the seed
     // (agent-conductor item 3 — the parent's text turns, read off the log);
@@ -18490,7 +18881,8 @@ workspaceDir: __WORKDIR__
       fallback: { put: async () => {}, abandoned: () => {} },
       warn: () => {},
     });
-    deps.runs = createRunsService({ registry, store: ledgerBackedStore(ledger, store), ledger });
+    deps.runStore = ledgerBackedStore(ledger, store);
+    deps.runs = createRunsService({ registry, store: deps.runStore, ledger });
     return { deps, registry, store, writer, admission, ledger };
   }
   const agentsProvisioned = () => vi.mocked(makeExecutor).mock.calls.map((c) => c[1].agent.name);
@@ -18569,6 +18961,55 @@ workspaceDir: __WORKDIR__
     expect(admission.get(CHILD_THREAD)).toBeUndefined();
   });
 
+  it("a new child-thread turn retains its own answer and notes while rebinding the parent's frozen recall", async () => {
+    const { provider, requests } = treeProvider(
+      [{ preset: "research", prompt: "look up the storage model" }],
+      "the child found durable state",
+    );
+    const t = treeDeps(provider);
+    const complete = provider.complete.bind(provider);
+    provider.complete = async (request) => {
+      if (!request.tools?.some((tool) => tool.name === "spawn_run")) {
+        const live = (await t.ledger.listLive()).find((row) => row.runId === "run-child");
+        if (live?.meta.session)
+          expect(
+            await t.ledger.writeNotepad(
+              live.meta.session.key,
+              "gen-C",
+              "child decision: retain the exact receipt",
+              live.runId,
+            ),
+          ).toEqual({ ok: true });
+      }
+      return complete(request);
+    };
+    const { parent, child } = treeIO();
+    await dispatch(t.deps, inChannel("CX", "agent:conductor inspect durable state"), parent.io);
+    await vi.waitFor(() => expect(t.registry.getById("run-child")?.finished).toBe(true));
+    await t.writer.settled();
+    const initial = t.ledger.finished.get("run-child")!;
+    expect(await t.ledger.readNotepad(initial.session!.key)).toMatchObject({
+      text: "child decision: retain the exact receipt",
+    });
+    requests.length = 0;
+    const result = await dispatch(
+      t.deps,
+      { ...inChannel("CX", "agent:research explain that decision"), threadKey: CHILD_THREAD },
+      child.io,
+    );
+    expect(result.status).toBe("completed");
+    expect(JSON.stringify(requests[0].messages)).toContain("the child found durable state");
+    expect(JSON.stringify(requests[0].messages)).toContain("explain that decision");
+    expect(requests[0].system).toContain("child decision: retain the exact receipt");
+    await t.writer.settled();
+    const continuation = t.ledger.finished.get("run-third")!;
+    expect(continuation.seed).toBe("session");
+    expect(continuation.childHandoff?.source.runId).toBe("run-parent");
+    expect(continuation.childHandoff?.consumer?.runId).toBe("run-third");
+    expect(continuation.childHandoff?.session).toEqual(initial.childHandoff?.session);
+    expect(continuation.childHandoff?.dependencies?.hash).toBe(initial.childHandoff?.dependencies?.hash);
+  });
+
   it("a child for a requester without `agent:run:<preset>` ends at the agent gate: the allowlist refusal in the child's thread, the parent's tool result naming `agent_allowlist`, and the child never reaches the factory", async () => {
     const { provider } = treeProvider([{ preset: "explore", prompt: "time the suite", repo: "acme/api" }], "unused");
     const t = treeDeps(provider);
@@ -18630,7 +19071,7 @@ workspaceDir: __WORKDIR__
             .filter((p) => p.type === "text")
             .map((p) => p.text ?? ""),
     ]);
-  it("a research child's model sees the parent's text turns — the request and what the conductor said before spawning, never its tool call — then the child's prompt as the one new turn; the child's record names `seed: parent` with those turns as its context, the parent's record `seed: channel`", async () => {
+  it("a research child's model sees frozen parent evidence and a labelled unfinished call before its own request; both records retain seed provenance", async () => {
     const requests: CompletionRequest[] = [];
     const provider: Provider = {
       name: "fake",
@@ -18662,17 +19103,24 @@ workspaceDir: __WORKDIR__
     await t.writer.settled();
     expect(child.replies).toEqual(["A single-instance coordination point."]);
     const childRequest = requests.find((r) => !r.tools?.some((tool) => tool.name === "spawn_run"))!;
-    expect(textTurns(childRequest)).toEqual([
-      ["user", ["look into durable objects"]],
-      ["assistant", ["Storage first: one research child."]],
-      ["user", ["what is a Durable Object?"]],
-    ]);
+    expect(JSON.stringify(textTurns(childRequest))).toContain("look into durable objects");
+    expect(JSON.stringify(textTurns(childRequest))).toContain("Storage first: one research child.");
+    expect(JSON.stringify(textTurns(childRequest))).toContain("result was not recorded before this child started");
+    expect(JSON.stringify(textTurns(childRequest))).toContain("what is a Durable Object?");
+    expect(
+      childRequest.messages
+        .flatMap((m) => m.content)
+        .some((part) => part.type === "tool_use" && part.name === "spawn_run"),
+    ).toBe(false);
     const childRecord = (await t.ledger.finished.get("run-child"))!;
     expect(childRecord.seed).toBe("parent");
-    expect(childRecord.events.filter((e) => e.type === "context").map((e) => (e as { text: string }).text)).toEqual([
-      "user: look into durable objects",
-      "assistant: Storage first: one research child.",
-    ]);
+    const inheritedContext = childRecord.events
+      .filter((e) => e.type === "context")
+      .map((e) => (e as { text: string }).text)
+      .join("\n");
+    expect(inheritedContext).toContain("look into durable objects");
+    expect(inheritedContext).toContain("Storage first: one research child.");
+    expect(childRecord.childHandoff?.source.runId).toBe("run-parent");
     expect(childRecord.events.filter((e) => e.type === "input").map((e) => (e as { text: string }).text)).toEqual([
       "what is a Durable Object?",
     ]);
@@ -18685,7 +19133,7 @@ workspaceDir: __WORKDIR__
   // reads the parent's conversation off its session log, so the child seeds
   // from the parent's text turns exactly as a native conductor's child does,
   // and a write preset's refusal reaches the tool result by name.
-  it("`harness: { conductor: pi }` runs the conductor on pi as a child of the bot: a `coding` spawn relayed through the bot is refused `spawn_identity` in the tool result and opens nothing; a `research` spawn reaches spawnChild with the parent's text turns read off its session log, so the child's record says `seed: parent` with the request and what the conductor said as its context; the relayed await_runs returns the child's reply; the parent's answer carries all three", async () => {
+  it("`harness: { conductor: pi }` runs the conductor on pi as a child of the bot: a `coding` spawn relayed through the bot is refused `spawn_identity` in the tool result and opens nothing; a `research` spawn reaches spawnChild with the parent's frozen structured context read off its session log, so the child's record says `seed: parent` with the request and what the conductor said as its context; the relayed await_runs returns the child's reply; the parent's answer carries all three", async () => {
     const provider: Provider = {
       name: "fake",
       async complete(): Promise<CompletionResult> {
@@ -18700,7 +19148,8 @@ workspaceDir: __WORKDIR__
       fallback: { put: async () => {}, abandoned: () => {} },
       warn: () => {},
     });
-    t.deps.runs = createRunsService({ registry: t.registry, store: t.store, ledger });
+    t.deps.runStore = ledgerBackedStore(ledger, t.store);
+    t.deps.runs = createRunsService({ registry: t.registry, store: t.deps.runStore, ledger });
     const container = new FakeHarnessContainer();
     const harnesses = new HarnessRegistry();
     const bearers = new RunBearerStore({ clock: Date.now });
@@ -18821,10 +19270,13 @@ workspaceDir: __WORKDIR__
       seed: "parent",
       status: "completed",
     });
-    expect(childRecord.events.filter((e) => e.type === "context").map((e) => (e as { text: string }).text)).toEqual([
-      "user: look into durable objects",
-      "assistant: Storage first: one research child.",
-    ]);
+    const inheritedContext = childRecord.events
+      .filter((e) => e.type === "context")
+      .map((e) => (e as { text: string }).text)
+      .join("\n");
+    expect(inheritedContext).toContain("look into durable objects");
+    expect(inheritedContext).toContain("Storage first: one research child.");
+    expect(childRecord.childHandoff?.source.runId).toBe("run-parent");
     expect(childRecord.events.filter((e) => e.type === "input").map((e) => (e as { text: string }).text)).toEqual([
       "what is a Durable Object?",
     ]);
@@ -18915,7 +19367,11 @@ workspaceDir: __WORKDIR__
         // harness drains and steers it on its next tick, so the inbox's arrival
         // count is the signal, not its size), then makes one bookkeeping call
         // so the steer rides the next user turn.
-        if (!req.messages.some((m) => m.role === "assistant")) {
+        if (
+          !req.messages.some(
+            (m) => Array.isArray(m.content) && m.content.some((part) => part.type === "tool_use" && part.id === "c1"),
+          )
+        ) {
           await vi.waitFor(() => expect(admission.get(CHILD_THREAD)?.inbox.arrived).toBe(1));
           return {
             content: [{ type: "tool_use", id: "c1", name: "update_status", input: { checklist: "○ reading" } }],
@@ -18996,7 +19452,7 @@ workspaceDir: __WORKDIR__
   }
 
   it("a parent awaiting a child that another generation finished (a store record, no registry frame) returns from the record; a child that closed `interrupted` comes back as `interrupted` and nothing restarts it", async () => {
-    const t = treeDeps(awaitOnlyProvider(["run-far", "run-cut"]));
+    const t = treeDeps(awaitOnlyProvider(["run-far", "run-cut", "run-unproved"]));
     const record = (id: string, status: RunRecord["status"], text?: string): RunRecord => {
       const events: RunEvent[] = text ? [{ type: "answer", text, seq: 1 }] : [];
       return {
@@ -19020,8 +19476,18 @@ workspaceDir: __WORKDIR__
         parentRunId: "run-parent",
       };
     };
-    await t.store.put(record("run-far", "completed", "Workers are isolates."));
+    const far = record("run-far", "completed", "Workers are isolates.");
+    far.contextDependencies = {
+      version: 1,
+      status: "known",
+      revision: 1,
+      origins: [{ runId: far.id, requester: far.userId, channelId: far.channelId, threadKey: far.threadKey }],
+      slack: [],
+      mcp: [],
+    };
+    await t.store.put(far);
     await t.store.put(record("run-cut", "interrupted"));
+    await t.store.put(record("run-unproved", "completed", "This body has no retained source proof."));
     const { parent } = treeIO();
     const startedAt = Date.now();
     await dispatch(t.deps, inChannel("CX", "agent:conductor collect the write-ups"), parent.io);
@@ -19032,9 +19498,21 @@ workspaceDir: __WORKDIR__
     expect(report.runs.map((r) => [r.id, r.status])).toEqual([
       ["run-far", "completed"],
       ["run-cut", "interrupted"],
+      ["run-unproved", "completed"],
     ]);
     expect(String(report.runs[0].finalReply)).toContain("Workers are isolates.");
     expect("finalReply" in report.runs[1]).toBe(false);
+    expect(report.runs[2]).toMatchObject({ contextUnavailable: expect.any(String) });
+    expect("finalReply" in report.runs[2]).toBe(false);
+    await t.writer.settled();
+    expect(t.ledger.finished.get("run-parent")?.contextDependencies?.origins).toEqual(
+      expect.arrayContaining([...far.contextDependencies.origins]),
+    );
+    expect(
+      t.ledger.finished
+        .get("run-parent")
+        ?.contextDependencies?.origins.some((origin) => origin.runId === "run-unproved"),
+    ).toBe(false);
     // Nothing was restarted: one run provisioned (the conductor), no run for either id anywhere live.
     expect(agentsProvisioned()).toEqual(["conductor"]);
     expect(t.registry.getById("run-far")).toBeNull();
@@ -19537,6 +20015,205 @@ describe("inbound staging (record 0033)", () => {
     expect(lastUserText(provider)).not.toContain("attachments/");
   });
 
+  it("dynamic asset recall persists readable producer dependencies before returning files and omits unproved or revoked producers", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: recordingExecutor().executor });
+    const ledger = new InMemoryRunLedger();
+    const store = new InMemoryRunStore();
+    const registry = new RunRegistry({ genId: () => "asset-consumer", genToken: () => "asset-token" });
+    const artifacts = new InMemoryArtifactStore();
+    const requests: CompletionRequest[] = [];
+    const origins = ["readable", "unproved", "revoked"].map((kind) => ({
+      runId: `asset-${kind}`,
+      requester: "slack:UADMIN",
+      channelId: "slack:CX",
+      threadKey: "slack:CX:1.0",
+    }));
+    const provider: Provider = {
+      name: "fake",
+      async complete(request): Promise<CompletionResult> {
+        requests.push(structuredClone(request));
+        if (requests.length === 1) {
+          // These files did not exist when the prompt's initial catalogue was read.
+          for (const [index, origin] of origins.entries()) {
+            const key = `threads/slack-CX-1.0/out/${origin.runId}.txt`;
+            artifacts.put(key, new Uint8Array([1]), "text/plain");
+            const events: RunEvent[] = [
+              {
+                type: "artifact",
+                direction: "out",
+                key,
+                callId: `${origin.runId}-file`,
+                name: `${origin.runId}.txt`,
+                size: 1,
+                contentType: "text/plain",
+                at: 1,
+                seq: 1,
+              },
+            ];
+            ledger.finished.set(origin.runId, {
+              id: origin.runId,
+              agent: "general",
+              userId: origin.requester,
+              channelId: origin.channelId,
+              threadKey: origin.threadKey,
+              channelVisibility: "public",
+              startedAt: Date.now() - 20000,
+              finishedAt: Date.now() - 10000,
+              status: "completed",
+              eventCount: 1,
+              storedEventCount: 1,
+              truncated: false,
+              events,
+              diagnosis: analyzeRunFriction(events),
+              ...(index === 1
+                ? {}
+                : {
+                    contextDependencies: {
+                      version: 1,
+                      status: index === 2 ? "revoked" : "known",
+                      revision: 1,
+                      origins: [origin],
+                      slack: [],
+                      mcp: [],
+                    },
+                  }),
+            });
+          }
+          return {
+            content: [{ type: "tool_use", id: "dynamic-files", name: "recall", input: { assets: true } }],
+            stopReason: "tool_use",
+          };
+        }
+        const live = (await deps.runLedger.readLiveRuns()).find((row) => row.runId === "asset-consumer");
+        const context = live?.state.contextDependencies;
+        if (!isContextDependencies(context)) throw new Error("missing canonical consumer dependencies");
+        expect(context.origins).toEqual(expect.arrayContaining([origins[0]]));
+        expect(context.origins).not.toEqual(expect.arrayContaining([origins[1]]));
+        expect(context.origins).not.toEqual(expect.arrayContaining([origins[2]]));
+        return { content: [{ type: "text", text: "I found the readable file." }], stopReason: "end_turn" };
+      },
+    };
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    deps.runLedger = createLedgerWriteThrough({ ledger, gen: "asset-test", fallback: store, warn: () => {} });
+    deps.runStore = ledgerBackedStore(ledger, store);
+    deps.runHistoryWriter = createRunHistoryWriter({
+      store,
+      warn: () => {},
+      sleep: async () => {},
+      onPersisted: (id) => registry.markPersisted(id),
+    });
+    deps.runs = createRunsService({ registry, store: deps.runStore, ledger });
+    deps.artifacts = artifacts;
+    deps.slackContextForRun = (_actor, origin) => testSlackCapability(origin, async () => "source");
+    const result = await dispatch(deps, msg("agent:coding list the files available now", "slack:UADMIN"), fakeIO().io);
+    expect(result.status).toBe("completed");
+    expect(requests).toHaveLength(2);
+    expect(JSON.stringify(requests[0])).not.toContain("asset-readable.txt");
+    const recalled = JSON.stringify(requests[1].messages);
+    expect(recalled).toContain("asset-readable.txt");
+    expect(recalled).not.toContain("asset-unproved.txt");
+    expect(recalled).not.toContain("asset-revoked.txt");
+    await deps.runHistoryWriter.settled();
+    expect((await deps.runStore.get("asset-consumer"))?.contextDependencies?.origins).toEqual(
+      expect.arrayContaining([origins[0]]),
+    );
+  });
+
+  it.each([true, false])(
+    "dynamic session recall admits post-seed dependencies before exposure (readable: %s)",
+    async (readable) => {
+      vi.stubEnv("SANDBOX_TOKEN", "tok");
+      vi.stubEnv("GITHUB_APP_ID", "");
+      vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: recordingExecutor().executor });
+      const origin = {
+        runId: "late-source",
+        requester: "slack:UADMIN",
+        channelId: "slack:CLATE",
+        threadKey: "slack:CLATE:1.0",
+      };
+      const context = {
+        version: 1 as const,
+        status: "known" as const,
+        revision: 1,
+        origins: [origin],
+        slack: [],
+        mcp: [],
+      };
+      const requests: CompletionRequest[] = [];
+      let admittedBeforeExposure = false;
+      const provider: Provider = {
+        name: "fake",
+        async complete(request): Promise<CompletionResult> {
+          requests.push(structuredClone(request));
+          if (requests.length === 1)
+            return {
+              content: [{ type: "tool_use", id: "late-recall", name: "recall", input: { query: "postseed" } }],
+              stopReason: "tool_use",
+            };
+          const live = (await deps.runLedger.readLiveRuns())[0];
+          const context = live.state.contextDependencies;
+          if (!isContextDependencies(context)) throw new Error("missing canonical consumer dependencies");
+          admittedBeforeExposure = context.origins.some((item) => item.runId === origin.runId);
+          return { content: [{ type: "text", text: "Recall finished." }], stopReason: "end_turn" };
+        },
+      };
+      const deps = memoryDeps(REMOTE_YAML_FIXTURE, provider);
+      await deps.runStore.put({
+        id: origin.runId,
+        agent: "general",
+        userId: origin.requester,
+        channelId: origin.channelId,
+        threadKey: origin.threadKey,
+        channelVisibility: "public",
+        startedAt: Date.now() - 20000,
+        finishedAt: Date.now() - 10000,
+        status: "completed",
+        eventCount: 0,
+        storedEventCount: 0,
+        truncated: false,
+        events: [],
+        diagnosis: analyzeRunFriction([]),
+        contextDependencies: context,
+      });
+      deps.slackContextForRun = (_actor, incoming) => ({
+        ...testSlackCapability(incoming, async () => "source"),
+        originAudience: async () => (incoming.channelId === origin.channelId && !readable ? undefined : "public"),
+      });
+      const search = deps.runLedger.searchSession.bind(deps.runLedger);
+      vi.spyOn(deps.runLedger, "searchSession").mockImplementationOnce(async (key, query, limit) => {
+        // A connector appends after seed, while the tool reads the current log.
+        expect(
+          await deps.runLedger.appendSession(
+            key,
+            "late-source-row",
+            [
+              {
+                part: 0,
+                json: JSON.stringify({
+                  role: "user",
+                  part: { type: "text", text: "postseed exact source evidence" },
+                  context,
+                }),
+              },
+            ],
+            context,
+          ),
+        ).toMatchObject({ ok: true, appended: true });
+        return search(key, query, limit);
+      });
+      const result = await dispatch(deps, msg("agent:coding recall the latest evidence", "slack:UADMIN"), fakeIO().io);
+      expect(result.status).toBe("completed");
+      expect(requests).toHaveLength(2);
+      expect(JSON.stringify(requests[0])).not.toContain("postseed exact source evidence");
+      expect(JSON.stringify(requests[1].messages).includes("postseed exact source evidence")).toBe(readable);
+      expect(admittedBeforeExposure).toBe(readable);
+      await deps.runHistoryWriter.settled();
+    },
+  );
+
   // The thread's earlier files: a later run in the thread finds the files dropped
   // on earlier messages too — the prior runs' records name them by key, the store
   // is asked by HEAD, nothing is copied again, and the new record carries them.
@@ -19580,6 +20257,16 @@ describe("inbound staging (record 0033)", () => {
     await runStore.put({
       id: "earlier-run",
       agent: "coding",
+      contextDependencies: {
+        version: 1,
+        status: "known",
+        revision: 0,
+        slack: [],
+        mcp: [],
+        origins: [
+          { runId: "earlier-run", requester: "slack:UADMIN", channelId: "slack:CX", threadKey: "slack:CX:1.0" },
+        ],
+      },
       channelId: "slack:CX",
       userId: "slack:UADMIN",
       threadKey: "slack:CX:1.0",
@@ -19594,6 +20281,7 @@ describe("inbound staging (record 0033)", () => {
       diagnosis: analyzeRunFriction(priorEvents),
     });
     deps.runStore = runStore;
+    deps.slackContextForRun = (_actor, origin) => testSlackCapability(origin, async () => "source");
     const { commands, executor } = recordingExecutor();
     vi.mocked(makeExecutor).mockResolvedValueOnce({ executor });
     const { io } = fakeIO([
@@ -19639,7 +20327,7 @@ describe("inbound staging (record 0033)", () => {
 // lines written since, the request — instead of the thread's Slack history.
 describe("a follow-up seeds from its session (docs/reference/specs/session-log.md item 9)", () => {
   const THREAD = "slack:CX:1.0";
-  const KEY = `${THREAD}:coding`;
+  const KEY = `${THREAD}:coding:@context-v1`;
   const PI_YAML = REMOTE_YAML_FIXTURE + "harness:\n  coding: pi\n";
   const NOW = Date.now();
   const PREVIOUS_END = NOW - 10_000;
@@ -19683,7 +20371,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     const userId = options.userId ?? "slack:UADMIN";
     const threadKey = options.threadKey ?? THREAD;
     const agent = options.agent ?? "coding";
-    const key = `${threadKey}:${agent}`;
+    const key = `${threadKey}:${agent}:@context-v1`;
     const sessionTail = options.tail ?? tail;
     const registry = new RunRegistry({ genId: () => "run-next", genToken: () => "tok" });
     const store = new InMemoryRunStore();
@@ -19715,8 +20403,21 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     };
     deps.runBearers = new RunBearerStore({ clock: () => NOW });
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "main" });
+    deps.slackContextForRun = (_actor, origin) => testSlackCapability(origin, async () => "source");
     await ledger.claimSession(key, "run-prev", "gen-R");
-    if (options.sources) await ledger.writeSessionSources(key, "run-prev", "gen-R", options.sources);
+    const directSources = options.sources ?? testSessionSources({ channelId, userId, threadKey }, []);
+    const sources: SessionSources = {
+      ...directSources,
+      context: directSources.context ?? {
+        version: 1,
+        status: options.tail !== undefined && options.sources === undefined ? "unknown" : directSources.status,
+        revision: 0,
+        origins: [{ runId: "run-prev", requester: userId, channelId, threadKey }],
+        slack: directSources.status === "known" ? directSources.receipts : [],
+        mcp: [],
+      },
+    };
+    await ledger.writeSessionSources(key, "run-prev", "gen-R", sources);
     await ledger.seed(
       "run-prev",
       "gen-R",
@@ -19724,7 +20425,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       key,
     );
     // The previous run kept notes (session-log item 10): they ride the next run's prompt.
-    await ledger.writeNotepad(key, "gen-R", "decided: keep the helper; head green at abc123");
+    await ledger.writeNotepad(key, "gen-R", "decided: keep the helper; head green at abc123", "run-prev");
     await ledger.releaseSession(key, "run-prev", "gen-R");
     await store.put({
       id: "run-prev",
@@ -19745,7 +20446,14 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       diagnosis: analyzeRunFriction([]),
       repo: "acme/api",
       seed: "channel",
-      session: { key, seedFrom: 0, request: 0, range: { from: 0, to: 3 } },
+      session: {
+        key,
+        threadSession: `${threadKey}:@thread:@context-v1`,
+        seedFrom: 0,
+        request: 0,
+        range: { from: 0, to: sessionTail.length - 1 },
+      },
+      contextDependencies: sources.context,
       // The run's post-step opened a pull request (run-history item 2): the
       // fact a follow-up's target resolution reads (resident-repos item 29).
       pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
@@ -20116,7 +20824,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     }
   });
 
-  it("refuses a verified DM turn before replaying a saved Slack source whose access may have changed", async () => {
+  it("omits an unproved saved Slack source while admitting a fresh verified DM turn", async () => {
     const channelId = "slack:DMAIN";
     const threadKey = `${channelId}:1.0`;
     const directAudience = { kind: "slack-unshared-im" as const, channelId, userId: "slack:UADMIN", threadKey };
@@ -20165,17 +20873,17 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     await vi.mocked(runPiHarnessOpen).withImplementation(
       async (_deps, run) => {
         seeded = run.messages;
-        return piAnswered(privateText);
+        return piAnswered("New request processed without old context.");
       },
       async () => dispatch(t.deps, { ...directAudience, text: "What changed?", directAudience }, io),
     );
-    expect(seeded).toBeUndefined();
+    expect(JSON.stringify(seeded ?? [])).not.toContain(privateText);
     expect(freshRead).not.toHaveBeenCalled();
-    expect(replies.join(" ")).toContain("check the Slack source again");
+    expect(JSON.stringify(seeded ?? [])).not.toContain(privateText);
     expect(JSON.stringify({ replies, statuses })).not.toContain(privateText);
   });
 
-  it("refuses a private follow-up before replaying a saved reference whose source access was revoked", async () => {
+  it("omits a revoked saved reference while admitting a fresh private follow-up", async () => {
     const channelId = "slack:DMAIN";
     const threadKey = `${channelId}:1.0`;
     const directAudience = { kind: "slack-unshared-im" as const, channelId, userId: "slack:UADMIN", threadKey };
@@ -20228,14 +20936,14 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     await vi.mocked(runPiHarnessOpen).withImplementation(
       async (_deps, run) => {
         seeded = run.messages;
-        return piAnswered(privateText);
+        return piAnswered("New request processed without old context.");
       },
       async () => dispatch(t.deps, { ...directAudience, text: "Fix it", directAudience }, io),
     );
-    expect(seeded).toBeUndefined();
+    expect(JSON.stringify(seeded ?? [])).not.toContain(privateText);
     expect(classify).not.toHaveBeenCalled();
     expect(read).not.toHaveBeenCalled();
-    expect(replies.join(" ")).toContain("check the Slack source again");
+    expect(JSON.stringify(seeded ?? [])).not.toContain(privateText);
     expect(JSON.stringify({ replies, statuses })).not.toContain(privateText);
   });
 
@@ -20301,7 +21009,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     expect(replies.at(-1)).toContain("I will fix it.");
   });
 
-  it("refuses a verified DM history fallback when its prior bot answer has no source proof", async () => {
+  it("omits prior bot answers without source proof when the verified DM history fallback is unavailable", async () => {
     const channelId = "slack:DMAIN";
     const threadKey = `${channelId}:1.0`;
     const directAudience = { kind: "slack-unshared-im" as const, channelId, userId: "slack:UADMIN", threadKey };
@@ -20330,12 +21038,12 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     await vi.mocked(runPiHarnessOpen).withImplementation(
       async (_deps, run) => {
         seeded = run.messages;
-        return piAnswered(privateText);
+        return piAnswered("New request processed without old context.");
       },
       async () => dispatch(t.deps, { ...directAudience, text: "Fix it", directAudience }, io),
     );
-    expect(seeded).toBeUndefined();
-    expect(replies.join(" ")).toContain("check the Slack source again");
+    expect(JSON.stringify(seeded ?? [])).not.toContain(privateText);
+    expect(JSON.stringify(seeded ?? [])).not.toContain(privateText);
     expect(JSON.stringify({ replies, statuses })).not.toContain(privateText);
   });
 
@@ -20414,7 +21122,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
         ],
       });
       if (compacted) {
-        const key = `${directAudience.threadKey}:orchestrator`;
+        const key = `${directAudience.threadKey}:orchestrator:@context-v1`;
         await t.ledger.claimSession(key, "run-prev", "gen-R");
         await t.ledger.seed(
           "run-prev",
@@ -20449,10 +21157,14 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       expect(JSON.stringify(seeded)).not.toContain("old external data");
       expect(prompt).not.toContain("old external data in summary");
       expect(replies.at(-1)).toContain("Fresh answer");
-      expect(revalidate).toHaveBeenCalled();
-      expect((await t.ledger.readSessionTail(`${directAudience.threadKey}:orchestrator`, 1000)).sources).toEqual(
-        sources,
-      );
+      // An untracked external result makes the complete envelope unknown. The
+      // original Slack receipt survives, but cannot prove the omitted result.
+      expect(revalidate).not.toHaveBeenCalled();
+      expect(
+        (await t.ledger.readSessionTail(`${directAudience.threadKey}:orchestrator:@context-v1`, 1000)).sources,
+      ).toMatchObject({
+        context: { status: "unknown", slack: sources.status === "known" ? sources.receipts : [] },
+      });
     },
   );
 
@@ -20660,7 +21372,13 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     // The finish lands on the ledger (the history store in production); the plain store keeps the tombstone.
     const record = t.ledger.finished.get("run-next")!;
     expect(record).toMatchObject({ agent: "coding", seed: "session", status: "completed", threadKey: THREAD });
-    expect(record.session).toEqual({ key: KEY, seedFrom: 0, request: 5, range: { from: 4, to: 5 } });
+    expect(record.session).toEqual({
+      key: KEY,
+      threadSession: `${THREAD}:@thread:@context-v1`,
+      seedFrom: 0,
+      request: 5,
+      range: { from: 4, to: 5 },
+    });
     const meta = record.events.find((e) => e.type === "run_meta") as { agentSource?: string } | undefined;
     expect(meta?.agentSource).toBe("sticky");
     expect(record.events.filter((e) => e.type === "context").map((e) => (e as { text: string }).text)).toEqual([
@@ -20702,10 +21420,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
   // rows authored too: each history line its author, the request the requester.
   it("a first run's channel seed writes authored rows: each channel line carries its author's actor id, the request row the requester's, machine rows none", async () => {
     const t = await threadWithSession(PI_YAML);
-    t.deps.runLedger.readSessionTail = async () => ({
-      from: 0,
-      transcript: { complete: true, turns: 0, messages: [], compactions: [] },
-    });
+    t.ledger.sessions.delete(KEY);
     vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor() });
     vi.mocked(runPiHarnessOpen).mockImplementationOnce(async () => piAnswered("done"));
     const authored: HistoryItem[] = [
@@ -20720,21 +21435,26 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     expect(record).toMatchObject({ seed: "channel", status: "completed" });
     const rows = t.ledger.sessions.get(KEY)!.rows;
     const actorAt = (idx: number) => actorOfStoredRow(rows.find((r) => r.idx === idx && r.part === 0)!.json);
-    // The run's own rows follow the earlier run's log (idx 0..3): row 4 Alice's
-    // line, row 5 the bot's, row 6 Bob's line merged with the requester's
-    // request — mixed authors, so the merged row stores none…
-    expect([4, 5].map(actorAt)).toEqual(["slack:UALICE", undefined]);
-    expect(actorAt(6)).toBeUndefined();
+    // Unproved machine history is omitted. Adjacent human lines merge, so
+    // this mixed-author row cannot claim one person's identity.
+    expect(actorAt(0)).toBeUndefined();
+    expect((await t.ledger.readSession(KEY, 0)).messages).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "fix the flaky test" },
+          { type: "text", text: "also check the lockfile" },
+          { type: "text", text: followUp.text },
+        ],
+      },
+    ]);
     const again = await threadWithSession(PI_YAML);
-    again.deps.runLedger.readSessionTail = async () => ({
-      from: 0,
-      transcript: { complete: true, turns: 0, messages: [], compactions: [] },
-    });
+    again.ledger.sessions.delete(KEY);
     vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor() });
     vi.mocked(runPiHarnessOpen).mockImplementationOnce(async () => piAnswered("done"));
-    // …and a requester whose own line is the last one keeps the merged row theirs.
+    // A row made entirely of the requester's lines keeps their identity.
     const ownLine: HistoryItem[] = [
-      { role: "user", text: "fix the flaky test", at: NOW - 20_000, user: "slack:UALICE" },
+      { role: "user", text: "fix the flaky test", at: NOW - 20_000, user: "slack:UADMIN" },
       { role: "assistant", text: "fixed it", at: NOW - 11_000 },
       { role: "user", text: "also check the lockfile", at: NOW - 5_000, user: "slack:UADMIN" },
     ];
@@ -20742,7 +21462,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     await again.writer.settled();
     const ownRows = again.ledger.sessions.get(KEY)!.rows;
     const ownActorAt = (idx: number) => actorOfStoredRow(ownRows.find((r) => r.idx === idx && r.part === 0)!.json);
-    expect([4, 5, 6].map(ownActorAt)).toEqual(["slack:UALICE", undefined, "slack:UADMIN"]);
+    expect(ownActorAt(0)).toBe("slack:UADMIN");
   });
 
   // docs/reference/specs/session-log.md item 9 (record 0034 "The session", as
@@ -20754,6 +21474,14 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     const reviewHead = "b".repeat(40);
     await t.store.put({
       id: "run-rev",
+      contextDependencies: {
+        version: 1,
+        status: "known",
+        revision: 0,
+        slack: [],
+        mcp: [],
+        origins: [{ runId: "run-rev", requester: "slack:UADMIN", channelId: "slack:CX", threadKey: THREAD }],
+      },
       label: "review · acme/api#7",
       agent: "review",
       model: "anthropic/review-model",
@@ -20924,9 +21652,8 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
 
   it("a log that cannot be read seeds from the channel with a seed note naming it, and the agent is still the thread's", async () => {
     const t = await threadWithSession(PI_YAML);
-    t.deps.runLedger.readSessionTail = async () => {
-      throw new Error("no such route");
-    };
+    const readTail = t.deps.runLedger.readSessionTail.bind(t.deps.runLedger);
+    t.deps.runLedger.readSessionTail = vi.fn(readTail).mockRejectedValueOnce(new Error("no such route"));
     vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor() });
     let handed: ChatMessage[] | undefined;
     vi.mocked(runPiHarnessOpen).mockImplementationOnce(async (_deps, run) => {
@@ -20939,7 +21666,8 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     // The finish lands on the ledger (the history store in production); the plain store keeps the tombstone.
     const record = t.ledger.finished.get("run-next")!;
     expect(record).toMatchObject({ agent: "coding", seed: "channel", status: "completed" });
-    expect(handed?.map((m) => m.role)).toEqual(["user", "assistant", "user"]); // the channel's history, merged, then the request
+    expect(handed?.map((m) => m.role)).toEqual(["user"]);
+    expect(JSON.stringify(handed)).not.toContain("fixed it"); // the old bot answer has no source proof
     const notes = record.events.filter((e) => e.type === "run_note") as Array<{ kind: string; summary: string }>;
     expect(notes.map((n) => n.kind)).toContain("seed");
     expect(notes.find((n) => n.kind === "seed")!.summary).toContain(`the log ${KEY} could not be read (no such route)`);
@@ -24030,6 +24758,25 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     return { deps, provider, registry };
   }
 
+  /** List rows locate a saved decision; only its finished record supplies the
+   * question and the dependencies admitted when the question was produced. */
+  async function savePendingQuestion(deps: TestDeps, thread: RunView[]) {
+    const pending = thread[0]!;
+    if (!pending.operator) throw new Error("Expected a question fixture");
+    pending.userId ??= "slack:UADMIN";
+    const events: RunEvent[] = [{ type: "operator", ...pending.operator }];
+    await threadWithFinishedRun(deps, "door", {
+      id: pending.id,
+      userId: pending.userId,
+      session: undefined,
+      events,
+      eventCount: events.length,
+      storedEventCount: events.length,
+      contextDependencies: { version: 1, status: "known", revision: 0, origins: [], slack: [], mcp: [] },
+    });
+    deps.slackContextForRun = (_actor, incoming) => testSlackCapability(incoming, async () => "source");
+  }
+
   it("on: typed effort, budget and verbosity reach the run without rewriting the request", async () => {
     const { deps, provider, registry } = operatorDeps(ON_YAML);
     const request = "Use high effort, a 25 minute budget, and debug detail to answer this.";
@@ -24525,6 +25272,11 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
 
   it("on: a question leaves a door record carrying the decision as its operator event — the parked pending question", async () => {
     const { deps, registry } = operatorDeps(ON_YAML);
+    const store = new InMemoryRunStore();
+    deps.runStore = store;
+    deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
+    deps.runs = createRunsService({ registry, store });
+    deps.slackContextForRun = (_actor, incoming) => testSlackCapability(incoming, async () => "source");
     deps.operatorModel = decides({
       reason: "ambiguous",
       question: { text: "Which listing?", proposal: "runs list --status all" },
@@ -24538,6 +25290,13 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       outcome: "question",
       proposal: "runs list --status all",
     });
+    await deps.runHistoryWriter.settled();
+    expect((await store.get("r1"))?.contextDependencies?.status).toBe("known");
+    const next = decides({ binds: [{ line: "help" }] });
+    deps.operatorModel = next;
+    await dispatch(deps, { ...msg("yes", "slack:UADMIN"), messageId: "slack:CX:2.0" }, fakeIO().io);
+    expect(next).not.toHaveBeenCalled();
+    expect(deps.invoked).toEqual(["runs.list"]);
   });
 
   it("on: the next turn's \"yes\" binds the pending question's proposal with no model call; another answer binds fresh", async () => {
@@ -24551,6 +25310,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       },
     ] as RunView[];
     const { deps, registry } = operatorDeps(ON_YAML);
+    await savePendingQuestion(deps, pendingThread);
     deps.operatorModel = decides({ reason: "never", binds: [{ line: "help", reason: "never" }] });
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("yes", "slack:UADMIN"), io, { thread: pendingThread });
@@ -24564,6 +25324,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
 
     // Anything but "yes" is a fresh decision: the model runs, the marker in view.
     const { deps: fresh } = operatorDeps(ON_YAML);
+    await savePendingQuestion(fresh, pendingThread);
     fresh.operatorModel = decides({ reason: "fresh", binds: [{ line: "help", reason: "the menu" }] });
     await dispatch(fresh, msg("no, the runs one", "slack:UADMIN"), fakeIO().io, { thread: pendingThread });
     expect(fresh.operatorModel).toHaveBeenCalledTimes(1);
@@ -24596,13 +25357,43 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       },
     ] as RunView[];
 
+  it.each(["missing record", "missing dependencies"] as const)(
+    "on: a pending question with %s cannot supply saved words or assent",
+    async (missing) => {
+      const { deps, provider } = operatorDeps(ON_YAML);
+      const thread = questionThread();
+      if (missing === "missing dependencies") {
+        await savePendingQuestion(deps, thread);
+        const saved = await deps.runStore.get(thread[0]!.id);
+        if (!saved) throw new Error("Expected the saved question fixture");
+        const { contextDependencies: _unproved, ...legacy } = saved;
+        await deps.runStore.put(legacy);
+      }
+      const operator = vi.fn<RouteModel>(async () => ({
+        tool: "ask",
+        input: { text: "What should the new request cover?", reason: "request preference" },
+      }));
+      deps.operatorModel = operator;
+      const channel = fakeIO();
+      await dispatch(deps, msg("yes", "slack:UADMIN"), channel.io, { thread });
+      expect(operator).toHaveBeenCalledOnce();
+      const exposed = JSON.stringify({ prompts: operator.mock.calls, replies: channel.replies });
+      expect(exposed).not.toContain(QUESTION_REQUEST);
+      expect(exposed).not.toContain(QUESTION_TEXT);
+      expect(deps.invoked).toEqual([]);
+      expect(provider.requests).toHaveLength(0);
+    },
+  );
+
   it("on: a free-text answer to a pending question joins the original ask — the operator decides the joined line, no mention needed, and its preset bind routes it (issue 2046)", async () => {
     const { deps, registry, provider } = operatorDeps(ON_YAML);
+    const thread = questionThread();
+    await savePendingQuestion(deps, thread);
     const operator = decides({ reason: "the ask", binds: [{ line: `agent:general ${JOINED}`, reason: "the ask" }] });
     deps.operatorModel = operator;
     const { io } = fakeIO();
     // The reply is the answer's bare words: no mention, no directive, no repeat of the ask.
-    await dispatch(deps, msg("acme/tools is the repo", "slack:UADMIN"), io, { thread: questionThread() });
+    await dispatch(deps, msg("acme/tools is the repo", "slack:UADMIN"), io, { thread });
     // The operator's turn was asked the JOINED line, never the fragment.
     const prompt: RoutePrompt = operator.mock.calls[0]![0];
     expect(prompt.user).toContain(JOINED);
@@ -24647,6 +25438,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
         return next;
       });
     const joined = `${request} — ${question}: acme/examples`;
+    await savePendingQuestion(deps, pending);
     const operator = decides({ binds: [{ line: `agent:general ${joined}`, repo: "acme/examples" }] });
     deps.operatorModel = operator;
     await dispatch(deps, msg("acme/examples", "slack:UADMIN"), fakeIO().io, { thread: pending });
@@ -24659,7 +25451,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
   });
 
   it("on: a typed target answer is saved before the operator starts its selected writer", async () => {
-    const { deps } = operatorDeps(ON_YAML);
+    const { deps, registry } = operatorDeps(ON_YAML);
     const request = "Add hourly drift detection to the infrastructure repo";
     const question = "Which repository should receive this change? Reply with owner/name.";
     const pending = [
@@ -24688,24 +25480,34 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
         target = next;
         return next;
       });
-    const joined = `${request} — ${question}: acme/infrastructure`;
+    const reply = "acme/infrastructure, and double the alert budget";
+    await savePendingQuestion(deps, pending);
+    const joined = `${request} — ${question}: ${reply}`;
     deps.operatorModel = decides({
       binds: [{ line: `agent:ship ${joined}`, repo: "acme/infrastructure", shipEntry: "work" }],
     });
-    await dispatch(deps, msg("acme/infrastructure", "slack:UADMIN"), fakeIO().io, { thread: pending });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg(reply, "slack:UADMIN"), io, { thread: pending });
     expect(checkpoint).toHaveBeenCalledWith(
       expect.any(String),
       "slack:UADMIN",
-      expect.objectContaining({ repo: "acme/infrastructure", provenance: expect.stringContaining(request) }),
+      expect.objectContaining({ repo: "acme/infrastructure", provenance: expect.stringContaining(reply) }),
     );
+    expect(replies).not.toContain("I couldn't bind this request to an action, so nothing started.");
+    expect(registry.snapshotById("r1")!.events.find((event) => event.type === "operator")).toMatchObject({
+      outcome: "binds",
+      binds: [{ repo: "acme/infrastructure", repoSource: "thread" }],
+    });
   });
 
   it("on: a pending question's no-call answer is re-asked once, then stops without a reader hand-off (issue 2046)", async () => {
     const FALLBACK_YAML = YAML_FIXTURE.replace("routing: { operator: off }\n", "routing: { operator: on }\n");
     const { deps, provider, registry } = operatorDeps(FALLBACK_YAML);
+    const thread = questionThread();
+    await savePendingQuestion(deps, thread);
     deps.operatorModel = vi.fn<RouteModel>(async () => "sure, acme/tools it is");
     const { io, replies } = fakeIO();
-    await dispatch(deps, msg("acme/tools is the repo", "slack:UADMIN"), io, { thread: questionThread() });
+    await dispatch(deps, msg("acme/tools is the repo", "slack:UADMIN"), io, { thread });
     expect(deps.operatorModel).toHaveBeenCalledTimes(2);
     expect(provider.requests).toHaveLength(0);
     expect(replies).toContain("I couldn't bind this request to an action, so nothing started.");
@@ -25509,6 +26311,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       },
     ] as RunView[];
     const { deps, registry, provider } = operatorDeps(ON_YAML);
+    await savePendingQuestion(deps, pendingThread);
     wireCommands(deps);
     deps.operatorModel = decides({ reason: "never", binds: [{ line: "help", reason: "never" }] });
     const { io } = fakeIO();
@@ -25550,6 +26353,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       },
     ] as RunView[];
     const { deps, provider, registry } = operatorDeps(ON_YAML);
+    await savePendingQuestion(deps, pendingThread);
     deps.operatorModel = decides({ reason: "never", binds: [{ line: "help", reason: "never" }] });
 
     await dispatch(deps, msg("yes", "slack:UADMIN"), fakeIO().io, { thread: pendingThread });
@@ -25579,6 +26383,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       },
     ] as RunView[];
     const { deps, provider } = operatorDeps(ON_YAML);
+    await savePendingQuestion(deps, pendingThread);
     deps.operatorModel = decides({ reason: "never", binds: [{ line: "help", reason: "never" }] });
     const { io, replies } = fakeIO();
 
@@ -25730,6 +26535,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       ...questionThread(),
       { id: "c1", startedAt: 0, finished: true, eventCount: 1, agent: "coding", parentInstanceId: INSTANCE },
     ] as RunView[];
+    await savePendingQuestion(deps, thread);
     deps.operatorModel = decides({
       reason: "reads as guidance for the door",
       binds: [{ line: "agent:general summarize the answer", reason: "a rival" }],
@@ -25873,6 +26679,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       },
       { id: "c1", startedAt: 0, finished: true, eventCount: 1, agent: "coding", parentInstanceId: INSTANCE },
     ] as RunView[];
+    await savePendingQuestion(deps, thread);
     deps.operatorModel = decides({ reason: "never", binds: [{ line: "help", reason: "never" }] });
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("yes", "slack:UADMIN"), io, { thread });
@@ -26092,3 +26899,515 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     expect(deps.invoked).toEqual(["config.show"]);
   });
 });
+
+describe("durable structured child context", () => {
+  it.each([
+    { acknowledge: true, workBrief: true },
+    { acknowledge: false, workBrief: true },
+    { acknowledge: true, workBrief: false },
+  ])(
+    "requires the applicable coding seed acknowledgment before the first provider call (brief=$workBrief, ACK=$acknowledge)",
+    async ({ acknowledge, workBrief }) => {
+      const { contractFor } = await import("./coordinator/briefs.js");
+      const { contextAccessForRun } = await import("./dispatch/contextAccess.js");
+      const { canonicalHandoffRunOf } = await import("./dispatch/handoffValidation.js");
+      const { contextDependenciesHash } = await import("./references/contextDependencies.js");
+      const { turnRows } = await import("./runLedger/transcript.js");
+      const { isUnitSeedReceipt } = await import("./coordinator/unitSeedReceipt.js");
+      const provider = capturingProvider("The private work is ready.");
+      const deps = makeDeps(YAML_FIXTURE, provider);
+      const ledger = new InMemoryRunLedger();
+      const store = new InMemoryRunStore();
+      deps.runStore = store;
+      deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
+      deps.runLedger = createLedgerWriteThrough({ ledger, gen: "seed-generation", fallback: store, warn: () => {} });
+      const instance: CoordinatorInstance = {
+        id: "ship_seed",
+        kind: "ship",
+        userId: "slack:UADMIN",
+        channelId: workBrief ? "slack:DALICE" : "slack:CX",
+        threadKey: workBrief ? "slack:DALICE:1.0" : "slack:CX:1.0",
+        repo: "acme/api",
+        base: "main",
+        branch: unitBranch("seed", "task"),
+        plan: { id: "seed" },
+        createdAt: 1,
+      };
+      const source = {
+        runId: "seed-parent",
+        requester: instance.userId,
+        channelId: instance.channelId,
+        threadKey: instance.threadKey,
+      };
+      const evidence: ChatMessage[] = [
+        { role: "user", content: [{ type: "text", text: "Exact evidence for the saved task" }] },
+      ];
+      const dependencies: ContextDependencies = {
+        version: 1,
+        status: "known",
+        revision: 1,
+        origins: [source],
+        slack: [],
+        mcp: [],
+      };
+      expect(
+        await ledger.appendSession("seed-parent-log", "parent-evidence", turnRows(0, evidence[0]!).rows, dependencies),
+      ).toMatchObject({ ok: true });
+      const handoff = {
+        version: 1 as const,
+        source,
+        session: { key: "seed-parent-log", from: 0, to: 0 },
+        window: { from: 0, to: 0, hash: await sourceHash({ messages: evidence, actors: [] }) },
+        assets: [],
+        dependencies: { value: dependencies, hash: await contextDependenciesHash(dependencies) },
+      };
+      const unit: CoordinatorUnit = {
+        instanceId: instance.id,
+        unit: "task",
+        slug: "task",
+        branch: instance.branch,
+        dependsOn: [],
+        rounds: [],
+        threadKey: workBrief ? `worker:${instance.id}:task` : "slack:CX:unit",
+        workBrief: {
+          requesterId: instance.userId,
+          mainThreadKey: instance.threadKey,
+          actId: "original-request",
+          repo: instance.repo,
+          base: "main",
+          question: "Why did this fail?",
+          findings: [],
+          requestedChange: "Fix the linked issue",
+        },
+        context: { version: 1, handoff },
+      };
+      if (!workBrief) {
+        delete unit.workBrief;
+        instance.runId = source.runId;
+        const { generatedTaskOf } = await import("./coordinator/generatedTask.js");
+        unit.generatedTask = generatedTaskOf("Fix the linked issue", {
+          runId: source.runId,
+          requesterId: instance.userId,
+          threadKey: instance.threadKey,
+          repo: instance.repo,
+        });
+      }
+      const binding = {
+        instanceId: instance.id,
+        unit: unit.unit,
+        instanceAttempt: 0,
+        idempotencyKey: `${instance.id}:${unit.unit}/0/coding`,
+      };
+      const instances = new InMemoryCoordinatorInstanceStore();
+      expect(await instances.put(instance)).toEqual({ ok: true });
+      expect(await instances.putUnits([unit])).toEqual({ ok: true });
+      deps.coordinatorInstances = instances;
+      const contract = await contractFor(instance, unit, {
+        readRepoFile: async () => undefined,
+        readRunFacts: async () => undefined,
+      });
+      deps.handoffAccessForRun = async (input) => ({
+        loadRun: async (runId) => {
+          if (runId === source.runId)
+            return {
+              ...source,
+              session: { key: "seed-parent-log", seedFrom: 0, request: 0, range: { from: 0, to: 0 } },
+              writtenThrough: 0,
+              dependencies,
+            };
+          const row = (await ledger.listLive()).find((candidate) => candidate.runId === runId);
+          return row ? canonicalHandoffRunOf(row, 100, dependencies) : undefined;
+        },
+        readSession: async () => ({ complete: true, turns: 1, messages: evidence, compactions: [] }),
+        readNotepad: async () => null,
+        loadAdmission: !workBrief
+          ? (await contextAccessForRun(deps)(input)).loadAdmission
+          : async () => ({
+              binding,
+              context: unit.context!,
+              requester: instance.userId,
+              channelId: instance.channelId,
+              threadKey: unit.threadKey!,
+            }),
+        canRead: async () => true,
+        readAssets: async () => [],
+        validateDependencies: async () => true,
+        captureDependencies: async () => dependencies,
+        loadSource: async () => undefined,
+      });
+      let attemptedAck = 0;
+      const setState = ledger.setState.bind(ledger);
+      vi.spyOn(ledger, "setState").mockImplementation(async (runId, gen, state) => {
+        if (state.unitSeedReceipt !== undefined && ledger.live.get(runId)?.state.unitSeedReceipt === undefined) {
+          attemptedAck++;
+          if (!acknowledge) return { ok: false, reason: "fenced" };
+        }
+        return setState(runId, gen, state);
+      });
+      let provedBeforeProvider = false;
+      const complete = provider.complete.bind(provider);
+      vi.spyOn(provider, "complete").mockImplementation(async (request) => {
+        const row = (await ledger.listLive()).find(
+          (candidate) => candidate.meta.idempotencyKey === binding.idempotencyKey,
+        );
+        const receipt = row?.state.unitSeedReceipt;
+        if (!workBrief) {
+          expect(receipt).toBeUndefined();
+          expect(row?.meta.childHandoff?.source).toEqual(source);
+          expect(row?.meta.childHandoff?.consumer?.attempt).toBe(binding.idempotencyKey);
+          expect(row?.state.contextCheckpoint).toBeDefined();
+          return complete(request);
+        }
+        expect(isUnitSeedReceipt(receipt)).toBe(true);
+        if (!isUnitSeedReceipt(receipt)) throw new Error("The first provider call has no acknowledged seed.");
+        expect(receipt.binding).toEqual(binding);
+        expect(receipt.contractHash).toBe(await sourceHash(contract.unit));
+        expect(receipt.capsuleHash).toBe(await sourceHash(unit.context));
+        expect(
+          await sourceHash(await deps.runLedger.readSession(receipt.seed.key, receipt.seed.from, receipt.seed.through)),
+        ).toBe(receipt.seed.messagesHash);
+        provedBeforeProvider = true;
+        return complete(request);
+      });
+      const io = privateWorkerIO(
+        new InMemoryPrivateWorkerLog(),
+        { instanceId: instance.id, unit: unit.unit },
+        {
+          clock: () => Date.now(),
+          currentInputId: binding.idempotencyKey,
+          audience: {
+            actId: "original-request",
+            requester: {
+              kind: "slack-unshared-im",
+              userId: instance.userId,
+              channelId: instance.channelId,
+              threadKey: instance.threadKey,
+            },
+            spawnKey: binding.idempotencyKey,
+            verify: async () => ({ ok: true }),
+          },
+        },
+      );
+      const outcome = await dispatch(
+        deps,
+        {
+          userId: instance.userId,
+          channelId: instance.channelId,
+          threadKey: unit.threadKey!,
+          messageId: binding.idempotencyKey,
+          text: "agent:coding Fix the linked issue in acme/api",
+        },
+        workBrief ? io : fakeIO().io,
+        {
+          coordinator: {
+            parentInstanceId: instance.id,
+            unit: unit.unit,
+            instanceAttempt: 0,
+            idempotencyKey: binding.idempotencyKey,
+            base: "main",
+            branch: unit.branch,
+          },
+          childHandoff: handoff,
+          unitContextAdmission: binding,
+          contract,
+        },
+      );
+      expect(attemptedAck, JSON.stringify(outcome)).toBe(workBrief ? 1 : 0);
+      expect(provider.requests).toHaveLength(acknowledge ? 1 : 0);
+      expect(provedBeforeProvider).toBe(acknowledge && workBrief);
+      if (acknowledge) expect(outcome.status, JSON.stringify(outcome)).toBe("completed");
+      await deps.runHistoryWriter.settled();
+      const record = [...ledger.finished.values()][0];
+      if (acknowledge && workBrief) expect(record?.unitSeedReceipt?.binding).toEqual(binding);
+      else expect(record?.unitSeedReceipt).toBeUndefined();
+    },
+  );
+
+  it.each(["direct", "queued unit", "Ship"])(
+    "persists the %s source before seeding and reconstructs tool evidence from canonical rows",
+    async (kind) => {
+      const { parentContextOf, snapshotNotepad } = await import("./dispatch/handoff.js");
+      const { canonicalHandoffRunOf } = await import("./dispatch/handoffValidation.js");
+      const { contextDependenciesHash } = await import("./references/contextDependencies.js");
+      const provider = capturingProvider("child answered");
+      const deps = makeDeps(YAML_FIXTURE, provider);
+      const ledger = new InMemoryRunLedger();
+      deps.runHistoryWriter = createRunHistoryWriter({
+        store: new InMemoryRunStore(),
+        warn: () => {},
+        sleep: async () => {},
+      });
+      deps.runLedger = createLedgerWriteThrough({
+        ledger,
+        gen: "child-test",
+        fallback: new InMemoryRunStore(),
+        warn: () => {},
+      });
+      const source = {
+        runId: "source-run",
+        requester: "slack:UADMIN",
+        channelId: "slack:CX",
+        threadKey: "slack:CX:source",
+      };
+      const evidence: ChatMessage[] = [
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "evidence-call", name: "read_file", input: { path: "README.md" } }],
+        },
+        {
+          role: "user",
+          content: [{ type: "tool_result", toolUseId: "evidence-call", content: "exact evidence from the source" }],
+        },
+      ];
+      const dependencies = {
+        version: 1 as const,
+        status: "known" as const,
+        revision: 1,
+        origins: [source],
+        slack: [],
+        mcp: [],
+      };
+      const { turnRows } = await import("./runLedger/transcript.js");
+      for (const [index, message] of evidence.entries()) {
+        const rows = turnRows(index, message).rows.map(({ part, json }) => ({
+          part,
+          json: JSON.stringify({ ...JSON.parse(json), context: dependencies }),
+        }));
+        expect(await ledger.appendSession("source-log", `source-evidence-${index}`, rows, dependencies)).toMatchObject({
+          ok: true,
+        });
+      }
+      const handoff = {
+        version: 1 as const,
+        source,
+        session: { key: "source-log", from: 0, to: 1 },
+        window: { from: 0, to: 1, hash: await sourceHash({ messages: evidence, actors: [] }) },
+        assets: [],
+        dependencies: { value: dependencies, hash: await contextDependenciesHash(dependencies) },
+        ...(kind === "queued unit"
+          ? { notepad: await snapshotNotepad({ text: "frozen source note", updatedAt: 1 }) }
+          : {}),
+      };
+      const admission = {
+        instanceId: "saved-unit",
+        unit: "U11",
+        instanceAttempt: 0,
+        idempotencyKey: "saved-unit:U11/0/coding",
+      };
+      let reservedBeforeSeed = false;
+      const originalSeed = ledger.seed.bind(ledger);
+      vi.spyOn(ledger, "seed").mockImplementation(async (runId, gen, turns, session) => {
+        const row = (await ledger.listLive()).find((r) => r.runId === runId);
+        reservedBeforeSeed = row?.meta.childHandoff?.consumer?.runId === runId;
+        return originalSeed(runId, gen, turns, session);
+      });
+      deps.handoffAccessForRun = () => ({
+        loadRun: async (runId) => {
+          if (runId === source.runId)
+            return {
+              ...source,
+              session: { key: "source-log", seedFrom: 0, request: 0, range: { from: 0, to: 1 } },
+              writtenThrough: 1,
+              dependencies,
+            };
+          const row = (await ledger.listLive()).find((r) => r.runId === runId);
+          return row ? canonicalHandoffRunOf(row, 100, dependencies) : undefined;
+        },
+        readSession: async () => ({ complete: true, turns: 2, messages: evidence, compactions: [] }),
+        readNotepad: async () => (kind === "queued unit" ? { text: "later unrelated note", updatedAt: 2 } : null),
+        loadAdmission: async (binding, consumer) => ({
+          binding,
+          context: { version: 1, handoff },
+          requester: consumer.requester,
+          channelId: consumer.channelId,
+          threadKey: consumer.threadKey,
+        }),
+        canRead: async () => true,
+        readAssets: async () => [],
+        validateDependencies: async () => true,
+        captureDependencies: async () => dependencies,
+        loadSource: async () => undefined,
+      });
+      const { io } = fakeIO();
+      const shipBranch = vi.fn<NonNullable<CoreDeps["shipBranch"]>>(async () => ({ hostedLive: false }));
+      if (kind === "Ship") deps.shipBranch = shipBranch;
+      const outcome = await dispatch(
+        deps,
+        msg(
+          kind === "Ship" ? "agent:ship in acme/api: fix the evidence" : "agent:general use the source evidence",
+          "slack:UADMIN",
+        ),
+        io,
+        kind === "queued unit"
+          ? {
+              childHandoff: handoff,
+              unitContextAdmission: admission,
+            }
+          : { parentContext: parentContextOf(evidence, handoff) },
+      );
+      if (kind === "Ship") {
+        expect(shipBranch).toHaveBeenCalledOnce();
+        expect(shipBranch.mock.calls[0][3].context).toEqual({ version: 1, handoff });
+        expect(provider.requests).toHaveLength(0);
+        return;
+      }
+      expect(outcome.status).toBe("completed");
+      expect(reservedBeforeSeed).toBe(true);
+      expect(provider.requests.length).toBeGreaterThan(0);
+      expect(provider.requests[0].messages.flatMap((m) => m.content)).toEqual(
+        expect.arrayContaining(evidence.flatMap((m) => m.content)),
+      );
+      await deps.runHistoryWriter.settled();
+      const record = [...ledger.finished.values()][0];
+      expect(record.childHandoff?.source).toEqual(source);
+      if (kind === "queued unit") {
+        expect(record.childHandoff?.consumer?.attempt).toBe(admission.idempotencyKey);
+        expect(provider.requests[0].system).toContain("frozen source note");
+        expect(provider.requests[0].system).not.toContain("later unrelated note");
+      }
+    },
+  );
+
+  it("refuses an invalid parent manifest before any model call without a text fallback", async () => {
+    const provider = capturingProvider("must not run");
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    wireChildLedger(deps);
+    const { io } = fakeIO();
+    const outcome = await dispatch(deps, msg("agent:general use the source", "slack:UADMIN"), io, {
+      parentContext: { messages: [{ role: "user", content: [{ type: "text", text: "invented parent" }] }] },
+    });
+    expect(outcome.status).not.toBe("completed");
+    expect(provider.requests).toHaveLength(0);
+  });
+});
+describe("durable operator conversation without an agent run", () => {
+  it.each(["question", "route", "command"] as const)(
+    "revalidates admitted operator memory before publishing or acting (%s)",
+    async (decision) => {
+      const { contextThreadSessionKey } = await import("./runLedger/sessionLog.js");
+      for (const revoke of [false, true]) {
+        const secret = "private deployment detail orchid-seven";
+        const provider = capturingProvider("The requested answer is ready.");
+        const deps = memoryDeps(
+          MEMORY_ON_YAML.replace("routing: { operator: off }", "routing: { operator: on }"),
+          provider,
+        );
+        deps.memory = new InMemoryMemoryStore([memRecord()]);
+        let visible = true;
+        deps.slackContextForRun = (_actor, incoming) => ({
+          ...testSlackCapability(incoming, async () => "source"),
+          originAudience: async () =>
+            incoming.threadKey === MEMORY_PRODUCER.threadKey && !visible ? undefined : "public",
+        });
+        deps.operatorModel = vi.fn<RouteModel>(async () => {
+          if (revoke) visible = false;
+          return decision === "question"
+            ? { tool: "ask", input: { text: secret, reason: "a preference" } }
+            : decision === "route"
+              ? { tool: "bind_preset", input: { preset: "general", reason: secret } }
+              : { tool: mcpToolName("runs.list"), input: { reason: secret } };
+        });
+        const channel = fakeIO();
+        await dispatch(deps, msg("What is the deploy command?", "slack:UADMIN"), channel.io);
+        await deps.runHistoryWriter.settled();
+        expect(deps.operatorModel).toHaveBeenCalledOnce();
+        expect(JSON.stringify(vi.mocked(deps.operatorModel).mock.calls)).toContain(
+          "the deploy command is npm run deploy",
+        );
+        const tail = await deps.runLedger.readSessionTail(contextThreadSessionKey("slack:CX:1.0"), 100_000);
+        const records = await Promise.all((await deps.runStore.list({})).map((row) => deps.runStore.get(row.id)));
+        if (revoke) {
+          expect(JSON.stringify({ replies: channel.replies, statuses: channel.statuses, tail, records })).not.toContain(
+            secret,
+          );
+          expect(provider.requests).toHaveLength(0);
+          expect(deps.invoked).toEqual([]);
+          expect(channel.replies.join(" ")).toContain("ask me to check the source again");
+        } else if (decision === "question") {
+          expect(channel.replies.join(" ")).toContain(secret);
+        } else if (decision === "route") {
+          expect(provider.requests.length).toBeGreaterThan(0);
+        } else {
+          expect(deps.invoked).toEqual(["runs.list"]);
+        }
+      }
+    },
+  );
+
+  it.each(["yes", "all services"])(
+    "revalidates a pending decision before joining an answer or binding assent (%s)",
+    async (answer) => {
+      const secret = "Should the orchid-seven deployment detail guide the report?";
+      const deps = memoryDeps(
+        MEMORY_ON_YAML.replace("routing: { operator: off }", "routing: { operator: on }"),
+        capturingProvider("ready"),
+      );
+      deps.memory = new InMemoryMemoryStore([memRecord()]);
+      let visible = true;
+      deps.slackContextForRun = (_actor, incoming) => ({
+        ...testSlackCapability(incoming, async () => "source"),
+        originAudience: async () =>
+          incoming.threadKey === MEMORY_PRODUCER.threadKey && !visible ? undefined : "public",
+      });
+      const prompts: unknown[] = [];
+      deps.operatorModel = vi.fn<RouteModel>(async (request) => {
+        prompts.push(structuredClone(request));
+        return prompts.length === 1
+          ? { tool: "ask", input: { text: secret, proposal: "runs list", reason: "a preference" } }
+          : { tool: "ask", input: { text: "What should the new report cover?", reason: "a preference" } };
+      });
+      const first = fakeIO();
+      await dispatch(
+        deps,
+        { ...msg("What is the deploy command?", "slack:UADMIN"), messageId: "slack:CX:2.0" },
+        first.io,
+      );
+      await deps.runHistoryWriter.settled();
+      expect(first.replies.join(" ")).toContain(secret);
+      visible = false;
+      const second = fakeIO();
+      await dispatch(deps, { ...msg(answer, "slack:UADMIN"), messageId: "slack:CX:3.0" }, second.io);
+      expect(JSON.stringify(prompts.slice(1))).not.toContain(secret);
+      expect(deps.invoked).toEqual([]);
+      expect(second.replies.join(" ")).not.toContain(secret);
+    },
+  );
+
+  it("keeps a question and its reply across a new dispatcher facade", async () => {
+    const { contextThreadSessionKey } = await import("./runLedger/sessionLog.js");
+    const yaml = YAML_FIXTURE.replace("routing: { operator: off }", "routing: { operator: on }");
+    const ledger = new InMemoryRunLedger();
+    const store = new InMemoryRunStore();
+    const setup = (gen: string) => {
+      const deps = makeDeps(yaml, capturingProvider());
+      deps.runStore = store;
+      deps.runLedger = createLedgerWriteThrough({ ledger, gen, fallback: store, warn: () => {} });
+      deps.operatorModel = vi.fn<RouteModel>(async () => ({
+        tool: "ask",
+        input: {
+          text: gen === "first" ? "Should the report cover all connected repositories?" : "I have the earlier answer.",
+          reason: "request preference",
+        },
+      }));
+      return deps;
+    };
+    const first = setup("first");
+    const firstIO = fakeIO();
+    await dispatch(
+      first,
+      { ...msg("Prepare a repository report", "slack:UADMIN"), messageId: "slack:CX:2.0" },
+      firstIO.io,
+    );
+    expect(firstIO.replies.join(" ")).toContain("all connected repositories");
+    const second = setup("second");
+    await dispatch(second, { ...msg("Yes, include them all", "slack:UADMIN"), messageId: "slack:CX:3.0" }, fakeIO().io);
+    const prompt = JSON.stringify(vi.mocked(second.operatorModel!).mock.calls);
+    expect(prompt).toContain("Should the report cover all connected repositories?");
+    expect(prompt).toContain("Prepare a repository report");
+    const tail = await ledger.readSessionTail(contextThreadSessionKey("slack:CX:1.0"), 100_000);
+    expect(tail.transcript.messages).toHaveLength(4);
+    expect(tail.sources?.context?.status).toBe("known");
+    expect(ledger.live.size).toBe(0);
+  });
+});
+import { isContextDependencies, type ContextDependencies } from "./references/contextDependencies.js";

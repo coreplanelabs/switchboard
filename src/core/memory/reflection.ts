@@ -11,6 +11,13 @@ import type { MemoryCandidate, MemoryRecord, MemoryScope, MemoryStore, WriteCoun
 import { rejectionMarkers } from "./engine.js";
 import { DEFAULT_REPO_WINDOW } from "./scorer.js";
 import { listScopeKeys, type RequestScopeKeys } from "./scope.js";
+import type { AudienceCheck } from "../audienceDecision.js";
+import {
+  memoryScopeDependencies,
+  mergeContextDependencies,
+  type ContextDependencies,
+} from "../references/contextDependencies.js";
+import { frozenMemoryRecord, sealMemoryCandidate, validMemoryProvenance } from "./provenance.js";
 
 // Cross-session memory WRITE path: the post-run reflection
 // pass. After a run's reply has landed, ONE cheap model call distills the thread
@@ -282,6 +289,11 @@ export function reflectionActor(principal: Actor, run: { channelId?: string; rep
 }
 
 export interface ReflectDeps extends ReflectionProvenance {
+  /** Immutable closure of every input the producing run consumed. */
+  context?: ContextDependencies;
+  /** Current read capability for an exact frozen existing revision. Missing
+   * capability omits existing memory from the extractor. */
+  admitMemory?(record: MemoryRecord): Promise<AudienceCheck>;
   provider: Provider;
   /** Bare model id (provider prefix already stripped) — resolved by the caller
    *  from `memory.model` (AGENTS.md invariant 7: never hardcoded here). */
@@ -422,6 +434,7 @@ export async function reflect(deps: ReflectDeps): Promise<void> {
   const warn = deps.onWarn ?? (() => {});
   const info = deps.onInfo ?? (() => {});
   try {
+    const producerContext = deps.context === undefined ? undefined : structuredClone(deps.context);
     const query = `${deps.request} ${deps.answer}`.slice(0, MAX_RETRIEVE_QUERY_CHARS);
     // The shown set (memory.md item 12): the repository window — the same
     // `list` read the context block leads with, no usage bump — plus the
@@ -444,7 +457,29 @@ export async function reflect(deps: ReflectDeps): Promise<void> {
       )
     ).flat();
     const seen = new Set<string>();
-    const existing = [...(await windowP), ...hits].filter((r) => !seen.has(r.id) && (seen.add(r.id), true));
+    const candidates = [...(await windowP), ...hits].filter((r) => !seen.has(r.id) && (seen.add(r.id), true));
+    const existing: MemoryRecord[] = [];
+    const scopes = new Set(listScopeKeys(deps.scopeKeys));
+    for (const value of candidates) {
+      try {
+        const snapshot = frozenMemoryRecord(value);
+        if (
+          !scopes.has(snapshot.scopeKey) ||
+          !deps.admitMemory ||
+          !(await validMemoryProvenance(snapshot)) ||
+          snapshot.provenance?.dependencies.status !== "known"
+        )
+          continue;
+        if ((await deps.admitMemory(snapshot)).ok) existing.push(snapshot);
+      } catch {
+        // One unavailable revision cannot erase independently admitted inputs.
+      }
+    }
+    const context = mergeContextDependencies(
+      producerContext,
+      memoryScopeDependencies(existing.map((record) => record.scopeKey)),
+      ...existing.map((record) => record.provenance!.dependencies),
+    );
     const text = buildReflectionInput({ history: deps.history, request: deps.request, answer: deps.answer, existing });
     const maxTokens = outputCapWithReasoning(REFLECTION_MAX_TOKENS, { capField: deps.capField });
     let result: CompletionResult;
@@ -509,7 +544,7 @@ export async function reflect(deps: ReflectDeps): Promise<void> {
       }
       let batch = byScope.get(placement.target.key);
       if (!batch) byScope.set(placement.target.key, (batch = []));
-      batch.push(record);
+      batch.push(await sealMemoryCandidate(placement.target.key, record, context));
     }
     if (narrowed.size > 0)
       warn(`write narrowed by policy: ${[...narrowed].map(([line, n]) => `${n}× ${line}`).join(", ")}`);

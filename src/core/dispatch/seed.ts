@@ -76,8 +76,9 @@ export interface SessionSeed {
   /** What the seed could not do, one line each, for the record's notes. */
   notes: string[];
   /** The platform-namespaced author id for each message, by index into
-   *  `messages`; absent (or the entry undefined) for machine turns and reused
-   *  tail rows. Only present when at least one new message has an actor
+   *  `messages`; absent (or the entry undefined) for machine turns. Tail
+   *  authors also ride here so a legacy-key copy keeps their provenance.
+   *  Only present when at least one message has an actor
    *  (record 0057). */
   actors?: readonly (string | undefined)[];
 }
@@ -184,6 +185,10 @@ export function sessionSeed(input: {
     );
   }
   messages.push(...kept);
+  for (let i = 0; i < kept.length; i++) {
+    const actor = transcript.actors?.[start + i];
+    if (actor !== undefined) actorMap.set(i, actor);
+  }
 
   // A tail that ends on calls in flight: each answered, as a resume answers
   // them, so no dangling call reaches a provider.
@@ -253,6 +258,11 @@ export async function sessionSeedFor(input: {
   ledger: Pick<LedgerWriteThrough, "readSessionTail" | "readNotepad">;
   threadKey: string;
   agent: string;
+  /** The canonical unit lane, when this run belongs to a persisted unit. */
+  sessionKey?: string;
+  /** A legacy key verified by the caller to belong to this unit and lane.
+   * Read only when the canonical lane is empty; rows are copied, not reused. */
+  legacySessionKey?: string;
   thread: readonly RunView[];
   history: readonly HistoryItem[];
   request: {
@@ -267,30 +277,47 @@ export async function sessionSeedFor(input: {
     actor?: string;
   };
 }): Promise<{ seed?: SessionSeed; notes: string[] }> {
-  const key = sessionKey(input.threadKey, input.agent);
+  const key = input.sessionKey ?? sessionKey(input.threadKey, input.agent);
+  let readKey = key;
   let tail: SessionTail;
   try {
     tail = await input.ledger.readSessionTail(key, SEED_BUDGET_BYTES);
+    if (tail.from === 0 && tail.transcript.turns === 0 && input.legacySessionKey && input.legacySessionKey !== key) {
+      readKey = input.legacySessionKey;
+      tail = await input.ledger.readSessionTail(readKey, SEED_BUDGET_BYTES);
+    }
   } catch (err) {
     const why = err instanceof Error ? err.message : String(err);
     return { notes: [`session seed: the log ${key} could not be read (${why}) — the run seeds from the channel`] };
   }
+  const thread = input.thread.filter((run) => run.session?.key === readKey);
   const seed = sessionSeed({
     tail,
-    previous: previousRunOf(input.thread, input.agent),
+    previous: previousRunOf(thread, input.agent),
     history: input.history,
     request: input.request,
-    refusedRequests: refusedRequestsOf(input.thread, input.agent),
+    refusedRequests: refusedRequestsOf(thread, input.agent),
   });
   if (!seed) return { notes: [] };
+  if (readKey !== key) {
+    seed.log = { from: 0, turns: 0 };
+    seed.notes.push(`working context: copied legacy log ${readKey} into ${key}`);
+  }
   // The notepad rides the prompt, never a row (item 10); a notepad that cannot
   // be read is a note, and the seed stands.
   try {
-    const notepad = await input.ledger.readNotepad(key);
+    const notepad = await input.ledger.readNotepad(readKey);
     if (notepad && notepad.text.trim().length > 0) seed.notepad = notepad.text;
   } catch (err) {
     const why = err instanceof Error ? err.message : String(err);
     seed.notes.push(`session seed: the notepad of ${key} could not be read (${why}) — the run starts without it`);
+  }
+  // Notes and summaries can change independently of the first tail read.
+  // Capture their bytes before the cumulative dependency envelope.
+  try {
+    seed.sources = (await input.ledger.readSessionTail(readKey, 1)).sources;
+  } catch {
+    seed.sources = undefined;
   }
   return { seed, notes: seed.notes };
 }

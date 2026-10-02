@@ -78,6 +78,12 @@ export function carriedCoordinatorTag(row: LiveRunRow, events: readonly RunEvent
   const branch = (tag?.type === "coordinator_tag" ? tag.branch : undefined) ?? row.meta.ref;
   return {
     parentInstanceId,
+    ...(row.meta.coordinatorUnit !== undefined
+      ? {
+          unit: row.meta.coordinatorUnit,
+          ...(row.meta.coordinatorAttempt !== undefined ? { instanceAttempt: row.meta.coordinatorAttempt } : {}),
+        }
+      : {}),
     idempotencyKey,
     ...(costCapUsd !== undefined ? { costCapUsd } : {}),
     ...(branch !== undefined ? { branch } : {}),

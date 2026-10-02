@@ -5,6 +5,7 @@ import type { Actor } from "../core/authz/types.js";
 import type { IncomingMessage } from "../core/types.js";
 import type { MainStartInput, MainStartResult } from "../core/coordinator/mainStart.js";
 import { MainSourceTracker } from "../core/dispatch/mainSource.js";
+import { contextCapsuleOf } from "../core/dispatch/unitContext.js";
 import { canOfferMainStart, mainStartForRun, workStartTool } from "./mainStart.js";
 import type { ToolContext } from "./runnableTool.js";
 
@@ -50,6 +51,51 @@ const resolveSource = (sources: MainSourceTracker, quote: string, repo: string, 
 };
 
 describe("work_start — plain-language private worker handoff", () => {
+  it("captures trusted context separately from tool arguments and refuses capture failures or changed authority", async () => {
+    const capsule = contextCapsuleOf({
+      version: 1,
+      source: { runId: "main-run", requester: msg.userId, channelId: msg.channelId, threadKey: msg.threadKey },
+      session: { key: `${msg.threadKey}:@thread`, from: 0, to: -1 },
+      assets: [],
+    });
+    const start = vi.fn(async (_value: MainStartInput): Promise<MainStartResult> => ({
+      kind: "accepted",
+      actId: "act",
+      instanceId: "unit",
+      reply: "started",
+    }));
+    let live = true;
+    let privateNow = true;
+    const captureContext = vi.fn(async () => capsule);
+    const capability = mainStartForRun({
+      agentName: "orchestrator",
+      channelVisibility: "dm",
+      initial: { actor, msg },
+      source: () => ({ kind: "ready", actor, msg, authorizedRepo: input.repo }),
+      live: () => live,
+      runId: "main-run",
+      verifyDirectAudience: booleanAudienceVerifier(async () => privateNow),
+      captureContext,
+      start,
+    });
+    expect(await workStartTool.run(input, context(capability))).toContain("Started");
+    expect(start.mock.calls[0]?.[0].context).toEqual(capsule);
+    expect(workStartTool.inputSchema.properties).not.toHaveProperty("context");
+    captureContext.mockRejectedValueOnce(new Error("storage budget"));
+    expect(await workStartTool.run(input, context(capability))).toContain("couldn't save");
+    captureContext.mockImplementationOnce(async () => {
+      live = false;
+      return capsule;
+    });
+    expect(await workStartTool.run(input, context(capability))).toContain("stopped");
+    live = true;
+    captureContext.mockImplementationOnce(async () => {
+      privateNow = false;
+      return capsule;
+    });
+    expect(await workStartTool.run(input, context(capability))).toContain("no longer a private");
+    expect(start).toHaveBeenCalledTimes(1);
+  });
   it("reports a reconciled existing worker without saying it started another", async () => {
     const start = vi.fn<(input: MainStartInput) => Promise<MainStartResult>>().mockResolvedValue({
       kind: "existing",

@@ -1,4 +1,5 @@
-import type { MemoryCandidate, MemoryRecord } from "./types.js";
+import type { MemoryCandidate, MemoryProvenance, MemoryRecord } from "./types.js";
+import { mergeMemoryProvenance, storedMemoryProvenance } from "./provenance.js";
 import { keywordMatch, scoreRecord, tokenize } from "./scorer.js";
 
 // The store-agnostic memory algorithms: retrieval ranking and the write plan
@@ -66,8 +67,8 @@ export function planEviction(active: MemoryRecord[], cap: number): MemoryRecord[
  *  (already minted) and, when `supersede` is set, flip that record to
  *  `superseded`. */
 export type WritePlan =
-  | { action: "restate"; target: MemoryRecord; confidence?: number }
-  | { action: "dedup"; target: MemoryRecord }
+  | { action: "restate"; target: MemoryRecord; confidence?: number; provenance?: MemoryProvenance }
+  | { action: "dedup"; target: MemoryRecord; provenance?: MemoryProvenance }
   | { action: "insert"; record: MemoryRecord; supersede?: MemoryRecord };
 
 /**
@@ -100,9 +101,11 @@ export function planWrite(
     const restated = active.find((r) => r.status === "active" && r.id === cand.restates);
     if (restated) {
       const confidences = [restated.confidence, cand.confidence].filter((c): c is number => c !== undefined);
+      const provenance = mergeMemoryProvenance(restated.scopeKey, restated.provenance, cand.provenance);
       return {
         action: "restate",
         target: restated,
+        ...(provenance ? { provenance } : {}),
         ...(confidences.length > 0 ? { confidence: Math.max(...confidences) } : {}),
       };
     }
@@ -111,8 +114,14 @@ export function planWrite(
   const target = cand.supersedes ? active.find((r) => r.status === "active" && r.id === cand.supersedes) : undefined;
   const dedupPool = cand.supersedes ? (target ? [target] : []) : active.filter((r) => r.status === "active");
   const existing = dedupPool.find((r) => normalizeText(r.text) === norm);
-  if (existing) return { action: "dedup", target: existing };
-  return { action: "insert", record: mint(cand), ...(target ? { supersede: target } : {}) };
+  if (existing) {
+    const provenance = mergeMemoryProvenance(existing.scopeKey, existing.provenance, cand.provenance);
+    return { action: "dedup", target: existing, ...(provenance ? { provenance } : {}) };
+  }
+  const candidate = target
+    ? { ...cand, provenance: mergeMemoryProvenance(target.scopeKey, cand.provenance, target.provenance) }
+    : cand;
+  return { action: "insert", record: mint(candidate), ...(target ? { supersede: target } : {}) };
 }
 
 // ---- The write gate (docs/reference/specs/memory.md item 13) -----------------
@@ -217,6 +226,7 @@ export function rejectionMarkers(text: string): string[] {
  *  AGENTS.md invariant 4 (`mem:<scopeKey>:<seq>`); keywords default to the
  *  text's tokens so keyword retrieval always has something to hit. */
 export function mintRecord(scopeKey: string, seq: number, now: number, cand: MemoryCandidate): MemoryRecord {
+  const provenance = storedMemoryProvenance(scopeKey, cand.provenance);
   return {
     id: `mem:${scopeKey}:${seq}`,
     scopeKey,
@@ -225,6 +235,7 @@ export function mintRecord(scopeKey: string, seq: number, now: number, cand: Mem
     keywords: cand.keywords ?? tokenize(cand.text),
     sourceThreadKey: cand.sourceThreadKey,
     sourceRunId: cand.sourceRunId,
+    ...(provenance ? { provenance } : {}),
     createdAt: now,
     useCount: 0,
     confidence: cand.confidence,

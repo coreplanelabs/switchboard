@@ -22,6 +22,8 @@ import {
 } from "./commandRun.js";
 import { refusalOf } from "../refusal.js";
 import { ROUTE_RECEIPT_CAP } from "./route.js";
+import { InMemoryRunLedger } from "../runLedger/inMemory.js";
+import { contextThreadSessionKey } from "../runLedger/sessionLog.js";
 
 // Feature: docs/reference/specs/command-registry.md item 18 — the command-run
 // machinery the fast paths and the request router's command branch share
@@ -91,6 +93,28 @@ const ROUTE: RouteEventFields = {
 };
 
 describe("runChatCommand — the machinery moved from the fast path", () => {
+  it("durably stores a runless command's exact output with explicit unknown dependencies before returning", async () => {
+    const ledger = new InMemoryRunLedger();
+    const d = { ...deps(), runLedger: { sessionPersistence: true, appendSession: ledger.appendSession.bind(ledger) } };
+    const { message, io, ending, trace } = request("config show", d);
+    const invoke = () =>
+      runChatCommand(
+        d,
+        message,
+        io,
+        { kind: "invoke", id: "config.show", input: { args: [], options: {} } },
+        ending,
+        trace,
+      );
+    const result = await invoke();
+    await invoke();
+    const stored = await ledger.readSession(contextThreadSessionKey(message.threadKey), 0);
+    expect(stored.messages).toEqual([{ role: "assistant", content: [{ type: "text", text: result.text }] }]);
+    expect(stored.contexts?.[0]?.status).toBe("unknown");
+    expect(d.runRegistry.snapshotById("run-cmd")).toBeNull();
+    d.runLedger.appendSession = async () => ({ ok: false, appended: false });
+    await expect(invoke()).rejects.toThrow("refused");
+  });
   it("records an inline run for a command that does work (`repo.test`) and none for one that answers from local state (`config.show`) — exactly as the fast path did", async () => {
     expect(isInlineRunCommand("repo.test")).toBe(true);
     expect(isInlineRunCommand("mcp.promote")).toBe(true); // a promote does work: an org entry and a ticket

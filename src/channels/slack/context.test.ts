@@ -165,6 +165,18 @@ function setup(
 }
 
 describe("Slack context adapter", () => {
+  it("checks a saved context's current origin audience without consuming source text", async () => {
+    const privateOrigin = setup({ origin: "C_PRIVATE", member: true });
+    expect(await privateOrigin.capability.originAudience?.()).toBe("private");
+    expect(privateOrigin.calls.replies).not.toHaveBeenCalled();
+    expect(privateOrigin.calls.history).not.toHaveBeenCalled();
+    const denied = setup({ origin: "C_PRIVATE", member: false });
+    expect(await denied.capability.originAudience?.()).toBeUndefined();
+    expect(denied.calls.replies).not.toHaveBeenCalled();
+    expect(await setup({ origin: "C_PUBLIC" }).capability.originAudience?.()).toBe("public");
+    expect(await setup().capability.originAudience?.()).toBe("dm");
+  });
+
   it("keeps categorical source policy separate from temporary and unknown failures", async () => {
     for (const isMember of [true, false, undefined]) {
       const h = setup({

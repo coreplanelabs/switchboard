@@ -12,6 +12,9 @@ import {
 import type { CoordinatorInstanceStore } from "./instanceStore.js";
 import { shipSettlementOf, type ShipSettlement } from "./shipOutcome.js";
 import type { RecoveryReceipt } from "./recoveryHistory.js";
+import { systemClock } from "../trace/clock.js";
+import { observeWorkState, workStateHash, type WorkStateObservation } from "./mainWorkObservation.js";
+import { unitSeedProofFor, type UnitSeedProof, type UnitSeedReader } from "./mainActions.js";
 
 const PAGE_SIZE = 8;
 const TITLE_LIMIT = 160;
@@ -28,6 +31,8 @@ export type MainWorkerRelayResult =
   | { kind: "not_found" | "forbidden" | "invalid" | "unavailable" }
   | {
       kind: "found";
+      observation: WorkStateObservation;
+      seedProof: UnitSeedProof;
       /** The private log's durable sequence, safe to pass as `afterSeq` on the next read. */
       cursor: number;
       more: boolean;
@@ -74,6 +79,9 @@ function resource(instance: CoordinatorInstance) {
 export function createMainWorkerRelay(deps: {
   instances: Pick<CoordinatorInstanceStore, "getMainTask" | "get" | "listUnits" | "listRecoveryHistory">;
   privateWorkerLog: Pick<PrivateWorkerLog, "listAfter">;
+  clock?: () => number;
+  liveAuthority?: { verify(): Promise<boolean>; active(): boolean };
+  readSeedReceipt?: UnitSeedReader;
 }) {
   return {
     async read(
@@ -89,83 +97,120 @@ export function createMainWorkerRelay(deps: {
         return { kind: "not_found" };
       try {
         const key = { mainThreadKey: origin.threadKey, actId: input.actId };
-        const link = await deps.instances.getMainTask(key);
-        if (!link) return { kind: "not_found" };
-        const [instance, units] = await Promise.all([
-          deps.instances.get(link.instanceId),
-          deps.instances.listUnits(link.instanceId),
-        ]);
-        const unit = units.find((row) => row.unit === link.unit);
-        if (
-          !isCoordinatorInstance(instance) ||
-          !isCoordinatorUnit(unit) ||
-          instance.channelId !== origin.channelId ||
-          !selfIdsOf(actor).includes(instance.userId) ||
-          !mainTaskClaimMatches(key, instance, unit)
-        )
-          return { kind: "not_found" };
-        if (!authorize(actor, "runs:read", resource(instance)).allow) return { kind: "forbidden" };
-        const historyPage = unit.history ? await deps.instances.listRecoveryHistory(unit, afterHistory) : undefined;
-        const history = historyPage
-          ? {
-              cursor: historyPage.cursor,
-              more: historyPage.more,
-              priorHistory: "not_recorded" as const,
-              receipts: historyPage.receipts.map(
-                ({ id, seq, provenance, predecessorId, actionId, workflowId, ending }) => ({
-                  id,
-                  seq,
-                  provenance,
-                  ...(predecessorId ? { predecessorId } : {}),
-                  ...(actionId ? { actionId } : {}),
-                  ...(workflowId ? { workflowId } : {}),
-                  settlement: shipSettlementOf(ending),
-                  kind: ending.kind,
-                  report: ending.report.slice(0, REPORT_LIMIT),
-                  ...(ending.report.length > REPORT_LIMIT ? { reportTruncated: true as const } : {}),
-                  at: ending.at,
-                }),
-              ),
-            }
-          : undefined;
-        const page = await deps.privateWorkerLog.listAfter(
-          privateWorkerThreadKey({ instanceId: instance.id, unit: unit.unit }),
-          afterSeq,
-          PAGE_SIZE,
-        );
-        if (
-          page.events.length > PAGE_SIZE ||
-          page.events.some((event, index) => event.seq <= (index === 0 ? afterSeq : page.events[index - 1]!.seq))
-        )
-          return { kind: "unavailable" };
-        const cursor = page.events.at(-1)?.seq ?? afterSeq;
-        const progress = page.events.flatMap((event): MainWorkerProgress[] => {
-          if (event.kind !== "status") return [];
-          const title =
-            event.frame.title
-              .split(/[\r\n]/, 1)[0]!
-              .trim()
-              .slice(0, TITLE_LIMIT) || "Working";
-          return [{ seq: event.seq, phase: event.phase, title, at: event.at }];
-        });
-        const final = unit.ending
-          ? {
-              kind: unit.ending.kind,
-              settlement: shipSettlementOf(unit.ending),
-              report: unit.ending.report.slice(0, REPORT_LIMIT),
-              ...(unit.ending.report.length > REPORT_LIMIT ? { reportTruncated: true as const } : {}),
-              at: unit.ending.at,
-              ...(unit.pr ? { pr: { number: unit.pr.number, url: unit.pr.url } } : {}),
-            }
-          : undefined;
-        return {
-          kind: "found",
-          cursor,
-          more: page.more,
-          progress,
-          ...(final ? { final } : {}),
-          ...(history ? { history } : {}),
-        };
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const link = await deps.instances.getMainTask(key);
+          if (!link) return { kind: "not_found" };
+          const [instance, units] = await Promise.all([
+            deps.instances.get(link.instanceId),
+            deps.instances.listUnits(link.instanceId),
+          ]);
+          const unit = units.find((row) => row.unit === link.unit);
+          if (
+            !isCoordinatorInstance(instance) ||
+            !isCoordinatorUnit(unit) ||
+            instance.channelId !== origin.channelId ||
+            !selfIdsOf(actor).includes(instance.userId) ||
+            !mainTaskClaimMatches(key, instance, unit)
+          )
+            return { kind: "not_found" };
+          if (!authorize(actor, "runs:read", resource(instance)).allow) return { kind: "forbidden" };
+          const seedProof = await unitSeedProofFor(instance, unit, unit.workBrief, deps.readSeedReceipt);
+          const historyPage = unit.history ? await deps.instances.listRecoveryHistory(unit, afterHistory) : undefined;
+          const history = historyPage
+            ? {
+                cursor: historyPage.cursor,
+                more: historyPage.more,
+                priorHistory: "not_recorded" as const,
+                receipts: historyPage.receipts.map(
+                  ({ id, seq, provenance, predecessorId, actionId, workflowId, ending }) => ({
+                    id,
+                    seq,
+                    provenance,
+                    ...(predecessorId ? { predecessorId } : {}),
+                    ...(actionId ? { actionId } : {}),
+                    ...(workflowId ? { workflowId } : {}),
+                    settlement: shipSettlementOf(ending),
+                    kind: ending.kind,
+                    report: ending.report.slice(0, REPORT_LIMIT),
+                    ...(ending.report.length > REPORT_LIMIT ? { reportTruncated: true as const } : {}),
+                    at: ending.at,
+                  }),
+                ),
+              }
+            : undefined;
+          const page = await deps.privateWorkerLog.listAfter(
+            privateWorkerThreadKey({ instanceId: instance.id, unit: unit.unit }),
+            afterSeq,
+            PAGE_SIZE,
+          );
+          if (
+            page.events.length > PAGE_SIZE ||
+            page.events.some((event, index) => event.seq <= (index === 0 ? afterSeq : page.events[index - 1]!.seq))
+          )
+            return { kind: "unavailable" };
+          const cursor = page.events.at(-1)?.seq ?? afterSeq;
+          const progress = page.events.flatMap((event): MainWorkerProgress[] => {
+            if (event.kind !== "status") return [];
+            const title =
+              event.frame.title
+                .split(/[\r\n]/, 1)[0]!
+                .trim()
+                .slice(0, TITLE_LIMIT) || "Working";
+            return [{ seq: event.seq, phase: event.phase, title, at: event.at }];
+          });
+          const final = unit.ending
+            ? {
+                kind: unit.ending.kind,
+                settlement: shipSettlementOf(unit.ending),
+                report: unit.ending.report.slice(0, REPORT_LIMIT),
+                ...(unit.ending.report.length > REPORT_LIMIT ? { reportTruncated: true as const } : {}),
+                at: unit.ending.at,
+                ...(unit.pr ? { pr: { number: unit.pr.number, url: unit.pr.url } } : {}),
+              }
+            : undefined;
+          // History and progress may have awaited a settlement. Rejoin the exact
+          // canonical owner and state before returning one coherent observation.
+          if (deps.liveAuthority && (!(await deps.liveAuthority.verify()) || !deps.liveAuthority.active()))
+            return { kind: "unavailable" };
+          const currentLink = await deps.instances.getMainTask(key);
+          if (!currentLink) return { kind: "not_found" };
+          const [currentInstance, currentUnits] = await Promise.all([
+            deps.instances.get(currentLink.instanceId),
+            deps.instances.listUnits(currentLink.instanceId),
+          ]);
+          const currentUnit = currentUnits.find((row) => row.unit === currentLink.unit);
+          if (
+            !isCoordinatorInstance(currentInstance) ||
+            !isCoordinatorUnit(currentUnit) ||
+            currentInstance.channelId !== origin.channelId ||
+            !selfIdsOf(actor).includes(currentInstance.userId) ||
+            !mainTaskClaimMatches(key, currentInstance, currentUnit)
+          )
+            return { kind: "not_found" };
+          if (!authorize(actor, "runs:read", resource(currentInstance)).allow) return { kind: "forbidden" };
+          const snapshot = { link, instance, unit };
+          if (
+            (await workStateHash(snapshot)) !==
+            (await workStateHash({ link: currentLink, instance: currentInstance, unit: currentUnit }))
+          )
+            continue;
+          if (deps.liveAuthority && !deps.liveAuthority.active()) return { kind: "unavailable" };
+          return {
+            kind: "found",
+            observation: await observeWorkState(input.actId, snapshot, (deps.clock ?? systemClock)(), {
+              history,
+              page,
+              seedProof,
+            }),
+            seedProof,
+            cursor,
+            more: page.more,
+            progress,
+            ...(final ? { final } : {}),
+            ...(history ? { history } : {}),
+          };
+        }
+        return { kind: "unavailable" };
       } catch {
         return { kind: "unavailable" };
       }

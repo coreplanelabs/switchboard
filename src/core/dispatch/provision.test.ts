@@ -14,7 +14,8 @@ import {
 } from "../../execution/factory.js";
 import { ExecInfraError } from "../../execution/executor.js";
 import { ResidentNeedsRefError } from "../../execution/resident.js";
-import { NullMemoryStore } from "../memory/index.js";
+import { NullMemoryStore, InMemoryMemoryStore } from "../memory/index.js";
+import { sealMemoryCandidate } from "../memory/provenance.js";
 import { NullRunHistoryWriter } from "../runHistoryWriter.js";
 import { NullMcpToolSource } from "../../mcp/source.js";
 import { NO_CAPABILITIES } from "../capabilities.js";
@@ -296,6 +297,52 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllEnvs());
 
 describe("startMemoryRead — the memory read, started", () => {
+  it("injects only an admitted immutable memory revision and forwards its dependencies", async () => {
+    const d = deps("\nmemory:\n  enabled: true\n");
+    const memory = new InMemoryMemoryStore();
+    d.memory = memory;
+    const context = {
+      version: 1 as const,
+      status: "known" as const,
+      revision: 1,
+      origins: [
+        { runId: "producer", requester: "slack:UADMIN", channelId: "slack:CX", threadKey: "slack:CX:producer" },
+      ],
+      slack: [],
+      mcp: [],
+    };
+    for (const [id, text] of [
+      ["producer", "retry uses a durable queue"],
+      ["denied", "retry hidden detail"],
+    ])
+      await memory.write("org:acme", [
+        await sealMemoryCandidate(
+          "org:acme",
+          { kind: "fact", text, sourceRunId: id, sourceThreadKey: "slack:CX:producer" },
+          context,
+        ),
+      ]);
+    const { message, root, directives } = request(d, "retry");
+    const authorizeMemory = vi.fn(async (candidate: { sourceRunId?: string }) =>
+      candidate.sourceRunId === "producer"
+        ? { ok: true as const }
+        : { ok: false as const, code: "saved-context-unproved" as const },
+    );
+    const onContext = vi.fn();
+    const block = await startMemoryRead(d, {
+      msg: { ...message, userId: "slack:UADMIN" },
+      directives,
+      repoCtxP: Promise.resolve({}),
+      root,
+      authorizeMemory,
+      onContext,
+    });
+    expect(block).toContain("retry uses a durable queue");
+    expect(block).not.toContain("hidden detail");
+    expect(authorizeMemory).toHaveBeenCalledTimes(2);
+    expect(onContext).toHaveBeenCalledWith(expect.objectContaining({ status: "known", origins: context.origins }));
+  });
+
   it("with memory off it resolves to no block, under its own span, and a rejection is never unhandled", async () => {
     const d = deps();
     const { message, root, directives, trace } = request(d, "hello there");

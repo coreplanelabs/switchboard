@@ -1,3 +1,5 @@
+import { parentContextOf } from "./handoff.js";
+import { contextCapsuleOf } from "./unitContext.js";
 import type { AudienceCheck } from "../audienceDecision.js";
 import { booleanAudienceVerifier } from "../testing/audienceVerifier.js";
 import { testSlackCapability } from "../testing/slackSources.js";
@@ -1080,6 +1082,115 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     );
   });
 
+  it.each(["checkpoint", "parent lookup", "report append"] as const)(
+    "withholds the next report and answer event after a late untrusted follow-up (%s)",
+    async (blockedAt) => {
+      const audience = {
+        kind: "slack-unshared-im" as const,
+        channelId: "slack:DMAIN",
+        userId: "slack:WALICE",
+        threadKey: "slack:DMAIN:1.0",
+      };
+      const secret = "late private result";
+      const harness = watched(piHarness, { answer: secret });
+      const s = setup("unused", {
+        agent: "general",
+        ...audience,
+        directAudience: audience,
+        io: { verifyDirectAudience: booleanAudienceVerifier(async () => true) },
+        harness: {
+          harnesses: roster(harness.harness),
+          registry: new HarnessRegistry(),
+          harnessUrl: "https://bot.example.com",
+          loopbackUrl: "http://127.0.0.1:8080",
+          containerFor: () => new FakeHarnessContainer(),
+        },
+      });
+      const inner = new InMemoryRunLedger(() => NOW);
+      const ledger = createLedgerWriteThrough({ ledger: inner, gen: "gen-T", fallback: s.store, warn: () => {} });
+      s.deps.runLedger = ledger;
+      const opened = await ledger.open({
+        runId: s.run.id,
+        threadKey: audience.threadKey,
+        startedAt: NOW,
+        meta: { agent: "general", ...audience, directAudience: audience },
+        card: null,
+        system: "test",
+        tools: [],
+        seed: {
+          messages: s.ctx.messages,
+          budgetMs: 60_000,
+          context: { version: 1, status: "known", revision: 0, origins: [], slack: [], mcp: [] },
+        },
+      });
+      if (opened.kind !== "tracked") throw new Error("untracked test");
+      let entered!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let resume!: () => void;
+      const held = new Promise<void>((resolve) => {
+        resume = resolve;
+      });
+      const block = async () => {
+        entered();
+        await held;
+      };
+      if (blockedAt === "checkpoint") {
+        const original = opened.run.checkpointSession.bind(opened.run);
+        opened.run.checkpointSession = async () => {
+          await block();
+          return original();
+        };
+      } else if (blockedAt === "parent lookup") {
+        s.deps.runStore.getSummary = async () => {
+          await block();
+          return {
+            id: "parent",
+            userId: audience.userId,
+            channelId: audience.channelId,
+            threadKey: "slack:DMAIN:parent",
+          } as RunRecord;
+        };
+      } else {
+        const original = ledger.appendSession.bind(ledger);
+        ledger.appendSession = async (...args) => {
+          const result = await original(...args);
+          await block();
+          return result;
+        };
+      }
+      const privateAudienceLatch = { revoked: false };
+      try {
+        const running = runLoop(s.deps, {
+          ...s.ctx,
+          ledgerRun: opened.run,
+          privateAudienceLatch,
+          channelVisibility: "dm",
+          ...(blockedAt !== "checkpoint" ? { parentRunId: "parent" } : {}),
+        });
+        await started;
+        s.ctx.admitted.inbox.markUntrustedFollowUp();
+        resume();
+        const out = answered(await running);
+        expect(privateAudienceLatch.revoked).toBe(true);
+        expect(out.answer).not.toContain(secret);
+        expect(JSON.stringify(s.published)).not.toContain(secret);
+        const { contextThreadSessionKey } = await import("../runLedger/sessionLog.js");
+        const parent = await ledger.readSession(contextThreadSessionKey("slack:DMAIN:parent"), 0);
+        expect(JSON.stringify(parent.messages)).not.toContain(secret);
+        if (blockedAt === "checkpoint") {
+          const own = await ledger.readSession(contextThreadSessionKey(audience.threadKey), 0);
+          expect(JSON.stringify(own.messages)).not.toContain(secret);
+        }
+      } finally {
+        await opened.run.close();
+        s.ending.drain(undefined);
+        await s.writer.settled();
+      }
+    },
+  );
+
   it("seals a recovered private result when a prior indirect follow-up was already consumed", async () => {
     const audience = {
       kind: "slack-unshared-im" as const,
@@ -1370,6 +1481,13 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     s.deps.coordinatorInstances = instances;
     await runLoop(s.deps, {
       ...s.ctx,
+      captureUnitContext: async () =>
+        contextCapsuleOf({
+          version: 1,
+          source: { runId: s.run.id, requester: audience.userId, channelId, threadKey },
+          session: { key: `${threadKey}:@thread`, from: 0, to: -1 },
+          assets: [],
+        }),
       configuredRepo: "acme/api",
       msg: { ...s.ctx.msg, ...audience, directAudience: audience, messageId: "1.0", text: "fix it in acme/api" },
       requestText: "fix it in acme/api",
@@ -1438,6 +1556,13 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       s.deps.mainTaskStart = started;
       await runLoop(s.deps, {
         ...s.ctx,
+        captureUnitContext: async () =>
+          contextCapsuleOf({
+            version: 1,
+            source: { runId: s.run.id, requester: audience.userId, channelId, threadKey },
+            session: { key: `${threadKey}:@thread`, from: 0, to: -1 },
+            assets: [],
+          }),
         configuredRepo: "acme/api",
         msg: { ...s.ctx.msg, channelId, threadKey, directAudience: audience, messageId: "1.0", text: initialText },
         requestText: initialText,
@@ -1512,6 +1637,13 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     s.deps.mainTaskStart = started;
     await runLoop(s.deps, {
       ...s.ctx,
+      captureUnitContext: async () =>
+        contextCapsuleOf({
+          version: 1,
+          source: { runId: s.run.id, requester: audience.userId, channelId, threadKey },
+          session: { key: `${threadKey}:@thread`, from: 0, to: -1 },
+          assets: [],
+        }),
       configuredRepo: "acme/api",
       msg: {
         ...s.ctx.msg,
@@ -2058,17 +2190,144 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     });
     s.deps.coordinatorInstances = instances;
     s.deps.privateWorkerLog = log;
-    const out = answered(await runLoop(s.deps, s.ctx));
+    const inner = new InMemoryRunLedger();
+    const ledger = createLedgerWriteThrough({ ledger: inner, gen: "work-read", fallback: s.store, warn: () => {} });
+    s.deps.runLedger = ledger;
+    const opened = await ledger.open({
+      runId: s.run.id,
+      threadKey: dmThread,
+      startedAt: NOW,
+      meta: { agent: "orchestrator", userId: instance.userId, channelId: instance.channelId, threadKey: dmThread },
+      card: null,
+      system: s.ctx.system,
+      tools: [],
+      seed: {
+        messages: s.ctx.messages,
+        budgetMs: 60_000,
+        context: { version: 1, status: "known", revision: 0, origins: [], slack: [], mcp: [] },
+      },
+    });
+    if (opened.kind !== "tracked") throw new Error("untracked fixture");
+    const out = answered(await runLoop(s.deps, { ...s.ctx, ledgerRun: opened.run }));
     expect(out.answer).toContain("worker is testing");
     expect(visible).toContain("work_progress");
     s.ending.drain(true);
     await s.writer.settled();
-    const record = (await s.store.get("run-l"))!;
+    const record = inner.finished.get("run-l")!;
     const result = JSON.stringify(record.events.filter((event) => event.type === "tool_result"));
     expect(modelContext).toContain("Testing");
     expect(modelContext).not.toMatch(/private coding transcript|private details/);
     expect(result).not.toContain("Testing");
     expect(result).not.toMatch(/private coding transcript|private details/);
+  });
+
+  it.each(["stable", "changes again"] as const)("refreshes current work before the final answer (%s)", async (race) => {
+    const threadKey = "slack:DMAIN:1.0",
+      channelId = "slack:DMAIN",
+      userId = "slack:UX";
+    const instances = new InMemoryCoordinatorInstanceStore();
+    const instance = {
+      id: "status-work",
+      kind: "ship" as const,
+      userId,
+      channelId,
+      threadKey,
+      repo: "acme/api",
+      branch: "ship/work",
+      base: "main",
+      plan: { id: "work" },
+      merge: "person" as const,
+      createdAt: 1,
+    };
+    const unit = {
+      instanceId: instance.id,
+      unit: "task",
+      slug: "work",
+      branch: instance.branch,
+      dependsOn: [],
+      rounds: [],
+      startedAt: 2,
+      workBrief: {
+        requesterId: userId,
+        mainThreadKey: threadKey,
+        actId: "work",
+        repo: instance.repo,
+        base: "main",
+        question: "What failed?",
+        findings: [],
+        requestedChange: "Fix it",
+      },
+    };
+    await instances.recordRequesterTurn({ threadKey, requesterId: userId, messageId: "1" });
+    await instances.claimMainTask({ mainThreadKey: threadKey, actId: "work" }, instance, unit, {
+      requesterId: userId,
+      sourceMessageId: "1",
+      revision: 1,
+      repo: instance.repo,
+    });
+    let turns = 0;
+    const requests: import("../provider.js").CompletionRequest[] = [];
+    const scripted: Provider = {
+      name: "fake",
+      async complete(req) {
+        requests.push(req);
+        if (turns++ === 0)
+          return {
+            content: [{ type: "tool_use", id: "status-read", name: "work_status", input: { actId: "work" } }],
+            stopReason: "tool_use",
+          };
+        if (turns === 2) {
+          await instances.putUnits([{ ...unit, ending: { kind: "aborted", at: 3, report: "Stopped" } }]);
+          return { content: [{ type: "text", text: "The work is running." }], stopReason: "end_turn" };
+        }
+        expect(JSON.stringify(req.messages)).toContain("aborted");
+        if (race === "changes again")
+          await instances.putUnits([{ ...unit, ending: { kind: "aborted", at: 4, report: "Changed again" } }]);
+        return { content: [{ type: "text", text: "The work was aborted." }], stopReason: "end_turn" };
+      },
+    };
+    const s = setup("", {
+      agent: "orchestrator",
+      provider: scripted,
+      channelId,
+      threadKey,
+      directAudience: { kind: "slack-unshared-im", channelId, threadKey, userId },
+      io: { verifyDirectAudience: booleanAudienceVerifier(async () => true) },
+    });
+    s.deps.coordinatorInstances = instances;
+    s.deps.plane = async () => ({}) as PlaneService;
+    const inner = new InMemoryRunLedger(),
+      ledger = createLedgerWriteThrough({ ledger: inner, gen: "status-gen", fallback: s.store, warn: () => {} });
+    s.deps.runLedger = ledger;
+    const opened = await ledger.open({
+      runId: s.run.id,
+      threadKey,
+      startedAt: NOW,
+      meta: { agent: "orchestrator", userId, channelId, threadKey },
+      card: null,
+      system: s.ctx.system,
+      tools: [],
+      seed: {
+        messages: s.ctx.messages,
+        budgetMs: 60_000,
+        context: { version: 1, status: "known", revision: 0, origins: [], slack: [], mcp: [] },
+      },
+    });
+    if (opened.kind !== "tracked") throw new Error("untracked fixture");
+    const privateAudienceLatch = { revoked: false };
+    const out = answered(await runLoop(s.deps, { ...s.ctx, ledgerRun: opened.run, privateAudienceLatch }));
+    expect(out.answer).toContain(race === "stable" ? "aborted" : "current state remains unconfirmed");
+    expect(out.answer).not.toContain("is running");
+    expect(privateAudienceLatch.revoked).toBe(false);
+    expect(turns).toBe(3);
+    const saved = (await ledger.readLiveRuns()).find((row) => row.runId === s.run.id);
+    expect(saved?.state.workRefreshUsed).toBe(true);
+    expect(saved?.state.workReads).toEqual([expect.objectContaining({ callId: "status-read", tool: "work_status" })]);
+    s.ending.drain(true);
+    await s.writer.settled();
+    const record = inner.finished.get(s.run.id);
+    expect(record?.workReads).toHaveLength(1);
+    expect(JSON.stringify(record?.events.filter((e) => e.type === "answer"))).not.toContain("is running");
   });
 
   it("revokes private progress when an app follow-up folds into the live main run", async () => {
@@ -2183,7 +2442,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
 
   const WIP_COORDINATOR: CoordinatorTag = {
     parentInstanceId: "instance",
-    idempotencyKey: "key",
+    idempotencyKey: "instance:U11/0/coding",
     base: "main",
   };
   it("a coding child reads Depot failure evidence through its repo-bound Worker bridge", async () => {
@@ -6911,10 +7170,7 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
         text: "agent:research what is a Durable Object?",
         opts: {
           parent: { runId: "run-l", depth: 1, remainingMs: expect.any(Number) },
-          seed: [
-            { role: "user", text: "look into durable objects" },
-            { role: "assistant", text: "Storage first: one research child." },
-          ],
+          parentContext: parentContextOf(conductorLog),
         },
       },
     ]);

@@ -19,6 +19,8 @@ export interface VerifiedSlackContextCapability {
   readSource(request: SlackContextRequest): Promise<SlackSourceRead>;
   revalidateSource(receipt: SlackSourceReceipt): Promise<boolean>;
   verifyDirectOrigin(): Promise<boolean>;
+  /** Current source audience for internal context consumption, without reading text. */
+  originAudience?(): Promise<"public" | "private" | "dm" | undefined>;
 }
 
 export const slackContextTool: RunnableTool = {

@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
-import { z } from "zod";
+import { sourceHash } from "../core/references/receipts.js";
+import { isSourceReadReference, type SourceReadReference } from "./sourceReadState.js";
+import { sourceReadState, type SourceReadState, type SourceReadOwner, type ReadRecord } from "./sourceReadState.js";
+export { sourceReadState, type SourceReadState, type SourceReadOwner } from "./sourceReadState.js";
 import { wrapUntrusted } from "../core/commandRegistry.js";
 import type { AudienceCheck } from "../core/audienceDecision.js";
 import { SOURCE_READ_ELIGIBILITY_MS, SOURCE_REVALIDATE_MAX_MS } from "../core/budgets.js";
@@ -7,41 +10,11 @@ import type { McpCallResult } from "./types.js";
 import type { Span } from "../core/trace/types.js";
 import {
   sourceReadJson,
-  sourceReadQuerySchema,
   sourceReadResponseSchema,
   type SourceReadContract,
   type SourceReadResponse,
 } from "./sourceReadProtocol.js";
 
-const text = z.string().min(1).max(1024);
-const ownerSchema = z.object({ runId: text, requester: text, agent: text, channelId: text, threadKey: text }).strict();
-const recordSchema = z
-  .object({
-    actionId: text,
-    callIds: z.array(text).min(1).max(50),
-    toolName: text,
-    serverId: text,
-    connectionRevision: text,
-    sessionId: text,
-    operationId: text,
-    operationRevision: text,
-    query: sourceReadQuerySchema,
-    phase: z.enum(["pending", "unknown", "settled"]),
-    exposed: z.boolean(),
-    response: sourceReadResponseSchema.optional(),
-  })
-  .strict();
-const stateSchema = z
-  .object({
-    version: z.literal(1),
-    owner: ownerSchema,
-    recoverable: z.boolean(),
-    records: z.array(recordSchema).max(50),
-  })
-  .strict();
-export type SourceReadOwner = z.infer<typeof ownerSchema>;
-export type SourceReadState = z.infer<typeof stateSchema>;
-type ReadRecord = SourceReadState["records"][number];
 export interface SourceReadOperation {
   toolName: string;
   serverId: string;
@@ -64,21 +37,6 @@ const unavailable = "Source unavailable: the read could not be authorized or rec
 const unknown =
   "Source outcome unknown: only inspection of the original action is allowed. No source result is available.";
 
-export function sourceReadState(value: unknown, owner: SourceReadOwner): SourceReadState | undefined {
-  const parsed = stateSchema.safeParse(value);
-  if (!parsed.success || sourceReadJson(parsed.data.owner) !== sourceReadJson(owner)) return undefined;
-  const ids = new Set<string>(),
-    calls = new Set<string>();
-  for (const r of parsed.data.records) {
-    if (ids.has(r.actionId)) return undefined;
-    ids.add(r.actionId);
-    for (const call of r.callIds) {
-      if (calls.has(call)) return undefined;
-      calls.add(call);
-    }
-  }
-  return parsed.data;
-}
 function resultText(r: ReadRecord): string {
   const response = r.response;
   if (r.phase !== "settled" || !response) return unknown;
@@ -94,6 +52,128 @@ function resultText(r: ReadRecord): string {
     }),
   );
 }
+function validResponse(raw: McpCallResult, r: ReadRecord, now: () => number): SourceReadResponse | undefined {
+  if (raw.isError || JSON.stringify(raw.structuredContent ?? null).length > 24_000) return undefined;
+  const parsed = sourceReadResponseSchema.safeParse(raw.structuredContent);
+  if (!parsed.success) return undefined;
+  const value = parsed.data;
+  if (value.actionId !== undefined && value.actionId !== r.actionId) return undefined;
+  if (!("binding" in value)) return value;
+  if (
+    value.operationId !== r.operationId ||
+    value.operationRevision !== r.operationRevision ||
+    value.binding.sessionId !== r.sessionId ||
+    sourceReadJson(value.binding.resource) !== sourceReadJson(r.query.resource) ||
+    sourceReadJson(value.binding.input) !== sourceReadJson(r.query.input) ||
+    Date.parse(value.binding.expiresAt) <= now()
+  )
+    return undefined;
+  if (r.response && "binding" in r.response && sourceReadJson(r.response.binding) !== sourceReadJson(value.binding))
+    return undefined;
+  if (
+    value.status === "succeeded" &&
+    (JSON.stringify(value.result).length > 16_000 ||
+      Date.parse(value.observedAt) > now() ||
+      Date.parse(value.observedAt) >= Date.parse(value.binding.expiresAt) ||
+      Date.parse(value.binding.expiresAt) - Date.parse(value.observedAt) > SOURCE_READ_ELIGIBILITY_MS)
+  )
+    return undefined;
+  if (r.response?.status === "succeeded" && sourceReadJson(r.response) !== sourceReadJson(value)) return undefined;
+  return value;
+}
+
+/** Inspect an original action for a currently admitted consumer. This read
+ * neither creates an action nor retargets, refreshes or rewrites its owner. */
+export async function inspectStoredSourceRead(input: {
+  state: unknown;
+  owner: SourceReadOwner;
+  reference: SourceReadReference;
+  requester: string;
+  operations: readonly SourceReadOperation[];
+  audience(): Promise<boolean>;
+  now(): number;
+  signal?: AbortSignal;
+}): Promise<AudienceCheck> {
+  const refused = { ok: false as const, code: "mcp-source-changed" as const };
+  if (
+    input.requester !== input.owner.requester ||
+    !isSourceReadReference(input.reference) ||
+    input.reference.runId !== input.owner.runId
+  )
+    return refused;
+  const state = sourceReadState(input.state, input.owner);
+  const row = state?.records.find((r) => r.actionId === input.reference.actionId);
+  if (
+    !row ||
+    !row.exposed ||
+    row.phase !== "settled" ||
+    row.response?.status !== "succeeded" ||
+    !input.reference.callIds.every((id) => row.callIds.includes(id)) ||
+    (await sourceHash(row.response)) !== input.reference.responseHash ||
+    Date.parse(row.response.binding.expiresAt) <= input.now()
+  )
+    return refused;
+  const operation = input.operations.find(
+    (op) =>
+      op.toolName === row.toolName &&
+      op.serverId === row.serverId &&
+      op.connectionRevision === row.connectionRevision &&
+      op.contract.descriptor.operationId === row.operationId &&
+      op.contract.descriptor.operationRevision === row.operationRevision &&
+      op.contract.accepts(row.query),
+  );
+  if (!operation) return refused;
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  input.signal?.addEventListener("abort", abort, { once: true });
+  if (input.signal?.aborted) controller.abort();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const allowed = async () =>
+    !controller.signal.aborted &&
+    (await input.audience()) &&
+    (await operation.current()) &&
+    (await input.audience()) &&
+    !controller.signal.aborted;
+  try {
+    return await Promise.race([
+      (async (): Promise<AudienceCheck> => {
+        if (!(await allowed())) return refused;
+        const response = validResponse(
+          await operation.call(
+            {
+              version: 1,
+              action: "inspect",
+              actionId: row.actionId,
+              operationRevision: row.operationRevision,
+              ...row.query,
+            },
+            row.sessionId,
+            controller.signal,
+          ),
+          row,
+          input.now,
+        );
+        return response?.status === "succeeded" &&
+          (await allowed()) &&
+          Date.parse(response.binding.expiresAt) > input.now()
+          ? { ok: true }
+          : refused;
+      })(),
+      new Promise<AudienceCheck>((resolve) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          resolve({ ok: false, code: "source-check-timeout" });
+        }, SOURCE_REVALIDATE_MAX_MS);
+      }),
+    ]);
+  } catch {
+    return refused;
+  } finally {
+    clearTimeout(timer);
+    input.signal?.removeEventListener("abort", abort);
+  }
+}
+
 /** The ledger owns intent; the source owns authority and effect settlement. */
 export function createSourceReads(opts: {
   owner: SourceReadOwner;
@@ -176,35 +256,6 @@ export function createSourceReads(opts: {
         op.contract.accepts(r.query),
     );
   }
-  function validResponse(raw: McpCallResult, r: ReadRecord): SourceReadResponse | undefined {
-    if (raw.isError || JSON.stringify(raw.structuredContent ?? null).length > 24_000) return undefined;
-    const parsed = sourceReadResponseSchema.safeParse(raw.structuredContent);
-    if (!parsed.success) return undefined;
-    const value = parsed.data;
-    if (value.actionId !== undefined && value.actionId !== r.actionId) return undefined;
-    if (!("binding" in value)) return value;
-    if (
-      value.operationId !== r.operationId ||
-      value.operationRevision !== r.operationRevision ||
-      value.binding.sessionId !== r.sessionId ||
-      sourceReadJson(value.binding.resource) !== sourceReadJson(r.query.resource) ||
-      sourceReadJson(value.binding.input) !== sourceReadJson(r.query.input) ||
-      Date.parse(value.binding.expiresAt) <= opts.now()
-    )
-      return undefined;
-    if (r.response && "binding" in r.response && sourceReadJson(r.response.binding) !== sourceReadJson(value.binding))
-      return undefined;
-    if (
-      value.status === "succeeded" &&
-      (JSON.stringify(value.result).length > 16_000 ||
-        Date.parse(value.observedAt) > opts.now() ||
-        Date.parse(value.observedAt) >= Date.parse(value.binding.expiresAt) ||
-        Date.parse(value.binding.expiresAt) - Date.parse(value.observedAt) > SOURCE_READ_ELIGIBILITY_MS)
-    )
-      return undefined;
-    if (r.response?.status === "succeeded" && sourceReadJson(r.response) !== sourceReadJson(value)) return undefined;
-    return value;
-  }
   async function invoke(
     r: ReadRecord,
     action: "execute" | "inspect",
@@ -227,6 +278,7 @@ export function createSourceReads(opts: {
           span,
         ),
         r,
+        opts.now,
       );
     } catch {
       /* A lost acknowledgment leaves this original action unresolved. */

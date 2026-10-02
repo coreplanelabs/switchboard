@@ -91,6 +91,7 @@ Statuses: **proposed** (written, not yet agreed), **accepted** (agreed, being bu
 | 0079 | [A person outlives the surfaces they use](../decisions/0079-a-person-outlives-the-surfaces-they-use.md) | Verified external identities resolve to a durable person; each request retains its actor, authority and surface | proposed | 2026-09-25 |
 | 0081 | [Account linking proves both identities and revocation fences their use](../decisions/0081-account-linking-proves-both-identities-and-revocation-fences-their-use.md) | Dual authentication with a one-time intent; transactional binding and revision-fenced authorization | proposed | 2026-09-26 |
 | 0082 | [An explicit PR batch may start exact Ship children](../decisions/0082-an-explicit-pr-batch-may-start-exact-ship-children.md) | — | accepted | 2026-09-29 |
+| 0083 | [Context keeps its original sources across conversations and child work](../decisions/0083-context-keeps-its-original-sources-across-conversations-and-child-work.md) | Information-flow control and immutable snapshots | accepted | 2026-10-01 |
 
 <!-- /generated:decision-records -->
 

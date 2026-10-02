@@ -1288,6 +1288,29 @@ describe("deliverAnswer — the answer reaches the thread", () => {
     expect(audience.refusal.withheldAt).toBe("answer-event");
   });
 
+  it("rechecks work state after the card closes without treating change as an audience refusal", async () => {
+    const s = finishedRun();
+    let changed = false;
+    const audience = {};
+    await deliverAnswer({
+      ...s.ctx,
+      audience,
+      answer: "The work is running.",
+      prNote: "Old work details",
+      card: {
+        ...s.ctx.card,
+        done: async (frame) => {
+          changed = true;
+          s.closes.push(frame);
+        },
+      },
+      publicationCheck: async () => ({ ok: true }),
+      currentWorkCheck: async () => (changed ? "The work's current state remains unconfirmed." : undefined),
+    });
+    expect(s.replies).toEqual(["The work's current state remains unconfirmed."]);
+    expect(audience).not.toHaveProperty("refusal");
+  });
+
   it("rechecks source access after the card closes and before the channel reply", async () => {
     const s = finishedRun();
     let sourceReadable = true;

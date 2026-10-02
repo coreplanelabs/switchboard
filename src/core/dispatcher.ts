@@ -1,3 +1,22 @@
+import { runSessionIdentity } from "./dispatch/sessionIdentity.js";
+import { appendThreadTurn } from "./runLedger/threadSession.js";
+import { contextAccessForMessage, contextAccessForRun, revalidateAdmittedContext } from "./dispatch/contextAccess.js";
+import { contextForReferences, contextForSourceReads, freshContext } from "./dispatch/contextSeed.js";
+import { applyContextCheckpoint, type ContextCheckpointReceipt } from "./references/contextCheckpoint.js";
+import {
+  contextDependenciesOf,
+  mergeContextDependencies,
+  UNKNOWN_CONTEXT_DEPENDENCIES,
+  type ContextDependencies,
+} from "./references/contextDependencies.js";
+import { readOperatorNotes } from "./dispatch/operatorNotes.js";
+import { readOperatorMemory } from "./dispatch/operatorMemory.js";
+import { reflectionActor } from "./memory/index.js";
+import { readOperatorTailContext } from "./dispatch/operatorTail.js";
+import { isChildHandoff, type ChildHandoff, type HandoffConsumer, type ParentContext } from "./dispatch/handoff.js";
+import { validateChildHandoff } from "./dispatch/handoffValidation.js";
+import { contextCapsuleOf, type UnitContext, type UnitContextBinding } from "./dispatch/unitContext.js";
+import type { HandoffAccess, HandoffAccessFactory } from "./dispatch/handoffRuntime.js";
 import { isBudgetAnswer } from "./answerOutcome.js";
 import {
   audienceRefusalOf,
@@ -7,7 +26,6 @@ import {
   type AudienceRefusalCode,
   type AudienceTrace,
 } from "./audienceDecision.js";
-import { requiresFreshSourceTool } from "./runLedger/sessionLog.js";
 import { sourceBinding, type SessionSources } from "./references/receipts.js";
 import { getAgent } from "../agents/registry.js";
 import { MINUTE_MS, minutesToMs } from "./budgets.js";
@@ -42,7 +60,7 @@ import {
   type ResumeContext,
 } from "./dispatch/admission.js";
 import { answerChatCommand, type FastPathDeps } from "./dispatch/fastPath.js";
-import { actorIdsOf, cancelPending, consumeAndRun, REFUSED_REASON } from "./dispatch/confirm.js";
+import { actorIdsOf, cancelPending, consumeAndRun, OFFER_CONTEXT_LINE, REFUSED_REASON } from "./dispatch/confirm.js";
 import type { PrWorkBinding } from "./ship/prWorkBinding.js";
 import {
   postSettledOutcome,
@@ -60,6 +78,7 @@ import {
   referenceRefusalCode,
   type ReferenceDeps,
 } from "./dispatch/references.js";
+import { authorize } from "./authz/authorize.js";
 import { chatActorOf, resolveChatActor } from "./authz/actor.js";
 import { operatorModeOf, referencesOn } from "../config.js";
 import { parseChatCommand } from "./commandChat.js";
@@ -149,6 +168,7 @@ import { resolveAddressSeverity } from "./reviewVerdict.js";
 import { closedReviewPreflight, type RoundWorkspace } from "./reviewRound.js";
 import { DEFAULT_CONTRACT_MAX_CHARS, renderContract, type ChildContract } from "./ship/contract.js";
 import { withContractInFirstUserTurn } from "./ship/codingChild.js";
+import { acknowledgeUnitSeed } from "./dispatch/unitSeedProof.js";
 import { prepareFreshTurn, settleThread, tellDropped } from "./dispatch/settle.js";
 import {
   abandonLostWorkspace,
@@ -255,6 +275,8 @@ export interface CoreDeps
     ShipDeps {
   /** The MCP tool source required for provisioning every run. */
   mcp: McpToolSource;
+  /** Canonical context storage and current source authorization. */
+  handoffAccessForRun?: HandoffAccessFactory;
   /** The configured providers used to build the one door's model call. */
   completions: ProviderTable;
   /** The operator's model call (record 0057; routing-and-config item 29).
@@ -516,6 +538,12 @@ export interface DispatchOptions {
    *  history, as for every request a person, a schedule or a coordinator
    *  started; the record says which (run-history item 52). */
   seed?: TextTurn[];
+  /** Structured evidence must be proven against its durable source before seed. */
+  parentContext?: ParentContext;
+  /** A previously bound immutable manifest restored from the original run. */
+  childHandoff?: ChildHandoff;
+  /** Trusted coordinator identity for its previously captured immutable context. */
+  unitContextAdmission?: UnitContextBinding;
   /** Set by the coordinator's spawn route alone (src/channels/adminCoordinator.ts;
    *  run-history item 48): this request is a coordinator instance's child —
    *  the instance and the idempotency key ride every row the run has, and a
@@ -691,6 +719,22 @@ export async function dispatch(
   const ended: DispatchOutcome = { status: "completed" };
   const resume = opts.resume;
   const restart = opts.restart;
+  let incomingHandoff: unknown =
+    opts.parentContext !== undefined
+      ? (opts.parentContext.handoff ?? null)
+      : opts.childHandoff !== undefined
+        ? opts.childHandoff
+        : (resume?.row.meta.childHandoff ?? restart?.row.meta.childHandoff);
+  let hasHandoff = incomingHandoff !== undefined;
+  let continuedHandoff = false;
+  const handoffFactory = deps.handoffAccessForRun ?? contextAccessForRun(deps);
+  const contextReader = contextAccessForMessage(deps, { msg, io });
+  let operatorContext = freshContext();
+  let memoryContext = freshContext();
+  let boundHandoff: ChildHandoff | undefined;
+  let handoffAccess: HandoffAccess | undefined;
+  let handoffConsumer: HandoffConsumer | undefined;
+  let handoffReserved = false;
   // Recovery authority is a durable fact of the coordinator child, not a
   // process-local spawn option. A resume/restart rebuilds the full boundary
   // from the run's coordinator event before any profile or target decision.
@@ -1010,6 +1054,25 @@ export async function dispatch(
         // private authority record cannot be read.
       }
     }
+    if (
+      deps.runLedger.sessionPersistence &&
+      !resume &&
+      !restart &&
+      !opts.parent &&
+      !coordinator &&
+      !opts.seed &&
+      !hasHandoff
+    ) {
+      await appendThreadTurn(deps.runLedger, {
+        threadKey: msg.threadKey,
+        rowId: msg.messageId ?? `request:${root.traceId}:${root.id}`,
+        role: "user",
+        text: msg.text,
+        actor: msg.userId,
+        ...(opts.intake?.verdict === "silent" ? { silent: true } : {}),
+        context: freshContext(),
+      });
+    }
     // Keep the requester's target before the model transcript can grow.
     // Child requests and replay are not requester-authored evidence.
     if (!resume && !restart && !opts.parent && !opts.coordinator) {
@@ -1242,7 +1305,14 @@ export async function dispatch(
       // have been — mention or not, never reduced to a bare answer. The joined
       // line is what the operator decides, so the fragment
       // never becomes a request by itself.
-      const pendingQuestion = operatorMode === "on" ? pendingQuestionOf(operatorThread, msg.userId) : undefined;
+      const pendingDecision =
+        operatorMode === "on" && operatorThread?.[0]?.operator?.outcome === "question"
+          ? await contextReader.readOperatorDecision(operatorThread[0].id)
+          : undefined;
+      const pendingQuestion = pendingDecision
+        ? pendingQuestionOf([{ userId: operatorThread?.[0]?.userId, operator: pendingDecision.operator }], msg.userId)
+        : undefined;
+      const pendingContext = pendingQuestion ? pendingDecision?.context : undefined;
       const joinedAnswer =
         pendingQuestion !== undefined && !(pendingQuestion.proposal !== undefined && isYesAnswer(msg.text))
           ? joinedAnswerRequest(pendingQuestion, msg.text)
@@ -1281,14 +1351,67 @@ export async function dispatch(
                     }
                   : undefined;
       operatorEvent = await root.span("dispatch.operator", async (span) => {
-        const event = await operatorStage(deps, {
-          msg: doorMsg,
-          mode: operatorMode,
-          ...(operatorThread ? { thread: operatorThread } : {}),
-          ...(opts.intake ? { intake: opts.intake } : {}),
-          ...(threadOwner ? { owner: threadOwner } : {}),
-          ...(answeredTarget ? { answeredTarget } : {}),
-        });
+        const github = githubCapabilityFor(deps, chatActorOf(deps.config, msg));
+        const event = await operatorStage(
+          {
+            ...deps,
+            github: {
+              listRepos: () => github.readableRepos?.() ?? Promise.resolve([]),
+              listTree: (...args) => github.api.listTree(...args),
+              readFile: (...args) => github.api.readFile(...args),
+            },
+          },
+          {
+            msg: doorMsg,
+            mode: operatorMode,
+            pending: pendingQuestion,
+            onContext: (context) => {
+              operatorContext = mergeContextDependencies(context, ...(pendingContext ? [pendingContext] : []));
+            },
+            readTail: () =>
+              readOperatorTailContext({
+                ledger: deps.runLedger,
+                runs: operatorThread ?? [],
+                msg,
+                validateDependencies: contextReader.validateDependencies,
+                normalizeDependencies: contextReader.normalizeDependencies,
+              }),
+            readNotes: () =>
+              readOperatorNotes({
+                ledger: deps.runLedger,
+                runs: operatorThread ?? [],
+                msg,
+                io,
+                validateDependencies: contextReader.validateDependencies,
+                normalizeDependencies: contextReader.normalizeDependencies,
+              }),
+            readMemory: () =>
+              readOperatorMemory({
+                organization: deps.config.config.organization,
+                requester: msg.userId,
+                channelId: msg.channelId,
+                text: doorMsg.text,
+                memoryConfig: deps.config.config.memory,
+                memory: deps.memory,
+                canReadScope: (key) => {
+                  const kind = key.slice(0, key.indexOf(":"));
+                  return (
+                    (kind === "org" || kind === "user" || kind === "repo" || kind === "channel") &&
+                    authorize(
+                      reflectionActor(chatActorOf(deps.config, msg), { channelId: msg.channelId }),
+                      "memory:read",
+                      { type: "memory-scope", key, kind },
+                    ).allow
+                  );
+                },
+                authorizeSource: ({ candidate }) => contextReader.authorizeMemory(candidate),
+              }),
+            ...(operatorThread ? { thread: operatorThread } : {}),
+            ...(opts.intake ? { intake: opts.intake } : {}),
+            ...(threadOwner ? { owner: threadOwner } : {}),
+            ...(answeredTarget ? { answeredTarget } : {}),
+          },
+        );
         if (event) {
           const repoSource = event.binds?.find((bind) => bind.repoSource !== undefined)?.repoSource;
           const attrs = {
@@ -1326,6 +1449,7 @@ export async function dispatch(
         registry.publish(live.runId, { type: "operator", ...operatorEvent, at: clock() });
         operatorEvent = undefined;
       } else if (operatorMode === "on" && operatorEvent) {
+        let operatorReplyIndex = 0;
         const execution = await root.span("dispatch.operator_decision", () =>
           executeOperatorDecision(deps, {
             msg: doorMsg,
@@ -1333,6 +1457,18 @@ export async function dispatch(
             ending,
             trace,
             event: operatorEvent!,
+            contextDependencies: structuredClone(operatorContext),
+            validateContext: () => revalidateAdmittedContext(() => operatorContext, contextReader.validateDependencies),
+            appendReply: async (text) => {
+              if (!deps.runLedger.sessionPersistence) return;
+              await appendThreadTurn(deps.runLedger, {
+                threadKey: msg.threadKey,
+                rowId: `${msg.messageId ?? `request:${root.traceId}:${root.id}`}:operator-reply:${operatorReplyIndex++}`,
+                role: "assistant",
+                text,
+                context: operatorContext,
+              });
+            },
             ...(operatorThread ? { thread: operatorThread } : {}),
             ...(threadOwner ? { owner: threadOwner } : {}),
           }),
@@ -2216,6 +2352,9 @@ export async function dispatch(
         ...(operationTarget !== undefined ? { operationTarget } : {}),
         ...(opts.parent ? { parent: opts.parent } : {}),
         ...(opts.seed ? { seed: opts.seed } : {}),
+        ...(opts.parentContext !== undefined ? { parentContext: opts.parentContext } : {}),
+        ...(opts.childHandoff !== undefined ? { childHandoff: opts.childHandoff } : {}),
+        ...(opts.unitContextAdmission !== undefined ? { unitContextAdmission: opts.unitContextAdmission } : {}),
         ...(opts.coordinator ? { coordinator: opts.coordinator } : {}),
         ...(opts.restartOf !== undefined ? { restartOf: opts.restartOf } : {}),
         ...(opts.restartCarried !== undefined ? { restartCarried: opts.restartCarried } : {}),
@@ -2291,12 +2430,16 @@ export async function dispatch(
     // Cross-session memory — READ path, started here (dispatch/provision.ts) so
     // the memory Worker round trip overlaps the repo/PR resolution and the
     // attach; awaited when the prompt is composed.
-    // The pilot cannot prove an org/repo memory record's audience from a
-    // private DM source. Keep this agent's context within its thread.
-    const memoryBlockP =
-      agent.name === "orchestrator"
-        ? Promise.resolve(undefined)
-        : startMemoryRead(deps, { msg, directives, repoCtxP, root });
+    const memoryBlockP = startMemoryRead(deps, {
+      msg,
+      directives,
+      repoCtxP,
+      root,
+      authorizeMemory: contextReader.authorizeMemory,
+      onContext: (context) => {
+        memoryContext = context;
+      },
+    });
 
     // Acknowledge NOW, before anything slow. Everything between here and the
     // model turn can take minutes — repo/PR resolution (GitHub REST), memory
@@ -2522,11 +2665,28 @@ export async function dispatch(
     // unexpected throw propagates to the outer catch after the branch closed
     // its own card and persisted its failed record.
     if (agent.name === "ship") {
+      let context: UnitContext | undefined;
+      if (opts.parentContext !== undefined) {
+        const handoff = opts.parentContext.handoff;
+        if (!isChildHandoff(handoff)) throw new Error("The parent context cannot be durably captured.");
+        const consumer = { ...handoff.source, attempt: handoff.source.runId };
+        const access = await handoffFactory({ consumer, msg, io });
+        const captured = await validateChildHandoff({
+          value: handoff,
+          consumer,
+          mode: "capture",
+          deps: access,
+          inline: opts.parentContext,
+        });
+        if (captured.kind !== "valid") throw new Error("The parent context cannot be durably captured.");
+        context = contextCapsuleOf(captured.context.handoff);
+      }
       setupCard = undefined; // the ship branch owns the card from here
       clearInterval(setupHeartbeat);
       shipForked = true;
       const branchEnd = await (deps.shipBranch ?? runShipBranch)(deps, msg, io, {
         agent,
+        ...(context ? { context } : {}),
         profile,
         modelRef: resolved.modelRef,
         label: shell.label,
@@ -2593,12 +2753,21 @@ export async function dispatch(
     // their source audience cannot be proven from those records, so it must
     // check the source itself before using or sharing a specialist result.
     // When both reads apply, they are independent reads of the same thread.
+    const sessionIdentity = runSessionIdentity(
+      msg.threadKey,
+      agent.name,
+      coordinator,
+      resume?.row.meta.session ?? restart?.row.meta.session,
+    );
+    const runSessionKey = sessionIdentity.key;
     const [fromSession, threadArtifacts] = await Promise.all([
-      !resume && !opts.seed && thread
+      !resume && !opts.seed && !hasHandoff && thread
         ? sessionSeedFor({
             ledger: deps.runLedger,
             threadKey: msg.threadKey,
             agent: agent.name,
+            sessionKey: runSessionKey,
+            ...(sessionIdentity.legacyKey ? { legacySessionKey: sessionIdentity.legacyKey } : {}),
             thread,
             history,
             request: {
@@ -2611,7 +2780,12 @@ export async function dispatch(
           })
         : undefined,
       thread && agent.name !== "orchestrator"
-        ? threadArtifactsFor({ runs: runsService, thread, agent: agent.name })
+        ? threadArtifactsFor({
+            runs: runsService,
+            thread,
+            agent: agent.name,
+            readContext: contextReader.readRunDependencies,
+          })
         : undefined,
     ]);
     // A bare continuation after an unanswered general budget uses the original
@@ -2716,40 +2890,30 @@ export async function dispatch(
         }
       }
     }
-    // GitHub, plane and MCP results have no durable grant or source revision label. A later main turn
-    // starts from requester-authored Slack text and reads those sources anew;
-    // it must not replay the old log through either its prompt or session tools.
-    const staleMainRead =
-      agent.name === "orchestrator" &&
-      fromSession?.seed !== undefined &&
-      (fromSession.seed.requiresFreshSources ||
-        fromSession.seed.messages.some((message) =>
-          message.content.some((part) => part.type === "tool_use" && requiresFreshSourceTool(part.name)),
-        ));
-    // Prompt replay and trusted dependencies have separate lifetimes.
-    const sourceSession = fromSession?.seed;
-    const session = staleMainRead || sourceContinuation !== undefined ? undefined : fromSession?.seed;
-    // If a prior main run exists but its log cannot be read, an old bot answer
-    // may quote a private source. A specialist-only history has no main answer
-    // to recover and can start fresh from the requester's own words.
-    const unprovedMainLog =
-      agent.name === "orchestrator" &&
-      fromSession?.seed === undefined &&
-      msg.channelId.startsWith("slack:D") &&
-      (await establishedMainDmOf(
-        runsService,
-        { channelId: msg.channelId, threadKey: msg.threadKey, userId: msg.userId },
-        thread ?? [],
-      ));
-    // A fresh main run has no durable source labels for earlier bot posts in
-    // channel history. Keep the requester's turns, then read sources afresh.
-    const mainHistory =
-      agent.name === "orchestrator"
-        ? history.filter((item) => item.role === "user" && item.user === msg.userId)
-        : history;
+    // Saved text is reusable only with its complete current dependency envelope.
+    // An unavailable optional context leaves the new request runnable.
+    const candidateContext = contextDependenciesOf(fromSession?.seed?.sources);
+    const savedContextValid =
+      fromSession?.seed !== undefined && (await contextReader.validateDependencies(candidateContext)).ok;
+    const sourceSession = savedContextValid ? fromSession?.seed : undefined;
+    const session = sourceContinuation !== undefined ? undefined : sourceSession;
+    const mainHistory = history.filter(
+      (item) => item.role === "user" && (agent.name !== "orchestrator" || item.user === msg.userId),
+    );
+    let seedContext = mergeContextDependencies(
+      freshContext(),
+      operatorContext,
+      ...(opts.seed ? [UNKNOWN_CONTEXT_DEPENDENCIES] : []),
+      contextForReferences(references, msg),
+      ...(session ? [candidateContext] : []),
+      ...(threadArtifacts?.context ? [threadArtifacts.context] : []),
+    );
     const seedNotes = [
       ...(sourceContinuation === undefined ? (fromSession?.notes ?? []) : []),
       ...(threadArtifacts?.notes ?? []),
+      ...(fromSession?.seed && !savedContextValid
+        ? ["Earlier saved context could not be verified; this request starts from the available conversation."]
+        : []),
     ];
     const recovered = resume !== undefined || restart !== undefined || opts.restartOf !== undefined;
     const sourceReadOwnerOf = (runId: string) => ({
@@ -2769,7 +2933,7 @@ export async function dispatch(
     const needsSavedSlackRecheck =
       agent.name === "orchestrator" &&
       /^slack:D[A-Z0-9_]+$/.test(msg.channelId) &&
-      savedSlackContextNeedsRecheck(sourceSession, unprovedMainLog ? history : mainHistory);
+      savedSlackContextNeedsRecheck(sourceSession, mainHistory);
     const savedSlackVisibility = needsSavedSlackRecheck
       ? await root.span("dispatch.channel_visibility", () => channelVisibilityOf(deps, msg.channelId))
       : undefined;
@@ -2799,9 +2963,41 @@ export async function dispatch(
       );
       return ended;
     }
-    const seed: RunSeed = opts.seed ? "parent" : session ? "session" : "channel";
+    // A new turn in a child's thread continues its own session. The parent's
+    // immutable recall view is inherited separately from those accumulated turns.
+    if (!hasHandoff && session && !resume && !restart) {
+      const previous = thread?.find(
+        (view) =>
+          view.finished &&
+          (view.session?.key === runSessionKey ||
+            (sessionIdentity.legacyKey !== undefined && view.session?.key === sessionIdentity.legacyKey)),
+      );
+      if (previous) {
+        const reader = await handoffFactory({
+          consumer: {
+            runId: previous.id,
+            requester: msg.userId,
+            channelId: msg.channelId,
+            threadKey: msg.threadKey,
+            attempt: previous.id,
+          },
+          msg,
+          io,
+        });
+        const prior = await reader.loadRun(previous.id);
+        if (!prior) throw new Error("The previous conversation's stored context could not be checked.");
+        if (prior.childHandoff !== undefined) {
+          incomingHandoff = prior.childHandoff;
+          hasHandoff = true;
+          continuedHandoff = true;
+        }
+      }
+    }
+    const seed: RunSeed = opts.seed || (hasHandoff && !continuedHandoff) ? "parent" : session ? "session" : "channel";
     const seedTurns: TextTurn[] | undefined =
-      opts.seed ?? (session ? textTurnsOf(session.messages.slice(0, -1)) : undefined);
+      hasHandoff && !continuedHandoff
+        ? []
+        : (opts.seed ?? (session ? textTurnsOf(session.messages.slice(0, -1)) : undefined));
     // The channel (and parent) seed keeps its authors too (session-log item 12):
     // a thread's first run stores each history line's author and the request row
     // the requester's, exactly as the session path does through SessionSeed.actors.
@@ -2810,7 +3006,9 @@ export async function dispatch(
       : buildConversation(
           sourceContinuation !== undefined
             ? [{ role: "user", text: sourceContinuation, user: msg.userId }]
-            : (opts.seed ?? mainHistory),
+            : hasHandoff
+              ? []
+              : (opts.seed ?? mainHistory),
           requestText,
           msg.images,
           msg.documents,
@@ -2818,7 +3016,7 @@ export async function dispatch(
           msg.userId,
         );
     const built = session ? session.messages : channelBuilt!.messages;
-    const seedActors = session ? session.actors : channelBuilt?.actors;
+    let seedActors = session ? session.actors : channelBuilt?.actors;
     const withRecord =
       !resume && decisionRecord !== undefined && agent.name === "coding"
         ? withContractInFirstUserTurn(built, `record: ${decisionRecord}`)
@@ -2885,6 +3083,7 @@ export async function dispatch(
         admitted: admitted!,
         root,
         parentRunId,
+        ...(boundHandoff ? { childHandoff: boundHandoff } : {}),
         coordinator,
         seed,
         ...(decisionRecord !== undefined ? { decisionRecord } : {}),
@@ -2919,7 +3118,7 @@ export async function dispatch(
     const registration = await registerRun(deps, {
       msg,
       io,
-      ...(coordinator && !resume && !restart
+      ...((coordinator && !resume && !restart) || hasHandoff
         ? {
             beforeRegister: async ({
               runId,
@@ -2928,7 +3127,64 @@ export async function dispatch(
               runId: string;
               channelVisibility: ChannelVisibility;
             }) => {
+              if (hasHandoff) {
+                const saved = isChildHandoff(incomingHandoff) ? incomingHandoff : undefined;
+                handoffConsumer = {
+                  runId,
+                  requester: msg.userId,
+                  channelId: msg.channelId,
+                  threadKey: msg.threadKey,
+                  attempt:
+                    saved?.consumer?.runId === runId
+                      ? saved.consumer.attempt
+                      : (opts.unitContextAdmission?.idempotencyKey ?? runId),
+                };
+                handoffAccess = await handoffFactory({ consumer: handoffConsumer, msg, io });
+                if (!handoffAccess) throw new Error("The child context storage and source checks are unavailable.");
+                const checked = await validateChildHandoff({
+                  value: incomingHandoff,
+                  consumer: handoffConsumer,
+                  mode: saved?.consumer
+                    ? saved.consumer.runId === runId
+                      ? "consume"
+                      : "inherit"
+                    : opts.unitContextAdmission
+                      ? "admitted-bind"
+                      : "bind",
+                  ...(opts.unitContextAdmission ? { admission: opts.unitContextAdmission } : {}),
+                  deps: handoffAccess,
+                  ...(opts.parentContext ? { inline: opts.parentContext } : {}),
+                });
+                if (checked.kind !== "valid")
+                  throw new Error(checked.kind === "invalid" ? checked.reason : "The parent context is missing.");
+                boundHandoff = checked.context.handoff;
+                if (!resume && !continuedHandoff) {
+                  // Only canonical rows enter the prompt. Historical tool calls
+                  // are evidence; unfinished calls were rendered as text.
+                  const childRequest = buildConversation(
+                    [],
+                    requestText,
+                    msg.images,
+                    msg.documents,
+                    references.blocks,
+                    msg.userId,
+                  );
+                  let combined = [...checked.context.messages, ...childRequest.messages];
+                  if (decisionRecord !== undefined && agent.name === "coding")
+                    combined = withContractInFirstUserTurn(combined, `record: ${decisionRecord}`);
+                  if (contractBlock !== undefined && agent.name !== "review")
+                    combined = withContractInFirstUserTurn(combined, contractBlock);
+                  messages.splice(0, messages.length, ...combined);
+                  seedActors = [
+                    ...(checked.context.actors ?? checked.context.messages.map(() => undefined)),
+                    ...(childRequest.actors ?? childRequest.messages.map(() => undefined)),
+                  ];
+                  seedTurns!.push(...textTurnsOf(checked.context.messages));
+                }
+              }
               await reserveIdentity(runId, channelVisibility);
+              handoffReserved = true;
+              if (!coordinator || resume || restart) return;
               const childReservation = reserved!;
               // Installed before the registry can expose the id, not at model start.
               childSetupFinalizer = () => {
@@ -3057,13 +3313,49 @@ export async function dispatch(
     // recording events while the read runs: its files are the turn's own, so
     // they are left out here — the attachments line names them, and `recall`
     // reads them fresh.
-    const threadAssets: Promise<ThreadAsset[]> | undefined =
+    const artifactContexts: ContextDependencies[] = [];
+    const ownThreadAssets: Promise<ThreadAsset[]> | undefined =
       sourceIntake === "automatic" && !resume && deps.artifacts && thread && thread.length > 0
         ? readThreadAssets(
             { runs: runsService, store: deps.artifacts, trustedCoordinatorChild: opts.coordinator !== undefined },
             msg.threadKey,
-          ).then((assets) => assets.filter((a) => a.runId !== runId))
+          ).then(async (assets) => {
+            const contexts = new Map<string, ContextDependencies | undefined>();
+            const admitted: ThreadAsset[] = [];
+            for (const asset of assets) {
+              if (asset.runId === runId) continue;
+              if (!contexts.has(asset.runId)) {
+                const context = await contextReader.readRunDependencies(asset.runId);
+                contexts.set(asset.runId, context);
+                if (context) artifactContexts.push(context);
+              }
+              if (contexts.get(asset.runId)) admitted.push(asset);
+            }
+            return admitted;
+          })
         : undefined;
+    const inheritedAssetKeys = new Set<string>();
+    const threadAssets =
+      boundHandoff && handoffAccess && handoffConsumer
+        ? Promise.resolve(
+            await (async (): Promise<ThreadAsset[]> => {
+              const inherited: ThreadAsset[] = [];
+              for (const source of [boundHandoff!, ...(boundHandoff!.ancestors ?? [])]) {
+                if (!(await handoffAccess!.canRead(source, handoffConsumer!)))
+                  throw new Error("The inherited files are no longer readable.");
+                const files = await handoffAccess!.readAssets(source);
+                for (const file of files) {
+                  if (!source.omitted?.assets && !source.assets.some((a) => a.key === file.key)) continue;
+                  inheritedAssetKeys.add(file.key);
+                  inherited.push(file);
+                }
+              }
+              return [
+                ...new Map([...((await ownThreadAssets) ?? []), ...inherited].map((file) => [file.key, file])).values(),
+              ];
+            })(),
+          )
+        : ownThreadAssets;
     // What prior runs' records name as received is still in the store for the
     // retention window, so a later run pulls it too — never copied again. The
     // message's files took their indexes when `copyStaged` was called, so the
@@ -3074,7 +3366,7 @@ export async function dispatch(
       threadAssets && agent.machine !== "none"
         ? threadAssets.then((assets) =>
             stageThreadArtifacts(
-              assets.filter((a) => a.direction === "in"),
+              assets.filter((a) => a.direction === "in" || inheritedAssetKeys.has(a.key)),
               {
                 nextIndex: nextStagedIndex,
                 messageId: messageIdOf(msg, runId),
@@ -3083,7 +3375,7 @@ export async function dispatch(
             ),
           )
         : undefined;
-    if (!childSetupFinalizer) await reserveIdentity(runId, channelVisibility);
+    if (!childSetupFinalizer && !handoffReserved) await reserveIdentity(runId, channelVisibility);
 
     // Admission owns the first live condition. Its absolute bound is the
     // effective run budget already admitted for this profile, and the durable
@@ -3640,6 +3932,7 @@ export async function dispatch(
     // The prompt (dispatch/provision.ts): skills, MCP discovery, the config and
     // self-description blocks, the custom instructions, the memory block, and
     // the system composer pinned to the head this run reviews.
+    const seedNotepad = session?.notepad ?? boundHandoff?.notepad?.text;
     const prompt = await composePrompt(deps, {
       msg,
       directAudienceVerified,
@@ -3662,10 +3955,10 @@ export async function dispatch(
       // What the session already knows (session-log item 10): the notepad and
       // the newest compaction's summary the seed brought back, and the thread's
       // files (record 0033) with where each is for this run, for the prompt.
-      ...(session?.notepad !== undefined || session?.summary !== undefined || threadFiles.length > 0
+      ...(seedNotepad !== undefined || session?.summary !== undefined || threadFiles.length > 0
         ? {
             session: {
-              ...(session?.notepad !== undefined ? { notepad: session.notepad } : {}),
+              ...(seedNotepad !== undefined ? { notepad: seedNotepad } : {}),
               ...(session?.summary !== undefined ? { summary: session.summary } : {}),
               ...(threadFiles.length > 0 ? { files: threadFiles } : {}),
             },
@@ -3673,6 +3966,31 @@ export async function dispatch(
         : {}),
     });
     const { mcpForRun, system } = prompt;
+    seedContext = mergeContextDependencies(
+      seedContext,
+      memoryContext,
+      ...artifactContexts,
+      ...(boundHandoff?.dependencies?.value ? [boundHandoff.dependencies.value] : []),
+    );
+    const contextValidation =
+      agent.name === "orchestrator" ? await contextReader.validateDependencies(seedContext) : undefined;
+    let admittedContext = structuredClone(seedContext);
+    let committedContextCheckpoint: ContextCheckpointReceipt | undefined;
+    const normalizeAdmittedOrigins = (context: ContextDependencies) =>
+      committedContextCheckpoint ? applyContextCheckpoint(context, committedContextCheckpoint) : context;
+    const revalidateAdmitted = () =>
+      revalidateAdmittedContext(() => admittedContext, contextReader.validateDependencies);
+    seedContext = mergeContextDependencies(seedContext, {
+      ...freshContext(),
+      origins: [{ runId: run.id, requester: msg.userId, channelId: msg.channelId, threadKey: msg.threadKey }],
+    });
+    let currentSources: SessionSources = {
+      version: 1,
+      status: "known",
+      binding: sourceBinding(msg),
+      receipts: [],
+      context: seedContext,
+    };
     const sourceReads =
       agent.name === "orchestrator"
         ? createSourceReads({
@@ -3683,6 +4001,7 @@ export async function dispatch(
               !session &&
               !threadArtifacts?.block &&
               opts.seed === undefined &&
+              !hasHandoff &&
               (!sourceSession ||
                 (sourceSession.sources?.status === "known" && sourceSession.sources.receipts.length === 0)) &&
               !msg.images?.length &&
@@ -3692,8 +4011,17 @@ export async function dispatch(
               const checked = await privateAudienceDecision(msg, io);
               return audienceTrace.refusal === undefined && checked.ok;
             },
-            save: async (state) =>
-              ledgerRun?.tracked() === true && (await ledgerRun.setStateAndFlush({ sourceReads: state })),
+            save: async (state) => {
+              if (ledgerRun?.tracked() !== true || !(await ledgerRun.setStateAndFlush({ sourceReads: state })))
+                return false;
+              const exposed = normalizeAdmittedOrigins(await contextForSourceReads(state));
+              const context = mergeContextDependencies(contextDependenciesOf(currentSources), exposed);
+              const next = { ...currentSources, context };
+              if (!(await ledgerRun.writeSources(next))) return false;
+              currentSources = next;
+              admittedContext = mergeContextDependencies(admittedContext, exposed);
+              return true;
+            },
           })
         : undefined;
     const mainAudience =
@@ -3720,7 +4048,8 @@ export async function dispatch(
             thread,
             history: agent.name === "orchestrator" ? history.filter((item) => item.role === "user") : history,
             threadArtifacts: threadArtifacts?.block?.text,
-            parentSeed: opts.seed !== undefined,
+            parentSeed: opts.seed !== undefined || hasHandoff,
+            contextValidation,
           })
         : undefined;
     if (mainAudience && !mainAudience.ok) {
@@ -3784,16 +4113,20 @@ export async function dispatch(
     const privateAudienceLatch = Object.assign(audienceTrace, recoveredPrivateAudienceLatch(msg, recovered));
     if (privateAudienceLatch.code === "recovered-provenance-unproved")
       noteAudienceRefusal(privateAudienceLatch, "recovered-provenance-unproved", "recovery");
-    if (slackContext || sourceReads)
-      privateAudienceLatch.revalidateSources = async () => {
-        if (slackContext) {
-          const checked = await slackContext.sourcesStillValid();
-          if (!checked.ok) return checked;
-        }
-        return sourceReads ? sourceReads.revalidate() : { ok: true };
-      };
+    privateAudienceLatch.revalidateSources = async () => {
+      if (slackContext) {
+        const checked = await slackContext.sourcesStillValid();
+        if (!checked.ok) return checked;
+      }
+      if (sourceReads) {
+        const checked = await sourceReads.revalidate();
+        if (!checked.ok) return checked;
+      }
+      return revalidateAdmitted();
+    };
     ledgerRun = await claimRun(deps, {
       msg,
+      sessionKey: runSessionKey,
       verifyDirectAudience: io.verifyDirectAudience?.bind(io),
       privateWorkVerifierAvailable: io.verifyDirectAudience !== undefined,
       io,
@@ -3816,6 +4149,8 @@ export async function dispatch(
       mcpForRun,
       ...(mainAudience?.ok ? { mainAudienceChecked: true as const } : {}),
       messages,
+      seedContext,
+      ...(seedNotepad !== undefined ? { seedNotepad } : {}),
       resume,
       ledgerRun,
       card,
@@ -3823,6 +4158,7 @@ export async function dispatch(
       clock,
       root,
       parentRunId,
+      ...(boundHandoff ? { childHandoff: boundHandoff } : {}),
       coordinator,
       seed,
       ...(opts.restartOf !== undefined ? { restartOf: opts.restartOf } : {}),
@@ -3833,18 +4169,72 @@ export async function dispatch(
       ...(seedActors !== undefined ? { seedActors } : {}),
     });
     if (slackContext) {
-      const sources: SessionSources = sourceSession?.sources ?? {
-        version: 1,
-        status: "known",
-        binding: sourceBinding(msg),
-        receipts: [],
-      };
+      const sources: SessionSources = currentSources;
       if (
-        !(await slackContext.initialize(sources, (next) => ledgerRun?.writeSources(next) ?? Promise.resolve(false)))
+        !(await slackContext.initialize(sources, async (next) => {
+          next = { ...next, context: normalizeAdmittedOrigins(contextDependenciesOf(next)) };
+          if (!(await ledgerRun?.writeSources(next))) return false;
+          currentSources = {
+            ...next,
+            context: mergeContextDependencies(contextDependenciesOf(currentSources), contextDependenciesOf(next)),
+          };
+          admittedContext = mergeContextDependencies(admittedContext, contextDependenciesOf(next));
+          return true;
+        }))
       ) {
         privateAudienceLatch.revoked = true;
         privateAudienceLatch.code = "slack-source-unverified";
         throw new Error("The Slack source receipts could not be saved.");
+      }
+    }
+    if (boundHandoff) {
+      if (!ledgerRun?.tracked() || !handoffAccess || !handoffConsumer)
+        throw new Error("The child context was not durably claimed.");
+      const childCheckpoint = await ledgerRun.checkpointSession();
+      if (!childCheckpoint) throw new Error("The child context checkpoint could not be saved.");
+      const consumed = await validateChildHandoff({
+        value: boundHandoff,
+        consumer: handoffConsumer,
+        mode: "consume",
+        deps: handoffAccess,
+      });
+      if (consumed.kind !== "valid")
+        throw new Error(consumed.kind === "invalid" ? consumed.reason : "The persisted child context is missing.");
+      if (opts.unitContextAdmission && deps.coordinatorInstances) {
+        const proof = await acknowledgeUnitSeed(
+          { runLedger: deps.runLedger, runStore: deps.runStore, instances: deps.coordinatorInstances },
+          {
+            run: ledgerRun,
+            binding: opts.unitContextAdmission,
+            handoff: boundHandoff,
+            contract: opts.contract,
+            contractBlock,
+            messages,
+            actors: seedActors,
+            system,
+            checkpoint: childCheckpoint,
+            acknowledgedAt: clock(),
+          },
+        );
+        if (proof.kind === "unavailable") throw new Error("The unit's saved seed could not be acknowledged.");
+      }
+    }
+    handoffConsumer ??= {
+      runId,
+      requester: msg.userId,
+      channelId: msg.channelId,
+      threadKey: msg.threadKey,
+      attempt: runId,
+    };
+    handoffAccess ??= await handoffFactory({ consumer: handoffConsumer, msg, io });
+    if (ledgerRun?.tracked()) {
+      const normalized = await ledgerRun.normalizeContextOrigins();
+      if (normalized.ok) {
+        committedContextCheckpoint = normalized.receipt;
+        // Only the committed store receipt can substitute canonical ordinary
+        // origins. A union would restore every earlier turn's origin here.
+        currentSources = { ...currentSources, context: structuredClone(normalized.receipt.normalized) };
+        admittedContext = applyContextCheckpoint(admittedContext, normalized.receipt);
       }
     }
     if (preserveOnReattachRefusal && !ledgerRun?.tracked())
@@ -3869,26 +4259,72 @@ export async function dispatch(
     // claim set it; a run without a session (untracked, a ship pipeline, no
     // ledger) has none and the tools say so.
     const sessionTools =
-      agent.name === "orchestrator" && (staleMainRead || unprovedMainLog)
+      fromSession?.seed !== undefined && !savedContextValid
         ? undefined
         : sessionCapabilityFor(
             ledgerRun,
             deps.runLedger,
             sourceIntake === "automatic" && deps.artifacts
               ? {
-                  read: () =>
-                    readThreadAssets(
+                  read: async () => {
+                    const assets = await readThreadAssets(
                       {
                         runs: runsService,
                         store: deps.artifacts!,
                         trustedCoordinatorChild: opts.coordinator !== undefined,
                       },
                       msg.threadKey,
-                    ),
+                    );
+                    const allowed = new Map<string, boolean>();
+                    for (const asset of assets) {
+                      if (!allowed.has(asset.runId)) allowed.set(asset.runId, await admitRunContext(asset.runId));
+                    }
+                    return assets.filter((asset) => allowed.get(asset.runId));
+                  },
                   pathOf: (key) => workspaceFiles.pathOf(key),
                 }
               : undefined,
+            boundHandoff && handoffAccess && handoffConsumer
+              ? {
+                  handoff: boundHandoff,
+                  canRead: async (source) => {
+                    const checked = await validateChildHandoff({
+                      value: boundHandoff,
+                      consumer: handoffConsumer!,
+                      mode: "consume",
+                      deps: handoffAccess!,
+                    });
+                    return checked.kind === "valid" && (await handoffAccess!.canRead(source, handoffConsumer!));
+                  },
+                  loadSource: (source) => handoffAccess!.loadSource(source),
+                }
+              : undefined,
+            () => admitRunContext(runId),
           );
+    const captureParentContext = async (): Promise<ParentContext> => {
+      if (!sessionTools?.captureHandoff || !ledgerRun?.tracked() || !handoffAccess)
+        throw new Error("The parent context cannot be durably captured.");
+      const checkpoint = await ledgerRun.checkpointSession();
+      if (!checkpoint || checkpoint.key !== sessionTools.session.key)
+        throw new Error("The parent context checkpoint is unavailable.");
+      return sessionTools.captureHandoff(
+        { runId, requester: msg.userId, channelId: msg.channelId, threadKey: msg.threadKey },
+        (source) => handoffAccess!.captureDependencies(source),
+        checkpoint.through,
+      );
+    };
+    const captureUnitContext = async (): Promise<UnitContext> => {
+      const parent = await captureParentContext();
+      const captured = await validateChildHandoff({
+        value: parent.handoff,
+        consumer: handoffConsumer!,
+        mode: "capture",
+        deps: handoffAccess!,
+        inline: parent,
+      });
+      if (captured.kind !== "valid") throw new Error("The working context cannot be durably captured.");
+      return contextCapsuleOf(captured.context.handoff);
+    };
     // What this run may do to other runs (dispatch/spawn.ts; docs/reference/specs/
     // agent-conductor.md): spawn a child as this run, read the runs its
     // REQUESTER may, steer a child through the inbox a thread reply takes, and
@@ -3909,7 +4345,27 @@ export async function dispatch(
       },
     );
     const threadWorkSnapshots: string[] = [];
-    const fencedRuns = { ...runs, recordThreadWorkRead: (result: string) => threadWorkSnapshots.push(result) };
+    const admitSourceContext = async (context: ContextDependencies): Promise<boolean> => {
+      context = normalizeAdmittedOrigins(context);
+      if (!ledgerRun?.tracked()) return false;
+      const next = {
+        ...currentSources,
+        context: mergeContextDependencies(contextDependenciesOf(currentSources), context),
+      };
+      if (!(await ledgerRun.writeSources(next))) return false;
+      currentSources = next;
+      admittedContext = mergeContextDependencies(admittedContext, context);
+      return true;
+    };
+    const admitRunContext = async (sourceRunId: string): Promise<boolean> => {
+      const context = await contextReader.readRunDependencies(sourceRunId);
+      return context ? admitSourceContext(context) : false;
+    };
+    const fencedRuns = {
+      ...runs,
+      admitContext: admitRunContext,
+      recordThreadWorkRead: (result: string) => threadWorkSnapshots.push(result),
+    };
     // The severity to address for this run (agent-review.md item 5a): the
     // request's `severity:` directive over the user's scope over the channel's
     // over the org's `review.addressSeverity` — the one level the verdict
@@ -3997,6 +4453,7 @@ export async function dispatch(
       channelVisibility,
       slackContext,
       privateAudienceLatch,
+      publicationContextCheck: revalidateAdmitted,
       publishText,
       ending,
       spawn,
@@ -4004,6 +4461,9 @@ export async function dispatch(
       steer,
       wait,
       ...(sessionTools ? { session: sessionTools } : {}),
+      captureParentContext,
+      captureUnitContext,
+      admitSourceContext,
       ...(route !== undefined ? { route } : {}),
       parentRunId,
       coordinator,
@@ -4116,6 +4576,8 @@ export async function dispatch(
       runDiagnosis,
       releaseWorkspace,
       root,
+      currentWorkCheck: ran.currentWorkCheck,
+      publicationCheck: revalidateAdmitted,
       ...(mainAudience?.ok
         ? {
             publicationCheck: async (): Promise<AudienceCheck> => {
@@ -4178,7 +4640,7 @@ export async function dispatch(
                     current: currentThreadWork?.ok ? currentThreadWork.snapshot : undefined,
                   },
                 );
-                return checked;
+                return checked.ok ? revalidateAdmitted() : checked;
               } catch {
                 return { ok: false, code: checking };
               }
@@ -4186,24 +4648,25 @@ export async function dispatch(
           }
         : {}),
     });
-    if (delivery.kind === "fenced") return ended;
+    if (delivery.kind === "fenced" || (await ran.currentWorkCheck?.()) !== undefined) return ended;
 
     // After the reply (dispatch/reply.ts): the memory reflection pass. The
     // review post-step ran inside the run loop, before the stream finished.
-    if (agent.name !== "orchestrator")
-      afterReply(deps, {
-        msg,
-        resolved,
-        directives,
-        history,
-        repoCtx,
-        run,
-        channelVisibility,
-        referenceVisibilities: references.visibilities,
-        stopped,
-        answer,
-        toolCalls,
-      });
+    afterReply(deps, {
+      msg,
+      resolved,
+      directives,
+      history,
+      repoCtx,
+      run,
+      channelVisibility,
+      referenceVisibilities: references.visibilities,
+      producerContext: await contextReader.readRunDependencies(run.id).catch(() => undefined),
+      admitMemory: contextReader.authorizeMemory,
+      stopped,
+      answer,
+      toolCalls,
+    });
     return ended;
   } catch (err) {
     // Promotion can discover a fence after the attach's ownership check. The
@@ -4434,7 +4897,10 @@ export async function dispatch(
         ...(restartRequest.coordinator !== undefined ? { coordinator: restartRequest.coordinator } : {}),
         ...(restartRequest.operationTarget !== undefined ? { operationTarget: restartRequest.operationTarget } : {}),
       });
-      const restarted = await dispatch(deps, restart.msg, io, restart.opts).catch((err: unknown) => {
+      const restarted = await dispatch(deps, restart.msg, io, {
+        ...restart.opts,
+        ...(boundHandoff ? { childHandoff: boundHandoff } : {}),
+      }).catch((err: unknown) => {
         console.error(
           `[dispatch] ${msg.threadKey} restart from the request failed: ${err instanceof Error ? err.message : String(err)}`,
         );
@@ -4614,10 +5080,21 @@ export async function dispatchClick(deps: CoreDeps, click: ClickRequest): Promis
     // A question's Yes (record 0054): the consumed `redispatch` row goes back
     // through `dispatch()` whole — the proposal as the requester's own message,
     // the click's drain slot handed over, the question's code on the record.
-    const res = await consumeAndRun(deps, { id: click.id, actorIds }, io, ending, trace, (row) =>
-      dispatch(deps, row.message, io, {
-        redispatch: { code: row.code, ...(row.binding ? { binding: row.binding } : {}) },
-      }),
+    const res = await consumeAndRun(
+      deps,
+      { id: click.id, actorIds },
+      io,
+      ending,
+      trace,
+      (row) =>
+        dispatch(deps, row.message, io, {
+          redispatch: { code: row.code, ...(row.binding ? { binding: row.binding } : {}) },
+        }),
+      (context, message) =>
+        revalidateAdmittedContext(
+          () => context,
+          contextAccessForMessage(deps, { msg: message, io }).validateDependencies,
+        ),
     );
     if (res.kind === "redispatched") {
       redispatched = res.outcome;
@@ -4672,7 +5149,11 @@ export async function dispatchClick(deps: CoreDeps, click: ClickRequest): Promis
     // typed line's does; the receipt leads, the command's text follows.
     await ending.sealAfterReply(
       async () => {},
-      () => root.span("post.reply", () => io.reply(res.text)),
+      () =>
+        root.span("post.reply", async () => {
+          const current = await res.publicationCheck?.();
+          return io.reply(current && !current.ok ? OFFER_CONTEXT_LINE : res.text);
+        }),
     );
     if (res.result.ok && res.result.followUp) postSettledOutcome(res.result.followUp, io, root);
     return ended;

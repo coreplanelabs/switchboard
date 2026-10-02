@@ -11,6 +11,16 @@
  *  re-grounded in the run that produced it. */
 import type { Effort } from "../../effort.js";
 import type { TraceOptions } from "../trace/types.js";
+import type { ContextDependencies } from "../references/contextDependencies.js";
+
+/** One content revision and the bounded canonical dependencies behind it.
+ * The store may only extend dependencies when refreshing unchanged content. */
+export interface MemoryProvenance {
+  version: 1;
+  scopeKey: string;
+  contentHash: string;
+  dependencies: ContextDependencies;
+}
 
 export interface MemoryRecord {
   /** Internal id, namespaced per AGENTS.md invariant 4 (`mem:<scopeKey>:<n>`). */
@@ -27,6 +37,8 @@ export interface MemoryRecord {
   sourceThreadKey: string;
   /** Provenance: ties to the runRegistry / live-view page, when known. */
   sourceRunId?: string;
+  /** Absent on legacy records whose derived inputs cannot be verified. */
+  provenance?: MemoryProvenance;
   createdAt: number;
   /** Bumped on retrieval → drives the recency term and decay. */
   lastUsedAt?: number;
@@ -53,6 +65,7 @@ export interface MemoryCandidate {
   keywords?: string[];
   sourceThreadKey: string;
   sourceRunId?: string;
+  provenance?: MemoryProvenance;
   confidence?: number;
   supersedes?: string;
   /** id of a shown record this fact restates: the store bumps that record

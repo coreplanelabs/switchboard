@@ -396,6 +396,32 @@ describe("the offer's words and the stored message", () => {
     expect(isConfirmation(null)).toBe(false);
   });
 
+  it("preserves exact operator dependencies and refuses a present malformed derivation without legacy fallback", () => {
+    const context = {
+      version: 1,
+      status: "known",
+      revision: 2,
+      origins: [],
+      slack: [],
+      mcp: [],
+      memoryScopes: ["user:slack:UREQ"],
+    };
+    const row = { ...pending("c1"), derivation: { kind: "operator", context } };
+    expect(parsePendingConfirmation(row)).toEqual(row);
+    for (const derivation of [
+      null,
+      undefined,
+      {},
+      { kind: "other", context },
+      { kind: "operator" },
+      { kind: "operator", context: {} },
+    ]) {
+      expect(parsePendingConfirmation({ ...row, derivation })).toBeUndefined();
+      expect(parseConfirmation({ ...row, derivation, expiresAt: 5 })).toBeUndefined();
+    }
+    expect(parsePendingConfirmation(pending("legacy"))).toEqual(pending("legacy"));
+  });
+
   it("a row stored before the union existed — no `kind` — still parses, as the routed write it was, with the kind stamped", () => {
     // The pre-change fixture: yesterday's stored shape, byte for byte.
     const { kind: _kind, ...old } = pending("c1");
