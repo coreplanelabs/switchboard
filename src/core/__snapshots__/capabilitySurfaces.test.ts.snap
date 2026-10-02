@@ -95,6 +95,7 @@ exports[`capability surfaces — cloud-full > CLI catalogue 1`] = `
        switchboard ask [--thread <key>] "[agent:name] [model:provider/model] your request"
        switchboard start                            (the bot: Slack from the installation's .env and config/)
        switchboard init [--option value…]          (= setup init: the installer)
+       switchboard connect <host>                  (use an existing deployment)
        switchboard help
 
 commands:
@@ -395,6 +396,7 @@ exports[`capability surfaces — local-full > CLI catalogue 1`] = `
        switchboard ask [--thread <key>] "[agent:name] [model:provider/model] your request"
        switchboard start                            (the bot: Slack from the installation's .env and config/)
        switchboard init [--option value…]          (= setup init: the installer)
+       switchboard connect <host>                  (use an existing deployment)
        switchboard help
 
 commands:
@@ -651,6 +653,7 @@ exports[`capability surfaces — minimal > CLI catalogue 1`] = `
        switchboard ask [--thread <key>] "[agent:name] [model:provider/model] your request"
        switchboard start                            (the bot: Slack from the installation's .env and config/)
        switchboard init [--option value…]          (= setup init: the installer)
+       switchboard connect <host>                  (use an existing deployment)
        switchboard help
 
 commands:
