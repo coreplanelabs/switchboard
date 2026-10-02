@@ -7,8 +7,8 @@ Read this first. Details: [README.md](README.md), [docs](docs/README.md) at <htt
 ## How a change is made
 
 1. **The spec says what should be true.** Every behavior has a row in a spec under `docs/reference/specs/`: the criterion and its proof — a `file::describe::it` test, a procedure an agent runs live, or a `[gap]` still to be proven. A change starts with that row, in the same PR as the code. A spec describing code that no longer exists is a bug — and the review agent reads the specs a PR touches (`specs:coverage`) and files a contradiction as a finding.
-2. **A failing test, then the code.** Unit tests are the default proof. The loop is `npx vitest run` on the test files you touched, by name, once before the push — never `--changed`, never a directory: on a moving base `--changed` is most of the suite, and on the shared resident that is the memory incident the coding contract exists to prevent. The full suite and typecheck are CI's gate and run only there. Local human session: `npm test` before pushing.
-3. **`npm run fix`, then the checks the change needs.** `fix` regenerates every generated artifact and repairs lint and formatting. CI runs the tests, types, formatting and `npm run verify` on every push, so a pipeline agent never runs them whole — passing them is not its criterion; it validates its own change at the changed-set scope (`npx prettier --check` on the changed files, `tsc --noEmit -p` the touched tsconfig under `NODE_OPTIONS=--max-old-space-size=6144`, `npm run hygiene:check`, `npm run specs:check`) and uses judgement beyond that, not a checklist. Local human session: `npm run verify` before requesting review — it is exactly what CI runs; nothing lives only in CI, and a unit test over the workflow files keeps it so.
+2. **A failing test, then the code.** Unit tests are the default proof. The loop is `npx vitest run` on the test files you touched, by name, once before the push — never `--changed`, never a directory: on a moving base `--changed` is most of the suite. CI runs the full suite and typecheck when the change needs them. Local human session: `npm test` before pushing.
+3. **`npm run fix`, then the checks the change needs.** `fix` regenerates every generated artifact and repairs lint and formatting. CI selects checks and builds from the push's inputs, so a pipeline agent validates its own change at the changed-set scope (`npx prettier --check` on the changed files, `tsc --noEmit -p` the touched tsconfig under `NODE_OPTIONS=--max-old-space-size=6144`, `npm run hygiene:check`, `npm run specs:check`) and uses judgement beyond that. Local human session: `npm run verify` before requesting review — it runs every CI gate locally, and a unit test holds the workflow to those scripts.
 4. **A PR written for the reader.** The title is the changelog line, 72 characters at most: `type(scope): what a reader can now do or expect`, scope from the code map's Areas, `!` plus a migration note when it breaks ([the rule](CONTRIBUTING.md#the-pr-title-is-the-changelog-line)); a required check refuses the rest. Body: the fixed-size map of [pr-description.md](docs/reference/specs/pr-description.md); decisions and receipts fold below. Docs for changed behavior change in the same PR.
 5. **Switchboard reviews it, in the open.** The PR is posted to `agent:review`; findings are addressed or declined with a reason, the branch rewritten into reviewable commits, review re-requested at the new head. `LGTM:` auto-approves where the repo has opted in; a person merges.
 6. **Squash-merge, release, deploy.** The title is the commit. release-please accumulates a release PR; merging it tags the version and CI deploys only the Workers whose inputs changed.
@@ -39,12 +39,13 @@ The repo's whole interface: deterministic, non-interactive, no credential unless
 | `npm run start` | Runs the compiled bot from `dist/`. | Production entry (the container's CMD). |
 | `npm run dev` | Runs the bot from source with tsx. | Local development against a real Slack app. |
 | `npm run typecheck` | TypeScript over the bot and its scripts, no emit. | After type-level changes; `verify:root` runs it. A pipeline agent scopes it to the touched tsconfig. |
-| `npm run test` | The whole vitest suite from one entry, after `deploy:gen`. | Local sessions, before pushing; a pipeline agent runs the changed set — the full suite is CI's. |
+| `npm run test` | The whole vitest suite from one entry, after `deploy:gen`. | Local sessions before pushing; CI runs it for relevant changes. |
 | `npm run cli` | The operator CLI over the command registry (`-- <group> <verb> …`), plus `ask` to drive the full pipeline without Slack. | Smoke tests, deploys, config, run history. |
-| `npm run verify` | The whole gate: every check, every workspace — exactly what CI runs. | Local sessions, before requesting review. ~4 min. A pipeline agent leaves it to CI. |
+| `npm run verify` | Runs every CI check across the repo and workspaces. | Local sessions before review; CI selects affected checks on each push. |
 | `npm run verify:root` | The bot package's gate: consistency checks, typecheck, lint, format, tests, dist. | When only the bot changed. |
 | `npm run check:consistency` | The sub-second checks that generated and declared things equal the code, this table included. | After touching a generated or declared artifact; one CI leg. |
-| `npm run ci:gate` | Reads the `needs` context of a CI fan-out and passes only when every leg succeeded. | CI only — the `bot` and `workers` gate jobs. |
+| `npm run ci:gate` | Reads the `needs` context of a CI fan-out and accepts only successful legs or an explicitly planned skip. | CI only — the `bot`, `workers` and `image` gate jobs. |
+| `npm run ci:plan` | Selects checks and builds from the full diff; uncertainty runs all. | CI; locally with `-- --base <ref>`. |
 | `npm run fix` | Regenerates every generated artifact and repairs lint and formatting. | Before committing; whenever `check:consistency` reports drift. |
 | `npm run deploy:gen` | Renders each Worker's gitignored `wrangler.jsonc` from its template and the profile in force. | `test`, each Worker's `verify` and `deploy all` run it; by hand before `wrangler dev`. |
 | `npm run deploy:check` | The rendered `wrangler.jsonc` files match `deploy:gen`. | When one looks hand-edited; change the template. |
@@ -53,7 +54,7 @@ The repo's whole interface: deterministic, non-interactive, no credential unless
 | `npm run check:pr-title` | Judges one PR title as the changelog line: grammar, type, scope, `!`. | `-- "feat(scope): …"` before opening a PR; CI's `title` check. |
 | `npm run pr-title:gen` | Writes the title gate's types and scopes from the release config and the code map. | Part of `fix`. |
 | `npm run pr-title:check` | The committed title vocabulary equals its two sources. | Part of `check:consistency`. |
-| `npm run check:project-facts` | Every copy of the project's names, repository, docs URL and contact address equals `project.json`; its description, topics and npm package fit their rules. | After editing `project.json` or a community file; part of `check:consistency`. |
+| `npm run check:project-facts` | Checks project names, URLs, contact and package metadata against `project.json`. | After project or community file changes; part of `check:consistency`. |
 | `npm run check:registry-drift` | Every example-config model ref still resolves against the pinned pi registry. | After a pi bump; part of `check:consistency`. |
 | `npm run agents:gen` | Writes the Commands table in AGENTS.md from `package.json` and this file. | After adding or changing a script; part of `fix`. |
 | `npm run clock:gen` | Regenerates both clock allowlists: wall-clock reads (empty) and duration literals outside `src/core/budgets.ts`. | Part of `fix`. |
@@ -72,20 +73,20 @@ The repo's whole interface: deterministic, non-interactive, no credential unless
 | `npm run check:deps-drift` | Installed node_modules match the lockfile: drift fails by name. | Part of `check:consistency`. |
 | `npm run docs:gen` | Writes the generated regions of the reference docs from the command registry. | After changing a command, flag, route, or config key; part of `fix`. |
 | `npm run docs:check` | The generated doc regions equal what the code would generate. | Part of `check:consistency`. |
-| `npm run specs:check` | Validates spec proofs, headers and typed decision-boundary declarations. | After test/spec edits; `-- --fix` repairs titles. Schema/census flags: [spec coverage](docs/reference/specs/specs-coverage.md). |
-| `npm run specs:coverage` | Maps a change's paths to the specs whose headers cover them, then lists paths no spec covers. | `-- --changed origin/main...HEAD [--test-guard]` before review; `-- --require` fails on an uncovered path; `-- --json` for machines. |
-| `npm run decisions:check` | Every record under `docs/decisions/` and `docs/plans/` has a valid `status`, a superseded one names its successor, an accepted body only gains `## Amended`. | Part of `check:consistency`; a failing record is superseded or amended, never edited. |
+| `npm run specs:check` | Checks spec proofs, headers and decision boundaries. | After test/spec edits; see [spec coverage](docs/reference/specs/specs-coverage.md). |
+| `npm run specs:coverage` | Maps changed paths to specs and lists gaps. | Before review: `-- --changed origin/main...HEAD`; `-- --require` fails on gaps. |
+| `npm run decisions:check` | Checks decision and plan status, succession and amendment rules. | Part of `check:consistency`; supersede or amend failed records. |
 | `npm run hygiene:check` | The public tree's imprint (company, people, trackers, plan ids, ids, dates) equals the recorded list, which only shrinks. | Part of `check:consistency`. New hit: rewrite the line or allow it by name. |
 | `npm run hygiene:gen` | Records the tree's remaining imprint after a scrub; refuses growth unless `-- --force`. | Part of `fix`; new imprint fails it like `hygiene:check`. |
 | `npm run vocabulary:check` | No internal word prints on a user surface; the baseline only shrinks. | Part of `check:consistency`; a hit is rewritten in the user's nouns. |
 | `npm run vocabulary:gen` | Records the remaining internal words; refuses growth unless `-- --force`. | Part of `fix`. |
 | `npm run user-message:check` | No user-facing statement delegates recovery. | Part of `check:consistency`; the baseline only shrinks. |
-| `npm run docs:changed` | Says whether the last push touched the docs or their build (a CI job output). | CI only — gates the docs deploy. |
+| `npm run docs:changed` | Reports whether HEAD^ changed a docs site input. | Local one-commit diagnostics; CI uses `ci:plan`. |
 | `npm run deploy:targets` | Which Workers a PR's diff would deploy, as a job summary; on the release PR, a sticky comment. | CI only — the `deploy targets` job. |
 | `npm run docs:dev` | Serves the docs site locally with live reload. | Writing docs; `-- --port <n>` picks the port. |
 | `npm run docs:build` | Builds the docs site to `docs/.vitepress/dist`. | Rarely by hand; `verify -w docs` and the docs Worker's deploy run it. |
 | `npm run web:preview` | Serves the dashboard bundle over fixtures for a visual check. | After a `web/` change. |
-| `npm run screenshots:gen` | Renders the dashboard screenshots whose inputs changed, both themes, recording input hashes in the manifest (`--force`: all). | After a `web/` or fixture change; needs `npx playwright-core install chromium`, so not in `fix`. |
+| `npm run screenshots:gen` | Renders changed dashboard captures in both themes and records input hashes. | After a `web/` or fixture change; needs Chromium. |
 | `npm run screenshots:check` | Each surface's inputs still hash to what its screenshots were rendered from — no browser. | Part of `check:consistency`. |
 | `npm run load` | Load harness for infrastructure and route checks. | Capacity receipts. |
 | `npm run smoke:ingress` | Probes a live read through ingress. | Release gate. |
