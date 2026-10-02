@@ -196,7 +196,11 @@ import { shellQuote } from "../../src/execution/shellQuote.js";
 import { envFromRequest } from "../../src/execution/sandboxEnv.js";
 import { CREDENTIAL_EXPIRY_MARGIN_MS } from "../../src/execution/residentCredentials.js";
 import { destroyWithPersistentFence } from "../../src/execution/residentDestroyGate.js";
-import { ResidentRecreateAdmission, idleForPoolRecycle } from "../../src/execution/residentRecreateAdmission.js";
+import {
+  ResidentRecreateAdmission,
+  idleForPoolRecycle,
+  retryPoolRecycleAfterRefresh,
+} from "../../src/execution/residentRecreateAdmission.js";
 import {
   claimPoolBinding,
   mayRunAsPoolUser,
@@ -5865,25 +5869,33 @@ export class ResidentDO extends Sandbox<Env> {
           this.registeredRunsBeyondOps(),
           this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX }),
         ]);
-        if (
-          !snapshot ||
-          !idleForPoolRecycle({
-            state: status.state,
-            draining: liveDrain(drain, systemClock()) !== null,
-            imagePending: imagePending !== undefined,
-            inFlight: this.inFlightCount(),
-            refreshAdmissions: this.refreshAdmissionsInFlight,
-            adminWork: this.adminWorkInFlight,
-            hydrating: this.hydration !== null,
-            registeredRuns,
-            liveBindings: [...bindings.values()].filter((binding) => !binding.evicted).length,
-            inspecting: this.poolUsersInspecting.size,
-          })
-        )
+        const idle = {
+          state: status.state,
+          draining: liveDrain(drain, systemClock()) !== null,
+          imagePending: imagePending !== undefined,
+          inFlight: this.inFlightCount(),
+          refreshAdmissions: this.refreshAdmissionsInFlight,
+          refreshes: this.refreshesInFlight,
+          adminWork: this.adminWorkInFlight,
+          hydrating: this.hydration !== null,
+          registeredRuns,
+          liveBindings: [...bindings.values()].filter((binding) => !binding.evicted).length,
+          inspecting: this.poolUsersInspecting.size,
+        };
+        if (!snapshot || !idleForPoolRecycle(idle)) {
+          if (snapshot && retryPoolRecycleAfterRefresh(idle))
+            return {
+              error: "pool-recycle-wait: scheduled refresh is still using the resident",
+              status: 503,
+              transient: true,
+              reason: "pool-recycle-wait",
+              cause: "system",
+            };
           return {
             error: "pool-recycle-required: all UIDs spent and the resident is not idle for checked VM recycle",
             status: 503,
           };
+        }
         await this.recreateContainer("pool-recycle: all UIDs spent; no other resident work owns this VM", true, true);
         await this.ensureHydrated();
         const fresh = parseSpentPoolUsers(await this.ctx.storage.get<unknown>(SPENT_POOL_USERS_KEY), THREAD_USERS);

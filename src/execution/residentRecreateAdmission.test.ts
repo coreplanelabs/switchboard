@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { ResidentRecreateAdmission, idleForPoolRecycle } from "./residentRecreateAdmission.js";
+import {
+  ResidentRecreateAdmission,
+  idleForPoolRecycle,
+  retryPoolRecycleAfterRefresh,
+} from "./residentRecreateAdmission.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -37,6 +41,54 @@ describe("resident recreate admission", () => {
       { inspecting: 1 },
     ])
       expect(idleForPoolRecycle({ ...idle, ...busy })).toBe(false);
+  });
+
+  it("waits through a refresh without weakening the idle recycle gate", () => {
+    const refresh = {
+      state: "refreshing",
+      draining: false,
+      imagePending: false,
+      inFlight: 2,
+      refreshAdmissions: 1,
+      refreshes: 1,
+      adminWork: 0,
+      hydrating: false,
+      registeredRuns: 0,
+      liveBindings: 0,
+      inspecting: 0,
+    };
+    expect(idleForPoolRecycle(refresh)).toBe(false);
+    expect(retryPoolRecycleAfterRefresh(refresh)).toBe(true);
+    for (const busy of [
+      { inFlight: 3 },
+      { liveBindings: 1 },
+      { registeredRuns: 1 },
+      { inspecting: 1 },
+      { adminWork: 1 },
+      { draining: true },
+      { imagePending: true },
+      { hydrating: true },
+      { state: "down" },
+    ])
+      expect(retryPoolRecycleAfterRefresh({ ...refresh, ...busy })).toBe(false);
+    expect(
+      retryPoolRecycleAfterRefresh({
+        ...refresh,
+        inFlight: 1,
+        refreshAdmissions: 0,
+        refreshes: 0,
+      }),
+    ).toBe(true); // between refresh steps, the persisted lifecycle still fences the VM
+    expect(retryPoolRecycleAfterRefresh({ ...refresh, state: "warm", inFlight: 1, refreshes: 0 })).toBe(true);
+    expect(
+      retryPoolRecycleAfterRefresh({
+        ...refresh,
+        state: "warm",
+        inFlight: 1,
+        refreshAdmissions: 0,
+        refreshes: 0,
+      }),
+    ).toBe(false);
   });
 
   it("closes admission before checking idleness and holds it through destruction", async () => {
