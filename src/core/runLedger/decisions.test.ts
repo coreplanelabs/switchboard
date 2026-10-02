@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  assignLedgerLiveState,
   checkFence,
   decideClaim,
   decideClaimWrite,
@@ -8,6 +9,47 @@ import {
   selectReclaim,
   transcriptCompleteness,
 } from "./decisions.js";
+
+describe("assignLedgerLiveState — one resumed setup segment", () => {
+  it("reopens admission under the saved bound without adding a backward edge to ordinary live state", () => {
+    for (const state of ["waiting_provider", "working", "wrapping_up", "admitted"] as const) {
+      const prior = { state, since: 100, bound: 1_000 };
+      expect(
+        assignLedgerLiveState(prior, 7, {
+          expectedSeq: 7,
+          at: 200,
+          state: "admitted",
+          bound: 900,
+          resumeSegment: true,
+        }),
+      ).toMatchObject({
+        ok: true,
+        liveState: { state: "admitted", since: 200, bound: 900 },
+        event: { state: "admitted" },
+      });
+    }
+    const prior = { state: "waiting_provider" as const, since: 100, bound: 1_000 };
+    expect(assignLedgerLiveState(prior, 7, { expectedSeq: 7, at: 200, state: "admitted", bound: 900 })).toEqual({
+      ok: false,
+      reason: "invalid-transition",
+    });
+    expect(
+      assignLedgerLiveState(prior, 7, { expectedSeq: 6, at: 200, state: "admitted", bound: 900, resumeSegment: true }),
+    ).toEqual({ ok: false, reason: "stale-sequence" });
+    expect(
+      assignLedgerLiveState({ state: "ended", since: 100 }, 7, {
+        expectedSeq: 7,
+        at: 200,
+        state: "admitted",
+        bound: 900,
+        resumeSegment: true,
+      }),
+    ).toEqual({ ok: false, reason: "terminal" });
+    expect(
+      assignLedgerLiveState(prior, 7, { expectedSeq: 7, at: 200, state: "preparing", bound: 900, resumeSegment: true }),
+    ).toEqual({ ok: false, reason: "invalid-transition" });
+  });
+});
 
 // The ledger's decisions (docs/reference/specs/run-history.md items 28–31), pure: the
 // Durable Object applies them inside one transaction and the in-memory ledger

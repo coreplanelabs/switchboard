@@ -130,6 +130,7 @@ import {
   type UsageRun,
 } from "../../src/core/runUsage.ts";
 import {
+  assignLedgerLiveState,
   checkFence,
   decideClaim,
   decideClaimWrite,
@@ -252,7 +253,6 @@ import {
   type RecoveryHistoryPage,
 } from "../../src/core/coordinator/recoveryHistory.ts";
 import { systemClock } from "../../src/core/trace/clock.ts";
-import { assignRunLiveState } from "../../src/core/runLiveState.ts";
 import { createTracer } from "../../src/core/trace/tracer.ts";
 import { startAdoptedRoot, workerLogSink } from "../../src/core/trace/workerTrace.ts";
 
@@ -4615,11 +4615,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         out = { ok: false, reason: "fenced" };
         return;
       }
-      const result = assignRunLiveState(
-        assignment.restart ? undefined : row.liveState,
-        row.liveStateSeq ?? 0,
-        assignment,
-      );
+      const result = assignLedgerLiveState(row.liveState, row.liveStateSeq ?? 0, assignment);
       if (!result.ok) {
         out = result;
         return;

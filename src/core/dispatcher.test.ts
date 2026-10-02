@@ -14526,7 +14526,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
           type: "refusal",
           code: "setup_failed",
           cause: "system",
-          text: "fallback live state could not be committed",
+          text: "The fallback live state could not be confirmed: durable-unavailable (unavailable).",
         }),
       );
       expect(h.provider.requests).toEqual([]);
@@ -15459,10 +15459,13 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
             user: "worker2",
             container: "vm-1",
             recreated: false,
+            deps: "hardlink",
           }),
           { status: 200 },
         );
       },
+      exec: () =>
+        new Response(JSON.stringify({ stdout: "READY", stderr: "", exitCode: 0, truncated: false }), { status: 200 }),
     });
     const ledger = new InMemoryRunLedger(() => 10_000);
     const request = msg("agent:coding fix it", "slack:UADMIN");
@@ -15480,13 +15483,22 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         model: "anthropic/coding-model",
         repo: "acme/api",
         ref: "main",
+        parentInstanceId: "instance-resume",
+        idempotencyKey: "instance-resume:unit/coding",
+        coordinatorUnit: "unit-a",
         request: durableInboxMessage(request, request.text, 4_000),
       },
       system: "sys",
       tools: [],
       // A row from before the container was recorded: the re-attach completes it.
       state: {
-        binding: { backend: "resident", workspace: "/workspace/threads/t/main", user: "worker2" },
+        binding: { backend: "resident", workspace: "/workspace/threads/t/main", user: "worker2", ref: "main" },
+        preserveOnReattachRefusal: true,
+        readyPilotRequirement: {
+          testCommand: "npm test",
+          dependencyDir: "node_modules",
+          requiredTools: ["node", "npm"],
+        },
       },
     });
     await ledger.seed("run-old", "gen-OLD", [
@@ -15507,12 +15519,29 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       },
       [],
     );
+    for (const [expectedSeq, state] of [
+      [0, "admitted"],
+      [1, "working"],
+      [2, "waiting_provider"],
+    ] as const) {
+      expect(
+        await ledger.assignLiveState("run-old", "gen-OLD", {
+          expectedSeq,
+          eventSeq: expectedSeq + 1,
+          at: 10_000,
+          state,
+          bound: 1_200_000,
+        }),
+      ).toMatchObject({ ok: true });
+    }
     ledger.live.get("run-old")!.leaseUntil = 0;
     const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
     let stateAtFirstCall: unknown;
+    let messagesAtFirstCall: ChatMessage[] | undefined;
     const provider: Provider = {
       name: "fake",
-      async complete(): Promise<CompletionResult> {
+      async complete(req): Promise<CompletionResult> {
+        messagesAtFirstCall ??= structuredClone(req.messages);
         stateAtFirstCall ??= structuredClone(ledger.live.get("run-old")?.state);
         return { content: [{ type: "text", text: "resumed and done" }], stopReason: "end_turn" };
       },
@@ -15539,8 +15568,8 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         row: reclaimed.row,
         lastStep: reclaimed.lastStep!,
         plan,
-        events: [],
-        lastSeq: 0,
+        events: await ledger.readEvents("run-old"),
+        lastSeq: 3,
         repoCtx: { repo: "acme/api", ref: "main" },
         inbox: [],
       },
@@ -15559,9 +15588,183 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(stateAtFirstCall).toMatchObject({
       binding: { backend: "resident", workspace: "/workspace/threads/t/main", user: "worker2", container: "vm-1" },
     });
+    expect(messagesAtFirstCall?.[0]?.role).toBe("user");
+    expect(messagesAtFirstCall?.[0]?.content).toContainEqual({ type: "text", text: "fix it" });
     expect(registry.listActive().map((r) => r.id)).toEqual(["run-old"]);
     expect(ledger.finished.get("run-old")?.status).toBe("completed");
+    expect(ledger.finished.get("run-old")?.events.filter((event) => event.type === "child_resumed")).toHaveLength(1);
+    expect(ledger.finished.get("run-old")?.parentInstanceId).toBe("instance-resume");
+    expect(reclaimed.row.meta.ref).toBe("main");
+    expect(reclaimed.row.meta.coordinatorUnit).toBe("unit-a");
+    expect(
+      ledger.finished
+        .get("run-old")
+        ?.events.slice(0, 3)
+        .map((event) => event.seq),
+    ).toEqual([1, 2, 3]);
+    expect(
+      ledger.finished
+        .get("run-old")
+        ?.events.filter((event) => event.type === "run_state")
+        .map((event) => event.state),
+    ).toEqual(expect.arrayContaining(["waiting_provider", "preparing"]));
   });
+
+  it.each([
+    "stale-sequence",
+    "invalid-transition",
+    "terminal",
+    "bound-required",
+    "invalid-bound",
+    "cause-required",
+    "fenced",
+    "unknown-run",
+    "unavailable",
+    "projection-rejection",
+  ] as const)(
+    "a resumed pilot holds its original workspace after a %s and never signals child_resumed",
+    async (failure) => {
+      vi.stubEnv("SANDBOX_TOKEN", "tok");
+      vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+      vi.stubEnv("GITHUB_APP_ID", "");
+      const { calls } = residentFetchStub({
+        attach: () =>
+          new Response(
+            JSON.stringify({
+              workspace: "/workspace/retained",
+              ref: "main",
+              sha: "abc",
+              user: "worker2",
+              recreated: false,
+              deps: "hardlink",
+            }),
+            { status: 200 },
+          ),
+        exec: () =>
+          new Response(JSON.stringify({ stdout: "READY", stderr: "", exitCode: 0, truncated: false }), { status: 200 }),
+      });
+      const ledger = new InMemoryRunLedger(() => 10_000);
+      const request = msg("agent:coding fix it", "slack:UADMIN");
+      const binding = { backend: "resident" as const, workspace: "/workspace/retained", user: "worker2", ref: "main" };
+      await ledger.claim({
+        runId: "run-held",
+        threadKey: "slack:CX:1.0",
+        gen: "gen-OLD",
+        leaseMs: 30_000,
+        startedAt: 5_000,
+        meta: {
+          channelId: "slack:CX",
+          userId: "slack:UADMIN",
+          threadKey: "slack:CX:1.0",
+          agent: "coding",
+          model: "anthropic/coding-model",
+          repo: "acme/api",
+          ref: "main",
+          parentInstanceId: "instance-resume",
+          idempotencyKey: "instance-resume:unit/coding",
+          request: durableInboxMessage(request, request.text, 4_000),
+        },
+        system: "sys",
+        tools: [],
+        state: {
+          binding,
+          preserveOnReattachRefusal: true,
+          readyPilotRequirement: {
+            testCommand: "npm test",
+            dependencyDir: "node_modules",
+            requiredTools: ["node", "npm"],
+          },
+        },
+      });
+      await ledger.seed("run-held", "gen-OLD", [
+        { idx: 0, message: { role: "user", content: [{ type: "text", text: "fix it" }] } },
+      ]);
+      await ledger.step(
+        "run-held",
+        "gen-OLD",
+        {
+          step: 0,
+          seq: 0,
+          turnIndex: 1,
+          inFlight: [],
+          inboxConsumedSeq: 0,
+          remainingMs: 20 * 60_000,
+          turn: 0,
+          iteration: 0,
+        },
+        [],
+      );
+      for (const [expectedSeq, state] of [
+        [0, "admitted"],
+        [1, "working"],
+        [2, "waiting_provider"],
+      ] as const)
+        expect(
+          await ledger.assignLiveState("run-held", "gen-OLD", {
+            expectedSeq,
+            eventSeq: expectedSeq + 1,
+            at: 10_000,
+            state,
+            bound: 1_200_000,
+          }),
+        ).toMatchObject({ ok: true });
+      ledger.live.get("run-held")!.leaseUntil = 0;
+      const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
+      const provider = capturingProvider("must not run");
+      const { deps, registry, writer } = wired(provider, { ledger, yaml: RESIDENT_YAML_FIXTURE });
+      if (failure !== "projection-rejection") {
+        const assign = ledger.assignLiveState.bind(ledger);
+        vi.spyOn(ledger, "assignLiveState").mockImplementation((runId, gen, assignment) =>
+          assignment.state === "admitted" && assignment.resumeSegment
+            ? Promise.resolve({ ok: false, reason: failure })
+            : assign(runId, gen, assignment),
+        );
+      } else {
+        const commit = registry.commitLiveState.bind(registry);
+        vi.spyOn(registry, "commitLiveState").mockImplementation((id, committed) =>
+          committed.liveState.state === "admitted" &&
+          committed.liveState.detail === "reattaching the original workspace"
+            ? false
+            : commit(id, committed),
+        );
+      }
+      const plan = planResume({
+        transcript: {
+          complete: true,
+          compactions: [],
+          turns: 1,
+          messages: [{ role: "user", content: [{ type: "text", text: "fix it" }] }],
+        },
+        lastStep: reclaimed.lastStep!,
+        tools: knownToolsFor(getAgent("coding")),
+      });
+      if (plan.kind !== "resume") throw new Error(plan.kind === "interrupted" ? plan.why : plan.kind);
+      const { io, replies } = ioWithCard();
+      await dispatch(deps, resumeMessage(reclaimed.row, "fix it"), io, {
+        resume: {
+          row: reclaimed.row,
+          lastStep: reclaimed.lastStep!,
+          plan,
+          events: await ledger.readEvents("run-held"),
+          lastSeq: 3,
+          repoCtx: { repo: "acme/api", ref: "main" },
+          inbox: [],
+        },
+      });
+      await writer.settled();
+      expect(provider.requests).toEqual([]);
+      expect(replies.at(-1)).toContain(failure);
+      if (failure !== "fenced" && failure !== "unknown-run")
+        expect(replies.at(-1)).toContain("Reconcile the saved run state and owner");
+      expect(ledger.live.get("run-held")).toMatchObject({
+        phase: failure === "fenced" || failure === "unknown-run" ? "live" : "handoff",
+        state: { binding },
+      });
+      expect(ledger.finished.has("run-held")).toBe(false);
+      expect((await ledger.readEvents("run-held")).filter((event) => event.type === "child_resumed")).toEqual([]);
+      expect(calls.filter((call) => call.path === "/detach")).toEqual([]);
+    },
+  );
 
   it("a resumed pilot readiness failure keeps its run and dirty workspace for the next generation", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
@@ -15698,14 +15901,15 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       gen: "gen-NEXT",
       yaml: RESIDENT_YAML_FIXTURE,
     });
+    const nextEvents = await ledger.readEvents("run-old");
     const { io: nextIo, replies: nextReplies } = ioWithCard();
     await dispatch(continued.deps, resumeMessage(next[0]!.row, "fix it"), nextIo, {
       resume: {
         row: next[0]!.row,
         lastStep: next[0]!.lastStep!,
         plan,
-        events: [],
-        lastSeq: 0,
+        events: nextEvents,
+        lastSeq: Math.max(0, ...nextEvents.map((event) => event.seq)),
         repoCtx: { repo: "acme/api", ref: "main" },
         inbox: [],
       },
@@ -15786,9 +15990,11 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     const provider = capturingProvider("must not run");
     const { deps, registry, writer } = wired(provider, { ledger, yaml: RESIDENT_YAML_FIXTURE });
     const commit = registry.commitLiveState.bind(registry);
-    vi.spyOn(registry, "commitLiveState").mockImplementation((id, assignment) =>
-      assignment.liveState.state === "preparing" ? false : commit(id, assignment),
-    );
+    let preparationCommits = 0;
+    vi.spyOn(registry, "commitLiveState").mockImplementation((id, assignment) => {
+      if (assignment.liveState.state === "preparing" && ++preparationCommits === 1) return false;
+      return commit(id, assignment);
+    });
     const release = vi.fn(async () => ({ released: true }));
     vi.mocked(makeExecutor).mockResolvedValueOnce({
       executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "", release },

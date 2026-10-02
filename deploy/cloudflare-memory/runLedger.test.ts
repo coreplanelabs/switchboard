@@ -450,6 +450,60 @@ describe("run ledger — the fence (item 28)", () => {
 });
 
 describe("run ledger — steps, events, inbox, state (items 30–31)", () => {
+  it("the SQLite ledger fences and sequences a resumed setup boundary after provider wait", async () => {
+    const key = storeKey();
+    await post("/runs/claim", claimBody(key, "resume-state", "slack:C1:resume-state"));
+    for (const [expectedSeq, state] of [
+      [0, "admitted"],
+      [1, "working"],
+      [2, "waiting_provider"],
+    ] as const) {
+      expect(
+        await post("/runs/live-state", {
+          storeKey: key,
+          runId: "resume-state",
+          gen: "g1",
+          assignment: { expectedSeq, eventSeq: expectedSeq + 1, at: 100, state, bound: 1_000 },
+        }),
+      ).toMatchObject({ status: 200, data: { ok: true } });
+    }
+    expect(await post("/runs/handoff", { storeKey: key, gen: "g1", runIds: ["resume-state"] })).toMatchObject({
+      status: 200,
+      data: { marked: ["resume-state"] },
+    });
+    expect(await post("/runs/reclaim", { storeKey: key, gen: "g2", now: Date.now(), leaseMs: LEASE_MS })).toMatchObject(
+      {
+        status: 200,
+        data: { runs: [expect.objectContaining({ row: expect.objectContaining({ runId: "resume-state" }) })] },
+      },
+    );
+    const assignment = { expectedSeq: 3, eventSeq: 4, at: 200, state: "admitted", bound: 900, resumeSegment: true };
+    expect(await post("/runs/live-state", { storeKey: key, runId: "resume-state", gen: "g1", assignment })).toEqual({
+      status: 409,
+      data: { ok: false, reason: "fenced" },
+    });
+    expect(
+      await post("/runs/live-state", { storeKey: key, runId: "resume-state", gen: "g2", assignment }),
+    ).toMatchObject({
+      status: 200,
+      data: { ok: true, liveState: { state: "admitted", since: 200 }, liveStateSeq: 4 },
+    });
+    expect(await post("/runs/live-state", { storeKey: key, runId: "resume-state", gen: "g2", assignment })).toEqual({
+      status: 400,
+      data: { ok: false, reason: "stale-sequence" },
+    });
+    const events = (await post("/runs/live-events", { storeKey: key, runId: "resume-state" })).data.events as Array<{
+      seq: number;
+      type: string;
+    }>;
+    expect(events.map((event) => [event.seq, event.type])).toEqual([
+      [1, "run_state"],
+      [2, "run_state"],
+      [3, "run_state"],
+      [4, "run_state"],
+    ]);
+  });
+
   it("live-state assignment commits its boundary and projection together, while a pre-commit refusal exposes neither half", async () => {
     const key = storeKey();
     await post("/runs/claim", claimBody(key, "state-1", "slack:C1:state"));

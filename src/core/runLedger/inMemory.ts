@@ -39,8 +39,8 @@ import {
 import { INTAKE_DELIVERY_CLAIM_MS } from "../budgets.js";
 import { utf8ByteLength, workEvidenceBelongsToRun, type RunRecord } from "../runRecord.js";
 import type { UnitSeedReceipt } from "../coordinator/unitSeedReceipt.js";
-import { assignRunLiveState } from "../runLiveState.js";
 import {
+  assignLedgerLiveState,
   checkFence,
   decideClaim,
   decideClaimWrite,
@@ -618,11 +618,7 @@ export class InMemoryRunLedger implements RunLedger {
     if (!preserveCheckpointState(row.state, assignment.statePatch ?? {})) return { ok: false, reason: "fenced" };
     if (!workEvidenceBelongsToRun({ ...row.state, ...assignment.statePatch }, { id: row.runId, ...row.meta }))
       return { ok: false, reason: "fenced" };
-    const result = assignRunLiveState(
-      assignment.restart ? undefined : row.liveState,
-      row.liveStateSeq ?? 0,
-      assignment,
-    );
+    const result = assignLedgerLiveState(row.liveState, row.liveStateSeq ?? 0, assignment);
     if (!result.ok) return result;
     let liveStateSeq = row.liveStateSeq ?? 0;
     const events = [...(this.events.get(runId) ?? [])];

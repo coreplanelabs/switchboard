@@ -2,7 +2,30 @@
 // Durable Object applies them inside one transaction; the in-memory ledger
 // applies them in tests; both agree because this is the only copy.
 
-import type { ClaimResult, FenceResult, IntakeReceipt, IntakeWriteResult, LivePhase, StepRecord } from "./types.js";
+import type {
+  ClaimResult,
+  FenceResult,
+  IntakeReceipt,
+  IntakeWriteResult,
+  LivePhase,
+  LiveStateAssignRequest,
+  StepRecord,
+} from "./types.js";
+import { assignRunLiveState, type AssignRunLiveStateResult, type RunLiveState } from "../runLiveState.js";
+
+/** One segment boundary for both ledger implementations; the ordinary live-state table stays forward-only. */
+export function assignLedgerLiveState(
+  current: RunLiveState | undefined,
+  currentSeq: number,
+  assignment: LiveStateAssignRequest,
+): AssignRunLiveStateResult {
+  if (assignment.resumeSegment) {
+    if (assignment.restart || assignment.state !== "admitted") return { ok: false, reason: "invalid-transition" };
+    if (current?.state === "ended") return { ok: false, reason: "terminal" };
+    return assignRunLiveState(undefined, currentSeq, assignment);
+  }
+  return assignRunLiveState(assignment.restart ? undefined : current, currentSeq, assignment);
+}
 
 /** One live run per thread. The existing row, if any, is what `live_runs` holds
  *  for the thread; the same run re-claimed by its owner is idempotent (a retry

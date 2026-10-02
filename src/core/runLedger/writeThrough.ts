@@ -1473,7 +1473,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         return result;
       } catch (err) {
         warn(`[ledger] ${this.threadKey} live state not written: ${describe(err)}`);
-        return { ok: false, reason: "unknown-run" };
+        return { ok: false, reason: "unavailable" };
       }
     }
 
