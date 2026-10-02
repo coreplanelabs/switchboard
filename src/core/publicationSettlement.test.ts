@@ -240,7 +240,14 @@ describe("checkpoint artifact preservation", () => {
   afterEach(async () => {
     await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
   });
-  const fixture = async (corrupt = false, moveRef = false) => {
+  const fixture = async (
+    corrupt = false,
+    moveRef = false,
+    rewritten = false,
+    unrelated = false,
+    missingRemoteRef = false,
+    unboundOrigin = false,
+  ) => {
     const dir = await mkdtemp(join(tmpdir(), "publication-test-"));
     cleanup.push(dir);
     const checkout = join(dir, "work");
@@ -255,9 +262,22 @@ describe("checkpoint artifact preservation", () => {
     await shell("git init -b main && git config user.name Tester && git config user.email tester@example.com");
     await writeFile(join(checkout, "tracked.ts"), "original\n");
     await shell("git add . && git commit -m base");
+    const sharedAncestor = (await shell("git rev-parse HEAD")).trim();
+    if (rewritten) {
+      await writeFile(join(checkout, "tracked.ts"), "main advanced\n");
+      await shell("git add . && git commit -m main-advanced");
+    }
     const baseHeadSha = (await shell("git rev-parse HEAD")).trim();
     await shell(`git clone --bare . '${dir}/remote.git'`);
-    await shell(`git switch -c '${binding.branch}' && git remote add origin https://github.com/acme/api.git`);
+    if (missingRemoteRef) await shell(`git --git-dir='${dir}/remote.git' update-ref -d refs/heads/main`);
+    if (unrelated) {
+      await shell(`git switch --orphan '${binding.branch}'`);
+      await writeFile(join(checkout, "tracked.ts"), "orphan\n");
+      await shell("git add . && git commit -m orphan");
+    } else {
+      await shell(`git switch -c '${binding.branch}' ${rewritten ? sharedAncestor : ""}`);
+    }
+    await shell(`git remote add origin '${dir}/remote.git'`);
     await writeFile(join(checkout, "tracked.ts"), "changed\n");
     await writeFile(join(checkout, "new.test.ts"), "new test\n");
     const objects = new Map<string, Uint8Array>();
@@ -274,6 +294,8 @@ describe("checkpoint artifact preservation", () => {
     const records: PublicationSettlement[] = [];
     const executor = {
       exec: async (cmd: string) => {
+        if (cmd.includes("remote get-url origin"))
+          return unboundOrigin ? `${dir}/remote.git` : "https://github.com/acme/api.git";
         if (cmd.startsWith("curl")) {
           const upload = /-T '([^']+)'/.exec(cmd)?.[1];
           if (upload) {
@@ -313,7 +335,7 @@ describe("checkpoint artifact preservation", () => {
         },
       },
     });
-    return { result, records, dir, checkout, objects, key, shell };
+    return { result, records, dir, checkout, objects, key, shell, sharedAncestor, baseHeadSha };
   };
 
   it("recovers the exact commit with tracked and untracked files after the original checkout is removed", async () => {
@@ -334,6 +356,27 @@ describe("checkpoint artifact preservation", () => {
     expect(await readFile(join(restored, "new.test.ts"), "utf8")).toBe("new test\n");
   });
 
+  it("recovers a rewritten sibling head from its actual shared prerequisite after the original checkout is removed", async () => {
+    const f = await fixture(false, false, true);
+    expect(f.result.settlement).toMatchObject({ publication: { kind: "unknown" }, preservation: { kind: "saved" } });
+    expect(f.key).toContain(`0-checkpoint-${f.baseHeadSha}-${f.result.head}.bundle`);
+    const bundleHeader = Buffer.from(f.objects.get(f.key)!).subarray(0, 512).toString("utf8").split("\n\n")[0];
+    expect(bundleHeader).toContain(`-${f.sharedAncestor} `);
+    expect(bundleHeader).not.toContain(`-${f.baseHeadSha} `);
+    await rm(f.checkout, { recursive: true });
+    const restored = join(f.dir, "restore");
+    await f.shell(`git clone '${f.dir}/remote.git' '${restored}'`, f.dir);
+    const bundle = join(f.dir, "rewritten-checkpoint.bundle");
+    await writeFile(bundle, f.objects.get(f.key)!);
+    await f.shell(
+      `git bundle verify '${bundle}' && git fetch '${bundle}' '${binding.branch}' && git checkout --detach FETCH_HEAD`,
+      restored,
+    );
+    expect((await f.shell("git rev-parse HEAD", restored)).trim()).toBe(f.result.head);
+    expect(await readFile(join(restored, "tracked.ts"), "utf8")).toBe("changed\n");
+    expect(await readFile(join(restored, "new.test.ts"), "utf8")).toBe("new test\n");
+  });
+
   it("refuses a bundle whose valid bytes package a later branch head", async () => {
     const f = await fixture(false, true);
     expect(f.result.settlement).toMatchObject({
@@ -342,6 +385,36 @@ describe("checkpoint artifact preservation", () => {
         reason: "the stored checkpoint does not name the bound source and branch",
       },
     });
+  });
+
+  it("leaves unrelated histories unverified without a shared prerequisite", async () => {
+    const f = await fixture(false, false, false, true);
+    expect(f.result.settlement).toMatchObject({
+      publication: { kind: "unknown" },
+      preservation: { kind: "unavailable" },
+    });
+    expect(f.records.some((value) => value.preservation.kind === "saved")).toBe(false);
+    expect(f.objects.size).toBe(0);
+  });
+
+  it("does not claim a rewritten checkpoint when the shared prerequisite has no durable remote ref", async () => {
+    const f = await fixture(false, false, true, false, true);
+    expect(f.result.settlement).toMatchObject({
+      publication: { kind: "unknown" },
+      preservation: { kind: "unavailable" },
+    });
+    expect(f.records.some((value) => value.preservation.kind === "saved")).toBe(false);
+    expect(f.objects.size).toBe(0);
+  });
+
+  it("refuses a rewritten checkpoint when origin no longer names the bound repository", async () => {
+    const f = await fixture(false, false, true, false, false, true);
+    expect(f.result.settlement).toMatchObject({
+      publication: { kind: "unknown" },
+      preservation: { kind: "unavailable" },
+    });
+    expect(f.records.some((value) => value.preservation.kind === "saved")).toBe(false);
+    expect(f.objects.size).toBe(0);
   });
 
   it("does not report preservation when readback has the right size but a different digest", async () => {
