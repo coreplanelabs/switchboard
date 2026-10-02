@@ -19,15 +19,116 @@ describe("resident deploy preflight — main()", () => {
 const payload = (residents) => ({
   ok: true,
   payload: {
+    fenceReady: true,
+    draining: {
+      since: new Date(Date.now() - 1000).toISOString(),
+      until: new Date(Date.now() + 60_000).toISOString(),
+      swapFence: true,
+    },
     cap: 8,
     count: residents.length,
     inFlight: residents.reduce((a, r) => a + (r.live?.inFlight ?? 0), 0),
-    residents,
+    residents: residents.map((r) => ({
+      ...r,
+      live: r.live
+        ? {
+            executingRuns: r.live.runsInFlight ?? r.live.inFlight,
+            retainedRuns: 0,
+            unknownRuns: 0,
+            ...r.live,
+            runsInFlight: r.live.runsInFlight ?? r.live.inFlight,
+          }
+        : r.live,
+    })),
   },
 });
 const resident = (resource, inFlight) => ({ resource, live: { state: "warm", inFlight } });
 
 describe("resident deploy preflight — decide()", () => {
+  it("retained terminal registrations do not count as executing under a closed deploy fence", () => {
+    const d = decide({
+      ok: true,
+      payload: {
+        fenceReady: true,
+        draining: {
+          since: new Date(Date.now() - 1000).toISOString(),
+          until: new Date(Date.now() + 60_000).toISOString(),
+          swapFence: true,
+        },
+        residents: [
+          {
+            resource: "repo:acme/widgets",
+            live: { state: "warm", inFlight: 3, runsInFlight: 3, executingRuns: 0, retainedRuns: 3, unknownRuns: 0 },
+          },
+        ],
+      },
+    });
+    expect(d.allow).toBe(true);
+    expect(d.busy).toEqual([]);
+    expect(d.message).toContain("3 retained");
+  });
+
+  it("refuses unclassified protected activity but permits an operation to overlap a retained registration", () => {
+    const missed = decide(
+      payload([
+        {
+          resource: "repo:x/y",
+          live: { state: "warm", inFlight: 3, runsInFlight: 3, executingRuns: 0, retainedRuns: 2, unknownRuns: 0 },
+        },
+      ]),
+    );
+    expect(missed.allow).toBe(false);
+    expect(missed.unknown[0].error).toContain("misses a protected run");
+    const overlapping = decide(
+      payload([
+        {
+          resource: "repo:x/y",
+          live: { state: "warm", inFlight: 1, runsInFlight: 1, executingRuns: 1, retainedRuns: 1, unknownRuns: 0 },
+        },
+      ]),
+    );
+    expect(overlapping.allow).toBe(false);
+    expect(overlapping.busy).toEqual([{ resource: "repo:x/y", inFlight: 1 }]);
+    expect(overlapping.unknown).toEqual([]);
+  });
+
+  it("refuses retained work without a live fence, an executing owner, or unknown ownership", () => {
+    const retained = payload([
+      {
+        resource: "repo:x/y",
+        live: { state: "warm", inFlight: 3, runsInFlight: 3, executingRuns: 0, retainedRuns: 3, unknownRuns: 0 },
+      },
+    ]);
+    expect(decide({ ...retained, payload: { ...retained.payload, draining: null } }).allow).toBe(false);
+    expect(decide({ ...retained, payload: { ...retained.payload, fenceReady: false } }).allow).toBe(false);
+    expect(
+      decide({
+        ...retained,
+        payload: { ...retained.payload, draining: { ...retained.payload.draining, until: "2000-01-01T00:00:00Z" } },
+      }).allow,
+    ).toBe(false);
+    expect(
+      decide(
+        payload([
+          {
+            resource: "repo:x/y",
+            live: { state: "warm", inFlight: 4, runsInFlight: 4, executingRuns: 1, retainedRuns: 3, unknownRuns: 0 },
+          },
+        ]),
+      ).allow,
+    ).toBe(false);
+    expect(
+      decide(
+        payload([
+          {
+            resource: "repo:x/y",
+            live: { state: "warm", inFlight: 3, runsInFlight: 3, executingRuns: 0, retainedRuns: 2, unknownRuns: 1 },
+          },
+        ]),
+      ).allow,
+    ).toBe(false);
+  });
+
   it("idle everywhere → allow, not forced", () => {
     const d = decide(payload([resident("repo:jshttp/vary", 0), resident("repo:acme/widgets", 0)]));
     expect(d.allow).toBe(true);
@@ -116,7 +217,7 @@ describe("resident deploy preflight — decide()", () => {
     expect(refreshingBusy.message).toContain("repo:x/y (1 in flight)");
   });
 
-  it("`runsInFlight` decides busy when the live view carries it: a refreshing resident whose only in-flight work is its own cycle (inFlight 1, runsInFlight 0) → allow with the WARNING; a run in flight → refuse; a Worker without the field → inFlight decides as before", () => {
+  it("`executingRuns` decides busy under the fence: a refreshing resident whose only in-flight work is its cycle allows with a warning; a run refuses", () => {
     const cycleOnly = decide(
       payload([{ resource: "repo:x/y", live: { state: "refreshing", inFlight: 1, runsInFlight: 0 } }]),
     );
@@ -191,7 +292,7 @@ describe("resident deploy preflight — decide()", () => {
     const d = decide({ ok: false, error: "no bearer in the environment" });
     expect(d.allow).toBe(false);
     expect(d.message).toContain("no bearer in the environment");
-    expect(d.message).toMatch(/RESIDENT_ADMIN_TOKEN/);
+    expect(d.message).toMatch(/RESIDENT_DRAIN_TOKEN/);
     expect(d.message).toMatch(/RESIDENT_DEPLOY_FORCE=1/);
   });
 
@@ -219,10 +320,10 @@ describe("resident deploy preflight — decide()", () => {
 });
 
 describe("readToken()", () => {
-  it("prefers admin, then operator, then read; never returns a blank", () => {
-    expect(readToken({ RESIDENT_ADMIN_TOKEN: "a", RESIDENT_OPERATOR_TOKEN: "o", RESIDENT_READ_TOKEN: "r" })).toBe("a");
-    expect(readToken({ RESIDENT_OPERATOR_TOKEN: "o", RESIDENT_READ_TOKEN: "r" })).toBe("o");
-    expect(readToken({ RESIDENT_READ_TOKEN: "r" })).toBe("r");
+  it("uses the drain bearer; read, operator, and admin bearers cannot replace the runner's drain", () => {
+    expect(readToken({ RESIDENT_DRAIN_TOKEN: "d", RESIDENT_ADMIN_TOKEN: "a" })).toBe("d");
+    expect(readToken({ RESIDENT_ADMIN_TOKEN: "a" })).toBeNull();
+    expect(readToken({ RESIDENT_OPERATOR_TOKEN: "o", RESIDENT_READ_TOKEN: "r" })).toBeNull();
     expect(readToken({ RESIDENT_ADMIN_TOKEN: "  " })).toBeNull();
     expect(readToken({})).toBeNull();
   });

@@ -144,7 +144,10 @@ export const DRAIN = {
   leaseReserveMs: 10 * MINUTE_MS,
   fallbackWaitMs: 3 * MINUTE_MS,
   deployWaitMaxMs: 60 * MINUTE_MS,
-  marginMinutes: 5,
+  marginMinutes: 30,
+  /** Minimum live drain left when the deploy fence is read: upload and the
+   *  ten-minute readiness window must fit before registered reattach opens. */
+  deployFenceMinRemainingMinutes: 20,
   maxMinutes: 90,
   defaultMinutes: 60,
   /** How long a held drain waits for a container's post-deploy cycle before

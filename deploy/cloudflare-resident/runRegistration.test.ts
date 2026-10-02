@@ -1,11 +1,67 @@
 import { describe, expect, it } from "vitest";
 import { methodOf, readSource } from "./testing/sourceScan";
 import {
+  deployRegistrationState,
   registeredRunAllowsClaim,
   registeredRunAllowsReattach,
   registeredRunNeedsProtection,
   registeredRunOwnsRelease,
 } from "./runRegistration";
+
+describe("deploy registration activity", () => {
+  const registration = { threadKey: "mcp:run", runId: "r1", ownerGen: "g1", ownerFence: 7 };
+  const fence = { runId: "r1", ownerGen: "g1", ownerFence: 7 };
+  const state = (owner: unknown, patch: Record<string, unknown> = {}) =>
+    deployRegistrationState({ threadKey: "mcp:run", registration, fence, owner, ...patch });
+
+  it("counts a live owner as executing and keeps an exact terminal owner retained", () => {
+    expect(state({ kind: "live", row: { runId: "r1", threadKey: "mcp:run", ownerGen: "g1" } })).toBe("executing");
+    expect(state({ kind: "terminal", record: { id: "r1", threadKey: "mcp:run", status: "failed" } })).toBe("retained");
+  });
+
+  it("fails closed on missing owner, stale generation or fence, and provisional terminal history", () => {
+    expect(state(null)).toBe("unknown");
+    expect(state({ kind: "unknown" })).toBe("unknown");
+    expect(state({ kind: "live", row: { runId: "r1", threadKey: "mcp:run", ownerGen: "g2" } })).toBe("unknown");
+    expect(
+      state(
+        { kind: "terminal", record: { id: "r1", threadKey: "mcp:run", status: "failed" } },
+        { fence: { ...fence, ownerFence: 8 } },
+      ),
+    ).toBe("unknown");
+    expect(
+      state({ kind: "terminal", record: { id: "r1", threadKey: "mcp:run", status: "failed", provisional: true } }),
+    ).toBe("unknown");
+    expect(state({ kind: "terminal", record: { id: "r2", threadKey: "mcp:run", status: "failed" } })).toBe("unknown");
+    expect(
+      state(
+        { kind: "terminal", record: { id: "r1", threadKey: "mcp:run", status: "failed" } },
+        { registration: undefined },
+      ),
+    ).toBe("unknown");
+  });
+
+  it("fences owned reattach before the activity read while keeping preservation counts intact", () => {
+    const registry = source.slice(
+      source.indexOf("export class ResidentRegistryDO"),
+      source.indexOf("export class ResidentDO"),
+    );
+    const start = methodOf(registry, "setDeployFence")!;
+    const activity = method("getResidentDeployInfo");
+    const attach = method("attachThreadTraced");
+    const route = source.slice(source.indexOf("async function handleDeployFence"));
+    expect(start).toContain("swapFence: true");
+    expect(start).toContain("deployFenceReady(fenced, now)");
+    expect(route.indexOf("registry.setDeployFence()")).toBeLessThan(route.indexOf("getResidentDeployInfo()"));
+    expect(route.indexOf("getResidentDeployInfo()")).toBeLessThan(route.indexOf("registry.getDrain()"));
+    expect(route).toContain("deployFenceReady(current, now)");
+    expect(attach).toContain("drain.swapFence || !registered");
+    expect(activity).toContain("this.runsInFlightCount()");
+    expect(activity).toContain("this.threadOpsInFlight.get(binding.threadKey)");
+    expect(activity).toContain("deployRegistrationState");
+    expect(method("registeredRunsBeyondOps")).toContain("binding.lastRunOwner?.runId");
+  });
+});
 
 // A deploy's preflight promises to refuse while a resident has a run in
 // flight (docs/reference/specs/resident-repos.md item 44) — but a harness
@@ -186,7 +242,7 @@ describe("the preflight-facing counts see registered runs the op counters miss",
     expect(sweep).toContain("systemClock() <= registration.deadlineAt + RUN_REGISTRATION_GRACE_MS");
   });
 
-  it("GET /status adds the registrations (getInFlightCount), so the preflight and a person see the same number", () => {
+  it("GET /status adds the registrations (getInFlightCount), so a person sees the protected registration count", () => {
     const status = method("getInFlightCount");
     expect(status).toMatch(/this\.inFlightCount\(\) \+ \(await this\.registeredRunsBeyondOps\(\)\)/);
   });

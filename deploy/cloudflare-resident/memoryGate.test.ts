@@ -81,7 +81,7 @@ describe("the two route gates refuse NEW work as the mirror-busy 503 shape and t
     expect(body).toMatch(/const memory = await this\.memoryGate\("exec"\);\s*\n\s*if \(memory\) return memory;/);
   });
 
-  it("attachThreadTraced asks the attach gate after the drain (storage only) and before the image reconcile — a refused attach never restarts a container, and a registered run's re-attach passes as it passes the drain", () => {
+  it("attachThreadTraced asks the attach gate after the drain and before image reconcile; a registered re-attach passes an ordinary drain but waits under a deploy fence", () => {
     const body = method("attachThreadTraced");
     const drain = body.indexOf("await this.fleetDrain()");
     const gate = body.indexOf('await this.memoryGate("attach"');
@@ -93,7 +93,7 @@ describe("the two route gates refuse NEW work as the mirror-busy 503 shape and t
     expect(body).toMatch(
       /const registration = await this\.ctx\.storage\.get<RunRegistration>\(runRegKey\(threadKey\)\);\s*const registered = registeredRunAllowsReattach\(\s*registration,\s*runId,\s*systemClock\(\),\s*RUN_REGISTRATION_GRACE_MS,\s*ownerGen,\s*ownerFence,\s*\);/,
     );
-    expect(body).toMatch(/if \(drain && !registered\)/);
+    expect(body).toMatch(/if \(drain && \(drain\.swapFence \|\| !registered\)\)/);
     expect(body).toMatch(
       /const memory = await this\.memoryGate\("attach", registered\);\s*\n\s*if \(memory\) return memory;/,
     );
