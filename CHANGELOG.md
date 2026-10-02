@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.278.0](https://github.com/coreplanelabs/switchboard/compare/v1.277.0...v1.278.0) (2026-10-02)
+
+
+### Features
+
+* **mcp:** connect local clients to an existing deployment ([#2654](https://github.com/coreplanelabs/switchboard/issues/2654)) ([26a0c2a](https://github.com/coreplanelabs/switchboard/commit/26a0c2a2b9897362485dbf077375084a62f642bb))
+
 ## [1.277.0](https://github.com/coreplanelabs/switchboard/compare/v1.276.4...v1.277.0) (2026-10-02)
 
 
