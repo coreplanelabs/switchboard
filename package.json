@@ -25,6 +25,7 @@
     "docs",
     "deploy/cloudflare",
     "deploy/cloudflare-memory",
+    "deploy/cloudflare-acceptance-source",
     "deploy/cloudflare-resident",
     "deploy/cloudflare-sandbox",
     "deploy/cloudflare-docs",

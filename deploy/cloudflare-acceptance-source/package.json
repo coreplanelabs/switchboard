@@ -1,0 +1,11 @@
+{
+  "name": "switchboard-controlled-acceptance-source",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "verify": "tsc --noEmit -p tsconfig.json && cd ../.. && vitest run --config deploy/cloudflare-acceptance-source/vitest.config.ts deploy/cloudflare-acceptance-source/worker.test.ts"
+  }
+}

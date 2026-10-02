@@ -1,0 +1,11 @@
+name = "switchboard-controlled-acceptance-source"
+main = "worker.ts"
+workers_dev = false
+
+[[durable_objects.bindings]]
+name = "ACTIONS"
+class_name = "AcceptanceActions"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AcceptanceActions"]

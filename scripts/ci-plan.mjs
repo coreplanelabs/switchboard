@@ -14,6 +14,8 @@ export const WORKERS = [
   "deploy/cloudflare-sandbox",
 ];
 export const IMAGES = ["deploy/cloudflare", "deploy/cloudflare-resident", "deploy/cloudflare-sandbox"];
+// Controlled acceptance fixture is an isolated verification target, not a production deploy target.
+const ACCEPTANCE_SOURCE = "deploy/cloudflare-acceptance-source";
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const CODE = /\.(?:[cm]?[jt]sx?|vue)$/;
 
@@ -112,6 +114,9 @@ export function fullPlan() {
 
 /** Pure path selection; `none` keeps an otherwise empty matrix valid. */
 export function planForPaths(paths) {
+  const acceptanceChanged = paths.some((path) => path.startsWith(`${ACCEPTANCE_SOURCE}/`));
+  const withAcceptance = (plan) =>
+    acceptanceChanged ? { ...plan, workers: [...plan.workers, ACCEPTANCE_SOURCE] } : plan;
   const checks = new Set(["check:consistency"]);
   const workers = new Set();
   const images = new Set();
@@ -133,7 +138,7 @@ export function planForPaths(paths) {
         path,
       )
     )
-      return fullPlan();
+      return withAcceptance(fullPlan());
     if (
       (/\.(?:[cm]?[jt]sx?|vue|css|jsonc?|ya?ml)$/.test(path) && path !== "package-lock.json") ||
       path === ".prettierignore"
@@ -172,6 +177,10 @@ export function planForPaths(paths) {
       source();
       if (path === "scripts/check-dist.mjs") checks.add("check:dist");
       if (/^scripts\/(?:docs-gen|check-site)/.test(path)) plan.docs = true;
+    } else if (path.startsWith(`${ACCEPTANCE_SOURCE}/`)) {
+      // CI's existing workers matrix calls `verify -w` only for this workspace.
+      // No image or deploy selection: the fixture is not a release target.
+      plan.botTests = true;
     } else if (path.startsWith("deploy/cloudflare-docs/")) {
       plan.docs = true;
       plan.botTests = true;
@@ -201,7 +210,7 @@ export function planForPaths(paths) {
     } else if (/^\.(?:github|depot)\/workflows\/.+\.ya?ml$/.test(path)) {
       plan.botTests = true;
     } else if (["package.json", "package-lock.json", ".nvmrc"].includes(path)) {
-      return fullPlan();
+      return withAcceptance(fullPlan());
     } else if (["tsconfig.json", "tsconfig.build.json", "tsconfig.scripts.json", "vitest.config.ts"].includes(path)) {
       source();
       if (path !== "vitest.config.ts") botArtifact();
@@ -234,7 +243,7 @@ export function planForPaths(paths) {
       plan.botTests = true;
       images.add("deploy/cloudflare");
     } else {
-      return fullPlan();
+      return withAcceptance(fullPlan());
     }
   }
   plan.botChecks = BOT_CHECKS.filter((check) => checks.has(check));
@@ -242,7 +251,7 @@ export function planForPaths(paths) {
   plan.images = IMAGES.filter((image) => images.has(image));
   if (plan.workers.length === 0) plan.workers = ["none"];
   if (plan.images.length === 0) plan.images = ["none"];
-  return plan;
+  return withAcceptance(plan);
 }
 
 function diffPaths(base) {
