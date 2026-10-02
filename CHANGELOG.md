@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.276.4](https://github.com/coreplanelabs/switchboard/compare/v1.276.3...v1.276.4) (2026-10-02)
+
+
+### Bug fixes
+
+* **agents:** describe Switchboard capabilities accurately ([#2647](https://github.com/coreplanelabs/switchboard/issues/2647)) ([79063b1](https://github.com/coreplanelabs/switchboard/commit/79063b1e4ad948db321a0332b949cca7131c0bee))
+* **coding:** report verified publication alongside work details ([#2620](https://github.com/coreplanelabs/switchboard/issues/2620)) ([885963d](https://github.com/coreplanelabs/switchboard/commit/885963d812accad3ed431791c4aa39f6a91eda76))
+* **http:** accept empty Git push probes ([#2643](https://github.com/coreplanelabs/switchboard/issues/2643)) ([a28fc04](https://github.com/coreplanelabs/switchboard/commit/a28fc04b783685d71c80e9c03966fb5666956caa))
+* **resident:** preserve owned workspaces before cleanup ([#2638](https://github.com/coreplanelabs/switchboard/issues/2638)) ([518021a](https://github.com/coreplanelabs/switchboard/commit/518021a9ade8eade13c232117ec4ffd93e37f8ab))
+* **runs:** acknowledge each committed state snapshot independently ([#2640](https://github.com/coreplanelabs/switchboard/issues/2640)) ([77eb220](https://github.com/coreplanelabs/switchboard/commit/77eb22007ced020b18c2b34fce405877d05adf73))
+* **runs:** allow steering through MCP, HTTP, and CLI ([#2648](https://github.com/coreplanelabs/switchboard/issues/2648)) ([0c2bbb1](https://github.com/coreplanelabs/switchboard/commit/0c2bbb1f2ae0efcf131085958dc54d18bb5b38cd))
+
+
+### Documentation
+
+* **docs:** explain the gateway, agents, and data flow ([#2646](https://github.com/coreplanelabs/switchboard/issues/2646)) ([beda7a9](https://github.com/coreplanelabs/switchboard/commit/beda7a94c466fb78d398212e543a8565bc69ae2c))
+* **docs:** guide users of an existing deployment ([#2645](https://github.com/coreplanelabs/switchboard/issues/2645)) ([c9d1987](https://github.com/coreplanelabs/switchboard/commit/c9d19874cd4a266053cbc9f1c0ad53e1c01ea866))
+
 ## [1.276.3](https://github.com/coreplanelabs/switchboard/compare/v1.276.2...v1.276.3) (2026-10-02)
 
 
