@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.276.0](https://github.com/coreplanelabs/switchboard/compare/v1.275.3...v1.276.0) (2026-10-02)
+
+
+### Features
+
+* **core:** preserve context from questions through child work ([#2619](https://github.com/coreplanelabs/switchboard/issues/2619)) ([6ac4ea4](https://github.com/coreplanelabs/switchboard/commit/6ac4ea446191e083af85a49b30445118ea7ab8d3))
+
 ## [1.275.3](https://github.com/coreplanelabs/switchboard/compare/v1.275.2...v1.275.3) (2026-10-02)
 
 
