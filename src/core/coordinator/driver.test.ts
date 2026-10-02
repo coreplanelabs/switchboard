@@ -2,7 +2,12 @@ import type { PublicationSettlement } from "../publicationSettlement.js";
 import { describe, expect, it } from "vitest";
 import { SHIP_RECORD_VISIBILITY } from "../budgets.js";
 import { MERGE_WAIT_CHUNK_MS, PR_TRANSITION_GUARD_MS, WAIT_CHUNK_MS } from "../ship/coordinator.js";
-import { checksSettledEventType, RUN_FINISHED_EVENT_PREFIX, type CoordinatorUnit } from "./contract.js";
+import {
+  checksSettledEventType,
+  RUN_FINISHED_EVENT_PREFIX,
+  type CoordinatorUnit,
+  type OriginalReviewRecovery,
+} from "./contract.js";
 import {
   SPAWN_STEP_CONFIG,
   STEP_CONFIG,
@@ -128,7 +133,7 @@ const acked = (at = T0): BotReply => ok({ ok: true }, at);
 
 describe("runOriginalUnitRecovery", () => {
   const WORKFLOW = "recovery-run-original-review";
-  const recoveryRow = (kind: "findings" | "review", over: Partial<CoordinatorUnit["recovery"]> = {}): CoordinatorUnit =>
+  const recoveryRow = (kind: "findings" | "review", over: Partial<OriginalReviewRecovery> = {}): CoordinatorUnit =>
     row("U10", {
       pr: { number: 7, url: PR_URL },
       lastPush: HEAD,
@@ -147,6 +152,58 @@ describe("runOriginalUnitRecovery", () => {
         ...over,
       },
     });
+
+  it("starts a recovered round-zero coding child on the original unit", async () => {
+    const restored = row("U10", {
+      lastPush: HEAD,
+      recovery: {
+        kind: "coding",
+        round: 0,
+        codingRunId: "run-original-coding",
+        codingKey: `${INSTANCE}:U10/0/coding`,
+        expectedHeadSha: HEAD,
+        accounting: {
+          spendUsd: 0.25,
+          children: [{ runId: "run-original-coding", key: `${INSTANCE}:U10/0/coding`, usd: 0.25 }],
+          grant: { renewals: 0 },
+          renewalsSpent: 0,
+        },
+        remainingMs: 180 * MIN,
+        claimedAt: T0,
+        step: "U10/recovery/0/coding",
+        previousEnding: { kind: "aborted", report: "original stopped", at: T0 - MIN },
+        workflowId: WORKFLOW,
+        deadlineAt: T0 + 180 * MIN,
+      },
+    });
+    const s = steps({ "U10/recovery/0/coding/wait/1": "event", "U10/recovery/1/review/wait/1": "event" });
+    const b = bot({
+      "recover-unit": [acked()],
+      plan: [planAnswer([restored], T0, "person")],
+      spawn: [spawned("run-recovered-coding"), spawned("run-new-review", T0 + 10 * MIN)],
+      "read-record": [
+        codingDone("run-recovered-coding", T0 + 10 * MIN),
+        reviewApproved("run-new-review", T0 + 20 * MIN),
+      ],
+      "pr-check": [prOpen(T0 + 10 * MIN)],
+      round: [acked(), acked(), acked(), acked()],
+      "unit-end": [acked(T0 + 20 * MIN)],
+    });
+    const summary = await runOriginalUnitRecovery(s.runner, b.client, WORKFLOW, {
+      kind: "recover-original-unit",
+      parentInstanceId: INSTANCE,
+      unit: "U10",
+    });
+    expect(summary.units).toEqual({ U10: "merge_ready" });
+    expect(b.of("unit-start")).toEqual([]);
+    expect(b.of("branch")).toEqual([]);
+    expect(b.of("spawn")[0]).toMatchObject({
+      step: "U10/recovery/0/coding",
+      preset: "coding",
+      brief: { kind: "contract", continue: { from: HEAD, previousRunId: "run-original-coding", recovery: true } },
+    });
+    expect(b.of("spawn")[1]).toMatchObject({ step: "U10/recovery/1/review", preset: "review" });
+  });
 
   it("continues request_changes through the original findings namespace and re-review without a start, branch, or generated unit", async () => {
     const HEAD_2 = "b".repeat(40);

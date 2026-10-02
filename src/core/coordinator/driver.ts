@@ -1109,6 +1109,9 @@ async function runUnit(
             remainingMs: row.recovery.remainingMs,
             unitKey: `${instanceId}:${unit}`,
             ...(row.recovery.accounting !== undefined ? { renewalsSpent: row.recovery.accounting.renewalsSpent } : {}),
+            ...(row.recovery.kind === "coding"
+              ? { coding: { from: row.recovery.expectedHeadSha, previousRunId: row.recovery.codingRunId } }
+              : {}),
           },
         }
       : {}),
@@ -1118,9 +1121,11 @@ async function runUnit(
       ? openRecoveredUnitPipeline(input, start.at, {
           kind: row.recovery.kind,
           round: row.recovery.round,
-          pr: row.pr!,
+          ...(row.pr !== undefined ? { pr: row.pr } : {}),
           expectedHeadSha: row.recovery.expectedHeadSha,
-          reviewRunId: row.recovery.reviewRunId,
+          ...(row.recovery.kind === "coding"
+            ? { codingRunId: row.recovery.codingRunId }
+            : { reviewRunId: row.recovery.reviewRunId }),
           ...(row.recovery.accounting !== undefined ? { spendUsd: row.recovery.accounting.spendUsd } : {}),
           ...(row.recovery.findingsRunId !== undefined ? { findingsRunId: row.recovery.findingsRunId } : {}),
           ...(row.recovery.findings !== undefined ? { findings: row.recovery.findings } : {}),

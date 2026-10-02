@@ -9,6 +9,7 @@ import { buildReviewPostBody } from "../core/reviewVerdict.js";
 import { ALL_GRANTS } from "../core/authz/grants.js";
 import { InMemoryCoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import { createMainTaskStarter } from "../core/coordinator/mainStart.js";
+import { generatedTaskOf } from "../core/coordinator/generatedTask.js";
 import {
   InMemoryPrivateWorkerLog,
   UnavailablePrivateWorkerLog,
@@ -237,6 +238,7 @@ function harness(
      *  subject, `null` = wired but unreadable, Error = the read throws; absent,
      *  the dep is absent too and the fallback title stands. */
     headSubject?: string | null | Error;
+    branchHead?: string | Error;
     /** The branch's commits over the base (githubPulls.commitsOverBase): a count, or unread. */
     ahead?: number | Error;
     /** The merge step's GitHub: the pull request's facts, the checks at the head, the squash's answer. */
@@ -375,6 +377,14 @@ function harness(
           branchHeadSubject: async (): Promise<string | undefined> => {
             if (over.headSubject instanceof Error) throw over.headSubject;
             return over.headSubject ?? undefined;
+          },
+        }
+      : {}),
+    ...(over.branchHead !== undefined
+      ? {
+          fetchBranchHeadSha: async (): Promise<string | undefined> => {
+            if (over.branchHead instanceof Error) throw over.branchHead;
+            return over.branchHead;
           },
         }
       : {}),
@@ -8025,6 +8035,247 @@ describe("the runner's routes read the hard stop's mark (record 0060; issue 1924
       finished: true,
       status: "completed",
     });
+  });
+});
+
+describe("POST /admin/coordinator/recover-unit — pre-PR same-unit coding", () => {
+  const HEAD = "7".repeat(40);
+  const task = "Finish the original coding request";
+  const original = (): CoordinatorInstance => ({
+    ...INSTANCE,
+    runId: "run-parent",
+    plan: { id: "orchestration" },
+    caps: { maxRounds: 3, maxMinutes: 240 },
+    grant: { renewals: 0, costCapUsd: 2 },
+  });
+  const unit = (): CoordinatorUnit => ({
+    instanceId: INSTANCE.id,
+    unit: "U12",
+    slug: "u12",
+    branch: INSTANCE.branch!,
+    dependsOn: [],
+    threadKey: INSTANCE.threadKey,
+    generatedTask: generatedTaskOf(task, {
+      requesterId: INSTANCE.userId,
+      threadKey: INSTANCE.threadKey,
+      runId: "run-parent",
+      repo: INSTANCE.repo,
+      sourceUrl: INSTANCE.sourceUrl,
+    }),
+    startedAt: NOW - minutesToMs(60),
+    rounds: [
+      { index: 0, agent: "coding", outcome: "started", at: NOW - minutesToMs(50) },
+      { index: 0, agent: "coding", outcome: "aborted", at: NOW - minutesToMs(15) },
+    ],
+    ending: { kind: "aborted", report: "coding stopped before the PR", at: NOW - minutesToMs(10) },
+  });
+  const priced = {
+    turns: 1,
+    byModel: {
+      "test/model": { turns: 1, inputTokens: 10, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0, usd: 0.25 },
+    },
+  };
+  const settlement = () => ({
+    version: 1 as const,
+    binding: {
+      runId: "run-original-coding",
+      instanceId: INSTANCE.id,
+      step: `${INSTANCE.id}:U12/0/coding`,
+      repo: INSTANCE.repo,
+      branch: INSTANCE.branch!,
+      requester: INSTANCE.userId,
+      threadKey: INSTANCE.threadKey,
+      generation: "original",
+    },
+    checkpoint: { kind: "created" as const, head: HEAD },
+    publication: { kind: "accepted" as const, head: HEAD },
+    preservation: { kind: "unavailable" as const, reason: "the verified remote push preserves this checkpoint" },
+    release: { kind: "released" as const },
+  });
+  const coding = (push = true): RunRecord =>
+    record("run-original-coding", {
+      parentInstanceId: INSTANCE.id,
+      idempotencyKey: `${INSTANCE.id}:U12/0/coding`,
+      agent: "coding",
+      repo: INSTANCE.repo,
+      headSha: HEAD,
+      ...(push ? { pushed: [{ ref: INSTANCE.branch!, sha: HEAD, by: "push" }] } : {}),
+      ...(push ? { publicationSettlement: settlement() } : {}),
+      status: "interrupted",
+      startedAt: NOW - minutesToMs(51),
+      finishedAt: NOW - minutesToMs(20),
+      usage: priced,
+    });
+  const recover = (h: ReturnType<typeof harness>, userId = INSTANCE.userId, messageId = "recovery-1") =>
+    recoverOriginalUnit({ parentInstanceId: INSTANCE.id, unit: "U12" }, h.deps, {
+      userId,
+      threadKey: INSTANCE.threadKey,
+      messageId,
+    });
+
+  it("admits one verified original-ref coding continuation", async () => {
+    const h = harness({ branchHead: HEAD });
+    await h.instances.put(original());
+    await h.instances.putUnits([unit()]);
+    await h.store.put(coding());
+    expect(await recover(h)).toMatchObject({ status: 200, body: { parentInstanceId: INSTANCE.id, unit: "U12" } });
+    const [row] = await h.instances.listUnits(INSTANCE.id);
+    expect(row).toMatchObject({ branch: INSTANCE.branch, recovery: { kind: "coding", expectedHeadSha: HEAD } });
+    expect(row?.generatedTask?.text).toBe(task);
+    expect(row?.recovery?.accounting?.spendUsd).toBe(0.25);
+    expect(h.recoveries).toHaveLength(1);
+    expect(await recover(h)).toMatchObject({ status: 200, body: { outcome: "already_started" } });
+    expect(h.recoveries).toHaveLength(1);
+    const workflowId = (h.recoveries[0] as { id: string }).id;
+    expect(await recoverOriginalUnit({ parentInstanceId: INSTANCE.id, unit: "U12", workflowId }, h.deps)).toMatchObject(
+      { status: 200, body: { workflowId } },
+    );
+  });
+
+  it("spawns only the original coding step and refuses a ref move before dispatch", async () => {
+    const h = harness({ branchHead: HEAD });
+    await h.instances.put(original());
+    await h.instances.putUnits([unit()]);
+    await h.store.put(coding());
+    expect(await recover(h)).toMatchObject({ status: 200 });
+    const body = {
+      parentInstanceId: INSTANCE.id,
+      unit: "U12",
+      step: "U12/recovery/0/coding",
+      preset: "coding",
+      brief: {
+        kind: "contract",
+        unit: "U12",
+        rebase: { branch: INSTANCE.branch, onto: "main" },
+        continue: { segment: 1, from: HEAD, previousRunId: "run-original-coding", recovery: true },
+      },
+      budget: 30,
+    };
+    const first = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, body), h.deps);
+    expect(first.status, JSON.stringify(first.body)).toBe(200);
+    expect(h.dispatched).toHaveLength(1);
+    expect(h.dispatched[0]).toMatchObject({
+      opts: { coordinator: { parentInstanceId: INSTANCE.id, unit: "U12", branch: INSTANCE.branch } },
+    });
+    const second = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}spawn`, { ...body, step: "U12/recovery/0/coding/a1" }),
+      h.deps,
+    );
+    expect(second).toMatchObject({ status: 409, body: { error: "recovery_claim_mismatch" } });
+    expect(h.dispatched).toHaveLength(1);
+
+    const moved = harness({ branchHead: HEAD });
+    await moved.instances.put(original());
+    await moved.instances.putUnits([unit()]);
+    await moved.store.put(coding());
+    expect(await recover(moved)).toMatchObject({ status: 200 });
+    moved.deps.fetchBranchHeadSha = async () => "8".repeat(40);
+    expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, body), moved.deps)).toMatchObject({
+      status: 409,
+      body: { error: "recovery_head_moved" },
+    });
+    expect(moved.dispatched).toHaveLength(0);
+  });
+
+  it("settles the coding recovery without inventing a review receipt", async () => {
+    const h = harness({ branchHead: HEAD });
+    await h.instances.put(original());
+    await h.instances.putUnits([unit()]);
+    await h.store.put(coding());
+    const response = await recover(h);
+    expect(response).toMatchObject({ status: 200 });
+    const workflowId = (response.body as { workflowId: string }).workflowId;
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          recoveryWorkflowId: workflowId,
+          ending: {
+            kind: "aborted",
+            report: "the second coding attempt ended",
+            outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 0 },
+          },
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 200 });
+    const [settled] = await h.instances.listUnits(INSTANCE.id);
+    expect(settled?.recovery).toBeUndefined();
+    expect(settled?.recoveryReceipt).toMatchObject({ codingRunId: "run-original-coding", workflowId });
+    expect(settled?.recoveryReceipt?.reviewRunId).toBeUndefined();
+    expect((await h.instances.listRecoveryHistory(unit())).receipts).toHaveLength(2);
+    expect(await recover(h, INSTANCE.userId, "recovery-2")).toMatchObject({
+      status: 409,
+      body: { error: "recovery_already_completed" },
+    });
+  });
+
+  it("refuses unverified work and moved heads before claiming", async () => {
+    for (const push of [false, true]) {
+      const h = harness({ branchHead: push ? "8".repeat(40) : HEAD });
+      await h.instances.put(original());
+      await h.instances.putUnits([unit()]);
+      await h.store.put(coding(push));
+      expect(await recover(h)).toMatchObject({ status: 409 });
+      expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
+      expect(h.recoveries).toHaveLength(0);
+    }
+  });
+
+  it("refuses missing publication proof, discarded private work, and pending branch publication", async () => {
+    const cases: Partial<RunRecord>[] = [
+      { publicationSettlement: undefined },
+      {
+        publicationSettlement: {
+          ...settlement(),
+          release: { kind: "released", leftBehind: { uncommittedChanges: 1, unpushedCommits: 0 } },
+        },
+      },
+      {
+        doorPublicationPending: {
+          id: "pending-branch",
+          repo: INSTANCE.repo,
+          owner: { instanceId: INSTANCE.id, unit: "U12" },
+          update: { ref: `refs/heads/${INSTANCE.branch}`, old: HEAD, next: "8".repeat(40) },
+        },
+      },
+    ];
+    for (const over of cases) {
+      const h = harness({ branchHead: HEAD });
+      await h.instances.put(original());
+      await h.instances.putUnits([unit()]);
+      await h.store.put({ ...coding(), ...over });
+      expect(await recover(h)).toMatchObject({ status: 409, body: { error: "recovery_work_unverified" } });
+      expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
+      expect(h.recoveries).toHaveLength(0);
+    }
+  });
+
+  it("refuses a foreign requester and exhausted original budget", async () => {
+    const h = harness({ branchHead: HEAD });
+    await h.instances.put(original());
+    await h.instances.putUnits([unit()]);
+    await h.store.put(coding());
+    expect(await recover(h, "slack:FOREIGN")).toMatchObject({ status: 403 });
+    expect(h.recoveries).toHaveLength(0);
+    const expiredHarness = harness({ branchHead: HEAD });
+    const expired = original();
+    expired.caps = { maxRounds: 3, maxMinutes: 60 };
+    await expiredHarness.instances.put(expired);
+    await expiredHarness.instances.putUnits([unit()]);
+    await expiredHarness.store.put(coding());
+    expect(await recover(expiredHarness)).toMatchObject({
+      status: 409,
+      body: { error: "recovery_wall_clock_exhausted" },
+    });
+    expect(expiredHarness.recoveries).toHaveLength(0);
+    const capped = harness({ branchHead: HEAD });
+    await capped.instances.put({ ...original(), grant: { renewals: 0, costCapUsd: 0.2 } });
+    await capped.instances.putUnits([unit()]);
+    await capped.store.put(coding());
+    expect(await recover(capped)).toMatchObject({ status: 409, body: { error: "recovery_cost_cap_exhausted" } });
+    expect(capped.recoveries).toHaveLength(0);
   });
 });
 

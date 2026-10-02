@@ -176,6 +176,7 @@ import {
   fetchDecisionRecordClaims,
   fetchPullRequestComments,
   fetchPullRequestFacts,
+  fetchBranchHeadSha,
   fetchRepoShipInfo,
   fetchPullRequestTitleBody,
   fixupCommitSubjects,
@@ -1329,6 +1330,7 @@ export async function runBot(): Promise<void> {
       // The recover open's preferred title (record 0064's `unit_title` move):
       // the head commit's subject, when it passes the title rule.
       branchHeadSubject,
+      fetchBranchHeadSha,
       rewriteIdentities: (args) => dispatchIdentityRewrite(config).rewrite(args),
       // The round-0 fact (agent-ship item 12): a branch with no commits over
       // the base, beside a handoff naming where the scope landed, ends the

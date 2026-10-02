@@ -227,13 +227,15 @@ const prUrl = (repo: string, pr: number) => `https://github.com/${repo}/pull/${p
  *  write-up and handoff as the checkpoint to pick up — the unit's request
  *  follows unchanged, so the contract stays the contract. */
 async function continuationPreface(
-  cont: { segment: number; from?: string; previousRunId?: string; texts?: string[] },
+  cont: { segment: number; from?: string; previousRunId?: string; texts?: string[]; recovery?: true },
   unit: CoordinatorUnit,
   readers: BriefReaders,
 ): Promise<string> {
   const previous = cont.previousRunId !== undefined ? await readers.readRunFacts(cont.previousRunId) : undefined;
   const lines = [
-    `Segment ${cont.segment} of this unit: the previous segment ended at its lease with the unit unfinished. ` +
+    (cont.recovery === true
+      ? `The original coding attempt ended before a pull request. `
+      : `Segment ${cont.segment} of this unit: the previous segment ended at its lease with the unit unfinished. `) +
       `Continue from \`${unit.branch}\`${cont.from !== undefined ? ` at \`${cont.from.slice(0, 7)}\`` : ""} as it stands — a clean checkout of what was pushed — and finish the unit: what is done stays done, so do not redo it.`,
   ];
   if (previous?.finalReply !== undefined) lines.push(`The previous segment's write-up:\n${previous.finalReply}`);

@@ -487,7 +487,7 @@ export type Brief =
       rebase: { branch: string; onto: string };
       /** A renewal's segment (decision 0046): the child continues the previous
        *  segment's work from `from`, briefed with that run's write-up and handoff. */
-      continue?: { segment: number; from?: string; previousRunId?: string; texts?: string[] };
+      continue?: { segment: number; from?: string; previousRunId?: string; texts?: string[]; recovery?: true };
     }
   | {
       kind: "review";
@@ -1198,7 +1198,12 @@ export interface UnitPipelineInput {
   /** A terminal original unit re-entered at its unchanged reviewed head. The
    * exact remaining lease is carried in milliseconds; the step prefix keeps
    * every new durable step under `<original instance>:<unit>/recovery/...`. */
-  recovery?: { remainingMs: number; unitKey: string; renewalsSpent?: number };
+  recovery?: {
+    remainingMs: number;
+    unitKey: string;
+    renewalsSpent?: number;
+    coding?: { from: string; previousRunId: string };
+  };
 }
 
 type Phase =
@@ -1442,18 +1447,19 @@ export function openUnitPipeline(input: UnitPipelineInput, at: number): UnitPipe
   return resumed;
 }
 
-/** Open the narrow unchanged-head recovery directly at the one authorized
- * child boundary. No branch, pre-check, fresh clock or round zero is invented;
- * the caller has already CAS-claimed the durable row and verified GitHub. */
+/** Open the narrow unchanged-head recovery directly at the claimed child
+ * boundary. The caller has already claimed the durable row and verified GitHub;
+ * the coding case resumes round zero with the original lease and spend. */
 export function openRecoveredUnitPipeline(
   input: UnitPipelineInput,
   at: number,
   recovery: {
-    kind: "findings" | "review";
+    kind: "findings" | "review" | "coding";
     round: number;
-    pr: PrRef;
+    pr?: PrRef;
     expectedHeadSha: string;
-    reviewRunId: string;
+    reviewRunId?: string;
+    codingRunId?: string;
     spendUsd?: number;
     findingsRunId?: string;
     findings?: Finding[];
@@ -1462,6 +1468,20 @@ export function openRecoveredUnitPipeline(
     patternContinuations?: number;
   },
 ): UnitPipelineState {
+  if (recovery.kind === "coding") {
+    const base = openUnitPipeline(input, at);
+    return enterRound(
+      {
+        ...base,
+        phase: { at: "ended" },
+        spendUsd: recovery.spendUsd ?? null,
+        ...(recovery.codingRunId !== undefined ? { lastCodingRunId: recovery.codingRunId } : {}),
+      },
+      { index: 0, kind: "coding" },
+    ).state;
+  }
+  if (recovery.pr === undefined || recovery.reviewRunId === undefined)
+    throw new Error("review recovery lacks its verified pull request");
   const base: UnitPipelineState = {
     input,
     startedAt: at,
@@ -1589,20 +1609,30 @@ function briefFor(s: UnitPipelineState, round: RoundRef): Brief {
   const unit = s.input.unit.id;
   if (round.kind === "coding") {
     const session = s.input.session;
+    const recovered = s.input.recovery?.coding;
     return {
       kind: "contract",
       unit,
       rebase: { branch: s.input.unit.branch, onto: s.input.base },
-      ...(session !== undefined && session.segment > 1
+      ...(recovered !== undefined
         ? {
             continue: {
-              segment: session.segment,
-              ...(session.continueFrom !== undefined ? { from: session.continueFrom } : {}),
-              ...(session.previousRunId !== undefined ? { previousRunId: session.previousRunId } : {}),
-              ...(session.texts !== undefined ? { texts: session.texts } : {}),
+              segment: 1,
+              from: recovered.from,
+              previousRunId: recovered.previousRunId,
+              recovery: true as const,
             },
           }
-        : {}),
+        : session !== undefined && session.segment > 1
+          ? {
+              continue: {
+                segment: session.segment,
+                ...(session.continueFrom !== undefined ? { from: session.continueFrom } : {}),
+                ...(session.previousRunId !== undefined ? { previousRunId: session.previousRunId } : {}),
+                ...(session.texts !== undefined ? { texts: session.texts } : {}),
+              },
+            }
+          : {}),
     };
   }
   const pr = s.pr!.number;
