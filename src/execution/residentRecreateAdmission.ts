@@ -42,7 +42,7 @@ export class ResidentRecreateAdmission {
 
 /** The request asking for a new UID is the sole in-flight operation. A VM
  * recycle is safe only while no other work or retained workspace owns it. */
-export function idleForPoolRecycle(input: {
+type PoolRecycleState = {
   state: string;
   draining: boolean;
   imagePending: boolean;
@@ -53,13 +53,32 @@ export function idleForPoolRecycle(input: {
   registeredRuns: number;
   liveBindings: number;
   inspecting: number;
-}): boolean {
+};
+
+export function idleForPoolRecycle(input: PoolRecycleState): boolean {
   return (
     input.state === "warm" &&
     !input.draining &&
     !input.imagePending &&
     input.inFlight === 1 &&
     input.refreshAdmissions === 0 &&
+    input.adminWork === 0 &&
+    !input.hydrating &&
+    input.registeredRuns === 0 &&
+    input.liveBindings === 0 &&
+    input.inspecting === 0
+  );
+}
+
+/** A refresh can finish without another run owning the VM. The caller waits
+ * under its attach budget, then rechecks the complete idle gate before destroy. */
+export function retryPoolRecycleAfterRefresh(input: PoolRecycleState & { refreshes: number }): boolean {
+  return (
+    (input.state === "warm" || input.state === "refreshing") &&
+    !input.draining &&
+    !input.imagePending &&
+    (input.state === "refreshing" || input.refreshAdmissions > 0) &&
+    input.inFlight - input.refreshes === 1 &&
     input.adminWork === 0 &&
     !input.hydrating &&
     input.registeredRuns === 0 &&

@@ -28,6 +28,14 @@ describe("resident pool UID generation fence", () => {
     expect(method("allocateThreadUser")).toContain("this.reserveSafePoolUser(`thread:${threadKey}`, threadKey)");
   });
 
+  it("types a refresh-only recycle conflict for the attach wait", () => {
+    const recycle = method("recycleSpentPoolForAdmission");
+    expect(recycle).toContain("retryPoolRecycleAfterRefresh(");
+    expect(recycle).toContain("transient: true");
+    expect(recycle).toContain("pool-recycle-wait:");
+    expect(recycle).toContain("pool-recycle-required:");
+  });
+
   it("refuses old or unrecorded UIDs at the model-command boundary", () => {
     expect(method("threadRun")).toContain("this.poolUserOwnerMatches(user)");
     expect(method("claimRetainedThreadUser")).toContain("this.markPoolUserSpent(user, `thread:${binding.threadKey}`)");

@@ -1809,6 +1809,18 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
     expect(deterministic.calls.map(route)).toEqual(["/attach"]);
   });
 
+  it("waits through a typed refresh conflict and attaches when the refresh settles", async () => {
+    const waiting = {
+      body: { error: "pool-recycle-wait: scheduled refresh is still using the resident", status: 503, transient: true },
+    };
+    const { calls } = stubFetch(waiting, status("refreshing"), waiting, status("warm"), { body: ATTACH_OK });
+    const pending = new ResidentExecutor(OPTS).attach(undefined, { budgetMs: 10_000 });
+    await vi.advanceTimersByTimeAsync(5_000);
+    const binding = await pending;
+    expect(binding).toMatchObject({ ref: "master", sha: "1220b9c4" });
+    expect(calls.map(route)).toEqual(["/attach", "/status", "/attach", "/status", "/attach"]);
+  });
+
   it("attach: the wait is bounded by the wake budget — a resident still transient past it is the wake's own strike, the resident unavailable (`worker-unavailable`, infra a longer clock may still wait on), which the first attach's caller folds into its cold-fallback reason; and a `transient` flag on a non-5xx refusal is never a reason to wait (`isTransientRefusal`, one rule)", async () => {
     const transientAttach = {
       body: { error: "attach-failed: Network connection lost.", status: 500, transient: true },
