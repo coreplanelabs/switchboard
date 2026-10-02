@@ -11578,6 +11578,78 @@ workspaceDir: __WORKDIR__
       input: { preset: "ship", shipEntry: "work", request, reason: "the ask" },
     }));
 
+  it("sends an explicit MCP recover-unit command to the original unit with the operator enabled", async () => {
+    const { deps, created } = shipDeps(SHIP_OPERATOR_YAML);
+    const recover = vi.fn(async () => ({
+      status: 200,
+      body: { ok: true, outcome: "started", workflowId: "recovery-original" },
+    }));
+    deps.recoverOriginalUnit = recover;
+    deps.operatorModel = vi.fn<RouteModel>(async () => ({
+      tool: "ask",
+      input: { text: "Which action?", reason: "unnecessary" },
+    }));
+    const threadKey = "mcp:ops:original-unit";
+    const instanceId = `plan-${generatedPlanId("recover original", threadKey)}`;
+    const io = new McpIO([], threadKey);
+
+    await dispatch(
+      deps,
+      {
+        channelId: "mcp:ops",
+        userId: "mcp:job",
+        threadKey,
+        text: `agent:ship recover unit ${instanceId}:U12`,
+      },
+      io,
+    );
+
+    expect(recover).toHaveBeenCalledExactlyOnceWith(
+      { instanceId, unit: "U12" },
+      expect.objectContaining({ userId: "mcp:job", threadKey }),
+    );
+    expect(deps.operatorModel).not.toHaveBeenCalled();
+    expect(created).toEqual([]);
+  });
+
+  it("keeps the shadow operator decision beside an MCP recover-unit command", async () => {
+    const yaml = SHIP_YAML.replace("routing: { operator: off }", "routing: { operator: shadow }");
+    const { deps } = shipDeps(yaml);
+    const recover = vi.fn(async () => ({
+      status: 200,
+      body: { ok: true, outcome: "started", workflowId: "recovery-original" },
+    }));
+    deps.recoverOriginalUnit = recover;
+    deps.operatorModel = vi.fn<RouteModel>(async () => ({
+      tool: "bind_preset",
+      input: { preset: "ship", shipEntry: "continue", repo: "acme/api", reason: "recover the original unit" },
+    }));
+    const registry = new RunRegistry({ genId: () => "run-shadow-recovery", genToken: () => "tok" });
+    deps.runRegistry = registry;
+    const threadKey = "mcp:ops:shadow-recovery";
+    const instanceId = `plan-${generatedPlanId("recover original", threadKey)}`;
+
+    await dispatch(
+      deps,
+      {
+        channelId: "mcp:ops",
+        userId: "mcp:job",
+        threadKey,
+        text: `agent:ship recover unit ${instanceId}:U12`,
+      },
+      new McpIO([], threadKey),
+    );
+
+    expect(recover).toHaveBeenCalledOnce();
+    expect(deps.operatorModel).toHaveBeenCalledOnce();
+    expect(
+      registry.snapshotById("run-shadow-recovery")?.events.find((event) => event.type === "operator"),
+    ).toMatchObject({
+      mode: "shadow",
+      outcome: "binds",
+    });
+  });
+
   it("an explicit Ship plan request keeps its runner grant after the operator binds the plan stage", async () => {
     const { deps, instances } = shipDeps(SHIP_OPERATOR_YAML);
     deps.githubApi = new InMemoryGithubApi({
@@ -22320,6 +22392,22 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     s.deps.shipBranch = shipBranch;
     return { ...s, branch, recordedHead, operator, shipBranch, shipParent };
   }
+
+  it("routes original-unit recovery past the ended pipeline continuation gate", async () => {
+    const s = await endedPrContinuationSetup();
+    const [row] = await s.instances.listUnits(INSTANCE);
+    const { lastPush: _lastPush, ...withoutExpectedHead } = row!;
+    await s.instances.putUnits([withoutExpectedHead]);
+    const { io, replies } = fakeIO();
+
+    await dispatch(s.deps, msg(`agent:ship recover unit ${INSTANCE}:U12`, "slack:UADMIN"), io, {
+      thread: [s.shipParent],
+    });
+
+    expect(s.operator).not.toHaveBeenCalled();
+    expect(s.shipBranch).toHaveBeenCalledOnce();
+    expect(replies.join(" ")).not.toContain("durable expected head");
+  });
 
   async function repeatedEndedPrSetup() {
     const s = await endedPrContinuationSetup();
