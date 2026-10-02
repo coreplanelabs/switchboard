@@ -10,6 +10,85 @@ import { assertNoPendingBackgroundTasks } from "./backgroundTasks.ts";
 import type { RunHistoryDO, SessionLogDO } from "./worker.ts";
 
 describe("run ledger — alarm retention of live events", () => {
+  it("keeps scheduled cleanup paused while the alarm serves live work", async () => {
+    const key = storeKey();
+    const runId = "paused-alarm-live";
+    expect(await post("/runs/claim", claimBody(key, runId, "slack:C1:paused-alarm"))).toMatchObject({ status: 200 });
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (instance: RunHistoryDO, state) => {
+      state.storage.sql.exec(`INSERT INTO run_events (run_id, seq, json) VALUES (?, 1, '{}')`, "paused-orphan");
+      state.storage.sql.exec(
+        `INSERT INTO context_refs (holder_run_id, source_run_id) VALUES (?, ?)`,
+        "missing-holder",
+        "missing-source",
+      );
+      state.storage.sql.exec(
+        `INSERT INTO intake_receipts (key, thread_key, decided_at, prune_after, json) VALUES (?, ?, 1, 1, '{}')`,
+        "expired-receipt",
+        "slack:C1:paused-alarm",
+      );
+      state.storage.sql.exec(
+        `INSERT INTO sessions (key, thread_key) VALUES (?, ?)`,
+        "slack:C1:paused-alarm:coding",
+        "slack:C1:paused-alarm",
+      );
+      const subject = instance as unknown as {
+        env: { RUN_HISTORY_MAINTENANCE?: string };
+        trim: () => never;
+        syncRangePins: () => never;
+        sweepSessions: () => never;
+      };
+      const prior = subject.env.RUN_HISTORY_MAINTENANCE;
+      const trim = subject.trim;
+      const pins = subject.syncRangePins;
+      const sessions = subject.sweepSessions;
+      subject.env.RUN_HISTORY_MAINTENANCE = "paused";
+      subject.trim = () => {
+        throw new Error("scheduled trim ran");
+      };
+      subject.syncRangePins = () => {
+        throw new Error("scheduled pin walk ran");
+      };
+      subject.sweepSessions = () => {
+        throw new Error("scheduled session drop ran");
+      };
+      try {
+        await instance.alarm();
+      } finally {
+        subject.env.RUN_HISTORY_MAINTENANCE = prior;
+        subject.trim = trim;
+        subject.syncRangePins = pins;
+        subject.sweepSessions = sessions;
+      }
+      expect(
+        state.storage.sql.exec(`SELECT run_id FROM run_events WHERE run_id = 'paused-orphan'`).toArray(),
+      ).toHaveLength(1);
+      expect(
+        state.storage.sql
+          .exec(`SELECT holder_run_id FROM context_refs WHERE holder_run_id = 'missing-holder'`)
+          .toArray(),
+      ).toHaveLength(1);
+      expect(
+        state.storage.sql.exec(`SELECT key FROM intake_receipts WHERE key = 'expired-receipt'`).toArray(),
+      ).toHaveLength(1);
+      expect(
+        state.storage.sql.exec(`SELECT key FROM sessions WHERE key = 'slack:C1:paused-alarm:coding'`).toArray(),
+      ).toHaveLength(1);
+    });
+    expect((await post("/runs/live", { storeKey: key })).data.runs).toEqual(
+      expect.arrayContaining([expect.objectContaining({ runId })]),
+    );
+    expect(await post("/runs/coordinator/get", { storeKey: key, id: "unknown-plan" })).toMatchObject({ status: 200 });
+    expect(
+      await post("/runs/session/append", {
+        storeKey: key,
+        key: "slack:C1:paused-alarm:coding",
+        rowId: "after-alarm",
+        rows: [{ part: 0, json: JSON.stringify({ role: "user", part: { type: "text", text: "still here" } }) }],
+      }),
+    ).toMatchObject({ status: 200, data: { ok: true, appended: true } });
+  });
+
   it("keeps an unfinished run's events while pruning orphaned event rows", async () => {
     const key = storeKey();
     const runId = "alarm-live";
@@ -3052,6 +3131,37 @@ describe("the plane's resident stage — /plane/level, /plane/observe, the re-as
     expect((await level(key, "owner/repo", "memory", "below")).data).toEqual({ admitted: 1 });
     await runInDurableObject(stub, async (inst: RunHistoryDO) => {
       await (inst as unknown as WithAlarm).ctx.storage.deleteAlarm();
+    });
+  });
+
+  it("a paused-maintenance alarm still probes a waiting resident and offers an expired lease", async () => {
+    const key = storeKey();
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await level(key, "owner/repo", "memory", "above");
+    await residentAsk(key, "slack:C13:paused", "owner/repo", { reaskMs: 60_000 });
+    expect(await post("/runs/claim", claimBody(key, "lease-paused", "slack:C13:lease-paused"))).toMatchObject({
+      status: 200,
+    });
+    await runInDurableObject(stub, async (instance: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        `UPDATE plane_levels SET reported_at = ? WHERE resident = ?`,
+        Date.now() - 61_000,
+        "owner/repo",
+      );
+      state.storage.sql.exec(`UPDATE live_runs SET lease_until = 1 WHERE run_id = ?`, "lease-paused");
+      const subject = instance as unknown as { env: { RUN_HISTORY_MAINTENANCE?: string } };
+      const prior = subject.env.RUN_HISTORY_MAINTENANCE;
+      subject.env.RUN_HISTORY_MAINTENANCE = "paused";
+      try {
+        await instance.alarm();
+      } finally {
+        subject.env.RUN_HISTORY_MAINTENANCE = prior;
+      }
+      expect(instance.openPlaneEffects().map((effect) => effect.id)).toContain("probe:owner/repo");
+      expect(
+        state.storage.sql.exec(`SELECT run_id FROM live_runs WHERE run_id = 'lease-paused'`).toArray(),
+      ).toHaveLength(1);
+      expect(await state.storage.getAlarm()).not.toBeNull();
     });
   });
 

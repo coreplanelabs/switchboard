@@ -10,7 +10,7 @@ stateDiagram-v2
     Finished --> WrittenToHistory: record built, written after the reply<br/>(fire-and-forget, retried)
     Finished --> Gone: no runHistory configured —<br/>evicted ~60s after finish
     WrittenToHistory --> Retained: kept until retentionDays / maxRuns / maxBytes
-    Retained --> Swept: retention sweep alarm
+    Retained --> Swept: scheduled cleanup when enabled
 ```
 
 ## Live is in memory and cheap

@@ -338,6 +338,8 @@ export interface Env {
   /** The dataset's name, rendered beside the binding, so `/healthz` can answer
    *  `runMetrics:<dataset>` and the bot's boot probe can compare names. */
   RUN_METRICS_DATASET?: string;
+  /** Scheduled physical history cleanup. Paused by default; live plane alarms still run. */
+  RUN_HISTORY_MAINTENANCE?: "enabled" | "paused";
   /** The bot Worker, for the plane's effect push (record 0064, "Where it
    *  lives"): committed effects are POSTed to its bearer-gated
    *  `/plane/effects`, which forwards to the container. Optional like
@@ -1611,10 +1613,10 @@ export const RUN_EVENT_INSERT_BATCH = Math.floor(DO_MAX_BOUND_PARAMETERS / 3);
 /** Ids per `DELETE ... WHERE run_id IN (...)` statement. */
 const RUN_DELETE_BATCH = DO_MAX_BOUND_PARAMETERS;
 /** Rows a single `put` may delete while trimming (the deletion fence): a
- *  policy shrink dropping thousands of runs is spread over successive puts and
- *  the 6 h alarm, so no single write stalls. Reads hide them immediately. */
+ *  policy shrink dropping thousands of runs is spread over successive puts and,
+ *  when enabled, the 6 h sweep. Reads hide them immediately. */
 const RUN_TRIM_FENCE = 500;
-/** How often `alarm()` sweeps everything outside the retention policy. */
+/** Background alarm interval; physical retention work runs only when enabled. */
 const RUN_SWEEP_INTERVAL_MS = 6 * 3600_000;
 /** `finishedAt` further ahead of the DO clock than this is clamped (a skewed bot clock). */
 const RUN_MAX_FUTURE_MS = 24 * 3600_000;
@@ -1859,7 +1861,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     // first writer wins, beside the live rows because the reconnect catch-up
     // reads them through the same store key. `prune_after` is stamped at the
     // insert (the bound is the writer's window through
-    // `intakeReceiptRetentionMs`) and the alarm sweeps by it.
+    // `intakeReceiptRetentionMs`) and the enabled alarm sweep prunes by it.
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS intake_receipts (
         key TEXT PRIMARY KEY,
@@ -2430,7 +2432,7 @@ export class RunHistoryDO extends DurableObject<Env> {
   }
 
   /** The re-ask cadence (record 0064): while a queued row waits on a resident,
-   *  the object's alarm fires within the cadence — the sweep's own 6 h alarm
+   *  the object's alarm fires within the cadence — the background 6 h alarm
    *  is pulled forward, never pushed back. */
   private planeReaskMs(): number {
     const row = this.sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'plane_reask_ms'`).toArray()[0];
@@ -2492,15 +2494,15 @@ export class RunHistoryDO extends DurableObject<Env> {
    *  the meta row alone: the slot is shared with the re-ask and the sweep and
    *  a fired alarm is consumed, so a meta row equal to a static due (a
    *  hosting deadline) can claim a wake that no longer exists. The due is
-   *  capped to the sweep interval so the retention sweep never starves behind
-   *  a distant hosting deadline. */
+   *  capped to the background interval so enabled maintenance never starves
+   *  behind a distant hosting deadline. */
   private async ensurePlaneAlarm(now: number): Promise<void> {
     const raw = this.planeEarliestDue(now);
     const prior = this.sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'plane_alarm_at'`).toArray()[0];
     const priorAt = prior ? Number(prior.value) : undefined;
     if (raw === undefined) {
       if (prior) this.sql.exec(`DELETE FROM meta WHERE key = 'plane_alarm_at'`);
-      return; // nothing waits: the sweep's own arming stands
+      return; // nothing waits: the background alarm's own arming stands
     }
     const due = Math.min(raw, now + RUN_SWEEP_INTERVAL_MS);
     const set = await this.ctx.storage.getAlarm();
@@ -4954,7 +4956,7 @@ export class RunHistoryDO extends DurableObject<Env> {
   /** Insert-if-absent inside one transaction: the first writer's row stands
    *  and every caller acts on `stored` (`decideIntakeInsert`). `windowMs` is
    *  the writer's reconnect catch-up window; the retention bound is stamped on
-   *  the row so the alarm's sweep is one indexed delete. */
+   *  the row so the enabled alarm sweep is one indexed delete. */
   async recordIntake(key: string, receipt: IntakeReceipt, windowMs: number): Promise<IntakeWriteResult> {
     let out: IntakeWriteResult = { inserted: false, stored: receipt };
     this.ctx.storage.transactionSync(() => {
@@ -5437,59 +5439,60 @@ export class RunHistoryDO extends DurableObject<Env> {
     });
   }
 
-  /** Every 6 h: delete everything outside policy (no fence — this is where a
-   *  large shrink finishes), sweep orphaned events, then re-arm. */
+  /** The shared alarm always serves live plane work. Scheduled physical
+   *  cleanup runs only when explicitly enabled. */
   async alarm(): Promise<void> {
-    // The sweep nobody asked for is a root of its own (docs/reference/specs/tracing.md
-    // item 25): `state.alarm`, ending with how many rows it swept.
+    // The timer is a root of its own (docs/reference/specs/tracing.md item 25):
+    // `state.alarm`, ending with how many rows it swept (zero when paused).
     const root = startAdoptedRoot(tracer, "state.alarm", { sinks: traceSinks });
     try {
       const now = systemClock();
-      const { policy } = this.policyState();
       let deleted = 0;
-      let receipts = 0;
-      let candidates: { key: string; threadKey: string }[] = [];
-      this.ctx.storage.transactionSync(() => {
-        deleted = this.trim(policy, now, undefined).deleted;
-        // Orphan sweep: events whose run is gone. The table holds both live
-        // ledger events and finished history, so both owners must be absent.
-        this.sql.exec(`DELETE FROM run_events
+      if (this.env.RUN_HISTORY_MAINTENANCE === "enabled") {
+        const { policy } = this.policyState();
+        let receipts = 0;
+        let candidates: { key: string; threadKey: string }[] = [];
+        this.ctx.storage.transactionSync(() => {
+          deleted = this.trim(policy, now, undefined).deleted;
+          // Orphan sweep: events whose run is gone. The table holds both live
+          // ledger events and finished history, so both owners must be absent.
+          this.sql.exec(`DELETE FROM run_events
           WHERE NOT EXISTS (SELECT 1 FROM runs WHERE runs.run_id = run_events.run_id)
             AND NOT EXISTS (SELECT 1 FROM live_runs WHERE live_runs.run_id = run_events.run_id)`);
-        this.sql.exec(
-          `DELETE FROM context_refs WHERE holder_run_id NOT IN (SELECT run_id FROM runs UNION SELECT run_id FROM live_runs UNION SELECT '@session:' || key FROM sessions UNION SELECT '@unit:' || instance_id || ':' || unit FROM coordinator_units)`,
-        );
-        // Intake receipts past their bound (item 59): each row carries its own
-        // `prune_after`, stamped at the insert from the writer's window.
-        receipts = this.sql
-          .exec<{ n: number }>(`SELECT COUNT(*) AS n FROM intake_receipts WHERE prune_after <= ?`, now)
-          .one().n;
-        this.sql.exec(
-          `DELETE FROM intake_deliveries WHERE receipt_key IN (SELECT key FROM intake_receipts WHERE prune_after <= ?)`,
-          now,
-        );
-        this.sql.exec(`DELETE FROM intake_receipts WHERE prune_after <= ?`, now);
-        // The sessions no kept run names any more (session-log item 7): decided
-        // here, on the rows this transaction leaves; dropped after it.
-        candidates = this.sql
-          .exec<{ key: string; thread_key: string }>(
-            `SELECT key, thread_key FROM sessions
+          this.sql.exec(
+            `DELETE FROM context_refs WHERE holder_run_id NOT IN (SELECT run_id FROM runs UNION SELECT run_id FROM live_runs UNION SELECT '@session:' || key FROM sessions UNION SELECT '@unit:' || instance_id || ':' || unit FROM coordinator_units)`,
+          );
+          // Intake receipts past their bound (item 59): each row carries its own
+          // `prune_after`, stamped at the insert from the writer's window.
+          receipts = this.sql
+            .exec<{ n: number }>(`SELECT COUNT(*) AS n FROM intake_receipts WHERE prune_after <= ?`, now)
+            .one().n;
+          this.sql.exec(
+            `DELETE FROM intake_deliveries WHERE receipt_key IN (SELECT key FROM intake_receipts WHERE prune_after <= ?)`,
+            now,
+          );
+          this.sql.exec(`DELETE FROM intake_receipts WHERE prune_after <= ?`, now);
+          // The sessions no kept run names any more (session-log item 7): decided
+          // here, on the rows this transaction leaves; dropped after it.
+          candidates = this.sql
+            .exec<{ key: string; thread_key: string }>(
+              `SELECT key, thread_key FROM sessions
               WHERE key NOT IN (SELECT session_key FROM runs WHERE session_key IS NOT NULL)`,
-          )
-          .toArray()
-          .map((r) => ({ key: r.key, threadKey: r.thread_key }));
-      });
-      await this.ctx.blockConcurrencyWhile(() => this.syncRangePins());
-      const dropped = await this.sweepSessions(candidates);
-      console.log(
-        `[runs/alarm] swept ${deleted} rows outside policy, pruned ${receipts} intake receipt(s), dropped ${dropped} session log(s)`,
-      );
+            )
+            .toArray()
+            .map((r) => ({ key: r.key, threadKey: r.thread_key }));
+        });
+        await this.ctx.blockConcurrencyWhile(() => this.syncRangePins());
+        const dropped = await this.sweepSessions(candidates);
+        console.log(
+          `[runs/alarm] swept ${deleted} rows outside policy, pruned ${receipts} intake receipt(s), dropped ${dropped} session log(s)`,
+        );
+      }
       // The plane's re-ask (record 0064): while a queued row waits on a resident
       // that has said nothing within the cadence, one probe effect per
       // resident — and the next alarm is pulled forward to the cadence, so a
-      // silent resident is probed, never waited on forever. The sweep rides
-      // the same alarm; a probing cadence re-runs it, which is only indexed
-      // deletes and only while something waits.
+      // silent resident is probed, never waited on forever. When maintenance
+      // is enabled, its sweep rides this same alarm.
       if (this.planeWaitsOnResident()) {
         const probes = this.planeApply({ kind: "reask", at: now, cadenceMs: this.planeReaskMs() }).effects;
         if (probes.length > 0) console.log(`[plane/reask] ${probes.map((e) => e.id).join(", ")}`);
@@ -6552,7 +6555,7 @@ type SessionTurnRow = { id: number; idx: number; part: number; json: string; tex
  * attachments the rows reference, the byte policy that replaces the oldest
  * tool results with a marker once the log is over its budget, and the
  * notepad row a later release writes. Nothing here is cleared when a run
- * finishes; the sweep on `RunHistoryDO` drops the whole object.
+ * finishes; the enabled sweep on `RunHistoryDO` drops the whole object.
  */
 export class SessionLogDO extends DurableObject<Env> {
   private readonly sql: SqlStorage;
