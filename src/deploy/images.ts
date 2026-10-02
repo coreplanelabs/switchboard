@@ -6,10 +6,11 @@
 // `project.json` records (`images`). Cloudflare cannot pull from that registry,
 // and an image it pulls from any external registry is fetched uncached on every
 // container start, so an installation that deploys published images COPIES them
-// once per version into its own account registry — a registry-to-registry
+// once per image tag into its own account registry — a registry-to-registry
 // transfer over HTTPS (src/deploy/registryTransfer.ts), run by `deploy images`
 // and by `deploy all` itself when a planned Worker's copy is missing — and its
-// Worker configs reference the copy, `registry.cloudflare.com/<account>/<name>:<version>`.
+// Worker configs reference the copy. Bot tags follow the release version;
+// resident and sandbox tags follow the inputs of their Dockerfiles.
 // That is the profile's `images: "registry"` mode. The other mode, `build`, is
 // the checkout's: each Worker's `image` is its Dockerfile and wrangler builds it
 // at deploy time.
@@ -43,6 +44,14 @@ export const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 export interface PublishedImages {
   version: string;
   names: Readonly<Record<ImageKind, string>>;
+  /** Stable account-registry tags for execution images; absent means use the release tag. */
+  inputTags?: Readonly<Partial<Record<"resident" | "sandbox", string>>>;
+}
+
+/** The source GHCR image is always the release build. The account copy of an
+ * execution image is shared across releases when its Docker inputs are equal. */
+export function accountImageTag(kind: ImageKind, published: PublishedImages): string {
+  return kind === "bot" ? published.version : (published.inputTags?.[kind] ?? published.version);
 }
 
 /** Pure: the three published names from project.json (parsed), or the problem with the facts. */
@@ -101,7 +110,7 @@ export function containerImage(
 ): string {
   return profile.images === "build"
     ? DOCKERFILES[kind]
-    : accountRegistryImage(profile.account, registryName(published.names[kind]), published.version);
+    : accountRegistryImage(profile.account, registryName(published.names[kind]), accountImageTag(kind, published));
 }
 
 /** One image to copy: read `source` where the release published it, write it into the account
@@ -117,13 +126,13 @@ export interface ImageCopy {
 export interface ImagesPlan {
   version: string;
   account: string;
-  /** Every image at the version: where it is published, where it lands, and whether the account registry already has it. */
+  /** Every release source and account target, with presence at the target tag. */
   images: { kind: ImageKind; source: string; target: string; present: boolean }[];
   /** The images not yet present — what the copy moves, in order. */
   copy: ImageCopy[];
 }
 
-/** Pure: which images the account registry already holds at the version and which to copy. */
+/** Pure: which target tags the account registry holds and which release images to copy. */
 export function planImageCopies(
   published: PublishedImages,
   account: string,
@@ -131,12 +140,14 @@ export function planImageCopies(
 ): ImagesPlan {
   const images = IMAGE_KINDS.map((kind) => {
     const name = registryName(published.names[kind]);
+    const tag = accountImageTag(kind, published);
     return {
       kind,
       name,
       source: `${published.names[kind]}:${published.version}`,
-      target: accountRegistryImage(account, name, published.version),
-      present: registryHas(listing, name, published.version),
+      target: accountRegistryImage(account, name, tag),
+      present: registryHas(listing, name, tag),
+      tag,
     };
   });
   return {
@@ -145,7 +156,7 @@ export function planImageCopies(
     images: images.map(({ kind, source, target, present }) => ({ kind, source, target, present })),
     copy: images
       .filter((i) => !i.present)
-      .map(({ kind, source, target, name }) => ({ kind, source, target, name, version: published.version })),
+      .map(({ kind, source, target, name, tag }) => ({ kind, source, target, name, version: tag })),
   };
 }
 

@@ -8,6 +8,7 @@ import { callerWith } from "../testing/callers.js";
 import { parseInvocation } from "../commandSurface.js";
 import { RESTART_TOKEN_ENV, type RestartPlan } from "../../deploy/restart.js";
 import { TEST_PROFILE, TEST_PUBLISHED_IMAGES, TEST_REGISTRY_PROFILE } from "../../deploy/testing/profile.js";
+import { executionImageInputTags } from "../../deploy/imageInputs.js";
 import type { ImagesHostIO } from "../../deploy/imagesHost.js";
 import { containersEditProblem } from "../../deploy/registryTransfer.js";
 
@@ -1482,6 +1483,67 @@ describe("deploy.plan / deploy.all in registry mode", () => {
       CHECKOUT_ROOT,
       io,
     );
+
+  it("reuses present execution image tags while the bot still needs its release image", async () => {
+    const disk = new Map([
+      [PROJECT_FACTS_FILE, FACTS],
+      ["deploy/cloudflare-resident/Dockerfile", "FROM node:24\nCOPY hook /hook\n"],
+      ["deploy/cloudflare-resident/hook", "resident tool"],
+      ["deploy/cloudflare-sandbox/Dockerfile", "FROM node:24\nCOPY wrapper /wrapper\n"],
+      ["deploy/cloudflare-sandbox/wrapper", "sandbox tool"],
+    ]);
+    const tags = await executionImageInputTags(async (path) => disk.get(path));
+    const probed: { name: string; version: string }[][] = [];
+    const io: ImagesHostIO = {
+      registry: async (_account, refs) => {
+        probed.push([...(refs ?? [])]);
+        return {
+          value: (refs ?? [])
+            .filter((ref) => ref.name !== "switchboard")
+            .map((ref) => ({ name: ref.name, tags: [ref.version] })),
+        };
+      },
+      credential: async () => ({ ok: true }),
+      copy: async () => ({ ok: false, problem: "not called by this plan" }),
+    };
+    const { commands } = bind(
+      neverRunsPlan,
+      () => true,
+      neverRestarts,
+      neverAffected,
+      async () => REGISTRY,
+      disk,
+      noSecrets,
+      neverPushes,
+      CHECKOUT_ROOT,
+      io,
+    );
+    const result = await commands.invoke("deploy.plan", {}, cli);
+    if (!result.ok) throw new Error(result.message);
+    const plan = result.value as unknown as DeployPlan;
+    expect(probed).toMatchObject([
+      [
+        { name: "switchboard", version: "1.2.3" },
+        { name: "switchboard-resident", version: tags.resident },
+        { name: "switchboard-sandbox", version: tags.sandbox },
+      ],
+    ]);
+    expect(plan.images).toMatchObject({
+      images: [
+        { kind: "bot", present: false },
+        {
+          kind: "resident",
+          ref: `registry.cloudflare.com/${ACCOUNT}/switchboard-resident:${tags.resident}`,
+          present: true,
+        },
+        {
+          kind: "sandbox",
+          ref: `registry.cloudflare.com/${ACCOUNT}/switchboard-sandbox:${tags.sandbox}`,
+          present: true,
+        },
+      ],
+    });
+  });
 
   it("probes the account registry once and plans with every step's image present — the plan says so and `deploy all` runs it, copying nothing", async () => {
     let probes = 0;

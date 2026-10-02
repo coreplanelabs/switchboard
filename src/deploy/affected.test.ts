@@ -192,6 +192,8 @@ describe("classifyPath", () => {
       "deploy/cloudflare-resident/README.md",
       ".github/workflows/ci.yml",
       ".github/CODEOWNERS",
+      ".depot/workflows/ci.yml",
+      ".depot/workflows/pr-title.yml",
       "scripts/docs-gen.ts",
       "packages/switchboard/package.json",
       "packages/switchboard/build.mts",
@@ -597,6 +599,7 @@ describe("computeAffected", () => {
       "docs/reference/specs/execution.md": "# spec 2\n",
       "src/core/drain.test.ts": "test 2\n",
       ".github/workflows/ci.yml": "name: ci\n",
+      ".depot/workflows/ci.yml": "name: ci\n",
       "CHANGELOG.md": "## 0.2.0\n",
     });
     const { probe } = fakeProbe({ trees: { [HEAD]: head, [LIVE]: BASE_TREE }, live: allLive(LIVE), ancestors: [LIVE] });

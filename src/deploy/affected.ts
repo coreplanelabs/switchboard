@@ -30,6 +30,7 @@ export const INERT_RULES: readonly { rule: string; test: RegExp }[] = [
   // Not under skills/: the bot image COPYs skills/ and loads every SKILL.md at startup.
   { rule: "markdown", test: /^(?!skills\/).*\.md$/ },
   { rule: "ci", test: /^\.github\// },
+  { rule: "ci", test: /^\.depot\/workflows\// },
   { rule: "scripts", test: /^scripts\// },
   // The npm package is built and published by the release, never deployed; its
   // manifest is in the image only so npm can resolve the workspace tree.

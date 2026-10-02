@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { AffectedReport } from "../../deploy/affected.js";
+import { executionImageInputTags } from "../../deploy/imageInputs.js";
 import {
   planImageCopies,
   publishedImagesFrom,
@@ -240,13 +241,20 @@ async function loadProfile(deps: DeployCommandDeps): Promise<LoadedProfile> {
   }
 }
 
-/** The release's images this CLI deploys — project.json's `images` through the file access, at this
- *  CLI's own version (the only one the rendered configs can reference) — or `unavailable` naming the
- *  facts file. */
+/** The release's GHCR images and the account tags this CLI deploys — names
+ * from project.json, bot at the release version, execution images at their
+ * input tags when those inputs can be read. */
+async function withInputTags(published: PublishedImages, deps: DeployCommandDeps): Promise<PublishedImages> {
+  return {
+    ...published,
+    inputTags: await executionImageInputTags((path) => deps.deploy.files.read(path)),
+  };
+}
+
 async function publishedImages(deps: DeployCommandDeps): Promise<PublishedImages> {
   const published = publishedImagesFrom(await deps.deploy.files.read(PROJECT_FACTS_FILE), deps.deploy.cliVersion());
   if (!published.ok) throw new CommandError("unavailable", published.problem);
-  return published.images;
+  return withInputTags(published.images, deps);
 }
 
 /** What the planner needs to say where each step's image comes from. `build` mode needs nothing (the
@@ -467,13 +475,13 @@ export const deployInit = defineCommand({
     const templates = new Map<string, string | undefined>();
     for (const t of [...workerConfigTargets(loaded.profile), SITE_CONFIG_TARGET])
       templates.set(t.templatePath, await deps.deploy.files.read(t.templatePath));
-    // project.json gives the Workers their images (in `registry` mode, at this CLI's version) and
-    // the docs site its name and host — the site is the project's, not a Worker of the installation,
-    // so only the account comes from the profile.
+    // project.json gives the Workers their image names and the docs site its
+    // name and host. The CLI supplies the release and input tags; the profile
+    // supplies the installation's account.
     const facts = await deps.deploy.files.read(PROJECT_FACTS_FILE);
     const published = publishedImagesFrom(facts, deps.deploy.cliVersion());
     const rendered = published.ok
-      ? renderWorkerConfigs(loaded.profile, (path) => templates.get(path), published.images)
+      ? renderWorkerConfigs(loaded.profile, (path) => templates.get(path), await withInputTags(published.images, deps))
       : { ok: false as const, problems: [published.problem] };
     const site = renderSiteConfig(loaded.profile, facts, (path) => templates.get(path));
     const problems = [...new Set([...(rendered.ok ? [] : rendered.problems), ...(site.ok ? [] : site.problems)])];
@@ -681,13 +689,13 @@ export const deploySecrets = defineCommand({
   },
 });
 
-/** No `--version`: the rendered configs reference this CLI's own version and nothing else, so a copy at
- *  another version would satisfy no deploy. Another release's images are copied by that release's CLI. */
+/** No `--version`: GHCR sources use this CLI's release version; account targets
+ * use that version for bot and input tags for resident and sandbox. */
 const imagesOptions = z.object({
   dryRun: flag
     .optional()
     .describe(
-      "say which images the account registry already holds at the version and which would be copied; nothing is copied",
+      "say which release images the account registry already holds at their target tags and which would be copied; nothing is copied",
     ),
 });
 
@@ -768,7 +776,7 @@ export const deployImages = defineCommand({
   effect: "write",
   surfaces: { chat: false, mcp: false, http: false },
   describe:
-    "Copy the release's bot, resident and sandbox images from where the release published them into this account's Cloudflare registry — once per version, skipping any already there — so `registry`-mode Workers deploy without a build and every container starts from Cloudflare's own cached registry. A registry-to-registry transfer over HTTPS: needs CLOUDFLARE_API_TOKEN with Containers Edit, nothing else.",
+    "Copy the release's bot, resident and sandbox images from where the release published them into this account's Cloudflare registry — bot by release version, execution images by build-input tag, skipping any already there — so `registry`-mode Workers deploy without a build and every container starts from Cloudflare's own cached registry. A registry-to-registry transfer over HTTPS: needs CLOUDFLARE_API_TOKEN with Containers Edit, nothing else.",
   render: (output) => {
     const o = output as unknown as ImagesOutput;
     if (o.mode === "build")

@@ -71,6 +71,7 @@ import { checkoutInstallHolds, imageBuiltOutsideDir, readWorkAreaState, type Wor
 import { RENDERED_FILE } from "./wranglerTemplate.js";
 import { parseConfigSource, readConfigSource, type ConfigSourceIO } from "./configSource.js";
 import { publishedImagesFrom, type PublishedImages } from "./images.js";
+import { executionImageInputTags } from "./imageInputs.js";
 import {
   isExampleProfile,
   parseProfile,
@@ -408,7 +409,7 @@ export async function renderWorkerConfigsOnHost(
   writeFile: (path: string, text: string) => void | Promise<void> = (path, text) => hostDeployFiles.write(path, text),
 ): Promise<string[]> {
   const loaded = await loadProfileOnHost(env);
-  const published = publishedImagesOnHost();
+  const published = await publishedImagesOnHost();
   if (!published.ok) return [published.problem];
   const rendered = renderWorkerConfigs(loaded.profile, (path) => readShipped(path), published.images);
   if (!rendered.ok) return rendered.problems;
@@ -426,12 +427,19 @@ function readShipped(path: string): string | undefined {
 /**
  * The images this CLI deploys or copies (src/deploy/images.ts `PublishedImages`):
  * the three names from the shipped `project.json`, and the version this CLI runs
- * as (src/deploy/host.ts `cliVersionOnHost`) — a release publishes its images
- * and its CLI under one number, in either root. A facts file without the names
- * is a problem naming it, not a guess.
+ * as (src/deploy/host.ts `cliVersionOnHost`). GHCR images all carry that release
+ * tag; the account's resident and sandbox copies use stable image-input tags.
+ * A facts file without the names is a problem naming it, not a guess.
  */
-export function publishedImagesOnHost(): { ok: true; images: PublishedImages } | { ok: false; problem: string } {
-  return publishedImagesFrom(readShipped(PROJECT_FACTS_FILE), cliVersionOnHost());
+export async function publishedImagesOnHost(): Promise<
+  { ok: true; images: PublishedImages } | { ok: false; problem: string }
+> {
+  const published = publishedImagesFrom(readShipped(PROJECT_FACTS_FILE), cliVersionOnHost());
+  if (!published.ok) return published;
+  return {
+    ok: true,
+    images: { ...published.images, inputTags: await executionImageInputTags(async (path) => readShipped(path)) },
+  };
 }
 
 /**

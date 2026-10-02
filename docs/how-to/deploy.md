@@ -40,7 +40,7 @@ The installation is `~/.switchboard` (or `SWITCHBOARD_HOME`, or the directory yo
 |---|---|
 | `account`, `zone` | Your account id; the zone every hostname is under. |
 | `workers.<name>` | `script` and `hostname` per Worker; delete one and the plan has no step for it. |
-| `images` | `registry` (what `init` writes): the release's published images, copied into your account's registry by `deploy all` once per version, over HTTPS. `build`: each Dockerfile, built where `deploy all` runs (a checkout; needs Docker). |
+| `images` | `registry` (what `init` writes): the release's published images, copied into your account's registry by `deploy all` over HTTPS. The bot uses a release tag; resident and sandbox images are reused while their Dockerfile and copied files stay unchanged. `build`: each Dockerfile, built where `deploy all` runs (a checkout; needs Docker). |
 | `configSource` | The bot's config: a path, `github://owner/repo/path@ref` (needs `CONFIG_REPO_TOKEN`) or `op://Vault/Item/field`. |
 | `secretsSource` | A directory of `<NAME>` files (`~/.secrets/switchboard` when absent) or `op://Vault/Item`. |
 | `access` | `{ "teamDomain": "<team>.cloudflareaccess.com", "aud": "<AUD tag>" }`: Cloudflare Access in front of the dashboards. |
