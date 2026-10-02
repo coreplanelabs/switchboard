@@ -44,6 +44,8 @@ export interface DrainRecord {
   liftAsked?: boolean;
   /** During the isolate swap, even a registered owner must wait to reattach. */
   swapFence?: true;
+  /** Build that closed admission; that same build cannot lift the fence. */
+  swapBuild?: string;
 }
 
 /** The longest a drain may run, and the default, from the one clock table
@@ -130,6 +132,7 @@ export function liveDrain(stored: unknown, now: number): DrainRecord | null {
     ...(holds.length > 0 && holdsUntil !== undefined ? { holdsUntil } : {}),
     ...(r.liftAsked === true ? { liftAsked: true } : {}),
     ...(r.swapFence === true ? { swapFence: true } : {}),
+    ...(typeof r.swapBuild === "string" ? { swapBuild: r.swapBuild } : {}),
   };
 }
 

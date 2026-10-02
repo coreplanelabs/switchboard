@@ -20,6 +20,7 @@ const payload = (residents) => ({
   ok: true,
   payload: {
     fenceReady: true,
+    activeAdmissions: 0,
     draining: {
       since: new Date(Date.now() - 1000).toISOString(),
       until: new Date(Date.now() + 60_000).toISOString(),
@@ -50,6 +51,7 @@ describe("resident deploy preflight — decide()", () => {
       ok: true,
       payload: {
         fenceReady: true,
+        activeAdmissions: 0,
         draining: {
           since: new Date(Date.now() - 1000).toISOString(),
           until: new Date(Date.now() + 60_000).toISOString(),
@@ -101,6 +103,9 @@ describe("resident deploy preflight — decide()", () => {
     ]);
     expect(decide({ ...retained, payload: { ...retained.payload, draining: null } }).allow).toBe(false);
     expect(decide({ ...retained, payload: { ...retained.payload, fenceReady: false } }).allow).toBe(false);
+    const admitted = decide({ ...retained, payload: { ...retained.payload, activeAdmissions: 1 } });
+    expect(admitted.allow).toBe(false);
+    expect(admitted.message).toContain("operation(s) admitted before the fence");
     expect(
       decide({
         ...retained,

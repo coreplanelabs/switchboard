@@ -280,11 +280,12 @@ describe("the Worker's wiring (by scan)", () => {
     // The bound stamped and the alarm armed at it — the earlier end fires first.
     expect(source).toMatch(/holdDrain\(record, resources, now\)/);
     expect(source).toMatch(
-      /if \(held\.holdsUntil !== undefined\) await this\.ctx\.storage\.setAlarm\(Date\.parse\(held\.holdsUntil\)\);/,
+      /if \(held\?\.holdsUntil !== undefined\) await this\.ctx\.storage\.setAlarm\(Date\.parse\(held\.holdsUntil\)\);/,
     );
     // The reopen past the bound is a warning naming who never cycled, never a silence.
     expect(source).toMatch(/const stale = staleHolds\(stored, now\);/);
-    expect(source).toMatch(/fleet reopened with \$\{stale\.join\(", "\)\} still on the pre-deploy image/);
+    expect(source).toMatch(/async alarm\(\): Promise<void> \{\s*const result = await this\.ctx\.storage\.transaction/);
+    expect(source).toMatch(/fleet reopened with \$\{result\.stale\.join\(", "\)\} still on the pre-deploy image/);
     // A rebuild or fresh provision counts as the report: provisioning reports right after warm.
     const provision = source.slice(
       source.indexOf("async runProvisioning("),
@@ -316,8 +317,8 @@ describe("the Worker's wiring (by scan)", () => {
   it("the registry Durable Object stores the drain under its own key outside the `resident:` prefix and offers get, set, a gated clear, the deploy's holds and the per-container new-image report (issue 1931)", () => {
     expect(source).toMatch(/const DRAIN_KEY = "drain";/);
     expect(source).toMatch(/async getDrain\(\): Promise<unknown>/);
-    expect(source).toMatch(/async setDrain\(record: DrainRecord\): Promise<DrainRecord>/);
-    expect(source).toMatch(/async clearDrain\(\): Promise<\{ cleared: boolean; held: string\[\] \}>/);
+    expect(source).toMatch(/async setDrain\(record: DrainRecord\): Promise<DrainRecord \| null>/);
+    expect(source).toMatch(/async clearDrain\(\): Promise<\{ cleared: boolean; held: string\[\]; error\?: string \}>/);
     expect(source).toMatch(/async holdDrainFor\(resources: string\[\]\): Promise<void>/);
     expect(source).toMatch(/async reportContainerImageCurrent\(resource: string\): Promise<\{ lifted: boolean \}>/);
     // The lift with holds outstanding keeps the record standing (liftAsked);
@@ -325,15 +326,14 @@ describe("the Worker's wiring (by scan)", () => {
     // container's own fact, never on the reconcile call's return.
     const clear = source.slice(source.indexOf("async clearDrain("), source.indexOf("async holdDrainFor("));
     expect(clear).toMatch(/const lift = liftDrain\(record\);/);
-    expect(clear).toMatch(/if \(!lift\.cleared\) \{\s*\n\s*await this\.ctx\.storage\.put\(DRAIN_KEY, lift\.record\);/);
+    expect(clear).toMatch(/if \(!lift\.cleared\) \{\s*\n\s*await txn\.put\(DRAIN_KEY, lift\.record\);/);
     const report = source.slice(
       source.indexOf("async reportContainerImageCurrent("),
       source.indexOf("/** The one alarm"),
     );
     expect(report).toMatch(/reportImageCurrent\(record, resource\)/);
-    expect(report).toMatch(
-      /await this\.ctx\.storage\.delete\(DRAIN_KEY\);\s*\n\s*await this\.pushDrainPost\("below"\);/,
-    );
+    expect(report).toMatch(/if \(report\.record === null\) return txn\.delete\(DRAIN_KEY\);/);
+    expect(report).toMatch(/if \(lifted\) \{\s*await this\.pushDrainPost\("below"\);/);
   });
 
   it("the gate is the Durable Object's — after hydration, before the image reconcile — and only a live registration owned by this run permits reattach; the Worker-level handler gates nothing; `/residents` carries `draining`", () => {
@@ -374,7 +374,8 @@ describe("the Worker's wiring (by scan)", () => {
       source.indexOf("async function handleReconcile("),
       source.indexOf("async function handleResidents("),
     );
-    expect(handler).toMatch(/registryStub\(env\)\.list\(\)/);
+    expect(handler).toMatch(/const residents = await registry\.list\(\)/);
+    expect(handler).toMatch(/drain\?\.swapFence && drain\.swapBuild === BUILD_ID/);
     expect(handler).toMatch(/residentStub\(env, record\.resource\)\.reconcileForDeploy\(record\.resource\)/);
     // A failing resident degrades to its own error row, never its neighbors'.
     expect(handler).toMatch(/Promise\.allSettled/);

@@ -37,9 +37,15 @@ const bodies = methods.map((name) => {
   if (!method) throw new Error(`ResidentDO.${name} is missing`);
   return method.getText(source);
 });
-const compiled = ts.transpileModule(`class PreservationUnderTest { ${bodies.join("\n")} }`, {
-  compilerOptions: { target: ts.ScriptTarget.ES2022 },
-}).outputText;
+const compiled = ts.transpileModule(
+  `class PreservationUnderTest {
+  async withDeployAdmission(fn: () => Promise<unknown>) { return fn(); }
+  ${bodies.join("\n")}
+}`,
+  {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  },
+).outputText;
 
 const NOW = Date.parse("2026-10-02T03:00:00Z");
 const MINUTE = 60_000;

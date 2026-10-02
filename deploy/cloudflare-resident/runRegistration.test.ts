@@ -54,12 +54,38 @@ describe("deploy registration activity", () => {
     expect(start).toContain("deployFenceReady(fenced, now)");
     expect(route.indexOf("registry.setDeployFence()")).toBeLessThan(route.indexOf("getResidentDeployInfo()"));
     expect(route.indexOf("getResidentDeployInfo()")).toBeLessThan(route.indexOf("registry.getDrain()"));
-    expect(route).toContain("deployFenceReady(current, now)");
+    expect(methodOf(registry, "verifyDeployFence")).toContain("deployFenceReady(current, now)");
     expect(attach).toContain("drain.swapFence || !registered");
     expect(activity).toContain("this.runsInFlightCount()");
     expect(activity).toContain("this.threadOpsInFlight.get(binding.threadKey)");
     expect(activity).toContain("deployRegistrationState");
     expect(method("registeredRunsBeyondOps")).toContain("binding.lastRunOwner?.runId");
+  });
+
+  it("holds a durable admission across already-bound work and rejects a quiet read with admitted work", () => {
+    const registry = source.slice(
+      source.indexOf("export class ResidentRegistryDO"),
+      source.indexOf("export class ResidentDO"),
+    );
+    const begin = methodOf(registry, "beginDeployAdmission")!;
+    const end = methodOf(registry, "endDeployAdmission")!;
+    const verify = methodOf(registry, "verifyDeployFence")!;
+    const route = source.slice(source.indexOf("async function handleDeployFence"));
+    expect(begin).toContain("swapFence");
+    expect(begin).toContain("DEPLOY_ADMISSION_KEY_PREFIX");
+    expect(end).toContain("DEPLOY_ADMISSION_KEY_PREFIX");
+    expect(verify).toContain("DEPLOY_ADMISSION_KEY_PREFIX");
+    expect(route).toContain("registry.verifyDeployFence(fence.since, fence.until)");
+    for (const name of ["attachThreadTraced", "detachThread", "runOpTraced", "withThreadBusy"]) {
+      expect(method(name), `${name} must participate in the admission barrier`).toContain("withDeployAdmission");
+    }
+    expect(method("updateRunDeadline")).toContain("withDeployAdmission");
+    expect(source).toContain('case "/onboard":\n            return await withFleetAdmission');
+    expect(source).toContain('case "/offboard":\n            return await withFleetAdmission');
+    expect(source).toContain('case "/rebuild":\n            return await withFleetAdmission');
+    expect(methodOf(registry, "setDrain")).toContain("swapFence");
+    expect(methodOf(registry, "clearDrain")).toContain("swapBuild === BUILD_ID");
+    expect(source.slice(source.indexOf("async function handleReconcile"))).toContain("drain.swapBuild === BUILD_ID");
   });
 });
 
