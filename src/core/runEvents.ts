@@ -1192,6 +1192,8 @@ export type RunEvent =
           evidence?: { action: string; targets: ReadonlyArray<string> };
         };
         confirmed?: true;
+        /** The confirmed bind came from a saved preset question, not a display-only command. */
+        confirmedPreset?: true;
       }>;
       question?: string;
       /** A typed write-target question; only the original requester may answer with a bare slug. */
@@ -1210,6 +1212,9 @@ export type RunEvent =
         renewals?: number;
         verbosity?: Verbosity;
       };
+      /** The question was classified as a confirmable preset when saved.
+       *  Absence fails closed even if the command catalogue later changes. */
+      confirmablePreset?: true;
       /** A question's original ask, redacted and capped: the request the
        *  question interrupted, kept so the person's next words in the thread
        *  join back onto it (`joinedAnswerRequest` —

@@ -551,6 +551,7 @@ export interface RunOperatorDecision {
       evidence?: { action: string; targets: string[] };
     };
     confirmed?: true;
+    confirmedPreset?: true;
   }[];
   question?: string;
   questionKind?: "target_repository";
@@ -566,6 +567,7 @@ export interface RunOperatorDecision {
     renewals?: number;
     verbosity?: Verbosity;
   };
+  confirmablePreset?: true;
   /** A question's original ask — what the person's next words join back onto
    *  (`joinedAnswerRequest`). */
   request?: string;
@@ -625,6 +627,7 @@ export function operatorOfEvents(events: readonly RunEvent[]): RunOperatorDecisi
                 }
               : {}),
             ...(b.confirmed ? { confirmed: true as const } : {}),
+            ...(b.confirmedPreset ? { confirmedPreset: true as const } : {}),
           })),
         }
       : {}),
@@ -633,6 +636,7 @@ export function operatorOfEvents(events: readonly RunEvent[]): RunOperatorDecisi
     ...(e.questionWriter !== undefined ? { questionWriter: e.questionWriter } : {}),
     ...(e.proposal !== undefined ? { proposal: e.proposal } : {}),
     ...(e.proposalSettings !== undefined ? { proposalSettings: e.proposalSettings } : {}),
+    ...(e.confirmablePreset === true ? { confirmablePreset: true as const } : {}),
     ...(e.request !== undefined ? { request: e.request } : {}),
     ...(e.refusalCause !== undefined ? { refusalCause: e.refusalCause } : {}),
     ...(e.refusalText !== undefined ? { refusalText: e.refusalText } : {}),
