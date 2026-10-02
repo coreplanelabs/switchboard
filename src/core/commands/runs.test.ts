@@ -19,6 +19,7 @@ import { analyzeRunFriction } from "../runFriction.js";
 import type { RunRecord } from "../runRecord.js";
 import { RunRegistry } from "../runRegistry.js";
 import { InMemoryRunStore } from "../runStore.js";
+import { TransientStoreError } from "../runStoreWorker.js";
 import { createRunsService } from "../runsService.js";
 import {
   HOSTED_STOP_REFUSAL,
@@ -484,6 +485,21 @@ describe("channel visibility (authorization.md items 5–7)", () => {
       { commandId: "runs.events", actorId: "access:op-2", action: "runs:read", reason: "not-member" },
       { commandId: "runs.friction", actorId: "access:op-2", action: "runs:read", reason: "not-member" },
     ]);
+  });
+
+  it("runs.get reports a transient history outage as unavailable, distinct from a hidden run", async () => {
+    const { store, registry, deps, denied } = await setup();
+    store.getSummary = async () => {
+      throw new TransientStoreError("run store /runs/summary: HTTP 503");
+    };
+    const result = await registry.invoke("runs.get", { args: ["fin-pub"], options: {} }, reader, deps);
+    expect(result).toMatchObject({
+      ok: false,
+      error: "unavailable",
+      status: 503,
+      message: "History is temporarily unavailable",
+    });
+    expect(denied).toEqual([]);
   });
 
   it("an Access operator without all-channels lists only public and granted runs; an admin lists the fleet", async () => {
