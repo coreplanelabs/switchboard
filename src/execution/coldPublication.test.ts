@@ -2,7 +2,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import { createTracer } from "../core/trace/tracer.js";
 import { recordingSink } from "../core/testing/recordingSink.js";
-import { execFileSync } from "node:child_process";
+import {
+  execFileSync,
+  type ExecFileSyncOptions,
+  type ExecFileSyncOptionsWithBufferEncoding,
+  type ExecFileSyncOptionsWithStringEncoding,
+} from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -30,6 +35,21 @@ const opts = {
 };
 afterEach(() => vi.unstubAllGlobals());
 
+// Production runs these commands in Linux sandboxes. Translate only the
+// host-specific wrappers when exercising their Git behavior on macOS.
+function runShell(command: string, options: ExecFileSyncOptionsWithStringEncoding): string;
+function runShell(command: string, options?: ExecFileSyncOptionsWithBufferEncoding): Buffer;
+function runShell(command: string, options?: ExecFileSyncOptions): string | Buffer {
+  const hostCommand =
+    process.platform === "darwin"
+      ? command
+          .replaceAll("stat -c %s ", "stat -f %z ")
+          .replaceAll("ulimit -v 524288\n", "")
+          .replaceAll(/timeout -k 5 (?:30|45|60) /g, "")
+      : command;
+  return execFileSync("bash", ["-c", hostCommand], { timeout: 120_000, ...options });
+}
+
 describe("isolated cold publication plan", () => {
   it("accepts only a bounded typed graph and builds an exact lease in the fresh repository", () => {
     const plan = controllerPublicationPlan(input);
@@ -46,6 +66,12 @@ describe("isolated cold publication plan", () => {
     expect(plan.env.PATH).toBe("/usr/bin:/bin");
     expect(plan.prepareCommand).toContain("fsck");
     expect(plan.pushCommand).not.toContain("fsck");
+    expect(plan.prepareCommand).toContain("ulimit -v 524288");
+    expect(plan.prepareCommand).toContain("timeout -k 5 60 git");
+    expect(plan.fetchCommand).toContain("timeout -k 5 45 git");
+    expect(plan.fetchCommand).toContain("timeout -k 5 30 git");
+    expect(plan.pushCommand).toContain("timeout -k 5 60 git");
+    expect(sourcePublicationPackCommand(input.next, input.old, "/workspace/transfer.pack")).toContain("stat -c %s");
     expect(plan.command).toContain("fsck");
     expect(plan.command).toContain("verify-pack");
     expect(plan.command).not.toContain("/workspace/checkout");
@@ -91,14 +117,13 @@ describe("isolated cold publication plan", () => {
       mkdirSync(join(source, ".git", "hooks"), { recursive: true });
       writeFileSync(join(source, ".git", "hooks", "pre-push"), `#!/bin/sh\ntouch ${marker}\n`, { mode: 0o755 });
       const pack = join(fixture, "transfer.pack");
-      execFileSync("bash", ["-c", sourcePublicationPackCommand(next, undefined, pack, source)]);
+      runShell(sourcePublicationPackCommand(next, undefined, pack, source));
       const graph = readFileSync(pack);
       const plan = controllerPublicationPlan({ ...input, next, old: undefined });
       const prepare = plan.prepareCommand
         .replaceAll("/workspace/publisher", join(fixture, "publisher"))
         .replaceAll("/workspace/transfer.pack", join(fixture, "transfer.pack"));
-      const run = () =>
-        execFileSync("bash", ["-c", prepare], { env: { ...process.env, ...plan.prepareEnv }, timeout: 120_000 });
+      const run = () => runShell(prepare, { env: { ...process.env, ...plan.prepareEnv } });
       writeFileSync(pack, graph);
       expect(() => run()).not.toThrow();
       expect(existsSync(marker)).toBe(false);
@@ -153,16 +178,14 @@ describe("isolated cold publication plan", () => {
         maxBuffer: COLD_PACK_MAX_BYTES + 4_000_000,
       });
       expect(full.length).toBeGreaterThan(COLD_PACK_MAX_BYTES);
-      execFileSync("bash", ["-c", sourcePublicationPackCommand(next, old, pack, source)]);
+      runShell(sourcePublicationPackCommand(next, old, pack, source));
       const graph = readFileSync(pack);
       expect(graph.length).toBeLessThan(100_000);
       const plan = controllerPublicationPlan({ ...input, old, next });
       const prepare = plan.prepareCommand
         .replaceAll("/workspace/publisher", join(fixture, "publisher"))
         .replaceAll("/workspace/transfer.pack", pack);
-      expect(() =>
-        execFileSync("bash", ["-c", prepare], { env: { ...process.env, ...plan.prepareEnv } }),
-      ).not.toThrow();
+      expect(() => runShell(prepare, { env: { ...process.env, ...plan.prepareEnv } })).not.toThrow();
       expect(() =>
         execFileSync("git", ["-C", join(fixture, "publisher"), "cat-file", "-t", historical], { stdio: "ignore" }),
       ).toThrow();
@@ -173,14 +196,12 @@ describe("isolated cold publication plan", () => {
         input: `${old}\n${next}\n`,
       });
       writeFileSync(pack, incomplete);
-      expect(() =>
-        execFileSync("bash", ["-c", prepare], { env: { ...process.env, ...plan.prepareEnv }, stdio: "ignore" }),
-      ).toThrow();
+      expect(() => runShell(prepare, { env: { ...process.env, ...plan.prepareEnv }, stdio: "ignore" })).toThrow();
       expect(() => sourcePublicationPackCommand("HEAD", old, pack, source)).toThrow();
       writeFileSync(join(source, "live.txt"), randomBytes(COLD_PACK_MAX_BYTES + 1_000_000));
       const oversized = commit();
       expect(() =>
-        execFileSync("bash", ["-c", sourcePublicationPackCommand(oversized, next, pack, source)], { stdio: "ignore" }),
+        runShell(sourcePublicationPackCommand(oversized, next, pack, source), { stdio: "ignore" }),
       ).toThrow();
     } finally {
       rmSync(fixture, { recursive: true, force: true });
@@ -228,7 +249,7 @@ describe("isolated cold publication plan", () => {
       execFileSync("git", ["-C", source, "checkout", "-q", "-b", "rebased", base]);
       const rebasedNext = commit("fresh publication");
       expect(() =>
-        execFileSync("bash", ["-c", sourcePublicationPackCommand(rebasedNext, old, rebased, source)], {
+        runShell(sourcePublicationPackCommand(rebasedNext, old, rebased, source), {
           stdio: "ignore",
         }),
       ).toThrow();
@@ -239,13 +260,13 @@ describe("isolated cold publication plan", () => {
         command.replaceAll("/workspace/publisher", dir).replaceAll("https://door.example/git/acme/api.git", remote);
       if (kind === "rebased") {
         expect(
-          execFileSync("bash", ["-c", local(plan.fetchCommand)], {
+          runShell(local(plan.fetchCommand), {
             env: { ...process.env, ...plan.env },
             encoding: "utf8",
           }).trim(),
         ).toBe(old);
         expect(() =>
-          execFileSync("bash", ["-c", sourcePublicationPackCommand(rebasedNext, old, pack, source, true)], {
+          runShell(sourcePublicationPackCommand(rebasedNext, old, pack, source, true), {
             stdio: "ignore",
           }),
         ).toThrow();
@@ -254,28 +275,24 @@ describe("isolated cold publication plan", () => {
       // historical blob makes that attempt exceed the cap in this case.
       if (kind === "initial")
         expect(() =>
-          execFileSync("bash", ["-c", sourcePublicationPackCommand(rebasedNext, undefined, pack, source)], {
+          runShell(sourcePublicationPackCommand(rebasedNext, undefined, pack, source), {
             stdio: "ignore",
           }),
         ).toThrow();
       const fetch = local(controllerPublicationPlan(request, undefined, "default").fetchCommand);
-      expect(
-        execFileSync("bash", ["-c", fetch], { env: { ...process.env, ...plan.env }, encoding: "utf8" }).trim(),
-      ).toBe(base);
-      execFileSync("bash", ["-c", sourcePublicationPackCommand(rebasedNext, base, pack, source, true)]);
+      expect(runShell(fetch, { env: { ...process.env, ...plan.env }, encoding: "utf8" }).trim()).toBe(base);
+      runShell(sourcePublicationPackCommand(rebasedNext, base, pack, source, true));
       const update = controllerPublicationPlan(request, base);
       const prepare = update.prepareCommand
         .replaceAll("/workspace/publisher", dir)
         .replaceAll("/workspace/transfer.pack", pack);
-      expect(() =>
-        execFileSync("bash", ["-c", prepare], { env: { ...process.env, ...update.prepareEnv } }),
-      ).not.toThrow();
+      expect(() => runShell(prepare, { env: { ...process.env, ...update.prepareEnv } })).not.toThrow();
       expect(readFileSync(pack).length).toBeLessThan(100_000);
       expect(rebasedNext).not.toBe(next);
       // The trusted base only bounds the graph; the push still uses the
       // original lease, including the empty lease on the initial branch.
       expect(update.pushCommand).toContain(`--force-with-lease='refs/heads/${input.branch}:${request.old ?? ""}'`);
-      execFileSync("bash", ["-c", local(update.pushCommand)], { env: { ...process.env, ...update.env } });
+      runShell(local(update.pushCommand), { env: { ...process.env, ...update.env } });
       expect(
         execFileSync("git", ["-C", remote, "rev-parse", `refs/heads/${input.branch}`], { encoding: "utf8" }).trim(),
       ).toBe(rebasedNext);
@@ -337,7 +354,7 @@ describe("isolated cold publication plan", () => {
             .replaceAll("https://door.example/git/acme/api.git", remote);
         if (kind === "empty repository") {
           expect(() =>
-            execFileSync("bash", ["-c", local(plan.fetchCommand)], {
+            runShell(local(plan.fetchCommand), {
               env: { ...process.env, ...plan.env },
               stdio: "ignore",
             }),
@@ -346,16 +363,16 @@ describe("isolated cold publication plan", () => {
         } else {
           const defaultHead = execFileSync("git", ["-C", remote, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
           expect(() =>
-            execFileSync("bash", ["-c", sourcePublicationPackCommand(next, defaultHead, pack, source, true)], {
+            runShell(sourcePublicationPackCommand(next, defaultHead, pack, source, true), {
               stdio: "ignore",
             }),
           ).toThrow();
         }
-        execFileSync("bash", ["-c", sourcePublicationPackCommand(next, undefined, pack, source)]);
+        runShell(sourcePublicationPackCommand(next, undefined, pack, source));
         expect(readFileSync(pack).length).toBeLessThan(COLD_PACK_MAX_BYTES);
-        execFileSync("bash", ["-c", local(plan.prepareCommand)], { env: { ...process.env, ...plan.prepareEnv } });
+        runShell(local(plan.prepareCommand), { env: { ...process.env, ...plan.prepareEnv } });
         expect(plan.pushCommand).toContain(`--force-with-lease='refs/heads/${input.branch}:'`);
-        execFileSync("bash", ["-c", local(plan.pushCommand)], { env: { ...process.env, ...plan.env } });
+        runShell(local(plan.pushCommand), { env: { ...process.env, ...plan.env } });
         expect(
           execFileSync("git", ["-C", remote, "rev-parse", `refs/heads/${input.branch}`], {
             encoding: "utf8",
@@ -376,9 +393,7 @@ describe("isolated cold publication plan", () => {
       const fetch = plan.fetchCommand
         .replaceAll("/workspace/publisher", join(fixture, "publisher"))
         .replaceAll("https://door.example/git/acme/api.git", empty);
-      expect(() =>
-        execFileSync("bash", ["-c", fetch], { env: { ...process.env, ...plan.env }, stdio: "ignore" }),
-      ).toThrow();
+      expect(() => runShell(fetch, { env: { ...process.env, ...plan.env }, stdio: "ignore" })).toThrow();
       expect(plan.fetchCommand).toContain("https://door.example/git/acme/api.git");
       expect(plan.fetchCommand).not.toContain("/workspace/checkout");
       expect(plan.prepareEnv).not.toHaveProperty("GIT_CONFIG_VALUE_0", expect.stringContaining(input.bearer));
@@ -423,28 +438,26 @@ describe("isolated cold publication plan", () => {
       const old = commit("branch tip");
       execFileSync("git", ["-C", source, "push", "-q", remote, `${old}:refs/heads/${input.branch}`]);
       const next = commit("tiny update");
-      execFileSync("git", ["-C", source, "checkout", "-q", "-b", "main", ancestor]);
+      execFileSync("git", ["-C", source, "checkout", "-q", "-b", "diverged-default", ancestor]);
       const main = commit("independent default tip");
       execFileSync("git", ["-C", source, "push", "-q", remote, `${main}:refs/heads/main`]);
       execFileSync("git", ["-C", remote, "symbolic-ref", "HEAD", "refs/heads/main"]);
-      expect(() =>
-        execFileSync("bash", ["-c", sourcePublicationPackCommand(next, old, pack, source)], { stdio: "ignore" }),
-      ).toThrow();
+      expect(() => runShell(sourcePublicationPackCommand(next, old, pack, source), { stdio: "ignore" })).toThrow();
       const local = (command: string) =>
         command
           .replaceAll("/workspace/publisher", dir)
           .replaceAll("/workspace/transfer.pack", pack)
           .replaceAll("https://door.example/git/acme/api.git", remote);
       const plan = controllerPublicationPlan({ ...input, old, next });
-      const base = execFileSync("bash", ["-c", local(plan.fetchCommand)], {
+      const base = runShell(local(plan.fetchCommand), {
         env: { ...process.env, ...plan.env },
         encoding: "utf8",
       }).trim();
       expect(base).toBe(old);
-      execFileSync("bash", ["-c", sourcePublicationPackCommand(next, base, pack, source, true)]);
+      runShell(sourcePublicationPackCommand(next, base, pack, source, true));
       expect(readFileSync(pack).length).toBeLessThan(100_000);
       const update = controllerPublicationPlan({ ...input, old, next }, base);
-      execFileSync("bash", ["-c", local(update.prepareCommand)], { env: { ...process.env, ...update.prepareEnv } });
+      runShell(local(update.prepareCommand), { env: { ...process.env, ...update.prepareEnv } });
       const oldBlob = execFileSync("git", ["-C", source, "rev-parse", `${old}:live.txt`], {
         encoding: "utf8",
       }).trim();
@@ -456,7 +469,7 @@ describe("isolated cold publication plan", () => {
           }),
         ).toThrow();
       oldBlobIsMissing();
-      execFileSync("bash", ["-c", local(update.pushCommand)], { env: { ...process.env, ...update.env } });
+      runShell(local(update.pushCommand), { env: { ...process.env, ...update.env } });
       oldBlobIsMissing();
       expect(
         execFileSync("git", ["-C", remote, "rev-parse", `refs/heads/${input.branch}`], {
@@ -467,7 +480,7 @@ describe("isolated cold publication plan", () => {
       // A moved branch cannot be silently substituted for the typed old tip.
       rmSync(dir, { recursive: true, force: true });
       expect(() =>
-        execFileSync("bash", ["-c", local(plan.fetchCommand)], {
+        runShell(local(plan.fetchCommand), {
           env: { ...process.env, ...plan.env },
           stdio: "ignore",
         }),
@@ -502,7 +515,7 @@ describe("isolated cold publication plan", () => {
             .replaceAll("https://door.example/git/acme/api.git", source);
         const plan = controllerPublicationPlan({ ...input, old });
         expect(
-          execFileSync("bash", ["-c", local(plan.fetchCommand)], {
+          runShell(local(plan.fetchCommand), {
             env: { ...process.env, ...plan.env },
             encoding: "utf8",
           }).trim(),
@@ -548,7 +561,7 @@ describe("isolated cold publication plan", () => {
         }
         const update = controllerPublicationPlan({ ...input, old, next }, old);
         expect(() =>
-          execFileSync("bash", ["-c", local(update.prepareCommand)], {
+          runShell(local(update.prepareCommand), {
             env: { ...process.env, ...update.prepareEnv },
             stdio: "pipe",
           }),
