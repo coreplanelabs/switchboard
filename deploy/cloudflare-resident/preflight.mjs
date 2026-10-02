@@ -105,8 +105,15 @@ export function decide(fetched, { force = false } = {}) {
       Date.parse(drain.until) <= Date.parse(drain.since)
     )
       problems.push("deploy fence is missing or invalid (registered owners may reattach)");
+    const activeAdmissions = fetched.payload?.activeAdmissions;
+    if (!Number.isSafeInteger(activeAdmissions) || activeAdmissions < 0)
+      problems.push("deploy admission count is missing or invalid");
+    else if (activeAdmissions > 0)
+      problems.push(`${activeAdmissions} resident operation(s) admitted before the fence remain active`);
     if (fetched.payload?.fenceReady !== true)
-      problems.push("deploy fence has insufficient verified time for upload and readiness");
+      problems.push(
+        "deploy fence is not ready: activity, owner evidence or time is insufficient for upload and readiness",
+      );
     const residents = fetched.payload?.residents;
     if (!Array.isArray(residents)) {
       problems.push("resident Worker answered without a `residents` array (malformed /residents payload)");

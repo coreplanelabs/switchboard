@@ -1499,6 +1499,7 @@ const TEST_OVERRIDES_KEY = "testOverrides";
  *  counts as a slot; it survives the isolate swap a deploy performs, which is
  *  why the record carries its own end. */
 const DRAIN_KEY = "drain";
+const DEPLOY_ADMISSION_KEY_PREFIX = "deploy:admission:";
 /** Resident-DO key (issue 1931): set when a deploy's reconcile could not
  *  verify this resident's container on the new image; the next reconcile that
  *  finds it current reports to the registry and clears it. */
@@ -1627,12 +1628,48 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     return (await this.ctx.storage.get(DRAIN_KEY)) ?? null;
   }
 
+  /** A durable permit closes the gap between an admitted call and the
+   * resident's in-memory counters. The swap fence and permit use the same
+   * registry transaction boundary. An orphaned permit refuses deployment. */
+  async beginDeployAdmission(): Promise<string | null> {
+    return this.ctx.storage.transaction(async (txn) => {
+      if (liveDrain(await txn.get(DRAIN_KEY), systemClock())?.swapFence) return null;
+      const id = crypto.randomUUID();
+      await txn.put(`${DEPLOY_ADMISSION_KEY_PREFIX}${id}`, { startedAt: systemClock() });
+      return id;
+    });
+  }
+
+  async endDeployAdmission(id: string): Promise<void> {
+    await this.ctx.storage.delete(`${DEPLOY_ADMISSION_KEY_PREFIX}${id}`);
+  }
+
+  async activeDeployAdmissions(): Promise<number> {
+    return (await this.ctx.storage.list({ prefix: DEPLOY_ADMISSION_KEY_PREFIX })).size;
+  }
+
+  /** The last pre-upload read is one registry transaction: an admitted call,
+   * replaced drain, or expiring fence makes the answer fail closed. */
+  async verifyDeployFence(since: string, until: string): Promise<boolean> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const now = systemClock();
+      const current = liveDrain(await txn.get(DRAIN_KEY), now);
+      const active = await txn.list({ prefix: DEPLOY_ADMISSION_KEY_PREFIX });
+      return deployFenceReady(current, now) && current?.since === since && current.until === until && active.size === 0;
+    });
+  }
+
   /** Admin-only by construction (reached solely via POST /drain): replaces
    *  whatever drain stood — a second deploy's drain extends the first's. The
    *  set posts `above` for the plane (record 0064) and arms ONE alarm at
    *  `until`, so a drain nobody lifts posts its expiry itself. */
-  async setDrain(record: DrainRecord): Promise<DrainRecord> {
-    await this.ctx.storage.put(DRAIN_KEY, record);
+  async setDrain(record: DrainRecord): Promise<DrainRecord | null> {
+    const stored = await this.ctx.storage.transaction(async (txn) => {
+      if (liveDrain(await txn.get(DRAIN_KEY), systemClock())?.swapFence) return false;
+      await txn.put(DRAIN_KEY, record);
+      return true;
+    });
+    if (!stored) return null;
     await this.pushDrainPost("above");
     await this.ctx.storage.setAlarm(Date.parse(record.until));
     return record;
@@ -1641,22 +1678,26 @@ export class ResidentRegistryDO extends DurableObject<Env> {
   /** Close the reattach exception before reading deploy activity. The same
    * durable drain survives the Worker isolate swap and expires by itself. */
   async setDeployFence(): Promise<DrainRecord | null> {
-    const now = systemClock();
-    const record = liveDrain(await this.ctx.storage.get(DRAIN_KEY), now);
-    if (record === null || record.swapFence) return null;
-    const fenced = { ...record, swapFence: true } as const;
-    if (!deployFenceReady(fenced, now)) return null;
-    await this.ctx.storage.put(DRAIN_KEY, fenced);
-    return fenced;
+    return this.ctx.storage.transaction(async (txn) => {
+      const now = systemClock();
+      const record = liveDrain(await txn.get(DRAIN_KEY), now);
+      if (record === null || record.swapFence) return null;
+      const fenced = { ...record, swapFence: true, swapBuild: BUILD_ID } as const;
+      if (!deployFenceReady(fenced, now)) return null;
+      await txn.put(DRAIN_KEY, fenced);
+      return fenced;
+    });
   }
 
   /** A refused preflight reopens owned reattach, but cannot clear a newer
    * deployment's drain. */
   async clearDeployFence(since: string, until: string): Promise<void> {
-    const record = liveDrain(await this.ctx.storage.get(DRAIN_KEY), systemClock());
-    if (record?.since !== since || record.until !== until || !record.swapFence) return;
-    const { swapFence: _fence, ...rest } = record;
-    await this.ctx.storage.put(DRAIN_KEY, rest);
+    await this.ctx.storage.transaction(async (txn) => {
+      const record = liveDrain(await txn.get(DRAIN_KEY), systemClock());
+      if (record?.since !== since || record.until !== until || !record.swapFence) return;
+      const { swapFence: _fence, swapBuild: _build, ...rest } = record;
+      await txn.put(DRAIN_KEY, rest);
+    });
   }
 
   /** Admin-only by construction (POST /undrain): `cleared` when a record was
@@ -1665,49 +1706,60 @@ export class ResidentRegistryDO extends DurableObject<Env> {
    *  container still to report the deploy's image) the fleet STAYS closed:
    *  the record stands with `liftAsked` and the last container's report lifts
    *  it (`reportContainerImageCurrent`); `until` remains the backstop. */
-  async clearDrain(): Promise<{ cleared: boolean; held: string[] }> {
-    const record = liveDrain(await this.ctx.storage.get(DRAIN_KEY), systemClock());
-    if (record !== null) {
-      const lift = liftDrain(record);
-      if (!lift.cleared) {
-        await this.ctx.storage.put(DRAIN_KEY, lift.record);
-        return { cleared: false, held: lift.record.holds ?? [] };
+  async clearDrain(): Promise<{ cleared: boolean; held: string[]; error?: string }> {
+    const result = await this.ctx.storage.transaction(async (txn) => {
+      const record = liveDrain(await txn.get(DRAIN_KEY), systemClock());
+      if (record?.swapFence && record.swapBuild === BUILD_ID)
+        return { cleared: false, held: [], error: "deploy-fence: the pre-upload Worker cannot reopen the fleet" };
+      if (record !== null) {
+        const lift = liftDrain(record);
+        if (!lift.cleared) {
+          await txn.put(DRAIN_KEY, lift.record);
+          return { cleared: false, held: lift.record.holds ?? [] };
+        }
       }
-    }
-    const had = await this.ctx.storage.delete(DRAIN_KEY);
-    if (had) await this.pushDrainPost("below");
-    return { cleared: had, held: [] };
+      return { cleared: await txn.delete(DRAIN_KEY), held: [] };
+    });
+    if (result.cleared) await this.pushDrainPost("below");
+    return result;
   }
 
   /** The deploy's reconcile could not verify these residents' containers on
    *  the new image (issue 1931): hold the drain for each — the fleet must not
    *  reopen onto them until they report. No live drain, nothing to hold. */
   async holdDrainFor(resources: string[]): Promise<void> {
-    const now = systemClock();
-    const record = liveDrain(await this.ctx.storage.get(DRAIN_KEY), now);
-    if (record === null || resources.length === 0) return;
-    const held = holdDrain(record, resources, now);
-    await this.ctx.storage.put(DRAIN_KEY, held);
+    if (resources.length === 0) return;
+    const held = await this.ctx.storage.transaction(async (txn) => {
+      const now = systemClock();
+      const record = liveDrain(await txn.get(DRAIN_KEY), now);
+      if (record === null) return null;
+      const next = holdDrain(record, resources, now);
+      await txn.put(DRAIN_KEY, next);
+      return next;
+    });
     // The hold's liveness alarm (issue 2044): the cycle bound is the earlier
     // end, so the alarm fires there — reopening the fleet with the stale
     // containers named — instead of at `until`, the last resort.
-    if (held.holdsUntil !== undefined) await this.ctx.storage.setAlarm(Date.parse(held.holdsUntil));
+    if (held?.holdsUntil !== undefined) await this.ctx.storage.setAlarm(Date.parse(held.holdsUntil));
   }
 
   /** One resident's word that its running container is on the deploy's image:
    *  its hold drops, and when it was the last hold of a lift already asked the
    *  drain lifts here — the reopen fires on the last container's report. */
   async reportContainerImageCurrent(resource: string): Promise<{ lifted: boolean }> {
-    const record = liveDrain(await this.ctx.storage.get(DRAIN_KEY), systemClock());
-    if (record === null) return { lifted: false };
-    const report = reportImageCurrent(record, resource);
-    if (report.record === null) {
-      await this.ctx.storage.delete(DRAIN_KEY);
+    const lifted = await this.ctx.storage.transaction(async (txn) => {
+      const record = liveDrain(await txn.get(DRAIN_KEY), systemClock());
+      if (record === null) return false;
+      const report = reportImageCurrent(record, resource);
+      if (report.record === null) return txn.delete(DRAIN_KEY);
+      await txn.put(DRAIN_KEY, report.record);
+      return false;
+    });
+    if (lifted) {
       await this.pushDrainPost("below");
       console.log(`[drain] fleet reopened — ${resource} was the last container to report the deploy's image`);
       return { lifted: true };
     }
-    await this.ctx.storage.put(DRAIN_KEY, report.record);
     return { lifted: false };
   }
 
@@ -1716,24 +1768,30 @@ export class ResidentRegistryDO extends DurableObject<Env> {
    *  posted `below` like a clear — whoever forgot the drain, the plane's
    *  window lifts. A drain replaced with a later `until` re-arms via setDrain. */
   async alarm(): Promise<void> {
-    const now = systemClock();
-    const stored = await this.ctx.storage.get(DRAIN_KEY);
-    if (stored === undefined) return;
-    if (liveDrain(stored, now) === null) {
+    const result = await this.ctx.storage.transaction(async (txn) => {
+      const now = systemClock();
+      const stored = await txn.get(DRAIN_KEY);
+      if (stored === undefined) return { kind: "missing" } as const;
+      if (liveDrain(stored, now) === null) {
+        const stale = staleHolds(stored, now);
+        await txn.delete(DRAIN_KEY);
+        return { kind: "expired", stale } as const;
+      }
+      return { kind: "live", record: stored as DrainRecord } as const;
+    });
+    if (result.kind === "expired") {
       // The hold's liveness (issue 2044): a reopen past the cycle bound names
       // the containers whose post-deploy cycle never landed — a warning, never
       // a silence; each restarts on its own next quiet attach or refresh.
-      const stale = staleHolds(stored, now);
-      if (stale !== null)
+      if (result.stale !== null)
         console.log(
-          `[drain] fleet reopened with ${stale.join(", ")} still on the pre-deploy image — the post-deploy cycle did not land within its bound; a stale container restarts on its next quiet attach or refresh`,
+          `[drain] fleet reopened with ${result.stale.join(", ")} still on the pre-deploy image — the post-deploy cycle did not land within its bound; a stale container restarts on its next quiet attach or refresh`,
         );
-      await this.ctx.storage.delete(DRAIN_KEY);
       await this.pushDrainPost("below");
-    } else {
+    } else if (result.kind === "live") {
       // Replaced with a later end under an already-armed alarm: re-arm at the
       // record's own earlier end — the hold's cycle bound when one stands.
-      const record = stored as DrainRecord;
+      const record = result.record;
       const ends = [
         Date.parse(record.until),
         ...(record.holdsUntil !== undefined ? [Date.parse(record.holdsUntil)] : []),
@@ -6155,97 +6213,99 @@ export class ResidentDO extends Sandbox<Env> {
     ownerFence?: number,
   ): Promise<AttachOk | ThreadErr> {
     try {
-      return await this.threadAttaches.run(threadKey, async () => {
-        // The attachment fence takes precedence over every 503 gate. Keep the
-        // same thread lock through the gates and registration write so a newer
-        // attach cannot slip between this check and a fallback-eligible refusal.
-        const current = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
-        const accepted = await this.ctx.storage.get<Pick<RunRegistration, "runId" | "ownerGen" | "ownerFence">>(
-          runFenceKey(threadKey),
-        );
-        if (
-          !registeredRunAllowsClaim(current, runId, ownerGen, ownerFence) ||
-          !registeredRunAllowsClaim(accepted, runId, ownerGen, ownerFence)
-        )
-          return { error: "run-registration-mismatch: a newer generation owns the thread", status: 409 };
-        if (await this.recreateAdmission.blocked()) return this.recreateRefusal();
-        await this.ensureHydrated();
-        if (await this.recreateAdmission.blocked()) return this.recreateRefusal();
-        // The fleet drain (item 69): a deploy is waiting for the runs in flight
-        // to end, and a NEW run's attach is refused with the record the bot
-        // waits on — a real 503 in the streamed document, read by the client as
-        // `draining`, never as the platform's transient. A run already in flight
-        // — with an owned, live registration (item 44) — re-attaches
-        // through: a rolled container, an evicted worktree, a resumed run are
-        // the runs the drain waits FOR, and refusing them would hold the fleet
-        // closed on the run it is closed for. Read before the image reconcile so
-        // a refused attach never restarts a container.
-        const drain = await this.fleetDrain();
-        const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
-        const registered = registeredRunAllowsReattach(
-          registration,
-          runId,
-          systemClock(),
-          RUN_REGISTRATION_GRACE_MS,
-          ownerGen,
-          ownerFence,
-        );
-        if (drain && (drain.swapFence || !registered)) {
-          const refusal: ThreadErr & { draining: DrainRecord } = drainRefusal(drain);
-          return refusal;
-        }
-        // Item 70: above the soft memory threshold a NEW attach is refused like
-        // `mirror-busy` (the bot falls back or waits, the card says why) — after
-        // the drain (storage only, cheaper) and before the image reconcile, so a
-        // refused attach never restarts a container. An owned, live run's
-        // re-attach passes for the same reason it passes the drain above.
-        const memory = await this.memoryGate("attach", registered);
-        if (memory) return memory;
-        const resourceId = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
-        // An attach never restarts the container (issue 2101): a `stale` verdict
-        // refuses the NEW run — it falls back to the seeded sandbox — while a
-        // owned, live run's re-attach passes exactly as it passes the drain and
-        // the memory gate; the restart itself is the refresh cycle's or the
-        // deploy's.
-        if ((await this.reconcileImage("attach")) === "stale" && !registered) {
-          const s = await this.getStatus();
-          return {
-            error:
-              "image-stale: the container predates the deploy and restarts on the next quiet refresh; new runs use the fallback sandbox until then",
-            status: 503,
-            state: s.state,
-            stateReason: s.reason,
-            reason: "image-stale",
-          };
-        }
-        // From here the attach may hold the mirror lock through clone/install:
-        // count it so a concurrent refresh-cycle reconcileImage never stops the
-        // container under it (and isIdle never parks the cycle mid-attach).
-        this.attachesInFlight++;
-        const priorTree = !reuse ? await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey)) : undefined;
-        if (priorTree && !priorTree.evicted && priorTree.user) this.workspaceEvictionsInFlight.add(threadKey);
-        try {
-          const res = await this.attachThreadBody(
-            threadKey,
-            refHint,
-            readonly,
-            wantSha,
-            reuse,
-            resourceId,
-            t0,
-            record,
-            reason,
-            githubDoor,
+      return await this.withDeployAdmission(() =>
+        this.threadAttaches.run(threadKey, async () => {
+          // The attachment fence takes precedence over every 503 gate. Keep the
+          // same thread lock through the gates and registration write so a newer
+          // attach cannot slip between this check and a fallback-eligible refusal.
+          const current = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
+          const accepted = await this.ctx.storage.get<Pick<RunRegistration, "runId" | "ownerGen" | "ownerFence">>(
+            runFenceKey(threadKey),
           );
-          // The run this attach opens is now in flight until its release —
-          // whatever its op counters read between the bot's calls (item 44).
-          if (!("error" in res)) await this.registerRun(threadKey, runBudgetMs, runId, ownerGen, ownerFence);
-          return res;
-        } finally {
-          if (priorTree && !priorTree.evicted && priorTree.user) this.workspaceEvictionsInFlight.delete(threadKey);
-          this.attachesInFlight--;
-        }
-      });
+          if (
+            !registeredRunAllowsClaim(current, runId, ownerGen, ownerFence) ||
+            !registeredRunAllowsClaim(accepted, runId, ownerGen, ownerFence)
+          )
+            return { error: "run-registration-mismatch: a newer generation owns the thread", status: 409 };
+          if (await this.recreateAdmission.blocked()) return this.recreateRefusal();
+          await this.ensureHydrated();
+          if (await this.recreateAdmission.blocked()) return this.recreateRefusal();
+          // The fleet drain (item 69): a deploy is waiting for the runs in flight
+          // to end, and a NEW run's attach is refused with the record the bot
+          // waits on — a real 503 in the streamed document, read by the client as
+          // `draining`, never as the platform's transient. A run already in flight
+          // — with an owned, live registration (item 44) — re-attaches
+          // through: a rolled container, an evicted worktree, a resumed run are
+          // the runs the drain waits FOR, and refusing them would hold the fleet
+          // closed on the run it is closed for. Read before the image reconcile so
+          // a refused attach never restarts a container.
+          const drain = await this.fleetDrain();
+          const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
+          const registered = registeredRunAllowsReattach(
+            registration,
+            runId,
+            systemClock(),
+            RUN_REGISTRATION_GRACE_MS,
+            ownerGen,
+            ownerFence,
+          );
+          if (drain && (drain.swapFence || !registered)) {
+            const refusal: ThreadErr & { draining: DrainRecord } = drainRefusal(drain);
+            return refusal;
+          }
+          // Item 70: above the soft memory threshold a NEW attach is refused like
+          // `mirror-busy` (the bot falls back or waits, the card says why) — after
+          // the drain (storage only, cheaper) and before the image reconcile, so a
+          // refused attach never restarts a container. An owned, live run's
+          // re-attach passes for the same reason it passes the drain above.
+          const memory = await this.memoryGate("attach", registered);
+          if (memory) return memory;
+          const resourceId = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
+          // An attach never restarts the container (issue 2101): a `stale` verdict
+          // refuses the NEW run — it falls back to the seeded sandbox — while a
+          // owned, live run's re-attach passes exactly as it passes the drain and
+          // the memory gate; the restart itself is the refresh cycle's or the
+          // deploy's.
+          if ((await this.reconcileImage("attach")) === "stale" && !registered) {
+            const s = await this.getStatus();
+            return {
+              error:
+                "image-stale: the container predates the deploy and restarts on the next quiet refresh; new runs use the fallback sandbox until then",
+              status: 503,
+              state: s.state,
+              stateReason: s.reason,
+              reason: "image-stale",
+            };
+          }
+          // From here the attach may hold the mirror lock through clone/install:
+          // count it so a concurrent refresh-cycle reconcileImage never stops the
+          // container under it (and isIdle never parks the cycle mid-attach).
+          this.attachesInFlight++;
+          const priorTree = !reuse ? await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey)) : undefined;
+          if (priorTree && !priorTree.evicted && priorTree.user) this.workspaceEvictionsInFlight.add(threadKey);
+          try {
+            const res = await this.attachThreadBody(
+              threadKey,
+              refHint,
+              readonly,
+              wantSha,
+              reuse,
+              resourceId,
+              t0,
+              record,
+              reason,
+              githubDoor,
+            );
+            // The run this attach opens is now in flight until its release —
+            // whatever its op counters read between the bot's calls (item 44).
+            if (!("error" in res)) await this.registerRun(threadKey, runBudgetMs, runId, ownerGen, ownerFence);
+            return res;
+          } finally {
+            if (priorTree && !priorTree.evicted && priorTree.user) this.workspaceEvictionsInFlight.delete(threadKey);
+            this.attachesInFlight--;
+          }
+        }),
+      );
     } catch (err) {
       return catchAllErr(err, "attach-failed");
     }
@@ -7799,15 +7859,34 @@ export class ResidentDO extends Sandbox<Env> {
    *  until its final owner check and directory removal have settled. */
   private workspaceEvictionsInFlight = new Set<string>();
 
-  private async withThreadBusy<T>(threadKey: string, fn: () => Promise<T>): Promise<T> {
-    this.threadOpsInFlight.set(threadKey, (this.threadOpsInFlight.get(threadKey) ?? 0) + 1);
+  private async withDeployAdmission<T>(fn: () => Promise<T>): Promise<T | ThreadErr> {
+    const registry = this.registry();
+    const id = await registry.beginDeployAdmission();
+    if (!id)
+      return {
+        error: "deploy-fence: resident Worker upload is in progress",
+        status: 503,
+        reason: "draining",
+        cause: "system",
+      };
     try {
       return await fn();
     } finally {
-      const n = (this.threadOpsInFlight.get(threadKey) ?? 1) - 1;
-      if (n <= 0) this.threadOpsInFlight.delete(threadKey);
-      else this.threadOpsInFlight.set(threadKey, n);
+      await registry.endDeployAdmission(id);
     }
+  }
+
+  private async withThreadBusy<T>(threadKey: string, fn: () => Promise<T>): Promise<T | ThreadErr> {
+    return this.withDeployAdmission(async () => {
+      this.threadOpsInFlight.set(threadKey, (this.threadOpsInFlight.get(threadKey) ?? 0) + 1);
+      try {
+        return await fn();
+      } finally {
+        const n = (this.threadOpsInFlight.get(threadKey) ?? 1) - 1;
+        if (n <= 0) this.threadOpsInFlight.delete(threadKey);
+        else this.threadOpsInFlight.set(threadKey, n);
+      }
+    });
   }
 
   async execThread(
@@ -7839,7 +7918,7 @@ export class ResidentDO extends Sandbox<Env> {
     env: Record<string, string>,
   ): Promise<CredentialInspection> {
     try {
-      return await this.withThreadBusy(threadKey, async () => {
+      const inspection = await this.withThreadBusy(threadKey, async () => {
         if (this.workspaceEvictionsInFlight.has(threadKey)) return emptyCredentialInspection();
         if (await this.memoryGate("exec")) return emptyCredentialInspection();
         // Inspection cannot hydrate, reattach or repair the selected runtime.
@@ -7884,6 +7963,7 @@ export class ResidentDO extends Sandbox<Env> {
           }
         });
       });
+      return "error" in inspection ? emptyCredentialInspection() : inspection;
     } catch {
       return emptyCredentialInspection();
     }
@@ -7896,34 +7976,39 @@ export class ResidentDO extends Sandbox<Env> {
     threadKey: string,
     input: Omit<ResidentPublicationInput, "worktreePath">,
   ): Promise<{ stdout: string; stderr: string; exitCode: number; truncated: boolean } | ThreadErr> {
-    return this.withThreadBusy(threadKey, async () => {
-      const memory = await this.memoryGate("exec");
-      if (memory) return memory;
-      const pre = await this.threadPreflight(threadKey);
-      if ("error" in pre) return pre;
-      const { binding } = pre;
-      if (binding.readonly || !binding.githubDoorHost)
-        return { error: "publication requires a writable Git Door binding", status: 403, cause: "request" };
-      let command: ReturnType<typeof residentPublicationCommand>;
-      try {
-        command = residentPublicationCommand({ ...input, worktreePath: binding.worktreePath });
-      } catch {
-        return { error: "invalid typed publication request", status: 400, cause: "request" };
-      }
-      if (new URL(input.doorOrigin).host !== binding.githubDoorHost)
-        return { error: "publication Door host does not match the thread binding", status: 403, cause: "request" };
-      const objects = await this.run(["test", "-d", command.env.GIT_ALTERNATE_OBJECT_DIRECTORIES]);
-      if (objects.exitCode !== 0)
-        return { error: "publication source objects are unavailable", status: 409, cause: "request" };
-      const result = await this.run(command.argv, { timeoutMs: BASH_TIMEOUT_MS, env: command.env });
-      return {
-        stdout: result.stdout.slice(0, EXEC_OUTPUT_CAP),
-        stderr: result.stderr.slice(0, EXEC_OUTPUT_CAP),
-        exitCode: result.timedOut ? 124 : result.exitCode,
-        truncated:
-          result.truncated === true || result.stdout.length > EXEC_OUTPUT_CAP || result.stderr.length > EXEC_OUTPUT_CAP,
-      };
-    });
+    return this.withThreadBusy(
+      threadKey,
+      async (): Promise<{ stdout: string; stderr: string; exitCode: number; truncated: boolean } | ThreadErr> => {
+        const memory = await this.memoryGate("exec");
+        if (memory) return memory;
+        const pre = await this.threadPreflight(threadKey);
+        if ("error" in pre) return pre;
+        const { binding } = pre;
+        if (binding.readonly || !binding.githubDoorHost)
+          return { error: "publication requires a writable Git Door binding", status: 403, cause: "request" };
+        let command: ReturnType<typeof residentPublicationCommand>;
+        try {
+          command = residentPublicationCommand({ ...input, worktreePath: binding.worktreePath });
+        } catch {
+          return { error: "invalid typed publication request", status: 400, cause: "request" };
+        }
+        if (new URL(input.doorOrigin).host !== binding.githubDoorHost)
+          return { error: "publication Door host does not match the thread binding", status: 403, cause: "request" };
+        const objects = await this.run(["test", "-d", command.env.GIT_ALTERNATE_OBJECT_DIRECTORIES]);
+        if (objects.exitCode !== 0)
+          return { error: "publication source objects are unavailable", status: 409, cause: "request" };
+        const result = await this.run(command.argv, { timeoutMs: BASH_TIMEOUT_MS, env: command.env });
+        return {
+          stdout: result.stdout.slice(0, EXEC_OUTPUT_CAP),
+          stderr: result.stderr.slice(0, EXEC_OUTPUT_CAP),
+          exitCode: result.timedOut ? 124 : result.exitCode,
+          truncated:
+            result.truncated === true ||
+            result.stdout.length > EXEC_OUTPUT_CAP ||
+            result.stderr.length > EXEC_OUTPUT_CAP,
+        };
+      },
+    );
   }
 
   /** The exec route's one gate for a runtime replacement (item 43): every
@@ -8363,75 +8448,77 @@ export class ResidentDO extends Sandbox<Env> {
     ownerGen?: string,
     ownerFence?: number,
   ): Promise<DetachAnswer | ThreadErr> {
-    return this.threadAttaches.run(threadKey, async () => {
-      const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
-      if (!binding) return { error: `no-binding: ${threadKey} has never attached to this resident`, status: 404 };
-      if (binding.evicted || !binding.user) {
-        if (pushed.length > 0 && registeredRunOwnsRelease(binding.lastRunOwner, runId, ownerGen, ownerFence))
-          await this.rememberOwnBranches(threadKey, pushed);
-        return { released: false, reason: "already-evicted" };
-      }
-      const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
-      if (!registeredRunOwnsRelease(registration, runId, ownerGen, ownerFence))
-        return { released: false, reason: "run-registration-mismatch: the workspace belongs to another run" };
-      if (pushed.length > 0) await this.rememberOwnBranches(threadKey, pushed);
-      if (!(await this.poolUserOwnerMatches(binding.user, `thread:${threadKey}`)))
-        return { error: "pool-owner-mismatch: detach refused for conflicting UID owner", status: 503 };
-      const plan = planForceDetach({
-        force,
-        inFlight: this.threadOpsInFlight.get(threadKey) ?? 0,
-        user: binding.user,
-        poolUsers: THREAD_USERS,
-      });
-      if (plan.action === "refuse") return { released: false, reason: plan.reason, user: binding.user };
-      if (plan.action === "kill") {
-        if (!(await this.killThreadUserProcesses(plan.user, threadKey)))
-          return { error: "pool-owner-mismatch: force detach refused before kill", status: 503 };
-        console.log(
-          `detach: force — killed ${plan.user}'s processes for ${threadKey} (${plan.inFlight} op(s) were in flight)`,
-        );
-        const left = await this.waitForThreadDrain(threadKey);
-        if (left > 0) return { released: false, reason: busyAfterKillReason(left), user: binding.user };
-      }
-      const active = await this.isRuntimeActive().catch(() => false);
-      // What the tree still holds, for the answer and the eviction's record.
-      // Not measured on a force release: a read-only
-      // tree holds nothing, and a hard stop's tree is whatever the killed
-      // command left. A probe that fails names nothing in the answer (never a
-      // guess); the record and the log say it could not be measured.
-      let tree: EvictedTree | undefined;
-      if (!force && active) tree = await this.measureTreeBeforeEviction(binding);
-      // Re-check right before removal: the measurement above awaited (the DO
-      // yields at each await), so an exec that arrived mid-detach would otherwise
-      // have its tree removed under it.
-      const busyNow = this.threadOpsInFlight.get(threadKey) ?? 0;
-      if (busyNow > 0)
-        return {
-          released: false,
-          reason: `busy: ${busyNow} operation(s) started during detach — kept`,
+    return this.withDeployAdmission(() =>
+      this.threadAttaches.run(threadKey, async () => {
+        const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
+        if (!binding) return { error: `no-binding: ${threadKey} has never attached to this resident`, status: 404 };
+        if (binding.evicted || !binding.user) {
+          if (pushed.length > 0 && registeredRunOwnsRelease(binding.lastRunOwner, runId, ownerGen, ownerFence))
+            await this.rememberOwnBranches(threadKey, pushed);
+          return { released: false, reason: "already-evicted" };
+        }
+        const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
+        if (!registeredRunOwnsRelease(registration, runId, ownerGen, ownerFence))
+          return { released: false, reason: "run-registration-mismatch: the workspace belongs to another run" };
+        if (pushed.length > 0) await this.rememberOwnBranches(threadKey, pushed);
+        if (!(await this.poolUserOwnerMatches(binding.user, `thread:${threadKey}`)))
+          return { error: "pool-owner-mismatch: detach refused for conflicting UID owner", status: 503 };
+        const plan = planForceDetach({
+          force,
+          inFlight: this.threadOpsInFlight.get(threadKey) ?? 0,
           user: binding.user,
-        };
-      // Same re-read as the sweep: a re-attach during the measurement means a
-      // fresh tree we must not remove from a stale snapshot.
-      const current = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
-      if (!current || current.evicted) return { released: false, reason: "already-evicted" };
-      if (current.lastAttachAt !== binding.lastAttachAt)
-        return { released: false, reason: "re-attached during the detach — kept", user: current.user };
-      const user = current.user;
-      // Same as the sweep: `active` was read before the measurement's awaits; a
-      // container that woke meanwhile must get the rm, not an orphaned tree.
-      const activeNow = await this.isRuntimeActive().catch(() => true);
-      const eviction = await this.evictBinding(current, activeNow, `detach`, "detach", tree, true);
-      if (eviction === "preserved")
-        return { released: false, reason: "workspace-preservation: owner or saved work is not verified", user };
-      if (eviction === "cleanup-failed")
-        return { released: false, reason: "thread-cleanup-failed: pool user kept", user };
-      if (eviction === "changed") return { released: false, reason: "re-attached during eviction — kept", user };
-      // Item 55: the tree is gone; the gauge catches up at the next refresh
-      // instance's `measure` step, and the admission's `df` sees the space now.
-      const leftBehind = tree && "leftBehind" in tree ? tree.leftBehind : undefined;
-      return { released: true, user, ...(leftBehind !== undefined ? { leftBehind } : {}) };
-    });
+          poolUsers: THREAD_USERS,
+        });
+        if (plan.action === "refuse") return { released: false, reason: plan.reason, user: binding.user };
+        if (plan.action === "kill") {
+          if (!(await this.killThreadUserProcesses(plan.user, threadKey)))
+            return { error: "pool-owner-mismatch: force detach refused before kill", status: 503 };
+          console.log(
+            `detach: force — killed ${plan.user}'s processes for ${threadKey} (${plan.inFlight} op(s) were in flight)`,
+          );
+          const left = await this.waitForThreadDrain(threadKey);
+          if (left > 0) return { released: false, reason: busyAfterKillReason(left), user: binding.user };
+        }
+        const active = await this.isRuntimeActive().catch(() => false);
+        // What the tree still holds, for the answer and the eviction's record.
+        // Not measured on a force release: a read-only
+        // tree holds nothing, and a hard stop's tree is whatever the killed
+        // command left. A probe that fails names nothing in the answer (never a
+        // guess); the record and the log say it could not be measured.
+        let tree: EvictedTree | undefined;
+        if (!force && active) tree = await this.measureTreeBeforeEviction(binding);
+        // Re-check right before removal: the measurement above awaited (the DO
+        // yields at each await), so an exec that arrived mid-detach would otherwise
+        // have its tree removed under it.
+        const busyNow = this.threadOpsInFlight.get(threadKey) ?? 0;
+        if (busyNow > 0)
+          return {
+            released: false,
+            reason: `busy: ${busyNow} operation(s) started during detach — kept`,
+            user: binding.user,
+          };
+        // Same re-read as the sweep: a re-attach during the measurement means a
+        // fresh tree we must not remove from a stale snapshot.
+        const current = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
+        if (!current || current.evicted) return { released: false, reason: "already-evicted" };
+        if (current.lastAttachAt !== binding.lastAttachAt)
+          return { released: false, reason: "re-attached during the detach — kept", user: current.user };
+        const user = current.user;
+        // Same as the sweep: `active` was read before the measurement's awaits; a
+        // container that woke meanwhile must get the rm, not an orphaned tree.
+        const activeNow = await this.isRuntimeActive().catch(() => true);
+        const eviction = await this.evictBinding(current, activeNow, `detach`, "detach", tree, true);
+        if (eviction === "preserved")
+          return { released: false, reason: "workspace-preservation: owner or saved work is not verified", user };
+        if (eviction === "cleanup-failed")
+          return { released: false, reason: "thread-cleanup-failed: pool user kept", user };
+        if (eviction === "changed") return { released: false, reason: "re-attached during eviction — kept", user };
+        // Item 55: the tree is gone; the gauge catches up at the next refresh
+        // instance's `measure` step, and the admission's `df` sees the space now.
+        const leftBehind = tree && "leftBehind" in tree ? tree.leftBehind : undefined;
+        return { released: true, user, ...(leftBehind !== undefined ? { leftBehind } : {}) };
+      }),
+    );
   }
 
   /** Force-detach's kill: end every process owned by the pool user —
@@ -8578,19 +8665,21 @@ export class ResidentDO extends Sandbox<Env> {
     ownerGen?: string,
     ownerFence?: number,
   ): Promise<{ deadlineAt: number } | ThreadErr> {
-    return this.ctx.storage.transaction(async (txn) => {
-      const registration = await txn.get<RunRegistration>(runRegKey(threadKey));
-      if (
-        !registration ||
-        registration.runId !== runId ||
-        registration.ownerGen !== ownerGen ||
-        registration.ownerFence !== ownerFence
-      )
-        return { error: "run-registration-mismatch: this run does not own the thread", status: 409 };
-      const deadlineAt = systemClock() + remainingMs;
-      await txn.put(runRegKey(threadKey), { ...registration, deadlineAt });
-      return { deadlineAt };
-    });
+    return this.withDeployAdmission(() =>
+      this.ctx.storage.transaction(async (txn) => {
+        const registration = await txn.get<RunRegistration>(runRegKey(threadKey));
+        if (
+          !registration ||
+          registration.runId !== runId ||
+          registration.ownerGen !== ownerGen ||
+          registration.ownerFence !== ownerFence
+        )
+          return { error: "run-registration-mismatch: this run does not own the thread", status: 409 };
+        const deadlineAt = systemClock() + remainingMs;
+        await txn.put(runRegKey(threadKey), { ...registration, deadlineAt });
+        return { deadlineAt };
+      }),
+    );
   }
   /** Execution deadlines bound legacy registrations only. A binding with a
    *  durable run identity stays protected until its files pass the shared
@@ -8789,161 +8878,165 @@ export class ResidentDO extends Sandbox<Env> {
   }
 
   private async runOpTraced(op: "test" | "build", refArg: string | null, t0: number): Promise<OpRunOk | ThreadErr> {
-    if (await this.recreateAdmission.blocked()) return this.recreateRefusal();
-    // The fleet drain (item 69; issue 2044): a typed op is a new piece of work
-    // like a new run's attach, and during the incident one waited silently at
-    // the drain — so it is answered with the drain's own record at once, a
-    // deterministic refusal the command surfaces as its reason, never a wait.
-    const drain = await this.fleetDrain();
-    if (drain !== null) {
-      return {
-        error: `op-refused: the resident fleet is drained for ${drain.reason} (asked by ${drain.by}, ends by ${drain.until}) — re-run the command when the fleet reopens`,
-        status: 503,
-        reason: "draining",
-        cause: "system",
-      };
-    }
-    try {
-      await this.ensureHydrated();
-    } catch (err) {
-      const s = await this.getStatus();
-      return {
-        error: `not-serviceable: ${errMsg(err)}`,
-        status: 503,
-        state: s.state,
-        stateReason: s.reason,
-        reason: s.reason,
-        cause: "system",
-      };
-    }
-    if (await this.recreateAdmission.blocked()) return this.recreateRefusal();
-    // One storage round trip for the two facts; the registry lookup stays (an
-    // op resolves ONLY through the onboard-time command table).
-    const stored = await this.ctx.storage.get<string | RepoFacts>([RESOURCE_KEY, FACTS_KEY]);
-    const resource = (stored.get(RESOURCE_KEY) as string | undefined) ?? "";
-    const facts = stored.get(FACTS_KEY) as RepoFacts | undefined;
-    const record = await this.registry().getRecord(resource);
-    // Typed `reason` beside the words: the client reads the field — a refusal no
-    // wait clears, unlike the restore window's 503s — never the sentence.
-    if (!record || !facts)
-      return {
-        error: "not-serviceable: registry record or repo facts missing",
-        status: 503,
-        reason: "unregistered",
-        cause: "system",
-      };
-    const command = record.commands[op];
-    if (!command) return { error: `op-unavailable: the command table has no "${op}" entry`, status: 400 };
-
-    const user = await this.allocateOpUser();
-    if (typeof user !== "string") return user;
-    const opDir = `${OPS_DIR}/${crypto.randomUUID()}`;
-    const checkout = `${opDir}/checkout`;
-    try {
-      // Command-level token mint, attach's discipline: only a mirror
-      // fetch for an unknown ref would use it; failure never blocks the op.
-      let token: string | null = null;
-      if (githubAppConfigured(this.env)) {
-        token = (await mintRepoScopedToken(this.env, resource.slice("repo:".length)).catch(() => null))?.token ?? null;
-      }
-      const locked = await this.withMirrorLock(async () => {
-        await this.ensureGitSetup();
-        const ref = refArg ?? facts.defaultRef;
-        if (!(await this.refExists(ref))) {
-          await this.gitWithCred(
-            token,
-            ["-C", MIRROR_DIR, "fetch", "--prune", "origin"],
-            "fetch",
-            GIT_NETWORK_TIMEOUT_MS,
-          );
-          if (!(await this.refExists(ref))) {
-            throw new StepError(
-              "unknown-ref",
-              `ref ${JSON.stringify(ref)} does not resolve in the mirror (even after a fetch)`,
-            );
-          }
-        }
-        const sha = await this.readMirrorSha(ref);
-        const lockKey = await this.lockfileKey(sha);
-        await this.runOk(["install", "-d", "-m", "755", "-o", "root", "-g", "root", OPS_DIR], "ops-dir");
-        // 700 op dir first, clone beneath it: the tree is unreadable to peer
-        // users for its whole life, exactly like a thread dir.
-        await this.runOk(["install", "-d", "-m", "700", "-o", user, "-g", user, opDir], "op-dir");
-        await this.runOk(["git", "clone", "--no-hardlinks", "--branch", ref, MIRROR_DIR, checkout], "op-clone", {
-          timeoutMs: GIT_NETWORK_TIMEOUT_MS,
-        });
-        await this.runOk(["chown", "-R", `${user}:${user}`, checkout], "op-chown");
-        return { ref, sha, lockKey };
-      }, ATTACH_MUTEX_WAIT_MS);
-
-      const deps = await this.materializeThreadDeps(
-        { user, worktreePath: checkout },
-        locked.value.lockKey,
-        locked.value.sha,
-        facts.lockfileHash,
-        record.commands.install,
-      );
-
-      const commandStartedAt = systemClock();
-      const r = await this.threadRunCapped(user, checkout, command, OP_EXEC_TIMEOUT_MS, EXEC_OUTPUT_CAP);
-      // The command itself is the op's step, named for the op (`test`, `build`).
-      this.stepTrace.getStore()?.record(op, {
-        startedAt: commandStartedAt,
-        endedAt: systemClock(),
-        exitCode: r.exitCode,
-        timedOut: r.timedOut,
-      });
-      const ok = r.exitCode === 0 && !r.timedOut;
-      const truncated = r.stdout.length > EXEC_OUTPUT_CAP || r.stderr.length > EXEC_OUTPUT_CAP || r.truncated === true;
-      const notes: string[] = [];
-      if (r.timedOut) notes.push(`command timed out after ${OP_EXEC_TIMEOUT_MS}ms`);
-      if (truncated) notes.push(`output truncated to ${EXEC_OUTPUT_CAP} chars per stream`);
-      const durationMs = systemClock() - t0;
-      const sha8 = locked.value.sha.slice(0, 8);
-      const exitCode = r.timedOut ? 124 : r.exitCode;
-      return {
-        ok,
-        op,
-        resource,
-        ref: locked.value.ref,
-        sha: locked.value.sha,
-        summary: ok
-          ? `${op} passed on ${resource} @ ${locked.value.ref} (${sha8}) in ${Math.round(durationMs / 1000)}s`
-          : `${op} failed (exit ${exitCode}${r.timedOut ? ", timed out" : ""}) on ${resource} @ ${locked.value.ref} (${sha8})`,
-        stdout: r.stdout.slice(0, EXEC_OUTPUT_CAP),
-        stderr: [r.stderr.slice(0, EXEC_OUTPUT_CAP), ...notes].filter(Boolean).join("\n"),
-        exitCode,
-        truncated,
-        deps: deps.deps,
-        reconciled: deps.reconciled,
-        durationMs,
-        trace: this.currentSteps(),
-      };
-    } catch (err) {
-      if (err instanceof MirrorBusyError) {
-        const s = await this.getStatus();
+    return this.withDeployAdmission(async (): Promise<OpRunOk | ThreadErr> => {
+      if (await this.recreateAdmission.blocked()) return this.recreateRefusal();
+      // The fleet drain (item 69; issue 2044): a typed op is a new piece of work
+      // like a new run's attach, and during the incident one waited silently at
+      // the drain — so it is answered with the drain's own record at once, a
+      // deterministic refusal the command surfaces as its reason, never a wait.
+      const drain = await this.fleetDrain();
+      if (drain !== null) {
         return {
-          error: errMsg(err),
+          error: `op-refused: the resident fleet is drained for ${drain.reason} (asked by ${drain.by}, ends by ${drain.until}) — re-run the command when the fleet reopens`,
           status: 503,
-          state: s.state,
-          stateReason: s.reason,
-          reason: "mirror-busy",
+          reason: "draining",
           cause: "system",
         };
       }
-      if (err instanceof StepError && err.step === "unknown-ref") {
-        return { error: `unknown-ref: ${err.message}`, status: 400, cause: "request" };
+      try {
+        await this.ensureHydrated();
+      } catch (err) {
+        const s = await this.getStatus();
+        return {
+          error: `not-serviceable: ${errMsg(err)}`,
+          status: 503,
+          state: s.state,
+          stateReason: s.reason,
+          reason: s.reason,
+          cause: "system",
+        };
       }
-      // A step that failed is named and deterministic; a throw no step named is
-      // typed by the one builder every such 500 goes through.
-      if (err instanceof StepError) return { error: `op-failed at ${err.step}: ${errMsg(err)}`, status: 500 };
-      return catchAllErr(err, "op-failed");
-    } finally {
-      // Disposable means disposable: the checkout dies with the op, pass or
-      // fail (best effort — a slept container already destroyed it anyway).
-      await this.run(["rm", "-rf", opDir]).catch(() => {});
-      this.opUsersInUse.delete(user);
-    }
+      if (await this.recreateAdmission.blocked()) return this.recreateRefusal();
+      // One storage round trip for the two facts; the registry lookup stays (an
+      // op resolves ONLY through the onboard-time command table).
+      const stored = await this.ctx.storage.get<string | RepoFacts>([RESOURCE_KEY, FACTS_KEY]);
+      const resource = (stored.get(RESOURCE_KEY) as string | undefined) ?? "";
+      const facts = stored.get(FACTS_KEY) as RepoFacts | undefined;
+      const record = await this.registry().getRecord(resource);
+      // Typed `reason` beside the words: the client reads the field — a refusal no
+      // wait clears, unlike the restore window's 503s — never the sentence.
+      if (!record || !facts)
+        return {
+          error: "not-serviceable: registry record or repo facts missing",
+          status: 503,
+          reason: "unregistered",
+          cause: "system",
+        };
+      const command = record.commands[op];
+      if (!command) return { error: `op-unavailable: the command table has no "${op}" entry`, status: 400 };
+
+      const user = await this.allocateOpUser();
+      if (typeof user !== "string") return user;
+      const opDir = `${OPS_DIR}/${crypto.randomUUID()}`;
+      const checkout = `${opDir}/checkout`;
+      try {
+        // Command-level token mint, attach's discipline: only a mirror
+        // fetch for an unknown ref would use it; failure never blocks the op.
+        let token: string | null = null;
+        if (githubAppConfigured(this.env)) {
+          token =
+            (await mintRepoScopedToken(this.env, resource.slice("repo:".length)).catch(() => null))?.token ?? null;
+        }
+        const locked = await this.withMirrorLock(async () => {
+          await this.ensureGitSetup();
+          const ref = refArg ?? facts.defaultRef;
+          if (!(await this.refExists(ref))) {
+            await this.gitWithCred(
+              token,
+              ["-C", MIRROR_DIR, "fetch", "--prune", "origin"],
+              "fetch",
+              GIT_NETWORK_TIMEOUT_MS,
+            );
+            if (!(await this.refExists(ref))) {
+              throw new StepError(
+                "unknown-ref",
+                `ref ${JSON.stringify(ref)} does not resolve in the mirror (even after a fetch)`,
+              );
+            }
+          }
+          const sha = await this.readMirrorSha(ref);
+          const lockKey = await this.lockfileKey(sha);
+          await this.runOk(["install", "-d", "-m", "755", "-o", "root", "-g", "root", OPS_DIR], "ops-dir");
+          // 700 op dir first, clone beneath it: the tree is unreadable to peer
+          // users for its whole life, exactly like a thread dir.
+          await this.runOk(["install", "-d", "-m", "700", "-o", user, "-g", user, opDir], "op-dir");
+          await this.runOk(["git", "clone", "--no-hardlinks", "--branch", ref, MIRROR_DIR, checkout], "op-clone", {
+            timeoutMs: GIT_NETWORK_TIMEOUT_MS,
+          });
+          await this.runOk(["chown", "-R", `${user}:${user}`, checkout], "op-chown");
+          return { ref, sha, lockKey };
+        }, ATTACH_MUTEX_WAIT_MS);
+
+        const deps = await this.materializeThreadDeps(
+          { user, worktreePath: checkout },
+          locked.value.lockKey,
+          locked.value.sha,
+          facts.lockfileHash,
+          record.commands.install,
+        );
+
+        const commandStartedAt = systemClock();
+        const r = await this.threadRunCapped(user, checkout, command, OP_EXEC_TIMEOUT_MS, EXEC_OUTPUT_CAP);
+        // The command itself is the op's step, named for the op (`test`, `build`).
+        this.stepTrace.getStore()?.record(op, {
+          startedAt: commandStartedAt,
+          endedAt: systemClock(),
+          exitCode: r.exitCode,
+          timedOut: r.timedOut,
+        });
+        const ok = r.exitCode === 0 && !r.timedOut;
+        const truncated =
+          r.stdout.length > EXEC_OUTPUT_CAP || r.stderr.length > EXEC_OUTPUT_CAP || r.truncated === true;
+        const notes: string[] = [];
+        if (r.timedOut) notes.push(`command timed out after ${OP_EXEC_TIMEOUT_MS}ms`);
+        if (truncated) notes.push(`output truncated to ${EXEC_OUTPUT_CAP} chars per stream`);
+        const durationMs = systemClock() - t0;
+        const sha8 = locked.value.sha.slice(0, 8);
+        const exitCode = r.timedOut ? 124 : r.exitCode;
+        return {
+          ok,
+          op,
+          resource,
+          ref: locked.value.ref,
+          sha: locked.value.sha,
+          summary: ok
+            ? `${op} passed on ${resource} @ ${locked.value.ref} (${sha8}) in ${Math.round(durationMs / 1000)}s`
+            : `${op} failed (exit ${exitCode}${r.timedOut ? ", timed out" : ""}) on ${resource} @ ${locked.value.ref} (${sha8})`,
+          stdout: r.stdout.slice(0, EXEC_OUTPUT_CAP),
+          stderr: [r.stderr.slice(0, EXEC_OUTPUT_CAP), ...notes].filter(Boolean).join("\n"),
+          exitCode,
+          truncated,
+          deps: deps.deps,
+          reconciled: deps.reconciled,
+          durationMs,
+          trace: this.currentSteps(),
+        };
+      } catch (err) {
+        if (err instanceof MirrorBusyError) {
+          const s = await this.getStatus();
+          return {
+            error: errMsg(err),
+            status: 503,
+            state: s.state,
+            stateReason: s.reason,
+            reason: "mirror-busy",
+            cause: "system",
+          };
+        }
+        if (err instanceof StepError && err.step === "unknown-ref") {
+          return { error: `unknown-ref: ${err.message}`, status: 400, cause: "request" };
+        }
+        // A step that failed is named and deterministic; a throw no step named is
+        // typed by the one builder every such 500 goes through.
+        if (err instanceof StepError) return { error: `op-failed at ${err.step}: ${errMsg(err)}`, status: 500 };
+        return catchAllErr(err, "op-failed");
+      } finally {
+        // Disposable means disposable: the checkout dies with the op, pass or
+        // fail (best effort — a slept container already destroyed it anyway).
+        await this.run(["rm", "-rf", opDir]).catch(() => {});
+        this.opUsersInUse.delete(user);
+      }
+    });
   }
 
   /** Debug: enumerate thread bindings (read scope). No secrets live in a
@@ -10001,6 +10094,20 @@ const ROUTES: Record<string, { scope: Scope; method: string }> = {
   "/await-restore": { scope: "operator", method: "POST" },
 };
 
+/** Admin lifecycle calls can start work after the resident activity snapshot.
+ * A registry permit makes them visible to the same deploy barrier as thread
+ * commands; a failed registry read refuses rather than opening a gap. */
+async function withFleetAdmission(env: Env, work: () => Promise<Response>): Promise<Response> {
+  const registry = registryStub(env);
+  const id = await registry.beginDeployAdmission().catch(() => null);
+  if (!id) return json({ error: "deploy-fence: resident fleet admission is closed" }, 503);
+  try {
+    return await work();
+  } finally {
+    await registry.endDeployAdmission(id);
+  }
+}
+
 /** Per-resource R2 prefix for future resident cache objects; offboard deletes
  *  everything beneath it. NOTE: SDK backup snapshots deliberately do NOT live
  *  here — they land under backups/<uuid>/ and are deleted via the stored
@@ -10082,13 +10189,13 @@ export default {
       try {
         switch (url.pathname) {
           case "/onboard":
-            return await handleOnboard(env, body);
+            return await withFleetAdmission(env, () => handleOnboard(env, body));
           case "/offboard":
-            return await handleOffboard(env, body);
+            return await withFleetAdmission(env, () => handleOffboard(env, body));
           case "/reconfigure":
             return await handleReconfigure(env, body);
           case "/rebuild":
-            return await handleRebuild(env, body);
+            return await withFleetAdmission(env, () => handleRebuild(env, body));
           case "/drain":
             return await handleDrain(env, body);
           case "/deploy-fence":
@@ -10106,7 +10213,9 @@ export default {
             // Authenticated but under-scoped → 403 (401 is reserved for "no valid bearer").
             if (!isAdmin && !READ_DEBUG_OPS.has(op))
               return json({ error: "forbidden: admin scope required for this op" }, 403);
-            return await handleDebug(env, body);
+            return READ_DEBUG_OPS.has(op)
+              ? await handleDebug(env, body)
+              : await withFleetAdmission(env, () => handleDebug(env, body));
           }
           case "/status":
             return await handleStatus(env, url);
@@ -10543,6 +10652,7 @@ async function handleDrain(env: Env, body: Record<string, unknown>): Promise<Res
   const parsed = parseDrainRequest(body, systemClock());
   if (!parsed.ok) return json({ error: parsed.error }, 400);
   const record = await registryStub(env).setDrain(parsed.record);
+  if (!record) return json({ error: "deploy-fence: an upload already owns the fleet drain" }, 409);
   console.log(`[drain] fleet closed to new runs by ${record.by} for ${record.reason}: until ${record.until}`);
   return json({ draining: record, planeOutbox: await registryStub(env).getDrainOutbox() });
 }
@@ -10554,6 +10664,7 @@ async function handleDrain(env: Env, body: Record<string, unknown>): Promise<Res
  *  the fleet — a fact, never a timer; the drain's `until` is the backstop. */
 async function handleUndrain(env: Env): Promise<Response> {
   const lift = await registryStub(env).clearDrain();
+  if (lift.error) return json({ error: lift.error }, 409);
   if (!lift.cleared && lift.held.length > 0) {
     console.log(`[drain] fleet stays closed — containers still to report the deploy's image: ${lift.held.join(", ")}`);
     const draining = liveDrain(await registryStub(env).getDrain(), systemClock());
@@ -10579,10 +10690,8 @@ async function handleDeployFence(env: Env): Promise<Response> {
       const result = settled[i];
       return { ...record, live: result.status === "fulfilled" ? result.value : { error: errMsg(result.reason) } };
     });
-    const now = systemClock();
-    const current = liveDrain(await registry.getDrain(), now);
-    const sameFence =
-      deployFenceReady(current, now) && current?.since === fence.since && current?.until === fence.until;
+    const sameFence = await registry.verifyDeployFence(fence.since, fence.until);
+    const activeAdmissions = await registry.activeDeployAdmissions();
     const safe =
       sameFence &&
       enriched.every(({ live }) => {
@@ -10596,7 +10705,12 @@ async function handleDeployFence(env: Env): Promise<Response> {
         );
       });
     if (!safe) await registry.clearDeployFence(fence.since, fence.until);
-    return json({ draining: safe ? fence : { ...fence, swapFence: false }, fenceReady: safe, residents: enriched });
+    return json({
+      draining: safe ? fence : { ...fence, swapFence: false },
+      fenceReady: safe,
+      activeAdmissions,
+      residents: enriched,
+    });
   } catch (error) {
     await registry.clearDeployFence(fence.since, fence.until);
     return json({ error: `deploy-fence read failed: ${errMsg(error)}` }, 503);
@@ -10612,7 +10726,11 @@ async function handleDeployFence(env: Env): Promise<Response> {
  *  verified — deferred, a failed fresh probe, an error — leaves a hold on the
  *  drain, so the fleet reopens only on that container's later report. */
 async function handleReconcile(env: Env): Promise<Response> {
-  const residents = await registryStub(env).list();
+  const registry = registryStub(env);
+  const drain = liveDrain(await registry.getDrain(), systemClock());
+  if (drain?.swapFence && drain.swapBuild === BUILD_ID)
+    return json({ error: "deploy-fence: reconcile waits for the uploaded Worker" }, 409);
+  const residents = await registry.list();
   const settled = await Promise.allSettled(
     residents.map((record) => residentStub(env, record.resource).reconcileForDeploy(record.resource)),
   );
