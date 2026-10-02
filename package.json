@@ -41,6 +41,7 @@
     "verify:root": "npm run check:consistency && npm run typecheck && npm run lint && npm run format:check && npm test && npm run check:dist",
     "check:consistency": "npm run check:lockfile && npm run check:sandbox-pair && npm run skills:check && npm run check:deps-drift && npm run licenses:check && npm run docs:check && npm run pr-title:check && npm run specs:check && npm run decisions:check && npm run hygiene:check && npm run vocabulary:check && npm run user-message:check && npm run check:project-facts && npm run check:registry-drift && npm run agents:check && npm run clock:check && npm run screenshots:check",
     "ci:gate": "node scripts/ci-gate.mjs",
+    "ci:plan": "node scripts/ci-plan.mjs",
     "fix": "npm run docs:gen && npm run pr-title:gen && npm run agents:gen && npm run clock:gen && npm run hygiene:gen && npm run vocabulary:gen && npm run user-message:check -- --write && npm run deploy:gen && npm run skills:sync && npm run lint:fix && npm run format",
     "deploy:gen": "npm run --silent cli -- deploy init",
     "deploy:check": "npm run --silent cli -- deploy init --check",
