@@ -106,7 +106,7 @@
     "src/core/confirmations.ts": "4aae5ffa415b67e643949f0778bdaca64a3579475f3b6b9ade7fdf2eed70ac10",
     "src/core/coordinator/contract.ts": "5cda540aaeb7b22a3c50595687686724d6660c22406e78b4de5c3f68aacad267",
     "src/core/coordinator/mainActions.ts": "6e711178d36e06d191bf801ed920a5a8eb1581eaffefc5d59ecead3dbc543a8a",
-    "src/core/coordinator/mainWorkObservation.ts": "34f2a6406671745460ddadd73edd420ac3f4431746b6b8caa6956f115df1308e",
+    "src/core/coordinator/mainWorkObservation.ts": "8336abc6d7bff35c873773758701967f5094ce888e58b7206920dfd3d6919bf3",
     "src/core/coordinator/mainWorkerRelay.ts": "b547d15405a695bd21793b2e8539c56bc46a75710e8a924469be7dad249838b6",
     "src/core/coordinator/reportAdmission.ts": "a15e55feac3523c34dc2ad75d1de06b66d7dbce3bce96f555b4de1b15a82b2a9",
     "src/core/coordinator/requesterAuthority.ts": "409feb4df521301ee7a8fb42ea1d1a9472a8b7ab92f5c7b58fbf4f90b59e41f4",

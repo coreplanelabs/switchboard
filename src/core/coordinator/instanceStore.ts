@@ -9,6 +9,8 @@
 // process without a Worker-backed run history get the in-memory double or the
 // null store, which knows no instance and refuses every write by name.
 
+import type { MainTaskLink } from "./mainTaskLink.js";
+export type { MainTaskLink } from "./mainTaskLink.js";
 import type { Secrets } from "../../secrets.js";
 import type { RunHistoryConfig } from "../runStore.js";
 import { DEFAULT_RUN_STORE_TOKEN_ENV, RUN_STORE_KEY, RUN_STORE_TIMEOUT_MS } from "../runStoreWorker.js";
@@ -68,12 +70,6 @@ export type MarkConsumedResult = { ok: true } | { ok: false; reason: "unavailabl
 export type AnswerWakeResult = { ok: true } | { ok: false; reason: "unavailable" };
 export type MarkStoppedResult = { ok: true } | { ok: false; reason: "unknown_instance" | "stale" | "unavailable" };
 export type ReserveDecisionRecordResult = { ok: true; number: string } | { ok: false; reason: "unavailable" };
-export interface MainTaskLink {
-  instanceId: string;
-  unit: string;
-  /** Missing on legacy links, which cannot authorize a new Workflow create. */
-  authority?: MainTaskAuthority;
-}
 export type ClaimMainTaskResult =
   { ok: true; created: boolean; link: MainTaskLink } | { ok: false; reason: "conflict" | "unavailable" };
 

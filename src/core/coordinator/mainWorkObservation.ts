@@ -1,6 +1,6 @@
 import { sourceHash } from "../references/receipts.js";
 import type { CoordinatorInstance, CoordinatorUnit } from "./contract.js";
-import type { MainTaskLink } from "./instanceStore.js";
+import type { MainTaskLink } from "./mainTaskLink.js";
 
 /** A current read, distinct from an immutable historical status delivery. */
 export interface WorkStateObservation {
