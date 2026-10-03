@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { methodOf, readSource } from "./testing/sourceScan";
 import {
+  classifyDeployRegistration,
   deployRegistrationState,
   registeredRunAllowsClaim,
   registeredRunAllowsReattach,
@@ -41,6 +42,137 @@ describe("deploy registration activity", () => {
     ).toBe("unknown");
   });
 
+  it("classifies only an elapsed, ownerless legacy registration as nonexecuting while retaining its workspace", () => {
+    const now = 1_000_000;
+    const legacy = { threadKey: "mcp:run", registeredAt: "1970-01-01T00:01:00.000Z", deadlineAt: 800_000 };
+    const input = {
+      threadKey: "mcp:run",
+      registration: legacy,
+      fence: undefined,
+      lastRunOwner: undefined,
+      owner: null,
+      lastAttachAt: "1970-01-01T00:01:00.000Z",
+      cutoff: now - 100_000,
+      now,
+      opInFlight: 0,
+      graceMs: 60_000,
+    };
+    expect(classifyDeployRegistration(input)).toEqual({
+      state: "retained",
+      category: "legacy",
+      reason: "protection-elapsed",
+    });
+    expect(classifyDeployRegistration({ ...input, now: 800_000 })).toMatchObject({
+      state: "unknown",
+      reason: "legacy-protected",
+    });
+    expect(classifyDeployRegistration({ ...input, opInFlight: 1 })).toMatchObject({
+      state: "executing",
+      reason: "operation-active",
+    });
+    expect(classifyDeployRegistration({ ...input, registration: { ...legacy, deadlineAt: undefined } })).toMatchObject({
+      state: "retained",
+      reason: "protection-elapsed",
+    });
+    expect(
+      classifyDeployRegistration({ ...input, registration: { ...legacy, deadlineAt: undefined }, lastAttachAt: "bad" }),
+    ).toMatchObject({
+      state: "unknown",
+      reason: "legacy-protected",
+    });
+    // The classification is a read: it must not delete either durable row.
+    const activity = method("getResidentDeployInfo");
+    expect(activity).toContain("registrationReadback");
+    expect(activity).not.toContain("deleteThreadBinding(");
+    expect(activity).not.toContain("evictBinding(");
+  });
+
+  it("retains an elapsed ownerless legacy registration with a persisted null last-run owner", () => {
+    const input = {
+      threadKey: "mcp:run",
+      registration: { threadKey: "mcp:run", registeredAt: "1970-01-01T00:01:00.000Z", deadlineAt: 800_000 },
+      fence: undefined,
+      lastRunOwner: null,
+      owner: null,
+      lastAttachAt: "1970-01-01T00:01:00.000Z",
+      cutoff: 900_000,
+      now: 1_000_000,
+      opInFlight: 0,
+      graceMs: 60_000,
+    };
+    expect(classifyDeployRegistration(input)).toEqual({
+      state: "retained",
+      category: "legacy",
+      reason: "protection-elapsed",
+    });
+    expect(classifyDeployRegistration({ ...input, now: 860_000 })).toEqual({
+      state: "unknown",
+      category: "legacy",
+      reason: "legacy-protected",
+    });
+    expect(
+      classifyDeployRegistration({
+        ...input,
+        registration: { ...input.registration, deadlineAt: undefined },
+        cutoff: 60_000,
+      }),
+    ).toEqual({
+      state: "unknown",
+      category: "legacy",
+      reason: "legacy-protected",
+    });
+    expect(classifyDeployRegistration({ ...input, opInFlight: 1 })).toEqual({
+      state: "executing",
+      category: "legacy",
+      reason: "operation-active",
+    });
+    expect(classifyDeployRegistration({ ...input, fence: { ownerFence: 7 } })).toEqual({
+      state: "unknown",
+      category: "unknown",
+      reason: "owner-unverified",
+    });
+  });
+
+  it("fails closed on partial, malformed, fenced and named-owner legacy lookalikes without leaking identifiers", () => {
+    const input = {
+      threadKey: "mcp:run",
+      registration: { threadKey: "mcp:run", registeredAt: "1970-01-01T00:01:00.000Z", deadlineAt: 800_000 },
+      fence: undefined,
+      lastRunOwner: undefined,
+      owner: null,
+      lastAttachAt: "1970-01-01T00:01:00.000Z",
+      cutoff: 900_000,
+      now: 1_000_000,
+      opInFlight: 0,
+      graceMs: 60_000,
+    };
+    const refused = [
+      { registration: { ...input.registration, threadKey: "mcp:other" } },
+      { registration: { ...input.registration, runId: "r1" } },
+      { registration: { ...input.registration, ownerGen: "g1" } },
+      { registration: { ...input.registration, ownerFence: 7 } },
+      { registration: { ...input.registration, runId: null } },
+      { registration: { ...input.registration, deadlineAt: "bad" } },
+      { registration: { ...input.registration, registeredAt: "bad" } },
+      { registration: { ...input.registration, registeredAt: "1970-01-01T00:20:00.000Z" } },
+      { registration: { ...input.registration, deadlineAt: 1 } },
+      { registration: null },
+      { registration: [] },
+      { fence: { runId: "r1", ownerGen: "g1", ownerFence: 7 } },
+      { lastRunOwner: { runId: "r1" } },
+      { lastRunOwner: {} },
+      { lastRunOwner: "malformed" as never },
+    ];
+    for (const patch of refused) {
+      const result = classifyDeployRegistration({ ...input, ...patch });
+      expect(result.state, JSON.stringify(patch)).toBe("unknown");
+      expect(JSON.stringify(result)).not.toMatch(/mcp:|r1|g1/);
+    }
+    const activity = method("getResidentDeployInfo");
+    expect(activity).toContain("category");
+    expect(activity).toContain("reason");
+  });
+
   it("fences owned reattach before the activity read while keeping preservation counts intact", () => {
     const registry = source.slice(
       source.indexOf("export class ResidentRegistryDO"),
@@ -58,7 +190,7 @@ describe("deploy registration activity", () => {
     expect(attach).toContain("drain.swapFence || !registered");
     expect(activity).toContain("this.runsInFlightCount()");
     expect(activity).toContain("this.threadOpsInFlight.get(binding.threadKey)");
-    expect(activity).toContain("deployRegistrationState");
+    expect(activity).toContain("classifyDeployRegistration");
     expect(method("registeredRunsBeyondOps")).toContain("binding.lastRunOwner?.runId");
   });
 
