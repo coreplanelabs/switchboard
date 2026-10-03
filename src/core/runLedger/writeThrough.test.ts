@@ -2147,6 +2147,35 @@ describe("finishing and finish", () => {
     expect(reclaimed[0]?.row.state.binding).toEqual(binding);
   });
 
+  it("silences a retry pause refused by the ledger after another generation takes the row", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const { wt } = harness({ ledger });
+    const fenced: string[] = [];
+    const run = (await openRun(wt, openReq({ onFenced: () => fenced.push("hard") })))!;
+    ledger.live.get("r1")!.ownerGen = "gen-B";
+    expect(await run.pauseForRetry()).toBe(false);
+    expect(fenced).toEqual(["hard"]);
+    expect(run.tracked()).toBe(false);
+    expect(await run.finishing()).toBe("fenced");
+    expect(ledger.live.get("r1")).toMatchObject({ ownerGen: "gen-B", phase: "live" });
+  });
+
+  it("keeps a retry pause with unavailable storage distinct from a lost owner", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const down = overriding(ledger, {
+      handoff: async () => {
+        throw new PermanentStoreError("handoff unavailable");
+      },
+    });
+    const { wt } = harness({ ledger: down });
+    const fenced: string[] = [];
+    const run = (await openRun(wt, openReq({ onFenced: () => fenced.push("hard") })))!;
+    expect(await run.pauseForRetry()).toBe(false);
+    expect(fenced).toEqual([]);
+    expect(run.tracked()).toBe(true);
+    expect(ledger.live.get("r1")).toMatchObject({ ownerGen: "gen-A", phase: "live" });
+  });
+
   it("seals a hard stop that lands before the retry pause hands off", async () => {
     const { ledger, wt } = harness();
     const run = (await openRun(wt, openReq()))!;

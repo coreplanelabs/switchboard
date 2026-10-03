@@ -1109,7 +1109,12 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         await this.stateSending;
         await this.flusher.flush();
         const { marked } = await ledger.handoff(gen, [this.runId], { pausedForRetry: true });
-        if (!marked.includes(this.runId)) return false;
+        if (!marked.includes(this.runId)) {
+          // A completed handoff that did not mark this row refused its owner.
+          // Storage failure throws instead; only a refusal silences this owner.
+          this.detach("pause handoff refused (fenced)", true);
+          return false;
+        }
         this.markHandedOff();
         this.stopHeartbeat();
         live.delete(this);

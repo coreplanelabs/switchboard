@@ -3670,6 +3670,7 @@ export async function dispatch(
       if (!resume || !ledgerRun) throw new Error("a readiness retry needs the resumed run's ledger row");
       resumeRowRetained = true;
       const handedOff = await ledgerRun.pauseForRetry().catch(() => false);
+      if (fencedWhileAttaching) return;
       if (ledgerRun.tracked()) {
         settleRetryPause(
           deps.threadsElsewhere,

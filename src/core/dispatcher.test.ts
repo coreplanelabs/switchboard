@@ -16077,9 +16077,11 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       });
       await writer.settled();
       expect(provider.requests).toEqual([]);
-      expect(replies.at(-1)).toContain(failure);
-      if (failure !== "fenced" && failure !== "unknown-run")
-        expect(replies.at(-1)).toContain("Reconcile the saved run state and owner");
+      if (failure === "fenced") expect(replies).toEqual([]);
+      else {
+        expect(replies.at(-1)).toContain(failure);
+        if (failure !== "unknown-run") expect(replies.at(-1)).toContain("Reconcile the saved run state and owner");
+      }
       expect(ledger.live.get("run-held")).toMatchObject({
         phase: failure === "fenced" || failure === "unknown-run" ? "live" : "handoff",
         state: { binding },
@@ -16090,7 +16092,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     },
   );
 
-  it("a fenced resumed pilot binding commit leaves the reply and row to the new owner", async () => {
+  const checkResumedPilotBindingFence = async (when: "binding" | "pause") => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
     vi.stubEnv("GITHUB_APP_ID", "");
@@ -16167,15 +16169,23 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     ledger.live.get("run-held")!.leaseUntil = 0;
     const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
     const originalSetState = ledger.setState.bind(ledger);
-    const fencedCommit = vi.fn();
+    const bindingCommit = vi.fn();
     vi.spyOn(ledger, "setState").mockImplementation(async (runId, gen, state) => {
       if ((state.binding as { container?: string } | undefined)?.container === "vm-next") {
-        fencedCommit();
-        ledger.live.get(runId)!.ownerGen = "gen-NEXT";
-        return { ok: false, reason: "fenced" };
+        bindingCommit();
+        if (when === "binding") {
+          ledger.live.get(runId)!.ownerGen = "gen-NEXT";
+          return { ok: false, reason: "fenced" };
+        }
+        throw new PermanentStoreError("binding write unavailable");
       }
       return originalSetState(runId, gen, state);
     });
+    if (when === "pause")
+      vi.spyOn(ledger, "handoff").mockImplementation(async (_gen, runIds) => {
+        ledger.live.get(runIds[0]!)!.ownerGen = "gen-NEXT";
+        return { marked: [] };
+      });
     const provider = capturingProvider("must not run");
     const { deps, writer } = wired(provider, { ledger, yaml: RESIDENT_YAML_FIXTURE });
     const plan = planResume({
@@ -16202,13 +16212,21 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       },
     });
     await writer.settled();
-    expect(fencedCommit).toHaveBeenCalledOnce();
+    expect(bindingCommit).toHaveBeenCalledOnce();
     expect(provider.requests).toEqual([]);
     expect(replies).toEqual([]);
     expect(ledger.live.get("run-held")).toMatchObject({ ownerGen: "gen-NEXT", phase: "live", state: { binding } });
     expect(ledger.finished.has("run-held")).toBe(false);
     expect((await ledger.readEvents("run-held")).filter((event) => event.type === "child_resumed")).toEqual([]);
     expect(calls.filter((call) => call.path === "/detach")).toEqual([]);
+  };
+
+  it("a fenced resumed pilot binding commit leaves the reply and row to the new owner", async () => {
+    await checkResumedPilotBindingFence("binding");
+  });
+
+  it("a resumed pilot loses its owner during pause after binding storage fails without replying", async () => {
+    await checkResumedPilotBindingFence("pause");
   });
 
   it("a resumed pilot readiness failure keeps its run and dirty workspace for the next generation", async () => {
