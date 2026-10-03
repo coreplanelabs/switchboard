@@ -781,6 +781,20 @@ describe("coding prompts: the rebase before every push (agent-coding item 13, re
 // findings array with stable ids and define the severity vocabulary once; the
 // prose still carries the full explanation of each finding.
 describe("review prompts: structured findings through submit_verdict (agent-ship item 6)", () => {
+  it("all review paths filter uncertain and low-impact observations before submitting findings", () => {
+    for (const sys of [AGENTS.review.system, AGENTS.review.residentSystem!, REVIEW_SYSTEM_SEEDED]) {
+      expect(sys).toContain("HIGH-SIGNAL REVIEW");
+      expect(sys).toContain("code-review-and-quality");
+      expect(sys).toContain("introduced by this change");
+      expect(sys).toContain("concrete failure scenario");
+      expect(sys).toContain("Do not submit uncertain findings");
+      expect(sys).toContain("look for evidence that disproves it");
+      expect(sys).toContain("Read enough to settle a candidate");
+      expect(sys).not.toContain("At most 2-3 targeted follow-up reads");
+      expect(sys).not.toContain("REPORT every issue you find, including uncertain or low-severity ones");
+    }
+  });
+
   it("both review prompts instruct enumerating every finding with stable ids and the severity vocabulary", () => {
     for (const sys of [AGENTS.review.system, AGENTS.review.residentSystem!]) {
       expect(sys).toContain("findings");
