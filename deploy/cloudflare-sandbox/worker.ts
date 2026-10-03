@@ -48,7 +48,18 @@ import {
   heldOutputNote,
 } from "../../src/execution/sandboxLifecycle.js";
 import { envFromRequest } from "../../src/execution/sandboxEnv.js";
-import { IdleGuard, type IdleGuardHost } from "../../src/execution/sandboxIdle.js";
+import { DESTROY_GRACE_MS, IdleGuard, type IdleGuardHost } from "../../src/execution/sandboxIdle.js";
+import {
+  boundSeedMarkerDecision,
+  checkpointIfSafe,
+  parsePreservationOwner,
+  passivePreservationReceipt,
+  sameOwner,
+  seedClaimHeadMatches,
+  type CheckpointRecord,
+  type OwnerClaim,
+  type PreservationOwner,
+} from "../../src/execution/sandboxCheckpoint.js";
 import { StartGate, type StartGateHost, type StartingCause } from "../../src/execution/sandboxStart.js";
 import {
   RUNTIME_REPLACEMENT_WORDING,
@@ -258,6 +269,41 @@ const WARM_UP_BACKSTOP_MS = 4 * 60_000;
 const IDLE_LEDGER_KEY = "switchboard.idle.lastServedAt";
 /** The scheduled-callback name of the idle sweep (a method below). */
 const IDLE_SWEEP_CALLBACK = "idleSweep";
+const PRESERVATION_KEY = "switchboard.preservation.owner";
+const PRESERVATION_SEED_STATE_KEY = "switchboard.preservation.seedState";
+const PRESERVATION_CONTAINER_MARKER = "/workspace/.switchboard-preservation-incarnation";
+
+/** A complete SDK backup has BOTH objects; never infer preservation from a
+ * handle in DO storage alone. This prefix is subject to the bucket's lifecycle
+ * policy, independently of the SDK's TTL. */
+async function backupExists(bucket: R2Bucket | undefined, id: string): Promise<boolean | undefined> {
+  if (!bucket || !/^[0-9a-f-]{36}$/i.test(id)) return undefined;
+  try {
+    const [archive, metadataHead] = await Promise.all([
+      bucket.head(`backups/${id}/data.sqsh`),
+      bucket.head(`backups/${id}/meta.json`),
+    ]);
+    if (!archive || !metadataHead || metadataHead.size > 4096) return false;
+    const metadata = await bucket.get(`backups/${id}/meta.json`);
+    if (!metadata) return false;
+    const value = (await metadata.json()) as Record<string, unknown>;
+    // The SDK rejects expired metadata even if both R2 objects still exist.
+    // Do not call those unusable bytes a present checkpoint.
+    const created = typeof value.createdAt === "string" ? Date.parse(value.createdAt) : NaN;
+    return (
+      value.id === id &&
+      value.dir === SEED_CHECKOUT_DIR &&
+      typeof value.sizeBytes === "number" &&
+      archive.size === value.sizeBytes &&
+      typeof value.ttl === "number" &&
+      value.ttl >= 0 &&
+      Number.isFinite(created) &&
+      created + value.ttl * 1000 > systemClock() + DESTROY_GRACE_MS
+    );
+  } catch {
+    return undefined;
+  }
+}
 
 export class SwitchboardSandbox extends Sandbox<Env> {
   // The SDK's idle setting (its own default is 10 min), kept so its alarm
@@ -266,9 +312,9 @@ export class SwitchboardSandbox extends Sandbox<Env> {
   // deadline, and the answer kept twenty-five containers awake for 16 hours.
   // The deadline itself is the guard's (docs/reference/specs/execution.md
   // item 22): 5 minutes after the last request this object served, the
-  // container is destroyed, whatever runs inside; the shell-level `timeout`
-  // stays the one deadline a command can hit (item 2), since a request in
-  // flight is service.
+  // unseeded container is destroyed; seeded work passes a fail-closed
+  // preservation fence first. The shell-level `timeout` stays the one
+  // deadline a command can hit (item 2), since a request in flight is service.
   sleepAfter = SANDBOX_SLEEP_AFTER;
 
   private readonly idle: IdleGuard;
@@ -293,6 +339,7 @@ export class SwitchboardSandbox extends Sandbox<Env> {
       scheduleSweep: async (delayMs) => {
         await this.schedule(Math.ceil(delayMs / 1000), IDLE_SWEEP_CALLBACK);
       },
+      beforeDestroy: (why) => this.preserveBeforeDestroy(why),
       destroySandbox: () => this.destroy(),
       killContainer: async () => {
         await this.ctx.container?.destroy();
@@ -301,6 +348,47 @@ export class SwitchboardSandbox extends Sandbox<Env> {
       saveLastServedAt: (at) => this.ctx.storage.put(IDLE_LEDGER_KEY, at),
       log: (event) => console.log(JSON.stringify({ ...event, thread: this.ctx.id.name ?? this.ctx.id.toString() })),
       wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    };
+  }
+
+  /** Inspect only an already-running container. A missing file marker is NOT
+   * proof of an unseeded tree: a model-root writer can remove it while .git and
+   * unpublished work remain. Only a durable pre-start unseeded classification
+   * permits the cold teardown; unknown and every attempted seed retain. */
+  private async preserveBeforeDestroy(_why: "idle" | "stuck"): Promise<boolean> {
+    if (this.ctx.container?.running !== true) return false;
+    try {
+      const seedState = await this.ctx.storage.get<"seeded" | "unseeded">(PRESERVATION_SEED_STATE_KEY);
+      const marker = await this.exists(SEED_MARKER);
+      if (!marker.success || this.ctx.container?.running !== true) return false;
+      if (seedState === "unseeded" && !marker.exists) return true;
+      if (!marker.exists) return false;
+      const record = await this.ctx.storage.get<CheckpointRecord>(PRESERVATION_KEY);
+      if (!record) return false;
+      const incarnation = await this.readFile(PRESERVATION_CONTAINER_MARKER, { encoding: "utf-8" });
+      if (incarnation.content !== record.owner.container || this.ctx.container?.running !== true) return false;
+      return await checkpointIfSafe(record.owner, {
+        // Detached model writers are outside the SDK's process registry. No
+        // asserted "paused" state is a quiescence witness in this unit.
+        safeQuiescence: async () => false,
+        currentOwner: async () => (await this.ctx.storage.get<CheckpointRecord>(PRESERVATION_KEY))?.owner ?? null,
+        backup: (options) => this.createBackup(options),
+        verify: async (id) => (await backupExists(this.env.BACKUP_BUCKET, id)) === true,
+        save: (backupId, owner) => this.ctx.storage.put(PRESERVATION_KEY, { owner, backupId }),
+      });
+    } catch {
+      // A failed probe, upload, stale incarnation or unreadable runtime can
+      // never authorize the clean destroy OR the forced platform kill.
+      return false;
+    }
+  }
+
+  /** Durable metadata only. This RPC never calls the SDK, StartGate or an
+   * executor; in particular it cannot start a stopped container. */
+  async preservationRecord(): Promise<{ record: CheckpointRecord | null; running: boolean | undefined }> {
+    return {
+      record: (await this.ctx.storage.get<CheckpointRecord>(PRESERVATION_KEY)) ?? null,
+      running: this.ctx.container?.running,
     };
   }
 
@@ -316,6 +404,14 @@ export class SwitchboardSandbox extends Sandbox<Env> {
       containerRunning: () => this.ctx.container?.running,
       warmUp: () =>
         this.idle.served(async () => {
+          // Only a cold start can be classified unseeded. A DO upgraded over a
+          // running legacy writer has no such evidence and remains protected.
+          if (this.ctx.container?.running === false) {
+            await this.ctx.storage.transaction(async (txn) => {
+              if ((await txn.get(PRESERVATION_SEED_STATE_KEY)) === undefined)
+                await txn.put(PRESERVATION_SEED_STATE_KEY, "unseeded");
+            });
+          }
           const proc = await createExtensionProcessSandbox(this).exec(["true"], { timeout: WARM_UP_BACKSTOP_MS });
           await proc.output({ encoding: "utf8", timeout: WARM_UP_BACKSTOP_MS });
         }),
@@ -442,16 +538,96 @@ export class SwitchboardSandbox extends Sandbox<Env> {
    *  (ownership, origin, the deps view in place, the thread's ref checked out).
    *  Inside the idle ledger and behind the start gate like every route: the
    *  container's start is waited out by the executor, never carried here. */
-  async seed(seed: SandboxSeed, envVars: Record<string, string>): Promise<SeedAnswer | WaitAnswer> {
-    return this.idle.served(() =>
-      this.gate.through(
-        () => this.seedNow(seed, envVars),
+  async seed(seed: SandboxSeed, envVars: Record<string, string>, claim?: OwnerClaim): Promise<SeedAnswer | WaitAnswer> {
+    return this.idle.served(async () => {
+      // Commit the fence before any restore can create (or erase) a checkout.
+      // A failed seed still leaves uncertainty; only terminal ownership could
+      // ever release this classification, not a missing marker or a new boot.
+      await this.ctx.storage.put(PRESERVATION_SEED_STATE_KEY, "seeded");
+      return this.gate.through(
+        async () => {
+          // Do not re-seed over a checkout already bound to a different writer.
+          const prior = await this.ctx.storage.get<CheckpointRecord>(PRESERVATION_KEY);
+          if (
+            prior &&
+            (!claim ||
+              !this.claimMatches(prior.owner, claim) ||
+              seed.checkoutBackupId !== prior.owner.seed ||
+              (seed.fetchRef ?? seed.ref) !== prior.owner.ref ||
+              (seed.fetchSha ?? seed.sha) !== prior.owner.head)
+          )
+            return {
+              seeded: false,
+              reason: "seed-incompatible",
+              detail: "preservation owner changed",
+              step: "fixup",
+            } as SeedAnswer;
+          if (prior) {
+            try {
+              const [incarnation, cachedSeed] = await Promise.all([
+                this.readFile(PRESERVATION_CONTAINER_MARKER, { encoding: "utf-8" }),
+                this.readFile(SEED_MARKER, { encoding: "utf-8" }),
+              ]);
+              if (incarnation.content !== prior.owner.container || cachedSeed.content.trim() !== seedMarkerText(seed))
+                throw new Error("binding changed");
+            } catch {
+              return {
+                seeded: false,
+                reason: "seed-incompatible",
+                detail: "preservation binding unavailable",
+                step: "fixup",
+              } as SeedAnswer;
+            }
+          }
+          const answer = await this.seedNow(seed, envVars, !!prior);
+          if (!answer.seeded || !claim) return answer;
+          // Only a cached answer may reuse the prior binding; never give a
+          // fresh result the owner's receipt, even if its HEAD happens to fit.
+          if (prior && !answer.cached)
+            return {
+              seeded: false,
+              reason: "seed-incompatible",
+              detail: "preservation seed binding changed",
+              step: "fixup",
+            } as SeedAnswer;
+          if (
+            claim.thread !== (this.ctx.id.name ?? "") ||
+            claim.repository !== seed.slug ||
+            claim.ref !== (seed.fetchRef ?? seed.ref) ||
+            !seedClaimHeadMatches(claim.head, answer.sha, !!prior && answer.cached) ||
+            claim.seed !== seed.checkoutBackupId
+          )
+            return {
+              seeded: false,
+              reason: "seed-incompatible",
+              detail: "preservation seed binding changed",
+              step: "fixup",
+            } as SeedAnswer;
+          try {
+            if (prior) return { ...answer, preservationContainer: prior.owner.container };
+            const owner: PreservationOwner = { ...claim, container: crypto.randomUUID() };
+            await this.writeFile(PRESERVATION_CONTAINER_MARKER, owner.container);
+            await this.ctx.storage.put(PRESERVATION_KEY, { owner } satisfies CheckpointRecord);
+            return { ...answer, preservationContainer: owner.container };
+          } catch {
+            return {
+              seeded: false,
+              reason: "seed-incompatible",
+              detail: "preservation binding unavailable",
+              step: "fixup",
+            } as SeedAnswer;
+          }
+        },
         (cause) => sandboxStartingAnswer(cause),
-      ),
-    );
+      );
+    });
   }
 
-  private async seedNow(seed: SandboxSeed, envVars: Record<string, string>): Promise<SeedAnswer> {
+  private claimMatches(owner: PreservationOwner, claim: OwnerClaim): boolean {
+    return sameOwner(owner, { ...claim, container: owner.container });
+  }
+
+  private async seedNow(seed: SandboxSeed, envVars: Record<string, string>, bound = false): Promise<SeedAnswer> {
     const t0 = systemClock();
     const from = {
       ref: seed.ref,
@@ -476,12 +652,21 @@ export class SwitchboardSandbox extends Sandbox<Env> {
     } catch {
       return { seeded: false, reason: "seed-failed", detail: "Git door origin unavailable", step: "fixup" };
     }
-    // The marker names the seed this container carries — the handle and the
-    // ref and head checked out: the same seed again is the run's second
-    // request (a retry, a re-attach), and a restore over the live tree would
-    // destroy the run's work; a seed naming another ref is a new seed.
-    const marker = await this.runRoot(["cat", SEED_MARKER], 30_000);
-    if (marker.exitCode === 0 && marker.stdout.trim() === seedMarkerText(seed)) {
+    // The marker names the original seed, not the checkout's current HEAD.
+    // A bound retry can only use that marker: if it disappeared or changed
+    // since the pre-check, never fall through to the fresh seed's sweep.
+    const marker = await this.runRoot(["cat", SEED_MARKER], 30_000).catch((err: unknown) => {
+      if (bound) return null;
+      throw err;
+    });
+    const markerDecision = boundSeedMarkerDecision(
+      marker?.exitCode === 0 ? marker.stdout.trim() : null,
+      seedMarkerText(seed),
+      bound,
+    );
+    if (markerDecision === "refuse")
+      return { seeded: false, reason: "seed-incompatible", detail: "preservation seed marker changed", step: "fixup" };
+    if (markerDecision === "cached") {
       if (seed.depsBackupId) {
         const layout = await this.runRoot(["bash", "-c", dependencyLayoutCommand(SEED_CHECKOUT_DIR)], 30_000).catch(
           () => null,
@@ -1000,6 +1185,23 @@ export default {
 
     const url = new URL(request.url);
     const threadKey = request.headers.get("x-thread-key");
+    if (url.pathname === "/preservation/receipt") {
+      // Raw DO stub, NOT getSandbox: a stopped container is never started just
+      // to inspect it. The bearer is the trusted caller; the exact immutable
+      // owner tuple is compared again inside the durable object record.
+      if (!modelSandboxIdentity("/seed", threadKey)) return json({ error: "invalid thread identity" }, 400);
+      const requested = parsePreservationOwner(await request.json().catch(() => null));
+      if (!requested || !("container" in requested) || requested.thread !== threadKey)
+        return json({ error: "invalid preservation identity" }, 400);
+      const stub = env.Sandbox.get(env.Sandbox.idFromName(threadKey));
+      return json(
+        await passivePreservationReceipt(
+          requested,
+          async () => (await stub.preservationRecord()).record,
+          (id) => backupExists(env.BACKUP_BUCKET, id),
+        ),
+      );
+    }
     const modelIdentity = modelSandboxIdentity(url.pathname, threadKey);
     if (!modelIdentity) return json({ error: "invalid route or thread identity" }, 400);
 
@@ -1128,7 +1330,13 @@ export default {
           // that did not happen as a dead sandbox.
           const parsed = parseSeed(body.seed);
           if (!parsed.ok) return json({ error: parsed.error }, 400);
-          return streamSeed(() => sandbox.seed(parsed.seed, envVars), request.headers.get("traceparent") ?? undefined);
+          const claim = body.preservation === undefined ? undefined : parsePreservationOwner(body.preservation, false);
+          if (body.preservation !== undefined && !claim) return json({ error: "invalid preservation identity" }, 400);
+          if (claim && claim.thread !== threadKey) return json({ error: "invalid preservation thread" }, 400);
+          return streamSeed(
+            () => sandbox.seed(parsed.seed, envVars, claim as OwnerClaim | undefined),
+            request.headers.get("traceparent") ?? undefined,
+          );
         }
         case "/read": {
           const encoding = readEncodingOf(body);

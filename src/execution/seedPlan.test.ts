@@ -647,12 +647,49 @@ describe("the seeded sandbox wiring (static)", () => {
   const worker = read("deploy/cloudflare-sandbox/worker.ts");
 
   it("POST /seed parses the handle by field, then runs the seed inside the idle ledger and behind the start gate, streamed", () => {
-    expect(worker).toMatch(
-      /case "\/seed": \{[\s\S]*?parseSeed\(body\.seed\)[\s\S]*?streamSeed\(\(\) => sandbox\.seed\(/,
+    const route = worker.slice(worker.indexOf('case "/seed": {'), worker.indexOf('case "/read": {'));
+    expect(route).toMatch(
+      /const parsed = parseSeed\(body\.seed\);\s*if \(!parsed\.ok\) return json\(\{ error: parsed\.error \}, 400\)/,
     );
-    expect(worker).toMatch(
-      /async seed\([\s\S]*?this\.idle\.served\(\(\) =>\s*this\.gate\.through\(\s*\(\) => this\.seedNow\(/,
+    expect(route).toContain("parsePreservationOwner(body.preservation, false)");
+    expect(route).toContain(
+      'if (claim && claim.thread !== threadKey) return json({ error: "invalid preservation thread" }, 400)',
     );
+    expect(route).toMatch(
+      /return streamSeed\(\s*\(\) => sandbox\.seed\(parsed\.seed, envVars, claim as OwnerClaim \| undefined\)/,
+    );
+    const seedRoute = worker.slice(worker.indexOf("async seed(seed:"), worker.indexOf("private claimMatches("));
+    expect(seedRoute).toMatch(
+      /return this\.idle\.served\(async \(\) => \{[\s\S]*?return this\.gate\.through\(\s*async \(\) => \{/,
+    );
+    expect(seedRoute).toContain("this.seedNow(seed, envVars, !!prior)");
+  });
+
+  it("a prior owner only accepts a cached answer and permits the checkout HEAD to advance", () => {
+    const seedRoute = worker.slice(worker.indexOf("async seed(seed:"), worker.indexOf("private claimMatches("));
+    expect(seedRoute).toMatch(
+      /if \(prior && !answer\.cached\)\s*return \{\s*seeded: false,\s*reason: "seed-incompatible"/,
+    );
+    expect(seedRoute).toContain("seedClaimHeadMatches(claim.head, answer.sha, !!prior && answer.cached)");
+    expect(seedRoute.indexOf("if (prior && !answer.cached)")).toBeLessThan(
+      seedRoute.indexOf("seedClaimHeadMatches(claim.head, answer.sha"),
+    );
+  });
+
+  it("a bound seed refuses a changed or missing second marker before restore, without a destructive sweep", () => {
+    const seedNow = worker.slice(worker.indexOf("private async seedNow("), worker.indexOf("private seedSweep("));
+    expect(seedNow).toContain("boundSeedMarkerDecision(");
+    expect(seedNow).toContain("if (bound) return null;"); // a failed second read also refuses a bound seed
+    expect(seedNow).toContain("marker?.exitCode === 0 ? marker.stdout.trim() : null");
+    expect(seedNow).toMatch(
+      /if \(markerDecision === "refuse"\)\s*return \{\s*seeded: false,\s*reason: "seed-incompatible"/,
+    );
+    const boundRetry = seedNow.slice(
+      seedNow.indexOf('if (markerDecision === "refuse")'),
+      seedNow.indexOf("const deadline ="),
+    );
+    expect(boundRetry).not.toMatch(/seedSweep|restoreSeedInto|rm -rf/);
+    expect(seedNow.indexOf('if (markerDecision === "refuse")')).toBeLessThan(seedNow.indexOf("this.seedSweep()"));
   });
 
   it("presigned only: the transfer mode is read first and a local-mode Worker answers seed-unconfigured", () => {
@@ -663,7 +700,7 @@ describe("the seeded sandbox wiring (static)", () => {
 
   it("an incompatible cached dependency view refuses before origin writes and cannot reach the destructive restore or cleanup", () => {
     const cached = worker.slice(
-      worker.indexOf("if (marker.exitCode === 0"),
+      worker.indexOf('if (markerDecision === "cached")'),
       worker.indexOf("const deadline = t0 + SEED_RESTORE_MAX_MS"),
     );
     expect(cached).toContain("dependencyLayoutCommand(SEED_CHECKOUT_DIR)");
@@ -678,7 +715,8 @@ describe("the seeded sandbox wiring (static)", () => {
     const seedNow = worker.slice(worker.indexOf("private async seedNow("), worker.indexOf("private seedSweep("));
     expect(seedNow).toContain('seedDoorRemote(envVars.GIT_DOOR_ORIGIN ?? "", seed.slug)');
     expect(seedNow.indexOf('["cat", SEED_MARKER]')).toBeLessThan(seedNow.indexOf("restoreSeedInto("));
-    expect(seedNow).toContain("marker.stdout.trim() === seedMarkerText(seed)");
+    expect(seedNow).toContain("marker?.exitCode === 0 ? marker.stdout.trim() : null");
+    expect(seedNow).toContain("seedMarkerText(seed),");
     expect(seedNow).toContain('["git", "-C", SEED_CHECKOUT_DIR, "remote", "set-url", "origin", doorRemote]');
     expect(seedNow).toContain("cached: true");
     expect(seedNow.indexOf("printf %s ${shellQuote(seedMarkerText(seed))}")).toBeGreaterThan(
