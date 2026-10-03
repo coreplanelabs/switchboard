@@ -14,6 +14,7 @@ import { LocalExecutor, execDeadline, isDeadlineMiss, isRunStopError, type Execu
 import { E2BExecutor } from "./e2b.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import { parsePreservationOwner, type OwnerClaim } from "./sandboxCheckpoint.js";
+import type { InstallRepairPolicy } from "./installRepairPolicy.js";
 import {
   SEED_CHECKOUT_DIR,
   seedForThread,
@@ -91,6 +92,9 @@ export interface ExecutionConfig {
   /** Operator-declared admission for pilot coding repositories. An absent
    * repository keeps ordinary executor selection unchanged. */
   readyPilotRepos?: Record<string, ReadyEnvironmentRequirement>;
+  /** Trusted Bot operator allowlist for a future dependency repair route.
+   * This declaration alone runs nothing and does not change readiness. */
+  installRepairRepos?: Record<string, InstallRepairPolicy>;
 }
 
 export interface GithubCredentialProvider {
