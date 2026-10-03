@@ -3066,8 +3066,27 @@ async function verifiedReviewAttachRefusal(
     ) ?? -1;
   const memoryOpened = events?.[memoryStart];
   const memoryClosed = events?.[memoryEnd];
-  // The memory read may finish while attach is in flight. Only already-opened
-  // setup spans may close after the system refusal; no new work may start.
+  const postRefusal = events?.slice(systemRefusal + 1) ?? [];
+  const matchingCleanupPair = (offset: number, name: string): boolean => {
+    const opened = postRefusal[offset];
+    const closed = postRefusal[offset + 1];
+    return (
+      opened?.type === "span_start" &&
+      opened.name === name &&
+      closed?.type === "span_end" &&
+      closed.name === name &&
+      closed.spanId === opened.spanId &&
+      closed.status === "ok" &&
+      events?.filter(
+        (event) => (event.type === "span_start" || event.type === "span_end") && event.spanId === opened.spanId,
+      ).length === 2
+    );
+  };
+  // The memory read may finish while attach is in flight. Previously opened
+  // setup spans may close after refusal; the only newly opened spans are the
+  // ordered refusal and reply cleanup pairs, never another dispatch action.
+  const pairedRefusalReply =
+    postRefusal.length === 4 && matchingCleanupPair(0, "dispatch.refuse") && matchingCleanupPair(2, "post.reply");
   const admittedAttachRefusal =
     run.liveState?.state === "admitted" &&
     child?.liveState?.state === "admitted" &&
@@ -3101,6 +3120,7 @@ async function verifiedReviewAttachRefusal(
       if (index === admitted) return event.type === "run_state" && event.state === "admitted";
       if (index === attachStart || index === memoryEnd || index === attachEnd) return true;
       if (index === systemRefusal) return event.type === "refusal";
+      if (pairedRefusalReply && index > systemRefusal) return true;
       if (event.type !== "span_end" || index < systemRefusal) return false;
       if (
         event.name !== "request" &&
