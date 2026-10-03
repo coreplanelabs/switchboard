@@ -470,11 +470,15 @@ export function seedForThread(
 /** What a seeded sandbox is, on the selection: where the checkout is and what
  *  it is on, for the prompt and the card. */
 export interface SeededSandbox {
+  /** Verified effect receipt kept on the saved workspace binding across resumes. */
+  repairReceipt?: import("./installRepairPolicy.js").InstallRepairReceipt;
   slug: string;
   ref: string;
   sha: string;
   /** The snapshot commit whose root lockfiles supplied the dependency view. */
   sourceSha?: string;
+  /** The original checkout archive identifier in the preservation owner. */
+  seedBackupId?: string;
   /** The actual restored dependency archive, vouched for by the seed response. */
   depsBackupId?: string;
   /** The checkout's path inside the sandbox — the run's working tree. */

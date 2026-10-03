@@ -3213,6 +3213,7 @@ describe("makeExecutor seeded sandbox", () => {
     expect(sel.seeded).toEqual({
       slug: "jshttp/vary",
       ref: "master",
+      seedBackupId: C1,
       sha: HEAD,
       sourceSha: SHA,
       workspace: "/workspace/checkout",
@@ -3616,6 +3617,101 @@ describe("makeExecutor pilot ready environment", () => {
     expect(check.mock.calls.at(-1)?.[0]).toContain("node_modules");
     expect(check.mock.calls.at(-1)?.[0]).toContain("git diff --quiet 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' HEAD");
     expect(calls).toEqual([]);
+  });
+
+  it("repairs only an opted-in resumed owner before rechecking readiness", async () => {
+    envs();
+    fetches();
+    let probe = 0;
+    const check = vi.spyOn(CloudflareSandboxExecutor.prototype, "exec").mockImplementation(async (command) => {
+      if (command.includes("rev-parse --abbrev-ref HEAD")) return "master\n";
+      if (command.includes("rev-parse HEAD")) return `${SHA}\n`;
+      if (command.includes("config --get remote.origin.url")) return "https://door.example/git/jshttp/vary.git\n";
+      return probe++ === 0 ? "LOCKFILE_MISMATCH" : "READY";
+    });
+    const repair = vi
+      .spyOn(CloudflareSandboxExecutor.prototype, "repairDependencies")
+      .mockImplementation(async (owner, head) => ({
+        version: "install-repair-receipt-v1",
+        owner,
+        targetHead: head,
+        policyVersion: "npm-ci-v1",
+        lockfileKey: "c".repeat(64),
+      }));
+    const binding = {
+      backend: "sandbox" as const,
+      container: "33333333-3333-3333-3333-333333333333",
+      publicationBaseSha: SHA,
+      seeded: {
+        slug: "jshttp/vary",
+        ref: "master",
+        workspace: "/workspace/checkout",
+        sourceSha: "b".repeat(40),
+        seedBackupId: CHECKOUT,
+      },
+    };
+    const base = {
+      ...context(),
+      headSha: undefined,
+      runId: "11111111-1111-1111-1111-111111111111",
+      requester: "slack:U123",
+      reattach: binding,
+    };
+    await expect(makeExecutor(opts(), base)).rejects.toMatchObject({ reason: "dependencies_stale" });
+    expect(repair).not.toHaveBeenCalled();
+    probe = 0;
+    const selected = await makeExecutor(opts(), { ...base, installRepairPolicy: { policyVersion: "npm-ci-v1" } });
+    expect(selected.seeded?.sha).toBe(SHA);
+    expect(workspaceBindingFor(selected)?.seeded?.repairReceipt).toMatchObject({
+      targetHead: SHA,
+      lockfileKey: "c".repeat(64),
+    });
+    expect(repair).toHaveBeenCalledOnce();
+    expect(repair.mock.calls[0]?.[0]).toMatchObject({
+      run: base.runId,
+      seed: CHECKOUT,
+      container: binding.container,
+      head: SHA,
+    });
+    expect(repair.mock.calls[0]?.[1]).toBe(SHA);
+    expect(probe).toBe(2);
+    const readiness = check.mock.calls.filter(([command]) => command.includes("node_modules"));
+    expect(readiness).toHaveLength(3);
+    expect(readiness.at(-1)?.[0]).toContain(`git diff --quiet '${SHA}' HEAD`);
+  });
+
+  it("refuses repair when a saved preservation owner field is missing", async () => {
+    envs();
+    fetches();
+    vi.spyOn(CloudflareSandboxExecutor.prototype, "exec").mockImplementation(async (command) => {
+      if (command.includes("rev-parse --abbrev-ref HEAD")) return "master\n";
+      if (command.includes("rev-parse HEAD")) return `${SHA}\n`;
+      if (command.includes("config --get remote.origin.url")) return "https://door.example/git/jshttp/vary.git\n";
+      return "LOCKFILE_MISMATCH";
+    });
+    const repair = vi.spyOn(CloudflareSandboxExecutor.prototype, "repairDependencies");
+    const binding = {
+      backend: "sandbox" as const,
+      publicationBaseSha: SHA,
+      seeded: {
+        slug: "jshttp/vary",
+        ref: "master",
+        workspace: "/workspace/checkout",
+        sourceSha: "b".repeat(40),
+        seedBackupId: CHECKOUT,
+      },
+    };
+    await expect(
+      makeExecutor(opts(), {
+        ...context(),
+        headSha: undefined,
+        runId: "11111111-1111-1111-1111-111111111111",
+        requester: "slack:U123",
+        reattach: binding,
+        installRepairPolicy: { policyVersion: "npm-ci-v1" },
+      }),
+    ).rejects.toMatchObject({ reason: "dependencies_stale" });
+    expect(repair).not.toHaveBeenCalled();
   });
 
   it("holds a seeded pilot resume when the recorded dependency snapshot head is absent", async () => {
