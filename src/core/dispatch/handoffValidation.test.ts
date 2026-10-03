@@ -100,6 +100,7 @@ describe("canonical child handoff validation", () => {
     } as LiveRunRow;
     expect(canonicalHandoffRunOf(live)).toBeUndefined();
     expect(canonicalHandoffRunOf(live, 0)?.writtenThrough).toBe(0);
+    expect(canonicalHandoffRunOf({ ...finished, provisional: true })).toBeUndefined();
     expect(canonicalHandoffRunOf({ ...finished, session: { ...emptySession, range: "broken" } })).toBeUndefined();
   });
 

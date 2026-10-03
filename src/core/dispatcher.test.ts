@@ -24744,6 +24744,36 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     expect(s.provider.requests).toHaveLength(0);
   });
 
+  it("does not reissue a publication-bound merge-ready unit without a coding push", async () => {
+    const s = await legacyMergeReadySetup({ codingHeads: [], reviewHeads: [] });
+    const [row] = await s.instances.listUnits(INSTANCE);
+    await s.instances.putUnits([
+      {
+        ...row!,
+        publication: {
+          repo: "acme/api",
+          pr: 7,
+          headRef: s.branch,
+          baseRef: "main",
+          expectedHeadSha: s.head,
+          publicationRef: s.branch,
+          owner: { instanceId: INSTANCE, unit: "U12" },
+        },
+      },
+    ]);
+    const { io, replies } = fakeIO();
+
+    await dispatch(s.deps, msg("continue", "slack:UADMIN"), io, { thread: [s.shipParent] });
+
+    expect(replies).toEqual([
+      "bound: `agent:ship continue` — write — continue the original unit",
+      "acme/api#7 is already merge-ready, so there is no ended unit to continue. Name a separate task to start new work. Nothing started.",
+    ]);
+    expect(s.runs.listUnitRuns).not.toHaveBeenCalled();
+    expect(s.deps.shipBranch).not.toHaveBeenCalled();
+    expect(s.handoffsStarted()).toBe(0);
+  });
+
   it("legacy merge-ready recovery retains a coding record's exact final-head evidence", async () => {
     const s = await legacyMergeReadySetup({ codingEvidence: "head" });
     const { io, replies } = fakeIO();

@@ -1823,6 +1823,21 @@ export async function dispatch(
         }
       }
       threadPr = namedReleasedPr ?? laterPr(threadPr, owner.releasedPr);
+      const releasedPr = namedReleasedPr ?? owner.releasedPr;
+      if (
+        releasedPr !== undefined &&
+        operatorEvent?.outcome === "binds" &&
+        operatorEvent.binds?.length === 1 &&
+        operatorEvent.binds[0]?.shipEntry === "continue" &&
+        (currentPrNumber === undefined || currentPrNumber === releasedPr.number) &&
+        (explicitPr === undefined || explicitPr.repo === releasedPr.repo)
+      ) {
+        await io.reply(
+          `${releasedPr.repo}#${releasedPr.number} is already merge-ready, so there is no ended unit to continue. Name a separate task to start new work. Nothing started.`,
+        );
+        await recordPendingOperator();
+        return ended;
+      }
       if (
         freshShipTask &&
         owner.kind === "pipeline" &&
@@ -2002,7 +2017,8 @@ export async function dispatch(
             : undefined;
         let expectedHead = owner.unit.lastPush ?? boundHead;
         const recoverLegacyBinding =
-          owner.unit.ending?.kind === "merge_ready" && (expectedHead === undefined || savedPublication === undefined);
+          owner.unit.ending?.kind === "merge_ready" &&
+          (owner.unit.lastPush === undefined || savedPublication === undefined);
         if (recoverLegacyBinding) {
           const recovered = await legacyReviewedHeadOf(runsService, instance, owner.unit, recordedPr.number);
           if (recovered === undefined || (expectedHead !== undefined && expectedHead.toLowerCase() !== recovered)) {
