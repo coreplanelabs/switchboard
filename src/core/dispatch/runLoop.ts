@@ -65,8 +65,13 @@ import {
 import { prepareRelaunch } from "./relaunch.js";
 import { harnessNamed } from "../harness/roster.js";
 import { harnessContainerFor } from "../harness/botHostContainer.js";
-import { checkoutOfSelection, workspaceBindingFor, type ReadyEnvironmentReason } from "../../execution/factory.js";
-import { SEED_CHECKOUT_DIR, type ReadyEnvironmentRequirement } from "../../execution/seedPlan.js";
+import {
+  checkoutOfSelection,
+  workspaceBindingFor,
+  workspaceBindingOf,
+  type ReadyEnvironmentReason,
+} from "../../execution/factory.js";
+import type { ReadyEnvironmentRequirement } from "../../execution/seedPlan.js";
 import type { BranchStartState } from "../../execution/identityRewrite.js";
 import { isContainerGone } from "../harness/container.js";
 import {
@@ -1191,6 +1196,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
    *  released. Abnormal endings always leave a mechanical marker; an ordinary
    *  completion checkpoints only work the child left dirty or unpushed, so a
    *  clean completed run can still use the description and PR post-steps. */
+  const branchLeaseHead = (branch: string): string | undefined =>
+    acceptedSalvageHead?.ref === branch
+      ? acceptedSalvageHead.sha
+      : (branchReceipts.filter((receipt) => receipt.ref === branch).at(-1)?.sha ??
+        workspaceBinding?.publicationBaseSha);
   const checkpointAdmission = (
     branch: string,
     publication: { ref: string; expectedHeadSha: string } | { blocked: string } | undefined,
@@ -1201,26 +1211,46 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       ...(repoCtx.repo
         ? { publicationDoor: { repo: repoCtx.repo, origin: new URL(ctx.githubDoor.baseUrl).origin } }
         : {}),
-      admitPush: async (next: string): Promise<{ release: () => void; publicationBearer: string } | undefined> => {
+      admitPush: async (next: string) => {
         const callId = `runner-checkpoint:${branch}:${next}`;
         const issued = deps.runBearers?.issue(run.id);
         const hash = issued && bearerHashOf(issued.token);
+        const old =
+          publication && "expectedHeadSha" in publication
+            ? publication.expectedHeadSha
+            : coordinator
+              ? branchLeaseHead(branch)
+              : undefined;
+        const beforeReceiptCount = branchReceipts.filter((receipt) => receipt.ref === branch).length;
         if (
           !issued ||
           !hash ||
+          (coordinator !== undefined && old === undefined) ||
           !bindings.allowToolPush(
             run.id,
             callId,
             {
               ref: `refs/heads/${branch}`,
               next,
-              ...(publication && "expectedHeadSha" in publication ? { old: publication.expectedHeadSha } : {}),
+              ...(old ? { old } : {}),
             },
             hash,
           )
         )
           return;
-        return { release: () => bindings.clearToolPush(run.id, callId), publicationBearer: issued.token };
+        return {
+          release: () => bindings.clearToolPush(run.id, callId),
+          publicationBearer: issued.token,
+          old,
+          accepted: () => {
+            if (publication && "expectedHeadSha" in publication) {
+              const after = bindings.publicationOf(run.id);
+              return after !== undefined && "expectedHeadSha" in after && after.expectedHeadSha === next;
+            }
+            const accepted = branchReceipts.filter((receipt) => receipt.ref === branch);
+            return accepted.length > beforeReceiptCount && accepted.at(-1)?.sha === next;
+          },
+        };
       },
     };
   };
@@ -1266,8 +1296,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                           requester: msg.userId,
                           threadKey: msg.threadKey,
                           generation: deps.runLedger?.gen ?? "local",
-                          ...((coordinator.publication?.expectedHeadSha ?? binding?.sha) !== undefined
-                            ? { baseHeadSha: coordinator.publication?.expectedHeadSha ?? binding?.sha }
+                          ...((coordinator.publication?.expectedHeadSha ?? workspaceBinding?.publicationBaseSha) !==
+                          undefined
+                            ? {
+                                baseHeadSha:
+                                  coordinator.publication?.expectedHeadSha ?? workspaceBinding?.publicationBaseSha,
+                              }
                             : {}),
                         },
                         ...(deps.artifacts ? { store: deps.artifacts } : {}),
@@ -1856,7 +1890,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   };
   // Where the run's workspace is (run-history item 54): the dispatch's binding,
   // then the one each relaunch re-attached — what the next relaunch re-attaches.
-  let workspaceBinding = workspaceBindingFor(round.selection, profile.machine);
+  let workspaceBinding = workspaceBindingFor(
+    round.selection,
+    profile.machine,
+    resume ? (workspaceBindingOf(restored.binding) ?? null) : undefined,
+  );
   if (privateRun) {
     // Keep the latch through answer delivery; the admission slot is released
     // only after the reply, so a late follow-up can still revoke publication.
@@ -1900,8 +1938,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           ref: repoCtx.ref,
           baseRef: prBase,
           requestHeadSha: restoredHead ?? repoCtx.headSha,
-          workspaceRef: binding?.ref ?? seeded?.ref,
-          workspaceHeadSha: binding?.sha ?? seeded?.sha,
+          workspaceRef: binding?.ref ?? seeded?.ref ?? round.selection.cold?.ref,
+          workspaceHeadSha: binding?.sha ?? seeded?.sha ?? round.selection.cold?.sha,
           owner: {
             instanceId: coordinator.parentInstanceId,
             unit: unitOfIdempotencyKey(coordinator.idempotencyKey) ?? "",
@@ -2274,11 +2312,16 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               repo: repoCtx.repo,
               doorUrl: ctx.githubDoor.baseUrl,
               ...(ownBranch ? { branch: ownBranch } : {}),
-              checkout: () =>
-                currentCheckout ?? (workspaceBinding?.backend === "sandbox" ? SEED_CHECKOUT_DIR : undefined),
+              checkout: () => currentCheckout,
               protectedBranches,
               bindings: deps.githubBindings!,
               bearers: deps.runBearers,
+              ...(coordinator && coordinator.publication === undefined
+                ? {
+                    branchHead: () => (ownBranch === undefined ? undefined : branchLeaseHead(ownBranch)),
+                    branchReceiptCount: () => branchReceipts.filter((receipt) => receipt.ref === ownBranch).length,
+                  }
+                : {}),
             })
           : undefined;
       const openRun = async () => {
@@ -2568,7 +2611,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             firstTestSelection = decision.round.selection;
             toolContext.executor = executor;
             currentCheckout = checkoutOfSelection(decision.round.selection);
-            const rebound = workspaceBindingFor(decision.round.selection, profile.machine);
+            const rebound = workspaceBindingFor(decision.round.selection, profile.machine, workspaceBinding);
             if (rebound !== undefined) {
               workspaceBinding = rebound;
               ledgerRun?.setState({ binding: rebound });

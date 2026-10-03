@@ -76,7 +76,7 @@ import {
   type PublicationSettlement,
 } from "./publicationSettlement.js";
 import { shellQuote } from "../execution/shellQuote.js";
-import { SEED_CHECKOUT_DIR } from "../execution/seedPlan.js";
+import { SEED_CHECKOUT_DIR, seedDoorRemote } from "../execution/seedPlan.js";
 import { outboundKey } from "../artifacts/keys.js";
 import type { ArtifactStore } from "../artifacts/store.js";
 import { shows, type Verbosity } from "./verbosity.js";
@@ -207,6 +207,7 @@ export async function observeCodingWorkspace(
     const checkedOut = parseBranchOutput(branchOut);
     const branch = pushed ?? checkedOut;
     let remoteHead: string | undefined = parseRevParseOutput(upstreamOut);
+    let exactRemoteHead: string | undefined;
     if (branch !== undefined) {
       const remote = parseLsRemoteOutput(
         await probe(`${git} ls-remote --exit-code origin ${shellQuote(`refs/heads/${branch}`)}`),
@@ -215,18 +216,31 @@ export async function observeCodingWorkspace(
       // The remote's answer is the truth when it gave one; only a probe that
       // failed outright leaves the local record standing.
       if (remote.kind !== "failed") remoteHead = remote.kind === "found" ? remote.sha : undefined;
+      if (remote.kind === "found") exactRemoteHead = remote.sha;
     }
+    const branchHead =
+      pushed === undefined ? headSha : (parseRevParseOutput(tipOut) ?? (checkedOut === pushed ? headSha : undefined));
+    const changes = parseStatusCount(statusOut);
+    const countedUnpushed = parseCountOutput(unpushedOut);
+    // A sandbox can leave its remote-tracking ref behind after an accepted
+    // push. The branch's exact remote readback is stronger than that cache.
+    const unpushed =
+      changes === 0 &&
+      branchHead !== undefined &&
+      exactRemoteHead !== undefined &&
+      checkedOut === branch &&
+      branchHead === exactRemoteHead &&
+      countedUnpushed !== undefined
+        ? 0
+        : countedUnpushed;
     return {
       observation: {
-        head:
-          pushed === undefined
-            ? headSha
-            : (parseRevParseOutput(tipOut) ?? (checkedOut === pushed ? headSha : undefined)),
+        head: branchHead,
         branch,
         checkedOut,
         remoteHead,
         remoteRepo: parseOriginRemoteOutput(remoteOut),
-        ...countsOf(parseStatusCount(statusOut), parseCountOutput(unpushedOut)),
+        ...countsOf(changes, unpushed),
       },
       isRepo: headSha !== undefined,
     };
@@ -317,7 +331,7 @@ export function salvageWorkOf(
  *  refused for good may end the run at the context's overflow before any
  *  wind-down, so the tree is pushed the moment the failure is known. */
 export async function salvageBudgetPush(
-  executor: Pick<Executor, "exec" | "publishBranch">,
+  executor: Pick<Executor, "exec" | "publishBranch" | "publishBranchResult">,
   opts: {
     branch: string;
     checkout?: string;
@@ -331,7 +345,11 @@ export async function salvageBudgetPush(
      * A refusal keeps the commit local; no shell push is attempted. */
     admitPush?: (
       head: string,
-    ) => Promise<{ release: () => void; publicationBearer: string } | (() => void) | undefined>;
+    ) => Promise<
+      | { release: () => void; publicationBearer: string; old?: string; accepted: () => boolean }
+      | (() => void)
+      | undefined
+    >;
     publicationDoor?: { repo: string; origin: string };
     unfinished?: { runId: string; baseHeadSha: string; store: ArtifactStore };
     settlement?: {
@@ -376,6 +394,14 @@ export async function salvageBudgetPush(
     return output;
   };
   const probe = (cmd: string) => run(cmd).catch(() => "");
+  const originMatchesBinding = async (git: string): Promise<boolean> => {
+    if (!opts.repo) return false;
+    const origin = (await run(`${git} remote get-url origin`)).trim();
+    if (!opts.publicationDoor) return parseOriginRemoteOutput(origin) === opts.repo.toLowerCase();
+    if (opts.publicationDoor.repo.toLowerCase() !== opts.repo.toLowerCase()) return false;
+    const expected = seedDoorRemote(opts.publicationDoor.origin, opts.repo);
+    return origin === expected || origin === expected.slice(0, -4);
+  };
   const words =
     opts.cue === "compaction"
       ? {
@@ -430,8 +456,7 @@ export async function salvageBudgetPush(
       if (dir === undefined && cloneOutput.trim() !== "") throw err;
       if (opts.repo === undefined) throw new Error("the checkout's repository is unknown", { cause: err });
       git = `git -C ${shellQuote(dir ?? SEED_CHECKOUT_DIR)}`;
-      const origin = parseOriginRemoteOutput(await run(`${git} remote get-url origin`));
-      if (origin !== opts.repo.toLowerCase())
+      if (!(await originMatchesBinding(git)))
         throw new Error("the checkout's origin does not match the bound repository", { cause: err });
       if (dir === undefined && (await run(`${git} symbolic-ref --quiet --short HEAD`)).trim() !== opts.branch)
         throw new Error("the seeded checkout is not on the owned branch", { cause: err });
@@ -441,7 +466,7 @@ export async function salvageBudgetPush(
       if ((await run(`${git} symbolic-ref --quiet --short HEAD`)).trim() !== opts.branch)
         throw new Error("the checkpoint checkout is not on the owned branch");
       if (opts.repo === undefined) throw new Error("the checkpoint repository is unknown");
-      if (parseOriginRemoteOutput(await run(`${git} remote get-url origin`)) !== opts.repo.toLowerCase())
+      if (!(await originMatchesBinding(git)))
         throw new Error("the checkpoint checkout's origin does not match the bound repository");
     }
     const dirty = status !== "" && status !== "(no output)";
@@ -459,10 +484,20 @@ export async function salvageBudgetPush(
     }
     // A checkpoint just committed is work regardless of a tracking probe.
     // Only a clean completion needs the count to prove there is nothing left.
-    const unpushed =
+    let unpushed =
       dirty || endingCheckpoint ? 1 : parseCountOutput(await run(`${git} rev-list --count HEAD --not --remotes`));
     if (unpushed === undefined) throw new Error("the unpushed commit count could not be measured");
     const checkpointHead = parseRevParseOutput(await run(`${git} rev-parse HEAD`));
+    if (!dirty && !endingCheckpoint && unpushed > 0 && checkpointHead) {
+      const ownedOrigin = opts.repo === undefined || (await originMatchesBinding(git).catch(() => false));
+      if (ownedOrigin) {
+        const remote = parseLsRemoteOutput(
+          await probe(`${git} ls-remote --exit-code origin ${shellQuote(`refs/heads/${opts.branch}`)}`),
+          opts.branch,
+        );
+        if (remote.kind === "found" && remote.sha === checkpointHead) unpushed = 0;
+      }
+    }
     if (settlement) {
       if (!checkpointHead) throw new Error("the checkpoint source commit could not be read");
       settlement = {
@@ -476,7 +511,6 @@ export async function salvageBudgetPush(
     }
     if (!dirty && !endingCheckpoint && unpushed === 0) return { pushed: false, summary: words.nothing, ...facts() };
     if (settlement && checkpointHead) {
-      const boundRepo = settlement.binding.repo.toLowerCase();
       settlement = {
         ...settlement,
         preservation: await saveCheckpointArtifact({
@@ -485,8 +519,7 @@ export async function salvageBudgetPush(
           binding: settlement.binding,
           source: checkpointHead,
           store: opts.settlement?.store,
-          originMatchesBinding: async () =>
-            parseOriginRemoteOutput(await run(`${git} remote get-url origin`)) === boundRepo,
+          originMatchesBinding: () => originMatchesBinding(git),
         }),
       };
       await record();
@@ -554,13 +587,15 @@ export async function salvageBudgetPush(
     try {
       let release: (() => void) | undefined;
       let pushBearer: string | undefined;
+      let admittedOld: string | undefined;
+      let accepted: (() => boolean) | undefined;
       let source: string | undefined;
       if (settlement) {
         source = parseRevParseOutput(await run(`${git} rev-parse HEAD`));
         if (source !== checkpointHead) throw new Error("the checkpoint source changed before publication admission");
       }
       if (opts.admitPush) {
-        if (!executor.publishBranch || !opts.publicationDoor)
+        if ((!executor.publishBranchResult && !executor.publishBranch) || !opts.publicationDoor)
           throw new Error("an isolated runner-owned publication transport is unavailable");
         if ((await run(`${git} symbolic-ref --quiet --short HEAD`)).trim() !== opts.branch)
           throw new Error("the checkpoint checkout is not on the owned branch");
@@ -570,24 +605,39 @@ export async function salvageBudgetPush(
         if (!admitted) throw new Error("the Git door did not admit the checkpoint source commit");
         release = typeof admitted === "function" ? admitted : admitted.release;
         pushBearer = typeof admitted === "function" ? undefined : admitted.publicationBearer;
+        admittedOld = typeof admitted === "function" ? undefined : admitted.old;
+        accepted = typeof admitted === "function" ? undefined : admitted.accepted;
       }
       try {
+        if (pushBearer && !accepted) throw new Error("the checkpoint admission has no durable outcome verifier");
         if (settlement) {
           settlement = { ...settlement, publication: { kind: "pending" } };
           await record();
         }
-        if (pushBearer && source && opts.publicationDoor && executor.publishBranch) {
-          const output = await executor.publishBranch({
+        if (pushBearer && source && opts.publicationDoor && (executor.publishBranchResult || executor.publishBranch)) {
+          const transport = {
             repo: opts.publicationDoor.repo,
             doorOrigin: opts.publicationDoor.origin,
             branch: opts.branch,
             next: source,
-            ...(opts.publication && "expectedHeadSha" in opts.publication
-              ? { old: opts.publication.expectedHeadSha }
-              : {}),
+            ...(admittedOld ? { old: admittedOld } : {}),
             bearer: pushBearer,
-          });
-          if (parseExitPrefix(output).failed) throw new CommandRejected(output.trim());
+          };
+          if (executor.publishBranchResult) {
+            const result = await executor.publishBranchResult(transport);
+            if (result.exitCode !== 0 || result.truncated)
+              throw new CommandRejected((result.stderr || result.stdout || "publication transport failed").trim());
+          } else {
+            const output = await executor.publishBranch!(transport);
+            if (parseExitPrefix(output).failed) throw new CommandRejected(output.trim());
+          }
+          if (!accepted?.()) throw new Error("the Git door did not commit an accepted checkpoint publication");
+          const remote = parseLsRemoteOutput(
+            await run(`${git} ls-remote --exit-code origin ${shellQuote(`refs/heads/${opts.branch}`)}`),
+            opts.branch,
+          );
+          if (remote.kind !== "found" || remote.sha !== source)
+            throw new Error("the remote checkpoint head cannot be verified after publication");
         } else if (opts.admitPush) {
           throw new Error("the admitted checkpoint has no isolated publication transport");
         } else {

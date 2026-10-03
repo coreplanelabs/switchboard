@@ -189,7 +189,7 @@ import {
   recordRestartDeath,
   type CarriedRunIdentity,
 } from "./dispatch/reattach.js";
-import { workspaceBindingFor } from "../execution/factory.js";
+import { prepareColdPublicationCheckout, workspaceBindingFor, workspaceBindingOf } from "../execution/factory.js";
 import { readyEnvironmentCommand, type ReadyEnvironmentRequirement } from "../execution/seedPlan.js";
 import { fetchPullRequestFacts } from "../execution/githubPulls.js";
 import { fleetBusyRunEndedLine } from "../execution/sandboxErrors.js";
@@ -3886,7 +3886,11 @@ export async function dispatch(
     // A resumed row learns the binding it re-attached on, complete: a row
     // written before the binding was recorded carried only its meta's word.
     if (resume && ledgerRun) {
-      const rebound = workspaceBindingFor(round.selection, profile.machine);
+      const rebound = workspaceBindingFor(
+        round.selection,
+        profile.machine,
+        workspaceBindingOf(resume.row.state.binding) ?? null,
+      );
       if (rebound !== undefined) ledgerRun.setState({ binding: rebound });
     }
     // A coordinator's child resumed across a bot roll says so to its parent
@@ -3999,6 +4003,34 @@ export async function dispatch(
     }
     if (headGate.kind === "refused") return ended;
     repoCtx = headGate.repoCtx;
+    // A fresh unseeded Ship child has no resident/seed head to lease. Clone
+    // its owned branch and verify the remote tip before claiming the row or
+    // giving the model a turn; the claim persists the checkout and first head.
+    if (
+      !resume &&
+      coordinator !== undefined &&
+      agent.name === "coding" &&
+      repoCtx.repo &&
+      repoCtx.ref &&
+      !round.selection.binding &&
+      !round.selection.seeded &&
+      round.selection.executor.execResult &&
+      round.selection.executor.publishBranchResult &&
+      githubDoor
+    ) {
+      round.selection.cold = await prepareColdPublicationCheckout(
+        round.selection,
+        {
+          repo: repoCtx.repo,
+          ref: repoCtx.ref,
+          doorUrl: githubDoor.baseUrl,
+          ...((coordinator.publication?.expectedHeadSha ?? recovery?.expectedHeadSha)
+            ? { expectedHeadSha: coordinator.publication?.expectedHeadSha ?? recovery?.expectedHeadSha }
+            : {}),
+        },
+        run.control.hardSignal,
+      );
+    }
     if (
       recovery !== undefined &&
       (agent.name === "review" || agent.name === "coding") &&

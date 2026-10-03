@@ -54,6 +54,7 @@ Rename a test and the build is red until the spec changes with it. Adopting the 
 | [coding-checks.md](coding-checks.md) | Task-directed baseline and verification commands, factual execution receipts and historical replay |
 | [first-coding-test.md](first-coding-test.md) | Legacy explicit startup-smoke policy, durable receipts and unknown-outcome holds |
 | [execution.md](execution.md) | Per-thread workspaces, sandbox timeouts (exit 124), heartbeat streaming, session recovery, GitHub identity |
+| [cold-publication.md](cold-publication.md) | Runner-owned publication of a precreated Ship branch and cold checkpoint recovery |
 | [costs.md](costs.md) | Costs dash: Access-gated `GET /costs` + JSON twin — per-day spend for a named group (Workers' DOs + container apps + Anthropic workspace) priced live from Cloudflare's billing datasets and the Anthropic Admin cost report |
 | [delivery.md](delivery.md) | Delivery indicators: `GET /delivery` + JSON twin and `delivery report` on every surface — issue-to-merge time, first-pass CI, review [rounds](../vocabulary.md#round), the review agent's findings and the share resolved with no human edit, per week and per [unit](../vocabulary.md#unit), computed from GitHub's own record of the merged pull requests and the run history, nothing written |
 | [resident-repos.md](resident-repos.md) | Resident repo environments: auth scopes, atomic cap, lifecycle engine, thread data plane, bot-side selection, `repo onboard/offboard/rebuild/list` chat commands (fail-closed gate, --dry-run plans) |

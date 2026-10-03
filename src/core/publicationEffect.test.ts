@@ -35,11 +35,22 @@ function effect(
     remoteResult?: Partial<ExecResult>;
     missingStructured?: "execResult" | "publishBranchResult";
     resident?: boolean;
+    precreatedHead?: string;
   } = {},
 ) {
   const bindings = new GitBindings();
+  let acceptedBranchHead = options.precreatedHead;
+  let acceptedReceiptCount = 0;
   bindings.register("run", { repo: "o/r", ref: source }, undefined, async () => true, !options.newBranch);
-  if (options.newBranch) bindings.setBranchRecorder("run", { begin: async () => true, finish: async () => true });
+  if (options.newBranch)
+    bindings.setBranchRecorder("run", {
+      begin: async () => true,
+      finish: async (_update, outcome) => {
+        if (outcome === "accepted") acceptedBranchHead = next;
+        if (outcome === "accepted") acceptedReceiptCount++;
+        return true;
+      },
+    });
   else {
     bindings.setPublication("run", { ref: branch, expectedHeadSha: old });
     bindings.setPublicationRecorder("run", { begin: async () => true, finish: async () => true });
@@ -76,8 +87,16 @@ function effect(
       publications.push(input);
       // An opaque shell using the model's bearer cannot borrow the effect's
       // pending grant even with the same source/destination and old head.
-      const request = options.newBranch ? { ...update, old: "0".repeat(40) } : update;
+      const request = options.newBranch ? { ...update, old: options.precreatedHead ?? "0".repeat(40) } : update;
       expect(bindings.takeToolPush("run", request, bearerHashOf(modelToken))).toBe(false);
+      if (options.precreatedHead) {
+        expect(bindings.takeToolPush("run", { ...request, old: "f".repeat(40) }, bearerHashOf(input.bearer))).toBe(
+          false,
+        );
+        expect(bindings.takeToolPush("run", { ...request, ref: "refs/heads/other" }, bearerHashOf(input.bearer))).toBe(
+          false,
+        );
+      }
       expect(bindings.takeToolPush("run", request, bearerHashOf(input.bearer))).toBe(true);
       pushAttempts++;
       if (options.failPush || (options.failFirstPush && pushAttempts === 1))
@@ -130,6 +149,8 @@ function effect(
     protectedBranches: ["main"],
     bindings,
     bearers: { issue: () => ({ token, expiresAt: 100 }) } as unknown as RunBearerStore,
+    ...(options.precreatedHead ? { branchHead: () => acceptedBranchHead } : {}),
+    ...(options.precreatedHead ? { branchReceiptCount: () => acceptedReceiptCount } : {}),
   });
   const published: unknown[] = [];
   const run = (name: string) =>
@@ -267,6 +288,17 @@ describe("publish_branch — a runner-owned Git Door effect", () => {
     expect(await run(branch)).toContain("[new branch]");
     expect(publications[0]?.old).toBeUndefined();
     expect(published).toEqual([]);
+  });
+
+  it("leases a precreated Ship branch at its trusted fetched head", async () => {
+    const { publications, run } = effect({ newBranch: true, precreatedHead: old });
+    expect(await run(branch)).toContain(`To https://door.example/git/o/r.git`);
+    expect(publications).toMatchObject([{ branch, next, old }]);
+  });
+
+  it("does not reuse an earlier matching head as proof of this publication", async () => {
+    const stale = effect({ newBranch: true, precreatedHead: next, unbound: true });
+    expect(await stale.run(branch)).toContain("did not commit an accepted publication outcome");
   });
 
   it("does not report an accepted publication when the Door has not committed the outcome", async () => {

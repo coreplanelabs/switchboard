@@ -6458,6 +6458,63 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     expect(spy.calls[0].base).toBe("main");
   });
 
+  it("claims a verified unseeded Ship clone and its fetched lease before the model turn", async () => {
+    const branch = "plan/p/u1";
+    const unitId = "U" + "1";
+    const sha = "a".repeat(40);
+    const ledger = new InMemoryRunLedger();
+    const commands: string[] = [];
+    const base = describeThenAnswer(undefined, "No changes needed.");
+    const provider: Provider = {
+      ...base,
+      complete: async (...args) => {
+        expect(commands).toHaveLength(1);
+        expect([...ledger.live.values()][0]?.state.binding).toMatchObject({
+          backend: "sandbox",
+          ref: branch,
+          workspace: "/workspace/checkout",
+          publicationBaseSha: sha,
+        });
+        return base.complete(...args);
+      },
+    };
+    const deps = codingDeps(provider);
+    deps.runLedger = createLedgerWriteThrough({
+      ledger,
+      gen: "gen-child",
+      fallback: new InMemoryRunStore(),
+      warn: () => {},
+    });
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "main" });
+    const executor = {
+      exec: async () => "",
+      execResult: async (command: string) => {
+        commands.push(command);
+        return {
+          exitCode: 0,
+          truncated: false,
+          stderr: "",
+          stdout: `/workspace/checkout\n${branch}\n${sha}\n${sha}\trefs/heads/${branch}\nhttps://git.bot.test/git/acme/api.git\n`,
+        };
+      },
+      publishBranchResult: async () => ({ exitCode: 1, truncated: false, stdout: "", stderr: "refused" }),
+      readFile: async () => "",
+      writeFile: async () => "",
+    };
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ backend: "sandbox", executor });
+    const contract = contractFromPlan({
+      planMarkdown: `### ${unitId}. do the unit\n\ndo the unit\n`,
+      unitId,
+      readSpec: () => undefined,
+      rebase: { branch, onto: "main" },
+    });
+    await dispatch(deps, msg("agent:coding in acme/api: do the unit", "slack:UADMIN"), fakeIO().io, {
+      coordinator: { parentInstanceId: "plan-p", idempotencyKey: `plan-p:${unitId}/0/coding`, base: "main" },
+      contract,
+    });
+    expect(commands[0]).toContain("clone --quiet --single-branch --branch 'plan/p/u1'");
+  });
+
   it("pins a coding unit's first push to its contract branch before any PR exists", async () => {
     const deps = codingDeps(describeThenAnswer(DESCRIPTION));
     const branch = ["plan", "p", "u1"].join("/");

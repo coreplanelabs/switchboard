@@ -18,6 +18,10 @@ export interface PublicationEffectBinding {
   protectedBranches: readonly string[];
   bindings: GitBindings;
   bearers: RunBearerStore;
+  /** Last durably accepted head, or the trusted initial head for a precreated branch. */
+  branchHead?: () => string | undefined;
+  /** Durable accepted receipts on the owned branch; this effect must add one. */
+  branchReceiptCount?: () => number;
 }
 
 function safeBranch(branch: string): boolean {
@@ -64,8 +68,12 @@ export function publicationEffectTool(binding: PublicationEffectBinding): Runnab
         return "error: this workspace has no structured publication transport";
       const checkout = binding.checkout();
       if (
-        checkout !== "/workspace/checkout" &&
-        (!checkout?.startsWith("/workspace/threads/") || checkout.split("/").includes(".."))
+        !checkout ||
+        (!(
+          /^\/(?:[A-Za-z0-9._-]+\/)*checkout$/.test(checkout) &&
+          !checkout.split("/").some((part) => part === "." || part === "..")
+        ) &&
+          (!checkout.startsWith("/workspace/threads/") || checkout.split("/").includes("..")))
       )
         return "error: the selected checkout is unavailable for publication";
       const git = (args: string) => `git -C ${shellQuote(checkout)} ${args}`;
@@ -90,7 +98,13 @@ export function publicationEffectTool(binding: PublicationEffectBinding): Runnab
       const issued = binding.bearers.issue(binding.runId);
       const hash = issued && bearerHashOf(issued.token);
       if (!issued || !hash || !ctx.callId) return "error: a run-bound publication credential is unavailable";
-      const old = authority && "expectedHeadSha" in authority ? authority.expectedHeadSha : undefined;
+      const existingOld = authority && "expectedHeadSha" in authority ? authority.expectedHeadSha : undefined;
+      const old = existingOld ?? binding.branchHead?.();
+      if (binding.branchHead && (!old || !fullSha(old)))
+        return "error: the precreated branch head is unavailable for publication";
+      const beforeReceiptCount = binding.branchHead ? binding.branchReceiptCount?.() : undefined;
+      if (binding.branchHead && (beforeReceiptCount === undefined || !Number.isSafeInteger(beforeReceiptCount)))
+        return "error: the precreated branch receipts are unavailable for publication";
       if (
         !binding.bindings.allowToolPush(
           binding.runId,
@@ -120,8 +134,10 @@ export function publicationEffectTool(binding: PublicationEffectBinding): Runnab
         // committed the exact accepted transition, and the remote must agree.
         const after = binding.bindings.publicationOf(binding.runId);
         if (
-          (old && (!after || "blocked" in after || after.expectedHeadSha !== next)) ||
-          (!old && after && "blocked" in after)
+          (existingOld && (!after || "blocked" in after || after.expectedHeadSha !== next)) ||
+          (binding.branchHead &&
+            (binding.branchHead() !== next || (binding.branchReceiptCount?.() ?? -1) <= (beforeReceiptCount ?? -1))) ||
+          (!existingOld && after && "blocked" in after)
         )
           return "error: the Git Door did not commit an accepted publication outcome";
         const remoteHead = await inspect(git(`ls-remote --exit-code origin ${quotedRef}`));
