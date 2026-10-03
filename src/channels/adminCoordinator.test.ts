@@ -14954,6 +14954,95 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(h.dispatched).toEqual([]);
   });
 
+  const pricedOriginalCoding = (over: Partial<RunRecord> = {}): RunRecord =>
+    record("run-original-coding", {
+      usage: historicalUsage,
+      parentInstanceId: INSTANCE.id,
+      idempotencyKey: `${INSTANCE.id}:U12/0/coding`,
+      agent: "coding",
+      repo: INSTANCE.repo,
+      userId: INSTANCE.userId,
+      threadKey: INSTANCE.threadKey,
+      startedAt: NOW - minutesToMs(55),
+      finishedAt: NOW - minutesToMs(45),
+      pr: { ...PR, head: INSTANCE.branch },
+      headSha: HEAD,
+      pushed: [{ ref: INSTANCE.branch, sha: HEAD, by: "push" }],
+      ...over,
+    });
+
+  it("recovers an H2 review attach after the priced original round-zero child pushed H1", async () => {
+    const { h, row, fixed } = await h2ReviewAttach(async (_row, _failed, _findings, harness) => {
+      await harness.store.put(pricedOriginalCoding());
+    });
+    expect(await callRecovery(h)).toMatchObject({
+      status: 200,
+      body: { outcome: "started", diagnostic: { reviewStart: "verified_no_work" } },
+    });
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    expect(claimed?.recovery).toMatchObject({
+      kind: "review",
+      round: 2,
+      expectedHeadSha: fixed,
+      accounting: {
+        spendUsd: 0.75,
+        children: expect.arrayContaining([
+          { runId: "run-original-coding", key: `${INSTANCE.id}:U12/0/coding`, usd: 0.25 },
+        ]),
+      },
+    });
+    expect(claimed?.rounds).toEqual(row.rounds);
+    expect(claimed?.publication).toEqual(row.publication);
+    expect(h.recoveries).toHaveLength(1);
+  });
+
+  it.each(["foreign same-ref push", "live same-ref writer", "unverified original push"])(
+    "refuses H2 review attach despite priced original coding when there is a %s",
+    async (scenario) => {
+      const { h, row } = await h2ReviewAttach(async (_row, _failed, _findings, harness) => {
+        await harness.store.put(
+          pricedOriginalCoding(
+            scenario === "unverified original push"
+              ? { pushed: [{ ref: INSTANCE.branch, sha: "9".repeat(40), by: "push" }] }
+              : {},
+          ),
+        );
+        if (scenario === "foreign same-ref push")
+          await harness.store.put(
+            record("run-foreign-coding", {
+              parentInstanceId: "other-instance",
+              idempotencyKey: "other-instance:U12/0/coding",
+              repo: INSTANCE.repo,
+              threadKey: INSTANCE.threadKey,
+              startedAt: NOW - minutesToMs(4),
+              finishedAt: NOW - minutesToMs(3),
+              pushed: [{ ref: INSTANCE.branch, sha: "9".repeat(40), by: "push" }],
+            }),
+          );
+        if (scenario === "live same-ref writer") {
+          const live = harness.registry.create("live coding", {
+            idempotencyKey: "other-instance:U12/0/coding",
+            agent: "coding",
+            parentInstanceId: "other-instance",
+            repo: INSTANCE.repo,
+            channelId: INSTANCE.channelId,
+            userId: INSTANCE.userId,
+            threadKey: INSTANCE.threadKey,
+          });
+          harness.registry.publish(live.id, {
+            type: "pushed_head",
+            ref: INSTANCE.branch,
+            sha: "9".repeat(40),
+            by: "push",
+          });
+        }
+      });
+      expect((await callRecovery(h)).status).toBe(409);
+      expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+      expect(h.recoveries).toEqual([]);
+    },
+  );
+
   it("recovers a failed H2 review attach after repeated same-key starts and an H1 findings push", async () => {
     const { h, row, fixed } = await h2ReviewAttach();
     expect(await callRecovery(h)).toMatchObject({
