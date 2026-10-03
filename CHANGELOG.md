@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.283.0](https://github.com/coreplanelabs/switchboard/compare/v1.282.0...v1.283.0) (2026-10-03)
+
+
+### Features
+
+* **mcp:** add controlled read-source receipts ([#2682](https://github.com/coreplanelabs/switchboard/issues/2682)) ([34b2394](https://github.com/coreplanelabs/switchboard/commit/34b23940c3cd6367f716693fb4dbeb5a48e5656d))
+
+
+### Bug fixes
+
+* **core:** classify private capture failures and retry transient saves ([#2677](https://github.com/coreplanelabs/switchboard/issues/2677)) ([7da8c54](https://github.com/coreplanelabs/switchboard/commit/7da8c54f80884bfd6793879a36ce558e7dde1a34))
+* **core:** route repeat PR reviews from the current request ([#2673](https://github.com/coreplanelabs/switchboard/issues/2673)) ([3c7cd56](https://github.com/coreplanelabs/switchboard/commit/3c7cd56021c122bd56f0f5a2c6a9246586e3ed30))
+* **dispatcher:** fence resumed pilot bindings before continuation ([#2691](https://github.com/coreplanelabs/switchboard/issues/2691)) ([1450efd](https://github.com/coreplanelabs/switchboard/commit/1450efd41a9e32220c1c9e6a9864095a43b2673a))
+* **resident:** bind run owners and reconcile retained registrations ([#2698](https://github.com/coreplanelabs/switchboard/issues/2698)) ([dae4b17](https://github.com/coreplanelabs/switchboard/commit/dae4b1751a4ea6bf0375db909f4c01b3a76d1d5c))
+* **ship:** adopt accepted head from trimmed terminal runs ([#2717](https://github.com/coreplanelabs/switchboard/issues/2717)) ([07f4ba4](https://github.com/coreplanelabs/switchboard/commit/07f4ba4169df2b7e4a6b3438af073eeece9c8597))
+
 ## [1.282.0](https://github.com/coreplanelabs/switchboard/compare/v1.281.0...v1.282.0) (2026-10-03)
 
 
