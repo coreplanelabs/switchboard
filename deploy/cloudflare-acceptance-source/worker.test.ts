@@ -389,6 +389,41 @@ describe("controlled read source", () => {
     }
   });
 
+  it("retires a slow read when its fixture storage read never settles", async () => {
+    vi.useFakeTimers();
+    try {
+      const f = fixture();
+      const session = await f.session();
+      const actionId = crypto.randomUUID();
+      void f.call(session, "execute", "slow", actionId);
+      for (let i = 0; i < 50 && !(await f.storage.get(`action:${actionId}`)); i++) await vi.advanceTimersByTimeAsync(1);
+      const get = f.storage.get;
+      let held = false;
+      f.storage.get = async (key) => {
+        if (key === "fixture:slow") {
+          held = true;
+          return new Promise<never>(() => {});
+        }
+        return get(key);
+      };
+      await vi.advanceTimersByTimeAsync(36_000);
+      const alarm = f.alarm();
+      for (let i = 0; i < 50 && !held; i++) await vi.advanceTimersByTimeAsync(1);
+      expect(held).toBe(true);
+      await vi.advanceTimersByTimeAsync(61_000);
+      await alarm;
+      f.storage.get = get;
+      expect(await f.storage.get("pending")).toEqual([]);
+      expect(await f.storage.get("fixture:slow")).toBeUndefined();
+      expect((await f.call(session, "inspect", "slow", actionId)).body.result?.structuredContent).toMatchObject({
+        status: "unknown",
+        reason: "receipt_unavailable",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not persist success when bootstrap readback arrives after the deadline", async () => {
     vi.useFakeTimers();
     try {

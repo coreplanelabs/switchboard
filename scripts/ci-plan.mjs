@@ -285,6 +285,14 @@ export function planForPaths(paths, { fixtureRegistrationOnly: fixtureRootOnly =
   return withAcceptance(plan);
 }
 
+/** Evaluate root registration from the same diff that drives CI selection. */
+export function planForDiff(paths, beforePackage, afterPackage, beforeLock, afterLock) {
+  const fixtureRootOnly =
+    paths.some((path) => path === "package.json" || path === "package-lock.json") &&
+    fixtureRegistrationOnly(beforePackage, afterPackage, beforeLock, afterLock);
+  return planForPaths(paths, { fixtureRegistrationOnly: fixtureRootOnly });
+}
+
 function diffPaths(base) {
   const result = spawnSync("git", ["diff", "--name-only", "--no-renames", "-z", base, "HEAD"], { encoding: "utf8" });
   return result.status === 0 ? result.stdout.split("\0").filter(Boolean) : undefined;
@@ -305,16 +313,15 @@ function main() {
   }
   const base = override ?? baseForEvent(process.env.GITHUB_EVENT_NAME, event) ?? sha(process.env.CI_BASE_SHA);
   const paths = base ? diffPaths(base) : undefined;
-  const fixtureRootOnly =
-    paths?.some((path) => path.startsWith(`${ACCEPTANCE_SOURCE}/`)) &&
-    paths.some((path) => path === "package.json" || path === "package-lock.json") &&
-    fixtureRegistrationOnly(
-      fileAt(base, "package.json"),
-      readFileSync(join(ROOT, "package.json"), "utf8"),
-      fileAt(base, "package-lock.json"),
-      readFileSync(join(ROOT, "package-lock.json"), "utf8"),
-    );
-  const plan = paths ? planForPaths(paths, { fixtureRegistrationOnly: fixtureRootOnly }) : fullPlan();
+  const plan = paths
+    ? planForDiff(
+        paths,
+        fileAt(base, "package.json"),
+        readFileSync(join(ROOT, "package.json"), "utf8"),
+        fileAt(base, "package-lock.json"),
+        readFileSync(join(ROOT, "package-lock.json"), "utf8"),
+      )
+    : fullPlan();
   const reason = paths ? `${paths.length} changed path(s) against ${base}` : "no trustworthy diff; running every leg";
   console.log(`ci:plan — ${reason}`);
   console.log(JSON.stringify(plan));

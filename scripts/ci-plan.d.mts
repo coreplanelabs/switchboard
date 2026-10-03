@@ -21,3 +21,10 @@ export function planForPaths(
   paths: string[],
   options?: { fixtureRegistrationOnly?: boolean },
 ): ReturnType<typeof fullPlan>;
+export function planForDiff(
+  paths: string[],
+  beforePackage: string | undefined,
+  afterPackage: string | undefined,
+  beforeLock: string | undefined,
+  afterLock: string | undefined,
+): ReturnType<typeof fullPlan>;

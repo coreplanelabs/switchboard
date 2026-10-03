@@ -155,16 +155,32 @@ export class AcceptanceActions {
       reason: this.stage(row) === "pending" ? "pending" : "receipt_unavailable",
     };
   }
+  private async fixtureReadBefore<T>(key: string, deadline?: number): Promise<T | undefined> {
+    if (deadline === undefined) return this.storage.get<T>(key);
+    const remaining = deadline - systemClock();
+    if (remaining <= 0) return undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        this.storage.get<T>(key),
+        new Promise<undefined>((resolve) => {
+          timer = setTimeout(() => resolve(undefined), remaining);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
   private async verifyFixture(resource: Resource, deadline?: number) {
     const key = `fixture:${resource}`;
     // Bootstrap fixed, non-customer data; success requires an independent durable readback.
-    const prior = await this.storage.get<string>(key);
+    const prior = await this.fixtureReadBefore<string>(key, deadline);
     if (deadline !== undefined && systemClock() >= deadline) return undefined;
     if (prior === undefined) {
       await this.storage.put(key, VALUES[resource]);
       if (deadline !== undefined && systemClock() >= deadline) return undefined;
     }
-    const readback = prior ?? (await this.storage.get<string>(key));
+    const readback = prior ?? (await this.fixtureReadBefore<string>(key, deadline));
     if (deadline !== undefined && systemClock() >= deadline) return undefined;
     return readback === VALUES[resource] ? { fixture: VALUES[resource], verified: true as const } : undefined;
   }

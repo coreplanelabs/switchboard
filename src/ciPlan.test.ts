@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { baseForEvent, fixtureRegistrationOnly, planForPaths } from "../scripts/ci-plan.mjs";
+import { baseForEvent, fixtureRegistrationOnly, planForDiff, planForPaths } from "../scripts/ci-plan.mjs";
 
 describe("selective CI", () => {
   it("runs the docs build, but no runtime or package build, for a docs page", () => {
@@ -86,6 +86,28 @@ describe("selective CI", () => {
     });
     expect(mixed.workers).toEqual(["deploy/cloudflare-resident", "deploy/cloudflare-acceptance-source"]);
     expect(mixed.images).toEqual(["deploy/cloudflare-resident"]);
+  });
+
+  it("recognizes root-only fixture registration in the actual diff planner", () => {
+    const beforePackage = JSON.stringify({ name: "switchboard", workspaces: ["web"] });
+    const afterPackage = JSON.stringify({
+      name: "switchboard",
+      workspaces: ["web", "deploy/cloudflare-acceptance-source"],
+    });
+    const beforeLock = JSON.stringify({ packages: { "": { workspaces: ["web"] } } });
+    const afterLock = JSON.stringify({
+      packages: {
+        "": { workspaces: ["web", "deploy/cloudflare-acceptance-source"] },
+        "deploy/cloudflare-acceptance-source": { name: "switchboard-controlled-acceptance-source" },
+        "node_modules/switchboard-controlled-acceptance-source": {
+          resolved: "deploy/cloudflare-acceptance-source",
+          link: true,
+        },
+      },
+    });
+    const plan = planForDiff(["package.json", "package-lock.json"], beforePackage, afterPackage, beforeLock, afterLock);
+    expect(plan.workers).toEqual(["deploy/cloudflare-acceptance-source"]);
+    expect(plan.images).toEqual(["none"]);
   });
 
   it("recognizes only the exact fixture workspace and lockfile link", () => {
