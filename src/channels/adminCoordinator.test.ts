@@ -13640,6 +13640,67 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(h.dispatched).toHaveLength(0);
   });
 
+  it("resumes the original findings after a zero-work child when lastPush is absent but the bound PR and fresh ref match the reviewed head", async () => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+    await h.instances.put({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 0.5 } });
+    const row = setupRefusalRow();
+    row.lastPush = undefined;
+    await h.instances.putUnits([row]);
+    await h.store.put(reviewRecord());
+    await h.store.put(failedBeforeWork());
+
+    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: "recovery-run-original-review" } });
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    expect(claimed?.recovery).toMatchObject({
+      kind: "findings",
+      round: 1,
+      expectedHeadSha: HEAD,
+      reviewRunId: "run-original-review",
+      remainingMs: minutesToMs(60),
+    });
+    expect(claimed?.lastPush).toBeUndefined();
+    expect(claimed?.publication).toEqual(publication);
+    expect(claimed?.recovery?.findingsRunId).toBeUndefined();
+    expect(h.recoveries).toHaveLength(1);
+    expect(h.dispatched).toHaveLength(0);
+  });
+
+  it.each([
+    "defined mismatched lastPush",
+    "foreign binding owner",
+    "foreign PR ref",
+    "foreign verified head",
+    "missing publication",
+    "stale PR",
+    "rival findings child",
+    "exhausted original lease",
+  ])("refuses %s even when zero-work findings have no continuation hint", async (scenario) => {
+    const facts = exactRecoveryFacts(HEAD);
+    if (scenario === "foreign PR ref") facts.headRef = "plan/other/unit";
+    if (scenario === "foreign verified head") facts.verifiedHead = { ...facts.verifiedHead!, sha: "b".repeat(40) };
+    if (scenario === "stale PR") facts.state = "closed";
+    const h = harness({ prFacts: facts });
+    await h.instances.put({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 0.5 } });
+    const row = setupRefusalRow();
+    row.lastPush = scenario === "defined mismatched lastPush" ? "b".repeat(40) : undefined;
+    if (scenario === "foreign binding owner") row.publication = { ...publication, owner: { ...owner, unit: "U13" } };
+    if (scenario === "missing publication") row.publication = undefined;
+    if (scenario === "exhausted original lease") row.startedAt = NOW - minutesToMs(121);
+    await h.instances.putUnits([row]);
+    await h.store.put(reviewRecord());
+    await h.store.put(failedBeforeWork());
+    if (scenario === "rival findings child")
+      await h.store.put(failedBeforeWork({ id: "run-rival", idempotencyKey: `${INSTANCE.id}:U12/1/findings/a2` }));
+
+    const response = await callRecovery(h);
+    expect(response.status).toBe(409);
+    if (scenario === "defined mismatched lastPush")
+      expect(response.body).toMatchObject({ error: "recovery_head_moved", reason: "findings_no_work_guard" });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+    expect(h.recoveries).toEqual([]);
+    expect(h.dispatched).toEqual([]);
+  });
+
   it.each([
     ["missing usage", { usage: undefined }],
     [
