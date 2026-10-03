@@ -5,6 +5,8 @@ import {
   checkpointIfSafe,
   seedClaimHeadMatches,
   parsePreservationOwner,
+  normalizedSeedDoorOrigin,
+  boundSeedOriginMatches,
   passivePreservationReceipt,
   preservationReceipt,
   type PreservationOwner,
@@ -29,6 +31,31 @@ function host() {
   const currentOwner = vi.fn(async () => owner);
   return { safeQuiescence: vi.fn(async () => true), backup, save, verify, currentOwner };
 }
+
+describe("trusted seed door origin", () => {
+  it("normalizes only a credential-free HTTPS origin, not a URL with a path or secrets", () => {
+    expect(normalizedSeedDoorOrigin("https://DOOR.example:443/")).toBe("https://door.example");
+    expect(normalizedSeedDoorOrigin("https://door.example:8443/")).toBe("https://door.example:8443");
+    for (const url of [
+      "",
+      "http://door.example",
+      "https://user:bearer@door.example",
+      "https://door.example/git",
+      "https://door.example/?q=x",
+      "https://door.example/#x",
+      "https://door.example\\n.evil",
+    ]) {
+      expect(normalizedSeedDoorOrigin(url)).toBeNull();
+    }
+  });
+
+  it("refuses changed or missing origin on exact cached owner; an old record cannot be upgraded", () => {
+    expect(boundSeedOriginMatches("https://door.example", "https://DOOR.example/")).toBe(true);
+    expect(boundSeedOriginMatches("https://door.example", "https://other.example")).toBe(false);
+    expect(boundSeedOriginMatches("https://door.example", "")).toBe(false);
+    expect(boundSeedOriginMatches(undefined, "https://door.example")).toBe(false);
+  });
+});
 
 describe("seedClaimHeadMatches", () => {
   it("accepts a bound owner's cached seed after a commit advances checkout HEAD", () => {
@@ -113,6 +140,14 @@ describe("checkpointIfSafe", () => {
 });
 
 describe("preservationReceipt", () => {
+  it("accepts a Git-valid seeded ref with a plus sign in an owner claim", () => {
+    expect(parsePreservationOwner({ ...owner, ref: "feature/fix+retry" })).toEqual({
+      ...owner,
+      ref: "feature/fix+retry",
+    });
+    expect(parsePreservationOwner({ ...owner, ref: "feature/fix?retry" })).toBeNull();
+  });
+
   it("rejects malformed identities and arbitrary file or command fields", () => {
     expect(parsePreservationOwner(owner)).toEqual(owner);
     for (const extra of ["path", "command", "env"]) {

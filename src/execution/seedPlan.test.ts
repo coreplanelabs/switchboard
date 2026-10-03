@@ -665,6 +665,17 @@ describe("the seeded sandbox wiring (static)", () => {
     expect(seedRoute).toContain("this.seedNow(seed, envVars, !!prior)");
   });
 
+  it("binds the trusted seed door origin to the birth record and refuses changed or legacy origins before cached mutation", () => {
+    const seedRoute = worker.slice(worker.indexOf("async seed(seed:"), worker.indexOf("private claimMatches("));
+    expect(seedRoute).toContain("normalizedSeedDoorOrigin(envVars.GIT_DOOR_ORIGIN)");
+    expect(seedRoute).toContain("boundSeedOriginMatches(prior.doorOrigin, envVars.GIT_DOOR_ORIGIN)");
+    expect(seedRoute.indexOf("boundSeedOriginMatches(")).toBeLessThan(seedRoute.indexOf("this.seedNow("));
+    expect(seedRoute).toContain("{ owner, doorOrigin } satisfies CheckpointRecord");
+    expect(worker).toContain("{ owner, doorOrigin: record.doorOrigin, backupId }");
+    expect(seedRoute).toContain("preservationContainer: prior.owner.container");
+    expect(seedRoute).toContain("PRESERVATION_CONTAINER_MARKER, owner.container");
+  });
+
   it("a prior owner only accepts a cached answer and permits the checkout HEAD to advance", () => {
     const seedRoute = worker.slice(worker.indexOf("async seed(seed:"), worker.indexOf("private claimMatches("));
     expect(seedRoute).toMatch(

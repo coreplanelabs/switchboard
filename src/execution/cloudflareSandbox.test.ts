@@ -1003,6 +1003,70 @@ describe("CloudflareSandboxExecutor seed", () => {
     fetchRef: "feat/x",
   };
 
+  it("posts a typed owner claim in the body and accepts only a matching claimed seed receipt", async () => {
+    const claim = {
+      run: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa",
+      requester: "slack:Uactor",
+      thread: OPTS.threadKey,
+      repository: seed.slug,
+      ref: seed.fetchRef,
+      head: seed.sha,
+      seed: seed.checkoutBackupId,
+    };
+    const answer = {
+      seeded: true,
+      cached: false,
+      slug: seed.slug,
+      ref: seed.fetchRef,
+      sha: seed.sha,
+      from: { ref: seed.ref, sha: seed.sha, checkoutBackupId: seed.checkoutBackupId },
+      steps: { restore: 1, deps: null, fixup: 1 },
+      ms: 2,
+      preservationContainer: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+    };
+    const { calls } = stubFetch(answer);
+    await expect(new CloudflareSandboxExecutor(OPTS).seed(seed, { claim })).resolves.toEqual(answer);
+    expect(sentBody(calls[0])).toEqual({ seed, preservation: claim, env: {} });
+  });
+
+  it("fails closed on missing, malformed or mismatched claimed receipts but keeps unclaimed responses compatible", async () => {
+    const claim = {
+      run: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa",
+      requester: "slack:Uactor",
+      thread: OPTS.threadKey,
+      repository: seed.slug,
+      ref: seed.fetchRef,
+      head: seed.sha,
+      seed: seed.checkoutBackupId,
+    };
+    const answer = {
+      seeded: true,
+      cached: false,
+      slug: seed.slug,
+      ref: seed.fetchRef,
+      sha: seed.sha,
+      from: { ref: seed.ref, sha: seed.sha, checkoutBackupId: seed.checkoutBackupId },
+      steps: { restore: 1, deps: null, fixup: 1 },
+      ms: 2,
+    };
+    for (const response of [
+      answer,
+      { ...answer, preservationContainer: "bad" },
+      { ...answer, preservationContainer: 123 },
+      {
+        ...answer,
+        preservationContainer: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+        from: { ...answer.from, checkoutBackupId: "other" },
+      },
+      { ...answer, preservationContainer: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb", sha: "f".repeat(40) },
+    ]) {
+      stubFetch(response);
+      await expect(new CloudflareSandboxExecutor(OPTS).seed(seed, { claim })).rejects.toThrow(/preservation/);
+    }
+    stubFetch(answer);
+    await expect(new CloudflareSandboxExecutor(OPTS).seed(seed)).resolves.toEqual(answer);
+  });
+
   it("posts the handle and the env to /seed and returns the Worker's answer as it came", async () => {
     const answer = {
       seeded: true,

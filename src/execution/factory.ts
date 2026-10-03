@@ -13,6 +13,7 @@ import type { RunProfile } from "../config/profile.js";
 import { LocalExecutor, execDeadline, isDeadlineMiss, isRunStopError, type Executor } from "./executor.js";
 import { E2BExecutor } from "./e2b.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
+import { parsePreservationOwner, type OwnerClaim } from "./sandboxCheckpoint.js";
 import {
   SEED_CHECKOUT_DIR,
   seedForThread,
@@ -337,7 +338,9 @@ export function workspaceBindingFor(
     ...(b?.ref !== undefined || selection.cold?.ref !== undefined ? { ref: b?.ref ?? selection.cold?.ref } : {}),
     ...(checkout !== undefined ? { workspace: checkout } : {}),
     ...(b?.user !== undefined ? { user: b.user } : {}),
-    ...(b?.container !== undefined ? { container: b.container } : {}),
+    ...(b?.container !== undefined || selection.seeded?.preservationContainer !== undefined
+      ? { container: b?.container ?? selection.seeded?.preservationContainer }
+      : {}),
     ...(publicationBaseSha ? { publicationBaseSha } : {}),
     ...(selection.backend === "sandbox" && selection.seeded
       ? {
@@ -948,8 +951,8 @@ export async function makeExecutor(
       // sandbox restores it before the run's first command instead of cloning
       // and installing from nothing. Nothing to seed from (an unreachable
       // resident answers no body; a Worker that is not the cloudflare one has
-      // no /seed) → the cold path as before, and so does a refused seed, with
-      // the refusal on the note.
+      // no /seed) → the cold path as before for an unclaimed seed. A claimed
+      // seed refuses errors rather than leaving its owner for a cold run.
       await recheckOwner();
       const handle = probe.kind === "status" ? probe.seed : undefined;
       if (ready !== undefined && (!handle || !handle.depsBackupId))
@@ -1018,13 +1021,40 @@ export async function makeExecutor(
   };
 }
 
+/** A claim is possible only when admission resolved the full run and branch
+ * identity before seed. A legacy caller without these facts remains unclaimed;
+ * present but conflicting fields must not silently downgrade to legacy. */
+export function seedOwnerClaim(
+  ctx: Pick<ExecutorContext, "runId" | "requester" | "threadKey" | "repo" | "ref" | "headSha">,
+  seed: SandboxSeed,
+): OwnerClaim | undefined {
+  if (!ctx.runId || !ctx.requester || !ctx.repo || !ctx.ref || !ctx.headSha) return undefined;
+  const claim = {
+    run: ctx.runId,
+    requester: ctx.requester,
+    thread: ctx.threadKey,
+    repository: ctx.repo,
+    ref: ctx.ref,
+    head: ctx.headSha,
+    seed: seed.checkoutBackupId,
+  };
+  if (
+    ctx.repo !== seed.slug ||
+    ctx.ref !== (seed.fetchRef ?? seed.ref) ||
+    ctx.headSha !== (seed.fetchSha ?? seed.sha) ||
+    !parsePreservationOwner(claim, false)
+  )
+    throw new Error("seed owner: trusted run context does not match the resolved seed");
+  return claim;
+}
+
 /** Seed the thread's sandbox from the resident's handle (item 26): one
  *  `POST /seed` with the thread's own ref and head riding along; a handle whose
  *  objects are gone (`seed-missing` — a rotation took them) re-reads `/status`
- *  once and retries with the newer handle; any other refusal, or a Worker that
- *  has no `/seed` (an older release answers 404, an infra error here), sends
- *  the run cold with the reason for the note. The seed's own wait for a full
- *  fleet or a starting container is the executor's, as for every route. */
+ *  once and retries with the newer handle. An unclaimed caller falls cold on
+ *  other errors, including an older Worker without `/seed`; a claimed caller
+ *  refuses them so its owner cannot silently move to a new checkout. The
+ *  seed's wait for a full fleet or starting container is the executor's. */
 async function seedSandbox(
   executor: CloudflareSandboxExecutor,
   handle: SeedHandle,
@@ -1038,13 +1068,14 @@ async function seedSandbox(
     ...(ctx.headSha ? { headSha: ctx.headSha } : {}),
   });
   for (let retried = false; ; retried = true) {
+    const claim = seedOwnerClaim(ctx, seed);
     let answer: SeedAnswer;
     try {
-      answer = await executor.seed(seed, { span, signal: ctx.stopSignal });
+      answer = await executor.seed(seed, { span, signal: ctx.stopSignal, ...(claim ? { claim } : {}) });
     } catch (err) {
       // A stop ends setup, not just this attempt to seed. Falling through to
       // a fresh sandbox would hide the stop and start work the run no longer owns.
-      if (isRunStopError(err)) throw err;
+      if (isRunStopError(err) || claim) throw err;
       return { why: oneLine(`seed failed (${err instanceof Error ? err.message : String(err)})`) };
     }
     if (answer.seeded) {
@@ -1063,6 +1094,7 @@ async function seedSandbox(
       return {
         sourceSha: seed.sha,
         seeded: {
+          ...(claim ? { preservationContainer: answer.preservationContainer } : {}),
           slug: answer.slug,
           ref: answer.ref,
           sha: answer.sha,

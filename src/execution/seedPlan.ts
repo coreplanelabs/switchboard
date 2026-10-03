@@ -309,6 +309,8 @@ export interface SeedPhases {
 export type SeedAnswer =
   | {
       seeded: true;
+      /** The Worker-bound birth container for a claimed seed; absent for legacy unclaimed callers. */
+      preservationContainer?: string;
       /** The container already carried this handle's tree: nothing was restored. */
       cached: boolean;
       slug: string;
@@ -477,6 +479,8 @@ export interface SeededSandbox {
   depsBackupId?: string;
   /** The checkout's path inside the sandbox — the run's working tree. */
   workspace: string;
+  /** The Worker's claimed preservation incarnation, recorded on the run's binding. */
+  preservationContainer?: string;
   /** The container already carried this seed: nothing was restored. */
   cached: boolean;
   ms: number;
