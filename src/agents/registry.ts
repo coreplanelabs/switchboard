@@ -1,7 +1,7 @@
 // Agent definitions. An agent is a system prompt + toolset + machine class + wall-clock budget.
-import type { Effort } from "../effort.js";
+import BUILTIN_CONFIG from "./defaults.json" with { type: "json" };
 import { BASH_TIMEOUT_MAX_MS } from "../execution/bashTimeout.js";
-import { ASKS, RUNAWAY_TURNS_PER_MINUTE, runawayTurnCap, type LoopPreset } from "../core/budgets.js";
+import { RUNAWAY_TURNS_PER_MINUTE, runawayTurnCap } from "../core/budgets.js";
 import {
   CONTRACT_HEADING,
   CONTRACT_SECTION_HEADINGS,
@@ -59,13 +59,6 @@ export type ModelTier = (typeof MODEL_TIERS)[number];
  *  learned them here. */
 export { RUNAWAY_TURNS_PER_MINUTE, runawayTurnCap };
 
-/** A loop-running preset's budget as one fact read from the module: the wall
- *  clock it asks for, and the runaway guard derived from it. */
-function loopBudget(preset: LoopPreset): Pick<AgentDef, "maxMinutes" | "maxTurns"> {
-  const maxMinutes = ASKS[preset];
-  return { maxMinutes, maxTurns: runawayTurnCap(maxMinutes) };
-}
-
 export interface AgentDef {
   name: string;
   description: string;
@@ -82,10 +75,6 @@ export interface AgentDef {
   /** hard wall-clock budget for the tool loop; at the deadline the agent is
    *  cut off and forced to write up findings so far */
   maxMinutes: number;
-  /** The agent's built-in effort, the layer just above the provider default —
-   *  every config layer (directive, thread, user, channel, `defaults.efforts`)
-   *  beats it; see `src/effort.ts`. Omit to leave it to config / the model. */
-  effort?: Effort;
   /** Where the agent's tools execute: the machine class the executor factory
    *  provisions for its runs (`MACHINE_CLASSES`). `none` provisions nothing —
    *  no workspace, no sandbox, no credential. */
@@ -616,8 +605,8 @@ ${BREVITY_RULE}
 ${FENCED_CONTENT_RULE}
 Use Slack-friendly formatting (no markdown headers; *bold*, bullets, code blocks). Your final message is posted to Slack — lead with the answer, then supporting detail and sources.`;
 
-// The general agent (docs/reference/specs/agent-general.md): the plain mention. Fast
-// model, few turns, no workspace or shell — but it can read the org's repos
+// The general agent (docs/reference/specs/agent-general.md): the plain mention.
+// No workspace or shell — but it can read the org's repos
 // and act on their issues through the GitHub tools, and read a URL, so the
 // everyday asks ("open an issue on X", "what does our resident system do?",
 // "what's in that link?") are answered here instead of bounced to a directive.
@@ -717,7 +706,7 @@ Lead with the answer, then the cited sources and time window — short lines, th
 // so the model picks from the real list and a preset that crosses the identity
 // line moves the day its def does; the write presets are named as what a child
 // never is, with the refusal's name.
-function conductorSystem(siblings: readonly AgentDef[]): string {
+export function conductorSystem(siblings: readonly AgentDef[]): string {
   const readers = siblings.filter((a) => a.identity !== "write");
   const writers = siblings.filter((a) => a.identity === "write" && a.name !== "ship");
   const rows = readers.map(
@@ -775,154 +764,52 @@ export function presetDoor(def: AgentDef): PresetDoor {
  *  from (those that read) and the ones it names as refused (those that write).
  *  The conductor is built from this list below, so its prompt renders its
  *  siblings and never itself. */
-const WORK_PRESETS = {
-  general: {
-    name: "general",
-    description:
-      "Default assistant: answers directly, reads URLs, manages issues; the preset for any question the org's GitHub answers. No workspace or shell.",
-    system: GENERAL_SYSTEM,
-    toolset: "assistant",
-    // The GitHub tools are REST in the bot process, so a general ask never
-    // provisions a workspace or sandbox (docs/reference/specs/agent-general.md item 4)
-    // and mints no credential of its own.
-    machine: "none",
-    identity: "none",
-    maxTokens: 16000,
-    ...loopBudget("general"),
-    tiers: ["fast", "strong"],
-  },
-  coding: {
-    name: "coding",
-    description: "Implements changes and ships PRs (git + gh in a workspace).",
-    system: CODING_SYSTEM,
-    residentSystem: CODING_SYSTEM_RESIDENT,
-    seededSystem: CODING_SYSTEM_SEEDED,
-    toolset: "full",
-    maxTokens: 64000,
-    ...loopBudget("coding"),
-    // No built-in effort: the deployment decides (`defaults.efforts.coding`,
-    // `config set channel efforts.coding=…`, or `effort:` per request).
-    machine: "repo-resident",
-    identity: "write", // pushes branches and opens pull requests
-    tiers: ["strong"], // code-writing never runs fast (the one-door plan's tiers rule)
-    // Never routed: a plain write ask deserves the coding → review loop, so
-    // the router's table offers `ship` in coding's seat — a routed ship runs
-    // a generated one-unit plan whose merge is a person's, never the runner's.
-    // A request that wants a bare coding run names it — `agent:coding`.
-    routable: false,
-  },
-  review: {
-    name: "review",
-    description: "Reviews PRs and produces high-quality findings. Read-only.",
-    system: REVIEW_SYSTEM,
-    residentSystem: REVIEW_SYSTEM_RESIDENT,
-    seededSystem: REVIEW_SYSTEM_SEEDED,
-    toolset: "readonly",
-    machine: "repo-resident",
-    identity: "read", // a read-scoped token and a read-only worktree: it cannot post or push from inside
-    tiers: ["strong"], // a wrong finding costs a merge decision: reviews never run fast
-    maxTokens: 64000,
-    ...loopBudget("review"), // a safety net — typical reviews land in ~5 minutes
-    effort: "medium", // fast turns; one big-context pass does the deep work
-  },
-  ship: {
-    name: "ship",
-    description:
-      "Coding → review → fix pipeline to LGTM: opens the PR, loops reviews, reports merge-ready. Never merges.",
-    // Never sent to a model: `agent:ship` forks inside dispatch() into the
-    // pipeline orchestrator (src/core/shipPipeline.ts), whose child rounds run
-    // on the coding/review defs above — runAgent is never called with THIS def.
-    system:
-      "You are Switchboard's ship pipeline. This prompt is never sent to a model — the pipeline orchestrates coding and review child runs on their own definitions.",
-    // Full toolset and the coding machine class, so repo and PR resolution
-    // gate a ship thread like a coding one. `maxMinutes` is the pipeline's
-    // wall clock (docs/reference/specs/agent-ship.md item 8): the ship preset's
-    // declared budget, which a deployment's `ship.maxMinutes` knob replaces
-    // (`shipPresetFor`) and a boundary or a `budget:` directive clips like any
-    // preset's; every child round runs its own agent's budget clipped to what
-    // remains of it. Turns and tokens are placeholders: no model call is ever
-    // made with this def.
-    toolset: "full",
-    machine: "repo-resident",
-    identity: "write",
-    tiers: ["strong"], // the pipeline's children write and review code: never fast
-    // Routable: a routed ship runs a generated one-unit plan whose merge is a
-    // person's (`merge: person`) and never a seeded plan (the hand-off refuses
-    // a routed `plan <path>.md` naming `agent:ship`), so a wrong route costs a
-    // reviewed pull request, never code landing on main.
-    maxTurns: 1,
-    maxTokens: 16000,
-    maxMinutes: ASKS.ship,
-  },
-  research: {
-    name: "research",
-    description:
-      "Answers questions that need the web (search, URL reading); GitHub for context, not for a question GitHub alone answers. No workspace.",
-    system: RESEARCH_SYSTEM,
-    toolset: "web",
-    machine: "none", // web I/O only; no workspace is provisioned
-    identity: "none",
-    tiers: ["fast", "strong"], // reads and reports: may run fast
-    maxTokens: 24000,
-    ...loopBudget("research"),
-    effort: "medium",
-  },
-  explore: {
-    name: "explore",
-    description:
-      "Read-only investigation of a repository in a cold sandbox: runs builds, suites and pipelines, searches the web, and reports a claim table with commands and numbers. Never opens a PR; cannot attach or post files.",
-    system: EXPLORE_SYSTEM,
-    toolset: "explore",
-    // Always a cold per-thread sandbox with the checkout, never the resident a
-    // review depends on: a two-hour job shares no container with anyone.
-    machine: "repo-cold",
-    identity: "read", // a read-scoped token: it can clone and read, never push — whatever the caller holds
-    tiers: ["fast", "strong"], // reads and reports: may run fast
-    maxTokens: 64000,
-    ...loopBudget("explore"),
-    // No built-in effort: the deployment decides, as for coding.
-  },
-  orchestrator: {
-    name: "orchestrator",
-    description:
-      "Answers fleet status from plane tables and other questions from GitHub and scoped MCP reads, with sources cited. No workspace or shell.",
-    system: ORCHESTRATOR_SYSTEM,
-    toolset: "orchestrator",
-    // The plane read is a call in the bot process: nothing is provisioned
-    // and no credential is minted (record 0070, criterion 3).
-    machine: "none",
-    identity: "none",
-    tiers: ["fast", "strong"], // reads and cites rows: may run fast
-    maxTokens: 16000,
-    ...loopBudget("orchestrator"),
-  },
-} satisfies Record<string, AgentDef>;
-
-export const AGENTS: Record<string, AgentDef> = {
-  ...WORK_PRESETS,
-  conductor: {
-    name: "conductor",
-    description:
-      "Coordinates other runs: spawns child runs as the requester — each in a thread of its own, under their permissions — follows them, and reports. No workspace or shell.",
-    system: conductorSystem(Object.values(WORK_PRESETS)),
-    toolset: "conductor",
-    tiers: ["fast", "strong"], // reads and coordinates: may run fast
-    // Nothing is provisioned and no credential minted: the run tools call the
-    // dispatcher, the GitHub reads are REST in the bot process.
-    machine: "none",
-    identity: "none",
-    // Never a row of the router's table: a plain message is never routed to a
-    // conductor that decides the split itself. The compound form is its one
-    // door (docs/reference/specs/routing-and-config.md item 21): the router
-    // names the parts and their presets, each checked against the same table
-    // and the requester's allowlist, and the brief tells the conductor to
-    // spawn exactly those — so no child runs that the record did not name.
-    routable: false,
-    maxTokens: 32000,
-    ...loopBudget("conductor"), // long enough to outlast a coding child; every child is capped by what remains of it
-    // No built-in effort: the deployment decides, as for coding.
-  },
+const BUILTIN_INSTRUCTIONS: Record<string, string> = {
+  general: GENERAL_SYSTEM,
+  coding: CODING_SYSTEM,
+  review: REVIEW_SYSTEM,
+  research: RESEARCH_SYSTEM,
+  explore: EXPLORE_SYSTEM,
+  orchestrator: ORCHESTRATOR_SYSTEM,
+  ship: "You are Switchboard's ship pipeline. This prompt is never sent to a model — the pipeline orchestrates coding and review child runs on their own definitions.",
 };
+
+/** Registered capabilities and prompts are code; their declarations use the
+ * same data document an installation extends. */
+export const AGENTS: Record<string, AgentDef> = Object.fromEntries(
+  Object.entries(BUILTIN_CONFIG.agents)
+    .filter(([, entry]) => "tools" in entry)
+    .map(([name, entry]) => {
+      const def = entry as {
+        description: string;
+        tools: AgentDef["toolset"];
+        machine: MachineClass;
+        identity: Identity;
+        tiers: ModelTier[];
+        routable?: false;
+        limits: { maxTokens: number; maxMinutes: number; maxTurns?: number };
+      };
+      return [
+        name,
+        {
+          name,
+          description: def.description,
+          system: BUILTIN_INSTRUCTIONS[name] ?? "",
+          toolset: def.tools,
+          machine: def.machine,
+          identity: def.identity,
+          tiers: def.tiers,
+          ...(def.routable !== undefined ? { routable: def.routable } : {}),
+          maxTokens: def.limits.maxTokens,
+          maxMinutes: def.limits.maxMinutes,
+          maxTurns: def.limits.maxTurns ?? runawayTurnCap(def.limits.maxMinutes),
+          ...(name === "coding" ? { residentSystem: CODING_SYSTEM_RESIDENT, seededSystem: CODING_SYSTEM_SEEDED } : {}),
+          ...(name === "review" ? { residentSystem: REVIEW_SYSTEM_RESIDENT, seededSystem: REVIEW_SYSTEM_SEEDED } : {}),
+        } satisfies AgentDef,
+      ];
+    }),
+);
+AGENTS.conductor!.system = conductorSystem(Object.values(AGENTS).filter((a) => a.name !== "conductor"));
 
 export function getAgent(name: string): AgentDef {
   const a = AGENTS[name];

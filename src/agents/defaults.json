@@ -1,0 +1,151 @@
+{
+  "profiles": {
+    "standard": {
+      "model": "openai/gpt-6.1-sol",
+      "modelSettings": {
+        "reasoning": {
+          "effort": "high"
+        }
+      },
+      "harness": "pi"
+    },
+    "fast": {
+      "model": "openai/gpt-6-luna",
+      "modelSettings": {
+        "reasoning": {
+          "effort": "medium"
+        }
+      }
+    },
+    "anthropic": {
+      "model": "anthropic/claude-opus-5",
+      "modelSettings": {
+        "reasoning": {
+          "effort": "high"
+        }
+      },
+      "harness": "pi"
+    },
+    "anthropicFast": {
+      "model": "anthropic/claude-haiku-4-5",
+      "modelSettings": {
+        "reasoning": {
+          "effort": "medium"
+        }
+      }
+    }
+  },
+  "agentDefaults": {
+    "profile": "standard"
+  },
+  "agents": {
+    "general": {
+      "description": "Default assistant: answers directly, reads URLs, manages issues; the preset for any question the org's GitHub answers. No workspace or shell.",
+      "instructions": "builtin:general",
+      "tools": "assistant",
+      "machine": "none",
+      "identity": "none",
+      "tiers": ["fast", "strong"],
+      "limits": {
+        "maxMinutes": 60,
+        "maxTokens": 16000
+      }
+    },
+    "coding": {
+      "description": "Implements changes and ships PRs (git + gh in a workspace).",
+      "instructions": "builtin:coding",
+      "tools": "full",
+      "machine": "repo-resident",
+      "identity": "write",
+      "tiers": ["strong"],
+      "routable": false,
+      "limits": {
+        "maxMinutes": 90,
+        "maxTokens": 64000
+      }
+    },
+    "review": {
+      "description": "Reviews PRs and produces high-quality findings. Read-only.",
+      "instructions": "builtin:review",
+      "tools": "readonly",
+      "machine": "repo-resident",
+      "identity": "read",
+      "tiers": ["strong"],
+      "limits": {
+        "maxMinutes": 25,
+        "maxTokens": 64000
+      }
+    },
+    "ship": {
+      "description": "Coding → review → fix pipeline to LGTM: opens the PR, loops reviews, reports merge-ready. Never merges.",
+      "instructions": "builtin:ship",
+      "tools": "full",
+      "machine": "repo-resident",
+      "identity": "write",
+      "tiers": ["strong"],
+      "limits": {
+        "maxMinutes": 1440,
+        "maxTokens": 16000,
+        "maxTurns": 1
+      }
+    },
+    "research": {
+      "description": "Answers questions that need the web (search, URL reading); GitHub for context, not for a question GitHub alone answers. No workspace.",
+      "instructions": "builtin:research",
+      "tools": "web",
+      "machine": "none",
+      "identity": "none",
+      "tiers": ["fast", "strong"],
+      "limits": {
+        "maxMinutes": 8,
+        "maxTokens": 24000
+      }
+    },
+    "explore": {
+      "description": "Read-only investigation of a repository in a cold sandbox: runs builds, suites and pipelines, searches the web, and reports a claim table with commands and numbers. Never opens a PR; cannot attach or post files.",
+      "instructions": "builtin:explore",
+      "tools": "explore",
+      "machine": "repo-cold",
+      "identity": "read",
+      "tiers": ["fast", "strong"],
+      "limits": {
+        "maxMinutes": 120,
+        "maxTokens": 64000
+      }
+    },
+    "orchestrator": {
+      "description": "Answers fleet status from plane tables and other questions from GitHub and scoped MCP reads, with sources cited. No workspace or shell.",
+      "instructions": "builtin:orchestrator",
+      "tools": "orchestrator",
+      "machine": "none",
+      "identity": "none",
+      "tiers": ["fast", "strong"],
+      "limits": {
+        "maxMinutes": 10,
+        "maxTokens": 16000
+      }
+    },
+    "conductor": {
+      "description": "Coordinates other runs: spawns child runs as the requester — each in a thread of its own, under their permissions — follows them, and reports. No workspace or shell.",
+      "instructions": "builtin:conductor",
+      "tools": "conductor",
+      "machine": "none",
+      "identity": "none",
+      "tiers": ["fast", "strong"],
+      "routable": false,
+      "limits": {
+        "maxMinutes": 1440,
+        "maxTokens": 32000
+      }
+    },
+    "operator": {
+      "profile": "fast"
+    },
+    "intake": {
+      "profile": "fast"
+    },
+    "memory": {
+      "profile": "standard"
+    }
+  }
+}

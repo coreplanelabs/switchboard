@@ -1,3 +1,5 @@
+import BUILTIN_CONFIG from "../agents/defaults.json" with { type: "json" };
+
 // Every wall clock in Switchboard as one table (docs/decisions/0046; docs/reference/specs/harness-pi.md
 // item 15; docs/reference/specs/agent-ship.md item 8). A budget is a LEASE a
 // parent carves from its own remainder, never a constant a file holds on its
@@ -212,19 +214,9 @@ export type Preset = LoopPreset | "ship";
  *  double the 90th percentile (31.5) with the gate inside it. Ship's one-day
  *  ask holds the default round ceiling at each later round's floor; a shorter
  *  effective lease lowers the round count to one it can hold. */
-export const ASKS: Readonly<Record<Preset, number>> = {
-  general: 60,
-  coding: 90,
-  review: 25,
-  ship: 1440,
-  research: 8,
-  explore: 120,
-  conductor: 1440,
-  // The plane's chat preset (record 0070): reads the fleet's tables and
-  // answers; a turn is a projection read plus a write-up, so its ask sits
-  // between general's and research's kind of work, with room for a few reads.
-  orchestrator: 10,
-};
+export const ASKS: Readonly<Record<Preset, number>> = Object.fromEntries(
+  [...LOOP_PRESETS, "ship" as const].map((name) => [name, BUILTIN_CONFIG.agents[name].limits.maxMinutes]),
+) as Record<Preset, number>;
 
 /** The rounds a ship loop is made of. `findings` is a coding child handed the
  *  review's findings; `merge` is the runner's wait on the guards. */

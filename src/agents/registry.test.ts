@@ -42,7 +42,7 @@ describe("agent registry matches the feature specs", () => {
   it("coding: full toolset, 90 min, no built-in effort (config layers decide)", () => {
     expect(AGENTS.coding.toolset).toBe("full");
     expect(AGENTS.coding.maxMinutes).toBe(90);
-    expect(AGENTS.coding.effort).toBeUndefined();
+    expect(AGENTS.coding).not.toHaveProperty("effort");
   });
 
   it("general's prompt names its GitHub tools and redirects code/PR/web-research asks to the other agents in plain words, never as a directive line to type", () => {
@@ -1268,7 +1268,7 @@ describe("conductor agent (docs/reference/specs/agent-conductor.md)", () => {
     expect(AGENTS.conductor.toolset).toBe("conductor");
     expect(AGENTS.conductor.maxMinutes).toBe(1440);
     expect(AGENTS.conductor.maxTurns).toBeGreaterThanOrEqual(30);
-    expect(AGENTS.conductor.effort).toBeUndefined();
+    expect(AGENTS.conductor).not.toHaveProperty("effort");
     expect(AGENTS.conductor.residentSystem).toBeUndefined();
     expect(getAgent("conductor")).toBe(AGENTS.conductor);
   });
@@ -1498,7 +1498,7 @@ describe("explore agent (docs/reference/specs/agent-explore.md)", () => {
     expect(AGENTS.explore.maxMinutes).toBe(120);
     expect(AGENTS.explore.maxTurns).toBeGreaterThanOrEqual(100);
     expect(AGENTS.explore.maxTokens).toBeGreaterThanOrEqual(64000);
-    expect(AGENTS.explore.effort).toBeUndefined(); // the config layers decide, as for coding
+    expect(AGENTS.explore).not.toHaveProperty("effort"); // the config layers decide, as for coding
     expect(AGENTS.explore.residentSystem).toBeUndefined(); // never a resident: the class is cold
     expect(getAgent("explore")).toBe(AGENTS.explore);
   });

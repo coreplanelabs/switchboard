@@ -6267,7 +6267,6 @@ describe("runPiHarness — a read-identity preset", () => {
         identity: "read",
         maxTurns: 150,
         maxMinutes: 25,
-        effort: "medium",
       },
     });
     let rules: ToolRuleContext | undefined;
