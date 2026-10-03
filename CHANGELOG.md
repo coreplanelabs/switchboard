@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.280.0](https://github.com/coreplanelabs/switchboard/compare/v1.279.1...v1.280.0) (2026-10-03)
+
+
+### Features
+
+* **sandbox:** bind seeded owner and Git Door origin ([#2705](https://github.com/coreplanelabs/switchboard/issues/2705)) ([ae41b6a](https://github.com/coreplanelabs/switchboard/commit/ae41b6ad4df6236cdfb652b9ad1f54ad86e5b1d3))
+
+
+### Bug fixes
+
+* **ship:** recognize admitted review attach refusals ([#2706](https://github.com/coreplanelabs/switchboard/issues/2706)) ([cd9b8c8](https://github.com/coreplanelabs/switchboard/commit/cd9b8c8182fa70ffeb08c8f12fa51873b3e4d9a2))
+
 ## [1.279.1](https://github.com/coreplanelabs/switchboard/compare/v1.279.0...v1.279.1) (2026-10-03)
 
 
