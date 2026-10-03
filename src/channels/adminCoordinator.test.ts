@@ -14404,6 +14404,207 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     return { h, row, fixed };
   };
 
+  const admittedReviewAttach = async (
+    change?: (failed: RunRecord, h: ReturnType<typeof harness>) => Promise<void> | void,
+  ) =>
+    h2ReviewAttach(async (_row, failed, _findings, h) => {
+      const started = NOW - minutesToMs(8);
+      const events: RunEvent[] = [
+        { type: "input", messageId: "m1", text: "review the pushed head" },
+        { type: "run_meta", agent: "review" },
+        { type: "span_start", spanId: "request", name: "request" },
+        { type: "span_start", spanId: "receive", name: "slack.receive" },
+        { type: "span_start", spanId: "admission", name: "dispatch.admission" },
+        {
+          type: "span_end",
+          spanId: "admission",
+          name: "dispatch.admission",
+          startedAt: started,
+          durationMs: 1,
+          status: "ok",
+        },
+        { type: "span_start", spanId: "memory", name: "dispatch.memory_read" },
+        { type: "span_start", spanId: "track", name: "dispatch.track" },
+        { type: "span_start", spanId: "card", name: "post.card_close" },
+        { type: "context", text: "earlier review context" },
+        { type: "coordinator_tag", parentInstanceId: INSTANCE.id, unit: "U12" },
+        { type: "context", text: "earlier findings context" },
+        { type: "run_state", state: "admitted", since: started, bound: NOW },
+        { type: "span_start", spanId: "attach", name: "dispatch.workspace.attach" },
+        {
+          type: "span_end",
+          spanId: "memory",
+          name: "dispatch.memory_read",
+          startedAt: started,
+          durationMs: 1,
+          status: "ok",
+        },
+        {
+          type: "span_end",
+          spanId: "attach",
+          name: "dispatch.workspace.attach",
+          startedAt: started,
+          durationMs: 1,
+          status: "error",
+        },
+        { type: "refusal", code: "setup_failed", cause: "system", text: "workspace unavailable" },
+        { type: "span_end", spanId: "card", name: "post.card_close", startedAt: started, durationMs: 1, status: "ok" },
+        {
+          type: "span_end",
+          spanId: "track",
+          name: "dispatch.track",
+          startedAt: started,
+          durationMs: 1,
+          status: "error",
+        },
+        { type: "span_end", spanId: "receive", name: "slack.receive", startedAt: started, durationMs: 1, status: "ok" },
+        { type: "span_end", spanId: "request", name: "request", startedAt: started, durationMs: 1, status: "ok" },
+      ];
+      failed.events = events.map((event, index) => ({ ...event, seq: index + 1 }));
+      failed.eventCount = failed.events.length;
+      failed.storedEventCount = failed.events.length;
+      failed.liveState = { state: "admitted", since: started, bound: NOW };
+      await change?.(failed, h);
+    });
+
+  it("recovers a zero-work admitted review attach refusal with concurrent memory read on the original H2 head", async () => {
+    const { h, row, fixed } = await admittedReviewAttach();
+    const events = (await h.store.get("run-h2-attach"))!.events;
+    expect(events).toHaveLength(21);
+    expect(events.map((event) => event.seq)).toEqual(Array.from({ length: 21 }, (_, index) => index + 1));
+    expect(events.slice(12, 17).map((event) => event.type)).toEqual([
+      "run_state",
+      "span_start",
+      "span_end",
+      "span_end",
+      "refusal",
+    ]);
+    expect(await callRecovery(h)).toMatchObject({
+      status: 200,
+      body: { diagnostic: { reviewStart: "verified_no_work", runId: "run-h2-attach" } },
+    });
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    expect(claimed?.recovery).toMatchObject({
+      kind: "review",
+      round: 2,
+      expectedHeadSha: fixed,
+      accounting: {
+        spendUsd: 0.5,
+        children: expect.arrayContaining([expect.objectContaining({ runId: "run-h2-attach", usd: 0 })]),
+      },
+    });
+    expect(claimed?.rounds).toEqual(row.rounds);
+    expect(claimed?.publication).toEqual(row.publication);
+    expect(h.recoveries).toHaveLength(1);
+    expect(h.dispatched).toEqual([]);
+  });
+
+  it.each([
+    "missing attach start",
+    "missing attach error",
+    "mismatched attach span",
+    "missing refusal",
+    "wrong refusal cause",
+    "wrong refusal code",
+    "missing memory end",
+    "mismatched memory span",
+    "preparing state",
+    "model activity",
+    "tool activity",
+    "post-admission context",
+    "second refusal",
+    "truncated history",
+    "missing event",
+    "broken sequence",
+    "foreign final identity",
+    "moved head",
+    "moved ref",
+    "missing cleanup start",
+    "priced activity",
+    "foreign final state",
+  ])("refuses admitted review attach evidence with %s before any claim", async (scenario) => {
+    const { h, row } = await admittedReviewAttach(async (failed, harness) => {
+      const events = failed.events;
+      if (scenario === "missing attach start") events.splice(13, 1);
+      if (scenario === "missing attach error")
+        events.splice(
+          events.findIndex((event) => event.type === "span_end" && event.spanId === "attach"),
+          1,
+        );
+      if (scenario === "mismatched attach span") events[15] = { ...events[15], spanId: "other" } as RunEvent;
+      if (scenario === "missing refusal")
+        events.splice(
+          events.findIndex((event) => event.type === "refusal"),
+          1,
+        );
+      if (scenario === "wrong refusal cause" || scenario === "wrong refusal code") {
+        const refusal = events[16];
+        if (refusal?.type === "refusal") {
+          if (scenario === "wrong refusal cause") refusal.cause = "workspace";
+          else refusal.code = "other";
+        }
+      }
+      if (scenario === "missing memory end") events.splice(14, 1);
+      if (scenario === "mismatched memory span") events[14] = { ...events[14], spanId: "other" } as RunEvent;
+      if (scenario === "preparing state")
+        events[12] = { type: "run_state", state: "preparing", since: NOW, bound: NOW };
+      if (scenario === "model activity") events[14] = { type: "span_start", spanId: "model", name: "model.turn" };
+      if (scenario === "tool activity") events[14] = { type: "tool_call", tool: "bash", summary: "git status" };
+      if (scenario === "post-admission context") events[14] = { type: "context", text: "model context" };
+      if (scenario === "second refusal")
+        events[18] = { type: "refusal", code: "setup_failed", cause: "system", text: "again" };
+      if (scenario === "truncated history") failed.truncated = true;
+      if (scenario === "missing event") failed.storedEventCount = 20;
+      if (scenario === "broken sequence") events[14] = { ...events[14], seq: 99 };
+      if (scenario === "moved head") harness.deps.fetchPrFacts = async () => exactRecoveryFacts("9".repeat(40));
+      if (scenario === "moved ref") harness.deps.fetchBranchHeadSha = async () => "9".repeat(40);
+      if (scenario === "missing cleanup start") events.splice(8, 1);
+      if (scenario === "priced activity")
+        failed.usage = {
+          turns: 1,
+          byModel: {
+            "test/historical": {
+              turns: 1,
+              inputTokens: 1,
+              outputTokens: 1,
+              cacheReadTokens: 0,
+              cacheWriteTokens: 0,
+              usd: 0.01,
+            },
+          },
+        };
+      if (!["missing event", "broken sequence"].includes(scenario)) {
+        failed.events = events.map((event, index) => ({ ...event, seq: index + 1 }));
+        if (scenario !== "truncated history") {
+          failed.eventCount = failed.events.length;
+          failed.storedEventCount = failed.events.length;
+        }
+      }
+    });
+    if (scenario === "foreign final identity" || scenario === "foreign final state") {
+      const getRun = h.deps.runs.getRun.bind(h.deps.runs);
+      vi.spyOn(h.deps.runs, "getRun").mockImplementation(async (id, opts) => {
+        const result = await getRun(id, opts);
+        return id === "run-h2-attach" && opts?.requireFinalRecord === true && result.ok
+          ? {
+              ...result,
+              value: {
+                ...result.value,
+                ...(scenario === "foreign final identity"
+                  ? { userId: "slack:OTHER" }
+                  : { liveState: { state: "preparing" as const, since: NOW, bound: NOW } }),
+              },
+            }
+          : result;
+      });
+    }
+    expect((await callRecovery(h)).status, scenario).toBe(409);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect(h.recoveries).toEqual([]);
+    expect(h.dispatched).toEqual([]);
+  });
+
   it("recovers a failed H2 review attach after repeated same-key starts and an H1 findings push", async () => {
     const { h, row, fixed } = await h2ReviewAttach();
     expect(await callRecovery(h)).toMatchObject({

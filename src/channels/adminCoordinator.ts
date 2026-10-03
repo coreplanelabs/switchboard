@@ -3017,7 +3017,7 @@ async function verifiedReviewAttachRefusal(
     run.agent !== "review" ||
     !run.finished ||
     run.status !== "failed" ||
-    run.liveState?.state !== "preparing" ||
+    (run.liveState?.state !== "preparing" && run.liveState?.state !== "admitted") ||
     run.usage?.turns !== 0 ||
     run.usage.byModel === undefined ||
     Object.keys(run.usage.byModel).length !== 0 ||
@@ -3055,6 +3055,72 @@ async function verifiedReviewAttachRefusal(
     ) ?? -1;
   const start = events?.[attachStart];
   const end = events?.[attachEnd];
+  const admitted = events?.findIndex((event) => event.type === "run_state" && event.state === "admitted") ?? -1;
+  const memoryStart =
+    events?.findIndex((event) => event.type === "span_start" && event.name === "dispatch.memory_read") ?? -1;
+  const memoryEnd =
+    events?.findIndex((event) => event.type === "span_end" && event.name === "dispatch.memory_read") ?? -1;
+  const systemRefusal =
+    events?.findIndex(
+      (event) => event.type === "refusal" && event.code === "setup_failed" && event.cause === "system",
+    ) ?? -1;
+  const memoryOpened = events?.[memoryStart];
+  const memoryClosed = events?.[memoryEnd];
+  // The memory read may finish while attach is in flight. Only already-opened
+  // setup spans may close after the system refusal; no new work may start.
+  const admittedAttachRefusal =
+    run.liveState?.state === "admitted" &&
+    child?.liveState?.state === "admitted" &&
+    preparing < 0 &&
+    admitted >= 0 &&
+    events?.filter((event) => event.type === "run_state").length === 1 &&
+    memoryStart >= 0 &&
+    memoryStart < admitted &&
+    attachStart === admitted + 1 &&
+    memoryEnd === attachStart + 1 &&
+    attachEnd === memoryEnd + 1 &&
+    systemRefusal === attachEnd + 1 &&
+    memoryOpened?.type === "span_start" &&
+    memoryClosed?.type === "span_end" &&
+    memoryOpened.spanId === memoryClosed.spanId &&
+    events?.every((event, index) => {
+      if (event.seq !== index + 1) return false;
+      if (index < admitted)
+        return (
+          event.type === "input" ||
+          event.type === "run_meta" ||
+          event.type === "coordinator_tag" ||
+          event.type === "context" ||
+          ((event.type === "span_start" || event.type === "span_end") &&
+            (event.name === "request" ||
+              event.name === "slack.receive" ||
+              event.name === "post.card_close" ||
+              event.name === "post.reply" ||
+              (event.name.startsWith("dispatch.") && event.name !== "dispatch.workspace.attach")))
+        );
+      if (index === admitted) return event.type === "run_state" && event.state === "admitted";
+      if (index === attachStart || index === memoryEnd || index === attachEnd) return true;
+      if (index === systemRefusal) return event.type === "refusal";
+      if (event.type !== "span_end" || index < systemRefusal) return false;
+      if (
+        event.name !== "request" &&
+        event.name !== "slack.receive" &&
+        event.name !== "post.card_close" &&
+        event.name !== "post.reply" &&
+        (!event.name.startsWith("dispatch.") ||
+          event.name === "dispatch.workspace.attach" ||
+          event.name === "dispatch.memory_read")
+      )
+        return false;
+      const opened = events.findIndex(
+        (prior) => prior.type === "span_start" && prior.spanId === event.spanId && prior.name === event.name,
+      );
+      return (
+        opened >= 0 &&
+        opened < admitted &&
+        events.filter((prior) => prior.type === "span_end" && prior.spanId === event.spanId).length === 1
+      );
+    }) === true;
   return child !== undefined &&
     child.id === run.id &&
     child.idempotencyKey === run.idempotencyKey &&
@@ -3066,7 +3132,7 @@ async function verifiedReviewAttachRefusal(
     child.startedAt === run.startedAt &&
     child.finishedAt === run.finishedAt &&
     child.status === "failed" &&
-    child.liveState?.state === "preparing" &&
+    (child.liveState?.state === "preparing" || child.liveState?.state === "admitted") &&
     child.truncated === false &&
     child.eventCount === run.eventCount &&
     child.storedEventCount === run.eventCount &&
@@ -3084,34 +3150,37 @@ async function verifiedReviewAttachRefusal(
     child.dispositions === undefined &&
     child.doorPublicationPending === undefined &&
     child.lease === undefined &&
-    preparing >= 0 &&
-    attachStart > preparing &&
-    attachEnd > attachStart &&
-    refusal > attachEnd &&
+    (admittedAttachRefusal ||
+      (run.liveState?.state === "preparing" &&
+        preparing >= 0 &&
+        attachStart > preparing &&
+        attachEnd > attachStart &&
+        refusal > attachEnd)) &&
     start?.type === "span_start" &&
     end?.type === "span_end" &&
     start.spanId === end.spanId &&
     events.filter((event) => event.type === "refusal").length === 1 &&
     events.filter((event) => event.type === "run_meta" && event.agent === "review").length === 1 &&
-    events.every(
-      (event, index) =>
-        event.seq === index + 1 &&
-        (event.type === "input" ||
-          event.type === "run_meta" ||
-          (event.type === "coordinator_tag" && index < preparing) ||
-          (event.type === "context" && index < preparing) ||
-          (event.type === "refusal" && index === refusal) ||
-          (event.type === "run_state" && ["admitted", "waiting_repository", "preparing"].includes(event.state)) ||
-          ((event.type === "span_start" || event.type === "span_end") &&
-            (index === attachStart ||
-              index === attachEnd ||
-              (index < preparing &&
-                (event.name === "request" ||
-                  event.name === "slack.receive" ||
-                  event.name === "post.card_close" ||
-                  event.name === "post.reply" ||
-                  event.name.startsWith("dispatch.")))))),
-    )
+    (admittedAttachRefusal ||
+      events.every(
+        (event, index) =>
+          event.seq === index + 1 &&
+          (event.type === "input" ||
+            event.type === "run_meta" ||
+            (event.type === "coordinator_tag" && index < preparing) ||
+            (event.type === "context" && index < preparing) ||
+            (event.type === "refusal" && index === refusal) ||
+            (event.type === "run_state" && ["admitted", "waiting_repository", "preparing"].includes(event.state)) ||
+            ((event.type === "span_start" || event.type === "span_end") &&
+              (index === attachStart ||
+                index === attachEnd ||
+                (index < preparing &&
+                  (event.name === "request" ||
+                    event.name === "slack.receive" ||
+                    event.name === "post.card_close" ||
+                    event.name === "post.reply" ||
+                    event.name.startsWith("dispatch.")))))),
+      ))
     ? "verified"
     : "invalid";
 }
