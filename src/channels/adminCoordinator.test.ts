@@ -14340,6 +14340,424 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(claimed!.recovery).toMatchObject({ kind: "review", round: 2, findingsRunId: "run-original-findings" });
   });
 
+  const h2ReviewAttach = async (
+    change?: (
+      row: CoordinatorUnit,
+      failed: RunRecord,
+      findings: RunRecord,
+      h: ReturnType<typeof harness>,
+    ) => Promise<void> | void,
+  ) => {
+    const fixed = "8".repeat(40);
+    const h = harness({ prFacts: exactRecoveryFacts(fixed), branchHead: fixed });
+    await h.instances.put({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 2 } });
+    const row = requestChangesRow();
+    row.publication = { ...publication, expectedHeadSha: fixed };
+    row.lastPush = fixed;
+    row.rounds.push({ index: 1, agent: "coding", outcome: "started", at: NOW - minutesToMs(14) });
+    row.rounds.push({ index: 1, agent: "coding", outcome: "pr_opened", at: NOW - minutesToMs(9) });
+    row.rounds.push(
+      ...Array.from({ length: 13 }, (_, index) => ({
+        index: 2,
+        agent: "review" as const,
+        outcome: "started" as const,
+        at: NOW - minutesToMs(8) + index * 10_000,
+      })),
+    );
+    row.ending = {
+      kind: "failed",
+      cause: "step_threw",
+      step: "U12/note/7",
+      round: 2,
+      report: "review workspace attach failed",
+      at: NOW - minutesToMs(5),
+    };
+    const findings = completedOriginalFindings(fixed, {
+      dispositions: [{ findingId: "F1", disposition: "fixed", note: "kept the fence" }],
+      events: [
+        { type: "input", messageId: "m1", text: "address the posted findings", seq: 1 },
+        { type: "answer", text: "the fix is pushed", seq: 2 },
+        {
+          type: "pr_description",
+          description: { title: "fix(ship): preserve the fence", tldr: "Fixed." },
+          seq: 3,
+        } as RunEvent,
+      ],
+      eventCount: 3,
+      storedEventCount: 3,
+    });
+    const failed = failedBeforeWork({
+      id: "run-h2-attach",
+      idempotencyKey: `${INSTANCE.id}:U12/2/review`,
+      agent: "review",
+      startedAt: NOW - minutesToMs(8),
+      finishedAt: NOW - minutesToMs(7),
+      events: failedBeforeWork().events.map((event) =>
+        event.type === "run_meta" ? { ...event, agent: "review" as const } : event,
+      ),
+    });
+    await change?.(row, failed, findings, h);
+    await h.instances.putUnits([row]);
+    await h.store.put(reviewRecord());
+    await h.store.put(findings);
+    await h.store.put(failed);
+    return { h, row, fixed };
+  };
+
+  it("recovers a failed H2 review attach after repeated same-key starts and an H1 findings push", async () => {
+    const { h, row, fixed } = await h2ReviewAttach();
+    expect(await callRecovery(h)).toMatchObject({
+      status: 200,
+      body: {
+        outcome: "started",
+        diagnostic: { reviewStart: "verified_no_work", runId: "run-h2-attach", key: `${INSTANCE.id}:U12/2/review` },
+      },
+    });
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    expect(claimed?.recovery).toMatchObject({
+      kind: "review",
+      round: 2,
+      expectedHeadSha: fixed,
+      remainingMs: minutesToMs(60),
+      reviewRunId: "run-original-review",
+      findingsRunId: "run-original-findings",
+      accounting: {
+        spendUsd: 0.5,
+        grant: { renewals: 0, costCapUsd: 2 },
+        renewalsSpent: 0,
+        children: expect.arrayContaining([{ runId: "run-h2-attach", key: `${INSTANCE.id}:U12/2/review`, usd: 0 }]),
+      },
+    });
+    expect(claimed?.rounds).toEqual(row.rounds);
+    expect(claimed?.publication).toEqual(row.publication);
+    expect(claimed?.lastPush).toBe(fixed);
+    expect(h.recoveries).toHaveLength(1);
+    expect(h.dispatched).toEqual([]);
+    expect(h.opens).toEqual([]);
+    expect(h.branches).toEqual([]);
+  });
+
+  it.each(["late review", "late coding", "late completed push", "late live push", "late remote push"])(
+    "refuses H2 review-start recovery when %s appears after the initial listing",
+    async (scenario) => {
+      const { h, row, fixed } = await h2ReviewAttach();
+      h.deps.fetchPrFacts = async () => {
+        if (scenario === "late review" || scenario === "late coding" || scenario === "late live push") {
+          const child = h.registry.create("late child", {
+            idempotencyKey: `${INSTANCE.id}:U12/2/${scenario === "late coding" ? "findings" : "review"}/a2`,
+            agent: scenario === "late coding" ? "coding" : "review",
+            parentInstanceId: INSTANCE.id,
+            repo: INSTANCE.repo,
+            channelId: INSTANCE.channelId,
+            userId: INSTANCE.userId,
+            threadKey: INSTANCE.threadKey,
+          });
+          if (scenario === "late live push")
+            h.registry.publish(child.id, {
+              type: "pushed_head",
+              ref: INSTANCE.branch,
+              sha: "9".repeat(40),
+              by: "push",
+            });
+        }
+        if (scenario === "late completed push")
+          await h.store.put(
+            completedOriginalFindings("9".repeat(40), {
+              id: "run-late-push",
+              idempotencyKey: `${INSTANCE.id}:U12/2/findings/a2`,
+              startedAt: NOW - minutesToMs(4),
+              finishedAt: NOW - minutesToMs(3),
+            }),
+          );
+        return exactRecoveryFacts(fixed);
+      };
+      if (scenario === "late remote push" || scenario === "late live push")
+        h.deps.fetchBranchHeadSha = async () => "9".repeat(40);
+      expect((await callRecovery(h)).status).toBe(409);
+      expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+      expect(h.recoveries).toEqual([]);
+    },
+  );
+
+  it.each([
+    ["throws", "history_incomplete"],
+    ["unavailable store", "history_incomplete"],
+    ["unavailable ledger", "history_incomplete"],
+    ["incomplete page", "history_incomplete"],
+    ["full page", "history_incomplete"],
+    ["changed snapshot", "history_changed"],
+  ])("refuses H2 review-start recovery when the claim history %s", async (scenario, reason) => {
+    const { h, row } = await h2ReviewAttach();
+    const listRuns = h.deps.runs.listRuns.bind(h.deps.runs);
+    let reads = 0;
+    vi.spyOn(h.deps.runs, "listRuns").mockImplementation(async (query) => {
+      const listing = await listRuns(query);
+      if (++reads === 1) return listing;
+      if (scenario === "throws") throw new Error("history read failed");
+      if (scenario === "unavailable store") return { ...listing, storeUnavailable: true };
+      if (scenario === "unavailable ledger") return { ...listing, ledgerUnavailable: true };
+      if (scenario === "incomplete page") return { ...listing, nextBefore: { finishedAt: NOW, id: "run-hidden" } };
+      if (scenario === "full page") return { ...listing, runs: Array(200).fill(listing.runs[0]!) };
+      return { ...listing, runs: listing.runs.slice(1) };
+    });
+    expect(await callRecovery(h)).toMatchObject({
+      status: 409,
+      body: { error: "recovery_evidence_incomplete", diagnostic: { reviewStart: "evidence_unavailable", reason } },
+    });
+    expect(reads).toBe(2);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect(h.recoveries).toEqual([]);
+  });
+
+  it.each(["throws", "missing head"])("refuses H2 review-start recovery when the claim ref %s", async (scenario) => {
+    const { h, row } = await h2ReviewAttach();
+    let reads = 0;
+    h.deps.fetchBranchHeadSha = async () => {
+      reads++;
+      if (scenario === "throws") throw new Error("ref read failed");
+      return undefined;
+    };
+    expect(await callRecovery(h)).toMatchObject({
+      status: 409,
+      body: {
+        error: "recovery_ref_unavailable",
+        diagnostic: { reviewStart: "evidence_unavailable", reason: "ref_unavailable" },
+      },
+    });
+    expect(reads).toBe(1);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect(h.recoveries).toEqual([]);
+  });
+
+  it.each([
+    ["closed", "recovery_facts_mismatch"],
+    ["merged", "recovery_facts_mismatch"],
+    ["changed base", "recovery_facts_mismatch"],
+    ["changed head ref", "recovery_facts_mismatch"],
+    ["changed head sha", "recovery_facts_mismatch"],
+    ["changed verified head", "recovery_facts_mismatch"],
+    ["changed verified ref", "recovery_facts_mismatch"],
+    ["changed head repo", "recovery_facts_mismatch"],
+    ["foreign head", "recovery_facts_mismatch"],
+    ["deleted head", "recovery_facts_mismatch"],
+    ["missing verified binding", "recovery_facts_mismatch"],
+    ["missing facts", "recovery_facts_mismatch"],
+    ["failed facts read", "recovery_facts_mismatch"],
+  ])("refuses H2 review-start recovery when claim PR facts are %s", async (scenario, error) => {
+    const { h, row, fixed } = await h2ReviewAttach();
+    let reads = 0;
+    let remoteReads = 0;
+    h.deps.fetchBranchHeadSha = async () => {
+      remoteReads++;
+      return fixed;
+    };
+    h.deps.fetchPrFacts = async () => {
+      if (++reads === 1) return exactRecoveryFacts(fixed);
+      expect(remoteReads).toBe(1);
+      if (scenario === "failed facts read") throw new Error("GitHub unavailable");
+      if (scenario === "missing facts") return undefined;
+      const facts = exactRecoveryFacts(fixed);
+      if (scenario === "closed") return { ...facts, state: "closed" };
+      if (scenario === "merged") return { ...facts, state: "closed", mergedAt: "2026-01-01T00:00:00Z" };
+      if (scenario === "changed base") return { ...facts, baseRef: "release" };
+      if (scenario === "changed head ref") return { ...facts, headRef: "plan/other/unit" };
+      if (scenario === "changed head sha") return { ...facts, headSha: "9".repeat(40) };
+      if (scenario === "changed verified head")
+        return { ...facts, verifiedHead: { ...facts.verifiedHead!, sha: "9".repeat(40) } };
+      if (scenario === "changed verified ref")
+        return { ...facts, verifiedHead: { ...facts.verifiedHead!, ref: "plan/other/unit" } };
+      if (scenario === "changed head repo")
+        return { ...facts, verifiedHead: { ...facts.verifiedHead!, repo: "acme/other" } };
+      if (scenario === "foreign head") return { ...facts, sameRepoHead: false };
+      if (scenario === "deleted head") return { ...facts, headBranchExists: false };
+      return { ...facts, verifiedHead: undefined };
+    };
+    expect(await callRecovery(h)).toMatchObject({
+      status: 409,
+      body: {
+        error,
+        ...(["missing facts", "failed facts read", "missing verified binding"].includes(scenario)
+          ? {
+              diagnostic: {
+                reviewStart: "evidence_unavailable",
+                reason: scenario === "missing verified binding" ? "pr_binding_unverified" : "pr_facts_unavailable",
+              },
+            }
+          : {}),
+      },
+    });
+    expect(reads).toBe(2);
+    expect(remoteReads).toBe(1);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect(h.recoveries).toEqual([]);
+  });
+
+  it.each([
+    "missing push",
+    "changed push ref",
+    "changed push head",
+    "changed requester",
+    "changed repository",
+    "changed thread",
+    "changed finish time",
+    "changed PR",
+    "higher final spend",
+  ])("refuses final H2 findings with %s against the listing", async (scenario) => {
+    const { h, row } = await h2ReviewAttach();
+    const getRun = h.deps.runs.getRun.bind(h.deps.runs);
+    vi.spyOn(h.deps.runs, "getRun").mockImplementation(async (id, opts) => {
+      const result = await getRun(id, opts);
+      if (id !== "run-original-findings" || opts?.requireFinalRecord !== true || !result.ok) return result;
+      const value = { ...result.value };
+      if (scenario === "missing push") value.pushed = undefined;
+      if (scenario === "changed push ref") value.pushed = [{ ref: "plan/other/unit", sha: value.headSha!, by: "push" }];
+      if (scenario === "changed push head") value.pushed = [{ ref: INSTANCE.branch, sha: "9".repeat(40), by: "push" }];
+      if (scenario === "changed requester") value.userId = "slack:OTHER";
+      if (scenario === "changed repository") value.repo = "acme/other";
+      if (scenario === "changed thread") value.threadKey = "slack:other";
+      if (scenario === "changed finish time") value.finishedAt = NOW - minutesToMs(9);
+      if (scenario === "changed PR") value.pr = { number: 99, url: "https://github.com/acme/api/pull/99" };
+      if (scenario === "higher final spend")
+        value.usage = {
+          turns: 1,
+          byModel: {
+            "test/historical": {
+              turns: 1,
+              inputTokens: 10,
+              outputTokens: 10,
+              cacheReadTokens: 0,
+              cacheWriteTokens: 0,
+              usd: 1.75,
+            },
+          },
+        };
+      return { ...result, value };
+    });
+    expect((await callRecovery(h)).status).toBe(409);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+    expect(h.recoveries).toEqual([]);
+  });
+
+  it.each([
+    "model turn",
+    "tool call",
+    "verdict",
+    "review post",
+    "push",
+    "head",
+    "rival child",
+    "live child",
+    "changed head",
+    "foreign ref",
+    "missing findings push",
+    "different round key",
+    "incomplete history",
+    "unavailable final record",
+    "review after ending",
+    "different note round",
+    "missing disposition",
+    "missing description",
+    "unavailable findings record",
+    "storage unavailable",
+    "review record storage error",
+    "findings record storage error",
+  ])("refuses H2 review-start recovery with %s", async (scenario) => {
+    const { h, row } = await h2ReviewAttach(async (unit, failed, findings, harness) => {
+      if (scenario === "model turn" || scenario === "tool call") {
+        failed.events[20] =
+          scenario === "model turn"
+            ? { type: "span_start", name: "model.turn", spanId: "model", seq: 21 }
+            : { type: "tool_call", tool: "bash", summary: "git status", seq: 21 };
+      }
+      if (scenario === "verdict") failed.verdict = { verdict: "approve", summary: "unexpected", findings: [] };
+      if (scenario === "review post")
+        failed.reviewPost = {
+          posted: true,
+          target: { repo: INSTANCE.repo, number: PR.number },
+          head: "8".repeat(40),
+          verdict: "approve",
+        };
+      if (scenario === "push") failed.pushed = [{ ref: INSTANCE.branch, sha: "8".repeat(40), by: "push" }];
+      if (scenario === "head") failed.headSha = "8".repeat(40);
+      if (scenario === "changed head") harness.deps.fetchPrFacts = async () => exactRecoveryFacts("9".repeat(40));
+      if (scenario === "foreign ref")
+        harness.deps.fetchPrFacts = async () => ({
+          ...exactRecoveryFacts("8".repeat(40)),
+          headRef: "plan/foreign/unit",
+        });
+      if (scenario === "missing findings push") findings.pushed = undefined;
+      if (scenario === "missing disposition") findings.dispositions = undefined;
+      if (scenario === "missing description") findings.events[2] = { type: "answer", text: "no description", seq: 3 };
+      if (scenario === "different round key") failed.idempotencyKey = `${INSTANCE.id}:U12/3/review`;
+      if (scenario === "incomplete history") failed.storedEventCount = failed.eventCount - 1;
+      if (scenario === "review after ending") failed.finishedAt = NOW + 1;
+      if (scenario === "different note round") unit.rounds.at(-1)!.index = 3;
+      if (scenario === "rival child")
+        await harness.store.put(
+          failedBeforeWork({
+            id: "run-rival",
+            agent: "review",
+            idempotencyKey: `${INSTANCE.id}:U12/2/review/a2`,
+            startedAt: NOW - minutesToMs(4),
+            finishedAt: NOW - minutesToMs(3),
+          }),
+        );
+      if (scenario === "live child")
+        harness.registry.create("competing review", {
+          idempotencyKey: `${INSTANCE.id}:U12/2/review/a2`,
+          agent: "review",
+          parentInstanceId: INSTANCE.id,
+          repo: INSTANCE.repo,
+          channelId: INSTANCE.channelId,
+          userId: INSTANCE.userId,
+          threadKey: INSTANCE.threadKey,
+        });
+    });
+    if (scenario === "unavailable final record" || scenario === "unavailable findings record") {
+      const getRun = h.deps.runs.getRun.bind(h.deps.runs);
+      vi.spyOn(h.deps.runs, "getRun").mockImplementation(async (id, opts) =>
+        id === (scenario === "unavailable final record" ? "run-h2-attach" : "run-original-findings")
+          ? { ok: false, error: "not_found" }
+          : getRun(id, opts),
+      );
+    }
+    if (scenario === "storage unavailable") {
+      const list = h.deps.runs.listRuns.bind(h.deps.runs);
+      vi.spyOn(h.deps.runs, "listRuns").mockImplementation(async (query) => ({
+        ...(await list(query)),
+        storeUnavailable: true,
+      }));
+    }
+    if (scenario === "review record storage error" || scenario === "findings record storage error") {
+      const getRun = h.deps.runs.getRun.bind(h.deps.runs);
+      vi.spyOn(h.deps.runs, "getRun").mockImplementation(async (id, opts) => {
+        if (id === (scenario === "review record storage error" ? "run-h2-attach" : "run-original-findings"))
+          throw new Error("store unavailable");
+        return getRun(id, opts);
+      });
+    }
+    const response = await callRecovery(h);
+    expect(response.status, scenario).toBe(scenario.includes("storage error") ? 503 : 409);
+    if (
+      [
+        "unavailable final record",
+        "model turn",
+        "storage unavailable",
+        "review record storage error",
+        "findings record storage error",
+      ].includes(scenario)
+    )
+      expect(response.body).toMatchObject({ diagnostic: { reviewStart: "evidence_unavailable" } });
+    if (scenario.includes("storage error"))
+      expect(response.body).toMatchObject({ error: "recovery_history_unavailable" });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+    expect(h.recoveries).toEqual([]);
+    expect(h.dispatched).toEqual([]);
+  });
+
   it("refuses an older completed boundary when a later review already started", async () => {
     const h = harness({
       prFacts: {
