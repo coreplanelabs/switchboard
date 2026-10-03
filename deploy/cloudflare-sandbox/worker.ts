@@ -955,16 +955,22 @@ export class SwitchboardSandbox extends Sandbox<Env> {
 
   /** Only a Worker-allocated fresh identity may receive an effect credential.
    * The container runs the image's fixed Git and has no model filesystem. */
-  async publishControlled(body: unknown, base?: string): Promise<{ state: "accepted" | "refused" | "unknown" }> {
+  async publishControlled(
+    body: unknown,
+    base?: string,
+  ): Promise<
+    | { state: "accepted" | "unknown" }
+    | { state: "refused"; phase: "cold-publication-transfer-refused" | "cold-publication-validation-refused" }
+  > {
     const parsed = parseColdPublication(body);
-    if (!parsed) return { state: "refused" };
+    if (!parsed) return { state: "refused", phase: "cold-publication-transfer-refused" };
     return this.idle.served(async () => {
       try {
         const written = await this.writeFile("/workspace/transfer.pack", parsed.pack, { encoding: "base64" });
-        if (!written.success) return { state: "refused" };
+        if (!written.success) return { state: "refused", phase: "cold-publication-transfer-refused" };
         const plan = controllerPublicationPlan(parsed.input, base);
         const prepared = await this.runRoot(["bash", "-c", plan.prepareCommand], 125_000, plan.prepareEnv);
-        if (prepared.exitCode !== 0) return { state: "refused" };
+        if (prepared.exitCode !== 0) return { state: "refused", phase: "cold-publication-validation-refused" };
         // A lost answer or a nonzero Git exit after push may follow an accepted
         // Door write; only the existing durable settlement can decide it.
         const pushed = await this.runRoot(["bash", "-c", plan.pushCommand], 75_000, plan.env);
@@ -1262,7 +1268,8 @@ export default {
           if (!pack || !parseColdPublication({ ...input, pack })) {
             answer = json(
               {
-                error:
+                error: "publication refused by cold controller",
+                phase:
                   base || input.old
                     ? "cold-publication-graph-unavailable-or-over-limit"
                     : "cold-publication-base-unavailable-or-over-limit",
@@ -1274,15 +1281,9 @@ export default {
             answer =
               result.state === "accepted"
                 ? json({ stdout: "", stderr: "", exitCode: 0, truncated: false })
-                : json(
-                    {
-                      error:
-                        result.state === "refused"
-                          ? "publication refused by cold controller"
-                          : "cold publication outcome unknown",
-                    },
-                    result.state === "refused" ? 409 : 503,
-                  );
+                : result.state === "refused"
+                  ? json({ error: "publication refused by cold controller", phase: result.phase }, 409)
+                  : json({ error: "cold publication outcome unknown" }, 503);
           }
         } catch {
           // An effect may have run. No SDK exception or command output crosses

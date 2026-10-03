@@ -655,19 +655,53 @@ describe("isolated cold publication plan", () => {
     await expect(new CloudflareSandboxExecutor(opts).publishBranchResult!(input)).rejects.toThrow(/outcome unknown/);
     expect(fetch).toHaveBeenCalledOnce();
   });
-  it("bounds refusals to fixed text even when the Worker returns credential bytes", async () => {
+  it.each([
+    "cold-publication-base-unavailable-or-over-limit",
+    "cold-publication-graph-unavailable-or-over-limit",
+    "cold-publication-transfer-refused",
+    "cold-publication-validation-refused",
+  ])("preserves only the fixed pre-effect 409 phase %s without Worker text", async (phase) => {
     const fetch = vi.fn(
-      async () => new Response(JSON.stringify({ error: "synthetic-effect-secret" }), { status: 409 }),
+      async () =>
+        new Response(JSON.stringify({ error: "publication refused by cold controller", phase }), { status: 409 }),
     );
     vi.stubGlobal("fetch", fetch);
-    const result = await new CloudflareSandboxExecutor(opts).publishBranchResult!(input);
-    expect(result).toEqual({
+    expect(await new CloudflareSandboxExecutor(opts).publishBranchResult!(input)).toEqual({
       stdout: "",
-      stderr: "publication refused by cold controller",
+      stderr: `publication refused by cold controller (phase: ${phase})`,
       exitCode: 1,
       truncated: false,
     });
-    expect(JSON.stringify(result)).not.toContain(input.bearer);
     expect(fetch).toHaveBeenCalledOnce();
+  });
+  it.each([
+    [409, { error: "synthetic-effect-secret" }],
+    [409, { error: "publication refused by cold controller", phase: "invented-phase" }],
+    [
+      409,
+      { error: "publication refused by cold controller", phase: "cold-publication-validation-refused", secret: "x" },
+    ],
+    [400, { error: "publication refused by cold controller", phase: "cold-publication-validation-refused" }],
+    [503, { error: "publication refused by cold controller", phase: "cold-publication-validation-refused" }],
+  ])("treats an untrusted %s publication answer as unknown, not a refusal", async (status, body) => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify(body), { status }));
+    vi.stubGlobal("fetch", fetch);
+    await expect(new CloudflareSandboxExecutor(opts).publishBranchResult!(input)).rejects.toThrow(/outcome unknown/);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+  it.each(["not-json", "x".repeat(2049)])("a malformed 409 body stays unknown with no replay", async (body) => {
+    const fetch = vi.fn(async () => new Response(body, { status: 409 }));
+    vi.stubGlobal("fetch", fetch);
+    await expect(new CloudflareSandboxExecutor(opts).publishBranchResult!(input)).rejects.toThrow(/outcome unknown/);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+  it("the Worker sends only fixed pre-effect 409 phase codes, never SDK output", () => {
+    const worker = readFileSync("deploy/cloudflare-sandbox/worker.ts", "utf8");
+    expect(worker).toContain('phase: "cold-publication-transfer-refused"');
+    expect(worker).toContain('phase: "cold-publication-validation-refused"');
+    expect(worker).toContain('"cold-publication-base-unavailable-or-over-limit"');
+    expect(worker).toContain('"cold-publication-graph-unavailable-or-over-limit"');
+    expect(worker).toContain('json({ error: "publication refused by cold controller", phase: result.phase }, 409)');
+    expect(worker).not.toMatch(/phase:\s*(?:prepared|written|pushed)\./);
   });
 });
