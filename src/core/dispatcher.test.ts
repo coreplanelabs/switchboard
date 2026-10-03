@@ -11904,6 +11904,51 @@ workspaceDir: __WORKDIR__
     }
   });
 
+  it("routes a single PR Ship request from the private main DM to review preflight", async () => {
+    const yaml =
+      SHIP_OPERATOR_YAML.replace(
+        "general: anthropic/general-model",
+        "general: anthropic/general-model\n    orchestrator: anthropic/general-model",
+      ) + 'channels:\n  "slack:DALICE": { agent: orchestrator }\n';
+    const { deps, instances, created, provider } = shipDeps(yaml);
+    deps.resolveRepoContext = vi.fn((_msg, _history, _records, _fallback, _reviewBarePr, target) => {
+      expect(target).toMatchObject({
+        repo: "acme/api",
+        prTarget: { number: 7, source: "request", quote: PR_URL },
+      });
+      return { repo: "acme/api", pr: 7, prFromMessage: true, headSha: HEAD_A, baseRef: "main" };
+    });
+    deps.operatorModel = vi.fn<RouteModel>(async () => ({
+      tool: "ask",
+      input: { text: "Which repository?", proposalSettings: {}, reason: "missed PR route" },
+    }));
+    deps.runRegistry = new RunRegistry({ genId: () => "run-private-ship-review", genToken: () => "tok" });
+    const directAudience = {
+      kind: "slack-unshared-im" as const,
+      channelId: "slack:DALICE",
+      userId: "slack:UADMIN",
+      threadKey: "slack:DALICE:1.0",
+    };
+    const { io } = fakeIO();
+    io.directAudience = () => directAudience;
+    io.verifyDirectAudience = booleanAudienceVerifier(async () => true);
+    await dispatch(
+      deps,
+      {
+        ...msg(`ship ${PR_URL}`, "slack:UADMIN"),
+        channelId: directAudience.channelId,
+        threadKey: directAudience.threadKey,
+        directAudience,
+      },
+      io,
+    );
+    expect(deps.operatorModel).not.toHaveBeenCalled();
+    expect(provider.requests).toEqual([]);
+    expect(created).toHaveLength(1);
+    const { unit } = await handed(instances, "run-private-ship-review");
+    expect(unit).toMatchObject({ resume: { pr: 7, headSha: HEAD_A } });
+  });
+
   it("an explicit Ship review request fails closed if the operator binds another preset", async () => {
     const { deps, instances, created } = shipDeps(SHIP_OPERATOR_YAML);
     deps.operatorModel = vi.fn<RouteModel>(async () => ({

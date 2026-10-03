@@ -1159,6 +1159,9 @@ export async function dispatch(
     const mainDm =
       msg.channelId.startsWith("slack:D") &&
       (mainScopes.user.agent ?? mainScopes.channel.agent ?? deps.config.config.defaults.agent) === "orchestrator";
+    // A named PR Ship request is an action, not a continuation of the main
+    // conversation. Let the operator's exact-target gate route it to Ship.
+    const bareShipPrRequest = typedAgent === undefined && /^ship\s+\S/i.test(msg.text.trimStart()) && !!explicitPr;
     // Exact original-unit operations have their own requester, thread and
     // publication gates. The operator cannot turn one into another action.
     const originalRecoveryCommand = typedAgent === "ship" && namesOriginalUnitRecovery(typed.text);
@@ -1168,7 +1171,7 @@ export async function dispatch(
       parseOriginalUnitAdoptionRequest(typed.text) !== undefined;
     let operatorMode =
       configuredOperator === "on" &&
-      (originalRecoveryCommand || originalAdoptionCommand || (mainDm && typedAgent !== "ship"))
+      (originalRecoveryCommand || originalAdoptionCommand || (mainDm && typedAgent !== "ship" && !bareShipPrRequest))
         ? "off"
         : configuredOperator;
     // The preset an `on` decision binds on the person's own words, with the

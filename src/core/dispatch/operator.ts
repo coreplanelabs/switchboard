@@ -2142,13 +2142,18 @@ function explicitPrDirective(input: OperatorInput): OperatorDecision | undefined
   const openingLine = input.text.split(/\r?\n/, 1)[0]?.trim() ?? "";
   const lineBreak = input.text.indexOf("\n");
   const laterLines = lineBreak < 0 ? "" : input.text.slice(lineBreak + 1);
-  // A stand-alone opening review line is current requester authority. Later
+  // A stand-alone opening PR request is current requester authority. Later
   // lines from an attached App notification are task data, not route authority.
   const naturalReview =
     directives.agent === undefined &&
     /^review\s+\S/i.test(openingLine) &&
     /^App notification from App\b/.test(laterLines.trimStart());
-  const preset = naturalReview ? "review" : directives.agent;
+  const naturalShip =
+    directives.agent === undefined &&
+    /^ship\s+\S/i.test(openingLine) &&
+    (laterLines.trim() === "" || /^App notification from App\b/.test(laterLines.trimStart()));
+  const naturalPr = naturalReview || naturalShip;
+  const preset = naturalReview ? "review" : naturalShip ? "ship" : directives.agent;
   if (preset !== "review" && preset !== "ship") return undefined;
   if (!input.projection.presets.some((offered) => offered.name === preset)) return undefined;
   if (input.owner && input.owner.kind !== "pipeline") return undefined;
@@ -2158,7 +2163,7 @@ function explicitPrDirective(input: OperatorInput): OperatorDecision | undefined
   if (Object.keys(directives).some((key) => key !== "agent" && key !== "text")) return undefined;
   // Keep newlines and indentation: parseDirectives normalizes whitespace,
   // which would erase the requesterTargetText quote/code boundary.
-  const words = naturalReview ? openingLine : stripDirectiveHead(input.text, preset);
+  const words = naturalPr ? openingLine : stripDirectiveHead(input.text, preset);
   const addressable = requesterTargetText(words);
   const urlWords = requesterUrlWords(addressable)
     .map(requesterUrlText)
@@ -2202,7 +2207,7 @@ function explicitPrDirective(input: OperatorInput): OperatorDecision | undefined
     return undefined;
   // Only retrospective context may ride an automatic repeat review; a
   // competing or ambiguous follow-up belongs to the ordinary operator path.
-  if (naturalReview && !descriptiveReviewFollowUp(laterLines)) return undefined;
+  if (naturalPr && !descriptiveReviewFollowUp(laterLines)) return undefined;
   if (preset === "ship" && action === "continue" && input.owner?.kind !== "pipeline") return undefined;
   // On an ended unit a Ship bind folds into continuation, even when it says
   // review. Let the operator choose an independent Review bind instead.
@@ -2237,7 +2242,7 @@ function explicitPrDirective(input: OperatorInput): OperatorDecision | undefined
     url.hash
   )
     return undefined;
-  if (naturalReview) {
+  if (naturalPr) {
     const targetPath = url.pathname.toLowerCase();
     for (const word of requesterUrlWords(requesterTargetText(laterLines))) {
       const raw = requesterUrlText(word);
