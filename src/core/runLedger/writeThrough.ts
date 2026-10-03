@@ -32,6 +32,8 @@ import {
 // where that lands.
 
 import { randomUUID } from "node:crypto";
+import { systemClock } from "../trace/clock.js";
+import { sealPausedHardStop } from "./pausedStop.js";
 import type { SourceReadState } from "../../mcp/sourceReadState.js";
 import type { StepReport } from "./stepReport.js";
 import type { ChatMessage } from "../chatMessage.js";
@@ -94,6 +96,7 @@ export interface LedgerWriteThroughOptions {
    *  state Worker without the routes, a run the ledger never tracked, a fence). */
   fallback: RecordSink;
   warn: (message: string) => void;
+  now?: () => number;
   leaseMs?: number;
   heartbeatMs?: number;
   flushMs?: number;
@@ -304,6 +307,10 @@ export interface LedgerRun {
   /** Preserve this one resumed run and its binding for the next generation after
    *  a readiness failure. No finish record or replacement workspace is made. */
   pauseForRetry(): Promise<boolean>;
+  /** The pause side found an earlier hard stop and sealed the run. */
+  readonly pauseStopped?: boolean;
+  /** Confirmed by a fresh ledger read after the handoff and any stop seal. */
+  readonly pauseRetained?: boolean;
   /** True when a resume could continue this run: its seed and seed record
    *  landed, it was adopted from a resume, or it is a hosted ship parent
    *  (record 0060) — a row with no process of its own that the next
@@ -700,6 +707,7 @@ const describe = (err: unknown): string => (err instanceof Error ? err.message :
 
 export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): LedgerWriteThrough {
   const { ledger, gen, fallback, warn } = opts;
+  const now = opts.now ?? systemClock;
   const leaseMs = opts.leaseMs ?? LEASE_MS;
   const heartbeatMs = opts.heartbeatMs ?? HEARTBEAT_MS;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
@@ -1092,20 +1100,36 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       this.handedOff = true;
     }
 
+    pauseStopped = false;
+    pauseRetained = false;
+
     async pauseForRetry(): Promise<boolean> {
       if (!this.resumable || !this.tracked() || this.handedOff || this.finished) return false;
       try {
         await this.stateSending;
         await this.flusher.flush();
-        const { marked } = await ledger.handoff(gen, [this.runId]);
+        const { marked } = await ledger.handoff(gen, [this.runId], { pausedForRetry: true });
         if (!marked.includes(this.runId)) return false;
         this.markHandedOff();
         this.stopHeartbeat();
         live.delete(this);
+        // A hard stop may have landed just before the handoff. Its caller
+        // checked before this marker existed; this side closes the same row.
+        try {
+          this.pauseStopped = (await sealPausedHardStop(ledger, this.runId, gen, now)) === "sealed";
+        } catch (err) {
+          warn(`[ledger] ${this.threadKey} could not check stop for paused run ${this.runId}: ${describe(err)}`);
+        }
+        try {
+          const row = (await ledger.listLive()).find((r) => r.runId === this.runId);
+          this.pauseRetained = row?.ownerGen === gen && row.phase === "handoff" && row.state.pausedForRetry === true;
+        } catch (err) {
+          warn(`[ledger] ${this.threadKey} could not confirm paused run ${this.runId}: ${describe(err)}`);
+        }
         return true;
       } catch (err) {
         warn(`[ledger] ${this.threadKey} could not pause run ${this.runId} for retry: ${describe(err)}`);
-        return false;
+        return this.handedOff;
       }
     }
 

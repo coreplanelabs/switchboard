@@ -615,8 +615,8 @@ export class WorkerRunLedger implements RunLedger {
     };
   }
 
-  async handoff(gen: string, runIds: string[]): Promise<{ marked: string[] }> {
-    const r = await this.post("/runs/handoff", { storeKey: this.opts.storeKey, gen, runIds });
+  async handoff(gen: string, runIds: string[], opts?: { pausedForRetry: true }): Promise<{ marked: string[] }> {
+    const r = await this.post("/runs/handoff", { storeKey: this.opts.storeKey, gen, runIds, ...opts });
     return { marked: Array.isArray(r.data.marked) ? (r.data.marked as string[]) : [] };
   }
 
@@ -625,7 +625,12 @@ export class WorkerRunLedger implements RunLedger {
     return this.fenceResult(await this.post("/runs/finishing", { storeKey: this.opts.storeKey, runId, gen }));
   }
 
-  async finish(runId: string, gen: string, record: RunRecord): Promise<FinishResult> {
+  async finish(
+    runId: string,
+    gen: string,
+    record: RunRecord,
+    opts?: { requireStoppedPause: true },
+  ): Promise<FinishResult> {
     this.checkIds(runId, gen);
     // The record's metrics point rides the finish (run-metrics.md): the object
     // writes it after its commit, only when the row turned final.
@@ -635,6 +640,7 @@ export class WorkerRunLedger implements RunLedger {
       runId,
       gen,
       record,
+      ...opts,
       ...(point !== undefined ? { point } : {}),
     });
     const f = this.fenceResult(r);

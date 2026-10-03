@@ -818,9 +818,9 @@ export function createLiveViewHandler(
       }
       // Run control: the only write. Mode is validated BEFORE anything
       // else so a malformed request is a plain 400; the registry's token-gated
-      // stop answers 404 for a vanished run and 409 for a finished one. Never
-      // throws: the run loop observes the control on its own schedule — this
-      // request only records the ask.
+      // stop answers 404 for a vanished run and 409 for a finished one. The
+      // token gates access; the service then records the stop durably before
+      // the response, including when the run is entering retry pause.
       if (route.kind === "stop") {
         if (ctx.actor.viewingAs) return refuseWhileViewing(res, ctx.actor.viewingAs);
         const mode = parseStopMode(url.searchParams.get("mode"));
@@ -828,15 +828,19 @@ export function createLiveViewHandler(
           text(res, 400, "mode must be soft or hard");
           return true;
         }
-        const result = access.requestStop(mode);
-        if (!result.ok) {
-          if (result.reason === "finished") text(res, 409, "the run already finished");
-          else if (result.reason === "hosted") text(res, 409, HOSTED_STOP);
-          else text(res, 404, NOT_FOUND);
-          return true;
-        }
-        res.writeHead(200, JSON_NO_STORE);
-        res.end(JSON.stringify({ id: route.id, mode: result.mode, state: "stopping" }));
+        run(res, async () => {
+          const result = await access.requestStop(mode, { kind: "access", id: ctx.actor.id });
+          if (!result.ok) {
+            if (result.reason === "finished") text(res, 409, "the run already finished");
+            else if (result.reason === "hosted") text(res, 409, HOSTED_STOP);
+            else if (result.reason === "unavailable")
+              text(res, 503, "the stop could not be recorded; check the run and retry");
+            else text(res, 404, NOT_FOUND);
+            return;
+          }
+          res.writeHead(200, JSON_NO_STORE);
+          res.end(JSON.stringify({ id: route.id, mode: result.mode, state: "stopping" }));
+        });
         return true;
       }
       // route.kind === "events"
@@ -896,6 +900,8 @@ export function createLiveViewHandler(
         if (!stopped.ok) {
           if (stopped.error === "hosted") text(res, 409, HOSTED_STOP);
           else if (stopped.error === "conflict") text(res, 409, "the run already finished");
+          else if (stopped.error === "unavailable")
+            text(res, 503, "the stop could not be recorded; check the run and retry");
           else text(res, 404, NOT_FOUND);
           return;
         }

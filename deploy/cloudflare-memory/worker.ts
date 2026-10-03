@@ -4855,13 +4855,17 @@ export class RunHistoryDO extends DurableObject<Env> {
   }
 
   /** SIGTERM: mark this generation's live runs for the next one (item 33). */
-  async handoff(gen: string, runIds: string[]): Promise<{ marked: string[] }> {
+  async handoff(gen: string, runIds: string[], pausedForRetry = false): Promise<{ marked: string[] }> {
     const marked: string[] = [];
     this.ctx.storage.transactionSync(() => {
       for (const id of runIds) {
         const row = this.liveRow(id);
         if (row && row.ownerGen === gen && phaseTransition(row.phase, "handoff")) {
-          this.sql.exec(`UPDATE live_runs SET phase = 'handoff' WHERE run_id = ?`, id);
+          this.sql.exec(
+            `UPDATE live_runs SET phase = 'handoff', state_json = ? WHERE run_id = ?`,
+            JSON.stringify(pausedForRetry ? { ...row.state, pausedForRetry: true } : row.state),
+            id,
+          );
           marked.push(id);
         }
       }
@@ -4899,14 +4903,26 @@ export class RunHistoryDO extends DurableObject<Env> {
     record: RunRecord,
     proposal?: RunPolicyProposal,
     point?: RunMetricsPoint,
+    requireStoppedPause = false,
   ): Promise<FenceResult & { stored?: boolean; event?: RunFinishedSend["kind"] }> {
     record = await this.archiveCheckpoint(record);
     let out: FenceResult & { stored?: boolean } = { ok: true };
     let turnedFinal = false;
     this.ctx.storage.transactionSync(() => {
-      const fence = checkFence(this.liveRow(runId), gen);
+      const row = this.liveRow(runId);
+      const fence = checkFence(row, gen);
       if (!fence.ok) {
         out = fence;
+        return;
+      }
+      if (
+        requireStoppedPause &&
+        (row?.phase !== "handoff" ||
+          row.state.pausedForRetry !== true ||
+          row.stop !== "hard" ||
+          record.status !== "stopped_hard")
+      ) {
+        out = { ok: false, reason: "fenced" };
         return;
       }
       const put = this.upsertInTransaction(record, proposal);
@@ -4985,11 +5001,14 @@ export class RunHistoryDO extends DurableObject<Env> {
       const rows = this.sql.exec<LiveRow>(`SELECT * FROM live_runs`).toArray().map(rowToLive);
       for (const row of selectReclaim(rows, now, gen)) {
         const phase = reclaimPhase(row.phase);
+        const state = { ...row.state };
+        delete state.pausedForRetry;
         this.sql.exec(
-          `UPDATE live_runs SET owner_gen = ?, lease_until = ?, phase = ? WHERE run_id = ?`,
+          `UPDATE live_runs SET owner_gen = ?, lease_until = ?, phase = ?, state_json = ? WHERE run_id = ?`,
           gen,
           now + leaseMs,
           phase,
+          JSON.stringify(state),
           row.runId,
         );
         const stepRow = this.sql
@@ -5017,7 +5036,7 @@ export class RunHistoryDO extends DurableObject<Env> {
           .toArray()
           .map((r) => ({ kind: r.kind, payload: JSON.parse(r.json) as unknown }));
         out.push({
-          row: { ...row, ownerGen: gen, leaseUntil: now + leaseMs, phase },
+          row: { ...row, ownerGen: gen, leaseUntil: now + leaseMs, phase, state },
           reclaimedFrom: row.phase,
           lastStep,
           inbox,
@@ -8309,7 +8328,9 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
       return json({ error: "runIds must be an array of run ids" }, 400);
     }
     const runIds = ids as string[];
-    const r = await stub.handoff(g.value, runIds);
+    if (b.pausedForRetry !== undefined && (b.pausedForRetry !== true || runIds.length !== 1))
+      return json({ error: "pausedForRetry requires one run" }, 400);
+    const r = await stub.handoff(g.value, runIds, b.pausedForRetry === true);
     console.log(`[runs/handoff] ${key.value} ${g.value} marked ${r.marked.length}/${runIds.length}`);
     return json(r);
   }
@@ -8660,7 +8681,16 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     const parsed = parseRunPut({ ...b, storeKey: key.value });
     if (!parsed.ok) return json({ error: parsed.error }, 400);
     if (parsed.value.record.id !== runId.value) return json({ error: "record.id must equal runId" }, 400);
-    const r = await stub.finish(runId.value, g.value, parsed.value.record, parsed.value.proposal, parsed.value.point);
+    if (b.requireStoppedPause !== undefined && b.requireStoppedPause !== true)
+      return json({ error: "requireStoppedPause must be true" }, 400);
+    const r = await stub.finish(
+      runId.value,
+      g.value,
+      parsed.value.record,
+      parsed.value.proposal,
+      parsed.value.point,
+      b.requireStoppedPause === true,
+    );
     console.log(
       `[runs/finish] ${key.value} ${runId.value} ok=${r.ok}${r.ok ? ` stored=${r.stored} event=${r.event}` : ` ${r.reason}`}`,
     );

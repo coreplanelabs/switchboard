@@ -698,6 +698,7 @@ export async function runBot(): Promise<void> {
     registry: defaultRunRegistry,
     store: runStore,
     ledger: ledgerClient,
+    generation,
     sessions: ledgerClient,
     units: coordinatorInstances,
     prices: costsCfg?.prices,

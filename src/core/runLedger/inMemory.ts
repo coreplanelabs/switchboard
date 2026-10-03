@@ -721,12 +721,13 @@ export class InMemoryRunLedger implements RunLedger {
     return { ok: true, ownerLive: row.leaseUntil > this.now() };
   }
 
-  async handoff(gen: string, runIds: string[]): Promise<{ marked: string[] }> {
+  async handoff(gen: string, runIds: string[], opts?: { pausedForRetry: true }): Promise<{ marked: string[] }> {
     const marked: string[] = [];
     for (const id of runIds) {
       const row = this.live.get(id);
       if (row && row.ownerGen === gen && phaseTransition(row.phase, "handoff")) {
         row.phase = "handoff";
+        if (opts?.pausedForRetry) row.state = { ...row.state, pausedForRetry: true };
         marked.push(id);
       }
     }
@@ -742,9 +743,23 @@ export class InMemoryRunLedger implements RunLedger {
     return { ok: true };
   }
 
-  async finish(runId: string, gen: string, record: RunRecord): Promise<FinishResult> {
+  async finish(
+    runId: string,
+    gen: string,
+    record: RunRecord,
+    opts?: { requireStoppedPause: true },
+  ): Promise<FinishResult> {
     const fence = this.fence(runId, gen);
     if (!fence.ok) return fence;
+    const row = this.live.get(runId)!;
+    if (
+      opts?.requireStoppedPause &&
+      (row.phase !== "handoff" ||
+        row.state.pausedForRetry !== true ||
+        row.stop !== "hard" ||
+        record.status !== "stopped_hard")
+    )
+      return { ok: false, reason: "fenced" };
     const canonicalWork = this.live.get(runId)?.state ?? this.finished.get(runId) ?? {};
     if (
       record.unitSeedReceipt !== undefined &&
@@ -1035,6 +1050,7 @@ export class InMemoryRunLedger implements RunLedger {
       row.ownerGen = gen;
       row.leaseUntil = now + leaseMs;
       row.phase = reclaimPhase(reclaimedFrom);
+      delete row.state.pausedForRetry;
       const t = this.transcripts.get(row.runId);
       if (t) t.ownerGen = gen;
       // The row's session log changes hands with it, as the transcript object does.

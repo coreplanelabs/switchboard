@@ -30,6 +30,7 @@ import { sourceBinding, type SessionSources } from "./references/receipts.js";
 import { getAgent } from "../agents/registry.js";
 import { MINUTE_MS, minutesToMs } from "./budgets.js";
 import type { LedgerRun } from "./runLedger/writeThrough.js";
+import { settleRetryPause } from "./runLedger/threadsElsewhere.js";
 import { systemClock } from "./trace/index.js";
 import type { SpanSink, Tracer } from "./trace/types.js";
 import type { SpanLog } from "./trace/spanLog.js";
@@ -3668,12 +3669,18 @@ export async function dispatch(
       if (!resume || !ledgerRun) throw new Error("a readiness retry needs the resumed run's ledger row");
       resumeRowRetained = true;
       const handedOff = await ledgerRun.pauseForRetry().catch(() => false);
-      if (ledgerRun.tracked())
-        deps.threadsElsewhere.remember(msg.threadKey, {
-          runId: resume.row.runId,
-          agent: resume.row.meta.agent,
-          startedAt: resume.row.startedAt,
-        });
+      if (ledgerRun.tracked()) {
+        settleRetryPause(
+          deps.threadsElsewhere,
+          msg.threadKey,
+          {
+            runId: resume.row.runId,
+            agent: resume.row.meta.agent,
+            startedAt: resume.row.startedAt,
+          },
+          ledgerRun.pauseRetained === true,
+        );
+      }
       const pausedWhere = options.missingBinding
         ? "without starting a replacement"
         : "with its recorded workspace binding";
@@ -3685,9 +3692,11 @@ export async function dispatch(
       await refuse(
         refusalOf(
           "setup_failed",
-          handedOff
-            ? `${message} This run is paused ${pausedWhere}. ${nextAction}`
-            : `${message} The original run could not be marked for immediate recovery. No replacement started; an operator needs to check its saved workspace before a retry.`,
+          ledgerRun.pauseStopped
+            ? `${message} The original run was hard-stopped and its saved workspace remains intact. No replacement started.`
+            : handedOff && ledgerRun.pauseRetained
+              ? `${message} This run is paused ${pausedWhere}. ${nextAction}`
+              : `${message} The original run could not be confirmed for immediate recovery. No replacement started; an operator needs to check its saved workspace before a retry.`,
         ),
         () =>
           card.done(

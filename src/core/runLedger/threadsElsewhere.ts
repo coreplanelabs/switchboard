@@ -51,3 +51,19 @@ export class ThreadsElsewhere {
     return this.byThread.size;
   }
 }
+
+/** A retry handoff keeps its thread reserved only while its ledger row is
+ * still owned. Do not erase a newer run's owner if the old row ended. */
+export function settleRetryPause(
+  threads: Pick<ThreadsElsewhere, "get" | "forget" | "remember">,
+  threadKey: string,
+  run: ThreadElsewhere,
+  retained: boolean,
+): void {
+  if (retained) {
+    const current = threads.get(threadKey);
+    if (!current || current.runId === run.runId) threads.remember(threadKey, run);
+  } else {
+    if (threads.get(threadKey)?.runId === run.runId) threads.forget(threadKey);
+  }
+}

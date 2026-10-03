@@ -1396,6 +1396,173 @@ describe("RunsService with the run ledger — one registry across generations (r
     expectNoToken([view, full, page, friction]);
   });
 
+  it("a hard stop seals a same-generation paused handoff without replaying publication", async () => {
+    const { reg, store } = setup();
+    const ledger = new InMemoryRunLedger(() => NOW);
+    const svc = createRunsService({ registry: reg, store, ledger, generation: "g-SAME", clock: () => NOW });
+    const id = "paused-child";
+    const threadKey = "slack:C9:paused";
+    const session = { key: `${threadKey}:coding`, seedFrom: 0, request: 0, range: { from: 0 } };
+    const binding = { backend: "resident", workspace: "/workspace/original" };
+    await ledger.claim({
+      runId: id,
+      threadKey,
+      gen: "g-SAME",
+      leaseMs: 30_000,
+      startedAt: NOW - 5_000,
+      meta: { channelId: "slack:C9", userId: "slack:UIVY", threadKey, agent: "coding", session },
+      card: null,
+      system: "sys",
+      tools: [],
+      state: { binding, pushedBranch: "plan/original/u1", descriptionPending: true },
+    });
+    await ledger.claimSession(session.key, id, "g-SAME");
+    await ledger.append(id, "g-SAME", [{ type: "input", messageId: "m1", text: "work", at: NOW - 5_000, seq: 1 }]);
+    expect(await ledger.handoff("g-SAME", [id], { pausedForRetry: true })).toEqual({ marked: [id] });
+
+    expect(await svc.stopRun(id, "hard", actor)).toEqual({ ok: true, value: { id, mode: "hard", state: "stopping" } });
+    expect(ledger.live.has(id)).toBe(false);
+    expect(ledger.finished.get(id)).toMatchObject({ id, status: "stopped_hard", threadKey });
+    expect(ledger.sessions.get(session.key)?.owner).toBeUndefined();
+    expect(
+      await ledger.claim({
+        runId: "next-child",
+        threadKey,
+        gen: "g-SAME",
+        leaseMs: 30_000,
+        startedAt: NOW,
+        meta: { channelId: "slack:C9", userId: "slack:UIVY", threadKey, agent: "coding" },
+        card: null,
+        system: "sys",
+        tools: [],
+      }),
+    ).toEqual({ ok: true });
+    expect(await ledger.reclaim("g-NEXT", NOW + 31_000, 30_000)).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ row: expect.objectContaining({ runId: id }) })]),
+    );
+    expect(ledger.finished.get(id)?.events).toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: "input" })]),
+    );
+    expect(ledger.finished.get(id)?.events).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: "pr_opened" })]),
+    );
+    expect(binding).toEqual({ backend: "resident", workspace: "/workspace/original" });
+    const sealed = ledger.finished.get(id);
+    expect(await svc.stopRun(id, "hard", actor)).not.toMatchObject({ ok: true });
+    expect(ledger.finished.get(id)).toBe(sealed); // no second finish or publication
+  });
+
+  it("persists a local hard stop before pause and seals a pause still in the registry", async () => {
+    const { reg, store } = setup();
+    const ledger = new InMemoryRunLedger(() => NOW);
+    const svc = createRunsService({ registry: reg, store, ledger, generation: "g-SAME", clock: () => NOW });
+    const meta = { agent: "coding" as const, channelId: "slack:C9", userId: "slack:UIVY", threadKey: "slack:C9:local" };
+    const before = reg.create("coding · before pause", meta);
+    await ledger.claim({
+      runId: before.id,
+      threadKey: meta.threadKey,
+      gen: "g-SAME",
+      leaseMs: 30_000,
+      startedAt: NOW,
+      meta,
+      card: null,
+      system: "sys",
+      tools: [],
+    });
+    expect(await svc.stopRun(before.id, "hard", actor)).toMatchObject({ ok: true });
+    expect(ledger.live.get(before.id)?.stop).toBe("hard");
+
+    const during = reg.create("coding · during pause", { ...meta, threadKey: "slack:C9:during" });
+    await ledger.claim({
+      runId: during.id,
+      threadKey: "slack:C9:during",
+      gen: "g-SAME",
+      leaseMs: 30_000,
+      startedAt: NOW,
+      meta: { ...meta, threadKey: "slack:C9:during" },
+      card: null,
+      system: "sys",
+      tools: [],
+    });
+    await ledger.handoff("g-SAME", [during.id], { pausedForRetry: true });
+    expect(await svc.stopRun(during.id, "hard", actor)).toMatchObject({ ok: true });
+    expect(ledger.finished.get(during.id)?.status).toBe("stopped_hard");
+    expect(ledger.live.has(during.id)).toBe(false);
+  });
+
+  it("reports an unavailable local hard stop until its ledger write succeeds", async () => {
+    const { reg, store } = setup();
+    const ledger = new InMemoryRunLedger(() => NOW);
+    const svc = createRunsService({ registry: reg, store, ledger, generation: "g-SAME", clock: () => NOW });
+    const meta = { agent: "coding" as const, channelId: "slack:C9", userId: "slack:UIVY", threadKey: "slack:C9:stop" };
+    const first = reg.create("coding · failed write", meta);
+    await ledger.claim({
+      runId: first.id,
+      threadKey: meta.threadKey,
+      gen: "g-SAME",
+      leaseMs: 30_000,
+      startedAt: NOW,
+      meta,
+      card: null,
+      system: "sys",
+      tools: [],
+    });
+    const stop = vi.spyOn(ledger, "requestStop");
+    stop.mockRejectedValueOnce(new Error("unavailable"));
+    expect(await svc.stopRun(first.id, "hard", actor)).toEqual({ ok: false, error: "unavailable" });
+    expect(ledger.live.get(first.id)?.stop).toBeNull();
+    expect(first.control.requested).toBeUndefined();
+    expect(first.control.hardSignal.aborted).toBe(false);
+    expect(await svc.stopRun(first.id, "hard", actor)).toMatchObject({ ok: true });
+    expect(ledger.live.get(first.id)?.stop).toBe("hard");
+    expect(first.control.hardSignal.aborted).toBe(true);
+
+    const second = reg.create("coding · refused write", { ...meta, threadKey: "slack:C9:stop-two" });
+    await ledger.claim({
+      runId: second.id,
+      threadKey: "slack:C9:stop-two",
+      gen: "g-SAME",
+      leaseMs: 30_000,
+      startedAt: NOW,
+      meta: { ...meta, threadKey: "slack:C9:stop-two" },
+      card: null,
+      system: "sys",
+      tools: [],
+    });
+    stop.mockResolvedValueOnce({ ok: false });
+    expect(await svc.stopRun(second.id, "hard", actor)).toEqual({ ok: false, error: "unavailable" });
+    expect(ledger.live.get(second.id)?.stop).toBeNull();
+    expect(second.control.requested).toBeUndefined();
+    expect(second.control.hardSignal.aborted).toBe(false);
+  });
+
+  it("a same-generation SIGTERM handoff and a foreign paused run still receive only stop intent", async () => {
+    const { reg, store } = setup();
+    const ledger = new InMemoryRunLedger(() => NOW);
+    const svc = createRunsService({ registry: reg, store, ledger, generation: "g-SAME" });
+    for (const [id, gen, paused] of [
+      ["draining", "g-SAME", false],
+      ["foreign", "g-OTHER", true],
+    ] as const) {
+      const threadKey = `slack:C9:${id}`;
+      await ledger.claim({
+        runId: id,
+        threadKey,
+        gen,
+        leaseMs: 30_000,
+        startedAt: NOW,
+        meta: { agent: "coding", channelId: "slack:C9", userId: "slack:UIVY", threadKey },
+        card: null,
+        system: "sys",
+        tools: [],
+      });
+      await ledger.handoff(gen, [id], paused ? { pausedForRetry: true } : undefined);
+      expect(await svc.stopRun(id, "hard", actor)).toMatchObject({ ok: true });
+      expect(ledger.live.get(id)).toMatchObject({ stop: "hard", phase: "handoff" });
+      expect(ledger.finished.has(id)).toBe(false);
+    }
+  });
+
   it("stopRun on a ledger row asks the ledger — the owning generation reads the stop on its next heartbeat — and answers stopping; an unknown id stays not_found", async () => {
     const { svc, ledger } = ledgerSetup();
     await farRun(ledger);
@@ -2590,6 +2757,7 @@ describe("RunsService.stopRun — a hosted parent: soft refused, hard seals (rec
       store: new InMemoryRunStore({ now: () => NOW }),
       ledger,
       units,
+      generation: GEN,
       clock: () => NOW,
     });
     const { id, token } = reg.create("ship · acme/api", hostedMeta);
@@ -2657,6 +2825,37 @@ describe("RunsService.stopRun — a hosted parent: soft refused, hard seals (rec
       tools: [],
     });
     expect(claim.ok).toBe(true);
+  });
+
+  it("a stopped hosted parent does not leave its paused child resumable", async () => {
+    const { ledger, svc, id, units } = await hostedWorld();
+    const child = "paused-unit";
+    const threadKey = "web:s:u2";
+    await ledger.claim({
+      runId: child,
+      threadKey,
+      gen: GEN,
+      leaseMs: 30_000,
+      startedAt: NOW - 1_000,
+      meta: {
+        agent: "coding",
+        channelId: "web:s",
+        userId: "access:u1",
+        threadKey,
+        parentInstanceId: "plan-p-1",
+        idempotencyKey: "plan-p-1:U17/0/coding",
+      },
+      card: null,
+      system: "sys",
+      tools: [],
+    });
+    await ledger.handoff(GEN, [child], { pausedForRetry: true });
+    expect(await svc.stopRun(id, "hard", actor)).toMatchObject({ ok: true });
+    expect((await units.get("plan-p-1"))!.stop).toEqual({ at: NOW });
+    expect(await svc.stopRun(child, "hard", actor)).toMatchObject({ ok: true });
+    expect(ledger.finished.get(id)?.status).toBe("failed");
+    expect(ledger.finished.get(child)?.status).toBe("stopped_hard");
+    expect((await ledger.reclaim("g-NEXT", NOW + 31_000, 30_000)).some((r) => r.row.runId === child)).toBe(false);
   });
 
   // Issue 1924: the hard stop also stops the runner — the seal writes the stop
