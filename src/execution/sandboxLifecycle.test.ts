@@ -294,7 +294,7 @@ describe("sandbox Worker wiring (static)", () => {
     expect(worker).toMatch(/override async onActivityExpired\(\): Promise<void> \{\s*await this\.idle\.expired\(\);/);
     expect(worker).toMatch(/blockConcurrencyWhile\(\(\) => this\.idle\.wake\(\)\)/);
     // every route the fetch handler calls runs inside served() — the seed among them (item 25) — and so does the start gate's warm-up
-    expect(worker.match(/this\.idle\.served\(/g)).toHaveLength(9);
+    expect(worker.match(/this\.idle\.served\(/g)).toHaveLength(10);
     expect(worker).toMatch(/async fetchPublicationBase\([\s\S]*?return this\.idle\.served\(/);
     expect(worker).toMatch(/async publishControlled\([\s\S]*?return this\.idle\.served\(/);
   });

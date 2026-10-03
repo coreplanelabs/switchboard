@@ -124,6 +124,8 @@ import { CheckoutFence, installRepairCommand } from "../../src/execution/install
 import {
   INSTALL_REPAIR_POLICY_VERSION,
   INSTALL_REPAIR_RECEIPT_VERSION,
+  verifyInstallRepairReceipt,
+  type InstallRepairAttempt,
   type InstallRepairReceipt,
 } from "../../src/execution/installRepairPolicy.js";
 import {
@@ -404,6 +406,26 @@ export class SwitchboardSandbox extends Sandbox<Env> {
 
   /** A trusted, single-effect repair on the original running container. No
    *  SDK or start gate is used: native exec cannot wake a stopped runtime. */
+  async inspectRepairDependencies(owner: PreservationOwner, targetHead: string): Promise<InstallRepairAttempt> {
+    const prior = await this.ctx.storage.get<{
+      owner: PreservationOwner;
+      targetHead: string;
+      receipt?: InstallRepairReceipt;
+    }>(`switchboard.install-repair.attempt:${owner.run}:${owner.seed}`);
+    if (!prior) return { kind: "none" };
+    const record = await this.ctx.storage.get<CheckpointRecord>(PRESERVATION_KEY);
+    if (!record || !sameOwner(record.owner, owner) || this.ctx.id.name !== owner.thread) return { kind: "unknown" };
+    if (!sameOwner(prior.owner, owner) || prior.targetHead !== targetHead || !prior.receipt) return { kind: "unknown" };
+    return verifyInstallRepairReceipt(prior.receipt, {
+      owner,
+      targetHead,
+      policy: { policyVersion: INSTALL_REPAIR_POLICY_VERSION },
+      lockfileKey: prior.receipt.lockfileKey,
+    })
+      ? { kind: "completed", receipt: prior.receipt }
+      : { kind: "unknown" };
+  }
+
   async repairDependencies(owner: PreservationOwner, targetHead: string): Promise<InstallRepairReceipt | null> {
     if (this.ctx.container?.running !== true) return null;
     const result = this.checkoutFence.exclusive(() =>
@@ -412,6 +434,13 @@ export class SwitchboardSandbox extends Sandbox<Env> {
         const record = await this.ctx.storage.get<CheckpointRecord>(PRESERVATION_KEY);
         if (!record || !sameOwner(record.owner, owner) || this.ctx.id.name !== owner.thread) return null;
         if (this.ctx.container?.running !== true) return null;
+        // This key belongs to the original run and seed. A lost response may
+        // follow a completed native install; re-entry must inspect, never run it again.
+        const attemptKey = `switchboard.install-repair.attempt:${owner.run}:${owner.seed}`;
+        const prior = await this.inspectRepairDependencies(owner, targetHead);
+        if (prior.kind === "completed") return prior.receipt;
+        if (prior.kind === "unknown") return null;
+        await this.ctx.storage.put(attemptKey, { owner, targetHead });
         try {
           const process = await this.ctx.container.exec([
             "bash",
@@ -430,13 +459,15 @@ export class SwitchboardSandbox extends Sandbox<Env> {
             this.ctx.container?.running !== true
           )
             return null;
-          return {
+          const receipt = {
             version: INSTALL_REPAIR_RECEIPT_VERSION,
             owner,
             targetHead,
             policyVersion: INSTALL_REPAIR_POLICY_VERSION,
             lockfileKey: match[1],
           } satisfies InstallRepairReceipt;
+          await this.ctx.storage.put(attemptKey, { owner, targetHead, receipt });
+          return receipt;
         } catch {
           // Native command may have started before the response was lost. Never
           // re-send automatically or turn an unknown outcome into a receipt.
@@ -1269,7 +1300,7 @@ export default {
 
     const url = new URL(request.url);
     const threadKey = request.headers.get("x-thread-key");
-    if (url.pathname === "/install-repair") {
+    if (url.pathname === "/install-repair" || url.pathname === "/install-repair/inspect") {
       if (!modelSandboxIdentity("/seed", threadKey)) return json({ error: "invalid thread identity" }, 400);
       const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
       const owner = parsePreservationOwner(body?.owner);
@@ -1285,6 +1316,8 @@ export default {
       )
         return json({ error: "invalid repair binding" }, 400);
       const stub = env.Sandbox.get(env.Sandbox.idFromName(threadKey));
+      if (url.pathname === "/install-repair/inspect")
+        return json(await stub.inspectRepairDependencies(owner, body.targetHead));
       const receipt = await stub.repairDependencies(owner, body.targetHead);
       return receipt ? json(receipt) : json({ error: "repair refused or outcome unknown" }, 409);
     }

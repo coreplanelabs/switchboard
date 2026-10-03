@@ -3395,6 +3395,7 @@ describe("makeExecutor pilot ready environment", () => {
       vi.fn(async (url: unknown) => {
         const path = new URL(String(url)).pathname;
         if (path === "/exec") return new Response(JSON.stringify({ exitCode: 0, stdout: "" }), { status: 200 });
+        if (path === "/install-repair/inspect") return new Response(JSON.stringify({ kind: "none" }), { status: 200 });
         calls.push(path);
         const answer = answers.shift();
         if (!answer) throw new Error(`unexpected fetch ${String(url)}`);
@@ -3678,6 +3679,101 @@ describe("makeExecutor pilot ready environment", () => {
     const readiness = check.mock.calls.filter(([command]) => command.includes("node_modules"));
     expect(readiness).toHaveLength(3);
     expect(readiness.at(-1)?.[0]).toContain(`git diff --quiet '${SHA}' HEAD`);
+  });
+
+  it("holds a ready reattach when an earlier native repair has no durable receipt", async () => {
+    envs();
+    fetches();
+    vi.spyOn(CloudflareSandboxExecutor.prototype, "exec").mockImplementation(async (command) => {
+      if (command.includes("rev-parse --abbrev-ref HEAD")) return "master\n";
+      if (command.includes("rev-parse HEAD")) return `${SHA}\n`;
+      if (command.includes("config --get remote.origin.url")) return "https://door.example/git/jshttp/vary.git\n";
+      return "READY";
+    });
+    const inspect = vi.spyOn(CloudflareSandboxExecutor.prototype, "inspectRepairDependencies").mockResolvedValue({
+      kind: "unknown",
+    });
+    const repair = vi.spyOn(CloudflareSandboxExecutor.prototype, "repairDependencies");
+    await expect(
+      makeExecutor(opts(), {
+        ...context(),
+        headSha: undefined,
+        runId: "11111111-1111-1111-1111-111111111111",
+        requester: "slack:U123",
+        installRepairPolicy: { policyVersion: "npm-ci-v1" },
+        reattach: {
+          backend: "sandbox",
+          container: "33333333-3333-3333-3333-333333333333",
+          publicationBaseSha: SHA,
+          seeded: {
+            slug: "jshttp/vary",
+            ref: "master",
+            workspace: "/workspace/checkout",
+            sourceSha: "b".repeat(40),
+            seedBackupId: CHECKOUT,
+          },
+        },
+      }),
+    ).rejects.toMatchObject({ reason: "dependencies_invalid" });
+    expect(inspect).toHaveBeenCalledOnce();
+    expect(repair).not.toHaveBeenCalled();
+  });
+
+  it("inspects the repaired source head after coding advances the checkout", async () => {
+    envs();
+    fetches();
+    const sourceHead = "b".repeat(40);
+    const runId = "11111111-1111-1111-1111-111111111111";
+    const container = "33333333-3333-3333-3333-333333333333";
+    const owner = {
+      run: runId,
+      requester: "slack:U123",
+      thread: "slack:CX:1.0",
+      repository: "jshttp/vary",
+      ref: "master",
+      head: SHA,
+      seed: CHECKOUT,
+      container,
+    };
+    const receipt = {
+      version: "install-repair-receipt-v1" as const,
+      owner,
+      targetHead: sourceHead,
+      policyVersion: "npm-ci-v1" as const,
+      lockfileKey: "c".repeat(64),
+    };
+    vi.spyOn(CloudflareSandboxExecutor.prototype, "exec").mockImplementation(async (command) => {
+      if (command.includes("rev-parse --abbrev-ref HEAD")) return "master\n";
+      if (command.includes("rev-parse HEAD")) return `${SHA}\n`;
+      if (command.includes("config --get remote.origin.url")) return "https://door.example/git/jshttp/vary.git\n";
+      return "READY";
+    });
+    const inspect = vi.spyOn(CloudflareSandboxExecutor.prototype, "inspectRepairDependencies").mockResolvedValue({
+      kind: "completed",
+      receipt,
+    });
+    const selected = await makeExecutor(opts(), {
+      ...context(),
+      headSha: undefined,
+      runId,
+      requester: "slack:U123",
+      reattach: {
+        backend: "sandbox",
+        container,
+        publicationBaseSha: SHA,
+        seeded: {
+          slug: "jshttp/vary",
+          ref: "master",
+          workspace: "/workspace/checkout",
+          sourceSha: sourceHead,
+          seedBackupId: CHECKOUT,
+          repairReceipt: receipt,
+        },
+      },
+    });
+    expect(inspect).toHaveBeenCalledOnce();
+    expect(inspect.mock.calls[0]?.[1]).toBe(sourceHead);
+    expect(selected.seeded?.repairReceipt).toEqual(receipt);
   });
 
   it("refuses repair when a saved preservation owner field is missing", async () => {

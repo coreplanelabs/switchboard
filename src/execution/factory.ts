@@ -768,7 +768,7 @@ async function selectExecutor(
         container: recorded.container,
       });
       const priorReceipt = originalSeed.repairReceipt;
-      const repairedHead =
+      let repairedHead =
         owner &&
         "container" in owner &&
         priorReceipt &&
@@ -780,6 +780,28 @@ async function selectExecutor(
         })
           ? priorReceipt.targetHead
           : undefined;
+      if (
+        owner &&
+        "container" in owner &&
+        selection.executor instanceof CloudflareSandboxExecutor &&
+        ctx.profile.identity === "write" &&
+        ctx.agent.name === "coding"
+      ) {
+        // A completed attempt belongs to the head it repaired. Later coding
+        // commits can advance the checkout without changing those lockfiles.
+        const attempt = await selection.executor.inspectRepairDependencies(
+          owner,
+          repairedHead ?? selection.seeded.sha,
+          { policyVersion: "npm-ci-v1" },
+          ctx.stopSignal,
+        );
+        if (attempt.kind === "unknown" || (attempt.kind === "none" && repairedHead))
+          throw readyFailure("dependencies_invalid", "The original dependency repair has no verified receipt.");
+        if (attempt.kind === "completed") {
+          selection.seeded.repairReceipt = attempt.receipt;
+          repairedHead = attempt.receipt.targetHead;
+        }
+      }
       try {
         await checkReadyEnvironment(
           selection.executor,

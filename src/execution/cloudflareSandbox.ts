@@ -38,6 +38,7 @@ import { SEED_BUDGET_MS, type SandboxSeed, type SeedAnswer } from "./seedPlan.js
 import { parsePreservationOwner, type OwnerClaim, type PreservationOwner } from "./sandboxCheckpoint.js";
 import {
   verifyInstallRepairReceipt,
+  type InstallRepairAttempt,
   type InstallRepairPolicy,
   type InstallRepairReceipt,
 } from "./installRepairPolicy.js";
@@ -633,6 +634,54 @@ export class CloudflareSandboxExecutor implements Executor {
       if (rewrote) out = await run();
     }
     return truncate(out);
+  }
+
+  /** Read the original durable attempt without another native install. */
+  async inspectRepairDependencies(
+    owner: PreservationOwner,
+    targetHead: string,
+    policy: InstallRepairPolicy,
+    signal?: AbortSignal,
+  ): Promise<InstallRepairAttempt> {
+    if (
+      !parsePreservationOwner(owner) ||
+      owner.thread !== this.opts.threadKey ||
+      !/^[0-9a-f]{40}$/.test(targetHead) ||
+      policy.policyVersion !== "npm-ci-v1"
+    )
+      return { kind: "unknown" };
+    try {
+      const deadline = execDeadline(EXEC_CALL_MARGIN_MS, signal);
+      const response = await fetch(`${this.opts.url.replace(/\/$/, "")}/install-repair/inspect`, {
+        method: "POST",
+        redirect: "manual",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${this.opts.token}`,
+          "x-thread-key": this.opts.threadKey,
+        },
+        body: JSON.stringify({ owner, targetHead, policyVersion: policy.policyVersion }),
+        signal: deadline,
+      });
+      if (!response.ok) return { kind: "unknown" };
+      const result: unknown = await response.json();
+      if (!result || typeof result !== "object" || Array.isArray(result)) return { kind: "unknown" };
+      const state = result as Record<string, unknown>;
+      if (state.kind === "none" && Object.keys(state).length === 1) return { kind: "none" };
+      if (state.kind !== "completed" || Object.keys(state).length !== 2) return { kind: "unknown" };
+      const receipt = state.receipt as InstallRepairReceipt;
+      if (typeof receipt?.lockfileKey !== "string") return { kind: "unknown" };
+      return verifyInstallRepairReceipt(receipt, {
+        owner,
+        targetHead,
+        policy,
+        lockfileKey: receipt?.lockfileKey,
+      })
+        ? { kind: "completed", receipt }
+        : { kind: "unknown" };
+    } catch {
+      return { kind: "unknown" };
+    }
   }
 
   /** Single no-retry effect: no model env, no credential refresh or SDK start.
