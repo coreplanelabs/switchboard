@@ -16090,6 +16090,127 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     },
   );
 
+  it("a fenced resumed pilot binding commit leaves the reply and row to the new owner", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const { calls } = residentFetchStub({
+      attach: (body) => {
+        expect(body.reuse).toBe(true);
+        return new Response(
+          JSON.stringify({
+            workspace: "/workspace/retained",
+            ref: "main",
+            sha: "abc",
+            user: "worker2",
+            container: "vm-next",
+            recreated: false,
+            deps: "hardlink",
+          }),
+          { status: 200 },
+        );
+      },
+      exec: () =>
+        new Response(JSON.stringify({ stdout: "READY", stderr: "", exitCode: 0, truncated: false }), { status: 200 }),
+    });
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const request = msg("agent:coding fix it", "slack:UADMIN");
+    const binding = { backend: "resident" as const, workspace: "/workspace/retained", user: "worker2", ref: "main" };
+    await ledger.claim({
+      runId: "run-held",
+      threadKey: "slack:CX:1.0",
+      gen: "gen-OLD",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      meta: {
+        channelId: "slack:CX",
+        userId: "slack:UADMIN",
+        threadKey: "slack:CX:1.0",
+        agent: "coding",
+        model: "anthropic/coding-model",
+        repo: "acme/api",
+        ref: "main",
+        parentInstanceId: "instance-resume",
+        idempotencyKey: "instance-resume:unit/coding",
+        request: durableInboxMessage(request, request.text, 4_000),
+      },
+      system: "sys",
+      tools: [],
+      state: {
+        binding,
+        preserveOnReattachRefusal: true,
+        readyPilotRequirement: {
+          testCommand: "npm test",
+          dependencyDir: "node_modules",
+          requiredTools: ["node", "npm"],
+        },
+      },
+    });
+    await ledger.seed("run-held", "gen-OLD", [
+      { idx: 0, message: { role: "user", content: [{ type: "text", text: "fix it" }] } },
+    ]);
+    await ledger.step(
+      "run-held",
+      "gen-OLD",
+      {
+        step: 0,
+        seq: 0,
+        turnIndex: 1,
+        inFlight: [],
+        inboxConsumedSeq: 0,
+        remainingMs: 20 * 60_000,
+        turn: 0,
+        iteration: 0,
+      },
+      [],
+    );
+    ledger.live.get("run-held")!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
+    const originalSetState = ledger.setState.bind(ledger);
+    const fencedCommit = vi.fn();
+    vi.spyOn(ledger, "setState").mockImplementation(async (runId, gen, state) => {
+      if ((state.binding as { container?: string } | undefined)?.container === "vm-next") {
+        fencedCommit();
+        ledger.live.get(runId)!.ownerGen = "gen-NEXT";
+        return { ok: false, reason: "fenced" };
+      }
+      return originalSetState(runId, gen, state);
+    });
+    const provider = capturingProvider("must not run");
+    const { deps, writer } = wired(provider, { ledger, yaml: RESIDENT_YAML_FIXTURE });
+    const plan = planResume({
+      transcript: {
+        complete: true,
+        compactions: [],
+        turns: 1,
+        messages: [{ role: "user", content: [{ type: "text", text: "fix it" }] }],
+      },
+      lastStep: reclaimed.lastStep!,
+      tools: knownToolsFor(getAgent("coding")),
+    });
+    if (plan.kind !== "resume") throw new Error(plan.kind === "interrupted" ? plan.why : plan.kind);
+    const { io, replies } = ioWithCard();
+    await dispatch(deps, resumeMessage(reclaimed.row, "fix it"), io, {
+      resume: {
+        row: reclaimed.row,
+        lastStep: reclaimed.lastStep!,
+        plan,
+        events: await ledger.readEvents("run-held"),
+        lastSeq: 0,
+        repoCtx: { repo: "acme/api", ref: "main" },
+        inbox: [],
+      },
+    });
+    await writer.settled();
+    expect(fencedCommit).toHaveBeenCalledOnce();
+    expect(provider.requests).toEqual([]);
+    expect(replies).toEqual([]);
+    expect(ledger.live.get("run-held")).toMatchObject({ ownerGen: "gen-NEXT", phase: "live", state: { binding } });
+    expect(ledger.finished.has("run-held")).toBe(false);
+    expect((await ledger.readEvents("run-held")).filter((event) => event.type === "child_resumed")).toEqual([]);
+    expect(calls.filter((call) => call.path === "/detach")).toEqual([]);
+  });
+
   it("a resumed pilot readiness failure keeps its run and dirty workspace for the next generation", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");

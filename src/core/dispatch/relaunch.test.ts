@@ -16,13 +16,16 @@ import {
 import { bearerHashOf, RunBearerStore } from "../modelProxy/runBearers.js";
 import type { RepoContext } from "../repoContext.js";
 import { TEST_GITHUB_CREDENTIALS } from "../../execution/testing/githubCredentials.js";
+import { LocalExecutor } from "../../execution/executor.js";
+import type { RoundWorkspace } from "../reviewRound.js";
+import { parsePreservationOwner } from "../../execution/sandboxCheckpoint.js";
 import { prepareRelaunch, RelaunchRefusedError } from "./relaunch.js";
 
 // The re-attach as the run's stop ends it: the provision stage's own answer
 // (`stopped`, provision.test.ts proves the mapping) handed to the relaunch,
 // with the context the relaunch passed kept for the test.
 const reattachState = vi.hoisted(() => ({
-  answer: undefined as { kind: "stopped" } | undefined,
+  answer: undefined as { kind: "stopped" } | { kind: "attached"; round: RoundWorkspace } | undefined,
   contexts: [] as Array<{ runId?: string; ownerGen?: string; stopSignal?: AbortSignal }>,
   requiredOwner: undefined as string | undefined,
 }));
@@ -202,6 +205,116 @@ describe("prepareRelaunch — the relaunch decided and prepared", () => {
     expect(decision.bearer).toBeUndefined();
     expect(decision.round).toBeUndefined();
     expect(decision.resume.facts).toEqual(facts(2, "ab".repeat(32)));
+  });
+
+  it.each(["fenced", "unavailable"] as const)(
+    "pauses a pilot before bearer rotation when its rebound binding commit is %s",
+    async (result) => {
+      const d = deps();
+      grant(d.runBearers);
+      const binding = {
+        backend: "sandbox" as const,
+        seeded: {
+          slug: "acme/api",
+          ref: "main",
+          workspace: "/workspace/checkout",
+          sourceSha: "b".repeat(40),
+        },
+      };
+      reattachState.answer = {
+        kind: "attached",
+        round: {
+          selection: {
+            executor: new LocalExecutor("/tmp/relaunch-binding"),
+            backend: "sandbox" as const,
+            seeded: { ...binding.seeded, sha: "a".repeat(40), sourceSha: "a".repeat(40), cached: true, ms: 0 },
+          },
+          release: async () => {},
+        } satisfies RoundWorkspace,
+      };
+      const commitState = vi.fn(async () => result);
+      try {
+        const { ctx, saves } = context({
+          binding,
+          preserveOnReattachRefusal: true,
+          commitPilotBinding: { commitState },
+        });
+        expect(await prepareRelaunch(d, ctx)).toMatchObject({ kind: "paused", reason: "check_failed" });
+        expect(commitState).toHaveBeenCalledWith({
+          binding: expect.objectContaining({
+            seeded: expect.objectContaining({ sourceSha: "a".repeat(40) }),
+          }),
+        });
+        expect(saves).toEqual([]);
+        expect(d.runBearers.grantOf("run-1")?.bearers).toBe(1);
+      } finally {
+        reattachState.answer = undefined;
+      }
+    },
+  );
+
+  it("commits the repaired dependency receipt before relaunching the original run", async () => {
+    const d = deps();
+    grant(d.runBearers);
+    const owner = parsePreservationOwner({
+      run: "11111111-1111-1111-1111-111111111111",
+      requester: "slack:U123",
+      thread: "slack:C123:123.456",
+      repository: "acme/api",
+      ref: "refs/heads/main",
+      head: "a".repeat(40),
+      seed: "22222222-2222-2222-2222-222222222222",
+      container: "33333333-3333-3333-3333-333333333333",
+    });
+    if (!owner || !("container" in owner)) throw new Error("invalid test owner");
+    const repairReceipt = {
+      version: "install-repair-receipt-v1" as const,
+      owner,
+      targetHead: "b".repeat(40),
+      policyVersion: "npm-ci-v1" as const,
+      lockfileKey: "c".repeat(64),
+    };
+    const seed = {
+      slug: "acme/api",
+      ref: "main",
+      workspace: "/workspace/checkout",
+      sourceSha: "b".repeat(40),
+    };
+    reattachState.answer = {
+      kind: "attached",
+      round: {
+        selection: {
+          executor: new LocalExecutor("/tmp/relaunch-repaired-binding"),
+          backend: "sandbox",
+          seeded: { ...seed, sha: "b".repeat(40), repairReceipt, cached: true, ms: 0 },
+        },
+        release: async () => {},
+      } satisfies RoundWorkspace,
+    };
+    const commitState = vi.fn(async () => "ok" as const);
+    try {
+      const { ctx } = context({
+        binding: {
+          backend: "sandbox",
+          container: owner.container,
+          sandboxKey: "run:11111111-1111-1111-1111-111111111111",
+          seeded: { ...seed, sourceSha: "a".repeat(40) },
+        },
+        preserveOnReattachRefusal: true,
+        commitPilotBinding: { commitState },
+      });
+      const decision = await prepareRelaunch(d, ctx);
+      expect(commitState).toHaveBeenCalledWith({
+        binding: expect.objectContaining({
+          container: owner.container,
+          sandboxKey: "run:11111111-1111-1111-1111-111111111111",
+          seeded: expect.objectContaining({ sourceSha: "b".repeat(40), repairReceipt }),
+        }),
+      });
+      expect(decision.kind).toBe("relaunch");
+    } finally {
+      reattachState.answer = undefined;
+    }
   });
 
   it("pauses a pilot at the relaunch ceiling without releasing or replacing its dirty checkout", async () => {

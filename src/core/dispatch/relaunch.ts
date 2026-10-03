@@ -15,6 +15,8 @@
 import type { AgentDef } from "../../agents/registry.js";
 import type { RunProfile } from "../../config/profile.js";
 import type { ReadyEnvironmentReason, WorkspaceBinding } from "../../execution/factory.js";
+import type { LedgerRun } from "../runLedger/writeThrough.js";
+import { commitResumedPilotBinding } from "./readyBinding.js";
 import type { ReadyEnvironmentRequirement } from "../../execution/seedPlan.js";
 import {
   HarnessInterruptedError,
@@ -63,6 +65,8 @@ export interface RelaunchContext {
   binding: WorkspaceBinding | undefined;
   preserveOnReattachRefusal?: boolean;
   readyRequirementOverride?: ReadyEnvironmentRequirement;
+  /** The same owner-fenced write-through that holds the original run's binding. */
+  commitPilotBinding?: Pick<LedgerRun, "commitState">;
   /** The run's hard stop (`run.control.hardSignal`): it rides into the re-attach's
    *  wake wait, so a stop while the replacement is being re-attached ends it at
    *  once and the run ends stopped, never relaunched (execution.md item 9). */
@@ -208,6 +212,14 @@ export async function prepareRelaunch(
       );
     }
     round = reattached.round;
+    if (
+      ctx.preserveOnReattachRefusal &&
+      !(await commitResumedPilotBinding(ctx.commitPilotBinding, round.selection, ctx.profile.machine, ctx.binding))
+    )
+      return pausePilot(
+        "check_failed",
+        "The coding workspace binding could not be durably verified after re-attachment.",
+      );
   }
   // The rotation (model-proxy item 2): the row's write inside it, the count one higher.
   const counted: HarnessFacts = { ...facts, relaunches: relaunches + 1 };
