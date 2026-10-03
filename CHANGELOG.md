@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.278.6](https://github.com/coreplanelabs/switchboard/compare/v1.278.5...v1.278.6) (2026-10-03)
+
+
+### Bug fixes
+
+* **docs:** exclude execution wiring from screenshot manifests ([#2686](https://github.com/coreplanelabs/switchboard/issues/2686)) ([749ef1e](https://github.com/coreplanelabs/switchboard/commit/749ef1ed6e7e6d06e3991d2275933efce5725b91))
+* **ship:** recover zero-work findings without a lastPush hint ([#2689](https://github.com/coreplanelabs/switchboard/issues/2689)) ([71db3bd](https://github.com/coreplanelabs/switchboard/commit/71db3bdaad2a381865413e45ce1ab3bdc420fc95))
+
 ## [1.278.5](https://github.com/coreplanelabs/switchboard/compare/v1.278.4...v1.278.5) (2026-10-03)
 
 
