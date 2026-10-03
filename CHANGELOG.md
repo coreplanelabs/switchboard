@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.284.3](https://github.com/coreplanelabs/switchboard/compare/v1.284.2...v1.284.3) (2026-10-03)
+
+
+### Bug fixes
+
+* **dispatcher:** resume from saved empty ranges and PR heads ([#2733](https://github.com/coreplanelabs/switchboard/issues/2733)) ([e58d78f](https://github.com/coreplanelabs/switchboard/commit/e58d78fc9641142f5854d7d892849f11923470a5))
+* **runs:** confirm terminal writes before releasing workspaces ([#2736](https://github.com/coreplanelabs/switchboard/issues/2736)) ([eaa25ec](https://github.com/coreplanelabs/switchboard/commit/eaa25ec3fe833d11dcbc7d3f7c058e1dc32e72f7))
+
+
+### Documentation
+
+* **docs:** publish Switchboard at switchboard.space ([#2734](https://github.com/coreplanelabs/switchboard/issues/2734)) ([c6fa40f](https://github.com/coreplanelabs/switchboard/commit/c6fa40f212f5b4023e787960b54a5aa4790e1f5f))
+
 ## [1.284.2](https://github.com/coreplanelabs/switchboard/compare/v1.284.1...v1.284.2) (2026-10-03)
 
 
