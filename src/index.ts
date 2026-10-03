@@ -1390,7 +1390,7 @@ export async function runBot(): Promise<void> {
     const coordinatorAdmin = createAdminCoordinatorHandler(coordinatorDeps);
     deps.recoverOriginalUnit = async (key, caller) => {
       const answer = await recoverOriginalUnit(
-        { parentInstanceId: key.instanceId, unit: key.unit },
+        { parentInstanceId: key.instanceId, unit: key.unit, ...(key.renew === true ? { renew: true } : {}) },
         coordinatorDeps,
         caller,
       );

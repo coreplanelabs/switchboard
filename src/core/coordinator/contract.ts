@@ -891,6 +891,8 @@ interface RecoveryClaimBase {
   /** The authenticated request's journal action; absent on older claims. */
   actionId?: string;
   accounting?: RecoveryAccounting;
+  /** One requester-spent grant renewal, distinct from ordinary lease recovery. */
+  renewed?: true;
   round: number;
   /** Credits earned in the original segment, checked against posted review pairs at claim time. */
   patternContinuations?: number;
@@ -921,8 +923,8 @@ interface RecoveryClaimBase {
   /** The separate Workflow execution checkpoint. This is transport identity,
    * not a replacement coordinator/unit identity. */
   workflowId: string;
-  /** Absolute end of the original active lease. Delayed Workflow admission or
-   * replay cannot turn the claim's snapshot into fresh time. */
+  /** Absolute end of the original active lease, or the one explicitly renewed
+   * lease. Delayed Workflow admission or replay cannot mint fresh time. */
   deadlineAt: number;
   /** Exact durable child key of the review outcome that authorized recovery. */
 }
@@ -1542,6 +1544,11 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
           r.recovery.patch === undefined
         : isText(r.recovery.reviewRunId) && isText(r.recovery.reviewKey)) &&
       (r.recovery.accounting === undefined || isRecoveryAccounting(r.recovery.accounting)) &&
+      (r.recovery.renewed === undefined ||
+        (r.recovery.renewed === true &&
+          r.recovery.kind === "findings" &&
+          isRecoveryAccounting(r.recovery.accounting) &&
+          r.recovery.accounting.renewalsSpent > (r.segments?.length ?? 0))) &&
       (r.recovery.externalReview === undefined ||
         (isRecoveryReview(r.recovery.externalReview) &&
           r.recovery.kind === "review" &&

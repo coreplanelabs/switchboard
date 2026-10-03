@@ -13834,6 +13834,176 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     });
   };
 
+  it("renews one expired no-work findings lease on the original unit and replays the same claim", async () => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD), branchHead: HEAD });
+    await h.instances.put({ ...recoveryInstance(), grant: { renewals: 1, costCapUsd: 2 } });
+    const row = setupRefusalRow();
+    row.startedAt = NOW - minutesToMs(130);
+    await h.instances.putUnits([row]);
+    await h.store.put(reviewRecord());
+    await h.store.put(failedBeforeWork());
+    const renew = () =>
+      recoverOriginalUnit({ parentInstanceId: INSTANCE.id, unit: "U12", renew: true }, h.deps, {
+        userId: INSTANCE.userId,
+        threadKey: INSTANCE.threadKey,
+        messageId: "slack:C1:renew-request",
+      });
+
+    expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_wall_clock_exhausted" } });
+    expect(await renew()).toMatchObject({ status: 200, body: { outcome: "started" } });
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    expect(claimed).toMatchObject({
+      instanceId: row.instanceId,
+      unit: row.unit,
+      branch: row.branch,
+      pr: row.pr,
+      lastPush: row.lastPush,
+      publication: row.publication,
+      recovery: {
+        kind: "findings",
+        round: 1,
+        expectedHeadSha: HEAD,
+        remainingMs: minutesToMs(120),
+        deadlineAt: NOW + minutesToMs(120),
+        accounting: { renewalsSpent: 1, grant: { renewals: 1, costCapUsd: 2 }, spendUsd: 0.25 },
+      },
+    });
+    expect(await renew()).toMatchObject({ status: 200, body: { outcome: "already_started" } });
+    expect(isCoordinatorUnit(JSON.parse(JSON.stringify(claimed)))).toBe(true);
+    expect(claimed?.rounds).toEqual(row.rounds);
+    expect(h.recoveries).toHaveLength(1);
+    expect(h.dispatched).toHaveLength(0);
+  });
+
+  it.each([
+    "grant spent",
+    "cost cap spent",
+    "active writer",
+    "moved ref",
+    "unreadable ref",
+    "incomplete child",
+    "rival child",
+    "rival owner",
+    "ordinary recovery still has time",
+  ])("refuses expired findings renewal with %s before claiming another writer", async (scenario) => {
+    const h = harness({
+      prFacts: exactRecoveryFacts(HEAD),
+      ...(scenario !== "unreadable ref" ? { branchHead: scenario === "moved ref" ? "b".repeat(40) : HEAD } : {}),
+    });
+    const row = setupRefusalRow();
+    row.startedAt = NOW - minutesToMs(scenario === "ordinary recovery still has time" ? 60 : 130);
+    await h.instances.put({
+      ...recoveryInstance(),
+      grant: { renewals: scenario === "grant spent" ? 0 : 1, costCapUsd: scenario === "cost cap spent" ? 0.25 : 2 },
+    });
+    await h.instances.putUnits([row]);
+    await h.store.put(reviewRecord());
+    await h.store.put(failedBeforeWork(scenario === "incomplete child" ? { truncated: true } : {}));
+    if (scenario === "rival child")
+      await h.store.put(failedBeforeWork({ id: "rival", idempotencyKey: `${INSTANCE.id}:U12/1/findings/a2` }));
+    if (scenario === "active writer")
+      h.registry.create("competing writer", {
+        agent: "coding",
+        channelId: "slack:C1",
+        userId: INSTANCE.userId,
+        threadKey: INSTANCE.threadKey,
+        parentInstanceId: INSTANCE.id,
+        idempotencyKey: `${INSTANCE.id}:U12/1/findings/a2`,
+      });
+    if (scenario === "rival owner")
+      h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
+    const before = await h.instances.listUnits(INSTANCE.id);
+    const result = await recoverOriginalUnit({ parentInstanceId: INSTANCE.id, unit: "U12", renew: true }, h.deps, {
+      userId: INSTANCE.userId,
+      threadKey: INSTANCE.threadKey,
+      messageId: "slack:C1:renew-request",
+    });
+    expect(result.status).not.toBe(200);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+    expect(h.recoveries).toHaveLength(0);
+  });
+
+  it("refuses a competing writer arriving during renewal revalidation", async () => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD), branchHead: HEAD });
+    await h.instances.put({ ...recoveryInstance(), grant: { renewals: 1 } });
+    const row = { ...setupRefusalRow(), startedAt: NOW - minutesToMs(130) };
+    await h.instances.putUnits([row]);
+    await h.store.put(reviewRecord());
+    await h.store.put(failedBeforeWork());
+    const list = h.deps.runs.listRuns.bind(h.deps.runs);
+    let reads = 0;
+    vi.spyOn(h.deps.runs, "listRuns").mockImplementation(async (opts) => {
+      const result = await list(opts);
+      if (++reads === 2)
+        return { ...result, runs: [...result.runs, { ...result.runs[0]!, id: "late-writer", finished: false }] };
+      return result;
+    });
+    expect(
+      await recoverOriginalUnit({ parentInstanceId: INSTANCE.id, unit: "U12", renew: true }, h.deps, {
+        userId: INSTANCE.userId,
+        threadKey: INSTANCE.threadKey,
+        messageId: "slack:C1:renew-request",
+      }),
+    ).toMatchObject({ status: 409, body: { error: "recovery_evidence_incomplete" } });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+    expect(h.recoveries).toHaveLength(0);
+  });
+
+  it("keeps a committed renewal spent if its Workflow fails before a child starts", async () => {
+    const h = harness({
+      prFacts: exactRecoveryFacts(HEAD),
+      branchHead: HEAD,
+      startRecovery: async (id) => ({ kind: "failed", id, reason: "not admitted" }),
+    });
+    await h.instances.put({ ...recoveryInstance(), grant: { renewals: 2, costCapUsd: 2 } });
+    const row = { ...setupRefusalRow(), startedAt: NOW - minutesToMs(130) };
+    await h.instances.putUnits([row]);
+    await h.store.put(reviewRecord());
+    await h.store.put(failedBeforeWork());
+    const renew = (messageId: string) =>
+      recoverOriginalUnit({ parentInstanceId: INSTANCE.id, unit: "U12", renew: true }, h.deps, {
+        userId: INSTANCE.userId,
+        threadKey: INSTANCE.threadKey,
+        messageId,
+      });
+    expect(await renew("slack:C1:renew-request")).toMatchObject({
+      status: 409,
+      body: { error: "recovery_workflow_failed" },
+    });
+    const [restored] = await h.instances.listUnits(INSTANCE.id);
+    expect(restored).toMatchObject({
+      ending: row.ending,
+      recoveryReceipt: { accounting: { renewalsSpent: 1 } },
+    });
+    expect(await renew("slack:C1:renew-request")).toMatchObject({
+      status: 409,
+      body: { error: "recovery_workflow_failed" },
+    });
+    expect((await renew("slack:C1:other-request")).status).toBe(409);
+    expect(h.recoveries).toHaveLength(1);
+  });
+
+  it("refuses a different renewal message after the first claim without consuming another renewal", async () => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD), branchHead: HEAD });
+    await h.instances.put({ ...recoveryInstance(), grant: { renewals: 2, costCapUsd: 2 } });
+    await h.instances.putUnits([{ ...setupRefusalRow(), startedAt: NOW - minutesToMs(130) }]);
+    await h.store.put(reviewRecord());
+    await h.store.put(failedBeforeWork());
+    const renew = (messageId: string) =>
+      recoverOriginalUnit({ parentInstanceId: INSTANCE.id, unit: "U12", renew: true }, h.deps, {
+        userId: INSTANCE.userId,
+        threadKey: INSTANCE.threadKey,
+        messageId,
+      });
+    expect((await renew("slack:C1:renew-request")).status).toBe(200);
+    expect(await renew("slack:C1:other-request")).toMatchObject({
+      status: 409,
+      body: { error: "recovery_already_claimed" },
+    });
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery?.accounting?.renewalsSpent).toBe(1);
+    expect(h.recoveries).toHaveLength(1);
+  });
+
   it("resumes original findings after a complete drain-wait setup refusal", async () => {
     const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
     await h.instances.put({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 0.5 } });

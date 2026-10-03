@@ -4200,6 +4200,11 @@ export async function recoverOriginalUnit(
   const instance = await deps.instances.get(id.value);
   if (instance === null) return json(404, { ok: false, error: "unknown_instance", at });
   const requestedWorkflowId = typeof body.workflowId === "string" ? body.workflowId : undefined;
+  const renew = body.renew === true;
+  if (body.renew !== undefined && body.renew !== true)
+    return json(400, { ok: false, error: "recovery_renewal_invalid", at });
+  if (renew && requestedWorkflowId !== undefined)
+    return json(409, { ok: false, error: "recovery_renewal_requester_required", at });
   if (caller === undefined && requestedWorkflowId === undefined)
     return json(403, { ok: false, error: "recovery_caller_required", at });
   if (caller !== undefined && caller.userId !== instance.userId)
@@ -4260,7 +4265,9 @@ export async function recoverOriginalUnit(
     return json(409, { ok: false, error: "unit_lifecycle_ambiguous", at });
 
   if (row.pr === undefined && (row.recovery === undefined || row.recovery.kind === "coding"))
-    return recoverOriginalCodingUnit(deps, instance, row, request, savedAction, requestedWorkflowId, at);
+    return renew
+      ? json(409, { ok: false, error: "recovery_renewal_stage_unsupported", at })
+      : recoverOriginalCodingUnit(deps, instance, row, request, savedAction, requestedWorkflowId, at);
 
   const originalOwner = { instanceId: instance.id, unit: row.unit };
   let publication = row.publication;
@@ -4319,6 +4326,8 @@ export async function recoverOriginalUnit(
   let externalReview: RecoveryReviewEvidence | undefined;
   let accounting: RecoveryAccounting | undefined;
   let claimRow = row;
+  let noWorkFindings = false;
+  let renewalEvidence: RunView[] | undefined;
   let facts: PullRequestFacts | undefined;
   let originalRow: CoordinatorUnit | undefined;
   if (existingClaim !== undefined) {
@@ -4340,6 +4349,8 @@ export async function recoverOriginalUnit(
       accounting,
     } = existingClaim);
     patternContinuations = existingClaim.patternContinuations ?? 0;
+    if (requestedWorkflowId === undefined && renew !== (existingClaim.renewed === true))
+      return json(409, { ok: false, error: "recovery_claim_mismatch", at });
     if (
       !Number.isSafeInteger(patternContinuations) ||
       patternContinuations < 0 ||
@@ -4428,8 +4439,9 @@ export async function recoverOriginalUnit(
       (grant.costCapUsd !== undefined && (!Number.isFinite(grant.costCapUsd) || grant.costCapUsd <= 0))
     )
       return unknownBudget("grant_invalid");
-    // Recovery resumes the active segment's original wall-clock lease. A
-    // renewal starts a full lease at its durable segment time; a stopped
+    // Ordinary recovery resumes the active segment's original wall-clock
+    // lease. A grant-backed renewal below is admitted only after proven
+    // no-work findings failure and claims its own bounded lease. A stopped
     // segment can carry the smaller unspent lease on its durable wake answer.
     const latestSegmentIndex = row.segments?.reduce((latest, candidate) => Math.max(latest, candidate.index), 1) ?? 1;
     const latestSegments = row.segments?.filter((candidate) => candidate.index === latestSegmentIndex) ?? [];
@@ -4873,6 +4885,8 @@ export async function recoverOriginalUnit(
         return json(409, { ok: false, error: "recovery_head_moved", reason: "findings_no_work_guard", at });
       // The failed dispatch consumed neither a findings contract nor a review
       // slot. Keep the posted review as the claim's identity and original lease.
+      noWorkFindings = true;
+      renewalEvidence = listing.runs;
     } else if (
       kind === "findings" &&
       row.ending.kind === "aborted" &&
@@ -5049,11 +5063,24 @@ export async function recoverOriginalUnit(
     if (kind === "review" && round > caps.maxRounds + patternContinuations)
       return json(409, { ok: false, error: "recovery_rounds_exhausted", at });
     const floor = minutesToMs(leaseMinimum(kind === "findings" ? "fix" : "review"));
+    if (renew) {
+      if (!noWorkFindings || remainingMs >= floor || row.recoveryReceipt !== undefined)
+        return json(409, { ok: false, error: "recovery_renewal_stage_unsupported", at });
+      if (segments.length >= grant.renewals) return json(409, { ok: false, error: "recovery_renewals_exhausted", at });
+      remainingMs = minutesToMs(caps.maxMinutes);
+      accounting = {
+        spendUsd: spend.usd,
+        children: spend.children,
+        grant: { ...grant },
+        renewalsSpent: segments.length + 1,
+      };
+    }
     if (!Number.isFinite(remainingMs) || remainingMs < floor)
       return json(409, { ok: false, error: "recovery_wall_clock_exhausted", at });
     stepName = `${row.unit}/recovery/${round}/${kind}`;
-    workflowId =
-      externalReview !== undefined
+    workflowId = renew
+      ? `recovery-renewal-${reviewRunId}`
+      : externalReview !== undefined
         ? `recovery-review-${externalReview.id}`
         : `recovery-${findingsRunId ?? reviewRunId}`;
     deadlineAt = at + remainingMs;
@@ -5124,6 +5151,9 @@ export async function recoverOriginalUnit(
   let token: symbol | undefined;
   let transferred = existingClaim !== undefined;
   const rollback = async (error: string, consumed = false): Promise<IngressResponse> => {
+    // A committed renewal is spent even if Workflow admission fails: a later
+    // request must not mint another lease from the same original grant.
+    consumed ||= claimedRow.recovery?.renewed === true;
     if (originalRow !== undefined) {
       const replacement = consumed
         ? {
@@ -5274,9 +5304,55 @@ export async function recoverOriginalUnit(
   if (existingClaim === undefined) {
     if (instance.stop !== undefined) return json(409, { ok: false, error: "stopped", at });
     // Historical evidence and remote reads can outlive the remaining lease.
-    // Refuse before reserving ownership; the original deadline never moves.
+    // Refuse before reserving ownership; the claimed deadline never moves.
     if (deadlineAt - (deps.clock ?? systemClock)() < minutesToMs(leaseMinimum(kind === "findings" ? "fix" : "review")))
       return json(409, { ok: false, error: "recovery_wall_clock_exhausted", at });
+    if (renew) {
+      // Evidence and PR facts read before a claim are not a lock. A fresh
+      // complete scope, exact remote ref and PR binding must still agree.
+      const current = await deps.runs
+        .listRuns({
+          privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
+          status: "all",
+          visibleTo: EVERY_RUN,
+          limit: RUN_LIST_MAX_LIMIT,
+          recoveryEvidence: {
+            instanceId: instance.id,
+            unit: row.unit,
+            threadKeys: [
+              row.threadKey ?? instance.threadKey,
+              row.reviewThread?.threadKey ?? row.threadKey ?? instance.threadKey,
+            ],
+          },
+        })
+        .catch(() => undefined);
+      if (
+        current === undefined ||
+        current.storeUnavailable ||
+        current.ledgerUnavailable ||
+        current.nextBefore !== undefined ||
+        current.runs.length >= RUN_LIST_MAX_LIMIT ||
+        renewalEvidence === undefined ||
+        JSON.stringify(current.runs) !== JSON.stringify(renewalEvidence)
+      )
+        return json(409, { ok: false, error: "recovery_evidence_incomplete", at });
+      const remote = await deps.fetchBranchHeadSha?.(instance.repo, row.branch).catch(() => undefined);
+      if (remote === undefined) return json(409, { ok: false, error: "recovery_ref_unavailable", at });
+      if (remote !== expectedHead) return json(409, { ok: false, error: "recovery_head_moved", at });
+      const refreshed = await deps.fetchPrFacts({ repo: instance.repo, number: pr.number }).catch(() => undefined);
+      if (
+        refreshed?.state !== "open" ||
+        refreshed.sameRepoHead !== true ||
+        refreshed.headBranchExists !== true ||
+        refreshed.headRef !== row.branch ||
+        refreshed.baseRef !== base ||
+        refreshed.headSha !== expectedHead ||
+        refreshed.verifiedHead?.sha !== expectedHead ||
+        refreshed.verifiedHead.ref !== row.branch ||
+        refreshed.verifiedHead.repo.toLowerCase() !== instance.repo.toLowerCase()
+      )
+        return json(409, { ok: false, error: "recovery_facts_mismatch", at });
+    }
     try {
       token = fence.reserve(instance.repo, pr.number, fenceOwner);
     } catch (err) {
@@ -5289,6 +5365,7 @@ export async function recoverOriginalUnit(
       recovery: {
         kind,
         round,
+        ...(renew ? { renewed: true } : {}),
         ...(patternContinuations > 0 ? { patternContinuations } : {}),
         expectedHeadSha: expectedHead,
         remainingMs,

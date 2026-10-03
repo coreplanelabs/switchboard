@@ -111,7 +111,7 @@ export interface ShipDeps extends RunDeps, Pick<FastPathDeps, "clock" | "runRegi
   /** The explicit Slack recovery operation. It is deterministic coordinator
    * work, not a generated-plan hand-off or a model run. */
   recoverOriginalUnit?: (
-    key: { instanceId: string; unit: string },
+    key: { instanceId: string; unit: string; renew?: true },
     caller: { userId: string; threadKey: string; messageId?: string },
   ) => Promise<{ status: number; body: Record<string, unknown> }>;
   adoptOriginalPublishedHead?: (
@@ -151,12 +151,18 @@ export interface ShipBranchEnd {
   hostedLive: boolean;
 }
 
-export function parseOriginalUnitRecoveryRequest(text: string): { instanceId: string; unit: string } | undefined {
-  const match = /^recover\s+unit\s+(\S+)\s*$/i.exec(text.trim());
-  return match ? parseUnitKey(match[1]!) : undefined;
+export function parseOriginalUnitRecoveryRequest(
+  text: string,
+): { instanceId: string; unit: string; renew?: true } | undefined {
+  const match = /^(recover|renew)\s+unit\s+(\S+)\s*$/i.exec(text.trim());
+  const key = match ? parseUnitKey(match[2]!) : undefined;
+  return key === undefined
+    ? undefined
+    : { ...key, ...(match![1]!.toLowerCase() === "renew" ? { renew: true as const } : {}) };
 }
 
-export const namesOriginalUnitRecovery = (text: string): boolean => /^recover\s+unit(?:\s|$)/i.test(text.trim());
+export const namesOriginalUnitRecovery = (text: string): boolean =>
+  /^(?:recover|renew)\s+unit(?:\s|$)/i.test(text.trim());
 
 export function parseOriginalUnitAdoptionRequest(text: string): { instanceId: string; unit: string } | undefined {
   const match = /^adopt\s+unit\s+(\S+)\s*$/i.exec(text.trim());
@@ -306,7 +312,8 @@ export async function runShipBranch(
   }
   const recovery = parseOriginalUnitRecoveryRequest(directives.text);
   if (recovery === undefined && namesOriginalUnitRecovery(directives.text)) {
-    const reason = "original-unit recovery must be `recover unit <instanceId>:<unit>`";
+    const reason =
+      "original-unit recovery must be `recover unit <instanceId>:<unit>` or `renew unit <instanceId>:<unit>`";
     await refuse(refusalOf("setup_failed", reason), () =>
       card.done(shell.close({ kind: "refused", icon: "🚫", reason, ...closeLines(clock(), false) })),
     );
