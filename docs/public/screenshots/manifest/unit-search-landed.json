@@ -187,7 +187,7 @@
     "src/execution/residentDisk.ts": "9fb95f5e533af830869f7a8049b8fc7b1a934e58332bc68f5f64851a24be0d7f",
     "src/execution/residentDiskBudget.ts": "102322313876fb3dcbb24918e54847df593819ce581220f34463d8aaf2b23565",
     "src/execution/residentSteps.ts": "dfa70b342924515349157655b237502f8cdfb283906570eaccf92b047b23a496",
-    "src/execution/seedPlan.ts": "e6a4da3e1234af5325920ffac50048d4f16387e34557acdd50b106c643785163",
+    "src/execution/seedPlan.ts": "fd6ba9225eb7cef24151d036d7414f2d430cf9e0389482c7d4af41d9154a72ed",
     "src/execution/shellQuote.ts": "4e67bf91cb92b322e39198bfa326f34a75f3154c49a7efddd45b354cb3992f88",
     "src/mcp/config.ts": "085b45a4b18c86299b5e8aee22bc828a928e9eeda5625a47e9d17b532a3bb128",
     "src/mcp/registry.ts": "f66dbc9f9593669d1ea4e1e30182fb46055362295ea2968c9a1bce3907b60af4",

@@ -51,6 +51,8 @@ import { envFromRequest } from "../../src/execution/sandboxEnv.js";
 import { DESTROY_GRACE_MS, IdleGuard, type IdleGuardHost } from "../../src/execution/sandboxIdle.js";
 import {
   boundSeedMarkerDecision,
+  boundSeedOriginMatches,
+  normalizedSeedDoorOrigin,
   checkpointIfSafe,
   parsePreservationOwner,
   passivePreservationReceipt,
@@ -374,7 +376,8 @@ export class SwitchboardSandbox extends Sandbox<Env> {
         currentOwner: async () => (await this.ctx.storage.get<CheckpointRecord>(PRESERVATION_KEY))?.owner ?? null,
         backup: (options) => this.createBackup(options),
         verify: async (id) => (await backupExists(this.env.BACKUP_BUCKET, id)) === true,
-        save: (backupId, owner) => this.ctx.storage.put(PRESERVATION_KEY, { owner, backupId }),
+        save: (backupId, owner) =>
+          this.ctx.storage.put(PRESERVATION_KEY, { owner, doorOrigin: record.doorOrigin, backupId }),
       });
     } catch {
       // A failed probe, upload, stale incarnation or unreadable runtime can
@@ -562,6 +565,16 @@ export class SwitchboardSandbox extends Sandbox<Env> {
               detail: "preservation owner changed",
               step: "fixup",
             } as SeedAnswer;
+          // A previously bound owner cannot be retrofitted with today's door:
+          // compare the birth origin before seedNow can update origin or checkout.
+          const doorOrigin = claim ? normalizedSeedDoorOrigin(envVars.GIT_DOOR_ORIGIN) : null;
+          if ((claim && !doorOrigin) || (prior && !boundSeedOriginMatches(prior.doorOrigin, envVars.GIT_DOOR_ORIGIN)))
+            return {
+              seeded: false,
+              reason: "seed-incompatible",
+              detail: "preservation door origin changed or unavailable",
+              step: "fixup",
+            } as SeedAnswer;
           if (prior) {
             try {
               const [incarnation, cachedSeed] = await Promise.all([
@@ -605,9 +618,10 @@ export class SwitchboardSandbox extends Sandbox<Env> {
             } as SeedAnswer;
           try {
             if (prior) return { ...answer, preservationContainer: prior.owner.container };
+            if (!doorOrigin) throw new Error("unbound door origin");
             const owner: PreservationOwner = { ...claim, container: crypto.randomUUID() };
             await this.writeFile(PRESERVATION_CONTAINER_MARKER, owner.container);
-            await this.ctx.storage.put(PRESERVATION_KEY, { owner } satisfies CheckpointRecord);
+            await this.ctx.storage.put(PRESERVATION_KEY, { owner, doorOrigin } satisfies CheckpointRecord);
             return { ...answer, preservationContainer: owner.container };
           } catch {
             return {

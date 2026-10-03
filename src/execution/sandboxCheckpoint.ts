@@ -24,13 +24,44 @@ export interface PreservationOwner {
 export type OwnerClaim = Omit<PreservationOwner, "container">;
 export interface CheckpointRecord {
   owner: PreservationOwner;
+  /** Bound at the owner's birth, never inferred from a later retry. Old rows have no origin. */
+  doorOrigin?: string;
   backupId?: string;
+}
+
+/** The trusted seed env supplies an origin, not a URL carrying credentials,
+ * path, query or fragment. Canonicalizing the host/port makes equivalent
+ * spellings match without accepting a later change of destination. */
+export function normalizedSeedDoorOrigin(input: unknown): string | null {
+  if (typeof input !== "string" || !/^https:\/\/[^/?#\s]+\/?$/.test(input)) return null;
+  try {
+    const url = new URL(input);
+    return url.protocol === "https:" &&
+      !url.username &&
+      !url.password &&
+      url.pathname === "/" &&
+      !url.search &&
+      !url.hash
+      ? url.origin
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Missing birth metadata is unknown, not permission to retrofit an old owner. */
+export function boundSeedOriginMatches(bound: string | undefined, requested: unknown): boolean {
+  const origin = normalizedSeedDoorOrigin(requested);
+  return origin !== null && bound === origin;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SHA = /^[0-9a-f]{40}$/;
 const REPOSITORY = /^[a-zA-Z0-9_.-]{1,80}\/[a-zA-Z0-9_.-]{1,80}$/;
-const REF = /^(?![-/.])(?!.*\.\.)(?!.*\/\/)(?!.*\.lock$)(?!.*\.$)(?!.*@\{)[a-zA-Z0-9_./-]{1,255}$/;
+// Keep the owner claim's branch grammar aligned with parseSeed: Git permits
+// characters such as `+`, while its reserved ref syntax stays forbidden.
+const REF = /^(?![-/.])(?!.*\.\.)(?!.*\/\/)(?!.*\.lock$)(?!.*\.$)(?!.*@\{)[\x21-\x7e]{1,255}$/;
+const REF_FORBIDDEN = /[~^:?*[\\]/;
 const OWNER_FIELDS = ["run", "requester", "thread", "repository", "ref", "head", "seed", "container"] as const;
 
 /** No path, env, command or arbitrary JSON fields accepted from a receipt. */
@@ -57,6 +88,7 @@ export function parsePreservationOwner(input: unknown, requireContainer = true):
     !REPOSITORY.test(o.repository) ||
     typeof o.ref !== "string" ||
     !REF.test(o.ref) ||
+    REF_FORBIDDEN.test(o.ref) ||
     typeof o.head !== "string" ||
     !SHA.test(o.head)
   )

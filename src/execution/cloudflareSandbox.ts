@@ -35,6 +35,7 @@ import {
   type WaitReason,
 } from "./sandboxErrors.js";
 import { SEED_BUDGET_MS, type SandboxSeed, type SeedAnswer } from "./seedPlan.js";
+import { parsePreservationOwner, type OwnerClaim } from "./sandboxCheckpoint.js";
 import {
   SandboxCredentialRefresher,
   SandboxCredentialRefreshError,
@@ -608,18 +609,55 @@ export class CloudflareSandboxExecutor implements Executor {
    *  first command. The Worker streams the answer under SEED_BUDGET_MS — a
    *  restore takes minutes — and names every outcome in the body: `seeded`,
    *  or a reason the caller decides on (`seed-missing` → re-read `/status`
-   *  once and retry; anything else → the run goes cold, with the note). The
+   *  once and retry; other returned reasons follow the caller's decision).
+   *  A claimed caller refuses a transport error or invalid receipt. The
    *  env rides along as on every route: the fix-up's fetch authenticates with
    *  it. A container still starting or a full fleet is waited out here like
    *  any other route. */
-  async seed(seed: SandboxSeed, opts?: { signal?: AbortSignal; span?: Span }): Promise<SeedAnswer> {
-    const r = await this.call("/seed", { seed }, opts?.signal, SEED_BUDGET_MS, opts?.span);
+  async seed(seed: SandboxSeed, opts?: { signal?: AbortSignal; span?: Span; claim?: OwnerClaim }): Promise<SeedAnswer> {
+    const claim = opts?.claim;
+    if (
+      claim &&
+      (!parsePreservationOwner(claim, false) ||
+        claim.thread !== this.opts.threadKey ||
+        claim.repository !== seed.slug ||
+        claim.ref !== (seed.fetchRef ?? seed.ref) ||
+        claim.head !== (seed.fetchSha ?? seed.sha) ||
+        claim.seed !== seed.checkoutBackupId)
+    )
+      throw new ExecInfraError("sandbox /seed: invalid preservation claim", "refused");
+    const r = await this.call(
+      "/seed",
+      { seed, ...(claim ? { preservation: claim } : {}) },
+      opts?.signal,
+      SEED_BUDGET_MS,
+      opts?.span,
+    );
     if (typeof r.seeded !== "boolean") {
       throw new ExecInfraError(
         `sandbox worker /seed answered without a verdict: ${JSON.stringify(r).slice(0, 200)}`,
         "refused",
       );
     }
+    if (
+      claim &&
+      r.seeded &&
+      (!parsePreservationOwner({ ...claim, container: r.preservationContainer }) ||
+        r.slug !== claim.repository ||
+        r.ref !== claim.ref ||
+        typeof r.cached !== "boolean" ||
+        typeof r.sha !== "string" ||
+        !/^[0-9a-f]{40}$/.test(r.sha) ||
+        (!r.cached && r.sha !== claim.head) ||
+        !r.from ||
+        typeof r.from !== "object" ||
+        Array.isArray(r.from) ||
+        (r.from as Record<string, unknown>).ref !== seed.ref ||
+        (r.from as Record<string, unknown>).sha !== seed.sha ||
+        (r.from as Record<string, unknown>).checkoutBackupId !== claim.seed ||
+        (r.from as Record<string, unknown>).depsBackupId !== seed.depsBackupId)
+    )
+      throw new ExecInfraError("sandbox /seed: invalid preservation receipt", "refused");
     return r as unknown as SeedAnswer;
   }
 
