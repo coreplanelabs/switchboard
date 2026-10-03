@@ -55,7 +55,9 @@ import {
   normalizedSeedDoorOrigin,
   checkpointIfSafe,
   parsePreservationOwner,
+  parseSlotEvidenceRequest,
   passivePreservationReceipt,
+  passiveSlotEvidence,
   sameOwner,
   seedClaimHeadMatches,
   type CheckpointRecord,
@@ -397,9 +399,18 @@ export class SwitchboardSandbox extends Sandbox<Env> {
 
   /** Durable metadata only. This RPC never calls the SDK, StartGate or an
    * executor; in particular it cannot start a stopped container. */
-  async preservationRecord(): Promise<{ record: CheckpointRecord | null; running: boolean | undefined }> {
+  async preservationRecord(): Promise<{
+    objectId: string;
+    threadName: string | undefined;
+    record: CheckpointRecord | null;
+    seedState: "seeded" | "unseeded" | undefined;
+    running: boolean | undefined;
+  }> {
     return {
+      objectId: this.ctx.id.toString(),
+      threadName: this.ctx.id.name,
       record: (await this.ctx.storage.get<CheckpointRecord>(PRESERVATION_KEY)) ?? null,
+      seedState: await this.ctx.storage.get<"seeded" | "unseeded">(PRESERVATION_SEED_STATE_KEY),
       running: this.ctx.container?.running,
     };
   }
@@ -1320,6 +1331,23 @@ export default {
         return json(await stub.inspectRepairDependencies(owner, body.targetHead));
       const receipt = await stub.repairDependencies(owner, body.targetHead);
       return receipt ? json(receipt) : json({ error: "repair refused or outcome unknown" }, 409);
+    }
+    if (url.pathname === "/preservation/slot") {
+      // This evidence-only read cannot wake a container or authorize its stop.
+      // The caller binds the platform's DO actor id and all original owner
+      // fields except the birth container, which this exact DO may disclose.
+      if (!modelSandboxIdentity("/seed", threadKey)) return json({ error: "invalid thread identity" }, 400);
+      const requested = parseSlotEvidenceRequest(await request.json().catch(() => null));
+      if (!requested || requested.claim.thread !== threadKey)
+        return json({ error: "invalid preservation identity" }, 400);
+      const stub = env.Sandbox.get(env.Sandbox.idFromName(threadKey));
+      return json(
+        await passiveSlotEvidence(
+          requested,
+          () => stub.preservationRecord(),
+          (id) => backupExists(env.BACKUP_BUCKET, id),
+        ),
+      );
     }
     if (url.pathname === "/preservation/receipt") {
       // Raw DO stub, NOT getSandbox: a stopped container is never started just

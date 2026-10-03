@@ -364,6 +364,27 @@ describe("sandbox Worker wiring (static)", () => {
     expect(route).not.toContain(".exec(");
   });
 
+  it("the exact-slot receipt bypasses getSandbox and native exec", () => {
+    const route = worker.slice(
+      worker.indexOf('if (url.pathname === "/preservation/slot")'),
+      worker.indexOf('if (url.pathname === "/preservation/receipt")'),
+    );
+    expect(route).toContain("env.Sandbox.get(env.Sandbox.idFromName(threadKey))");
+    expect(route).toContain("passiveSlotEvidence(");
+    expect(route).not.toContain("getSandbox(");
+    expect(route).not.toContain(".exec(");
+    expect(route).not.toContain(".destroy(");
+    const record = worker.slice(
+      worker.indexOf("async preservationRecord()"),
+      worker.indexOf("async inspectRepairDependencies("),
+    );
+    expect(record).toContain("this.ctx.id.toString()");
+    expect(record).toContain("this.ctx.storage.get<CheckpointRecord>(PRESERVATION_KEY)");
+    expect(record).not.toContain(".exec(");
+    expect(record).not.toContain(".readFile(");
+    expect(record).not.toContain(".destroy(");
+  });
+
   // The rollout window a NEW thread can fall into is closed by replacing the
   // old-image instances in ONE wave: rollout_step_percentage 100, not the
   // platform's default [10, 100] that left minutes between the waves.

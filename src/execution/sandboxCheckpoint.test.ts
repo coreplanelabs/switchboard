@@ -8,6 +8,8 @@ import {
   normalizedSeedDoorOrigin,
   boundSeedOriginMatches,
   passivePreservationReceipt,
+  passiveSlotEvidence,
+  parseSlotEvidenceRequest,
   preservationReceipt,
   type PreservationOwner,
 } from "./sandboxCheckpoint.js";
@@ -183,5 +185,86 @@ describe("preservationReceipt", () => {
     expect(preservationReceipt(owner, record, false)).toEqual({ state: "lost" });
     expect(preservationReceipt(owner, { owner }, false)).toEqual({ state: "unknown" });
     expect(preservationReceipt(owner, { owner }, true)).toEqual({ state: "unknown" });
+  });
+});
+
+describe("passive slot evidence", () => {
+  const claim = (({ container: _container, ...rest }) => rest)(owner);
+  const objectId = "d".repeat(64);
+
+  it("reports a matched running owner and complete checkpoint as retained, never as a stop permit", async () => {
+    const read = vi.fn(async () => ({
+      objectId,
+      threadName: owner.thread,
+      running: true,
+      seedState: "seeded" as const,
+      record: { owner, backupId: "eeeeeeee-eeee-4eee-eeee-eeeeeeeeeeee" },
+    }));
+    const archive = vi.fn(async () => true);
+    expect(await passiveSlotEvidence({ claim, objectId }, read, archive)).toEqual({
+      state: "retained",
+      objectId,
+      birthContainer: owner.container,
+      seedState: "seeded",
+      checkpoint: "present",
+      platformInstance: "unknown",
+      liveIncarnation: "unknown",
+      exclusiveOwner: "unknown",
+      quiescence: "unknown",
+      liveCheckout: "unknown",
+      reason: "quiescence_and_live_bytes_unproven",
+    });
+    expect(archive).toHaveBeenCalledWith("eeeeeeee-eeee-4eee-eeee-eeeeeeeeeeee");
+  });
+
+  it("discloses no owner or checkpoint when the DO, claim, or running state is uncertain", async () => {
+    const read = vi.fn(async () => ({
+      objectId,
+      threadName: owner.thread,
+      running: true,
+      seedState: "seeded" as "seeded" | "unseeded",
+      record: { owner },
+    }));
+    const archive = vi.fn(async () => true);
+    expect(await passiveSlotEvidence({ claim, objectId: "f".repeat(64) }, read, archive)).toEqual({ state: "unknown" });
+    expect(
+      await passiveSlotEvidence({ claim: { ...claim, run: crypto.randomUUID() }, objectId }, read, archive),
+    ).toEqual({ state: "unknown" });
+    read.mockResolvedValueOnce({
+      objectId,
+      threadName: owner.thread,
+      running: false,
+      seedState: "seeded",
+      record: { owner },
+    });
+    expect(await passiveSlotEvidence({ claim, objectId }, read, archive)).toEqual({ state: "unknown" });
+    read.mockResolvedValueOnce({
+      objectId,
+      threadName: owner.thread,
+      running: true,
+      seedState: "unseeded",
+      record: { owner },
+    });
+    expect(await passiveSlotEvidence({ claim, objectId }, read, archive)).toEqual({ state: "unknown" });
+    expect(archive).not.toHaveBeenCalled();
+  });
+
+  it("accepts only the complete claim and DO id, without paths or commands", () => {
+    expect(parseSlotEvidenceRequest({ claim, objectId })).toEqual({ claim, objectId });
+    expect(parseSlotEvidenceRequest({ claim, objectId, path: "/workspace/checkout" })).toBeNull();
+    expect(parseSlotEvidenceRequest({ claim: { ...claim, command: "ps" }, objectId })).toBeNull();
+    expect(parseSlotEvidenceRequest({ claim, objectId: "short" })).toBeNull();
+  });
+
+  it("keeps a matching owner retained when the R2 checkpoint is missing", async () => {
+    const read = async () => ({
+      objectId,
+      threadName: owner.thread,
+      running: true,
+      seedState: "seeded" as const,
+      record: { owner, backupId: "eeeeeeee-eeee-4eee-eeee-eeeeeeeeeeee" },
+    });
+    const result = await passiveSlotEvidence({ claim, objectId }, read, async () => false);
+    expect(result).toMatchObject({ state: "retained", checkpoint: "lost", quiescence: "unknown" });
   });
 });
