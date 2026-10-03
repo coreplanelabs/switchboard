@@ -16,7 +16,7 @@
   "src/channels/slack.ts": 2,
   "src/channels/slack/dedupe.ts": 1,
   "src/channels/slack/lookups.ts": 1,
-  "src/channels/slackCatchUp.ts": 3,
+  "src/channels/slackCatchUp.ts": 2,
   "src/channels/slackChannelDirectory.ts": 2,
   "src/config/profile.ts": 1,
   "src/core/chatMessage.ts": 1,

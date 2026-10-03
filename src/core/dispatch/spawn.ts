@@ -47,19 +47,8 @@ import type { DispatchOutcome } from "./outcome.js";
 import type { OperationTarget } from "../repoContext.js";
 import type { PrBatchBinding } from "../prBatchBinding.js";
 
-/** The `spawn` block of `config.yaml` (docs/reference/specs/agent-conductor.md item 5). */
-export interface SpawnConfig {
-  /** The most read children one run may have live at once (default 8, at least 1);
-   *  an exact-PR Ship batch starts independent durable units. */
-  maxChildren?: number;
-}
-
-export const DEFAULT_MAX_CHILDREN = 8;
-
-/** The fan-out cap in force: the knob, or the default. */
-export function maxChildrenOf(cfg: SpawnConfig | undefined): number {
-  return cfg?.maxChildren ?? DEFAULT_MAX_CHILDREN;
-}
+import { maxChildrenOf } from "./spawnConfig.js";
+export { DEFAULT_MAX_CHILDREN, maxChildrenOf, type SpawnConfig } from "./spawnConfig.js";
 
 /** How deep a tree goes: a run a person started is depth 0, its children are
  *  depth 1, and a child cannot spawn — the fan-out's cost has one bound. */

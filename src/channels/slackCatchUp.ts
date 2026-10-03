@@ -1,4 +1,5 @@
 import { DEPLOY_RESTART_NOTICE } from "../core/dispatch/run.js";
+import { DEFAULT_CATCH_UP_WINDOW_MS } from "../core/budgets.js";
 import { LIVE_CARD_PREFIXES } from "../core/statusCardFrame.js";
 import { MIN_CATCH_UP_WINDOW_MS } from "../core/drain.js";
 import { systemClock } from "../core/trace/clock.js";
@@ -49,7 +50,7 @@ export const ORPHAN_CARD_WINDOW_MS = 2 * 3_600_000;
  *  — `MIN_CATCH_UP_WINDOW_MS`, pinned by `src/core/drain.test.ts`. Older
  *  un-acked mentions are left alone — re-running a request from an hour ago is
  *  worse than the human re-posting it. */
-export const DEFAULT_WINDOW_MS = 30 * 60_000;
+export const DEFAULT_WINDOW_MS = DEFAULT_CATCH_UP_WINDOW_MS;
 /** A 👀-acked message with NO bot reply after it is a run that died between
  *  the ack and its status card (a deploy rollover that kills the process
  *  seconds after it acked a thread reply: the reply never gets a card, and a
