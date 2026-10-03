@@ -21,10 +21,14 @@
     "html_handling": "auto-trailing-slash",
     "not_found_handling": "404-page"
   },
-  // workers.dev is DISABLED so the site has exactly one hostname, the one
-  // project.json publishes. The site is public: no Access application fronts
-  // it, and nothing here is an installation's to gate.
+  // workers.dev is DISABLED. The public site uses the project.json hostname;
+  // the retired hostname remains attached only to keep its Worker-managed DNS
+  // record alive for the zone's edge redirect to the public site. Cloudflare
+  // rejects a standalone DNS record while that custom domain exists.
   "workers_dev": false,
-  "routes": [{ "pattern": "{{hostname}}", "custom_domain": true }],
+  "routes": [
+    { "pattern": "{{hostname}}", "custom_domain": true },
+    { "pattern": "openswitchboard.dev", "custom_domain": true }
+  ],
   "observability": { "enabled": true }
 }

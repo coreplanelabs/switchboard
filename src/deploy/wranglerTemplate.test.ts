@@ -91,6 +91,17 @@ describe("templateView", () => {
 describe("siteView / renderSiteConfig", () => {
   const FACTS = { name: "switchboard", docs: "https://docs.example.test/" };
 
+  it("keeps the retired docs host attached so its edge redirect retains DNS after a docs deploy", () => {
+    const rendered = renderSiteConfig(TEST_PROFILE, JSON.stringify(FACTS), (path) => readFileSync(path, "utf8"));
+    expect(rendered.ok).toBe(true);
+    if (!rendered.ok) return;
+    const config = JSON.parse(stripJsonc(rendered.text)) as { routes: { pattern: string; custom_domain: boolean }[] };
+    expect(config.routes).toEqual([
+      { pattern: "docs.example.test", custom_domain: true },
+      { pattern: "openswitchboard.dev", custom_domain: true },
+    ]);
+  });
+
   it("binds `<name>-docs` and the docs host to the profile's account — nothing from the profile's Workers", () => {
     expect(siteView(TEST_PROFILE, FACTS)).toEqual({
       ok: true,
