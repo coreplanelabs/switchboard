@@ -498,7 +498,7 @@ describe("one preservation guard covers automatic loss paths", () => {
       "rebuild",
     ])
       expect(methodOf(entry, name), name).toContain("automaticContainerLoss");
-    expect(methodOf(entry, "registeredRunsBeyondOps")).toContain("r?.runId");
+    expect(methodOf(entry, "registeredRunsBeyondOps")).toContain("hasRunOwnerField(r)");
     expect(methodOf(entry, "isIdle")).toContain("registeredRunsBeyondOps");
   });
 

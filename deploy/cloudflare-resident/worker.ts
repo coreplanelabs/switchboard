@@ -97,7 +97,7 @@ import {
 } from "./legacyCredentials.js";
 import { hasUnexpectedOwnedThreadDir } from "./orphanThreadUsers.js";
 import { KeyedAsyncLock } from "./keyedAsyncLock.js";
-import { decideWorkspaceRemoval, type PreservationDecision } from "./workspacePreservation.js";
+import { decideWorkspaceRemoval, hasRunOwnerField, type PreservationDecision } from "./workspacePreservation.js";
 import { RUN_STORE_KEY, RUN_STORE_TIMEOUT_MS } from "../../src/core/runStoreConstants.js";
 import { residentPublicationCommand, type ResidentPublicationInput } from "../../src/execution/residentPublication.js";
 import {
@@ -106,7 +106,9 @@ import {
   type DeployImageReconcileState,
 } from "./imageReconcileState.js";
 import {
-  classifyDeployRegistration,
+  classifyDeployRegistrationWithLedger,
+  decideOwnerReconciliation,
+  validRunOwner,
   registeredRunAllowsClaim,
   registeredRunAllowsReattach,
   registeredRunNeedsProtection,
@@ -1971,6 +1973,8 @@ interface RunRegistration {
   runId?: string;
   ownerGen?: string;
   ownerFence?: number;
+  /** Exact-thread reconciliation proves this unidentified run is elapsed, not deletable. */
+  legacyRetainedAt?: number;
 }
 
 /** Deterministic per-thread+ref worktree path. Slugs replace anything outside
@@ -6307,6 +6311,8 @@ export class ResidentDO extends Sandbox<Env> {
           // The attachment fence takes precedence over every 503 gate. Keep the
           // same thread lock through the gates and registration write so a newer
           // attach cannot slip between this check and a fallback-eligible refusal.
+          if (!validRunOwner(runId, ownerGen, ownerFence))
+            return { error: "run-registration-incomplete: attach requires a verifiable owner", status: 400 };
           const current = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
           const accepted = await this.ctx.storage.get<Pick<RunRegistration, "runId" | "ownerGen" | "ownerFence">>(
             runFenceKey(threadKey),
@@ -8722,6 +8728,112 @@ export class ResidentDO extends Sandbox<Env> {
   async getInFlightCount(): Promise<number> {
     return this.inFlightCount() + (await this.registeredRunsBeyondOps());
   }
+  /** Admin-only, one exact retained thread. No workspace or private content is
+   * changed: unidentified runs remain unidentified and cannot authorize removal. */
+  async reconcileRetainedOwner(
+    threadKey: string,
+  ): Promise<{ migrated: number; legacy: number; ledger: number; reason: string } | ThreadErr> {
+    return this.withDeployAdmission(() =>
+      this.threadAttaches.run(threadKey, async () => {
+        const refuse = (reason: string): ThreadErr => ({
+          error: `owner-reconciliation-refused: ${reason}`,
+          status: 503,
+        });
+        const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
+        if (!binding || binding.evicted || !binding.user || binding.threadKey !== threadKey)
+          return refuse("binding-unavailable");
+        if ((this.threadOpsInFlight.get(threadKey) ?? 0) > 0 || this.opUsersInUse.has(binding.user))
+          return refuse("owner-active");
+        const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
+        const fence = await this.ctx.storage.get<unknown>(runFenceKey(threadKey));
+        const owner = registration?.runId ? await this.observeRunForEviction(registration, binding) : null;
+        const lastRunOwner = binding.lastRunOwner;
+        const canonicalPath = await threadWorktreePath(threadKey, binding.ref);
+        const path = binding.worktreePath;
+        // A named-ref change can slug-collide with its old checkout. In that
+        // case the retained row names the deterministic sibling, not canonical.
+        if (
+          (path !== canonicalPath && path !== (await replacementWorktreePath(threadKey, binding.ref, canonicalPath))) ||
+          !(await this.isRuntimeActive())
+        )
+          return refuse("workspace-unverified");
+        try {
+          if (await this.poolUserHasOldThreadDir(binding.user, [parentDir(path)])) return refuse("workspace-conflict");
+          const disk = await this.run([
+            "sh",
+            "-c",
+            'if test -L "$1" || test -L "$(dirname "$1")" || ! test -d "$1"; then exit 42; fi; stat -c %U "$1"',
+            "_",
+            path,
+          ]);
+          if (
+            disk.exitCode !== 0 ||
+            disk.timedOut ||
+            disk.truncated ||
+            disk.stderr.trim() ||
+            disk.stdout.trim() !== binding.user
+          )
+            return refuse("workspace-unverified");
+          const processes = await this.run(["pgrep", "-u", binding.user]);
+          if (
+            processes.exitCode !== 1 ||
+            processes.stdout.trim() !== "" ||
+            processes.stderr.trim() ||
+            processes.timedOut ||
+            processes.truncated
+          )
+            return refuse("owner-active-or-unreadable");
+        } catch {
+          return refuse("workspace-unreadable");
+        }
+        const now = systemClock();
+        return this.ctx.storage.transaction(async (txn) => {
+          const current = await txn.get<ThreadBinding>(threadBindingKey(threadKey));
+          const row = await txn.get<RunRegistration>(runRegKey(threadKey));
+          const currentFence = await txn.get<unknown>(runFenceKey(threadKey));
+          if (
+            !current ||
+            JSON.stringify(current) !== JSON.stringify(binding) ||
+            JSON.stringify(row) !== JSON.stringify(registration) ||
+            JSON.stringify(currentFence) !== JSON.stringify(fence) ||
+            (this.threadOpsInFlight.get(threadKey) ?? 0) > 0 ||
+            this.opUsersInUse.has(binding.user)
+          )
+            return refuse("owner-changed");
+          const ledger = await txn.get<unknown>(SPENT_POOL_USERS_KEY);
+          const claimants = await txn.get<unknown>(poolBindingKey(binding.user));
+          const decision = decideOwnerReconciliation({
+            binding,
+            registration: row,
+            fence,
+            lastRunOwner,
+            owner,
+            ledger,
+            claimants,
+            pool: THREAD_USERS,
+            now,
+            cutoff: now - CLEAN_IDLE_RELEASE_S * 1000,
+            graceMs: RUN_REGISTRATION_GRACE_MS,
+            opInFlight: this.threadOpsInFlight.get(threadKey) ?? 0,
+          });
+          if (decision.action === "refuse") return refuse(decision.reason);
+          if (decision.spend) {
+            const next = spendPoolUser(ledger, THREAD_USERS, binding.user, `thread:${threadKey}`);
+            if (!next) return refuse("ledger-conflict");
+            await txn.put(SPENT_POOL_USERS_KEY, next);
+          }
+          if (decision.legacy) await txn.put(runRegKey(threadKey), { ...row, legacyRetainedAt: now });
+          return {
+            migrated: Number(decision.action === "migrate"),
+            legacy: Number(decision.legacy),
+            ledger: Number(decision.spend),
+            reason: decision.action === "migrate" ? "retained-owner-reconciled" : "already-reconciled",
+          };
+        });
+      }),
+    );
+  }
+
   /** A run's registration protects its worktree until release or the bounded
    *  deadline. `/detach`, the sweep, and disk pressure end in `evictBinding`,
    *  which clears the row; a re-attach refreshes it. */
@@ -8732,16 +8844,17 @@ export class ResidentDO extends Sandbox<Env> {
     ownerGen?: string,
     ownerFence?: number,
   ): Promise<void> {
+    if (!validRunOwner(runId, ownerGen, ownerFence)) throw new Error("run-registration-incomplete");
     const now = systemClock();
     await this.ctx.storage.transaction(async (txn) => {
-      if (ownerFence !== undefined) await txn.put(runFenceKey(threadKey), { runId, ownerGen, ownerFence });
+      await txn.put(runFenceKey(threadKey), { runId, ownerGen, ownerFence });
       await txn.put(runRegKey(threadKey), {
         threadKey,
         registeredAt: new Date(now).toISOString(),
         ...(runBudgetMs !== undefined ? { deadlineAt: now + runBudgetMs } : {}),
-        ...(runId !== undefined ? { runId } : {}),
-        ...(ownerGen !== undefined ? { ownerGen } : {}),
-        ...(ownerFence !== undefined ? { ownerFence } : {}),
+        runId,
+        ownerGen,
+        ownerFence,
       } satisfies RunRegistration);
     });
   }
@@ -8781,15 +8894,7 @@ export class ResidentDO extends Sandbox<Env> {
     for (const binding of bindings) {
       const r = regs.get(runRegKey(binding.threadKey));
       const fence = await this.ctx.storage.get<unknown>(runFenceKey(binding.threadKey));
-      if (
-        r?.runId ||
-        r?.ownerGen ||
-        r?.ownerFence !== undefined ||
-        fence !== undefined ||
-        binding.lastRunOwner?.runId ||
-        binding.lastRunOwner?.ownerGen ||
-        binding.lastRunOwner?.ownerFence !== undefined
-      ) {
+      if (hasRunOwnerField(r) || fence !== undefined || hasRunOwnerField(binding.lastRunOwner)) {
         if ((this.threadOpsInFlight.get(binding.threadKey) ?? 0) === 0) n++;
         continue;
       }
@@ -8814,6 +8919,7 @@ export class ResidentDO extends Sandbox<Env> {
   async getResidentDeployInfo(): Promise<Record<string, unknown>> {
     const bindings = await this.liveBindings();
     const regs = await this.ctx.storage.list<RunRegistration>({ prefix: RUN_REG_KEY_PREFIX });
+    const ledger = await this.ctx.storage.get<unknown>(SPENT_POOL_USERS_KEY);
     let executingRuns = 0;
     let retainedRuns = 0;
     let unknownRuns = 0;
@@ -8824,7 +8930,7 @@ export class ResidentDO extends Sandbox<Env> {
       const fence = await this.ctx.storage.get<unknown>(runFenceKey(binding.threadKey));
       const owner = registration?.runId ? await this.observeRunForEviction(registration, binding) : null;
       const opInFlight = this.threadOpsInFlight.get(binding.threadKey) ?? 0;
-      const { state, category, reason } = classifyDeployRegistration({
+      const { state, category, reason } = classifyDeployRegistrationWithLedger({
         threadKey: binding.threadKey,
         registration,
         fence,
@@ -8835,6 +8941,10 @@ export class ResidentDO extends Sandbox<Env> {
         now,
         graceMs: RUN_REGISTRATION_GRACE_MS,
         opInFlight,
+        ledger,
+        claimants: await this.ctx.storage.get<unknown>(poolBindingKey(binding.user)),
+        user: binding.user,
+        pool: THREAD_USERS,
       });
       if (state !== "none") {
         const key = `${category}:${reason}`;
@@ -11102,8 +11212,8 @@ async function handleAttach(env: Env, body: Record<string, unknown>, traceparent
     (typeof ownerFence !== "number" || !Number.isSafeInteger(ownerFence) || ownerFence <= 0)
   )
     return json({ error: "invalid run fence" }, 400);
-  if (ownerFence !== undefined && (runId === undefined || ownerGen === undefined))
-    return json({ error: "run fence requires a run id and generation" }, 400);
+  if (!validRunOwner(runId, ownerGen, ownerFence))
+    return json({ error: "run registration requires a run id, generation and fence" }, 400);
   // Why the hint is what it is (item 16): the thread's own pull request and
   // its head branch — the branch checked against the one ref pattern like
   // every ref, before it can become a git argument — and the bound-by-default flag.
@@ -11577,6 +11687,16 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
     }
     case "threads":
       return json(await stub.debugThreads());
+    case "reconcile-owner": {
+      const thread = parseThreadKey(body.threadKey);
+      if ("error" in thread) return json({ error: thread.error }, 400);
+      try {
+        const result = await stub.reconcileRetainedOwner(thread.threadKey);
+        return "error" in result ? threadErrResponse(result) : json(result);
+      } catch {
+        return json({ error: "owner-reconciliation-refused: evidence-unreadable" }, 503);
+      }
+    }
     case "deps-backups":
       return json(await stub.debugDepsBackups());
     case "sweep-now": {
