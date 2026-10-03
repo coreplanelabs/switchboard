@@ -66,6 +66,7 @@ const runRewrite = (
     requester?: IdentityPair;
     bot?: IdentityPair | undefined;
     expectedTip?: string;
+    readOnly?: true;
   } = {},
 ) =>
   rewriteRunCommits({
@@ -77,9 +78,16 @@ const runRewrite = (
     bot: "bot" in over ? over.bot : BOT,
     ...(over.requester !== undefined ? { requester: over.requester } : {}),
     api,
+    ...(over.readOnly ? { readOnly: true as const } : {}),
   });
 
 describe("rewriteRunCommits — the run's commits carry only the allowed identities (record 0062)", () => {
+  it("holds a published head requiring rewrite without creating commits or moving its ref", async () => {
+    const { api, created, moved } = apiOf([{ totalCommits: 1, commits: [commit("a1b2", { author: RAJ })] }]);
+    expect(await runRewrite(api, { requester: IVY, readOnly: true })).toMatchObject({ kind: "unreadable" });
+    expect(created).toHaveLength(0);
+    expect(moved).toHaveLength(0);
+  });
   it("the author env is on: a bound requester's pair is read, an unbound one yields none, and off reads no pair", () => {
     expect(authorEnvEnabled).toBe(true);
     expect(requesterPairFor({ login: "ivy-dev", id: 4242 })).toEqual(IVY);

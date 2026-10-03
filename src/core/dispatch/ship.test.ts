@@ -21,7 +21,12 @@ import { InMemoryCoordinatorInstanceStore, type CoordinatorInstanceStore } from 
 import { ThreadAdmission } from "../threadAdmission.js";
 import type { ChannelIO, StatusHandle, StatusUpdate } from "../types.js";
 import type { DispatchFollowUp } from "./admission.js";
-import { parseOriginalUnitRecoveryRequest, runShipBranch, type ShipDeps } from "./ship.js";
+import {
+  parseOriginalUnitRecoveryRequest,
+  parseOriginalUnitAdoptionRequest,
+  runShipBranch,
+  type ShipDeps,
+} from "./ship.js";
 
 // Feature: docs/reference/specs/agent-ship.md items 1–2 (the fork's preflight
 // refusal), 10 (the resume at review) and 16 (the hand-off): every `agent:ship`
@@ -337,6 +342,29 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
     expect(parseOriginalUnitRecoveryRequest("recover unit plan-old:U12 now")).toBeUndefined();
     expect(parseOriginalUnitRecoveryRequest("recover plan-old:U12")).toBeUndefined();
     expect(parseOriginalUnitRecoveryRequest("recover unit not-a-key")).toBeUndefined();
+  });
+
+  it("routes explicit original-head adoption with the real requester and no new plan", async () => {
+    expect(parseOriginalUnitAdoptionRequest("adopt unit plan-old:U12")).toEqual({
+      instanceId: "plan-old",
+      unit: "U12",
+    });
+    expect(parseOriginalUnitAdoptionRequest("adopt unit plan-old:U12 again")).toBeUndefined();
+    const s = setup("slack:UADMIN", { text: "agent:ship adopt unit plan-old:U12" });
+    const calls: unknown[] = [];
+    s.deps.adoptOriginalPublishedHead = async (key, caller) => {
+      calls.push({ key, caller });
+      return { status: 200, body: { outcome: "bound", pr: 99 } };
+    };
+    await runShipBranch(s.deps, { ...s.msg, messageId: "adopt-1" }, s.io, s.ctx);
+    expect(calls).toEqual([
+      {
+        key: { instanceId: "plan-old", unit: "U12" },
+        caller: { userId: "slack:UADMIN", threadKey: THREAD, messageId: "adopt-1" },
+      },
+    ]);
+    expect(s.created).toHaveLength(0);
+    expect(s.replies[0]).toContain("draft PR");
   });
 
   it("refuses recovery-shaped malformed text instead of handing it to a replacement generated plan", async () => {

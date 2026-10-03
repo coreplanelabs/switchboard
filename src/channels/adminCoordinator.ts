@@ -177,6 +177,7 @@ import {
   type RecoveryAction,
 } from "../core/coordinator/recoveryHistory.js";
 import { generatedTaskText } from "../core/coordinator/generatedTask.js";
+import { publishedHeadEvidence } from "../core/coordinator/publishedHeadAdoption.js";
 import type { ChannelIO, IncomingMessage } from "../core/types.js";
 import { authenticateIngressBearer } from "../deploy/restart.js";
 import type { GithubApi } from "../execution/githubApi.js";
@@ -191,6 +192,7 @@ import {
   type MergeResult,
   type OpenedPullRequest,
   type OpenPrRef,
+  type AnyHeadPullRequest,
   type PullRequestComment,
   type PullRequestFacts,
   type PullRequestReview,
@@ -327,6 +329,18 @@ export interface AdminCoordinatorDeps {
    *  a unit whose pull request merged before the runner reached it is done, not aborted. */
   findOpenPrByHead: (repo: string, branch: string) => Promise<OpenPrRef | null>;
   findMergedPrByHead: (repo: string, branch: string) => Promise<MergedPrRef | null>;
+  /** All states, bounded and complete; required for create-only original-head adoption. */
+  listAnyPrByHead?: (repo: string, branch: string) => Promise<AnyHeadPullRequest[]>;
+  createDraftPullRequest?: (target: PullRequestTarget) => Promise<OpenedPullRequest>;
+  /** Identity check at a pinned head; it must have no write seam. */
+  verifyIdentitiesReadOnly?: (args: {
+    repo: string;
+    base: string;
+    branch: string;
+    expectedTip: string;
+    startState: BranchStartState;
+    requester: string;
+  }) => Promise<RewriteResult>;
   /** The recover path's one write (githubPulls.openPullRequest, open-or-edit by
    *  head branch): a coding child that pushed and then died leaves its work on
    *  the branch — the pr-check opens the pull request from the branch itself
@@ -2771,8 +2785,8 @@ async function adoptSupersededHead(
     candidate.verifiedHead.ref === binding.publicationRef &&
     candidate.verifiedHead.sha === candidate.headSha;
   if (
-    instance.stop !== undefined ||
     row.instanceId !== instance.id ||
+    instance.stop !== undefined ||
     row.ending !== undefined ||
     row.idle !== undefined ||
     row.recovery !== undefined ||
@@ -3597,6 +3611,270 @@ export interface OriginalUnitRecoveryCaller {
   threadKey: string;
   /** Original adapter event identity, never a model call or run-id fallback. */
   messageId?: string;
+}
+
+/** Adopt only the original child's accepted remote head. This never resumes
+ *  its sandbox, replays its uncertain description, or grants another round. */
+export async function adoptOriginalPublishedHead(
+  body: Record<string, unknown>,
+  deps: AdminCoordinatorDeps,
+  caller?: OriginalUnitRecoveryCaller,
+): Promise<IngressResponse> {
+  const id = parseInstanceId(body.parentInstanceId);
+  if (!id.ok) return json(400, { ok: false, error: id.error });
+  if (typeof body.unit !== "string" || !UNIT_ID.test(body.unit))
+    return json(400, { ok: false, error: "unit must be a unit id" });
+  const at = (deps.clock ?? systemClock)();
+  if (caller === undefined || !isRecoveryRequest(caller))
+    return json(403, { ok: false, error: "adoption_caller_required", at });
+  const instance = await deps.instances.get(id.value);
+  if (instance === null) return json(404, { ok: false, error: "unknown_instance", at });
+  const rows = await deps.instances.listUnits(instance.id);
+  const matches = rows.filter((candidate) => candidate.unit === body.unit);
+  if (matches.length !== 1) return json(409, { ok: false, error: "unit_evidence_ambiguous", at });
+  let row = matches[0]!;
+  if (
+    caller.userId !== instance.userId ||
+    caller.threadKey !== (row.threadKey ?? instance.threadKey) ||
+    instance.base === undefined ||
+    instance.stop !== undefined ||
+    row.instanceId !== instance.id ||
+    row.resume !== undefined ||
+    row.recovery !== undefined ||
+    (row.pr !== undefined && row.adoption?.state !== "bound") ||
+    (row.publication !== undefined && row.adoption?.state !== "bound") ||
+    row.ending === undefined ||
+    row.idle !== undefined ||
+    row.startedAt === undefined ||
+    row.rounds.some((note) => note.agent !== "coding" || note.index !== 0)
+  )
+    return json(409, { ok: false, error: "adoption_identity_or_stage_mismatch", at });
+  const branch = parsePlanBranch(row.branch);
+  if (branch === undefined || branch.planId !== instance.plan?.id || branch.unitSlug !== row.slug)
+    return json(409, { ok: false, error: "adoption_branch_mismatch", at });
+  try {
+    generatedTaskText(row.generatedTask, instance);
+  } catch {
+    return json(409, { ok: false, error: "adoption_task_unverified", at });
+  }
+  if (
+    deps.listAnyPrByHead === undefined ||
+    deps.createDraftPullRequest === undefined ||
+    deps.verifyIdentitiesReadOnly === undefined ||
+    deps.fetchBranchHeadSha === undefined
+  )
+    return json(503, { ok: false, error: "adoption_seam_unavailable", at });
+  const listing = await deps.runs.listRuns({
+    privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
+    status: "all",
+    visibleTo: EVERY_RUN,
+    limit: RUN_LIST_MAX_LIMIT,
+    recoveryEvidence: { instanceId: instance.id, unit: row.unit, threadKeys: [row.threadKey ?? instance.threadKey] },
+  });
+  if (
+    listing.storeUnavailable ||
+    listing.ledgerUnavailable ||
+    listing.nextBefore !== undefined ||
+    listing.runs.length >= RUN_LIST_MAX_LIMIT
+  )
+    return json(409, { ok: false, error: "adoption_ledger_incomplete", at });
+  const key = `${instance.id}:${row.unit}/0/coding`;
+  const children = listing.runs.filter((run) => run.idempotencyKey === key);
+  if (children.length !== 1) return json(409, { ok: false, error: "child_evidence_ambiguous", at });
+  const full = await deps.runs
+    .getRun(children[0]!.id, {
+      include: "messages",
+      privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
+    })
+    .catch(() => undefined);
+  if (!full?.ok) return json(409, { ok: false, error: "adoption_ledger_incomplete", at });
+  const proof = publishedHeadEvidence({
+    instance: {
+      id: instance.id,
+      repo: instance.repo,
+      base: instance.base,
+      userId: instance.userId,
+      threadKey: instance.threadKey,
+    },
+    row: { ...row, startedAt: row.startedAt },
+    run: full.value,
+    runs: listing.runs,
+  });
+  if (!proof.ok) return json(409, { ok: false, error: proof.error, at });
+  const head = proof.head;
+  const actionId = await recoveryActionId(row, caller);
+  const existing = row.adoption;
+  if (
+    existing?.state === "bound" &&
+    (existing.pr === undefined ||
+      row.pr?.number !== existing.pr.number ||
+      row.pr?.url !== existing.pr.url ||
+      row.lastPush !== head ||
+      row.publication?.pr !== existing.pr.number ||
+      row.publication?.expectedHeadSha !== head ||
+      row.publication?.headRef !== row.branch ||
+      row.publication?.baseRef !== instance.base)
+  )
+    return json(409, { ok: false, error: "adoption_pr_mismatch", at });
+  if (
+    existing !== undefined &&
+    (existing.actionId !== actionId ||
+      existing.headSha !== head ||
+      existing.runId !== proof.runId ||
+      existing.requester !== caller.userId ||
+      existing.threadKey !== caller.threadKey ||
+      existing.messageId !== caller.messageId)
+  )
+    return json(409, { ok: false, error: "adoption_already_claimed", at });
+  const freshHead = await deps.fetchBranchHeadSha(instance.repo, row.branch).catch(() => undefined);
+  if (freshHead !== head) return json(409, { ok: false, error: "adoption_head_moved", at });
+  const ahead = await deps.commitsOverBase(instance.repo, instance.base, row.branch).catch(() => undefined);
+  if (ahead === undefined || ahead <= 0) return json(409, { ok: false, error: "adoption_no_verified_commits", at });
+  const identities = await deps
+    .verifyIdentitiesReadOnly({
+      repo: instance.repo,
+      base: instance.base,
+      branch: row.branch,
+      expectedTip: head,
+      startState: EMPTY_START_STATE,
+      requester: instance.userId,
+    })
+    .catch(() => undefined);
+  if (identities?.kind !== "clean" || identities.tip !== head)
+    return json(409, { ok: false, error: "adoption_identity_unverified", at });
+  const readPrs = async () => deps.listAnyPrByHead!(instance.repo, row.branch).catch(() => undefined);
+  let prs = await readPrs();
+  if (prs === undefined) return json(502, { ok: false, error: "github_unavailable", at });
+  if (existing === undefined && prs.length !== 0) return json(409, { ok: false, error: "adoption_pr_exists", at });
+  if (existing === undefined) {
+    const claimed: CoordinatorUnit = {
+      ...row,
+      adoption: {
+        version: 1,
+        actionId,
+        runId: proof.runId,
+        headSha: head,
+        requester: caller.userId,
+        threadKey: caller.threadKey,
+        messageId: caller.messageId,
+        claimedAt: at,
+        state: "claimed",
+      },
+    };
+    const saved = await deps.instances.compareAndReplaceUnit(row, claimed).catch(() => undefined);
+    if (saved?.ok !== true)
+      return json(saved?.reason === "stale" ? 409 : 503, {
+        ok: false,
+        error: saved?.reason === "stale" ? "adoption_claim_stale" : "adoption_store_unavailable",
+        at,
+      });
+    row = claimed;
+  }
+  const marker = `<!-- switchboard-adoption:${actionId}:${head} -->`;
+  let mayPost = false;
+  if (row.adoption?.state === "claimed") {
+    const posting: CoordinatorUnit = { ...row, adoption: { ...row.adoption, state: "posting" } };
+    const saved = await deps.instances.compareAndReplaceUnit(row, posting).catch(() => undefined);
+    if (saved?.ok !== true)
+      return json(saved?.reason === "stale" ? 409 : 503, {
+        ok: false,
+        error: saved?.reason === "stale" ? "adoption_claim_stale" : "adoption_store_unavailable",
+        at,
+      });
+    row = posting;
+    mayPost = true;
+  }
+  if (row.adoption?.state === "bound") {
+    if (prs.length !== 1 || prs[0]?.number !== row.adoption.pr?.number || !prs[0]?.body.includes(marker))
+      return json(409, { ok: false, error: "adoption_pr_mismatch", at });
+  } else if (prs.length === 0 && mayPost) {
+    // Recheck the ref after the durable claim. A lost create response leaves
+    // this claim for a same-action retry; it never authorizes a second writer.
+    if ((await deps.fetchBranchHeadSha(instance.repo, row.branch).catch(() => undefined)) !== head)
+      return json(409, { ok: false, error: "adoption_head_moved", at });
+    const subject = await deps.branchHeadSubject?.(instance.repo, row.branch).catch(() => undefined);
+    const title =
+      subject && checkPrTitle(subject, PR_TITLE_VOCABULARY).ok
+        ? subject
+        : recoveredFallbackTitle(row, row.branch, instance.plan?.id);
+    const header = requestedByLine({
+      name: instance.userName?.trim() || instance.userId,
+      threadUrl: threadPageLink(instance.threadKey, deps.runPageBase?.replace(/\/runs\/?$/, "") ?? ""),
+    });
+    const prBody = `${header}\n\n${marker}\n\nOpened from the original unit's accepted pushed head \`${head}\`. The interrupted PR description and any later uncommitted sandbox work remain unverified. Review this committed head only.`;
+    try {
+      await deps.createDraftPullRequest({
+        repo: instance.repo,
+        headBranch: row.branch,
+        base: instance.base,
+        title,
+        body: prBody,
+      });
+    } catch {
+      // An accepted POST may have lost its response. Reconcile from GitHub.
+    }
+    prs = await readPrs();
+    if (prs === undefined) return json(502, { ok: false, error: "github_unavailable", at });
+  }
+  if (prs.length === 0) return json(200, { ok: true, outcome: "indeterminate", head, at });
+  const found = prs.length === 1 ? prs[0] : undefined;
+  if (
+    found?.state !== "open" ||
+    found.draft !== true ||
+    found.headSha !== head ||
+    found.headRef !== row.branch ||
+    found.baseRef !== instance.base ||
+    !found.body.includes(marker) ||
+    (await deps.fetchBranchHeadSha(instance.repo, row.branch).catch(() => undefined)) !== head
+  )
+    return json(409, { ok: false, error: "adoption_pr_mismatch", at });
+  const facts = await deps.fetchPrFacts({ repo: instance.repo, number: found.number }).catch(() => undefined);
+  if (
+    facts?.state !== "open" ||
+    facts.sameRepoHead !== true ||
+    facts.headBranchExists !== true ||
+    facts.headRef !== row.branch ||
+    facts.baseRef !== instance.base ||
+    facts.headSha !== head ||
+    facts.verifiedHead?.repo.toLowerCase() !== instance.repo.toLowerCase() ||
+    facts.verifiedHead.ref !== row.branch ||
+    facts.verifiedHead.sha !== head
+  )
+    return json(409, { ok: false, error: "adoption_pr_mismatch", at });
+  if (row.adoption?.state === "bound")
+    return json(200, { ok: true, outcome: "already_bound", pr: found.number, head, at });
+  const owner = { instanceId: instance.id, unit: row.unit };
+  try {
+    if (deps.runnerOwnership?.claim(instance.repo, found.number, owner) !== true)
+      return json(409, { ok: false, error: "publication_ownership_changed", at });
+  } catch {
+    return json(503, { ok: false, error: "publication_ownership_unknown", at });
+  }
+  const pr = { number: found.number, url: found.htmlUrl };
+  const replacement: CoordinatorUnit = {
+    ...row,
+    pr,
+    lastPush: head,
+    publication: {
+      repo: instance.repo,
+      pr: pr.number,
+      headRef: row.branch,
+      baseRef: instance.base,
+      expectedHeadSha: head,
+      publicationRef: row.branch,
+      owner,
+    },
+    adoption: { ...row.adoption!, state: "bound", pr },
+  };
+  const saved = await deps.instances.compareAndReplaceUnit(row, replacement).catch(() => undefined);
+  deps.runnerOwnership?.release(instance.repo, found.number, owner);
+  if (saved?.ok !== true)
+    return json(saved?.reason === "stale" ? 409 : 503, {
+      ok: false,
+      error: saved?.reason === "stale" ? "adoption_claim_stale" : "adoption_store_unavailable",
+      at,
+    });
+  return json(200, { ok: true, outcome: "bound", pr: found.number, url: found.htmlUrl, head, at });
 }
 
 /** A terminal first coding round has no PR owner to reserve. Its durable unit

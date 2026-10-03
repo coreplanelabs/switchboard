@@ -123,6 +123,8 @@ export interface RewriteInput {
    *  author env is enabled and the requester has a binding. */
   requester?: IdentityPair;
   api: RewriteApi;
+  /** Judge an already published exact head without creating commits or moving its ref. */
+  readOnly?: true;
 }
 
 /** How many commits the compare may carry before the range is unreadable. */
@@ -288,6 +290,7 @@ export async function rewriteRunCommits(input: RewriteInput): Promise<RewriteRes
       if (totalRewritten === 0) return { kind: "clean", ...(tip !== undefined ? { tip } : {}) };
       return { kind: "rewritten", count: totalRewritten, replaced, tip: tip ?? input.branch };
     }
+    if (input.readOnly) return { kind: "unreadable", reason: "the published head requires an identity rewrite" };
     if (rebuilds >= 2)
       return { kind: "unreadable", reason: "the branch tip moved twice while the rewrite ran; giving up" };
     // Rebuild from the first offender through the tip: the listed order
@@ -357,6 +360,14 @@ export interface DispatchIdentityRewrite {
     startState: BranchStartState;
     requester: string;
   }): Promise<RewriteResult>;
+  verify?(args: {
+    repo: string;
+    base: string;
+    branch: string;
+    expectedTip: string;
+    startState: BranchStartState;
+    requester: string;
+  }): Promise<RewriteResult>;
   pullRequestHead(repo: string, number: number): Promise<string | undefined>;
   isAssignable(repo: string, login: string): Promise<boolean | undefined>;
   addAssignee(repo: string, number: number, login: string): Promise<void>;
@@ -388,6 +399,29 @@ export function dispatchIdentityRewrite(store: BindingSource): DispatchIdentityR
         bot: bot !== undefined ? pairOfBinding(bot) : undefined,
         ...(requesterPair !== undefined ? { requester: requesterPair } : {}),
         api: { compareRange, createCommit, forceMoveRef },
+      });
+    },
+    verify: async ({ repo, base, branch, expectedTip, startState, requester }) => {
+      const bot = await resolveGithubIdentity();
+      const binding = await bindingOf(requester, store, { fresh: true }).catch(() => undefined);
+      return rewriteRunCommits({
+        repo,
+        base,
+        branch,
+        expectedTip,
+        startState,
+        ...(requesterPairFor(binding) !== undefined ? { requester: requesterPairFor(binding) } : {}),
+        bot: bot !== undefined ? pairOfBinding(bot) : undefined,
+        api: {
+          compareRange,
+          createCommit: async () => {
+            throw new Error("read-only identity verification");
+          },
+          forceMoveRef: async () => {
+            throw new Error("read-only identity verification");
+          },
+        },
+        readOnly: true,
       });
     },
     pullRequestHead,

@@ -114,6 +114,10 @@ export interface ShipDeps extends RunDeps, Pick<FastPathDeps, "clock" | "runRegi
     key: { instanceId: string; unit: string },
     caller: { userId: string; threadKey: string; messageId?: string },
   ) => Promise<{ status: number; body: Record<string, unknown> }>;
+  adoptOriginalPublishedHead?: (
+    key: { instanceId: string; unit: string },
+    caller: { userId: string; threadKey: string; messageId?: string },
+  ) => Promise<{ status: number; body: Record<string, unknown> }>;
   /**
    * The bot's read of an earlier attempt's instance status on its own shim
    * (`GET /admin/coordinator/instances/<id>`), before a plan is re-issued.
@@ -153,6 +157,13 @@ export function parseOriginalUnitRecoveryRequest(text: string): { instanceId: st
 }
 
 export const namesOriginalUnitRecovery = (text: string): boolean => /^recover\s+unit(?:\s|$)/i.test(text.trim());
+
+export function parseOriginalUnitAdoptionRequest(text: string): { instanceId: string; unit: string } | undefined {
+  const match = /^adopt\s+unit\s+(\S+)\s*$/i.exec(text.trim());
+  return match ? parseUnitKey(match[1]!) : undefined;
+}
+
+export const namesOriginalUnitAdoption = (text: string): boolean => /^adopt\s+unit(?:\s|$)/i.test(text.trim());
 
 /** What the agent:ship fork carries out of dispatch()'s prelude — values the
  *  branch must not re-derive, because the gates already ran against them. */
@@ -253,6 +264,46 @@ export async function runShipBranch(
   const clock = deps.clock ?? systemClock;
   // The same one-builder card shell as the main path, on the same label and clock.
   const shell = createCardShell({ label, startedAt: ctx.startedAt, now: clock });
+  const adoption = parseOriginalUnitAdoptionRequest(directives.text);
+  if (adoption === undefined && namesOriginalUnitAdoption(directives.text)) {
+    const reason = "original-unit adoption must be `adopt unit <instanceId>:<unit>`";
+    await refuse(refusalOf("setup_failed", reason), () =>
+      card.done(shell.close({ kind: "refused", icon: "🚫", reason, ...closeLines(clock(), false) })),
+    );
+    return { hostedLive: false };
+  }
+  if (adoption !== undefined) {
+    const answer = await root.span("dispatch.ship_adopt_original_head", () =>
+      deps.adoptOriginalPublishedHead === undefined
+        ? Promise.resolve({ status: 503, body: { error: "original-head adoption is unavailable" } })
+        : deps.adoptOriginalPublishedHead(adoption, {
+            userId: msg.userId,
+            threadKey: msg.threadKey,
+            messageId: msg.messageId,
+          }),
+    );
+    if (answer.status !== 200) {
+      const reason = typeof answer.body.error === "string" ? answer.body.error : "original-head adoption was refused";
+      await refuse(refusalOf("setup_failed", reason), () =>
+        card.done(shell.close({ kind: "refused", icon: "🚫", reason, ...closeLines(clock(), false) })),
+      );
+      return { hostedLive: false };
+    }
+    const detail =
+      answer.body.outcome === "indeterminate"
+        ? `Original unit \`${adoption.instanceId}:${adoption.unit}\` has one pending draft-PR create; no PR is claimed until exact GitHub readback.`
+        : `Original unit \`${adoption.instanceId}:${adoption.unit}\` adopted its committed head in draft PR #${answer.body.pr}. Review and CI remain pending.`;
+    await replyAck(io, ctx.verbosity, detail);
+    await card.done(
+      shell.close({
+        kind: "done",
+        icon: answer.body.outcome === "indeterminate" ? "⚠️" : "✅",
+        detail,
+        ...closeLines(clock(), true),
+      }),
+    );
+    return { hostedLive: false };
+  }
   const recovery = parseOriginalUnitRecoveryRequest(directives.text);
   if (recovery === undefined && namesOriginalUnitRecovery(directives.text)) {
     const reason = "original-unit recovery must be `recover unit <instanceId>:<unit>`";
