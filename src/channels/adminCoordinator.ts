@@ -2998,6 +2998,124 @@ const fullHead = (value: unknown): value is string => typeof value === "string" 
 const isStepAttempt = (key: string | undefined, step: string): boolean =>
   key === step || (key?.startsWith(`${step}/a`) === true && /^[1-9][0-9]*$/.test(key.slice(step.length + 2)));
 
+type RecoveryReviewStartDiagnostic =
+  | { reviewStart: "verified_no_work"; runId: string; key: string }
+  | { reviewStart: "evidence_unavailable"; reason: string };
+
+const unavailableReviewStart = (reason: string): RecoveryReviewStartDiagnostic => ({
+  reviewStart: "evidence_unavailable",
+  reason,
+});
+
+/** Zero-turn review starts are evidence only with the complete final attach
+ * refusal, not merely a zero-usage summary or an absent review post. */
+async function verifiedReviewAttachRefusal(
+  run: RunView,
+  service: RunsService,
+): Promise<"verified" | "invalid" | "unavailable"> {
+  if (
+    run.agent !== "review" ||
+    !run.finished ||
+    run.status !== "failed" ||
+    run.liveState?.state !== "preparing" ||
+    run.usage?.turns !== 0 ||
+    run.usage.byModel === undefined ||
+    Object.keys(run.usage.byModel).length !== 0 ||
+    run.reviewHead !== undefined ||
+    run.verdict !== undefined ||
+    run.reviewPost !== undefined ||
+    run.headSha !== undefined ||
+    run.pushed !== undefined ||
+    run.pr !== undefined ||
+    run.doorPublicationPending !== undefined
+  )
+    return "invalid";
+  let final: Awaited<ReturnType<RunsService["getRun"]>>;
+  try {
+    final = await service.getRun(run.id, {
+      include: "messages",
+      requireFinalRecord: true,
+      privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
+    });
+  } catch {
+    return "unavailable";
+  }
+  const child = final.ok === true ? final.value : undefined;
+  const events = child?.events;
+  const preparing = events?.findIndex((event) => event.type === "run_state" && event.state === "preparing") ?? -1;
+  const attachStart =
+    events?.findIndex((event) => event.type === "span_start" && event.name === "dispatch.workspace.attach") ?? -1;
+  const attachEnd =
+    events?.findIndex(
+      (event) => event.type === "span_end" && event.name === "dispatch.workspace.attach" && event.status === "error",
+    ) ?? -1;
+  const refusal =
+    events?.findIndex(
+      (event) => event.type === "refusal" && event.code === "setup_failed" && event.cause === "workspace",
+    ) ?? -1;
+  const start = events?.[attachStart];
+  const end = events?.[attachEnd];
+  return child !== undefined &&
+    child.id === run.id &&
+    child.idempotencyKey === run.idempotencyKey &&
+    child.parentInstanceId === run.parentInstanceId &&
+    child.userId === run.userId &&
+    child.repo === run.repo &&
+    child.threadKey === run.threadKey &&
+    child.agent === "review" &&
+    child.startedAt === run.startedAt &&
+    child.finishedAt === run.finishedAt &&
+    child.status === "failed" &&
+    child.liveState?.state === "preparing" &&
+    child.truncated === false &&
+    child.eventCount === run.eventCount &&
+    child.storedEventCount === run.eventCount &&
+    events !== undefined &&
+    events.length === run.eventCount &&
+    child.usage?.turns === 0 &&
+    child.usage.byModel !== undefined &&
+    Object.keys(child.usage.byModel).length === 0 &&
+    child.reviewHead === undefined &&
+    child.verdict === undefined &&
+    child.reviewPost === undefined &&
+    child.headSha === undefined &&
+    child.pushed === undefined &&
+    child.pr === undefined &&
+    child.dispositions === undefined &&
+    child.doorPublicationPending === undefined &&
+    child.lease === undefined &&
+    preparing >= 0 &&
+    attachStart > preparing &&
+    attachEnd > attachStart &&
+    refusal > attachEnd &&
+    start?.type === "span_start" &&
+    end?.type === "span_end" &&
+    start.spanId === end.spanId &&
+    events.filter((event) => event.type === "refusal").length === 1 &&
+    events.filter((event) => event.type === "run_meta" && event.agent === "review").length === 1 &&
+    events.every(
+      (event, index) =>
+        event.seq === index + 1 &&
+        (event.type === "input" ||
+          event.type === "run_meta" ||
+          (event.type === "coordinator_tag" && index < preparing) ||
+          (event.type === "context" && index < preparing) ||
+          (event.type === "refusal" && index === refusal) ||
+          (event.type === "run_state" && ["admitted", "waiting_repository", "preparing"].includes(event.state)) ||
+          ((event.type === "span_start" || event.type === "span_end") &&
+            (index === attachStart ||
+              index === attachEnd ||
+              (index < preparing &&
+                (event.name === "request" ||
+                  event.name === "slack.receive" ||
+                  event.name === "post.card_close" ||
+                  event.name === "post.reply" ||
+                  event.name.startsWith("dispatch.")))))),
+    )
+    ? "verified"
+    : "invalid";
+}
+
 /** Audit the retained original children, not today's cost projection. A known
  * per-turn meter total is historical price evidence; repricing old tokens with
  * the current operator table is not. This total is a lower bound until every
@@ -3007,7 +3125,10 @@ async function historicalRecoverySpend(
   row: CoordinatorUnit,
   runs: RunView[],
   service: RunsService,
-): Promise<{ usd: number; children: RecoveryAccounting["children"]; noWork: string[] } | { reason: string }> {
+): Promise<
+  | { usd: number; children: RecoveryAccounting["children"]; noWork: string[]; noWorkReviews: string[] }
+  | { reason: string }
+> {
   const unitKey = `${instance.id}:${row.unit}`;
   const unitPrefix = `${unitKey}/`;
   // A bare unit key claims this unit but has no auditable step identity.
@@ -3022,6 +3143,7 @@ async function historicalRecoverySpend(
     return { reason: "child_identity_mismatch" };
   const pricedChildren: RecoveryAccounting["children"] = [];
   const noWork: string[] = [];
+  const noWorkReviews: string[] = [];
   const stagedChildren: {
     run: RunView;
     segment: number;
@@ -3115,7 +3237,15 @@ async function historicalRecoverySpend(
     if (run.startedAt < segmentStart || run.finishedAt > segmentEnd) return { reason: "child_round_mismatch" };
     const models = Object.values(run.usage?.byModel ?? {});
     let childUsd: number;
-    if (run.usage?.turns === 0 && models.length === 0 && action === "findings") {
+    if (run.usage?.turns === 0 && models.length === 0 && action === "review") {
+      const refusal = await verifiedReviewAttachRefusal(run, service);
+      if (refusal !== "verified")
+        return {
+          reason: refusal === "unavailable" ? "review_start_store_unavailable" : "review_start_evidence_unavailable",
+        };
+      childUsd = 0;
+      noWorkReviews.push(run.id);
+    } else if (run.usage?.turns === 0 && models.length === 0 && action === "findings") {
       // Zero tokens are not a price receipt. Only a complete final server
       // record that stopped in setup before any model/tool/work is $0 evidence.
       const final = await service
@@ -3361,8 +3491,38 @@ async function historicalRecoverySpend(
       .filter((child) => `${child.segment}:${child.order}` === groupKey)
       .sort((left, right) => left.run.startedAt - right.run.startedAt);
     const starts = startedNotes.filter((start) => `${start.segment}:${start.order}` === groupKey);
-    if (new Set(stageChildren.map((child) => child.action)).size > 1 || starts.length > stageChildren.length)
+    const noWorkReview =
+      stageChildren.length === 1 &&
+      stageChildren[0]?.action === "review" &&
+      noWorkReviews.includes(stageChildren[0].run.id) &&
+      row.ending?.kind === "failed" &&
+      row.ending.cause === "step_threw" &&
+      row.ending.round === stageChildren[0].round &&
+      /^.+\/note\/[1-9][0-9]*$/.test(row.ending.step ?? "") &&
+      starts.length > 0 &&
+      starts[0]!.note.at <= stageChildren[0].run.finishedAt! &&
+      starts.every(
+        (start) =>
+          start.note.agent === "review" &&
+          start.note.outcome === "started" &&
+          start.note.at >= stageChildren[0]!.run.startedAt &&
+          start.note.at <= row.ending!.at,
+      ) &&
+      stageChildren[0].run.finishedAt! <= row.ending.at &&
+      row.rounds
+        .filter(
+          (note) =>
+            note.agent === "review" &&
+            note.index === stageChildren[0]!.round &&
+            segmentAt(note.at) === stageChildren[0]!.segment,
+        )
+        .every((note) => note.outcome === "started");
+    if (
+      new Set(stageChildren.map((child) => child.action)).size > 1 ||
+      (starts.length > stageChildren.length && !noWorkReview)
+    )
       return { reason: "child_history_missing" };
+    const admittedStarts = noWorkReview ? starts.slice(0, 1) : starts;
     const first = stageChildren[0];
     if (
       first?.action === "review" &&
@@ -3371,7 +3531,7 @@ async function historicalRecoverySpend(
           `${instance.id}:${stepPrefixOf(row.unit, first.segment > 1 ? { segment: first.segment, renewalsSpent: 0, spendUsd: null } : undefined)}/${first.round}/review`)
     )
       return { reason: "child_round_mismatch" };
-    const extraCount = stageChildren.length - starts.length;
+    const extraCount = stageChildren.length - admittedStarts.length;
     const extras = stageChildren.slice(0, extraCount);
     if (
       extras.some(
@@ -3395,7 +3555,7 @@ async function historicalRecoverySpend(
       )
     )
       return { reason: "child_history_missing" };
-    for (const [index, start] of starts.entries()) {
+    for (const [index, start] of admittedStarts.entries()) {
       const child = stageChildren[extraCount + index]!;
       if (child.run.startedAt > start.note.at || (index > 0 && child.run.startedAt < starts[index - 1]!.note.at))
         return { reason: "child_history_missing" };
@@ -3411,6 +3571,7 @@ async function historicalRecoverySpend(
               note.at >= start.note.at,
           )
           .at(-1);
+        if (noWorkReview) continue;
         if (terminal === undefined || child.run.finishedAt! > terminal.at) return { reason: "child_round_mismatch" };
         const expectedVerdict =
           terminal.outcome === "checks_failed"
@@ -3446,7 +3607,7 @@ async function historicalRecoverySpend(
       .sort((left, right) => left.order - right.order || left.run.startedAt - right.run.startedAt)[0];
     if (later !== undefined) {
       if (later.order !== stage.order + 1) return { reason: "child_round_mismatch" };
-      const lastStart = starts.at(-1)?.note.at;
+      const lastStart = admittedStarts.at(-1)?.note.at;
       const terminal = row.rounds
         .filter(
           (note) =>
@@ -3486,7 +3647,7 @@ async function historicalRecoverySpend(
   // so a different listing order cannot change the fractional USD total.
   const usd = pricedChildren.reduce((sum, child) => sum + child.usd, 0);
   if (!Number.isFinite(usd)) return { reason: "child_price_unknown" };
-  return { usd, children: pricedChildren, noWork };
+  return { usd, children: pricedChildren, noWork, noWorkReviews };
 }
 
 /** Select exactly one later review from the complete GitHub list. A later
@@ -4327,7 +4488,9 @@ export async function recoverOriginalUnit(
   let accounting: RecoveryAccounting | undefined;
   let claimRow = row;
   let noWorkFindings = false;
+  let reviewStartEvidence: RecoveryReviewStartDiagnostic | undefined;
   let renewalEvidence: RunView[] | undefined;
+  let reviewStartHistory: RunView[] | undefined;
   let facts: PullRequestFacts | undefined;
   let originalRow: CoordinatorUnit | undefined;
   if (existingClaim !== undefined) {
@@ -4407,7 +4570,17 @@ export async function recoverOriginalUnit(
       (!postApproval && boundary.outcome !== "request_changes" && boundary.outcome !== "no_verdict")
     )
       return json(409, { ok: false, error: "recovery_ending_unsupported", at });
-    if (row.rounds.slice(boundaryPosition + 1).some((candidate) => candidate.agent === "review"))
+    const laterReviewStarts = row.rounds.slice(boundaryPosition + 1).filter((note) => note.agent === "review");
+    if (
+      laterReviewStarts.length > 0 &&
+      (boundary.outcome !== "request_changes" ||
+        row.ending.kind !== "failed" ||
+        row.ending.cause !== "step_threw" ||
+        row.ending.round !== boundary.index + 1 ||
+        !new RegExp(`^${row.unit}/note/[1-9][0-9]*$`).test(row.ending.step ?? "") ||
+        laterReviewStarts.some((note) => note.outcome !== "started" || note.index !== boundary.index + 1) ||
+        row.rounds.at(-1) !== laterReviewStarts.at(-1))
+    )
       return json(409, { ok: false, error: "recovery_stage_ambiguous", at });
     kind = boundary.outcome === "request_changes" ? "findings" : "review";
     if (kind === "review" && !postApproval && row.ending.kind !== "no_verdict")
@@ -4493,7 +4666,9 @@ export async function recoverOriginalUnit(
         return unknownBudget("round_history_invalid");
       if (entry.agent === "review" && entry.outcome === "started") {
         const segmentIndex = segments.filter((segment) => segment.at <= entry.at).at(-1)?.index ?? 1;
-        if (entry.index !== (reviewCounts.get(segmentIndex) ?? 0) + 1) return unknownBudget("round_history_invalid");
+        const previous = reviewCounts.get(segmentIndex) ?? 0;
+        if (entry.index !== previous + 1 && !(laterReviewStarts.includes(entry) && entry.index === previous))
+          return unknownBudget("round_history_invalid");
         reviewCounts.set(segmentIndex, entry.index);
       }
       previousRoundAt = entry.at;
@@ -4534,7 +4709,12 @@ export async function recoverOriginalUnit(
       // A full live-only page carries no cursor but can still hide children.
       listing.runs.length >= RUN_LIST_MAX_LIMIT
     )
-      return json(409, { ok: false, error: "recovery_evidence_incomplete", at });
+      return json(409, {
+        ok: false,
+        error: "recovery_evidence_incomplete",
+        ...(laterReviewStarts.length > 0 ? { diagnostic: unavailableReviewStart("history_incomplete") } : {}),
+        at,
+      });
     const histories = new Map<string, RunView>();
     for (const run of listing.runs) {
       const previous = histories.get(run.id);
@@ -4571,7 +4751,32 @@ export async function recoverOriginalUnit(
       return json(409, { ok: false, error: "door_publication_unresolved", at });
     if (grant.costCapUsd !== undefined && histories.size === 0) return unknownBudget("cost_cap_spend_unknown");
     const spend = await historicalRecoverySpend(instance, row, [...histories.values()], deps.runs);
-    if ("reason" in spend) return unknownBudget(spend.reason);
+    if ("reason" in spend)
+      return laterReviewStarts.length > 0
+        ? json(spend.reason === "review_start_store_unavailable" ? 503 : 409, {
+            ok: false,
+            error:
+              spend.reason === "review_start_store_unavailable"
+                ? "recovery_history_unavailable"
+                : "recovery_budget_unknown",
+            reason: spend.reason,
+            diagnostic: unavailableReviewStart(spend.reason),
+            at,
+          })
+        : unknownBudget(spend.reason);
+    if (
+      laterReviewStarts.length > 0 &&
+      (spend.noWorkReviews.length !== 1 ||
+        listing.runs.filter((run) => run.id === spend.noWorkReviews[0]).length !== 1 ||
+        listing.runs.find((run) => run.id === spend.noWorkReviews[0])?.idempotencyKey !==
+          `${instance.id}:${segmentPrefix}/${boundary.index + 1}/review`)
+    )
+      return json(409, {
+        ok: false,
+        error: "recovery_review_evidence_ambiguous",
+        diagnostic: unavailableReviewStart("review_child_ambiguous"),
+        at,
+      });
     if (grant.costCapUsd !== undefined && spend.usd >= grant.costCapUsd)
       return json(409, {
         ok: false,
@@ -4627,9 +4832,16 @@ export async function recoverOriginalUnit(
         run.reviewHead === row.lastPush &&
         publication !== undefined &&
         publication.expectedHeadSha !== row.lastPush;
+      const precedingFindingsHead =
+        laterReviewStarts.length > 0 &&
+        row.lastPush === publication?.expectedHeadSha &&
+        run.reviewHead !== row.lastPush;
       if (
         !fullHead(run.reviewHead) ||
-        (publication !== undefined && run.reviewHead !== publication.expectedHeadSha && !originalFindingsHead)
+        (publication !== undefined &&
+          run.reviewHead !== publication.expectedHeadSha &&
+          !originalFindingsHead &&
+          !precedingFindingsHead)
       )
         return false;
       const reviewedHead = run.reviewHead;
@@ -4745,9 +4957,119 @@ export async function recoverOriginalUnit(
     const findingsPrefix = `${instance.id}:${findingsStep}`;
     const headMoved = facts.headSha !== reviewedHead || expectedHead !== reviewedHead;
     const failedStep = row.ending.step;
-    // Recognize check-shaped failures before validating the exact action. A
-    // malformed suffix or trailing path must not fall through to more coding.
-    if (row.ending.cause === "step_threw" && failedStep?.includes("/pr-check") === true) {
+    if (laterReviewStarts.length > 0) {
+      const afterBoundary = row.rounds.slice(boundaryPosition + 1);
+      const findings = unitRuns.filter(
+        (run) => run.parentInstanceId === instance.id && isStepAttempt(run.idempotencyKey, findingsPrefix),
+      );
+      const fixed = findings.length === 1 ? findings[0] : undefined;
+      const reviewStarts = reviewRuns.filter(
+        (run) =>
+          run.parentInstanceId === instance.id &&
+          isStepAttempt(run.idempotencyKey, `${instance.id}:${segmentPrefix}/${boundary.index + 1}/review`),
+      );
+      const noWork = reviewStarts.length === 1 ? reviewStarts[0] : undefined;
+      let final: Awaited<ReturnType<RunsService["getRun"]>> | undefined;
+      try {
+        if (fixed !== undefined)
+          final = await deps.runs.getRun(fixed.id, {
+            include: "messages",
+            requireFinalRecord: true,
+            privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
+          });
+      } catch {
+        return json(503, {
+          ok: false,
+          error: "recovery_history_unavailable",
+          diagnostic: unavailableReviewStart("findings_store_unavailable"),
+          at,
+        });
+      }
+      const full = final?.ok === true ? final.value : undefined;
+      const postedFindings = review.verdict?.findings ?? [];
+      if (
+        row.lastPush !== publication.expectedHeadSha ||
+        expectedHead !== publication.expectedHeadSha ||
+        review.finishedAt === undefined ||
+        review.status !== "completed" ||
+        fixed === undefined ||
+        fixed.finished !== true ||
+        fixed.status !== "completed" ||
+        fixed.agent !== "coding" ||
+        fixed.idempotencyKey !== findingsPrefix ||
+        fixed.startedAt < review.finishedAt ||
+        fixed.finishedAt === undefined ||
+        fixed.finishedAt > laterReviewStarts[0]!.at ||
+        fixed.headSha !== expectedHead ||
+        fixed.pushed?.length !== 1 ||
+        fixed.pushed[0]?.ref !== row.branch ||
+        fixed.pushed[0].sha !== expectedHead ||
+        fixed.pushed[0].by !== "push" ||
+        full?.id !== fixed.id ||
+        full.idempotencyKey !== fixed.idempotencyKey ||
+        full.parentInstanceId !== fixed.parentInstanceId ||
+        full.agent !== fixed.agent ||
+        full.userId !== fixed.userId ||
+        full.repo !== fixed.repo ||
+        full.threadKey !== fixed.threadKey ||
+        full.startedAt !== fixed.startedAt ||
+        full.finishedAt !== fixed.finishedAt ||
+        JSON.stringify(full.pr) !== JSON.stringify(fixed.pr) ||
+        JSON.stringify(full.pushed) !== JSON.stringify(fixed.pushed) ||
+        JSON.stringify(full.usage) !== JSON.stringify(fixed.usage) ||
+        full.status !== "completed" ||
+        full.headSha !== expectedHead ||
+        full.eventCount !== fixed.eventCount ||
+        full.storedEventCount !== full.eventCount ||
+        full.truncated !== false ||
+        full.events?.length !== full.eventCount ||
+        full.events.some((event, index) => event.seq !== index + 1) ||
+        full.events.filter((event) => event.type === "pr_description").length !== 1 ||
+        JSON.stringify(full.dispositions) !== JSON.stringify(fixed.dispositions) ||
+        fixed.dispositions?.length !== postedFindings.length ||
+        new Set(fixed.dispositions.map((item) => item.findingId)).size !== postedFindings.length ||
+        postedFindings.some((item) => !fixed.dispositions!.some((decision) => decision.findingId === item.id)) ||
+        reviewedHead === expectedHead ||
+        facts.headSha !== expectedHead ||
+        noWork?.id !== spend.noWorkReviews[0] ||
+        noWork.idempotencyKey !== `${instance.id}:${segmentPrefix}/${boundary.index + 1}/review` ||
+        noWork.startedAt < fixed.finishedAt ||
+        noWork.finishedAt === undefined ||
+        noWork.finishedAt > row.ending.at ||
+        afterBoundary.length !== laterReviewStarts.length + 2 ||
+        afterBoundary[0]?.agent !== "coding" ||
+        afterBoundary[0].index !== boundary.index ||
+        afterBoundary[0].outcome !== "started" ||
+        afterBoundary[0].at < fixed.startedAt ||
+        afterBoundary[0].at > fixed.finishedAt ||
+        afterBoundary[1]?.agent !== "coding" ||
+        afterBoundary[1].index !== boundary.index ||
+        afterBoundary[1].outcome !== "pr_opened" ||
+        afterBoundary[1].at < fixed.finishedAt ||
+        afterBoundary[1].at > noWork.startedAt ||
+        afterBoundary.slice(2).some((note) => note.agent !== "review" || note.index !== round + 1) ||
+        listing.runs.some(
+          (run) =>
+            run.id !== fixed.id &&
+            run.id !== review.id &&
+            run.id !== noWork.id &&
+            (!run.finished || run.pushed?.some((push) => push.ref === row.branch)),
+        )
+      )
+        return json(409, {
+          ok: false,
+          error: "recovery_review_evidence_ambiguous",
+          diagnostic: unavailableReviewStart("review_or_findings_mismatch"),
+          at,
+        });
+      reviewStartHistory = listing.runs;
+      findingsRunId = fixed.id;
+      findingsKey = fixed.idempotencyKey!;
+      kind = "review";
+      round = boundary.index + 1;
+      reviewStartEvidence = { reviewStart: "verified_no_work", runId: noWork.id, key: noWork.idempotencyKey! };
+    } else if (row.ending.cause === "step_threw" && failedStep?.includes("/pr-check") === true) {
+      // A malformed check suffix or trailing path cannot authorize more coding.
       const checkedStep = failedStep.slice(0, -"/pr-check".length);
       // A failed post-findings check is never permission to code again. Even
       // when the head did not move, its exact completed attempt must be proven.
@@ -5307,6 +5629,55 @@ export async function recoverOriginalUnit(
     // Refuse before reserving ownership; the claimed deadline never moves.
     if (deadlineAt - (deps.clock ?? systemClock)() < minutesToMs(leaseMinimum(kind === "findings" ? "fix" : "review")))
       return json(409, { ok: false, error: "recovery_wall_clock_exhausted", at });
+    if (reviewStartHistory !== undefined) {
+      // The initial complete listing preceded full-record and PR reads. Neither
+      // a newly live child nor a later push can be hidden by those old facts.
+      const current = await deps.runs
+        .listRuns({
+          privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
+          status: "all",
+          visibleTo: EVERY_RUN,
+          limit: RUN_LIST_MAX_LIMIT,
+          recoveryEvidence: {
+            instanceId: instance.id,
+            unit: row.unit,
+            threadKeys: [
+              row.threadKey ?? instance.threadKey,
+              row.reviewThread?.threadKey ?? row.threadKey ?? instance.threadKey,
+            ],
+          },
+        })
+        .catch(() => undefined);
+      if (
+        current === undefined ||
+        current.storeUnavailable ||
+        current.ledgerUnavailable ||
+        current.nextBefore !== undefined ||
+        current.runs.length >= RUN_LIST_MAX_LIMIT
+      )
+        return json(409, {
+          ok: false,
+          error: "recovery_evidence_incomplete",
+          diagnostic: unavailableReviewStart("history_incomplete"),
+          at,
+        });
+      if (JSON.stringify(current.runs) !== JSON.stringify(reviewStartHistory))
+        return json(409, {
+          ok: false,
+          error: "recovery_evidence_incomplete",
+          diagnostic: unavailableReviewStart("history_changed"),
+          at,
+        });
+      const remote = await deps.fetchBranchHeadSha?.(instance.repo, row.branch).catch(() => undefined);
+      if (remote === undefined)
+        return json(409, {
+          ok: false,
+          error: "recovery_ref_unavailable",
+          diagnostic: unavailableReviewStart("ref_unavailable"),
+          at,
+        });
+      if (remote !== expectedHead) return json(409, { ok: false, error: "recovery_head_moved", at });
+    }
     if (renew) {
       // Evidence and PR facts read before a claim are not a lock. A fresh
       // complete scope, exact remote ref and PR binding must still agree.
@@ -5339,6 +5710,10 @@ export async function recoverOriginalUnit(
       const remote = await deps.fetchBranchHeadSha?.(instance.repo, row.branch).catch(() => undefined);
       if (remote === undefined) return json(409, { ok: false, error: "recovery_ref_unavailable", at });
       if (remote !== expectedHead) return json(409, { ok: false, error: "recovery_head_moved", at });
+    }
+    if (renew || reviewStartHistory !== undefined) {
+      // Neither the earlier H2 admission nor a renewal's PR observation can
+      // prove the owned PR is still open when the claim reserves its writer.
       const refreshed = await deps.fetchPrFacts({ repo: instance.repo, number: pr.number }).catch(() => undefined);
       if (
         refreshed?.state !== "open" ||
@@ -5351,7 +5726,18 @@ export async function recoverOriginalUnit(
         refreshed.verifiedHead.ref !== row.branch ||
         refreshed.verifiedHead.repo.toLowerCase() !== instance.repo.toLowerCase()
       )
-        return json(409, { ok: false, error: "recovery_facts_mismatch", at });
+        return json(409, {
+          ok: false,
+          error: "recovery_facts_mismatch",
+          ...(reviewStartHistory !== undefined && (refreshed === undefined || refreshed.verifiedHead === undefined)
+            ? {
+                diagnostic: unavailableReviewStart(
+                  refreshed === undefined ? "pr_facts_unavailable" : "pr_binding_unverified",
+                ),
+              }
+            : {}),
+          at,
+        });
     }
     try {
       token = fence.reserve(instance.repo, pr.number, fenceOwner);
@@ -5477,6 +5863,7 @@ export async function recoverOriginalUnit(
     workflowId,
     parentInstanceId: instance.id,
     unit: row.unit,
+    ...(reviewStartEvidence !== undefined ? { diagnostic: reviewStartEvidence } : {}),
     at,
   });
 }
