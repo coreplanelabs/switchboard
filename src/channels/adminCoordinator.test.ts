@@ -14467,6 +14467,148 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       await change?.(failed, h);
     });
 
+  const admittedReviewWithRefusalReply = (
+    change?: (failed: RunRecord, h: ReturnType<typeof harness>) => Promise<void> | void,
+  ) =>
+    admittedReviewAttach(async (failed, h) => {
+      const started = NOW - minutesToMs(8);
+      const cleanup: RunEvent[] = [
+        { type: "span_start", spanId: "refuse", name: "dispatch.refuse" },
+        {
+          type: "span_end",
+          spanId: "refuse",
+          name: "dispatch.refuse",
+          startedAt: started,
+          durationMs: 1,
+          status: "ok",
+        },
+        { type: "span_start", spanId: "reply", name: "post.reply" },
+        { type: "span_end", spanId: "reply", name: "post.reply", startedAt: started, durationMs: 1, status: "ok" },
+      ];
+      failed.events = [...failed.events.slice(0, 17), ...cleanup].map((event, index) => ({ ...event, seq: index + 1 }));
+      failed.eventCount = failed.events.length;
+      failed.storedEventCount = failed.events.length;
+      await change?.(failed, h);
+    });
+
+  it("recovers admitted review attach refusal followed by ordered refusal and reply cleanup", async () => {
+    const { h, row, fixed } = await admittedReviewWithRefusalReply();
+    const events = (await h.store.get("run-h2-attach"))!.events;
+    expect(events).toHaveLength(21);
+    expect(events.slice(12).map((event) => [event.seq, event.type, "name" in event ? event.name : undefined])).toEqual([
+      [13, "run_state", undefined],
+      [14, "span_start", "dispatch.workspace.attach"],
+      [15, "span_end", "dispatch.memory_read"],
+      [16, "span_end", "dispatch.workspace.attach"],
+      [17, "refusal", undefined],
+      [18, "span_start", "dispatch.refuse"],
+      [19, "span_end", "dispatch.refuse"],
+      [20, "span_start", "post.reply"],
+      [21, "span_end", "post.reply"],
+    ]);
+    expect(await callRecovery(h)).toMatchObject({
+      status: 200,
+      body: { diagnostic: { reviewStart: "verified_no_work", runId: "run-h2-attach" } },
+    });
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    expect(claimed?.recovery).toMatchObject({
+      kind: "review",
+      round: 2,
+      expectedHeadSha: fixed,
+      accounting: {
+        spendUsd: 0.5,
+        children: expect.arrayContaining([expect.objectContaining({ runId: "run-h2-attach", usd: 0 })]),
+      },
+    });
+    expect(claimed?.rounds).toEqual(row.rounds);
+    expect(claimed?.publication).toEqual(row.publication);
+    expect(h.recoveries).toHaveLength(1);
+    expect(h.dispatched).toEqual([]);
+  });
+
+  it("recovers admitted review attach refusal when memory read ends before attach starts", async () => {
+    const { h, row, fixed } = await admittedReviewWithRefusalReply(async (failed) => {
+      const events = [...failed.events];
+      [events[13], events[14]] = [events[14]!, events[13]!];
+      failed.events = events.map((event, index) => ({ ...event, seq: index + 1 }));
+    });
+    const events = (await h.store.get("run-h2-attach"))!.events;
+    expect(
+      events.slice(12, 17).map((event) => [event.seq, event.type, "name" in event ? event.name : undefined]),
+    ).toEqual([
+      [13, "run_state", undefined],
+      [14, "span_end", "dispatch.memory_read"],
+      [15, "span_start", "dispatch.workspace.attach"],
+      [16, "span_end", "dispatch.workspace.attach"],
+      [17, "refusal", undefined],
+    ]);
+    expect(await callRecovery(h)).toMatchObject({
+      status: 200,
+      body: { diagnostic: { reviewStart: "verified_no_work", runId: "run-h2-attach" } },
+    });
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    expect(claimed?.recovery).toMatchObject({ kind: "review", round: 2, expectedHeadSha: fixed });
+    expect(claimed?.rounds).toEqual(row.rounds);
+    expect(h.recoveries).toHaveLength(1);
+    expect(h.dispatched).toEqual([]);
+  });
+
+  it.each([
+    "reversed cleanup pairs",
+    "mismatched refusal span",
+    "mismatched reply span",
+    "extra cleanup span",
+    "extra matched cleanup pair",
+    "failed cleanup end",
+    "model work after refusal",
+    "tool work after refusal",
+    "changed final identity",
+  ])("refuses admitted review cleanup with %s before any claim", async (scenario) => {
+    const { h, row } = await admittedReviewWithRefusalReply(async (failed) => {
+      const events = failed.events;
+      if (scenario === "reversed cleanup pairs") events.splice(17, 4, ...events.slice(19, 21), ...events.slice(17, 19));
+      if (scenario === "mismatched refusal span") events[18] = { ...events[18], spanId: "other" } as RunEvent;
+      if (scenario === "mismatched reply span") events[20] = { ...events[20], spanId: "other" } as RunEvent;
+      if (scenario === "extra cleanup span")
+        events.push({ type: "span_start", spanId: "extra", name: "dispatch.refuse", seq: 22 });
+      if (scenario === "extra matched cleanup pair")
+        events.push(
+          { type: "span_start", spanId: "extra", name: "dispatch.refuse", seq: 22 },
+          {
+            type: "span_end",
+            spanId: "extra",
+            name: "dispatch.refuse",
+            startedAt: NOW,
+            durationMs: 1,
+            status: "ok",
+            seq: 23,
+          },
+        );
+      if (scenario === "failed cleanup end") events[18] = { ...events[18], status: "error" } as RunEvent;
+      if (scenario === "model work after refusal")
+        events[19] = { type: "span_start", spanId: "model", name: "model.turn", seq: 20 };
+      if (scenario === "tool work after refusal")
+        events[19] = { type: "tool_call", tool: "bash", summary: "git status", seq: 20 };
+      failed.events = events.map((event, index) => ({ ...event, seq: index + 1 }));
+      failed.eventCount = failed.events.length;
+      failed.storedEventCount = failed.events.length;
+    });
+    if (scenario === "changed final identity") {
+      const getRun = h.deps.runs.getRun.bind(h.deps.runs);
+      vi.spyOn(h.deps.runs, "getRun").mockImplementation(async (id, opts) => {
+        const result = await getRun(id, opts);
+        return id === "run-h2-attach" && opts?.requireFinalRecord === true && result.ok
+          ? { ...result, value: { ...result.value, threadKey: "slack:COTHER:thread" } }
+          : result;
+      });
+    }
+    expect((await callRecovery(h)).status, scenario).toBe(409);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect(h.recoveries).toEqual([]);
+    expect(h.dispatched).toEqual([]);
+  });
+
   it("recovers a zero-work admitted review attach refusal with concurrent memory read on the original H2 head", async () => {
     const { h, row, fixed } = await admittedReviewAttach();
     const events = (await h.store.get("run-h2-attach"))!.events;
