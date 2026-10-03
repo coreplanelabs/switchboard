@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.282.0](https://github.com/coreplanelabs/switchboard/compare/v1.281.0...v1.282.0) (2026-10-03)
+
+
+### Features
+
+* **sandbox:** repair paused seeded dependencies in place ([#2715](https://github.com/coreplanelabs/switchboard/issues/2715)) ([99e7a65](https://github.com/coreplanelabs/switchboard/commit/99e7a6590c28e9c561a33de7fe22918170089fab))
+
+
+### Bug fixes
+
+* **ship:** recover H2 review after the original H1 push ([#2713](https://github.com/coreplanelabs/switchboard/issues/2713)) ([c3e784b](https://github.com/coreplanelabs/switchboard/commit/c3e784bdb32e36bb9ee344d7175ccca973e71d8f))
+
 ## [1.281.0](https://github.com/coreplanelabs/switchboard/compare/v1.280.0...v1.281.0) (2026-10-03)
 
 
