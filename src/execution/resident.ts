@@ -573,7 +573,7 @@ export interface ResidentExecutorOptions {
    * the Worker's short release grace. Absent for non-run callers. */
   runBudgetMs?: number;
   /** Admission time left before the harness starts its separate run lease. */
-  setupRemainingMs?: () => number;
+  setupRemainingMs?: () => number | undefined;
   /** The commit the caller expects the ref to be at — a PR head (docs/reference/specs/
    *  resident-repos.md item 51). The resident fetches its mirror when the ref's
    *  tip is not this commit instead of cloning a stale tip. Sent only when set,

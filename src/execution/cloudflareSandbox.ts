@@ -68,6 +68,9 @@ export interface CloudflareSandboxOptions {
   /** Bearer token shared with the Worker (SANDBOX_TOKEN secret). */
   token: string;
   threadKey: string;
+  /** Trusted admission's remaining setup time before the model starts.
+   *  Zero ends capacity waiting; undefined restores ordinary command caps. */
+  setupRemainingMs?: () => number | undefined;
   /** A reused thread sandbox may still contain a pre-door App token store. */
   scrubLegacyCredentials?: boolean;
   /** Env vars forwarded into the sandbox (including the run bearer), resolved on EVERY
@@ -111,11 +114,12 @@ function waitReasonOf(res: Response, data: Record<string, unknown>): WaitReason 
 function waitPlan(
   reason: WaitReason,
   budgetMs: number,
+  setupRemainingMs?: number,
 ): { budget: number; backoff: readonly number[]; exhausted: (waitedMs: number) => string } {
   switch (reason) {
     case FLEET_BUSY_REASON:
       return {
-        budget: Math.min(budgetMs, FLEET_BUSY_WAIT_MAX_MS),
+        budget: setupRemainingMs ?? Math.min(budgetMs, FLEET_BUSY_WAIT_MAX_MS),
         backoff: FLEET_BUSY_BACKOFF_MS,
         exhausted: fleetBusyExhaustedMessage,
       };
@@ -254,7 +258,8 @@ export class CloudflareSandboxExecutor implements Executor {
    *  (same route, body — env included —, headers; the envs resolved once
    *  here, so the wait never mints a new credential mid-command) after 10 s,
    *  20 s, then 30 s, until the total wait reaches `budgetMs` capped at
-   *  FLEET_BUSY_WAIT_MAX_MS; then throws `ExecCapacityError` (never
+   *  FLEET_BUSY_WAIT_MAX_MS, or the trusted run's remaining setup
+   *  admission; then throws `ExecCapacityError` (never
    *  `ExecInfraError` — a full fleet is not a dead sandbox, item 14). Safe to
    *  re-send by construction: the Worker answers busy only when session
    *  creation failed, before the command or file op ever started.
@@ -313,7 +318,12 @@ export class CloudflareSandboxExecutor implements Executor {
       const answer = await this.send(route, sent, headers, budgetMs, signal, span, singleSend);
       if (answer.kind === "ok") return answer.data;
       if (singleSend) throw new ExecCapacityError("The typed command was refused before execution.");
-      const plan = waitPlan(answer.reason, budgetMs);
+      const setupRemaining = this.opts.setupRemainingMs?.();
+      const setupWaitMs =
+        typeof setupRemaining === "number" && Number.isFinite(setupRemaining) && setupRemaining >= 0
+          ? waited + Math.trunc(setupRemaining)
+          : undefined;
+      const plan = waitPlan(answer.reason, budgetMs, setupWaitMs);
       if (waited >= plan.budget) {
         // The fleet's spent wait carries its facts — the Worker's refusal text
         // (the platform's own words as the cause), the wait and the Durable

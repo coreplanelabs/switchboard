@@ -95,6 +95,7 @@ Statuses: **proposed** (written, not yet agreed), **accepted** (agreed, being bu
 | 0084 | [Execution images follow their build inputs across Worker releases](../decisions/0084-execution-images-follow-their-inputs.md) | Content-addressed deployment artifact | accepted | 2026-10-01 |
 | 0085 | [A cold publication controller is a fresh sandbox, not an inspector](../decisions/0085-a-cold-publication-controller-is-a-fresh-sandbox-not-an-inspector.md) | One-use isolated effect domain | accepted | 2026-10-02 |
 | 0086 | [A deploy fence separates execution from workspace retention](../decisions/0086-deploy-fence-separates-execution-from-workspace-retention.md) | Durable run fence and exact owner read | accepted | 2026-10-02 |
+| 0087 | [An advertised run keeps one identity through setup](../decisions/0087-an-advertised-run-keeps-one-identity-through-setup.md) | One run from reservation to finish | accepted | 2026-10-03 |
 
 <!-- /generated:decision-records -->
 

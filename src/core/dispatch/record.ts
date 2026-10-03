@@ -650,15 +650,14 @@ export function writeTombstone(deps: RecordDeps, ctx: TombstoneContext): void {
   }
 }
 
-/** A durably reserved child that never reached its model loop still owns its
- *  identity. Finish through that reservation, not a newly minted door record;
- *  the ordinary writer retains retries and the ledger's atomic finish. */
-export function finishChildSetup(
+/** A run that never reached its model loop still owns its advertised identity.
+ *  A tracked reservation finishes atomically; the store writes an untracked run. */
+export function finishSetupRun(
   deps: RecordDeps,
   ctx: Omit<TombstoneContext, "run" | "resume"> & {
     audience?: AudienceTrace;
     runId: string;
-    ledgerRun: LedgerRun;
+    ledgerRun?: LedgerRun;
     ending: RunEnding;
     root: Span;
     finishedAt: number;
@@ -673,7 +672,7 @@ export function finishChildSetup(
     type: "refusal",
     code: refusal.code,
     cause: refusal.cause,
-    text: redactAndCap(reason.trim() ? reason : "The child ended before its model started.", 600),
+    text: redactAndCap(reason.trim() ? reason : "The run ended before its model started.", 600),
     at: finishedAt,
   });
   registry.finish(runId, status);
@@ -705,7 +704,7 @@ export function finishChildSetup(
           seal,
           diagnosis: analyzeRunFriction(snap?.events ?? [], { finished: true, truncated: snap?.truncated ?? false }),
         }),
-        { via: ctx.ledgerRun.sink, span: ctx.root },
+        { ...(ctx.ledgerRun ? { via: ctx.ledgerRun.sink } : {}), span: ctx.root },
       ),
   });
 }

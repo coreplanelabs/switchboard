@@ -346,8 +346,12 @@ export interface RegisteredRun {
 
 /** What `registerRun` reads off the dispatch. */
 export interface RegisterRunContext {
-  /** A child must be durably reserved before any surface can discover its id. */
+  /** Reserve before any surface can discover the run id. */
   beforeRegister?: (identity: { runId: string; channelVisibility: ChannelVisibility }) => Promise<void>;
+  /** Give the new row a terminal setup path before publishing its link. */
+  afterCreate?: (identity: { runId: string; channelVisibility: ChannelVisibility }) => void;
+  /** An untracked reservation cannot promise a durable Live run link. */
+  linkable?: () => boolean;
   /** Reuse the one visibility lookup when a saved private source needed it before registration. */
   channelVisibility?: ChannelVisibility;
   msg: IncomingMessage;
@@ -546,6 +550,7 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
           : {}),
     },
   );
+  ctx.afterCreate?.({ runId, channelVisibility });
   // The replacement is ONE line on the transcript (item 54), in user words,
   // between the replayed segment and the turn the restart publishes next.
   const events = new RunEventLane((event) => registry.publish(run.id, event));
@@ -555,7 +560,7 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
   // degrades gracefully, the run is otherwise unchanged. The card carries it
   // from here, and a follow-up's ack/refusal can link the run page
   // (thread-admission item 1).
-  const liveUrl = liveViewLink(run.id, run.token);
+  const liveUrl = ctx.linkable?.() === false ? undefined : liveViewLink(run.id, run.token);
   shell.setLink(liveUrl ? { url: liveUrl, label: "Live run" } : undefined);
   if (liveUrl) admitted.runLink = liveUrl;
   // A coordinator child is announced by dispatch after it owns the finalizer.
@@ -872,7 +877,7 @@ export interface AttachContext {
   threadKey: string;
   runId?: string;
   ownerGen?: string;
-  setupRemainingMs?: () => number;
+  setupRemainingMs?: () => number | undefined;
   agent: AgentDef;
   profile: RunProfile;
   githubDoor?: { baseUrl: string; bearer: string; ghConfigDir?: string };

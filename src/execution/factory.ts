@@ -13,6 +13,7 @@ import type { RunProfile } from "../config/profile.js";
 import { LocalExecutor, execDeadline, isDeadlineMiss, isRunStopError, type Executor } from "./executor.js";
 import { E2BExecutor } from "./e2b.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
+import { fleetBusyEndingFactsOf } from "./sandboxErrors.js";
 import { parsePreservationOwner, type OwnerClaim } from "./sandboxCheckpoint.js";
 import { verifyInstallRepairReceipt, type InstallRepairPolicy } from "./installRepairPolicy.js";
 import {
@@ -130,7 +131,7 @@ export interface ExecutorContext {
   /** Minted by the durable run ledger after confirming this run's current owner. */
   residentClaim?: () => Promise<number | undefined>;
   /** Time left for setup before the harness may start its separate run lease. */
-  setupRemainingMs?: () => number;
+  setupRemainingMs?: () => number | undefined;
   /** Run-bound credential accepted only by the trusted GitHub door. */
   githubDoor?: { baseUrl: string; bearer: string; ghConfigDir?: string };
   /** the resolved agent (never mutated here) — named in the null executor's error */
@@ -1245,7 +1246,7 @@ async function seedSandbox(
     } catch (err) {
       // A stop ends setup, not just this attempt to seed. Falling through to
       // a fresh sandbox would hide the stop and start work the run no longer owns.
-      if (isRunStopError(err) || claim) throw err;
+      if (isRunStopError(err) || claim || fleetBusyEndingFactsOf(err) !== undefined) throw err;
       return { why: oneLine(`seed failed (${err instanceof Error ? err.message : String(err)})`) };
     }
     if (answer.seeded) {
@@ -1851,6 +1852,7 @@ interface PerThreadInputs {
   ref?: string;
   /** the sandbox env, resolved per command (docs/reference/specs/execution.md item 5) */
   resolveEnvs: () => Promise<Record<string, string>>;
+  setupRemainingMs?: () => number | undefined;
 }
 
 /** A per-thread checkout carries the resolved repo/ref, the run bearer and
@@ -1867,13 +1869,20 @@ function perThreadCheckout(opts: ExecutorFactoryOptions, ctx: ExecutorContext): 
       threadKey: ctx.threadKey,
       repo: ctx.repo,
       ref: ctx.ref,
+      ...(ctx.setupRemainingMs ? { setupRemainingMs: ctx.setupRemainingMs } : {}),
       resolveEnvs: async () => ({
         ...githubDoorEnvs(door, ctx.repo),
         ...(await gitIdentityEnvs(ctx.profile.identity, authorSourceOf(opts, ctx))),
       }),
     };
   }
-  return { threadKey: ctx.threadKey, repo: ctx.repo, ref: ctx.ref, resolveEnvs: async () => ({}) };
+  return {
+    threadKey: ctx.threadKey,
+    repo: ctx.repo,
+    ref: ctx.ref,
+    ...(ctx.setupRemainingMs ? { setupRemainingMs: ctx.setupRemainingMs } : {}),
+    resolveEnvs: async () => ({}),
+  };
 }
 
 /** Every model command gets a revocable run bearer for the trusted door,
@@ -1975,6 +1984,7 @@ async function makePerThreadExecutor(
       url: opts.execution.url,
       token: token.reveal(),
       threadKey: sandboxKey ?? threadKey,
+      ...(input.setupRemainingMs ? { setupRemainingMs: input.setupRemainingMs } : {}),
       resolveEnvs: input.resolveEnvs,
       repo: input.repo,
       ref: input.ref,
