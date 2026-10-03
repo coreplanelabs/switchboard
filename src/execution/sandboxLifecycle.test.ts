@@ -313,11 +313,55 @@ describe("sandbox Worker wiring (static)", () => {
     expect(worker.match(/this\.gate\.through\(/g)).toHaveLength(6);
     expect(worker).toMatch(/async exportPublicationPack\([\s\S]*?this\.gate\.through\(/);
     expect(worker).toMatch(
-      /warmUp: \(\) =>\s*this\.idle\.served\(async \(\) => \{\s*const proc = await createExtensionProcessSandbox\(this\)\.exec\(\["true"\]/,
+      /warmUp: \(\) =>\s*this\.idle\.served\(async \(\) => \{[\s\S]*?await this\.ctx\.storage\.transaction\([\s\S]*?const proc = await createExtensionProcessSandbox\(this\)\.exec\(\["true"\]/,
     );
     expect(worker).toMatch(/\(cause\) => sandboxStartingExecAnswer\(cause\)/);
     expect(worker.match(/\(cause\) => this\.startingRefusal\(cause\)/g)).toHaveLength(3);
     expect(worker).toMatch(/return \{ error, status: 503, reason \};/);
+  });
+
+  it("fences both idle and SDK expiry teardown before SDK destroy or platform kill", () => {
+    expect(worker).toContain("beforeDestroy: (why) => this.preserveBeforeDestroy(why)");
+    expect(worker).toMatch(/override async onActivityExpired\(\): Promise<void> \{\s*await this\.idle\.expired\(\);/);
+    expect(worker).toContain("containerRunning: () => this.ctx.container?.running");
+  });
+
+  it("a legacy or failed seed stays protected even when its container marker disappears", () => {
+    expect(worker).toContain('const PRESERVATION_SEED_STATE_KEY = "switchboard.preservation.seedState"');
+    expect(worker).toContain('await this.ctx.storage.put(PRESERVATION_SEED_STATE_KEY, "seeded")');
+    expect(worker).toContain('if (seedState === "unseeded" && !marker.exists) return true;');
+    expect(worker).toContain("if (!marker.exists) return false;");
+    expect(worker).toContain("if (this.ctx.container?.running === false) {");
+  });
+
+  it("checks an earlier bound incarnation before seed can overwrite its checkout", () => {
+    const seed = worker.slice(worker.indexOf("async seed(seed:"), worker.indexOf("private async seedNow("));
+    expect(seed).toMatch(/const prior = await this\.ctx\.storage\.get<CheckpointRecord>\(PRESERVATION_KEY\)/);
+    expect(seed).toMatch(
+      /if \(prior\) \{[\s\S]*?this\.readFile\(PRESERVATION_CONTAINER_MARKER[\s\S]*?this\.seedNow\(seed, envVars, !!prior\)/,
+    );
+  });
+
+  it("a bound owner retries the original seed without requiring the checkout HEAD to stay at its seed commit", () => {
+    const seed = worker.slice(worker.indexOf("async seed(seed:"), worker.indexOf("private claimMatches("));
+    expect(seed).toContain("seedClaimHeadMatches(claim.head, answer.sha, !!prior && answer.cached)");
+    expect(seed).toContain("this.seedNow(seed, envVars, !!prior)");
+  });
+
+  it("declines a paused writer backup without an independent quiescence witness", () => {
+    expect(worker).toContain("safeQuiescence: async () => false");
+    expect(worker).toContain("return await checkpointIfSafe(record.owner, {");
+  });
+
+  it("the stopped-container receipt bypasses getSandbox StartGate and exec", () => {
+    const route = worker.slice(
+      worker.indexOf('if (url.pathname === "/preservation/receipt")'),
+      worker.indexOf("const sandbox = getSandbox("),
+    );
+    expect(route).toContain("env.Sandbox.get(env.Sandbox.idFromName(threadKey))");
+    expect(route).not.toContain("getSandbox(");
+    expect(route).not.toContain(".gate");
+    expect(route).not.toContain(".exec(");
   });
 
   // The rollout window a NEW thread can fall into is closed by replacing the

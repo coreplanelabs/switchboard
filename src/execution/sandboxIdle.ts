@@ -16,9 +16,10 @@
 // guard below makes the deadline ours again: served-time is recorded on every
 // request, a sweep the Durable Object schedules for itself checks it once a
 // minute (and the SDK's own expiry hook is answered by the same verdict), and
-// a container past the window is destroyed — through the SDK's clean teardown
-// when that finishes in time, by the platform's own kill when it does not.
-// Nothing inside the container can extend its life; only a request can.
+// a container past the window enters the preservation fence: a seeded
+// checkout remains in place unless a coherent owner-bound snapshot is proved.
+// Unseeded containers still stop through clean teardown or the platform kill.
+// A process alone does not refresh the idle clock.
 
 import { BASH_TIMEOUT_MAX_MS } from "./bashTimeout.js";
 
@@ -96,6 +97,9 @@ export interface IdleGuardHost {
   /** Whether a sweep callback is already scheduled (the SDK's schedule table). */
   sweepScheduled(): Promise<boolean>;
   scheduleSweep(delayMs: number): Promise<void>;
+  /** Fail-closed preservation fence before either teardown path. A seed whose
+   * writer, incarnation or backup cannot be verified must remain running. */
+  beforeDestroy(why: "idle" | "stuck"): Promise<boolean>;
   /** The SDK's clean teardown (`Sandbox.destroy()`): sessions closed, the
    *  container SIGKILLed at the end. May hang or throw; the guard bounds it. */
   destroySandbox(): Promise<void>;
@@ -113,6 +117,10 @@ export class IdleGuard {
   readonly ledger: IdleLedger;
   private armed = false;
   private destroying: Promise<void> | null = null;
+  private teardownStarted = false;
+  // A served request can start and finish on the same clock tick. Timestamp
+  // equality is not evidence that no writer arrived during the stop fence.
+  private activityEpoch = 0;
 
   constructor(private readonly host: IdleGuardHost) {
     this.ledger = newIdleLedger(host.now());
@@ -136,12 +144,18 @@ export class IdleGuard {
    *  its start (so a live command is never idle), recorded at its finish
    *  (success or failure alike), persisted on the persist cadence. */
   async served<T>(op: () => Promise<T>): Promise<T> {
+    // Once teardown has begun, a new request must not start a seed or command
+    // in a container the SDK is already destroying. It runs after the fence
+    // resolves, whether the container was retained or stopped.
+    if (this.teardownStarted && this.destroying) await this.destroying;
     const startedAt = this.host.now();
+    this.activityEpoch++;
     this.ledger.inflight.push(startedAt);
     try {
       await this.arm();
       return await op();
     } finally {
+      this.activityEpoch++;
       const i = this.ledger.inflight.indexOf(startedAt);
       if (i >= 0) this.ledger.inflight.splice(i, 1);
       const now = this.host.now();
@@ -188,15 +202,38 @@ export class IdleGuard {
     const verdict = idleVerdict(this.ledger, this.host.now());
     if (verdict.action === "keep") return;
     this.destroying = this.destroy(verdict, source).finally(() => {
+      this.teardownStarted = false;
       this.destroying = null;
     });
     return this.destroying;
   }
 
-  /** The SDK's clean destroy, bounded; then the platform's kill unless the
-   *  container is known stopped. The guarantee lives in the second step. */
+  /** The preservation fence runs BEFORE SDK destroy or the platform kill.
+   * A request arriving while it awaits an upload invalidates the old verdict;
+   * no stop of a newly-serving incarnation is licensed by old idle time. */
   private async destroy(verdict: Extract<IdleVerdict, { action: "destroy" }>, source: IdleStopSource): Promise<void> {
     const base = { why: verdict.why, idleMs: verdict.idleMs, source, sleepAfterMs: SANDBOX_SLEEP_AFTER_MS };
+    const servedAt = this.ledger.lastServedAt;
+    const activityEpoch = this.activityEpoch;
+    const inflight = [...this.ledger.inflight];
+    let safe = false;
+    try {
+      safe = (await this.host.beforeDestroy?.(verdict.why)) === true;
+    } catch {
+      // A failed preservation check is a reason to retain, not force kill.
+    }
+    if (
+      !safe ||
+      activityEpoch !== this.activityEpoch ||
+      servedAt !== this.ledger.lastServedAt ||
+      inflight.length !== this.ledger.inflight.length ||
+      inflight.some((at, i) => at !== this.ledger.inflight[i]) ||
+      idleVerdict(this.ledger, this.host.now()).action !== "destroy"
+    ) {
+      this.host.log({ event: "sandbox.idle-stop.retained", ...base });
+      return;
+    }
+    this.teardownStarted = true;
     this.host.log({ event: "sandbox.idle-stop", ...base });
     let outcome: "done" | "timeout" | "failed";
     let error: string | undefined;

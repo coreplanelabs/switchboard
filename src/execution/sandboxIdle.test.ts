@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   DESTROY_GRACE_MS,
   IDLE_SWEEP_INTERVAL_MS,
@@ -19,9 +19,9 @@ import { BASH_TIMEOUT_MAX_MS } from "./bashTimeout.js";
 // tracked process or terminal is active, and keeps it awake on any probe
 // failure; twenty-five sandboxes were found awake 10–16 h after their last
 // request against a 5-minute sleepAfter, with three runs in flight. The
-// Durable Object now decides for itself from the one fact it owns — when it
-// last served a request — and destroys the container when that is older than
-// SANDBOX_SLEEP_AFTER, whatever is running inside.
+// Durable Object proposes teardown from the last served request, but the
+// preservation fence retains seeded or unknown work without independent
+// quiescence and a complete checkpoint, even beyond the idle/stuck deadline.
 
 const MIN = 60_000;
 const flush = () => new Promise<void>((r) => setTimeout(r, 0));
@@ -55,7 +55,7 @@ describe("idleVerdict", () => {
     expect(v).toEqual({ action: "keep", why: "warm", recheckInMs: 3 * MIN });
   });
 
-  it("destroys a container whose last request is SANDBOX_SLEEP_AFTER old, whatever runs inside", () => {
+  it("proposes teardown at SANDBOX_SLEEP_AFTER, subject to the preservation fence", () => {
     const v = idleVerdict(at(1_000_000), 1_000_000 + SANDBOX_SLEEP_AFTER_MS);
     expect(v).toEqual({ action: "destroy", why: "idle", idleMs: SANDBOX_SLEEP_AFTER_MS });
   });
@@ -66,7 +66,7 @@ describe("idleVerdict", () => {
     expect(v).toEqual({ action: "keep", why: "serving", recheckInMs: IDLE_SWEEP_INTERVAL_MS });
   });
 
-  it("a request in flight longer than any command may run is a stuck request, not service", () => {
+  it("proposes teardown for a stuck request, subject to the preservation fence", () => {
     const now = 1_000_000 + 60 * MIN;
     const v = idleVerdict(at(1_000_000, [now - INFLIGHT_STUCK_MS]), now);
     expect(v).toEqual({ action: "destroy", why: "stuck", idleMs: INFLIGHT_STUCK_MS });
@@ -112,6 +112,7 @@ function fakeHost(opts: { running?: boolean | undefined; stored?: number; destro
       scheduled.push(ms);
       sweepRow = true;
     },
+    beforeDestroy: async () => true,
     destroySandbox: async () => {
       destroyed++;
       if (opts.destroyHangs) return new Promise<void>(() => {});
@@ -152,6 +153,119 @@ function fakeHost(opts: { running?: boolean | undefined; stored?: number; destro
     },
   };
 }
+
+describe("IdleGuard preservation", () => {
+  it("retains if the preservation fence is missing or throws", async () => {
+    const f = fakeHost({ running: true });
+    f.host.beforeDestroy = undefined as unknown as IdleGuardHost["beforeDestroy"];
+    const g = new IdleGuard(f.host);
+    await g.wake();
+    f.advance(SANDBOX_SLEEP_AFTER_MS);
+    f.fired();
+    await g.sweep();
+    expect(f.counts()).toEqual({ destroyed: 0, killed: 0 });
+    f.host.beforeDestroy = async () => {
+      throw new Error("probe failed");
+    };
+    await g.expired();
+    expect(f.counts()).toEqual({ destroyed: 0, killed: 0 });
+  });
+
+  it("retains an idle seeded writer when preservation is uncertain", async () => {
+    const f = fakeHost({ running: true });
+    const preserve = vi.fn(async () => false);
+    f.host.beforeDestroy = preserve;
+    const g = new IdleGuard(f.host);
+    await g.wake();
+    f.advance(SANDBOX_SLEEP_AFTER_MS);
+    f.fired();
+    await g.sweep();
+    expect(preserve).toHaveBeenCalledWith("idle");
+    expect(f.counts()).toEqual({ destroyed: 0, killed: 0 });
+    expect(f.scheduled).toHaveLength(2);
+    await g.expired(); // SDK expiry must not bypass the same fence
+    expect(f.counts()).toEqual({ destroyed: 0, killed: 0 });
+  });
+
+  it("retains a stuck in-flight writer when preservation is uncertain", async () => {
+    const f = fakeHost({ running: true });
+    f.host.beforeDestroy = async () => false;
+    const g = new IdleGuard(f.host);
+    await g.wake();
+    void g.served(() => new Promise<void>(() => {}));
+    await flush();
+    f.advance(INFLIGHT_STUCK_MS);
+    f.fired();
+    await g.sweep();
+    expect(f.counts()).toEqual({ destroyed: 0, killed: 0 });
+  });
+
+  it("retains on a same-tick request even when the idle clock does not advance", async () => {
+    const f = fakeHost({ running: true });
+    let release!: (safe: boolean) => void;
+    f.host.beforeDestroy = () => new Promise<boolean>((resolve) => (release = resolve));
+    const g = new IdleGuard(f.host);
+    await g.wake();
+    void g.served(() => new Promise<void>(() => {})); // stuck writer stays in flight
+    await flush();
+    f.advance(INFLIGHT_STUCK_MS);
+    await g.served(async () => undefined); // establish lastServedAt on this tick
+    f.fired();
+    const sweep = g.sweep();
+    await flush();
+    await g.served(async () => undefined); // second request, same tick and same inflight array
+    release(true);
+    await sweep;
+    expect(f.counts()).toEqual({ destroyed: 0, killed: 0 });
+  });
+
+  it("does not admit a new writer while teardown of an unseeded container is in progress", async () => {
+    const f = fakeHost({ running: true });
+    let release!: () => void;
+    f.host.destroySandbox = () => new Promise<void>((resolve) => (release = resolve));
+    f.host.wait = () => new Promise<void>(() => {});
+    const g = new IdleGuard(f.host);
+    await g.wake();
+    f.advance(SANDBOX_SLEEP_AFTER_MS);
+    f.fired();
+    const sweep = g.sweep();
+    await flush();
+    let started = false;
+    const request = g.served(async () => {
+      started = true;
+    });
+    await flush();
+    expect(started).toBe(false);
+    f.setRunning(false);
+    release();
+    await sweep;
+    await request;
+    expect(started).toBe(true);
+  });
+
+  it("retains on failed backup and a concurrent request during preservation", async () => {
+    const f = fakeHost({ running: true });
+    let release!: (safe: boolean) => void;
+    f.host.beforeDestroy = () => new Promise<boolean>((resolve) => (release = resolve));
+    const g = new IdleGuard(f.host);
+    await g.wake();
+    f.advance(SANDBOX_SLEEP_AFTER_MS);
+    f.fired();
+    const sweep = g.sweep();
+    await flush();
+    await g.served(async () => undefined);
+    release(true); // backup completed, but the old idle verdict is now stale
+    await sweep;
+    expect(f.counts()).toEqual({ destroyed: 0, killed: 0 });
+    f.advance(SANDBOX_SLEEP_AFTER_MS);
+    f.fired();
+    const second = g.sweep();
+    await flush();
+    release(false); // failed upload retains even though the deadline holds
+    await second;
+    expect(f.counts()).toEqual({ destroyed: 0, killed: 0 });
+  });
+});
 
 describe("IdleGuard", () => {
   it("wake() takes the stored last-served time as the baseline and arms one sweep when none is scheduled", async () => {
