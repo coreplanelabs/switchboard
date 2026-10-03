@@ -607,6 +607,52 @@ describe("claimRun — the ledger claim once the prompt exists", () => {
 });
 
 describe("githubCapabilityFor — the github_* tools' capability for one run", () => {
+  it("admits a private repo only for its bound requester in a verified direct DM with current GitHub read permission", async () => {
+    const { deps } = setup();
+    deps.githubApi = new InMemoryGithubApi({
+      "acme/api": { private: false },
+      "acme/private": { private: true, permissions: { "ivy-dev": { id: 4242, permission: "read" } } },
+    });
+    await deps.config.setUserOverride("slack:UDEV", { github: { login: "ivy-dev", id: 4242 } });
+    const actor = (channelId: string, postedBy?: string) =>
+      chatActorOf(deps.config, {
+        userId: "slack:UDEV",
+        channelId,
+        threadKey: `${channelId}:1.0`,
+        ...(postedBy ? { postedBy } : {}),
+      });
+    const privateDm = { requesterId: "slack:UDEV", verifiedDirectAudience: true };
+    const names = async (channelId: string, audience = privateDm, postedBy?: string) =>
+      (await githubCapabilityFor(deps, actor(channelId, postedBy), audience).readableRepos?.())?.map((r) => r.fullName);
+    expect(await names("slack:DONE")).toEqual(["acme/api", "acme/private"]);
+    expect(await names("slack:DONE", { ...privateDm, verifiedDirectAudience: false })).toEqual(["acme/api"]);
+    expect(await names("slack:CONE")).toEqual(["acme/api"]);
+    expect(await names("slack:DONE", privateDm, "slack:bot:B0CLAUDE")).toEqual(["acme/api"]);
+    expect(await names("slack:DONE", { ...privateDm, requesterId: "slack:UOTHER" })).toEqual(["acme/api"]);
+    const api = deps.githubApi as InMemoryGithubApi;
+    api.repos.set("acme/other", {
+      private: true,
+      permissions: { "ivy-dev": { id: 4242, permission: "read" } },
+      files: {},
+      issues: [],
+    });
+    const checked = vi.spyOn(api, "getUserRepoPermission");
+    expect(
+      (await githubCapabilityFor(deps, actor("slack:DONE"), privateDm).readableRepos?.(["acme/private"]))?.map(
+        (repo) => repo.fullName,
+      ),
+    ).toEqual(["acme/private"]);
+    expect(checked).toHaveBeenCalledExactlyOnceWith("acme/private", "ivy-dev");
+    checked.mockRestore();
+    api.repos.delete("acme/other");
+    await deps.config.setUserOverride("slack:UDEV", { github: { login: "ivy-dev", id: 9999 } });
+    expect(await names("slack:DONE")).toEqual(["acme/api"]);
+    await deps.config.setUserOverride("slack:UDEV", { github: { login: "ivy-dev", id: 4242 } });
+    (deps.githubApi as InMemoryGithubApi).repos.get("acme/private")!.permissions = {
+      "ivy-dev": { id: 4242, permission: "none" },
+    };
+    expect(await names("slack:DONE")).toEqual(["acme/api"]);
+  });
   it("limits main-agent reads to public installation repos the resolved requester may use", async () => {
     const { deps } = setup();
     deps.githubApi = new InMemoryGithubApi({

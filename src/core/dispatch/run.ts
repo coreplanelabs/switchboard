@@ -594,17 +594,55 @@ export const webCapability = () => (sharedWeb ??= makeWebCapability(processSecre
  *  repo's resident — so an issue write from a plain mention is authorized
  *  like a coding run on that repo. */
 let sharedGithubApi: GithubApi | undefined;
-export function githubCapabilityFor(deps: Pick<RunDeps, "config" | "githubApi">, actor: Actor): GithubCapability {
+export function githubCapabilityFor(
+  deps: Pick<RunDeps, "config" | "githubApi">,
+  actor: Actor,
+  privateAudience?: { requesterId: string; verifiedDirectAudience: boolean },
+): GithubCapability {
   const api = deps.githubApi ?? (sharedGithubApi ??= new RestGithubApi());
   return {
     api,
     canWrite: (repo) => deps.config.canUseRepo(actor, repo),
-    // The App token proves only the installation's access, not this person's.
-    // Until GitHub user credentials are available, expose only public repos
-    // that the resolved requester may use. Re-read each tool call so a grant
-    // or visibility change is not masked by an earlier turn's cached list.
-    readableRepos: async () =>
-      (await api.listRepos()).filter((repo) => !repo.private && deps.config.canUseRepo(actor, repo.fullName)),
+    // A bound GitHub id and fresh GitHub permission extend a verified direct
+    // requester's read capability. The App's own access is never person proof.
+    readableRepos: async (requested) => {
+      const names = requested ? new Set(requested.map((repo) => repo.toLowerCase())) : undefined;
+      const repos = (await api.listRepos()).filter(
+        (repo) => (!names || names.has(repo.fullName.toLowerCase())) && deps.config.canUseRepo(actor, repo.fullName),
+      );
+      const person =
+        privateAudience?.verifiedDirectAudience &&
+        privateAudience.requesterId === actor.id &&
+        actor.kind === "user" &&
+        /^slack:U[A-Z0-9_]+$/.test(actor.id) &&
+        /^slack:D[A-Z0-9_]+$/.test(actor.origin?.channelId ?? "") &&
+        actor.origin?.threadKey.startsWith(`${actor.origin.channelId}:`)
+          ? deps.config.userGithubBinding(actor.id)
+          : undefined;
+      if (!person || typeof person === "string") return repos.filter((repo) => !repo.private);
+      const readable = new Set<string>();
+      const privateRepos = repos.filter((repo) => repo.private);
+      for (let start = 0; start < privateRepos.length; start += 4) {
+        const batch = privateRepos.slice(start, start + 4);
+        const checked = await Promise.all(
+          batch.map(async (repo) => {
+            try {
+              const current = await api.getUserRepoPermission(repo.fullName, person.login);
+              return (
+                current?.user.id === person.id &&
+                current.user.login.toLowerCase() === person.login.toLowerCase() &&
+                (current.permission === "read" || current.permission === "write" || current.permission === "admin")
+              );
+            } catch {
+              return false;
+            }
+          }),
+        );
+        for (const [index, allowed] of checked.entries())
+          if (allowed) readable.add(batch[index].fullName.toLowerCase());
+      }
+      return repos.filter((repo) => !repo.private || readable.has(repo.fullName.toLowerCase()));
+    },
   };
 }
 

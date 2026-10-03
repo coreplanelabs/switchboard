@@ -333,7 +333,11 @@ function buildContextAccess(deps: ContextAccessDeps, { msg, io }: { msg: Incomin
           return denied();
       }
       if (dependencies.githubRepos?.length) {
-        const current = await githubCapabilityFor(deps, actor()).readableRepos?.();
+        const current = await githubCapabilityFor(deps, actor(), {
+          requesterId: msg.userId,
+          verifiedDirectAudience:
+            directAudienceStampOf(msg) !== undefined && (await destinationAudience()) !== undefined,
+        }).readableRepos?.(dependencies.githubRepos);
         const readable = new Set(current?.map((repo) => repo.fullName.toLowerCase()));
         if (dependencies.githubRepos.some((repo) => !readable.has(repo.toLowerCase()))) return denied();
       }

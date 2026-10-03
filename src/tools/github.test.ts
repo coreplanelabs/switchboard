@@ -96,7 +96,9 @@ describe("github_* reads", () => {
     expect(await text(githubFileTool, { repo: "acme/public", path: "README.md" }, ctx)).toContain("public text");
     expect(exposed).toEqual(["acme/public", "acme/public"]);
     allowed = false;
-    expect(await text(githubFileTool, { repo: "acme/public", path: "README.md" }, ctx)).toContain("not allowed");
+    expect(await text(githubFileTool, { repo: "acme/public", path: "README.md" }, ctx)).toContain(
+      "could not be verified",
+    );
     expect(exposed).toHaveLength(2);
   });
 
@@ -159,7 +161,7 @@ describe("github_* reads", () => {
     );
   });
 
-  it("the orchestrator exposes only requester-approved public repositories and refuses every private or unscoped read before the API", async () => {
+  it("the orchestrator refuses every repository outside the requester-scoped catalog before the API", async () => {
     const api = new InMemoryGithubApi({
       "acme/public": { private: false, files: { "README.md": "public text" } },
       "acme/private": { private: true, files: { "README.md": "private text" } },
@@ -179,21 +181,23 @@ describe("github_* reads", () => {
     };
     expect(await text(githubReposTool, {}, ctx)).toContain("acme/public");
     expect(await text(githubReposTool, {}, ctx)).not.toContain("acme/private");
-    expect(await text(githubFileTool, { repo: "acme/private", path: "README.md" }, ctx)).toContain("not allowed");
-    expect(await text(githubTreeTool, { repo: "acme/private" }, ctx)).toContain("not allowed");
-    expect(await text(githubIssueListTool, { repo: "acme/private" }, ctx)).toContain("not allowed");
-    expect(await text(githubIssueGetTool, { repo: "acme/private", number: 1 }, ctx)).toContain("not allowed");
-    expect(await text(githubPullGetTool, { repo: "acme/private", number: 1 }, ctx)).toContain("not allowed");
+    expect(await text(githubFileTool, { repo: "acme/private", path: "README.md" }, ctx)).toContain(
+      "could not be verified",
+    );
+    expect(await text(githubTreeTool, { repo: "acme/private" }, ctx)).toContain("could not be verified");
+    expect(await text(githubIssueListTool, { repo: "acme/private" }, ctx)).toContain("could not be verified");
+    expect(await text(githubIssueGetTool, { repo: "acme/private", number: 1 }, ctx)).toContain("could not be verified");
+    expect(await text(githubPullGetTool, { repo: "acme/private", number: 1 }, ctx)).toContain("could not be verified");
     expect(await text(githubSearchCodeTool, { query: "private text" }, ctx)).toContain("repo is required");
     expect(await text(githubSearchCodeTool, { query: "private text", repo: "acme/private" }, ctx)).toContain(
-      "not allowed",
+      "could not be verified",
     );
     expect(await text(githubActionsRunTool, { run: "https://github.com/acme/private/actions/runs/1" }, ctx)).toContain(
-      "not allowed",
+      "could not be verified",
     );
     expect(
       await text(githubActionsJobLogTool, { job: "https://github.com/acme/private/actions/runs/1/job/1" }, ctx),
-    ).toContain("not allowed");
+    ).toContain("could not be verified");
     expect(await text(githubFileTool, { repo: "acme/public", path: "README.md" }, ctx)).toContain("public text");
     expect(calls.length).toBeGreaterThanOrEqual(9);
     expect(
@@ -202,7 +206,19 @@ describe("github_* reads", () => {
         { repo: "acme/public", path: "README.md" },
         { ...ctx, github: { api, canWrite: () => false } },
       ),
-    ).toContain("not allowed");
+    ).toContain("could not be verified");
+  });
+  it("lets the orchestrator read a private repository in its verified requester catalog", async () => {
+    const api = new InMemoryGithubApi({
+      "acme/private": { private: true, files: { "README.md": "private text" } },
+    });
+    const ctx: ToolContext = {
+      executor: noExecutor,
+      agentName: "orchestrator",
+      github: { api, canWrite: () => false, readableRepos: async () => api.listRepos() },
+    };
+    expect(await text(githubReposTool, {}, ctx)).toContain("acme/private");
+    expect(await text(githubFileTool, { repo: "acme/private", path: "README.md" }, ctx)).toContain("private text");
   });
   it("every tool reports itself unavailable without the capability, never throws", async () => {
     for (const tool of [...GITHUB_READ_TOOLS, ...GITHUB_ISSUE_WRITE_TOOLS]) {

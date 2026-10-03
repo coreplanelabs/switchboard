@@ -95,7 +95,7 @@ describe("orchestrator conversational reads", () => {
     expect(github).toContain("cursor");
     expect(
       String(await tool("github_file").run({ repo: "acme/api", path: "README.md" }, context("user:other"))),
-    ).toContain("not allowed");
+    ).toContain("repository access could not be verified");
     const mcp = String(await tool("mcp__metrics__read").run({}, ctx));
     expect(mcp).toContain("last completed hour UTC");
     expect(mcp).toContain("<<<UNTRUSTED");
@@ -116,7 +116,9 @@ describe("orchestrator conversational reads", () => {
         absent,
       ).toBe(false);
     }
-    expect(await tool("github_file").run({ repo: "acme/hidden", path: "README.md" }, ctx)).toContain("not allowed");
+    expect(await tool("github_file").run({ repo: "acme/hidden", path: "README.md" }, ctx)).toContain(
+      "repository access could not be verified",
+    );
     expect(await tool("github_file").run({}, { ...ctx, github: undefined })).toContain("not available");
     expect(await tool("plane_show").run({}, ctx)).toContain("instead of answering the question from memory");
   });

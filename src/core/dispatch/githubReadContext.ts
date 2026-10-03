@@ -29,9 +29,7 @@ export function githubReadWithContext(
       if (!ctx.callId || repositories.size === 0) return result;
       let readable: Set<string>;
       try {
-        readable = new Set(
-          (await github.readableRepos?.())?.filter((r) => !r.private).map((r) => r.fullName.toLowerCase()),
-        );
+        readable = new Set((await github.readableRepos?.([...repositories]))?.map((r) => r.fullName.toLowerCase()));
       } catch {
         readable = new Set();
       }

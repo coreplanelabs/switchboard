@@ -188,6 +188,25 @@ describe("RestGithubApi — reads use the read token", () => {
     ]);
   });
 
+  it("reads current user permission on the App read token and treats missing or malformed proof as absent", async () => {
+    scopes.length = 0;
+    const { api: gh, calls } = api(({ url }) => {
+      if (url.endsWith("/acme/private/collaborators/ivy-dev/permission"))
+        return { status: 200, body: { permission: "read", user: { login: "ivy-dev", id: 4242 } } };
+      if (url.endsWith("/acme/malformed/collaborators/ivy-dev/permission"))
+        return { status: 200, body: { permission: "read", user: { login: "ivy-dev" } } };
+      return undefined;
+    });
+    expect(await gh.getUserRepoPermission("acme/private", "ivy-dev")).toEqual({
+      permission: "read",
+      user: { login: "ivy-dev", id: 4242 },
+    });
+    expect(await gh.getUserRepoPermission("acme/malformed", "ivy-dev")).toBeNull();
+    expect(await gh.getUserRepoPermission("acme/absent", "ivy-dev")).toBeNull();
+    expect(calls.every((call) => call.headers.authorization === "Bearer tok-read")).toBe(true);
+    expect(scopes).toEqual(["read", "read", "read"]);
+  });
+
   it("listRepos includes every connected repository beyond three pages", async () => {
     const { api: gh, calls } = api(({ url }) => {
       const page = Number(new URL(url).searchParams.get("page"));
