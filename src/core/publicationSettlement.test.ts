@@ -214,6 +214,37 @@ describe("publication settlement", () => {
     expect(calls).toContain("git add -A");
   });
 
+  it("records a fixed cold 409 refusal phase as rejected, never an accepted or pending effect", async () => {
+    const result = await salvageBudgetPush(
+      {
+        exec: async (cmd) => {
+          if (cmd.includes("status")) return " M tracked.ts";
+          if (cmd.includes("symbolic-ref")) return binding.branch;
+          if (cmd.includes("rev-parse HEAD")) return source;
+          return "";
+        },
+        publishBranchResult: async () => ({
+          stdout: "",
+          stderr: "publication refused by cold controller (phase: cold-publication-validation-refused)",
+          exitCode: 1,
+          truncated: false,
+        }),
+      },
+      {
+        branch: binding.branch,
+        cue: "ending",
+        publicationDoor: { repo: binding.repo, origin: "https://door.example" },
+        admitPush: async () => ({ release: () => {}, publicationBearer: "fixture-bearer", accepted: () => false }),
+        settlement: { binding, record: async () => true },
+      },
+    );
+    expect(result.settlement?.publication).toEqual({
+      kind: "rejected",
+      reason: "publication refused by cold controller (phase: cold-publication-validation-refused)",
+    });
+    expect(result.pushed).toBe(false);
+  });
+
   it("does not classify a lost publication acknowledgment as a rejected push", async () => {
     const executor = {
       exec: async (cmd: string) => {

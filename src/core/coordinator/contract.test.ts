@@ -15,6 +15,7 @@ import {
   sendRunFinished,
   STEP_NAME_PATTERN,
   isCoordinatorUnit,
+  isSavedFindingsPatch,
   isWorkBrief,
   validateWorkBrief,
   parseUnitKey,
@@ -30,6 +31,37 @@ import {
   type CoordinatorUnit,
   type WorkflowSender,
 } from "./contract.js";
+
+describe("saved findings recovery variant", () => {
+  it("admits only the exact bound bundle key, base, target and single source shape while retaining legacy patches", () => {
+    const baseHeadSha = "a".repeat(40),
+      sourceHeadSha = "b".repeat(40);
+    const bundle = {
+      kind: "bundle",
+      runId: "run-child",
+      baseHeadSha,
+      targetHeadSha: baseHeadSha,
+      sourceHeadSha,
+      key: `runs/run-child/out/0-checkpoint-${baseHeadSha}-${sourceHeadSha}.bundle`,
+      size: 123,
+      sha256: "c".repeat(64),
+    };
+    expect(isSavedFindingsPatch(bundle)).toBe(true);
+    expect(isSavedFindingsPatch({ ...bundle, kind: undefined })).toBe(false);
+    expect(isSavedFindingsPatch({ ...bundle, runId: "../other" })).toBe(false);
+    expect(isSavedFindingsPatch({ ...bundle, key: "runs/other/out/0-checkpoint.bundle" })).toBe(false);
+    expect(isSavedFindingsPatch({ ...bundle, targetHeadSha: "d".repeat(40) })).toBe(false);
+    expect(isSavedFindingsPatch({ ...bundle, sourceHeadSha: baseHeadSha })).toBe(false);
+    const { kind: _kind, ...patch } = bundle;
+    expect(
+      isSavedFindingsPatch({
+        ...patch,
+        targetHeadSha: "d".repeat(40),
+        key: `runs/run-child/out/0-unfinished-${baseHeadSha}-${"d".repeat(40)}-${sourceHeadSha}.patch`,
+      }),
+    ).toBe(true);
+  });
+});
 
 describe("main-agent work brief", () => {
   it("decodes legacy rows without promoting them to new admission", () => {
