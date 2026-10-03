@@ -62,7 +62,7 @@ The agent fetched the page and answered. That was the whole pipeline, the same o
 
 ### 3. Create the Slack app
 
-1. At [api.slack.com/apps](https://api.slack.com/apps): **Create New App → From a manifest** → paste [`slack-app-manifest.yaml`](https://openswitchboard.dev/slack-app-manifest.yaml).
+1. At [api.slack.com/apps](https://api.slack.com/apps): **Create New App → From a manifest** → paste [`slack-app-manifest.yaml`](https://switchboard.space/slack-app-manifest.yaml).
 2. **Basic Information → App-Level Tokens** → generate one with `connections:write`. It starts with `xapp-`.
 3. **Install App → Install to Workspace**. The **Bot User OAuth Token** starts with `xoxb-`.
 

@@ -14,7 +14,7 @@
 
 /** The project's published documentation — the `docs` fact in project.json,
  *  which `check:project-facts` holds this constant equal to. */
-export const PROJECT_DOCS_URL = "https://openswitchboard.dev";
+export const PROJECT_DOCS_URL = "https://switchboard.space";
 
 /** Where `/docs…` should send the caller, or undefined when the path is not a
  *  docs path at all. The subpath is carried across unchanged, so a deep link

@@ -1,14 +1,14 @@
 #!/bin/sh
-# Switchboard's installer front door: https://openswitchboard.dev/install.sh
+# Switchboard's installer front door: https://switchboard.space/install.sh
 #
-#   curl -fsSL https://openswitchboard.dev/install.sh | sh -s -- --organization <org> --anthropic-key <key>
+#   curl -fsSL https://switchboard.space/install.sh | sh -s -- --organization <org> --anthropic-key <key>
 #
 # Installs nothing itself. It checks that Node.js is present and new enough,
 # says how to get it when it is not (never installs Node for you), and then
 # runs the published package's `init` or `connect` command with every argument
 # you gave it, in the directory you ran it from. Both paths are described at
-# https://openswitchboard.dev/tutorials/get-started and
-# https://openswitchboard.dev/tutorials/use-an-existing-deployment.
+# https://switchboard.space/tutorials/get-started and
+# https://switchboard.space/tutorials/use-an-existing-deployment.
 set -eu
 
 # The Node major the repository pins in .nvmrc; a test holds the two equal.
