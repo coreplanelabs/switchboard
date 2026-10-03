@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.283.1](https://github.com/coreplanelabs/switchboard/compare/v1.283.0...v1.283.1) (2026-10-03)
+
+
+### Bug fixes
+
+* **resident:** retire missing terminal worktrees safely ([#2718](https://github.com/coreplanelabs/switchboard/issues/2718)) ([c893699](https://github.com/coreplanelabs/switchboard/commit/c893699e29f1fa3db2f9ea2113bc9208a54532f8))
+* **ship:** route exact original-unit adoption past the Door ([#2719](https://github.com/coreplanelabs/switchboard/issues/2719)) ([22d9de0](https://github.com/coreplanelabs/switchboard/commit/22d9de0ce6a756b8c46ec439bdf7698609ad7b1a))
+
 ## [1.283.0](https://github.com/coreplanelabs/switchboard/compare/v1.282.0...v1.283.0) (2026-10-03)
 
 
