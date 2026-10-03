@@ -63,6 +63,7 @@ import {
   type HarnessSession,
 } from "../harness/contract.js";
 import { prepareRelaunch } from "./relaunch.js";
+import { resumedPilotBindingFor } from "./readyBinding.js";
 import { harnessNamed } from "../harness/roster.js";
 import { harnessContainerFor } from "../harness/botHostContainer.js";
 import {
@@ -1890,11 +1891,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   };
   // Where the run's workspace is (run-history item 54): the dispatch's binding,
   // then the one each relaunch re-attached — what the next relaunch re-attaches.
-  let workspaceBinding = workspaceBindingFor(
-    round.selection,
-    profile.machine,
-    resume ? (workspaceBindingOf(restored.binding) ?? null) : undefined,
-  );
+  const recordedBinding = resume ? workspaceBindingOf(restored.binding) : undefined;
+  let workspaceBinding =
+    resume && ctx.preserveOnReattachRefusal && recordedBinding
+      ? resumedPilotBindingFor(round.selection, profile.machine, recordedBinding)
+      : workspaceBindingFor(round.selection, profile.machine, resume ? (recordedBinding ?? null) : undefined);
   if (privateRun) {
     // Keep the latch through answer delivery; the admission slot is released
     // only after the reply, so a late follow-up can still revoke publication.
@@ -2535,7 +2536,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               replaced: err,
               facts: lastFacts,
               binding: workspaceBinding,
-              ...(ctx.preserveOnReattachRefusal ? { preserveOnReattachRefusal: true } : {}),
+              ...(ctx.preserveOnReattachRefusal
+                ? { preserveOnReattachRefusal: true, ...(ledgerRun ? { commitPilotBinding: ledgerRun } : {}) }
+                : {}),
               ...(ctx.readyRequirementOverride !== undefined
                 ? { readyRequirementOverride: ctx.readyRequirementOverride }
                 : {}),
@@ -2617,10 +2620,13 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             firstTestSelection = decision.round.selection;
             toolContext.executor = executor;
             currentCheckout = checkoutOfSelection(decision.round.selection);
-            const rebound = workspaceBindingFor(decision.round.selection, profile.machine, workspaceBinding);
+            const rebound =
+              ctx.preserveOnReattachRefusal && workspaceBinding
+                ? resumedPilotBindingFor(decision.round.selection, profile.machine, workspaceBinding)
+                : workspaceBindingFor(decision.round.selection, profile.machine, workspaceBinding);
             if (rebound !== undefined) {
               workspaceBinding = rebound;
-              ledgerRun?.setState({ binding: rebound });
+              if (!ctx.preserveOnReattachRefusal) ledgerRun?.setState({ binding: rebound });
             }
           }
           if (decision.bearer !== undefined) bearer = decision.bearer;

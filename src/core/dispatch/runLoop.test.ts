@@ -61,6 +61,7 @@ import { buildMessages } from "./messages.js";
 import { resolveRun } from "./resolve.js";
 import type { HarnessProcessDeps, RunDeps } from "./run.js";
 import { runLoop, type RunLoopOutcome, type RunOutcome } from "./runLoop.js";
+import * as relaunchModule from "./relaunch.js";
 import { bindSlackContext } from "./slackContextBinding.js";
 import { deliverAnswer } from "./reply.js";
 import { resumeMessage } from "../resumeLaunch.js";
@@ -6368,6 +6369,58 @@ describe("the pi harness — the container replaced under a living bot: the rela
     s.ending.drain(undefined);
     await s.writer.settled();
     expect(await s.store.get("run-l")).toBeNull();
+  });
+
+  it("a refused pilot binding commit pauses before child resume or model continuation", async () => {
+    const relaunch = vi.spyOn(relaunchModule, "prepareRelaunch").mockResolvedValueOnce({
+      kind: "paused",
+      reason: "check_failed",
+      message: "The coding workspace binding could not be durably verified after re-attachment.",
+    });
+    const registry = new HarnessRegistry();
+    const original = new FakeHarnessContainer();
+    original.onStdin = piThatMeetsTheRoll(registry);
+    const replacement = new FakeHarnessContainer();
+    replacement.vm = "vm-new";
+    const model = scriptPiFromProvider(replacement, {
+      provider: provider("should not run"),
+      registry,
+      beforeModelCall: () => new Promise((resolve) => setTimeout(resolve, 10)),
+    });
+    const containers: FakeHarnessContainer[] = [];
+    const s = setup("unused", {
+      agent: "coding",
+      yaml: yamlWithWorkspace(),
+      coordinator: { parentInstanceId: "plan-p", idempotencyKey: "plan-p:u1/0/coding" },
+      harness: harnessOver(registry, () => {
+        const next = containers.length === 0 ? original : replacement;
+        containers.push(next);
+        return next;
+      }),
+    });
+    const { ledgerRun } = recordingLedgerRun();
+    const pauseForRetry = vi.fn(async () => true);
+    ledgerRun.pauseForRetry = pauseForRetry;
+    const publish = vi.spyOn(s.registry, "publish");
+    const out = await runLoop(s.deps, {
+      ...s.ctx,
+      ledgerRun,
+      preserveOnReattachRefusal: true,
+    });
+    expect(out).toMatchObject({ kind: "paused", reason: "check_failed", handedOff: true });
+    expect(relaunch).toHaveBeenCalledOnce();
+    expect(publish.mock.calls.some(([, event]) => event.type === "child_resumed")).toBe(false);
+    expect(pauseForRetry).toHaveBeenCalledOnce();
+    expect(containers).toEqual([original]);
+    expect(replacement.starts).toEqual([]);
+    expect(model.requests).toEqual([]);
+    expect(s.closes).toEqual([]);
+    expect(s.releases).toEqual([]);
+    expect(s.registry.getById("run-l")).toBeNull();
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    expect(await s.store.get("run-l")).toBeNull();
+    relaunch.mockRestore();
   });
 
   it("pauses a pilot at the relaunch ceiling without finishing or releasing the run", async () => {

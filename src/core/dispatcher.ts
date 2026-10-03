@@ -1,4 +1,5 @@
 import { runSessionIdentity } from "./dispatch/sessionIdentity.js";
+import { resumedPilotBindingFor } from "./dispatch/readyBinding.js";
 import { appendThreadTurn } from "./runLedger/threadSession.js";
 import { contextAccessForMessage, contextAccessForRun, revalidateAdmittedContext } from "./dispatch/contextAccess.js";
 import { contextForReferences, contextForSourceReads, freshContext } from "./dispatch/contextSeed.js";
@@ -3669,6 +3670,7 @@ export async function dispatch(
       if (!resume || !ledgerRun) throw new Error("a readiness retry needs the resumed run's ledger row");
       resumeRowRetained = true;
       const handedOff = await ledgerRun.pauseForRetry().catch(() => false);
+      if (fencedWhileAttaching) return;
       if (ledgerRun.tracked()) {
         settleRetryPause(
           deps.threadsElsewhere,
@@ -3895,12 +3897,29 @@ export async function dispatch(
     // A resumed row learns the binding it re-attached on, complete: a row
     // written before the binding was recorded carried only its meta's word.
     if (resume && ledgerRun) {
-      const rebound = workspaceBindingFor(
-        round.selection,
-        profile.machine,
-        workspaceBindingOf(resume.row.state.binding) ?? null,
-      );
-      if (rebound !== undefined) ledgerRun.setState({ binding: rebound });
+      const recorded = workspaceBindingOf(resume.row.state.binding);
+      if (preserveOnReattachRefusal) {
+        // A pilot's dependency source must reach the SAME run's ledger before
+        // coordinator notification or model continuation, not just the local
+        // write-through queue. A fence belongs to the new owner; an unavailable
+        // store pauses only while this generation still owns the run.
+        const binding = recorded && resumedPilotBindingFor(round.selection, profile.machine, recorded);
+        const committed = binding
+          ? await ledgerRun.commitState({ binding }).catch(() => "unavailable" as const)
+          : "unavailable";
+        if (committed === "fenced" || fencedWhileAttaching) {
+          fencedWhileAttaching = true;
+          resumeRowRetained = true;
+          return ended;
+        }
+        if (committed !== "ok") {
+          await pauseResumedPilot("The coding workspace binding could not be durably verified after re-attachment.");
+          return ended;
+        }
+      } else {
+        const rebound = workspaceBindingFor(round.selection, profile.machine, recorded ?? null);
+        if (rebound !== undefined) ledgerRun.setState({ binding: rebound });
+      }
     }
     // A coordinator's child resumed across a bot roll says so to its parent
     // (run-history item 47a): the typed `child_resumed` event on its record
@@ -4629,6 +4648,9 @@ export async function dispatch(
       ...(modelCard ? { modelCard } : {}),
     });
     if (ran.kind === "paused") {
+      // A mid-run binding commit can fence while the relaunch is pausing. The
+      // successor owns the row and reply; this generation must say nothing.
+      if (fencedWhileAttaching) return ended;
       resumeRowRetained = true;
       const checkpointPaused = ran.reason === "checkpoint_unavailable";
       if (ledgerRun?.tracked())
