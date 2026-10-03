@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { baseForEvent, planForPaths } from "../scripts/ci-plan.mjs";
+import { baseForEvent, fixtureRegistrationOnly, planForDiff, planForPaths } from "../scripts/ci-plan.mjs";
 
 describe("selective CI", () => {
   it("runs the docs build, but no runtime or package build, for a docs page", () => {
@@ -54,6 +54,95 @@ describe("selective CI", () => {
     expect(plan.images).toEqual(["deploy/cloudflare-resident"]);
     expect(plan.package).toBe(true);
     expect(plan.web).toBe(false);
+  });
+
+  it("selects the isolated acceptance workspace without the none sentinel", () => {
+    expect(planForPaths(["deploy/cloudflare-acceptance-source/worker.ts"]).workers).toEqual([
+      "deploy/cloudflare-acceptance-source",
+    ]);
+    expect(
+      planForPaths(["deploy/cloudflare-acceptance-source/worker.ts", "deploy/cloudflare-resident/worker.ts"]).workers,
+    ).toEqual(["deploy/cloudflare-resident", "deploy/cloudflare-acceptance-source"]);
+    expect(planForPaths(["scripts/ci-plan.mjs", "deploy/cloudflare-acceptance-source/worker.ts"]).workers).toEqual([
+      "deploy/cloudflare",
+      "deploy/cloudflare-memory",
+      "deploy/cloudflare-resident",
+      "deploy/cloudflare-sandbox",
+      "deploy/cloudflare-acceptance-source",
+    ]);
+  });
+
+  it("keeps fixture-only root workspace registration out of production images", () => {
+    const rootOnly = planForPaths(["package.json", "package-lock.json"], { fixtureRegistrationOnly: true });
+    expect(rootOnly.workers).toEqual(["deploy/cloudflare-acceptance-source"]);
+    expect(rootOnly.images).toEqual(["none"]);
+    const paths = ["package.json", "package-lock.json", "deploy/cloudflare-acceptance-source/worker.ts"];
+    const fixture = planForPaths(paths, { fixtureRegistrationOnly: true });
+    expect(fixture.workers).toEqual(["deploy/cloudflare-acceptance-source"]);
+    expect(fixture.images).toEqual(["none"]);
+    expect(planForPaths(paths).images).toContain("deploy/cloudflare");
+    const mixed = planForPaths([...paths, "deploy/cloudflare-resident/worker.ts"], {
+      fixtureRegistrationOnly: true,
+    });
+    expect(mixed.workers).toEqual(["deploy/cloudflare-resident", "deploy/cloudflare-acceptance-source"]);
+    expect(mixed.images).toEqual(["deploy/cloudflare-resident"]);
+  });
+
+  it("recognizes root-only fixture registration in the actual diff planner", () => {
+    const beforePackage = JSON.stringify({ name: "switchboard", workspaces: ["web"] });
+    const afterPackage = JSON.stringify({
+      name: "switchboard",
+      workspaces: ["web", "deploy/cloudflare-acceptance-source"],
+    });
+    const beforeLock = JSON.stringify({ packages: { "": { workspaces: ["web"] } } });
+    const afterLock = JSON.stringify({
+      packages: {
+        "": { workspaces: ["web", "deploy/cloudflare-acceptance-source"] },
+        "deploy/cloudflare-acceptance-source": { name: "switchboard-controlled-acceptance-source" },
+        "node_modules/switchboard-controlled-acceptance-source": {
+          resolved: "deploy/cloudflare-acceptance-source",
+          link: true,
+        },
+      },
+    });
+    const plan = planForDiff(["package.json", "package-lock.json"], beforePackage, afterPackage, beforeLock, afterLock);
+    expect(plan.workers).toEqual(["deploy/cloudflare-acceptance-source"]);
+    expect(plan.images).toEqual(["none"]);
+  });
+
+  it("recognizes only the exact fixture workspace and lockfile link", () => {
+    const root = { name: "switchboard", workspaces: ["web"] };
+    const registered = { ...root, workspaces: ["web", "deploy/cloudflare-acceptance-source"] };
+    const lock = { packages: { "": { workspaces: ["web"] }, web: { name: "web" } } };
+    const linked = {
+      packages: {
+        "": { workspaces: ["web", "deploy/cloudflare-acceptance-source"] },
+        web: { name: "web" },
+        "deploy/cloudflare-acceptance-source": { name: "switchboard-controlled-acceptance-source" },
+        "node_modules/switchboard-controlled-acceptance-source": {
+          resolved: "deploy/cloudflare-acceptance-source",
+          link: true,
+        },
+      },
+    };
+    const inputs = [
+      JSON.stringify(root),
+      JSON.stringify(registered),
+      JSON.stringify(lock),
+      JSON.stringify(linked),
+    ] as const;
+    expect(fixtureRegistrationOnly(...inputs)).toBe(true);
+    expect(
+      fixtureRegistrationOnly(
+        inputs[0],
+        JSON.stringify({ ...registered, scripts: { deploy: "changed" } }),
+        inputs[2],
+        inputs[3],
+      ),
+    ).toBe(false);
+    expect(fixtureRegistrationOnly(inputs[0], inputs[1], inputs[2], JSON.stringify({ ...linked, extra: true }))).toBe(
+      false,
+    );
   });
 
   it("follows shared source imports without checking unrelated Workers", () => {

@@ -14,6 +14,9 @@ export const WORKERS = [
   "deploy/cloudflare-sandbox",
 ];
 export const IMAGES = ["deploy/cloudflare", "deploy/cloudflare-resident", "deploy/cloudflare-sandbox"];
+// Controlled acceptance fixture is an isolated verification target, not a production deploy target.
+const ACCEPTANCE_SOURCE = "deploy/cloudflare-acceptance-source";
+const ACCEPTANCE_NAME = "switchboard-controlled-acceptance-source";
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const CODE = /\.(?:[cm]?[jt]sx?|vue)$/;
 
@@ -110,8 +113,40 @@ export function fullPlan() {
   };
 }
 
+/** Only the exact isolated workspace registration may be ignored by CI's
+ * production image plan. Every other manifest or lockfile edit runs full CI. */
+export function fixtureRegistrationOnly(beforePackage, afterPackage, beforeLock, afterLock) {
+  try {
+    const [a, b, c, d] = [beforePackage, afterPackage, beforeLock, afterLock].map(JSON.parse);
+    if (
+      !Array.isArray(b.workspaces) ||
+      !b.workspaces.includes(ACCEPTANCE_SOURCE) ||
+      !Array.isArray(d.packages?.[""]?.workspaces) ||
+      !d.packages[""].workspaces.includes(ACCEPTANCE_SOURCE) ||
+      d.packages[ACCEPTANCE_SOURCE]?.name !== ACCEPTANCE_NAME ||
+      d.packages[`node_modules/${ACCEPTANCE_NAME}`]?.resolved !== ACCEPTANCE_SOURCE ||
+      d.packages[`node_modules/${ACCEPTANCE_NAME}`]?.link !== true
+    )
+      return false;
+    for (const value of [a, b]) value.workspaces = value.workspaces?.filter((item) => item !== ACCEPTANCE_SOURCE);
+    for (const value of [c, d]) {
+      value.packages[""].workspaces = value.packages[""].workspaces?.filter((item) => item !== ACCEPTANCE_SOURCE);
+      delete value.packages[ACCEPTANCE_SOURCE];
+      delete value.packages[`node_modules/${ACCEPTANCE_NAME}`];
+    }
+    return JSON.stringify(a) === JSON.stringify(b) && JSON.stringify(c) === JSON.stringify(d);
+  } catch {
+    return false;
+  }
+}
+
 /** Pure path selection; `none` keeps an otherwise empty matrix valid. */
-export function planForPaths(paths) {
+export function planForPaths(paths, { fixtureRegistrationOnly: fixtureRootOnly = false } = {}) {
+  const acceptanceChanged = fixtureRootOnly || paths.some((path) => path.startsWith(`${ACCEPTANCE_SOURCE}/`));
+  const withAcceptance = (plan) =>
+    acceptanceChanged
+      ? { ...plan, workers: [...plan.workers.filter((worker) => worker !== "none"), ACCEPTANCE_SOURCE] }
+      : plan;
   const checks = new Set(["check:consistency"]);
   const workers = new Set();
   const images = new Set();
@@ -128,12 +163,13 @@ export function planForPaths(paths) {
     images.add("deploy/cloudflare");
   };
   for (const path of paths) {
+    if (fixtureRootOnly && (path === "package.json" || path === "package-lock.json")) continue;
     if (
       ["scripts/ci-plan.mjs", "scripts/ci-plan.d.mts", ".depot/workflows/ci.yml", ".github/workflows/ci.yml"].includes(
         path,
       )
     )
-      return fullPlan();
+      return withAcceptance(fullPlan());
     if (
       (/\.(?:[cm]?[jt]sx?|vue|css|jsonc?|ya?ml)$/.test(path) && path !== "package-lock.json") ||
       path === ".prettierignore"
@@ -172,6 +208,10 @@ export function planForPaths(paths) {
       source();
       if (path === "scripts/check-dist.mjs") checks.add("check:dist");
       if (/^scripts\/(?:docs-gen|check-site)/.test(path)) plan.docs = true;
+    } else if (path.startsWith(`${ACCEPTANCE_SOURCE}/`)) {
+      // CI's existing workers matrix calls `verify -w` only for this workspace.
+      // No image or deploy selection: the fixture is not a release target.
+      plan.botTests = true;
     } else if (path.startsWith("deploy/cloudflare-docs/")) {
       plan.docs = true;
       plan.botTests = true;
@@ -201,7 +241,7 @@ export function planForPaths(paths) {
     } else if (/^\.(?:github|depot)\/workflows\/.+\.ya?ml$/.test(path)) {
       plan.botTests = true;
     } else if (["package.json", "package-lock.json", ".nvmrc"].includes(path)) {
-      return fullPlan();
+      return withAcceptance(fullPlan());
     } else if (["tsconfig.json", "tsconfig.build.json", "tsconfig.scripts.json", "vitest.config.ts"].includes(path)) {
       source();
       if (path !== "vitest.config.ts") botArtifact();
@@ -234,7 +274,7 @@ export function planForPaths(paths) {
       plan.botTests = true;
       images.add("deploy/cloudflare");
     } else {
-      return fullPlan();
+      return withAcceptance(fullPlan());
     }
   }
   plan.botChecks = BOT_CHECKS.filter((check) => checks.has(check));
@@ -242,12 +282,25 @@ export function planForPaths(paths) {
   plan.images = IMAGES.filter((image) => images.has(image));
   if (plan.workers.length === 0) plan.workers = ["none"];
   if (plan.images.length === 0) plan.images = ["none"];
-  return plan;
+  return withAcceptance(plan);
+}
+
+/** Evaluate root registration from the same diff that drives CI selection. */
+export function planForDiff(paths, beforePackage, afterPackage, beforeLock, afterLock) {
+  const fixtureRootOnly =
+    paths.some((path) => path === "package.json" || path === "package-lock.json") &&
+    fixtureRegistrationOnly(beforePackage, afterPackage, beforeLock, afterLock);
+  return planForPaths(paths, { fixtureRegistrationOnly: fixtureRootOnly });
 }
 
 function diffPaths(base) {
   const result = spawnSync("git", ["diff", "--name-only", "--no-renames", "-z", base, "HEAD"], { encoding: "utf8" });
   return result.status === 0 ? result.stdout.split("\0").filter(Boolean) : undefined;
+}
+
+function fileAt(ref, path) {
+  const result = spawnSync("git", ["show", `${ref}:${path}`], { encoding: "utf8", maxBuffer: 8 * 1024 * 1024 });
+  return result.status === 0 ? result.stdout : undefined;
 }
 
 function main() {
@@ -260,7 +313,15 @@ function main() {
   }
   const base = override ?? baseForEvent(process.env.GITHUB_EVENT_NAME, event) ?? sha(process.env.CI_BASE_SHA);
   const paths = base ? diffPaths(base) : undefined;
-  const plan = paths ? planForPaths(paths) : fullPlan();
+  const plan = paths
+    ? planForDiff(
+        paths,
+        fileAt(base, "package.json"),
+        readFileSync(join(ROOT, "package.json"), "utf8"),
+        fileAt(base, "package-lock.json"),
+        readFileSync(join(ROOT, "package-lock.json"), "utf8"),
+      )
+    : fullPlan();
   const reason = paths ? `${paths.length} changed path(s) against ${base}` : "no trustworthy diff; running every leg";
   console.log(`ci:plan — ${reason}`);
   console.log(JSON.stringify(plan));

@@ -11,4 +11,20 @@ export function fullPlan(): {
   workers: string[];
   images: string[];
 };
-export function planForPaths(paths: string[]): ReturnType<typeof fullPlan>;
+export function fixtureRegistrationOnly(
+  beforePackage: string | undefined,
+  afterPackage: string | undefined,
+  beforeLock: string | undefined,
+  afterLock: string | undefined,
+): boolean;
+export function planForPaths(
+  paths: string[],
+  options?: { fixtureRegistrationOnly?: boolean },
+): ReturnType<typeof fullPlan>;
+export function planForDiff(
+  paths: string[],
+  beforePackage: string | undefined,
+  afterPackage: string | undefined,
+  beforeLock: string | undefined,
+  afterLock: string | undefined,
+): ReturnType<typeof fullPlan>;
