@@ -3,6 +3,7 @@ import type { ChatMessage } from "../chatMessage.js";
 import { sourceHash } from "../references/receipts.js";
 import { contextDependenciesHash, type ContextDependencies } from "../references/contextDependencies.js";
 import type { RunView } from "../runsService.js";
+import type { LiveRunRow } from "../runLedger/types.js";
 import { parentContextOf, snapshotNotepad, type ChildHandoff, type HandoffConsumer } from "./handoff.js";
 import {
   canonicalHandoffRunOf,
@@ -64,6 +65,44 @@ async function fixture() {
 }
 
 describe("canonical child handoff validation", () => {
+  it("accepts a finished source with no written turn and refuses an unproved live range", async () => {
+    const w = await fixture();
+    const emptySession = { key: w.parent.session.key, seedFrom: 0, request: 0, range: { from: 0 } };
+    const finished = {
+      id: w.parent.runId,
+      userId: w.parent.requester,
+      channelId: w.parent.channelId,
+      threadKey: w.parent.threadKey,
+      session: emptySession,
+      startedAt: 0,
+      finished: true,
+      eventCount: 0,
+      status: "stopped_hard",
+    } satisfies RunView;
+    const canonical = canonicalHandoffRunOf(finished, undefined, w.parent.dependencies);
+    expect(canonical?.writtenThrough).toBe(-1);
+    w.runs.set(w.parent.runId, canonical!);
+    const empty = {
+      ...w.handoff,
+      session: { key: emptySession.key, from: 0, to: -1 },
+      window: { from: 0, to: -1, hash: await sourceHash({ messages: [], actors: [] }) },
+    };
+    expect((await w.validate(empty)).kind).toBe("valid");
+    expect(w.deps.readSession).not.toHaveBeenCalled();
+    const live = {
+      runId: finished.id,
+      meta: {
+        userId: finished.userId,
+        channelId: finished.channelId,
+        threadKey: finished.threadKey,
+        session: emptySession,
+      },
+    } as LiveRunRow;
+    expect(canonicalHandoffRunOf(live)).toBeUndefined();
+    expect(canonicalHandoffRunOf(live, 0)?.writtenThrough).toBe(0);
+    expect(canonicalHandoffRunOf({ ...finished, session: { ...emptySession, range: "broken" } })).toBeUndefined();
+  });
+
   it.each(["admitted-bind", "consume"] as const)(
     "keeps a canonical frozen snapshot after later unproved parent output (%s)",
     async (mode) => {
