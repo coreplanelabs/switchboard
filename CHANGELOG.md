@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.284.0](https://github.com/coreplanelabs/switchboard/compare/v1.283.1...v1.284.0) (2026-10-03)
+
+
+### Features
+
+* **tools:** read private repos for verified requesters ([#2724](https://github.com/coreplanelabs/switchboard/issues/2724)) ([24cdd4c](https://github.com/coreplanelabs/switchboard/commit/24cdd4c0b835e81aa8e8670ce6c5399917804ad2))
+
+
+### Bug fixes
+
+* **deploy:** Hold one release for a scoped rollout ([#2728](https://github.com/coreplanelabs/switchboard/issues/2728)) ([d2966a0](https://github.com/coreplanelabs/switchboard/commit/d2966a0a69bc7d39000c42dca755f5c7142d10b3))
+* **dispatcher:** Route single PR Ship requests before the model ([#2722](https://github.com/coreplanelabs/switchboard/issues/2722)) ([b1463b7](https://github.com/coreplanelabs/switchboard/commit/b1463b75df193b670f6d375f69b7f3cad419a7bc))
+* **memory:** Keep run checkpoints after session write stalls ([#2726](https://github.com/coreplanelabs/switchboard/issues/2726)) ([6555053](https://github.com/coreplanelabs/switchboard/commit/6555053b2db0e141abf53ba00e95019564587210))
+* **ship:** Retry review when sandbox capacity clears ([#2725](https://github.com/coreplanelabs/switchboard/issues/2725)) ([c60bdac](https://github.com/coreplanelabs/switchboard/commit/c60bdac08d6a3e07fc2c6055fd852570b055035a))
+
 ## [1.283.1](https://github.com/coreplanelabs/switchboard/compare/v1.283.0...v1.283.1) (2026-10-03)
 
 
