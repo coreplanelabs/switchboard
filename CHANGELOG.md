@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.279.1](https://github.com/coreplanelabs/switchboard/compare/v1.279.0...v1.279.1) (2026-10-03)
+
+
+### Bug fixes
+
+* **core:** seal paused runs on hard stop ([#2700](https://github.com/coreplanelabs/switchboard/issues/2700)) ([8f545d6](https://github.com/coreplanelabs/switchboard/commit/8f545d61331c0e5cd8af869cf6a486361b2ae66b))
+* **sandbox:** retain seeded writers past idle teardown ([#2699](https://github.com/coreplanelabs/switchboard/issues/2699)) ([fcba0d2](https://github.com/coreplanelabs/switchboard/commit/fcba0d2d15a9985648007a8cbb485b47f4c13a47))
+* **ship:** recover verified no-work review starts at pushed head ([#2703](https://github.com/coreplanelabs/switchboard/issues/2703)) ([2e1d4d2](https://github.com/coreplanelabs/switchboard/commit/2e1d4d20c95898c9397c1d207c879893bd01115b))
+
 ## [1.279.0](https://github.com/coreplanelabs/switchboard/compare/v1.278.7...v1.279.0) (2026-10-03)
 
 
