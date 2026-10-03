@@ -45,6 +45,7 @@ interface OriginalRun {
   storedEventCount?: number;
   events?: readonly {
     type: string;
+    seq?: number;
     tool?: string;
     callId?: string;
     ref?: string;
@@ -62,7 +63,8 @@ interface OriginalRun {
 }
 
 /** The original runner's accepted remote write, without credit for local or
- *  description bytes. Every ambiguous or incomplete record stays held. */
+ *  description bytes. Missing events before the push or an unavailable typed
+ *  summary keep the record held. */
 export function publishedHeadEvidence(input: {
   instance: OriginalInstance;
   row: OriginalRow;
@@ -111,15 +113,30 @@ export function publishedHeadEvidence(input: {
     return refuse("child_identity_mismatch");
   if (
     run.persisted !== true ||
-    run.truncated !== false ||
     run.events === undefined ||
-    run.eventCount !== run.events.length ||
-    run.storedEventCount !== run.events.length
+    typeof run.truncated !== "boolean" ||
+    !Number.isSafeInteger(run.eventCount) ||
+    run.eventCount < run.events.length ||
+    !Number.isSafeInteger(run.storedEventCount) ||
+    run.storedEventCount !== run.events.length ||
+    (!run.truncated && run.eventCount !== run.events.length)
   )
     return refuse("child_record_incomplete");
   const events = run.events;
   const pushes = events.filter((event) => event.type === "pushed_head");
   const push = pushes.length === 1 ? pushes[0] : undefined;
+  if (run.truncated) {
+    let nextSeq = 1;
+    let pastPush = false;
+    for (const event of events) {
+      const seq = event.seq;
+      if (typeof seq !== "number" || !Number.isSafeInteger(seq) || seq < nextSeq || seq > run.eventCount)
+        return refuse("child_record_incomplete");
+      if (!pastPush && seq !== nextSeq) return refuse("child_record_incomplete");
+      nextSeq = seq + 1;
+      if (event === push) pastPush = true;
+    }
+  }
   if (push?.ref !== row.branch || push.by !== "push" || !HEAD.test(push.sha ?? "")) return refuse("push_unverified");
   const head = push.sha!;
   // The Git Door recorder commits this typed acceptance before the tool

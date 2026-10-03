@@ -8089,11 +8089,15 @@ describe("original committed head adoption — create-only draft PR", () => {
       truncated: false,
     });
   const caller = { userId: INSTANCE.userId, threadKey: INSTANCE.threadKey, messageId: "adopt-1" };
-  async function setup() {
+  async function setup(
+    instance: CoordinatorInstance = original(),
+    row: CoordinatorUnit = unit(),
+    child: RunRecord = coding(),
+  ) {
     const h = harness({ branchHead: head, ahead: 1, runPageBase: "https://bot.example/runs" });
-    await h.instances.put(original());
-    await h.instances.putUnits([unit()]);
-    await h.store.put(coding());
+    await h.instances.put(instance);
+    await h.instances.putUnits([row]);
+    await h.store.put(child);
     h.deps.verifyIdentitiesReadOnly = async () => ({ kind: "clean", tip: head });
     const prs: NonNullable<AdminCoordinatorDeps["listAnyPrByHead"]> extends (...args: never[]) => Promise<infer T>
       ? T
@@ -8146,6 +8150,30 @@ describe("original committed head adoption — create-only draft PR", () => {
     expect(posts[0]).toContain(marker(row!));
     expect(await adopt(h)).toMatchObject({ status: 200, body: { outcome: "already_bound", pr: 99 } });
     expect(posts).toHaveLength(1);
+  });
+
+  it("a stopped original instance can adopt only its terminal child's accepted head", async () => {
+    const child = coding();
+    const { h, posts } = await setup(
+      { ...original(), stop: { at: NOW - 50 } },
+      { ...unit(), ending: { kind: "stopped", report: "coding stopped after push", at: NOW - 100 } },
+      {
+        ...child,
+        events: [
+          ...child.events,
+          { type: "tool_call", tool: "submit_pr_description", callId: "description", summary: "submit", seq: 5 },
+          { type: "run_note", kind: "stopped", summary: "coding stopped", seq: 8 },
+        ],
+        eventCount: 8,
+        storedEventCount: 6,
+        truncated: true,
+      },
+    );
+    expect(await adopt(h)).toMatchObject({ status: 200, body: { outcome: "bound", pr: 99, head } });
+    expect(posts).toHaveLength(1);
+    expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
+      adoption: { state: "bound", headSha: head },
+    });
   });
 
   it("holds a lost create response and reconciles the same action without reposting", async () => {
