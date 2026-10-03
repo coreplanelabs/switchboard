@@ -506,17 +506,26 @@ describe("explicit PR directives at the operator stage", () => {
       `organization: acme\nproviders:\n  anthropic:\n    type: anthropic\ndefaults:\n  agent: general\n  models:\n    general: anthropic/general-model\n`,
     );
     const model = vi.fn<RouteModel>(async () => ({ tool: OPERATOR_ASK_TOOL, input: { text: "Which task?" } }));
-    const text = "review https://github.com/acme/api/pull/7\nApp notification from App: updated\nThe fix was pushed";
-    const result = await operatorStage(
-      { config: new ConfigStore(path, join(dir, "overrides.json")), operatorModel: model },
-      {
-        msg: { channelId: "slack:CPUBLIC", userId: "slack:UREQUESTER", threadKey: "slack:CPUBLIC:1", text },
-        mode: "on",
-        readTail: async () => ({ turns: [], unavailable: [] }),
-      },
-    );
-    expect(model).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ outcome: "binds", binds: [{ prTarget: { number: 7 } }] });
+    for (const text of [
+      ...[
+        "The fix was pushed",
+        "The PR has been updated",
+        "The author has updated the tests",
+        "They have updated the tests",
+      ].map((followUp) => `review https://github.com/acme/api/pull/7\nApp notification from App: updated\n${followUp}`),
+      "review https://github.com/acme/api/pull/7\nApp notification from App: The PR has been updated",
+    ]) {
+      const result = await operatorStage(
+        { config: new ConfigStore(path, join(dir, "overrides.json")), operatorModel: model },
+        {
+          msg: { channelId: "slack:CPUBLIC", userId: "slack:UREQUESTER", threadKey: "slack:CPUBLIC:1", text },
+          mode: "on",
+          readTail: async () => ({ turns: [], unavailable: [] }),
+        },
+      );
+      expect(model).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ outcome: "binds", binds: [{ prTarget: { number: 7 } }] });
+    }
   });
 
   it.each([
@@ -534,6 +543,8 @@ describe("explicit PR directives at the operator stage", () => {
     "The fix was pushed so add tests",
     "The fix was pushed so ship it",
     "The fix was pushed so release it",
+    "The PR has been updated so merge it",
+    "The author has updated the tests so add more",
   ])("asks the operator about a competing follow-up task at the early stage: %s", async (followUp) => {
     const dir = mkdtempSync(join(tmpdir(), "swb-ambiguous-review-"));
     const path = join(dir, "config.yaml");
@@ -806,6 +817,8 @@ describe("the operator is one loop with typed tools", () => {
       "The fix was pushed so add tests",
       "The fix was pushed so ship it",
       "The fix was pushed so release it",
+      "The PR has been updated so merge it",
+      "The author has updated the tests so add more",
     ].map((followUp) => `review https://github.com/acme/api/pull/7\nApp notification from App: updated\n${followUp}`),
     "> review https://github.com/acme/api/pull/7",
   ])("does not auto-bind conflicting natural review requests: %s", async (text) => {
@@ -816,11 +829,20 @@ describe("the operator is one loop with typed tools", () => {
   });
 
   it("binds a repeat review with descriptive follow-up context rather than treating a past fix as a task", async () => {
-    const text = "review https://github.com/acme/api/pull/7\nApp notification from App: updated\nThe fix was pushed";
     const model = vi.fn<RouteModel>(async () => ({ tool: OPERATOR_ASK_TOOL, input: { text: "Which task?" } }));
-    const answer = await runOperator(input({ text, projection: projectionOf(["review"]) }), model);
-    expect(model).not.toHaveBeenCalled();
-    expect(answer.decision).toMatchObject({ kind: "binds", binds: [{ prTarget: { number: 7 } }] });
+    for (const text of [
+      ...[
+        "The fix was pushed",
+        "The PR has been updated",
+        "The author has updated the tests",
+        "They have updated the tests",
+      ].map((followUp) => `review https://github.com/acme/api/pull/7\nApp notification from App: updated\n${followUp}`),
+      "review https://github.com/acme/api/pull/7\nApp notification from App: The PR has been updated",
+    ]) {
+      const answer = await runOperator(input({ text, projection: projectionOf(["review"]) }), model);
+      expect(model).not.toHaveBeenCalled();
+      expect(answer.decision).toMatchObject({ kind: "binds", binds: [{ prTarget: { number: 7 } }] });
+    }
   });
 
   it("leaves an ended owner's Ship review wording to the operator instead of folding it as continuation", async () => {

@@ -2126,9 +2126,12 @@ function descriptiveReviewFollowUp(lines: string): boolean {
       return false;
     if (/^[a-z]+ed[.!]?$/i.test(text)) return true; // e.g. an App's "updated"
     // Admit one complete status clause. A trailing request is left to the model.
-    const subject = "(?:(?:the|a|an|this|that)\\s+(?:(?!(?:was|were|had|has)\\b)[a-z]+\\s+){1,3}|(?:it|we|i|they)\\s+)";
+    const subject =
+      "(?:(?:the|a|an|this|that)\\s+(?:(?!(?:was|were|had|has|have|been)\\b)[a-z]+\\s+){1,3}|(?:it|we|i|they)\\s+)";
+    const nounWord = "(?!(?:so|then|now|to|and|but|please)\\b)[a-z]+";
+    const object = `(?:the|a|an|this|that)\\s+${nounWord}(?:\\s+${nounWord})?`;
     return new RegExp(
-      `^${subject}(?:(?:was|were|had|has)\\s+[a-z]+ed|[a-z]+ed\\s+(?:the|a|an|this|that)\\s+[a-z]+(?:\\s+[a-z]+)?)[.!]?$`,
+      `^${subject}(?:(?:was|were)\\s+[a-z]+ed|(?:has|have|had)\\s+been\\s+[a-z]+ed|(?:has|have|had)\\s+[a-z]+ed\\s+${object}|[a-z]+ed\\s+${object})[.!]?$`,
       "i",
     ).test(text);
   });
