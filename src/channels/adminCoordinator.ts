@@ -3938,7 +3938,6 @@ export async function adoptOriginalPublishedHead(
     caller.userId !== instance.userId ||
     caller.threadKey !== (row.threadKey ?? instance.threadKey) ||
     instance.base === undefined ||
-    instance.stop !== undefined ||
     row.instanceId !== instance.id ||
     row.resume !== undefined ||
     row.recovery !== undefined ||

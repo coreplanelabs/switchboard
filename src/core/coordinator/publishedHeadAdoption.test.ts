@@ -54,6 +54,40 @@ describe("publishedHeadEvidence — one original committed head", () => {
     expect(publishedHeadEvidence(evidence())).toEqual({ ok: true, head: HEAD, runId: "coding-run" });
   });
 
+  it("adopts only a push retained before a trimmed unanswered description", () => {
+    const facts = evidence();
+    const run = {
+      ...facts.run,
+      truncated: true,
+      eventCount: 7,
+      storedEventCount: 5,
+      events: [
+        ...facts.run.events.map((event, index) => ({ ...event, seq: index + 1 })),
+        { type: "tool_call", tool: "submit_pr_description", callId: "call-description", summary: "submit", seq: 4 },
+        { type: "run_note", kind: "stopped", summary: "coding stopped", seq: 7 },
+      ],
+    };
+    expect(publishedHeadEvidence({ ...facts, run })).toEqual({ ok: true, head: HEAD, runId: "coding-run" });
+    expect(
+      publishedHeadEvidence({ ...facts, run: { ...run, events: run.events.slice(1), storedEventCount: 4 } }),
+    ).toMatchObject({
+      ok: false,
+      error: "child_record_incomplete",
+    });
+    expect(publishedHeadEvidence({ ...facts, run: { ...run, pushed: undefined } })).toMatchObject({
+      ok: false,
+      error: "push_unverified",
+    });
+    expect(publishedHeadEvidence({ ...facts, run: { ...run, pr: { number: 99 } } })).toMatchObject({
+      ok: false,
+      error: "push_unverified",
+    });
+    expect(publishedHeadEvidence({ ...facts, run: { ...run, doorPublicationPending: {} } })).toMatchObject({
+      ok: false,
+      error: "door_publication_unresolved",
+    });
+  });
+
   it("holds while the original child is live, even if the remote already has its push", () => {
     const facts = evidence();
     facts.run.finished = false;
