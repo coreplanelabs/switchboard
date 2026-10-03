@@ -25698,6 +25698,49 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     );
   });
 
+  it("a repeat review with an App notification reaches PR preflight without earlier source context", async () => {
+    const { deps } = operatorDeps(ON_YAML);
+    const url = "https://github.com/acme/api/pull/7";
+    const text =
+      `review <${url}|github.com/acme/api/pull/7>\n` +
+      "App notification from App: The author updated the tests.\n" +
+      "Why: The earlier review requested a regression guard.";
+    deps.operatorModel = vi.fn<RouteModel>(async () => ({
+      tool: "ask",
+      input: { text: "Which repository?", reason: "older source unavailable" },
+    }));
+    const tail = vi.spyOn(deps.runLedger, "readSessionTail").mockRejectedValue(new Error("older source unavailable"));
+    deps.resolveRepoContext = vi.fn(() => ({ repo: "acme/api", pr: 7, closedPr: { number: 7, merged: true } }));
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg(text, "slack:UADMIN"), io, {
+      thread: [
+        {
+          id: "prior-review",
+          agent: "review",
+          repo: "acme/api",
+          userId: "slack:UADMIN",
+          channelId: "slack:CX",
+          threadKey: "slack:CX:1.0",
+          startedAt: 1,
+          finishedAt: 2,
+          finished: true,
+          eventCount: 0,
+        },
+      ],
+    });
+    expect(deps.operatorModel).not.toHaveBeenCalled();
+    expect(tail).not.toHaveBeenCalled();
+    expect(deps.resolveRepoContext).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      undefined,
+      expect.anything(),
+      true,
+      { repo: "acme/api", prTarget: { number: 7, source: "request", quote: url } },
+    );
+    expect(replies.join(" ")).not.toContain("earlier source data");
+  });
+
   it("the early review preflight receives the operator's verified PR target", async () => {
     const { deps } = operatorDeps(ON_YAML);
     const url = "https://github.com/acme/api/pull/7";

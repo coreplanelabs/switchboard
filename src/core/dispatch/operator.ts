@@ -2115,9 +2115,40 @@ export function requesterThreadEvidence(
  * becomes a typed refusal with the cause's one safe sentence. It never falls
  * through to the configured default.
  */
+function descriptiveReviewFollowUp(lines: string): boolean {
+  // The shortcut can only discard retrospective context, never decide whether
+  // an unknown follow-up is a second task. Leave uncertain prose to the model.
+  return lines.split(/\r?\n/).every((line) => {
+    let text = line.trim();
+    if (!text) return true;
+    text = text.replace(/^App notification from App:\s*/i, "").replace(/^(?:Why|Context|Note):\s*/i, "");
+    if (/\b(?:please|also|actually|instead|should|must|need|want|will|can|could|would|and|but)\b/i.test(text))
+      return false;
+    if (/^[a-z]+ed[.!]?$/i.test(text)) return true; // e.g. an App's "updated"
+    // Admit one complete status clause. A trailing request is left to the model.
+    const subject =
+      "(?:(?:the|a|an|this|that)\\s+(?:(?!(?:was|were|had|has|have|been)\\b)[a-z]+\\s+){1,3}|(?:it|we|i|they)\\s+)";
+    const nounWord = "(?!(?:so|then|now|to|and|but|please)\\b)[a-z]+";
+    const object = `(?:the|a|an|this|that)\\s+${nounWord}(?:\\s+${nounWord})?`;
+    return new RegExp(
+      `^${subject}(?:(?:was|were)\\s+[a-z]+ed|(?:has|have|had)\\s+been\\s+[a-z]+ed|(?:has|have|had)\\s+[a-z]+ed\\s+${object}|[a-z]+ed\\s+${object})[.!]?$`,
+      "i",
+    ).test(text);
+  });
+}
+
 function explicitPrDirective(input: OperatorInput): OperatorDecision | undefined {
   const directives = parseDirectives(input.text);
-  const preset = directives.agent;
+  const openingLine = input.text.split(/\r?\n/, 1)[0]?.trim() ?? "";
+  const lineBreak = input.text.indexOf("\n");
+  const laterLines = lineBreak < 0 ? "" : input.text.slice(lineBreak + 1);
+  // A stand-alone opening review line is current requester authority. Later
+  // lines from an attached App notification are task data, not route authority.
+  const naturalReview =
+    directives.agent === undefined &&
+    /^review\s+\S/i.test(openingLine) &&
+    /^App notification from App\b/.test(laterLines.trimStart());
+  const preset = naturalReview ? "review" : directives.agent;
   if (preset !== "review" && preset !== "ship") return undefined;
   if (!input.projection.presets.some((offered) => offered.name === preset)) return undefined;
   if (input.owner && input.owner.kind !== "pipeline") return undefined;
@@ -2127,7 +2158,7 @@ function explicitPrDirective(input: OperatorInput): OperatorDecision | undefined
   if (Object.keys(directives).some((key) => key !== "agent" && key !== "text")) return undefined;
   // Keep newlines and indentation: parseDirectives normalizes whitespace,
   // which would erase the requesterTargetText quote/code boundary.
-  const words = stripDirectiveHead(input.text, preset);
+  const words = naturalReview ? openingLine : stripDirectiveHead(input.text, preset);
   const addressable = requesterTargetText(words);
   const urlWords = requesterUrlWords(addressable)
     .map(requesterUrlText)
@@ -2139,7 +2170,20 @@ function explicitPrDirective(input: OperatorInput): OperatorDecision | undefined
   let before = words.slice(0, index).trim();
   let after = words.slice(index + quote.length).trim();
   // An authored Slack label is task text too, not an ignorable URL decoration.
-  if (after.startsWith("|")) return undefined;
+  if (after.startsWith("|")) {
+    if (!before.endsWith("<")) return undefined;
+    const labelled = /^\|([^>]+)>/.exec(after);
+    if (!labelled) return undefined;
+    let labelUrl: URL;
+    try {
+      labelUrl = new URL(quote);
+    } catch {
+      return undefined;
+    }
+    if (labelled[1] !== `${labelUrl.hostname}${labelUrl.pathname}`) return undefined;
+    before = before.slice(0, -1).trim();
+    after = after.slice(labelled[0].length).trim();
+  }
   if (before.endsWith("<") && after.startsWith(">")) {
     before = before.slice(0, -1).trim();
     after = after.slice(1).trim();
@@ -2156,6 +2200,9 @@ function explicitPrDirective(input: OperatorInput): OperatorDecision | undefined
     return undefined;
   if (action !== undefined && action !== "review" && action !== preset && !(preset === "ship" && action === "continue"))
     return undefined;
+  // Only retrospective context may ride an automatic repeat review; a
+  // competing or ambiguous follow-up belongs to the ordinary operator path.
+  if (naturalReview && !descriptiveReviewFollowUp(laterLines)) return undefined;
   if (preset === "ship" && action === "continue" && input.owner?.kind !== "pipeline") return undefined;
   // On an ended unit a Ship bind folds into continuation, even when it says
   // review. Let the operator choose an independent Review bind instead.
@@ -2190,6 +2237,26 @@ function explicitPrDirective(input: OperatorInput): OperatorDecision | undefined
     url.hash
   )
     return undefined;
+  if (naturalReview) {
+    const targetPath = url.pathname.toLowerCase();
+    for (const word of requesterUrlWords(requesterTargetText(laterLines))) {
+      const raw = requesterUrlText(word);
+      if (!raw) continue;
+      try {
+        const other = new URL(raw);
+        if (
+          other.hostname === "github.com" &&
+          /^\/[^/]+\/[^/]+\/pull\/[1-9]\d*$/.test(other.pathname) &&
+          other.pathname.toLowerCase() !== targetPath
+        )
+          return undefined;
+      } catch {
+        // An unrelated malformed link cannot select a different PR.
+      }
+    }
+    for (const match of laterLines.matchAll(/\bPR\s*#([1-9]\d*)\b/gi))
+      if (Number(match[1]) !== Number(url.pathname.split("/").at(-1))) return undefined;
+  }
   const direct = explicitPrOf(input.text);
   const repo = explicitRepoOf(input.text);
   if (!direct || !repo || repo !== direct.repo) return undefined;
@@ -2733,6 +2800,32 @@ export async function operatorStage(
     commands: deps.commands ? routableCommands(deps.commands) : [],
     allowedPresets: presets.map((p) => p.name).filter((name) => deps.config.canRunAgent(actor, name)),
   });
+  // This route consumes only the current request. Do not load a previous
+  // review's source results or notes and then refuse an independent re-review
+  // when one of those optional sources can no longer be revalidated.
+  if (!msg.documents?.length && !msg.images?.length && !msg.staged?.length) {
+    const direct = explicitPrDirective({
+      text: msg.text,
+      projection,
+      tail: [],
+      requesterId: msg.userId,
+      ...(ctx.owner ? { owner: ctx.owner } : {}),
+    });
+    if (direct) {
+      ctx.onContext?.(freshContext());
+      const event: OperatorEventFields = operatorEventOf(
+        mode,
+        { decision: direct, latencyMs: 0, outputTokens: 0 },
+        ctx.intake,
+      );
+      event.repoContext = {
+        organization: cfg.organization,
+        candidateStatus: "skipped",
+        candidateCount: 0,
+      };
+      return event;
+    }
+  }
   const newestFinishedRun = ctx.thread ? newestFinishedRunOf(ctx.thread) : undefined;
   const channelRepo = deps.config.scopes(msg.channelId, msg.userId).channel.repo;
   const preferredRepos = [newestFinishedRun?.repo, channelRepo].filter(
