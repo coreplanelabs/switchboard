@@ -167,6 +167,7 @@ import { predicateFor } from "./authz/predicate.js";
 import { channelVisibilityOf, finishChildSetup, writeTombstone } from "./dispatch/record.js";
 import {
   namesOriginalUnitRecovery,
+  parseOriginalUnitAdoptionRequest,
   parseOriginalUnitRecoveryRequest,
   runShipBranch,
   type ShipContext,
@@ -1158,12 +1159,16 @@ export async function dispatch(
     const mainDm =
       msg.channelId.startsWith("slack:D") &&
       (mainScopes.user.agent ?? mainScopes.channel.agent ?? deps.config.config.defaults.agent) === "orchestrator";
-    // Recovery-shaped typed Ship commands have their own deterministic
-    // requester, thread, unit and budget checks. The on-mode operator can
-    // turn one into another action; shadow still records its decision.
-    const originalRecoveryCommand = typedAgent === "ship" && namesOriginalUnitRecovery(parseDirectives(msg.text).text);
+    // Exact original-unit operations have their own requester, thread and
+    // publication gates. The operator cannot turn one into another action.
+    const originalRecoveryCommand = typedAgent === "ship" && namesOriginalUnitRecovery(typed.text);
+    const originalAdoptionCommand =
+      typedAgent === "ship" &&
+      Object.keys(typed).every((key) => key === "agent" || key === "text") &&
+      parseOriginalUnitAdoptionRequest(typed.text) !== undefined;
     let operatorMode =
-      configuredOperator === "on" && (originalRecoveryCommand || (mainDm && typedAgent !== "ship"))
+      configuredOperator === "on" &&
+      (originalRecoveryCommand || originalAdoptionCommand || (mainDm && typedAgent !== "ship"))
         ? "off"
         : configuredOperator;
     // The preset an `on` decision binds on the person's own words, with the

@@ -22751,6 +22751,40 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     expect(replies.join(" ")).not.toContain("durable expected head");
   });
 
+  it("routes exact original-unit adoption past the operator and PR-less continuation gate", async () => {
+    const s = await endedPrContinuationSetup();
+    const [row] = await s.instances.listUnits(INSTANCE);
+    const { pr: _pr, ...withoutPr } = row!;
+    await s.instances.putUnits([withoutPr]);
+    const { io, replies } = fakeIO();
+
+    await dispatch(s.deps, msg(`agent:ship adopt unit ${INSTANCE}:U12`, "slack:UADMIN"), io, {
+      thread: [s.shipParent],
+    });
+
+    expect(s.operator).not.toHaveBeenCalled();
+    expect(s.shipBranch).toHaveBeenCalledOnce();
+    expect(replies.join(" ")).not.toContain("durable pull request identity");
+  });
+
+  it.each([
+    `agent:ship adopt unit ${INSTANCE}:U12 and start another writer`,
+    `agent:ship adopt unit ${INSTANCE}:U12 model:openai/o3`,
+  ])("keeps adoption requests with extra work or settings at the operator: %s", async (text) => {
+    const s = await endedPrContinuationSetup();
+    const operator = vi.fn<RouteModel>(async () => ({
+      tool: "ask",
+      input: { text: "Which action should run?", reason: "the request includes more than adoption" },
+    }));
+    s.deps.operatorModel = operator;
+    const { io } = fakeIO();
+
+    await dispatch(s.deps, msg(text, "slack:UADMIN"), io, { thread: [s.shipParent] });
+
+    expect(operator).toHaveBeenCalledOnce();
+    expect(s.shipBranch).not.toHaveBeenCalled();
+  });
+
   async function repeatedEndedPrSetup() {
     const s = await endedPrContinuationSetup();
     const original = (await s.instances.listUnits(INSTANCE))[0]!;
