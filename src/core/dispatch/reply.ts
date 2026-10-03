@@ -1,3 +1,4 @@
+import { settingsForAgent } from "../../config/agents.js";
 import type { ContextDependencies } from "../references/contextDependencies.js";
 import type { MemoryRecord } from "../memory/types.js";
 import { answerOutcomeDetail, type AnswerOutcome } from "../answerOutcome.js";
@@ -953,6 +954,7 @@ export function afterReply(deps: ReplyDeps, ctx: AfterReplyContext): void {
   if (stopped !== "hard")
     scheduleReflection({
       cfg: deps.config.config.memory,
+      settings: settingsForAgent(deps.config.config, "memory", resolved.modelRef),
       context: ctx.producerContext,
       ...(ctx.admitMemory ? { admitMemory: ctx.admitMemory } : {}),
       store: deps.memory,

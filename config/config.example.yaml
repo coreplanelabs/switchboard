@@ -5,6 +5,8 @@
 # GitHub App is installed on. Required. It names the shared memory scope
 # (`org:<organization>`) and the About block every model run carries; nothing
 # in the code assumes a particular organization.
+extends: builtin
+
 organization: acme
 
 providers:
@@ -28,6 +30,52 @@ providers:
     wire: openai-responses
     baseUrl: https://api.openai.com/v1
     apiKeyEnv: OPENAI_API_KEY
+    # Native Responses cards for the shipped profiles; rates in USD per million.
+    models:
+      gpt-6.1-sol:
+        window: 1050000
+        capField: max_output_tokens
+        price:
+          input: 2
+          output: 10
+          cacheRead: 0.1
+          cacheWrite: 2.5
+          tiers:
+            - inputTokensAbove: 272000
+              input: 4
+              output: 15
+              cacheRead: 0.2
+              cacheWrite: 5
+        levels:
+          low: low
+          medium: medium
+          high: high
+          xhigh: xhigh
+          max: max
+        inputs:
+          image: true
+      gpt-6-luna:
+        window: 1050000
+        capField: max_output_tokens
+        price:
+          input: 0.1
+          output: 0.5
+          cacheRead: 0.01
+          cacheWrite: 0.125
+          tiers:
+            - inputTokensAbove: 272000
+              input: 0.2
+              output: 0.75
+              cacheRead: 0.02
+              cacheWrite: 0.25
+        levels:
+          low: low
+          medium: medium
+          high: high
+          xhigh: xhigh
+          max: max
+        inputs:
+          image: true
     # invoiceApi: openai-costs            # GET /v1/organization/costs, an admin key
     # invoiceKeyEnv: OPENAI_ADMIN_KEY
   # groq:
@@ -98,23 +146,29 @@ providers:
   #   wire: openai-chat
   #   baseUrl: http://localhost:11434/v1   # Ollama
 
+# Shipped profiles: standard = openai/gpt-6.1-sol, high; light = openai/gpt-6-luna, medium.
+# agentDefaults.profile is standard; operator and intake select light. Memory selects standard.
+# Override once per profile, or override one agent. Missing nested fields inherit; null clears effort.
+# profiles:
+#   standard:
+#     model: openai/gpt-6.1-sol
+#     modelSettings: { reasoning: { effort: high } }
+#   light:
+#     model: openai/gpt-6-luna
+#     modelSettings: { reasoning: { effort: medium } }
+# agentDefaults: { profile: standard }
+# agents:
+#   coding:
+#     instructions: builtin:coding
+#     tools: full
+#     limits: { maxMinutes: 90, maxTokens: 64000 }
+#   operator: { profile: light }
+#   intake: { profile: light }
+#   memory: { profile: standard }
+
 defaults:
   # Agent used when none is specified (per-channel/user/request can override).
   agent: general
-  # Default model per agent, as <provider>/<model>.
-  models:
-    general: anthropic/claude-haiku-4-5
-    coding: anthropic/claude-opus-5
-    review: anthropic/claude-opus-5
-    explore: anthropic/claude-opus-5 # the two-hour read-only investigation (docs/reference/specs/agent-explore.md)
-  # Default model effort per agent: low | medium | high (how hard the model
-  # thinks per turn; lower = much faster turns). Same layering as models —
-  # per-channel/user `effort` / `efforts.<agent>` and a per-request `effort:`
-  # directive override these; unset → the agent's built-in effort, else the
-  # provider default. Skipped for models without effort support. The `general`
-  # entry also controls the operator turn on `defaults.models.general`.
-  # efforts:
-  #   coding: medium
   # How much the bot says about its own doing (docs/reference/specs/routing-and-config.md
   # item 28): quiet (default) — only what needs the person: answers, verdicts,
   # refusals, questions, results, the card's progress; verbose — plus every
@@ -407,12 +461,7 @@ workspaceDir: ./workspaces
 #                       # per-scope cap on ACTIVE records (default 500): a write
 #                       # that would exceed it evicts the least recently used
 #                       # records (soft delete, status `evicted`) in the same write.
-#   model: anthropic/claude-haiku-4-5
-#                       # <provider>/<model> for the reflection pass — pick a
-#                       # cheap level. Absent → the run's own resolved model.
-#   effort: low         # how hard the reflection model thinks per distillation —
-#                       # low | medium | high | xhigh | max, applied through the
-#                       # model card; unset → the model's own default.
+#   # Model and effort: agents.memory (above).
 
 # Self-improvement proposals (docs/reference/specs/run-friction.md). Every finished run's friction
 # diagnosis (docs/reference/specs/run-friction.md) is stored with its run record, so the
@@ -472,23 +521,11 @@ workspaceDir: ./workspaces
 
 # Which harness each preset's runs are driven by, deployment-wide
 # (docs/reference/specs/harness.md item 8): a mapping of preset to a harness's
-# name. Two exist — `pi` (the pi coding agent, the default for every preset)
-# and `opencode` (OpenCode's server, `opencode serve`) — each started inside
-# the run's own execution container (or as a child of the bot for a preset
-# without a workspace) with the run's model-proxy bearer as its only key, every
-# tool call decided in the bot, every event on the run's record. This block is
-# the defaults layer of the per-scope `harness` setting: a channel's or a
-# user's `harness` (above, or `config set channel|me --harness.<preset> …`)
-# overrides it for the runs in that scope, user over channel over here. A
-# preset no layer names runs on pi; nothing defaults to OpenCode. A run keeps
-# the harness it started on, so changing a word moves the next run, never one
-# in flight. Any other word (`native`, the deleted loop; `codex`) fails the
-# load naming the two, as does an unknown preset, in every layer; a
-# `defaults.harness` key is refused pointing here. How-to:
-# docs/how-to/put-a-preset-on-opencode.md.
-# harness:
-#   coding: opencode   # coding runs on OpenCode
-#   review: pi         # the default, written out
+# name. Two exist: pi and opencode. Select one under agents.<name>.harness,
+# or on a named profile. Channel/user harness overrides still take precedence.
+# An existing run keeps its recorded harness; this setting affects fresh runs.
+# agents:
+#   coding: { harness: opencode }
 
 # What the harness writes into pi's per-run settings for every run on pi
 # (docs/reference/specs/harness-pi.md item 4): pi's compaction thresholds, in
@@ -544,17 +581,13 @@ workspaceDir: ./workspaces
 # model call) or `always` (today's answer-every-reply path, byte for byte).
 # Also settable per channel and per user: `intake: { threadReplies: <mode> }`
 # on a `channels.<id>` or `users.<id>` scope, user over channel over here.
-# `model` is the verdict's model; default `defaults.models.general`. `effort`
-# is how hard that model thinks per verdict — low | medium | high | xhigh |
-# max, applied through the model card; unset → the model's own default. A
-# mention, a DM and a top-level post never pass through the gate in any mode.
+# Configure the verdict's model and effort under agents.intake (above).
+# A mention, DM or top-level post never passes through the gate in any mode.
 # A model whose operator card (`providers.<p>.
 # models.<id>.answers`) declares it answers neither a forced tool call nor the
 # text contract is refused at load when the default mode is `classify`.
 # intake:
 #   threadReplies: classify
-#   model: anthropic/claude-haiku-4-5
-#   effort: low
 
 # The orchestration plane (docs/decisions/0064-the-plane-owns-every-runs-state-a-refusal-becomes-a-queue-position-an-ending-is-judged-by-the-ledger-that-saw-it-and-a-release-is-a-quiet-window-a-person-closes.md;
 # docs/reference/specs/routing-and-config.md item 31; orchestration-plane.md).

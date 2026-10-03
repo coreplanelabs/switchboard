@@ -1,3 +1,4 @@
+import { AGENT_CONFIG_NAMES, settingsForAgent } from "../config/agents.js";
 import { ARTIFACT_DEFAULTS } from "../artifacts/config.js";
 import { referencesOn, type AppConfig } from "../config.js";
 import { DEFAULT_CATCH_UP_WINDOW_MS } from "./budgets.js";
@@ -335,5 +336,35 @@ export function installationSettings(config: AppConfig, caps: Capabilities): Ins
     on: caps[key],
     how: CAPABILITY_HOW[key],
   }));
+  if (config.extends === "builtin") {
+    const canonical = settings.filter(
+      (setting) =>
+        !setting.key.startsWith("defaults.models.") &&
+        !setting.key.startsWith("defaults.efforts.") &&
+        !["intake.effort", "memory.model", "memory.effort"].includes(setting.key),
+    );
+    for (const name of AGENT_CONFIG_NAMES) {
+      const effective = settingsForAgent(config, name);
+      const internal = ["operator", "intake", "memory"].includes(name);
+      canonical.push(
+        row(
+          `agents.${name}.profile`,
+          config.agents?.[name]?.profile,
+          "standard",
+          "config",
+          "the inherited settings profile",
+        ),
+        row(`agents.${name}.model`, effective.model, "", internal ? "config" : "runtime", "the resolved model"),
+        row(
+          `agents.${name}.modelSettings.reasoning.effort`,
+          effective.effort,
+          "the model's own default",
+          internal ? "config" : "runtime",
+          "the resolved reasoning effort",
+        ),
+      );
+    }
+    return { settings: canonical, capabilities };
+  }
   return { settings, capabilities };
 }

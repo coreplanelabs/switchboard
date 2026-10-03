@@ -1,6 +1,6 @@
 # Add a model provider
 
-Route a new provider's models through Switchboard, so a `model:` directive and `defaults.models` can name them.
+Route a new provider's models through Switchboard, so a `model:` directive and `agents.<name>.model` can name them.
 
 **You need:**
 
@@ -54,7 +54,7 @@ The provider's models are now valid as `groq/<model-id>` anywhere a model is acc
 
 - a `model:` directive
 - `config set`
-- a `defaults.models` entry ([Configure your defaults](configure-your-defaults.md))
+- an `agents.<name>.model` entry ([Configure your defaults](configure-your-defaults.md))
 
 ## Check the block against the provider
 

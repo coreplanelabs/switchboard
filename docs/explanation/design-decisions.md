@@ -97,6 +97,7 @@ Statuses: **proposed** (written, not yet agreed), **accepted** (agreed, being bu
 | 0086 | [A deploy fence separates execution from workspace retention](../decisions/0086-deploy-fence-separates-execution-from-workspace-retention.md) | Durable run fence and exact owner read | accepted | 2026-10-02 |
 | 0087 | [An advertised run keeps one identity through setup](../decisions/0087-an-advertised-run-keeps-one-identity-through-setup.md) | One run from reservation to finish | accepted | 2026-10-03 |
 | 0088 | [Review selects verified defects before applying severity](../decisions/0088-review-selects-verified-defects-before-applying-severity.md) | Evidence filter followed by severity policy | accepted | 2026-10-03 |
+| 0089 | [Shipped and installed agents use one configuration language](../decisions/0089-shipped-and-installed-agents-use-one-configuration-language.md) | Declarative profiles with layered configuration | accepted | 2026-10-03 |
 
 <!-- /generated:decision-records -->
 

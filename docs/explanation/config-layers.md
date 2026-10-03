@@ -30,7 +30,7 @@ The saved conversation and agent working logs are separate from the resolved set
 
 ## Effort is a layer, not a model detail
 
-Effort (`low` through `max`) rides the same ladder as the model: request directive, per-agent override at any scope, installation defaults, the agent's built-in floor.
+Effort (`low` through `max`) rides the same ladder as the model: request directive, per-agent override at any scope, installation settings extending the shipped profile.
 
 Wall-clock time is an agent's real budget, and effort decides how much of each turn goes to thinking. A channel can want cheap `general` answers and a high-effort `review` without faking it through two model configurations.
 

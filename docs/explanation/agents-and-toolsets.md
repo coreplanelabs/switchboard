@@ -48,4 +48,4 @@ Add one when a recurring kind of work needs its own instructions **and** a disti
 
 An agent is [added in the repository](../how-to/add-an-agent.md): declare its definition and budgets, give it a behavioral spec, and decide how it is routed and who may run it. The channel adapters and dispatcher do not need a new branch for its name.
 
-The current definitions are in [`src/agents/registry.ts`](../../src/agents/registry.ts), toolsets in [`src/tools/toolsets.ts`](../../src/tools/toolsets.ts), and budget defaults in [`src/core/budgets.ts`](../../src/core/budgets.ts).
+The shipped definitions and default limits are in [`src/agents/defaults.json`](../../src/agents/defaults.json), their builtin prompts in [`src/agents/registry.ts`](../../src/agents/registry.ts), toolsets in [`src/tools/toolsets.ts`](../../src/tools/toolsets.ts), and budget defaults in [`src/core/budgets.ts`](../../src/core/budgets.ts).

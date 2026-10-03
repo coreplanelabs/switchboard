@@ -17,6 +17,8 @@ web/components.d.ts
 docs/public/screenshots/manifest.json
 # Written by `npm run pr-title:gen`
 src/core/prTitleVocabulary.json
+# Written by npm run docs:gen from the agent DSL runtime schema
+config/agents.schema.json
 src/core/__snapshots__
 src/core/testing/pr329.body.md
 src/core/testing/pr329.description.json

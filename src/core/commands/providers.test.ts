@@ -238,6 +238,13 @@ describe("registryDrift — the drift gate between the pinned registry and the c
     expect(lines[0]).toContain("no longer carries");
   });
 
+  it("an explicit model card pins a model missing from the catalog", () => {
+    const blocks: Record<string, ProviderConfig> = {
+      anthropic: { ...BLOCKS.anthropic, models: { "new-model": { window: 100000 } } },
+    };
+    expect(registryDrift(["anthropic/new-model"], blocks, tableRegistry(files))).toEqual([]);
+  });
+
   it("a block without a catalog (none, or no file of its name) is not drift — there is no registry to disagree with", () => {
     const blocks: Record<string, ProviderConfig> = {
       local: { type: "openai-compatible", baseUrl: "http://localhost:11434/v1" },

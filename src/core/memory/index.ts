@@ -1,3 +1,4 @@
+import type { settingsForAgent } from "../../config/agents.js";
 import type { ContextDependencies } from "../references/contextDependencies.js";
 import type { AudienceCheck } from "../audienceDecision.js";
 import { parseModelRef, type Provider, type ProviderConfig } from "../provider.js";
@@ -90,9 +91,10 @@ export {
  * deciding whether this run qualifies; when it does, the reflection promise is
  * tracked for the shutdown drain (`drainReflections`) and never awaited by the
  * caller, so its latency and failures cannot reach the user reply. Memory off
- * → returns without doing anything (zero behavior change). The model comes from
- * `memory.model`, falling back to the run's own resolved ref — both are config-
- * resolved `<provider>/<model>` strings (AGENTS.md invariant 7). Records are
+ * → returns without doing anything (zero behavior change). Installation DSL
+ * settings select `agents.memory`'s profile or explicit model; legacy config
+ * selects `memory.model`, falling back to the run's resolved ref. All are
+ * config-resolved `<provider>/<model>` strings (AGENTS.md invariant 7). Records are
  * written to the org scope and — per the extractor's `audience` — the
  * requesting user's own scope or the run's repo / channel scope, each write
  * decided by the authorization policy for the run's principal under the run's
@@ -101,12 +103,14 @@ export {
  */
 export function scheduleReflection(input: {
   cfg: MemoryConfig | undefined;
+  /** Model settings resolved by the installation DSL at the composition root. */
+  settings?: ReturnType<typeof settingsForAgent>;
   store: MemoryStore | undefined;
   providers: { get(name: string): Provider };
   /** The config's provider blocks, for the extractor's model card — where
-   *  `memory.effort` is decided (`turnEffort`). Absent → no effort is sent. */
+   *  the resolved memory effort is decided (`turnEffort`). Unset → no effort is sent. */
   providerBlocks?: Readonly<Record<string, ProviderConfig>>;
-  /** The run's resolved model ref — the fallback when `memory.model` is unset. */
+  /** The run's resolved model ref — the fallback for legacy config without `memory.model`. */
   runModelRef: string;
   gate: ReflectGateInput;
   threadKey: string;
@@ -136,7 +140,7 @@ export function scheduleReflection(input: {
   let model: string;
   let capField: string | undefined;
   try {
-    const modelRef = input.cfg.model ?? input.runModelRef;
+    const modelRef = input.settings?.model ?? input.cfg.model ?? input.runModelRef;
     const ref = parseModelRef(modelRef);
     provider = input.providers.get(ref.provider);
     model = ref.model;
@@ -147,7 +151,11 @@ export function scheduleReflection(input: {
   }
   // `memory.effort` (memory.md item 11): decided against the extractor model's
   // card; a degraded or dropped tier is a log line, never a skipped pass.
-  const effort = turnEffort(input.cfg.model ?? input.runModelRef, input.cfg.effort, input.providerBlocks ?? {});
+  const effort = turnEffort(
+    input.settings?.model ?? input.cfg.model ?? input.runModelRef,
+    input.settings ? input.settings.effort : input.cfg.effort,
+    input.providerBlocks ?? {},
+  );
   if (effort.note) info(`reflection effort: ${effort.note}`);
   trackReflection(
     reflect({

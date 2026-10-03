@@ -5,7 +5,7 @@
   // written for strict narrowing.
   "compilerOptions": {
     "target": "es2022",
-    "module": "es2022",
+    "module": "esnext",
     "moduleResolution": "bundler",
     "lib": ["es2022"],
     "types": ["@cloudflare/workers-types"],

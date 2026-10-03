@@ -29,7 +29,7 @@ import {
   type AudienceTrace,
 } from "./audienceDecision.js";
 import { sourceBinding, type SessionSources } from "./references/receipts.js";
-import { getAgent } from "../agents/registry.js";
+import { configuredAgent } from "../config/agents.js";
 import { MINUTE_MS, minutesToMs } from "./budgets.js";
 import type { LedgerRun } from "./runLedger/writeThrough.js";
 import { settleRetryPause } from "./runLedger/threadsElsewhere.js";
@@ -291,7 +291,7 @@ export interface CoreDeps
   /** The configured providers used to build the one door's model call. */
   completions: ProviderTable;
   /** The operator's model call (record 0057; routing-and-config item 29).
-   *  Default: the provider behind `defaults.models.general`. Tests script one. */
+   *  Default: the provider behind the resolved operator model. Tests script one. */
   operatorModel?: RouteModel;
   /** The providers catalogue behind the loop's `provider_models` read tool
    *  (issue 2088): the refs this deployment can run, so a write proposal
@@ -2320,7 +2320,8 @@ export async function dispatch(
     // ship, whose declared budget is the `ship.maxMinutes` knob
     // (docs/reference/specs/agent-ship.md item 8) — so the profile below, the
     // card's budget line and the pipeline's wall clock read one number.
-    const agent = resolved.agentName === "ship" ? shipPresetFor(deps.config.config.ship) : getAgent(resolved.agentName);
+    const agent = configuredAgent(deps.config.config, resolved.agentName);
+    if (resolved.agentName === "ship") agent.maxMinutes = shipPresetFor(deps.config.config.ship).maxMinutes;
     // The run's effective profile (dispatch/resolve.ts; record 0026): preset ∩
     // the request's `budget:` directive ∩ the boundaries on the path — a
     // child's parent's remaining wall clock among them (routing-and-config

@@ -3,8 +3,8 @@
 // intake and memory reflection. Callers keep the completion vocabulary — a
 // `Provider` whose `complete` takes a `CompletionRequest` and answers a
 // `CompletionResult` — while pi's adapters speak each provider's wire shape.
-// The table is built from config provider blocks; `defaults.models.general`,
-// `intake.model` and `memory.model` resolve through it. These background calls
+// The table is built from config provider blocks; the operator, intake and
+// memory model settings resolve through it. These background calls
 // do not publish a run's `model.turn` span or usage record.
 import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";

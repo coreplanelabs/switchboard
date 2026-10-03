@@ -1,8 +1,8 @@
 # Put a preset on OpenCode
 
-Run one preset's runs on OpenCode instead of pi — for yourself alone, for one channel, or for the whole deployment. Nothing else about a run changes: the same run bearer as its only key, the same gate deciding every tool call in the bot, the same record on the run page — and the same setting flips it back. Nothing runs on OpenCode until a word says so: every preset is on pi by default, and there is no setting that makes OpenCode the default for all of them.
+Run one preset's runs on OpenCode instead of pi — for yourself alone, for one channel, or for the whole deployment. Nothing else about a run changes: the same run bearer as its only key, the same gate deciding every tool call in the bot, the same record on the run page — and the same setting flips it back. Nothing runs on OpenCode until a word says so: every preset is on pi by default, A profile can select OpenCode for all agents that use it.
 
-The word is a scope setting like the model ([routing-and-config.md](../reference/specs/routing-and-config.md) item 2): your own scope beats the channel's, the channel's beats the deployment's block. Start with your own runs — it moves nobody else's.
+The word is a scope setting like the model ([routing-and-config.md](../reference/specs/routing-and-config.md) item 2): your own scope beats the channel's, the channel's beats the agent's installation setting. Start with your own runs — it moves nobody else's.
 
 **You need:**
 
@@ -45,8 +45,9 @@ Needs `config:write` (admins hold it):
 The deployment-wide block, in `config.yaml`:
 
 ```yaml
-harness:
-  coding: opencode
+extends: builtin
+agents:
+  coding: { harness: opencode }
 ```
 
 **What moves:** everyone's coding runs, in every channel — unless a channel's or a person's word says otherwise (the block is the defaults layer: user > channel > this). A preset the block does not name stays on pi, so this puts coding runs on OpenCode and leaves review, general and the rest where they were. Name several presets with one line each. Any word but `pi` or `opencode` fails the load naming both (`harness.coding: codex is not a harness; the harnesses are pi and opencode`), in this block and under any channel's or user's `harness` alike; `defaults.harness` is refused pointing here.
@@ -78,7 +79,7 @@ OpenCode's own words, in tokens: `buffer` is kept free of the model's window bef
 - **The run page reads as a pi run does**: the request, each step with its tool calls and results, the reply. Tool names are the record's shared vocabulary — `bash`, `read`, `edit`, `write`, `find`, `grep` — so OpenCode's `shell` shows as `bash` and its `glob` as `find`, and the card's tool line is the same.
 - **Every one of OpenCode's own tool calls is decided in the bot before it runs.** A refused command appears in the step as a `tool_refused` note carrying the reason the model was shown — a push to a branch that is not the run's own, a write under a read-only identity. Switchboard's relayed tools (GitHub, memory, the run tools) run in the bot and are gated there, exactly as on pi.
 - **The record names its harness and whose word chose it.** The run's metadata carries `harness: opencode` and `harnessScope: user | channel | defaults` (`runs get <id>` shows both; the facts bar reads `opencode harness (user scope)`), and the row's facts carry the server's pid, port and conversation, which is how a restart finds or rebuilds the process.
-- **Effort has no effect on an OpenCode preset today.** OpenCode maps Switchboard's effort word onto a model's declared reasoning variants, and the deployment's OpenCode configuration declares none, so `effort:` on a request and `defaults.efforts` are accepted and leave OpenCode's default. When a deployment declares variants, the effort will select one.
+- **Effort has no effect on an OpenCode preset today.** OpenCode maps Switchboard's effort word onto a model's declared reasoning variants, and the deployment's OpenCode configuration declares none, so `effort:` on a request and `modelSettings.reasoning.effort` are accepted and leave OpenCode's default. When a deployment declares variants, the effort will select one.
 - **Follow-ups, stops and restarts behave the same.** A thread follow-up is steered into the running process as its next turn, a hard stop interrupts it, and a bot restart resumes the run on OpenCode from its record.
 
 ## What the gate does not enforce

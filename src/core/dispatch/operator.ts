@@ -1,3 +1,4 @@
+import { configuredAgent, settingsForAgent } from "../../config/agents.js";
 import { OFFER_CONTEXT_LINE } from "./confirm.js";
 import { audienceRefusalText, type AudienceCheck } from "../audienceDecision.js";
 import {
@@ -64,7 +65,7 @@ import { ADDRESS_SEVERITIES, isAddressSeverity, type AddressSeverity } from "../
 import { VERBOSITY_LEVELS, isVerbosity, shows, type Verbosity } from "../verbosity.js";
 import { oneLine, redactAndCap, redactSecrets, stripAnsi } from "../redact.js";
 import type { IntakeVerdict } from "../intake.js";
-import type { ConfigStore } from "../../config.js";
+import type { AppConfig, ConfigStore } from "../../config.js";
 import type { ProviderTable } from "../harness/piAi.js";
 import type { AssembledTranscript } from "../runLedger/transcript.js";
 import type { RequesterTarget } from "../runLedger/ledger.js";
@@ -142,9 +143,12 @@ export const OPERATOR_BATCH_TOOL = "bind_pr_batch";
 /** The presets the one door may bind. The conductor keeps its compound door:
  * the old readers' router no longer owns that path, so the operator offers it
  * beside the registry's ordinary routed presets. */
-export function operatorPresets(): RoutablePreset[] {
-  const presets = routablePresets();
-  const conductor = AGENTS[COMPOUND_PRESET];
+export function operatorPresets(config?: AppConfig): RoutablePreset[] {
+  const agents = config
+    ? Object.fromEntries(Object.keys(AGENTS).map((name) => [name, configuredAgent(config, name)]))
+    : AGENTS;
+  const presets = routablePresets(agents);
+  const conductor = agents[COMPOUND_PRESET];
   return conductor === undefined
     ? presets
     : [
@@ -2638,7 +2642,7 @@ export interface OperatorStageDeps {
   completions?: ProviderTable;
   commands?: ChatCommands;
   /** The operator's model call. Default: the provider behind
-   *  `defaults.models.general`. Tests script one. */
+   *  the resolved operator model. Tests script one. */
   operatorModel?: RouteModel;
   /** The providers catalogue behind the loop's `provider_models` read tool
    *  (issue 2088); absent, the tool answers its no-reader fallback. */
@@ -2776,17 +2780,15 @@ export async function operatorStage(
         )
       : undefined;
   if (!model) {
-    const modelRef = cfg.defaults.models["general"];
+    const modelRef = settingsForAgent(cfg, "operator").model;
     if (!modelRef || !deps.completions) {
-      console.log(`[operator] ${msg.threadKey} not run: no defaults.models.general to run on`);
+      console.log(`[operator] ${msg.threadKey} not run: no operator model configured`);
       return unavailable();
     }
     try {
       const ref = parseModelRef(modelRef);
-      // The operator's effort key sits beside its model key (routing-and-config
-      // item 29): `defaults.efforts.general`, decided against the same card; a
-      // degraded or dropped tier is a log line, never a skipped operator.
-      const effort = turnEffort(modelRef, cfg.defaults.efforts?.["general"], cfg.providers);
+      // Resolve model and effort together against the selected operator card.
+      const effort = turnEffort(modelRef, settingsForAgent(cfg, "operator").effort, cfg.providers);
       if (effort.note) console.log(`[operator] ${msg.threadKey} effort: ${effort.note}`);
       const card = resolveModelCard(modelRef, cfg.providers, installedModelRegistry);
       maxOutputTokens = operatorMaxOutputTokens({ capField: card.capField });
@@ -2798,7 +2800,7 @@ export async function operatorStage(
       return unavailable();
     }
   }
-  const presets = operatorPresets();
+  const presets = operatorPresets(cfg);
   const actor = chatActorOf(deps.config, msg);
   const projection = operatorProjection({
     presets,
@@ -3550,8 +3552,8 @@ export async function executeOperatorDecision(
                 input: invocation.input,
                 receipt: routeReceipt(bound.def, invocation.input),
                 // The row's model is the decider's, as the routed offer stores
-                // the router's: the operator runs on `defaults.models.general`.
-                model: deps.config.config.defaults.models["general"] ?? "",
+                // the router's: the operator has its own resolved settings.
+                model: settingsForAgent(deps.config.config, "operator").model ?? "",
               })
             : undefined;
         if (mint !== undefined && mint.kind === "offered") {

@@ -1752,11 +1752,11 @@ describe("the example config's provider blocks", () => {
 
   // Feature: docs/reference/specs/harness-pi.md item 13 — the block is the one
   // the router and reflection reach OpenRouter through, on pi's library.
-  it("the OpenRouter block ships live: the example loads as shipped with it, every default model still on the anthropic block, and pi's library builds one openai-completions provider from it — a trailing slash on baseUrl kept by the loader and stripped by the reader", () => {
+  it("the OpenRouter block ships live: the example loads as shipped with it, every default model on the openai block, and pi's library builds one openai-completions provider from it — a trailing slash on baseUrl kept by the loader and stripped by the reader", () => {
     const store = storeFrom(EXAMPLE);
     expect(store.config.providers.openrouter).toEqual(OPENROUTER);
     expect(Object.keys(store.config.providers)).toEqual(["anthropic", "openai", "openrouter"]);
-    for (const ref of Object.values(store.config.defaults.models)) expect(ref).toMatch(/^anthropic\//);
+    for (const ref of Object.values(store.config.defaults.models)) expect(ref).toMatch(/^openai\//);
     const provider = new PiAiProviders(store.config.providers, { secrets: secretsFrom({}) }).get("openrouter");
     expect(provider).toMatchObject({
       name: "openrouter",
@@ -1795,9 +1795,12 @@ describe("the example config's provider blocks", () => {
 
   // Feature: docs/reference/specs/model-proxy.md items 2 and 4 — a run's upstream is the
   // block the `<provider>` half of its model ref names; `upstreamFor` is called here, not changed.
-  it("any preset's model points at OpenRouter by one ref: defaults.models.general: openrouter/anthropic/<model> splits at the first slash into the openrouter block and pi's model id anthropic/<model>; a run on it reaches the block's /chat/completions with the key as the bearer, and provider_key_missing names OPENROUTER_API_KEY without one", () => {
+  it("any preset's model points at OpenRouter by one ref: agents.general.model: openrouter/anthropic/<model> splits at the first slash into the openrouter block and pi's model id anthropic/<model>; a run on it reaches the block's /chat/completions with the key as the bearer, and provider_key_missing names OPENROUTER_API_KEY without one", () => {
     const store = storeFrom(
-      edited("general: anthropic/claude-haiku-4-5", "general: openrouter/anthropic/claude-sonnet-4"),
+      edited(
+        "extends: builtin",
+        "extends: builtin\nagents: { general: { model: openrouter/anthropic/claude-sonnet-4 } }",
+      ),
     );
     const ref = parseModelRef(store.config.defaults.models.general);
     expect(ref).toEqual({ provider: "openrouter", model: "anthropic/claude-sonnet-4" });
