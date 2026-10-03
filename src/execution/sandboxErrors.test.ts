@@ -6,6 +6,7 @@ import {
   FLEET_BUSY_REFUSED_EVENT,
   FLEET_BUSY_RUN_ENDED_EVENT,
   fleetBusyRefusedLine,
+  fleetBusyEndingFactsOf,
   fleetBusyRunEndedLine,
   isFleetBusyError,
   thrownShape,
@@ -114,7 +115,8 @@ describe("the fleet-busy answer shapes the Worker sends", () => {
     expect(a.reason).toBe(FLEET_BUSY_REASON);
     expect(FLEET_BUSY_REASON).toBe("fleet-busy");
     expect(a.error).toMatch(/^fleet-busy: /);
-    expect(a.error).toContain("max_instances");
+    expect(a.error).toContain("running-instance capacity or start rate");
+    expect(a.error).not.toContain("awake serving another thread");
     expect(a.error).toContain("Failed to create session: 503");
   });
 
@@ -170,6 +172,9 @@ describe("the fleet-busy ending log lines", () => {
   it("matches the error by name across an import boundary — a name-and-facts shape logs like the class itself", () => {
     const shaped = Object.assign(new Error("sandbox fleet busy"), { name: "ExecCapacityError", fleetBusy: facts });
     expect(fleetBusyRunEndedLine("run-1", "t", shaped)).not.toBeNull();
+    expect(fleetBusyEndingFactsOf(shaped)).toEqual(facts);
+    expect(fleetBusyEndingFactsOf(new ExecCapacityError("capacity without fleet facts"))).toBeUndefined();
+    expect(fleetBusyEndingFactsOf({ name: "ExecCapacityError", fleetBusy: { refusal: "x" } })).toBeUndefined();
   });
 
   it("a run that ends any other way emits none: a plain error, an infra failure, a capacity ending that is not the fleet's", () => {
@@ -249,9 +254,9 @@ describe("the executor's bounded wait", () => {
     expect(FLEET_BUSY_BACKOFF_MS).toEqual([10_000, 20_000, 30_000]);
   });
 
-  it("the exhausted message names the wait in seconds and the knob (max_instances)", () => {
+  it("the exhausted message names the wait without asserting which capacity limit refused placement", () => {
     expect(fleetBusyExhaustedMessage(300_000)).toBe(
-      "this is a bug: the sandbox fleet had no free per-thread sandbox after waiting 300s (the fleet's max_instances is reached), and no automatic queue remained",
+      "sandbox fleet busy: no per-thread sandbox was available after waiting 300s; this request did not run",
     );
     expect(fleetBusyExhaustedMessage(60_000)).toContain("after waiting 60s");
   });

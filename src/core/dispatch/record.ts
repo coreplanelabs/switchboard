@@ -664,6 +664,7 @@ export function finishChildSetup(
     finishedAt: number;
     refusal: Refusal;
     status: RunStatus;
+    failure?: RunFailure;
   },
 ): void {
   const { registry, runId, finishedAt, refusal, status, ending } = ctx;
@@ -700,6 +701,7 @@ export function finishChildSetup(
           seed: ctx.seed,
           finishedAt,
           status,
+          ...(ctx.failure !== undefined ? { failure: ctx.failure } : {}),
           seal,
           diagnosis: analyzeRunFriction(snap?.events ?? [], { finished: true, truncated: snap?.truncated ?? false }),
         }),

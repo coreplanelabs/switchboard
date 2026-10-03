@@ -134,7 +134,7 @@ import {
   WorkspaceFiles,
   type StagedOutcome,
 } from "./dispatch/staging.js";
-import { RUN_LIST_MAX_LIMIT, type RunRecord, type RunSeed } from "./runRecord.js";
+import { RUN_LIST_MAX_LIMIT, type RunFailure, type RunRecord, type RunSeed } from "./runRecord.js";
 import {
   attachWorkspace,
   budgetClipLabel,
@@ -196,7 +196,7 @@ import {
 import { prepareColdPublicationCheckout, workspaceBindingFor, workspaceBindingOf } from "../execution/factory.js";
 import { readyEnvironmentCommand, type ReadyEnvironmentRequirement } from "../execution/seedPlan.js";
 import { fetchPullRequestFacts } from "../execution/githubPulls.js";
-import { fleetBusyRunEndedLine } from "../execution/sandboxErrors.js";
+import { fleetBusyEndingFactsOf, fleetBusyRunEndedLine } from "../execution/sandboxErrors.js";
 import { lineageOf, lineageParent, tellParent, type LineageHeard } from "./dispatch/lineage.js";
 import { sessionSeedFor } from "./dispatch/seed.js";
 import { sessionCapabilityFor } from "../tools/session.js";
@@ -824,6 +824,7 @@ export async function dispatch(
   let operatorEvent: OperatorEventFields | undefined;
   let childSetupFinalizer: (() => void) | undefined;
   let childSetupRefusal: Refusal | undefined;
+  let childSetupFailure: RunFailure | undefined;
   let childSetupFinished = false;
   const audienceTrace: AudienceTrace = { refusal: audienceRefusalOf(resume?.row.state.audienceRefusal) };
   const recordRefusalOnce = async (refusal: Refusal) => {
@@ -3278,6 +3279,7 @@ export async function dispatch(
                   seed,
                   finishedAt: clock(),
                   status,
+                  ...(childSetupFailure !== undefined ? { failure: childSetupFailure } : {}),
                   refusal: childSetupRefusal ?? refusalOf("setup_failed", "The child ended before its model started."),
                 });
                 // Channel notification cannot prevent the same-id writer or
@@ -4907,11 +4909,11 @@ export async function dispatch(
     }
     if (childSetupFinalizer && !runLoopStarted) {
       childSetupRefusal ??= thrown ?? refusalOf("setup_failed", errMsg);
+      if (fleetBusyEndingFactsOf(err) !== undefined) childSetupFailure = { kind: "sandbox_fleet_busy" };
       childSetupFinalizer();
     }
     // A run the full sandbox fleet ended is one queryable line in the bot's
-    // own log (docs/reference/specs/execution.md item 14) — the card and the
-    // record still carry the ending as before; this line is what a log sweep
+    // own log (docs/reference/specs/execution.md item 14) — this line is what a log sweep
     // counts after a capacity incident, when reading every card is the only
     // other way to find which runs the burst killed. Here, the one site every
     // failing run passes (the run loop rethrows), so it is emitted once; any

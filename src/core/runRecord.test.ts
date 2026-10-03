@@ -1159,6 +1159,8 @@ describe("isRunRecord — the failure field", () => {
     const stream = record({ status: "failed", failure: { kind: "model_stream_incomplete" } });
     expect(isRunRecord(stream)).toBe(true);
     expect(isRunRecord(JSON.parse(JSON.stringify(stream)))).toBe(true);
+    const capacity = record({ status: "failed", failure: { kind: "sandbox_fleet_busy" } });
+    expect(isRunRecord(JSON.parse(JSON.stringify(capacity)))).toBe(true);
     expect("failure" in record()).toBe(false);
     expect(isRunRecord(record())).toBe(true);
   });

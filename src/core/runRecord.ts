@@ -709,9 +709,17 @@ function isRunPullRequestShape(v: unknown): v is RunPullRequest {
  *  (docs/reference/specs/agent-ship.md item 9, issue 1932).
  *  `model_stream_incomplete`: pi's answer stream ended incomplete after its
  *  local retry lease, with no provider-down evidence; Ship grants the same
- *  one re-run when nothing was pushed. A failure without
+ *  one re-run when nothing was pushed. `sandbox_fleet_busy`: a coordinator
+ *  child failed in setup before its model started after the executor spent
+ *  the fleet wait; Ship may retry its review only at a freshly verified PR
+ *  head within the original unit's lease. A failure without
  *  a name here leaves the record without the field. */
-export const RUN_FAILURE_KINDS = ["policy_refusal", "provider_transient", "model_stream_incomplete"] as const;
+export const RUN_FAILURE_KINDS = [
+  "policy_refusal",
+  "provider_transient",
+  "model_stream_incomplete",
+  "sandbox_fleet_busy",
+] as const;
 export type RunFailureKind = (typeof RUN_FAILURE_KINDS)[number];
 export interface RunFailure {
   kind: RunFailureKind;

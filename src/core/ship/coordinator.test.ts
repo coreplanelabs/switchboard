@@ -3180,6 +3180,85 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     expect(report).toContain("run run-r1");
   });
 
+  it("a capacity failure before review starts rechecks the original PR head, then retries inside the same round", () => {
+    const d = fresh(input({ merge: "person" }));
+    throughRoundZero(d);
+    runChild(
+      d,
+      "run-r1",
+      finished({ status: "failed", costUsd: 0, failure: { kind: "sandbox_fleet_busy" } }),
+      T0 + 20 * MIN,
+    );
+    expect(d.action).toMatchObject({ type: "pr-check", pr: 7, step: "U10/1/review/capacity/pr-check" });
+    d.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A, headBranchExists: true },
+      at: T0 + 20 * MIN,
+    });
+    expect(d.action).toMatchObject({
+      type: "spawn",
+      step: "U10/1/review/a2",
+      round: { index: 1, kind: "review", attempt: 2 },
+      brief: { kind: "review", pr: 7, headSha: HEAD_A },
+    });
+    expect(d.state.reviewRounds).toBe(1);
+    runChild(
+      d,
+      "run-r1-retry",
+      finished({
+        status: "completed",
+        costUsd: 1,
+        verdict: { verdict: "approve", findings: [] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 30 * MIN,
+    );
+    expect(d.action).toMatchObject({ type: "checks", headSha: HEAD_A });
+  });
+
+  it("does not redispatch a capacity-blocked review when the PR head moved or cannot be verified", () => {
+    for (const pr of [
+      { state: "open" as const, prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
+      { state: "open" as const, prNumber: 7, url: PR_URL, headSha: HEAD_A },
+    ]) {
+      const d = fresh(input({ merge: "person" }));
+      throughRoundZero(d);
+      runChild(
+        d,
+        "run-r1",
+        finished({ status: "failed", costUsd: 0, failure: { kind: "sandbox_fleet_busy" } }),
+        T0 + 20 * MIN,
+      );
+      d.answer({ type: "pr-check", pr, at: T0 + 20 * MIN });
+      expect(d.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
+      expect(renderUnitReport(d.state)).toContain("no review reached the pull request");
+    }
+  });
+
+  it("says capacity kept review from reaching the PR when the original lease cannot fit another wait", () => {
+    const d = fresh(input({ merge: "person", caps: { maxRounds: 1, maxMinutes: 60 } }));
+    throughRoundZero(d, T0 + 40 * MIN);
+    runChild(
+      d,
+      "run-r1",
+      finished({ status: "failed", costUsd: 0, failure: { kind: "sandbox_fleet_busy" } }),
+      T0 + 55 * MIN,
+    );
+    expect(d.action).toMatchObject({ type: "pr-check", pr: 7 });
+    d.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A, headBranchExists: true },
+      at: T0 + 55 * MIN,
+    });
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "no_verdict", cause: "sandbox_fleet_busy" } });
+    expect(renderUnitReport(d.state)).toContain(
+      "Review never reached the pull request because sandbox capacity kept refusing placement",
+    );
+    expect(renderUnitReport(d.state)).toContain("Review run: run-r1.");
+    expect(renderUnitReport(d.state)).not.toContain("write-up");
+  });
+
   it("a capped no-verdict stop does not suggest restarting the exhausted unit", () => {
     const d = fresh(input({ generated: true, grant: { renewals: 6, costCapUsd: 50 } }));
     d.answer({ type: "branch", ok: true, at: T0 });

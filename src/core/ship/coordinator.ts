@@ -641,8 +641,8 @@ export type ChildFacts =
       costUsd?: number | null;
       handoffLists?: Handoff;
       /** The failure by name off a `failed` run's record (run-history item 57):
-       *  provider transport failure or an incomplete local model stream may
-       *  earn one round-0 re-run when nothing was pushed (issue 1932). */
+       *  provider/stream failure may earn one empty round-0 re-run; a fleet
+       *  refusal during pre-model setup may recheck and retry review. */
       failure?: { kind: string };
       /** What ended an `interrupted` child, off its record's own events (issue
        *  1876): the ending's sentence names it instead of claiming a bot
@@ -1008,7 +1008,7 @@ export type UnitEnding =
       reviewRounds: number;
       spent: ShipBudgetSpent;
     }
-  | { kind: "no_verdict"; round: RoundRef; reviewRounds: number; finalReply?: string }
+  | { kind: "no_verdict"; round: RoundRef; reviewRounds: number; finalReply?: string; cause?: "sandbox_fleet_busy" }
   | { kind: "idle_expired"; reviewRounds: number }
   /** Round 0's coding child died on a retryable model-call failure — a
    *  provider transient or an incomplete local stream past its retry ladder —
@@ -1215,6 +1215,9 @@ type Phase =
   /** `until`: when the child's budget plus the margin runs out, counted from the spawn's answer — the wait's last slice ends there. */
   | { at: "wait"; round: RoundRef; runId: string; n: number; until: number }
   | { at: "read"; round: RoundRef; runId: string; n: number; until: number; finishedObserved: boolean }
+  /** A review could not attach before its model started. Recheck the exact
+   * adopted PR head before the same unit spends more of its lease. */
+  | { at: "capacity-pr-check"; round: RoundRef; expectedHeadSha: string }
   /** A live child lost authority because its pull request became terminal,
    *  its reviewed head moved, or its branch disappeared. Steer once, then
    *  drain the child to its recorded end while ignoring every late artifact. */
@@ -1347,8 +1350,8 @@ export interface UnitPipelineState {
   /** Extra reviews granted only for strict same-invariant case-table widenings.
    * Physical round indexes remain unique; this counter is bounded separately. */
   readonly patternContinuations: number;
-  /** Review dispatches superseded by an external head move. The count gives
-   * each restarted round a fresh durable `/a<n>` step identity. */
+  /** Review dispatches restarted after a head move or a pre-model capacity
+   * refusal. The count gives each child a fresh durable `/a<n>` identity. */
   readonly reviewRestarts: number;
   readonly pr?: PrRef;
   readonly lastReviewHead?: string;
@@ -1742,6 +1745,12 @@ export function nextAction(s: UnitPipelineState): CoordinatorAction {
         step: `${roundStep(s, p.round)}/read/${p.n}`,
         runId: p.runId,
         ...(p.finishedObserved ? { finishedObserved: true as const } : {}),
+      };
+    case "capacity-pr-check":
+      return {
+        type: "pr-check",
+        step: `${roundStep(s, p.round)}/capacity/pr-check`,
+        ...(s.pr !== undefined ? { pr: s.pr.number } : {}),
       };
     case "steer":
       return {
@@ -2323,6 +2332,22 @@ function settleReview(
         },
         [roundNote(round, "stopped")],
       );
+    if (facts.status === "failed" && facts.failure?.kind === "sandbox_fleet_busy") {
+      const expectedHeadSha = fullHead(charged.lastReviewHead);
+      if (charged.pr !== undefined && expectedHeadSha !== undefined)
+        return { state: { ...charged, phase: { at: "capacity-pr-check", round, expectedHeadSha } }, notes: [] };
+      return end(
+        charged,
+        {
+          kind: "aborted",
+          reason:
+            "The sandbox fleet blocked review before it reached the pull request; no exact original pull request head was recorded for a safe retry, so no review reached the pull request.",
+          round,
+          reviewRounds: s.reviewRounds,
+        },
+        [roundNote(round, "aborted")],
+      );
+    }
     return end(
       charged,
       {
@@ -3715,6 +3740,41 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
         ? settleReview(clocked, p.round, r.run)
         : settleCoding(clocked, p.round, p.runId, r.run);
     }
+    case "capacity-pr-check": {
+      const pr = (ret as Extract<StepReturn, { type: "pr-check" }>).pr;
+      if (pr.state === "merged") return foundMerged(clocked, pr);
+      if (pr.state === "closed") return foundClosed(clocked, pr);
+      const actualHead = pr.state === "open" ? fullHead(pr.headSha) : undefined;
+      if (
+        pr.state !== "open" ||
+        pr.prNumber !== clocked.pr?.number ||
+        pr.headBranchExists !== true ||
+        actualHead !== p.expectedHeadSha
+      )
+        return end(
+          clocked,
+          {
+            kind: "aborted",
+            reason:
+              "The sandbox fleet blocked review before it reached the pull request; the original pull request and exact head could not be verified for a safe retry, so no review reached the pull request.",
+            round: p.round,
+            reviewRounds: clocked.reviewRounds,
+          },
+          [roundNote(p.round, "aborted")],
+        );
+      // The failed child never entered its model loop. The replacement has a
+      // fresh step identity, the original round count and the original lease.
+      const reviewRestarts = clocked.reviewRestarts + 1;
+      const next = { ...clocked, reviewRestarts };
+      const retryRound = { ...p.round, attempt: reviewRestarts + 1 };
+      if (roundCarve(next, retryRound).kind === "refused")
+        return end(
+          next,
+          { kind: "no_verdict", round: p.round, reviewRounds: next.reviewRounds, cause: "sandbox_fleet_busy" },
+          [roundNote(p.round, "no_verdict")],
+        );
+      return enterRound(next, retryRound);
+    }
     case "steer": {
       // Delivery is best effort with respect to a child that may have ended
       // between the fresh PR read and this effect. Either answer is followed
@@ -4524,6 +4584,20 @@ function renderUnitReportWithWake(
         nextAction(),
       ]);
     case "no_verdict":
+      if (e.cause === "sandbox_fleet_busy") {
+        const runId = s.reviewRunByRound[e.round.index];
+        const run =
+          runId === undefined
+            ? undefined
+            : s.input.runPageBase !== undefined
+              ? `Review run: ${s.input.runPageBase.replace(/\/+$/, "")}/${encodeURIComponent(runId)}.`
+              : `Review run: ${runId}.`;
+        return join([
+          `⚠️ Review never reached the pull request because sandbox capacity kept refusing placement. Ship waited within the original unit and checked the exact PR head; its remaining time budget could not fit another review.${prLine}`,
+          run,
+          spentCapAction(),
+        ]);
+      }
       if (!shows(verbosity, "verbose"))
         return join([
           `⚠️ No verdict from review round ${e.round.index} — aborted after ${rounds}.${prLine}`,
