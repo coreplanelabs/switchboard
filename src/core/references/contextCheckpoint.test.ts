@@ -6,6 +6,7 @@ import {
   checkpointMembersOf,
   checkpointMemberHashesOf,
   checkpointOutsideOrdinaryWindow,
+  contextCheckpointMatchesRun,
   normalizeCheckpointContexts,
   planContextCheckpoint,
   validateContextCheckpoint,
@@ -48,6 +49,37 @@ async function seal(
 }
 
 describe("ordinary context checkpoint", () => {
+  it("validates a committed prefix when a later write breaks the run range", async () => {
+    const run: CanonicalCheckpointSource = {
+      runId: "broken-later",
+      meta: meta(4),
+      context: { ...clean, origins: [origin("broken-later")] },
+    };
+    const receipt = await seal(run);
+    expect(receipt).toBeDefined();
+    expect(
+      await seal({ ...run, meta: { ...run.meta, session: { ...run.meta.session!, range: "broken" } } }),
+    ).toBeUndefined();
+    const source: CanonicalCheckpointSource = {
+      ...run,
+      meta: { ...run.meta, session: { ...run.meta.session!, range: "broken" } },
+      context: receipt!.normalized,
+      receipt,
+      transcriptHash: receipt!.inputs.transcriptHash,
+      members: [run.runId],
+      memberCheckpoints: { [run.runId]: "" },
+    };
+    expect(contextCheckpointMatchesRun(receipt!, source)).toBe(true);
+    expect(await validateContextCheckpoint(receipt, source)).toBe(true);
+    expect(await validateContextCheckpoint(receipt, { ...source, transcriptHash: "f".repeat(64) })).toBe(false);
+    expect(
+      contextCheckpointMatchesRun(receipt!, {
+        ...source,
+        meta: { ...source.meta, session: { ...source.meta.session!, request: 5 } },
+      }),
+    ).toBe(false);
+  });
+
   it("rolls ordinary identity evidence after 128 runs without growing a restored checkpoint", async () => {
     let previous: CanonicalCheckpointSource | undefined;
     let original: CanonicalCheckpointSource | undefined;

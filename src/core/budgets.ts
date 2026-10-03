@@ -18,6 +18,9 @@
 
 export const SECOND_MS = 1_000;
 
+/** Only slow session-pin RPCs need completion logs; starts identify one that stalls. */
+export const RANGE_PIN_RPC_SLOW_MS = SECOND_MS;
+
 /** One fixed, count-only workspace inspection; never a provider call. */
 export const CREDENTIAL_INSPECTION_MAX_MS = 20 * SECOND_MS;
 

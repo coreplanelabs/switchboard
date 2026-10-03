@@ -396,7 +396,7 @@ describe("unified sessions — durable owner and retention lifecycle", () => {
     expect((await post("/runs/context-checkpoint", { storeKey, runId: "ordinary-383" })).data.source).toBeNull();
   }, 60_000);
 
-  it("commits an exact ordinary checkpoint, archives it privately, and rejects stale input seals", async () => {
+  it("commits an exact ordinary checkpoint, archives it after a broken tail, and rejects stale input seals", async () => {
     const id = unique();
     const storeKey = `runs:checkpoint-${id}`;
     const threadKey = `slack:C1:${id}`;
@@ -508,16 +508,18 @@ describe("unified sessions — durable owner and retention lifecycle", () => {
       "current",
     );
     await post("/runs/session/notepad/write", { key, gen: "g2", runId: "current", text: "seed note" });
-    await post("/runs/finish", {
-      storeKey,
-      runId: "current",
-      gen: "g2",
-      record: {
-        ...record("current", threadKey),
-        session: session(key, threadKey),
-        contextDependencies: context,
-      },
-    });
+    expect(
+      await post("/runs/finish", {
+        storeKey,
+        runId: "current",
+        gen: "g2",
+        record: {
+          ...record("current", threadKey),
+          session: { ...session(key, threadKey), range: "broken" },
+          contextDependencies: context,
+        },
+      }),
+    ).toMatchObject({ status: 200, data: { ok: true } });
     expect((await post("/runs/context-checkpoint", { storeKey, runId: "current" })).data.source).toMatchObject({
       runId: "current",
       receipt,
