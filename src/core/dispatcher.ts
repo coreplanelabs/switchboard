@@ -1823,6 +1823,21 @@ export async function dispatch(
         }
       }
       threadPr = namedReleasedPr ?? laterPr(threadPr, owner.releasedPr);
+      const releasedPr = namedReleasedPr ?? owner.releasedPr;
+      if (
+        releasedPr !== undefined &&
+        operatorEvent?.outcome === "binds" &&
+        operatorEvent.binds?.length === 1 &&
+        operatorEvent.binds[0]?.shipEntry === "continue" &&
+        (currentPrNumber === undefined || currentPrNumber === releasedPr.number) &&
+        (explicitPr === undefined || explicitPr.repo === releasedPr.repo)
+      ) {
+        await io.reply(
+          `${releasedPr.repo}#${releasedPr.number} is already merge-ready, so there is no ended unit to continue. Name a separate task to start new work. Nothing started.`,
+        );
+        await recordPendingOperator();
+        return ended;
+      }
       if (
         freshShipTask &&
         owner.kind === "pipeline" &&
@@ -1987,10 +2002,23 @@ export async function dispatch(
           await recordPendingOperator();
           return ended;
         }
-        let expectedHead = owner.unit.lastPush;
+        const savedPublication = owner.unit.publication;
+        const boundHead =
+          savedPublication !== undefined &&
+          savedPublication.repo.toLowerCase() === instance.repo.toLowerCase() &&
+          savedPublication.pr === recordedPr.number &&
+          savedPublication.headRef === owner.unit.branch &&
+          savedPublication.publicationRef === owner.unit.branch &&
+          savedPublication.baseRef === instance.base &&
+          savedPublication.owner.instanceId === owner.instanceId &&
+          savedPublication.owner.unit === owner.unit.unit &&
+          FULL_SHA.test(savedPublication.expectedHeadSha)
+            ? savedPublication.expectedHeadSha
+            : undefined;
+        let expectedHead = owner.unit.lastPush ?? boundHead;
         const recoverLegacyBinding =
           owner.unit.ending?.kind === "merge_ready" &&
-          (expectedHead === undefined || owner.unit.publication === undefined);
+          (owner.unit.lastPush === undefined || savedPublication === undefined);
         if (recoverLegacyBinding) {
           const recovered = await legacyReviewedHeadOf(runsService, instance, owner.unit, recordedPr.number);
           if (recovered === undefined || (expectedHead !== undefined && expectedHead.toLowerCase() !== recovered)) {
@@ -2044,6 +2072,17 @@ export async function dispatch(
         if (verifiedHead.sha !== expectedHead) {
           await io.reply(
             `${instance.repo}#${recordedPr.number} moved from the pipeline's expected head \`${expectedHead}\` to \`${verifiedHead.sha}\`, so continuation did not start. Nothing else ran.`,
+          );
+          await recordPendingOperator();
+          return ended;
+        }
+        if (
+          owner.unit.lastPush === undefined &&
+          boundHead !== undefined &&
+          facts.baseRef !== savedPublication?.baseRef
+        ) {
+          await io.reply(
+            `${instance.repo}#${recordedPr.number} no longer has the pipeline's verifiable base ref, so continuation did not start. Nothing else ran.`,
           );
           await recordPendingOperator();
           return ended;

@@ -47,7 +47,9 @@ export interface CanonicalHandoffRun {
  * insufficient: the caller supplies the last committed row of this run. */
 export function canonicalHandoffRunOf(
   row:
-    | (Pick<RunRecord, "id" | "userId" | "channelId" | "threadKey" | "session"> & { childHandoff?: unknown })
+    | (Pick<RunRecord, "id" | "userId" | "channelId" | "threadKey" | "session" | "provisional"> & {
+        childHandoff?: unknown;
+      })
     | LiveRunRow,
   liveWrittenThrough?: number,
   dependencies?: ContextDependencies,
@@ -57,7 +59,10 @@ export function canonicalHandoffRunOf(
   const session = facts.session;
   const requester = live ? row.meta.userId : row.userId;
   if (!session || session.range === "broken" || !requester || !facts.channelId || !facts.threadKey) return undefined;
-  const writtenThrough = session.range.to ?? liveWrittenThrough;
+  if (!live && row.provisional) return undefined;
+  // A finished run that wrote no turns has no `to`; its durable range is
+  // empty. Only a live row may borrow a committed checkpoint instead.
+  const writtenThrough = session.range.to ?? (live ? liveWrittenThrough : session.range.from - 1);
   if (writtenThrough === undefined || !Number.isSafeInteger(writtenThrough) || writtenThrough < -1) return undefined;
   return {
     runId: live ? row.runId : row.id,
