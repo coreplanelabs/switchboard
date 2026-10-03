@@ -2125,11 +2125,12 @@ function descriptiveReviewFollowUp(lines: string): boolean {
     if (/\b(?:please|also|actually|instead|should|must|need|want|will|can|could|would|and|but)\b/i.test(text))
       return false;
     if (/^[a-z]+ed[.!]?$/i.test(text)) return true; // e.g. an App's "updated"
-    const retrospective =
-      /^(?:the|a|an|this|that|it|we|i|they)\s+[^,.;:!?\p{Pd}]*?\b(?:was|were|had|has|[a-z]+ed)\b([^,.;:!?\p{Pd}]*)[.!]?$/iu.exec(
-        text,
-      );
-    return retrospective !== null && !/\b(?:deploy|merge)\b/i.test(retrospective[1] ?? "");
+    // Admit one complete status clause. A trailing request is left to the model.
+    const subject = "(?:(?:the|a|an|this|that)\\s+(?:(?!(?:was|were|had|has)\\b)[a-z]+\\s+){1,3}|(?:it|we|i|they)\\s+)";
+    return new RegExp(
+      `^${subject}(?:(?:was|were|had|has)\\s+[a-z]+ed|[a-z]+ed\\s+(?:the|a|an|this|that)\\s+[a-z]+(?:\\s+[a-z]+)?)[.!]?$`,
+      "i",
+    ).test(text);
   });
 }
 

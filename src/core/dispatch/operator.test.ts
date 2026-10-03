@@ -531,6 +531,9 @@ describe("explicit PR directives at the operator stage", () => {
     "The PR was updated — merge it",
     "The fix was pushed so deploy this change",
     "The PR was updated so merge it",
+    "The fix was pushed so add tests",
+    "The fix was pushed so ship it",
+    "The fix was pushed so release it",
   ])("asks the operator about a competing follow-up task at the early stage: %s", async (followUp) => {
     const dir = mkdtempSync(join(tmpdir(), "swb-ambiguous-review-"));
     const path = join(dir, "config.yaml");
@@ -800,6 +803,9 @@ describe("the operator is one loop with typed tools", () => {
       "The PR was updated — merge it",
       "The fix was pushed so deploy this change",
       "The PR was updated so merge it",
+      "The fix was pushed so add tests",
+      "The fix was pushed so ship it",
+      "The fix was pushed so release it",
     ].map((followUp) => `review https://github.com/acme/api/pull/7\nApp notification from App: updated\n${followUp}`),
     "> review https://github.com/acme/api/pull/7",
   ])("does not auto-bind conflicting natural review requests: %s", async (text) => {
