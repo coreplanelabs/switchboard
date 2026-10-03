@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.284.1](https://github.com/coreplanelabs/switchboard/compare/v1.284.0...v1.284.1) (2026-10-03)
+
+
+### Bug fixes
+
+* **sandbox:** expose exact-slot preservation evidence ([#2729](https://github.com/coreplanelabs/switchboard/issues/2729)) ([1ed2dcd](https://github.com/coreplanelabs/switchboard/commit/1ed2dcd9c791e4dba6297ec785f6bd54c7430316))
+
 ## [1.284.0](https://github.com/coreplanelabs/switchboard/compare/v1.283.1...v1.284.0) (2026-10-03)
 
 
