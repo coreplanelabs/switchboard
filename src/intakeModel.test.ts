@@ -73,6 +73,26 @@ describe("intakeCompletion — the intake composition root", () => {
     expect(bare.requests[0].effortWord).toBeUndefined();
   });
 
+  it("resolves the intake profile independently of the work profile", async () => {
+    const configured = completionRequests();
+    const config = parseAppConfigText(`
+extends: builtin
+organization: acme
+providers:
+  acme:
+    wire: openai-chat
+    catalog: none
+    models:
+      gate: { capField: max_output_tokens, levels: { low: quick } }
+profiles:
+  standard: { model: acme/work }
+  light: { model: acme/gate, modelSettings: { reasoning: { effort: low } } }
+`);
+    const wired = intakeCompletion(config, configured.completions, () => undefined)!;
+    await ask(wired.model);
+    expect(configured.requests[0]).toMatchObject({ model: "gate", effort: "low", effortWord: "quick" });
+  });
+
   it("production intake deps carry the completion's cap field into the verdict call", async () => {
     const captured = completionRequests();
     const completion = intakeCompletion(parseAppConfigText(yaml()), captured.completions, () => undefined)!;

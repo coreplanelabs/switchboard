@@ -1,3 +1,4 @@
+import { normalizeAgentConfig, settingsForAgent, type AgentConfiguration } from "./config/agents.js";
 import type { Grant } from "./core/budgets.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import type { TracingLogLevel } from "./core/trace/sinks.js";
@@ -328,7 +329,7 @@ export interface ReviewConfig {
   addressSeverity?: AddressSeverity;
 }
 
-export interface AppConfig {
+export interface AppConfig extends AgentConfiguration {
   /**
    * The GitHub organization (or user) this installation serves — the account
    * its GitHub App is installed on. Required: it names the shared memory scope
@@ -341,8 +342,8 @@ export interface AppConfig {
     agent: string;
     /** default model per agent, e.g. { general: "<provider>/<model>" } */
     models: Record<string, string>;
-    /** default effort per agent, e.g. { coding: "medium" }; unset → the agent
-     *  definition's effort, else the provider's default */
+    /** Legacy input and runtime projection of the agent DSL. Unset effort
+     *  leaves the provider's default. */
     efforts?: Record<string, Effort>;
     /** The installation's verbosity (docs/reference/specs/routing-and-config.md
      *  item 28); unset → `quiet`. A channel's, a user's or a request's word wins. */
@@ -838,7 +839,7 @@ export function overridesBackingFor(
 
 /** Parse + validate config YAML text; throws naming the first fatal finding. */
 export function parseAppConfigText(text: string): AppConfig {
-  const config = YAML.parse(text) as AppConfig;
+  const config = normalizeAgentConfig(YAML.parse(text));
   validateConfig(config);
   return config;
 }
@@ -1225,11 +1226,10 @@ export class ConfigStore {
       ch.model ??
       us.models?.[agentName] ??
       ch.models?.[agentName] ??
-      this.config.defaults.models[agentName] ??
-      this.config.defaults.models["general"];
+      settingsForAgent(this.config, agentName).model;
 
     if (!modelRef) {
-      throw new Error(`No model configured for agent "${agentName}" — set defaults.models.${agentName} in config.yaml`);
+      throw new Error(`No model configured for agent "${agentName}" — set agents.${agentName}.model in config.yaml`);
     }
 
     const effort =
@@ -1238,7 +1238,7 @@ export class ConfigStore {
       ch.effort ??
       us.efforts?.[agentName] ??
       ch.efforts?.[agentName] ??
-      this.config.defaults.efforts?.[agentName];
+      settingsForAgent(this.config, agentName).effort;
 
     const harness = this.harnessFor(agentName, ch, us);
 
@@ -1564,7 +1564,9 @@ export class ConfigStore {
         ...(this.config.harness ? { harness: this.config.harness } : {}),
       },
       installationEfforts: {
-        ...(this.config.defaults.efforts?.general ? { operator: this.config.defaults.efforts.general } : {}),
+        ...(settingsForAgent(this.config, "operator").effort
+          ? { operator: settingsForAgent(this.config, "operator").effort }
+          : {}),
         ...(this.config.intake?.effort ? { intake: this.config.intake.effort } : {}),
         ...(this.config.memory?.effort ? { memory: this.config.memory.effort } : {}),
       },

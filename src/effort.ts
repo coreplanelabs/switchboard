@@ -2,8 +2,8 @@
 // `output_config.effort`; skipped for models without support). A first-class
 // config dimension resolved through the SAME layers as the model ref
 // (docs/reference/specs/routing-and-config.md item 2): request directive > thread-sticky
-// > user scope > channel scope > defaults > the agent definition > the
-// provider's own default. Lower effort = much faster turns; the wall clock is
+// > user scope > channel scope > installation settings extending the shipped
+// profiles > the provider's own default. Lower effort = much faster turns; the wall clock is
 // the real budget, so effort is what decides how much of it goes to thinking.
 
 export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;

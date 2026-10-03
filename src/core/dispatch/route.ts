@@ -158,8 +158,8 @@ export interface RoutablePreset {
  *  and the conductor, which starts other runs — is neither shown as a row nor
  *  accepted as a single route. The conductor is reached through the compound
  *  form alone (`CompoundOffer`), never as a plain preset. */
-export function routablePresets(): RoutablePreset[] {
-  return Object.values(AGENTS)
+export function routablePresets(agents = AGENTS): RoutablePreset[] {
+  return Object.values(agents)
     .filter((a) => a.routable !== false)
     .map(({ name, description, machine, identity, maxMinutes }) => ({
       name,

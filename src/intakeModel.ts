@@ -2,6 +2,7 @@
 // verdict model and `intake.effort` together so the effort decision cannot be
 // lost between config and the completion the gate receives.
 
+import { settingsForAgent } from "./config/agents.js";
 import { intakeModelRef, type AppConfig } from "./config.js";
 import { providerStructuredModel, type RouteModel } from "./core/dispatch/route.js";
 import { turnEffort } from "./core/dispatch/turnEffort.js";
@@ -42,7 +43,7 @@ export function intakeCompletion(
 
   const ref = parseModelRef(modelRef);
   const card = resolveModelCard(modelRef, config.providers, installedModelRegistry);
-  const effort = turnEffort(modelRef, config.intake?.effort, config.providers);
+  const effort = turnEffort(modelRef, settingsForAgent(config, "intake").effort, config.providers);
   if (effort.note) log(`[intake] effort: ${effort.note}`);
   return {
     modelRef,

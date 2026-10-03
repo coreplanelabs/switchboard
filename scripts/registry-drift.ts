@@ -9,18 +9,14 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import YAML from "yaml";
+import { parseAppConfigText } from "../src/config.js";
 import { configuredModelRefs, registryDrift } from "../src/core/commands/providers.js";
 import { installedModelRegistry } from "../src/core/installedModelRegistry.js";
-import type { ProviderConfig } from "../src/core/provider.js";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 function main(): number {
-  const cfg = YAML.parse(readFileSync(join(ROOT, "config", "config.example.yaml"), "utf8")) as {
-    providers?: Record<string, ProviderConfig>;
-    defaults?: { models?: Record<string, string> };
-  };
+  const cfg = parseAppConfigText(readFileSync(join(ROOT, "config", "config.example.yaml"), "utf8"));
   const refs = configuredModelRefs(cfg);
   const lines = registryDrift(refs, cfg.providers ?? {}, installedModelRegistry);
   if (lines.length > 0) {

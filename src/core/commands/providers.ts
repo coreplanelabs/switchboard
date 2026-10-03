@@ -223,8 +223,10 @@ export const providersCheck = defineCommand({
 export function configuredModelRefs(cfg: {
   defaults?: { models?: Record<string, string> };
   providers?: Record<string, { models?: Record<string, unknown> }>;
+  agents?: Record<string, { model?: string }>;
 }): string[] {
   const refs = Object.values(cfg.defaults?.models ?? {});
+  for (const entry of Object.values(cfg.agents ?? {})) if (entry.model) refs.push(entry.model);
   for (const [name, block] of Object.entries(cfg.providers ?? {}))
     for (const id of Object.keys(block.models ?? {})) refs.push(`${name}/${id}`);
   return [...new Set(refs)];
@@ -246,6 +248,7 @@ export function registryDrift(
   for (const ref of [...new Set(refs)]) {
     const vendor = vendorOf(ref, blocks);
     const block = blocks[vendor.block];
+    if (block?.models?.[vendor.model]) continue; // explicit cards are independent of registry drift
     if (!block) continue; // an unknown block is the config validator's refusal, not registry drift
     const catalog = block.catalog ?? (registry.file(vendor.block) !== undefined ? vendor.block : "none");
     if (catalog === "none" || registry.file(catalog) === undefined) continue;

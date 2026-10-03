@@ -2,6 +2,7 @@
 // document. Every finding names the key it is about and fails the load, so a
 // typo never silently becomes "no cap", "no restriction" or "no setting".
 
+import { settingsForAgent } from "./agents.js";
 import { TRACING_LOG_LEVELS } from "../core/trace/sinks.js";
 import { EFFORT_LEVELS_HINT, isEffort } from "../effort.js";
 import { isVerbosity, VERBOSITY_LEVELS_HINT } from "../core/verbosity.js";
@@ -69,6 +70,10 @@ export const MAX_INSTRUCTIONS_LENGTH = 2000;
  *  the moment it is declared, and a key the interface does not have fails the
  *  load by name (`unknownKeys`). */
 const CONFIG_KEYS: Record<keyof AppConfig, true> = {
+  extends: true,
+  profiles: true,
+  agentDefaults: true,
+  agents: true,
   organization: true,
   providers: true,
   defaults: true,
@@ -838,13 +843,11 @@ export function defaultIntakeMode(config: AppConfig): IntakeMode {
   return config.intake?.threadReplies ?? "classify";
 }
 
-/** The verdict's model ref: `intake.model`, else
- *  `defaults.models.general`; undefined when the config names none — the gate
- *  then cannot classify and says so at its caller. The one resolver:
- *  `validateIntake` checks the card of the ref it returns, and `decideIntake`
- *  calls the same ref at runtime (`src/config.ts` re-exports it). */
+/** The verdict's model ref comes from the shared agent resolver. Legacy
+ * documents retain intake.model -> defaults.models.general. Validation and
+ * the composition root use the same ref. */
 export function intakeModelRef(config: AppConfig): string | undefined {
-  return config.intake?.model ?? config.defaults?.models?.["general"];
+  return settingsForAgent(config, "intake").model;
 }
 
 /** `intake` (docs/reference/specs/routing-and-config.md item 27): the mode is

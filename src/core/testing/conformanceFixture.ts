@@ -187,8 +187,9 @@ export const SETUP_ENV_TEMPLATE = [
   '# GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\\n...\\n-----END RSA PRIVATE KEY-----"',
   "",
 ].join("\n");
-/** `setup init`'s `config.example.yaml` stand-in: both example providers and the three default models. */
+/** `setup init`'s stand-in uses the same agent DSL as the shipped example. */
 export const SETUP_CONFIG_TEMPLATE = `
+extends: builtin
 organization: acme
 providers:
   anthropic:
@@ -200,10 +201,6 @@ providers:
     apiKeyEnv: OPENAI_API_KEY
 defaults:
   agent: general
-  models:
-    general: anthropic/general-model
-    coding: anthropic/general-model
-    review: anthropic/general-model
 execution:
   type: local
 `;

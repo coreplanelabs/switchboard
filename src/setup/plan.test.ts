@@ -77,7 +77,7 @@ describe("planInit — the files", () => {
     const config = parseAppConfigText(fileAt(plan, CONFIG_PATH).text);
     expect(config.organization).toBe("acme");
     expect(Object.keys(config.providers)).toEqual(["anthropic"]);
-    expect(config.defaults.models.general).toBe("anthropic/claude-haiku-4-5");
+    expect(config.defaults.models.general).toBe("anthropic/claude-opus-5");
     expect(plan.providers).toEqual(["anthropic"]);
     expect(plan.config).toEqual(config);
     // Everything optional is off: the example's blocks stay commented out.
@@ -114,12 +114,8 @@ describe("planInit — the files", () => {
         apiKeyEnv: "OPENAI_API_KEY",
       },
     });
-    expect(config.defaults.models).toEqual({
-      general: "openai/llama-3.3-70b",
-      coding: "openai/llama-3.3-70b",
-      review: "openai/llama-3.3-70b",
-      explore: "openai/llama-3.3-70b",
-    });
+    expect(new Set(Object.values(config.defaults.models))).toEqual(new Set(["openai/llama-3.3-70b"]));
+    expect(config.defaults.efforts).toEqual({});
     expect(parseEnv(fileAt(plan, ENV_PATH).text).OPENAI_API_KEY).toBe(OPENAI);
     expect(plan.providers).toEqual(["openai"]);
   });
@@ -148,14 +144,9 @@ describe("planInit — the files", () => {
     };
     const a = parseAppConfigText(fileAt(planned(both), CONFIG_PATH).text);
     expect(Object.keys(a.providers)).toEqual(["anthropic", "openai"]);
-    expect(a.defaults.models.general).toBe("anthropic/claude-haiku-4-5");
+    expect(a.defaults.models.general).toBe("anthropic/claude-opus-5");
     const b = parseAppConfigText(fileAt(planned({ ...both, model: "gpt-5" }), CONFIG_PATH).text);
-    expect(b.defaults.models).toEqual({
-      general: "openai/gpt-5",
-      coding: "openai/gpt-5",
-      review: "openai/gpt-5",
-      explore: "openai/gpt-5",
-    });
+    expect(new Set(Object.values(b.defaults.models))).toEqual(new Set(["openai/gpt-5"]));
   });
 
   // Feature: init.md item 3 — the example's live `openrouter` block rides into an installation only with its key.
@@ -170,7 +161,7 @@ describe("planInit — the files", () => {
       baseUrl: "https://openrouter.ai/api/v1",
       apiKeyEnv: "OPENROUTER_API_KEY",
     });
-    expect(withKey.config.defaults.models.general).toBe("anthropic/claude-haiku-4-5");
+    expect(withKey.config.defaults.models.general).toBe("anthropic/claude-opus-5");
     expect(withKey.providers).toEqual(["anthropic", "openrouter"]);
     const env = fileAt(withKey, ENV_PATH);
     expect(parseEnv(env.text).OPENROUTER_API_KEY).toBe(OPENROUTER);

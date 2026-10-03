@@ -532,7 +532,7 @@ describe("setup.init — prompts", () => {
     expect(b.written[0].text).toContain("SLACK_BOT_TOKEN=xoxb-from-prompt");
     expect(b.written[0].text).toContain("SLACK_APP_TOKEN=xapp-flag");
     expect(b.written[1].text).toContain("baseUrl: http://localhost:11434/v1");
-    expect(b.written[1].text).toContain("general: openai/llama3");
+    expect(b.written[1].text).toContain("model: openai/llama3");
     expect(res.ok && (res.value as { providers: string[] }).providers).toEqual(["openai"]);
   });
 });

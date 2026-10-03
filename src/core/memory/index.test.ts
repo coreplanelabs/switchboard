@@ -1,3 +1,4 @@
+import { settingsForAgent } from "../../config/agents.js";
 import { describe, expect, it, vi } from "vitest";
 import { parseAppConfigText } from "../../config.js";
 import { NO_GRANTS } from "../authz/types.js";
@@ -7,8 +8,71 @@ import { drainReflections, scheduleReflection } from "./index.js";
 import { InMemoryMemoryStore } from "./stores.js";
 
 describe("scheduleReflection — production completion wiring", () => {
+  it.each([
+    {
+      installation: `organization: acme
+providers: { openai: { wire: openai-responses } }
+defaults: { agent: general, models: { general: openai/gpt-6.1-sol } }
+memory: { enabled: true }`,
+      runModel: "openai/gpt-6-luna",
+      expectedModel: "gpt-6-luna",
+      format: "legacy without memory.model",
+    },
+    {
+      installation: `extends: builtin
+organization: acme
+providers: { openai: { wire: openai-responses } }
+memory: { enabled: true }`,
+      runModel: "openai/gpt-6-luna",
+      expectedModel: "gpt-6.1-sol",
+      format: "DSL without memory.model",
+    },
+    {
+      installation: `extends: builtin
+organization: acme
+providers: { openai: { wire: openai-responses } }
+agents: { memory: { model: openai/gpt-6-luna } }
+memory: { enabled: true }`,
+      runModel: "openai/gpt-6.1-sol",
+      expectedModel: "gpt-6-luna",
+      format: "DSL with agents.memory.model",
+    },
+  ])("selects the reflection model for $format", async ({ installation, runModel, expectedModel }) => {
+    const config = parseAppConfigText(installation);
+    const complete = vi.fn(async (_request: CompletionRequest) => ({
+      content: [{ type: "text" as const, text: JSON.stringify({ facts: [], summary: "" }) }],
+      stopReason: "end_turn" as const,
+    }));
+    const get = vi.fn((): Provider => ({ name: "openai", complete }));
+    scheduleReflection({
+      cfg: config.memory,
+      settings: settingsForAgent(config, "memory", runModel),
+      store: new InMemoryMemoryStore(),
+      providers: { get },
+      providerBlocks: config.providers,
+      runModelRef: runModel,
+      gate: { toolCalls: 1, historyTurns: 0, agentName: "coding" },
+      threadKey: "slack:C1:1",
+      runId: "run-1",
+      actor: { kind: "user", id: "slack:U_TEST", grants: NO_GRANTS },
+      originChannelVisibility: "public",
+      organization: "acme",
+      userId: "slack:U_TEST",
+      channelId: "slack:C1",
+      history: [],
+      request: "remember",
+      answer: "remembered",
+      context: { version: 1, status: "known", revision: 1, origins: [], slack: [], mcp: [] },
+    });
+    await drainReflections();
+    expect(get).toHaveBeenCalledExactlyOnceWith("openai");
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(complete.mock.calls[0]?.[0]).toMatchObject({ model: expectedModel });
+  });
+
   it("carries the reflection model card's cap field into the completion request", async () => {
     const config = parseAppConfigText(`
+extends: builtin
 organization: acme
 providers:
   acme:
@@ -18,13 +82,12 @@ providers:
     models:
       reflect:
         capField: max_output_tokens
-defaults:
-  agent: general
-  models:
-    general: acme/reflect
+        levels: { high: deep }
+profiles:
+  standard: { model: acme/reflect }
+  light: { model: acme/fast }
 memory:
   enabled: true
-  model: acme/reflect
 `);
     const requests: CompletionRequest[] = [];
     const provider: Provider = {
@@ -40,6 +103,7 @@ memory:
 
     scheduleReflection({
       cfg: config.memory,
+      settings: settingsForAgent(config, "memory", "acme/run-model"),
       store: new InMemoryMemoryStore(),
       providers: { get: () => provider },
       providerBlocks: config.providers,
@@ -67,6 +131,7 @@ memory:
     await drainReflections();
 
     expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({ model: "reflect", effort: "high", effortWord: "deep" });
     expect(requests[0]?.maxTokens).toBeGreaterThanOrEqual(REASONING_OUTPUT_TOKEN_ALLOWANCE + 1_024);
   });
 

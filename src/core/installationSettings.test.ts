@@ -61,6 +61,32 @@ artifacts:
 const rowsByKey = (rows: InstallationSetting[]) => new Map(rows.map((r) => [r.key, r]));
 
 describe("installationSettings", () => {
+  it("shows resolved DSL profiles and independent caller settings without exposing instructions", () => {
+    const config = parseAppConfigText(`
+extends: builtin
+organization: acme
+providers:
+  openai: { wire: openai-responses, apiKeyEnv: SECRET_API_KEY }
+agents:
+  general: { model: openai/general-only, instructions: SECRET_PROMPT }
+`);
+    const view = installationSettings(config, NO_CAPABILITIES);
+    expect(view.settings).toContainEqual(
+      expect.objectContaining({ key: "agents.general.model", value: "openai/general-only" }),
+    );
+    expect(view.settings).toContainEqual(expect.objectContaining({ key: "agents.operator.profile", value: "light" }));
+    expect(view.settings).toContainEqual(
+      expect.objectContaining({ key: "agents.operator.model", value: "openai/gpt-6-luna" }),
+    );
+    expect(view.settings).toContainEqual(
+      expect.objectContaining({ key: "agents.memory.modelSettings.reasoning.effort", value: "high" }),
+    );
+    expect(view.settings.some((row) => row.key.startsWith("defaults.models.") || row.key === "intake.effort")).toBe(
+      false,
+    );
+    expect(JSON.stringify(view)).not.toMatch(/SECRET_API_KEY|SECRET_PROMPT/);
+  });
+
   it("renders every named knob with its configured value, or the default marked as such", () => {
     const view = installationSettings(parseAppConfigText(EVERYTHING_YAML), ALL_CAPABILITIES);
     const rows = rowsByKey(view.settings);

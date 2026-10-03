@@ -34,8 +34,8 @@ const onLabel = (on: boolean | string) => (typeof on === "string" ? on : on ? "o
   <section class="grid gap-4">
     <p class="text-sm text-muted">
       The behaviour knobs of this installation's <code>config.yaml</code>, with the value in force. A running process
-      keeps the config it started with: a change here is <code>deploy config</code> and a restart. The
-      <code>defaults.*</code> rows are what a channel overrides on the Channels tab.
+      keeps the config it started with: a change here is <code>deploy config</code> and a restart. The rows marked for
+      run-time changes can be overridden per channel on the Channels tab.
     </p>
 
     <div class="overflow-x-auto rounded-lg border border-default bg-elevated">

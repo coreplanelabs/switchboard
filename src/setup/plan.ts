@@ -1,3 +1,4 @@
+import BUILTIN from "../agents/defaults.json" with { type: "json" };
 import { parseEnv } from "node:util";
 import YAML from "yaml";
 import { parseAppConfigText, type AppConfig } from "../config.js";
@@ -122,11 +123,6 @@ const OPENAI_KEY_ENV = "OPENAI_API_KEY";
 /** The example's OpenRouter block, live in `config.example.yaml`: kept only when its key is given. */
 const OPENROUTER_PROVIDER = "openrouter";
 const OPENROUTER_KEY_ENV = "OPENROUTER_API_KEY";
-/** The agents `config.example.yaml` gives a default model — every one of them
- *  moves to the endpoint's model, or an OpenAI-only installation would name a
- *  provider it does not have. */
-const DEFAULT_MODEL_AGENTS = ["general", "coding", "review", "explore"] as const;
-
 export function planInit(answers: InitAnswers, templates: InitTemplates, world: InitWorld): InitPlan {
   const problems = answerProblems(answers);
   if (problems.length > 0) return { ok: false, code: "invalid_input", problems };
@@ -295,13 +291,23 @@ function configFile(a: InitAnswers, template: string): PlannedFile {
     // the example's `openai` block declares OpenAI's own Responses wire, which
     // only api.openai.com serves — so the written block declares the wire the
     // endpoint actually speaks.
-    if (a.openaiCompatible !== "https://api.openai.com/v1")
+    if (a.openaiCompatible !== "https://api.openai.com/v1") {
       doc.setIn(["providers", OPENAI_PROVIDER, "wire"], "openai-chat");
+      doc.deleteIn(["providers", OPENAI_PROVIDER, "models"]);
+    }
     doc.setIn(["providers", OPENAI_PROVIDER, "baseUrl"], a.openaiCompatible);
     if (a.modelKey === undefined) doc.deleteIn(["providers", OPENAI_PROVIDER, "apiKeyEnv"]);
   }
-  if (a.model !== undefined)
-    for (const agent of DEFAULT_MODEL_AGENTS) doc.setIn(["defaults", "models", agent], `${OPENAI_PROVIDER}/${a.model}`);
+  if (a.model !== undefined) {
+    for (const name of ["standard", "light"]) {
+      doc.setIn(["profiles", name, "model"], `${OPENAI_PROVIDER}/${a.model}`);
+      // A compatible endpoint may not expose reasoning; leave its own default.
+      doc.setIn(["profiles", name, "modelSettings", "reasoning", "effort"], null);
+    }
+  } else if (a.anthropicKey !== undefined) {
+    doc.setIn(["profiles", "standard"], BUILTIN.profiles.anthropic);
+    doc.setIn(["profiles", "light"], BUILTIN.profiles.anthropicLight);
+  }
   // The example's header tells a reader to copy it; this file IS the copy.
   const text = doc
     .toString()

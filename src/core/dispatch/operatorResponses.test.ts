@@ -98,12 +98,12 @@ function bindReviewStream(): string {
   return events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("");
 }
 
-function configStore(): ConfigStore {
+function configStore(dsl = false): ConfigStore {
   const dir = mkdtempSync(join(tmpdir(), "swb-operator-responses-"));
   const path = join(dir, "config.yaml");
   writeFileSync(
     path,
-    `organization: acme
+    `${dsl ? "extends: builtin\nprofiles:\n  standard: { model: openai/work, modelSettings: { reasoning: { effort: low } } }\n  light: { model: openai/front-door, modelSettings: { reasoning: { effort: high } } }\n" : ""}organization: acme
 providers:
   openai:
     wire: openai-responses
@@ -111,12 +111,20 @@ providers:
     models:
       gpt-5.6-sol:
         capField: max_output_tokens
-defaults:
+      front-door:
+        capField: max_output_tokens
+        levels: { high: high }
+${
+  dsl
+    ? ""
+    : `defaults:
   agent: general
   models:
     general: openai/gpt-5.6-sol
   efforts:
     general: high
+`
+}
 `,
   );
   return new ConfigStore(path, join(dir, "overrides.json"));
@@ -140,6 +148,28 @@ function fullCatalogue() {
 }
 
 describe("the direct operator on the Responses wire", () => {
+  it("uses the independent operator profile on the actual Responses request", async () => {
+    const calls: Record<string, unknown>[] = [];
+    const config = configStore(true);
+    const completions = new PiAiProviders(config.config.providers, {
+      secrets: secretsFrom({}),
+      fetch: async (_url, init) => {
+        calls.push(JSON.parse(String(init?.body)));
+        return new Response(bindReviewStream(), { headers: { "content-type": "text/event-stream" } });
+      },
+    });
+    const { commands } = fullCatalogue();
+    const msg: IncomingMessage = {
+      channelId: "slack:CX",
+      userId: "slack:UX",
+      userName: "UX",
+      text: "review https://github.com/acme/api/pull/7",
+      threadKey: "slack:CX:1.0",
+    };
+    await operatorStage({ config, completions, commands }, { msg, mode: "on" });
+    expect(calls[0]).toMatchObject({ model: "front-door", reasoning: { effort: "high" } });
+  });
+
   it("shapes the fully authorized catalogue before Pi serializes it and binds review", async () => {
     const { commands, tools } = fullCatalogue();
     const canonical = JSON.stringify(tools);

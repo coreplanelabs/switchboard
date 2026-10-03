@@ -1,0 +1,247 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "extends": {
+      "type": "string",
+      "const": "builtin"
+    },
+    "profiles": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "extends": {
+            "type": "string",
+            "minLength": 1
+          },
+          "model": {
+            "type": "string",
+            "pattern": "^[^/\\s]+\\/[\\s\\S]+$"
+          },
+          "modelSettings": {
+            "type": "object",
+            "properties": {
+              "reasoning": {
+                "type": "object",
+                "properties": {
+                  "effort": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "low",
+                          "medium",
+                          "high",
+                          "xhigh",
+                          "max"
+                        ]
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          },
+          "harness": {
+            "type": "string",
+            "enum": [
+              "pi",
+              "opencode"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "agentDefaults": {
+      "type": "object",
+      "properties": {
+        "profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "type": "string",
+          "pattern": "^[^/\\s]+\\/[\\s\\S]+$"
+        },
+        "modelSettings": {
+          "type": "object",
+          "properties": {
+            "reasoning": {
+              "type": "object",
+              "properties": {
+                "effort": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "enum": [
+                        "low",
+                        "medium",
+                        "high",
+                        "xhigh",
+                        "max"
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "harness": {
+          "type": "string",
+          "enum": [
+            "pi",
+            "opencode"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "agents": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "profile": {
+            "type": "string",
+            "minLength": 1
+          },
+          "model": {
+            "type": "string",
+            "pattern": "^[^/\\s]+\\/[\\s\\S]+$"
+          },
+          "modelSettings": {
+            "type": "object",
+            "properties": {
+              "reasoning": {
+                "type": "object",
+                "properties": {
+                  "effort": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "low",
+                          "medium",
+                          "high",
+                          "xhigh",
+                          "max"
+                        ]
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          },
+          "harness": {
+            "type": "string",
+            "enum": [
+              "pi",
+              "opencode"
+            ]
+          },
+          "limits": {
+            "type": "object",
+            "properties": {
+              "maxTokens": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "maxMinutes": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "maxTurns": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "additionalProperties": false
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1
+          },
+          "instructions": {
+            "type": "string",
+            "minLength": 1
+          },
+          "tools": {
+            "type": "string",
+            "enum": [
+              "full",
+              "readonly",
+              "web",
+              "assistant",
+              "explore",
+              "conductor",
+              "orchestrator",
+              "none"
+            ]
+          },
+          "machine": {
+            "type": "string",
+            "enum": [
+              "none",
+              "blank",
+              "repo-cold",
+              "repo-resident"
+            ]
+          },
+          "identity": {
+            "type": "string",
+            "enum": [
+              "none",
+              "read",
+              "write"
+            ]
+          },
+          "tiers": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "fast",
+                "strong"
+              ]
+            }
+          },
+          "routable": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": true,
+  "$comment": "Generated by npm run docs:gen from src/config/agents.ts; do not edit."
+}
