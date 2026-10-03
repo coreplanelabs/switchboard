@@ -933,6 +933,32 @@ describe("pilot ready environment config", () => {
   });
 });
 
+// Feature: docs/reference/specs/installer-repair.md — trusted operator policy only.
+describe("install repair policy config", () => {
+  const declared = `\nexecution:\n  type: cloudflare\n  installRepairRepos:\n    acme/api:\n      policyVersion: npm-ci-v1\n`;
+
+  it("accepts only an explicit fixed policy for a lower-case repository", () => {
+    expect(store(YAML_FIXTURE).config.execution?.installRepairRepos).toBeUndefined();
+    expect(store(YAML_FIXTURE + declared).config.execution?.installRepairRepos).toEqual({
+      "acme/api": { policyVersion: "npm-ci-v1" },
+    });
+    for (const invalid of [
+      declared.replace("acme/api:", "Acme/api:"),
+      declared.replace("acme/api:", "../api:"),
+      declared.replace("acme/api:", "acme//api:"),
+      declared.replace("acme/api:", "acme/api/other:"),
+      declared.replace("installRepairRepos:\n    acme/api:\n      policyVersion: npm-ci-v1", "installRepairRepos: []"),
+      declared.replace("policyVersion: npm-ci-v1", "policyVersion: npm-ci-v2"),
+      declared.replace("policyVersion: npm-ci-v1", "command: npm ci"),
+      declared.replace("policyVersion: npm-ci-v1", "policyVersion: npm-ci-v1\n      env: { NODE_OPTIONS: dangerous }"),
+      declared.replace("policyVersion: npm-ci-v1", "policyVersion: npm-ci-v1\n      path: /workspace"),
+      declared.replace("      policyVersion: npm-ci-v1\n", ""),
+    ]) {
+      expect(() => store(YAML_FIXTURE + invalid).config, invalid).toThrow(/installRepairRepos/);
+    }
+  });
+});
+
 // Feature: docs/reference/specs/run-history.md — the `runHistory` section.
 describe("runHistory config", () => {
   const withRunHistory = (block: string, extra = "") => `${YAML_FIXTURE}\n${extra}\nrunHistory:\n${block}\n`;

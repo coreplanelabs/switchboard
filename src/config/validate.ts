@@ -37,6 +37,7 @@ import type { OpenCodeCompactionConfig } from "../core/harness/opencode/process.
 import { CONFIRM_CLASSES, type Boundary, type ConfirmClass } from "./profile.js";
 import { assertUrlAllowed } from "../tools/web.js";
 import { readyEnvironmentCommand, type ReadyEnvironmentRequirement } from "../execution/seedPlan.js";
+import { INSTALL_REPAIR_POLICY_VERSION } from "../execution/installRepairPolicy.js";
 import {
   isMcpServerEntry,
   MCP_HEADER_NAME_RE,
@@ -327,6 +328,7 @@ export function validateConfig(cfg: AppConfig): void {
   validateBoundaries(cfg, "config.yaml");
   validateScopeBlocks(cfg, "config.yaml");
   validateReadyPilotRepos(cfg.execution);
+  validateInstallRepairRepos(cfg.execution);
   {
     // The merge watch's static half (record 0071): the org tier's defaults.
     const problem = pullsProblem("defaults.pulls", cfg.defaults?.pulls);
@@ -408,6 +410,28 @@ function validateReadyPilotRepos(execution: AppConfig["execution"]): void {
     } catch (err) {
       throw new Error(`${where}: ${err instanceof Error ? err.message : "invalid requirement"}`, { cause: err });
     }
+  }
+}
+
+function validateInstallRepairRepos(execution: AppConfig["execution"]): void {
+  const configured = execution?.installRepairRepos;
+  if (configured === undefined) return;
+  const path = "config.yaml: execution.installRepairRepos";
+  if (typeof configured !== "object" || configured === null || Array.isArray(configured))
+    throw new Error(`${path} must map repositories to policies`);
+  if (Object.keys(configured).length > 16) throw new Error(`${path} supports at most 16 repositories`);
+  for (const [repo, policy] of Object.entries(configured)) {
+    const where = `${path}.${repo}`;
+    if (
+      !/^[a-z0-9_.-]{1,80}\/[a-z0-9_.-]{1,80}$/.test(repo) ||
+      repo.split("/").some((part) => part === "." || part === "..")
+    )
+      throw new Error(`${where}: repository names must be lower-case owner/name`);
+    if (typeof policy !== "object" || policy === null || Array.isArray(policy))
+      throw new Error(`${where}: policy must be a mapping`);
+    for (const key of unknownKeys(policy, { policyVersion: true })) throw new Error(`${where}: unknown field ${key}`);
+    if ((policy as Record<string, unknown>).policyVersion !== INSTALL_REPAIR_POLICY_VERSION)
+      throw new Error(`${where}.policyVersion must be ${INSTALL_REPAIR_POLICY_VERSION}`);
   }
 }
 

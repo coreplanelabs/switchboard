@@ -343,6 +343,12 @@ execution:
   #       kind: baseline_test
   #       policyVersion: smoke-v1
   #       timeoutMs: 30000
+  # Trusted Bot-only prerequisite for a future exact-head dependency repair.
+  # Off by default. A declaration alone never installs or bypasses readiness;
+  # no arbitrary command, environment or path may be configured here.
+  # installRepairRepos:
+  #   acme/api:
+  #     policyVersion: npm-ci-v1
 
 # Where per-conversation agent workspaces are created (local execution only).
 # Under docker compose this directory is a named volume, so checkouts survive a restart.
