@@ -34,6 +34,7 @@ import { activityOfEvents } from "./runRegistry/activity.js";
 import { pipelineOfEvents, type PipelineSummary } from "./pipelineStanding.js";
 import { parseUnitKey, unitKeyOf, type CoordinatorUnit } from "./coordinator/contract.js";
 import { assembleRunRecord } from "./dispatch/record.js";
+import { sealPausedHardStop } from "./runLedger/pausedStop.js";
 import { waitingWords } from "./plane/decide.js";
 import { NO_PRICES, runCostOf, type ModelPriceTable, type RunCost } from "./modelPricing.js";
 import type { RunUsage } from "./runUsage.js";
@@ -68,7 +69,8 @@ export type { RunActor } from "./runEvents.js";
 /** `hosted` is a ship pipeline's parent refused a soft stop (record 0060;
  *  live-view items 10 and 16): the units run elsewhere, so a soft stop would
  *  end nothing — the surfaces answer 409 naming the hard escape. */
-export type Result<T> = { ok: true; value: T } | { ok: false; error: "not_found" | "conflict" | "hosted" };
+export type Result<T> =
+  { ok: true; value: T } | { ok: false; error: "not_found" | "conflict" | "hosted" | "unavailable" };
 
 /**
  * One run as every surface sees it — live or persisted, the same shape. A
@@ -417,7 +419,7 @@ export interface LiveRunAccess {
    *  result. */
   subscribe(opts: SubscribeOptions): Subscribed | null;
   snapshot(): RunSnapshot | null;
-  requestStop(mode: StopMode): StopRequestResult;
+  requestStop(mode: StopMode, actor: RunActor): Promise<StopRequestResult | { ok: false; reason: "unavailable" }>;
 }
 
 export interface RunsService {
@@ -525,6 +527,9 @@ export interface RunsServiceDeps {
     RunLedger,
     "listLive" | "readEvents" | "requestStop" | "finish" | "planeWithdraw" | "planeQueued"
   > | null;
+  /** Only the bot that owns this generation may close its paused rows.
+   *  A CLI or another reader has no generation and only signals a stop. */
+  generation?: string;
   /** The session logs' search (session-log item 8) — the same ledger object in
    *  the bot. A process that reads history without driving runs (the CLI)
    *  hands the ledger here alone, so its run listing stays the store's. Null
@@ -1391,14 +1396,34 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       // — refused, pointing at the hard escape — and a hard stop is the
       // maintainer's escape for an orphaned pipeline: seal it, not signal it.
       const here = registry.getById(id);
+      if (here?.finished) return conflict;
       if (here && !here.finished && here.hosted) {
         if (mode === "soft") return hostedRefused;
         return sealHosted(here.id, actor);
       }
-      const res = registry.requestStopById(id, mode, actor);
-      if (res.ok) return { ok: true, value: { id, mode: res.mode, state: "stopping" } };
-      if (res.reason === "finished") return conflict;
-      if (res.reason === "hosted") return hostedRefused;
+      if (here) {
+        // A retry pause can hand off while this stop is being written.
+        // Persist before signalling the local control. If this write fails,
+        // the still-live run and its token can retry the stop.
+        if (mode === "hard" && ledger && deps.generation !== undefined && RUN_ID_PATTERN.test(id)) {
+          try {
+            if (!(await ledger.requestStop(id, mode)).ok) return { ok: false, error: "unavailable" };
+          } catch (err) {
+            warn(`[runs] local run ledger stop failed for ${id}: ${describe(err)}`);
+            return { ok: false, error: "unavailable" };
+          }
+          try {
+            await sealPausedHardStop(ledger, id, deps.generation, clock);
+          } catch (err) {
+            // Stop intent is durable. The next generation can seal this row.
+            warn(`[runs] paused run ledger finish failed for ${id}: ${describe(err)}`);
+          }
+        }
+        const res = registry.requestStopById(id, mode, actor);
+        if (res.ok) return { ok: true, value: { id, mode: res.mode, state: "stopping" } };
+        if (res.reason === "finished") return conflict;
+        if (res.reason === "hosted") return hostedRefused;
+      }
       // Live on the ledger under another generation (item 41): the stop rides the
       // row; the owner reads it on its next heartbeat. A foreign HOSTED row
       // refuses the soft stop before the ledger is written — its owner would
@@ -1410,7 +1435,18 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
             if (row?.meta.hosted) return hostedRefused;
           }
           const r = await ledger.requestStop(id, mode);
-          if (r.ok) return { ok: true, value: { id, mode, state: "stopping" } };
+          if (r.ok) {
+            if (mode === "hard" && deps.generation !== undefined) {
+              try {
+                await sealPausedHardStop(ledger, id, deps.generation, clock);
+              } catch (err) {
+                // The stop write is durable even if sealing fails; reclaim
+                // will close the row under the next generation.
+                warn(`[runs] paused run ledger finish failed for ${id}: ${describe(err)}`);
+              }
+            }
+            return { ok: true, value: { id, mode, state: "stopping" } };
+          }
         } catch (err) {
           warn(`[runs] run ledger stop failed for ${id}: ${describe(err)}`);
         }
@@ -1442,7 +1478,25 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       return {
         subscribe: (opts) => registry.subscribe(id, token, opts),
         snapshot: () => registry.snapshot(id, token),
-        requestStop: (mode) => registry.requestStop(id, token, mode),
+        requestStop: async (mode, actor) => {
+          // The token is the authority. Once it checks out, use the same
+          // durable stop path as an operator; the registry-only token path
+          // could lose a stop while a child was entering retry pause.
+          if (summary.hosted && !summary.finished) return { ok: false, reason: "hosted" };
+          const stopped = await this.stopRun(id, mode, actor);
+          if (stopped.ok) return { ok: true, mode: stopped.value.mode };
+          return {
+            ok: false,
+            reason:
+              stopped.error === "conflict"
+                ? "finished"
+                : stopped.error === "hosted"
+                  ? "hosted"
+                  : stopped.error === "unavailable"
+                    ? "unavailable"
+                    : "not-found",
+          };
+        },
       };
     },
 

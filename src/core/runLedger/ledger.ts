@@ -210,8 +210,9 @@ export interface RunLedger {
   readInbox(runId: string, afterSeq: number): Promise<InboxItem[]>;
   /** Any generation; `ownerLive` says whether the owner's lease is current. */
   requestStop(runId: string, mode: StopMode): Promise<{ ok: boolean; ownerLive?: boolean }>;
-  /** SIGTERM: mark this generation's runs for the next one. */
-  handoff(gen: string, runIds: string[]): Promise<{ marked: string[] }>;
+  /** Mark this generation's runs for the next one. A paused retry has no
+   *  local runner left; unlike a SIGTERM handoff it can be sealed here. */
+  handoff(gen: string, runIds: string[], opts?: { pausedForRetry: true }): Promise<{ marked: string[] }>;
   /** CAS `live → finishing`, taken before the reply. */
   finishing(runId: string, gen: string): Promise<FenceResult>;
   /** The finished record replaces the live rows in one transaction. Fenced by
@@ -220,7 +221,7 @@ export interface RunLedger {
    *  and a handing-off generation whose run completes in its last seconds has
    *  a true finish to record. The double-answer protection is `finishing`,
    *  which the reply path MUST take first; `finish` does not check it. */
-  finish(runId: string, gen: string, record: RunRecord): Promise<FinishResult>;
+  finish(runId: string, gen: string, record: RunRecord, opts?: { requireStoppedPause: true }): Promise<FinishResult>;
   /** The live rows go with NO record (item 42): a run reserved at admission
    *  whose dispatch ended before its prompt existed — a refusal, a failed
    *  attach — never started, so there is nothing to record and nothing to

@@ -1078,11 +1078,12 @@ describe("run control: POST /runs/:id/stop", () => {
     expect(parseRunRoute("/runs/abc/stop/")).toEqual({ id: "abc", kind: "stop" });
   });
 
-  it("soft: drives the run's control, answers JSON {stopping, mode}", () => {
+  it("soft: drives the run's control, answers JSON {stopping, mode}", async () => {
     const reg = fixedRegistry();
     const { id, token, control } = reg.create();
     const t = fakeReqRes("POST", `/runs/${id}/stop?t=${token}&mode=soft`);
     expect(liveOnlyHandler(reg)(t.req, t.res)).toBe(true);
+    await t.finished;
     expect(t.status).toBe(200);
     expect(t.headers["content-type"]).toContain("application/json");
     expect(t.headers["cache-control"]).toBe("no-store");
@@ -1107,14 +1108,108 @@ describe("run control: POST /runs/:id/stop", () => {
     expect(control.hardSignal.aborted).toBe(false);
   });
 
-  it("hard: aborts the run's hard signal immediately", () => {
+  it("hard: aborts the run's hard signal immediately", async () => {
     const reg = fixedRegistry();
     const { id, token, control } = reg.create();
     const t = fakeReqRes("POST", `/runs/${id}/stop?t=${token}&mode=hard`);
     liveOnlyHandler(reg)(t.req, t.res);
+    await t.finished;
     expect(t.status).toBe(200);
     expect(JSON.parse(t.body()).mode).toBe("hard");
     expect(control.hardSignal.aborted).toBe(true);
+  });
+
+  it("a token-gated hard stop durably seals a retry pause still in the registry", async () => {
+    const stamp = 10_000;
+    const ids = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"];
+    const reg = fixedRegistry({ genId: () => ids.shift()! });
+    const ledger = new InMemoryRunLedger(() => stamp);
+    const service = createRunsService({ registry: reg, store: null, ledger, generation: "g-SAME", clock: () => stamp });
+    const handler = liveOnlyHandler(reg, { service });
+    const meta = {
+      agent: "coding" as const,
+      channelId: "slack:C9",
+      userId: "slack:UIVY",
+      threadKey: "slack:C9:paused",
+    };
+    const before = reg.create("coding · before pause", meta);
+    expect(
+      (
+        await ledger.claim({
+          runId: before.id,
+          threadKey: meta.threadKey,
+          gen: "g-SAME",
+          leaseMs: 30_000,
+          startedAt: stamp,
+          meta,
+          card: null,
+          system: "sys",
+          tools: [],
+        })
+      ).ok,
+    ).toBe(true);
+    const first = fakeReqRes("POST", `/runs/${before.id}/stop?t=${before.token}&mode=hard`);
+    handler(first.req, first.res);
+    await first.finished;
+    expect(first.status).toBe(200);
+    expect(ledger.live.get(before.id)?.stop).toBe("hard");
+
+    const during = reg.create("coding · during pause", { ...meta, threadKey: "slack:C9:during" });
+    expect(
+      (
+        await ledger.claim({
+          runId: during.id,
+          threadKey: "slack:C9:during",
+          gen: "g-SAME",
+          leaseMs: 30_000,
+          startedAt: stamp,
+          meta: { ...meta, threadKey: "slack:C9:during" },
+          card: null,
+          system: "sys",
+          tools: [],
+        })
+      ).ok,
+    ).toBe(true);
+    await ledger.handoff("g-SAME", [during.id], { pausedForRetry: true });
+    const second = fakeReqRes("POST", `/runs/${during.id}/stop?t=${during.token}&mode=hard`);
+    handler(second.req, second.res);
+    await second.finished;
+    expect(second.status).toBe(200);
+    expect(ledger.finished.get(during.id)?.status).toBe("stopped_hard");
+  });
+
+  it("returns 503 when a token-gated hard stop cannot be recorded in the ledger", async () => {
+    const stamp = 10_000;
+    const reg = fixedRegistry({ genId: () => "33333333-3333-4333-8333-333333333333" });
+    const ledger = new InMemoryRunLedger(() => stamp);
+    const service = createRunsService({ registry: reg, store: null, ledger, generation: "g-SAME", clock: () => stamp });
+    const handler = liveOnlyHandler(reg, { service });
+    const meta = {
+      agent: "coding" as const,
+      channelId: "slack:C9",
+      userId: "slack:UIVY",
+      threadKey: "slack:C9:failed",
+    };
+    const run = reg.create("coding · failed stop", meta);
+    await ledger.claim({
+      runId: run.id,
+      threadKey: meta.threadKey,
+      gen: "g-SAME",
+      leaseMs: 30_000,
+      startedAt: stamp,
+      meta,
+      card: null,
+      system: "sys",
+      tools: [],
+    });
+    vi.spyOn(ledger, "requestStop").mockRejectedValueOnce(new Error("unavailable"));
+    const response = fakeReqRes("POST", `/runs/${run.id}/stop?t=${run.token}&mode=hard`);
+    handler(response.req, response.res);
+    await response.finished;
+    expect(response.status).toBe(503);
+    expect(ledger.live.get(run.id)?.stop).toBeNull();
+    expect(run.control.requested).toBeUndefined();
+    expect(run.control.hardSignal.aborted).toBe(false);
   });
 
   it("400s a missing or unknown mode without touching the run", () => {
@@ -1147,18 +1242,19 @@ describe("run control: POST /runs/:id/stop", () => {
     expect(control.hardSignal.aborted).toBe(false);
   });
 
-  it("409s a stop on a finished run", () => {
+  it("409s a stop on a finished run", async () => {
     const reg = fixedRegistry();
     const { id, token } = reg.create();
     reg.finish(id);
     const t = fakeReqRes("POST", `/runs/${id}/stop?t=${token}&mode=soft`);
     liveOnlyHandler(reg)(t.req, t.res);
+    await t.finished;
     expect(t.status).toBe(409);
   });
 
   // Feature: record 0060 (live-view items 10 and 16) — a hosted ship parent has
   // no run loop observing its control: the capability token stops nothing on it.
-  it("409s both modes on a hosted run through the token route, control untouched", () => {
+  it("409s both modes on a hosted run through the token route, control untouched", async () => {
     const reg = fixedRegistry();
     const { id, token, control } = reg.create("ship · acme/api", {
       agent: "ship",
@@ -1171,6 +1267,7 @@ describe("run control: POST /runs/:id/stop", () => {
     for (const mode of ["soft", "hard"]) {
       const t = fakeReqRes("POST", `/runs/${id}/stop?t=${token}&mode=${mode}`);
       handler(t.req, t.res);
+      await t.finished;
       expect(t.status).toBe(409);
       expect(t.body()).toContain("is a pipeline; its units run in their own threads");
     }
@@ -1738,16 +1835,18 @@ describe("live view on RunsService: history pages + index toggle", () => {
       expect(run.control.requested).toBeUndefined();
     });
 
-    it("a valid token still stops a live run (200) and 409s a finished one — the token path is unchanged", () => {
+    it("a valid token still stops a live run (200) and 409s a finished one — the token path is unchanged", async () => {
       const h = harness();
       const run = h.registry.create();
       const ok = fakeReqRes("POST", `/runs/${run.id}/stop?t=${run.token}&mode=soft`);
       h.handler(ok.req, ok.res);
+      await done(ok);
       expect(ok.status).toBe(200);
       expect(JSON.parse(ok.body())).toEqual({ id: run.id, mode: "soft", state: "stopping" });
       h.registry.finish(run.id);
       const fin = fakeReqRes("POST", `/runs/${run.id}/stop?t=${run.token}&mode=soft`);
       h.handler(fin.req, fin.res);
+      await done(fin);
       expect(fin.status).toBe(409);
     });
   });

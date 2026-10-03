@@ -5,6 +5,7 @@ import type { RunRecord } from "../runRecord.js";
 import { createRunHistoryWriter } from "../runHistoryWriter.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "../runStoreWorker.js";
 import { InMemoryRunLedger } from "./inMemory.js";
+import { sealPausedHardStop } from "./pausedStop.js";
 import type { RunLedger } from "./ledger.js";
 import { FollowUpInbox } from "../threadAdmission.js";
 import { GEN_PATTERN, TRANSCRIPT_PART_BYTES, type IntakeReceipt } from "./types.js";
@@ -2144,6 +2145,73 @@ describe("finishing and finish", () => {
     const reclaimed = await ledger.reclaim("gen-next", 10_000, 30_000);
     expect(reclaimed.map((r) => r.row.runId)).toEqual(["r1"]);
     expect(reclaimed[0]?.row.state.binding).toEqual(binding);
+  });
+
+  it("seals a hard stop that lands before the retry pause hands off", async () => {
+    const { ledger, wt } = harness();
+    const run = (await openRun(wt, openReq()))!;
+    expect((await ledger.requestStop("r1", "hard")).ok).toBe(true);
+    expect(await run.pauseForRetry()).toBe(true);
+    expect(run.pauseStopped).toBe(true);
+    expect(ledger.live.has("r1")).toBe(false);
+    expect(ledger.finished.get("r1")?.status).toBe("stopped_hard");
+    expect(await ledger.reclaim("gen-next", 10_000, 30_000)).toEqual([]);
+  });
+
+  it("does not retain a retry pause already sealed by a concurrent stop", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const ledger = overriding(inner, {
+      handoff: async (gen, ids, opts) => {
+        const marked = await inner.handoff(gen, ids, opts);
+        await inner.requestStop("r1", "hard");
+        expect(await sealPausedHardStop(inner, "r1", gen, () => 10_000)).toBe("sealed");
+        return marked;
+      },
+    });
+    const { wt } = harness({ ledger });
+    const run = (await openRun(wt, openReq()))!;
+    expect(await run.pauseForRetry()).toBe(true);
+    expect(run.pauseStopped).toBe(false);
+    expect(run.pauseRetained).toBe(false);
+    expect(inner.finished.get("r1")?.status).toBe("stopped_hard");
+  });
+
+  it("confirms row ownership after a concurrent finish fences the pause-side seal", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const ledger = overriding(inner, {
+      finish: async (id, gen, record, opts) => {
+        expect((await inner.finish(id, gen, record, opts)).ok).toBe(true);
+        return { ok: false, reason: "fenced" };
+      },
+    });
+    const { wt } = harness({ ledger });
+    const run = (await openRun(wt, openReq()))!;
+    await inner.requestStop("r1", "hard");
+    expect(await run.pauseForRetry()).toBe(true);
+    expect(run.pauseStopped).toBe(false);
+    expect(run.pauseRetained).toBe(false);
+    expect(inner.finished.get("r1")?.status).toBe("stopped_hard");
+  });
+
+  it("does not infer a retained pause when its seal read fails after another stop closed the row", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    let raced = false;
+    const ledger = overriding(inner, {
+      listLive: async () => {
+        if (!raced && inner.live.get("r1")?.phase === "handoff") {
+          raced = true;
+          await inner.requestStop("r1", "hard");
+          expect(await sealPausedHardStop(inner, "r1", "gen-A", () => 10_000)).toBe("sealed");
+          throw new Error("read unavailable");
+        }
+        return inner.listLive();
+      },
+    });
+    const { wt } = harness({ ledger });
+    const run = (await openRun(wt, openReq()))!;
+    expect(await run.pauseForRetry()).toBe(true);
+    expect(run.pauseRetained).toBe(false);
+    expect(inner.finished.get("r1")?.status).toBe("stopped_hard");
   });
 
   it("the step record carries the inbox seq the run has consumed (run-history item 40); pushInbox hands back the ledger's seq for a live run — undefined, with a warning, when the ledger refuses or fails", async () => {

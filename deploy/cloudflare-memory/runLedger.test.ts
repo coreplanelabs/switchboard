@@ -806,6 +806,35 @@ describe("run ledger — steps, events, inbox, state (items 30–31)", () => {
 });
 
 describe("run ledger — finishing, finish, handoff, reclaim (items 31, 33)", () => {
+  it("guards a paused same-generation hard-stop seal and removes its durable owner once", async () => {
+    const key = storeKey();
+    const id = "paused-child";
+    const threadKey = "slack:C1:paused-child";
+    await post(
+      "/runs/claim",
+      claimBody(key, id, threadKey, "g1", {
+        state: { binding: { backend: "resident", workspace: "/workspace/kept" } },
+      }),
+    );
+    const stopRecord = { ...record(id, threadKey), status: "stopped_hard" as const };
+    const finish = (gen: string) =>
+      post("/runs/finish", { storeKey: key, runId: id, gen, record: stopRecord, requireStoppedPause: true });
+    expect((await finish("g1")).status).toBe(409); // live owner cannot be mistaken for a paused one
+    expect(
+      (await post("/runs/handoff", { storeKey: key, gen: "g1", runIds: [id], pausedForRetry: true })).data,
+    ).toMatchObject({ marked: [id] });
+    expect((await finish("g2")).status).toBe(409); // different generation cannot seal it
+    expect((await finish("g1")).status).toBe(409); // not stopped yet
+    expect((await post("/runs/stop", { storeKey: key, runId: id, mode: "hard" })).status).toBe(200);
+    expect((await finish("g1")).data).toMatchObject({ ok: true, stored: true });
+    expect((await finish("g1")).status).toBe(409); // no duplicate finish/event
+    expect((await post("/runs/live", { storeKey: key })).data.runs).toEqual([]);
+    expect((await post("/runs/summary", { storeKey: key, id })).data.summary).toMatchObject({ status: "stopped_hard" });
+    expect(
+      (await post("/runs/reclaim", { storeKey: key, gen: "g2", now: Date.now(), leaseMs: LEASE_MS })).data.runs,
+    ).toEqual([]);
+  });
+
   it("finishing is a CAS taken once; finish writes the finished record and removes every live row in one step; the record then lists as finished", async () => {
     const key = storeKey();
     await post("/runs/claim", claimBody(key, "r1", "slack:C1:1.0"));
