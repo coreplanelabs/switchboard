@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { MCP_PROTOCOL_VERSION, StreamableHttpMcpClient } from "../../src/mcp/client.js";
-import { sourceReadContract } from "../../src/mcp/sourceReadProtocol.js";
+import { sourceReadContract, sourceReadResponseSchema } from "../../src/mcp/sourceReadProtocol.js";
 import source, { AcceptanceActions, READ_TOOL, type Env } from "./worker.js";
 
 // A storage-backed fake retains entries across Durable Object reconstruction.
@@ -246,17 +246,178 @@ describe("controlled read source", () => {
     const actionId = crypto.randomUUID();
     expect((await f.call(session, "execute", "quick", actionId)).body.result?.structuredContent).toMatchObject({
       status: "unknown",
-      reason: "pending",
+      reason: "receipt_unavailable",
     });
     f.restart();
     expect((await f.call(session, "inspect", "quick", actionId)).body.result?.structuredContent).toMatchObject({
       status: "unknown",
-      reason: "pending",
+      reason: "receipt_unavailable",
     });
     f.env.SOURCE_RESOURCE_SCOPE = "slow";
     expect((await f.call(session, "inspect", "quick", actionId)).body.result?.structuredContent).toMatchObject({
       status: "refused",
       reason: "unauthorized",
     });
+  });
+
+  it("retires an unverifiable slow read without repeating its alarm", async () => {
+    vi.useFakeTimers();
+    try {
+      const f = fixture();
+      const session = await f.session();
+      const actionId = crypto.randomUUID();
+      await f.storage.put("fixture:slow", "tampered");
+      void f.call(session, "execute", "slow", actionId);
+      for (let i = 0; i < 50 && !(await f.storage.get(`action:${actionId}`)); i++) await vi.advanceTimersByTimeAsync(1);
+      await vi.advanceTimersByTimeAsync(36_000);
+      await f.alarm();
+      expect(await f.storage.get("pending")).toEqual([]);
+      expect(await f.storage.get(`action:${actionId}`)).toMatchObject({ stage: "unknown" });
+      expect((await f.call(session, "inspect", "slow", actionId)).body.result?.structuredContent).toMatchObject({
+        status: "unknown",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retires a pending read after the bounded storage retry window", async () => {
+    vi.useFakeTimers();
+    try {
+      const f = fixture();
+      const session = await f.session();
+      const actionId = crypto.randomUUID();
+      void f.call(session, "execute", "slow", actionId);
+      for (let i = 0; i < 50 && !(await f.storage.get(`action:${actionId}`)); i++) await vi.advanceTimersByTimeAsync(1);
+      const put = f.storage.put;
+      f.storage.put = async (key, value) => {
+        if (key === `action:${actionId}`) throw new Error("temporary storage error");
+        return put(key, value);
+      };
+      await vi.advanceTimersByTimeAsync(36_000);
+      await f.alarm();
+      expect(await f.storage.get("pending")).toEqual([actionId]);
+      await vi.advanceTimersByTimeAsync(61_000);
+      await f.alarm();
+      expect(await f.storage.get("pending")).toEqual([]);
+      expect((await f.call(session, "inspect", "slow", actionId)).body.result?.structuredContent).toMatchObject({
+        status: "unknown",
+        reason: "receipt_unavailable",
+      });
+      const diag = await source.fetch(
+        new Request(`https://source.invalid/diagnostic/${actionId}`, {
+          headers: { authorization: `Bearer ${f.credential}`, "mcp-session-id": session },
+        }),
+        f.env,
+      );
+      expect(await diag.json()).toMatchObject({ stage: "unknown" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns a valid unknown receipt when a quick result cannot be stored", async () => {
+    const f = fixture();
+    const session = await f.session();
+    const actionId = crypto.randomUUID();
+    const put = f.storage.put;
+    f.storage.put = async (key, value) => {
+      if (key === `action:${actionId}`) throw new Error("temporary storage error");
+      return put(key, value);
+    };
+    const result = (await f.call(session, "execute", "quick", actionId)).body.result?.structuredContent;
+    expect(sourceReadResponseSchema.parse(result)).toMatchObject({ status: "unknown", reason: "receipt_unavailable" });
+    expect((await f.call(session, "inspect", "quick", actionId)).body.result?.structuredContent).toMatchObject({
+      status: "unknown",
+      reason: "receipt_unavailable",
+    });
+  });
+
+  it("does not verify a slow fixture after its retry deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const f = fixture();
+      const session = await f.session();
+      const actionId = crypto.randomUUID();
+      void f.call(session, "execute", "slow", actionId);
+      for (let i = 0; i < 50 && !(await f.storage.get(`action:${actionId}`)); i++) await vi.advanceTimersByTimeAsync(1);
+      await vi.advanceTimersByTimeAsync(36_000 + 61_000);
+      await f.alarm();
+      expect(await f.storage.get("fixture:slow")).toBeUndefined();
+      expect(await f.storage.get("pending")).toEqual([]);
+      expect((await f.call(session, "inspect", "slow", actionId)).body.result?.structuredContent).toMatchObject({
+        status: "unknown",
+        reason: "receipt_unavailable",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not accept a read that finishes after the retry deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const f = fixture();
+      const session = await f.session();
+      const actionId = crypto.randomUUID();
+      void f.call(session, "execute", "slow", actionId);
+      for (let i = 0; i < 50 && !(await f.storage.get(`action:${actionId}`)); i++) await vi.advanceTimersByTimeAsync(1);
+      const get = f.storage.get;
+      let finishRead: (() => void) | undefined;
+      let held = false;
+      f.storage.get = async (key) => {
+        if (key === "fixture:slow" && !held) {
+          held = true;
+          await new Promise<void>((resolve) => (finishRead = resolve));
+        }
+        return get(key);
+      };
+      await vi.advanceTimersByTimeAsync(36_000);
+      const alarm = f.alarm();
+      for (let i = 0; i < 50 && !finishRead; i++) await vi.advanceTimersByTimeAsync(1);
+      expect(finishRead).toBeTypeOf("function");
+      await vi.advanceTimersByTimeAsync(61_000);
+      finishRead!();
+      await alarm;
+      expect(await f.storage.get("fixture:slow")).toBeUndefined();
+      expect((await f.call(session, "inspect", "slow", actionId)).body.result?.structuredContent).toMatchObject({
+        status: "unknown",
+        reason: "receipt_unavailable",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not persist success when bootstrap readback arrives after the deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const f = fixture();
+      const session = await f.session();
+      const actionId = crypto.randomUUID();
+      void f.call(session, "execute", "slow", actionId);
+      for (let i = 0; i < 50 && !(await f.storage.get(`action:${actionId}`)); i++) await vi.advanceTimersByTimeAsync(1);
+      const get = f.storage.get;
+      let reads = 0;
+      let finishRead: (() => void) | undefined;
+      f.storage.get = async (key) => {
+        if (key === "fixture:slow" && ++reads === 2) await new Promise<void>((resolve) => (finishRead = resolve));
+        return get(key);
+      };
+      await vi.advanceTimersByTimeAsync(36_000);
+      const alarm = f.alarm();
+      for (let i = 0; i < 50 && !finishRead; i++) await vi.advanceTimersByTimeAsync(1);
+      expect(finishRead).toBeTypeOf("function");
+      await vi.advanceTimersByTimeAsync(61_000);
+      finishRead!();
+      await alarm;
+      expect(await f.storage.get("fixture:slow")).toBe("fixture-slow-v1");
+      expect((await f.call(session, "inspect", "slow", actionId)).body.result?.structuredContent).toMatchObject({
+        status: "unknown",
+        reason: "receipt_unavailable",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

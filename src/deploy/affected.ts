@@ -40,6 +40,10 @@ export const INERT_RULES: readonly { rule: string; test: RegExp }[] = [
   { rule: "deploy tooling", test: /^deploy\/cloudflare\/write-build\.mjs$/ },
   { rule: "docs Worker (its own CI deploy)", test: /^deploy\/cloudflare-docs\// },
   {
+    rule: "isolated acceptance source (not a production deploy target)",
+    test: /^deploy\/cloudflare-acceptance-source\//,
+  },
+  {
     rule: "operator manifests (a new secret is a `wrangler secret put`, not a deploy)",
     test: /^deploy\/(secrets\.manifest\.json|agent-env\.jsonc|agent-env-bootstrap\.sh)$/,
   },
@@ -302,7 +306,7 @@ function canonicalJson(value: unknown): string {
 export function packageJsonChangeKind(
   before: string | undefined,
   after: string | undefined,
-  { ignoreDevDependencies = false } = {},
+  { ignoreDevDependencies = false, ignoreFixtureWorkspace = false } = {},
 ): "unchanged" | "inert-only" | "changed" {
   if (before === after) return "unchanged";
   if (before === undefined || after === undefined) return "changed";
@@ -310,8 +314,14 @@ export function packageJsonChangeKind(
     const a = JSON.parse(before) as Record<string, unknown>;
     const b = JSON.parse(after) as Record<string, unknown>;
     if (typeof a !== "object" || a === null || typeof b !== "object" || b === null) return "changed";
-    const strip = ({ version: _v, devDependencies, ...rest }: Record<string, unknown>) =>
-      ignoreDevDependencies ? rest : { ...rest, devDependencies };
+    const strip = ({ version: _v, devDependencies, workspaces, ...rest }: Record<string, unknown>) => {
+      const withoutFixture = ignoreFixtureWorkspace
+        ? (Array.isArray(workspaces) ? workspaces : []).filter((item) => item !== "deploy/cloudflare-acceptance-source")
+        : workspaces;
+      return ignoreDevDependencies
+        ? { ...rest, workspaces: withoutFixture }
+        : { ...rest, devDependencies, workspaces: withoutFixture };
+    };
     if (canonicalJson(strip(a)) !== canonicalJson(strip(b))) return "changed";
     return canonicalJson(a) === canonicalJson(b) ? "unchanged" : "inert-only";
   } catch {
@@ -481,6 +491,7 @@ export async function computeAffected(
               if (
                 packageJsonChangeKind(await probe.fileAt(baseRef, path), await readHead(path), {
                   ignoreDevDependencies,
+                  ignoreFixtureWorkspace: path === "package.json",
                 }) === "changed"
               )
                 reasons.push(path);

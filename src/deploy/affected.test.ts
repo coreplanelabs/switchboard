@@ -203,6 +203,10 @@ describe("classifyPath", () => {
       "deploy/cloudflare-resident/preflight.mjs",
       "deploy/cloudflare/write-build.mjs",
       "deploy/cloudflare-docs/wrangler.jsonc",
+      "deploy/cloudflare-acceptance-source/worker.ts",
+      "deploy/cloudflare-acceptance-source/wrangler.toml",
+      "deploy/cloudflare-acceptance-source/package.json",
+      "deploy/cloudflare-acceptance-source/tsconfig.json",
       "deploy/secrets.manifest.json",
       "deploy/agent-env.jsonc",
       "deploy/agent-env-bootstrap.sh",
@@ -462,6 +466,27 @@ describe("lockfile workspace dependencies", () => {
 });
 
 describe("package.json version bumps", () => {
+  it("ignores only the isolated fixture workspace registration for deployed artifacts", () => {
+    const base = JSON.stringify({ name: "switchboard", workspaces: ["web"], dependencies: { zod: "4" } });
+    const fixture = JSON.stringify({
+      name: "switchboard",
+      workspaces: ["web", "deploy/cloudflare-acceptance-source"],
+      dependencies: { zod: "4" },
+    });
+    expect(packageJsonChangeKind(base, fixture, { ignoreFixtureWorkspace: true })).toBe("inert-only");
+    expect(packageJsonChangeKind(base, fixture)).toBe("changed");
+    expect(
+      packageJsonChangeKind(
+        base,
+        JSON.stringify({
+          name: "switchboard",
+          workspaces: ["web", "deploy/cloudflare-acceptance-source"],
+          dependencies: { zod: "5" },
+        }),
+        { ignoreFixtureWorkspace: true },
+      ),
+    ).toBe("changed");
+  });
   it("a diff that changes only `version` is inert — release-please bumps it on every release; any other field is a change", () => {
     const base = JSON.stringify({
       name: "switchboard",
@@ -607,6 +632,42 @@ describe("computeAffected", () => {
     expect(r.selected).toEqual([]);
     expect(r.deployAll).toBe(false);
     expect(r.workers.every((w) => w.reasons.length === 0)).toBe(true);
+  });
+
+  it("the isolated acceptance source does not select production Workers", async () => {
+    const head = withChanges({
+      "deploy/cloudflare-acceptance-source/worker.ts": "fixture 2\n",
+      "deploy/cloudflare-acceptance-source/wrangler.toml": "name = 'fixture'\n",
+      "deploy/cloudflare-acceptance-source/package.json": "{}\n",
+    });
+    const { probe } = fakeProbe({ trees: { [HEAD]: head, [LIVE]: BASE_TREE }, live: allLive(LIVE), ancestors: [LIVE] });
+    const result = await computeAffected(probe);
+    expect(result.unclassified).toEqual([]);
+    expect(result.selected).toEqual([]);
+    const rootRegistered = withChanges({
+      ...head,
+      "package.json": JSON.stringify({
+        ...JSON.parse(BASE_TREE["package.json"]),
+        workspaces: ["deploy/cloudflare-acceptance-source"],
+      }),
+      "package-lock.json": JSON.stringify({
+        ...JSON.parse(BASE_TREE["package-lock.json"]),
+        packages: {
+          ...JSON.parse(BASE_TREE["package-lock.json"]).packages,
+          "deploy/cloudflare-acceptance-source": { name: "switchboard-controlled-acceptance-source" },
+          "node_modules/switchboard-controlled-acceptance-source": {
+            resolved: "deploy/cloudflare-acceptance-source",
+            link: true,
+          },
+        },
+      }),
+    });
+    const registered = fakeProbe({
+      trees: { [HEAD]: rootRegistered, [LIVE]: BASE_TREE },
+      live: allLive(LIVE),
+      ancestors: [LIVE],
+    });
+    expect((await computeAffected(registered.probe)).selected).toEqual([]);
   });
 
   it("an unclassified path makes every Worker unsure → the whole fleet deploys, saying why", async () => {

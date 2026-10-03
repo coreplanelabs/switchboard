@@ -1,9 +1,11 @@
 // Controlled fixture reads only. No provider API, production config or deployment is wired here.
-import { SOURCE_READ_ELIGIBILITY_MS } from "../../src/core/budgets.js";
+import { MINUTE_MS, SOURCE_READ_ELIGIBILITY_MS } from "../../src/core/budgets.js";
 import { systemClock } from "../../src/core/trace/clock.js";
 import { MCP_PROTOCOL_VERSION } from "../../src/mcp/client.js";
 const DELAY_MS = 35_000; // Beyond the client's 30 s timeout; the alarm survives its disconnect.
 const RETENTION_MS = SOURCE_READ_ELIGIBILITY_MS;
+const RETRY_WINDOW_MS = MINUTE_MS;
+const RETRY_DELAY_MS = MINUTE_MS / 12;
 const OPERATION = "acceptance.fixture.read";
 const REVISION = "1";
 const VALUES = { quick: "fixture-quick-v1", slow: "fixture-slow-v1" } as const;
@@ -79,7 +81,7 @@ type Entry = {
   enteredAt: string;
   dueAt: number;
   expiresAt: string;
-  stage: "pending" | "succeeded";
+  stage: "pending" | "succeeded" | "unknown";
   resource: Resource;
   result?: { fixture: string; verified: true };
   observedAt?: string;
@@ -119,6 +121,11 @@ export class AcceptanceActions {
   private async session(id: string) {
     return !!id && (await this.storage.get<string>(`session:${id}`)) === this.env.SOURCE_REQUESTER;
   }
+  private stage(row: Entry): Entry["stage"] {
+    if (row.stage !== "pending") return row.stage;
+    if (row.resource === "quick" || systemClock() >= row.dueAt + RETRY_WINDOW_MS) return "unknown";
+    return "pending";
+  }
   private receipt(row: Entry) {
     const binding = {
       id: row.bindingId,
@@ -132,7 +139,7 @@ export class AcceptanceActions {
     const base = { version: 1, actionId: row.actionId, operationId: OPERATION, operationRevision: REVISION, binding };
     if (systemClock() >= Date.parse(row.expiresAt))
       return { ...base, status: "refused", attempt: "possibly_dispatched", reason: "expired" };
-    if (row.stage === "succeeded" && row.result && row.observedAt)
+    if (this.stage(row) === "succeeded" && row.result && row.observedAt)
       return {
         ...base,
         status: "succeeded",
@@ -141,19 +148,33 @@ export class AcceptanceActions {
         truncation: "none",
         result: row.result,
       };
-    return { ...base, status: "unknown", attempt: "possibly_dispatched", reason: "pending" };
+    return {
+      ...base,
+      status: "unknown",
+      attempt: "possibly_dispatched",
+      reason: this.stage(row) === "pending" ? "pending" : "receipt_unavailable",
+    };
   }
-  private async verifyFixture(resource: Resource) {
+  private async verifyFixture(resource: Resource, deadline?: number) {
     const key = `fixture:${resource}`;
     // Bootstrap fixed, non-customer data; success requires an independent durable readback.
-    if ((await this.storage.get<string>(key)) === undefined) await this.storage.put(key, VALUES[resource]);
-    return (await this.storage.get<string>(key)) === VALUES[resource]
-      ? { fixture: VALUES[resource], verified: true as const }
-      : undefined;
+    const prior = await this.storage.get<string>(key);
+    if (deadline !== undefined && systemClock() >= deadline) return undefined;
+    if (prior === undefined) {
+      await this.storage.put(key, VALUES[resource]);
+      if (deadline !== undefined && systemClock() >= deadline) return undefined;
+    }
+    const readback = prior ?? (await this.storage.get<string>(key));
+    if (deadline !== undefined && systemClock() >= deadline) return undefined;
+    return readback === VALUES[resource] ? { fixture: VALUES[resource], verified: true as const } : undefined;
   }
   private async finish(row: Entry) {
-    const result = await this.verifyFixture(row.resource);
-    if (!result) return;
+    const deadline = row.resource === "slow" ? row.dueAt + RETRY_WINDOW_MS : undefined;
+    const result = await this.verifyFixture(row.resource, deadline);
+    if (!result || (row.resource === "slow" && systemClock() >= row.dueAt + RETRY_WINDOW_MS)) {
+      await this.storage.put(`action:${row.actionId}`, { ...row, stage: "unknown" } satisfies Entry);
+      return;
+    }
     await this.storage.put(`action:${row.actionId}`, {
       ...row,
       stage: "succeeded",
@@ -166,10 +187,18 @@ export class AcceptanceActions {
     for (const id of pending) {
       const row = await this.storage.get<Entry>(`action:${id}`);
       if (!row || row.stage !== "pending" || systemClock() < row.dueAt) continue;
+      if (systemClock() >= Date.parse(row.expiresAt) || this.stage(row) === "unknown") {
+        try {
+          await this.storage.put(`action:${id}`, { ...row, stage: "unknown" } satisfies Entry);
+        } catch {
+          // Reads derive the same terminal state if the write is unavailable.
+        }
+        continue;
+      }
       try {
         await this.finish(row);
       } catch {
-        /* A failed read/write is not a successful receipt; a future alarm retries. */
+        // Unknown remains unknown. Only the bounded retry window can schedule another read.
       }
     }
     await this.storage.transaction(async (tx) => {
@@ -177,11 +206,13 @@ export class AcceptanceActions {
       const current = (await tx.get<string[]>("pending")) ?? [];
       const keep: string[] = [];
       let next = Infinity;
+      const now = systemClock();
       for (const id of current) {
         const row = await tx.get<Entry>(`action:${id}`);
         if (!row || row.stage !== "pending") continue;
+        if (now >= Date.parse(row.expiresAt) || now >= row.dueAt + RETRY_WINDOW_MS) continue;
         keep.push(id);
-        next = Math.min(next, Math.max(systemClock() + 1_000, row.dueAt));
+        next = Math.min(next, Math.max(now + RETRY_DELAY_MS, row.dueAt));
       }
       await tx.put("pending", keep);
       if (keep.length) await tx.setAlarm(next);
@@ -215,7 +246,7 @@ export class AcceptanceActions {
         actionId: id,
         enteredAt: row.enteredAt,
         dueAt: new Date(row.dueAt).toISOString(),
-        stage: row.stage,
+        stage: this.stage(row),
       });
     }
     if (method !== "tools/call" || !object(msg.params) || msg.params.name !== READ_TOOL.name)
@@ -262,7 +293,14 @@ export class AcceptanceActions {
       return true;
     });
     if (!inserted) return json({ result: { content: [], structuredContent: refused("action_conflict", actionId) } });
-    if (resource.id === "quick") await this.finish(row);
+    if (resource.id === "quick") {
+      try {
+        await this.finish(row);
+      } catch {
+        // The action entry is durable; an unavailable result is inspectable
+        // and cannot be executed again under this action ID.
+      }
+    }
     return json({
       result: {
         content: [],
