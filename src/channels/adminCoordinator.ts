@@ -3115,6 +3115,52 @@ async function historicalRecoverySpend(
       const events = child?.events;
       const preparingIndex =
         events?.findIndex((event) => event.type === "run_state" && event.state === "preparing") ?? -1;
+      const waitingDeployIndex =
+        events?.findIndex((event) => event.type === "run_state" && event.state === "waiting_deploy") ?? -1;
+      const drainStartIndex =
+        events?.findIndex(
+          (event) => event.type === "span_start" && event.name === "dispatch.workspace.attach.drain-wait",
+        ) ?? -1;
+      const drainEndIndex =
+        events?.findIndex(
+          (event) =>
+            event.type === "span_end" &&
+            event.name === "dispatch.workspace.attach.drain-wait" &&
+            event.status === "error",
+        ) ?? -1;
+      const attachStartIndex =
+        events?.findIndex((event) => event.type === "span_start" && event.name === "dispatch.workspace.attach") ?? -1;
+      const attachEndIndex =
+        events?.findIndex(
+          (event) =>
+            event.type === "span_end" && event.name === "dispatch.workspace.attach" && event.status === "error",
+        ) ?? -1;
+      const refusalIndex =
+        events?.findIndex((event) => event.type === "refusal" && event.code === "setup_failed") ?? -1;
+      const attachStart = events?.[attachStartIndex];
+      const attachEnd = events?.[attachEndIndex];
+      const drainStart = events?.[drainStartIndex];
+      const drainEnd = events?.[drainEndIndex];
+      const drainWaitSetupRefusal =
+        run.liveState?.state === "waiting_deploy" &&
+        child?.liveState?.state === "waiting_deploy" &&
+        preparingIndex < 0 &&
+        attachStartIndex >= 0 &&
+        attachStartIndex < waitingDeployIndex &&
+        waitingDeployIndex < drainStartIndex &&
+        drainStartIndex < drainEndIndex &&
+        drainEndIndex < attachEndIndex &&
+        attachEndIndex < refusalIndex &&
+        attachStart?.type === "span_start" &&
+        attachEnd?.type === "span_end" &&
+        attachStart.spanId === attachEnd.spanId &&
+        drainStart?.type === "span_start" &&
+        drainEnd?.type === "span_end" &&
+        drainStart.spanId === drainEnd.spanId &&
+        events?.slice(waitingDeployIndex + 1).every((event) => event.type !== "run_state") === true &&
+        events?.[refusalIndex]?.type === "refusal" &&
+        events[refusalIndex].cause === "system";
+      const setupBoundaryIndex = drainWaitSetupRefusal ? waitingDeployIndex : preparingIndex;
       if (
         child === undefined ||
         child.id !== run.id ||
@@ -3127,9 +3173,9 @@ async function historicalRecoverySpend(
         child.startedAt !== run.startedAt ||
         child.finishedAt !== run.finishedAt ||
         run.status !== "failed" ||
-        run.liveState?.state !== "preparing" ||
+        (run.liveState?.state !== "preparing" && !drainWaitSetupRefusal) ||
         child.status !== "failed" ||
-        child.liveState?.state !== "preparing" ||
+        (child.liveState?.state !== "preparing" && !drainWaitSetupRefusal) ||
         child.truncated !== false ||
         child.eventCount !== run.eventCount ||
         child.storedEventCount !== run.eventCount ||
@@ -3151,7 +3197,7 @@ async function historicalRecoverySpend(
         child.doorPublicationPending !== undefined ||
         child.lease !== undefined ||
         events.filter((event) => event.type === "refusal" && event.code === "setup_failed").length !== 1 ||
-        preparingIndex < 0 ||
+        setupBoundaryIndex < 0 ||
         events.some(
           (event, index) =>
             event.seq !== index + 1 ||
@@ -3161,7 +3207,7 @@ async function historicalRecoverySpend(
               event.type === "coordinator_tag" ||
               // The dispatcher records prior-thread context before setup; later
               // narrative events cannot attest to a pre-model refusal.
-              (event.type === "context" && typeof event.text === "string" && index < preparingIndex) ||
+              (event.type === "context" && typeof event.text === "string" && index < setupBoundaryIndex) ||
               (event.type === "refusal" && event.code === "setup_failed") ||
               (event.type === "run_state" &&
                 ["admitted", "waiting_deploy", "waiting_repository", "falling_back", "preparing"].includes(

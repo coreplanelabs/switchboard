@@ -13607,6 +13607,104 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     ending: { kind: "aborted", report: "findings setup failed", at: NOW - minutesToMs(10) },
   });
 
+  const failedDuringDrainWait = (over: Partial<RunRecord> = {}): RunRecord => {
+    const source: RunEvent[] = [
+      { type: "input", messageId: "m1", text: "address findings" },
+      { type: "run_meta", agent: "coding" },
+      { type: "run_state", state: "admitted", since: NOW - minutesToMs(20), bound: NOW },
+      { type: "span_start", spanId: "attach", name: "dispatch.workspace.attach" },
+      { type: "run_state", state: "waiting_deploy", since: NOW - minutesToMs(19), bound: NOW },
+      { type: "span_start", spanId: "drain", name: "dispatch.workspace.attach.drain-wait" },
+      {
+        type: "span_end",
+        spanId: "drain",
+        name: "dispatch.workspace.attach.drain-wait",
+        startedAt: NOW - minutesToMs(19),
+        durationMs: 1,
+        status: "error",
+      },
+      {
+        type: "span_end",
+        spanId: "attach",
+        name: "dispatch.workspace.attach",
+        startedAt: NOW - minutesToMs(19),
+        durationMs: 1,
+        status: "error",
+      },
+      { type: "refusal", code: "setup_failed", cause: "system", text: "workspace unavailable" },
+    ];
+    const events = source.map((event, index) => ({ ...event, seq: index + 1 }));
+    return failedBeforeWork({
+      liveState: { state: "waiting_deploy", since: NOW - minutesToMs(19), bound: NOW },
+      events,
+      eventCount: events.length,
+      storedEventCount: events.length,
+      ...over,
+    });
+  };
+
+  it("resumes original findings after a complete drain-wait setup refusal", async () => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+    await h.instances.put({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 0.5 } });
+    const row = setupRefusalRow();
+    row.lastPush = undefined;
+    await h.instances.putUnits([row]);
+    await h.store.put(reviewRecord());
+    await h.store.put(failedDuringDrainWait());
+
+    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: "recovery-run-original-review" } });
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    expect(claimed?.recovery).toMatchObject({ kind: "findings", round: 1, expectedHeadSha: HEAD });
+    expect(claimed?.lastPush).toBeUndefined();
+    expect(claimed?.publication).toEqual(publication);
+    expect(h.recoveries).toHaveLength(1);
+    expect(h.dispatched).toEqual([]);
+  });
+
+  it.each([
+    "missing failed drain",
+    "missing failed attach",
+    "mismatched drain span",
+    "preparing state",
+    "tool activity",
+    "missing refusal",
+  ])("refuses incomplete drain-wait no-work evidence: %s", async (scenario) => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+    await h.instances.put(recoveryInstance());
+    const row = setupRefusalRow();
+    await h.instances.putUnits([row]);
+    await h.store.put(reviewRecord());
+    const candidate = failedDuringDrainWait();
+    const events = candidate.events.filter((event) =>
+      scenario === "missing refusal" ? event.type !== "refusal" : true,
+    );
+    if (scenario === "missing failed drain")
+      events.splice(
+        events.findIndex((event) => event.type === "span_end" && event.spanId === "drain"),
+        1,
+      );
+    if (scenario === "missing failed attach")
+      events.splice(
+        events.findIndex((event) => event.type === "span_end" && event.spanId === "attach"),
+        1,
+      );
+    if (scenario === "mismatched drain span") {
+      const ended = events.find((event) => event.type === "span_end" && event.spanId === "drain");
+      if (ended?.type === "span_end") ended.spanId = "other-drain";
+    }
+    if (scenario === "preparing state")
+      events.push({ type: "run_state", state: "preparing", since: NOW - minutesToMs(18), bound: NOW });
+    if (scenario === "tool activity") events.push({ type: "tool_call", tool: "bash", summary: "git status" });
+    candidate.events = events.map((event, index) => ({ ...event, seq: index + 1 }));
+    candidate.eventCount = candidate.events.length;
+    candidate.storedEventCount = candidate.events.length;
+    await h.store.put(candidate);
+
+    expect((await callRecovery(h)).status).toBe(409);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+    expect(h.recoveries).toEqual([]);
+  });
+
   it("accounts a complete server setup refusal as $0 and resumes the original same-head findings without work credit", async () => {
     const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
     await h.instances.put({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 0.5 } });
