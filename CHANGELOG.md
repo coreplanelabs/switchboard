@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.284.4](https://github.com/coreplanelabs/switchboard/compare/v1.284.3...v1.284.4) (2026-10-03)
+
+
+### Bug fixes
+
+* **workers:** preserve old-domain redirect on docs deploy ([#2738](https://github.com/coreplanelabs/switchboard/issues/2738)) ([1ebb1e0](https://github.com/coreplanelabs/switchboard/commit/1ebb1e02f14ef89fd5cb9a761e570812326e3fae))
+
 ## [1.284.3](https://github.com/coreplanelabs/switchboard/compare/v1.284.2...v1.284.3) (2026-10-03)
 
 
