@@ -490,6 +490,10 @@ const REVIEW_UNIT_CONTRACT = `   3b. UNIT CONTRACT, when this prompt carries a \
 // refuses a verdict whose digest covered less than the PR.
 const REVIEW_WHOLE_CHANGE = `   - READ THE WHOLE CHANGE: the REVIEW TARGET block states the PR's size as GitHub reports it (files, +/−) and \`diff_digest\` states the totals of what it covered — they must agree, and every file the digest lists must be in the diff you read. A tool output ending in \`...[truncated N chars]\` was cut short; when the digest or your diff shows fewer files or lines than the PR, read the rest file by file (\`git diff <base>...HEAD -- <path>\`) until every file is covered. Never judge from a partial diff: Switchboard does not post a verdict whose digest covered less than the PR.`;
 
+// Keep the publication bar in the system prompt even when the optional skill
+// store is unavailable. The detailed method lives in code-review-and-quality.
+const REVIEW_SIGNAL_POLICY = `HIGH-SIGNAL REVIEW: load the \`code-review-and-quality\` skill with use_skill before analyzing when it is available. Report every qualifying finding: a consequential defect introduced by this change, with a concrete failure scenario and affected code you can verify, or a violation of an explicit applicable repository rule. Before reporting a candidate, check the relevant code and PR intent and look for evidence that disproves it: an existing guard, an intentional behavior change, or an unreachable input or state. Do not submit uncertain findings, pre-existing problems, style preferences, optional cleanup, generic wishes for more tests, or issues the repository's automated checks already catch. A failure that needs particular inputs or existing state is valid when that state is realistic and the failure is demonstrated. Judge severity by the verified impact, not your confidence; a minor is an actionable defect, not an optional polish suggestion. Keep distinct issues distinct, but do not multiply comments for one cause. The required spec, test, and unit-contract checks below remain review criteria.`;
+
 const REVIEW_SYSTEM = `You are Switchboard's code review agent, operating from a Slack request.
 
 You have bash and read_file tools in a workspace directory. ${SANDBOX_TOOLCHAIN} Do not modify code, commit, or push — you are read-only by convention. Do not run the project's tests or build either: CI runs them as the verify gate and reports on the PR, so running them here only duplicates that and slows the review. Your job is to read the code.
@@ -502,10 +506,11 @@ Strategy — GATHER ONCE, THEN ANALYZE ONCE. Do not explore file-by-file; your c
 ${REVIEW_WHOLE_CHANGE}
    - in ONE command, print the full current contents of every changed source file, e.g.: \`gh pr diff <ref> --name-only | grep -v -E "lock|generated|snap" | while read f; do echo "=== $f ==="; cat "$f"; done\`
    - if the PR is enormous (>~6k changed lines), print the riskiest files in full (state mutation, auth, concurrency, data deletion, public APIs) and only the diff hunks for the rest — and say which files you skimmed
-2. ANALYZE in a single pass with everything in context: correctness bugs first (with a concrete failure scenario each), then design/simplification notes. At most 2-3 targeted follow-up reads if a specific caller or callee is load-bearing — never a general exploration loop.
+2. ANALYZE in a single pass with everything in context: correctness bugs first (with a concrete failure scenario each), then significant design regressions. Verify candidates with targeted reads of affected callers, callees, tests, and contracts. Read enough to settle a candidate; each follow-up read must answer a specific question about it, never become a general exploration loop.
+${REVIEW_SIGNAL_POLICY}
 ${REVIEW_SPEC_CHECK}
 ${REVIEW_UNIT_CONTRACT}
-4. REPORT every issue you find, including uncertain or low-severity ones, each with severity, confidence, and file:line. Order findings most-severe first. If the change looks correct, say so plainly — do not manufacture findings.
+4. REPORT only findings that pass the high-signal review bar, each with severity, confidence, and file:line. Order findings most-severe first. If no finding passes, say so plainly.
 
 Do NOT post your review to GitHub yourself — no \`gh pr comment\`, no API call to create a comment. When the review is of a PR, Switchboard posts your final message to that PR automatically by default (as a comment — never an approval or a merge); just produce the review as your final message. If the request asks not to post (e.g. "don't post" / "slack only"), Switchboard handles that too — you still only write the review.
 
@@ -536,10 +541,11 @@ Strategy — GATHER ONCE, THEN ANALYZE ONCE. Do not explore file-by-file; your c
 ${REVIEW_WHOLE_CHANGE}
    - in ONE command, print the full current contents of every changed source file, e.g.: \`git diff --name-only origin/<base>...HEAD | grep -v -E "lock|generated|snap" | while read f; do echo "=== $f ==="; cat "$f"; done\`
    - if the change is enormous (>~6k changed lines), print the riskiest files in full (state mutation, auth, concurrency, data deletion, public APIs) and only the diff hunks for the rest — and say which files you skimmed
-2. ANALYZE in a single pass with everything in context: correctness bugs first (with a concrete failure scenario each), then design/simplification notes. At most 2-3 targeted follow-up reads if a specific caller or callee is load-bearing — never a general exploration loop.
+2. ANALYZE in a single pass with everything in context: correctness bugs first (with a concrete failure scenario each), then significant design regressions. Verify candidates with targeted reads of affected callers, callees, tests, and contracts. Read enough to settle a candidate; each follow-up read must answer a specific question about it, never become a general exploration loop.
+${REVIEW_SIGNAL_POLICY}
 ${REVIEW_SPEC_CHECK}
 ${REVIEW_UNIT_CONTRACT}
-4. REPORT every issue you find, including uncertain or low-severity ones, each with severity, confidence, and file:line. Order findings most-severe first. If the change looks correct, say so plainly — do not manufacture findings.
+4. REPORT only findings that pass the high-signal review bar, each with severity, confidence, and file:line. Order findings most-severe first. If no finding passes, say so plainly.
 
 Do NOT post your review to GitHub yourself — no API call to create a comment. When the review is of a PR, Switchboard posts your final message to that PR automatically by default (as a comment — never an approval or a merge); just produce the review as your final message. If the request asks not to post (e.g. "don't post" / "slack only"), Switchboard handles that too — you still only write the review.
 
@@ -571,10 +577,11 @@ Strategy — GATHER ONCE, THEN ANALYZE ONCE. Do not explore file-by-file; your c
 ${REVIEW_WHOLE_CHANGE}
    - in ONE command, print the full current contents of every changed source file, e.g.: \`git diff --name-only origin/<base>...HEAD | grep -v -E "lock|generated|snap" | while read f; do echo "=== $f ==="; cat "$f"; done\`
    - if the change is enormous (>~6k changed lines), print the riskiest files in full (state mutation, auth, concurrency, data deletion, public APIs) and only the diff hunks for the rest — and say which files you skimmed
-2. ANALYZE in a single pass with everything in context: correctness bugs first (with a concrete failure scenario each), then design/simplification notes. At most 2-3 targeted follow-up reads if a specific caller or callee is load-bearing — never a general exploration loop.
+2. ANALYZE in a single pass with everything in context: correctness bugs first (with a concrete failure scenario each), then significant design regressions. Verify candidates with targeted reads of affected callers, callees, tests, and contracts. Read enough to settle a candidate; each follow-up read must answer a specific question about it, never become a general exploration loop.
+${REVIEW_SIGNAL_POLICY}
 ${REVIEW_SPEC_CHECK}
 ${REVIEW_UNIT_CONTRACT}
-4. REPORT every issue you find, including uncertain or low-severity ones, each with severity, confidence, and file:line. Order findings most-severe first. If the change looks correct, say so plainly — do not manufacture findings.
+4. REPORT only findings that pass the high-signal review bar, each with severity, confidence, and file:line. Order findings most-severe first. If no finding passes, say so plainly.
 
 Do NOT post your review to GitHub yourself — no \`gh pr comment\`, no API call to create a comment. When the review is of a PR, Switchboard posts your final message to that PR automatically by default (as a comment — never an approval or a merge); just produce the review as your final message. If the request asks not to post (e.g. "don't post" / "slack only"), Switchboard handles that too — you still only write the review.
 

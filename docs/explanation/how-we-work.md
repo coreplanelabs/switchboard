@@ -31,6 +31,8 @@ flowchart LR
 
 ## Where the loop is enforced
 
+Reviews focus on [verified, consequential findings](agents-and-toolsets.md#what-a-review-reports). Minor defects remain actionable; optional polish and unverified concerns are omitted. The [review selection decision](../decisions/0088-review-selects-verified-defects-before-applying-severity.md) explains the borrowed rubric, verification approach, and limits of prompt tests.
+
 | Rule | Check |
 |---|---|
 | Spec proofs resolve to real tests | `npm run specs:check` |

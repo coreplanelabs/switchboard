@@ -32,6 +32,16 @@ A plain request is routed to a suitable agent. `coding` is only selected by an e
 
 The `orchestrator` is a model-backed agent for an ongoing conversation. It can answer general questions and read fresh fleet or source facts in each run. In a verified private Slack DM, its current work tools can start, inspect, steer and stop a linked Ship unit. It has no general child-agent spawn tool; `conductor` uses those tools for permitted read-only child runs. [A thread outlives its runs](a-thread-continues.md) explains follow-ups and saved context.
 
+## What a review reports
+
+The review agent reports verified defects introduced by the PR and violations of explicit rules that apply to the changed code. Each finding identifies the failure scenario or rule and its practical impact. The reviewer checks callers, guards, contracts, and the PR's intent before submitting a candidate. A bug can depend on a realistic input or existing state.
+
+Optional polish, cosmetic preferences, unsupported suspicions, pre-existing problems, generic requests for more tests, and failures already reported by automated checks are omitted. Repository spec, test-guard, and unit-contract obligations still apply. A correct PR can receive an approval with no findings.
+
+Severity belongs to each finding: `blocking`, `major`, `minor`, or `nit`. A minor means a real, bounded defect worth fixing. The normal review omits polish suggestions. The model judges impact; deterministic code validates the submitted severity and finding structure, applies the configured gate to an approval, and checks the reviewed head before posting.
+
+The existing `review.addressSeverity` setting defaults to `minor`. It controls the severity addressed by the review loop; there is no separate reporting threshold. An explicit request for changes still enters the findings loop. See [Configure your defaults](../how-to/configure-your-defaults.md#choose-the-review-action-threshold) for the existing control and [decision 0088](../decisions/0088-review-selects-verified-defects-before-applying-severity.md) for the sources, alternatives, and evaluation plan.
+
 ## When to add an agent
 
 Add one when a recurring kind of work needs its own instructions **and** a distinct set of tools, machine access, identity or limits. If only the model, effort or instructions for an existing kind of work need to vary by person or channel, use [configuration](../how-to/configure-your-defaults.md). If the new capability belongs to every agent using an existing toolset, extend that toolset instead.

@@ -17,6 +17,18 @@ Examples are chat messages; the same commands work on the published CLI (`npx --
 
 The reply names the effective agent, model, effort and verbosity for you, where each came from, and what is restricted. Six layers, highest first: message directives, thread history, your settings, the channel's settings, `config.yaml` defaults, the agent's built-in floor.
 
+## Choose the review action threshold
+
+Reviews report [verified, actionable findings](../explanation/agents-and-toolsets.md#what-a-review-reports). Keep the default `minor` to address bounded defects as well as major and blocking ones. To change your floor:
+
+```text
+@switchboard config set me --review.addressSeverity major
+```
+
+For one request, use `severity:major` alongside `agent:review` or `agent:ship`. The accepted levels are `blocking`, `major`, `minor`, and `nit`; precedence is request directive, your setting, channel setting, then the org default. The org setting is `review.addressSeverity` in `config.yaml`.
+
+The floor does not control which findings appear in the review. An approval containing a finding at or above the floor becomes a request for changes. Ship applies the floor to findings on an approval; an explicit request for changes enters the findings loop with all its findings. The default review omits optional polish even if the configured floor is `nit`.
+
 ## Set your own defaults
 
 ```
