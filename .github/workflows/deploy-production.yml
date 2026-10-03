@@ -169,6 +169,10 @@ on:
         description: Bypass the bot/resident preflights — deploy over a rollout in progress, or blind when a bot cannot be consulted (in-flight bot runs hand off regardless)
         type: boolean
         default: false
+      copy-images:
+        description: "`auto` (default): run `deploy images` before the plan — it copies what a `registry`-mode profile lacks and does nothing for a `build`-mode one; `never`: skip it and leave the copy to `deploy all`"
+        type: string
+        default: auto
 
 permissions:
   contents: read

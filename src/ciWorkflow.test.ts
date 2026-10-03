@@ -802,9 +802,11 @@ describe("the production deploy is one reusable workflow", () => {
       "copy-images": "auto",
       smoke: false,
     });
-    // A dispatch keeps the two operator-facing choices it always had; the rest default as above.
-    expect(Object.keys(workflow.on.workflow_dispatch.inputs)).toEqual(["targets", "force"]);
-    for (const k of ["targets", "force"]) expect(workflow.on.workflow_dispatch.inputs[k]).toEqual(inputs[k]);
+    // A scoped dispatch skips the blanket image warm-up and lets deploy all
+    // copy only its selected Workers' missing images.
+    expect(Object.keys(workflow.on.workflow_dispatch.inputs)).toEqual(["targets", "force", "copy-images"]);
+    for (const k of ["targets", "force", "copy-images"])
+      expect(workflow.on.workflow_dispatch.inputs[k]).toEqual(inputs[k]);
   });
 
   it("declares every secret by name so another repository can pass them, none required — `secrets: inherit` still works", () => {
@@ -1019,6 +1021,17 @@ describe("the production deploy is one reusable workflow", () => {
       smoke: "${{ vars.SMOKE_INGRESS_ENABLED == 'true' }}",
     });
     expect(call.secrets).toBe("inherit");
+  });
+
+  it("holds automatic deployment only for the named release tag", () => {
+    const release = parse(read(".github/workflows/release-please.yml")) as {
+      jobs: Record<string, { if?: string; needs?: string[] }>;
+    };
+    expect(release.jobs.deploy.needs).toEqual(["release-please", "publish-image"]);
+    expect(release.jobs.deploy.if).toBe(
+      "needs.release-please.outputs.release_created == 'true' && (vars.SWITCHBOARD_RELEASE_DEPLOY_SKIP_TAG == '' || vars.SWITCHBOARD_RELEASE_DEPLOY_SKIP_TAG != needs.release-please.outputs.tag_name)",
+    );
+    expect(release.jobs["publish-image"].if).toBe("needs.release-please.outputs.release_created == 'true'");
   });
 
   it("the release fails when an ordinary deployed request cannot start and finish an agent", () => {
