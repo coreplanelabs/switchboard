@@ -2125,9 +2125,11 @@ function descriptiveReviewFollowUp(lines: string): boolean {
     if (/\b(?:please|also|actually|instead|should|must|need|want|will|can|could|would|and|but)\b/i.test(text))
       return false;
     if (/^[a-z]+ed[.!]?$/i.test(text)) return true; // e.g. an App's "updated"
-    return /^(?:the|a|an|this|that|it|we|i|they)\s+[^,.;:!?\p{Pd}]*\b(?:was|were|had|has|[a-z]+ed)\b[^,.;:!?\p{Pd}]*[.!]?$/iu.test(
-      text,
-    );
+    const retrospective =
+      /^(?:the|a|an|this|that|it|we|i|they)\s+[^,.;:!?\p{Pd}]*?\b(?:was|were|had|has|[a-z]+ed)\b([^,.;:!?\p{Pd}]*)[.!]?$/iu.exec(
+        text,
+      );
+    return retrospective !== null && !/\b(?:deploy|merge)\b/i.test(retrospective[1] ?? "");
   });
 }
 
