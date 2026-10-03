@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.281.0](https://github.com/coreplanelabs/switchboard/compare/v1.280.0...v1.281.0) (2026-10-03)
+
+
+### Features
+
+* **review:** isolate Cloudflare sandboxes by run ID ([#2711](https://github.com/coreplanelabs/switchboard/issues/2711)) ([51b607e](https://github.com/coreplanelabs/switchboard/commit/51b607e7b34d412a4a9ff4519fbe15d806ce9f90))
+* **sandbox:** define trusted install repair policy and receipt ([#2708](https://github.com/coreplanelabs/switchboard/issues/2708)) ([e6b1aa0](https://github.com/coreplanelabs/switchboard/commit/e6b1aa0e82e2e64fa4c461baf7ce6162a3f3a6b1))
+* **ship:** recover verified cold checkpoint after refusal ([#2712](https://github.com/coreplanelabs/switchboard/issues/2712)) ([3ac3c30](https://github.com/coreplanelabs/switchboard/commit/3ac3c30990565c52013543e93f02c6f8503aee1d))
+
+
+### Bug fixes
+
+* **ship:** admit ordered review attach cleanup after refusal ([#2709](https://github.com/coreplanelabs/switchboard/issues/2709)) ([7355b86](https://github.com/coreplanelabs/switchboard/commit/7355b862cb6e84064b59904be286bf1400b8a505))
+
 ## [1.280.0](https://github.com/coreplanelabs/switchboard/compare/v1.279.1...v1.280.0) (2026-10-03)
 
 
