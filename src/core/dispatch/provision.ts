@@ -1011,6 +1011,8 @@ async function attachRound(
           ...(deps.githubCredentials !== undefined ? { githubCredentials: deps.githubCredentials } : {}),
         },
         round: {
+          // Admission, Ship and resident attach keep the conversation key. The factory
+          // chooses the review run's physical Cloudflare key from this durable run ID.
           threadKey,
           ...(ctx.runId !== undefined ? { runId: ctx.runId } : {}),
           ...(ctx.ownerGen !== undefined ? { ownerGen: ctx.ownerGen } : {}),
