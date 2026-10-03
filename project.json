@@ -87,6 +87,10 @@
       "does": "The operator CLI over the command registry (`-- <group> <verb> …`), plus `ask` to drive the full pipeline without Slack.",
       "when": "Smoke tests, deploys, config, run history."
     },
+    "resident:archive": {
+      "does": "Captures a bounded retained resident tree through the old route and verifies an offline restore.",
+      "when": "Reviewed disposable-resident rehearsal with exact binding and Worker build receipts."
+    },
     "ci:gate": {
       "does": "Reads the `needs` context of a CI fan-out and accepts only successful legs or an explicitly planned skip.",
       "when": "CI only — the `bot`, `workers` and `image` gate jobs."
