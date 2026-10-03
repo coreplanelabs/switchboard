@@ -63,9 +63,64 @@ const ctxOf = (agent: AgentDef) => ({
   threadKey: "slack:CX:1.0",
   agent,
   profile: declaredProfile(agent),
+  ...(agent.name === "review" ? { runId: "review-fixture" } : {}),
   githubDoor: { baseUrl: "https://door.example", bearer: "sbr_test.secret" },
 });
 const ctx = (agentName: string) => ctxOf(AGENTS[agentName]);
+
+describe("review sandbox isolation", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  const opts = () => ({ execution: { type: "cloudflare" as const, url: "https://sandbox.example" }, ...dirs() });
+  const keyOf = (selection: Awaited<ReturnType<typeof makeExecutor>>) =>
+    (selection.executor as CloudflareSandboxExecutor as unknown as { opts: { threadKey: string } }).opts.threadKey;
+
+  it("separates a coding predecessor and two fresh read-profile reviews of the same logical thread", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    const coding = await makeExecutor(opts(), { ...ctx("coding"), runId: "coding-1" });
+    const first = await makeExecutor(opts(), { ...ctx("review"), runId: "review-1" });
+    const second = await makeExecutor(opts(), { ...ctx("review"), runId: "review-2" });
+    expect(keyOf(coding)).toBe("slack:CX:1.0");
+    expect(keyOf(first)).toBe("review:review-1");
+    expect(keyOf(second)).toBe("review:review-2");
+    expect(new Set([keyOf(coding), keyOf(first), keyOf(second)]).size).toBe(3);
+    const binding = workspaceBindingOf(JSON.parse(JSON.stringify(workspaceBindingFor(first))));
+    expect(binding).toMatchObject({ backend: "sandbox", sandboxKey: "review:review-1" });
+    const resumed = await makeExecutor(opts(), { ...ctx("review"), runId: "review-1", reattach: binding });
+    expect(keyOf(resumed)).toBe(keyOf(first));
+    expect(workspaceBindingFor(resumed, "repo-resident", binding)).toEqual(binding);
+    await expect(
+      makeExecutor(
+        { ...dirs(), execution: { type: "local" } },
+        { ...ctx("review"), runId: "review-1", reattach: binding },
+      ),
+    ).rejects.toBeInstanceOf(WorkspaceReattachRefusedError);
+  });
+
+  it("reattaches a legacy sandbox binding on its original thread key and refuses an invalid stored key", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    const legacy = workspaceBindingOf({ backend: "sandbox" });
+    const resumed = await makeExecutor(opts(), { ...ctx("review"), runId: "review-2", reattach: legacy });
+    expect(keyOf(resumed)).toBe("slack:CX:1.0");
+    expect(workspaceBindingFor(resumed, "repo-resident", legacy)).toEqual(legacy);
+    await expect(
+      makeExecutor(opts(), { ...ctx("review"), runId: "review-2", reattach: { backend: "sandbox", sandboxKey: "" } }),
+    ).rejects.toBeInstanceOf(WorkspaceReattachRefusedError);
+    await expect(
+      makeExecutor(opts(), {
+        ...ctx("review"),
+        runId: "review-2",
+        reattach: workspaceBindingOf({ backend: "sandbox", sandboxKey: "review:review-1" }),
+      }),
+    ).rejects.toBeInstanceOf(WorkspaceReattachRefusedError);
+  });
+
+  it("refuses to provision a fresh read-profile review without a safe durable run ID", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    await expect(makeExecutor(opts(), { ...ctx("review"), runId: undefined })).rejects.toThrow(/durable run ID/);
+    await expect(makeExecutor(opts(), { ...ctx("review"), runId: "bad\nid" })).rejects.toThrow(/durable run ID/);
+  });
+});
 
 describe("makeExecutor per-agent provisioning", () => {
   afterEach(() => {
@@ -432,6 +487,21 @@ describe("makeExecutor resident selection", () => {
     expect(note).toBeUndefined();
     expect(binding).toBeUndefined(); // nothing attached on the per-thread path
     expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("uses the run-specific review key only on a resident's Cloudflare fallback", async () => {
+    stubEnvs();
+    const { calls } = stubFetch({ body: { state: "down", reason: "offline" } });
+    const context = { ...repoCtx(), ...ctxOf(AGENTS.review), runId: "review-3" };
+    const selected = await makeExecutor(residentOpts(), context);
+    expect(calls).toEqual(["/status"]);
+    expect(selected.backend).toBe("sandbox");
+    expect(selected.sandboxKey).toBe("review:review-3");
+    expect(workspaceBindingFor(selected)?.sandboxKey).toBe("review:review-3");
+    expect(
+      (selected.executor as CloudflareSandboxExecutor as unknown as { opts: { threadKey: string } }).opts.threadKey,
+    ).toBe("review:review-3");
+    expect(context.threadKey).toBe("slack:CX:1.0");
   });
 
   it("a poisoned probe reason reaches the note as one redacted line (item 62)", async () => {
@@ -3152,6 +3222,33 @@ describe("makeExecutor seeded sandbox", () => {
     expect(sel.note).toBe(
       `resident degraded (disk-pressure: need 2.1 GiB) — seeded sandbox · from resident snapshot · jshttp/vary · master@${HEAD.slice(0, 7)}`,
     );
+  });
+
+  it("a read-profile review seeds its own sandbox with an owner claim matching the physical key", async () => {
+    stubEnvs();
+    const runId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const container = "dddddddd-eeee-4fff-8aaa-bbbbbbbbbbbb";
+    const answer = seededAnswer(C1);
+    const { calls, bodies } = stubFetch(degraded(C1), {
+      body: {
+        ...answer.body,
+        preservationContainer: container,
+        from: { ...answer.body.from, depsBackupId: snapshot(C1).depsBackupId },
+      },
+    });
+    const selected = await makeExecutor(residentOpts(), {
+      ...repoCtx(),
+      ...ctxOf(AGENTS.review),
+      repo: "jshttp/vary",
+      ref: "master",
+      headSha: HEAD,
+      runId,
+      requester: "slack:U123",
+    });
+    expect(calls).toEqual(["/status", "/seed"]);
+    expect(bodies[1]?.preservation).toMatchObject({ run: runId, thread: `review:${runId}`, head: HEAD });
+    expect(selected.sandboxKey).toBe(`review:${runId}`);
+    expect(workspaceBindingFor(selected)?.sandboxKey).toBe(`review:${runId}`);
   });
 
   it("the thread's resolved head rides along as fetchSha", async () => {

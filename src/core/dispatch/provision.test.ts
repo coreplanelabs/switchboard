@@ -1064,6 +1064,39 @@ describe("budgetClipLabel — the card's budget line", () => {
 });
 
 describe("attachWorkspace — the workspace attach and the ask-once refusal", () => {
+  it("a review forwards its logical thread, durable run ID and PR head without changing its Ship unit", async () => {
+    const d = deps();
+    attachState.attached = {
+      selection: { executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "" } },
+      release: async () => {},
+    };
+    const r = request(d, "agent:review acme/api#42", "review");
+    const headSha = "a".repeat(40);
+    const out = await attachWorkspace(d, {
+      msg: r.message,
+      io: fakeIO().io,
+      refuse: r.refuse,
+      card: { update: () => {}, done: async () => {} },
+      shell: r.shell,
+      closeLines: () => ({}),
+      clock: () => NOW,
+      agent: r.agent,
+      profile: r.profile,
+      runId: "review-run-1",
+      repoCtx: { repo: "acme/api", ref: "change", headSha, pr: 42 },
+      root: r.root,
+    });
+    expect(out.kind).toBe("attached");
+    expect(attachState.rounds.at(-1)).toMatchObject({
+      threadKey: r.message.threadKey,
+      runId: "review-run-1",
+      repo: "acme/api",
+      ref: "change",
+      headSha,
+      profile: { identity: "read" },
+    });
+    expect(attachState.rounds.at(-1)).not.toHaveProperty("ownPr");
+  });
   it("a configured pilot writer resolves the exact base head and supplies the declared readiness check before its first model turn", async () => {
     const d = deps(
       `\nexecution:\n  type: cloudflare\n  url: https://sandbox.example.com\n  resident:\n    baseUrl: https://resident.example.com\n  readyPilotRepos:\n    acme/api:\n      testCommand: npm test\n      dependencyDir: node_modules\n      requiredTools: [node, npm]\n`,

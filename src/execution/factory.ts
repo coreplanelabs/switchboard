@@ -52,6 +52,7 @@ import { systemClock } from "../core/trace/clock.js";
 import { processSecrets, type Secret, type Secrets } from "../secrets.js";
 import { shellQuote } from "./shellQuote.js";
 import { parseRevParseOutput } from "../core/reviewedHead.js";
+import { modelSandboxIdentity } from "./coldPublicationBoundary.js";
 
 export interface ResidentExecutionConfig {
   /** base URL of the resident Worker (deploy/cloudflare-resident/) */
@@ -199,6 +200,8 @@ export interface WorkspaceBinding {
   /** The identity of the container the workspace is in (docs/reference/specs/harness-pi.md
    *  item 8), when the attach answered one: the resident's is its VM's boot id. */
   container?: string;
+  /** The physical Cloudflare sandbox identity, distinct from the logical thread for new read-profile reviews. */
+  sandboxKey?: string;
   /** Trusted fetched branch tip before this run can change its checkout. */
   publicationBaseSha?: string;
   /** A resident fallback's seed identity, retained so re-attach can verify the same checkout. */
@@ -241,6 +244,9 @@ export function workspaceBindingOf(value: unknown): WorkspaceBinding | undefined
     ...(typeof v.ref === "string" && v.ref.length > 0 && v.ref.length <= 255 ? { ref: v.ref } : {}),
     ...(typeof v.workspace === "string" && v.workspace ? { workspace: v.workspace } : {}),
     ...(typeof v.user === "string" && v.user ? { user: v.user } : {}),
+    ...(v.backend === "sandbox" && Object.hasOwn(v, "sandboxKey")
+      ? { sandboxKey: typeof v.sandboxKey === "string" ? v.sandboxKey : "" }
+      : {}),
     ...(typeof v.container === "string" && v.container ? { container: v.container } : {}),
     ...(typeof v.publicationBaseSha === "string" && /^[0-9a-f]{40}$/.test(v.publicationBaseSha)
       ? { publicationBaseSha: v.publicationBaseSha }
@@ -346,6 +352,9 @@ export function workspaceBindingFor(
       ? { container: b?.container ?? selection.seeded?.preservationContainer }
       : {}),
     ...(publicationBaseSha ? { publicationBaseSha } : {}),
+    ...(selection.backend === "sandbox" && selection.sandboxKey !== undefined
+      ? { sandboxKey: selection.sandboxKey }
+      : {}),
     ...(selection.backend === "sandbox" && selection.seeded
       ? {
           seeded: {
@@ -542,6 +551,8 @@ export interface ExecutorSelection {
    *  `exec.*` spans. Every production selection names one; a test double may
    *  leave it out. */
   backend?: Backend;
+  /** Physical Cloudflare key chosen at provisioning, saved on the run's binding. */
+  sandboxKey?: string;
   /** The resident's step trace for the attach (docs/reference/specs/tracing.md item 19):
    *  the dispatcher grafts it under its attach span. On the resident path, or
    *  on the sandbox fallback after a resident attach failed (the steps that
@@ -614,6 +625,41 @@ export async function makeExecutor(
    *  probe and the attach become its `http.client` children (tracing.md item 21). */
   span?: Span,
 ): Promise<ExecutorSelection> {
+  const sandboxKey = physicalSandboxKey(opts, ctx);
+  const selection = await selectExecutor(opts, ctx, sandboxKey, span);
+  return selection.backend === "sandbox" && sandboxKey !== undefined ? { ...selection, sandboxKey } : selection;
+}
+
+/** A recorded key wins on recovery. An older binding used the thread key; it must not
+ * be silently migrated onto a fresh run-key sandbox with an empty checkout. */
+function physicalSandboxKey(opts: ExecutorFactoryOptions, ctx: ExecutorContext): string | undefined {
+  if (ctx.reattach?.backend === "sandbox" && opts.execution?.type !== "cloudflare")
+    throw new WorkspaceReattachRefusedError(ctx.reattach, "the recorded Cloudflare sandbox backend is unavailable");
+  if (opts.execution?.type !== "cloudflare" || ctx.profile.machine === "none") return undefined;
+  if (ctx.reattach?.backend === "sandbox") {
+    const key = ctx.reattach.sandboxKey ?? ctx.threadKey;
+    if (
+      !modelSandboxIdentity("/exec", key) ||
+      (ctx.reattach.sandboxKey !== undefined &&
+        ctx.agent.name === "review" &&
+        ctx.profile.identity === "read" &&
+        key !== `review:${ctx.runId}`)
+    )
+      throw new WorkspaceReattachRefusedError(ctx.reattach, "the recorded sandbox identity is invalid");
+    return ctx.reattach.sandboxKey;
+  }
+  if (ctx.agent.name !== "review" || ctx.profile.identity !== "read") return undefined;
+  if (!ctx.runId || !/^[A-Za-z0-9_-]{1,56}$/.test(ctx.runId))
+    throw new Error("a fresh read-profile review requires a safe durable run ID before sandbox attach");
+  return `review:${ctx.runId}`;
+}
+
+async function selectExecutor(
+  opts: ExecutorFactoryOptions,
+  ctx: ExecutorContext,
+  sandboxKey: string | undefined,
+  span?: Span,
+): Promise<ExecutorSelection> {
   // The profile's machine class decides what is provisioned
   // (docs/reference/specs/execution.md item 18). `none` → nothing: no workspace
   // dir, no sandbox created or reconnected, no credential required. The
@@ -659,7 +705,7 @@ export async function makeExecutor(
   // A resume re-attaches where the row says the run ran (run-history item 54)
   // and never provisions again: the branches below are a fresh run's.
   if (ctx.reattach !== undefined) {
-    const selection = await reattachWorkspace(opts, ctx, ctx.reattach, span);
+    const selection = await reattachWorkspace(opts, ctx, ctx.reattach, sandboxKey, span);
     if (ready === undefined) return selection;
     // A resumed tree may hold unpublished edits. A readiness refusal leaves
     // that binding in place for the same unit to retry after repair.
@@ -707,7 +753,11 @@ export async function makeExecutor(
   if (machine === "blank") {
     assertProfileIdentity(ctx.profile.identity, machine);
     return {
-      executor: await makePerThreadExecutor(opts, { threadKey: ctx.threadKey, resolveEnvs: async () => ({}) }),
+      executor: await makePerThreadExecutor(
+        opts,
+        { threadKey: ctx.threadKey, resolveEnvs: async () => ({}) },
+        sandboxKey,
+      ),
       backend: perThreadBackend(opts),
     };
   }
@@ -718,7 +768,7 @@ export async function makeExecutor(
   // there is no note.
   if (machine === "repo-cold") {
     return {
-      executor: await makePerThreadExecutor(opts, perThreadCheckout(opts, ctx)),
+      executor: await makePerThreadExecutor(opts, perThreadCheckout(opts, ctx), sandboxKey),
       backend: perThreadBackend(opts),
     };
   }
@@ -966,7 +1016,7 @@ export async function makeExecutor(
             ? "Refresh the pilot dependency snapshot, then retry this task."
             : "Restore or onboard the pilot repository, then retry this task.",
         );
-      const executor = await makePerThreadExecutor(opts, perThreadCheckout(opts, ctx));
+      const executor = await makePerThreadExecutor(opts, perThreadCheckout(opts, ctx), sandboxKey);
       await recheckOwner();
       const outcome =
         handle && executor instanceof CloudflareSandboxExecutor
@@ -974,6 +1024,7 @@ export async function makeExecutor(
               executor,
               handle,
               ctx,
+              sandboxKey,
               () => probeResident(resident, token, resource, span, ctx.stopSignal),
               span,
             )
@@ -1015,7 +1066,7 @@ export async function makeExecutor(
   if (ready !== undefined)
     throw readyFailure("repository_not_onboarded", "Onboard the pilot repository as a resident, then retry this task.");
   await recheckOwner();
-  const executor = await makePerThreadExecutor(opts, perThreadCheckout(opts, ctx));
+  const executor = await makePerThreadExecutor(opts, perThreadCheckout(opts, ctx), sandboxKey);
   await recheckOwner();
   return {
     executor,
@@ -1063,6 +1114,7 @@ async function seedSandbox(
   executor: CloudflareSandboxExecutor,
   handle: SeedHandle,
   ctx: ExecutorContext,
+  sandboxKey: string | undefined,
   reprobe: () => Promise<ResidentStatusProbe>,
   span?: Span,
 ): Promise<{ seeded: SeededSandbox; sourceSha: string } | { why: string }> {
@@ -1072,7 +1124,7 @@ async function seedSandbox(
     ...(ctx.headSha ? { headSha: ctx.headSha } : {}),
   });
   for (let retried = false; ; retried = true) {
-    const claim = seedOwnerClaim(ctx, seed);
+    const claim = seedOwnerClaim({ ...ctx, threadKey: sandboxKey ?? ctx.threadKey }, seed);
     let answer: SeedAnswer;
     try {
       answer = await executor.seed(seed, { span, signal: ctx.stopSignal, ...(claim ? { claim } : {}) });
@@ -1145,6 +1197,7 @@ async function reattachWorkspace(
   opts: ExecutorFactoryOptions,
   ctx: ExecutorContext,
   recorded: WorkspaceBinding,
+  sandboxKey: string | undefined,
   span?: Span,
 ): Promise<ExecutorSelection> {
   const refuse = (why: string) => new WorkspaceReattachRefusedError(recorded, oneLine(why));
@@ -1167,7 +1220,7 @@ async function reattachWorkspace(
       ctx.profile.machine === "blank"
         ? { threadKey: ctx.threadKey, resolveEnvs: async () => ({}) }
         : perThreadCheckout(opts, ctx);
-    const executor = await makePerThreadExecutor(opts, input);
+    const executor = await makePerThreadExecutor(opts, input, sandboxKey);
     if (!recorded.seeded) {
       if (
         recorded.workspace &&
@@ -1767,7 +1820,11 @@ function assertProfileIdentity(identity: Identity, machine: MachineClass): void 
 }
 
 /** The per-thread backends (the pre-resident selection, unchanged). */
-async function makePerThreadExecutor(opts: ExecutorFactoryOptions, input: PerThreadInputs): Promise<Executor> {
+async function makePerThreadExecutor(
+  opts: ExecutorFactoryOptions,
+  input: PerThreadInputs,
+  sandboxKey?: string,
+): Promise<Executor> {
   const { threadKey } = input;
   const type = opts.execution?.type ?? "local";
 
@@ -1802,7 +1859,7 @@ async function makePerThreadExecutor(opts: ExecutorFactoryOptions, input: PerThr
     const executor = new CloudflareSandboxExecutor({
       url: opts.execution.url,
       token: token.reveal(),
-      threadKey,
+      threadKey: sandboxKey ?? threadKey,
       resolveEnvs: input.resolveEnvs,
       repo: input.repo,
       ref: input.ref,
