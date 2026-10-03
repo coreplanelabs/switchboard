@@ -276,6 +276,8 @@ export type RunNoteKind =
   | "tool_refused"
   /** The producer rejected a private work source before any worker claim. */
   | "work_source_refused"
+  /** Bounded private context-capture refusal, never raw store output. */
+  | "work_context_refused"
   /** OpenCode withdrew a pending ask before the gate's reply to it landed
    *  (harness.md item 2): the server answered the reply 404 and its pending
    *  asks no longer listed the ask — the gate refused a sibling call of the
@@ -384,6 +386,7 @@ export const RUN_NOTE_KINDS = [
   "policy_refusal",
   "tool_refused",
   "work_source_refused",
+  "work_context_refused",
   "ask_withdrawn",
   "settle_set_aside",
   "tool_unnamed",
@@ -666,6 +669,8 @@ export type RunEvent =
       summary: string;
       /** A bounded private source decision; never includes a message, actor or repository. */
       sourceReason?: MainSourceFailureCode;
+      /** Bounded capture-stage or typed checkpoint cause; no private source bytes. */
+      contextReason?: import("./mainContextRefusal.js").MainContextRefusalCode;
       /** Runner-owned baseline receipt; model text cannot authorize execution. */
       firstTest?: FirstTestReceipt;
       mode?: StopMode;

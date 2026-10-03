@@ -45,7 +45,13 @@ export type MainStartResult =
   | { kind: "accepted"; actId: string; instanceId: string; reply: string }
   | { kind: "existing"; actId: string; instanceId: string; reply: string }
   | { kind: "pending"; actId: string; instanceId?: string; reply: string }
-  | { kind: "refused"; reply: string; issues?: WorkBriefIssue[]; sourceReason?: MainSourceFailureCode };
+  | {
+      kind: "refused";
+      reply: string;
+      issues?: WorkBriefIssue[];
+      sourceReason?: MainSourceFailureCode;
+      retryQuote?: string;
+    };
 
 const refuse = (reply: string): MainStartResult => ({ kind: "refused", reply });
 

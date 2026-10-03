@@ -51,6 +51,64 @@ const resolveSource = (sources: MainSourceTracker, quote: string, repo: string, 
 };
 
 describe("work_start — plain-language private worker handoff", () => {
+  it("keeps capture refusal private and emits a bounded category without starting a worker", async () => {
+    const onContextRefusal = vi.fn();
+    const start = vi.fn<(value: MainStartInput) => Promise<MainStartResult>>();
+    const secret = "private DM and store exception";
+    const capability = mainStartForRun({
+      agentName: "orchestrator",
+      channelVisibility: "dm",
+      initial: { actor, msg },
+      source: () => ({ kind: "ready", actor, msg, authorizedRepo: input.repo }),
+      live: () => true,
+      runId: "main-run",
+      verifyDirectAudience: booleanAudienceVerifier(verifyDirectAudience),
+      captureContext: async () => {
+        throw new Error(secret);
+      },
+      onContextRefusal,
+      start,
+    });
+    const reply = await workStartTool.run(input, context(capability));
+    expect(reply).toContain("couldn't save the conversation context");
+    expect(reply).not.toContain(secret);
+    expect(onContextRefusal).toHaveBeenCalledExactlyOnceWith("capture_unknown");
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("waits for the durable refusal receipt before returning the private refusal", async () => {
+    let entered!: () => void;
+    const receiptStarted = new Promise<void>((resolve) => (entered = resolve));
+    let release!: () => void;
+    const receiptSaved = new Promise<void>((resolve) => (release = resolve));
+    const capability = mainStartForRun({
+      agentName: "orchestrator",
+      channelVisibility: "dm",
+      initial: { actor, msg },
+      source: () => ({ kind: "ready", actor, msg, authorizedRepo: input.repo }),
+      live: () => true,
+      runId: "main-run",
+      verifyDirectAudience: booleanAudienceVerifier(async () => true),
+      captureContext: async () => {
+        throw new Error("private capture failure");
+      },
+      onContextRefusal: async () => {
+        entered();
+        await receiptSaved;
+      },
+      start: vi.fn(),
+    });
+    let returned = false;
+    const result = workStartTool.run(input, context(capability)).then((reply) => {
+      returned = true;
+      return reply;
+    });
+    await receiptStarted;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(returned).toBe(false);
+    release();
+    expect(await result).toContain("couldn't save");
+  });
   it("captures trusted context separately from tool arguments and refuses capture failures or changed authority", async () => {
     const capsule = contextCapsuleOf({
       version: 1,
@@ -345,6 +403,48 @@ describe("work_start — plain-language private worker handoff", () => {
     expect(await workStartTool.run({ ...input, sourceMessage: "fix signup" }, context(capability))).toContain("error:");
     await workStartTool.run({ ...input, sourceMessage: "fix billing" }, context(capability));
     expect(start.mock.calls[0]?.[0].msg.messageId).toBe("2");
+  });
+
+  it("returns a bounded latest-turn quote for a private same-turn retry", async () => {
+    const latest = "1. fix the parent/child view\n2. remove the org name from labels";
+    const sources = new MainSourceTracker({ ...msg, text: "earlier request" }, () => actor);
+    sources.accept([{ userId: msg.userId, directAudience: msg.directAudience, text: latest, messageId: "2", at: 2 }]);
+    const start = vi.fn<(value: MainStartInput) => Promise<MainStartResult>>().mockResolvedValue({
+      kind: "accepted",
+      actId: "work-1",
+      instanceId: "unit-1",
+      reply: "started",
+    });
+    let privateNow = true;
+    const capability = mainStartForRun({
+      agentName: "orchestrator",
+      channelVisibility: "dm",
+      initial: { actor, msg },
+      source: (quote, repo) => resolveSource(sources, quote, repo),
+      live: () => true,
+      runId: "main-run",
+      verifyDirectAudience: booleanAudienceVerifier(async () => privateNow),
+      start,
+    });
+    const refused = await workStartTool.run({ ...input, sourceMessage: "earlier request" }, context(capability));
+    const reason = JSON.parse(String(refused).slice("error: ".length)) as Record<string, string>;
+    expect(reason).toMatchObject({
+      kind: "source_resolution",
+      code: "source_quote_mismatch",
+      retryQuote: "1. fix the parent/child view",
+    });
+    expect(reason.retryQuote.length).toBeLessThanOrEqual(64);
+    expect(start).not.toHaveBeenCalled();
+    expect(await workStartTool.run({ ...input, sourceMessage: reason.retryQuote }, context(capability))).toContain(
+      "work-1",
+    );
+    expect(start.mock.calls[0]?.[0].msg.messageId).toBe("2");
+    privateNow = false;
+    const closed = await workStartTool.run({ ...input, sourceMessage: "earlier request" }, context(capability));
+    expect(JSON.parse(String(closed).slice("error: ".length))).toEqual({
+      kind: "source_resolution",
+      code: "source_quote_mismatch",
+    });
   });
 
   it("refuses a stopped main run before calling the starter", async () => {

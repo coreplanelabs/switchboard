@@ -69,6 +69,15 @@ export function privateMainEvent(event: RunEvent): RunEvent {
     case "lease":
       return event;
     case "run_note":
+      if (event.kind === "work_context_refused" && event.contextReason)
+        return {
+          type: "run_note",
+          kind: "work_context_refused",
+          summary: "Private work context refused.",
+          contextReason: event.contextReason,
+          at,
+          seq,
+        };
       if (event.kind === "work_source_refused" && event.sourceReason)
         return {
           type: "run_note",
