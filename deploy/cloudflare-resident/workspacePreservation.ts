@@ -18,7 +18,7 @@ export interface PreservationBinding {
   lastRunOwner?: { runId?: string; ownerGen?: string; ownerFence?: number } | null;
 }
 
-export type PreservationDecision = { removable: true } | { removable: false; reason: string };
+export type PreservationDecision = { removable: true; missingTree?: true } | { removable: false; reason: string };
 const keep = (reason: string): PreservationDecision => ({ removable: false, reason });
 const object = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
 export const hasRunOwnerField = (value: unknown): boolean =>
@@ -83,6 +83,11 @@ export function decideWorkspaceRemoval(input: {
     !["completed", "stopped_soft", "stopped_hard", "failed", "interrupted"].includes(String(record.status))
   )
     return keep("owner-mismatch");
+  // The worker supplies this fact only for eviction after an independent
+  // active-VM directory, claimant and process probe. No bytes remain at the
+  // bound path; the eviction records the loss rather than claiming a save.
+  if (object(tree) && tree.present === false && tree.absenceVerified === true)
+    return { removable: true, missingTree: true };
   if (!privateTreeObservation(tree) || tree.branch !== binding.ref) return keep("private-tree-unverified");
   if (tree.uncommittedChanges !== 0 || tree.untrackedNonIgnored !== 0) return keep("private-tree-changed");
   // A clean tree still at the resident's attach HEAD has no local work to

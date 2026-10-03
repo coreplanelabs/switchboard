@@ -8365,6 +8365,49 @@ export class ResidentDO extends Sandbox<Env> {
     }
   }
 
+  /** A restored VM can retain the durable binding after its private disk is
+   * gone. Retire that binding only after checking the exact path, sole UID
+   * claimant, empty UID directories and staging, and no process on an active runtime. */
+  private async observeAbsentPrivateTree(binding: ThreadBinding): Promise<boolean> {
+    try {
+      const canonical = await threadWorktreePath(binding.threadKey, binding.ref);
+      if (
+        binding.worktreePath !== canonical &&
+        binding.worktreePath !== (await replacementWorktreePath(binding.threadKey, binding.ref, canonical))
+      )
+        return false;
+      if (this.hydration !== null || (await this.getStatus()).state !== "warm") return false;
+      if (await this.recreateAdmission.blocked()) return false;
+      if (!(await this.isRuntimeActive())) return false;
+      const claimants = parsePoolBindings(await this.ctx.storage.get(poolBindingKey(binding.user)));
+      if (!claimants || claimants.length !== 1 || claimants[0] !== binding.threadKey) return false;
+      const dir = parentDir(binding.worktreePath);
+      const absentScript =
+        'import os, sys\ntry:\n    os.lstat(sys.argv[1])\nexcept FileNotFoundError:\n    print("absent")\nelse:\n    raise SystemExit(42)\n';
+      const absent = await this.run(["sh", "-c", `python3 -c ${shellQuote(absentScript)} "$1"`, "_", dir]);
+      if (
+        absent.exitCode !== 0 ||
+        absent.timedOut ||
+        absent.truncated ||
+        absent.stderr !== "" ||
+        absent.stdout !== "absent\n"
+      )
+        return false;
+      if (await this.poolUserHasOldThreadDir(binding.user, [])) return false;
+      if (await this.poolUserHasOldStageContent(binding.user)) return false;
+      const processes = await this.run(["pgrep", "-u", binding.user]);
+      return (
+        processes.exitCode === 1 &&
+        processes.stdout.trim() === "" &&
+        processes.stderr.trim() === "" &&
+        !processes.timedOut &&
+        !processes.truncated
+      );
+    } catch {
+      return false;
+    }
+  }
+
   private async guardWorkspaceReplacement(binding: ThreadBinding): Promise<ThreadErr | null> {
     if ((this.threadOpsInFlight.get(binding.threadKey) ?? 0) > 0) {
       await this.reportBlockedWorkspace({ binding, reason: "thread-operation-in-flight" });
@@ -8378,8 +8421,13 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** One decision for every automatic loss path. A true legacy cache needs
    *  no remote read; a known owner stays until exact terminal and current
-   *  private-tree evidence agree. */
-  private async workspaceRemovalDecision(binding: ThreadBinding, canObserveTree = true): Promise<PreservationDecision> {
+   *  private-tree evidence agree, except for eviction of a verified absent
+   *  directory that no process still owns. */
+  private async workspaceRemovalDecision(
+    binding: ThreadBinding,
+    canObserveTree = true,
+    recoverAbsent = false,
+  ): Promise<PreservationDecision> {
     const [registration, fence] = await Promise.all([
       this.ctx.storage.get<RunRegistration>(runRegKey(binding.threadKey)),
       this.ctx.storage.get<unknown>(runFenceKey(binding.threadKey)),
@@ -8391,6 +8439,10 @@ export class ResidentDO extends Sandbox<Env> {
     decision = decideWorkspaceRemoval(input);
     if (decision.removable || decision.reason !== "private-tree-unverified" || !canObserveTree) return decision;
     input.tree = await this.observePrivateTree(binding);
+    decision = decideWorkspaceRemoval(input);
+    if (decision.removable || !recoverAbsent || input.tree !== null) return decision;
+    if (!(await this.observeAbsentPrivateTree(binding))) return decision;
+    input.tree = { present: false, absenceVerified: true };
     return decideWorkspaceRemoval(input);
   }
 
@@ -8446,11 +8498,16 @@ export class ResidentDO extends Sandbox<Env> {
     if ((this.threadOpsInFlight.get(binding.threadKey) ?? 0) > 0) return "changed";
     this.workspaceEvictionsInFlight.add(binding.threadKey);
     try {
-      const decision = await this.workspaceRemovalDecision(before, runtimeActive);
+      const decision = await this.workspaceRemovalDecision(before, runtimeActive, true);
       if (decision.removable === false) {
         await this.reportBlockedWorkspace({ binding: before, reason: decision.reason });
         return "preserved";
       }
+      // A pre-ledger binding still consumes this UID. Reconstruct its spend
+      // before releasing the binding, so another owner cannot inherit it on
+      // this VM. The exact claimant and empty disk were checked above.
+      if (decision.missingTree && !(await this.markPoolUserSpent(binding.user, `thread:${binding.threadKey}`)))
+        return "cleanup-failed";
       if (!(await this.poolUserOwnerMatches(binding.user, `thread:${binding.threadKey}`))) return "cleanup-failed";
       const threadDir = parentDir(binding.worktreePath);
       if (runtimeActive && !threadDir.startsWith(`${THREADS_DIR}/`)) return "cleanup-failed";
@@ -8471,6 +8528,9 @@ export class ResidentDO extends Sandbox<Env> {
               (this.threadOpsInFlight.get(binding.threadKey) ?? 0) > 0
             )
               return false;
+            // Missing-disk proof was read before this mutex. Recheck here and
+            // never delete a path that may have appeared in the meantime.
+            if (decision.missingTree) return this.observeAbsentPrivateTree(before);
             await this.runOk(["rm", "-rf", threadDir], "evict");
             return true;
           });
@@ -8486,7 +8546,8 @@ export class ResidentDO extends Sandbox<Env> {
         // tree — its pnpm store (the tree's hardlink source: 0 unique bytes while
         // the tree lived, all of them now), npm/yarn/bun caches — goes with it.
         // Pool users only, never the build user (its store backs the warm checkout).
-        if ((THREAD_USERS as readonly string[]).includes(binding.user)) {
+        // A missing-tree eviction leaves this spent UID's home for VM recycle.
+        if (!decision.missingTree && (THREAD_USERS as readonly string[]).includes(binding.user)) {
           if (!(await this.poolUserOwnerMatches(binding.user, `thread:${binding.threadKey}`))) return "cleanup-failed";
           await this.run(threadUserCacheCleanArgv(`/home/${binding.user}`)).catch((err) =>
             console.log(`${logCtx}: home cache rm failed for ${binding.user}: ${errMsg(err)}`),
@@ -8503,6 +8564,9 @@ export class ResidentDO extends Sandbox<Env> {
         console.log(`${logCtx}: ${binding.threadKey} ${why} during eviction — binding left as is`);
         return "changed";
       }
+      const recordedTree: EvictedTree | undefined = decision.missingTree
+        ? { unmeasured: "private tree absent on active VM; prior contents unverified" }
+        : tree;
       await this.putThreadBinding({
         ...now,
         user: "",
@@ -8511,13 +8575,14 @@ export class ResidentDO extends Sandbox<Env> {
         lastRunOwner: await this.ctx.storage.get<RunRegistration>(runRegKey(binding.threadKey)),
         evictedWhy: why,
         preservationBlocked: undefined,
-        evictedLeftBehind: tree && "leftBehind" in tree ? tree.leftBehind : undefined,
-        evictedUnmeasured: tree && "unmeasured" in tree ? tree.unmeasured : undefined,
+        evictedLeftBehind: recordedTree && "leftBehind" in recordedTree ? recordedTree.leftBehind : undefined,
+        evictedUnmeasured: recordedTree && "unmeasured" in recordedTree ? recordedTree.unmeasured : undefined,
       } satisfies ThreadBinding);
       // The run's registration goes with its binding (item 44): released here,
       // never on a give-way above — a re-attach has re-registered it anyway.
       await this.ctx.storage.delete(runRegKey(binding.threadKey));
-      if (tree) console.log(`${logCtx}: ${binding.threadKey} evicted (${why}) — ${evictedTreeSentence(tree)}`);
+      if (recordedTree)
+        console.log(`${logCtx}: ${binding.threadKey} evicted (${why}) — ${evictedTreeSentence(recordedTree)}`);
       return "evicted";
     } finally {
       this.workspaceEvictionsInFlight.delete(binding.threadKey);
