@@ -20,9 +20,9 @@
  *  on, never the SDK's message text. */
 export const FLEET_BUSY_REASON = "fleet-busy" as const;
 
-/** What a full fleet means, in the words the model and the operator see. */
+/** What a placement refusal means, without guessing which capacity limit fired. */
 export const FLEET_BUSY_EXPLANATION =
-  "no free per-thread sandbox — every container instance the fleet may run (wrangler.jsonc max_instances) is awake serving another thread";
+  "no per-thread sandbox is available yet; running-instance capacity or start rate is limiting placement";
 
 /** The executor waits at most this long for an instance — the default bash
  *  budget, so a default command never waits past its own limit. A longer
@@ -142,7 +142,7 @@ export function fleetBusyExecAnswer(
 // logs held the platform's raw refusals with no run attached, the bot's stdout
 // held nothing — so a log sweep after a capacity incident could not count the
 // runs it killed. The stable prefix below selects both lines in one query;
-// the card and the record are unchanged.
+// the child setup record also carries the same typed cause for Ship.
 
 /** The stable prefix both events share — a log query on it selects the pair. */
 export const FLEET_BUSY_LOG_PREFIX = "sandbox.fleet-busy" as const;
@@ -163,6 +163,25 @@ export interface FleetBusyEndingFacts {
   containerId?: string;
 }
 
+/** The executor's typed capacity ending. Only this shape may drive a run
+ * record or the paired log; message text is never a recovery signal. */
+export function fleetBusyEndingFactsOf(err: unknown): FleetBusyEndingFacts | undefined {
+  if (typeof err !== "object" || err === null) return undefined;
+  const e = err as { name?: unknown; fleetBusy?: Partial<FleetBusyEndingFacts> };
+  const facts = e.fleetBusy;
+  if (
+    e.name !== "ExecCapacityError" ||
+    facts === undefined ||
+    typeof facts.refusal !== "string" ||
+    typeof facts.waitedMs !== "number" ||
+    !Number.isFinite(facts.waitedMs) ||
+    facts.waitedMs < 0 ||
+    (facts.containerId !== undefined && typeof facts.containerId !== "string")
+  )
+    return undefined;
+  return facts as FleetBusyEndingFacts;
+}
+
 /** The Worker's one JSON line where the platform's refusal is turned into the
  *  named condition, beside `sandbox.starting` and `sandbox.idle-stop`. */
 export function fleetBusyRefusedLine(fields: {
@@ -179,10 +198,9 @@ export function fleetBusyRefusedLine(fields: {
  *  and its carried facts, never `instanceof`: this module is bundled into the
  *  Worker and cannot import the executor's class. */
 export function fleetBusyRunEndedLine(run: string | undefined, thread: string, err: unknown): string | null {
-  if (typeof err !== "object" || err === null) return null;
-  const e = err as { name?: unknown; fleetBusy?: FleetBusyEndingFacts };
-  if (e.name !== "ExecCapacityError" || e.fleetBusy === undefined) return null;
-  const { refusal, waitedMs, containerId } = e.fleetBusy;
+  const facts = fleetBusyEndingFactsOf(err);
+  if (facts === undefined) return null;
+  const { refusal, waitedMs, containerId } = facts;
   return JSON.stringify({
     event: FLEET_BUSY_RUN_ENDED_EVENT,
     ...(run !== undefined ? { run } : {}),
@@ -193,13 +211,10 @@ export function fleetBusyRunEndedLine(run: string | undefined, thread: string, e
   });
 }
 
-/** The message `ExecCapacityError` carries once the wait is spent: names the
- *  wait and the missing automatic queue as a bug, never delegates a retry. */
+/** The message `ExecCapacityError` carries once this request's wait is spent.
+ *  It does not guess which platform limit fired or whether Ship can retry. */
 export function fleetBusyExhaustedMessage(waitedMs: number): string {
-  return (
-    `this is a bug: the sandbox fleet had no free per-thread sandbox after waiting ${Math.round(waitedMs / 1000)}s ` +
-    "(the fleet's max_instances is reached), and no automatic queue remained"
-  );
+  return `sandbox fleet busy: no per-thread sandbox was available after waiting ${Math.round(waitedMs / 1000)}s; this request did not run`;
 }
 
 // ---------------------------------------------------------------------------

@@ -44,7 +44,7 @@ import { CloudflareSandboxExecutor } from "../execution/cloudflareSandbox.js";
 import { makeExecutor } from "../execution/factory.js";
 import { TEST_GITHUB_CREDENTIALS } from "../execution/testing/githubCredentials.js";
 import { InMemoryArtifactStore } from "../artifacts/store.js";
-import { ExecInfraError, ExecSandboxRestartedError } from "../execution/executor.js";
+import { ExecCapacityError, ExecInfraError, ExecSandboxRestartedError } from "../execution/executor.js";
 import { classifyError } from "./trace/classify.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
 import type { ChannelIO, HistoryItem, IncomingMessage, RunReceipt, StatusUpdate } from "./types.js";
@@ -14509,6 +14509,25 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         expect(missing).toEqual({ status: 404, body: { ok: false, error: "not_found" } });
       },
     );
+
+    it("records typed fleet capacity only when a review child failed before its model started", async () => {
+      const h = await setup("review");
+      vi.mocked(makeExecutor).mockRejectedValueOnce(
+        new ExecCapacityError("fleet stayed full", { refusal: "max_instances reached", waitedMs: 315_000 }),
+      );
+      expect(await h.call("spawn", h.spawnBody)).toMatchObject({ status: 200, body: { runId: "run-l" } });
+      await Promise.all(h.dispatched);
+      await h.writer.settled();
+      const record = await h.store.get("run-l");
+      expect(record).toMatchObject({ status: "failed", failure: { kind: "sandbox_fleet_busy" }, usage: { turns: 0 } });
+      expect(record?.events.some((e) => e.type === "span_start" && e.name === "model.turn")).toBe(false);
+      expect(isRunRecord(record)).toBe(true);
+      h.admin.runs = createRunsService({ registry: new RunRegistry(), store: h.store, ledger: h.ledger });
+      expect(await h.call("read-record", { parentInstanceId: h.instance.id, runId: "run-l" })).toMatchObject({
+        status: 200,
+        body: { run: { status: "failed", failure: { kind: "sandbox_fleet_busy" }, costUsd: 0 } },
+      });
+    });
 
     it.each(["claim", "open", "seed", "working-state"] as const)(
       "keeps the same-id finalizer through a %s failure at durable promotion without running the model",

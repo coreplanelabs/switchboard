@@ -446,9 +446,9 @@ function readRecordReturn(step: string, a: BotAnswer, owner: { runId: string; in
       ...(typeof leaseStartedAt === "number" ? { leaseStartedAt } : {}),
       ...(typeof costUsd === "number" || costUsd === null ? { costUsd } : {}),
       ...(handoffLists !== undefined ? { handoffLists } : {}),
-      // The failure by name (run-history item 57), shape-checked: a
-      // A provider transient or incomplete local model stream drives the
-      // round-0 re-run (agent-ship item 9).
+      // The failure by name (run-history item 57), shape-checked. These
+      // named failures drive the bounded round-0 or pre-model review
+      // recovery (agent-ship item 9).
       ...(isRecord(failure) && typeof failure.kind === "string" ? { failure: { kind: failure.kind } } : {}),
       // What ended an interrupted child (issue 1876): the ending's sentence
       // names the cause instead of claiming a bot restart for every one.
