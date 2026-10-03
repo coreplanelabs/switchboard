@@ -675,6 +675,56 @@ describe("the operator is one loop with typed tools", () => {
   );
 
   it.each([
+    "ship https://github.com/acme/api/pull/7",
+    "ship https://github.com/acme/api/pull/7\nApp notification from App: The author updated the tests.",
+  ])("binds one opening-line Ship PR request before asking the model: %s", async (text) => {
+    const url = "https://github.com/acme/api/pull/7";
+    const model = vi.fn<RouteModel>(async () => ({
+      tool: OPERATOR_ASK_TOOL,
+      input: { text: "Which task?", proposalSettings: {}, reason: "missed PR route" },
+    }));
+    const answer = await runOperator(
+      input({
+        text,
+        projection: projectionOf(["review", "ship", "orchestrator"]),
+        requesterId: "slack:UREQUESTER",
+      }),
+      model,
+    );
+    expect(model).not.toHaveBeenCalled();
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [
+        {
+          repo: "acme/api",
+          repoSource: "request",
+          shipEntry: "review",
+          prTarget: { source: "request", number: 7, quote: url },
+        },
+      ],
+    });
+  });
+
+  it("leaves a competing Ship follow-up with the operator", async () => {
+    const model = vi.fn<RouteModel>(async () => ({
+      tool: OPERATOR_ASK_TOOL,
+      input: { text: "Ship the PR or fix the check?" },
+    }));
+    const answer = await runOperator(
+      input({
+        text:
+          "ship https://github.com/acme/api/pull/7\n" +
+          "App notification from App: updated\nPlease fix the failing check instead",
+        projection: projectionOf(["ship", "orchestrator"]),
+        requesterId: "slack:UREQUESTER",
+      }),
+      model,
+    );
+    expect(model).toHaveBeenCalled();
+    expect(answer.decision).toMatchObject({ kind: "question" });
+  });
+
+  it.each([
     { preset: "review", words: "Please review pull request", entry: undefined },
     { preset: "ship", words: "review pull request", entry: "review" },
   ])(
