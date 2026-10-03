@@ -1025,6 +1025,12 @@ async function attachRound(
           ref: bound?.ref ?? reattach?.ref ?? reattach?.seeded?.ref ?? repoCtx.ref,
           headSha: ready !== undefined && reattach !== undefined ? undefined : (bound?.headSha ?? repoCtx.headSha),
           ...(ready !== undefined ? { readyEnvironment: ready } : {}),
+          ...(reattach !== undefined &&
+          ctx.preserveOnReattachRefusal === true &&
+          repoCtx.repo &&
+          deps.config.config.execution?.installRepairRepos?.[repoCtx.repo.toLowerCase()]
+            ? { installRepairPolicy: deps.config.config.execution.installRepairRepos[repoCtx.repo.toLowerCase()] }
+            : {}),
           // The thread's own pull request, when the ref is its head (resident-
           // repos item 16): the one reason the resident may move a binding.
           ...(ownPr !== undefined ? { ownPr } : {}),

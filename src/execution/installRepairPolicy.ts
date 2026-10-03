@@ -15,6 +15,8 @@ export interface InstallRepairReceipt {
   lockfileKey: string;
 }
 
+export type InstallRepairAttempt = { kind: "none" | "unknown" } | { kind: "completed"; receipt: InstallRepairReceipt };
+
 const RECEIPT_FIELDS = ["version", "owner", "targetHead", "policyVersion", "lockfileKey"] as const;
 const TARGET_HEAD = /^[0-9a-f]{40}$/;
 const LOCKFILE_KEY = /^[0-9a-f]{64}$/;

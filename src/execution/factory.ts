@@ -14,7 +14,7 @@ import { LocalExecutor, execDeadline, isDeadlineMiss, isRunStopError, type Execu
 import { E2BExecutor } from "./e2b.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import { parsePreservationOwner, type OwnerClaim } from "./sandboxCheckpoint.js";
-import type { InstallRepairPolicy } from "./installRepairPolicy.js";
+import { verifyInstallRepairReceipt, type InstallRepairPolicy } from "./installRepairPolicy.js";
 import {
   SEED_CHECKOUT_DIR,
   seedForThread,
@@ -93,8 +93,8 @@ export interface ExecutionConfig {
   /** Operator-declared admission for pilot coding repositories. An absent
    * repository keeps ordinary executor selection unchanged. */
   readyPilotRepos?: Record<string, ReadyEnvironmentRequirement>;
-  /** Trusted Bot operator allowlist for a future dependency repair route.
-   * This declaration alone runs nothing and does not change readiness. */
+  /** Trusted Bot operator allowlist for paused seeded coding resumes only.
+   * Absent by default; the declaration alone never bypasses readiness. */
   installRepairRepos?: Record<string, InstallRepairPolicy>;
 }
 
@@ -150,6 +150,8 @@ export interface ExecutorContext {
    * onboarded repository's test command. It runs before the model. A refused
    * gate is a typed hold for the caller to retain its original unit/brief. */
   readyEnvironment?: ReadyEnvironmentRequirement;
+  /** Trusted Bot-only opt-in for the original resumed seeded owner. */
+  installRepairPolicy?: InstallRepairPolicy;
   /** The pull request the thread's OWN run opened, whose head branch `ref` is
    *  (`ownPrOf`; docs/reference/specs/resident-repos.md item 16): the one reason
    *  the resident may move a default-bound thread onto `ref` — the tree is
@@ -205,7 +207,10 @@ export interface WorkspaceBinding {
   /** Trusted fetched branch tip before this run can change its checkout. */
   publicationBaseSha?: string;
   /** A resident fallback's seed identity, retained so re-attach can verify the same checkout. */
-  seeded?: Pick<SeededSandbox, "slug" | "ref" | "workspace" | "sourceSha" | "depsBackupId">;
+  seeded?: Pick<
+    SeededSandbox,
+    "slug" | "ref" | "workspace" | "sourceSha" | "seedBackupId" | "depsBackupId" | "repairReceipt"
+  >;
 }
 
 const BACKENDS: readonly Backend[] = ["local", "resident", "sandbox", "e2b"];
@@ -231,6 +236,19 @@ export function workspaceBindingOf(value: unknown): WorkspaceBinding | undefined
           slug: seed.slug,
           ref: seed.ref,
           workspace: seed.workspace,
+          ...(typeof seed.repairReceipt === "object" &&
+          seed.repairReceipt !== null &&
+          verifyInstallRepairReceipt(seed.repairReceipt, {
+            owner: (seed.repairReceipt as { owner: never }).owner,
+            targetHead: (seed.repairReceipt as { targetHead: never }).targetHead,
+            policy: { policyVersion: "npm-ci-v1" },
+            lockfileKey: (seed.repairReceipt as { lockfileKey: never }).lockfileKey,
+          })
+            ? { repairReceipt: seed.repairReceipt as SeededSandbox["repairReceipt"] }
+            : {}),
+          ...(typeof seed.seedBackupId === "string" && /^[0-9a-f-]{36}$/i.test(seed.seedBackupId)
+            ? { seedBackupId: seed.seedBackupId }
+            : {}),
           ...(typeof seed.depsBackupId === "string" && seed.depsBackupId.length > 0 && seed.depsBackupId.length <= 128
             ? { depsBackupId: seed.depsBackupId }
             : {}),
@@ -362,6 +380,8 @@ export function workspaceBindingFor(
             ref: selection.seeded.ref,
             workspace: selection.seeded.workspace,
             ...(selection.seeded.sourceSha ? { sourceSha: selection.seeded.sourceSha } : {}),
+            ...(selection.seeded.seedBackupId ? { seedBackupId: selection.seeded.seedBackupId } : {}),
+            ...(selection.seeded.repairReceipt ? { repairReceipt: selection.seeded.repairReceipt } : {}),
             ...(selection.seeded.depsBackupId ? { depsBackupId: selection.seeded.depsBackupId } : {}),
           },
         }
@@ -735,13 +755,107 @@ async function selectExecutor(
       ctx.reattach.seeded.sourceSha !== undefined &&
       /^[0-9a-f]{40}$/.test(ctx.reattach.seeded.sourceSha)
     ) {
-      await checkReadyEnvironment(
-        selection.executor,
-        selection.seeded.workspace,
-        ready,
-        ctx.stopSignal,
-        ctx.reattach.seeded.sourceSha,
-      );
+      const recorded = ctx.reattach;
+      const originalSeed = ctx.reattach.seeded;
+      const owner = parsePreservationOwner({
+        run: ctx.runId,
+        requester: ctx.requester,
+        thread: ctx.threadKey,
+        repository: originalSeed.slug,
+        ref: originalSeed.ref,
+        head: recorded.publicationBaseSha,
+        seed: originalSeed.seedBackupId,
+        container: recorded.container,
+      });
+      const priorReceipt = originalSeed.repairReceipt;
+      let repairedHead =
+        owner &&
+        "container" in owner &&
+        priorReceipt &&
+        verifyInstallRepairReceipt(priorReceipt, {
+          owner,
+          targetHead: priorReceipt.targetHead,
+          policy: { policyVersion: "npm-ci-v1" },
+          lockfileKey: priorReceipt.lockfileKey,
+        })
+          ? priorReceipt.targetHead
+          : undefined;
+      if (
+        owner &&
+        "container" in owner &&
+        selection.executor instanceof CloudflareSandboxExecutor &&
+        ctx.profile.identity === "write" &&
+        ctx.agent.name === "coding"
+      ) {
+        // A completed attempt belongs to the head it repaired. Later coding
+        // commits can advance the checkout without changing those lockfiles.
+        const attempt = await selection.executor.inspectRepairDependencies(
+          owner,
+          repairedHead ?? selection.seeded.sha,
+          { policyVersion: "npm-ci-v1" },
+          ctx.stopSignal,
+        );
+        if (attempt.kind === "unknown" || (attempt.kind === "none" && repairedHead))
+          throw readyFailure("dependencies_invalid", "The original dependency repair has no verified receipt.");
+        if (attempt.kind === "completed") {
+          selection.seeded.repairReceipt = attempt.receipt;
+          repairedHead = attempt.receipt.targetHead;
+        }
+      }
+      try {
+        await checkReadyEnvironment(
+          selection.executor,
+          selection.seeded.workspace,
+          ready,
+          ctx.stopSignal,
+          repairedHead ?? originalSeed.sourceSha,
+        );
+      } catch (err) {
+        if (
+          !(err instanceof ReadyEnvironmentError) ||
+          !["dependencies_stale", "dependencies_missing", "dependencies_invalid"].includes(err.reason) ||
+          ctx.installRepairPolicy?.policyVersion !== "npm-ci-v1" ||
+          !(selection.executor instanceof CloudflareSandboxExecutor) ||
+          ctx.profile.identity !== "write" ||
+          ctx.agent.name !== "coding"
+        )
+          throw err;
+        if (
+          !owner ||
+          !("container" in owner) ||
+          originalSeed.slug !== ctx.repo ||
+          originalSeed.ref !== ctx.ref ||
+          !selection.seeded.seedBackupId ||
+          originalSeed.seedBackupId !== selection.seeded.seedBackupId
+        )
+          throw err;
+        // The reattach probe established this HEAD before the readiness check.
+        // The Worker checks it again atomically with the fixed native effect.
+        const receipt = await selection.executor.repairDependencies(
+          owner,
+          selection.seeded.sha,
+          ctx.installRepairPolicy,
+          ctx.stopSignal,
+        );
+        if (
+          !receipt ||
+          !verifyInstallRepairReceipt(receipt, {
+            owner,
+            targetHead: selection.seeded.sha,
+            policy: ctx.installRepairPolicy,
+            lockfileKey: receipt.lockfileKey,
+          })
+        )
+          throw err;
+        selection.seeded.repairReceipt = receipt;
+        await checkReadyEnvironment(
+          selection.executor,
+          selection.seeded.workspace,
+          ready,
+          ctx.stopSignal,
+          receipt.targetHead,
+        );
+      }
     } else {
       throw readyFailure("binding_mismatch", "Verify the original task's seeded checkout, then retry it.");
     }
@@ -1154,6 +1268,7 @@ async function seedSandbox(
           slug: answer.slug,
           ref: answer.ref,
           sha: answer.sha,
+          ...(answer.from?.checkoutBackupId ? { seedBackupId: answer.from.checkoutBackupId } : {}),
           ...(answer.from?.depsBackupId ? { depsBackupId: answer.from.depsBackupId } : {}),
           workspace: SEED_CHECKOUT_DIR,
           cached: answer.cached,

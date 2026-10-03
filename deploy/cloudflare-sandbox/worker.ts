@@ -120,6 +120,14 @@ import {
   type SeedStep,
 } from "../../src/execution/seedPlan.js";
 import { shellQuote } from "../../src/execution/shellQuote.js";
+import { CheckoutFence, installRepairCommand } from "../../src/execution/installRepairEffect.js";
+import {
+  INSTALL_REPAIR_POLICY_VERSION,
+  INSTALL_REPAIR_RECEIPT_VERSION,
+  verifyInstallRepairReceipt,
+  type InstallRepairAttempt,
+  type InstallRepairReceipt,
+} from "../../src/execution/installRepairPolicy.js";
 import {
   modelSandboxIdentity,
   newControllerIdentity,
@@ -321,6 +329,7 @@ export class SwitchboardSandbox extends Sandbox<Env> {
 
   private readonly idle: IdleGuard;
   private readonly gate: StartGate;
+  private readonly checkoutFence = new CheckoutFence();
 
   constructor(...args: ConstructorParameters<typeof Sandbox<Env>>) {
     super(...args);
@@ -395,6 +404,80 @@ export class SwitchboardSandbox extends Sandbox<Env> {
     };
   }
 
+  /** A trusted, single-effect repair on the original running container. No
+   *  SDK or start gate is used: native exec cannot wake a stopped runtime. */
+  async inspectRepairDependencies(owner: PreservationOwner, targetHead: string): Promise<InstallRepairAttempt> {
+    const prior = await this.ctx.storage.get<{
+      owner: PreservationOwner;
+      targetHead: string;
+      receipt?: InstallRepairReceipt;
+    }>(`switchboard.install-repair.attempt:${owner.run}:${owner.seed}`);
+    if (!prior) return { kind: "none" };
+    const record = await this.ctx.storage.get<CheckpointRecord>(PRESERVATION_KEY);
+    if (!record || !sameOwner(record.owner, owner) || this.ctx.id.name !== owner.thread) return { kind: "unknown" };
+    if (!sameOwner(prior.owner, owner) || prior.targetHead !== targetHead || !prior.receipt) return { kind: "unknown" };
+    return verifyInstallRepairReceipt(prior.receipt, {
+      owner,
+      targetHead,
+      policy: { policyVersion: INSTALL_REPAIR_POLICY_VERSION },
+      lockfileKey: prior.receipt.lockfileKey,
+    })
+      ? { kind: "completed", receipt: prior.receipt }
+      : { kind: "unknown" };
+  }
+
+  async repairDependencies(owner: PreservationOwner, targetHead: string): Promise<InstallRepairReceipt | null> {
+    if (this.ctx.container?.running !== true) return null;
+    const result = this.checkoutFence.exclusive(() =>
+      this.idle.served(async () => {
+        if (this.ctx.container?.running !== true || !/^[0-9a-f]{40}$/.test(targetHead)) return null;
+        const record = await this.ctx.storage.get<CheckpointRecord>(PRESERVATION_KEY);
+        if (!record || !sameOwner(record.owner, owner) || this.ctx.id.name !== owner.thread) return null;
+        if (this.ctx.container?.running !== true) return null;
+        // This key belongs to the original run and seed. A lost response may
+        // follow a completed native install; re-entry must inspect, never run it again.
+        const attemptKey = `switchboard.install-repair.attempt:${owner.run}:${owner.seed}`;
+        const prior = await this.inspectRepairDependencies(owner, targetHead);
+        if (prior.kind === "completed") return prior.receipt;
+        if (prior.kind === "unknown") return null;
+        await this.ctx.storage.put(attemptKey, { owner, targetHead });
+        try {
+          const process = await this.ctx.container.exec([
+            "bash",
+            "-c",
+            installRepairCommand(targetHead, owner.container),
+          ]);
+          const output = await process.output();
+          const text = new TextDecoder().decode(output.stdout);
+          const match = /^REPAIRED:([0-9a-f]{64})$/.exec(text);
+          const after = await this.ctx.storage.get<CheckpointRecord>(PRESERVATION_KEY);
+          if (
+            output.exitCode !== 0 ||
+            !match ||
+            !after ||
+            !sameOwner(after.owner, owner) ||
+            this.ctx.container?.running !== true
+          )
+            return null;
+          const receipt = {
+            version: INSTALL_REPAIR_RECEIPT_VERSION,
+            owner,
+            targetHead,
+            policyVersion: INSTALL_REPAIR_POLICY_VERSION,
+            lockfileKey: match[1],
+          } satisfies InstallRepairReceipt;
+          await this.ctx.storage.put(attemptKey, { owner, targetHead, receipt });
+          return receipt;
+        } catch {
+          // Native command may have started before the response was lost. Never
+          // re-send automatically or turn an unknown outcome into a receipt.
+          return null;
+        }
+      }),
+    );
+    return result ?? null;
+  }
+
   /** The start gate's view of this object (docs/reference/specs/execution.md
    *  item 23): the platform's running flag, and a warm-up that is one trivial
    *  command through the SDK — which does the start (instance grant, image
@@ -448,19 +531,21 @@ export class SwitchboardSandbox extends Sandbox<Env> {
     envVars: Record<string, string>,
   ): Promise<ExecAnswer | ExecFailure> {
     const startedAt = systemClock();
-    return this.idle.served(async () => {
-      try {
-        return await this.gate.through(
-          () => this.execute(command, execTimeoutSecs, envVars),
-          (cause) => sandboxStartingExecAnswer(cause),
-        );
-      } catch (err) {
-        // The warm-up's own failure, handed on by the gate: a full fleet, a
-        // refused connect or a silent control port keeps its name; anything
-        // else propagates. Nothing ran — the warm-up is a spawn.
-        return this.spawnFailure(err, startedAt);
-      }
-    });
+    return this.checkoutFence.shared(() =>
+      this.idle.served(async () => {
+        try {
+          return await this.gate.through(
+            () => this.execute(command, execTimeoutSecs, envVars),
+            (cause) => sandboxStartingExecAnswer(cause),
+          );
+        } catch (err) {
+          // The warm-up's own failure, handed on by the gate: a full fleet, a
+          // refused connect or a silent control port keeps its name; anything
+          // else propagates. Nothing ran — the warm-up is a spawn.
+          return this.spawnFailure(err, startedAt);
+        }
+      }),
+    );
   }
 
   /** `runCommand` without the ledger entry: the body, and the internal caller
@@ -542,47 +627,88 @@ export class SwitchboardSandbox extends Sandbox<Env> {
    *  Inside the idle ledger and behind the start gate like every route: the
    *  container's start is waited out by the executor, never carried here. */
   async seed(seed: SandboxSeed, envVars: Record<string, string>, claim?: OwnerClaim): Promise<SeedAnswer | WaitAnswer> {
-    return this.idle.served(async () => {
-      // Commit the fence before any restore can create (or erase) a checkout.
-      // A failed seed still leaves uncertainty; only terminal ownership could
-      // ever release this classification, not a missing marker or a new boot.
-      await this.ctx.storage.put(PRESERVATION_SEED_STATE_KEY, "seeded");
-      return this.gate.through(
-        async () => {
-          // Do not re-seed over a checkout already bound to a different writer.
-          const prior = await this.ctx.storage.get<CheckpointRecord>(PRESERVATION_KEY);
-          if (
-            prior &&
-            (!claim ||
-              !this.claimMatches(prior.owner, claim) ||
-              seed.checkoutBackupId !== prior.owner.seed ||
-              (seed.fetchRef ?? seed.ref) !== prior.owner.ref ||
-              (seed.fetchSha ?? seed.sha) !== prior.owner.head)
-          )
-            return {
-              seeded: false,
-              reason: "seed-incompatible",
-              detail: "preservation owner changed",
-              step: "fixup",
-            } as SeedAnswer;
-          // A previously bound owner cannot be retrofitted with today's door:
-          // compare the birth origin before seedNow can update origin or checkout.
-          const doorOrigin = claim ? normalizedSeedDoorOrigin(envVars.GIT_DOOR_ORIGIN) : null;
-          if ((claim && !doorOrigin) || (prior && !boundSeedOriginMatches(prior.doorOrigin, envVars.GIT_DOOR_ORIGIN)))
-            return {
-              seeded: false,
-              reason: "seed-incompatible",
-              detail: "preservation door origin changed or unavailable",
-              step: "fixup",
-            } as SeedAnswer;
-          if (prior) {
+    return this.checkoutFence.shared(() =>
+      this.idle.served(async () => {
+        // Commit the fence before any restore can create (or erase) a checkout.
+        // A failed seed still leaves uncertainty; only terminal ownership could
+        // ever release this classification, not a missing marker or a new boot.
+        await this.ctx.storage.put(PRESERVATION_SEED_STATE_KEY, "seeded");
+        return this.gate.through(
+          async () => {
+            // Do not re-seed over a checkout already bound to a different writer.
+            const prior = await this.ctx.storage.get<CheckpointRecord>(PRESERVATION_KEY);
+            if (
+              prior &&
+              (!claim ||
+                !this.claimMatches(prior.owner, claim) ||
+                seed.checkoutBackupId !== prior.owner.seed ||
+                (seed.fetchRef ?? seed.ref) !== prior.owner.ref ||
+                (seed.fetchSha ?? seed.sha) !== prior.owner.head)
+            )
+              return {
+                seeded: false,
+                reason: "seed-incompatible",
+                detail: "preservation owner changed",
+                step: "fixup",
+              } as SeedAnswer;
+            // A previously bound owner cannot be retrofitted with today's door:
+            // compare the birth origin before seedNow can update origin or checkout.
+            const doorOrigin = claim ? normalizedSeedDoorOrigin(envVars.GIT_DOOR_ORIGIN) : null;
+            if ((claim && !doorOrigin) || (prior && !boundSeedOriginMatches(prior.doorOrigin, envVars.GIT_DOOR_ORIGIN)))
+              return {
+                seeded: false,
+                reason: "seed-incompatible",
+                detail: "preservation door origin changed or unavailable",
+                step: "fixup",
+              } as SeedAnswer;
+            if (prior) {
+              try {
+                const [incarnation, cachedSeed] = await Promise.all([
+                  this.readFile(PRESERVATION_CONTAINER_MARKER, { encoding: "utf-8" }),
+                  this.readFile(SEED_MARKER, { encoding: "utf-8" }),
+                ]);
+                if (incarnation.content !== prior.owner.container || cachedSeed.content.trim() !== seedMarkerText(seed))
+                  throw new Error("binding changed");
+              } catch {
+                return {
+                  seeded: false,
+                  reason: "seed-incompatible",
+                  detail: "preservation binding unavailable",
+                  step: "fixup",
+                } as SeedAnswer;
+              }
+            }
+            const answer = await this.seedNow(seed, envVars, !!prior);
+            if (!answer.seeded || !claim) return answer;
+            // Only a cached answer may reuse the prior binding; never give a
+            // fresh result the owner's receipt, even if its HEAD happens to fit.
+            if (prior && !answer.cached)
+              return {
+                seeded: false,
+                reason: "seed-incompatible",
+                detail: "preservation seed binding changed",
+                step: "fixup",
+              } as SeedAnswer;
+            if (
+              claim.thread !== (this.ctx.id.name ?? "") ||
+              claim.repository !== seed.slug ||
+              claim.ref !== (seed.fetchRef ?? seed.ref) ||
+              !seedClaimHeadMatches(claim.head, answer.sha, !!prior && answer.cached) ||
+              claim.seed !== seed.checkoutBackupId
+            )
+              return {
+                seeded: false,
+                reason: "seed-incompatible",
+                detail: "preservation seed binding changed",
+                step: "fixup",
+              } as SeedAnswer;
             try {
-              const [incarnation, cachedSeed] = await Promise.all([
-                this.readFile(PRESERVATION_CONTAINER_MARKER, { encoding: "utf-8" }),
-                this.readFile(SEED_MARKER, { encoding: "utf-8" }),
-              ]);
-              if (incarnation.content !== prior.owner.container || cachedSeed.content.trim() !== seedMarkerText(seed))
-                throw new Error("binding changed");
+              if (prior) return { ...answer, preservationContainer: prior.owner.container };
+              if (!doorOrigin) throw new Error("unbound door origin");
+              const owner: PreservationOwner = { ...claim, container: crypto.randomUUID() };
+              await this.writeFile(PRESERVATION_CONTAINER_MARKER, owner.container);
+              await this.ctx.storage.put(PRESERVATION_KEY, { owner, doorOrigin } satisfies CheckpointRecord);
+              return { ...answer, preservationContainer: owner.container };
             } catch {
               return {
                 seeded: false,
@@ -591,50 +717,11 @@ export class SwitchboardSandbox extends Sandbox<Env> {
                 step: "fixup",
               } as SeedAnswer;
             }
-          }
-          const answer = await this.seedNow(seed, envVars, !!prior);
-          if (!answer.seeded || !claim) return answer;
-          // Only a cached answer may reuse the prior binding; never give a
-          // fresh result the owner's receipt, even if its HEAD happens to fit.
-          if (prior && !answer.cached)
-            return {
-              seeded: false,
-              reason: "seed-incompatible",
-              detail: "preservation seed binding changed",
-              step: "fixup",
-            } as SeedAnswer;
-          if (
-            claim.thread !== (this.ctx.id.name ?? "") ||
-            claim.repository !== seed.slug ||
-            claim.ref !== (seed.fetchRef ?? seed.ref) ||
-            !seedClaimHeadMatches(claim.head, answer.sha, !!prior && answer.cached) ||
-            claim.seed !== seed.checkoutBackupId
-          )
-            return {
-              seeded: false,
-              reason: "seed-incompatible",
-              detail: "preservation seed binding changed",
-              step: "fixup",
-            } as SeedAnswer;
-          try {
-            if (prior) return { ...answer, preservationContainer: prior.owner.container };
-            if (!doorOrigin) throw new Error("unbound door origin");
-            const owner: PreservationOwner = { ...claim, container: crypto.randomUUID() };
-            await this.writeFile(PRESERVATION_CONTAINER_MARKER, owner.container);
-            await this.ctx.storage.put(PRESERVATION_KEY, { owner, doorOrigin } satisfies CheckpointRecord);
-            return { ...answer, preservationContainer: owner.container };
-          } catch {
-            return {
-              seeded: false,
-              reason: "seed-incompatible",
-              detail: "preservation binding unavailable",
-              step: "fixup",
-            } as SeedAnswer;
-          }
-        },
-        (cause) => sandboxStartingAnswer(cause),
-      );
-    });
+          },
+          (cause) => sandboxStartingAnswer(cause),
+        );
+      }),
+    );
   }
 
   private claimMatches(owner: PreservationOwner, claim: OwnerClaim): boolean {
@@ -889,48 +976,50 @@ export class SwitchboardSandbox extends Sandbox<Env> {
    * again after the read to close the stat/read race. */
   async exportPublicationPack(next: string, old?: string, baseFetched = false): Promise<string | null> {
     if (!/^[0-9a-f]{40}$/.test(next) || (old !== undefined && !/^[0-9a-f]{40}$/.test(old))) return null;
-    return this.idle.served(() =>
-      this.gate.through(
-        async () => {
-          const path = `/tmp/cold-pack-${crypto.randomUUID()}.pack`;
-          try {
-            const script = sourcePublicationPackCommand(next, old, path, WORKDIR, baseFetched);
-            const result = await this.runRoot(["bash", "-c", script], 60_000);
-            if (result.exitCode !== 0) return null;
-            // A model-root writer can swap the file after stat. Read the SDK's
-            // binary stream under an independent byte cap, never a whole-file RPC.
-            let timer: ReturnType<typeof setTimeout> | undefined;
-            const read = async (): Promise<string | null> => {
-              const stream = await this.readFileStream(path);
-              let bytes = 0;
-              const parts: string[] = [];
-              for await (const chunk of streamFile(stream)) {
-                if (!(chunk instanceof Uint8Array) || (bytes += chunk.byteLength) > COLD_PACK_MAX_BYTES) {
-                  await stream.cancel().catch(() => undefined);
-                  return null;
-                }
-                for (let at = 0; at < chunk.length; at += 8192)
-                  parts.push(String.fromCharCode(...chunk.subarray(at, at + 8192)));
-              }
-              return btoa(parts.join(""));
-            };
+    return this.checkoutFence.shared(() =>
+      this.idle.served(() =>
+        this.gate.through(
+          async () => {
+            const path = `/tmp/cold-pack-${crypto.randomUUID()}.pack`;
             try {
-              return await Promise.race([
-                read(),
-                new Promise<null>((resolve) => {
-                  timer = setTimeout(() => resolve(null), 30_000);
-                }),
-              ]);
+              const script = sourcePublicationPackCommand(next, old, path, WORKDIR, baseFetched);
+              const result = await this.runRoot(["bash", "-c", script], 60_000);
+              if (result.exitCode !== 0) return null;
+              // A model-root writer can swap the file after stat. Read the SDK's
+              // binary stream under an independent byte cap, never a whole-file RPC.
+              let timer: ReturnType<typeof setTimeout> | undefined;
+              const read = async (): Promise<string | null> => {
+                const stream = await this.readFileStream(path);
+                let bytes = 0;
+                const parts: string[] = [];
+                for await (const chunk of streamFile(stream)) {
+                  if (!(chunk instanceof Uint8Array) || (bytes += chunk.byteLength) > COLD_PACK_MAX_BYTES) {
+                    await stream.cancel().catch(() => undefined);
+                    return null;
+                  }
+                  for (let at = 0; at < chunk.length; at += 8192)
+                    parts.push(String.fromCharCode(...chunk.subarray(at, at + 8192)));
+                }
+                return btoa(parts.join(""));
+              };
+              try {
+                return await Promise.race([
+                  read(),
+                  new Promise<null>((resolve) => {
+                    timer = setTimeout(() => resolve(null), 30_000);
+                  }),
+                ]);
+              } finally {
+                if (timer !== undefined) clearTimeout(timer);
+              }
+            } catch {
+              return null;
             } finally {
-              if (timer !== undefined) clearTimeout(timer);
+              await this.deleteFile(path).catch(() => undefined);
             }
-          } catch {
-            return null;
-          } finally {
-            await this.deleteFile(path).catch(() => undefined);
-          }
-        },
-        () => null,
+          },
+          () => null,
+        ),
       ),
     );
   }
@@ -1078,10 +1167,12 @@ export class SwitchboardSandbox extends Sandbox<Env> {
   }
 
   async readText(path: string): Promise<{ content: string } | FileRefusal> {
-    return this.idle.served(() =>
-      this.gate.through(
-        () => this.fileOp(async () => ({ content: (await this.readFile(path, { encoding: "utf-8" })).content })),
-        (cause) => this.startingRefusal(cause),
+    return this.checkoutFence.shared(() =>
+      this.idle.served(() =>
+        this.gate.through(
+          () => this.fileOp(async () => ({ content: (await this.readFile(path, { encoding: "utf-8" })).content })),
+          (cause) => this.startingRefusal(cause),
+        ),
       ),
     );
   }
@@ -1091,10 +1182,12 @@ export class SwitchboardSandbox extends Sandbox<Env> {
    *  decoded bytes to it — an SDK read that came back short would otherwise
    *  pass as the file. A file over the cap is refused by name inside a 200. */
   async readBase64(path: string): Promise<Base64ReadAnswer | FileRefusal> {
-    return this.idle.served(() =>
-      this.gate.through(
-        () => this.readBase64Now(path),
-        (cause) => this.startingRefusal(cause),
+    return this.checkoutFence.shared(() =>
+      this.idle.served(() =>
+        this.gate.through(
+          () => this.readBase64Now(path),
+          (cause) => this.startingRefusal(cause),
+        ),
       ),
     );
   }
@@ -1124,14 +1217,16 @@ export class SwitchboardSandbox extends Sandbox<Env> {
   }
 
   async write(path: string, content: string): Promise<{ ok: true } | FileRefusal> {
-    return this.idle.served(() =>
-      this.gate.through(
-        () =>
-          this.fileOp(async () => {
-            await this.writeFile(path, content);
-            return { ok: true as const };
-          }),
-        (cause) => this.startingRefusal(cause),
+    return this.checkoutFence.shared(() =>
+      this.idle.served(() =>
+        this.gate.through(
+          () =>
+            this.fileOp(async () => {
+              await this.writeFile(path, content);
+              return { ok: true as const };
+            }),
+          (cause) => this.startingRefusal(cause),
+        ),
       ),
     );
   }
@@ -1205,6 +1300,27 @@ export default {
 
     const url = new URL(request.url);
     const threadKey = request.headers.get("x-thread-key");
+    if (url.pathname === "/install-repair" || url.pathname === "/install-repair/inspect") {
+      if (!modelSandboxIdentity("/seed", threadKey)) return json({ error: "invalid thread identity" }, 400);
+      const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+      const owner = parsePreservationOwner(body?.owner);
+      if (
+        !body ||
+        Object.keys(body).length !== 3 ||
+        body.policyVersion !== INSTALL_REPAIR_POLICY_VERSION ||
+        !owner ||
+        !("container" in owner) ||
+        owner.thread !== threadKey ||
+        typeof body.targetHead !== "string" ||
+        !/^[0-9a-f]{40}$/.test(body.targetHead)
+      )
+        return json({ error: "invalid repair binding" }, 400);
+      const stub = env.Sandbox.get(env.Sandbox.idFromName(threadKey));
+      if (url.pathname === "/install-repair/inspect")
+        return json(await stub.inspectRepairDependencies(owner, body.targetHead));
+      const receipt = await stub.repairDependencies(owner, body.targetHead);
+      return receipt ? json(receipt) : json({ error: "repair refused or outcome unknown" }, 409);
+    }
     if (url.pathname === "/preservation/receipt") {
       // Raw DO stub, NOT getSandbox: a stopped container is never started just
       // to inspect it. The bearer is the trusted caller; the exact immutable

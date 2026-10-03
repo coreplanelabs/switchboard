@@ -660,7 +660,7 @@ describe("the seeded sandbox wiring (static)", () => {
     );
     const seedRoute = worker.slice(worker.indexOf("async seed(seed:"), worker.indexOf("private claimMatches("));
     expect(seedRoute).toMatch(
-      /return this\.idle\.served\(async \(\) => \{[\s\S]*?return this\.gate\.through\(\s*async \(\) => \{/,
+      /return this\.checkoutFence\.shared\(\(\) =>\s*this\.idle\.served\(async \(\) => \{[\s\S]*?return this\.gate\.through\(\s*async \(\) => \{/,
     );
     expect(seedRoute).toContain("this.seedNow(seed, envVars, !!prior)");
   });
