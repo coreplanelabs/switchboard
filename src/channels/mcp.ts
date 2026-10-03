@@ -1,4 +1,5 @@
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
+import { randomUUID } from "node:crypto";
 import { resolveActor, type GrantsLookup } from "../core/authz/actor.js";
 import {
   blastRadius,
@@ -353,7 +354,9 @@ async function route(
       if (keyError) return err(id, INVALID_PARAMS, keyError);
       // The request's root (docs/reference/specs/tracing.md), once the caller is known.
       const trace = startRequestRoot(deps, { channel: "mcp", receivedAt });
-      const msg: IncomingMessage = { ...incoming, receivedAt };
+      // One bounded identity per admitted call, retained by the in-flight async
+      // dispatch. Neither mutable text/thread nor a reusable JSON-RPC id names it.
+      const msg: IncomingMessage = { ...incoming, messageId: `${PLATFORM}:${randomUUID()}`, receivedAt };
       const io = new McpIO([], msg.threadKey);
       const dispatchFn = options.dispatch ?? realDispatch;
       const result = await dispatchSingleShot({

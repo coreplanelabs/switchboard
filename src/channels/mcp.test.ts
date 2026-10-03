@@ -12,6 +12,7 @@ import { registerRunsCommands, type RunsCommandDeps } from "../core/commands/run
 import { registerSteerCommands, type SteerCommandDeps } from "../core/commands/steer.js";
 import type { RunEvent } from "../core/runEvents.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
+import { isRecoveryRequest } from "../core/coordinator/recoveryHistory.js";
 import type { RunRecord } from "../core/runRecord.js";
 import { RunRegistry } from "../core/runRegistry.js";
 import { InMemoryRunStore } from "../core/runStore.js";
@@ -122,9 +123,55 @@ describe("handleMcpRequest — tools/call", () => {
       userId: "mcp:alice",
       channelId: "mcp:ops",
       threadKey: "mcp:ops:t1",
+      messageId: expect.stringMatching(/^mcp:[0-9a-f-]{36}$/),
       text: "hi",
       receivedAt: expect.any(Number), // stamped at receipt (docs/reference/specs/tracing.md)
     });
+  });
+
+  it("passes a bounded unique message identity to the recovery caller across async retries", async () => {
+    let finishFirst!: () => void;
+    const firstCompleted = new Promise<void>((resolve) => (finishFirst = resolve));
+    let firstIO: McpIO | undefined;
+    const recover = vi.fn(async (caller: { userId: string; threadKey: string; messageId?: string }) =>
+      isRecoveryRequest(caller) ? { status: 200 } : { status: 409, error: "recovery_request_identity_required" },
+    );
+    const dispatch: DispatchFn = async (_deps, msg, io) => {
+      // The Ship recovery seam forwards precisely these fields from IncomingMessage.
+      const result = await recover({ userId: msg.userId, threadKey: msg.threadKey, messageId: msg.messageId });
+      if (result.status !== 200) {
+        await io.reply(result.error!);
+        return;
+      }
+      const attempt = recover.mock.calls.length;
+      io.runStarted?.({ id: `recovery-${attempt}` });
+      if (attempt === 1) {
+        firstIO = io as McpIO;
+        await firstCompleted;
+      }
+      await io.reply(`finished ${attempt}`);
+    };
+    const request = rpc(
+      "tools/call",
+      { name: "dispatch", arguments: { text: "recover the original unit", thread: "t1", async: true } },
+      "reused-rpc-id",
+    );
+    const options = { auth: good, dispatch };
+    const first = await handleMcpRequest(request, deps, options);
+    expect((first.body as RpcResult).result).toMatchObject({ structuredContent: { runId: "recovery-1" } });
+    // A lost response followed by the identical JSON-RPC id and arguments is a new call.
+    const retry = await handleMcpRequest(request, deps, options);
+    expect((retry.body as RpcResult).result).toMatchObject({ structuredContent: { runId: "recovery-2" } });
+    expect(recover).toHaveBeenCalledTimes(2);
+    const [original, repeated] = recover.mock.calls.map(([caller]) => caller);
+    expect(original).toMatchObject({ userId: "mcp:alice", threadKey: "mcp:default:t1" });
+    expect(original.messageId).toMatch(/^mcp:[0-9a-f-]{36}$/);
+    expect(original.messageId!.length).toBe(40);
+    expect(repeated.messageId).toMatch(/^mcp:[0-9a-f-]{36}$/);
+    expect(repeated.messageId).not.toBe(original.messageId);
+    finishFirst();
+    await vi.waitFor(() => expect(firstIO?.collected()).toBe("finished 1"));
+    expect(recover.mock.calls[0]![0].messageId).toBe(original.messageId);
   });
 
   it("acknowledges a Ship run by id while dispatch continues, then exposes its final receipt", async () => {
@@ -196,6 +243,7 @@ describe("handleMcpRequest — tools/call", () => {
       authenticatedAs: "mcp:alice-mcp",
       channelId: "mcp:default",
       threadKey: "mcp:default:default",
+      messageId: expect.stringMatching(/^mcp:[0-9a-f-]{36}$/),
       text: "hi",
       receivedAt: expect.any(Number),
     });
@@ -209,6 +257,7 @@ describe("handleMcpRequest — tools/call", () => {
       userId: "mcp:alice-mcp",
       channelId: "mcp:default",
       threadKey: "mcp:default:default",
+      messageId: expect.stringMatching(/^mcp:[0-9a-f-]{36}$/),
       text: "hi",
       receivedAt: expect.any(Number),
     });
