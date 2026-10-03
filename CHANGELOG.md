@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.284.5](https://github.com/coreplanelabs/switchboard/compare/v1.284.4...v1.284.5) (2026-10-03)
+
+
+### Bug fixes
+
+* **agents:** report actionable review defects without pedantry ([#2737](https://github.com/coreplanelabs/switchboard/issues/2737)) ([a1b1d93](https://github.com/coreplanelabs/switchboard/commit/a1b1d93588b6b21bf081773c76168cb4afa58ce9))
+
 ## [1.284.4](https://github.com/coreplanelabs/switchboard/compare/v1.284.3...v1.284.4) (2026-10-03)
 
 
