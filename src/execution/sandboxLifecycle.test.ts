@@ -320,6 +320,23 @@ describe("sandbox Worker wiring (static)", () => {
     expect(worker).toMatch(/return \{ error, status: 503, reason \};/);
   });
 
+  it("fences both idle and SDK expiry teardown before SDK destroy or platform kill", () => {
+    expect(worker).toContain("beforeDestroy: (why) => this.preserveBeforeDestroy(why)");
+    expect(worker).toMatch(/override async onActivityExpired\(\): Promise<void> \{\s*await this\.idle\.expired\(\);/);
+    expect(worker).toContain("containerRunning: () => this.ctx.container?.running");
+  });
+
+  it("the stopped-container receipt bypasses getSandbox StartGate and exec", () => {
+    const route = worker.slice(
+      worker.indexOf('if (url.pathname === "/preservation/receipt")'),
+      worker.indexOf("const sandbox = getSandbox("),
+    );
+    expect(route).toContain("env.Sandbox.get(env.Sandbox.idFromName(threadKey))");
+    expect(route).not.toContain("getSandbox(");
+    expect(route).not.toContain(".gate");
+    expect(route).not.toContain(".exec(");
+  });
+
   // The rollout window a NEW thread can fall into is closed by replacing the
   // old-image instances in ONE wave: rollout_step_percentage 100, not the
   // platform's default [10, 100] that left minutes between the waves.

@@ -16,9 +16,10 @@
 // guard below makes the deadline ours again: served-time is recorded on every
 // request, a sweep the Durable Object schedules for itself checks it once a
 // minute (and the SDK's own expiry hook is answered by the same verdict), and
-// a container past the window is destroyed — through the SDK's clean teardown
-// when that finishes in time, by the platform's own kill when it does not.
-// Nothing inside the container can extend its life; only a request can.
+// a container past the window enters the preservation fence: a seeded
+// checkout remains in place unless a coherent owner-bound snapshot is proved.
+// Unseeded containers still stop through clean teardown or the platform kill.
+// A process alone does not refresh the idle clock.
 
 import { BASH_TIMEOUT_MAX_MS } from "./bashTimeout.js";
 
@@ -96,6 +97,9 @@ export interface IdleGuardHost {
   /** Whether a sweep callback is already scheduled (the SDK's schedule table). */
   sweepScheduled(): Promise<boolean>;
   scheduleSweep(delayMs: number): Promise<void>;
+  /** Fail-closed preservation fence before either teardown path. A seed whose
+   * writer, incarnation or backup cannot be verified must remain running. */
+  beforeDestroy?(why: "idle" | "stuck"): Promise<boolean>;
   /** The SDK's clean teardown (`Sandbox.destroy()`): sessions closed, the
    *  container SIGKILLed at the end. May hang or throw; the guard bounds it. */
   destroySandbox(): Promise<void>;
@@ -193,10 +197,29 @@ export class IdleGuard {
     return this.destroying;
   }
 
-  /** The SDK's clean destroy, bounded; then the platform's kill unless the
-   *  container is known stopped. The guarantee lives in the second step. */
+  /** The preservation fence runs BEFORE SDK destroy or the platform kill.
+   * A request arriving while it awaits an upload invalidates the old verdict;
+   * no stop of a newly-serving incarnation is licensed by old idle time. */
   private async destroy(verdict: Extract<IdleVerdict, { action: "destroy" }>, source: IdleStopSource): Promise<void> {
     const base = { why: verdict.why, idleMs: verdict.idleMs, source, sleepAfterMs: SANDBOX_SLEEP_AFTER_MS };
+    const servedAt = this.ledger.lastServedAt;
+    const inflight = [...this.ledger.inflight];
+    let safe = false;
+    try {
+      safe = (await this.host.beforeDestroy?.(verdict.why)) ?? true;
+    } catch {
+      // A failed preservation check is a reason to retain, not force kill.
+    }
+    if (
+      !safe ||
+      servedAt !== this.ledger.lastServedAt ||
+      inflight.length !== this.ledger.inflight.length ||
+      inflight.some((at, i) => at !== this.ledger.inflight[i]) ||
+      idleVerdict(this.ledger, this.host.now()).action !== "destroy"
+    ) {
+      this.host.log({ event: "sandbox.idle-stop.retained", ...base });
+      return;
+    }
     this.host.log({ event: "sandbox.idle-stop", ...base });
     let outcome: "done" | "timeout" | "failed";
     let error: string | undefined;
