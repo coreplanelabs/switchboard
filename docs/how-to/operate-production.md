@@ -31,6 +31,18 @@ npx --yes @coreplane/switchboard@<version> deploy all --affected
 | bot | the container is mid-rollout |
 | resident | `RESIDENT_DRAIN_TOKEN` drains the fleet, fences registered reattach, and checks actual run ownership before upload; an executing or unverified owner refuses, while a terminal registration stays protected. The post-deploy readiness gate uses `RESIDENT_READ_TOKEN`. |
 
+## Hold one release for a scoped deploy
+
+When a selected Worker has a protected owner, set the repository variable `SWITCHBOARD_RELEASE_DEPLOY_SKIP_TAG` to the pending exact tag (for example, `v1.284.0`) before merging its release PR. The release and images still publish; only that tag's automatic `affected` deploy is skipped. Confirm the tag and image jobs succeeded and the automatic deploy job was skipped, then remove the variable so it cannot affect a later release.
+
+With `main` still at the release commit, dispatch the existing production workflow with only the safe targets:
+
+```bash
+gh workflow run deploy-production.yml --ref main -f targets=memory,bot -f copy-images=never
+```
+
+`copy-images=never` skips the blanket registry warm-up; `deploy all` still copies any missing image for the selected Workers. Check the run's head is that release commit, its frozen plan selects only memory and bot, and its live receipt shows the bot on the exact commit. The memory step has no container live gate; read its `/healthz` build and run a separate functional check. A protected resident remains for a later deployment after its owner and fence are reconciled. Do not rerun the skipped `affected` deployment while that protection remains.
+
 ## Roll back the bot image
 
 Run the prior release's full bot deploy from the operator directory. Pin the released CLI; `--force` is the deliberate override for the supersede guard.

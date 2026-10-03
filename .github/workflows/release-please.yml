@@ -2,7 +2,8 @@
 # them (docs/reference/specs/release-and-deploy.md). Every merge to main updates (or opens)
 # one release PR carrying the next version and the changelog entry; merging
 # that PR tags the version, publishes the GitHub release — and deploys
-# production: deploy-production.yml runs `deploy all --affected`, so only the
+# production unless its exact tag is held for a scoped manual deploy:
+# deploy-production.yml runs `deploy all --affected`, so only the
 # Workers whose inputs this release changed roll, in the one supported order.
 # The release PR itself shows that plan before anyone merges it: the
 # release-pr-deploy-targets job below posts it on every push to main.
@@ -180,7 +181,10 @@ jobs:
   # `deploy` skipped, and the release is finished by rerunning the failed jobs.
   deploy:
     needs: [release-please, publish-image]
-    if: needs.release-please.outputs.release_created == 'true'
+    # A single release can hold its automatic rollout while preserving the
+    # release and image publishes. The operator then uses deploy-production's
+    # existing scoped dispatch. An unset or stale tag cannot hold a later release.
+    if: needs.release-please.outputs.release_created == 'true' && (vars.SWITCHBOARD_RELEASE_DEPLOY_SKIP_TAG == '' || vars.SWITCHBOARD_RELEASE_DEPLOY_SKIP_TAG != needs.release-please.outputs.tag_name)
     # The called workflow declares each secret by name and requires none; this
     # repository's own call inherits the full set on purpose (an operator's
     # repository passes them by name instead) — src/ciWorkflow.test.ts pins both.
