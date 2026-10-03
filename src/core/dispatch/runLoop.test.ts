@@ -30,7 +30,7 @@ import { RunRegistry } from "../runRegistry.js";
 import type { RunEvent } from "../runEvents.js";
 import { createRunsService } from "../runsService.js";
 import { createLedgerWriteThrough, NullLedgerRun, NullLedgerWriteThrough } from "../runLedger/writeThrough.js";
-import { TransientStoreError } from "../runStoreWorker.js";
+import { PermanentStoreError, TransientStoreError } from "../runStoreWorker.js";
 import type { PublicationSettlement } from "../publicationSettlement.js";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { planResume, transcriptSource } from "../runLedger/resume.js";
@@ -445,6 +445,95 @@ function setup(
 }
 
 describe("runLoop — the model turn and everything that rides on it", () => {
+  it.each(["landed", "retried", "newer owner", "failed", "hard stop", "late hard stop"] as const)(
+    "ordinary review release waits for its exact terminal ledger write (%s)",
+    async (mode) => {
+      const s = setup("The review is complete.", { agent: "review" });
+      const inner = new InMemoryRunLedger();
+      const finish = inner.finish.bind(inner);
+      let unblock!: () => void;
+      let started!: () => void;
+      const blocked = new Promise<void>((resolve) => (unblock = resolve));
+      const entered = new Promise<void>((resolve) => (started = resolve));
+      let attempts = 0;
+      vi.spyOn(inner, "finish").mockImplementation(async (...args) => {
+        started();
+        await blocked;
+        attempts++;
+        if (mode === "failed") throw new PermanentStoreError("finish rejected");
+        if (mode === "retried" && attempts === 1) throw new TransientStoreError("try again");
+        return finish(...args);
+      });
+      const ledger = createLedgerWriteThrough({ ledger: inner, gen: "review", fallback: s.store, warn: () => {} });
+      s.deps.runLedger = ledger;
+      const opened = await ledger.open({
+        runId: s.run.id,
+        threadKey: s.ctx.msg.threadKey,
+        startedAt: NOW,
+        meta: {
+          agent: "review",
+          userId: s.ctx.msg.userId,
+          channelId: s.ctx.msg.channelId,
+          threadKey: s.ctx.msg.threadKey,
+        },
+        card: null,
+        system: s.ctx.system,
+        tools: [],
+      });
+      if (opened.kind !== "tracked") throw new Error("untracked fixture");
+      const out = answered(await runLoop(s.deps, { ...s.ctx, ledgerRun: opened.run }));
+      if (mode === "hard stop") s.run.control.requestStop("hard");
+      const delivery = deliverAnswer({
+        msg: s.ctx.msg,
+        io: s.ctx.io,
+        agent: s.ctx.agent,
+        run: s.run,
+        answer: out.answer,
+        liveUrl: undefined,
+        prNote: out.prNote,
+        stopped: undefined,
+        ledgerRun: opened.run,
+        ending: s.ending,
+        card: s.ctx.card,
+        shell: s.ctx.shell,
+        checklistAsLeft: out.checklistAsLeft,
+        hasIncompleteToolEffects: out.hasIncompleteToolEffects,
+        answerOutcome: out.answerOutcome,
+        doneLines: s.ctx.doneLines,
+        runDiagnosis: out.runDiagnosis,
+        releaseWorkspace: out.releaseWorkspace,
+        root: s.ctx.root,
+      });
+      try {
+        await entered;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(s.replies).toHaveLength(1);
+        expect(inner.live.has(s.run.id)).toBe(true);
+        expect(s.releases).toEqual(mode === "hard stop" ? ["hard"] : []);
+        if (mode === "newer owner") inner.live.get(s.run.id)!.ownerGen = "successor";
+        if (mode === "late hard stop") {
+          s.run.control.requestStop("hard");
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          expect(inner.live.has(s.run.id)).toBe(true);
+          expect(s.releases).toEqual(["hard"]);
+        }
+      } finally {
+        unblock();
+        await delivery;
+        await s.writer.settled();
+      }
+      if (mode === "newer owner" || mode === "failed") {
+        expect(inner.live.has(s.run.id)).toBe(true);
+        if (mode === "newer owner") expect(inner.live.get(s.run.id)!.ownerGen).toBe("successor");
+        expect(await s.store.get(s.run.id)).toMatchObject({ id: s.run.id, status: "completed" });
+        expect(s.releases).toEqual([]);
+      } else {
+        expect(inner.live.has(s.run.id)).toBe(false);
+        expect(s.releases).toEqual(mode === "hard stop" || mode === "late hard stop" ? ["hard"] : ["paired"]);
+      }
+    },
+  );
+
   it.each(["general", "research"] as const)(
     "an all-checked source lookup without a write-up retains its work and records the missing answer (%s)",
     async (agent) => {

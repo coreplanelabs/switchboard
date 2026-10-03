@@ -6680,6 +6680,9 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
   it("a coding run that opened a pull request releases its workspace with `pushed` naming the branch and the PR; a run that opened none releases without it", async () => {
     const deps = codingDeps(describeThenAnswer(DESCRIPTION));
     acceptedCodingWrite(deps, "fix/x");
+    // This fixture owns a live ledger row; release needs the terminal writer
+    // as production provides, rather than makeDeps' null history writer.
+    deps.runHistoryWriter = createRunHistoryWriter({ store: deps.runStore, warn: () => {}, sleep: async () => {} });
     const { executor } = codingExecutor({ head: HEAD, branch: "fix/x", bindingRef: "main" });
     const releases: Array<{ mode: string; pushed?: unknown }> = [];
     Object.assign(executor, {

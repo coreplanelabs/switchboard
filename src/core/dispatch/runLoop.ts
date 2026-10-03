@@ -3686,7 +3686,25 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     checklistAsLeft,
     hasIncompleteToolEffects: () => incompleteToolEffects || pendingToolCalls.size > 0,
     answerOutcome,
-    releaseWorkspace,
+    releaseWorkspace: async (span) => {
+      // The final writer starts after the reply seal. Ordinary detach must
+      // await its exact ledger finish, or the preservation guard still sees
+      // a live owner. A store fallback cannot authorize that detach.
+      if (ledgerRun && run.control.requested !== "hard" && !commandInFlight && !gateBypassed) {
+        const signal = run.control.hardSignal;
+        let onStop!: () => void;
+        const stopped = new Promise<void>((resolve) => (onStop = resolve));
+        signal.addEventListener("abort", onStop, { once: true });
+        try {
+          if (signal.aborted) onStop();
+          const outcome = await Promise.race([ledgerRun.waitForFinish(), stopped]);
+          if (!signal.aborted && outcome?.kind !== "landed" && outcome?.kind !== "off") return;
+        } finally {
+          signal.removeEventListener("abort", onStop);
+        }
+      }
+      await releaseWorkspace(span);
+    },
     currentWorkCheck: workFreshness.beforePublish,
   };
 }
