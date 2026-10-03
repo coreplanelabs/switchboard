@@ -70,6 +70,40 @@ describe("resident deploy preflight — decide()", () => {
     expect(d.message).toContain("3 retained");
   });
 
+  it("allows only a categorized elapsed legacy row behind a ready fence and refuses malformed or protected rows", () => {
+    const live = {
+      state: "warm",
+      inFlight: 0,
+      runsInFlight: 0,
+      executingRuns: 0,
+      retainedRuns: 1,
+      unknownRuns: 0,
+      registrationReadback: [{ category: "legacy", reason: "protection-elapsed", count: 1 }],
+    };
+    const elapsed = payload([{ resource: "repo:x/y", live }]);
+    expect(decide(elapsed).allow).toBe(true);
+    expect(decide({ ...elapsed, payload: { ...elapsed.payload, fenceReady: false } }).allow).toBe(false);
+    for (const reason of ["malformed-registration", "legacy-protected"]) {
+      const unverified = payload([
+        {
+          resource: "repo:x/y",
+          live: {
+            ...live,
+            retainedRuns: 0,
+            unknownRuns: 1,
+            registrationReadback: [
+              { category: reason === "legacy-protected" ? "legacy" : "unknown", reason, count: 1 },
+            ],
+          },
+        },
+      ]);
+      expect(decide(unverified).allow).toBe(false);
+    }
+    expect(
+      decide(payload([{ resource: "repo:x/y", live: { ...live, retainedRuns: 0, executingRuns: 1 } }])).allow,
+    ).toBe(false);
+  });
+
   it("refuses unclassified protected activity but permits an operation to overlap a retained registration", () => {
     const missed = decide(
       payload([

@@ -67,13 +67,94 @@ export function registeredRunOwnsRelease(
   );
 }
 
+/** Read-only deploy classification. Category and reason are fixed vocabulary:
+ * the fenced live view can explain a legacy row without exposing its owner. */
+export function classifyDeployRegistration(input: {
+  threadKey: string;
+  registration:
+    | {
+        threadKey: string;
+        registeredAt?: string;
+        deadlineAt?: number;
+        runId?: string;
+        ownerGen?: string;
+        ownerFence?: number;
+      }
+    | undefined;
+  fence: unknown;
+  lastRunOwner?: { runId?: string; ownerGen?: string; ownerFence?: number } | null;
+  owner: unknown;
+  lastAttachAt?: string;
+  cutoff: number;
+  now: number;
+  graceMs: number;
+  opInFlight: number;
+}): {
+  state: "none" | "executing" | "retained" | "unknown";
+  category: "none" | "legacy" | "owned" | "unknown";
+  reason: string;
+} {
+  const { registration, threadKey, fence, lastRunOwner, owner } = input;
+  if (
+    registration !== undefined &&
+    (typeof registration !== "object" || registration === null || Array.isArray(registration))
+  )
+    return { state: "unknown", category: "unknown", reason: "malformed-registration" };
+  const hasOwnerFields =
+    registration !== undefined &&
+    (Object.hasOwn(registration, "runId") ||
+      Object.hasOwn(registration, "ownerGen") ||
+      Object.hasOwn(registration, "ownerFence"));
+  if (registration && !hasOwnerFields) {
+    const deadlineAt = registration.deadlineAt;
+    if (
+      registration.threadKey !== threadKey ||
+      typeof registration.registeredAt !== "string" ||
+      !Number.isFinite(Date.parse(registration.registeredAt)) ||
+      Date.parse(registration.registeredAt) > input.now ||
+      (deadlineAt !== undefined &&
+        (!Number.isSafeInteger(deadlineAt) ||
+          deadlineAt < Date.parse(registration.registeredAt) ||
+          !Number.isSafeInteger(deadlineAt + input.graceMs)))
+    )
+      return { state: "unknown", category: "unknown", reason: "malformed-registration" };
+    if (fence !== undefined || lastRunOwner != null || owner != null)
+      return { state: "unknown", category: "unknown", reason: "owner-unverified" };
+    if (input.opInFlight > 0) return { state: "executing", category: "legacy", reason: "operation-active" };
+    if (
+      registeredRunNeedsProtection(
+        input.lastAttachAt,
+        0,
+        input.cutoff,
+        deadlineAt === undefined ? undefined : deadlineAt + input.graceMs,
+        input.now,
+      )
+    )
+      return { state: "unknown", category: "legacy", reason: "legacy-protected" };
+    return { state: "retained", category: "legacy", reason: "protection-elapsed" };
+  }
+  const state = deployRegistrationState(input);
+  if (state === "none") return { state, category: "none", reason: "no-registration" };
+  if (state === "unknown")
+    return {
+      state,
+      category: "unknown",
+      reason:
+        hasOwnerFields &&
+        (!registration?.runId || !registration.ownerGen || !Number.isSafeInteger(registration.ownerFence))
+          ? "malformed-registration"
+          : "owner-unverified",
+    };
+  return { state, category: "owned", reason: state === "executing" ? "live-owner" : "terminal-owner" };
+}
+
 /** A retained workspace is not an executing run. Unknown ownership still
  * refuses a deploy; this decision never authorizes removal of the binding. */
 export function deployRegistrationState(input: {
   threadKey: string;
   registration: { threadKey: string; runId?: string; ownerGen?: string; ownerFence?: number } | undefined;
   fence: unknown;
-  lastRunOwner?: { runId?: string; ownerGen?: string; ownerFence?: number };
+  lastRunOwner?: { runId?: string; ownerGen?: string; ownerFence?: number } | null;
   owner: unknown;
 }): "none" | "executing" | "retained" | "unknown" {
   const { threadKey, registration, fence, lastRunOwner, owner } = input;

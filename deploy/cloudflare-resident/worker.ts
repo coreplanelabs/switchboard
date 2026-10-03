@@ -106,7 +106,7 @@ import {
   type DeployImageReconcileState,
 } from "./imageReconcileState.js";
 import {
-  deployRegistrationState,
+  classifyDeployRegistration,
   registeredRunAllowsClaim,
   registeredRunAllowsReattach,
   registeredRunNeedsProtection,
@@ -8817,19 +8817,33 @@ export class ResidentDO extends Sandbox<Env> {
     let executingRuns = 0;
     let retainedRuns = 0;
     let unknownRuns = 0;
+    const readback = new Map<string, { category: string; reason: string; count: number }>();
+    const now = systemClock();
     for (const binding of bindings) {
       const registration = regs.get(runRegKey(binding.threadKey));
       const fence = await this.ctx.storage.get<unknown>(runFenceKey(binding.threadKey));
       const owner = registration?.runId ? await this.observeRunForEviction(registration, binding) : null;
-      const state = deployRegistrationState({
+      const opInFlight = this.threadOpsInFlight.get(binding.threadKey) ?? 0;
+      const { state, category, reason } = classifyDeployRegistration({
         threadKey: binding.threadKey,
         registration,
         fence,
         lastRunOwner: binding.lastRunOwner,
         owner,
+        lastAttachAt: binding.lastAttachAt,
+        cutoff: now - CLEAN_IDLE_RELEASE_S * 1000,
+        now,
+        graceMs: RUN_REGISTRATION_GRACE_MS,
+        opInFlight,
       });
+      if (state !== "none") {
+        const key = `${category}:${reason}`;
+        const entry = readback.get(key) ?? { category, reason, count: 0 };
+        entry.count++;
+        readback.set(key, entry);
+      }
       // An operator call on this thread is already in runsInFlightCount().
-      if (state === "executing" && (this.threadOpsInFlight.get(binding.threadKey) ?? 0) === 0) executingRuns++;
+      if (state === "executing" && opInFlight === 0) executingRuns++;
       else if (state === "retained") retainedRuns++;
       else if (state === "unknown") unknownRuns++;
     }
@@ -8838,6 +8852,7 @@ export class ResidentDO extends Sandbox<Env> {
       executingRuns: executingRuns + this.runsInFlightCount(),
       retainedRuns,
       unknownRuns,
+      registrationReadback: [...readback.values()],
     };
   }
 
