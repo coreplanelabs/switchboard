@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.279.0](https://github.com/coreplanelabs/switchboard/compare/v1.278.7...v1.279.0) (2026-10-03)
+
+
+### Features
+
+* **resident:** capture retained trees through the old route ([#2671](https://github.com/coreplanelabs/switchboard/issues/2671)) ([4fb2bf0](https://github.com/coreplanelabs/switchboard/commit/4fb2bf076c59968dfe2428392c6dfc1580382a40))
+* **ship:** renew expired no-work findings leases ([#2701](https://github.com/coreplanelabs/switchboard/issues/2701)) ([5f83b1b](https://github.com/coreplanelabs/switchboard/commit/5f83b1b6e04005ff92924eb921620764c32c2402))
+
+
+### Bug fixes
+
+* **mcp:** pass unique request identity to recovery ([#2702](https://github.com/coreplanelabs/switchboard/issues/2702)) ([748e2db](https://github.com/coreplanelabs/switchboard/commit/748e2dbdf849afc4d6322623452119dbbf2cebb4))
+
 ## [1.278.7](https://github.com/coreplanelabs/switchboard/compare/v1.278.6...v1.278.7) (2026-10-03)
 
 
