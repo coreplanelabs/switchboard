@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { StepReport } from "./stepReport.js";
 import type { ChatMessage } from "../chatMessage.js";
-import type { RunRecord } from "../runRecord.js";
+import { isRunRecord, type RunRecord } from "../runRecord.js";
 import { createRunHistoryWriter } from "../runHistoryWriter.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "../runStoreWorker.js";
 import { InMemoryRunLedger } from "./inMemory.js";
@@ -403,6 +403,31 @@ describe("open — claim and seed", () => {
     expect(ledger.finished.get("r1")?.contextDependencies?.githubRepos).toEqual(["org/later", "org/repo"]);
     const restarted = harness({ ledger }).wt;
     expect((await restarted.readContextCheckpoint("r1"))?.receipt).toEqual(committed.receipt);
+  });
+
+  it("archives a committed checkpoint with a broken range after a later step detaches", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const { wt } = harness({
+      ledger: overriding(ledger, {
+        step: async (...args) =>
+          args[2].step === 0 ? ledger.step(...args) : Promise.reject(new PermanentStoreError("later step failed")),
+      }),
+    });
+    const req = openReq();
+    req.meta.channelVisibility = "public";
+    req.seed!.context = { version: 1, status: "known", revision: 0, origins: [], slack: [], mcp: [] };
+    const run = (await openRun(wt, req))!;
+    const committed = await run.normalizeContextOrigins();
+    expect(committed.ok).toBe(true);
+    if (!committed.ok) throw new Error("checkpoint not committed");
+    await run.step(step());
+    expect(run.tracked()).toBe(false);
+    await run.sink.put({ ...record("r1"), agent: "review", channelVisibility: "public" });
+    const archived = ledger.finished.get("r1")!;
+    expect(archived.session?.range).toBe("broken");
+    expect(archived.contextCheckpointReceipt).toEqual(committed.receipt);
+    expect(isRunRecord(archived)).toBe(true);
+    expect((await harness({ ledger }).wt.readContextCheckpoint("r1"))?.receipt).toEqual(committed.receipt);
   });
 
   it("keeps covered origins normalized when a source controller saves its earlier snapshot", async () => {

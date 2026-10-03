@@ -210,13 +210,11 @@ export async function validateContextCheckpoint(receipt: unknown, source: Canoni
   if (
     !authority ||
     !session ||
-    session.range === "broken" ||
     receipt.runId !== source.runId ||
     receipt.session.key !== session.key ||
     receipt.session.seedFrom !== session.seedFrom ||
     receipt.session.request !== session.request ||
-    receipt.session.from !== session.range.from ||
-    (session.range.to !== undefined && receipt.session.through > session.range.to) ||
+    !checkpointRangeMatchesRun(receipt, session) ||
     source.transcriptHash !== receipt.inputs.transcriptHash ||
     !source.members ||
     source.members.length !== receipt.membershipCount ||
@@ -413,19 +411,32 @@ export function contextCheckpointMatchesRun(
 ): boolean {
   const authority = checkpointAuthorityOf(source.meta);
   const session = source.meta.session;
-  if (!authority || !session || session.range === "broken") return false;
+  if (!authority || !session) return false;
   return (
     receipt.runId === source.runId &&
     JSON.stringify(authority) === JSON.stringify(receipt.authority) &&
     receipt.session.key === session.key &&
     receipt.session.seedFrom === session.seedFrom &&
     receipt.session.request === session.request &&
-    receipt.session.from === session.range.from &&
-    (session.range.to === undefined || receipt.session.through <= session.range.to) &&
+    checkpointRangeMatchesRun(receipt, session) &&
     source.context.origins.some(
       (origin) =>
         origin.runId === source.runId && origin.checkpoint === receipt.hash && sameOrigin(origin, sourceOrigin(source)),
     )
+  );
+}
+
+/** A later failed write breaks the open tail, not a prefix already sealed by
+ * the canonical checkpoint. Full reads still verify that prefix's hash. */
+function checkpointRangeMatchesRun(
+  receipt: ContextCheckpointReceipt,
+  session: NonNullable<CanonicalCheckpointSource["meta"]["session"]>,
+): boolean {
+  if (session.range === "broken")
+    return receipt.session.from >= session.seedFrom && receipt.session.from <= receipt.session.request;
+  return (
+    receipt.session.from === session.range.from &&
+    (session.range.to === undefined || receipt.session.through <= session.range.to)
   );
 }
 

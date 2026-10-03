@@ -65,6 +65,12 @@ curl -sS -H "authorization: Bearer $SWITCHBOARD_INGRESS_TOKEN" \
   "$SWITCHBOARD_BASE_URL/admin/trace/log?traceId=<32 hex>&limit=5000"
 ```
 
+For a slow `/runs/abandon`, search the memory Worker's logs for `[runs/abandon] <runId>`.
+It records the number of log pin updates and their total time. Each
+`[range-pins]` start names a log object's Cloudflare ID, without printing
+the conversation key or transcript. A missing completion in that request's trace
+identifies a stalled RPC; `slow` and `failed` lines include its elapsed time.
+
 ## Probe the model proxy
 
 The bot proxies model calls for its runs ([Model proxy](../reference/specs/model-proxy.md)): a run's bearer, presented as the API key on `POST /v1/messages` (Anthropic-shaped) or `POST /v1/chat/completions` (OpenAI-shaped), buys a call pinned to that run's model and caps, metered on its run page. To prove the path against a real run, mint a probe bearer for one that is live — it spends the run's own turns and dies with it — then make one small call.

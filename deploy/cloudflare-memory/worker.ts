@@ -141,7 +141,13 @@ import {
   selectReclaim,
   unreadInbox,
 } from "../../src/core/runLedger/decisions.ts";
-import { INTAKE_DELIVERY_CLAIM_MS, intakeReceiptRetentionMs, minutesToMs, PLANE } from "../../src/core/budgets.ts";
+import {
+  INTAKE_DELIVERY_CLAIM_MS,
+  intakeReceiptRetentionMs,
+  minutesToMs,
+  PLANE,
+  RANGE_PIN_RPC_SLOW_MS,
+} from "../../src/core/budgets.ts";
 import { PROVIDER_FAILURE_CAUSES, type ProviderFailureCause } from "../../src/core/provider.ts";
 import { holdBackgroundTask } from "./backgroundTasks.ts";
 import {
@@ -4308,7 +4314,21 @@ export class RunHistoryDO extends DurableObject<Env> {
             .toArray()[0];
           return !!(record?.context_checkpoint_json || record?.work_evidence_json) && this.isKept(record, policy, now);
         });
-      await this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(key)).retainRangePins(holders);
+      const id = this.env.SESSION_LOGS.idFromName(key);
+      const started = systemClock();
+      // The object ID joins this attempt to the Cloudflare RPC trace without
+      // printing a thread or session key. A missing completion marks a stall.
+      console.log(`[range-pins] session=${id.toString()} holders=${holders.length} start`);
+      try {
+        await this.env.SESSION_LOGS.get(id).retainRangePins(holders);
+      } catch (error) {
+        console.warn(`[range-pins] session=${id.toString()} failed after ${systemClock() - started}ms`);
+        throw error;
+      }
+      const elapsed = systemClock() - started;
+      const completed = `[range-pins] session=${id.toString()} complete in ${elapsed}ms`;
+      if (elapsed >= RANGE_PIN_RPC_SLOW_MS) console.warn(`${completed} (slow)`);
+      else console.log(completed);
     }
   }
 
@@ -4970,16 +4990,32 @@ export class RunHistoryDO extends DurableObject<Env> {
     return this.ctx.blockConcurrencyWhile(async () => {
       let out: FenceResult = { ok: true };
       let threadKey: string | undefined;
+      let pinKeys: string[] = [];
       this.ctx.storage.transactionSync(() => {
         const row = this.liveRow(runId);
         out = checkFence(row, gen);
         if (!out.ok) return;
         threadKey = row?.threadKey;
+        // Only this holder or source can lose a pin when its live row goes.
+        // A store-wide walk waits on every session object behind this input gate.
+        pinKeys = this.sql
+          .exec<{ session_key: string }>(
+            `SELECT DISTINCT session_key FROM context_refs
+             WHERE session_key != '' AND (holder_run_id = ? OR source_run_id = ?)`,
+            runId,
+            runId,
+          )
+          .toArray()
+          .map((ref) => ref.session_key);
         this.deleteLiveRows([runId]);
       });
+      if (!out.ok) return out;
       // An abandoned reservation seals like a finish does: the thread frees and the queue walks.
-      if (out.ok && threadKey !== undefined) this.planeSealed(runId, threadKey, systemClock());
-      await this.syncRangePins();
+      if (threadKey !== undefined) this.planeSealed(runId, threadKey, systemClock());
+      const pinSyncStart = systemClock();
+      console.log(`[runs/abandon] ${runId}: syncing range pins for ${pinKeys.length} session(s)`);
+      if (pinKeys.length > 0) await this.syncRangePins(pinKeys);
+      console.log(`[runs/abandon] ${runId}: range pins synced in ${systemClock() - pinSyncStart}ms`);
       return out;
     });
   }

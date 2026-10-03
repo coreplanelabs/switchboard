@@ -15,6 +15,70 @@ import { assertNoPendingBackgroundTasks } from "./backgroundTasks.ts";
 import type { RunHistoryDO, SessionLogDO } from "./worker.ts";
 
 describe("run ledger — alarm retention of live events", () => {
+  it("abandon syncs only range pins touched by the abandoned run", async () => {
+    const key = storeKey();
+    const runId = "abandon-pin-owner";
+    expect(await post("/runs/claim", claimBody(key, runId, "slack:C1:abandon-pin-owner"))).toMatchObject({
+      status: 200,
+    });
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (instance: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO sessions (key, thread_key) VALUES (?, ?)`,
+        "slack:C1:unrelated:review",
+        "slack:C1:unrelated",
+      );
+      const touched = "slack:C1:abandon-pin-owner:review";
+      const source = "slack:C1:abandon-pin-source:review";
+      state.storage.sql.exec(
+        `INSERT INTO context_refs (holder_run_id, source_run_id, session_key) VALUES (?, ?, ?)`,
+        runId,
+        runId,
+        touched,
+      );
+      state.storage.sql.exec(
+        `INSERT INTO context_refs (holder_run_id, source_run_id, session_key) VALUES (?, ?, ?)`,
+        "another-holder",
+        runId,
+        source,
+      );
+      const subject = instance as unknown as { syncRangePins: (keys?: readonly string[]) => Promise<void> };
+      const sync = subject.syncRangePins;
+      const calls: Array<readonly string[] | undefined> = [];
+      subject.syncRangePins = async (keys) => {
+        calls.push(keys);
+      };
+      try {
+        expect(await instance.abandon(runId, "g1")).toEqual({ ok: true });
+      } finally {
+        subject.syncRangePins = sync;
+      }
+      expect(calls).toEqual([[touched, source]]);
+    });
+  });
+
+  it("abandon without range pins does not sweep other session logs", async () => {
+    const key = storeKey();
+    const runId = "abandon-without-pins";
+    expect(await post("/runs/claim", claimBody(key, runId, "slack:C1:abandon-without-pins"))).toMatchObject({
+      status: 200,
+    });
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (instance: RunHistoryDO) => {
+      const subject = instance as unknown as { syncRangePins: (keys?: readonly string[]) => Promise<void> };
+      const sync = subject.syncRangePins;
+      subject.syncRangePins = async () => {
+        throw new Error("unrelated range pins swept");
+      };
+      try {
+        expect(await instance.abandon(runId, "wrong-generation")).toEqual({ ok: false, reason: "fenced" });
+        expect(await instance.abandon(runId, "g1")).toEqual({ ok: true });
+      } finally {
+        subject.syncRangePins = sync;
+      }
+    });
+  });
+
   it("keeps scheduled cleanup paused while the alarm serves live work", async () => {
     const key = storeKey();
     const runId = "paused-alarm-live";
