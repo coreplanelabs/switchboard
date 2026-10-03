@@ -164,7 +164,7 @@ import { mainAudienceAtPrompt, mainAudienceAtReply, planeRowIdentities } from ".
 import { createSourceReads } from "../mcp/sourceRead.js";
 import { readThreadWorkEvidence } from "../tools/threadWork.js";
 import { predicateFor } from "./authz/predicate.js";
-import { channelVisibilityOf, finishChildSetup, writeTombstone } from "./dispatch/record.js";
+import { channelVisibilityOf, finishSetupRun, writeTombstone } from "./dispatch/record.js";
 import {
   namesOriginalUnitRecovery,
   parseOriginalUnitAdoptionRequest,
@@ -765,7 +765,6 @@ export async function dispatch(
   let boundHandoff: ChildHandoff | undefined;
   let handoffAccess: HandoffAccess | undefined;
   let handoffConsumer: HandoffConsumer | undefined;
-  let handoffReserved = false;
   // Recovery authority is a durable fact of the coordinator child, not a
   // process-local spawn option. A resume/restart rebuilds the full boundary
   // from the run's coordinator event before any profile or target decision.
@@ -822,16 +821,17 @@ export async function dispatch(
   // recorded (a setup failure's silent close, then its error reply).
   let refusalRecorded = false;
   let operatorEvent: OperatorEventFields | undefined;
-  let childSetupFinalizer: (() => void) | undefined;
-  let childSetupRefusal: Refusal | undefined;
-  let childSetupFailure: RunFailure | undefined;
-  let childSetupFinished = false;
+  let setupFinalizer: (() => void) | undefined;
+  let setupRefusal: Refusal | undefined;
+  let setupFailure: RunFailure | undefined;
+  let setupFinished = false;
+  let setupUntrackedWhy: string | undefined;
   const audienceTrace: AudienceTrace = { refusal: audienceRefusalOf(resume?.row.state.audienceRefusal) };
   const recordRefusalOnce = async (refusal: Refusal) => {
     if (refusalRecorded) return;
     refusalRecorded = true;
-    if (childSetupFinalizer && !runLoopStarted) {
-      childSetupRefusal ??= refusal;
+    if (setupFinalizer && !runLoopStarted) {
+      setupRefusal ??= refusal;
       return;
     }
     await recordRefusal(deps, msg, io, refusal, ending, trace, operatorEvent, audienceTrace.refusal);
@@ -929,6 +929,7 @@ export async function dispatch(
   // left open — a run failure is closed (with its checklist) by the run loop.
   let setupCard: StatusHandle | undefined;
   let setupShell: CardShell | undefined;
+  let setupReviewTarget: { repo: string; pr: number } | undefined;
   let decisionRecord: string | undefined;
   let decisionRecordTask: string | undefined;
   // The card ticks from the ack (docs/reference/specs/tracing.md): a 5 s heartbeat repaints
@@ -950,9 +951,7 @@ export async function dispatch(
   // return value, so a run that THREW after a stop was requested still counts
   // as stopped.
   let registered: RunHandle | undefined;
-  // True once the run loop owns the run (its own finally finishes it). Until
-  // then the outer finally discards the row — the run never started — as it
-  // abandons the reservation.
+  // The setup finalizer owns an advertised run until the model loop takes it.
   let runLoopStarted = false;
   // A successful attach belongs to this setup until the run loop takes it.
   // A failed setup releases an ordinary tree; a resumed pilot retains its
@@ -3111,11 +3110,11 @@ export async function dispatch(
       repoCtx,
     });
     if (headPreflight.kind === "refused") return ended;
+    if (agent.name === "review" && repoCtx.repo !== undefined && repoCtx.pr !== undefined)
+      setupReviewTarget = { repo: repoCtx.repo, pr: repoCtx.pr };
 
-    // The reservation (item 42): the run's row on every surface BEFORE the
-    // workspace attach (dispatch/provision.ts) — the registry row, its label and
-    // link, the request and context events — then, for a fresh request, the
-    // ledger row. `registered` the moment the row exists: a later throw discards it.
+    // Reserve before publishing the registry row and link. Setup finishes that
+    // same row if the model never starts.
     // A child names its parent on every row (run-history item 46) — a run in a
     // spawned thread the same parent; a coordinator's child its instance and
     // key (item 48).
@@ -3158,32 +3157,55 @@ export async function dispatch(
       if (reservation) {
         reserved = reservation.reserved;
         requestRow = reservation.requestRow;
-        // A run the ledger would not track — whichever way its reservation ended
-        // untracked (run-history item 54) — says so on its own stream and on its
-        // card, not in the bot log alone: no handoff, resume or reclaim reaches
-        // this run, and a reader of its record should see why. Head material,
-        // like the cold-sandbox note below: a setup fact ahead of the loop.
-        if (reservation.untrackedWhy !== undefined) {
-          registry.publish(runId, {
-            type: "run_note",
-            kind: "ledger_untracked",
-            summary: redactAndCap(
-              oneLine(
-                `not tracked by the run ledger: ${reservation.untrackedWhy} — no handoff, resume or reclaim reaches this run; its record still reaches the store`,
-              ),
-              500,
-            ),
-            at: clock(),
-          });
-          shell.note("debug", "untracked by the ledger");
-        }
+        setupUntrackedWhy = reservation.untrackedWhy;
       }
+    };
+
+    const installSetupFinalizer = (runId: string, channelVisibility: ChannelVisibility) => {
+      const reservation = reserved;
+      // The same finalizer serves every admitted run.
+      setupFinalizer = () => {
+        if (setupFinished || runLoopStarted || fencedWhileAttaching) return;
+        setupFinished = true;
+        const status =
+          stoppedWhileAttaching === "hard"
+            ? "stopped_hard"
+            : stoppedWhileAttaching === "soft"
+              ? "stopped_soft"
+              : "failed";
+        finishSetupRun(deps, {
+          audience: audienceTrace,
+          runId,
+          registry,
+          ...(reservation ? { ledgerRun: reservation } : {}),
+          ending,
+          root,
+          msg,
+          agent,
+          profile,
+          resolved,
+          repoCtx,
+          channelVisibility,
+          ...(coordinator !== undefined ? { coordinator } : {}),
+          ...(parentRunId !== undefined ? { parentRunId } : {}),
+          seed,
+          finishedAt: clock(),
+          status,
+          ...(setupFailure !== undefined ? { failure: setupFailure } : {}),
+          refusal: setupRefusal ?? refusalOf("setup_failed", "The run ended before its model started."),
+        });
+        try {
+          io.runFinished?.({ id: runId, status });
+        } catch {
+          console.warn(`[dispatch] run ${runId}: setup finish notification failed`);
+        }
+      };
     };
 
     const registration = await registerRun(deps, {
       msg,
       io,
-      ...((coordinator && !resume && !restart) || hasHandoff
+      ...((!resume && !restart) || hasHandoff
         ? {
             beforeRegister: async ({
               runId,
@@ -3247,50 +3269,32 @@ export async function dispatch(
                   seedTurns!.push(...textTurnsOf(checked.context.messages));
                 }
               }
-              await reserveIdentity(runId, channelVisibility);
-              handoffReserved = true;
-              if (!coordinator || resume || restart) return;
-              const childReservation = reserved!;
-              // Installed before the registry can expose the id, not at model start.
-              childSetupFinalizer = () => {
-                if (childSetupFinished || runLoopStarted || fencedWhileAttaching) return;
-                childSetupFinished = true;
-                const status =
-                  stoppedWhileAttaching === "hard"
-                    ? "stopped_hard"
-                    : stoppedWhileAttaching === "soft"
-                      ? "stopped_soft"
-                      : "failed";
-                finishChildSetup(deps, {
-                  audience: audienceTrace,
-                  runId,
-                  registry,
-                  ledgerRun: childReservation,
-                  ending,
-                  root,
-                  msg,
-                  agent,
-                  profile,
-                  resolved,
-                  repoCtx,
-                  channelVisibility,
-                  coordinator,
-                  parentRunId,
-                  seed,
-                  finishedAt: clock(),
-                  status,
-                  ...(childSetupFailure !== undefined ? { failure: childSetupFailure } : {}),
-                  refusal: childSetupRefusal ?? refusalOf("setup_failed", "The child ended before its model started."),
-                });
-                // Channel notification cannot prevent the same-id writer or
-                // thread cleanup when a transport fails during setup.
-                try {
-                  io.runFinished?.({ id: runId, status });
-                } catch {
-                  console.warn(`[dispatch] run ${runId}: setup finish notification failed`);
-                }
-              };
+              if (!resume && !restart) await reserveIdentity(runId, channelVisibility);
             },
+          }
+        : {}),
+      ...(!resume && !restart
+        ? {
+            afterCreate: ({ runId, channelVisibility }: { runId: string; channelVisibility: ChannelVisibility }) => {
+              installSetupFinalizer(runId, channelVisibility);
+              // A reserve-time refusal predates registry.create. Publish its
+              // reason only now, so the live stream and final record keep it.
+              const why = setupUntrackedWhy;
+              if (why === undefined) return;
+              registry.publish(runId, {
+                type: "run_note",
+                kind: "ledger_untracked",
+                summary: redactAndCap(
+                  oneLine(
+                    `not tracked by the run ledger: ${why} — no handoff, resume or reclaim reaches this run; its record still reaches the store`,
+                  ),
+                  500,
+                ),
+                at: clock(),
+              });
+              shell.note("debug", "untracked by the ledger");
+            },
+            linkable: () => setupUntrackedWhy === undefined,
           }
         : {}),
       agent,
@@ -3441,7 +3445,6 @@ export async function dispatch(
             ),
           )
         : undefined;
-    if (!childSetupFinalizer && !handoffReserved) await reserveIdentity(runId, channelVisibility);
 
     // Admission owns the first live condition. Its absolute bound is the
     // effective run budget already admitted for this profile, and the durable
@@ -3772,7 +3775,7 @@ export async function dispatch(
     const attach = await attachWorkspace(deps, {
       runId: run.id,
       ownerGen: deps.runLedger.gen,
-      setupRemainingMs: () => Math.max(0, admissionBound - clock()),
+      setupRemainingMs: () => (runLoopStarted ? undefined : Math.max(0, admissionBound - clock())),
       msg,
       io,
       refuse,
@@ -4907,10 +4910,10 @@ export async function dispatch(
       );
       return ended;
     }
-    if (childSetupFinalizer && !runLoopStarted) {
-      childSetupRefusal ??= thrown ?? refusalOf("setup_failed", errMsg);
-      if (fleetBusyEndingFactsOf(err) !== undefined) childSetupFailure = { kind: "sandbox_fleet_busy" };
-      childSetupFinalizer();
+    if (setupFinalizer && !runLoopStarted) {
+      setupRefusal ??= thrown ?? refusalOf("setup_failed", errMsg);
+      if (fleetBusyEndingFactsOf(err) !== undefined) setupFailure = { kind: "sandbox_fleet_busy" };
+      setupFinalizer();
     }
     // A run the full sandbox fleet ended is one queryable line in the bot's
     // own log (docs/reference/specs/execution.md item 14) — this line is what a log sweep
@@ -4961,10 +4964,16 @@ export async function dispatch(
           root.span(
             replyName,
             async () => {
-              // The failure reply carries the run link when a run started: the
-              // card scrolls away, and a failed run's transcript should be one
-              // click from the thread.
-              const line = redactSecrets(stripAnsi(errorReply(err)));
+              // The card scrolls away after this reply, so retain the run link.
+              const directReviewCapacity =
+                !runLoopStarted && setupReviewTarget !== undefined && fleetBusyEndingFactsOf(err) !== undefined;
+              const line = redactSecrets(
+                stripAnsi(
+                  directReviewCapacity
+                    ? `Review never reached ${setupReviewTarget!.repo}#${setupReviewTarget!.pr} because sandbox capacity stayed full. No verdict or GitHub review was posted.`
+                    : errorReply(err),
+                ),
+              );
               const link = admitted?.runLink;
               await io.reply(link ? `${line}\n\n[Live run](${link})` : line);
               // The catch-all's refusal is a record too (record 0054, as
@@ -4979,9 +4988,9 @@ export async function dispatch(
   } finally {
     clearInterval(setupHeartbeat); // a refusal or a setup failure ended the request before the run loop took the card
     releaseLegacyOwnership?.();
-    // Every acknowledged child has a terminal same-id path, including a
-    // refusal or card failure that returned without entering the model loop.
-    childSetupFinalizer?.();
+    // Every admitted run has a terminal same-id path, including a refusal
+    // returned before the model loop.
+    setupFinalizer?.();
     // The backstop: a finished run no reply attempt reached (a fenced run, a
     // branch that returned early) is sealed with no `replyOk`, and any record
     // still registered is written.
@@ -5021,17 +5030,10 @@ export async function dispatch(
     // dispatch: it claims the thread itself, and a follow-up arriving during it
     // steers into it.
     //
-    // Before the thread is settled: a reservation never promoted (item 42) —
-    // the dispatch ended before its prompt existed: a refusal after the reserve,
-    // an attach that failed, a throw — so the run never started and nothing is
-    // recorded; the row goes, or the sweep would restart it forever, and it
-    // goes NOW, ahead of the fresh turn the settle may dispatch for follow-ups
-    // queued during the attach: that turn's own reservation would otherwise
-    // meet this row still live — a finish nobody is landing, so nothing to wait
-    // for — and run untracked for its whole life (item 54). A fenced
-    // reservation is another generation's to restart: `abandon` is a no-op on it.
-    if (reserved && !ledgerRun && !childSetupFinished)
-      await root.span("post.ledger_abandon", () => reserved!.abandon());
+    // A reservation that never got a registry row or setup finalizer must be
+    // abandoned before the next queued turn claims the thread. A fenced row
+    // belongs to another generation and its abandon is a no-op.
+    if (reserved && !ledgerRun && !setupFinished) await root.span("post.ledger_abandon", () => reserved!.abandon());
     // The predecessor's identity a restart keeps (run-history item 54), read
     // BEFORE the discard below takes the row: its events, its token, its
     // start — so the restart runs under the same run id and every posted link,
@@ -5040,9 +5042,8 @@ export async function dispatch(
       restartRequest?.restartOf !== undefined
         ? carriedRunIdentity(registry, restartRequest.restartOf, restartRequest.note)
         : undefined;
-    // …and the registry row created with it goes the same way: no finished
-    // frame, no record — a run that never started is not listed as one that did.
-    if (registered && !runLoopStarted && !childSetupFinished) registry.discard(registered.id);
+    // A finalized setup run keeps its frame and record under the original id.
+    if (registered && !runLoopStarted && !setupFinished) registry.discard(registered.id);
     // The second net under that discard (run-history item 42): a branch that
     // opens its own registry row — `runShipBranch` does — and throws or returns
     // before finishing it would leave the row `running` with no runner behind

@@ -128,7 +128,7 @@ export async function attachRoundWorkspace(input: {
     runId?: string;
     ownerGen?: string;
     residentClaim?: () => Promise<number | undefined>;
-    setupRemainingMs?: () => number;
+    setupRemainingMs?: () => number | undefined;
     agent: AgentDef;
     /** The round's effective profile — what is provisioned, and as whom. */
     profile: RunProfile;

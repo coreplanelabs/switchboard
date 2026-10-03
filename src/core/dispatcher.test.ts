@@ -2243,8 +2243,7 @@ describe("executor provisioning by agent resources", () => {
     expect(last).toContain("stopped before the run started");
     expect(last).not.toContain("setup failed");
     expect(replies).toEqual([]);
-    // A run that never started is not listed as one that did.
-    expect(registry.listActive()).toEqual([]);
+    expect(registry.getById("r1")).toMatchObject({ status: "stopped_hard", finished: true });
   });
 
   it("a hard stop during PR review checkout closes the run before any model turn", async () => {
@@ -2282,7 +2281,7 @@ describe("executor provisioning by agent resources", () => {
     expect(statuses.at(-1)?.title).toContain("⛔");
     expect(replies).toEqual([]);
     expect(release).toHaveBeenCalled();
-    expect(registry.listActive()).toEqual([]);
+    expect(registry.getById("r1")).toMatchObject({ status: "stopped_hard", finished: true });
   });
 
   it("a follow-up queued during the first attach's wait is dropped with the ⛔ note when the stop ends the attach — never handed on as a fresh run on the stopped thread", async () => {
@@ -2332,7 +2331,7 @@ describe("executor provisioning by agent resources", () => {
     expect(second.replies).toHaveLength(2);
     expect(second.replies[1]).toMatch(/^⛔ .*stopped before it read this folded follow-up/);
     expect(first.replies).toEqual([]);
-    expect(registry.listActive()).toEqual([]);
+    expect(registry.getById("r1")).toMatchObject({ status: "stopped_hard", finished: true });
   });
 
   it("a provisioning failure beside a pending stop is the failure, not the stop: the card says setup failed and the error is replied — only the executor's typed aborted error reads as the stop", async () => {
@@ -13164,6 +13163,86 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     return { io, replies };
   }
 
+  it("keeps a direct PR review's advertised run when fleet capacity prevents setup", async () => {
+    vi.stubEnv("PUBLIC_BASE_URL", "https://sb.example");
+    const provider = capturingProvider("must not review");
+    const { deps, registry, ledger, writer } = wired(provider);
+    deps.admission = new ThreadAdmission<DispatchFollowUp>();
+    deps.resolveRepoContext = () => ({
+      repo: "acme/api",
+      ref: "patch-1",
+      pr: 42,
+      headSha: "e".repeat(40),
+    });
+    vi.mocked(makeExecutor).mockRejectedValueOnce(
+      new ExecCapacityError("sandbox fleet busy: this request did not run", {
+        refusal: "max_instances reached",
+        waitedMs: 315_000,
+      }),
+    );
+    const { io, replies } = ioWithCard();
+
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
+    await writer.settled();
+
+    expect(provider.requests).toHaveLength(0);
+    expect(vi.mocked(makeExecutor).mock.calls.some(([, ctx]) => typeof ctx.setupRemainingMs === "function")).toBe(true);
+    expect(replies.join("\n")).toContain("Review never reached acme/api#42 because sandbox capacity stayed full");
+    expect(replies.join("\n")).toContain("[Live run](https://sb.example/runs/run-l?t=tok)");
+    expect([...ledger.finished.keys()]).toEqual(["run-l"]);
+    expect(ledger.finished.get("run-l")).toMatchObject({
+      id: "run-l",
+      agent: "review",
+      status: "failed",
+      failure: { kind: "sandbox_fleet_busy" },
+      usage: { turns: 0 },
+    });
+    expect(ledger.finished.get("run-l")?.events).toContainEqual(
+      expect.objectContaining({
+        type: "run_meta",
+        repo: "acme/api",
+        ref: "patch-1",
+        pr: 42,
+        headSha: "e".repeat(40),
+      }),
+    );
+    expect(registry.snapshotById("run-l")?.finished).toBe(true);
+    expect(ledger.live.size).toBe(0);
+  });
+
+  it("keeps an untracked reserve reason on the advertised run while omitting its unproven link", async () => {
+    vi.stubEnv("PUBLIC_BASE_URL", "https://sb.example");
+    const { deps, registry, store, writer } = wired(capturingProvider("must not review"));
+    deps.admission = new ThreadAdmission<DispatchFollowUp>();
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: "e".repeat(40) });
+    vi.spyOn(deps.runLedger, "reserve").mockResolvedValueOnce({ kind: "untracked", why: "ledger unavailable" });
+    vi.mocked(makeExecutor).mockRejectedValueOnce(
+      new ExecCapacityError("sandbox fleet busy", { refusal: "max_instances reached", waitedMs: 315_000 }),
+    );
+    const { io, replies } = ioWithCard();
+
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
+    await writer.settled();
+
+    expect(replies.join("\n")).toContain("Review never reached acme/api#42 because sandbox capacity stayed full");
+    expect(replies.join("\n")).not.toContain("[Live run]");
+    expect(registry.snapshotById("run-l")?.finished).toBe(true);
+    expect(registry.snapshotById("run-l")?.events).toContainEqual(
+      expect.objectContaining({
+        type: "run_note",
+        kind: "ledger_untracked",
+        summary: expect.stringContaining("ledger unavailable"),
+      }),
+    );
+    expect((await store.get("run-l"))?.events).toContainEqual(
+      expect.objectContaining({
+        type: "run_note",
+        kind: "ledger_untracked",
+        summary: expect.stringContaining("ledger unavailable"),
+      }),
+    );
+  });
+
   it("restarts an attaching private child from its durable coordinator row", async () => {
     const ledger = new InMemoryRunLedger(() => 10_000);
     const provider = capturingProvider("private work resumed");
@@ -13579,7 +13658,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         expect(replies).toEqual([]);
         expect(provider.requests).toEqual([]);
         expect(JSON.stringify(statuses.at(-1))).toContain("stopped before the run started");
-        expect(registry.listActive()).toEqual([]);
+        expect(registry.getById("run-l")).toMatchObject({ status: "stopped_hard", finished: true });
         expect(ledger.live.size).toBe(0);
         expect(calls).toEqual(
           stage === "credential cleanup"
@@ -15032,7 +15111,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     });
   });
 
-  it("a dispatch that ends before its prompt exists — here the attach's ask-once branch refusal — abandons its reservation and discards its registry row (item 42): both go with no record and no warning, the index feed sees the row come and go, so nothing restarts or lists a run that never started", async () => {
+  it("an attach refusal finishes the same advertised run without a second door record", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("GITHUB_APP_ID", "");
     const ledger = new InMemoryRunLedger(() => 10_000);
@@ -15056,17 +15135,13 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(liveAtAttach).toEqual(["run-l"]);
     expect(replies.some((r) => r.includes("Which branch"))).toBe(true);
     expect(ledger.live.size).toBe(0);
-    expect(ledger.finished.size).toBe(0);
-    // The refusal's own `door` record is the one row left (record 0054, as
-    // amended: every refusal is a run record); the run that never started is gone.
-    expect(registry.listActive().map((r) => r.agent)).toEqual(["door"]);
-    // The row came (the create, then one upsert per content event published at
-    // the reservation — request, meta, context) and went (the discard), and
-    // nothing more came for it after the removal.
+    expect([...ledger.finished.keys()]).toEqual(["run-l"]);
+    expect(ledger.finished.get("run-l")).toMatchObject({ status: "failed", usage: { turns: 0 } });
+    expect(registry.getById("run-l")).toMatchObject({ agent: "coding", status: "failed", finished: true });
     expect(index[0]?.type).toBe("upsert");
     const rowEvents = index.filter((ev) => (ev.type === "removed" ? ev.id : ev.run.id) === "run-l");
-    expect(rowEvents.at(-1)).toEqual({ type: "removed", id: "run-l" });
-    expect(index.filter((ev) => ev.type === "removed")).toHaveLength(1);
+    expect(rowEvents.at(-1)).toMatchObject({ type: "upsert", run: { id: "run-l", status: "failed" } });
+    expect(index.filter((ev) => ev.type === "removed")).toHaveLength(0);
     expect(warnings).toEqual([]);
   });
 
@@ -17627,10 +17702,9 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
 
   // The other exit before `open`: the reservation is made, then the setup
   // fails — here the MCP discovery throws — while follow-ups were queued
-  // during it. Nobody is finishing that row, so nothing could be waited for;
-  // it is abandoned before the thread is settled, and the fresh turn for those
-  // follow-ups claims a free thread.
-  it("a never-promoted reservation is abandoned before the thread is settled: the fresh turn for follow-ups queued during a setup that failed before open claims a free thread and is tracked, with no untracked note", async () => {
+  // during it. The run's finish releases the thread before the queued follow-up
+  // becomes its own turn.
+  it("a setup failure finishes the advertised run before a queued follow-up claims the thread", async () => {
     const inner = new InMemoryRunLedger(() => 10_000);
     const order: string[] = [];
     const ledger = new Proxy(inner, {
@@ -17712,40 +17786,34 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(a.replies.some((r) => r.includes("mcp discovery exploded"))).toBe(true);
     // The follow-up was not lost: it ran as its own turn, on its own sender's handle…
     expect(b.replies.at(-1)).toBe("answer 2");
-    // …and its reservation found the thread free: run-1's row was abandoned
-    // BEFORE the settle handed the follow-up on. (run-2 is the failure's own
-    // `door` refusal record — record 0054, as amended — which claims no thread;
-    // the fresh turn's run is run-3.)
-    expect(order.indexOf("abandon run-1")).toBeLessThan(order.indexOf("claim run-3 ok"));
-    expect(order.filter((o) => o.startsWith("claim run-3"))).toEqual(["claim run-3 ok", "claim run-3 ok"]);
+    // The setup run finishes under its own advertised ID; its atomic finish
+    // releases the thread before the next turn claims it.
+    expect(order.indexOf("finish run-1")).toBeLessThan(order.indexOf("claim run-2 ok"));
+    expect(order.filter((o) => o.startsWith("claim run-2"))).toEqual(["claim run-2 ok", "claim run-2 ok"]);
     expect(inner.live.has("run-1")).toBe(false);
-    expect(inner.finished.has("run-1")).toBe(false); // never started: no record of it
-    expect(inner.finished.get("run-3")).toMatchObject({ status: "completed", threadKey: "slack:CX:1.0" });
+    expect(inner.finished.get("run-1")).toMatchObject({ status: "failed", agent: "general", usage: { turns: 0 } });
+    expect(inner.finished.get("run-2")).toMatchObject({ status: "completed", threadKey: "slack:CX:1.0" });
     expect(
-      inner.finished.get("run-3")!.events.filter((e) => e.type === "run_note" && e.kind === "ledger_untracked"),
+      inner.finished.get("run-2")!.events.filter((e) => e.type === "run_note" && e.kind === "ledger_untracked"),
     ).toEqual([]);
     expect(inner.live.size).toBe(0);
   });
 
-  // The ordering above holds only when the ledger answers the abandon. When it
-  // does not — one transient — the row stands as this generation's own dead
-  // reservation, and the fresh turn's claim meets it: the write-through knows
-  // the row is its own (reserved here, promoted never, driven by nobody),
-  // abandons it again from the claim and claims once more.
-  it("a never-promoted reservation whose abandon failed transiently is abandoned again by the next claim on the thread: the fresh turn is still tracked, with no untracked note", async () => {
+  // A transient setup finish is retried before the next turn claims the thread.
+  it("a setup finish retry releases the original row before a queued follow-up claims", async () => {
     const inner = new InMemoryRunLedger(() => 10_000);
     const order: string[] = [];
-    let abandonFailures = 1;
+    let finishFailures = 1;
     const ledger = new Proxy(inner, {
       get(target, prop) {
-        if (prop === "abandon")
-          return async (runId: string, gen: string) => {
-            if (abandonFailures-- > 0) {
-              order.push(`abandon ${runId} threw`);
-              throw new TransientStoreError("run ledger /runs/abandon: HTTP 503");
+        if (prop === "finish")
+          return async (...args: Parameters<InMemoryRunLedger["finish"]>) => {
+            if (args[0] === "run-1" && finishFailures-- > 0) {
+              order.push("finish run-1 threw");
+              throw new TransientStoreError("run ledger /runs/finish: HTTP 503");
             }
-            order.push(`abandon ${runId}`);
-            return target.abandon(runId, gen);
+            order.push(`finish ${args[0]}`);
+            return target.finish(...args);
           };
         if (prop === "claim")
           return async (req: ClaimRequest) => {
@@ -17809,19 +17877,12 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     await run;
     await writer.settled();
     expect(b.replies.at(-1)).toBe("answer 2");
-    // The finally's abandon threw; the fresh turn's claim met the dead row, abandoned it again, and claimed once more.
-    // run-2 is the failure's own `door` refusal record (record 0054, as
-    // amended), which claims no thread; the fresh turn's run is run-3.
-    expect(order.slice(0, 4)).toEqual([
-      "abandon run-1 threw",
-      "claim run-3 thread-live",
-      "abandon run-1",
-      "claim run-3 ok",
-    ]);
+    expect(order.slice(0, 4)).toEqual(["finish run-1 threw", "finish run-1", "claim run-2 ok", "claim run-2 ok"]);
     expect(inner.live.has("run-1")).toBe(false);
-    expect(inner.finished.get("run-3")).toMatchObject({ status: "completed", threadKey: "slack:CX:1.0" });
+    expect(inner.finished.get("run-1")).toMatchObject({ status: "failed", usage: { turns: 0 } });
+    expect(inner.finished.get("run-2")).toMatchObject({ status: "completed", threadKey: "slack:CX:1.0" });
     expect(
-      inner.finished.get("run-3")!.events.filter((e) => e.type === "run_note" && e.kind === "ledger_untracked"),
+      inner.finished.get("run-2")!.events.filter((e) => e.type === "run_note" && e.kind === "ledger_untracked"),
     ).toEqual([]);
     expect(inner.live.size).toBe(0);
   });

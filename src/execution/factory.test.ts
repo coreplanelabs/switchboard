@@ -3307,6 +3307,18 @@ describe("makeExecutor seeded sandbox", () => {
     );
   });
 
+  it("a typed fleet refusal during seed ends setup without starting a fresh checkout", async () => {
+    stubEnvs();
+    const { calls } = stubFetch(degraded(C1), {
+      status: 503,
+      body: { error: "fleet-busy: max_instances reached", reason: "fleet-busy" },
+    });
+    await expect(makeExecutor(residentOpts(), { ...repoCtx(), setupRemainingMs: () => 0 })).rejects.toMatchObject({
+      name: "ExecCapacityError",
+    });
+    expect(calls).toEqual(["/status", "/seed"]);
+  });
+
   it("a Worker without /seed (an older release answers 404) sends the run cold with the reason — never a dead run", async () => {
     stubEnvs();
     stubFetch(

@@ -458,6 +458,36 @@ describe("CloudflareSandboxExecutor fleet-busy wait", () => {
     expect(calls).toHaveLength(12);
   });
 
+  it("waits within one run setup lease on the identical refused request, then returns to the command cap", async () => {
+    let preparing = true;
+    const busy = Array.from({ length: 13 }, () => ({ body: BUSY_EXEC }));
+    const { calls } = scriptedFetch([...busy, { body: OK }, ...busy]);
+    const ex = new CloudflareSandboxExecutor({
+      ...OPTS,
+      setupRemainingMs: () => (preparing ? 7 * 60_000 : undefined),
+    });
+    const setup = ex.exec("git rev-parse HEAD", { timeoutMs: 60_000 });
+    await vi.advanceTimersByTimeAsync(360_000);
+    await expect(setup).resolves.toBe("ok");
+    expect(calls.slice(0, 14).every((call) => String(call.init.body) === String(calls[0]!.init.body))).toBe(true);
+
+    preparing = false;
+    const ordinary = ex.exec("npm test", { timeoutMs: 60_000 }).catch((err: unknown) => err);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(await ordinary).toBeInstanceOf(ExecCapacityError);
+  });
+
+  it("does not open a new five-minute wait after the run setup lease is spent", async () => {
+    const { calls } = scriptedFetch([{ body: BUSY_EXEC }]);
+    const outcome = new CloudflareSandboxExecutor({ ...OPTS, setupRemainingMs: () => 0 })
+      .exec("git rev-parse HEAD", { timeoutMs: 60_000 })
+      .catch((err: unknown) => err);
+    const err = await outcome;
+    expect(err).toBeInstanceOf(ExecCapacityError);
+    expect((err as ExecCapacityError).fleetBusy?.waitedMs).toBe(0);
+    expect(calls).toHaveLength(1);
+  });
+
   it("a /read answered HTTP 503 with reason fleet-busy is the same wait (the default 5-min budget applies)", async () => {
     const { calls } = scriptedFetch([
       { status: 503, body: { error: "fleet-busy: no free per-thread sandbox", reason: "fleet-busy" } },
