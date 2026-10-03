@@ -62,13 +62,14 @@ const REPOSITORY = /^[a-zA-Z0-9_.-]{1,80}\/[a-zA-Z0-9_.-]{1,80}$/;
 // characters such as `+`, while its reserved ref syntax stays forbidden.
 const REF = /^(?![-/.])(?!.*\.\.)(?!.*\/\/)(?!.*\.lock$)(?!.*\.$)(?!.*@\{)[\x21-\x7e]{1,255}$/;
 const REF_FORBIDDEN = /[~^:?*[\\]/;
-const OWNER_FIELDS = ["run", "requester", "thread", "repository", "ref", "head", "seed", "container"] as const;
+const OWNER_CLAIM_FIELDS = ["run", "requester", "thread", "repository", "ref", "head", "seed"] as const;
+const OWNER_FIELDS = [...OWNER_CLAIM_FIELDS, "container"] as const;
 
 /** No path, env, command or arbitrary JSON fields accepted from a receipt. */
 export function parsePreservationOwner(input: unknown, requireContainer = true): PreservationOwner | OwnerClaim | null {
   if (!input || typeof input !== "object" || Array.isArray(input)) return null;
   const o = input as Record<string, unknown>;
-  const fields = requireContainer ? OWNER_FIELDS : OWNER_FIELDS.slice(0, -1);
+  const fields = requireContainer ? OWNER_FIELDS : OWNER_CLAIM_FIELDS;
   if (Object.keys(o).length !== fields.length || Object.keys(o).some((key) => !fields.includes(key as never)))
     return null;
   if (
@@ -148,6 +149,89 @@ export async function checkpointIfSafe(owner: PreservationOwner, host: Checkpoin
 }
 
 export type PreservationFact = { state: "present" | "lost" | "unknown" };
+
+/** Evidence for a named, already-running DO. This is deliberately not a
+ * retirement decision: durable metadata cannot observe a detached writer or
+ * prove that the live checkout still equals a prior checkpoint. */
+export type SlotEvidence =
+  | { state: "unknown" }
+  | {
+      state: "retained";
+      objectId: string;
+      birthContainer: string;
+      seedState: "seeded";
+      checkpoint: "present" | "lost" | "unknown";
+      platformInstance: "unknown";
+      liveIncarnation: "unknown";
+      exclusiveOwner: "unknown";
+      quiescence: "unknown";
+      liveCheckout: "unknown";
+      reason: "quiescence_and_live_bytes_unproven";
+    };
+
+export interface SlotEvidenceRequest {
+  claim: OwnerClaim;
+  objectId: string;
+}
+
+export interface SlotEvidenceSnapshot {
+  objectId: string;
+  threadName: string | undefined;
+  running: boolean | undefined;
+  seedState: "seeded" | "unseeded" | undefined;
+  record: CheckpointRecord | null;
+}
+
+export function parseSlotEvidenceRequest(input: unknown): SlotEvidenceRequest | null {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+  const value = input as Record<string, unknown>;
+  if (Object.keys(value).length !== 2 || !("claim" in value) || !("objectId" in value)) return null;
+  const claim = parsePreservationOwner(value.claim, false);
+  if (!claim || "container" in claim || typeof value.objectId !== "string" || !/^[0-9a-f]{64}$/i.test(value.objectId))
+    return null;
+  return { claim, objectId: value.objectId };
+}
+
+/** No SDK call or container command belongs in this path. A matching row
+ * discloses only its birth container and the existing full-checkout backup's
+ * R2 status; it cannot certify current bytes or quiescence. */
+export async function passiveSlotEvidence(
+  request: SlotEvidenceRequest,
+  readSnapshot: () => Promise<SlotEvidenceSnapshot>,
+  archivePresent: (id: string) => Promise<boolean | undefined>,
+): Promise<SlotEvidence> {
+  try {
+    if (!parseSlotEvidenceRequest(request)) return { state: "unknown" };
+    const snapshot = await readSnapshot();
+    const owner = snapshot.record?.owner;
+    if (
+      snapshot.objectId.toLowerCase() !== request.objectId.toLowerCase() ||
+      snapshot.threadName !== request.claim.thread ||
+      snapshot.running !== true ||
+      snapshot.seedState !== "seeded" ||
+      !owner ||
+      !parsePreservationOwner(owner) ||
+      OWNER_CLAIM_FIELDS.some((field) => owner[field] !== request.claim[field])
+    )
+      return { state: "unknown" };
+    const present = snapshot.record?.backupId ? await archivePresent(snapshot.record.backupId) : undefined;
+    return {
+      state: "retained",
+      objectId: snapshot.objectId,
+      birthContainer: owner.container,
+      seedState: "seeded",
+      checkpoint: present === undefined ? "unknown" : present ? "present" : "lost",
+      platformInstance: "unknown",
+      liveIncarnation: "unknown",
+      exclusiveOwner: "unknown",
+      quiescence: "unknown",
+      liveCheckout: "unknown",
+      reason: "quiescence_and_live_bytes_unproven",
+    };
+  } catch {
+    return { state: "unknown" };
+  }
+}
 
 /** No-wake orchestration: load a DO row and, only for its exact owner, HEAD
  * two R2 objects. No sandbox SDK object is accepted by this seam. */

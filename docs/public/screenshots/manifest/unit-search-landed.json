@@ -189,7 +189,7 @@
     "src/execution/residentDisk.ts": "9fb95f5e533af830869f7a8049b8fc7b1a934e58332bc68f5f64851a24be0d7f",
     "src/execution/residentDiskBudget.ts": "102322313876fb3dcbb24918e54847df593819ce581220f34463d8aaf2b23565",
     "src/execution/residentSteps.ts": "dfa70b342924515349157655b237502f8cdfb283906570eaccf92b047b23a496",
-    "src/execution/sandboxCheckpoint.ts": "3ddfc7ee2fed9ac983aa77a2c0c414ad0a765a0d098d5b5e79ea897d3614c19d",
+    "src/execution/sandboxCheckpoint.ts": "179575240567c94158df16d5b9d3347a1530c04c4afe8233f8f1cc982011e341",
     "src/execution/seedPlan.ts": "120dbac4a914baf4527d4627113b70d3a2ad1abe40c015b25d968500b76bfc47",
     "src/execution/shellQuote.ts": "4e67bf91cb92b322e39198bfa326f34a75f3154c49a7efddd45b354cb3992f88",
     "src/mcp/config.ts": "085b45a4b18c86299b5e8aee22bc828a928e9eeda5625a47e9d17b532a3bb128",
