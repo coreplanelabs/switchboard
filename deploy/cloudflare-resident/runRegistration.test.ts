@@ -1,12 +1,22 @@
+import { webcrypto } from "node:crypto";
+import { runInNewContext } from "node:vm";
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import { methodOf, readSource } from "./testing/sourceScan";
+import { mayRunAsPoolUser, parsePoolBindings, spendPoolUser } from "../../src/execution/residentPoolSpends";
+import { admitThreadDiskWithRollback, boundByFor } from "../../src/execution/residentRebind";
+import { planForceDetach } from "../../src/execution/residentDetach";
+import { decideWorkspaceRemoval, hasRunOwnerField } from "./workspacePreservation";
 import {
   classifyDeployRegistration,
+  classifyDeployRegistrationWithLedger,
   deployRegistrationState,
   registeredRunAllowsClaim,
   registeredRunAllowsReattach,
   registeredRunNeedsProtection,
   registeredRunOwnsRelease,
+  decideOwnerReconciliation,
+  validRunOwner,
 } from "./runRegistration";
 
 describe("deploy registration activity", () => {
@@ -28,6 +38,12 @@ describe("deploy registration activity", () => {
       state(
         { kind: "terminal", record: { id: "r1", threadKey: "mcp:run", status: "failed" } },
         { fence: { ...fence, ownerFence: 8 } },
+      ),
+    ).toBe("unknown");
+    expect(
+      state(
+        { kind: "terminal", record: { id: "r1", threadKey: "mcp:run", status: "failed" } },
+        { registration: { ...registration, ownerFence: 0 }, fence: { ...fence, ownerFence: 0 } },
       ),
     ).toBe("unknown");
     expect(
@@ -191,7 +207,7 @@ describe("deploy registration activity", () => {
     expect(activity).toContain("this.runsInFlightCount()");
     expect(activity).toContain("this.threadOpsInFlight.get(binding.threadKey)");
     expect(activity).toContain("classifyDeployRegistration");
-    expect(method("registeredRunsBeyondOps")).toContain("binding.lastRunOwner?.runId");
+    expect(method("registeredRunsBeyondOps")).toContain("hasRunOwnerField(binding.lastRunOwner)");
   });
 
   it("holds a durable admission across already-bound work and rejects a quiet read with admitted work", () => {
@@ -293,6 +309,362 @@ describe("deploy registration activity", () => {
 const source = readSource("worker.ts");
 const residentDO = source.slice(source.indexOf("export class ResidentDO"));
 
+describe("exact-thread owner reconciliation", () => {
+  const now = 1_000_000;
+  const binding = { threadKey: "mcp:run", user: "worker2", lastAttachAt: "1970-01-01T00:01:00.000Z" };
+  const legacy = { threadKey: binding.threadKey, registeredAt: binding.lastAttachAt, deadlineAt: 800_000 };
+  const owned = { ...legacy, runId: "r1", ownerGen: "g1", ownerFence: 7 };
+  const input = {
+    binding,
+    registration: legacy as unknown,
+    fence: undefined as unknown,
+    owner: null as unknown,
+    lastRunOwner: null as unknown,
+    ledger: [] as unknown,
+    claimants: [binding.threadKey] as unknown,
+    pool: [binding.user, "worker3"],
+    now,
+    cutoff: 900_000,
+    graceMs: 60_000,
+    opInFlight: 0,
+  };
+
+  it("marks only an elapsed ownerless registration and its missing exact UID spend without losing the row", () => {
+    expect(decideOwnerReconciliation(input)).toEqual({ action: "migrate", legacy: true, spend: true });
+    expect(
+      decideOwnerReconciliation({ ...input, ledger: [{ user: binding.user, owner: `thread:${binding.threadKey}` }] }),
+    ).toEqual({ action: "migrate", legacy: true, spend: false });
+    expect(decideOwnerReconciliation({ ...input, registration: { ...legacy, legacyRetainedAt: now } })).toEqual({
+      action: "migrate",
+      legacy: false,
+      spend: true,
+    });
+  });
+
+  it("the fenced readback refuses a missing or conflicting spend until the exact thread is reconciled", () => {
+    const view = {
+      threadKey: binding.threadKey,
+      registration: legacy,
+      fence: undefined,
+      lastRunOwner: null,
+      owner: null,
+      lastAttachAt: binding.lastAttachAt,
+      now,
+      cutoff: 900_000,
+      graceMs: 60_000,
+      opInFlight: 0,
+      user: binding.user,
+      claimants: [binding.threadKey],
+      pool: input.pool,
+      ledger: [] as unknown,
+    };
+    expect(classifyDeployRegistrationWithLedger(view)).toEqual({
+      state: "unknown",
+      category: "unknown",
+      reason: "ledger-unverified",
+    });
+    const reconciled = { ...view, ledger: [{ user: binding.user, owner: `thread:${binding.threadKey}` }] };
+    expect(classifyDeployRegistrationWithLedger(reconciled)).toEqual({
+      state: "retained",
+      category: "legacy",
+      reason: "protection-elapsed",
+    });
+    expect(
+      classifyDeployRegistrationWithLedger({ ...reconciled, registration: { ...legacy, legacyRetainedAt: now } }),
+    ).toEqual({ state: "retained", category: "legacy", reason: "legacy-reconciled" });
+    expect(
+      classifyDeployRegistrationWithLedger({ ...reconciled, registration: { ...legacy, legacyRetainedAt: undefined } }),
+    ).toEqual({ state: "unknown", category: "unknown", reason: "malformed-registration" });
+    expect(
+      classifyDeployRegistrationWithLedger({ ...view, claimants: [binding.threadKey, "mcp:other"] }),
+    ).toMatchObject({ state: "unknown", reason: "binding-conflict" });
+    expect(classifyDeployRegistrationWithLedger({ ...view, opInFlight: 1 })).toMatchObject({ state: "executing" });
+  });
+
+  it("reconciles a terminal current owner with an absent spend, but never overwrites a live owner", () => {
+    const terminal = { kind: "terminal", record: { id: "r1", threadKey: binding.threadKey, status: "failed" } };
+    expect(
+      decideOwnerReconciliation({
+        ...input,
+        registration: owned,
+        fence: { runId: "r1", ownerGen: "g1", ownerFence: 7 },
+        owner: terminal,
+      }),
+    ).toEqual({ action: "migrate", legacy: false, spend: true });
+    expect(
+      decideOwnerReconciliation({
+        ...input,
+        registration: owned,
+        fence: { runId: "r1", ownerGen: "g1", ownerFence: 7 },
+        owner: { kind: "live", row: { runId: "r1", threadKey: binding.threadKey, ownerGen: "g1" } },
+      }),
+    ).toEqual({ action: "refuse", reason: "owner-active" });
+  });
+
+  it("refuses partial, mismatched, unreadable, protected and conflicting evidence without changing a UID", () => {
+    const patches = [
+      { registration: { ...legacy, runId: "r1" } },
+      { registration: { ...legacy, ownerFence: 7 } },
+      { registration: { ...legacy, legacyRetainedAt: undefined } },
+      { registration: { ...legacy, legacyRetainedAt: now + 1 } },
+      { registration: { ...legacy, deadlineAt: now } },
+      { registration: null },
+      { fence: { ownerFence: 7 } },
+      { lastRunOwner: { runId: "r1" } },
+      { owner: { kind: "unknown" } },
+      { opInFlight: 1 },
+      { ledger: undefined },
+      { ledger: [{ user: binding.user, owner: "thread:mcp:other" }] },
+      { claimants: [binding.threadKey, "mcp:other"] },
+      { claimants: null },
+      { binding: { ...binding, threadKey: "mcp:other" } },
+    ];
+    for (const patch of patches) {
+      const answer = decideOwnerReconciliation({ ...input, ...patch });
+      expect(answer.action, JSON.stringify(patch)).toBe("refuse");
+      expect(JSON.stringify(answer)).not.toMatch(/mcp:|r1|worker2/);
+    }
+  });
+
+  it("refuses incomplete new admissions before attachment and commits the full owner triple atomically", () => {
+    expect(validRunOwner("r1", "g1", 7)).toBe(true);
+    for (const owner of [
+      [undefined, "g1", 7],
+      ["r1", undefined, 7],
+      ["r1", "g1", undefined],
+      ["", "g1", 7],
+      ["r1", "", 7],
+      ["r1", "g1", 0],
+      ["r1", "g1", 1.5],
+      ["r1", "g1", Number.MAX_SAFE_INTEGER + 1],
+      ["r".repeat(129), "g1", 7],
+    ])
+      expect(validRunOwner(owner[0], owner[1], owner[2])).toBe(false);
+    const attach = source.slice(
+      source.indexOf("async function handleAttach("),
+      source.indexOf("async function handleRunDeadline("),
+    );
+    expect(attach).toContain("if (!validRunOwner(runId, ownerGen, ownerFence))");
+    const traced = methodOf(residentDO, "attachThreadTraced")!;
+    expect(traced.indexOf("validRunOwner(runId, ownerGen, ownerFence)")).toBeLessThan(
+      traced.indexOf("await this.attachThreadBody("),
+    );
+    const register = methodOf(residentDO, "registerRun")!;
+    expect(register).toContain("validRunOwner(runId, ownerGen, ownerFence)");
+    expect(register).toContain("txn.put(runFenceKey(threadKey)");
+    expect(register).toContain("txn.put(runRegKey(threadKey)");
+    expect(register).not.toContain("...(runId !== undefined");
+  });
+
+  it("keeps private legacy bytes in the reconciliation and preservation decisions", () => {
+    const spent = spendPoolUser([], input.pool, binding.user, `thread:${binding.threadKey}`);
+    expect(spent).not.toBeNull();
+    expect(
+      mayRunAsPoolUser(spent, input.pool, binding.user, [binding.threadKey], undefined, `thread:${binding.threadKey}`),
+    ).toBe(true);
+    expect(mayRunAsPoolUser(spent, input.pool, binding.user, ["mcp:other"], undefined, `thread:mcp:other`)).toBe(false);
+    expect(spendPoolUser(spent, input.pool, binding.user, `thread:${binding.threadKey}`)).toEqual(spent);
+    expect(
+      decideOwnerReconciliation({ ...input, ledger: spent, registration: { ...legacy, legacyRetainedAt: now } }),
+    ).toEqual({ action: "current", legacy: false, spend: false });
+    expect(
+      decideWorkspaceRemoval({
+        binding: { ...binding, ref: "main", worktreePath: "/workspace/private" },
+        registration: { ...legacy, legacyRetainedAt: now },
+        fence: undefined,
+        owner: null,
+        tree: null,
+      }),
+    ).toEqual({ removable: false, reason: "legacy-retained" });
+    const attach = methodOf(residentDO, "attachThreadBody")!;
+    const detach = methodOf(residentDO, "detachThread")!;
+    expect(attach).toContain("this.claimRetainedThreadUser(storedPrior)");
+    expect(detach).toContain("this.poolUserOwnerMatches(binding.user, `thread:${threadKey}`)");
+    expect(detach.indexOf("registeredRunOwnsRelease(registration, runId, ownerGen, ownerFence)")).toBeLessThan(
+      detach.indexOf("this.poolUserOwnerMatches(binding.user"),
+    );
+  });
+
+  it("treats a present malformed retention marker as unknown and preserves its workspace", () => {
+    const marked = { ...legacy, legacyRetainedAt: undefined };
+    const view = {
+      threadKey: binding.threadKey,
+      registration: marked,
+      fence: undefined,
+      lastRunOwner: null,
+      owner: null,
+      lastAttachAt: binding.lastAttachAt,
+      cutoff: 900_000,
+      now,
+      graceMs: 60_000,
+      opInFlight: 0,
+    };
+    expect(classifyDeployRegistration(view)).toEqual({
+      state: "unknown",
+      category: "unknown",
+      reason: "malformed-registration",
+    });
+    expect(decideOwnerReconciliation({ ...input, registration: marked })).toMatchObject({ action: "refuse" });
+    expect(
+      decideWorkspaceRemoval({
+        binding: { ...binding, ref: "main", worktreePath: "/workspace/private" },
+        registration: marked,
+        fence: undefined,
+        owner: null,
+        tree: null,
+      }),
+    ).toMatchObject({ removable: false });
+  });
+
+  it("offers an admin-only exact-thread path with disk and activity checks before one durable claim", () => {
+    const reconcile = methodOf(residentDO, "reconcileRetainedOwner")!;
+    expect(source).toContain('case "reconcile-owner":');
+    expect(reconcile).toContain("this.threadAttaches.run(threadKey");
+    expect(reconcile).toContain("this.withDeployAdmission(");
+    expect(reconcile).toContain("this.poolUserHasOldThreadDir(");
+    expect(reconcile).toContain("decideOwnerReconciliation(");
+    expect(reconcile).toContain("this.ctx.storage.transaction(");
+    expect(reconcile).toContain("SPENT_POOL_USERS_KEY");
+    expect(reconcile).not.toMatch(/evictBinding|deleteThreadBinding|rm -rf/);
+  });
+
+  it.each(["canonical", "collision-safe replacement"] as const)(
+    "reconciles an exact retained %s worktree path after verifying its owner and directory",
+    async (form) => {
+      const fixture = await ownerFlow(form);
+      if (form === "collision-safe replacement") {
+        expect(await fixture.pathFor("foo/bar")).toBe(fixture.canonicalPath);
+        expect(fixture.worktreePath).toMatch(/-ref-[a-f0-9]{8}$/);
+      }
+      const result = await fixture.instance.reconcileRetainedOwner(fixture.threadKey);
+      expect(result).toMatchObject({ migrated: 1, legacy: 1, ledger: 1 });
+      expect(fixture.rows.get("spent")).toEqual([{ user: "worker2", owner: `thread:${fixture.threadKey}` }]);
+      expect(fixture.rows.get(`runReg:${fixture.threadKey}`)).toMatchObject({ legacyRetainedAt: fixture.now });
+      expect(fixture.privateBytes()).toBe("private uncommitted work");
+      expect(fixture.checkedPaths).toContain(fixture.worktreePath);
+    },
+  );
+
+  it("refuses a stored worktree path that is neither canonical nor a collision-safe replacement", async () => {
+    const fixture = await ownerFlow("invalid");
+    expect(await fixture.instance.reconcileRetainedOwner(fixture.threadKey)).toMatchObject({ status: 503 });
+    expect(fixture.rows.get("spent")).toEqual([]);
+    expect(fixture.checkedPaths).toEqual([]);
+    expect(fixture.privateBytes()).toBe("private uncommitted work");
+  });
+
+  it("repairs the exact-thread ledger, attaches a new owner without touching private bytes, then fences detach", async () => {
+    const fixture = await ownerFlow("canonical");
+    const { instance, rows, threadKey } = fixture;
+    expect(await instance.reconcileRetainedOwner(threadKey)).toMatchObject({ migrated: 1, ledger: 1 });
+    const attached = await fixture.attach("new-run", 8);
+    expect(attached).not.toHaveProperty("error");
+    expect(rows.get(`runReg:${threadKey}`)).toMatchObject({ runId: "new-run", ownerGen: "new-gen", ownerFence: 8 });
+    expect(rows.get(`runFence:${threadKey}`)).toEqual({ runId: "new-run", ownerGen: "new-gen", ownerFence: 8 });
+    expect(fixture.privateBytes()).toBe("private uncommitted work");
+    expect((rows.get(`thread:${threadKey}`) as { user: string }).user).toBe("worker2");
+
+    expect(await instance.detachThread(threadKey, false, [], "other-run", "new-gen", 8)).toMatchObject({
+      released: false,
+      reason: expect.stringContaining("run-registration-mismatch"),
+    });
+    expect(await fixture.attach("other-run", 8)).toMatchObject({ status: 409 });
+    rows.set("pool:worker2", [threadKey, "mcp:other"]);
+    expect(await instance.detachThread(threadKey, false, [], "new-run", "new-gen", 8)).toMatchObject({ status: 503 });
+    rows.set("pool:worker2", [threadKey]);
+    expect(fixture.privateBytes()).toBe("private uncommitted work");
+    // Even the exact owner cannot delete unsaved bytes; after a verified
+    // terminal, clean checkout, only that owner can actually release it.
+    expect(await instance.detachThread(threadKey, false, [], "new-run", "new-gen", 8)).toMatchObject({
+      released: false,
+      reason: expect.stringContaining("workspace-preservation"),
+    });
+    expect(fixture.privateBytes()).toBe("private uncommitted work");
+    fixture.makeSafeToRelease();
+    expect(await instance.detachThread(threadKey, false, [], "new-run", "new-gen", 8)).toMatchObject({
+      released: true,
+      user: "worker2",
+    });
+    expect(fixture.privateBytes()).toBeUndefined();
+    expect((rows.get(`thread:${threadKey}`) as { evicted: boolean }).evicted).toBe(true);
+    expect(rows.has(`runReg:${threadKey}`)).toBe(false);
+    expect(rows.get(`spent`)).toEqual([{ user: "worker2", owner: `thread:${threadKey}` }]);
+  });
+
+  it.each(["registration", "last-run-owner"] as const)(
+    "keeps private bytes when a partial owner row meets legacy detach (%s)",
+    async (place) => {
+      const fixture = await ownerFlow("canonical");
+      const { instance, rows, threadKey } = fixture;
+      const registrationKey = `runReg:${threadKey}`;
+      const bindingKey = `thread:${threadKey}`;
+      rows.set("spent", [{ user: "worker2", owner: `thread:${threadKey}` }]);
+      if (place === "registration") {
+        rows.set(registrationKey, { ...(rows.get(registrationKey) as object), ownerFence: undefined });
+      } else {
+        rows.set(bindingKey, {
+          ...(rows.get(bindingKey) as object),
+          lastRunOwner: { ownerFence: undefined },
+        });
+      }
+      expect(await instance.detachThread(threadKey, false, [])).toMatchObject({ released: false });
+      expect(fixture.privateBytes()).toBe("private uncommitted work");
+      expect(rows.get(bindingKey)).toMatchObject({ user: "worker2", evicted: false });
+      expect(rows.has(registrationKey)).toBe(true);
+    },
+  );
+
+  it("keeps private bytes when a malformed retained marker reaches legacy detach", async () => {
+    const fixture = await ownerFlow("canonical");
+    const { instance, rows, threadKey } = fixture;
+    const registrationKey = `runReg:${threadKey}`;
+    rows.set("spent", [{ user: "worker2", owner: `thread:${threadKey}` }]);
+    rows.set(registrationKey, { ...(rows.get(registrationKey) as object), legacyRetainedAt: undefined });
+    expect(await instance.detachThread(threadKey, false, [])).toMatchObject({ released: false });
+    expect(fixture.privateBytes()).toBe("private uncommitted work");
+    expect(rows.has(registrationKey)).toBe(true);
+  });
+
+  it("keeps any partial owner field out of the legacy removal path", () => {
+    const binding = {
+      threadKey: "mcp:run",
+      ref: "main",
+      user: "worker2",
+      worktreePath: "/workspace/private",
+      lastRunOwner: null,
+    };
+    const registration = { threadKey: binding.threadKey };
+    const input = { binding, registration, fence: undefined, owner: null, tree: null };
+    expect(decideWorkspaceRemoval(input)).toEqual({ removable: true });
+    for (const field of ["runId", "ownerGen", "ownerFence"] as const) {
+      expect(decideWorkspaceRemoval({ ...input, registration: { ...registration, [field]: undefined } })).toEqual({
+        removable: false,
+        reason: "owner-registration-incomplete",
+      });
+      expect(
+        decideWorkspaceRemoval({ ...input, binding: { ...binding, lastRunOwner: { [field]: undefined } } }),
+      ).toEqual({ removable: false, reason: "owner-registration-incomplete" });
+    }
+  });
+
+  it.each(["registration", "fence"] as const)(
+    "refuses attach before materialization when the persisted %s has ownerFence: undefined",
+    async (place) => {
+      const fixture = await ownerFlow("canonical");
+      const key = `${place === "registration" ? "runReg" : "runFence"}:${fixture.threadKey}`;
+      const partial = { ownerFence: undefined };
+      fixture.rows.set(key, partial);
+      const beforeRegistration = fixture.rows.get(`runReg:${fixture.threadKey}`);
+      const beforeFence = fixture.rows.get(`runFence:${fixture.threadKey}`);
+      expect(await fixture.attach("new-run", 8)).toMatchObject({ status: 409 });
+      expect(fixture.rows.get(`runReg:${fixture.threadKey}`)).toBe(beforeRegistration);
+      expect(fixture.rows.get(`runFence:${fixture.threadKey}`)).toBe(beforeFence);
+      expect(fixture.privateBytes()).toBe("private uncommitted work");
+      expect(fixture.materializations()).toBe(0);
+    },
+  );
+});
+
 function method(name: string): string {
   const body = methodOf(residentDO, name);
   expect(body, `worker.ts declares ResidentDO.${name}`).not.toBeNull();
@@ -302,11 +674,17 @@ function method(name: string): string {
 describe("a run's registration is held from attach to release", () => {
   it("only the current run may release its workspace, including after its deadline", () => {
     expect(registeredRunOwnsRelease({ runId: "run-1", ownerGen: "gen-new" }, "run-1", "gen-old")).toBe(false);
-    expect(registeredRunOwnsRelease({ runId: "run-1", ownerGen: "gen-new" }, "run-1", "gen-new")).toBe(true);
+    expect(registeredRunOwnsRelease({ runId: "run-1", ownerGen: "gen-new" }, "run-1", "gen-new")).toBe(false);
     expect(registeredRunOwnsRelease({ runId: "run-2" }, "run-1")).toBe(false);
     expect(registeredRunOwnsRelease({ runId: "run-2" }, undefined)).toBe(false);
-    expect(registeredRunOwnsRelease({ runId: "run-1" }, "run-1")).toBe(true);
-    expect(registeredRunOwnsRelease({ runId: undefined }, undefined)).toBe(true);
+    expect(registeredRunOwnsRelease({ runId: "run-1" }, "run-1")).toBe(false);
+    expect(registeredRunOwnsRelease({ runId: "run-1", ownerGen: "gen-1", ownerFence: 7 }, "run-1", "gen-1", 7)).toBe(
+      true,
+    );
+    expect(registeredRunOwnsRelease({}, undefined)).toBe(true);
+    expect(registeredRunOwnsRelease({ ownerFence: undefined }, undefined)).toBe(false);
+    expect(registeredRunOwnsRelease({ runId: undefined }, undefined)).toBe(false);
+    expect(registeredRunOwnsRelease({ ownerGen: undefined }, undefined)).toBe(false);
     expect(registeredRunOwnsRelease(undefined, undefined)).toBe(false);
     expect(registeredRunOwnsRelease(undefined, "run-1")).toBe(false);
 
@@ -327,11 +705,14 @@ describe("a run's registration is held from attach to release", () => {
     const grace = 60_000;
     const own = { runId: "run-1", deadlineAt: now };
     expect(registeredRunAllowsReattach({ ...own, ownerGen: "gen-new" }, "run-1", now, grace, "gen-old")).toBe(false);
-    expect(registeredRunAllowsReattach({ ...own, ownerGen: "gen-new" }, "run-1", now, grace, "gen-new")).toBe(true);
+    expect(registeredRunAllowsReattach({ ...own, ownerGen: "gen-new" }, "run-1", now, grace, "gen-new")).toBe(false);
+    expect(
+      registeredRunAllowsReattach({ ...own, ownerGen: "gen-new", ownerFence: 7 }, "run-1", now, grace, "gen-new", 7),
+    ).toBe(true);
     const reclaimed = { ...own, ownerGen: "same-second-a", ownerFence: 7 };
     expect(registeredRunAllowsReattach(reclaimed, "run-1", now, grace, "same-second-b", 8)).toBe(true);
     expect(registeredRunAllowsReattach(reclaimed, "run-1", now, grace, "same-second-b", 6)).toBe(false);
-    expect(registeredRunAllowsReattach(own, "run-1", now + grace, grace)).toBe(true);
+    expect(registeredRunAllowsReattach(own, "run-1", now + grace, grace)).toBe(false);
     expect(registeredRunAllowsReattach(own, "run-1", now + grace + 1, grace)).toBe(false);
     expect(registeredRunAllowsReattach(own, "run-2", now, grace)).toBe(false);
     expect(registeredRunAllowsReattach(own, undefined, now, grace)).toBe(false);
@@ -348,7 +729,21 @@ describe("a run's registration is held from attach to release", () => {
     expect(registeredRunAllowsClaim(old, "run-1", old.ownerGen, 7)).toBe(true);
     expect(registeredRunAllowsClaim(old, "run-2", old.ownerGen, 7)).toBe(false);
     expect(registeredRunAllowsClaim(old, "run-1", undefined)).toBe(false);
-    expect(registeredRunAllowsClaim({ runId: "run-1" }, "run-1", "same-second-b", 8)).toBe(true);
+    expect(registeredRunAllowsClaim({ runId: "run-1" }, "run-1", "same-second-b", 8)).toBe(false);
+    expect(registeredRunAllowsClaim({ runId: undefined }, "run-1", "same-second-b", 8)).toBe(false);
+    // Both the registration and the high-water row may contain this partial
+    // persisted property. Its presence must not be mistaken for ownerlessness.
+    expect(registeredRunAllowsClaim({ ownerFence: undefined }, "run-1", "same-second-b", 8)).toBe(false);
+    expect(registeredRunAllowsClaim({ ownerFence: 7 }, "run-1", "same-second-b", 8)).toBe(false);
+    expect(
+      registeredRunAllowsClaim(
+        { runId: "run-1", ownerGen: "same-second-a", ownerFence: 0 },
+        "run-1",
+        "same-second-b",
+        8,
+      ),
+    ).toBe(false);
+    expect(registeredRunAllowsClaim({}, "run-1", "same-second-b", 8)).toBe(true);
     // The high-water row remains after /detach or a binding purge.
     expect(registeredRunAllowsClaim(old, "run-1", "same-second-a", 6)).toBe(false);
     const attach = method("attachThreadTraced");
@@ -424,11 +819,28 @@ describe("a run's registration is held from attach to release", () => {
 });
 
 describe("the preflight-facing counts see registered runs the op counters miss", () => {
+  it.each(["registration", "last-run-owner"] as const)(
+    "counts a persisted partial owner field in %s as protected activity",
+    async (place) => {
+      const fixture = await ownerFlow("canonical");
+      const { instance, rows, threadKey } = fixture;
+      expect(await instance.getInFlightCount()).toBe(0);
+      if (place === "registration")
+        rows.set(`runReg:${threadKey}`, { ...(rows.get(`runReg:${threadKey}`) as object), ownerFence: undefined });
+      else
+        rows.set(`thread:${threadKey}`, {
+          ...(rows.get(`thread:${threadKey}`) as object),
+          lastRunOwner: { ownerFence: undefined },
+        });
+      expect(await instance.getInFlightCount()).toBe(1);
+    },
+  );
+
   it("registeredRunsBeyondOps retains durable owners beyond the execution deadline and bounds only legacy registrations", () => {
     const count = method("registeredRunsBeyondOps");
     expect(count).toMatch(/this\.ctx\.storage\.list<RunRegistration>\(\{ prefix: RUN_REG_KEY_PREFIX \}\)/);
     expect(count).toContain("registeredRunNeedsProtection(");
-    expect(count).toContain("r?.runId");
+    expect(count).toContain("hasRunOwnerField(r)");
     expect(count).toContain("runFenceKey(binding.threadKey)");
     expect(count).toContain("this.threadOpsInFlight.get(binding.threadKey) ?? 0");
     expect(count).toContain("r.deadlineAt + RUN_REGISTRATION_GRACE_MS");
@@ -480,3 +892,255 @@ describe("the preflight-facing counts see registered runs the op counters miss",
     expect(reconcile).toMatch(/deferring restart until the resident is quiet/);
   });
 });
+
+// Execute the shipped DO methods with durable fake storage and a bounded fake
+// disk. The seams simulate workerd's storage, container and history; owner,
+// reconciliation, attachment, and detachment decisions are not reimplemented.
+const parsedWorker = ts.createSourceFile("worker.ts", source, ts.ScriptTarget.Latest, true);
+const ownerMethods = [
+  "reconcileRetainedOwner",
+  "attachThreadTraced",
+  "attachThreadBody",
+  "allocateThreadUser",
+  "claimRetainedThreadUser",
+  "markPoolUserSpent",
+  "poolUserOwnerMatches",
+  "registerRun",
+  "detachThread",
+  "evictBinding",
+  "workspaceRemovalDecision",
+  "reportBlockedWorkspace",
+  "registeredRunsBeyondOps",
+  "getInFlightCount",
+];
+const ownerFunctions = ["threadWorktreePath", "replacementWorktreePath"];
+const compiledOwnerFlow = ts.transpileModule(
+  `${ownerFunctions
+    .map((name) => {
+      const fn = parsedWorker.statements.find(
+        (statement): statement is ts.FunctionDeclaration =>
+          ts.isFunctionDeclaration(statement) && statement.name?.text === name,
+      );
+      if (!fn) throw new Error(`worker.ts declares ${name}`);
+      return fn.getText(parsedWorker);
+    })
+    .join("\n")}
+  class OwnerFlowUnderTest {
+    async withDeployAdmission(fn: () => Promise<unknown>) { return fn(); }
+    ${ownerMethods.map((name) => method(name)).join("\n")}
+  }`,
+  { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
+).outputText;
+
+type OwnerFlowInstance = {
+  getInFlightCount(): Promise<number>;
+  reconcileRetainedOwner(key: string): Promise<unknown>;
+  attachThreadTraced(
+    key: string,
+    ref: string | null,
+    readonly: boolean,
+    sha: string | null,
+    reuse: boolean,
+    record: unknown,
+    start: number,
+    reason: unknown,
+    door: unknown,
+    budget: number,
+    runId: string,
+    ownerGen: string,
+    ownerFence: number,
+  ): Promise<unknown>;
+  detachThread(
+    key: string,
+    force: boolean,
+    pushed: unknown[],
+    id?: string,
+    gen?: string,
+    fence?: number,
+  ): Promise<unknown>;
+};
+
+async function ownerFlow(pathForm: "canonical" | "collision-safe replacement" | "invalid") {
+  const now = Date.parse("2026-10-02T03:00:00Z");
+  const threadKey = "mcp:run";
+  const ref = pathForm === "collision-safe replacement" ? "foo-bar" : "main";
+  const Suite = runInNewContext(
+    `${compiledOwnerFlow}\n({ OwnerFlowUnderTest, threadWorktreePath, replacementWorktreePath })`,
+    {
+      crypto: webcrypto,
+      TextEncoder,
+      THREADS_DIR: "/workspace/threads",
+      MIRROR_DIR: "/workspace/mirror",
+      THREAD_USERS: ["worker2", "worker3"],
+      SPENT_POOL_USERS_KEY: "spent",
+      FACTS_KEY: "facts",
+      RESOURCE_KEY: "resource",
+      CLEAN_IDLE_RELEASE_S: 3600,
+      RUN_REGISTRATION_GRACE_MS: 60_000,
+      RUN_REG_KEY_PREFIX: "runReg:",
+      systemClock: () => now,
+      threadBindingKey: (key: string) => `thread:${key}`,
+      runRegKey: (key: string) => `runReg:${key}`,
+      runFenceKey: (key: string) => `runFence:${key}`,
+      poolBindingKey: (user: string) => `pool:${user}`,
+      parentDir: (path: string) => path.slice(0, path.lastIndexOf("/")),
+      decideOwnerReconciliation,
+      registeredRunAllowsClaim,
+      registeredRunAllowsReattach: () => false,
+      registeredRunOwnsRelease,
+      registeredRunNeedsProtection,
+      validRunOwner,
+      spendPoolUser,
+      parsePoolBindings,
+      mayRunAsPoolUser,
+      planForceDetach,
+      decideWorkspaceRemoval,
+      hasRunOwnerField,
+      admitThreadDiskWithRollback,
+      boundByFor,
+      planReadonlyAttach: () => ({}),
+      replacementWorktreeCleanup: () => null,
+      threadUserCacheCleanArgv: () => ["true"],
+      evictedTreeSentence: () => "",
+      catchAllErr: (err: unknown) => ({ error: String(err), status: 500 }),
+      console: { log: () => {} },
+    },
+  ) as {
+    OwnerFlowUnderTest: new () => OwnerFlowInstance;
+    threadWorktreePath: (key: string, ref: string) => Promise<string>;
+    replacementWorktreePath: (key: string, ref: string, prior: string) => Promise<string>;
+  };
+  const canonical = await Suite.threadWorktreePath(threadKey, ref);
+  const worktreePath =
+    pathForm === "collision-safe replacement"
+      ? await Suite.replacementWorktreePath(threadKey, ref, canonical)
+      : pathForm === "invalid"
+        ? `${canonical}-ref-bogus`
+        : canonical;
+  const binding = {
+    threadKey,
+    ref,
+    worktreePath,
+    user: "worker2",
+    lastAttachAt: new Date(now - 2 * 3600_000).toISOString(),
+    boundAt: new Date(now - 3 * 3600_000).toISOString(),
+    sha: "a".repeat(40),
+    evicted: false,
+  };
+  const rows = new Map<string, unknown>([
+    [`thread:${threadKey}`, binding],
+    [
+      `runReg:${threadKey}`,
+      {
+        threadKey,
+        registeredAt: binding.lastAttachAt,
+        deadlineAt: now - 120_000,
+      },
+    ],
+    ["pool:worker2", [threadKey]],
+    ["spent", []],
+    ["resource", "repo:owner/name"],
+    ["facts", { defaultRef: ref }],
+  ]);
+  const bytes = new Map([[worktreePath, "private uncommitted work"]]);
+  const checkedPaths: string[] = [];
+  let materializations = 0;
+  let safeToRelease = false;
+  const storage = {
+    get: async (key: string | string[]) =>
+      Array.isArray(key) ? new Map(key.map((part) => [part, rows.get(part)])) : rows.get(key),
+    put: async (key: string, value: unknown) => {
+      rows.set(key, value);
+    },
+    delete: async (key: string) => {
+      rows.delete(key);
+    },
+    list: async ({ prefix }: { prefix: string }) => new Map([...rows].filter(([key]) => key.startsWith(prefix))),
+    transaction: async <T>(fn: (txn: typeof storage) => Promise<T>) => fn(storage),
+  };
+  const instance = new Suite.OwnerFlowUnderTest();
+  Object.assign(instance, {
+    ctx: { storage },
+    threadAttaches: { run: async (_key: string, action: () => Promise<unknown>) => action() },
+    threadOpsInFlight: new Map(),
+    opUsersInUse: new Map(),
+    poolUsersInspecting: new Set(),
+    workspaceEvictionsInFlight: new Set(),
+    recreateAdmission: { blocked: async () => false },
+    ensureHydrated: async () => {},
+    inFlightCount: () => 0,
+    liveBindings: async () => [rows.get(`thread:${threadKey}`)],
+    fleetDrain: async () => null,
+    memoryGate: async () => null,
+    reconcileImage: async () => "current",
+    refreshIfStale: async () => {},
+    isRuntimeActive: async () => true,
+    poolUserHasOldThreadDir: async () => false,
+    rebindToOwnPr: async (prior: unknown) => ({ binding: prior }),
+    admitThreadDisk: async () => ({ committedKiB: 0 }),
+    diskCommittedKiB: 0,
+    attachThreadCreate: async ({ binding: attached }: { binding: unknown }) => {
+      materializations++;
+      return { binding: attached };
+    },
+    putThreadBinding: async (row: { threadKey: string }) => {
+      rows.set(`thread:${row.threadKey}`, row);
+    },
+    observeRunForEviction: async () =>
+      safeToRelease
+        ? { kind: "terminal", record: { id: "new-run", threadKey, status: "completed" } }
+        : { kind: "live", row: { runId: "new-run", threadKey, ownerGen: "new-gen" } },
+    observePrivateTree: async () => ({
+      present: true,
+      branch: ref,
+      head: "a".repeat(40),
+      uncommittedChanges: 0,
+      untrackedNonIgnored: 0,
+      unpushedCommits: 0,
+    }),
+    measureTreeBeforeEviction: async () => undefined,
+    withMirrorLock: async (action: () => Promise<unknown>) => ({ value: await action() }),
+    runOk: async (argv: string[]) => {
+      if (argv[0] === "rm") bytes.delete(worktreePath);
+    },
+    run: async (argv: string[]) => {
+      if (argv[0] === "pgrep") return { exitCode: 1, stdout: "", stderr: "" };
+      if (argv[0] === "sh") {
+        checkedPaths.push(argv.at(-1)!);
+        return { exitCode: 0, stdout: "worker2\n", stderr: "" };
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    },
+  });
+  return {
+    instance,
+    rows,
+    now,
+    threadKey,
+    worktreePath,
+    canonicalPath: canonical,
+    pathFor: (otherRef: string) => Suite.threadWorktreePath(threadKey, otherRef),
+    checkedPaths,
+    materializations: () => materializations,
+    privateBytes: () => bytes.get(worktreePath),
+    makeSafeToRelease: () => {
+      safeToRelease = true;
+    },
+    attach: (runId: string, fence: number) =>
+      instance.attachThreadTraced(
+        threadKey,
+        null,
+        true,
+        null,
+        false,
+        {},
+        now,
+        { refByDefault: true, ownPr: null },
+        undefined,
+        60_000,
+        runId,
+        "new-gen",
+        fence,
+      ),
+  };
+}

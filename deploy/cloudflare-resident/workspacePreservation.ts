@@ -6,6 +6,7 @@ export interface PreservationRegistration {
   runId?: string;
   ownerGen?: string;
   ownerFence?: number;
+  legacyRetainedAt?: number;
 }
 
 export interface PreservationBinding {
@@ -14,12 +15,15 @@ export interface PreservationBinding {
   user: string;
   worktreePath: string;
   sha?: string;
-  lastRunOwner?: { runId?: string; ownerGen?: string; ownerFence?: number };
+  lastRunOwner?: { runId?: string; ownerGen?: string; ownerFence?: number } | null;
 }
 
 export type PreservationDecision = { removable: true } | { removable: false; reason: string };
 const keep = (reason: string): PreservationDecision => ({ removable: false, reason });
 const object = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
+export const hasRunOwnerField = (value: unknown): boolean =>
+  object(value) &&
+  (Object.hasOwn(value, "runId") || Object.hasOwn(value, "ownerGen") || Object.hasOwn(value, "ownerFence"));
 const natural = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 0;
 const privateTreeObservation = (value: unknown): value is PrivateTreeObservation =>
   object(value) &&
@@ -41,14 +45,17 @@ export function decideWorkspaceRemoval(input: {
   tree: unknown;
 }): PreservationDecision {
   const { binding, registration, fence, owner, tree } = input;
+  // Reconciliation is an ownership read/ledger repair, never a grant to
+  // delete an unidentified run's private worktree on the next idle sweep.
+  if (registration && Object.hasOwn(registration, "legacyRetainedAt"))
+    return keep(
+      Number.isSafeInteger(registration.legacyRetainedAt) ? "legacy-retained" : "retention-marker-unverified",
+    );
   if (
-    !registration?.runId &&
-    !registration?.ownerGen &&
-    registration?.ownerFence === undefined &&
+    (registration === undefined ||
+      (object(registration) && registration.threadKey === binding.threadKey && !hasRunOwnerField(registration))) &&
     fence === undefined &&
-    !binding.lastRunOwner?.runId &&
-    !binding.lastRunOwner?.ownerGen &&
-    binding.lastRunOwner?.ownerFence === undefined
+    binding.lastRunOwner == null
   )
     return { removable: true }; // positively untracked legacy cache
   if (
