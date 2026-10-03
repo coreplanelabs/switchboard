@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.284.6](https://github.com/coreplanelabs/switchboard/compare/v1.284.5...v1.284.6) (2026-10-03)
+
+
+### Refactoring
+
+* **config:** resolve agent defaults through shared profiles ([#2741](https://github.com/coreplanelabs/switchboard/issues/2741)) ([9acad55](https://github.com/coreplanelabs/switchboard/commit/9acad55699666f4946a82295ec88c53ca3c3c7bb))
+
 ## [1.284.5](https://github.com/coreplanelabs/switchboard/compare/v1.284.4...v1.284.5) (2026-10-03)
 
 
