@@ -2,7 +2,7 @@
 
 Switchboard is an agent gateway: Slack, the CLI, HTTP or MCP sends a message; a dispatcher routes it to an agent, whose provider-backed run uses tools through an executor it never touches directly. Slack is one channel, not the architecture.
 
-Read this first. Details: [README.md](README.md), [docs](docs/README.md) at <https://openswitchboard.dev> and the [behavioral specs](docs/reference/specs/README.md).
+Read this first. Details: [README.md](README.md), [docs](docs/README.md) at <https://switchboard.space> and the [behavioral specs](docs/reference/specs/README.md).
 
 ## How a change is made
 

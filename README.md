@@ -29,7 +29,7 @@ npx @coreplane/switchboard init --organization <your GitHub org> --anthropic-key
 npx @coreplane/switchboard ask "what can you do?"
 ```
 
-`init` writes `.env` (mode 600) and `config/config.yaml` into `~/.switchboard`, so every command works from any directory; `ask` sends a request through the same dispatcher as Slack. `curl -fsSL https://openswitchboard.dev/install.sh | sh` is the same `init`. To use a deployment your team already runs, run `npx -y @coreplane/switchboard connect <host>` instead.
+`init` writes `.env` (mode 600) and `config/config.yaml` into `~/.switchboard`, so every command works from any directory; `ask` sends a request through the same dispatcher as Slack. `curl -fsSL https://switchboard.space/install.sh | sh` is the same `init`. To use a deployment your team already runs, run `npx -y @coreplane/switchboard connect <host>` instead.
 
 Next: [Get started](docs/tutorials/get-started.md).
 
@@ -65,6 +65,6 @@ Off means the bot never offers it and the dashboard and the plan never show it (
 
 ## Learn more
 
-Docs: <https://openswitchboard.dev> ([`docs/`](docs/README.md)) · [CONTRIBUTING.md](CONTRIBUTING.md) · [AGENTS.md](AGENTS.md) · [SECURITY.md](SECURITY.md) · [Apache-2.0](LICENSE).
+Docs: <https://switchboard.space> ([`docs/`](docs/README.md)) · [CONTRIBUTING.md](CONTRIBUTING.md) · [AGENTS.md](AGENTS.md) · [SECURITY.md](SECURITY.md) · [Apache-2.0](LICENSE).
 
 Going deeper: commands and directives exist for whoever wants to type them ([Slack commands](docs/reference/slack-commands.md)); a plain sentence needs none.

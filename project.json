@@ -12,7 +12,7 @@
     "resident": "ghcr.io/coreplanelabs/switchboard-resident",
     "sandbox": "ghcr.io/coreplanelabs/switchboard-sandbox"
   },
-  "docs": "https://openswitchboard.dev",
+  "docs": "https://switchboard.space",
   "topics": [
     "ai-agents",
     "coding-agent",
