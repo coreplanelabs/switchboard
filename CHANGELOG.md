@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.284.2](https://github.com/coreplanelabs/switchboard/compare/v1.284.1...v1.284.2) (2026-10-03)
+
+
+### Bug fixes
+
+* **runs:** keep admitted runs through setup failures ([#2731](https://github.com/coreplanelabs/switchboard/issues/2731)) ([0c963c3](https://github.com/coreplanelabs/switchboard/commit/0c963c31a26dc9cb3440e320d83004a9522f163d))
+
 ## [1.284.1](https://github.com/coreplanelabs/switchboard/compare/v1.284.0...v1.284.1) (2026-10-03)
 
 
