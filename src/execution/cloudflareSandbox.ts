@@ -536,7 +536,11 @@ export class CloudflareSandboxExecutor implements Executor {
         "cold publication outcome unknown; reconcile the durable effect before retry",
         "worker-unavailable",
       );
-    if (!response.ok || text.length > 2048) return refusal;
+    if (text.length > 2048)
+      throw new ExecInfraError(
+        "cold publication outcome unknown; reconcile the durable effect before retry",
+        "answered",
+      );
     let data: Record<string, unknown>;
     try {
       data = JSON.parse(text) as Record<string, unknown>;
@@ -546,6 +550,28 @@ export class CloudflareSandboxExecutor implements Executor {
         "answered",
       );
     }
+    if (response.status === 409) {
+      const phases = [
+        "cold-publication-base-unavailable-or-over-limit",
+        "cold-publication-graph-unavailable-or-over-limit",
+        "cold-publication-transfer-refused",
+        "cold-publication-validation-refused",
+      ];
+      if (
+        data !== null &&
+        typeof data === "object" &&
+        !Array.isArray(data) &&
+        Object.keys(data).sort().join(",") === "error,phase" &&
+        data.error === "publication refused by cold controller" &&
+        phases.includes(data.phase as string)
+      )
+        return { ...refusal, stderr: `publication refused by cold controller (phase: ${data.phase})` };
+    }
+    if (!response.ok)
+      throw new ExecInfraError(
+        "cold publication outcome unknown; reconcile the durable effect before retry",
+        "answered",
+      );
     if (
       data === null ||
       typeof data !== "object" ||

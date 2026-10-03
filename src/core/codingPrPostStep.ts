@@ -68,7 +68,7 @@
 // callers instead of two copies of "ask GitHub when nothing else names a
 // base".
 
-import { saveCheckpointArtifact } from "./checkpointArtifact.js";
+import { MAX_CHECKPOINT_BYTES, saveCheckpointArtifact } from "./checkpointArtifact.js";
 import {
   publicationReason,
   redactPublicationSettlement,
@@ -98,7 +98,7 @@ import { EMPTY_START_STATE, type BranchStartState, type RewriteResult } from "..
 import { submittedPrDescriptionArtifact } from "./reviewDescription.js";
 import { normalizeHead, parseRevParseOutput, sameCommit } from "./reviewedHead.js";
 import { parseExitPrefix, type RunEvent } from "./runEvents.js";
-import type { SavedFindingsPatch } from "./coordinator/contract.js";
+import { isSavedFindingsPatch, type SavedFindingsPatch } from "./coordinator/contract.js";
 import { systemClock } from "./trace/clock.js";
 import type { Span } from "./trace/types.js";
 import type { ExecTraceOptions, Executor } from "../execution/executor.js";
@@ -584,6 +584,7 @@ export async function salvageBudgetPush(
         ...(kept.patch !== undefined ? { patch: kept.patch } : {}),
       };
     }
+    let coldRefused = false;
     try {
       let release: (() => void) | undefined;
       let pushBearer: string | undefined;
@@ -625,8 +626,14 @@ export async function salvageBudgetPush(
           };
           if (executor.publishBranchResult) {
             const result = await executor.publishBranchResult(transport);
-            if (result.exitCode !== 0 || result.truncated)
+            if (result.exitCode !== 0 || result.truncated) {
+              coldRefused =
+                !result.truncated &&
+                /^publication refused by cold controller \(phase: cold-publication-(?:base-unavailable-or-over-limit|graph-unavailable-or-over-limit|transfer-refused|validation-refused)\)$/.test(
+                  result.stderr,
+                );
               throw new CommandRejected((result.stderr || result.stdout || "publication transport failed").trim());
+            }
           } else {
             const output = await executor.publishBranch!(transport);
             if (parseExitPrefix(output).failed) throw new CommandRejected(output.trim());
@@ -655,7 +662,7 @@ export async function salvageBudgetPush(
         settlement = {
           ...settlement,
           publication: {
-            kind: settlement.publication.kind === "pending" ? "unknown" : "rejected",
+            kind: settlement.publication.kind === "pending" && !coldRefused ? "unknown" : "rejected",
             reason: detail(err),
           },
         };
@@ -738,15 +745,46 @@ export async function stageSavedFindingsPatch(
     throw new Error("saved findings patch target no longer matches the checkout");
   if ((await run(`${git} status --porcelain`)) !== "")
     throw new Error("saved findings patch requires a clean checkout");
+  if (!isSavedFindingsPatch(patch)) throw new Error("saved findings identity is invalid");
+  const bundle = patch.kind === "bundle";
   const head = await store.head(patch.key);
-  if (head?.size !== patch.size || head.contentType !== "text/plain")
+  if (head?.size !== patch.size || head.contentType !== (bundle ? "application/octet-stream" : "text/plain"))
     throw new Error("saved findings patch is missing from private storage");
   const url = await store.presignGet(patch.key);
-  const path = `/tmp/ship-recovery-${patch.runId}.patch`;
-  await run(`curl -fsS -o ${shellQuote(path)} ${shellQuote(url)}`);
+  const path = `/tmp/ship-recovery-${patch.runId}.${bundle ? "bundle" : "patch"}`;
+  await run(
+    `curl -fsS${bundle ? ` --max-filesize ${MAX_CHECKPOINT_BYTES}` : ""} -o ${shellQuote(path)} ${shellQuote(url)}`,
+  );
   const size = Number(await run(`wc -c < ${shellQuote(path)}`));
   const digest = /^([0-9a-f]{64})\s/.exec(await run(`sha256sum ${shellQuote(path)}`))?.[1];
   if (size !== patch.size || digest !== patch.sha256) throw new Error("saved findings patch bytes failed verification");
+  if (bundle) {
+    await run(`${git} bundle verify ${shellQuote(path)}`);
+    if (
+      (await run(`${git} bundle list-heads ${shellQuote(path)}`)) !==
+      `${patch.sourceHeadSha} refs/heads/${target.branch}`
+    )
+      throw new Error("saved checkpoint bundle source head is not the bound commit");
+    const header = await run(`sed -n '1,/^$/ { p; /^$/q; }' ${shellQuote(path)}`);
+    const prerequisites = header.split("\n").filter((line) => line.startsWith("-"));
+    if (prerequisites.length === 0) throw new Error("saved checkpoint has no trusted prerequisite");
+    for (const line of prerequisites) {
+      const prerequisite = /^-([0-9a-f]{40}) /.exec(line)?.[1];
+      if (!prerequisite) throw new Error("saved checkpoint prerequisite is invalid");
+      await run(`${git} merge-base --is-ancestor ${shellQuote(prerequisite)} ${shellQuote(patch.targetHeadSha)}`);
+    }
+    await run(
+      `${git} fetch --no-tags ${shellQuote(path)} ${shellQuote(`refs/heads/${target.branch}:refs/swb/recovery/${patch.runId}`)}`,
+    );
+    const imported = `refs/swb/recovery/${patch.runId}`;
+    if ((await run(`${git} rev-parse ${shellQuote(`${imported}^{commit}`)}`)) !== patch.sourceHeadSha)
+      throw new Error("saved checkpoint import did not match its bound source head");
+    for (const line of prerequisites) {
+      const prerequisite = /^-([0-9a-f]{40}) /.exec(line)![1]!;
+      await run(`${git} merge-base --is-ancestor ${shellQuote(prerequisite)} ${shellQuote(imported)}`);
+    }
+    return;
+  }
   await run(`${git} apply --check ${shellQuote(path)}`);
   await run(`${git} apply ${shellQuote(path)}`);
 }

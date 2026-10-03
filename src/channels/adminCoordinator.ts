@@ -4578,6 +4578,7 @@ export async function recoverOriginalUnit(
   let findingsRunId: string | undefined;
   let findingsKey: string | undefined;
   let savedPatch: SavedFindingsPatch | undefined;
+  let bundleHistory: RunView[] | undefined;
   let externalReview: RecoveryReviewEvidence | undefined;
   let accounting: RecoveryAccounting | undefined;
   let claimRow = row;
@@ -5345,7 +5346,42 @@ export async function recoverOriginalUnit(
       const tags = child?.events?.filter((event) => event.type === "coordinator_tag") ?? [];
       const tag = tags.length === 1 ? tags[0] : undefined;
       const patchEvents = child?.events?.filter((event) => event.type === "unfinished_patch") ?? [];
-      const patch = patchEvents.length === 1 && isSavedFindingsPatch(patchEvents[0]) ? patchEvents[0] : undefined;
+      const textPatch = patchEvents.length === 1 && isSavedFindingsPatch(patchEvents[0]) ? patchEvents[0] : undefined;
+      const settlementEvents = child?.events?.filter((event) => event.type === "publication_settlement") ?? [];
+      const settlement =
+        child === undefined ? undefined : publicationSettlementForRun(child.publicationSettlement, child);
+      const preserved = settlement?.preservation;
+      const bundle =
+        child !== undefined &&
+        patchEvents.length === 0 &&
+        settlementEvents.length === 1 &&
+        JSON.stringify(settlementEvents[0].settlement) === JSON.stringify(settlement) &&
+        settlement?.checkpoint.kind === "created" &&
+        settlement.publication.kind === "rejected" &&
+        /^publication refused by cold controller \(phase: cold-publication-(?:base-unavailable-or-over-limit|graph-unavailable-or-over-limit|transfer-refused|validation-refused)\)$/.test(
+          settlement.publication.reason,
+        ) &&
+        preserved?.kind === "saved" &&
+        settlement.binding.branch === row.branch &&
+        settlement.binding.baseHeadSha === reviewedHead &&
+        settlement.checkpoint.head === child.headSha &&
+        child.doorPublicationPending === undefined &&
+        (child.pushed?.length ?? 0) === 0 &&
+        child.truncated === false &&
+        child.eventCount === child.storedEventCount &&
+        child.events?.length === child.storedEventCount
+          ? {
+              kind: "bundle" as const,
+              runId: child.id,
+              key: preserved.key,
+              size: preserved.size,
+              sha256: preserved.sha256,
+              baseHeadSha: reviewedHead,
+              targetHeadSha: reviewedHead,
+              sourceHeadSha: settlement.checkpoint.head,
+            }
+          : undefined;
+      const patch = textPatch ?? bundle;
       const movedHead = facts.headSha;
       // The live superseded check may already have advanced the uncredited
       // review target from H0 to H1. The child tag still pins immutable H0.
@@ -5365,11 +5401,17 @@ export async function recoverOriginalUnit(
         patch.baseHeadSha === originalBinding?.expectedHeadSha &&
         patch.targetHeadSha === movedHead &&
         patch.sourceHeadSha === child.headSha &&
-        (child.pushed ?? []).every((push) => push.ref === row.branch && push.sha !== movedHead);
+        (patch.kind === "bundle"
+          ? movedHead === reviewedHead &&
+            currentBinding?.expectedHeadSha === reviewedHead &&
+            isSavedFindingsPatch(patch)
+          : (child.pushed ?? []).every((push) => push.ref === row.branch && push.sha !== movedHead));
       const storedPatch =
         unfinishedPatch && deps.artifacts !== undefined ? await deps.artifacts.head(patch.key).catch(() => null) : null;
       const patchVerified =
-        unfinishedPatch && storedPatch?.size === patch.size && storedPatch.contentType === "text/plain";
+        unfinishedPatch &&
+        storedPatch?.size === patch.size &&
+        storedPatch.contentType === (patch?.kind === "bundle" ? "application/octet-stream" : "text/plain");
       if (child !== undefined && (child.pushed?.length ?? 0) === 0 && child.headSha !== facts.headSha && !patchVerified)
         return json(409, { ok: false, error: "recovery_patch_unavailable", at });
       const reviewFinishedAt = review.finishedAt;
@@ -5464,7 +5506,10 @@ export async function recoverOriginalUnit(
       )
         return json(409, { ok: false, error: "recovery_head_moved", at });
       expectedHead = facts.headSha;
-      if (patchVerified) savedPatch = patch;
+      if (patchVerified) {
+        savedPatch = patch;
+        if (patch.kind === "bundle") bundleHistory = listing.runs;
+      }
       // A failed child's salvaged head is a review target, not publication
       // credit. Both paths must redo the missing findings contract before review.
       claimRow = {
@@ -5669,7 +5714,11 @@ export async function recoverOriginalUnit(
   if (facts === undefined) return json(502, { ok: false, error: "github_unavailable", at });
   if (savedPatch !== undefined) {
     const object = await deps.artifacts?.head(savedPatch.key).catch(() => null);
-    if (!isSavedFindingsPatch(savedPatch) || object?.size !== savedPatch.size || object.contentType !== "text/plain")
+    if (
+      !isSavedFindingsPatch(savedPatch) ||
+      object?.size !== savedPatch.size ||
+      object.contentType !== (savedPatch.kind === "bundle" ? "application/octet-stream" : "text/plain")
+    )
       return json(409, { ok: false, error: "recovery_patch_unavailable", at });
     try {
       facts = await deps.fetchPrFacts({ repo: instance.repo, number: pr.number });
@@ -5805,7 +5854,37 @@ export async function recoverOriginalUnit(
       if (remote === undefined) return json(409, { ok: false, error: "recovery_ref_unavailable", at });
       if (remote !== expectedHead) return json(409, { ok: false, error: "recovery_head_moved", at });
     }
-    if (renew || reviewStartHistory !== undefined) {
+    if (bundleHistory !== undefined) {
+      const current = await deps.runs
+        .listRuns({
+          privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
+          status: "all",
+          visibleTo: EVERY_RUN,
+          limit: RUN_LIST_MAX_LIMIT,
+          recoveryEvidence: {
+            instanceId: instance.id,
+            unit: row.unit,
+            threadKeys: [
+              row.threadKey ?? instance.threadKey,
+              row.reviewThread?.threadKey ?? row.threadKey ?? instance.threadKey,
+            ],
+          },
+        })
+        .catch(() => undefined);
+      if (
+        current === undefined ||
+        current.storeUnavailable ||
+        current.ledgerUnavailable ||
+        current.nextBefore !== undefined ||
+        current.runs.length >= RUN_LIST_MAX_LIMIT ||
+        JSON.stringify(current.runs) !== JSON.stringify(bundleHistory)
+      )
+        return json(409, { ok: false, error: "recovery_evidence_incomplete", at });
+      const remote = await deps.fetchBranchHeadSha?.(instance.repo, row.branch).catch(() => undefined);
+      if (remote === undefined) return json(409, { ok: false, error: "recovery_ref_unavailable", at });
+      if (remote !== expectedHead) return json(409, { ok: false, error: "recovery_head_moved", at });
+    }
+    if (renew || reviewStartHistory !== undefined || bundleHistory !== undefined) {
       // Neither the earlier H2 admission nor a renewal's PR observation can
       // prove the owned PR is still open when the claim reserves its writer.
       const refreshed = await deps.fetchPrFacts({ repo: instance.repo, number: pr.number }).catch(() => undefined);

@@ -8906,6 +8906,213 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.instances.putUnits([{ ...row!, publication: { ...row!.publication!, expectedHeadSha: headSha } }]);
   };
 
+  const bundleHarness = async () => {
+    const h = await salvageHarness();
+    const base = SALVAGED;
+    const source = "c".repeat(40);
+    const row = (await h.instances.listUnits(INSTANCE.id))[0]!;
+    await h.instances.putUnits([{ ...row, publication: { ...publication, expectedHeadSha: base }, lastPush: base }]);
+    await h.store.put(
+      reviewRecord({
+        reviewHead: base,
+        reviewPost: {
+          posted: true,
+          target: { repo: INSTANCE.repo, number: PR.number },
+          head: base,
+          verdict: "request_changes",
+        },
+      }),
+    );
+    const settlement = {
+      version: 1 as const,
+      binding: {
+        runId: "run-original-findings",
+        instanceId: INSTANCE.id,
+        step: `${INSTANCE.id}:U12/1/findings`,
+        repo: INSTANCE.repo,
+        branch: INSTANCE.branch!,
+        requester: INSTANCE.userId,
+        threadKey: INSTANCE.threadKey,
+        generation: "gen-a",
+        baseHeadSha: base,
+      },
+      checkpoint: { kind: "created" as const, head: source },
+      publication: {
+        kind: "rejected" as const,
+        reason: "publication refused by cold controller (phase: cold-publication-validation-refused)",
+      },
+      preservation: {
+        kind: "saved" as const,
+        key: `runs/run-original-findings/out/0-checkpoint-${base}-${source}.bundle`,
+        size: 123,
+        sha256: "d".repeat(64),
+      },
+      release: { kind: "released" as const },
+    };
+    const bundle = {
+      kind: "bundle" as const,
+      runId: settlement.binding.runId,
+      key: settlement.preservation.key,
+      size: settlement.preservation.size,
+      sha256: settlement.preservation.sha256,
+      baseHeadSha: base,
+      targetHeadSha: base,
+      sourceHeadSha: source,
+    };
+    const child = (await h.store.get("run-original-findings"))!;
+    const events: RunEvent[] = [
+      {
+        type: "coordinator_tag",
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+        base: "main",
+        publication: { ...publication, expectedHeadSha: base },
+      },
+      { type: "publication_settlement", settlement },
+    ];
+    await h.store.put({
+      ...child,
+      status: "failed",
+      headSha: source,
+      pushed: [],
+      publicationSettlement: settlement,
+      events,
+      eventCount: events.length,
+      storedEventCount: events.length,
+      dispositions: undefined,
+    });
+    h.deps.artifacts = { head: async () => ({ size: bundle.size, contentType: "application/octet-stream" }) };
+    h.deps.fetchBranchHeadSha = async () => base;
+    return { h, bundle, settlement };
+  };
+
+  it("claims one verified saved bundle at the same H2 without crediting its sibling H3 as published", async () => {
+    const { h, bundle } = await bundleHarness();
+    const outcomes = await Promise.all([callRecovery(h), callRecovery(h)]);
+    expect(
+      outcomes.some((result) => result.status === 200),
+      JSON.stringify(outcomes),
+    ).toBe(true);
+    expect(h.recoveries).toHaveLength(1);
+    const [row] = await h.instances.listUnits(INSTANCE.id);
+    expect(row).toMatchObject({
+      lastPush: SALVAGED,
+      publication: { expectedHeadSha: SALVAGED },
+      recovery: { kind: "findings", expectedHeadSha: SALVAGED, patch: bundle },
+    });
+  });
+
+  it.each([
+    "foreign binding",
+    "stale base",
+    "absent bundle",
+    "wrong digest",
+    "pending Door",
+    "pending Door effect",
+    "accepted head",
+    "second settlement",
+    "incomplete events",
+    "moved remote",
+    "wrong PR base",
+    "wrong PR head",
+    "competing owner",
+    "unpriced child",
+    "spent cap",
+    "round cap",
+    "expired lease",
+  ] as const)("refuses saved bundle with %s before the original unit claim", async (scenario) => {
+    const { h, settlement } = await bundleHarness();
+    const child = (await h.store.get("run-original-findings"))!;
+    if (scenario === "foreign binding" || scenario === "stale base")
+      await h.store.put({
+        ...child,
+        events: child.events!.map((event) =>
+          event.type === "publication_settlement"
+            ? {
+                ...event,
+                settlement: {
+                  ...settlement,
+                  binding: {
+                    ...settlement.binding,
+                    ...(scenario === "foreign binding" ? { requester: "slack:UOTHER" } : { baseHeadSha: HEAD }),
+                  },
+                  ...(scenario === "stale base"
+                    ? {
+                        preservation: {
+                          ...settlement.preservation,
+                          key: `runs/run-original-findings/out/0-checkpoint-${HEAD}-${settlement.checkpoint.head}.bundle`,
+                        },
+                      }
+                    : {}),
+                },
+              }
+            : event,
+        ),
+      });
+    if (scenario === "wrong digest")
+      await h.store.put({
+        ...child,
+        publicationSettlement: { ...settlement, preservation: { ...settlement.preservation, sha256: "e".repeat(64) } },
+      });
+    if (scenario === "pending Door")
+      await h.store.put({ ...child, publicationSettlement: { ...settlement, publication: { kind: "pending" } } });
+    if (scenario === "pending Door effect")
+      await h.store.put({
+        ...child,
+        doorPublicationPending: {
+          id: "pending-branch",
+          repo: INSTANCE.repo,
+          owner,
+          update: { ref: `refs/heads/${INSTANCE.branch}`, old: SALVAGED, next: settlement.checkpoint.head },
+        },
+      });
+    if (scenario === "accepted head")
+      await h.store.put({
+        ...child,
+        publicationSettlement: { ...settlement, publication: { kind: "accepted", head: settlement.checkpoint.head } },
+      });
+    if (scenario === "second settlement")
+      await h.store.put({
+        ...child,
+        events: [...child.events!, { type: "publication_settlement", settlement }],
+        eventCount: 3,
+        storedEventCount: 3,
+      });
+    if (scenario === "incomplete events") await h.store.put({ ...child, storedEventCount: 1 });
+    if (scenario === "absent bundle") h.deps.artifacts = { head: async () => null };
+    if (scenario === "moved remote") h.deps.fetchBranchHeadSha = async () => "e".repeat(40);
+    if (scenario === "wrong PR base")
+      h.deps.fetchPrFacts = async () => ({ ...exactRecoveryFacts(SALVAGED), baseRef: "other" });
+    if (scenario === "wrong PR head") h.deps.fetchPrFacts = async () => exactRecoveryFacts("e".repeat(40));
+    if (scenario === "unpriced child") await h.store.put({ ...child, usage: undefined });
+    if (scenario === "round cap")
+      await h.instances.replace({ ...recoveryInstance(), caps: { maxRounds: 1, maxMinutes: 120 } });
+    if (scenario === "competing owner") {
+      h.deps.runnerOwnership!.release(INSTANCE.repo, PR.number, owner);
+      h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
+    }
+    if (scenario === "spent cap")
+      await h.instances.replace({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 0.5 } });
+    if (scenario === "expired lease") h.deps.clock = () => NOW + minutesToMs(121);
+    if (
+      [
+        "foreign binding",
+        "stale base",
+        "wrong digest",
+        "pending Door",
+        "pending Door effect",
+        "accepted head",
+        "second settlement",
+        "incomplete events",
+      ].includes(scenario)
+    )
+      expect(await h.store.get(child.id)).not.toEqual(child);
+    const before = await h.instances.listUnits(INSTANCE.id);
+    expect((await callRecovery(h)).status).toBe(409);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+    expect(h.recoveries).toEqual([]);
+  });
+
   it("a saved unpushed findings child restarts required findings at the requester-moved head without push credit", async () => {
     const { h, patch } = await unpushedHarness();
     expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: "recovery-run-original-review" } });

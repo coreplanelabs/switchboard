@@ -2072,7 +2072,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         onEvent({
           type: "run_note",
           kind: "work_salvage",
-          summary: "Saved findings work was restored at its verified PR head.",
+          summary:
+            patch.kind === "bundle"
+              ? "A verified local checkpoint ref is available for reconciliation; the PR remains at its original head."
+              : "Saved findings work was restored at its verified PR head.",
         });
       }
     }
@@ -2255,11 +2258,14 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             ? (binding?.ref ?? repoCtx.ref)
             : undefined;
       const publicationSystem =
-        coordinator?.publication !== undefined && existingPrPublication !== undefined
+        (coordinator?.publication !== undefined && existingPrPublication !== undefined
           ? "blocked" in existingPrPublication
             ? `${system}\n\nSwitchboard could not verify this run's existing pull request publication binding: ${existingPrPublication.blocked}. Do not edit or publish until the binding is repaired.`
             : `${system}\n\nSwitchboard verified this run's durable Ship publication binding against its checkout and a fresh pull request read before opening this agent: ${coordinator.publication.repo}#${coordinator.publication.pr}, head ref ${existingPrPublication.ref}, base ref ${coordinator.publication.baseRef}, expected full head ${existingPrPublication.expectedHeadSha}, owner ${coordinator.publication.owner.instanceId}:${coordinator.publication.owner.unit}. This is the trusted adoption receipt for this run. Continue work on that exact pull request and use the authorized Git door push for publication; do not require a separate adoption lookup.`
-          : system;
+          : system) +
+        (coordinator?.recovery?.patch?.kind === "bundle"
+          ? `\n\nA verified private checkpoint is imported only at local ref refs/swb/recovery/${coordinator.recovery.patch.runId}. Its source ${coordinator.recovery.patch.sourceHeadSha} may be a sibling of the current PR head ${coordinator.recovery.patch.targetHeadSha}; it has NOT been published. The child inspects its intended changes, reconciles them onto the clean bound checkout at the current head, verifies the focused checks, and publishes only through the normal authorized Git door. The recovery ref is local-only; the saved source is not a published head.`
+          : "");
       const protectedBranches = [
         ...new Set(
           (prBase !== undefined ? [prBase] : [binding?.ref, repoCtx.ref]).filter(

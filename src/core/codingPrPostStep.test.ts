@@ -1,4 +1,8 @@
-import { readFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { ArtifactStore } from "../artifacts/store.js";
 import type { OpenedPullRequest, OpenPrRef, PullRequestTarget, RepoShipInfo } from "../execution/githubPulls.js";
@@ -2241,6 +2245,189 @@ describe("salvageBudgetPush — a ship coding child pushes what it has at the bu
     expect(out.pushed).toBe(false);
     expect(out.summary).toContain("origin does not match");
     expect(w.commands).not.toContain("git add -A");
+  });
+
+  it("verifies a real sibling bundle against H2 and imports H3 locally without checking it out or pushing", async () => {
+    const root = mkdtempSync(join(tmpdir(), "saved-findings-bundle-"));
+    const target = mkdtempSync(join(tmpdir(), "saved-findings-target-"));
+    const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8" }).trim();
+    const targetGit = (...args: string[]) => execFileSync("git", ["-C", target, ...args], { encoding: "utf8" }).trim();
+    try {
+      execFileSync("git", ["init", "-q", "-b", "main", root]);
+      git("remote", "add", "origin", "https://github.com/acme/api.git");
+      const commit = (content: string) => {
+        writeFileSync(join(root, "tracked.txt"), content);
+        git("add", "tracked.txt");
+        git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture");
+        return git("rev-parse", "HEAD");
+      };
+      const prerequisite = commit("common\n");
+      git("switch", "-q", "-c", "fix/existing");
+      const source = commit("unpublished H3\n");
+      const originalBundle = join(root, ".git", "saved.bundle");
+      git("bundle", "create", originalBundle, "refs/heads/fix/existing", `^${prerequisite}`);
+      git("switch", "-q", "main");
+      const base = commit("published H2\n");
+      execFileSync("git", ["clone", "-q", "--no-local", "--single-branch", "--branch", "main", root, target]);
+      targetGit("switch", "-q", "-c", "fix/existing");
+      targetGit("remote", "set-url", "origin", "https://github.com/acme/api.git");
+      expect(() => targetGit("cat-file", "-e", `${source}^{commit}`)).toThrow();
+      const stored = readFileSync(originalBundle);
+      const recovered = {
+        kind: "bundle" as const,
+        runId: "run-child",
+        key: `runs/run-child/out/0-checkpoint-${base}-${source}.bundle`,
+        size: stored.length,
+        sha256: createHash("sha256").update(stored).digest("hex"),
+        baseHeadSha: base,
+        targetHeadSha: base,
+        sourceHeadSha: source,
+      };
+      const commands: string[] = [];
+      const executor = {
+        exec: async (cmd: string) => {
+          commands.push(cmd);
+          if (cmd.startsWith("curl -fsS --max-filesize 67108864 -o ")) {
+            const path = /-o '([^']+)'/.exec(cmd)?.[1];
+            if (!path) throw new Error("missing recovery output path");
+            copyFileSync(originalBundle, path);
+            return "";
+          }
+          try {
+            return execFileSync("bash", ["-c", cmd], { encoding: "utf8", cwd: target }).trim();
+          } catch (error) {
+            return `exit 1: ${String(error)}`;
+          }
+        },
+      };
+      const store = {
+        head: async () => ({ size: stored.length, contentType: "application/octet-stream" }),
+        presignGet: async () => "https://store.example/download",
+      } as unknown as ArtifactStore;
+      await stageSavedFindingsPatch(executor, store, recovered, {
+        checkout: target,
+        repo: "acme/api",
+        branch: "fix/existing",
+      });
+      expect(targetGit("rev-parse", "HEAD")).toBe(base);
+      expect(targetGit("rev-parse", "refs/swb/recovery/run-child")).toBe(source);
+      expect(commands.some((command) => command.includes(" push ") || command.includes(" checkout "))).toBe(false);
+      // A correctly re-digested object with a broken bundle header is still refused.
+      const corrupt = Buffer.from(stored);
+      corrupt[0] = 0;
+      writeFileSync(originalBundle, corrupt);
+      const badStore = {
+        ...store,
+        head: async () => ({ size: corrupt.length, contentType: "application/octet-stream" }),
+      };
+      await expect(
+        stageSavedFindingsPatch(
+          executor,
+          badStore,
+          {
+            ...recovered,
+            size: corrupt.length,
+            sha256: createHash("sha256").update(corrupt).digest("hex"),
+          },
+          { checkout: target, repo: "acme/api", branch: "fix/existing" },
+        ),
+      ).rejects.toThrow();
+      expect(targetGit("rev-parse", "HEAD")).toBe(base);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(target, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a source outside the trusted prerequisite even after local import, without publishing it", async () => {
+    const base = "a".repeat(40),
+      source = "b".repeat(40),
+      prerequisite = "c".repeat(40);
+    const patch = {
+      kind: "bundle" as const,
+      runId: "run-child",
+      key: `runs/run-child/out/0-checkpoint-${base}-${source}.bundle`,
+      size: 123,
+      sha256: "d".repeat(64),
+      baseHeadSha: base,
+      targetHeadSha: base,
+      sourceHeadSha: source,
+    };
+    const store = {
+      head: async () => ({ size: 123, contentType: "application/octet-stream" }),
+      presignGet: async () => "https://store.example/download",
+    } as unknown as ArtifactStore;
+    const commands: string[] = [];
+    const executor = {
+      exec: async (cmd: string) => {
+        commands.push(cmd);
+        if (cmd.includes("remote get-url origin")) return "https://github.com/acme/api.git\n";
+        if (cmd.includes("symbolic-ref")) return "fix/existing\n";
+        if (cmd.includes("rev-parse HEAD")) return `${base}\n`;
+        if (cmd.startsWith("wc -c")) return "123\n";
+        if (cmd.startsWith("sha256sum")) return `${patch.sha256}  bundle\n`;
+        if (cmd.includes("bundle list-heads")) return `${source} refs/heads/fix/existing\n`;
+        if (cmd.startsWith("sed -n")) return `# v2 git bundle\n-${prerequisite} shared\n\n`;
+        if (cmd.includes("rev-parse 'refs/swb/recovery/")) return `${source}\n`;
+        if (cmd.includes("merge-base --is-ancestor") && cmd.includes("refs/swb/recovery"))
+          return "exit 1: unrelated source";
+        return "";
+      },
+    };
+    await expect(
+      stageSavedFindingsPatch(executor, store, patch, {
+        checkout: "/workspace/checkout",
+        repo: "acme/api",
+        branch: "fix/existing",
+      }),
+    ).rejects.toThrow("unrelated source");
+    expect(commands.some((cmd) => cmd.includes(" push ") || cmd.includes(" checkout "))).toBe(false);
+  });
+
+  it("rejects absent, corrupt or mismatched checkpoint bytes, source heads and prerequisites before import", async () => {
+    const base = "a".repeat(40),
+      source = "b".repeat(40),
+      digest = "d".repeat(64);
+    const bundle = {
+      kind: "bundle" as const,
+      runId: "run-child",
+      key: `runs/run-child/out/0-checkpoint-${base}-${source}.bundle`,
+      size: 123,
+      sha256: digest,
+      baseHeadSha: base,
+      targetHeadSha: base,
+      sourceHeadSha: source,
+    };
+    for (const scenario of ["absent", "digest", "head", "prerequisite"] as const) {
+      const commands: string[] = [];
+      const store = {
+        head: async () => (scenario === "absent" ? null : { size: 123, contentType: "application/octet-stream" }),
+        presignGet: async () => "https://store.example/download",
+      } as unknown as ArtifactStore;
+      const executor = {
+        exec: async (cmd: string) => {
+          commands.push(cmd);
+          if (cmd.includes("remote get-url origin")) return "https://github.com/acme/api.git\n";
+          if (cmd.includes("symbolic-ref")) return "fix/existing\n";
+          if (cmd.includes("rev-parse HEAD")) return `${base}\n`;
+          if (cmd.startsWith("wc -c")) return "123\n";
+          if (cmd.startsWith("sha256sum")) return `${scenario === "digest" ? "e".repeat(64) : digest}  bundle\n`;
+          if (cmd.includes("bundle list-heads"))
+            return `${scenario === "head" ? "e".repeat(40) : source} refs/heads/fix/existing\n`;
+          if (cmd.startsWith("sed -n"))
+            return scenario === "prerequisite" ? "# v2 git bundle\n\n" : `# v2 git bundle\n-${base} shared\n\n`;
+          return "";
+        },
+      };
+      await expect(
+        stageSavedFindingsPatch(executor, store, bundle, {
+          checkout: "/workspace/checkout",
+          repo: "acme/api",
+          branch: "fix/existing",
+        }),
+      ).rejects.toThrow();
+      expect(commands.some((cmd) => cmd.includes(" fetch ") || cmd.includes(" push "))).toBe(false);
+    }
   });
 
   it("restores saved findings only after byte and exact-head verification", async () => {

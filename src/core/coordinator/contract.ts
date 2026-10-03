@@ -636,17 +636,29 @@ export interface ExistingPrPublicationBinding {
   owner: { instanceId: string; unit: string };
 }
 
-/** Private, verified bytes left by a findings child whose immutable push lease
- * was superseded. Diff from baseHeadSha to sourceHeadSha; apply only at targetHeadSha. */
-export interface SavedFindingsPatch {
-  runId: string;
-  key: string;
-  size: number;
-  sha256: string;
-  baseHeadSha: string;
-  targetHeadSha: string;
-  sourceHeadSha: string;
-}
+/** Private findings work: an existing exact-base text patch, or a verified
+ * checkpoint of a sibling commit. Neither form is a publication receipt. */
+export type SavedFindingsPatch =
+  | {
+      kind?: never;
+      runId: string;
+      key: string;
+      size: number;
+      sha256: string;
+      baseHeadSha: string;
+      targetHeadSha: string;
+      sourceHeadSha: string;
+    }
+  | {
+      kind: "bundle";
+      runId: string;
+      key: string;
+      size: number;
+      sha256: string;
+      baseHeadSha: string;
+      targetHeadSha: string;
+      sourceHeadSha: string;
+    };
 
 /** What a coordinator's spawn stamps on the child's every row: its instance,
  *  spawn key and admitted cost cap, plus the base for its PR post-step. */
@@ -1249,18 +1261,23 @@ const isFullSha = (v: unknown): v is string => typeof v === "string" && /^[0-9a-
 export const isSavedFindingsPatch = (v: unknown): v is SavedFindingsPatch =>
   isObject(v) &&
   isText(v.runId) &&
+  (v.kind === undefined || (v.kind === "bundle" && /^[A-Za-z0-9_-]{1,64}$/.test(String(v.runId)))) &&
   typeof v.key === "string" &&
-  v.key === `runs/${v.runId}/out/0-unfinished-${v.baseHeadSha}-${v.targetHeadSha}-${v.sourceHeadSha}.patch` &&
+  v.key ===
+    (v.kind === "bundle"
+      ? `runs/${v.runId}/out/0-checkpoint-${v.baseHeadSha}-${v.sourceHeadSha}.bundle`
+      : `runs/${v.runId}/out/0-unfinished-${v.baseHeadSha}-${v.targetHeadSha}-${v.sourceHeadSha}.patch`) &&
   typeof v.size === "number" &&
   Number.isSafeInteger(v.size) &&
   v.size > 0 &&
+  (v.kind !== "bundle" || v.size <= 64 * 1024 * 1024) &&
   typeof v.sha256 === "string" &&
   /^[0-9a-f]{64}$/.test(v.sha256) &&
   isFullSha(v.baseHeadSha) &&
   isFullSha(v.targetHeadSha) &&
   isFullSha(v.sourceHeadSha) &&
   v.baseHeadSha !== v.sourceHeadSha &&
-  v.baseHeadSha !== v.targetHeadSha;
+  (v.kind === "bundle" ? v.baseHeadSha === v.targetHeadSha : v.baseHeadSha !== v.targetHeadSha);
 const isPublication = (v: unknown): v is ExistingPrPublicationBinding =>
   isObject(v) &&
   typeof v.repo === "string" &&

@@ -95,7 +95,7 @@
     "src/core/budgets.ts": "c7ad974d57acf54dd4f2f51abe76f36b9586eb8cecd3e7e72a676cb728011ad9",
     "src/core/capabilities.ts": "5d95cfcefc532d454d583b1e267d591d1f013193fa954391d9975bec176ec481",
     "src/core/chatMessage.ts": "927d2931ac24b29555c29fcac1c077fb205aa7eead55352cec8b5a18df6afd04",
-    "src/core/coordinator/contract.ts": "3d0f949d4313d5c8bfa76c6241fb8d70ef9ede6c38c29890b7d65313a20005a6",
+    "src/core/coordinator/contract.ts": "81b2aad65f8696f3c9e1af374ba172842e1ba91277d68c1309154bfcecdeb23a",
     "src/core/coordinator/mainWorkObservation.ts": "8336abc6d7bff35c873773758701967f5094ce888e58b7206920dfd3d6919bf3",
     "src/core/coordinator/reportAdmission.ts": "a15e55feac3523c34dc2ad75d1de06b66d7dbce3bce96f555b4de1b15a82b2a9",
     "src/core/coordinator/shipOutcome.ts": "4a4a56c0dbaab3a80fac52934fbcf6716095e81a2e1c62a124975d72f1a6298e",
