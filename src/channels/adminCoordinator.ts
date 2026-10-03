@@ -3087,6 +3087,12 @@ async function verifiedReviewAttachRefusal(
   // ordered refusal and reply cleanup pairs, never another dispatch action.
   const pairedRefusalReply =
     postRefusal.length === 4 && matchingCleanupPair(0, "dispatch.refuse") && matchingCleanupPair(2, "post.reply");
+  // The already-started memory read may end just before attach starts or
+  // while attach runs. Both orders are setup-only when the three events are
+  // adjacent after admission and attach itself ends in an error.
+  const adjacentAttachSetup =
+    (attachStart === admitted + 1 && memoryEnd === admitted + 2) ||
+    (memoryEnd === admitted + 1 && attachStart === admitted + 2);
   const admittedAttachRefusal =
     run.liveState?.state === "admitted" &&
     child?.liveState?.state === "admitted" &&
@@ -3095,9 +3101,8 @@ async function verifiedReviewAttachRefusal(
     events?.filter((event) => event.type === "run_state").length === 1 &&
     memoryStart >= 0 &&
     memoryStart < admitted &&
-    attachStart === admitted + 1 &&
-    memoryEnd === attachStart + 1 &&
-    attachEnd === memoryEnd + 1 &&
+    adjacentAttachSetup &&
+    attachEnd === admitted + 3 &&
     systemRefusal === attachEnd + 1 &&
     memoryOpened?.type === "span_start" &&
     memoryClosed?.type === "span_end" &&

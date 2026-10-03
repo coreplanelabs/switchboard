@@ -14526,6 +14526,33 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(h.dispatched).toEqual([]);
   });
 
+  it("recovers admitted review attach refusal when memory read ends before attach starts", async () => {
+    const { h, row, fixed } = await admittedReviewWithRefusalReply(async (failed) => {
+      const events = [...failed.events];
+      [events[13], events[14]] = [events[14]!, events[13]!];
+      failed.events = events.map((event, index) => ({ ...event, seq: index + 1 }));
+    });
+    const events = (await h.store.get("run-h2-attach"))!.events;
+    expect(
+      events.slice(12, 17).map((event) => [event.seq, event.type, "name" in event ? event.name : undefined]),
+    ).toEqual([
+      [13, "run_state", undefined],
+      [14, "span_end", "dispatch.memory_read"],
+      [15, "span_start", "dispatch.workspace.attach"],
+      [16, "span_end", "dispatch.workspace.attach"],
+      [17, "refusal", undefined],
+    ]);
+    expect(await callRecovery(h)).toMatchObject({
+      status: 200,
+      body: { diagnostic: { reviewStart: "verified_no_work", runId: "run-h2-attach" } },
+    });
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    expect(claimed?.recovery).toMatchObject({ kind: "review", round: 2, expectedHeadSha: fixed });
+    expect(claimed?.rounds).toEqual(row.rounds);
+    expect(h.recoveries).toHaveLength(1);
+    expect(h.dispatched).toEqual([]);
+  });
+
   it.each([
     "reversed cleanup pairs",
     "mismatched refusal span",
