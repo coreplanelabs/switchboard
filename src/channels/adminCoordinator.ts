@@ -5082,6 +5082,30 @@ export async function recoverOriginalUnit(
       }
       const full = final?.ok === true ? final.value : undefined;
       const postedFindings = review.verdict?.findings ?? [];
+      const originalCodingKey = `${instance.id}:${row.unit}/0/coding`;
+      const originalCoding = listing.runs.filter((run) => run.idempotencyKey === originalCodingKey);
+      const original = originalCoding.length === 1 ? originalCoding[0] : undefined;
+      const verifiedOriginalPush =
+        original !== undefined &&
+        spend.children.some((child) => child.runId === original.id && child.key === originalCodingKey) &&
+        original.finished === true &&
+        original.status === "completed" &&
+        original.agent === "coding" &&
+        original.parentInstanceId === instance.id &&
+        original.userId === instance.userId &&
+        original.repo?.toLowerCase() === instance.repo.toLowerCase() &&
+        original.threadKey === unitThreadKey &&
+        original.headSha === reviewedHead &&
+        original.finishedAt !== undefined &&
+        original.finishedAt <= review.startedAt &&
+        (original.pr === undefined ||
+          (original.pr.number === pr.number &&
+            original.pr.url === pr.url &&
+            (original.pr.head === undefined || original.pr.head === row.branch))) &&
+        original.pushed?.length === 1 &&
+        original.pushed[0]?.ref === row.branch &&
+        original.pushed[0].sha === reviewedHead &&
+        original.pushed[0].by === "push";
       if (
         row.lastPush !== publication.expectedHeadSha ||
         expectedHead !== publication.expectedHeadSha ||
@@ -5148,7 +5172,9 @@ export async function recoverOriginalUnit(
             run.id !== fixed.id &&
             run.id !== review.id &&
             run.id !== noWork.id &&
-            (!run.finished || run.pushed?.some((push) => push.ref === row.branch)),
+            (!run.finished ||
+              (run.pushed?.some((push) => push.ref === row.branch) &&
+                !(verifiedOriginalPush && run.id === original?.id))),
         )
       )
         return json(409, {
