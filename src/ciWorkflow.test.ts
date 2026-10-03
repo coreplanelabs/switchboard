@@ -688,7 +688,11 @@ describe("the image check builds every image the deploy builds", () => {
     ]);
     expect(images.map((i) => i.dir).sort()).toEqual(IMAGE_KINDS.map((k) => WORKER_DIRS[k]).sort());
     for (const i of images) expect(existsSync(new URL(i.dockerfile, `file://${root}`)), i.dockerfile).toBe(true);
-    expect(withoutImage).toEqual(["deploy/cloudflare-docs", "deploy/cloudflare-memory"]);
+    expect(withoutImage).toEqual([
+      "deploy/cloudflare-acceptance-source",
+      "deploy/cloudflare-docs",
+      "deploy/cloudflare-memory",
+    ]);
   });
 
   it.each(images)(
