@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.278.5](https://github.com/coreplanelabs/switchboard/compare/v1.278.4...v1.278.5) (2026-10-03)
+
+
+### Bug fixes
+
+* **ship:** publish precreated branches from their bound head ([#2685](https://github.com/coreplanelabs/switchboard/issues/2685)) ([92c4f53](https://github.com/coreplanelabs/switchboard/commit/92c4f53646db9fe8fd81532f2e2ed6297dc67f11))
+
 ## [1.278.4](https://github.com/coreplanelabs/switchboard/compare/v1.278.3...v1.278.4) (2026-10-02)
 
 
