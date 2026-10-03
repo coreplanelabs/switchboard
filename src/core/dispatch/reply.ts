@@ -856,8 +856,9 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
     // the reply went and its record goes to the store — BEFORE the
     // workspace release below: the record does not depend on it, and on the
     // ledger the finish is what frees the thread, which must not wait ~90 s on
-    // a sandbox teardown (docs/reference/specs/run-history.md item 36). Fire-and-forget;
-    // the writer's `pending()` is incremented inside the drain, before the
+    // a sandbox teardown (docs/reference/specs/run-history.md item 36). The
+    // writer starts here; ordinary release awaits its exact ledger finish.
+    // The writer's `pending()` is incremented inside the drain, before the
     // outer finally's `activeRuns--`, so the shutdown drain never observes
     // "0 runs, 0 writes". A reply that threw still seals (`replyOk: false`)
     // and writes (`failed`) here, then reaches the outer catch for the error

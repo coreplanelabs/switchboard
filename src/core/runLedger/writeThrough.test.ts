@@ -1970,6 +1970,51 @@ describe("events, state, heartbeat", () => {
 });
 
 describe("finishing and finish", () => {
+  it("waits only for this run's finish and retains its outcome after settlement", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    let unblock!: () => void;
+    let started!: () => void;
+    const blocked = new Promise<void>((resolve) => (unblock = resolve));
+    const entered = new Promise<void>((resolve) => (started = resolve));
+    const { wt } = harness({
+      ledger: overriding(inner, {
+        finish: async (...args) => {
+          if (args[0] === "r2") {
+            started();
+            await blocked;
+          }
+          return inner.finish(...args);
+        },
+      }),
+    });
+    const first = (await openRun(wt, openReq()))!;
+    const other = (await openRun(
+      wt,
+      openReq({
+        runId: "r2",
+        threadKey: "slack:C2:1.0",
+        meta: { agent: "review", channelId: "slack:C2", userId: "slack:UALICE", threadKey: "slack:C2:1.0" },
+        seed: undefined,
+      }),
+    ))!;
+    expect(await first.waitForFinish()).toEqual({ kind: "unstarted" });
+    const pending = other.sink.put(record("r2"));
+    try {
+      await entered;
+      await first.sink.put(record("r1"));
+      expect(await first.waitForFinish()).toEqual({ kind: "landed" });
+      expect(inner.live.has("r2")).toBe(true);
+    } finally {
+      unblock();
+      await pending;
+    }
+    expect(await other.waitForFinish()).toEqual({ kind: "landed" });
+    expect(await first.waitForFinish()).toEqual({ kind: "landed" });
+    expect(await new NullLedgerRun("off", { put: async () => {}, abandoned: () => {} }).waitForFinish()).toEqual({
+      kind: "off",
+    });
+  });
+
   it("does not turn a storage error mentioning a fence into ownership loss", async () => {
     const { wt } = harness({
       ledger: overriding(new InMemoryRunLedger(() => 10_000), {

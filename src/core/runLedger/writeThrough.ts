@@ -271,7 +271,7 @@ export type OpenOutcome =
  *  asked or this run is untracked, reply as before (the run is this process's). */
 export type FinishingGate = "ok" | "fenced" | "unavailable";
 
-/** One tracked run. Every method is safe to call after a detach (a no-op). */
+/** One tracked run. Every method is safe to call after a detach. */
 export interface LedgerRun {
   readonly runId: string;
   /** False once a write was refused or failed for good: the ledger no longer
@@ -334,6 +334,10 @@ export interface LedgerRun {
    *  plain store — never both, never neither. Throws only a transient failure
    *  (the writer retries it; a repeated `finish` is idempotent). */
   readonly sink: RecordSink;
+  /** Await this run's terminal ledger acknowledgement, bounded by the sink
+   *  caller's retry policy. A plain-store fallback does not confirm removal
+   *  of the live owner; `unstarted` confirms nothing either. */
+  waitForFinish(): Promise<LandingOutcome | { kind: "unstarted" } | { kind: "off" }>;
   /** Stop the heartbeat and flush the events. Idempotent; `sink.put` does it too. */
   close(): Promise<void>;
 }
@@ -578,6 +582,9 @@ export class NullLedgerWriteThrough implements LedgerWriteThrough {
 /** A run the null write-through was asked to adopt: untracked, not resumable,
  *  every mirror a no-op, its finish landing on the plain store. */
 export class NullLedgerRun implements LedgerRun {
+  async waitForFinish(): Promise<{ kind: "off" }> {
+    return { kind: "off" };
+  }
   readonly lastCheckpointFailure = undefined;
   async normalizeContextOrigins(): Promise<ContextCheckpointResult> {
     return { ok: false, reason: "checkpoint-unavailable" };
@@ -667,7 +674,7 @@ function seedSources(req: OpenRunRequest): SessionSources | undefined {
 /** How a run's finish ended (item 54): the row went (`landed`), the ledger
  *  refused it and the record went to the plain store (`refused`), or the
  *  attempt sequence failed for good (`failed`, with the last error's words). */
-type LandingOutcome = { kind: "landed" } | { kind: "refused" } | { kind: "failed"; why: string };
+export type LandingOutcome = { kind: "landed" } | { kind: "refused" } | { kind: "failed"; why: string };
 
 /** A finish this process is landing (item 54): one entry per run from its
  *  first `put` to the outcome, settled once, awaited by a claim that met the
@@ -934,6 +941,10 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     private fencedOut = false;
     private detached = false;
     private finished = false;
+    private finishLanding: Landing | undefined;
+    async waitForFinish(): Promise<LandingOutcome | { kind: "unstarted" }> {
+      return this.finishLanding ? this.finishLanding.settled : { kind: "unstarted" };
+    }
     private seeded = false;
     private seedSystem: string | undefined;
     private seedNotepad: string | undefined;
@@ -1152,14 +1163,14 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         // 54). A failure here settles nothing: the caller decides whether it
         // tries again (the history writer's ladder) or is done — and says so
         // with `abandoned`, which is the one word that settles a failed finish.
-        const entry = landingFor(this.runId);
+        const entry = (this.finishLanding ??= landingFor(this.runId));
         const { value, outcome } = await this.land(plain);
         settleLanding(this.runId, entry, outcome);
         return value;
       },
       abandoned: (record, why) => {
         if (record.id !== this.runId) return;
-        const entry = landing.get(this.runId);
+        const entry = this.finishLanding;
         if (entry !== undefined) settleLanding(this.runId, entry, { kind: "failed", why });
       },
     };
