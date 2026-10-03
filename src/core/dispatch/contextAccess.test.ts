@@ -116,7 +116,7 @@ function setup() {
   const originAudience = vi.fn(async (): Promise<"public" | "private" | "dm" | undefined> => "dm");
   const getRunEvents = vi.fn();
   const deps = {
-    config: { grantsFor: () => ALL_GRANTS },
+    config: { grantsFor: () => ALL_GRANTS, userGithubBinding: () => undefined },
     runStore: { get: async (id: string) => records.get(id) },
     runLedger: { readLiveRuns: async () => live, readSessionTail: vi.fn() },
     slackContextForRun: () => ({ originAudience }),

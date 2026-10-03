@@ -1396,7 +1396,10 @@ export async function dispatch(
                     }
                   : undefined;
       operatorEvent = await root.span("dispatch.operator", async (span) => {
-        const github = githubCapabilityFor(deps, chatActorOf(deps.config, msg));
+        const github = githubCapabilityFor(deps, chatActorOf(deps.config, msg), {
+          requesterId: msg.userId,
+          verifiedDirectAudience: directAudienceVerified && directAudienceStampOf(msg) !== undefined,
+        });
         const event = await operatorStage(
           {
             ...deps,
@@ -4799,7 +4802,10 @@ export async function dispatch(
                 checking = "github-check-unavailable";
                 const readable =
                   ran.githubReadRepos.length > 0 || ran.githubReadUnknown
-                    ? await githubCapabilityFor(deps, chatActorOf(deps.config, msg)).readableRepos?.()
+                    ? await githubCapabilityFor(deps, chatActorOf(deps.config, msg), {
+                        requesterId: msg.userId,
+                        verifiedDirectAudience: directAudienceStillValid && directAudienceStampOf(msg) !== undefined,
+                      }).readableRepos?.(ran.githubReadRepos)
                     : [];
                 if (!readable) return { ok: false, code: checking };
                 checking = "plane-check-unavailable";

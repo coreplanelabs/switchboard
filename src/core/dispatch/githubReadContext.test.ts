@@ -5,7 +5,7 @@ import type { ToolContext } from "../../tools/runnableTool.js";
 import { sourceHash } from "../references/receipts.js";
 import { githubReadWithContext } from "./githubReadContext.js";
 
-describe("durable public GitHub reads", () => {
+describe("durable requester-scoped GitHub reads", () => {
   const fixture = () => {
     const api = new InMemoryGithubApi({ "acme/api": { private: false, files: { "README.md": "public readme" } } });
     const commit = vi.fn(async () => true);
@@ -77,5 +77,18 @@ describe("durable public GitHub reads", () => {
     const body = await githubReadWithContext(githubReposTool, { runId: "producer", commit: f.commit }).run({}, f.ctx);
     expect(body).toContain("acme/api");
     expect(f.commit).toHaveBeenCalledWith(expect.objectContaining({ repos: ["acme/api"] }), expect.anything());
+  });
+  it("records requester-authorized private results through the same receipt", async () => {
+    const f = fixture();
+    f.api.repos.set("acme/private", { private: true, files: { "README.md": "private readme" }, issues: [] });
+    const body = await githubReadWithContext(githubFileTool, { runId: "producer", commit: f.commit }).run(
+      { repo: "acme/private", path: "README.md" },
+      f.ctx,
+    );
+    expect(body).toContain("private readme");
+    expect(f.commit).toHaveBeenCalledWith(
+      expect.objectContaining({ repos: ["acme/private"], resultHash: await sourceHash(body) }),
+      expect.objectContaining({ status: "known", githubRepos: ["acme/private"] }),
+    );
   });
 });

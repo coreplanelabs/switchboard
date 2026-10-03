@@ -33,7 +33,7 @@ export interface GithubCapability {
   /** True when the requesting user may write to `repo` (`canUseRepo`: open unless `restrict.repos` names it). */
   canWrite(repo: string): boolean;
   /** Fresh requester and publication scoped list for the main conversation. Absent means no main-agent GitHub reads. */
-  readableRepos?: () => Promise<InstallationRepo[]>;
+  readableRepos?: (repos?: readonly string[]) => Promise<InstallationRepo[]>;
   /** Records an authorized read's repository for the final publication gate. */
   recordRead?: (repo: string) => void;
 }
@@ -43,12 +43,14 @@ const UNAVAILABLE = "GitHub tools are not available in this context.";
 const MAX_TREE_ENTRIES = 300;
 const MAX_ISSUE_BODY_SHOWN = 6000;
 const MAX_PULL_BODY_SHOWN = 65_536;
-const READ_REFUSED =
-  "you are not allowed to read this repository here; ask an admin to grant this requester access to a public pilot repository.";
+const READ_REFUSED = "repository access could not be verified for this requester and conversation.";
 
-async function readableRepos(ctx: Parameters<RunnableTool["run"]>[1]): Promise<InstallationRepo[] | undefined> {
+async function readableRepos(
+  ctx: Parameters<RunnableTool["run"]>[1],
+  repos?: readonly string[],
+): Promise<InstallationRepo[] | undefined> {
   if (ctx.agentName !== "orchestrator") return undefined;
-  return ctx.github?.readableRepos?.();
+  return ctx.github?.readableRepos?.(repos);
 }
 
 async function readGate(
@@ -61,7 +63,7 @@ async function readGate(
     return undefined;
   }
   try {
-    const repos = await readableRepos(ctx);
+    const repos = await readableRepos(ctx, [repo]);
     if (!repos?.some((r) => r.fullName.toLowerCase() === repo.toLowerCase())) return `${tool}: ${READ_REFUSED}`;
     // Record before the API call: even a returned error may expose metadata.
     ctx.github?.recordRead?.(repo);

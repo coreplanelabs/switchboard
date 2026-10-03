@@ -1,5 +1,6 @@
 import { createWorkFreshness } from "./workFreshness.js";
 import { appendRunReport } from "../runLedger/threadSession.js";
+import { directAudienceStampOf } from "../runLedger/inboxMessage.js";
 import { contextDependenciesOf, type ContextDependencies } from "../references/contextDependencies.js";
 import { GITHUB_READ_TOOLS } from "../../tools/github.js";
 import { githubReadWithContext } from "./githubReadContext.js";
@@ -1677,7 +1678,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   });
   const githubReadRepos = new Set<string>();
   let githubReadUnknown = false;
-  const github = githubCapabilityFor(deps, chatActorOf(deps.config, msg));
+  const github = githubCapabilityFor(deps, chatActorOf(deps.config, msg), {
+    requesterId: msg.userId,
+    verifiedDirectAudience: verifiedAtOpen === true && directAudienceStampOf(msg) !== undefined,
+  });
   github.recordRead = (repo) => {
     if (/^[^/\s]+\/[^/\s]+$/.test(repo)) githubReadRepos.add(repo.toLowerCase());
     else githubReadUnknown = true;

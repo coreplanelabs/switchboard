@@ -67,6 +67,12 @@ export interface InstallationRepo {
   description: string | null;
 }
 
+/** GitHub's current effective base permission for one bound account on one repository. */
+export interface RepositoryUserPermission {
+  permission: string;
+  user: { login: string; id: number };
+}
+
 export interface IssueSummary {
   number: number;
   title: string;
@@ -125,6 +131,7 @@ export interface GithubApi {
    *  client without it (a test double) is used as is. */
   withSpan?(span: Span): GithubApi;
   listRepos(): Promise<InstallationRepo[]>;
+  getUserRepoPermission(repo: string, login: string): Promise<RepositoryUserPermission | null>;
   /** A file's text at a ref, clipped at `opts.maxChars` (the tool clip
    *  `MAX_FILE_CHARS` when absent) with `truncated` saying so; a reader that
    *  needs the whole document, a plan the runner parses units out of, passes
@@ -250,6 +257,7 @@ export interface RestGithubApiOptions {
  *  which carries a repo, a file path or a query. */
 export type GithubRoute =
   | "installation_repos"
+  | "repository_user_permission"
   | "contents"
   | "contents_raw"
   | "search_code"
@@ -319,6 +327,26 @@ export class RestGithubApi implements GithubApi {
         break;
     }
     return out;
+  }
+
+  async getUserRepoPermission(repo: string, login: string): Promise<RepositoryUserPermission | null> {
+    let res: Response;
+    try {
+      res = await this.request(
+        "read",
+        "GET",
+        "repository_user_permission",
+        `/repos/${repo}/collaborators/${encodeURIComponent(login)}/permission`,
+      );
+    } catch (error) {
+      if (error instanceof GithubApiError && error.status === 404) return null;
+      throw error;
+    }
+    const body = (await res.json()) as Record<string, unknown>;
+    const user = typeof body.user === "object" && body.user !== null ? (body.user as Record<string, unknown>) : {};
+    if (typeof body.permission !== "string" || typeof user.login !== "string" || !Number.isSafeInteger(user.id))
+      return null;
+    return { permission: body.permission, user: { login: user.login, id: user.id as number } };
   }
 
   async readFile(repo: string, path: string, ref?: string, opts?: ReadFileOptions): Promise<RepoFile> {
@@ -806,6 +834,7 @@ export interface InMemoryRepo {
   defaultBranch?: string;
   private?: boolean;
   description?: string | null;
+  permissions?: Record<string, { id: number; permission: string }>;
   /** Seeded comparisons by `base...head`: the diff text, or the HTTP status
    *  GitHub would answer (406 for a diff too large to render). */
   compares?: Record<string, string | { status: number }>;
@@ -864,6 +893,13 @@ export class InMemoryGithubApi implements GithubApi {
       defaultBranch: r.defaultBranch ?? "main",
       description: r.description ?? null,
     }));
+  }
+
+  async getUserRepoPermission(repo: string, login: string): Promise<RepositoryUserPermission | null> {
+    const matched = Object.entries(this.repo(repo).permissions ?? {}).find(
+      ([name]) => name.toLowerCase() === login.toLowerCase(),
+    );
+    return matched ? { permission: matched[1].permission, user: { login: matched[0], id: matched[1].id } } : null;
   }
 
   async readFile(repo: string, path: string, ref?: string, opts?: ReadFileOptions): Promise<RepoFile> {
