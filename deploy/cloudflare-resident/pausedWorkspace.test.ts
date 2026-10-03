@@ -1,4 +1,8 @@
 import { runInNewContext } from "node:vm";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -10,6 +14,8 @@ import { decideWorkspaceRemoval } from "./workspacePreservation";
 import { parsePrivateTreeObservation, privateTreeObservationScript } from "../../src/execution/residentCleanliness";
 import { planForceDetach } from "../../src/execution/residentDetach";
 import { registeredRunOwnsRelease } from "./runRegistration";
+import { parsePoolBindings } from "../../src/execution/residentPoolSpends";
+import { shellQuote } from "../../src/execution/shellQuote";
 import { coordinatorFields, idempotencyKeyFor } from "../../src/core/coordinator/contract";
 import { methodOf, readSource } from "./testing/sourceScan";
 
@@ -166,6 +172,9 @@ function probe(
     owner?: unknown;
     unavailable?: boolean;
     privateTree?: unknown;
+    absentPrivateTree?: boolean;
+    cacheEligible?: boolean;
+    spendAccepted?: boolean;
     lastAttachAt?: string;
     registration?: Record<string, unknown> | null;
     fence?: unknown;
@@ -181,8 +190,11 @@ function probe(
   let runRegistration = options.registration === undefined ? { ...registration } : options.registration;
   const fence = "fence" in options ? options.fence : runFence;
   const removed = vi.fn(async () => {});
+  const cleanCache = vi.fn(async () => {});
   const observeRunForEviction = vi.fn(async () => (options.unavailable ? null : (options.owner ?? liveOwner)));
   const observePrivateTree = vi.fn(async () => (options.privateTree === undefined ? cleanTree : options.privateTree));
+  const observeAbsentPrivateTree = vi.fn(async () => options.absentPrivateTree === true);
+  const markPoolUserSpent = vi.fn(async () => options.spendAccepted !== false);
   const Scope = runInNewContext(`${compiled}\nPreservationUnderTest`, {
     decideWorkspaceRemoval,
     planForceDetach,
@@ -192,7 +204,8 @@ function probe(
     WORKTREE_TTL_DAYS_DEFAULT: 7,
     THREAD_KEY_PREFIX: "thread:",
     THREADS_DIR: "/workspace/threads",
-    THREAD_USERS: [],
+    THREAD_USERS: options.cacheEligible ? [original.user] : [],
+    threadUserCacheCleanArgv: () => ["cache-clean"],
     systemClock: () => NOW,
     runRegKey: (key: string) => `runReg:${key}`,
     runFenceKey: (key: string) => `runFence:${key}`,
@@ -230,17 +243,26 @@ function probe(
     runOk: async (argv: string[]) => {
       if (argv[0] === "rm") await removed();
     },
+    run: async (argv: string[]) => {
+      if (argv[0] === "cache-clean") await cleanCache();
+      return { exitCode: 0, stdout: "", stderr: "", timedOut: false };
+    },
     putThreadBinding: async (next: Record<string, unknown>) => {
       binding = next;
     },
     observeRunForEviction,
     observePrivateTree,
+    observeAbsentPrivateTree,
+    markPoolUserSpent,
   });
   return {
     instance,
     removed,
+    cleanCache,
     observeRunForEviction,
     observePrivateTree,
+    observeAbsentPrivateTree,
+    markPoolUserSpent,
     binding: () => binding,
     replaceBinding: (next: Record<string, unknown>) => {
       binding = next;
@@ -458,6 +480,182 @@ describe("paused unpublished work at resident removal", () => {
     release();
     expect(await pending).toEqual({ evicted: [], kept: 1 });
     expect(p.removed).not.toHaveBeenCalled();
+  });
+});
+
+describe("missing private tree recovery", () => {
+  it("retires a terminal owner's independently absent directory and records the loss", async () => {
+    const p = probe({ owner: ordinaryTerminal, privateTree: null, absentPrivateTree: true });
+    expect(await p.instance.sweepWorktrees("repo:owner/name")).toEqual({ evicted: [threadKey], kept: 0 });
+    expect(p.markPoolUserSpent).toHaveBeenCalledWith(original.user, `thread:${threadKey}`);
+    expect(p.binding().evictedUnmeasured).toBe("private tree absent on active VM; prior contents unverified");
+  });
+
+  it("keeps an unreadable directory and a live owner", async () => {
+    const unreadable = probe({ owner: ordinaryTerminal, privateTree: null });
+    expect(await unreadable.instance.sweepWorktrees("repo:owner/name")).toEqual({ evicted: [], kept: 1 });
+    const live = probe({ privateTree: null, absentPrivateTree: true });
+    expect(await live.instance.sweepWorktrees("repo:owner/name")).toEqual({ evicted: [], kept: 1 });
+    expect(live.observeAbsentPrivateTree).not.toHaveBeenCalled();
+    const wrongFence = probe({
+      owner: ordinaryTerminal,
+      privateTree: null,
+      absentPrivateTree: true,
+      fence: { ...runFence, ownerFence: runFence.ownerFence + 1 },
+    });
+    expect(await wrongFence.instance.sweepWorktrees("repo:owner/name")).toEqual({ evicted: [], kept: 1 });
+    expect(wrongFence.observeAbsentPrivateTree).not.toHaveBeenCalled();
+  });
+
+  it("keeps the binding if the historical UID spend cannot be fenced", async () => {
+    const p = probe({ owner: ordinaryTerminal, privateTree: null, absentPrivateTree: true, spendAccepted: false });
+    expect(await p.instance.sweepWorktrees("repo:owner/name")).toEqual({ evicted: [], kept: 1 });
+    expect(p.removed).not.toHaveBeenCalled();
+  });
+
+  it("rechecks absence under the mirror lock and keeps a newly present tree", async () => {
+    const p = probe({ owner: ordinaryTerminal, privateTree: null, absentPrivateTree: true });
+    let inMirrorLock = false;
+    const observedInside: boolean[] = [];
+    p.instance.withMirrorLock = async (action) => {
+      inMirrorLock = true;
+      try {
+        return { value: await action() };
+      } finally {
+        inMirrorLock = false;
+      }
+    };
+    p.observeAbsentPrivateTree.mockImplementation(async () => {
+      observedInside.push(inMirrorLock);
+      return !inMirrorLock;
+    });
+    expect(await p.instance.sweepWorktrees("repo:owner/name")).toEqual({ evicted: [], kept: 1 });
+    expect(observedInside).toEqual([false, true]);
+    expect(p.removed).not.toHaveBeenCalled();
+  });
+
+  it("does not delete a directory or home cache after missing-tree proof", async () => {
+    const p = probe({ owner: ordinaryTerminal, privateTree: null, absentPrivateTree: true, cacheEligible: true });
+    expect(await p.instance.sweepWorktrees("repo:owner/name")).toEqual({ evicted: [threadKey], kept: 0 });
+    expect(p.observeAbsentPrivateTree).toHaveBeenCalledTimes(2);
+    expect(p.removed).not.toHaveBeenCalled();
+    expect(p.cleanCache).not.toHaveBeenCalled();
+  });
+
+  it("does not use missing-disk proof to authorize automatic VM loss", async () => {
+    const p = probe({ owner: ordinaryTerminal, privateTree: null, absentPrivateTree: true });
+    Object.assign(p.instance, {
+      runsInFlightCount: () => 0,
+      liveBindings: async () => [p.binding()],
+      recordRefreshError: async () => {},
+      recreateAdmission: { run: async (fn: () => Promise<boolean>) => ({ busy: false, value: await fn() }) },
+    });
+    expect(await p.instance.automaticContainerLoss("image-stale", async () => {})).toBe(false);
+    expect(p.binding().evicted).toBe(false);
+  });
+
+  it("checks the shipped absent-directory probe and refuses uncertain evidence", async () => {
+    const method = resident?.members.find(
+      (member): member is ts.MethodDeclaration =>
+        ts.isMethodDeclaration(member) &&
+        ts.isIdentifier(member.name) &&
+        member.name.text === "observeAbsentPrivateTree",
+    );
+    if (!method) throw new Error("ResidentDO.observeAbsentPrivateTree is missing");
+    const compiledProbe = ts.transpileModule(`class AbsentProbe { ${method.getText(source)} }`, {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    let canonicalPath = original.worktreePath;
+    const Probe = runInNewContext(`${compiledProbe}\nAbsentProbe`, {
+      threadWorktreePath: async () => canonicalPath,
+      replacementWorktreePath: async () => `${canonicalPath}-ref-hash`,
+      parentDir: (path: string) => path.slice(0, path.lastIndexOf("/")),
+      poolBindingKey: (user: string) => `pool:${user}`,
+      parsePoolBindings,
+      shellQuote,
+    }) as new () => {
+      observeAbsentPrivateTree(binding: typeof original): Promise<boolean>;
+    };
+    const check = async (
+      options: {
+        runtime?: boolean;
+        state?: string;
+        hydrating?: boolean;
+        recreateHeld?: boolean;
+        claimants?: string[];
+        directoryPresent?: boolean;
+        strayDirectory?: boolean;
+        stageContent?: boolean;
+        processActive?: boolean;
+        wrongPath?: boolean;
+        realDirectory?: string;
+      } = {},
+    ) => {
+      canonicalPath = options.realDirectory ? `${options.realDirectory}/ref` : original.worktreePath;
+      const instance = new Probe();
+      Object.assign(instance, {
+        isRuntimeActive: async () => options.runtime ?? true,
+        getStatus: async () => ({ state: options.state ?? "warm" }),
+        hydration: options.hydrating ? {} : null,
+        recreateAdmission: { blocked: async () => options.recreateHeld ?? false },
+        ctx: { storage: { get: async () => options.claimants ?? [threadKey] } },
+        run: async (argv: string[]) =>
+          argv[0] === "pgrep"
+            ? {
+                exitCode: options.processActive ? 0 : 1,
+                stdout: options.processActive ? "12\n" : "",
+                stderr: "",
+                timedOut: false,
+              }
+            : options.realDirectory
+              ? (() => {
+                  const result = spawnSync(argv[0], argv.slice(1), { encoding: "utf8" });
+                  return {
+                    exitCode: result.status ?? 1,
+                    stdout: result.stdout,
+                    stderr: result.stderr,
+                    timedOut: false,
+                  };
+                })()
+              : {
+                  exitCode: options.directoryPresent ? 42 : 0,
+                  stdout: options.directoryPresent ? "" : "absent\n",
+                  stderr: "",
+                  timedOut: false,
+                },
+        poolUserHasOldThreadDir: async () => options.strayDirectory ?? false,
+        poolUserHasOldStageContent: async () => options.stageContent ?? false,
+      });
+      return instance.observeAbsentPrivateTree({
+        ...original,
+        worktreePath: options.wrongPath ? "/tmp/foreign" : canonicalPath,
+      });
+    };
+    expect(await check()).toBe(true);
+    for (const options of [
+      { runtime: false },
+      { state: "restoring" },
+      { hydrating: true },
+      { recreateHeld: true },
+      { claimants: [threadKey, "another"] },
+      { directoryPresent: true },
+      { strayDirectory: true },
+      { stageContent: true },
+      { processActive: true },
+      { wrongPath: true },
+    ])
+      expect(await check(options)).toBe(false);
+    const root = mkdtempSync(join(tmpdir(), "resident missing tree "));
+    try {
+      expect(await check({ realDirectory: join(root, "absent dir") })).toBe(true);
+      const present = join(root, "present dir");
+      mkdirSync(present);
+      expect(await check({ realDirectory: present })).toBe(false);
+      symlinkSync(present, join(root, "linked dir"));
+      expect(await check({ realDirectory: join(root, "linked dir") })).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

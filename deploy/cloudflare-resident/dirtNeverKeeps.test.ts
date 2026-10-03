@@ -194,11 +194,11 @@ describe("every eviction records what the tree held", () => {
     expect(evict).toMatch(
       /tree\?: EvictedTree,\s*threadLockHeld = false,\s*\): Promise<"evicted" \| "changed" \| "cleanup-failed" \| "preserved"> \{/,
     );
-    expect(evict.indexOf("workspaceRemovalDecision(before, runtimeActive)")).toBeLessThan(
+    expect(evict.indexOf("workspaceRemovalDecision(before, runtimeActive, true)")).toBeLessThan(
       evict.indexOf('["rm", "-rf", threadDir]'),
     );
     expect(evict).toMatch(
-      /evictedWhy: why,\s*preservationBlocked: undefined,\s*evictedLeftBehind: tree && "leftBehind" in tree \? tree\.leftBehind : undefined,\s*evictedUnmeasured: tree && "unmeasured" in tree \? tree\.unmeasured : undefined,\s*\} satisfies ThreadBinding\);/,
+      /const recordedTree: EvictedTree \| undefined = decision\.missingTree[\s\S]*?evictedWhy: why,\s*preservationBlocked: undefined,\s*evictedLeftBehind: recordedTree && "leftBehind" in recordedTree \? recordedTree\.leftBehind : undefined,\s*evictedUnmeasured: recordedTree && "unmeasured" in recordedTree \? recordedTree\.unmeasured : undefined,\s*\} satisfies ThreadBinding\);/,
     );
     const binding = /interface ThreadBinding \{[\s\S]*?\n\}/.exec(source);
     expect(binding, "worker.ts declares ThreadBinding").not.toBeNull();
@@ -209,11 +209,10 @@ describe("every eviction records what the tree held", () => {
 
   it("one log line names what went — the counts, or that the tree could not be measured — after the record is written", () => {
     const put = evict.indexOf("evictedWhy: why,");
-    const log = evict.indexOf(
-      "if (tree) console.log(`${logCtx}: ${binding.threadKey} evicted (${why}) — ${evictedTreeSentence(tree)}`);",
-    );
+    const log = evict.indexOf("if (recordedTree)");
     expect(put).toBeGreaterThan(-1);
     expect(log).toBeGreaterThan(put);
+    expect(evict.slice(log)).toContain("evictedTreeSentence(recordedTree)");
   });
 
   it("the sweep measures too, with the runtime up — for the record only, never a keep", () => {
