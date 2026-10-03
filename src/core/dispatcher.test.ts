@@ -11669,6 +11669,38 @@ workspaceDir: __WORKDIR__
     expect(created).toEqual([]);
   });
 
+  it("routes an explicit MCP renewal to the same original unit without invoking the operator", async () => {
+    const { deps, created } = shipDeps(SHIP_OPERATOR_YAML);
+    const recover = vi.fn(async () => ({
+      status: 200,
+      body: { ok: true, outcome: "started", workflowId: "recovery-renewal-original" },
+    }));
+    deps.recoverOriginalUnit = recover;
+    deps.operatorModel = vi.fn<RouteModel>(async () => ({
+      tool: "ask",
+      input: { text: "Which action?", reason: "unnecessary" },
+    }));
+    const threadKey = "mcp:ops:original-unit";
+    const instanceId = `plan-${generatedPlanId("recover original", threadKey)}`;
+    await dispatch(
+      deps,
+      {
+        channelId: "mcp:ops",
+        userId: "mcp:job",
+        threadKey,
+        text: `agent:ship renew unit ${instanceId}:U12`,
+      },
+      new McpIO([], threadKey),
+    );
+
+    expect(recover).toHaveBeenCalledExactlyOnceWith(
+      { instanceId, unit: "U12", renew: true },
+      expect.objectContaining({ userId: "mcp:job", threadKey }),
+    );
+    expect(deps.operatorModel).not.toHaveBeenCalled();
+    expect(created).toEqual([]);
+  });
+
   const recoveryInstance = "plan-fix-the-login-6435ec";
   const recoveryThread = "slack:CX:1.0";
   const unavailableOwnerRecoverySetup = (yaml = SHIP_OPERATOR_YAML) => {

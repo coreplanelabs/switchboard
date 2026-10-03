@@ -339,6 +339,12 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
       instanceId: "plan-old",
       unit: "U12",
     });
+    expect(parseOriginalUnitRecoveryRequest("renew unit plan-old:U12")).toEqual({
+      instanceId: "plan-old",
+      unit: "U12",
+      renew: true,
+    });
+    expect(parseOriginalUnitRecoveryRequest("renew unit plan-old:U12 now")).toBeUndefined();
     expect(parseOriginalUnitRecoveryRequest("recover unit plan-old:U12 now")).toBeUndefined();
     expect(parseOriginalUnitRecoveryRequest("recover plan-old:U12")).toBeUndefined();
     expect(parseOriginalUnitRecoveryRequest("recover unit not-a-key")).toBeUndefined();
@@ -399,6 +405,24 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
     expect(s.created).toEqual([]);
     expect(s.replies).toEqual([
       "Original unit `plan-old:U12` recovery started as durable checkpoint `recovery-run-r1`.",
+    ]);
+  });
+
+  it("routes an explicit renewal as the requester without opening a replacement plan", async () => {
+    const s = setup("slack:UADMIN", { text: "agent:ship renew unit plan-old:U12" });
+    const message = { ...s.msg, messageId: "slack:CX:2.0" };
+    const calls: unknown[] = [];
+    s.deps.recoverOriginalUnit = async (key, caller) => {
+      calls.push({ key, caller });
+      return { status: 200, body: { outcome: "started", workflowId: "recovery-renewal-run-original-review" } };
+    };
+
+    expect(await runShipBranch(s.deps, message, s.io, s.ctx)).toEqual({ hostedLive: false });
+    expect(calls).toEqual([
+      {
+        key: { instanceId: "plan-old", unit: "U12", renew: true },
+        caller: { userId: message.userId, threadKey: message.threadKey, messageId: message.messageId },
+      },
     ]);
   });
 
