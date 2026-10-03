@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.278.7](https://github.com/coreplanelabs/switchboard/compare/v1.278.6...v1.278.7) (2026-10-03)
+
+
+### Bug fixes
+
+* **resident:** classify elapsed ownerless runs for deploy ([#2695](https://github.com/coreplanelabs/switchboard/issues/2695)) ([3964b32](https://github.com/coreplanelabs/switchboard/commit/3964b32e9583884a5fd8515694927a62f57101f0))
+* **ship:** adopt original committed head into a draft PR ([#2694](https://github.com/coreplanelabs/switchboard/issues/2694)) ([3e0386b](https://github.com/coreplanelabs/switchboard/commit/3e0386bab4947f4653e63159af3d48ba449eef1a))
+* **ship:** recover drain-wait findings with no work ([#2692](https://github.com/coreplanelabs/switchboard/issues/2692)) ([d442497](https://github.com/coreplanelabs/switchboard/commit/d442497aec7302d135e524997ebdbd71f42fb938))
+
 ## [1.278.6](https://github.com/coreplanelabs/switchboard/compare/v1.278.5...v1.278.6) (2026-10-03)
 
 
