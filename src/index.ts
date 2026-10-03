@@ -145,6 +145,7 @@ import {
   createCoordinatorChildAdmission,
   isCoordinatorAdminPath,
   recoverOriginalUnit,
+  adoptOriginalPublishedHead,
   type AdminCoordinatorDeps,
 } from "./channels/adminCoordinator.js";
 import { resolveGrant, resolveShipCaps } from "./core/shipPipeline.js";
@@ -183,6 +184,8 @@ import {
   fetchPullRequestReviews,
   findMergedPrByHead,
   findOpenPrByHead,
+  listAnyPrByHead,
+  createDraftPullRequest,
   listOpenPullRequests,
   mergePullRequest,
   openPullRequest,
@@ -1322,6 +1325,8 @@ export async function runBot(): Promise<void> {
       ioFor: (thread) => threadIoFor(thread),
       ...(privateWorkerLog !== undefined ? { privateWorkerLog } : {}),
       findOpenPrByHead,
+      listAnyPrByHead,
+      createDraftPullRequest,
       findMergedPrByHead,
       // The recover path (agent-ship item 15): a coding child that pushed and
       // then died has its pull request opened from the branch itself — after
@@ -1332,6 +1337,9 @@ export async function runBot(): Promise<void> {
       branchHeadSubject,
       fetchBranchHeadSha,
       rewriteIdentities: (args) => dispatchIdentityRewrite(config).rewrite(args),
+      verifyIdentitiesReadOnly: (args) =>
+        dispatchIdentityRewrite(config).verify?.(args) ??
+        Promise.resolve({ kind: "unreadable", reason: "read-only identity verifier unavailable" }),
       // The round-0 fact (agent-ship item 12): a branch with no commits over
       // the base, beside a handoff naming where the scope landed, ends the
       // unit already_landed instead of aborting it.
@@ -1390,6 +1398,18 @@ export async function runBot(): Promise<void> {
         typeof answer.body === "object" && answer.body !== null && !Array.isArray(answer.body)
           ? (answer.body as Record<string, unknown>)
           : { error: "original-unit recovery returned an unreadable answer" };
+      return { status: answer.status, body };
+    };
+    deps.adoptOriginalPublishedHead = async (key, caller) => {
+      const answer = await adoptOriginalPublishedHead(
+        { parentInstanceId: key.instanceId, unit: key.unit },
+        coordinatorDeps,
+        caller,
+      );
+      const body =
+        typeof answer.body === "object" && answer.body !== null && !Array.isArray(answer.body)
+          ? (answer.body as Record<string, unknown>)
+          : { error: "original-head adoption returned an unreadable answer" };
       return { status: answer.status, body };
     };
     // Scheduled jobs arrive through /ingress like any other caller: the

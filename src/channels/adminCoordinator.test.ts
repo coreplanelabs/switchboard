@@ -86,6 +86,7 @@ import {
   isCoordinatorAdminPath,
   planSummary,
   recoverOriginalUnit,
+  adoptOriginalPublishedHead,
   recoveredFallbackTitle,
   type AdminCoordinatorDeps,
 } from "./adminCoordinator.js";
@@ -8038,6 +8039,156 @@ describe("the runner's routes read the hard stop's mark (record 0060; issue 1924
   });
 });
 
+describe("original committed head adoption — create-only draft PR", () => {
+  const head = "6dca321e00afdda6179eb45c64438a126cb42465";
+  const prior = "60deac0789bb6817caa117f0487f24bc826751ab";
+  const marker = (row: CoordinatorUnit) => `<!-- switchboard-adoption:${row.adoption!.actionId}:${head} -->`;
+  const original = (): CoordinatorInstance => ({ ...INSTANCE, runId: "run-parent", plan: { id: "orchestration" } });
+  const unit = (): CoordinatorUnit => ({
+    instanceId: INSTANCE.id,
+    unit: "U12",
+    slug: "u12",
+    branch: INSTANCE.branch!,
+    dependsOn: [],
+    threadKey: INSTANCE.threadKey,
+    startedAt: NOW - 1000,
+    generatedTask: generatedTaskOf("Finish the original task", {
+      requesterId: INSTANCE.userId,
+      threadKey: INSTANCE.threadKey,
+      runId: "run-parent",
+      repo: INSTANCE.repo,
+      sourceUrl: INSTANCE.sourceUrl,
+    }),
+    rounds: [{ index: 0, agent: "coding", outcome: "started", at: NOW - 900 }],
+    ending: { kind: "aborted", report: "coding stopped after push", at: NOW - 100 },
+  });
+  const coding = (): RunRecord =>
+    record("original-coding", {
+      parentInstanceId: INSTANCE.id,
+      idempotencyKey: `${INSTANCE.id}:U12/0/coding`,
+      repo: INSTANCE.repo,
+      startedAt: NOW - 800,
+      finishedAt: NOW - 200,
+      status: "failed",
+      headSha: head,
+      pushed: [{ ref: INSTANCE.branch!, sha: head, by: "push" }],
+      events: [
+        { type: "tool_call", tool: "publish_branch", callId: "call-push", summary: "publish branch", seq: 1 },
+        {
+          type: "publication_push_authorized",
+          callId: "call-push",
+          ref: INSTANCE.branch!,
+          expectedHeadSha: prior,
+          seq: 2,
+        },
+        { type: "pushed_head", ref: INSTANCE.branch!, sha: head, by: "push", seq: 3 },
+        { type: "tool_result", tool: "publish_branch", callId: "call-push", ok: true, summary: "published", seq: 4 },
+      ],
+      eventCount: 4,
+      storedEventCount: 4,
+      truncated: false,
+    });
+  const caller = { userId: INSTANCE.userId, threadKey: INSTANCE.threadKey, messageId: "adopt-1" };
+  async function setup() {
+    const h = harness({ branchHead: head, ahead: 1, runPageBase: "https://bot.example/runs" });
+    await h.instances.put(original());
+    await h.instances.putUnits([unit()]);
+    await h.store.put(coding());
+    h.deps.verifyIdentitiesReadOnly = async () => ({ kind: "clean", tip: head });
+    const prs: NonNullable<AdminCoordinatorDeps["listAnyPrByHead"]> extends (...args: never[]) => Promise<infer T>
+      ? T
+      : never = [];
+    const posts: string[] = [];
+    h.deps.listAnyPrByHead = async () => prs;
+    h.deps.createDraftPullRequest = async (target) => {
+      posts.push(target.body);
+      prs.push({
+        number: 99,
+        htmlUrl: "https://github.com/acme/api/pull/99",
+        state: "open",
+        draft: true,
+        headSha: head,
+        headRef: INSTANCE.branch!,
+        baseRef: "main",
+        body: target.body,
+      });
+      return { number: 99, htmlUrl: "https://github.com/acme/api/pull/99", created: true };
+    };
+    h.deps.fetchPrFacts = async () => ({
+      state: "open",
+      sameRepoHead: true,
+      headBranchExists: true,
+      headRef: INSTANCE.branch!,
+      baseRef: "main",
+      headSha: head,
+      verifiedHead: { repo: INSTANCE.repo, ref: INSTANCE.branch!, sha: head },
+      htmlUrl: "https://github.com/acme/api/pull/99",
+    });
+    return { h, prs, posts };
+  }
+  const adopt = (h: ReturnType<typeof harness>) =>
+    adoptOriginalPublishedHead({ parentInstanceId: INSTANCE.id, unit: "U12" }, h.deps, caller);
+
+  it("claims the original unit and binds one draft PR at its accepted head", async () => {
+    const { h, posts } = await setup();
+    expect(await adopt(h)).toMatchObject({ status: 200, body: { outcome: "bound", pr: 99, head } });
+    const [row] = await h.instances.listUnits(INSTANCE.id);
+    expect(row).toMatchObject({
+      pr: { number: 99 },
+      lastPush: head,
+      publication: { expectedHeadSha: head },
+      adoption: { state: "bound", headSha: head },
+    });
+    expect(posts).toHaveLength(1);
+    expect(posts[0]).toMatch(
+      /^Requested by \*\*alice\*\* · \[Thread\]\(https:\/\/bot\.example\/threads\/slack%3AC1%3A1\.0\)/,
+    );
+    expect(posts[0]).toContain(marker(row!));
+    expect(await adopt(h)).toMatchObject({ status: 200, body: { outcome: "already_bound", pr: 99 } });
+    expect(posts).toHaveLength(1);
+  });
+
+  it("holds a lost create response and reconciles the same action without reposting", async () => {
+    const { h, prs, posts } = await setup();
+    h.deps.createDraftPullRequest = async (target) => {
+      posts.push(target.body);
+      throw new Error("lost response");
+    };
+    expect(await adopt(h)).toMatchObject({ status: 200, body: { outcome: "indeterminate" } });
+    expect(posts).toHaveLength(1);
+    expect(await adopt(h)).toMatchObject({ status: 200, body: { outcome: "indeterminate" } });
+    expect(posts).toHaveLength(1);
+    prs.push({
+      number: 99,
+      htmlUrl: "https://github.com/acme/api/pull/99",
+      state: "open",
+      draft: true,
+      headSha: head,
+      headRef: INSTANCE.branch!,
+      baseRef: "main",
+      body: posts[0]!,
+    });
+    expect(await adopt(h)).toMatchObject({ status: 200, body: { outcome: "bound", pr: 99 } });
+    expect(posts).toHaveLength(1);
+  });
+
+  it("refuses an existing closed PR before any create", async () => {
+    const { h, prs, posts } = await setup();
+    prs.push({
+      number: 77,
+      htmlUrl: "https://github.com/acme/api/pull/77",
+      state: "closed",
+      draft: false,
+      headSha: head,
+      headRef: INSTANCE.branch!,
+      baseRef: "main",
+      body: "old",
+    });
+    expect(await adopt(h)).toMatchObject({ status: 409, body: { error: "adoption_pr_exists" } });
+    expect(posts).toHaveLength(0);
+  });
+});
+
 describe("POST /admin/coordinator/recover-unit — pre-PR same-unit coding", () => {
   const HEAD = "7".repeat(40);
   const task = "Finish the original coding request";
@@ -12534,6 +12685,46 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       publication: { ...publication, expectedHeadSha: moved },
       lastPush: before.lastPush,
     });
+  });
+
+  it.each(["findings", "review"])("a stopped instance refuses %s head adoption", async (step) => {
+    const h = await ordinaryFindingsHarness();
+    const moved = "c".repeat(40);
+    h.deps.fetchPrFacts = async () => exactRecoveryFacts(moved);
+    if (step === "review") {
+      const [row] = await h.instances.listUnits(INSTANCE.id);
+      await h.instances.putUnits([
+        {
+          ...row!,
+          rounds: [...row!.rounds, { index: 2, agent: "review", outcome: "started", at: NOW - minutesToMs(5) }],
+        },
+      ]);
+      await h.store.put(
+        reviewRecord({
+          id: "run-moved-review",
+          idempotencyKey: `${INSTANCE.id}:U12/2/review`,
+          startedAt: NOW - minutesToMs(5),
+          finishedAt: NOW - minutesToMs(1),
+        }),
+      );
+    }
+    await h.instances.markStopped(INSTANCE.id, NOW - 1);
+    const before = (await h.instances.listUnits(INSTANCE.id))[0];
+    const answer = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+        pr: PR.number,
+        adopt: {
+          runId: step === "review" ? "run-moved-review" : "run-original-findings",
+          childStep: step === "review" ? "U12/2/review" : "U12/1/findings",
+          previousHeadSha: HEAD,
+        },
+      }),
+      h.deps,
+    );
+    expect(answer.status).toBe(409);
+    expect((await h.instances.listUnits(INSTANCE.id))[0]).toEqual(before);
   });
 
   it("a failed findings child with no push receipt hands a moved head to the findings gate", async () => {

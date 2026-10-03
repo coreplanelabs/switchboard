@@ -27,6 +27,8 @@ import {
   findOpenPrByHead,
   mergePullRequest,
   openPullRequest,
+  listAnyPrByHead,
+  createDraftPullRequest,
   refirePullRequestEvent,
   rerunFailedJobs,
   updatePullRequest,
@@ -79,6 +81,48 @@ describe("githubPulls", () => {
     title: "Add the widget",
     body: "## TL;DR\n\nAdds the widget.",
   };
+
+  it("lists every PR state for exact-head adoption and refuses an incomplete page", async () => {
+    stubToken();
+    const row = {
+      number: 7,
+      html_url: "https://github.com/acme/api/pull/7",
+      state: "closed",
+      draft: true,
+      head: { sha: "a".repeat(40), ref: "feat/x", repo: { full_name: "acme/api" } },
+      base: { ref: "main" },
+      body: "marker",
+    };
+    const calls = stubFetch(() => new Response(JSON.stringify([row]), { status: 200 }));
+    expect(await listAnyPrByHead("acme/api", "feat/x")).toMatchObject([{ number: 7, state: "closed" }]);
+    expect(calls[0]?.url).toContain("state=all&head=acme%3Afeat%2Fx");
+    vi.unstubAllGlobals();
+    stubFetch(
+      () =>
+        new Response(JSON.stringify([row]), {
+          status: 200,
+          headers: { link: '<https://api.github.com/next>; rel="next"' },
+        }),
+    );
+    await expect(listAnyPrByHead("acme/api", "feat/x")).rejects.toThrow("incomplete");
+  });
+
+  it("creates a draft PR once using POST and never edits an existing PR", async () => {
+    stubToken();
+    const calls = stubFetch(
+      () => new Response('{"number":8,"html_url":"https://github.com/acme/api/pull/8"}', { status: 201 }),
+    );
+    expect(await createDraftPullRequest(target)).toMatchObject({ number: 8, created: true });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.init.method).toBe("POST");
+    expect(JSON.parse(String(calls[0]?.init.body))).toEqual({
+      title: target.title,
+      head: target.headBranch,
+      base: target.base,
+      body: target.body,
+      draft: true,
+    });
+  });
 
   it("creates the PR when no open PR exists for the branch — owner:branch only in the lookup, bare branch in the payload", async () => {
     stubToken();

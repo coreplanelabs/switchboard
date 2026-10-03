@@ -53,6 +53,83 @@ export interface OpenPrRef {
   autoMergeEnabled?: boolean;
 }
 
+/** An adoption reads every PR state: a closed PR still consumed this head's
+ *  one-create opportunity. An incomplete page is never proof of absence. */
+export interface AnyHeadPullRequest {
+  number: number;
+  htmlUrl: string;
+  state: "open" | "closed";
+  draft: boolean;
+  headSha: string;
+  headRef: string;
+  baseRef: string;
+  body: string;
+}
+
+export async function listAnyPrByHead(repo: string, branch: string): Promise<AnyHeadPullRequest[]> {
+  const token = await requireToken();
+  const owner = repo.split("/")[0];
+  const res = await fetch(
+    `https://api.github.com/repos/${repo}/pulls?state=all&head=${encodeURIComponent(`${owner}:${branch}`)}&per_page=100`,
+    { headers: apiHeaders(token), signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
+  );
+  if (!res.ok || /rel="next"/.test(res.headers.get("link") ?? ""))
+    throw new Error(`PR all-state lookup incomplete: HTTP ${res.status}`);
+  const rows = (await res.json()) as Array<Record<string, unknown>>;
+  if (!Array.isArray(rows)) throw new Error("PR all-state lookup returned no list");
+  return rows.map((row) => {
+    const head = row.head as { sha?: unknown; ref?: unknown; repo?: { full_name?: unknown } } | undefined;
+    const base = row.base as { ref?: unknown } | undefined;
+    if (
+      !Number.isSafeInteger(row.number) ||
+      typeof row.html_url !== "string" ||
+      (row.state !== "open" && row.state !== "closed") ||
+      typeof row.draft !== "boolean" ||
+      typeof head?.sha !== "string" ||
+      !/^[0-9a-f]{40}$/.test(head.sha) ||
+      head.ref !== branch ||
+      typeof head.repo?.full_name !== "string" ||
+      head.repo.full_name.toLowerCase() !== repo.toLowerCase() ||
+      typeof base?.ref !== "string" ||
+      typeof row.body !== "string"
+    )
+      throw new Error("PR all-state lookup returned ambiguous facts");
+    return {
+      number: row.number as number,
+      htmlUrl: row.html_url,
+      state: row.state,
+      draft: row.draft,
+      headSha: head.sha,
+      headRef: head.ref,
+      baseRef: base.ref,
+      body: row.body,
+    } as AnyHeadPullRequest;
+  });
+}
+
+/** One create-only draft write. A caller reconciles a lost response from the
+ *  all-state listing; this function never edits or reopens an existing PR. */
+export async function createDraftPullRequest(target: PullRequestTarget): Promise<OpenedPullRequest> {
+  const token = await requireToken();
+  const res = await fetch(`https://api.github.com/repos/${target.repo}/pulls`, {
+    method: "POST",
+    headers: apiHeaders(token, true),
+    body: JSON.stringify({
+      title: target.title,
+      head: target.headBranch,
+      base: target.base,
+      body: clipBody(target.body),
+      draft: true,
+    }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!res.ok) throw new Error(`draft PR create failed: HTTP ${res.status}`);
+  const data = (await res.json()) as { number?: unknown; html_url?: unknown };
+  if (!Number.isSafeInteger(data.number) || typeof data.html_url !== "string")
+    throw new Error("draft PR create returned ambiguous facts");
+  return { number: data.number as number, htmlUrl: data.html_url, created: true };
+}
+
 export interface OpenedPullRequest {
   number: number;
   htmlUrl: string;

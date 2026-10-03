@@ -1012,6 +1012,21 @@ export interface CoordinatorUnit {
   /** Exact existing-PR publication authority. Absent for a fresh unit branch;
    * an adopted or resumed PR may publish only through this binding. */
   publication?: ExistingPrPublicationBinding;
+  /** One original committed head may be opened as a draft PR after its writer
+   *  has ended. This claim survives a lost GitHub create response. It confers
+   *  no coding lease, dirty-work recovery, or review round. */
+  adoption?: {
+    version: 1;
+    actionId: string;
+    runId: string;
+    headSha: string;
+    requester: string;
+    threadKey: string;
+    messageId: string;
+    claimedAt: number;
+    state: "claimed" | "posting" | "bound";
+    pr?: { number: number; url: string };
+  };
   /** The decision-record number reserved at admission for this unit. A unit
    * that writes a record carries it through every attempt and briefs its child
    * as `record: NNNN`; the child never scans the directory for a number. */
@@ -1134,6 +1149,53 @@ export function permitsRecoveryMetadataWrite(
   replacement: CoordinatorUnit,
   checked = false,
 ): boolean {
+  if (current?.adoption !== undefined && !checked && JSON.stringify(current) !== JSON.stringify(replacement))
+    return false;
+  if (JSON.stringify(current?.adoption) !== JSON.stringify(replacement.adoption)) {
+    if (!checked || current === undefined) return false;
+    const before = current.adoption;
+    const after = replacement.adoption;
+    const strip = (unit: CoordinatorUnit) => {
+      const { adoption: _adoption, pr: _pr, publication: _publication, lastPush: _lastPush, ...rest } = unit;
+      return rest;
+    };
+    if (
+      after?.version !== 1 ||
+      JSON.stringify(strip(current)) !== JSON.stringify(strip(replacement)) ||
+      (before === undefined &&
+        (after.state !== "claimed" ||
+          current.pr !== undefined ||
+          current.publication !== undefined ||
+          replacement.pr !== undefined ||
+          replacement.publication !== undefined ||
+          current.lastPush !== replacement.lastPush)) ||
+      (before !== undefined &&
+        (!(
+          (before.state === "claimed" && after.state === "posting") ||
+          (before.state === "posting" && after.state === "bound")
+        ) ||
+          before.actionId !== after.actionId ||
+          before.runId !== after.runId ||
+          before.headSha !== after.headSha ||
+          before.requester !== after.requester ||
+          before.threadKey !== after.threadKey ||
+          before.messageId !== after.messageId ||
+          before.claimedAt !== after.claimedAt ||
+          (after.state === "posting" &&
+            (after.pr !== undefined ||
+              JSON.stringify(replacement.pr) !== JSON.stringify(current.pr) ||
+              JSON.stringify(replacement.publication) !== JSON.stringify(current.publication) ||
+              replacement.lastPush !== current.lastPush)) ||
+          (after.state === "bound" &&
+            (after.pr === undefined ||
+              replacement.pr?.number !== after.pr.number ||
+              replacement.pr.url !== after.pr.url ||
+              replacement.lastPush !== after.headSha ||
+              replacement.publication?.expectedHeadSha !== after.headSha ||
+              replacement.publication.pr !== after.pr.number))))
+    )
+      return false;
+  }
   if (current?.history === undefined)
     return replacement.history === undefined && replacement.recovery?.actionId === undefined;
   const before = current.recovery;
@@ -1402,6 +1464,22 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
   if (r.pr !== undefined && !isPr(r.pr)) return false;
   if (r.resume !== undefined && !isResume(r.resume)) return false;
   if (r.publication !== undefined && !isPublication(r.publication)) return false;
+  if (
+    r.adoption !== undefined &&
+    (!isObject(r.adoption) ||
+      r.adoption.version !== 1 ||
+      !isText(r.adoption.actionId, 256) ||
+      !isText(r.adoption.runId) ||
+      !isFullSha(r.adoption.headSha) ||
+      !isText(r.adoption.requester) ||
+      !isText(r.adoption.threadKey) ||
+      !isText(r.adoption.messageId) ||
+      !isFinite(r.adoption.claimedAt) ||
+      (r.adoption.state !== "claimed" && r.adoption.state !== "posting" && r.adoption.state !== "bound") ||
+      (r.adoption.state !== "bound" && r.adoption.pr !== undefined) ||
+      (r.adoption.state === "bound" && !isPr(r.adoption.pr)))
+  )
+    return false;
   if (r.record !== undefined && (typeof r.record !== "string" || !/^\d{4}$/.test(r.record))) return false;
   if (r.lastPush !== undefined && !isText(r.lastPush)) return false;
   if (r.segments !== undefined && (!Array.isArray(r.segments) || !r.segments.every(isSegment))) return false;
