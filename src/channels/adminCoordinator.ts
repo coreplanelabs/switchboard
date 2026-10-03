@@ -4508,7 +4508,12 @@ export async function recoverOriginalUnit(
       const attempts = unitRuns.filter((run) => isStepAttempt(run.idempotencyKey, findingsPrefix));
       const child = attempts.length === 1 ? attempts[0] : undefined;
       if (
-        row.lastPush !== reviewedHead ||
+        // lastPush is a continuation hint, not the publication authority. If
+        // absent, require the original durable binding at the reviewed head;
+        // the fresh PR/ref proof above must independently agree with that head.
+        (row.lastPush === undefined
+          ? row.publication?.expectedHeadSha !== reviewedHead
+          : row.lastPush !== reviewedHead) ||
         row.ending.cause !== undefined ||
         row.ending.step !== undefined ||
         child === undefined ||
@@ -4541,7 +4546,7 @@ export async function recoverOriginalUnit(
                   run.pr !== undefined))),
         )
       )
-        return json(409, { ok: false, error: "recovery_head_moved", at });
+        return json(409, { ok: false, error: "recovery_head_moved", reason: "findings_no_work_guard", at });
       // The failed dispatch consumed neither a findings contract nor a review
       // slot. Keep the posted review as the claim's identity and original lease.
     } else if (
