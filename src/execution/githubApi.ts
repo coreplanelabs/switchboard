@@ -4,6 +4,8 @@ import { resolveGithubToken, type GithubTokenScope } from "./githubApp.js";
 import { classifyError } from "../core/trace/classify.js";
 import { redactAndCap } from "../core/redact.js";
 import { MINUTE_MS } from "../core/budgets.js";
+import { validRef } from "../core/residentAdmin.js";
+import { preferRefTip } from "./githubPulls.js";
 
 // The GitHub capability behind the `github_*` agent tools
 // (docs/reference/specs/github-tools.md): repository reads (files, trees, code search, the
@@ -94,6 +96,21 @@ export interface IssueComment {
   body: string;
 }
 
+/** Native source identities disambiguate finding IDs reused in different reviews. */
+export interface PullReviewFeedback {
+  id: number;
+  author: string;
+  authorType: "Bot" | "User";
+  head: string;
+  state: string;
+  submittedAt: string;
+  body: string;
+}
+export interface PullFeedback {
+  reviews: PullReviewFeedback[];
+  comments: Array<IssueComment & { id: number }>;
+}
+
 /** PR metadata for a relayed read. This is context, not publication authority. */
 export interface PullSummary {
   number: number;
@@ -145,6 +162,8 @@ export interface GithubApi {
   ): Promise<IssueSummary[]>;
   getIssue(repo: string, number: number): Promise<{ issue: IssueSummary; comments: IssueComment[] }>;
   getPullRequest(repo: string, number: number): Promise<PullSummary>;
+  /** Complete review and conversation history, or an explicit error. Read-scoped context only. */
+  getPullRequestFeedback(repo: string, number: number): Promise<PullFeedback>;
   createIssue(repo: string, input: NewIssueInput): Promise<IssueSummary>;
   updateIssue(repo: string, number: number, patch: IssuePatch): Promise<IssueSummary>;
   commentIssue(repo: string, number: number, body: string): Promise<{ url: string }>;
@@ -265,6 +284,8 @@ export type GithubRoute =
   | "issue"
   | "issue_comments"
   | "pull"
+  | "pull_reviews"
+  | "head_ref"
   | "issue_create"
   | "issue_update"
   | "issue_comment_create"
@@ -476,6 +497,38 @@ export class RestGithubApi implements GithubApi {
     const headRepo = (head.repo ?? {}) as Record<string, unknown>;
     const baseRepo = (base.repo ?? {}) as Record<string, unknown>;
     const user = (row.user ?? {}) as Record<string, unknown>;
+    let sha = String(head.sha ?? "");
+    const ref = typeof head.ref === "string" ? validRef(head.ref) : undefined;
+    // Match dispatch's ordinary PR-head policy: a positively read same-repo
+    // branch tip wins over lagging metadata; forks and frozen closed heads
+    // never consult a possibly unrelated branch on the base repository.
+    if (
+      row.state === "open" &&
+      !row.merged_at &&
+      typeof headRepo.full_name === "string" &&
+      headRepo.full_name.toLowerCase() === repo.toLowerCase() &&
+      ref !== undefined
+    ) {
+      let refTip: string | undefined;
+      try {
+        const tip = await this.request(
+          "read",
+          "GET",
+          "head_ref",
+          `/repos/${repo}/git/ref/heads/${ref.split("/").map(encodeURIComponent).join("/")}`,
+        );
+        const data = (await tip.json()) as { object?: { type?: unknown; sha?: unknown } } | null;
+        if (
+          data?.object?.type === "commit" &&
+          typeof data.object.sha === "string" &&
+          /^[0-9a-f]{40}$/.test(data.object.sha)
+        )
+          refTip = data.object.sha;
+      } catch {
+        // Unreadable or malformed refs retain the established PR-object fallback.
+      }
+      sha = preferRefTip(`${repo}#${number}`, sha, refTip, ref)!;
+    }
     return {
       number: Number(row.number),
       title: String(row.title ?? ""),
@@ -489,9 +542,65 @@ export class RestGithubApi implements GithubApi {
       head: {
         repo: String(headRepo.full_name ?? ""),
         ref: String(head.ref ?? ""),
-        sha: String(head.sha ?? ""),
+        sha,
       },
       base: { repo: String(baseRepo.full_name ?? ""), ref: String(base.ref ?? "") },
+    };
+  }
+
+  async getPullRequestFeedback(repo: string, number: number): Promise<PullFeedback> {
+    const pages = async (path: string, route: GithubRoute): Promise<Record<string, unknown>[]> => {
+      const rows: Record<string, unknown>[] = [];
+      // A bounded complete read: exhausting the bound is an error, never an empty or partial history.
+      for (let page = 1; page <= 20; page++) {
+        const res = await this.request("read", "GET", route, `${path}?per_page=100&page=${page}`);
+        const data: unknown = await res.json();
+        if (!Array.isArray(data) || data.some((r) => !r || typeof r !== "object" || Array.isArray(r)))
+          throw new GithubApiError(502, "Invalid pull request feedback page");
+        rows.push(...(data as Record<string, unknown>[]));
+        if (data.length < 100) return rows;
+      }
+      throw new GithubApiError(413, "Pull request feedback exceeds the complete-history page limit");
+    };
+    const reviews = await pages(`/repos/${repo}/pulls/${number}/reviews`, "pull_reviews");
+    const comments = await pages(`/repos/${repo}/issues/${number}/comments`, "issue_comments");
+    const source = (row: Record<string, unknown>) => {
+      const user = row.user as Record<string, unknown> | null;
+      if (
+        !Number.isSafeInteger(row.id) ||
+        Number(row.id) <= 0 ||
+        typeof user?.login !== "string" ||
+        !user.login ||
+        (row.body !== null && typeof row.body !== "string")
+      )
+        throw new GithubApiError(502, "Invalid pull request feedback identity or body");
+      return { id: Number(row.id), author: user.login, body: String(row.body ?? "") };
+    };
+    return {
+      reviews: reviews.map((row) => {
+        const native = source(row);
+        const authorType = (row.user as Record<string, unknown>).type;
+        if (authorType !== "Bot" && authorType !== "User")
+          throw new GithubApiError(502, "Invalid pull request review author type");
+        if (
+          typeof row.state !== "string" ||
+          typeof row.commit_id !== "string" ||
+          (row.submitted_at !== null && typeof row.submitted_at !== "string")
+        )
+          throw new GithubApiError(502, "Invalid pull request review metadata");
+        return {
+          ...native,
+          authorType,
+          state: row.state,
+          head: row.commit_id,
+          submittedAt: String(row.submitted_at ?? ""),
+        };
+      }),
+      comments: comments.map((row) => {
+        const native = source(row);
+        if (typeof row.created_at !== "string") throw new GithubApiError(502, "Invalid pull request comment timestamp");
+        return { ...native, createdAt: row.created_at };
+      }),
     };
   }
 
@@ -831,6 +940,7 @@ export interface InMemoryRepo {
   files?: Record<string, string>;
   issues?: IssueSummary[];
   pulls?: PullSummary[];
+  feedback?: Record<number, PullFeedback>;
   defaultBranch?: string;
   private?: boolean;
   description?: string | null;
@@ -982,6 +1092,11 @@ export class InMemoryGithubApi implements GithubApi {
     const pull = this.repo(repo).pulls?.find((p) => p.number === number);
     if (!pull) throw new GithubApiError(404, `GitHub GET /repos/${repo}/pulls/${number} failed: HTTP 404 Not Found`);
     return pull;
+  }
+
+  async getPullRequestFeedback(repo: string, number: number): Promise<PullFeedback> {
+    await this.getPullRequest(repo, number);
+    return this.repo(repo).feedback?.[number] ?? { reviews: [], comments: [] };
   }
 
   async createIssue(repo: string, input: NewIssueInput): Promise<IssueSummary> {

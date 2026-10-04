@@ -11,6 +11,8 @@ import type { Executor } from "../execution/executor.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import type { FollowUpTurnInput } from "./harness/contract.js";
 import type { PrCommitList } from "./headMoved.js";
+import { submitVerdictTool } from "../tools/submit.js";
+import type { ReviewHistoryContext } from "./reviewHistory.js";
 import type { RunEvent } from "./runEvents.js";
 import { RunControl } from "./runRegistry/runControl.js";
 import {
@@ -1022,6 +1024,112 @@ describe("settleReviewedHead — the head-move re-review", () => {
     expect(w.events).toEqual([expect.objectContaining({ type: "run_note", kind: "head_moved" })]);
     expect(w.labels).toEqual(["head moved → d75b5a5"]);
     expect(w.replies[0]).toContain("🔀 acme/api#42 moved during the run");
+  });
+
+  it("invalidates complete and partial old history before moving and shares the required head with later verdict turns", async () => {
+    const history = {
+      target: { repo: "acme/api", number: 42 },
+      snapshot: { head: HEAD, findings: [] },
+      progress: { head: HEAD, fingerprint: "old", nextPage: 2 },
+    };
+    const checkHistory = () => {
+      expect(history).toEqual({ target: { repo: "acme/api", number: 42 }, requiredHead: OTHER });
+    };
+    const w = moved({
+      followUp: async (input) => {
+        expect(input.toolContext.reviewHistory).toBe(history);
+        checkHistory();
+        return "No valid verdict.";
+      },
+    });
+    w.input.turn.toolContext.reviewHistory = history;
+    const moveTo = w.executor.moveTo!.bind(w.executor);
+    w.executor.moveTo = async (...args) => {
+      checkHistory();
+      return moveTo(...args);
+    };
+    const out = await settleReviewedHead(w.input);
+    checkHistory();
+    expect(out).toMatchObject({ verdict: undefined, reviewHead: OTHER, observedHead: OTHER });
+  });
+
+  it.each([false, true])(
+    "current-head adoption voids old approval and re-reads history before any new approval (session %s)",
+    async (session) => {
+      const history: ReviewHistoryContext = {
+        target: { repo: "acme/api", number: 42 },
+        snapshot: { head: HEAD, findings: [] },
+        progress: { head: HEAD, fingerprint: "old", nextPage: 2 },
+      };
+      const followUp = vi.fn(async (input: FollowUpTurnInput) => {
+        expect(input.text).toContain(OTHER);
+        expect(input.text).toContain("Re-review");
+        expect(history).toEqual({ target: history.target, requiredHead: OTHER });
+        const old = { verdict: "approve", summary: "old review", head: HEAD, findings: [] };
+        expect(await submitVerdictTool.run(old, input.toolContext)).toMatch(/^error:/);
+        // A later stale source read still cannot authorize the old head.
+        history.snapshot = { head: HEAD, findings: [] };
+        expect(await submitVerdictTool.run(old, input.toolContext)).toMatch(/^error:/);
+        const fresh = { ...old, summary: "new review", head: OTHER };
+        expect(await submitVerdictTool.run(fresh, input.toolContext)).toMatch(/^error:/);
+        history.snapshot = { head: OTHER, findings: [] };
+        expect(await submitVerdictTool.run(fresh, input.toolContext)).toMatch(/^verdict recorded: approve/);
+        return "Re-reviewed the new head.";
+      });
+      const w = moved(session ? { followUp } : {});
+      w.input.turn.toolContext.reviewHistory = history;
+      await w.executor.moveTo!(OTHER);
+      const out = await settleReviewedHead(w.input);
+      expect(out.reviewHead).toBe(OTHER);
+      expect(out.observedHead).toBe(OTHER);
+      if (session) {
+        expect(followUp).toHaveBeenCalledOnce();
+        expect(out.verdict).toMatchObject({ head: OTHER, summary: "new review" });
+      } else {
+        expect(out.verdict).toBeUndefined();
+        expect(history).toEqual({ target: history.target, requiredHead: OTHER });
+      }
+    },
+  );
+
+  it("current-head adoption without a verdict pins later verdict-only submissions to fresh current history", async () => {
+    const w = moved();
+    w.input.verdict = undefined;
+    const history: ReviewHistoryContext = {
+      target: { repo: "acme/api", number: 42 },
+      snapshot: { head: HEAD, findings: [] },
+    };
+    w.input.turn.toolContext.reviewHistory = history;
+    const captured = vi.fn();
+    w.input.turn.toolContext.onVerdict = captured;
+    await w.executor.moveTo!(OTHER);
+    expect((await settleReviewedHead(w.input)).verdict).toBeUndefined();
+    history.snapshot = { head: HEAD, findings: [] };
+    expect(
+      await submitVerdictTool.run(
+        { verdict: "approve", head: HEAD, summary: "old", findings: [] },
+        w.input.turn.toolContext,
+      ),
+    ).toMatch(/^error:/);
+    expect(captured).not.toHaveBeenCalled();
+  });
+
+  it("current-head adoption preserves a verdict already accepted against complete current history", async () => {
+    const followUp = vi.fn();
+    const w = moved({ followUp });
+    const history: ReviewHistoryContext = {
+      target: { repo: "acme/api", number: 42 },
+      snapshot: { head: OTHER, findings: [] },
+    };
+    w.input.turn.toolContext.reviewHistory = history;
+    w.input.verdict = { verdict: "approve", head: OTHER, summary: "current review", findings: [] };
+    await w.executor.moveTo!(OTHER);
+    const out = await settleReviewedHead(w.input);
+    expect(out.verdict).toBe(w.input.verdict);
+    expect(out.reviewHead).toBe(OTHER);
+    expect(history.requiredHead).toBe(OTHER);
+    expect(history.snapshot?.head).toBe(OTHER);
+    expect(followUp).not.toHaveBeenCalled();
   });
 
   it("a follow-up turn pi refuses fails the settle: the throw propagates to the run, nothing is swallowed", async () => {

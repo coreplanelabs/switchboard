@@ -25,6 +25,57 @@ import {
   verdictLine,
 } from "./reviewVerdict.js";
 
+describe("review finding resolutions", () => {
+  const head = "a".repeat(40);
+  const input = {
+    verdict: "approve",
+    summary: "verified",
+    head,
+    findings: [],
+    resolutions: [
+      { findingId: "review:1:F1", disposition: "fixed", note: "Unique write IDs preserve both concurrent paths" },
+    ],
+  };
+  it("preserves explicit closures in stored verdicts and the final marker even when prose is clipped", () => {
+    const verdict = parseVerdictInput(input)!;
+    expect(isReviewVerdictShape(verdict)).toBe(true);
+    expect(redactVerdict(verdict, (s) => s.replace("Unique", "Redacted")).resolutions?.[0].note).toContain("Redacted");
+    const body = buildReviewPostBody("x".repeat(100_000), verdict);
+    expect(body).toContain("| review:1:F1 | fixed | Unique write IDs preserve both concurrent paths |");
+    expect([...body]).toHaveLength(MAX_REVIEW_POST_CODE_POINTS);
+    expect(JSON.parse(body.match(/^<!-- switchboard:verdict (.*) -->$/m)![1]!).resolutions).toEqual(
+      verdict.resolutions,
+    );
+  });
+  it("refuses incomplete, normalized or duplicate resolution identities", () => {
+    for (const resolutions of [
+      null,
+      [{}],
+      [{ ...input.resolutions[0], note: "" }],
+      [{ ...input.resolutions[0], findingId: " review:1:F1 " }],
+      [input.resolutions[0], input.resolutions[0]],
+    ])
+      expect(parseVerdictInput({ ...input, resolutions })).toBeNull();
+    expect(
+      isReviewVerdictShape({
+        ...input,
+        resolutions: [{ findingId: "review:1:F1", disposition: "unknown", note: "x" }],
+      }),
+    ).toBe(false);
+  });
+  it("recovers resolutions only from an accepted verdict tool receipt", () => {
+    const messages: ChatMessage[] = [
+      { role: "assistant", content: [{ type: "tool_use", id: "v", name: "submit_verdict", input }] },
+      {
+        role: "user",
+        content: [{ type: "tool_result", toolUseId: "v", content: "verdict recorded: approve (0 findings)" }],
+      },
+    ];
+    expect(recordedVerdictFromTranscript(messages)?.resolutions).toEqual(input.resolutions);
+    expect(recordedVerdictFromTranscript(messages.slice(0, 1))).toBeUndefined();
+  });
+});
+
 describe("recordedVerdictFromTranscript", () => {
   const call: ChatMessage = {
     role: "assistant",

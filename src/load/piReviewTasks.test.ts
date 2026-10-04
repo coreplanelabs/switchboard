@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PI_REVIEW_TASKS, piReviewTaskByName, reviewTaskUrl } from "./piReviewTasks.js";
+import { PI_REVIEW_TASKS, parsePiReviewTasks, piReviewTaskByName, reviewTaskUrl } from "./piReviewTasks.js";
 
 // The review tasks of `load:pi --suite review` (docs/reference/specs/
 // load-harness.md, the review suite item): merged pull requests of the
@@ -27,5 +27,27 @@ describe("PI_REVIEW_TASKS", () => {
   });
   it("names the pull request's URL in whichever repository the checkout's origin is", () => {
     expect(reviewTaskUrl("acme/api", { number: 42 })).toBe("https://github.com/acme/api/pull/42");
+  });
+});
+
+describe("parsePiReviewTasks", () => {
+  it("accepts distinct historical heads of one PR with a pinned base and frozen context", () => {
+    const first = { ...PI_REVIEW_TASKS[0], baseHead: "a".repeat(40), context: "Earlier feedback" };
+    const next = { ...first, name: "followup", head: "b".repeat(40) };
+    expect(parsePiReviewTasks([first, next])).toEqual([first, next]);
+  });
+  it("rejects empty sets, duplicate names, moving heads, invalid refs and malformed context", () => {
+    const task = PI_REVIEW_TASKS[0];
+    for (const value of [
+      [],
+      [task, task],
+      [{ ...task, head: "main" }],
+      [{ ...task, baseHead: "main" }],
+      [{ ...task, number: 0 }],
+      [{ ...task, baseRef: "--upload-pack=x" }],
+      [{ ...task, context: {} }],
+    ]) {
+      expect(() => parsePiReviewTasks(value)).toThrow();
+    }
   });
 });

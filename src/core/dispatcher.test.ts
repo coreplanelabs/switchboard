@@ -287,6 +287,16 @@ function makeDeps(fixtureYaml: string, provider: Provider): TestDeps {
           registry: harnesses,
           bearers: deps.runBearers, // whatever store the test wired, read when the run starts
           beforeModelCall: () => realSleep(10), // two harness ticks: the inbox drained, the budgets checked
+          // These post-step fixtures assume prior findings have been verified.
+          // History reads and refusal are exercised by the tool and run-loop suites.
+          beforeToolCall: (live, call) => {
+            if (call.tool !== "submit_verdict" || !live?.toolContext.reviewHistory) return;
+            const raw = call.input as Record<string, unknown>;
+            live.toolContext.reviewHistory.snapshot = {
+              head: typeof raw.head === "string" ? raw.head : "",
+              findings: [],
+            };
+          },
         });
         return container;
       },
@@ -4684,7 +4694,7 @@ describe("review post-step", () => {
 
     it("the record is written AFTER the post: the review_posted event and the reviewPost fact are on the record the store receives, and the record lands after the GitHub post was made (item 18)", async () => {
       const order: string[] = [];
-      const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "ok"));
+      const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "ok", "the findings", PR_HEAD));
       deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
       headExecutor(PR_HEAD);
       deps.postReviewComment = async () => void order.push("post");
@@ -5211,7 +5221,7 @@ describe("review post-step", () => {
   it("an `approve` verdict makes the posted body start with the exact `LGTM:` token (deterministic, not prose)", async () => {
     const deps = makeDeps(
       YAML_FIXTURE,
-      verdictThenAnswer("approve", "no blocking issues", "Looks solid.\n- nit: naming"),
+      verdictThenAnswer("approve", "no blocking issues", "Looks solid.\n- nit: naming", "c".repeat(40)),
     );
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: "c".repeat(40) });
     headExecutor("c".repeat(40));
@@ -5231,7 +5241,7 @@ describe("review post-step", () => {
   it("a `request_changes` verdict never yields an LGTM-prefixed body, even when the prose says LGTM", async () => {
     const deps = makeDeps(
       YAML_FIXTURE,
-      verdictThenAnswer("request_changes", "null deref", "LGTM except for the null deref"),
+      verdictThenAnswer("request_changes", "null deref", "LGTM except for the null deref", PR_HEAD),
     );
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
     headExecutor(PR_HEAD);
@@ -5271,7 +5281,7 @@ describe("review post-step", () => {
     it("by default (minor) an `approve` carrying a major finding posts as `Changes requested:` naming the downgrade — never `LGTM:`", async () => {
       const deps = makeDeps(
         YAML_FIXTURE,
-        verdictThenAnswer("approve", "ship it", "Solid, one regression.", undefined, [major]),
+        verdictThenAnswer("approve", "ship it", "Solid, one regression.", PR_HEAD, [major]),
       );
       const spy = review(deps);
       const { io } = fakeIO();
@@ -5287,7 +5297,7 @@ describe("review post-step", () => {
     });
 
     it("by default an `approve` whose only finding is a nit still posts `LGTM:`", async () => {
-      const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "one nit", "Fine.", undefined, [nit]));
+      const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "one nit", "Fine.", PR_HEAD, [nit]));
       const spy = review(deps);
       const { io } = fakeIO();
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
@@ -5306,7 +5316,7 @@ describe("review post-step", () => {
     // `Full review` and on the answer event.
     it("item 5b: the thread reply is the token line, the finding bullets and the post with its run link — the write-up is on GitHub under `Full review`, not in the thread", async () => {
       vi.stubEnv("PUBLIC_BASE_URL", "https://bot.example");
-      const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "one nit", "F2: rename it.", undefined, [nit]));
+      const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "one nit", "F2: rename it.", PR_HEAD, [nit]));
       const spy = review(deps);
       const { io, replies } = fakeIO();
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
@@ -5320,7 +5330,7 @@ describe("review post-step", () => {
 
     it("item 5b: a Slack-only review (opt-out) keeps the write-up in the thread under the rendered head — the text lands nowhere else", async () => {
       vi.stubEnv("PUBLIC_BASE_URL", "https://bot.example");
-      const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "one nit", "F2: rename it.", undefined, [nit]));
+      const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "one nit", "F2: rename it.", PR_HEAD, [nit]));
       const spy = review(deps);
       const { io, replies } = fakeIO();
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42 slack only"), io);
@@ -5332,7 +5342,7 @@ describe("review post-step", () => {
     });
 
     it("a `severity:major` directive on the request widens the gate: an approve over a minor finding posts `LGTM:`", async () => {
-      const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "minor only", "Fine.", undefined, [minor]));
+      const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "minor only", "Fine.", PR_HEAD, [minor]));
       const spy = review(deps);
       const { io } = fakeIO();
       await dispatch(deps, msg("agent:review severity:major https://github.com/acme/api/pull/42"), io);
@@ -5341,7 +5351,7 @@ describe("review post-step", () => {
 
     it("an operator-bound review applies typed major severity without stripping the request", async () => {
       const yaml = YAML_FIXTURE.replace("routing: { operator: off }\n", "routing: { operator: on }\n");
-      const deps = makeDeps(yaml, verdictThenAnswer("approve", "minor only", "Fine.", undefined, [minor]));
+      const deps = makeDeps(yaml, verdictThenAnswer("approve", "minor only", "Fine.", PR_HEAD, [minor]));
       const spy = review(deps);
       deps.operatorModel = vi.fn<RouteModel>(async () => ({
         tool: "bind_preset",
@@ -5361,7 +5371,7 @@ describe("review post-step", () => {
 
     it("a channel's `review.addressSeverity: nit` narrows the gate for every review there: an approve over a nit posts `Changes requested:`", async () => {
       const yaml = YAML_FIXTURE + 'channels:\n  "slack:CX":\n    review:\n      addressSeverity: nit\n';
-      const deps = makeDeps(yaml, verdictThenAnswer("approve", "one nit", "Fine.", undefined, [nit]));
+      const deps = makeDeps(yaml, verdictThenAnswer("approve", "one nit", "Fine.", PR_HEAD, [nit]));
       const spy = review(deps);
       const { io } = fakeIO();
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);

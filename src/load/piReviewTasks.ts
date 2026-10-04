@@ -20,7 +20,48 @@ export interface PiReviewTask {
   headRef: string;
   /** The base branch: `origin/<baseRef>...HEAD` is the change. */
   baseRef: string;
+  /** Optional historical base; both sides stay pinned during a replay. */
+  baseHead?: string;
+  /** Frozen source context, never evaluation labels or expected answers. */
+  context?: string;
   title: string;
+}
+
+export function parsePiReviewTasks(value: unknown): PiReviewTask[] {
+  if (!Array.isArray(value) || value.length === 0) throw new Error("Review fixtures must be a nonempty array");
+  const names = new Set<string>();
+  return value.map((row: unknown) => {
+    if (!row || typeof row !== "object" || Array.isArray(row)) throw new Error("Invalid review fixture");
+    const t = row as Record<string, unknown>;
+    const sha = (v: unknown) => typeof v === "string" && /^[0-9a-f]{40}$/.test(v);
+    const ref = (v: unknown) => typeof v === "string" && /^[a-zA-Z0-9][a-zA-Z0-9_/.-]*$/.test(v) && !v.includes("..");
+    if (
+      typeof t.name !== "string" ||
+      !t.name.trim() ||
+      names.has(t.name) ||
+      !Number.isSafeInteger(t.number) ||
+      (t.number as number) < 1 ||
+      !sha(t.head) ||
+      !ref(t.headRef) ||
+      !ref(t.baseRef) ||
+      typeof t.title !== "string" ||
+      !t.title.trim() ||
+      (t.baseHead !== undefined && !sha(t.baseHead)) ||
+      (t.context !== undefined && typeof t.context !== "string")
+    )
+      throw new Error("Invalid or duplicate review fixture");
+    names.add(t.name);
+    return {
+      name: t.name,
+      number: t.number as number,
+      head: t.head as string,
+      headRef: t.headRef as string,
+      baseRef: t.baseRef as string,
+      title: t.title,
+      ...(t.baseHead === undefined ? {} : { baseHead: t.baseHead as string }),
+      ...(t.context === undefined ? {} : { context: t.context as string }),
+    };
+  });
 }
 
 const task = (t: Omit<PiReviewTask, "baseRef">): PiReviewTask => ({ ...t, baseRef: "main" });

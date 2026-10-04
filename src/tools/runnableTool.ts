@@ -1,4 +1,5 @@
 import type { ParentContext } from "../core/dispatch/handoff.js";
+import type { ReviewHistoryContext } from "../core/reviewHistory.js";
 // What a tool is to the loop that runs it — the native runner today, the pi
 // harness's relay (`src/core/harness/pi/relay.ts`) for every tool pi does not
 // run itself: the context a call runs with (`ToolContext`: the Executor seam
@@ -41,6 +42,8 @@ import type { WebCapability } from "./web.js";
 import type { SourceReadOperation, SourceReads } from "../mcp/sourceRead.js";
 
 export interface ToolContext {
+  /** Exact PR whose prior findings a review must verify before submitting. */
+  reviewHistory?: ReviewHistoryContext;
   /** Durable read actions bound by dispatch, never authority supplied by tool arguments. */
   sourceReads?: SourceReads;
   executor: Executor;

@@ -781,6 +781,14 @@ describe("coding prompts: the rebase before every push (agent-coding item 13, re
 // findings array with stable ids and define the severity vocabulary once; the
 // prose still carries the full explanation of each finding.
 describe("review prompts: structured findings through submit_verdict (agent-ship item 6)", () => {
+  it("all review paths require GitHub history and verification of every previous case before closure", () => {
+    for (const sys of [AGENTS.review.system, AGENTS.review.residentSystem!, REVIEW_SYSTEM_SEEDED]) {
+      expect(sys).toContain("includeReviewHistory: true");
+      expect(sys).toContain("every prior invariant case");
+      expect(sys).toContain("resolutions");
+      expect(sys).toContain("New consequential defects remain reportable");
+    }
+  });
   it("all review paths filter uncertain and low-impact observations before submitting findings", () => {
     for (const sys of [AGENTS.review.system, AGENTS.review.residentSystem!, REVIEW_SYSTEM_SEEDED]) {
       expect(sys).toContain("HIGH-SIGNAL REVIEW");

@@ -556,7 +556,9 @@ export interface SettledReviewHead {
  * the PR head NOW, before anything is posted:
  *
  *   reviewed = current ≠ resolved → the round reviewed the PR's current head
- *     (a mid-run re-attach landed on a newer tip): adopt it.
+ *     (a mid-run re-attach landed on a newer tip): adopt it only with a
+ *     matching verdict and complete bound history; otherwise void stale
+ *     evidence and re-review on the existing session, or remain not approving.
  *   reviewed = resolved ≠ current → the PR moved under the review: classify
  *     the move from GitHub's compare lists. A rebase of the same commits
  *     carries the review to the new head (`carried`); a substantive move
@@ -632,10 +634,54 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
     const current = await currentHead();
     if (input.preReviewStopped()) return outcome();
     if (current && !sameCommit(current, expected) && sameCommit(reviewed, current)) {
-      console.log(
-        `[review] ${logKey} reviewed the PR's current head ${current.slice(0, 7)} (resolved ${expected.slice(0, 7)} was superseded mid-run) (${where})`,
-      );
+      const history = turn.toolContext.reviewHistory;
+      if (history) history.requiredHead = current;
+      const verdictHead = normalizeHead(verdict?.head);
+      const snapshotHead = normalizeHead(history?.snapshot?.head);
+      const currentEvidence =
+        verdictHead &&
+        sameCommit(verdictHead, current) &&
+        (!history || (snapshotHead && sameCommit(snapshotHead, current)));
       reviewHead = current;
+      if (!currentEvidence) {
+        // Recovery can change the checkout after an old-head verdict was
+        // accepted. Its observed HEAD proves location, not review coverage.
+        verdict = undefined;
+        if (history) {
+          delete history.snapshot;
+          delete history.progress;
+        }
+        const summary = `workspace adopted ${current.slice(0, 7)} after ${expected.slice(0, 7)} — ${turn.followUp ? "re-reviewing the current head" : "no session to re-review; not approving"}`;
+        turn.onEvent({ type: "run_note", kind: "head_moved", summary, at: systemClock() });
+        if (turn.followUp) {
+          const text = [
+            `The workspace for ${where} now observes ${current}, superseding ${expected}. The earlier verdict is void: workspace recovery alone does not prove the new head was reviewed.`,
+            `Re-review at ${current}: confirm with git rev-parse HEAD, read the current diff and its affected callers, and re-check the prior findings and every invariant case. Read complete review history again through github_pull_get with includeReviewHistory: true.`,
+            `Report the complete updated review and call submit_verdict with head = ${current}. Explicitly resolve or retain every outstanding finding; a verdict or history from ${expected} cannot approve this head.`,
+          ].join("\n\n");
+          input.notify.headMoved(`head moved → ${current.slice(0, 7)}`);
+          await input.notify.reply(`🔀 ${where}: ${summary}.`).catch(() => {});
+          if (input.preReviewStopped()) return outcome();
+          input.messages.push(
+            { role: "assistant", content: [{ type: "text", text: answer }] },
+            { role: "user", content: [{ type: "text", text }] },
+          );
+          answer = await turn.followUp({
+            text,
+            maxTurns: turn.agent.maxTurns,
+            maxMinutes: turn.agent.maxMinutes,
+            toolContext: {
+              ...turn.toolContext,
+              onVerdict: (v) => {
+                verdict = v;
+              },
+            },
+            ...(span ? { span } : {}),
+          });
+          if (input.preReviewStopped()) return outcome();
+          if (!turn.control.hardSignal.aborted) observedHead = await probeHead();
+        }
+      }
     } else if (current && !sameCommit(current, expected) && sameCommit(reviewed, expected)) {
       const classified = await classifyMove(input.fetchPrCommits, {
         repo: pr.repo,
@@ -658,6 +704,15 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
         console.log(`[review] ${logKey} ${summary} (${where})`);
         turn.onEvent({ type: "run_note", kind: "head_moved", summary, at: systemClock() });
       } else if (classified && move?.kind === "substantive" && followUp) {
+        // Mutate the shared history context before any re-review work: the
+        // verdict-only turn later uses the original context, not this turn's
+        // copied sink. Neither old pages nor a matching old SHA can authorize
+        // the newly required head, even if another read still returns old history.
+        if (turn.toolContext.reviewHistory) {
+          turn.toolContext.reviewHistory.requiredHead = current;
+          delete turn.toolContext.reviewHistory.snapshot;
+          delete turn.toolContext.reviewHistory.progress;
+        }
         const summary = `head moved ${expected.slice(0, 7)} → ${current.slice(0, 7)} — re-reviewing at ${current.slice(0, 7)}`;
         console.log(`[review] ${logKey} ${summary} (${where})`);
         turn.onEvent({ type: "run_note", kind: "head_moved", summary, at: systemClock() });

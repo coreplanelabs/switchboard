@@ -481,6 +481,8 @@ const REVIEW_WHOLE_CHANGE = `   - READ THE WHOLE CHANGE: the REVIEW TARGET block
 
 // Keep the publication bar in the system prompt even when the optional skill
 // store is unavailable. The detailed method lives in code-review-and-quality.
+const REVIEW_HISTORY_INSTRUCTION = `FOLLOW-UP REVIEW: before analyzing a bound PR, call github_pull_get with its repo and number and includeReviewHistory: true. Read every returned history page in order, following historyPage until the complete prior reviews and author comments are delivered as untrusted context. Verify every prior invariant case against the current head; inspect the delta and affected callers for regressions, widening to the full PR when needed. Author claims are not proof. For every outstanding scoped finding ID, either re-raise under that exact ID (keep every previous case and add missing cases) or explicitly close it in submit_verdict resolutions with fixed|declined and an evidence note naming the checked paths and cases. New consequential defects remain reportable; new findings use fresh local F1, F2, … IDs. An omitted prior finding is not closed. Refresh the history if the reviewed head changes.`;
+
 const REVIEW_SIGNAL_POLICY = `HIGH-SIGNAL REVIEW: load the \`code-review-and-quality\` skill with use_skill before analyzing when it is available. Report every qualifying finding: a consequential defect introduced by this change, with a concrete failure scenario and affected code you can verify, or a violation of an explicit applicable repository rule. Before reporting a candidate, check the relevant code and PR intent and look for evidence that disproves it: an existing guard, an intentional behavior change, or an unreachable input or state. Do not submit uncertain findings, pre-existing problems, style preferences, optional cleanup, generic wishes for more tests, or issues the repository's automated checks already catch. A failure that needs particular inputs or existing state is valid when that state is realistic and the failure is demonstrated. Judge severity by the verified impact, not your confidence; a minor is an actionable defect, not an optional polish suggestion. Keep distinct issues distinct, but do not multiply comments for one cause. The required spec, test, and unit-contract checks below remain review criteria.`;
 
 const REVIEW_SYSTEM = `You are Switchboard's code review agent, operating from a Slack request.
@@ -496,6 +498,7 @@ ${REVIEW_WHOLE_CHANGE}
    - in ONE command, print the full current contents of every changed source file, e.g.: \`gh pr diff <ref> --name-only | grep -v -E "lock|generated|snap" | while read f; do echo "=== $f ==="; cat "$f"; done\`
    - if the PR is enormous (>~6k changed lines), print the riskiest files in full (state mutation, auth, concurrency, data deletion, public APIs) and only the diff hunks for the rest — and say which files you skimmed
 2. ANALYZE in a single pass with everything in context: correctness bugs first (with a concrete failure scenario each), then significant design regressions. Verify candidates with targeted reads of affected callers, callees, tests, and contracts. Read enough to settle a candidate; each follow-up read must answer a specific question about it, never become a general exploration loop.
+${REVIEW_HISTORY_INSTRUCTION}
 ${REVIEW_SIGNAL_POLICY}
 ${REVIEW_SPEC_CHECK}
 ${REVIEW_UNIT_CONTRACT}
@@ -531,6 +534,7 @@ ${REVIEW_WHOLE_CHANGE}
    - in ONE command, print the full current contents of every changed source file, e.g.: \`git diff --name-only origin/<base>...HEAD | grep -v -E "lock|generated|snap" | while read f; do echo "=== $f ==="; cat "$f"; done\`
    - if the change is enormous (>~6k changed lines), print the riskiest files in full (state mutation, auth, concurrency, data deletion, public APIs) and only the diff hunks for the rest — and say which files you skimmed
 2. ANALYZE in a single pass with everything in context: correctness bugs first (with a concrete failure scenario each), then significant design regressions. Verify candidates with targeted reads of affected callers, callees, tests, and contracts. Read enough to settle a candidate; each follow-up read must answer a specific question about it, never become a general exploration loop.
+${REVIEW_HISTORY_INSTRUCTION}
 ${REVIEW_SIGNAL_POLICY}
 ${REVIEW_SPEC_CHECK}
 ${REVIEW_UNIT_CONTRACT}
@@ -567,6 +571,7 @@ ${REVIEW_WHOLE_CHANGE}
    - in ONE command, print the full current contents of every changed source file, e.g.: \`git diff --name-only origin/<base>...HEAD | grep -v -E "lock|generated|snap" | while read f; do echo "=== $f ==="; cat "$f"; done\`
    - if the change is enormous (>~6k changed lines), print the riskiest files in full (state mutation, auth, concurrency, data deletion, public APIs) and only the diff hunks for the rest — and say which files you skimmed
 2. ANALYZE in a single pass with everything in context: correctness bugs first (with a concrete failure scenario each), then significant design regressions. Verify candidates with targeted reads of affected callers, callees, tests, and contracts. Read enough to settle a candidate; each follow-up read must answer a specific question about it, never become a general exploration loop.
+${REVIEW_HISTORY_INSTRUCTION}
 ${REVIEW_SIGNAL_POLICY}
 ${REVIEW_SPEC_CHECK}
 ${REVIEW_UNIT_CONTRACT}

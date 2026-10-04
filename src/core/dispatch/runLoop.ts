@@ -4,6 +4,7 @@ import { directAudienceStampOf } from "../runLedger/inboxMessage.js";
 import { contextDependenciesOf, type ContextDependencies } from "../references/contextDependencies.js";
 import { GITHUB_READ_TOOLS } from "../../tools/github.js";
 import { githubReadWithContext } from "./githubReadContext.js";
+import type { ReviewHistoryContext } from "../reviewHistory.js";
 import type { ParentContext } from "./handoff.js";
 import type { UnitContext } from "./unitContext.js";
 import { answerOutcomeOf, captureAnswerOutcome, type AnswerOutcome } from "../answerOutcome.js";
@@ -1810,6 +1811,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           clock,
         })
       : undefined;
+  const reviewHistory: ReviewHistoryContext | undefined =
+    isPrReview && repoCtx.repo && repoCtx.pr !== undefined
+      ? { target: { repo: repoCtx.repo, number: repoCtx.pr } }
+      : undefined;
   const toolContext = {
     ...(ctx.captureParentContext
       ? {
@@ -1854,6 +1859,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     ...(wait ? { wait } : {}),
     ...(session ? { session } : {}),
     onVerdict,
+    ...(reviewHistory ? { reviewHistory } : {}),
     addressSeverity: ctx.addressSeverity.level,
     onDigest,
     onPrDescription,

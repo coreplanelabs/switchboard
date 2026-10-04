@@ -1,5 +1,5 @@
-import { spawn as nodeSpawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { execFileSync, spawn as nodeSpawn } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -9,6 +9,7 @@ import {
   PI_REVIEW_TOOLS,
   PROXIED_MODEL_ENTRY,
   earlyExitNote,
+  checkoutPrHead,
   parseGithubSlug,
   piArgs,
   piEnv,
@@ -97,6 +98,34 @@ describe("parseGithubSlug", () => {
 });
 
 describe("the review suite's checkout", () => {
+  it("pins both sides of a historical diff after the remote base has advanced", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "review-history-test-"));
+    const git = (cwd: string, ...args: string[]) =>
+      execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+    try {
+      git(dir, "init", "-q", "--initial-branch=main");
+      git(dir, "config", "user.email", "fixture@example.com");
+      git(dir, "config", "user.name", "Fixture");
+      writeFileSync(join(dir, "file"), "base");
+      git(dir, "add", "file");
+      git(dir, "commit", "-qm", "base");
+      const baseHead = git(dir, "rev-parse", "HEAD");
+      writeFileSync(join(dir, "file"), "review");
+      git(dir, "commit", "-qam", "review");
+      const head = git(dir, "rev-parse", "HEAD");
+      writeFileSync(join(dir, "file"), "later");
+      git(dir, "commit", "-qam", "later");
+      git(dir, "clone", "-q", dir, "replay");
+      const replay = join(dir, "replay");
+      await checkoutPrHead(replay, { number: 1, baseRef: "main", head, baseHead });
+      expect(git(replay, "rev-parse", "HEAD")).toBe(head);
+      expect(git(replay, "rev-parse", "origin/main")).toBe(baseHead);
+      expect(git(replay, "diff", "origin/main...HEAD")).toContain("+review");
+      expect(git(replay, "status", "--porcelain")).toBe("");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
   it("fetches the pull request's head into a ref of the driver's own beside the base branch, then detaches at it", () => {
     expect(prHeadFetchArgs({ number: 1067, baseRef: "main" })).toEqual([
       "fetch",

@@ -56,6 +56,8 @@ export interface ProviderPiOptions {
    *  which the harness ticks — drains the inbox, steers, checks the budgets.
    *  A test gives the harness that room here (a few real milliseconds). */
   beforeModelCall?: () => Promise<void>;
+  /** Arrange a seam's state for a fixture that tests downstream behavior. */
+  beforeToolCall?: (live: LiveHarness | undefined, call: ToolCallAsk) => void;
   /** Asked once the harness has seen a tool call's start and the gate has let
    *  it run: `true` leaves the call in flight — nothing runs, no result ever
    *  lands, the double waits for the run's abort instead — as a tool in a
@@ -447,6 +449,7 @@ export function scriptPiFromProvider(container: FakeHarnessContainer, opts: Prov
         // as this step's record — before the call runs, so a test reads the
         // ledger in the order a real run's tools land in.
         await (entry ?? live())?.callSeen?.(call.id);
+        opts.beforeToolCall?.(entry ?? live(), ask);
         const answer = await runCall(s, entry ?? live(), ask, signal);
         const toolResult = {
           role: "toolResult",

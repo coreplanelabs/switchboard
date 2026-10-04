@@ -25,8 +25,28 @@ export function githubReadWithContext(
           ctx.github?.recordRead?.(repo);
         },
       };
-      const result = capToolResultContent(await tool.run(args, { ...ctx, github }));
-      if (!ctx.callId || repositories.size === 0) return result;
+      // A snapshot enables submission only when the corresponding source can be delivered.
+      const stagedHistory = ctx.reviewHistory ? { ...ctx.reviewHistory } : undefined;
+      const result = capToolResultContent(
+        await tool.run(args, { ...ctx, github, ...(stagedHistory ? { reviewHistory: stagedHistory } : {}) }),
+      );
+      const publishHistory = (delivered: boolean) => {
+        if (
+          ctx.reviewHistory &&
+          stagedHistory &&
+          (stagedHistory.snapshot !== ctx.reviewHistory.snapshot ||
+            stagedHistory.progress !== ctx.reviewHistory.progress)
+        ) {
+          if (delivered && stagedHistory.snapshot) ctx.reviewHistory.snapshot = stagedHistory.snapshot;
+          else delete ctx.reviewHistory.snapshot;
+          if (delivered && stagedHistory.progress) ctx.reviewHistory.progress = stagedHistory.progress;
+          else delete ctx.reviewHistory.progress;
+        }
+      };
+      if (!ctx.callId || repositories.size === 0) {
+        publishHistory(true);
+        return result;
+      }
       let readable: Set<string>;
       try {
         readable = new Set((await github.readableRepos?.([...repositories]))?.map((r) => r.fullName.toLowerCase()));
@@ -34,10 +54,12 @@ export function githubReadWithContext(
         readable = new Set();
       }
       const repos = [...repositories].sort();
-      if (repos.some((repo) => !readable.has(repo)))
+      if (repos.some((repo) => !readable.has(repo))) {
+        publishHistory(ctx.agentName !== "orchestrator");
         return ctx.agentName === "orchestrator"
           ? "GitHub result unavailable: current repository access could not be verified."
           : result;
+      }
       const receipt: SourceResultReceipt = {
         version: 1,
         runId: input.runId,
@@ -47,8 +69,11 @@ export function githubReadWithContext(
         resultHash: await sourceHash(result),
       };
       const context = githubRepositoryDependencies(repos);
-      if (!isSourceResultReceipt(receipt) || context.status !== "known" || !(await input.commit(receipt, context)))
+      if (!isSourceResultReceipt(receipt) || context.status !== "known" || !(await input.commit(receipt, context))) {
+        publishHistory(false);
         return "GitHub result unavailable: its source context could not be durably recorded.";
+      }
+      publishHistory(true);
       return result;
     },
   };

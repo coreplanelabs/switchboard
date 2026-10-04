@@ -15,6 +15,84 @@ describe("submit_verdict tool", () => {
   const ctxWith = (onVerdict?: ToolContext["onVerdict"]): ToolContext =>
     ({ executor: {} as ToolContext["executor"], onVerdict }) as ToolContext;
 
+  it("requires a complete exact-head history read and explicit prior-finding coverage for a bound PR review", async () => {
+    const got: unknown[] = [];
+    const ctx: ToolContext = {
+      ...ctxWith((v) => got.push(v)),
+      reviewHistory: { target: { repo: "acme/api", number: 7 } },
+    };
+    const input = { verdict: "approve", summary: "clean", head: "a".repeat(40), findings: [] };
+    expect(await submitVerdictTool.run(input, ctx)).toMatch(/history/i);
+    ctx.reviewHistory!.snapshot = { head: "b".repeat(40), findings: [] };
+    expect(await submitVerdictTool.run(input, ctx)).toMatch(/head/i);
+    ctx.reviewHistory!.requiredHead = input.head;
+    ctx.reviewHistory!.snapshot = {
+      head: input.head,
+      findings: [
+        {
+          reviewId: 1,
+          author: "review[bot]",
+          head: input.head,
+          finding: { id: "review:1:F1", severity: "major", file: "a.ts", title: "Lost write", kind: "single" },
+        },
+      ],
+    };
+    expect(await submitVerdictTool.run(input, ctx)).toMatch(/review:1:F1/);
+    expect(got).toEqual([]);
+    expect(
+      await submitVerdictTool.run(
+        {
+          ...input,
+          resolutions: [
+            {
+              findingId: "review:1:F1",
+              disposition: "fixed",
+              note: "Verified rollback retains the replacement at this head",
+            },
+          ],
+        },
+        ctx,
+      ),
+    ).toMatch(/^verdict recorded: approve/);
+    expect(got).toMatchObject([{ resolutions: [{ findingId: "review:1:F1", disposition: "fixed" }] }]);
+  });
+
+  it.each(["HEAD", "", undefined, "not-a-commit"])(
+    "rejects an unusable reviewed head %s for a bound PR even with complete empty history",
+    async (head) => {
+      const got: unknown[] = [];
+      const ctx: ToolContext = {
+        ...ctxWith((v) => got.push(v)),
+        reviewHistory: { target: { repo: "acme/api", number: 7 }, snapshot: { head: "a".repeat(40), findings: [] } },
+      };
+      expect(await submitVerdictTool.run({ verdict: "approve", summary: "clean", head, findings: [] }, ctx)).toMatch(
+        /^error:.*valid.*head/i,
+      );
+      expect(got).toEqual([]);
+    },
+  );
+
+  it.each([false, true])(
+    "rejects the valid old SHA after a substantive move even with matching stale history (%s)",
+    async (hasSnapshot) => {
+      const got: unknown[] = [];
+      const old = "a".repeat(40);
+      const current = "b".repeat(40);
+      const ctx: ToolContext = {
+        ...ctxWith((v) => got.push(v)),
+        reviewHistory: {
+          target: { repo: "acme/api", number: 7 },
+          requiredHead: current,
+          ...(hasSnapshot ? { snapshot: { head: old, findings: [] } } : {}),
+        },
+      };
+      expect(
+        await submitVerdictTool.run({ verdict: "approve", summary: "clean", head: old, findings: [] }, ctx),
+      ).toMatch(/^error: reviewed head differs from the required review head/);
+      expect(got).toEqual([]);
+    },
+  );
+
   it("is in the review (readonly) toolset only — coding and research never emit verdicts", () => {
     const names = (key: string) => (TOOLSETS[key] ?? []).map((t) => t.name);
     expect(names("readonly")).toContain("submit_verdict");

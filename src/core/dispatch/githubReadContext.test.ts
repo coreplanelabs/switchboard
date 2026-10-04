@@ -1,11 +1,39 @@
 import { describe, expect, it, vi } from "vitest";
 import { InMemoryGithubApi } from "../../execution/githubApi.js";
-import { githubFileTool, githubReposTool } from "../../tools/github.js";
+import { githubFileTool, githubReposTool, githubPullGetTool } from "../../tools/github.js";
 import type { ToolContext } from "../../tools/runnableTool.js";
 import { sourceHash } from "../references/receipts.js";
 import { githubReadWithContext } from "./githubReadContext.js";
 
 describe("durable requester-scoped GitHub reads", () => {
+  it("enables review closure only after delivering the history source receipt", async () => {
+    const f = fixture();
+    f.ctx.reviewHistory = { target: { repo: "acme/api", number: 7 } };
+    f.api.repos.get("acme/api")!.pulls = [
+      {
+        number: 7,
+        title: "fix",
+        body: "",
+        state: "open",
+        draft: false,
+        url: "https://github.com/acme/api/pull/7",
+        author: "author",
+        updatedAt: "2026-01-01T00:00:00Z",
+        head: { repo: "acme/api", ref: "fix", sha: "a".repeat(40) },
+        base: { repo: "acme/api", ref: "main" },
+      },
+    ];
+    const tool = githubReadWithContext(githubPullGetTool, { runId: "producer", commit: f.commit });
+    const args = { repo: "acme/api", number: 7, includeReviewHistory: true };
+    f.commit.mockResolvedValueOnce(false);
+    expect(await tool.run(args, f.ctx)).toMatch(/could not be durably recorded/);
+    expect(f.ctx.reviewHistory.snapshot).toBeUndefined();
+    await tool.run(args, f.ctx);
+    expect(f.ctx.reviewHistory.snapshot).toMatchObject({ head: "a".repeat(40), findings: [] });
+    f.commit.mockResolvedValueOnce(false);
+    await tool.run(args, f.ctx);
+    expect(f.ctx.reviewHistory.snapshot).toBeUndefined();
+  });
   const fixture = () => {
     const api = new InMemoryGithubApi({ "acme/api": { private: false, files: { "README.md": "public readme" } } });
     const commit = vi.fn(async () => true);

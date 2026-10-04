@@ -51,7 +51,7 @@ import {
 import { drivePiTask, realTimers, redactPiRun, type PiTaskRun } from "../src/load/piRpc.js";
 import { judgeToolCall } from "../src/core/harness/pi/toolRules.js";
 import { PI_TASK_NAMES, PI_TASKS, piTaskByName, taskBranch, taskPrompt } from "../src/load/piTasks.js";
-import { PI_REVIEW_TASKS, PI_REVIEW_TASK_NAMES, piReviewTaskByName, reviewTaskUrl } from "../src/load/piReviewTasks.js";
+import { PI_REVIEW_TASKS, parsePiReviewTasks, reviewTaskUrl } from "../src/load/piReviewTasks.js";
 import {
   reviewChecks,
   reviewFailureReason,
@@ -211,6 +211,8 @@ commands
              identity's allowlist, the verdict recorded in the receipt and posted nowhere
              --checkout DIR  --task all|<name>  --provider NAME  --model ID  --key-env VAR  [--suite coding|review]
              [--pi PATH  --thinking LEVEL  --budget-minutes N  --base-url URL (a custom OpenAI-compatible endpoint)]
+             review replay: [--fixtures JSON  --review-system FILE  --extension FILE]; fixtures may pin baseHead and
+             frozen prior context. Keep defect labels outside the fixtures; receipt checks prove execution and shape.
              [--through-proxy URL  (--shape anthropic|openai)]: the bot's model proxy as pi's one provider — URL is the
              bot's base, the key variable holds a run bearer (SWITCHBOARD_PI_MODEL_KEY unless --key-env names another)
              the model key is read from the environment variable --key-env names (default: the variable pi reads
@@ -291,6 +293,8 @@ function flags(argv: string[]): Flags {
       "base-url": { type: "string" },
       "through-proxy": { type: "string" },
       suite: { type: "string" },
+      "review-system": { type: "string" },
+      extension: { type: "string" },
       shape: { type: "string" },
       "print-prompt": { type: "boolean" },
       since: { type: "string" },
@@ -762,7 +766,7 @@ function piSetup(f: Flags, id: string, defaultBudgetMinutes: number): PiSetup | 
       ? ("openai-completions" as const)
       : ("anthropic-messages" as const)
     : undefined;
-  const extensionPath = resolve("src/load/piExtension.ts");
+  const extensionPath = resolve(str(f, "extension", "src/load/piExtension.ts"));
 
   // pi's config directory lives beside the receipt, not in a temp dir: its
   // session files are the run's own record and stay with the results
@@ -1012,9 +1016,11 @@ async function pi(f: Flags): Promise<boolean> {
 async function piReviewSuite(f: Flags): Promise<boolean> {
   const id = runId();
   const taskFlag = str(f, "task", "all");
-  const tasks =
-    taskFlag === "all" ? [...PI_REVIEW_TASKS] : [piReviewTaskByName(taskFlag)].flatMap((t) => (t ? [t] : []));
-  if (tasks.length === 0) throw new Error(`--task must be all or one of ${PI_REVIEW_TASK_NAMES.join(", ")}`);
+  const available =
+    typeof f.fixtures === "string" ? parsePiReviewTasks(JSON.parse(readFileSync(f.fixtures, "utf8"))) : PI_REVIEW_TASKS;
+  const tasks = taskFlag === "all" ? [...available] : available.filter((t) => t.name === taskFlag);
+  if (tasks.length === 0) throw new Error(`--task must be all or one of ${available.map((t) => t.name).join(", ")}`);
+  const system = typeof f["review-system"] === "string" ? readFileSync(f["review-system"], "utf8") : undefined;
   const setup = piSetup(f, id, 25);
   if (!setup) return false;
   const {
@@ -1045,7 +1051,7 @@ async function piReviewSuite(f: Flags): Promise<boolean> {
     // The framing a resident review run composes, rewritten per task: pi
     // reads SYSTEM.md from its config directory, as the production harness
     // writes it.
-    writeSystemPrompt(agentDir, reviewSystemPrompt(task, { repo, checkout }));
+    writeSystemPrompt(agentDir, reviewSystemPrompt(task, { repo, checkout }, system));
     const proc = spawnPi({
       piBin,
       checkout,
@@ -1157,6 +1163,9 @@ async function piReviewSuite(f: Flags): Promise<boolean> {
       checkout,
       repo,
       suite: "review",
+      fixtures: f.fixtures,
+      reviewSystem: f["review-system"],
+      extensionPath,
       tasks: tasks.map((t) => ({ name: t.name, url: reviewTaskUrl(repo, t), head: t.head })),
       provider: providerName,
       model,
