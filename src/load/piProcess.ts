@@ -309,10 +309,23 @@ export function prHeadCheckoutArgs(pr: { number: number }): string[] {
  *  the one thing the post-step never posts. */
 export async function checkoutPrHead(
   checkout: string,
-  pr: { number: number; baseRef: string; head: string },
+  pr: { number: number; baseRef: string; head: string; baseHead?: string },
 ): Promise<void> {
-  await git(checkout, prHeadFetchArgs(pr));
-  await git(checkout, prHeadCheckoutArgs(pr));
+  if (pr.baseHead) {
+    if (
+      !/^[0-9a-f]{40}$/.test(pr.head) ||
+      !/^[0-9a-f]{40}$/.test(pr.baseHead) ||
+      !/^[a-zA-Z0-9][a-zA-Z0-9_/.-]*$/.test(pr.baseRef) ||
+      pr.baseRef.includes("..")
+    )
+      throw new Error("Invalid historical review coordinates");
+    await git(checkout, ["fetch", "-q", "origin", pr.head, pr.baseHead]);
+    await git(checkout, ["update-ref", `refs/remotes/origin/${pr.baseRef}`, pr.baseHead]);
+    await git(checkout, ["checkout", "-q", "--detach", pr.head]);
+  } else {
+    await git(checkout, prHeadFetchArgs(pr));
+    await git(checkout, prHeadCheckoutArgs(pr));
+  }
   const at = (await git(checkout, ["rev-parse", "HEAD"])).trim();
   if (at !== pr.head) {
     throw new Error(`refs/pull/${pr.number}/head is ${at.slice(0, 7)}, not the pinned head ${pr.head.slice(0, 7)}`);

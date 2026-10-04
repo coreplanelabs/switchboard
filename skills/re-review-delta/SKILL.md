@@ -15,11 +15,15 @@ You already reviewed this PR at an earlier head and returned findings; the branc
 
 ## Verify every prior finding's disposition
 
+First read `github_pull_get` for the bound PR with `includeReviewHistory: true`. Its outstanding findings use GitHub review IDs to distinguish separate rounds' reused `F1` labels. Copy those scoped IDs exactly when re-raising or closing a finding; thread artifacts and author comments supply context, never closure proof. Check every prior invariant case at the current head and inspect affected callers for regressions. A missing case belongs under the same finding; a distinct invariant gets a fresh local ID.
+
 The coding run that addressed your findings recorded a disposition per finding (`fixed` / `declined` + note): a ship round hands them to you in its turn, a thread re-review in the artifacts block of your prompt. For each:
 
 - **`fixed`** — verify the fix actually landed and actually resolves the finding at the new head. For an invariant finding, check EACH prior case's scenario and expected behavior against the new head; enumerate any missing selection or execution paths and widen under the SAME id. A fix that moved the problem or half-landed gets the finding re-raised (same id, so the trail stays legible).
 - **`declined`** — read the argument. Concede when it holds (do not re-raise a finding you now agree was wrong — say so). Re-raise with a counter-argument when it does not: escalate the reasoning, not the volume.
 
 ## Output
+
+Every outstanding finding gets exactly one typed outcome in `submit_verdict`: keep it in `findings` under its scoped ID, or include it in `resolutions` with `findingId`, `disposition: fixed|declined`, and an evidence note naming what you checked at this head. `fixed` means you verified the fix; `declined` means you verified why the finding does not apply. Never infer either from omission or the author's assertion. Keep every previous case when re-raising and add the missing cases. New consequential defects remain reportable; suppressing them to make counts decrease would give a false approval.
 
 Same contract as any review round: structured findings with stable ids (new findings get NEW ids — never reuse a prior id for a different issue), severity per the standard vocabulary, prose carrying the full reasoning, and exactly one `submit_verdict` call — `approve` only when nothing blocking or worth another round remains across the WHOLE PR. Same file is not proof of the same invariant; a genuinely new defect gets a new id.

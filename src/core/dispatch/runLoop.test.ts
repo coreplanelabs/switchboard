@@ -7083,12 +7083,62 @@ describe("the pi harness — the review preset", () => {
     stopReason,
   });
 
+  function seedReviewHistory(deps: RunDeps, currentHead: () => string) {
+    const gh = new InMemoryGithubApi({
+      "o/r": {
+        pulls: [
+          {
+            number: 42,
+            title: "Fix behavior",
+            body: "",
+            state: "open",
+            draft: false,
+            url: "https://github.com/o/r/pull/42",
+            author: "author",
+            updatedAt: "2026-01-01T00:00:00Z",
+            head: { repo: "o/r", ref: "fix/the-pr-head", sha: HEAD },
+            base: { repo: "o/r", ref: "main" },
+          },
+        ],
+      },
+    });
+    const read = gh.getPullRequest.bind(gh);
+    gh.getPullRequest = async (repo, number) => {
+      const pr = await read(repo, number);
+      return { ...pr, head: { ...pr.head, sha: currentHead() } };
+    };
+    deps.githubApi = gh;
+  }
+
+  async function scriptedHistoryRead(c: FakeHarnessContainer, live: LiveHarness, id: string) {
+    const args = { repo: "o/r", number: 42, includeReviewHistory: true };
+    const t = assistant([{ type: "toolCall", id, name: "github_pull_get", arguments: args }]);
+    c.emit(
+      { type: "message_end", message: t },
+      { type: "tool_execution_start", toolCallId: id, toolName: "github_pull_get", args },
+    );
+    authorizeToolCall(live, { toolCallId: id, tool: "github_pull_get", input: args });
+    const answer = await runRelayedTool(live, { toolCallId: id, tool: "github_pull_get", input: args });
+    expect(answer.isError).toBe(false);
+    expect(live.toolContext.reviewHistory?.snapshot?.head).toBeDefined();
+    c.emit(
+      {
+        type: "tool_execution_end",
+        toolCallId: id,
+        toolName: "github_pull_get",
+        result: { content: answer.content },
+        isError: answer.isError,
+      },
+      { type: "turn_end", message: t, toolResults: [] },
+    );
+  }
+
   /** A review's pi: reads the head, tries an `edit` the gate refuses (the
    *  extension blocks it and pi ends it as an error — nothing ran), submits
    *  the verdict through the relay as the real extension does (`POST
    *  /harness/tool`), then answers. */
   function scriptedReviewPi(container: FakeHarnessContainer, registry: HarnessRegistry, finalText: string) {
-    container.onStdin = (line, c) => {
+    container.onStdin = async (line, c) => {
       const cmd = JSON.parse(line) as Record<string, unknown>;
       if (cmd.type === "set_auto_retry" || cmd.type === "get_state")
         c.emit({ id: cmd.id, type: "response", command: cmd.type, success: true, data: { sessionFile: "s.jsonl" } });
@@ -7129,6 +7179,7 @@ describe("the pi harness — the review preset", () => {
         },
         { type: "turn_end", message: t2, toolResults: [] },
       );
+      await scriptedHistoryRead(c, live, "history");
       const t3 = assistant([{ type: "toolCall", id: "c3", name: "submit_verdict", arguments: VERDICT }]);
       c.emit(
         { type: "message_end", message: t3 },
@@ -7180,6 +7231,7 @@ describe("the pi harness — the review preset", () => {
       ...prThread,
       review: { head: HEAD, post: async (target, body) => void posts.push({ target, body }) },
     });
+    seedReviewHistory(s.deps, () => HEAD);
     const out = answered(await runLoop(s.deps, s.ctx));
     expect(out.answer).toBe("The review: one nit, F1.");
     expect(providerCalls).toBe(0);
@@ -7214,6 +7266,7 @@ describe("the pi harness — the review preset", () => {
     expect(rec.events.filter((e) => e.type === "tool_call").map((e) => (e as { tool: string }).tool)).toEqual([
       "bash",
       "edit",
+      "github_pull_get",
       "submit_verdict",
     ]);
     expect(rec.events.filter((e) => e.type === "run_note" && (e as { kind: string }).kind === "tool_refused")).toEqual([
@@ -7239,130 +7292,195 @@ describe("the pi harness — the review preset", () => {
   // never a second pi and never the native loop; the second verdict, relayed
   // through the same registry entry under the turn's own capture, is the one
   // posted, pinned to the new head; pi is ended once the settle is done.
-  it("a substantive head move mid-review on pi re-reviews as a prompt on the same pi session: one pi process, two prompts, the worktree moved first, the second verdict posted pinned to the new head, the second answer the run's, pi ended after the settle", async () => {
-    const NEW = "d75b5a51aba97d43c64a42c96e580dd9abbfd78e";
-    const container = new FakeHarnessContainer();
-    const registry = new HarnessRegistry();
-    let worktreeHead = HEAD;
-    const moves: string[] = [];
-    const executor = {
-      exec: async (command: string) => (command.includes("rev-parse") ? `${worktreeHead}\n` : ""),
-      moveTo: async (sha: string) => {
-        moves.push(sha);
-        worktreeHead = sha;
-        return { sha };
-      },
-    };
-    const killedWhenPrompted: number[][] = [];
-    // A review's pi answering TWO prompts on one session: the request with a
-    // verdict at the pinned head, then the re-review's follow-up with a verdict
-    // at the new head — each through the relay as the real extension submits it.
-    let prompts = 0;
-    container.onStdin = (line, c) => {
-      const cmd = JSON.parse(line) as Record<string, unknown>;
-      if (cmd.type === "set_auto_retry" || cmd.type === "get_state")
-        c.emit({ id: cmd.id, type: "response", command: cmd.type, success: true, data: { sessionFile: "s.jsonl" } });
-      if (cmd.type !== "prompt") return;
-      const n = prompts++;
-      killedWhenPrompted.push([...container.killed]);
-      const live = registry.get("run-l")!;
-      c.emit({ id: cmd.id, type: "response", command: "prompt", success: true }, { type: "agent_start" });
-      const verdict =
-        n === 0 ? VERDICT : { verdict: "request_changes", summary: "the new test is wrong", head: NEW, findings: [] };
-      const id = `v${n}`;
-      const t = assistant([{ type: "toolCall", id, name: "submit_verdict", arguments: verdict }]);
-      c.emit(
-        { type: "message_end", message: t },
-        { type: "tool_execution_start", toolCallId: id, toolName: "submit_verdict", args: verdict },
-      );
-      authorizeToolCall(live, { toolCallId: id, tool: "submit_verdict", input: verdict });
-      void runRelayedTool(live, { toolCallId: id, tool: "submit_verdict", input: verdict }).then((answer) => {
+  it.each(["fresh matching history", "stale history in verdict-only follow-up"])(
+    "a substantive head move mid-review on pi re-reviews as a prompt on the same pi session: the old SHA cannot authorize the new head (%s)",
+    async (mode) => {
+      const NEW = "d75b5a51aba97d43c64a42c96e580dd9abbfd78e";
+      const container = new FakeHarnessContainer();
+      const registry = new HarnessRegistry();
+      let worktreeHead = HEAD;
+      const moves: string[] = [];
+      const executor = {
+        exec: async (command: string) => (command.includes("rev-parse") ? `${worktreeHead}\n` : ""),
+        moveTo: async (sha: string) => {
+          moves.push(sha);
+          worktreeHead = sha;
+          return { sha };
+        },
+      };
+      let historyHead = HEAD;
+      const refresh = mode === "fresh matching history";
+      const killedWhenPrompted: number[][] = [];
+      // A review's pi answering TWO prompts on one session: the request with a
+      // verdict at the pinned head, then the re-review's follow-up with a verdict
+      // at the new head — each through the relay as the real extension submits it.
+      let prompts = 0;
+      container.onStdin = async (line, c) => {
+        const cmd = JSON.parse(line) as Record<string, unknown>;
+        if (cmd.type === "set_auto_retry" || cmd.type === "get_state")
+          c.emit({ id: cmd.id, type: "response", command: cmd.type, success: true, data: { sessionFile: "s.jsonl" } });
+        if (cmd.type !== "prompt") return;
+        const n = prompts++;
+        killedWhenPrompted.push([...container.killed]);
+        const live = registry.get("run-l")!;
+        c.emit({ id: cmd.id, type: "response", command: "prompt", success: true }, { type: "agent_start" });
+        const verdict =
+          n === 0 ? VERDICT : { verdict: "request_changes", summary: "the new test is wrong", head: NEW, findings: [] };
+        const reject = async (head: string, error: string) => {
+          const args = { ...verdict, verdict: "approve", head };
+          const callId = `stale-${n}-${head}-${error.length}`;
+          authorizeToolCall(live, { toolCallId: callId, tool: "submit_verdict", input: args });
+          const rejected = await runRelayedTool(live, { toolCallId: callId, tool: "submit_verdict", input: args });
+          expect(JSON.stringify(rejected.content)).toContain(error);
+          expect(posts).toEqual([]);
+        };
+        if (n === 1) {
+          expect(worktreeHead).toBe(NEW);
+          await reject("HEAD", "error: a valid reviewed commit head");
+          await reject(HEAD, "error: reviewed head differs from the required review head");
+          expect(live.toolContext.reviewHistory?.snapshot).toBeUndefined();
+          expect(live.toolContext.reviewHistory?.progress).toBeUndefined();
+          await reject(NEW, "error: read complete PR history");
+          // Even a complete read that still returns A cannot bind the re-review at B.
+          await scriptedHistoryRead(c, live, "history-stale");
+          expect(live.toolContext.reviewHistory?.snapshot?.head).toBe(HEAD);
+          await reject(HEAD, "error: reviewed head differs from the required review head");
+          await reject(NEW, "error: reviewed head differs from the history snapshot");
+          if (refresh) historyHead = NEW;
+        }
+        if (n === 2) {
+          // The verdict-only prompt uses the original context, not the re-review's
+          // copied sink. Its required head must still be B despite cached A history.
+          expect(worktreeHead).toBe(NEW);
+          expect(live.toolContext.reviewHistory?.snapshot?.head).toBe(HEAD);
+          await reject(HEAD, "error: reviewed head differs from the required review head");
+        }
+        if (!refresh && n > 0) {
+          const done = assistant([{ type: "text", text: "Second review: no valid verdict." }], "stop");
+          c.emit(
+            { type: "message_end", message: done },
+            { type: "turn_end", message: done, toolResults: [] },
+            { type: "agent_settled" },
+          );
+          return;
+        }
+        await scriptedHistoryRead(c, live, `history-${n}`);
+        const id = `v${n}`;
+        const t = assistant([{ type: "toolCall", id, name: "submit_verdict", arguments: verdict }]);
         c.emit(
-          {
-            type: "tool_execution_end",
-            toolCallId: id,
-            toolName: "submit_verdict",
-            result: { content: answer.content },
-            isError: answer.isError,
-          },
-          { type: "turn_end", message: t, toolResults: [] },
+          { type: "message_end", message: t },
+          { type: "tool_execution_start", toolCallId: id, toolName: "submit_verdict", args: verdict },
         );
-        const done = assistant(
-          [{ type: "text", text: n === 0 ? "First review: approve." : "Second review: the new test is wrong." }],
-          "stop",
-        );
-        c.emit(
-          { type: "message_end", message: done },
-          { type: "turn_end", message: done, toolResults: [] },
-          { type: "agent_settled" },
-        );
+        authorizeToolCall(live, { toolCallId: id, tool: "submit_verdict", input: verdict });
+        void runRelayedTool(live, { toolCallId: id, tool: "submit_verdict", input: verdict }).then((answer) => {
+          c.emit(
+            {
+              type: "tool_execution_end",
+              toolCallId: id,
+              toolName: "submit_verdict",
+              result: { content: answer.content },
+              isError: answer.isError,
+            },
+            { type: "turn_end", message: t, toolResults: [] },
+          );
+          const done = assistant(
+            [{ type: "text", text: n === 0 ? "First review: approve." : "Second review: the new test is wrong." }],
+            "stop",
+          );
+          c.emit(
+            { type: "message_end", message: done },
+            { type: "turn_end", message: done, toolResults: [] },
+            { type: "agent_settled" },
+          );
+        });
+      };
+      const list = (subjects: string[]): PrCommitList => ({
+        commits: subjects.map((message, i) => ({ sha: `${i + 1}`.repeat(40), message })),
+        files: ["src/x.ts"],
+        filesTruncated: false,
       });
-    };
-    const list = (subjects: string[]): PrCommitList => ({
-      commits: subjects.map((message, i) => ({ sha: `${i + 1}`.repeat(40), message })),
-      files: ["src/x.ts"],
-      filesTruncated: false,
-    });
-    const posts: Array<{ target: ReviewCommentTarget; body: string }> = [];
-    const s = setup("", {
-      agent: "review",
-      // The re-review's note is an ack (item 28): asked for here so the thread shows it.
-      verbosity: "verbose",
-      provider: provider("unused"),
-      yaml: REVIEW_PI_YAML,
-      harness: { harnesses: roster(), registry, harnessUrl: "https://bot.example.com", containerFor: () => container },
-      bearer: "sbr_run-l.s3cret",
-      repoCtx: prThread.repoCtx,
-      binding: prThread.binding,
-      executor,
-      review: {
-        head: HEAD,
-        post: async (target, body) => void posts.push({ target, body }),
-        currentHead: NEW,
-        commits: (sha) => (sha === HEAD ? list(["feat: the change"]) : list(["feat: the change", "fix: review nits"])),
-      },
-    });
-    const out = answered(await runLoop(s.deps, s.ctx));
-    // one pi, two prompts on it — pi still alive at the second — and the worktree moved before it
-    expect(container.starts).toHaveLength(1);
-    expect(prompts).toBe(2);
-    expect(killedWhenPrompted).toEqual([[], []]);
-    expect(moves).toEqual([NEW]);
-    const followUp = container.stdin
-      .map((l) => JSON.parse(l) as Record<string, unknown>)
-      .filter((c) => c.type === "prompt")[1];
-    expect(String(followUp.message)).toContain("moved from a1b2c3d to d75b5a5");
-    expect(String(followUp.message)).toContain("Switchboard has already moved your worktree to d75b5a5");
-    // the second verdict and answer are the run's; posted once, pinned to the new head
-    expect(out.answer).toBe("Second review: the new test is wrong.");
-    expect(out.reviewHead).toBe(NEW);
-    expect(posts).toEqual([
-      {
-        target: { repo: "o/r", number: 42, commitId: NEW },
-        body: expect.stringContaining(
-          "<summary>Full review</summary>\n\nSecond review: the new test is wrong.\n\n</details>",
+      const posts: Array<{ target: ReviewCommentTarget; body: string }> = [];
+      const s = setup("", {
+        agent: "review",
+        // The re-review's note is an ack (item 28): asked for here so the thread shows it.
+        verbosity: "verbose",
+        provider: provider("unused"),
+        yaml: REVIEW_PI_YAML,
+        harness: {
+          harnesses: roster(),
+          registry,
+          harnessUrl: "https://bot.example.com",
+          containerFor: () => container,
+        },
+        bearer: "sbr_run-l.s3cret",
+        repoCtx: prThread.repoCtx,
+        binding: prThread.binding,
+        executor,
+        review: {
+          head: HEAD,
+          post: async (target, body) => void posts.push({ target, body }),
+          currentHead: NEW,
+          commits: (sha) =>
+            sha === HEAD ? list(["feat: the change"]) : list(["feat: the change", "fix: review nits"]),
+        },
+      });
+      seedReviewHistory(s.deps, () => historyHead);
+      const out = answered(await runLoop(s.deps, s.ctx));
+      // One pi survives the re-review and, if needed, the verdict-only prompt.
+      expect(container.starts).toHaveLength(1);
+      expect(prompts).toBe(refresh ? 2 : 3);
+      expect(killedWhenPrompted).toEqual(refresh ? [[], []] : [[], [], []]);
+      expect(moves).toEqual([NEW]);
+      const followUp = container.stdin
+        .map((l) => JSON.parse(l) as Record<string, unknown>)
+        .filter((c) => c.type === "prompt")[1];
+      expect(String(followUp.message)).toContain("moved from a1b2c3d to d75b5a5");
+      expect(String(followUp.message)).toContain("Switchboard has already moved your worktree to d75b5a5");
+      // the second verdict and answer are the run's; posted once, pinned to the new head
+      const answer = refresh ? "Second review: the new test is wrong." : "Second review: no valid verdict.";
+      expect(out.answer).toBe(answer);
+      expect(out.reviewHead).toBe(NEW);
+      expect(posts).toEqual([
+        {
+          target: { repo: "o/r", number: 42, commitId: NEW },
+          body: expect.stringContaining(`<summary>Full review</summary>\n\n${answer}\n\n</details>`),
+        },
+      ]);
+      expect(
+        posts[0].body.startsWith(
+          refresh ? "Changes requested: the new test is wrong\n" : "No verdict submitted — not approving.",
         ),
-      },
-    ]);
-    expect(posts[0].body.startsWith("Changes requested: the new test is wrong\n\n> [!WARNING]\n")).toBe(true);
-    expect(s.published).toEqual(["answer:Second review: the new test is wrong."]);
-    expect(s.replies.some((r) => r.startsWith("🔀 o/r#42 moved during the run"))).toBe(true);
-    // pi ended once, after the settle
-    expect(container.killed).toEqual([4242]);
-    expect(container.removed).toEqual(["/var/tmp/switchboard-pi-run-l"]);
-    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
-    s.ending.drain(true);
-    await s.writer.settled();
-    const rec = (await s.store.get("run-l"))!;
-    expect(rec.events.filter((e) => e.type === "tool_call").map((e) => (e as { tool: string }).tool)).toEqual([
-      "submit_verdict",
-      "submit_verdict",
-    ]);
-    expect(rec.events.some((e) => e.type === "run_note" && (e as { kind: string }).kind === "head_moved")).toBe(true);
-    expect(rec.events.filter((e) => e.type === "review_posted")).toEqual([
-      expect.objectContaining({ type: "review_posted", head: NEW, verdict: "request_changes" }),
-    ]);
-  });
+      ).toBe(true);
+      expect(s.published).toEqual([`answer:${answer}`]);
+      expect(s.replies.some((r) => r.startsWith("🔀 o/r#42 moved during the run"))).toBe(true);
+      // pi ended once, after the settle
+      expect(container.killed).toEqual([4242]);
+      expect(container.removed).toEqual(["/var/tmp/switchboard-pi-run-l"]);
+      expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
+      s.ending.drain(true);
+      await s.writer.settled();
+      const rec = (await s.store.get("run-l"))!;
+      expect(rec.events.filter((e) => e.type === "tool_call").map((e) => (e as { tool: string }).tool)).toEqual([
+        "github_pull_get",
+        "submit_verdict",
+        "github_pull_get",
+        ...(refresh ? ["github_pull_get", "submit_verdict"] : []),
+      ]);
+      if (!refresh) {
+        expect(rec.verdict).toBeUndefined();
+        expect(posts[0].body).not.toMatch(/^LGTM:/);
+        expect(rec.reviewPost).not.toHaveProperty("verdict");
+      }
+      expect(rec.events.some((e) => e.type === "run_note" && (e as { kind: string }).kind === "head_moved")).toBe(true);
+      expect(rec.events.filter((e) => e.type === "review_posted")).toEqual([
+        expect.objectContaining({
+          type: "review_posted",
+          head: NEW,
+          ...(refresh ? { verdict: "request_changes" } : {}),
+        }),
+      ]);
+    },
+  );
 });
 
 // Feature: docs/reference/specs/harness-pi.md item 12: a preset without a

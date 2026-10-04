@@ -151,6 +151,8 @@ export interface ReviewVerdict {
    *  the input carried a findings array (possibly empty after drops); absent
    *  when no array was supplied or the array itself was malformed. */
   findings?: Finding[];
+  /** Reviewer-verified closure of prior GitHub findings, with an evidence note. */
+  resolutions?: FindingDisposition[];
   /** Parse notes naming what was dropped from `findings` (ids/indices with
    *  reasons) — surfaced in the tool ack so the model can resubmit, never
    *  rendered into the posted body. */
@@ -184,6 +186,19 @@ export function parseVerdictInput(
   const head = normalizeHead(input.head);
   const out: ReviewVerdict = { verdict, summary };
   if (head) out.head = head;
+  if (input.resolutions !== undefined) {
+    const parsed = parseDispositionsInput({ dispositions: input.resolutions });
+    if (
+      !parsed ||
+      parsed.dropped.length ||
+      parsed.dispositions.some(
+        (d, i) => !d.note || d.findingId !== (input.resolutions as Record<string, unknown>[])[i]?.findingId,
+      ) ||
+      new Set(parsed.dispositions.map((d) => d.findingId)).size !== parsed.dispositions.length
+    )
+      return null;
+    out.resolutions = parsed.dispositions;
+  }
   if (input.findings !== undefined) {
     const parsed = parseFindings(input.findings, level);
     if (parsed.findings) out.findings = parsed.findings;
@@ -424,7 +439,8 @@ function whereCell(f: Finding, target: ReviewBodyTarget | undefined): string {
 
 /** The machine-readable marker the body ends with — the verdict, the head and
  *  the findings index as JSON inside an HTML comment, for a scanner that would
- *  otherwise parse the token line. `-->` can never occur inside it. */
+ *  otherwise parse the token line. JSON angle brackets are escaped so neither
+ *  HTML comment terminator (`-->` or `--!>`) can occur inside it. */
 function verdictMarker(verdict: ReviewVerdict | undefined, target: ReviewBodyTarget | undefined): string {
   const head = target?.head ?? verdict?.head;
   const payload = {
@@ -445,8 +461,9 @@ function verdictMarker(verdict: ReviewVerdict | undefined, target: ReviewBodyTar
           })),
         }
       : {}),
+    ...(verdict?.resolutions !== undefined ? { resolutions: verdict.resolutions } : {}),
   };
-  return `<!-- switchboard:verdict ${JSON.stringify(payload).replace(/-->/g, "--\\u003e")} -->`;
+  return `<!-- switchboard:verdict ${JSON.stringify(payload).replace(/[<>]/g, (c) => (c === "<" ? "\\u003c" : "\\u003e"))} -->`;
 }
 
 /**
@@ -497,6 +514,17 @@ export function buildReviewPostBody(
   }
 
   const marker = verdictMarker(verdict, target);
+  if (verdict?.resolutions?.length) {
+    fixedParts.push(
+      [
+        "| Prior finding | Resolution | Evidence at this head |",
+        "| --- | --- | --- |",
+        ...verdict.resolutions.map(
+          (d) => `| ${escapeMarkdownTableCell(d.findingId)} | ${d.disposition} | ${escapeMarkdownTableCell(d.note)} |`,
+        ),
+      ].join("\n"),
+    );
+  }
   const fixedBody = [...fixedParts, marker].join("\n\n");
   const prose = answer.trim();
   if (!prose) return fixedBody;
@@ -670,6 +698,7 @@ export function isReviewVerdictShape(v: unknown): v is ReviewVerdict {
   if (!VERDICT_KINDS.includes(v.verdict as string) || typeof v.summary !== "string") return false;
   if (v.head !== undefined && typeof v.head !== "string") return false;
   if (v.findings !== undefined && !(Array.isArray(v.findings) && v.findings.every(isFindingShape))) return false;
+  if (v.resolutions !== undefined && !isFindingDispositionsShape(v.resolutions)) return false;
   return true;
 }
 
@@ -736,6 +765,7 @@ export function redactVerdict(v: ReviewVerdict, redact: (s: string) => string = 
     verdict: v.verdict,
     summary: redact(v.summary),
     ...(v.head !== undefined ? { head: v.head } : {}),
+    ...(v.resolutions !== undefined ? { resolutions: redactDispositions(v.resolutions, redact) } : {}),
     ...(v.findings !== undefined
       ? {
           findings: v.findings.map((f) => ({

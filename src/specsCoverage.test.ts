@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -85,7 +85,7 @@ const guard = (range = "base", race?: { path: string; target: string; occurrence
   );
 
 beforeEach(() => {
-  fixture = mkdtempSync(join(tmpdir(), "specs-coverage-"));
+  fixture = realpathSync(mkdtempSync(join(tmpdir(), "specs-coverage-")));
   for (const path of [
     "scripts/specs-coverage.ts",
     "scripts/specs-check.mjs",

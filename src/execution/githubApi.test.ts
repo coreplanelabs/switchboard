@@ -53,6 +53,68 @@ const api = (routes: Parameters<typeof fakeFetch>[0]) => {
   return { api: new RestGithubApi({ fetch: f.fetch, token }), calls: f.calls };
 };
 
+describe("pull request feedback", () => {
+  it("reads every review and conversation page with the read token", async () => {
+    const raw = {
+      id: 1,
+      user: { login: "review[bot]", type: "Bot" },
+      body: "finding",
+      commit_id: "a".repeat(40),
+      state: "COMMENTED",
+      submitted_at: "2026-01-01T00:00:00Z",
+    };
+    const { api: gh, calls } = api(({ url }) => {
+      if (url.includes("/pulls/7/reviews"))
+        return {
+          status: 200,
+          body: url.endsWith("page=1")
+            ? Array.from({ length: 100 }, (_, i) => ({ ...raw, id: i + 1 }))
+            : [{ ...raw, id: 101 }],
+        };
+      if (url.includes("/issues/7/comments"))
+        return {
+          status: 200,
+          body: [
+            {
+              id: 102,
+              user: { login: "author" },
+              body: "Fixed F1 with unique write IDs",
+              created_at: "2026-01-02T00:00:00Z",
+            },
+          ],
+        };
+    });
+    const result = await gh.getPullRequestFeedback("acme/api", 7);
+    expect(result.reviews).toHaveLength(101);
+    expect(result.reviews[100]).toMatchObject({ id: 101, author: "review[bot]", head: raw.commit_id, body: "finding" });
+    expect(result.comments).toMatchObject([{ id: 102, author: "author", body: "Fixed F1 with unique write IDs" }]);
+    expect(calls.every((c) => c.method === "GET" && c.headers.authorization === "Bearer tok-read")).toBe(true);
+  });
+
+  it("refuses partial, malformed and over-limit history instead of returning an empty history", async () => {
+    const raw = {
+      id: 1,
+      user: { login: "review[bot]", type: "Bot" },
+      body: "finding",
+      commit_id: "a".repeat(40),
+      state: "COMMENTED",
+      submitted_at: "2026-01-01T00:00:00Z",
+    };
+    for (const mode of ["partial", "malformed", "limit"]) {
+      const { api: gh } = api(({ url }) => {
+        if (mode === "malformed") return { status: 200, body: {} };
+        if (url.includes("/pulls/7/reviews"))
+          return {
+            status: 200,
+            body: mode === "partial" ? [] : Array.from({ length: 100 }, (_, i) => ({ ...raw, id: i + 1 })),
+          };
+        return { status: 503, body: { message: "unavailable" } };
+      });
+      await expect(gh.getPullRequestFeedback("acme/api", 7)).rejects.toThrow();
+    }
+  });
+});
+
 describe("RestGithubApi — reads use the read token", () => {
   it("readFile decodes base64 content and returns size/sha/url; the ref is passed", async () => {
     scopes.length = 0;
@@ -367,6 +429,103 @@ describe("RestGithubApi — reads use the read token", () => {
 });
 
 describe("RestGithubApi — pull request reads", () => {
+  it.each([
+    {
+      scenario: "lagging same-repository metadata",
+      state: "open",
+      headRepo: "ACME/API",
+      object: { type: "commit", sha: "b".repeat(40) },
+      expected: "b".repeat(40),
+      readsRef: true,
+    },
+    {
+      scenario: "matching same-repository metadata",
+      state: "open",
+      headRepo: "acme/api",
+      object: { type: "commit", sha: "a".repeat(40) },
+      expected: "a".repeat(40),
+      readsRef: true,
+    },
+    {
+      scenario: "unreadable branch",
+      state: "open",
+      headRepo: "acme/api",
+      status: 503,
+      expected: "a".repeat(40),
+      readsRef: true,
+    },
+    {
+      scenario: "non-commit branch target",
+      state: "open",
+      headRepo: "acme/api",
+      object: { type: "tag", sha: "b".repeat(40) },
+      expected: "a".repeat(40),
+      readsRef: true,
+    },
+    {
+      scenario: "malformed branch commit",
+      state: "open",
+      headRepo: "acme/api",
+      object: { type: "commit", sha: "HEAD" },
+      expected: "a".repeat(40),
+      readsRef: true,
+    },
+    {
+      scenario: "missing branch object",
+      state: "open",
+      headRepo: "acme/api",
+      expected: "a".repeat(40),
+      readsRef: true,
+    },
+    {
+      scenario: "fork head",
+      state: "open",
+      headRepo: "fork/api",
+      object: { type: "commit", sha: "b".repeat(40) },
+      expected: "a".repeat(40),
+      readsRef: false,
+    },
+    {
+      scenario: "deleted fork",
+      state: "open",
+      headRepo: "",
+      object: { type: "commit", sha: "b".repeat(40) },
+      expected: "a".repeat(40),
+      readsRef: false,
+    },
+    {
+      scenario: "closed PR with reused branch",
+      state: "closed",
+      headRepo: "acme/api",
+      object: { type: "commit", sha: "b".repeat(40) },
+      expected: "a".repeat(40),
+      readsRef: false,
+    },
+  ])(
+    "getPullRequest uses the authoritative head for $scenario",
+    async ({ state, headRepo, object, status, expected, readsRef }) => {
+      const { api: gh, calls } = api(({ url }) =>
+        url.endsWith("/pulls/7")
+          ? {
+              status: 200,
+              body: {
+                number: 7,
+                state,
+                head: { repo: { full_name: headRepo }, ref: "fix/login", sha: "a".repeat(40) },
+                base: { repo: { full_name: "acme/api" }, ref: "main" },
+              },
+            }
+          : { status: status ?? 200, body: { object } },
+      );
+      expect((await gh.getPullRequest("acme/api", 7)).head.sha).toBe(expected);
+      expect(calls.map((c) => new URL(c.url).pathname)).toEqual([
+        "/repos/acme/api/pulls/7",
+        ...(readsRef ? ["/repos/acme/api/git/ref/heads/fix/login"] : []),
+      ]);
+      expect(calls.every((c) => c.headers.authorization === "Bearer tok-read")).toBe(true);
+    },
+  );
+
   it("getPullRequest preserves merge time so a merged PR is not reported as merely closed", async () => {
     const { api: gh } = api(() => ({
       status: 200,
@@ -423,9 +582,9 @@ describe("RestGithubApi — pull request reads", () => {
       head: { repo: "acme/api", ref: "fix/login", sha: "a".repeat(40) },
       base: { repo: "acme/api", ref: "main" },
     });
-    expect(calls).toHaveLength(1);
-    expect(calls[0]?.headers.authorization).toBe("Bearer tok-read");
-    expect(scopes).toEqual(["read"]);
+    expect(calls).toHaveLength(2);
+    expect(calls.every((c) => c.headers.authorization === "Bearer tok-read")).toBe(true);
+    expect(scopes).toEqual(["read", "read"]);
   });
 });
 

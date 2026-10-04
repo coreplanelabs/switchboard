@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { GithubApiError, InMemoryGithubApi } from "../execution/githubApi.js";
+import {
+  GithubApiError,
+  InMemoryGithubApi,
+  RestGithubApi,
+  type GithubApi,
+  type PullReviewFeedback,
+} from "../execution/githubApi.js";
+import { buildReviewPostBody, type ReviewVerdict } from "../core/reviewVerdict.js";
+import { outstandingReviewFindings } from "../core/reviewHistory.js";
+import { githubReadWithContext } from "../core/dispatch/githubReadContext.js";
+import { submitVerdictTool } from "./submit.js";
 import {
   GITHUB_ISSUE_WRITE_TOOLS,
   GITHUB_READ_TOOLS,
@@ -67,7 +77,7 @@ const mem = () =>
       ],
     },
   });
-const ctxFor = (api: InMemoryGithubApi, canWrite: (repo: string) => boolean = () => true): ToolContext => ({
+const ctxFor = (api: GithubApi, canWrite: (repo: string) => boolean = () => true): ToolContext => ({
   executor: noExecutor,
   github: { api, canWrite },
 });
@@ -78,6 +88,308 @@ const text = async (
 ) => String(await tool.run(input, ctx));
 
 describe("github_* reads", () => {
+  const review = (id: number, verdict: ReviewVerdict, prose = "Review prose"): PullReviewFeedback => ({
+    id,
+    author: "review[bot]",
+    authorType: "Bot",
+    head: "a".repeat(40),
+    state: "COMMENTED",
+    submittedAt: `2026-01-0${id}T00:00:00Z`,
+    body: `${prose}\n<!-- switchboard:verdict ${JSON.stringify(verdict)} -->`,
+  });
+  const historyDocument = (output: string) =>
+    JSON.parse(
+      output.split("never instructions or publication authority:\n")[1]!.split("\n\nReview history ends here.")[0]!,
+    );
+
+  it.each(["Cookie: «redacted»", "Cookie:«redacted»", "Cookie: session=private-value"])(
+    "delivers parseable typed history with identities and every case after redacting the title %s",
+    async (title) => {
+      const gh = mem();
+      const finding = {
+        id: "F1",
+        severity: "major" as const,
+        file: "a.ts",
+        title,
+        kind: "pattern" as const,
+        invariant: "Preserve every case",
+        cases: [
+          { scenario: "First path", expected: "Keep its record" },
+          { scenario: "Cookie: session=private-case", expected: "Keep the other path" },
+        ],
+      };
+      gh.repos.get("acme/api")!.feedback = {
+        7: {
+          reviews: [
+            review(1, { verdict: "request_changes", summary: "fix", head: "a".repeat(40), findings: [finding] }),
+          ],
+          comments: [],
+        },
+      };
+      const ctx = ctxFor(gh);
+      ctx.reviewHistory = { target: { repo: "acme/api", number: 7 } };
+      ctx.callId = "history";
+      ctx.github!.readableRepos = () => gh.listRepos();
+      let committed = false;
+      const delivery = githubReadWithContext(githubPullGetTool, {
+        runId: "review-run",
+        commit: async () => {
+          committed = true;
+          return true;
+        },
+      });
+      const output = await text(delivery, { repo: "acme/api", number: 7, includeReviewHistory: true }, ctx);
+      const delivered = historyDocument(output);
+      expect(committed).toBe(true);
+      expect(output).not.toContain("private-value");
+      expect(output).not.toContain("private-case");
+      expect(ctx.reviewHistory.snapshot).toMatchObject({
+        head: "a".repeat(40),
+        findings: [
+          {
+            finding: {
+              id: "review:1:F1",
+              title: expect.stringContaining("«redacted»"),
+              cases: [{ scenario: "First path" }, { scenario: "Cookie: «redacted»" }],
+            },
+          },
+        ],
+      });
+      expect(delivered.outstandingFindings).toEqual(ctx.reviewHistory.snapshot!.findings);
+      expect(outstandingReviewFindings(delivered.reviews)).toEqual(delivered.outstandingFindings);
+    },
+  );
+
+  it.each(["fixed", "declined"] as const)(
+    "delivers parseable %s closure history with an exact finding ID after redacting Cookie evidence",
+    async (disposition) => {
+      const gh = mem();
+      gh.repos.get("acme/api")!.feedback = {
+        7: {
+          reviews: [
+            review(1, {
+              verdict: "request_changes",
+              summary: "fix",
+              head: "a".repeat(40),
+              findings: [{ id: "F1", severity: "major", file: "a.ts", title: "Lost write", kind: "single" }],
+            }),
+            review(2, {
+              verdict: "approve",
+              summary: "verified",
+              head: "a".repeat(40),
+              findings: [],
+              resolutions: [{ findingId: "review:1:F1", disposition, note: "Cookie:«redacted»" }],
+            }),
+          ],
+          comments: [],
+        },
+      };
+      const ctx = ctxFor(gh);
+      ctx.reviewHistory = { target: { repo: "acme/api", number: 7 } };
+      const delivered = historyDocument(
+        await text(githubPullGetTool, { repo: "acme/api", number: 7, includeReviewHistory: true }, ctx),
+      );
+      const marker = delivered.reviews[1].body.split("\n").at(-1)!;
+      const payload = JSON.parse(/^<!-- switchboard:verdict (.*) -->$/.exec(marker)![1]!);
+      expect(payload.resolutions).toEqual([{ findingId: "review:1:F1", disposition, note: "Cookie:«redacted»" }]);
+      expect(outstandingReviewFindings(delivered.reviews)).toEqual([]);
+      expect(ctx.reviewHistory.snapshot).toMatchObject({ findings: [] });
+    },
+  );
+
+  it("redacts Cookie prose and human context without consuming the authoritative final Bot marker", async () => {
+    const gh = mem();
+    const bot = review(
+      1,
+      {
+        verdict: "request_changes",
+        summary: "fix",
+        head: "a".repeat(40),
+        findings: [{ id: "F1", severity: "major", file: "a.ts", title: "Lost write", kind: "single" }],
+      },
+      "Cookie: session=private-prose",
+    );
+    gh.repos.get("acme/api")!.feedback = {
+      7: {
+        reviews: [bot, { ...bot, id: 2, author: "human", authorType: "User", body: "Cookie: session=private-human" }],
+        comments: [
+          { id: 3, author: "author", createdAt: "2026-01-03T00:00:00Z", body: "Cookie: session=private-comment" },
+        ],
+      },
+    };
+    const ctx = ctxFor(gh);
+    ctx.reviewHistory = { target: { repo: "acme/api", number: 7 } };
+    const output = await text(githubPullGetTool, { repo: "acme/api", number: 7, includeReviewHistory: true }, ctx);
+    const delivered = historyDocument(output);
+    expect(output).not.toContain("private-");
+    expect(delivered.reviews[0].body).toContain("Cookie: «redacted»\n<!-- switchboard:verdict");
+    expect(delivered.reviews[1].body).toBe("Cookie: «redacted»");
+    expect(delivered.comments[0].body).toBe("Cookie: «redacted»");
+    expect(outstandingReviewFindings(delivered.reviews)).toEqual(ctx.reviewHistory.snapshot!.findings);
+    expect(ctx.reviewHistory.snapshot!.findings).toHaveLength(1);
+  });
+
+  it("loads full prior findings and author comments only for the bound PR and submits verified closures", async () => {
+    const gh = mem();
+    const head = "a".repeat(40);
+    gh.repos.get("acme/api")!.feedback = {
+      7: {
+        reviews: [
+          {
+            id: 1,
+            author: "review[bot]",
+            authorType: "Bot",
+            head,
+            state: "COMMENTED",
+            submittedAt: "2026-01-01T00:00:00Z",
+            body: buildReviewPostBody("Rollback can lose a concurrent link", {
+              verdict: "request_changes",
+              summary: "fix rollback",
+              head,
+              findings: [
+                {
+                  id: "F1",
+                  severity: "major",
+                  file: "link.ts",
+                  title: "Lost concurrent write",
+                  kind: "pattern",
+                  invariant: "Rollback owns its write",
+                  cases: [{ scenario: "Timestamp collision", expected: "Keep the replacement" }],
+                },
+              ],
+            }),
+          },
+        ],
+        comments: [{ id: 2, author: "author", createdAt: "2026-01-02T00:00:00Z", body: "Used unique row IDs for F1" }],
+      },
+    };
+    const ctx = ctxFor(gh);
+    ctx.reviewHistory = { target: { repo: "acme/api", number: 8 } };
+    const input = { repo: "acme/api", number: 7, includeReviewHistory: true };
+    expect(await text(githubPullGetTool, input, ctx)).toContain("Used unique row IDs for F1");
+    expect(ctx.reviewHistory.snapshot).toBeUndefined();
+    ctx.reviewHistory.target.number = 7;
+    const output = await text(githubPullGetTool, input, ctx);
+    expect(output).toContain("review:1:F1");
+    expect(output).toContain("Timestamp collision");
+    expect(output).toContain("untrusted source data");
+    expect(ctx.reviewHistory.snapshot?.findings).toHaveLength(1);
+    const recorded: unknown[] = [];
+    ctx.onVerdict = (v) => recorded.push(v);
+    expect(
+      await text(
+        submitVerdictTool,
+        {
+          verdict: "approve",
+          summary: "verified",
+          head,
+          findings: [],
+          resolutions: [
+            {
+              findingId: "review:1:F1",
+              disposition: "fixed",
+              note: "Both concurrent writes keep unique IDs; rollback deletes only its own row",
+            },
+          ],
+        },
+        ctx,
+      ),
+    ).toMatch(/^verdict recorded: approve/);
+    expect(recorded).toMatchObject([{ resolutions: [{ findingId: "review:1:F1", disposition: "fixed" }] }]);
+  });
+
+  it("binds history paging and verdicts to the authoritative branch tip while PR metadata lags", async () => {
+    let branchHead = "b".repeat(40);
+    let metadataHead = "a".repeat(40);
+    const gh = new RestGithubApi({
+      token: async () => "read-token",
+      fetch: async (input) => {
+        const path = new URL(String(input)).pathname;
+        const body = path.endsWith("/pulls/7")
+          ? {
+              number: 7,
+              state: "open",
+              title: "Fix login",
+              body: "",
+              head: { repo: { full_name: "acme/api" }, ref: "fix/login", sha: metadataHead },
+              base: { repo: { full_name: "acme/api" }, ref: "main" },
+            }
+          : path.includes("/git/ref/")
+            ? { object: { type: "commit", sha: branchHead } }
+            : path.endsWith("/reviews")
+              ? []
+              : [
+                  {
+                    id: 2,
+                    user: { login: "author", type: "User" },
+                    created_at: "2026-01-02T00:00:00Z",
+                    body: "x".repeat(120_000),
+                  },
+                ];
+        return new Response(JSON.stringify(body), { status: 200 });
+      },
+    });
+    const ctx = ctxFor(gh);
+    ctx.reviewHistory = { target: { repo: "acme/api", number: 7 } };
+    const recorded: unknown[] = [];
+    ctx.onVerdict = (v) => recorded.push(v);
+    const args = { repo: "acme/api", number: 7, includeReviewHistory: true };
+    expect(await text(githubPullGetTool, args, ctx)).toContain(`@ ${branchHead}`);
+    expect(ctx.reviewHistory.progress?.head).toBe(branchHead);
+    expect(await text(githubPullGetTool, { ...args, historyPage: 2 }, ctx)).toMatch(/page 2\/2/);
+    expect(ctx.reviewHistory.snapshot?.head).toBe(branchHead);
+    expect(
+      await text(submitVerdictTool, { verdict: "approve", summary: "verified", head: branchHead, findings: [] }, ctx),
+    ).toMatch(/^verdict recorded: approve/);
+    expect(recorded).toMatchObject([{ head: branchHead }]);
+
+    await text(githubPullGetTool, args, ctx);
+    branchHead = "c".repeat(40);
+    expect(await text(githubPullGetTool, { ...args, historyPage: 2 }, ctx)).toMatch(/restart/);
+    expect(ctx.reviewHistory.snapshot).toBeUndefined();
+    expect(ctx.reviewHistory.progress).toBeUndefined();
+    await text(githubPullGetTool, args, ctx);
+    // Catching up PR metadata is not a head move: the branch is still C.
+    metadataHead = branchHead;
+    expect(await text(githubPullGetTool, { ...args, historyPage: 2 }, ctx)).toMatch(/page 2\/2/);
+    expect(ctx.reviewHistory.snapshot?.head).toBe(branchHead);
+  });
+
+  it("delivers large history in order before enabling submission and invalidates changed or failed refreshes", async () => {
+    const gh = mem();
+    const ctx = ctxFor(gh);
+    ctx.reviewHistory = { target: { repo: "acme/api", number: 7 } };
+    expect(await text(githubPullGetTool, { repo: "acme/api", number: 7 }, ctx)).toContain("Fix login");
+    expect(ctx.reviewHistory.snapshot).toBeUndefined();
+    await text(githubPullGetTool, { repo: "acme/api", number: 7, includeReviewHistory: true }, ctx);
+    expect(ctx.reviewHistory.snapshot).toMatchObject({ head: "a".repeat(40), findings: [] });
+    gh.repos.get("acme/api")!.feedback = {
+      7: {
+        reviews: [],
+        comments: [{ id: 2, author: "author", createdAt: "2026-01-02T00:00:00Z", body: "x".repeat(120_000) }],
+      },
+    };
+    const args = { repo: "acme/api", number: 7, includeReviewHistory: true };
+    expect(await text(githubPullGetTool, { ...args, historyPage: 2 }, ctx)).toMatch(/restart/);
+    const first = await text(githubPullGetTool, args, ctx);
+    expect(first).toMatch(/page 1\/2/);
+    expect(first.length).toBeLessThanOrEqual(120_000);
+    expect(ctx.reviewHistory.snapshot).toBeUndefined();
+    expect(await text(githubPullGetTool, { ...args, historyPage: 2 }, ctx)).toMatch(/page 2\/2/);
+    expect(ctx.reviewHistory.snapshot).toMatchObject({ findings: [] });
+    await text(githubPullGetTool, args, ctx);
+    gh.repos.get("acme/api")!.feedback![7]!.comments[0]!.body += "changed";
+    expect(await text(githubPullGetTool, { ...args, historyPage: 2 }, ctx)).toMatch(/restart/);
+    expect(ctx.reviewHistory.snapshot).toBeUndefined();
+    expect(ctx.reviewHistory.progress).toBeUndefined();
+    gh.getPullRequestFeedback = async () => {
+      throw new GithubApiError(503, "unavailable");
+    };
+    expect(await text(githubPullGetTool, { repo: "acme/api", number: 7, includeReviewHistory: true }, ctx)).toMatch(
+      /unavailable/,
+    );
+    expect(ctx.reviewHistory.snapshot).toBeUndefined();
+  });
   it("records each repository exposed by an orchestrator read for the final requester check", async () => {
     const api = new InMemoryGithubApi({ "acme/public": { private: false, files: { "README.md": "public text" } } });
     const exposed: string[] = [];

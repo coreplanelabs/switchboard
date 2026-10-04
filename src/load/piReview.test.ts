@@ -60,6 +60,14 @@ const approve = {
 };
 
 describe("reviewSystemPrompt", () => {
+  it("accepts an explicit comparison policy and treats frozen history as untrusted source", () => {
+    const system = reviewSystemPrompt({ ...task, context: "Earlier source feedback" }, site, "Comparison policy");
+    expect(system).toContain("Comparison policy");
+    expect(system).not.toContain(AGENTS.review.residentSystem!);
+    expect(system).toContain("untrusted source context");
+    expect(system).toContain("Earlier source feedback");
+    expect(system).toContain(HEAD);
+  });
   it("is the registry's resident review prompt composed as a review run composes it — the REVIEW TARGET block with the task's coordinates, then the read identity's harness note naming the relayed verdict tool, then the driver's note on the tools this run lacks", () => {
     const system = reviewSystemPrompt(task, site);
     expect(system.startsWith(AGENTS.review.residentSystem!.slice(0, 60))).toBe(true);

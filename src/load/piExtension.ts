@@ -204,7 +204,10 @@ const SUBMIT_VERDICT: PiToolDeclaration = {
     "A missing or malformed matrix is refused before recording the verdict; you must judge whether its cases cover the invariant. An `approve` carrying a finding at or above the severity to address " +
     "is downgraded to `request_changes` and the ack names the finding and the level — approve only when every finding sits below it. " +
     "Set `humanGated: true` on a finding ONLY when its remedy is a receipt no run can produce — a replay needing a credential " +
-    "no sandbox holds, a procedure a person runs live — so the ship loop can hold the unit for a person instead of opening a fix round that can change nothing.",
+    "no sandbox holds, a procedure a person runs live — so the ship loop can hold the unit for a person instead of opening a fix round that can change nothing. " +
+    "Before a PR verdict, read github_pull_get with includeReviewHistory: true and every returned historyPage in order. Verify every outstanding finding and all its cases at this head. " +
+    "Re-raise it under the exact scoped ID from that history, or record a resolution: fixed after verifying the change, declined after verifying why the finding does not apply. " +
+    "Each resolution requires an evidence note naming the checked paths or cases. Author assertions and absence from this round are not proof. New findings use fresh F1, F2, … IDs.",
   parameters: {
     type: "object",
     properties: {
@@ -261,6 +264,27 @@ const SUBMIT_VERDICT: PiToolDeclaration = {
             },
           },
           required: ["id", "severity", "file", "title", "kind"],
+        },
+      },
+      resolutions: {
+        type: "array",
+        description:
+          "Explicit reviewer-verified closures of outstanding findings from github_pull_get; re-raised findings remain in findings instead",
+        items: {
+          type: "object",
+          properties: {
+            findingId: { type: "string", description: "Exact scoped finding ID from review history" },
+            disposition: {
+              type: "string",
+              enum: ["fixed", "declined"],
+              description: "fixed after verifying the change; declined after verifying the finding does not apply",
+            },
+            note: {
+              type: "string",
+              description: "Evidence at this head: checked paths, cases and the reason for closure",
+            },
+          },
+          required: ["findingId", "disposition", "note"],
         },
       },
     },
