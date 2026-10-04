@@ -1,3 +1,9 @@
+import {
+  isWorkspaceOwner,
+  workspaceOwnerKey,
+  workspaceBindingOf,
+  workspaceSettlementOf,
+} from "../../src/core/workspaceSettlement";
 import { runInNewContext } from "node:vm";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
@@ -34,6 +40,10 @@ const methods = [
   "reportBlockedWorkspace",
   "automaticContainerLoss",
   "detachThread",
+  "retainWorkspacePredecessor",
+  "reconcileWorkspaceSettlements",
+  "reconcileWorkspaceBinding",
+  "ackWorkspaceSettlement",
 ];
 const bodies = methods.map((name) => {
   const method = resident?.members.find(
@@ -196,6 +206,14 @@ function probe(
   const observeAbsentPrivateTree = vi.fn(async () => options.absentPrivateTree === true);
   const markPoolUserSpent = vi.fn(async () => options.spendAccepted !== false);
   const Scope = runInNewContext(`${compiled}\nPreservationUnderTest`, {
+    isWorkspaceOwner,
+    workspaceOwnerKey,
+    workspaceSettlementOf,
+    workspaceBindingOf,
+    WORKSPACE_PREDECESSORS_MAX: 20,
+    WORKSPACE_RECONCILE_BINDINGS_MAX: 20,
+    WORKSPACE_SETTLEMENT_CURSOR_KEY: "settlement-cursor",
+    RESOURCE_KEY: "resource",
     decideWorkspaceRemoval,
     planForceDetach,
     registeredRunOwnsRelease,
@@ -212,13 +230,15 @@ function probe(
     threadBindingKey: (key: string) => `thread:${key}`,
     parentDir: (path: string) => path.slice(0, path.lastIndexOf("/")),
     evictedTreeSentence: () => "",
-    console: { log: () => {} },
+    console: { log: () => {}, warn: () => {} },
+    errMsg: (err: unknown) => String(err),
   }) as new () => UnderTest;
   const instance = new Scope();
   Object.assign(instance, {
     registry: () => ({ getRecord: async () => ({ worktreeTtlDays: 7 }) }),
     ctx: {
       storage: {
+        put: async () => {},
         list: async () => new Map([[`thread:${threadKey}`, binding]]),
         get: async (key: string) =>
           key === `thread:${threadKey}`

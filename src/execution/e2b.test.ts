@@ -37,6 +37,21 @@ function e2bWith(
   return { ex, run: spy };
 }
 
+describe("E2B structured command stop boundary", () => {
+  it("does not dispatch a command after stopping during environment resolution", async () => {
+    const controller = new AbortController();
+    const h = e2bWith(
+      async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      async () => {
+        controller.abort();
+        return {};
+      },
+    );
+    await expect(h.ex.execResult("git checkout target", { signal: controller.signal })).rejects.toThrow("stopped");
+    expect(h.run).not.toHaveBeenCalled();
+  });
+});
+
 const OK = { stdout: "ok", stderr: "", exitCode: 0 };
 
 describe("E2B reused sandbox credential boundary", () => {

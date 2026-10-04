@@ -234,13 +234,18 @@ export async function findMergedPrByHead(repo: string, branch: string): Promise<
  * non-2xx response so the caller can report honestly instead of fabricating a
  * URL.
  */
-export async function openPullRequest(target: PullRequestTarget): Promise<OpenedPullRequest> {
+export async function openPullRequest(
+  target: PullRequestTarget,
+  beforeMutation?: (pr: number | undefined) => Promise<void>,
+): Promise<OpenedPullRequest> {
   const existing = await findOpenPrByHead(target.repo, target.headBranch);
   if (existing) {
+    await beforeMutation?.(existing.number);
     await updatePullRequest(target.repo, existing.number, { title: target.title, body: target.body });
     return { number: existing.number, htmlUrl: existing.htmlUrl, created: false };
   }
   const token = await requireToken();
+  await beforeMutation?.(undefined);
   const res = await fetch(`https://api.github.com/repos/${target.repo}/pulls`, {
     method: "POST",
     headers: apiHeaders(token, true),

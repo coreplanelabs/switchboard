@@ -4,6 +4,29 @@ import type { ExecutorSelection, WorkspaceBinding } from "../../execution/factor
 import { commitResumedPilotBinding, resumedPilotBindingFor } from "./readyBinding.js";
 
 describe("resumed pilot binding commit", () => {
+  it("does not borrow an earlier resident incarnation or attachment fence when the new response omits them", () => {
+    const rebound = resumedPilotBindingFor(
+      {
+        executor: new LocalExecutor("/tmp/ready-binding-test"),
+        backend: "resident",
+        binding: { ref: "main", sha: "b".repeat(40), workspace: "/workspace/threads/t/main", user: "worker2" },
+      },
+      "repo-resident",
+      {
+        backend: "resident",
+        container: "old-vm",
+        ownerFence: 7,
+        workspace: "/workspace/threads/t/main",
+        user: "worker2",
+        ref: "main",
+        publicationBaseSha: "a".repeat(40),
+      },
+    );
+    expect(rebound).not.toHaveProperty("container");
+    expect(rebound).not.toHaveProperty("ownerFence");
+    expect(rebound?.publicationBaseSha).toBe("a".repeat(40));
+  });
+
   const original: WorkspaceBinding = {
     backend: "sandbox",
     workspace: "/workspace/checkout",

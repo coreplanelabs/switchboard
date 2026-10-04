@@ -29,6 +29,7 @@ import { leftBehindSentence } from "../execution/residentCleanliness.js";
 import type { ToolContext } from "../tools/runnableTool.js";
 import type { Span } from "../core/trace/types.js";
 import type { ResidentLiveStateObserver } from "./runLiveState.js";
+import { ResidentRegistrationMismatchError, type ResidentBinding } from "../execution/resident.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import type { FollowUpTurn } from "./harness/contract.js";
 import {
@@ -43,7 +44,7 @@ import {
 } from "./headMoved.js";
 import { decideReviewPost, reviewPostIntended, reviewPostOptedOut, type ReviewPostTarget } from "./reviewPost.js";
 import { buildReviewPostBody, type ReviewPost, type ReviewVerdict } from "./reviewVerdict.js";
-import { checkReviewedHead, normalizeHead, parseRevParseOutput, sameCommit } from "./reviewedHead.js";
+import { checkReviewedHead, normalizeHead, sameCommit } from "./reviewedHead.js";
 import { reviewTargetBlock } from "./reviewTarget.js";
 import { checkDigestCoverage, type PrSize } from "./digestCoverage.js";
 import type { DigestReport } from "./diffDigest.js";
@@ -155,6 +156,7 @@ export async function attachRoundWorkspace(input: {
     requester?: string;
     /** Awaited observations from the resident's two wait states. */
     onLiveStateObservation?: ResidentLiveStateObserver;
+    onResidentBinding?: (binding: ResidentBinding) => Promise<void>;
   };
   logKey: string;
   /** The caller's `dispatch.workspace.attach` span: the probe and the attach
@@ -185,6 +187,7 @@ export async function attachRoundWorkspace(input: {
       ...(input.round.onLiveStateObservation !== undefined
         ? { onLiveStateObservation: input.round.onLiveStateObservation }
         : {}),
+      ...(input.round.onResidentBinding !== undefined ? { onResidentBinding: input.round.onResidentBinding } : {}),
     },
     input.span,
   );
@@ -583,6 +586,16 @@ export async function settleReviewedHead(input: SettleReviewedHeadInput): Promis
     : settle(input, undefined);
 }
 
+export class ReviewWorkspaceAdvanceError extends Error {
+  constructor(
+    readonly head: string,
+    reason: string,
+  ) {
+    super(`Review workspace could not advance to ${head}: ${reason}`);
+    this.name = "ReviewWorkspaceAdvanceError";
+  }
+}
+
 export interface SettleReviewedHeadInput {
   /** The parent span, when the run is traced. */
   span?: Span;
@@ -618,21 +631,40 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
   // The probe and the move are the settle's own work: their `exec.*` spans hang
   // under `run.settle_reviewed_head` (docs/reference/specs/tracing.md item 17).
   const trace = span ? { span } : undefined;
-  const probeHead = async () => parseRevParseOutput(await executor.exec("git rev-parse HEAD", trace).catch(() => ""));
+  const stopped = () => input.preReviewStopped() || turn.control.hardSignal.aborted;
+  const probeHead = async () => {
+    if (!executor.execResult) return undefined;
+    const result = await executor
+      .execResult("git rev-parse --verify HEAD", { ...trace, signal: turn.control.hardSignal })
+      .catch((err) => {
+        if (err instanceof ResidentRegistrationMismatchError) throw err;
+        return undefined;
+      });
+    if (
+      stopped() ||
+      !result ||
+      result.exitCode !== 0 ||
+      result.truncated !== false ||
+      typeof result.stdout !== "string"
+    )
+      return undefined;
+    const head = result.stdout.trim();
+    return /^[a-f0-9]{40}$/.test(head) ? head : undefined;
+  };
   let answer = input.answer;
   let verdict = input.verdict;
   let reviewHead = input.reviewHead;
   let carried: { reviewed: string; current: string; commits: number } | undefined;
   let observedHead = await probeHead();
   const outcome = (): SettledReviewHead => ({ answer, verdict, reviewHead, observedHead, carried });
-  if (input.preReviewStopped()) return outcome();
+  if (stopped()) return outcome();
   const where = `${pr.repo}#${pr.number}`;
   const currentHead = async () => normalizeHead(await input.fetchPrHead(pr).catch(() => undefined));
   const expected = normalizeHead(reviewHead);
   const reviewed = normalizeHead(observedHead) ?? normalizeHead(verdict?.head);
   if (expected && reviewed) {
     const current = await currentHead();
-    if (input.preReviewStopped()) return outcome();
+    if (stopped()) return outcome();
     if (current && !sameCommit(current, expected) && sameCommit(reviewed, current)) {
       const history = turn.toolContext.reviewHistory;
       if (history) history.requiredHead = current;
@@ -689,7 +721,7 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
         from: expected,
         to: current,
       });
-      if (input.preReviewStopped()) return outcome();
+      if (stopped()) return outcome();
       const move = classified?.move;
       const followUp = turn.followUp;
       if (move?.kind === "rebase") {
@@ -718,28 +750,22 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
         turn.onEvent({ type: "run_note", kind: "head_moved", summary, at: systemClock() });
         input.notify.headMoved(`head moved → ${current.slice(0, 7)}`);
         await input.notify.reply(headRereviewNote({ where, reviewed: expected, current, move })).catch(() => {});
-        if (input.preReviewStopped()) return outcome();
-        // Resident: move the worktree ourselves (one re-attach at the new
-        // head), the round's hard stop riding in so a move that waits on the
-        // resident ends with the stop. Anything else — no moveTo, a refusal,
-        // a tip that moved again under the re-attach — leaves the model to
-        // check it out.
-        let worktreeMoved = false;
-        if (executor.moveTo) {
-          try {
-            const moved = await executor.moveTo(current, { ...trace, signal: turn.control.hardSignal });
-            const at = normalizeHead(moved.sha);
-            worktreeMoved = at !== undefined && sameCommit(at, current);
-            console.log(
-              `[review] ${logKey} worktree moved to ${at?.slice(0, 7) ?? "?"}${worktreeMoved ? "" : " (not the expected head)"}`,
-            );
-          } catch (err) {
-            console.warn(
-              `[review] ${logKey} worktree move failed: ${err instanceof Error ? err.message : String(err)}`,
-            );
-          }
-        }
-        if (input.preReviewStopped()) return outcome();
+        if (stopped()) return outcome();
+        // Re-review begins only after the executor and a fresh HEAD read
+        // agree on the new target. A failed move cannot delegate authority to
+        // a model turn still running in the old checkout.
+        if (!executor.moveTo)
+          throw new ReviewWorkspaceAdvanceError(current, "executor cannot advance the review workspace");
+        const moved = await executor.moveTo(current, { ...trace, signal: turn.control.hardSignal });
+        if (stopped()) return outcome();
+        const at = normalizeHead(moved.sha);
+        if (!at || !sameCommit(at, current))
+          throw new ReviewWorkspaceAdvanceError(current, "executor answered a different head");
+        const confirmed = await probeHead();
+        if (stopped()) return outcome();
+        if (!confirmed || !sameCommit(confirmed, current))
+          throw new ReviewWorkspaceAdvanceError(current, "workspace HEAD could not confirm the advance");
+        observedHead = confirmed;
         verdict = undefined; // the earlier verdict is void; the re-review must submit its own
         reviewHead = current;
         const followUpText = rereviewFollowUp({
@@ -749,7 +775,6 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
           move,
           before: classified.before,
           after: classified.after,
-          worktreeMoved,
         });
         input.messages.push(
           { role: "assistant", content: [{ type: "text", text: answer }] },
@@ -771,10 +796,10 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
           toolContext,
           ...(span ? { span } : {}),
         });
-        if (input.preReviewStopped()) return outcome();
+        if (stopped()) return outcome();
         // Re-read, not narrowed: the stop may have been requested during the turn.
         if (!turn.control.hardSignal.aborted) observedHead = await probeHead();
-        if (input.preReviewStopped()) return outcome();
+        if (stopped()) return outcome();
       }
     }
   }

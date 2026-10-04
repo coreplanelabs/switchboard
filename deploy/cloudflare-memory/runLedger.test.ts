@@ -194,6 +194,326 @@ describe("run ledger — alarm retention of live events", () => {
 });
 
 describe("exact owner evidence for resident preservation", () => {
+  it("rolls back terminal history and owner removal when retained workspace versions reach capacity", async () => {
+    const key = storeKey();
+    const runId = "capacity-workspace";
+    const threadKey = "slack:C1:capacity-workspace";
+    const owner = { runId, ownerGen: "g1", ownerFence: 7 };
+    const binding = {
+      backend: "resident",
+      ownerGen: "g1",
+      ownerFence: 7,
+      ref: "codex/r1",
+      workspace: "/workspace/threads/t/r1",
+      user: "worker2",
+      container: "vm-1",
+    };
+    const publication = { version: 1, repo: "owner/name", branches: [], complete: true };
+    const terminal = { ...record(runId, threadKey), repo: "owner/name" };
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (_instance: RunHistoryDO, state) => {
+      for (let revision = 1; revision <= 20; revision++)
+        state.storage.sql.exec(
+          `INSERT INTO workspace_settlements (owner_key, revision, json) VALUES (?, ?, ?)`,
+          JSON.stringify([runId, "g1", 7]),
+          revision,
+          JSON.stringify({
+            version: 1,
+            revision,
+            owner,
+            binding,
+            publication,
+            record: { id: runId, threadKey, userId: terminal.userId, status: "interrupted", repo: "owner/name" },
+          }),
+        );
+    });
+    await post(
+      "/runs/claim",
+      claimBody(key, runId, threadKey, "g1", { state: { binding, branchPublication: publication } }),
+    );
+    await expect(
+      runInDurableObject(stub, (instance: RunHistoryDO) => instance.finish(runId, "g1", terminal)),
+    ).rejects.toThrow("workspace obligation capacity exhausted");
+    expect((await post("/runs/preservation-owner", { storeKey: key, ...owner })).data.kind).toBe("live");
+    const stored = await runInDurableObject(stub, async (_instance: RunHistoryDO, state) => ({
+      history: state.storage.sql.exec(`SELECT run_id FROM runs WHERE run_id = ?`, runId).toArray(),
+      versions: state.storage.sql.exec(`SELECT revision FROM workspace_settlements ORDER BY revision`).toArray(),
+    }));
+    expect(stored.history).toEqual([]);
+    expect(stored.versions).toHaveLength(20);
+  });
+  it("keeps each unverified terminal version when a later segment completes and refuses a different terminal thread", async () => {
+    const key = storeKey();
+    const runId = "prior-unverified";
+    const threadKey = "slack:C1:prior-unverified";
+    const owner = { runId, ownerGen: "g1", ownerFence: 7 };
+    const binding = {
+      backend: "resident",
+      ownerGen: "g1",
+      ownerFence: 7,
+      ref: "codex/r1",
+      workspace: "/workspace/threads/t/r1",
+      user: "worker2",
+      container: "vm-1",
+    };
+    const publication = { version: 1, repo: "owner/name", branches: [], complete: true };
+    const claim = claimBody(key, runId, threadKey, "g1", {
+      state: { binding, branchPublication: publication, publicationSettlement: { version: 2 } },
+    });
+    await post("/runs/claim", claim);
+    expect(
+      (
+        await post("/runs/finish", {
+          storeKey: key,
+          runId,
+          gen: "g1",
+          record: { ...record(runId, "slack:OTHER:1.0"), repo: "owner/name" },
+        })
+      ).status,
+    ).toBe(409);
+    expect((await post("/runs/preservation-owner", { storeKey: key, ...owner })).data.kind).toBe("live");
+    const terminal = { ...record(runId, threadKey), repo: "owner/name", startedAt: 1000, finishedAt: 2000 };
+    expect(
+      (await post("/runs/finish", { storeKey: key, runId, gen: "g1", record: { ...terminal, provisional: true } }))
+        .status,
+    ).toBe(409);
+    expect((await post("/runs/preservation-owner", { storeKey: key, ...owner })).data.kind).toBe("live");
+    await post("/runs/finish", { storeKey: key, runId, gen: "g1", record: terminal });
+    await post(
+      "/runs/claim",
+      claimBody(key, runId, threadKey, "g1", { state: { binding, branchPublication: publication } }),
+    );
+    await post("/runs/finish", { storeKey: key, runId, gen: "g1", record: terminal });
+    expect((await post("/runs/workspace-ack", { storeKey: key, ...owner, revision: 1 })).data).toEqual({
+      ok: false,
+      reason: "unverified",
+    });
+    expect((await post("/runs/workspace-ack", { storeKey: key, ...owner, revision: 2 })).data).toEqual({ ok: true });
+    expect((await post("/runs/preservation-owner", { storeKey: key, ...owner })).data.settlement).toMatchObject({
+      revision: 1,
+      record: { publicationSettlement: null },
+    });
+  });
+  it("never reports all versions acknowledged when a newer retained version is corrupt", async () => {
+    const key = storeKey();
+    const owner = { runId: "corrupt-newer", ownerGen: "g1", ownerFence: 7 };
+    const ownerKey = JSON.stringify([owner.runId, owner.ownerGen, owner.ownerFence]);
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (_instance: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO workspace_settlements (owner_key, revision, json) VALUES (?, 1, NULL), (?, 2, ?)`,
+        ownerKey,
+        ownerKey,
+        "corrupt",
+      );
+    });
+    expect((await post("/runs/workspace-ack", { storeKey: key, ...owner, revision: 1 })).data).toEqual({ ok: true });
+    expect((await post("/runs/preservation-owner", { storeKey: key, ...owner })).data).toEqual({ kind: "unknown" });
+  });
+  it("keeps corrupt retained evidence under acknowledgment and refuses invalid owner inputs", async () => {
+    const key = storeKey();
+    const owner = { runId: "corrupt", ownerGen: "g1", ownerFence: 7 };
+    const ownerKey = JSON.stringify([owner.runId, owner.ownerGen, owner.ownerFence]);
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (_instance: RunHistoryDO, state) => {
+      state.storage.sql.exec(`INSERT INTO workspace_settlements (owner_key, json) VALUES (?, ?)`, ownerKey, "corrupt");
+    });
+    expect((await post("/runs/workspace-ack", { storeKey: key, ...owner, revision: 1 })).data).toEqual({
+      ok: false,
+      reason: "unverified",
+    });
+    expect(
+      await runInDurableObject(stub, async (_instance: RunHistoryDO, state) =>
+        state.storage.sql.exec(`SELECT json FROM workspace_settlements WHERE owner_key = ?`, ownerKey).toArray(),
+      ),
+    ).toEqual([{ json: "corrupt" }]);
+    expect((await post("/runs/preservation-owner", { storeKey: key, runId: owner.runId, ownerGen: "g1" })).status).toBe(
+      400,
+    );
+    expect((await post("/runs/workspace-ack", { storeKey: key, ...owner, revision: 0 })).status).toBe(400);
+  });
+  it.each(["immediate retention", "explicit deletion"] as const)(
+    "retains the exact terminal workspace obligation through %s and acknowledges only its complete version",
+    async (mode) => {
+      const key = storeKey();
+      const runId = "retained-workspace";
+      const threadKey = "slack:C1:retained-workspace";
+      const owner = { runId, ownerGen: "g1", ownerFence: 7 };
+      const physical = {
+        backend: "resident",
+        ownerGen: "g1",
+        ref: "codex/retained",
+        workspace: "/workspace/threads/t/retained",
+        user: "worker2",
+        container: "vm-1",
+        ownerFence: 7,
+        publicationBaseSha: "a".repeat(40),
+      };
+      const publication = {
+        version: 1,
+        repo: "owner/name",
+        branches: [{ ref: "codex/retained", pr: 7 }],
+        complete: true,
+      };
+      expect(
+        (
+          await post(
+            "/runs/claim",
+            claimBody(key, runId, threadKey, "g1", { state: { binding: physical, branchPublication: publication } }),
+          )
+        ).status,
+      ).toBe(200);
+      const terminal = {
+        ...record(runId, threadKey),
+        repo: "owner/name",
+        ...(mode === "immediate retention" ? { startedAt: 1_000, finishedAt: 2_000 } : {}),
+      };
+      const result = await post("/runs/finish", { storeKey: key, runId, gen: "g1", record: terminal });
+      expect(result).toMatchObject({ status: 200, data: { ok: true, stored: mode !== "immediate retention" } });
+      if (mode === "explicit deletion")
+        await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (instance: RunHistoryDO) => {
+          await instance.delete(runId);
+        });
+      const read = () => post("/runs/preservation-owner", { storeKey: key, ...owner });
+      const receipt = await read();
+      expect(receipt.data).toMatchObject({
+        kind: "terminal",
+        settlement: {
+          revision: 1,
+          owner,
+          binding: physical,
+          publication,
+          record: { id: runId, threadKey, status: "completed" },
+        },
+      });
+      expect((await post("/runs/workspace-ack", { storeKey: key, ...owner, revision: 2 })).data).toMatchObject({
+        ok: false,
+        reason: "stale",
+      });
+      expect((await read()).data.settlement).toEqual(receipt.data.settlement);
+      expect((await post("/runs/workspace-ack", { storeKey: key, ...owner, revision: 1 })).data).toEqual({ ok: true });
+      expect((await read()).data).toEqual({ kind: "acknowledged", owner, revision: 1 });
+      expect((await post("/runs/workspace-ack", { storeKey: key, ...owner, revision: 1 })).data).toEqual({ ok: true });
+      expect(
+        (
+          await post(
+            "/runs/claim",
+            claimBody(key, runId, threadKey, "g1", { state: { binding: physical, branchPublication: publication } }),
+          )
+        ).status,
+      ).toBe(200);
+      expect((await post("/runs/finish", { storeKey: key, runId, gen: "g1", record: terminal })).status).toBe(200);
+      expect((await post("/runs/workspace-ack", { storeKey: key, ...owner, revision: 1 })).data).toEqual({
+        ok: true,
+      });
+      expect((await read()).data.settlement).toMatchObject({ revision: 2, owner });
+    },
+  );
+
+  it("retains invalid binding and saved proof as unverified and checks the owner stored under an acknowledgment key", async () => {
+    const key = storeKey();
+    const runId = "invalid-workspace";
+    const threadKey = "slack:C1:invalid-workspace";
+    const owner = { runId, ownerGen: "g1", ownerFence: 7 };
+    const state = {
+      binding: {
+        backend: "resident",
+        ownerGen: "g1",
+        ownerFence: 7,
+        ref: "codex/r1",
+        workspace: "/workspace/threads/t/r1",
+        user: "worker2",
+      },
+      branchPublication: { version: 1, repo: "owner/name", branches: [], complete: true },
+      publicationSettlement: { version: 2 },
+    };
+    await post("/runs/claim", claimBody(key, runId, threadKey, "g1", { state }));
+    await post("/runs/finish", {
+      storeKey: key,
+      runId,
+      gen: "g1",
+      record: { ...record(runId, threadKey), repo: "owner/name", startedAt: 1000, finishedAt: 2000 },
+    });
+    const receipt = (await post("/runs/preservation-owner", { storeKey: key, ...owner })).data.settlement as Record<
+      string,
+      unknown
+    >;
+    expect(receipt).toMatchObject({ owner, binding: null, record: { publicationSettlement: null } });
+    expect((await post("/runs/workspace-ack", { storeKey: key, ...owner, revision: 1 })).data).toEqual({
+      ok: false,
+      reason: "unverified",
+    });
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    const ownerKey = JSON.stringify([owner.runId, owner.ownerGen, owner.ownerFence]);
+    await runInDurableObject(stub, async (_instance: RunHistoryDO, storage) => {
+      storage.storage.sql.exec(
+        `UPDATE workspace_settlements SET json = ? WHERE owner_key = ?`,
+        JSON.stringify({ ...receipt, owner: { ...owner, ownerFence: 8 } }),
+        ownerKey,
+      );
+    });
+    expect((await post("/runs/workspace-ack", { storeKey: key, ...owner, revision: 1 })).data).toEqual({
+      ok: false,
+      reason: "unverified",
+    });
+    expect((await post("/runs/preservation-owner", { storeKey: key, ...owner })).data).toEqual({ kind: "unknown" });
+  });
+
+  it("retains incomplete publication and refuses workspace acknowledgment under a live or mismatched owner", async () => {
+    const key = storeKey();
+    const runId = "unresolved-workspace";
+    const threadKey = "slack:C1:unresolved-workspace";
+    const owner = { runId, ownerGen: "g1", ownerFence: 7 };
+    const state = {
+      binding: {
+        backend: "resident",
+        ownerGen: "g1",
+        ref: "codex/retained",
+        workspace: "/workspace/threads/t/retained",
+        user: "worker2",
+        container: "vm-1",
+        ownerFence: 7,
+        publicationBaseSha: "a".repeat(40),
+      },
+      branchPublication: {
+        version: 1,
+        repo: "owner/name",
+        branches: [],
+        complete: false,
+        pending: { id: "unconfirmed", ref: "codex/retained", headSha: "b".repeat(40) },
+      },
+    };
+    expect((await post("/runs/claim", claimBody(key, runId, threadKey, "g1", { state }))).status).toBe(200);
+    expect((await post("/runs/workspace-ack", { storeKey: key, ...owner, revision: 1 })).data).toMatchObject({
+      ok: false,
+      reason: "owner-live",
+    });
+    expect(
+      (
+        await post("/runs/finish", {
+          storeKey: key,
+          runId,
+          gen: "g1",
+          record: { ...record(runId, threadKey), repo: "owner/name", finishedAt: 2_000 },
+        })
+      ).status,
+    ).toBe(200);
+    const read = () => post("/runs/preservation-owner", { storeKey: key, ...owner });
+    expect((await read()).data).toMatchObject({
+      kind: "terminal",
+      settlement: { publication: state.branchPublication },
+    });
+    expect((await post("/runs/workspace-ack", { storeKey: key, ...owner, revision: 1 })).data).toMatchObject({
+      ok: false,
+      reason: "unverified",
+    });
+    expect((await post("/runs/preservation-owner", { storeKey: key, ...owner, ownerFence: 8 })).data).toEqual({
+      kind: "absent",
+      owner: { ...owner, ownerFence: 8 },
+    });
+    expect((await read()).data).toMatchObject({ settlement: { revision: 1 } });
+  });
+
   it("returns the live owner before a stored summary, then only a non-provisional terminal row", async () => {
     const key = storeKey();
     const runId = "resident-preservation-owner";
@@ -3800,5 +4120,70 @@ describe("the plane's endings and the alarm — the cause on close, /plane/recla
       await priv.ensurePlaneAlarm(now);
       expect(await priv.ctx.storage.getAlarm()).toBe(sooner);
     });
+  });
+});
+
+describe("run ledger — durable branch publication", () => {
+  it.each(["missing", "malformed", "different"])(
+    "retains the terminal outcome using only saved producer publication: %s",
+    async (mode) => {
+      const key = storeKey();
+      const id = `publication-${mode}`;
+      const thread = `slack:C1:${id}`;
+      const projection = { version: 1 as const, repo: "private/repo", branches: [], complete: true };
+      expect((await post("/runs/claim", claimBody(key, id, thread))).status).toBe(200);
+      if (mode !== "missing")
+        expect(
+          (
+            await post("/runs/state", {
+              storeKey: key,
+              runId: id,
+              gen: "g1",
+              state: { branchPublication: mode === "malformed" ? { ...projection, version: 2 } : projection },
+            })
+          ).status,
+        ).toBe(200);
+      const terminal = record(id, thread);
+      if (mode !== "malformed")
+        terminal.branchPublication = mode === "different" ? { ...projection, complete: false } : projection;
+      expect((await post("/runs/finish", { storeKey: key, runId: id, gen: "g1", record: terminal })).status).toBe(200);
+      const stored = (await post("/runs/get", { storeKey: key, id })).data.record;
+      expect(stored).toMatchObject({ id, status: "completed" });
+      expect(stored.branchPublication).toEqual(mode === "different" ? projection : undefined);
+      expect((await post("/runs/live", { storeKey: key })).data.runs).toEqual([]);
+    },
+  );
+
+  it("folds the fenced producer projection at finish independently of events and hides it on summaries", async () => {
+    const key = storeKey();
+    const id = "publication-owner";
+    const thread = "slack:C1:publication-owner";
+    const branchPublication = {
+      version: 1,
+      repo: "private/repo",
+      complete: false,
+      branches: [{ ref: "accepted/branch", pr: 7 }],
+      pending: { id: "intent-a", ref: "uncertain/branch", headSha: "a".repeat(40) },
+    };
+    expect((await post("/runs/claim", claimBody(key, id, thread))).status).toBe(200);
+    expect(
+      await post("/runs/state", { storeKey: key, runId: id, gen: "foreign", state: { branchPublication } }),
+    ).toMatchObject({ status: 409, data: { reason: "fenced" } });
+    expect(
+      (await post("/runs/state", { storeKey: key, runId: id, gen: "g1", state: { branchPublication } })).status,
+    ).toBe(200);
+    expect(
+      (await post("/runs/finish", { storeKey: key, runId: id, gen: "g1", record: record(id, thread) })).status,
+    ).toBe(200);
+    const stored = (await post("/runs/get", { storeKey: key, id })).data.record as RunRecord;
+    expect(stored.branchPublication).toEqual(branchPublication);
+    expect(stored.events.some((event) => event.type === "pr_opened")).toBe(false);
+    for (const summary of [
+      (await post("/runs/summary", { storeKey: key, id })).data.summary,
+      ...(await post("/runs/list", { storeKey: key })).data.items,
+    ]) {
+      expect(summary).not.toHaveProperty("branchPublication");
+      expect(JSON.stringify(summary)).not.toContain("uncertain/branch");
+    }
   });
 });

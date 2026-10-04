@@ -87,9 +87,8 @@ export function parseRefByDefault(value: unknown): ParsedRefByDefault {
   return { error: "refByDefault must be a boolean when present" };
 }
 
-/** A branch a run pushed and the pull request it heads — what the run's
- *  release hands the resident (`/detach` body `pushed`), read off the run's
- *  own `pr_opened` events. */
+/** A producer-confirmed branch and its pull request, passed to the resident
+ *  by the run's release (`/detach` body `pushed`). */
 export interface PushedBranch {
   ref: string;
   pr: number;

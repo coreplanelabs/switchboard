@@ -115,6 +115,13 @@ describe("RunsService.getRun", () => {
       },
     ];
     const internal = {
+      branchPublication: {
+        version: 1 as const,
+        repo: "private/repo",
+        complete: false,
+        branches: [],
+        pending: { id: "private-intent", ref: "private/branch", headSha: "c".repeat(40) },
+      },
       workReads,
       sourceReads: {
         version: 1 as const,
@@ -165,6 +172,9 @@ describe("RunsService.getRun", () => {
     ]) {
       const json = JSON.stringify(view);
       for (const field of [
+        "branchPublication",
+        "private-intent",
+        "private/branch",
         "sourceReads",
         "workReads",
         "private-work-act",

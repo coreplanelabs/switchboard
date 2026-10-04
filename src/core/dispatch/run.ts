@@ -213,7 +213,10 @@ export interface RunDeps
    * (src/execution/githubPulls.ts; no `gh` shell-out — AGENTS.md invariant 5).
    * Injectable so tests assert the typed inputs without a network call.
    */
-  openPullRequest?: (target: PullRequestTarget) => Promise<OpenedPullRequest>;
+  openPullRequest?: (
+    target: PullRequestTarget,
+    beforeMutation?: (pr: number | undefined) => Promise<void>,
+  ) => Promise<OpenedPullRequest>;
   /**
    * The open PR heading a branch, or null (githubPulls.findOpenPrByHead): the
    * post-step asks it when a proven-pushed branch comes with no description,

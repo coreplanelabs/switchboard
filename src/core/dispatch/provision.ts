@@ -20,6 +20,7 @@ import {
   WorkspaceReattachLeaseSpentError,
   WorkspaceReattachRefusedError,
   ReadyEnvironmentError,
+  workspaceBindingFor,
   type ReadyEnvironmentReason,
   type ExecutorSelection,
   type GithubCredentialProvider,
@@ -957,6 +958,7 @@ async function attachRound(
   const ledger = deps.runLedger;
   const runId = ctx.runId;
   const residentClaim = ledger && runId ? () => ledger.claimResident(runId, threadKey) : undefined;
+  let recordedBinding = reattach;
   // A review target's PR-derived ref is authoritative. Passing `ownPr` asks
   // the resident to preserve or conditionally move a sticky thread binding;
   // that is right for a coding follow-up, but can keep a plan unit's branch
@@ -1044,6 +1046,21 @@ async function attachRound(
           ...(remainingMs !== undefined ? { remainingMs } : {}),
           ...(requester !== undefined ? { requester } : {}),
           ...(onLiveStateObservation !== undefined ? { onLiveStateObservation } : {}),
+          onResidentBinding: async (physical) => {
+            const binding = workspaceBindingFor(
+              { backend: "resident", binding: physical },
+              profile.machine,
+              recordedBinding,
+            );
+            const tracked = ledger?.liveRuns().find((run) => run.runId === runId);
+            if (
+              ledger?.sessionPersistence &&
+              runId &&
+              (!binding || !tracked?.tracked() || (await tracked.commitState({ binding })) !== "ok")
+            )
+              throw new RefusalError(refusalOf("setup_failed", "attachment binding not durable"));
+            recordedBinding = binding;
+          },
         },
         logKey: threadKey,
         span,

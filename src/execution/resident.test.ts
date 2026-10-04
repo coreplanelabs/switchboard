@@ -769,6 +769,186 @@ describe("ResidentExecutor.readFile / writeFile", () => {
 });
 
 describe("ResidentExecutor.open (attach-on-open)", () => {
+  it.each(["missing", "wrong ref"])("latches an unacknowledged successful reattachment response: %s", async (mode) => {
+    const { calls } = stubFetch(
+      { body: ATTACH_OK },
+      { body: mode === "missing" ? {} : { ...ATTACH_OK, ref: "wrong" } },
+      { body: { content: "unsafe" } },
+    );
+    const executor = await ResidentExecutor.open({ ...OPTS, refHint: "master" });
+    await expect(executor.moveTo("b".repeat(40))).rejects.toBeInstanceOf(Error);
+    await expect(executor.readFile("private.txt")).rejects.toMatchObject({ name: "ResidentRegistrationMismatchError" });
+    expect(calls).toHaveLength(2);
+  });
+  it("holds publication while an operation's wake reattachment awaits acknowledgment", async () => {
+    let enteredAck!: () => void;
+    let rejectAck!: (error: Error) => void;
+    const entered = new Promise<void>((resolve) => {
+      enteredAck = resolve;
+    });
+    const ack = new Promise<void>((_resolve, reject) => {
+      rejectAck = reject;
+    });
+    const { calls } = stubFetch(
+      {
+        status: 503,
+        body: { error: "recreate-in-progress: attaching", reason: "recreate-in-progress", transient: true },
+      },
+      { body: { state: "warm", reason: "", inFlight: 0 } },
+      { body: ATTACH_OK },
+      { body: { stdout: "unsafe", stderr: "", exitCode: 0, truncated: false } },
+    );
+    const executor = new ResidentExecutor({
+      ...OPTS,
+      onBinding: () => {
+        enteredAck();
+        return ack;
+      },
+    });
+    const operating = executor.execResult("true");
+    const opResult = operating.catch((error) => error);
+    await entered;
+    const publishing = executor.publishBranchResult({
+      repo: "jshttp/vary",
+      doorOrigin: "https://door.test",
+      branch: "master",
+      next: "b".repeat(40),
+      bearer: "test",
+    });
+    const pubResult = publishing.catch((error) => error);
+    await Promise.resolve();
+    const count = calls.length;
+    rejectAck(new Error("unavailable"));
+    const results = await Promise.all([opResult, pubResult]);
+    expect(count).toBe(3);
+    expect(calls).toHaveLength(3);
+    for (const error of results) expect(error).toMatchObject({ name: "ResidentRegistrationMismatchError" });
+  });
+  it("holds concurrent commands behind attachment acknowledgment and latches a failed write", async () => {
+    let rejectAck!: (error: Error) => void;
+    let enteredAck!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enteredAck = resolve;
+    });
+    const ack = new Promise<void>((_resolve, reject) => {
+      rejectAck = reject;
+    });
+    const { calls } = stubFetch({ body: ATTACH_OK }, { body: ATTACH_OK }, { body: { content: "unsafe" } });
+    let opening = true;
+    const executor = await ResidentExecutor.open({
+      ...OPTS,
+      onBinding: () => {
+        if (opening) {
+          opening = false;
+          return Promise.resolve();
+        }
+        enteredAck();
+        return ack;
+      },
+    });
+    const moving = executor.moveTo("b".repeat(40));
+    const moveResult = expect(moving).rejects.toMatchObject({ name: "ResidentRegistrationMismatchError" });
+    await entered;
+    const reading = executor.readFile("/workspace/private");
+    const readResult = expect(reading).rejects.toMatchObject({ name: "ResidentRegistrationMismatchError" });
+    await Promise.resolve();
+    expect(calls).toHaveLength(2);
+    rejectAck(new Error("unavailable"));
+    await Promise.all([moveResult, readResult]);
+    expect(calls).toHaveLength(2);
+  });
+
+  it("latches a server registration refusal before later commands", async () => {
+    const { calls } = stubFetch(
+      { body: ATTACH_OK },
+      { status: 409, body: { error: "run-registration-mismatch: stale" } },
+      { body: { content: "unsafe" } },
+    );
+    const executor = await ResidentExecutor.open(OPTS);
+    await expect(executor.moveTo("b".repeat(40))).rejects.toMatchObject({ name: "ResidentRegistrationMismatchError" });
+    await expect(executor.readFile("/workspace/private")).rejects.toMatchObject({
+      name: "ResidentRegistrationMismatchError",
+    });
+    expect(calls).toHaveLength(2);
+  });
+
+  it("blocks commands after a successful physical attach whose binding acknowledgment failed", async () => {
+    const { calls } = stubFetch(
+      { body: { ...ATTACH_OK, sha: "a".repeat(40), ownerFence: 7 } },
+      { body: { ...ATTACH_OK, sha: "b".repeat(40), ownerFence: 7 } },
+    );
+    let reject = false;
+    const ex = await ResidentExecutor.open({
+      ...OPTS,
+      runId: "run-1",
+      ownerGen: "gen-1",
+      ownerFence: 7,
+      onBinding: async () => {
+        if (reject) throw new Error("storage unavailable");
+      },
+    });
+    reject = true;
+    await expect(ex.moveTo("b".repeat(40))).rejects.toThrow("attachment binding could not be saved");
+    await expect(ex.readFile("private.txt")).rejects.toThrow("attachment binding could not be saved");
+    await expect(
+      ex.publishBranchResult({
+        repo: "jshttp/vary",
+        doorOrigin: "https://door.test",
+        branch: "master",
+        next: "b".repeat(40),
+        bearer: "test",
+      }),
+    ).rejects.toThrow("attachment binding could not be saved");
+    expect(calls).toHaveLength(2);
+  });
+
+  it("awaits the current successful attachment binding and replaces an earlier fence on a later attach", async () => {
+    let saved: unknown;
+    let acknowledge!: () => void;
+    const wait = new Promise<void>((resolve) => {
+      acknowledge = resolve;
+    });
+    const current = { ...ATTACH_OK, sha: "a".repeat(40), ownerFence: 7, container: "vm-1" };
+    stubFetch({ body: current }, { body: { ...ATTACH_OK, sha: "b".repeat(40), container: "vm-2" } });
+    let opened = false;
+    const opening = ResidentExecutor.open({
+      ...OPTS,
+      runId: "run-1",
+      ownerGen: "gen-1",
+      ownerFence: 7,
+      onBinding: async (binding) => {
+        saved = structuredClone(binding);
+        await wait;
+      },
+    }).then((ex) => {
+      opened = true;
+      return ex;
+    });
+    await vi.waitFor(() => expect(saved).toMatchObject({ ownerFence: 7 }));
+    expect(opened).toBe(false);
+    acknowledge();
+    const ex = await opening;
+    const selection = { executor: ex, backend: "resident" as const, binding: ex.binding };
+    await ex.moveTo("b".repeat(40));
+    expect(saved).toMatchObject({ container: "vm-2" });
+    expect(saved).not.toHaveProperty("ownerFence");
+    expect(selection.binding).toMatchObject({ ownerFence: 7 });
+  });
+
+  it("retains the acknowledged attachment fence and refuses a different fence before commands", async () => {
+    const owner = { runId: "run-1", ownerGen: "gen-1", ownerFence: 7 };
+    stubFetch({ body: { ...ATTACH_OK, ownerFence: 7 } }, { body: { ...ATTACH_OK, ownerFence: 8 } });
+    const ex = await ResidentExecutor.open({ ...OPTS, ...owner });
+    expect(ex.binding).toMatchObject({ ownerFence: 7, ownerGen: "gen-1" });
+    await expect(ResidentExecutor.open({ ...OPTS, ...owner })).rejects.toThrow(/attachment fence mismatch/);
+  });
+
+  it("does not invent an acknowledged attachment fence from the request", async () => {
+    stubFetch({ body: ATTACH_OK });
+    const ex = await ResidentExecutor.open({ ...OPTS, runId: "run-1", ownerGen: "gen-1", ownerFence: 7 });
+    expect(ex.binding).not.toHaveProperty("ownerFence");
+  });
+
   it("attaches with the refHint and returns a ready executor", async () => {
     const { calls } = stubFetch({ body: ATTACH_OK });
     const ex = await ResidentExecutor.open({ ...OPTS, refHint: "master" });
@@ -1459,6 +1639,22 @@ describe("ResidentExecutor.release — return the thread's pool user when a run 
 // is one more /attach carrying that sha — the resident's own fetch-on-attach
 // (item 51) does the rest. The new sha sticks for every later attach.
 describe("ResidentExecutor.moveTo", () => {
+  it("an explicit move overrides resumed reuse for that attach, then restores ordinary recovery reuse", async () => {
+    const next = "b".repeat(40);
+    const { calls } = stubFetch(
+      { body: ATTACH_OK },
+      { body: { ...ATTACH_OK, sha: next } },
+      { body: { ...ATTACH_OK, sha: next } },
+    );
+    const ex = await ResidentExecutor.open({ ...OPTS, refHint: "master", reuse: true });
+    await ex.moveTo(next);
+    expect(sentBody(calls[1])).toMatchObject({ sha: next });
+    expect(sentBody(calls[1])).not.toHaveProperty("reuse");
+    await ex.attach();
+    expect(sentBody(calls[2])).toMatchObject({ reuse: true });
+    expect(sentBody(calls[2])).not.toHaveProperty("sha");
+  });
+
   it("re-attaches with the new sha and answers the sha the worktree is now at", async () => {
     const NEW = "d75b5a51aba97d43c64a42c96e580dd9abbfd78e";
     const OLD = "e8e43f480a09b76989b85ebe6a2a254d99a4d2a3";

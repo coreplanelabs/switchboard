@@ -141,11 +141,21 @@ function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION
           },
         },
       ];
-      await store.put({ ...base, sourceReads, contextDependencies, workReads });
+      const branchPublication = {
+        version: 1 as const,
+        repo: "private/repo",
+        complete: false,
+        branches: [],
+        pending: { id: "intent-a", ref: "private/branch", headSha: "a".repeat(40), pr: 7 },
+      };
+      await store.put({ ...base, sourceReads, contextDependencies, workReads, branchPublication });
+      expect((await store.get(base.id))?.branchPublication).toEqual(branchPublication);
       expect((await store.get(base.id))?.workReads).toEqual(workReads);
       expect((await store.get(base.id))?.sourceReads).toEqual(sourceReads);
       for (const summary of [await store.getSummary(base.id), ...(await store.list({}))]) {
         expect(summary?.contextDependencies).toEqual(contextDependencies);
+        expect(summary).not.toHaveProperty("branchPublication");
+        expect(JSON.stringify(summary)).not.toContain("private/branch");
         expect(summary).not.toHaveProperty("sourceReads");
         expect(summary).not.toHaveProperty("workReads");
         expect(JSON.stringify(summary)).not.toContain("original private source");

@@ -184,6 +184,8 @@ export interface ExecutorContext {
   requester?: string;
   /** Awaited observations from the resident's two wait states. */
   onLiveStateObservation?: ResidentLiveStateObserver;
+  /** Awaited for every successful resident attachment, including automatic recovery. */
+  onResidentBinding?: (binding: ResidentBinding) => Promise<void>;
 }
 
 /** Where a run's workspace is (docs/reference/specs/run-history.md item 54):
@@ -203,6 +205,9 @@ export interface WorkspaceBinding {
   /** The identity of the container the workspace is in (docs/reference/specs/harness-pi.md
    *  item 8), when the attach answered one: the resident's is its VM's boot id. */
   container?: string;
+  /** Exact successful resident attach fence; absent means unverified. */
+  ownerFence?: number;
+  ownerGen?: string;
   /** The physical Cloudflare sandbox identity, distinct from the logical thread for new read-profile reviews. */
   sandboxKey?: string;
   /** Trusted fetched branch tip before this run can change its checkout. */
@@ -267,6 +272,12 @@ export function workspaceBindingOf(value: unknown): WorkspaceBinding | undefined
       ? { sandboxKey: typeof v.sandboxKey === "string" ? v.sandboxKey : "" }
       : {}),
     ...(typeof v.container === "string" && v.container ? { container: v.container } : {}),
+    ...(v.backend === "resident" && Number.isSafeInteger(v.ownerFence) && Number(v.ownerFence) > 0
+      ? { ownerFence: v.ownerFence as number }
+      : {}),
+    ...(v.backend === "resident" && typeof v.ownerGen === "string" && /^[A-Za-z0-9_.:-]{1,128}$/.test(v.ownerGen)
+      ? { ownerGen: v.ownerGen }
+      : {}),
     ...(typeof v.publicationBaseSha === "string" && /^[0-9a-f]{40}$/.test(v.publicationBaseSha)
       ? { publicationBaseSha: v.publicationBaseSha }
       : {}),
@@ -276,7 +287,8 @@ export function workspaceBindingOf(value: unknown): WorkspaceBinding | undefined
 
 /** The checkout supplied by attach, seed or the verified pre-model cold clone. */
 export function checkoutOfSelection(selection: ExecutorSelection): string | undefined {
-  return selection.binding?.workspace ?? selection.seeded?.workspace ?? selection.cold?.workspace;
+  const binding = selection.executor instanceof ResidentExecutor ? selection.executor.binding : selection.binding;
+  return binding?.workspace ?? selection.seeded?.workspace ?? selection.cold?.workspace;
 }
 
 const COLD_CHECKOUT_PATH = /^\/(?:[A-Za-z0-9._-]+\/)*checkout$/;
@@ -349,16 +361,16 @@ export async function prepareColdPublicationCheckout(
  *  and a resident's pool user and container. Nothing for a class without a
  *  workspace (`none`): there is nothing to re-attach. */
 export function workspaceBindingFor(
-  selection: ExecutorSelection,
+  selection: Omit<ExecutorSelection, "executor"> & Partial<Pick<ExecutorSelection, "executor">>,
   machine: MachineClass = "repo-resident",
   recorded?: WorkspaceBinding | null,
 ): WorkspaceBinding | undefined {
   if (machine === "none" || selection.backend === undefined) return undefined;
-  const b = selection.binding;
-  const checkout = checkoutOfSelection(selection);
+  const b = selection.executor instanceof ResidentExecutor ? selection.executor.binding : selection.binding;
+  const checkout = b?.workspace ?? selection.seeded?.workspace ?? selection.cold?.workspace;
   const publicationBaseSha =
     recorded === undefined
-      ? (b?.sha ?? selection.seeded?.sha ?? selection.cold?.sha)
+      ? (selection.binding?.sha ?? b?.sha ?? selection.seeded?.sha ?? selection.cold?.sha)
       : recorded?.backend === selection.backend
         ? recorded.publicationBaseSha
         : undefined;
@@ -367,6 +379,8 @@ export function workspaceBindingFor(
     ...(b?.ref !== undefined || selection.cold?.ref !== undefined ? { ref: b?.ref ?? selection.cold?.ref } : {}),
     ...(checkout !== undefined ? { workspace: checkout } : {}),
     ...(b?.user !== undefined ? { user: b.user } : {}),
+    ...(selection.backend === "resident" && b?.ownerFence !== undefined ? { ownerFence: b.ownerFence } : {}),
+    ...(selection.backend === "resident" && b?.ownerGen !== undefined ? { ownerGen: b.ownerGen } : {}),
     ...(b?.container !== undefined || selection.seeded?.preservationContainer !== undefined
       ? { container: b?.container ?? selection.seeded?.preservationContainer }
       : {}),
@@ -1003,6 +1017,7 @@ async function selectExecutor(
             ...(ctx.ownPr !== undefined ? { ownPr: ctx.ownPr } : {}),
             ...(ctx.remainingMs !== undefined ? { remainingMs: ctx.remainingMs } : {}),
             ...(ctx.onLiveStateObservation !== undefined ? { onLiveStateObservation: ctx.onLiveStateObservation } : {}),
+            ...(ctx.onResidentBinding !== undefined ? { onBinding: ctx.onResidentBinding } : {}),
           },
           nonWarm,
           span,
@@ -1477,6 +1492,7 @@ async function reattachWorkspace(
     runBudgetMs: minutesToMs(ctx.profile.minutes),
     ...(ctx.setupRemainingMs !== undefined ? { setupRemainingMs: ctx.setupRemainingMs } : {}),
     ...(ctx.onLiveStateObservation !== undefined ? { onLiveStateObservation: ctx.onLiveStateObservation } : {}),
+    ...(ctx.onResidentBinding !== undefined ? { onBinding: ctx.onResidentBinding } : {}),
   });
   let binding: ResidentBinding;
   try {

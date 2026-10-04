@@ -45,7 +45,7 @@ describe("the `reuse` body field reaches the worktree decision", () => {
       /attachThreadTraced\(\s*threadKey,\s*refHint,\s*readonly,\s*wantSha,\s*reuse,\s*record,\s*t0,\s*reason,\s*githubDoor,\s*runBudgetMs,\s*runId,\s*ownerGen,\s*ownerFence,?\s*\)/,
     );
     expect(method("attachThreadTraced")).toMatch(
-      /attachThreadBody\(\s*threadKey,\s*refHint,\s*readonly,\s*wantSha,\s*reuse,\s*resourceId,\s*t0,\s*record,\s*reason,\s*githubDoor,?\s*\)/,
+      /attachThreadBody\(\s*threadKey,\s*refHint,\s*readonly,\s*wantSha,\s*reuse,\s*resourceId,\s*t0,\s*record,\s*reason,\s*githubDoor,[\s\S]*?registered && readonly && wantSha !== null && !reuse[\s\S]*?\)/,
     );
     expect(method("attachThreadBody")).toMatch(/reuse: boolean,/);
     expect(method("attachThreadBody")).toMatch(/attachThreadCreate\(\{[\s\S]*?\breuse,[\s\S]*?\}\)/);
@@ -59,11 +59,11 @@ describe("ensureThreadWorktree keeps a reusing attach's tree and wipes only on a
   it("takes the flag, measures the tree as WorktreeFacts and asks decideWorktree", () => {
     expect(source).toMatch(/import \{[^}]*decideWorktree[^}]*\} from "\.\.\/\.\.\/src\/execution\/residentReuse\.js";/);
     expect(ensure).toMatch(
-      /opts: \{ detached: boolean; reuse: boolean; refChanged: boolean; priorBinding\?: ThreadBinding \}/,
+      /opts: \{[\s\S]*?detached: boolean;[\s\S]*?reuse: boolean;[\s\S]*?refChanged: boolean;[\s\S]*?priorBinding\?: ThreadBinding;[\s\S]*?advanceOwner\?: WorkspaceOwner;?[\s\S]*?\}/,
     );
     expect(ensure).toMatch(/const facts: WorktreeFacts = \{ exists: false \};/);
     expect(ensure).toMatch(
-      /const decision = decideWorktree\(\{[\s\S]*?reuse: opts\.reuse,[\s\S]*?modeSwitch,[\s\S]*?refChanged: opts\.refChanged,[\s\S]*?sha,[\s\S]*?worktreePath: wt,[\s\S]*?facts,[\s\S]*?\}\);/,
+      /decideWorktree\(\{[\s\S]*?reuse: opts\.reuse,[\s\S]*?modeSwitch,[\s\S]*?refChanged: opts\.refChanged,[\s\S]*?sha,[\s\S]*?worktreePath: wt,[\s\S]*?facts,[\s\S]*?\}\);/,
     );
   });
 

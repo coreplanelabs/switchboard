@@ -1,3 +1,4 @@
+import { advanceWorkspace } from "./workspaceAdvance.js";
 import type { CredentialInspection, CredentialInspectionInput } from "./credentialInspection.js";
 import type { ExecResult } from "./execResult.js";
 export type { ExecResult } from "./execResult.js";
@@ -89,8 +90,7 @@ export interface Executor {
   /** Optional: bring the workspace to `sha` — the PR head that moved while a
    *  review ran (agent-review.md item 12) — fetching as needed, and answer the
    *  commit the workspace is now at (which may differ if the ref moved again).
-   *  Absent on executors whose workspace the model manages itself (a sandbox
-   *  clone): the dispatcher then tells the model to check the commit out. */
+   *  Absence refuses re-review before another model turn. */
   moveTo?(sha: string, opts?: MoveOptions): Promise<{ sha: string }>;
 }
 
@@ -344,7 +344,7 @@ export class ExecControlResetError extends Error {
   }
 }
 
-const MAX_OUTPUT = 120_000;
+export const MAX_OUTPUT = 120_000;
 
 export function truncate(s: string): string {
   return s.length > MAX_OUTPUT ? s.slice(0, MAX_OUTPUT) + `\n...[truncated ${s.length - MAX_OUTPUT} chars]` : s;
@@ -392,6 +392,28 @@ export class LocalExecutor implements Executor {
       return truncate(`exit ${r.error.code ?? "error"}: ${r.error.message}\n${parts}`);
     }
     return truncate(parts || "(no output)");
+  }
+
+  async execResult(command: string, opts?: ExecOptions): Promise<ExecResult> {
+    const identityEnv = await this.resolveEnvs?.();
+    const env = identityEnv === undefined && opts?.env === undefined ? undefined : { ...opts?.env, ...identityEnv };
+    const result = await runBash(command, this.workspaceDir, opts?.signal, clampBashTimeout(opts?.timeoutMs), env);
+    return {
+      stdout: result.stdout,
+      stderr: result.stderr,
+      exitCode: result.timedOut
+        ? 124
+        : result.error
+          ? typeof result.error.code === "number"
+            ? result.error.code
+            : 1
+          : 0,
+      truncated: result.stdout.length > MAX_OUTPUT || result.stderr.length > MAX_OUTPUT,
+    };
+  }
+
+  moveTo(sha: string, opts?: MoveOptions): Promise<{ sha: string }> {
+    return advanceWorkspace((command, options) => this.execResult(command, options), sha, opts);
   }
 
   async readFile(path: string): Promise<string> {

@@ -1,3 +1,5 @@
+import { PUSHED_MAX } from "../../execution/residentRebind.js";
+import { branchPublicationOf, type BranchPublication } from "../branchPublication.js";
 import { createWorkFreshness } from "./workFreshness.js";
 import { appendRunReport } from "../runLedger/threadSession.js";
 import { directAudienceStampOf } from "../runLedger/inboxMessage.js";
@@ -140,6 +142,7 @@ import {
   workLeftBehindLabel,
   workLeftBehindOf,
   workLeftBehindSummary,
+  type PrPublicationFact,
 } from "../codingPrPostStep.js";
 import { descriptionTurnTarget, runDescriptionTurn } from "../descriptionTurn.js";
 import { runVerdictTurn } from "../verdictTurn.js";
@@ -151,7 +154,7 @@ import { RunEventLane } from "../runEventLane.js";
 import { oneLine } from "../redact.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "../runFriction.js";
 import { markdownOutput } from "../llmOutput/index.js";
-import { callsInFlight, pushedBranchesOf, type RunFailure, type RunSeed, type RunStatus } from "../runRecord.js";
+import { callsInFlight, type RunFailure, type RunSeed, type RunStatus } from "../runRecord.js";
 import type { RunHandle, RunRegistry } from "../runRegistry.js";
 import type { LedgerRun } from "../runLedger/writeThrough.js";
 import { assignRunLiveState } from "../runLiveState.js";
@@ -519,6 +522,92 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // the checklist the card shows, the verdict/description already submitted,
   // the branch already pushed.
   const restored = resume?.row.state ?? {};
+  let branchPublication: BranchPublication | undefined = branchPublicationOf(restored.branchPublication, repoCtx.repo);
+  if (resume === undefined && isCodingPrRun && ledgerRun?.tracked())
+    branchPublication = {
+      version: 1,
+      ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
+      branches: [],
+      complete: true,
+    };
+  if (branchPublication) ledgerRun?.setState({ branchPublication });
+  let publicationAction: BranchPublication["pending"];
+  const recordBranchPublication = async ({ kind, target, ownsBranch }: PrPublicationFact): Promise<void> => {
+    if (kind !== "accepted" && tailSkipped()) throw new Error("publication stopped");
+    if (
+      (ownsBranch && !target.ref) ||
+      (!target.ref && (!Number.isSafeInteger(target.pr) || target.pr! < 1)) ||
+      !/^[0-9a-f]{40}$/.test(target.headSha)
+    )
+      throw new Error("publication target unavailable");
+    const current =
+      branchPublication ??
+      (resume === undefined ? { version: 1 as const, repo: target.repo, branches: [], complete: true } : undefined);
+    if (
+      !current ||
+      (current.repo !== undefined && current.repo !== target.repo) ||
+      (!current.complete && current.pending !== undefined && publicationAction === undefined)
+    )
+      throw new Error("publication mapping incomplete");
+    if (ownsBranch && !current.branches.some((b) => b.ref === target.ref) && current.branches.length >= PUSHED_MAX) {
+      branchPublication = { ...current, complete: false };
+      await ledgerRun?.commitState({ branchPublication });
+      throw new Error("publication mapping capacity");
+    }
+    let proposed: BranchPublication;
+    if (kind === "pending") {
+      if (
+        publicationAction &&
+        (publicationAction.ref !== target.ref ||
+          publicationAction.headSha !== target.headSha ||
+          (publicationAction.pr !== undefined && publicationAction.pr !== target.pr))
+      )
+        throw new Error("publication target changed");
+      publicationAction = {
+        id: publicationAction?.id ?? randomUUID(),
+        ref: target.ref,
+        headSha: target.headSha,
+        ...(target.pr !== undefined ? { pr: target.pr } : {}),
+      };
+      proposed = { ...current, repo: target.repo, complete: false, pending: publicationAction };
+      branchPublication = proposed;
+    } else {
+      if (!Number.isSafeInteger(target.pr) || target.pr! < 1) {
+        branchPublication = { ...current, complete: false };
+        await ledgerRun?.commitState({ branchPublication });
+        throw new Error("publication target unavailable");
+      }
+      if (
+        kind === "accepted" &&
+        (!publicationAction ||
+          publicationAction.ref !== target.ref ||
+          publicationAction.headSha !== target.headSha ||
+          (publicationAction.pr !== undefined && publicationAction.pr !== target.pr))
+      )
+        throw new Error("publication acceptance mismatch");
+      const branches = ownsBranch
+        ? [...current.branches.filter((b) => b.ref !== target.ref), { ref: target.ref!, pr: target.pr! }]
+        : current.branches;
+      proposed = {
+        version: 1,
+        repo: target.repo,
+        branches,
+        complete: [...branchReceipts, ...publicationReceipts].every((receipt) =>
+          branches.some((branch) => branch.ref === receipt.ref),
+        ),
+      };
+      if (!branchPublicationOf(proposed)) throw new Error("publication mapping capacity");
+      // Until the accepted projection is acknowledged, local release stays closed.
+      branchPublication = { ...current, complete: false };
+    }
+    const gate = await ledgerRun?.commitState({ branchPublication: proposed });
+    if (gate !== "ok") throw new Error(`publication state ${gate ?? "unavailable"}`);
+    branchPublication = proposed;
+    if (kind !== "pending") publicationAction = undefined;
+    // A stop can arrive while the intent is being saved. Acceptance must still
+    // be recorded for an already-issued mutation; no new call follows a stop.
+    if (kind !== "accepted" && tailSkipped()) throw new Error("publication stopped");
+  };
   // An intent without a completed outcome is a possible remote write. A
   // restart never guesses that it was harmless from an absent local event.
   // The recorder's same durable intent carries a terminal no-write outcome.
@@ -553,6 +642,15 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     )
       ? (restored.branchPushReceipts as Array<Extract<RunEvent, { type: "pushed_head" }>>)
       : [];
+  if (
+    branchPublication &&
+    [...branchReceipts, ...publicationReceipts].some(
+      (receipt) => !branchPublication?.branches.some((branch) => branch.ref === receipt.ref),
+    )
+  ) {
+    branchPublication = { ...branchPublication, complete: false };
+    ledgerRun?.setState({ branchPublication });
+  }
   const pushedEventsOn = (ref: string): Extract<RunEvent, { type: "pushed_head" }>[] =>
     (registry.snapshot(run.id, run.token)?.events ?? []).filter(
       (event): event is Extract<RunEvent, { type: "pushed_head" }> => event.type === "pushed_head" && event.ref === ref,
@@ -1444,7 +1542,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // thread. Hard-stop is read at CALL time — it may land during the run.
   // Under `post.workspace_release`: the release's own call is that span's child.
   // The release hands over what the run pushed (resident-repos item 16a) —
-  // the branches its `pr_opened` events name, read off the run's own backlog
+  // the producer's retained branch mappings
   // (the same read the finish makes) at CALL time so the post-step's event is
   // in — so a resident thread remembers its own branches once the clean tree
   // is gone and a follow-up can rebind onto them.
@@ -1487,7 +1585,19 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         }).catch(() => false);
         if (!recorded && !mandatory && publicationSettlement.publication.kind !== "accepted") return;
       }
-      const pushed = pushedBranchesOf(recordEvents());
+      if (
+        isCodingPrRun &&
+        (!ledgerRun?.tracked() ||
+          branchPublication?.complete !== true ||
+          [...branchReceipts, ...publicationReceipts].some(
+            (receipt) => !branchPublication?.branches.some((branch) => branch.ref === receipt.ref),
+          ) ||
+          (acceptedSalvageHead !== undefined &&
+            !branchPublication?.branches.some((branch) => branch.ref === acceptedSalvageHead?.ref))) &&
+        !mandatory
+      )
+        return;
+      const pushed = branchPublication?.branches ?? [];
       const result = await round
         .release({
           hardStopped: run.control.requested === "hard",
@@ -2004,7 +2114,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               )
                 return;
               const pending = { id: randomUUID(), update };
-              committed = await ledgerRun.setStateAndFlush({ doorPublicationPending: pending });
+              if (branchPublication && !branchPublication.branches.some((branch) => branch.ref === authority.ref))
+                branchPublication = { ...branchPublication, complete: false };
+              committed = await ledgerRun.setStateAndFlush({
+                doorPublicationPending: pending,
+                ...(branchPublication !== undefined ? { branchPublication } : {}),
+              });
               if (committed) activeDoorPublication = pending;
               else blockExistingPrPublication("the Git door publication intent could not be committed durably");
             });
@@ -2041,6 +2156,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                 committed = await ledgerRun.setStateAndFlush({
                   doorPublicationPending: null,
                   publicationReceipts: [...publicationReceipts, receipt],
+                  ...(branchPublication !== undefined ? { branchPublication } : {}),
                 });
                 if (committed) {
                   activeDoorPublication = undefined;
@@ -2126,7 +2242,13 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             await events.write(async () => {
               if (!ledgerRun?.tracked() || activeDoorPublication) return;
               const pending = { id: randomUUID(), update };
-              committed = await ledgerRun.setStateAndFlush({ doorPublicationPending: pending });
+              const ref = update.ref.slice("refs/heads/".length);
+              if (branchPublication && !branchPublication.branches.some((branch) => branch.ref === ref))
+                branchPublication = { ...branchPublication, complete: false };
+              committed = await ledgerRun.setStateAndFlush({
+                doorPublicationPending: pending,
+                ...(branchPublication !== undefined ? { branchPublication } : {}),
+              });
               if (committed) activeDoorPublication = pending;
             });
             return committed;
@@ -2150,9 +2272,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                   sha: update.next,
                   by: "push",
                 };
+                if (branchPublication && !branchPublication.branches.some((branch) => branch.ref === receipt.ref))
+                  branchPublication = { ...branchPublication, complete: false };
                 committed = await ledgerRun.setStateAndFlush({
                   doorPublicationPending: null,
                   branchPushReceipts: [...branchReceipts, receipt],
+                  ...(branchPublication !== undefined ? { branchPublication } : {}),
                 });
                 if (committed) {
                   activeDoorPublication = undefined;
@@ -3136,6 +3261,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             threadUrl: threadPageLink(requester.threadKey),
           },
           target: prTarget,
+          publication: recordBranchPublication,
           openPullRequest: deps.openPullRequest ?? openPullRequest,
           findOpenPr: deps.findOpenPrByHead ?? findOpenPrByHead,
           updatePullRequest: deps.updatePullRequest ?? updatePullRequest,

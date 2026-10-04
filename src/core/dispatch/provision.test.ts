@@ -33,6 +33,7 @@ import type { LiveRunRow } from "../runLedger/types.js";
 import {
   NullLedgerRun,
   NullLedgerWriteThrough,
+  createLedgerWriteThrough,
   type ReserveOutcome,
   type ReserveRunRequest,
 } from "../runLedger/writeThrough.js";
@@ -1520,6 +1521,74 @@ describe("reattachWorkspace — the run's recorded workspace re-attached without
     release: async () => {},
   });
 
+  it("persists each acknowledged resident attachment before continuation and removes an absent physical fence", async () => {
+    const d = deps();
+    const inner = new InMemoryRunLedger(() => NOW);
+    const through = createLedgerWriteThrough({
+      ledger: inner,
+      gen: "gen-A",
+      fallback: { put: async () => {}, abandoned: () => {} },
+      warn: () => {},
+    });
+    d.runLedger = through;
+    const run = await through.reserve({
+      runId: "physical-owner",
+      threadKey: THREAD,
+      startedAt: NOW,
+      meta: { channelId: "slack:CX", userId: "slack:UX", threadKey: THREAD },
+    });
+    if (run.kind !== "tracked") throw new Error("reservation missing");
+    const r = request(d, "agent:coding fix it", "coding");
+    attachState.reattached = round();
+    try {
+      await reattachWorkspace(d, {
+        runId: "physical-owner",
+        ownerGen: "gen-A",
+        threadKey: THREAD,
+        agent: r.agent,
+        profile: r.profile,
+        repoCtx: { repo: "acme/api", ref: "main" },
+        root: r.root,
+        clock: () => NOW,
+        reattach: { ...binding, publicationBaseSha: "a".repeat(40) },
+      });
+      const observe = attachState.rounds[0].onResidentBinding!;
+      await observe({
+        ref: "main",
+        sha: "b".repeat(40),
+        workspace: binding.workspace,
+        user: "worker2",
+        container: "vm-1",
+        ownerFence: 7,
+      });
+      expect(inner.live.get("physical-owner")?.state.binding).toMatchObject({
+        ownerFence: 7,
+        publicationBaseSha: "a".repeat(40),
+        container: "vm-1",
+      });
+      await observe({
+        ref: "main",
+        sha: "c".repeat(40),
+        workspace: binding.workspace,
+        user: "worker3",
+        container: "vm-2",
+      });
+      expect(inner.live.get("physical-owner")?.state.binding).toMatchObject({
+        user: "worker3",
+        publicationBaseSha: "a".repeat(40),
+        container: "vm-2",
+      });
+      expect(inner.live.get("physical-owner")?.state.binding).not.toHaveProperty("ownerFence");
+      inner.setState = async () => ({ ok: false, reason: "fenced" });
+      await expect(observe({ ref: "main", sha: "c".repeat(40), ownerFence: 8 })).rejects.toThrow(
+        "attachment binding not durable",
+      );
+      expect(inner.live.get("physical-owner")?.state.binding).not.toHaveProperty("ownerFence");
+    } finally {
+      await run.run.abandon();
+    }
+  });
+
   it("re-attaches a recorded binding mid-run with no gate context — no message, no card, no refusal wrap — and hands back the round the dispatch-time attach hands back for the same binding: the factory sees the same round input with the binding, under a dispatch.workspace.attach span each time", async () => {
     const d = deps();
     const r = request(d, "agent:coding fix it", "coding");
@@ -1560,9 +1629,16 @@ describe("reattachWorkspace — the run's recorded workspace re-attached without
     // The gate path alone carries the awaited resident observation sink: the
     // mid-run re-attach has no card to paint, so the factory sees the same
     // round input less that one sink.
-    const { onLiveStateObservation, ...gateRound } = attachState.rounds[1] as Record<string, unknown>;
+    const {
+      onLiveStateObservation,
+      onResidentBinding: gatedBinding,
+      ...gateRound
+    } = attachState.rounds[1] as Record<string, unknown>;
     expect(typeof onLiveStateObservation).toBe("function");
-    expect(attachState.rounds[0]).toEqual(gateRound);
+    const { onResidentBinding: midBinding, ...midRound } = attachState.rounds[0];
+    expect(typeof gatedBinding).toBe("function");
+    expect(typeof midBinding).toBe("function");
+    expect(midRound).toEqual(gateRound);
     expect(attachState.rounds[0]).toMatchObject({
       threadKey: THREAD,
       repo: "acme/api",

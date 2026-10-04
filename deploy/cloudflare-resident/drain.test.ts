@@ -15,7 +15,7 @@ import {
   staleHolds,
 } from "./drain";
 import { DRAIN } from "../../src/core/budgets";
-import { readSource } from "./testing/sourceScan";
+import { methodOf, readSource } from "./testing/sourceScan";
 
 describe("targeted deploy admission recovery", () => {
   const idle = { state: "warm", executingRuns: 0, unknownRuns: 0, activeProcesses: 0 };
@@ -384,8 +384,7 @@ describe("the Worker's wiring (by scan)", () => {
   });
 
   it("the gate is the Durable Object's — after hydration, before the image reconcile — and only a live registration owned by this run permits reattach; the Worker-level handler gates nothing; `/residents` carries `draining`", () => {
-    const start = source.indexOf("private async attachThreadTraced(");
-    const attach = source.slice(start, start + 4000);
+    const attach = methodOf(source.slice(source.indexOf("export class ResidentDO")), "attachThreadTraced")!;
     const hydrate = attach.indexOf("await this.ensureHydrated();");
     const gate = attach.indexOf("const drain = await this.fleetDrain();");
     const reconcile = attach.indexOf('this.reconcileImage("attach")');

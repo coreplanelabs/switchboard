@@ -2010,6 +2010,15 @@ execution:
 `;
 
 describe("executor provisioning by agent resources", () => {
+  function ownedRemoteDeps(provider: Provider) {
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    const ledger = new InMemoryRunLedger();
+    const store = new InMemoryRunStore();
+    deps.runLedger = createLedgerWriteThrough({ ledger, gen: "gen-release", fallback: store, warn: () => {} });
+    deps.runStore = ledgerBackedStore(ledger, store);
+    deps.runHistoryWriter = createRunHistoryWriter({ store: deps.runStore, warn: () => {}, sleep: async () => {} });
+    return deps;
+  }
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
@@ -2088,7 +2097,7 @@ describe("executor provisioning by agent resources", () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("GITHUB_APP_ID", "");
     const provider = capturingProvider();
-    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    const deps = ownedRemoteDeps(provider);
     const { io } = fakeIO();
     const release = vi.fn(async () => ({ released: true }));
     const fake = { exec: async () => "", readFile: async () => "", writeFile: async () => "", release };
@@ -2131,7 +2140,7 @@ describe("executor provisioning by agent resources", () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("GITHUB_APP_ID", "");
     const provider = capturingProvider();
-    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    const deps = ownedRemoteDeps(provider);
     const order: string[] = [];
     const { io } = fakeIO();
     const replyInner = io.reply;
@@ -2153,7 +2162,7 @@ describe("executor provisioning by agent resources", () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("GITHUB_APP_ID", "");
     const provider = capturingProvider();
-    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    const deps = ownedRemoteDeps(provider);
     const { io } = fakeIO();
     io.reply = async () => {
       throw new Error("msg_too_long");
@@ -2403,7 +2412,7 @@ describe("executor provisioning by agent resources", () => {
         return { content: [{ type: "text", text: "summary so far" }], stopReason: "end_turn" };
       },
     };
-    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    const deps = ownedRemoteDeps(provider);
     deps.runRegistry = registry;
     const { io, replies, statuses } = fakeIO();
     const release = vi.fn(async () => ({
@@ -3236,7 +3245,10 @@ function residentFetchStub(
     }
     if (path === "/run-deadline") return new Response(JSON.stringify({ deadlineAt: 0 }), { status: 200 });
     if (path === "/exec") {
-      if (handlers.exec === undefined && body?.command !== "git rev-parse HEAD") {
+      if (
+        handlers.exec === undefined &&
+        !["git rev-parse HEAD", "git rev-parse --verify HEAD"].includes(String(body?.command))
+      ) {
         throw new Error(`unexpected fetch: ${String(url)}`);
       }
       return (
@@ -4093,7 +4105,13 @@ describe("repo/ref resolution + resident prompt selection", () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
     vi.stubEnv("GITHUB_APP_ID", "");
-    residentFetchStub({});
+    residentFetchStub({
+      attach: (body) =>
+        new Response(
+          JSON.stringify({ workspace: "/workspace/threads/t/patch-1", ref: body.refHint, sha: "abc", user: "worker2" }),
+          { status: 200 },
+        ),
+    });
     const provider = capturingProvider();
     const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
     deps.resolveRepoContext = () => ({
@@ -4236,6 +4254,11 @@ describe("review post-step", () => {
             : "fatal: not a git repository (or any of the parent directories): .git\nexit 128";
         }
         return "";
+      },
+      execResult: async (cmd: string) => {
+        order.push(`exec:${cmd}`);
+        const observed = heads.length > 1 ? heads.shift() : heads[0];
+        return { exitCode: observed ? 0 : 128, stdout: observed ? observed + "\n" : "", stderr: "", truncated: false };
       },
       readFile: async () => "",
       writeFile: async () => "",
@@ -4883,6 +4906,10 @@ describe("review post-step", () => {
           state.probeSpans.push(opts?.span?.name ?? "none");
           return `${state.head}\n`;
         },
+        execResult: async (_cmd: string, opts?: { span?: { name: string } }) => {
+          state.probeSpans.push(opts?.span?.name ?? "none");
+          return { exitCode: 0, stdout: state.head + "\n", stderr: "", truncated: false };
+        },
         readFile: async () => "",
         writeFile: async () => "",
         release: async () => {
@@ -5014,26 +5041,22 @@ describe("review post-step", () => {
       expect(headAsks.length).toBeGreaterThanOrEqual(2);
     });
 
-    it("substantive move on an executor without moveTo (sandbox clone): the follow-up tells the model to fetch + check out the new head", async () => {
-      const provider = turnsProvider([
-        { answer: "first" },
-        { verdict: { verdict: "approve", head: OTHER_HEAD }, answer: "second" },
-      ]);
+    it("substantive move on an executor without moveTo ends failed before another model turn", async () => {
+      const provider = turnsProvider([{ answer: "first" }, { answer: "must not run" }]);
       const ex = movableExecutor(PR_HEAD, { moveTo: false });
       const { deps, spy } = setup({ provider, heads: [OTHER_HEAD], commits: CHANGED });
+      const ledger = new InMemoryRunLedger();
+      const store = new InMemoryRunStore();
+      deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
+      deps.runRegistry = new RunRegistry({ genId: () => "review-refused", genToken: () => "token" });
+      deps.runLedger = createLedgerWriteThrough({ ledger, gen: "gen-review", fallback: store, warn: () => {} });
       const { io } = fakeIO();
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
       expect(ex.moves).toEqual([]);
-      const userTurns = reviewTurns(provider);
-      expect(userTurns).toHaveLength(2);
-      const followUp = userTurns[1].messages
-        .at(-1)!
-        .content.map((p) => (p.type === "text" ? p.text : ""))
-        .join("");
-      expect(followUp).toContain(`git fetch origin ${OTHER_HEAD} && git checkout ${OTHER_HEAD}`);
-      // The workspace HEAD is still the old commit (this fake model never ran the checkout), but the
-      // verdict reports the new head: observed wins → the post is refused, said in the thread.
+      expect(reviewTurns(provider)).toHaveLength(1);
       expect(spy.calls).toHaveLength(0);
+      await deps.runHistoryWriter.settled();
+      expect(ledger.finished.get("review-refused")?.status).toBe("failed");
     });
 
     it("compare unavailable (classifier has no verdict) → item 10 behaviour: pinned to the reviewed head, re-request note, one turn", async () => {
@@ -5064,28 +5087,31 @@ describe("review post-step", () => {
       );
     });
 
-    it("worktree move fails (resident refuses) → the model is told to check the new head out itself; the run continues", async () => {
-      const provider = turnsProvider([{ answer: "first" }, { answer: "second" }]);
-      const state = { head: PR_HEAD };
+    it("worktree move fails and durable review ends failed without follow-up or verdict nudge", async () => {
+      const provider = turnsProvider([{ answer: "first" }, { answer: "must not run" }]);
       vi.mocked(makeExecutor).mockResolvedValueOnce({
         executor: {
-          exec: async (cmd: string) => (/git rev-parse HEAD/.test(cmd) ? `${state.head}\n` : ""),
+          exec: async () => PR_HEAD + "\n",
+          execResult: async () => ({ exitCode: 0, stdout: PR_HEAD + "\n", stderr: "", truncated: false }),
           readFile: async () => "",
           writeFile: async () => "",
           moveTo: async () => {
-            throw new Error("not-serviceable: refreshing");
+            throw new Error("workspace-preserved: owner-unverified");
           },
-        } as never,
+        },
       });
-      const { deps } = setup({ provider, heads: [OTHER_HEAD], commits: CHANGED });
+      const { deps, spy } = setup({ provider, heads: [OTHER_HEAD], commits: CHANGED });
+      const ledger = new InMemoryRunLedger();
+      const store = new InMemoryRunStore();
+      deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
+      deps.runRegistry = new RunRegistry({ genId: () => "review-refused", genToken: () => "token" });
+      deps.runLedger = createLedgerWriteThrough({ ledger, gen: "gen-review", fallback: store, warn: () => {} });
       const { io } = fakeIO();
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
-      const userTurns = reviewTurns(provider);
-      const followUp = userTurns[1].messages
-        .at(-1)!
-        .content.map((p) => (p.type === "text" ? p.text : ""))
-        .join("");
-      expect(followUp).toContain("git fetch origin");
+      expect(reviewTurns(provider)).toHaveLength(1);
+      expect(spy.calls).toHaveLength(0);
+      await deps.runHistoryWriter.settled();
+      expect(ledger.finished.get("review-refused")?.status).toBe("failed");
     });
 
     it("the worktree move carries the run's hard stop: the signal `moveTo` receives is the run's own, so a stop requested while the move waits on the resident ends it", async () => {
@@ -5095,6 +5121,7 @@ describe("review post-step", () => {
       vi.mocked(makeExecutor).mockResolvedValueOnce({
         executor: {
           exec: async (cmd: string) => (/git rev-parse HEAD/.test(cmd) ? `${PR_HEAD}\n` : ""),
+          execResult: async () => ({ exitCode: 0, stdout: PR_HEAD + "\n", stderr: "", truncated: false }),
           readFile: async () => "",
           writeFile: async () => "",
           moveTo: async (_sha: string, o?: { signal?: AbortSignal }) => {
@@ -5788,6 +5815,11 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
 
   function codingDeps(provider: Provider) {
     const deps = makeDeps(YAML_FIXTURE, provider);
+    const inner = new InMemoryRunLedger();
+    const store = new InMemoryRunStore();
+    deps.runLedger = createLedgerWriteThrough({ ledger: inner, gen: "gen-child", fallback: store, warn: () => {} });
+    deps.runStore = ledgerBackedStore(inner, store);
+    deps.runHistoryWriter = createRunHistoryWriter({ store: deps.runStore, warn: () => {}, sleep: async () => {} });
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "main" });
     // No open PR heads any branch unless a test says otherwise: the
     // description-less post-step asks this before it offers a compare URL.
@@ -5798,7 +5830,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
   /** Only tests with an actual accepted write use this producer fixture.
    * A matching workspace/remote head without it is observation, not a push. */
   function acceptedCodingWrite(deps: TestDeps, ref: string, head: string = HEAD): void {
-    wireChildLedger(deps);
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
     const original = vi.mocked(runPiHarnessOpen).getMockImplementation();
     if (!original) throw new Error("pi harness must have its pass-through implementation");
     vi.mocked(runPiHarnessOpen).mockImplementationOnce(async (harnessDeps, run) => {
@@ -6238,7 +6270,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     deps.resolveRepoContext = () => ({
       repo: "acme/api",
       prUnpostable: { number: 41, reason: "closed" },
-      closedRecordPr: { number: 41, headSha: PR_HEAD, merged: true },
+      closedRecordPr: { number: 41, headSha: PR_HEAD, headRef: "docs/seed-header", merged: true },
     });
     codingExecutor({ head: PR_HEAD, branch: "docs/seed-header", bindingRef: "docs/seed-header" });
     const spy = openSpy();
@@ -7203,7 +7235,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
     await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), fakeIO().io);
     await deps.runHistoryWriter.settled();
-    const rec = (await store.get("r11"))!;
+    const rec = (await deps.runStore.get("r11"))!;
     expect(rec.handoff).toEqual({
       deviations: [
         { from: "an empty handoff records nothing", to: "it is recorded as empty", why: "see «redacted-github-token»" },
@@ -7881,6 +7913,7 @@ const REVIEW_PR_HEAD = "e8e43f480a09b76989b85ebe6a2a254d99a4d2a3";
 function prHeadExecutor() {
   const executor = {
     exec: async (cmd: string) => (/git rev-parse HEAD/.test(cmd) ? `${REVIEW_PR_HEAD}\n` : ""),
+    execResult: async () => ({ exitCode: 0, stdout: REVIEW_PR_HEAD + "\n", stderr: "", truncated: false }),
     readFile: async () => "",
     writeFile: async () => "",
     release: async () => ({ released: true }),
@@ -12828,6 +12861,7 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     vi.mocked(makeExecutor).mockResolvedValueOnce({
       executor: {
         exec: async (cmd: string) => (/git rev-parse HEAD/.test(cmd) ? `${PR_HEAD}\n` : ""),
+        execResult: async () => ({ exitCode: 0, stdout: PR_HEAD + "\n", stderr: "", truncated: false }),
         readFile: async () => "",
         writeFile: async () => "",
         release: async () => ({ released: true }),

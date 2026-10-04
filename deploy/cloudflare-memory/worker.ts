@@ -1,3 +1,18 @@
+import { branchPublicationOf } from "../../src/core/branchPublication.js";
+import {
+  terminalWorkspaceSettlement,
+  terminalThreadKey,
+  terminalWorkspaceRecordMatches,
+  nextWorkspaceRevision,
+  WORKSPACE_SETTLEMENTS_MAX,
+  workspaceSettlementOf,
+  workspaceOwnerKey,
+  workspaceAcknowledgment,
+  isWorkspaceOwner,
+  type WorkspaceOwner,
+  type WorkspaceSettlement,
+  type WorkspaceAck,
+} from "../../src/core/workspaceSettlement.js";
 import type { UnitSeedReceipt } from "../../src/core/coordinator/unitSeedReceipt.js";
 import { isPersonalToken } from "../../src/core/personalToken.js";
 import { preserveCheckpointState } from "../../src/core/runLedger/checkpointState.js";
@@ -1929,6 +1944,12 @@ export class RunHistoryDO extends DurableObject<Env> {
         value INTEGER NOT NULL
       );
       INSERT OR IGNORE INTO resident_claim_clock (id, value) VALUES (1, 0);
+      CREATE TABLE IF NOT EXISTS workspace_settlements (
+        owner_key TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 1,
+        json TEXT,
+        PRIMARY KEY (owner_key, revision)
+      );
       CREATE TABLE IF NOT EXISTS run_steps (
         run_id TEXT NOT NULL,
         step INTEGER NOT NULL,
@@ -4925,6 +4946,11 @@ export class RunHistoryDO extends DurableObject<Env> {
     point?: RunMetricsPoint,
     requireStoppedPause = false,
   ): Promise<FenceResult & { stored?: boolean; event?: RunFinishedSend["kind"] }> {
+    const opening = this.liveRow(runId);
+    const admitted = checkFence(opening, gen);
+    if (!admitted.ok) return admitted;
+    if (!opening || !terminalWorkspaceRecordMatches(opening, record)) return { ok: false, reason: "fenced" };
+    this.checkWorkspaceFinishCapacity(opening, record);
     record = await this.archiveCheckpoint(record);
     let out: FenceResult & { stored?: boolean } = { ok: true };
     let turnedFinal = false;
@@ -4945,7 +4971,22 @@ export class RunHistoryDO extends DurableObject<Env> {
         out = { ok: false, reason: "fenced" };
         return;
       }
+      if (!row || !terminalWorkspaceRecordMatches(row, record)) {
+        out = { ok: false, reason: "fenced" };
+        return;
+      }
+      if (row) this.checkWorkspaceFinishCapacity(row, record);
       const put = this.upsertInTransaction(record, proposal);
+      const obligation = row && terminalWorkspaceSettlement(row, record);
+      if (obligation) {
+        obligation.revision = nextWorkspaceRevision(this.workspaceRevision(obligation.owner));
+        this.sql.exec(
+          `INSERT INTO workspace_settlements (owner_key, revision, json) VALUES (?, ?, ?)`,
+          workspaceOwnerKey(obligation.owner),
+          obligation.revision,
+          JSON.stringify(obligation),
+        );
+      }
       this.deleteLiveRows([runId]);
       // The ending's cause (record 0064), recorded exactly when the live
       // row closes: the record's own status word, `restarting` reading as the
@@ -5089,24 +5130,47 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   /** Exact owner evidence for resident cleanup. Read live first and bypass
    * history retention: absence from a retained history view is not an ending. */
-  async preservationOwner(runId: string): Promise<unknown> {
+  async preservationOwner(runId: string, owner?: WorkspaceOwner): Promise<unknown> {
     const live = this.sql
-      .exec<Pick<LiveRow, "run_id" | "thread_key" | "owner_gen" | "phase" | "state_json">>(
-        `SELECT run_id, thread_key, owner_gen, phase, state_json FROM live_runs WHERE run_id = ?`,
+      .exec<Pick<LiveRow, "run_id" | "thread_key" | "owner_gen" | "phase" | "state_json" | "meta_json">>(
+        `SELECT run_id, thread_key, owner_gen, phase, state_json, meta_json FROM live_runs WHERE run_id = ?`,
         runId,
       )
       .toArray()[0];
     if (live) {
       let binding: unknown;
+      let workspaceThreadKey: string | undefined;
       try {
+        workspaceThreadKey = terminalThreadKey({ threadKey: live.thread_key, meta: JSON.parse(live.meta_json) });
         binding = (JSON.parse(live.state_json) as RunState).binding;
       } catch {
         return { kind: "unknown" };
       }
       return {
         kind: "live",
-        row: { runId: live.run_id, threadKey: live.thread_key, ownerGen: live.owner_gen, phase: live.phase, binding },
+        row: {
+          runId: live.run_id,
+          threadKey: live.thread_key,
+          ownerGen: live.owner_gen,
+          phase: live.phase,
+          binding,
+          workspaceThreadKey,
+        },
       };
+    }
+    if (owner) {
+      const settlement = this.workspaceSettlementRow(owner);
+      if (settlement) return { kind: "terminal", record: settlement.record, settlement };
+      const revision = this.workspaceRevision(owner);
+      return settlement === undefined && revision !== undefined
+        ? {
+            kind: "acknowledged",
+            owner: { runId: owner.runId, ownerGen: owner.ownerGen, ownerFence: owner.ownerFence },
+            revision,
+          }
+        : settlement === undefined
+          ? { kind: "absent", owner: { runId: owner.runId, ownerGen: owner.ownerGen, ownerFence: owner.ownerFence } }
+          : { kind: "unknown" };
     }
     const row = this.sql
       .exec<{ summary_json: string }>(`SELECT summary_json FROM runs WHERE run_id = ?`, runId)
@@ -5127,6 +5191,74 @@ export class RunHistoryDO extends DurableObject<Env> {
         publicationSettlement: record.publicationSettlement,
       },
     };
+  }
+
+  private workspaceSettlementRow(owner: WorkspaceOwner, revision?: number): WorkspaceSettlement | null | undefined {
+    const row = this.sql
+      .exec<{ json: string | null; revision: number }>(
+        `SELECT json, revision FROM workspace_settlements WHERE owner_key = ? AND ${revision === undefined ? "json IS NOT NULL" : "revision = ?"} ORDER BY revision ASC LIMIT 1`,
+        workspaceOwnerKey(owner),
+        ...(revision === undefined ? [] : [revision]),
+      )
+      .toArray()[0];
+    if (!row || row.json === null) return;
+    try {
+      const value = workspaceSettlementOf(JSON.parse(row.json));
+      return value && workspaceOwnerKey(value.owner) === workspaceOwnerKey(owner) && value.revision === row.revision
+        ? value
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private checkWorkspaceFinishCapacity(row: LiveRunRow, record: RunRecord): void {
+    const value = terminalWorkspaceSettlement(row, record);
+    if (!value) return;
+    const count =
+      this.sql
+        .exec<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM workspace_settlements WHERE owner_key = ? AND json IS NOT NULL`,
+          workspaceOwnerKey(value.owner),
+        )
+        .toArray()[0]?.n ?? 0;
+    if (count >= WORKSPACE_SETTLEMENTS_MAX) throw new Error("workspace obligation capacity exhausted");
+  }
+
+  private workspaceRevision(owner: WorkspaceOwner): number | undefined {
+    return (
+      this.sql
+        .exec<{ revision: number }>(
+          `SELECT MAX(revision) AS revision FROM workspace_settlements WHERE owner_key = ?`,
+          workspaceOwnerKey(owner),
+        )
+        .toArray()[0]?.revision ?? undefined
+    );
+  }
+
+  async ackWorkspaceSettlement(owner: WorkspaceOwner, revision: number): Promise<WorkspaceAck> {
+    let result: WorkspaceAck = { ok: false, reason: "unverified" };
+    this.ctx.storage.transactionSync(() => {
+      result = workspaceAcknowledgment(
+        this.workspaceSettlementRow(owner, revision),
+        revision,
+        this.liveRow(owner.runId) !== undefined,
+        this.workspaceRevision(owner),
+      );
+      if (result.ok) {
+        this.sql.exec(
+          `UPDATE workspace_settlements SET json = NULL WHERE owner_key = ? AND revision = ?`,
+          workspaceOwnerKey(owner),
+          revision,
+        );
+        this.sql.exec(
+          `DELETE FROM workspace_settlements WHERE owner_key = ? AND json IS NULL AND revision < (SELECT MAX(revision) FROM workspace_settlements WHERE owner_key = ?)`,
+          workspaceOwnerKey(owner),
+          workspaceOwnerKey(owner),
+        );
+      }
+    });
+    return result;
   }
 
   /** The events a live run has appended so far (item 30), in seq order — what
@@ -5463,10 +5595,23 @@ export class RunHistoryDO extends DurableObject<Env> {
         JSON.stringify(stored.contextCheckpointReceipt) !== JSON.stringify(priorReceipt)
       )
         throw new Error("checkpoint receipt is not canonical");
-      const priorWork = this.sql
-        .exec<{ work_evidence_json: string | null }>(`SELECT work_evidence_json FROM runs WHERE run_id = ?`, stored.id)
-        .toArray()[0]?.work_evidence_json;
-      const canonicalWork = this.liveRow(stored.id)?.state ?? (priorWork ? JSON.parse(priorWork) : {});
+      const priorRecord = this.sql
+        .exec<{ work_evidence_json: string | null; summary_json: string }>(
+          `SELECT work_evidence_json, summary_json FROM runs WHERE run_id = ?`,
+          stored.id,
+        )
+        .toArray()[0];
+      const canonicalWork = this.liveRow(stored.id)?.state ?? {
+        ...(priorRecord?.work_evidence_json ? JSON.parse(priorRecord.work_evidence_json) : {}),
+        ...(priorRecord
+          ? { branchPublication: (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).branchPublication }
+          : {}),
+      };
+      // Terminal outcome and cost do not depend on a process-local publication
+      // acknowledgment. Only saved producer state can authorize branch release.
+      delete stored.branchPublication;
+      const branchPublication = branchPublicationOf(canonicalWork.branchPublication, stored.repo);
+      if (branchPublication !== undefined) stored.branchPublication = branchPublication;
       if (
         stored.unitSeedReceipt !== undefined &&
         JSON.stringify(stored.unitSeedReceipt) !== JSON.stringify(canonicalWork.unitSeedReceipt)
@@ -5802,11 +5947,14 @@ export class RunHistoryDO extends DurableObject<Env> {
     if (!summary) return null;
     const events: RunEvent[] = parseEventRows(this.eventRows(id, 0, Number.MAX_SAFE_INTEGER));
     let sourceReads: unknown;
+    let branchPublication: unknown;
     let workReads: unknown;
     let unitSeedReceipt: unknown;
     let contextCheckpointReceipt: unknown;
     let directAudience: unknown;
     try {
+      branchPublication = (JSON.parse(row.summary_json) as Record<string, unknown>).branchPublication;
+      if (branchPublication !== undefined && !branchPublicationOf(branchPublication, summary.repo)) return null;
       sourceReads = row.source_reads_json == null ? undefined : JSON.parse(row.source_reads_json);
       if (row.work_evidence_json != null) {
         const evidence: unknown = JSON.parse(row.work_evidence_json);
@@ -5833,6 +5981,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     const record = {
       ...summary,
       events,
+      ...(branchPublication === undefined ? {} : { branchPublication }),
       ...(sourceReads === undefined ? {} : { sourceReads }),
       ...(workReads === undefined ? {} : { workReads }),
       ...(unitSeedReceipt === undefined ? {} : { unitSeedReceipt }),
@@ -6257,7 +6406,9 @@ function identityOfSummary(raw: string): {
 function parseSummary(row: Pick<RunRow, "summary_json">): RunListItem | null {
   try {
     const parsed: unknown = JSON.parse(row.summary_json);
-    return isRunListItem(parsed) ? normalizeStored(parsed) : null;
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const { branchPublication: _branchPublication, ...summary } = parsed as Record<string, unknown>;
+    return isRunListItem(summary) ? normalizeStored(summary as unknown as RunListItem) : null;
   } catch {
     return null;
   }
@@ -7605,6 +7756,7 @@ const LEDGER_ROUTES = new Set([
   "/runs/reclaim",
   "/runs/live",
   "/runs/preservation-owner",
+  "/runs/workspace-ack",
   "/runs/live-events",
   "/runs/intake",
   "/runs/intake/read",
@@ -8339,7 +8491,15 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
   if (pathname === "/runs/preservation-owner") {
     const runId = parseRunId(b.runId);
     if (!runId.ok) return json({ error: runId.error }, 400);
-    return json(await stub.preservationOwner(runId.value));
+    const exact = b.ownerGen !== undefined || b.ownerFence !== undefined;
+    if (exact && !isWorkspaceOwner(b)) return json({ error: "invalid workspace owner" }, 400);
+    return json(await stub.preservationOwner(runId.value, exact ? (b as unknown as WorkspaceOwner) : undefined));
+  }
+  if (pathname === "/runs/workspace-ack") {
+    if (!isWorkspaceOwner(b) || !Number.isSafeInteger(b.revision) || Number(b.revision) <= 0)
+      return json({ error: "invalid workspace acknowledgment" }, 400);
+    const result = await stub.ackWorkspaceSettlement(b, Number(b.revision));
+    return json(result, result.ok ? 200 : 409);
   }
   if (pathname === "/runs/reclaim") {
     const g = gen(b.gen);

@@ -104,6 +104,14 @@ import {
 import { hasUnexpectedOwnedThreadDir } from "./orphanThreadUsers.js";
 import { KeyedAsyncLock } from "./keyedAsyncLock.js";
 import { decideWorkspaceRemoval, hasRunOwnerField, type PreservationDecision } from "./workspacePreservation.js";
+import {
+  isWorkspaceOwner,
+  workspaceOwnerKey,
+  workspaceSettlementOf,
+  workspaceBindingOf,
+  type WorkspaceOwner,
+  type WorkspaceSettlement,
+} from "../../src/core/workspaceSettlement.js";
 import { RUN_STORE_KEY, RUN_STORE_TIMEOUT_MS } from "../../src/core/runStoreConstants.js";
 import { residentPublicationCommand, type ResidentPublicationInput } from "../../src/execution/residentPublication.js";
 import {
@@ -120,7 +128,14 @@ import {
   registeredRunNeedsProtection,
   registeredRunOwnsRelease,
 } from "./runRegistration.js";
-import { CREDENTIAL_INSPECTION_MAX_MS, DAY_MS, RUN_REGISTRATION_GRACE_MS, SECOND_MS } from "../../src/core/budgets.js";
+import {
+  CREDENTIAL_INSPECTION_MAX_MS,
+  DAY_MS,
+  RUN_REGISTRATION_GRACE_MS,
+  SECOND_MS,
+  WORKSPACE_PREDECESSORS_MAX,
+  WORKSPACE_RECONCILE_BINDINGS_MAX,
+} from "../../src/core/budgets.js";
 import { BASH_TIMEOUT_MAX_MS, BASH_TIMEOUT_MS, clampBashTimeout } from "../../src/execution/bashTimeout.js";
 import { RESIDENT_MIRROR_PERMISSIONS, verifyGithubMintScope } from "../../src/execution/githubMintScope.js";
 import { selectBindingsToPurge } from "../../src/execution/bindingPurge.js";
@@ -1211,7 +1226,18 @@ interface ResidentRecord {
  *  current allocation; `ref` is sticky for the thread's whole life, with one
  *  exception — the branch the thread's own run opened a pull request on
  *  (`rebound`, docs/reference/specs/resident-repos.md item 16). */
+type WorkspaceReference = {
+  owner: WorkspaceOwner;
+  binding: WorkspaceSettlement["binding"];
+  applied?: WorkspaceSettlement;
+};
+const WORKSPACE_SETTLEMENT_CURSOR_KEY = "workspace:settlement-cursor";
+
 interface ThreadBinding {
+  /** Metadata delivery survives owner replacement and VM loss. */
+  workspacePredecessors?: WorkspaceReference[];
+  workspaceSettlement?: WorkspaceSettlement;
+  container?: string;
   threadKey: string;
   ref: string;
   /** How `ref` was chosen: the repo default for want of a named branch — when
@@ -1247,7 +1273,7 @@ interface ThreadBinding {
   evicted?: boolean;
   evictedAt?: string;
   /** Owner of the registration removed with this tree, for a delayed push receipt. */
-  lastRunOwner?: { runId?: string; ownerGen?: string; ownerFence?: number };
+  lastRunOwner?: Pick<RunRegistration, "runId" | "ownerGen" | "ownerFence" | "workspace">;
   /** Why the last eviction happened (the audit trail): `ttl`, `clean-idle`,
    *  `detach`, `disk-pressure`, or a reclamation fate — `merged #N` /
    *  `closed #N` / `gone`. */
@@ -1317,6 +1343,8 @@ interface AttachOk {
    *  VM (docs/reference/specs/harness-pi.md item 8), so the run's row can name
    *  the container its pi runs in. Absent when the kernel does not say. */
   container?: string;
+  /** Set only after the exact attachment registration commits. */
+  ownerFence?: number;
   deps: ThreadDepsMechanism;
   /** Present on a reused tree only when its stored dependency key matches this head. */
   depsKey?: string;
@@ -1973,6 +2001,7 @@ const runRegKey = (threadKey: string) => `${RUN_REG_KEY_PREFIX}${threadKey}`;
 const RUN_FENCE_KEY_PREFIX = "runFence:";
 const runFenceKey = (threadKey: string) => `${RUN_FENCE_KEY_PREFIX}${threadKey}`;
 interface RunRegistration {
+  workspace?: WorkspaceSettlement["binding"];
   threadKey: string;
   registeredAt: string;
   deadlineAt?: number;
@@ -5712,6 +5741,7 @@ export class ResidentDO extends Sandbox<Env> {
     /** Item 7: what the cron's instance-creation decision reads, after the check above settled the state. */
     refresh: RefreshRow;
   }> {
+    await this.reconcileWorkspaceSettlements();
     const [check, disk, memory] = await Promise.all([
       this.watchdogCheckLifecycle(),
       this.diskGauge(),
@@ -5927,7 +5957,7 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** Primary and per-UID rows change atomically. The index keeps every live
    * claimant, including a legacy duplicate that must block shell access. */
-  private async putThreadBinding(next: ThreadBinding): Promise<void> {
+  private async putThreadBinding(next: ThreadBinding, replaceWorkspaceFacts = false): Promise<void> {
     const key = threadBindingKey(next.threadKey);
     await this.ctx.storage.transaction(async (txn) => {
       const prior = await txn.get<ThreadBinding>(key);
@@ -5947,7 +5977,17 @@ export class ResidentDO extends Sandbox<Env> {
           await txn.put(poolBindingKey(newUser), keys);
         }
       }
-      await txn.put(key, next);
+      await txn.put(
+        key,
+        prior && !replaceWorkspaceFacts
+          ? {
+              ...next,
+              workspacePredecessors: prior.workspacePredecessors,
+              workspaceSettlement: prior.workspaceSettlement,
+              ownBranches: prior.ownBranches,
+            }
+          : next,
+      );
     });
   }
 
@@ -6211,6 +6251,13 @@ export class ResidentDO extends Sandbox<Env> {
                     ...(existing.returned !== undefined ? { returned: existing.returned } : {}),
                   }),
               ...(existing.ownBranches !== undefined ? { ownBranches: existing.ownBranches } : {}),
+              ...(existing.workspacePredecessors !== undefined
+                ? { workspacePredecessors: existing.workspacePredecessors }
+                : {}),
+              ...(existing.workspaceSettlement !== undefined
+                ? { workspaceSettlement: existing.workspaceSettlement }
+                : {}),
+              ...(existing.lastRunOwner !== undefined ? { lastRunOwner: existing.lastRunOwner } : {}),
             }
           : { boundBy }),
       };
@@ -6328,6 +6375,12 @@ export class ResidentDO extends Sandbox<Env> {
             !registeredRunAllowsClaim(accepted, runId, ownerGen, ownerFence)
           )
             return { error: "run-registration-mismatch: a newer generation owns the thread", status: 409 };
+          const retained = await this.retainWorkspacePredecessor(threadKey, {
+            runId: runId!,
+            ownerGen: ownerGen!,
+            ownerFence: ownerFence!,
+          });
+          if (retained) return retained;
           if (await this.recreateAdmission.blocked()) return this.recreateRefusal();
           await this.ensureHydrated();
           if (await this.recreateAdmission.blocked()) return this.recreateRefusal();
@@ -6396,10 +6449,16 @@ export class ResidentDO extends Sandbox<Env> {
               record,
               reason,
               githubDoor,
+              registered && readonly && wantSha !== null && !reuse
+                ? { runId: runId!, ownerGen: ownerGen!, ownerFence: ownerFence! }
+                : undefined,
             );
             // The run this attach opens is now in flight until its release —
             // whatever its op counters read between the bot's calls (item 44).
-            if (!("error" in res)) await this.registerRun(threadKey, runBudgetMs, runId, ownerGen, ownerFence);
+            if (!("error" in res)) {
+              await this.registerRun(threadKey, runBudgetMs, runId, ownerGen, ownerFence, res);
+              res.ownerFence = ownerFence;
+            }
             return res;
           } finally {
             if (priorTree && !priorTree.evicted && priorTree.user) this.workspaceExclusiveOpsInFlight.delete(threadKey);
@@ -6440,6 +6499,7 @@ export class ResidentDO extends Sandbox<Env> {
     recordFromRoute: ResidentRecord | undefined,
     reason: RefHintReason,
     githubDoor?: { baseUrl: string; bearer: string },
+    advanceOwner?: WorkspaceOwner,
   ): Promise<AttachOk | ThreadErr> {
     if (!readonly && !githubDoor)
       return { error: "writable attach requires a Git door run bearer", status: 403, cause: "request" };
@@ -6589,6 +6649,7 @@ export class ResidentDO extends Sandbox<Env> {
         record,
         binding,
         preservationSource: storedPrior,
+        advanceOwner,
         mode,
         githubDoor,
         rollback,
@@ -6814,10 +6875,13 @@ export class ResidentDO extends Sandbox<Env> {
     if (!binding) return;
     const remembered = rememberOwnBranches(binding.ownBranches, pushed, new Date(systemClock()).toISOString());
     if ("error" in remembered) return { error: remembered.error, status: 409 };
-    await this.putThreadBinding({
-      ...binding,
-      ownBranches: remembered.ownBranches,
-    } satisfies ThreadBinding);
+    await this.putThreadBinding(
+      {
+        ...binding,
+        ownBranches: remembered.ownBranches,
+      } satisfies ThreadBinding,
+      true,
+    );
   }
 
   /** The second half of an attach, past disk admission: mint, fetch + clone
@@ -6835,6 +6899,7 @@ export class ResidentDO extends Sandbox<Env> {
     record: ResidentRecord;
     binding: ThreadBinding;
     preservationSource?: ThreadBinding;
+    advanceOwner?: WorkspaceOwner;
     mode: ReturnType<typeof planReadonlyAttach>;
     githubDoor?: { baseUrl: string; bearer: string };
     rollback: () => Promise<void>;
@@ -6989,6 +7054,7 @@ export class ResidentDO extends Sandbox<Env> {
           reuse,
           refChanged,
           priorBinding: input.preservationSource,
+          ...(sha === wantSha && input.advanceOwner ? { advanceOwner: input.advanceOwner } : {}),
         });
         return { sha, threadLockKey, recreated };
       }, ATTACH_MUTEX_WAIT_MS);
@@ -7083,8 +7149,10 @@ export class ResidentDO extends Sandbox<Env> {
       githubDoorHost: _priorDoor,
       ...bindingSansCred
     } = binding;
+    const container = await this.containerIdentity();
     await this.putThreadBinding({
       ...bindingSansCred,
+      container,
       lastAttachAt: new Date(systemClock()).toISOString(),
       deps: deps.deps,
       // A reused tree keeps the key it was linked from (spread above).
@@ -7099,7 +7167,6 @@ export class ResidentDO extends Sandbox<Env> {
 
     // Which container the tree is in, for the run's row (harness-pi item 8):
     // memoized per incarnation, so this is a read after the first attach.
-    const container = await this.containerIdentity();
     return {
       workspace: binding.worktreePath,
       ref: binding.ref,
@@ -7154,7 +7221,13 @@ export class ResidentDO extends Sandbox<Env> {
      *  expected commit it still holds (item 51) — the tree is checked out at
      *  that commit, detached, instead of at a branch. `reuse`: a resumed
      *  run's attach (item 66): keep the tree as it stands, or refuse. */
-    opts: { detached: boolean; reuse: boolean; refChanged: boolean; priorBinding?: ThreadBinding } = {
+    opts: {
+      detached: boolean;
+      reuse: boolean;
+      refChanged: boolean;
+      priorBinding?: ThreadBinding;
+      advanceOwner?: WorkspaceOwner;
+    } = {
       detached: false,
       reuse: false,
       refChanged: false,
@@ -7195,18 +7268,36 @@ export class ResidentDO extends Sandbox<Env> {
         }
       }
     }
-    const decision = decideWorktree({
-      reuse: opts.reuse,
-      modeSwitch,
-      refChanged: opts.refChanged,
-      sha,
-      worktreePath: wt,
-      facts,
-    });
+    let advancing = false;
+    if (opts.advanceOwner && opts.priorBinding && facts.head !== sha) {
+      if (
+        opts.reuse ||
+        modeSwitch ||
+        opts.refChanged ||
+        binding.ref !== opts.priorBinding.ref ||
+        binding.worktreePath !== opts.priorBinding.worktreePath ||
+        binding.user !== opts.priorBinding.user
+      )
+        throw new StepError("workspace-preserved", "workspace-preserved: incompatible live owner advance");
+      const refusal = await this.guardWorkspaceAdvance(opts.priorBinding, opts.advanceOwner);
+      if (refusal) throw new StepError("workspace-preserved", refusal.error);
+      advancing = true;
+    }
+    const decision = advancing
+      ? { kind: "recreate" as const, why: "stale" as const }
+      : decideWorktree({
+          reuse: opts.reuse,
+          modeSwitch,
+          refChanged: opts.refChanged,
+          sha,
+          worktreePath: wt,
+          facts,
+        });
     if (decision.kind === "refuse") throw new ReuseRefusedError(decision.why);
     if (decision.kind === "reuse") return false;
 
     if (
+      !advancing &&
       opts.priorBinding &&
       !opts.priorBinding.evicted &&
       opts.priorBinding.user &&
@@ -8461,6 +8552,261 @@ export class ResidentDO extends Sandbox<Env> {
     return { ok: true, bytes: content.length };
   }
 
+  /** Keep the overwritten physical owner discoverable without a state read.
+   * Capacity refuses before materialization or registration transfer. */
+  private async retainWorkspacePredecessor(threadKey: string, owner: WorkspaceOwner): Promise<ThreadErr | undefined> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const binding = await txn.get<ThreadBinding>(threadBindingKey(threadKey));
+      const prior = await txn.get<RunRegistration>(runRegKey(threadKey));
+      const previous = prior ?? binding?.lastRunOwner;
+      if (!binding || !previous || !hasRunOwnerField(previous)) return;
+      if (binding.threadKey !== threadKey) return { error: "workspace-owner-unverified", status: 409 };
+      if (!isWorkspaceOwner(previous)) return { error: "workspace-owner-unverified", status: 409 };
+      const key = workspaceOwnerKey(previous);
+      if (key === workspaceOwnerKey(owner)) return;
+      const pending = binding.workspacePredecessors ?? [];
+      if (!Array.isArray(pending) || pending.some((p) => !isWorkspaceOwner(p?.owner)))
+        return { error: "workspace-owner-unverified", status: 409 };
+      if (pending.some((p) => workspaceOwnerKey(p.owner) === key)) return;
+      if (pending.length >= WORKSPACE_PREDECESSORS_MAX) return { error: "workspace-settlement-capacity", status: 409 };
+      await txn.put(threadBindingKey(threadKey), {
+        ...binding,
+        workspacePredecessors: [
+          ...pending,
+          {
+            owner: { runId: previous.runId, ownerGen: previous.ownerGen, ownerFence: previous.ownerFence },
+            binding: prior?.workspace ?? binding.workspaceSettlement?.binding ?? null,
+            ...(binding.workspaceSettlement && workspaceOwnerKey(binding.workspaceSettlement.owner) === key
+              ? { applied: binding.workspaceSettlement }
+              : {}),
+          },
+        ],
+      });
+    });
+  }
+
+  /** Storage and state-Worker traffic only. A down or busy VM cannot starve
+   * delivery of terminal metadata; each binding retries independently. */
+  private async reconcileWorkspaceSettlements(): Promise<void> {
+    const startAfter = await this.ctx.storage.get<string>(WORKSPACE_SETTLEMENT_CURSOR_KEY);
+    const bindings = await this.ctx.storage.list<ThreadBinding>({
+      prefix: THREAD_KEY_PREFIX,
+      limit: WORKSPACE_RECONCILE_BINDINGS_MAX,
+      ...(startAfter ? { startAfter } : {}),
+    });
+    for (const [key, binding] of bindings) {
+      try {
+        await this.threadAttaches.run(binding.threadKey, () => this.reconcileWorkspaceBinding(binding.threadKey));
+      } catch (err) {
+        console.warn(`workspace-settlement: retained ${binding.threadKey}: ${errMsg(err)}`);
+      } finally {
+        await this.ctx.storage.put(WORKSPACE_SETTLEMENT_CURSOR_KEY, key);
+      }
+    }
+    if (bindings.size < WORKSPACE_RECONCILE_BINDINGS_MAX)
+      await this.ctx.storage.delete(WORKSPACE_SETTLEMENT_CURSOR_KEY);
+  }
+
+  /** Called under the existing thread lock. Facts land together before the
+   * exact version ACK. No GitHub mutation or container command is involved. */
+  private async reconcileWorkspaceBinding(threadKey: string): Promise<void> {
+    const initial = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
+    if (
+      !initial ||
+      initial.threadKey !== threadKey ||
+      (initial.workspacePredecessors !== undefined &&
+        (!Array.isArray(initial.workspacePredecessors) ||
+          initial.workspacePredecessors.length > WORKSPACE_PREDECESSORS_MAX))
+    )
+      return;
+    let binding: ThreadBinding = initial;
+    const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
+    const current = registration ?? binding.lastRunOwner;
+    const currentWorkspace = current?.workspace;
+    const refs = [...(binding.workspacePredecessors ?? [])];
+    if (isWorkspaceOwner(current))
+      refs.push({
+        owner: { runId: current.runId, ownerGen: current.ownerGen, ownerFence: current.ownerFence },
+        binding: currentWorkspace ?? binding.workspaceSettlement?.binding ?? null,
+      });
+    const resource = await this.ctx.storage.get<string>(RESOURCE_KEY);
+    for (const ref of refs) {
+      if (!isWorkspaceOwner(ref.owner) || !workspaceBindingOf(ref.binding, ref.owner)) continue;
+      const observed = await this.observeRunForEviction({ threadKey, registeredAt: "", ...ref.owner }, binding);
+      const answer = observed as {
+        kind?: string;
+        settlement?: unknown;
+        owner?: unknown;
+        revision?: unknown;
+        row?: { runId?: string; ownerGen?: string; binding?: unknown; workspaceThreadKey?: string };
+      } | null;
+      if (!answer) continue;
+      if (answer.kind === "live" || answer.kind === "absent") {
+        let live = answer.row;
+        if (
+          answer.kind === "absent" &&
+          isWorkspaceOwner(answer.owner) &&
+          workspaceOwnerKey(answer.owner) === workspaceOwnerKey(ref.owner) &&
+          isWorkspaceOwner(current) &&
+          current.runId === ref.owner.runId &&
+          current.ownerFence > ref.owner.ownerFence
+        ) {
+          const observedCurrent = (await this.observeRunForEviction(
+            { threadKey, registeredAt: "", ...current },
+            binding,
+          )) as { kind?: string; settlement?: unknown; owner?: unknown; revision?: unknown } | null;
+          const terminal =
+            observedCurrent?.kind === "terminal"
+              ? workspaceSettlementOf(observedCurrent.settlement)
+              : observedCurrent?.kind === "acknowledged" &&
+                  isWorkspaceOwner(observedCurrent.owner) &&
+                  workspaceOwnerKey(observedCurrent.owner) === workspaceOwnerKey(current) &&
+                  observedCurrent.revision === binding.workspaceSettlement?.revision
+                ? workspaceSettlementOf(binding.workspaceSettlement)
+                : undefined;
+          if (terminal && workspaceOwnerKey(terminal.owner) === workspaceOwnerKey(current))
+            live = {
+              runId: terminal.owner.runId,
+              ownerGen: terminal.owner.ownerGen,
+              workspaceThreadKey: terminal.record.threadKey,
+              binding: terminal.binding,
+            };
+        }
+        const physical = isWorkspaceOwner(current) ? workspaceBindingOf(live?.binding, current) : undefined;
+        if (
+          isWorkspaceOwner(current) &&
+          current.runId === ref.owner.runId &&
+          current.ownerFence > ref.owner.ownerFence &&
+          live?.workspaceThreadKey === threadKey &&
+          live.runId === current.runId &&
+          live.ownerGen === current.ownerGen &&
+          physical &&
+          physical.backend === "resident" &&
+          physical.ownerGen === current.ownerGen &&
+          physical.ownerFence === current.ownerFence &&
+          currentWorkspace &&
+          workspaceBindingOf(currentWorkspace, current) &&
+          currentWorkspace.ownerGen === current.ownerGen &&
+          currentWorkspace.ownerFence === current.ownerFence &&
+          ["ref", "workspace", "user", "container"].every(
+            (field) =>
+              physical[field as keyof typeof physical] === ref.binding![field as keyof typeof ref.binding] &&
+              physical[field as keyof typeof physical] === currentWorkspace[field as keyof typeof currentWorkspace],
+          )
+        ) {
+          binding = {
+            ...binding,
+            workspacePredecessors: binding.workspacePredecessors?.filter(
+              (p) => workspaceOwnerKey(p.owner) !== workspaceOwnerKey(ref.owner),
+            ),
+          };
+          await this.putThreadBinding(binding, true);
+        }
+        continue;
+      }
+      const saved =
+        answer.kind === "terminal"
+          ? workspaceSettlementOf(answer.settlement)
+          : answer.kind === "acknowledged" &&
+              isWorkspaceOwner(answer.owner) &&
+              workspaceOwnerKey(answer.owner) === workspaceOwnerKey(ref.owner)
+            ? workspaceSettlementOf(ref.applied ?? binding.workspaceSettlement)
+            : undefined;
+      if (
+        (answer.kind === "acknowledged" &&
+          answer.revision !== (ref.applied ?? binding.workspaceSettlement)?.revision) ||
+        !saved ||
+        !saved.binding ||
+        workspaceOwnerKey(saved.owner) !== workspaceOwnerKey(ref.owner) ||
+        saved.record.threadKey !== threadKey ||
+        resource !== `repo:${saved.record.repo}` ||
+        saved.publication?.complete !== true ||
+        saved.record.publicationSettlement === null ||
+        [saved.record.userId, saved.record.repo, saved.record.parentInstanceId, saved.record.idempotencyKey].some(
+          (v) => v === null,
+        )
+      )
+        continue;
+      if (
+        ["ref", "workspace", "user", "container", "ownerGen", "ownerFence"].some(
+          (field) =>
+            saved.binding![field as keyof typeof saved.binding] !== ref.binding![field as keyof typeof ref.binding],
+        )
+      )
+        continue;
+      if (
+        answer.kind === "acknowledged" &&
+        saved.publication.branches.every((branch) =>
+          binding.ownBranches?.some((owned) => owned.ref === branch.ref && owned.pr === branch.pr),
+        )
+      ) {
+        const remaining = binding.workspacePredecessors?.filter(
+          (p) => workspaceOwnerKey(p.owner) !== workspaceOwnerKey(ref.owner) || p.applied?.revision !== saved.revision,
+        );
+        if (remaining?.length !== binding.workspacePredecessors?.length) {
+          binding = { ...binding, workspacePredecessors: remaining };
+          await this.putThreadBinding(binding, true);
+        }
+        continue;
+      }
+      const remembered = rememberOwnBranches(
+        binding.ownBranches,
+        saved.publication.branches,
+        new Date(systemClock()).toISOString(),
+      );
+      if ("error" in remembered) continue;
+      const key = workspaceOwnerKey(ref.owner);
+      const next: ThreadBinding = {
+        ...binding,
+        ownBranches: remembered.ownBranches,
+        workspacePredecessors: binding.workspacePredecessors?.map((p) =>
+          workspaceOwnerKey(p.owner) === key ? { ...p, applied: saved } : p,
+        ),
+        ...(isWorkspaceOwner(current) && workspaceOwnerKey(current) === key ? { workspaceSettlement: saved } : {}),
+      };
+      await this.putThreadBinding(next, true);
+      binding = next;
+      if (!(await this.ackWorkspaceSettlement(saved))) continue;
+      const after = (await this.observeRunForEviction({ threadKey, registeredAt: "", ...ref.owner }, binding)) as {
+        kind?: string;
+        owner?: unknown;
+        revision?: unknown;
+      } | null;
+      if (
+        after?.kind === "acknowledged" &&
+        isWorkspaceOwner(after.owner) &&
+        workspaceOwnerKey(after.owner) === key &&
+        after.revision === saved.revision &&
+        binding.workspacePredecessors?.some((p) => workspaceOwnerKey(p.owner) === key)
+      ) {
+        binding = {
+          ...binding,
+          workspacePredecessors: binding.workspacePredecessors.filter(
+            (p) => workspaceOwnerKey(p.owner) !== key || p.applied?.revision !== saved.revision,
+          ),
+        };
+        await this.putThreadBinding(binding, true);
+      }
+    }
+  }
+
+  private async ackWorkspaceSettlement(value: WorkspaceSettlement): Promise<boolean> {
+    const url = this.env.STATE_WORKER_URL,
+      token = this.env.MEMORY_TOKEN;
+    if (!url || !token) return false;
+    try {
+      const response = await fetch(new URL("/runs/workspace-ack", url), {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ storeKey: RUN_STORE_KEY, ...value.owner, revision: value.revision }),
+        signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
+      });
+      return response.status === 200 && ((await response.json()) as { ok?: unknown }).ok === true;
+    } catch {
+      return false;
+    }
+  }
+
   /** The state Worker answers one exact run, with live ownership taking
    *  precedence over a provisional or retained history row. An unavailable
    *  answer cannot authorize deletion. */
@@ -8472,7 +8818,12 @@ export class ResidentDO extends Sandbox<Env> {
       const res = await fetch(new URL("/runs/preservation-owner", url), {
         method: "POST",
         headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-        body: JSON.stringify({ storeKey: RUN_STORE_KEY, runId: registration.runId }),
+        body: JSON.stringify({
+          storeKey: RUN_STORE_KEY,
+          runId: registration.runId,
+          ownerGen: registration.ownerGen,
+          ownerFence: registration.ownerFence,
+        }),
         signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
       });
       return res.ok ? await res.json() : null;
@@ -8539,6 +8890,97 @@ export class ResidentDO extends Sandbox<Env> {
     }
   }
 
+  /** Same-owner checkout movement has its own authority: a live owner may
+   * advance a clean recorded head, but cannot grant terminal deletion. The
+   * caller holds both locks and blocks file operations until attach settles. */
+  private async guardWorkspaceAdvance(binding: ThreadBinding, owner: WorkspaceOwner): Promise<ThreadErr | null> {
+    const refuse = (): ThreadErr => ({
+      error: "workspace-preserved: live owner advance unverified",
+      status: 409,
+      reason: "workspace-preserved",
+    });
+    const [current, registration, fence] = await Promise.all([
+      this.ctx.storage.get<ThreadBinding>(threadBindingKey(binding.threadKey)),
+      this.ctx.storage.get<RunRegistration>(runRegKey(binding.threadKey)),
+      this.ctx.storage.get<unknown>(runFenceKey(binding.threadKey)),
+    ]);
+    if (
+      !isWorkspaceOwner(owner) ||
+      !isWorkspaceOwner(registration) ||
+      !isWorkspaceOwner(fence) ||
+      workspaceOwnerKey(owner) !== workspaceOwnerKey(registration) ||
+      workspaceOwnerKey(owner) !== workspaceOwnerKey(fence) ||
+      registration.threadKey !== binding.threadKey ||
+      binding.readonly !== true ||
+      !binding.sha ||
+      !/^[a-f0-9]{40}$/.test(binding.sha) ||
+      !current ||
+      ["threadKey", "ref", "worktreePath", "user", "container", "sha", "readonly"].some(
+        (field) => current[field as keyof ThreadBinding] !== binding[field as keyof ThreadBinding],
+      ) ||
+      (this.threadOpsInFlight.get(binding.threadKey) ?? 0) > 0 ||
+      this.opUsersInUse.has(binding.user) ||
+      !binding.container ||
+      (await this.containerIdentity()) !== binding.container ||
+      !(await this.poolUserOwnerMatches(binding.user, `thread:${binding.threadKey}`))
+    )
+      return refuse();
+    const registered = workspaceBindingOf(registration.workspace, owner);
+    const answer = (await this.observeRunForEviction(registration, binding)) as {
+      kind?: string;
+      row?: { runId?: string; ownerGen?: string; workspaceThreadKey?: string; binding?: unknown };
+    } | null;
+    const live = answer?.kind === "live" ? answer.row : undefined;
+    const physical = workspaceBindingOf(live?.binding, owner);
+    if (
+      !registered ||
+      !physical ||
+      live?.runId !== owner.runId ||
+      live.ownerGen !== owner.ownerGen ||
+      live.workspaceThreadKey !== binding.threadKey ||
+      ["ref", "workspace", "user", "container"].some(
+        (field) => registered[field as keyof typeof registered] !== physical[field as keyof typeof physical],
+      ) ||
+      registered.ref !== binding.ref ||
+      registered.workspace !== binding.worktreePath ||
+      registered.user !== binding.user ||
+      registered.container !== binding.container
+    )
+      return refuse();
+    const tree = await this.observePrivateTree(binding);
+    if (
+      !tree ||
+      tree.head !== binding.sha ||
+      tree.branch !== binding.ref ||
+      tree.uncommittedChanges !== 0 ||
+      tree.untrackedNonIgnored !== 0 ||
+      tree.unpushedCommits !== 0
+    )
+      return refuse();
+    const processes = await this.run(["pgrep", "-u", binding.user]);
+    if (
+      processes.exitCode !== 1 ||
+      processes.stdout.trim() !== "" ||
+      processes.stderr.trim() !== "" ||
+      processes.timedOut ||
+      processes.truncated
+    )
+      return refuse();
+    const fresh = (await this.observeRunForEviction(registration, binding)) as typeof answer;
+    const freshPhysical = fresh?.kind === "live" ? workspaceBindingOf(fresh.row?.binding, owner) : undefined;
+    if (
+      !freshPhysical ||
+      fresh?.row?.runId !== owner.runId ||
+      fresh.row.ownerGen !== owner.ownerGen ||
+      fresh.row.workspaceThreadKey !== binding.threadKey ||
+      ["ref", "workspace", "user", "container"].some(
+        (field) => physical[field as keyof typeof physical] !== freshPhysical[field as keyof typeof freshPhysical],
+      )
+    )
+      return refuse();
+    return null;
+  }
+
   private async guardWorkspaceReplacement(binding: ThreadBinding): Promise<ThreadErr | null> {
     if ((this.threadOpsInFlight.get(binding.threadKey) ?? 0) > 0) {
       await this.reportBlockedWorkspace({ binding, reason: "thread-operation-in-flight" });
@@ -8559,6 +9001,12 @@ export class ResidentDO extends Sandbox<Env> {
     canObserveTree = true,
     recoverAbsent = false,
   ): Promise<PreservationDecision> {
+    const pending = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(binding.threadKey));
+    if (
+      pending?.workspacePredecessors !== undefined &&
+      (!Array.isArray(pending.workspacePredecessors) || pending.workspacePredecessors.length > 0)
+    )
+      return { removable: false, reason: "workspace-settlement-pending" };
     const [registration, fence] = await Promise.all([
       this.ctx.storage.get<RunRegistration>(runRegKey(binding.threadKey)),
       this.ctx.storage.get<unknown>(runFenceKey(binding.threadKey)),
@@ -8567,9 +9015,47 @@ export class ResidentDO extends Sandbox<Env> {
     let decision = decideWorkspaceRemoval(input);
     if (decision.removable || decision.reason !== "owner-unavailable") return decision;
     input.owner = await this.observeRunForEviction(registration!, binding);
+    const answer = input.owner as { kind?: string; settlement?: unknown; owner?: unknown; revision?: unknown } | null;
+    if ((registration && Object.hasOwn(registration, "workspace")) || answer?.kind === "acknowledged") {
+      const saved = workspaceSettlementOf(pending?.workspaceSettlement);
+      if (answer?.kind === "live") return { removable: false, reason: "owner-live" };
+      if (
+        !saved ||
+        !saved.binding ||
+        !isWorkspaceOwner(registration) ||
+        workspaceOwnerKey(saved.owner) !== workspaceOwnerKey(registration) ||
+        saved.record.threadKey !== binding.threadKey ||
+        saved.publication?.complete !== true ||
+        saved.record.publicationSettlement === null ||
+        [saved.record.userId, saved.record.repo, saved.record.parentInstanceId, saved.record.idempotencyKey].some(
+          (v) => v === null,
+        ) ||
+        saved.binding.ref !== binding.ref ||
+        saved.binding.workspace !== binding.worktreePath ||
+        saved.binding.user !== binding.user ||
+        saved.binding.container !== binding.container ||
+        !saved.publication.branches.every((branch) =>
+          pending?.ownBranches?.some((owned) => owned.ref === branch.ref && owned.pr === branch.pr),
+        )
+      )
+        return { removable: false, reason: "workspace-settlement-unverified" };
+      const resource = await this.ctx.storage.get<string>(RESOURCE_KEY);
+      if (resource !== `repo:${saved.record.repo}`)
+        return { removable: false, reason: "workspace-settlement-unverified" };
+      if (
+        answer?.kind !== "acknowledged" ||
+        !isWorkspaceOwner(answer.owner) ||
+        workspaceOwnerKey(answer.owner) !== workspaceOwnerKey(saved.owner) ||
+        answer.revision !== saved.revision
+      )
+        return { removable: false, reason: "workspace-settlement-unverified" };
+      input.owner = { kind: "terminal", record: saved.record };
+    }
     decision = decideWorkspaceRemoval(input);
     if (decision.removable || decision.reason !== "private-tree-unverified" || !canObserveTree) return decision;
     input.tree = await this.observePrivateTree(binding);
+    if (binding.container && input.tree !== null && (await this.containerIdentity()) !== binding.container)
+      return { removable: false, reason: "workspace-incarnation-mismatch" };
     decision = decideWorkspaceRemoval(input);
     if (decision.removable || !recoverAbsent || input.tree !== null) return decision;
     if (!(await this.observeAbsentPrivateTree(binding))) return decision;
@@ -8741,6 +9227,7 @@ export class ResidentDO extends Sandbox<Env> {
   ): Promise<DetachAnswer | ThreadErr> {
     return this.withDeployAdmission(() =>
       this.threadAttaches.run(threadKey, async () => {
+        await this.reconcileWorkspaceBinding(threadKey);
         const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
         if (!binding) return { error: `no-binding: ${threadKey} has never attached to this resident`, status: 404 };
         if (binding.evicted || !binding.user) {
@@ -9044,13 +9531,35 @@ export class ResidentDO extends Sandbox<Env> {
     runId?: string,
     ownerGen?: string,
     ownerFence?: number,
+    attached?: AttachOk,
   ): Promise<void> {
     if (!validRunOwner(runId, ownerGen, ownerFence)) throw new Error("run-registration-incomplete");
+    const retained = await this.retainWorkspacePredecessor(threadKey, {
+      runId: runId!,
+      ownerGen: ownerGen!,
+      ownerFence: ownerFence!,
+    });
+    if (retained) throw new Error(retained.error);
     const now = systemClock();
     await this.ctx.storage.transaction(async (txn) => {
       await txn.put(runFenceKey(threadKey), { runId, ownerGen, ownerFence });
       await txn.put(runRegKey(threadKey), {
         threadKey,
+        ...(attached
+          ? {
+              workspace: attached.container
+                ? {
+                    backend: "resident" as const,
+                    ref: attached.ref,
+                    workspace: attached.workspace,
+                    user: attached.user,
+                    container: attached.container,
+                    ownerGen: ownerGen!,
+                    ownerFence: ownerFence!,
+                  }
+                : null,
+            }
+          : {}),
         registeredAt: new Date(now).toISOString(),
         ...(runBudgetMs !== undefined ? { deadlineAt: now + runBudgetMs } : {}),
         runId,
@@ -9194,6 +9703,7 @@ export class ResidentDO extends Sandbox<Env> {
    *  binding record marked evicted. Never wakes a slept container just to
    *  delete files a sleep already destroyed. */
   async sweepWorktrees(resource: string): Promise<{ evicted: string[]; kept: number }> {
+    await this.reconcileWorkspaceSettlements();
     const evicted: string[] = [];
     let kept = 0;
     const record = await this.registry()

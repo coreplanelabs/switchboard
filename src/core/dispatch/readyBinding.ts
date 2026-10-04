@@ -14,7 +14,7 @@ export function resumedPilotBindingFor(
   if (!rebound) return undefined;
   // Reattach can return a verified seeded checkout without repeating its
   // original physical identity. Keep the recorded owner for the next retry.
-  return rebound.backend === recorded.backend
+  return rebound.backend === "sandbox" && rebound.backend === recorded.backend
     ? {
         ...rebound,
         ...(rebound.container === undefined && recorded.container ? { container: recorded.container } : {}),

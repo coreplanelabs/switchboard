@@ -20,7 +20,6 @@ import {
   normalizeStored,
   operatorOfEvents,
   prOfEvents,
-  pushedBranchesOf,
   pushedHeadsOf,
   routeOfEvents,
   storedEventSeqs,
@@ -1396,7 +1395,7 @@ describe("the pull request on the record (docs/reference/specs/run-history.md it
 
   // resident-repos item 16: the branch the PR is opened from is the fact the
   // run's release hands the resident, so it rides the event and the record.
-  it("the pull request carries the head branch the run pushed when the event names it, and pushedBranchesOf lists every pushed branch with its PR, the last push to a branch winning", () => {
+  it("the pull request carries the head branch the run pushed when the event names it", () => {
     const events: RunEvent[] = [
       { type: "pr_opened", url: "https://github.com/acme/api/pull/1", number: 1, created: true, head: "fix/a" },
       { type: "pr_opened", url: "https://github.com/acme/api/pull/2", number: 2, created: false },
@@ -1405,12 +1404,6 @@ describe("the pull request on the record (docs/reference/specs/run-history.md it
     ];
     expect(prOfEvents(events)).toEqual({ number: 4, url: "https://github.com/acme/api/pull/4", head: "fix/a" });
     expect(prOfEvents(events.slice(0, 2))).toEqual({ number: 2, url: "https://github.com/acme/api/pull/2" });
-    expect(pushedBranchesOf(events)).toEqual([
-      { ref: "fix/c", pr: 3 },
-      { ref: "fix/a", pr: 4 },
-    ]);
-    expect(pushedBranchesOf(events.slice(1, 2))).toEqual([]);
-    expect(pushedBranchesOf([])).toEqual([]);
   });
 });
 
@@ -1529,5 +1522,47 @@ describe("isRunRecord — the route field", () => {
     expect(isRunRecord(record({ route: { preset: "review", reason: "r" } as never }))).toBe(false);
     expect(isRunRecord(record({ route: { ...route, parts: [{ preset: "general" }] } as never }))).toBe(false);
     expect(isRunRecord(record({ route: { ...route, collapsed: { presets: [1] } } as never }))).toBe(false);
+  });
+});
+
+describe("durable branch publication contract", () => {
+  it("validates complete and pending producer projections while rejecting unknown or over-cap facts", () => {
+    const complete = { version: 1 as const, repo: "acme/api", complete: true, branches: [{ ref: "fix/a", pr: 7 }] };
+    expect(isRunRecord(record({ repo: "acme/api", branchPublication: complete }))).toBe(true);
+    const pending = {
+      ...complete,
+      complete: false,
+      pending: { id: "publication-a", ref: "fix/b", headSha: "a".repeat(40) },
+    };
+    expect(isRunRecord(record({ repo: "acme/api", branchPublication: pending }))).toBe(true);
+    expect(
+      isRunRecord(
+        record({
+          repo: "acme/api",
+          branchPublication: {
+            ...pending,
+            pending: { id: "metadata-a", pr: 7, headSha: "a".repeat(40) },
+          },
+        }),
+      ),
+    ).toBe(true);
+    for (const value of [
+      { ...complete, repo: "foreign/repo" },
+      { ...complete, complete: "true" },
+      { ...pending, complete: true },
+      { ...pending, pending: { ...pending.pending, headSha: "short" } },
+      { ...pending, pending: { id: "unknown-a", headSha: "a".repeat(40) } },
+      {
+        ...complete,
+        branches: [
+          { ref: "fix/a", pr: 7 },
+          { ref: "fix/a", pr: 8 },
+        ],
+      },
+      { ...complete, branches: Array.from({ length: 21 }, (_, i) => ({ ref: `branch/${i}`, pr: i + 1 })) },
+    ])
+      expect(isRunRecord({ ...record({ repo: "acme/api" }), branchPublication: value })).toBe(false);
+    const { events: _events, ...summary } = record({ branchPublication: complete });
+    expect(isRunListItem(summary)).toBe(false);
   });
 });

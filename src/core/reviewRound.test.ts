@@ -1,3 +1,4 @@
+import { ResidentRegistrationMismatchError } from "../execution/resident.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -936,6 +937,76 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
 // first, head re-probed after). A round with no session left (a `finish` plan)
 // keeps the verdict for the head it reviewed and says so.
 describe("settleReviewedHead — the head-move re-review", () => {
+  it("a hard stop during confirmation prevents another prompt after substantive review began", async () => {
+    const followUp = vi.fn(async () => "must not run");
+    const w = moved({ followUp });
+    let reads = 0;
+    w.executor.execResult = async () => {
+      if (++reads === 2) w.input.turn.control.requestStop("hard");
+      return { exitCode: 0, stdout: (reads === 1 ? HEAD : OTHER) + "\n", stderr: "", truncated: false };
+    };
+    await settleReviewedHead(w.input);
+    expect(followUp).not.toHaveBeenCalled();
+    expect(w.input.messages).toHaveLength(1);
+  });
+  it("does not substitute an earlier verdict when the head probe loses attachment authority", async () => {
+    const followUp = vi.fn(async () => "must not run");
+    const w = moved({ followUp });
+    w.executor.execResult = async () => {
+      throw new ResidentRegistrationMismatchError("repo:acme/api", "registration lost");
+    };
+    await expect(settleReviewedHead(w.input)).rejects.toBeInstanceOf(ResidentRegistrationMismatchError);
+    expect(followUp).not.toHaveBeenCalled();
+  });
+  it("does not continue the review after an attachment ownership or binding acknowledgment refusal", async () => {
+    const followUp = vi.fn(async () => "must not run");
+    const w = moved({ followUp });
+    w.executor.moveTo = async () => {
+      throw new ResidentRegistrationMismatchError("repo:acme/api", "attachment binding could not be saved");
+    };
+    await expect(settleReviewedHead(w.input)).rejects.toBeInstanceOf(ResidentRegistrationMismatchError);
+    expect(followUp).not.toHaveBeenCalled();
+  });
+
+  it.each(["missing", "refused", "wrong-head", "unreadable"])(
+    "a moved-head review refuses an unproved workspace advance: %s",
+    async (mode) => {
+      const followUp = vi.fn(async () => "must not run");
+      const w = moved({ followUp });
+      if (mode === "missing") delete w.executor.moveTo;
+      if (mode === "refused")
+        w.executor.moveTo = async () => {
+          throw new Error("workspace-preserved: owner-live");
+        };
+      if (mode === "wrong-head") w.executor.moveTo = async () => ({ sha: HEAD });
+      if (mode === "unreadable")
+        w.executor.execResult = async () => ({ exitCode: 0, stdout: "", stderr: "", truncated: false });
+      await expect(settleReviewedHead(w.input)).rejects.toThrow();
+      expect(followUp).not.toHaveBeenCalled();
+      expect(w.input.messages).toHaveLength(1);
+    },
+  );
+
+  it.each(["failed", "truncated"])(
+    "a SHA in an unsuccessful confirmation cannot authorize re-review: %s",
+    async (mode) => {
+      const followUp = vi.fn(async () => "must not run");
+      const w = moved({ followUp });
+      w.executor.exec = async () => `exit 1:\n${OTHER}\n`;
+      w.executor.execResult = async () => ({
+        exitCode: mode === "failed" ? 1 : 0,
+        stdout: OTHER + "\n",
+        stderr: "read failed",
+        truncated: mode === "truncated",
+      });
+      // The earlier review's valid head stays available to classify the move.
+      let reads = 0;
+      w.executor.exec = async () => (++reads === 1 ? HEAD + "\n" : `exit 1:\n${OTHER}\n`);
+      await expect(settleReviewedHead(w.input)).rejects.toThrow();
+      expect(followUp).not.toHaveBeenCalled();
+    },
+  );
+
   const list = (subjects: string[]): PrCommitList => ({
     commits: subjects.map((message, i) => ({ sha: `${i + 1}`.repeat(40), message })),
     files: ["src/x.ts"],
@@ -949,6 +1020,7 @@ describe("settleReviewedHead — the head-move re-review", () => {
     const moves: string[] = [];
     const executor = {
       exec: async (cmd: string) => (cmd.includes("rev-parse") ? `${head}\n` : ""),
+      execResult: async () => ({ exitCode: 0, stdout: head + "\n", stderr: "", truncated: false }),
       moveTo: async (sha: string) => {
         moves.push(sha);
         head = sha;

@@ -145,6 +145,31 @@ describe("githubPulls", () => {
     expect(result).toEqual({ number: 7, htmlUrl: "https://github.com/acme/api/pull/7", created: true });
   });
 
+  it.each([undefined, 5])("commits the resolved target before the PR mutation: %s", async (pr) => {
+    stubToken();
+    const calls = stubFetch((_url, init) =>
+      (init.method ?? "GET") === "GET"
+        ? new Response(
+            JSON.stringify(
+              pr === undefined
+                ? []
+                : [{ number: pr, html_url: `https://github.com/acme/api/pull/${pr}`, head: { sha: "a".repeat(40) } }],
+            ),
+            { status: 200 },
+          )
+        : new Response('{"number":7,"html_url":"https://github.com/acme/api/pull/7"}', { status: 201 }),
+    );
+    const recorder = vi.fn(async (target) => {
+      expect(target).toBe(pr);
+      expect(calls).toHaveLength(1);
+      expect(calls[0].init.method ?? "GET").toBe("GET");
+      throw new Error("intent unavailable");
+    });
+    await expect(openPullRequest(target, recorder)).rejects.toThrow("intent unavailable");
+    expect(recorder).toHaveBeenCalledOnce();
+    expect(calls).toHaveLength(1);
+  });
+
   it("edits the existing open PR instead of creating a second one", async () => {
     stubToken();
     const calls = stubFetch((url, init) =>

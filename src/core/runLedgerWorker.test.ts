@@ -72,6 +72,79 @@ const claimReq: ClaimRequest = {
 };
 
 describe("WorkerRunLedger", () => {
+  it("reads and acknowledges only an exact retained workspace version and rejects ambiguous responses", async () => {
+    const owner = { runId: "r1", ownerGen: "g1", ownerFence: 7 };
+    const settlement = {
+      version: 1,
+      revision: 2,
+      owner,
+      binding: {
+        backend: "resident",
+        ref: "codex/r1",
+        workspace: "/workspace/threads/t/r1",
+        user: "worker2",
+        container: "vm-1",
+        ownerGen: "g1",
+        ownerFence: 7,
+      },
+      record: { id: "r1", threadKey: "slack:C1:1.0", userId: "slack:UALICE", status: "completed" },
+      publication: { version: 1, branches: [], complete: true },
+    };
+    const current = stubWorker((path) => ({
+      status: 200,
+      data: path === "/runs/preservation-owner" ? { kind: "terminal", settlement } : { ok: true },
+    }));
+    expect(await current.ledger.workspaceSettlement(owner)).toEqual(settlement);
+    expect(await current.ledger.ackWorkspaceSettlement(owner, 2)).toEqual({ ok: true });
+    expect(current.calls).toMatchObject([
+      { path: "/runs/preservation-owner", body: { storeKey: "runs:default", ...owner }, auth: "Bearer tok" },
+      { path: "/runs/workspace-ack", body: { storeKey: "runs:default", ...owner, revision: 2 }, auth: "Bearer tok" },
+    ]);
+    for (const kind of ["live", "unknown"])
+      expect(
+        await stubWorker(() => ({ status: 200, data: { kind } })).ledger.workspaceSettlement(owner),
+      ).toBeUndefined();
+    expect(
+      await stubWorker(() => ({
+        status: 200,
+        data: { kind: "acknowledged", owner, revision: 2 },
+      })).ledger.workspaceSettlement(owner),
+    ).toBeUndefined();
+    await expect(
+      stubWorker(() => ({
+        status: 200,
+        data: { kind: "acknowledged", owner: { ...owner, ownerFence: 8 }, revision: 2 },
+      })).ledger.workspaceSettlement(owner),
+    ).rejects.toBeInstanceOf(PermanentStoreError);
+    expect(
+      await stubWorker(() => ({ status: 200, data: { kind: "absent", owner } })).ledger.workspaceSettlement(owner),
+    ).toBeUndefined();
+    await expect(
+      stubWorker(() => ({
+        status: 200,
+        data: { kind: "absent", owner: { ...owner, ownerFence: 8 } },
+      })).ledger.workspaceSettlement(owner),
+    ).rejects.toBeInstanceOf(PermanentStoreError);
+    for (const reason of ["owner-live", "stale", "unverified"])
+      expect(
+        await stubWorker(() => ({ status: 409, data: { ok: false, reason } })).ledger.ackWorkspaceSettlement(owner, 2),
+      ).toEqual({ ok: false, reason });
+    await expect(
+      stubWorker(() => ({
+        status: 200,
+        data: { kind: "terminal", settlement: { ...settlement, owner: { ...owner, ownerFence: 8 } } },
+      })).ledger.workspaceSettlement(owner),
+    ).rejects.toBeInstanceOf(PermanentStoreError);
+    await expect(
+      stubWorker(() => ({ status: 200, data: {} })).ledger.ackWorkspaceSettlement(owner, 2),
+    ).rejects.toBeInstanceOf(PermanentStoreError);
+    await expect(
+      stubWorker(() => ({ status: 200, data: { ok: true } })).ledger.ackWorkspaceSettlement(owner, 0),
+    ).rejects.toBeInstanceOf(PermanentStoreError);
+    await expect(stubWorker(() => ({ status: 503 })).ledger.workspaceSettlement(owner)).rejects.toBeInstanceOf(
+      TransientStoreError,
+    );
+  });
   it("reads one frozen keyed entry without substituting transcript tail or malformed rows", async () => {
     const rows = [{ idx: 9, part: 0, json: '{"role":"assistant","part":{"type":"text","text":"original"}}' }];
     const current = stubWorker((_path, body) => ({

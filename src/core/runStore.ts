@@ -231,6 +231,7 @@ export function pageEvents(events: readonly RunEvent[], opts: RunEventsOptions):
 export function toListItem(record: RunRecord, bytes: number): RunListItem {
   const {
     events: _events,
+    branchPublication: _branchPublication,
     sourceReads: _sourceReads,
     workReads: _workReads,
     unitSeedReceipt: _unitSeedReceipt,

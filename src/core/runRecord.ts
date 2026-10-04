@@ -1,3 +1,4 @@
+import { branchPublicationOf, type BranchPublication } from "./branchPublication.js";
 import { answerOutcomeOf, type AnswerOutcome } from "./answerOutcome.js";
 import {
   isMainContextRefusalCode,
@@ -15,7 +16,6 @@ import type { AddressSeverity } from "./reviewVerdict.js";
 import type { Verbosity } from "./verbosity.js";
 import { isHeadMaterial, isSpanRecord } from "./runEvents.js";
 import { isRunUsage, type RunUsage } from "./runUsage.js";
-import type { PushedBranch } from "../execution/residentRebind.js";
 import type { RunLiveState } from "./runLiveState.js";
 import { isHandoffShape, type Handoff } from "./ship/handoff.js";
 import { isChildHandoff, type ChildHandoff } from "./dispatch/handoff.js";
@@ -338,6 +338,7 @@ export interface RunRecord {
    * live ledger row is deleted at finish, so recovery retains this exact
    * ref transition until head reconciliation. A PR number exists only for a
    * verified existing-PR publication. */
+  branchPublication?: BranchPublication;
   doorPublicationPending?: {
     id: string;
     repo: string;
@@ -431,20 +432,6 @@ export function prOfEvents(events: readonly RunEvent[]): RunPullRequest | undefi
       pr = { number: e.number, url: e.url, ...(e.head !== undefined ? { head: e.head } : {}) };
   }
   return pr;
-}
-
-/** Every branch a run's events say it pushed, with the pull request each
- *  heads — what the run's release hands the resident so the thread remembers
- *  its own branches past the tree (resident-repos item 16). One entry per
- *  branch, the last push to it winning; an event without a head names none. */
-export function pushedBranchesOf(events: readonly RunEvent[]): PushedBranch[] {
-  const byRef = new Map<string, number>();
-  for (const e of events) {
-    if (e.type !== "pr_opened" || e.head === undefined) continue;
-    byRef.delete(e.head);
-    byRef.set(e.head, e.number);
-  }
-  return [...byRef].map(([ref, pr]) => ({ ref, pr }));
 }
 
 /** A call a run's ending may have left running in its workspace (harness.md
@@ -818,7 +805,13 @@ function isRunProfileRecord(v: unknown): v is RunProfileRecord {
  *  missing value as 0. */
 export type RunListItem = Omit<
   RunRecord,
-  "events" | "sourceReads" | "workReads" | "unitSeedReceipt" | "contextCheckpointReceipt" | "directAudience"
+  | "events"
+  | "sourceReads"
+  | "workReads"
+  | "unitSeedReceipt"
+  | "contextCheckpointReceipt"
+  | "directAudience"
+  | "branchPublication"
 > & {
   bytes?: number;
 };
@@ -1319,6 +1312,8 @@ export function isRunRecord(v: unknown): v is RunRecord {
     publicationSettlementForRun(r.publicationSettlement, r) === undefined
   )
     return false;
+  if (r.branchPublication !== undefined && !branchPublicationOf(r.branchPublication, r.repo as string | undefined))
+    return false;
   if (r.doorPublicationPending !== undefined) {
     const pending = r.doorPublicationPending;
     if (typeof pending !== "object" || pending === null) return false;
@@ -1468,6 +1463,7 @@ export function isRunListItem(v: unknown): v is RunListItem {
   if (typeof v !== "object" || v === null) return false;
   const r = v as Record<string, unknown>;
   if (
+    r.branchPublication !== undefined ||
     r.sourceReads !== undefined ||
     r.workReads !== undefined ||
     r.unitSeedReceipt !== undefined ||

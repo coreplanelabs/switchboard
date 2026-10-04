@@ -738,6 +738,22 @@ describe("makeExecutor resident selection", () => {
     expect(calls).toEqual(["/status", "/attach"]);
   });
 
+  it("a mismatched acknowledged attachment fence never becomes a cold fallback", async () => {
+    stubEnvs();
+    const { calls } = stubFetch(
+      { body: { state: "warm", reason: "" } },
+      { body: { ref: "master", sha: "a".repeat(40), ownerFence: 8 } },
+    );
+    const refused = await makeExecutor(residentOpts(), {
+      ...repoCtx(),
+      runId: "run-1",
+      ownerGen: "gen-1",
+      residentClaim: async () => 7,
+    }).catch((err: unknown) => err);
+    expect(refused).toBeInstanceOf(ResidentRegistrationMismatchError);
+    expect(calls).toEqual(["/status", "/attach"]);
+  });
+
   it("needs-ref WITH the resident's defaultRef → re-attach once on that ref; the note says it was the repo default", async () => {
     stubEnvs();
     const { calls, bodies } = stubFetch(
@@ -2777,6 +2793,72 @@ describe("residentSlugsLister", () => {
 // Feature: docs/reference/specs/run-history.md item 54: the binding the row
 // records at the claim (`state.binding`) and how the next generation reads it.
 describe("the workspace binding on the row", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  it("uses the latest physical attachment while preserving the opening publication base through promotion", async () => {
+    const answers = [
+      {
+        ref: "main",
+        sha: "a".repeat(40),
+        workspace: "/workspace/threads/t/main",
+        user: "worker2",
+        container: "vm-1",
+        ownerFence: 7,
+      },
+      { ref: "main", sha: "b".repeat(40), workspace: "/workspace/threads/t/main", user: "worker3", container: "vm-2" },
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify(answers.shift()), { status: 200 })),
+    );
+    const executor = await ResidentExecutor.open({
+      baseUrl: "https://resident.example",
+      token: "test-token",
+      resource: "repo:acme/api",
+      threadKey: "mcp:physical",
+      refHint: "main",
+      runId: "run-1",
+      ownerGen: "gen-1",
+      ownerFence: 7,
+    });
+    const selection = { executor, backend: "resident" as const, binding: executor.binding };
+    await executor.moveTo("b".repeat(40));
+    const promoted = workspaceBindingFor(selection);
+    expect(promoted).toMatchObject({ user: "worker3", container: "vm-2", publicationBaseSha: "a".repeat(40) });
+    expect(promoted).not.toHaveProperty("ownerFence");
+  });
+
+  it("carries the actual attachment fence through save and resume without borrowing a later claim", () => {
+    const first = workspaceBindingFor({
+      executor: new LocalExecutor("/tmp/x"),
+      backend: "resident",
+      resident: true,
+      binding: {
+        ref: "main",
+        sha: "a".repeat(40),
+        workspace: "/workspace/threads/t/main",
+        user: "worker3",
+        container: "vm-9",
+        ownerFence: 7,
+      },
+    });
+    const restored = workspaceBindingOf(JSON.parse(JSON.stringify(first)));
+    expect(restored).toMatchObject({ ownerFence: 7, container: "vm-9", user: "worker3" });
+    const next = workspaceBindingFor(
+      {
+        executor: new LocalExecutor("/tmp/x"),
+        backend: "resident",
+        resident: true,
+        binding: { ref: "main", sha: "a".repeat(40), ownerFence: 8, container: "vm-9", user: "worker3" },
+      },
+      "repo-resident",
+      restored,
+    );
+    expect(next).toMatchObject({ ownerFence: 8 });
+    for (const ownerFence of [0, -1, 1.5, "7", Number.MAX_SAFE_INTEGER + 1])
+      expect(workspaceBindingOf({ ...restored, ownerFence })).not.toHaveProperty("ownerFence");
+    expect(workspaceBindingOf({ backend: "resident" })).not.toHaveProperty("ownerFence");
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();

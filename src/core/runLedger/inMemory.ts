@@ -1,4 +1,16 @@
 import { preserveCheckpointState } from "./checkpointState.js";
+import { branchPublicationOf } from "../branchPublication.js";
+import {
+  terminalWorkspaceSettlement,
+  terminalWorkspaceRecordMatches,
+  nextWorkspaceRevision,
+  WORKSPACE_SETTLEMENTS_MAX,
+  workspaceOwnerKey,
+  workspaceAcknowledgment,
+  type WorkspaceOwner,
+  type WorkspaceSettlement,
+  type WorkspaceAck,
+} from "../workspaceSettlement.js";
 import {
   checkpointMembersOf,
   checkpointMemberHashesOf,
@@ -143,6 +155,29 @@ export interface SessionLog {
 const TRIM_MARKER_BYTES_ESTIMATE = 260;
 
 export class InMemoryRunLedger implements RunLedger {
+  private readonly workspaceObligations = new Map<
+    string,
+    { revision: number; pending: Map<number, WorkspaceSettlement> }
+  >();
+
+  async workspaceSettlement(owner: WorkspaceOwner): Promise<WorkspaceSettlement | undefined> {
+    if (this.live.has(owner.runId)) return;
+    const value = this.workspaceObligations.get(workspaceOwnerKey(owner))?.pending.values().next().value;
+    return value && structuredClone(value);
+  }
+
+  async ackWorkspaceSettlement(owner: WorkspaceOwner, revision: number): Promise<WorkspaceAck> {
+    const key = workspaceOwnerKey(owner);
+    const standing = this.workspaceObligations.get(key);
+    const result = workspaceAcknowledgment(
+      standing?.pending.get(revision),
+      revision,
+      this.live.has(owner.runId),
+      standing?.revision,
+    );
+    if (result.ok) standing?.pending.delete(revision);
+    return result;
+  }
   private residentClaimFence = 0;
   async residentClaim(
     runId: string,
@@ -752,6 +787,7 @@ export class InMemoryRunLedger implements RunLedger {
     const fence = this.fence(runId, gen);
     if (!fence.ok) return fence;
     const row = this.live.get(runId)!;
+    if (!terminalWorkspaceRecordMatches(row, record)) return { ok: false, reason: "fenced" };
     if (
       opts?.requireStoppedPause &&
       (row.phase !== "handoff" ||
@@ -761,6 +797,9 @@ export class InMemoryRunLedger implements RunLedger {
     )
       return { ok: false, reason: "fenced" };
     const canonicalWork = this.live.get(runId)?.state ?? this.finished.get(runId) ?? {};
+    const { branchPublication: _speculativePublication, ...terminal } = record;
+    const branchPublication = branchPublicationOf(canonicalWork.branchPublication, record.repo);
+    record = { ...terminal, ...(branchPublication === undefined ? {} : { branchPublication }) };
     if (
       record.unitSeedReceipt !== undefined &&
       JSON.stringify(record.unitSeedReceipt) !== JSON.stringify(canonicalWork.unitSeedReceipt)
@@ -781,6 +820,17 @@ export class InMemoryRunLedger implements RunLedger {
       JSON.stringify(record.contextCheckpointReceipt) !== JSON.stringify(priorReceipt)
     )
       return { ok: false, reason: "fenced" };
+    const obligation = terminalWorkspaceSettlement(row, record);
+    if (obligation) {
+      const key = workspaceOwnerKey(obligation.owner);
+      const prior = this.workspaceObligations.get(key);
+      if ((prior?.pending.size ?? 0) >= WORKSPACE_SETTLEMENTS_MAX)
+        throw new Error("workspace obligation capacity exhausted");
+      obligation.revision = nextWorkspaceRevision(prior?.revision);
+      const pending = prior?.pending ?? new Map<number, WorkspaceSettlement>();
+      pending.set(obligation.revision, obligation);
+      this.workspaceObligations.set(key, { revision: obligation.revision, pending });
+    }
     this.finished.set(runId, record);
     // The ending's cause (record 0064): recorded when the row closes, first
     // cause standing — exactly the object's rule, its one keyed exception
