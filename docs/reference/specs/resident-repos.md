@@ -105,6 +105,9 @@ Base URL for all `[agent]` checks: the resident Worker's own hostname, written `
 
 ## Validation criteria
 
+The resolver's literal result objects are the independent proof for current-message PR flags, absent inherited flags, fetch-failure flags and closed-thread refusal. Their dedicated flag-only and closed-PR subset tests add no separate contract; the PR URL/shorthand and re-review fail-closed proofs below retain those obligations.
+
+
 | Criterion | Proof |
 |---|---|
 | 71: a live or uncertain owner survives deadline, TTL and cleanup; a matching terminal saved checkpoint permits release, as does a terminal review child without a coding receipt whose clean tree remains at its recorded attach HEAD; later edits, untracked files, moved HEAD, an unverified tree and partial fences block release | `[unit]` `deploy/cloudflare-resident/pausedWorkspace.test.ts::paused unpublished work at resident removal::*` |

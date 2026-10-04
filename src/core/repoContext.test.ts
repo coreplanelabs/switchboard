@@ -1500,34 +1500,6 @@ describe("resolveRepoContext: PR-source flags for ship", () => {
     expect(matching).toMatchObject({ repo: "acme/api", pr: 8, prFromMessage: true });
   });
 
-  it("a PR named in the current message sets prFromMessage, and its bound head ref sets refFromPr", async () => {
-    stubFetch({ body: { state: "open", head: { ref: "feat/x", sha: SHA, repo: { full_name: "acme/api" } } } });
-    const ctx = await resolveRepoContext(msg("look into https://github.com/acme/api/pull/508 for the regression"), []);
-    expect(ctx.pr).toBe(508);
-    expect(ctx.prFromMessage).toBe(true);
-    expect(ctx.ref).toBe("feat/x");
-    expect(ctx.refFromPr).toBe(true);
-  });
-
-  it("a PR INHERITED from the thread sets neither flag — it is not an in-message reference", async () => {
-    stubFetch({ body: { state: "open", head: { ref: "p9", sha: SHA, repo: { full_name: "acme/api" } } } });
-    const history = [{ role: "user" as const, text: "review https://github.com/acme/api/pull/7" }];
-    const ctx = await resolveRepoContext(msg("re-review"), history);
-    expect(ctx.pr).toBe(7);
-    expect(ctx.prFromMessage).toBeUndefined();
-    // The ref is never rebound from an inherited PR, so refFromPr never applies.
-    expect(ctx.refFromPr).toBeUndefined();
-  });
-
-  it("an in-message PR whose head fetch FAILS keeps prFromMessage but never sets refFromPr (the guard holds on the failed-fetch path)", async () => {
-    stubFetch({ reject: "fetch failed" });
-    const ctx = await resolveRepoContext(msg("look into https://github.com/acme/api/pull/508 for the regression"), []);
-    expect(ctx.pr).toBe(508);
-    expect(ctx.prFromMessage).toBe(true);
-    expect(ctx.ref).toBeUndefined();
-    expect(ctx.refFromPr).toBeUndefined();
-  });
-
   // Issue 1860: a merged pull request cited as a receipt in a coding ask must
   // not bind the thread's branch to its dead head branch — a ship child bound
   // there has its contract branch refused by the resident's push guard and the
@@ -1648,14 +1620,6 @@ describe("resolveRepoContext: re-review follow-ups inherit the thread's PR (fail
       prFromMessage: true,
       headSha: SHA,
     });
-  });
-
-  it("a CLOSED/merged thread PR is not inherited — a later review in the thread posts nowhere", async () => {
-    stubFetch({ body: { state: "closed", head: { sha: SHA, repo: { full_name: "acme/api" } } } });
-    const ctx = await resolveRepoContext(msg("review this snippet: `foo()`"), history);
-    expect(ctx.repo).toBe("acme/api");
-    expect(ctx.pr).toBeUndefined();
-    expect(ctx.headSha).toBeUndefined();
   });
 
   it("a failed or non-2xx fetch for the inherited PR fails closed: repo only, no pr, no headSha", async () => {

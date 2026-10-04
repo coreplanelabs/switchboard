@@ -16,15 +16,7 @@ import {
   type CommandDef,
   type SurfaceName,
 } from "../commandRegistry.js";
-import {
-  asText,
-  camelToKebab,
-  cliFlag,
-  flattenNamed,
-  isBooleanSchema,
-  jsonSchemaFor,
-  namedToInput,
-} from "../commandSurface.js";
+import { asText, camelToKebab, flattenNamed, isBooleanSchema, namedToInput } from "../commandSurface.js";
 import { coreCommandGroups } from "../commands/all.js";
 import { callerWith } from "./callers.js";
 import { TEST_PROFILE } from "../../deploy/testing/profile.js";
@@ -375,17 +367,6 @@ export function catalogueSnapshot(cmds: readonly CommandDef<unknown>[]): Command
       resource: resourceTargetOf(cmd, {}, probe),
       effect: cmd.effect,
     }));
-}
-
-/** The `jsonSchemaFor` property names, for the "no missing, no extras" check. */
-export function schemaPropertyNames(cmd: Pick<CommandDef<unknown>, "id" | "args" | "options" | "describe">): string[] {
-  const schema = jsonSchemaFor(cmd) as { properties: Record<string, unknown> };
-  return Object.keys(schema.properties).sort();
-}
-
-/** The CLI flag spellings every option must appear under in help text. */
-export function expectedFlags(cmd: Pick<CommandDef<unknown>, "options">): string[] {
-  return Object.keys(cmd.options?.shape ?? {}).map(cliFlag);
 }
 
 // ---- docs -----------------------------------------------------------------------------------------
@@ -950,7 +931,7 @@ export function buildConformanceMatrix(catalogue: readonly CommandDef<unknown>[]
   };
 }
 
-/** The assertions applied to every exercised cell, for the matrix's closing table. */
+/** Behavioral matrix assertions and shared metadata proofs for its closing table. */
 export const CROSS_CUTTING_ASSERTIONS: ReadonlyArray<{ name: string; assertion: string }> = [
   {
     name: "Name mapping",
@@ -960,11 +941,12 @@ export const CROSS_CUTTING_ASSERTIONS: ReadonlyArray<{ name: string; assertion: 
   {
     name: "Schema exactness",
     assertion:
-      "The MCP `inputSchema` is exactly `jsonSchemaFor(cmd)`: properties = the declared arguments + options, `required` = the non-optional ones, `additionalProperties: false`, enum values and defaults intact.",
+      "A separate literal public MCP proof covers the shared schema converter: arguments + options, required/optional fields, enums, defaults, descriptions and additionalProperties false; catalogue and capability proofs bind production declarations and exposure.",
   },
   {
     name: "Help completeness",
-    assertion: "CLI `--help` and chat `--help` name every `<argument>`, every `--option` flag, and the description.",
+    assertion:
+      "Separate literal public CLI/chat help proofs cover names, descriptions, required/optional/rest syntax and kebab flags; the per-command capability matrix checks help exposure and the installer has its own shorthand proof.",
   },
   {
     name: "Chat shape",

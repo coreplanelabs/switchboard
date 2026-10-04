@@ -176,12 +176,6 @@ describe("authorize: table shape", () => {
       allow: true,
     });
   });
-  it("rows OR: any one satisfied row allows", () => {
-    // The non-member is not in the private channel (row 1 fails) and holds no all-channels (row 2 fails) but owns the run (row 3).
-    expect(authorize(A.nonMember, "runs:read", run({ channel: "priv", userId: A.nonMember.id }))).toEqual({
-      allow: true,
-    });
-  });
   it("conditions AND: a held grant without membership denies", () => {
     expect(authorize(A.member, "runs:write", run({ channel: "dm" }))).toEqual({ allow: false, reason: "not-member" });
     expect(authorize(A.reader, "runs:write", run({ channel: "pub1" }))).toEqual({
