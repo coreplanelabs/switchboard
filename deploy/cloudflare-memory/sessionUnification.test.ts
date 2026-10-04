@@ -651,7 +651,7 @@ describe("unified sessions — durable owner and retention lifecycle", () => {
     expect((await post("/runs/session/tail", { key })).data.next).toBe(0);
   });
 
-  it("pins a pending unit's live source through finish and terminal updates until the canonical unit is removed", async () => {
+  it("pins a pending unit's live source through finish, a legacy ending and refused owner replacement", async () => {
     const id = unique();
     const storeKey = `runs:unified-${id}`;
     const threadKey = `slack:C1:${id}`;
@@ -709,10 +709,13 @@ describe("unified sessions — durable owner and retention lifecycle", () => {
     ).toBe(true);
     await runDurableObjectAlarm(env.RUNS.get(env.RUNS.idFromName(storeKey)));
     expect((await post("/runs/get", { storeKey, id: "source" })).data.record).not.toBeNull();
-    expect((await post("/runs/coordinator/replace", { storeKey, instance })).data.ok).toBe(true);
+    expect(await post("/runs/coordinator/replace", { storeKey, instance })).toMatchObject({
+      status: 409,
+      data: { ok: false, reason: "exists" },
+    });
     await runDurableObjectAlarm(env.RUNS.get(env.RUNS.idFromName(storeKey)));
-    expect((await post("/runs/get", { storeKey, id: "source" })).data.record).toBeNull();
-    expect((await post("/runs/session/tail", { key: sourceKey })).data.next).toBe(0);
+    expect((await post("/runs/get", { storeKey, id: "source" })).data.record).not.toBeNull();
+    expect((await post("/runs/session/tail", { key: sourceKey })).data.next).toBeGreaterThan(0);
   });
 
   it("keeps a queued unit's frozen tool results until its canonical unit is removed", async () => {

@@ -1,3 +1,5 @@
+import { seedCoordinatorUnit } from "../testing/coordinatorInstance.js";
+import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { describe, expect, it, vi } from "vitest";
 import type { Actor } from "../authz/types.js";
 import { createPlaneService, type PlaneService } from "../planeService.js";
@@ -69,7 +71,7 @@ function actor(over: Partial<Actor> = {}): Actor {
 }
 
 async function fixture(over: Partial<CoordinatorUnit> = {}) {
-  const instances = new InMemoryCoordinatorInstanceStore();
+  const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
   await instances.recordRequesterTurn({ threadKey: THREAD, requesterId: INSTANCE.userId, messageId: "1" });
   expect(
     await instances.claimMainTask({ mainThreadKey: THREAD, actId: ACT }, INSTANCE, UNIT, {
@@ -255,7 +257,7 @@ describe("main task actions", () => {
       liveAuthority: {
         active: () => true,
         verify: async () => {
-          await instances.putUnits([{ ...UNIT, startedAt: 1_100 + ++checks }]);
+          seedCoordinatorUnit(instances, { ...UNIT, startedAt: 1_100 + ++checks });
           return true;
         },
       },

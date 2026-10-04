@@ -1,5 +1,5 @@
 import { preserveCheckpointState } from "./checkpointState.js";
-import { branchPublicationOf } from "../branchPublication.js";
+import { branchPublicationOf, doorPublicationOf } from "../branchPublication.js";
 import {
   terminalWorkspaceSettlement,
   terminalWorkspaceRecordMatches,
@@ -160,6 +160,10 @@ export class InMemoryRunLedger implements RunLedger {
     { revision: number; pending: Map<number, WorkspaceSettlement> }
   >();
 
+  /** Canonical private obligations, read synchronously by this ledger's paired store. */
+  workspacePublicationRows(): WorkspaceSettlement[] {
+    return [...this.workspaceObligations.values()].flatMap((row) => [...row.pending.values()]);
+  }
   async workspaceSettlement(owner: WorkspaceOwner): Promise<WorkspaceSettlement | undefined> {
     if (this.live.has(owner.runId)) return;
     const value = this.workspaceObligations.get(workspaceOwnerKey(owner))?.pending.values().next().value;
@@ -199,6 +203,8 @@ export class InMemoryRunLedger implements RunLedger {
   readonly transcripts = new Map<string, Transcript>();
   readonly sessions = new Map<string, SessionLog>();
   readonly finished = new Map<string, RunRecord>();
+  /** Mirrors private terminal producer evidence that cannot enter a typed record. */
+  readonly finishedWorkEvidence = new Map<string, RunState>();
   readonly intake = new Map<string, IntakeReceipt>();
   readonly intakeDeliveries = new Map<string, { poster: string; claimUntil: number; delivered: boolean }>();
   /** The failure toggle (run-history item 59): tests flip a flag to make the
@@ -797,9 +803,18 @@ export class InMemoryRunLedger implements RunLedger {
     )
       return { ok: false, reason: "fenced" };
     const canonicalWork = this.live.get(runId)?.state ?? this.finished.get(runId) ?? {};
-    const { branchPublication: _speculativePublication, ...terminal } = record;
+    const {
+      branchPublication: _speculativePublication,
+      doorPublicationPending: _speculativeDoor,
+      ...terminal
+    } = record;
     const branchPublication = branchPublicationOf(canonicalWork.branchPublication, record.repo);
-    record = { ...terminal, ...(branchPublication === undefined ? {} : { branchPublication }) };
+    const doorPublicationPending = doorPublicationOf(canonicalWork.doorPublicationPending);
+    record = {
+      ...terminal,
+      ...(branchPublication === undefined ? {} : { branchPublication }),
+      ...(doorPublicationPending === undefined ? {} : { doorPublicationPending }),
+    };
     if (
       record.unitSeedReceipt !== undefined &&
       JSON.stringify(record.unitSeedReceipt) !== JSON.stringify(canonicalWork.unitSeedReceipt)
@@ -831,6 +846,18 @@ export class InMemoryRunLedger implements RunLedger {
       pending.set(obligation.revision, obligation);
       this.workspaceObligations.set(key, { revision: obligation.revision, pending });
     }
+    const unreadable = {
+      ...(canonicalWork.branchPublication !== undefined && branchPublication === undefined
+        ? { branchPublication: structuredClone(canonicalWork.branchPublication) }
+        : {}),
+      ...(canonicalWork.doorPublicationPending !== undefined &&
+      canonicalWork.doorPublicationPending !== null &&
+      doorPublicationPending === undefined
+        ? { doorPublicationPending: structuredClone(canonicalWork.doorPublicationPending) }
+        : {}),
+    };
+    if (Object.keys(unreadable).length) this.finishedWorkEvidence.set(runId, unreadable);
+    else this.finishedWorkEvidence.delete(runId);
     this.finished.set(runId, record);
     // The ending's cause (record 0064): recorded when the row closes, first
     // cause standing — exactly the object's rule, its one keyed exception

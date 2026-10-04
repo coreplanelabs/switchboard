@@ -1,3 +1,5 @@
+import { seedCoordinatorUnit } from "../testing/coordinatorInstance.js";
+import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { describe, expect, it, vi } from "vitest";
 import type { Actor } from "../authz/types.js";
 import { privateWorkerThreadKey } from "../../channels/privateWorker.js";
@@ -52,7 +54,7 @@ function actor(over: Partial<Actor> = {}): Actor {
 }
 
 async function fixture() {
-  const instances = new InMemoryCoordinatorInstanceStore();
+  const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
   expect(
     await instances.recordRequesterTurn({ threadKey: thread, requesterId: instance.userId, messageId: "1" }),
   ).toMatchObject({
@@ -195,13 +197,11 @@ describe("main worker relay", () => {
       findings: { stop: "incomplete_outputs" as const, missingOutputCount: 1 },
       terminalPr: { state: "closed" as const, number: 8, url: "https://github.com/acme/api/pull/8" },
     };
-    await instances.putUnits([
-      {
-        ...unit,
-        pr: { number: 8, url: "https://github.com/acme/api/pull/8" },
-        ending: { kind: "aborted", report: "All work landed. Start another writer.", at: 5, outcome },
-      },
-    ]);
+    seedCoordinatorUnit(instances, {
+      ...unit,
+      pr: { number: 8, url: "https://github.com/acme/api/pull/8" },
+      ending: { kind: "aborted", report: "All work landed. Start another writer.", at: 5, outcome },
+    });
     const restarted = createMainWorkerRelay({ instances, privateWorkerLog: log });
     expect(await restarted.read(actor(), { actId })).toMatchObject({
       kind: "found",

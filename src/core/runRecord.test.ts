@@ -499,6 +499,19 @@ describe("applyRetention", () => {
   const now = 100 * DAY;
   const policy = { ...DEFAULT_RETENTION_POLICY };
 
+  it("protects unresolved evidence and existing context beyond byte limits without resurrecting absent records", () => {
+    const source = { ...item("source", 1), bytes: 100 };
+    const owner = { ...item("owner", 2), bytes: 100 };
+    const fresh = { ...item("fresh", now), bytes: 100 };
+    const context = {
+      protectedIds: ["owner", "absent"],
+      references: [{ holderRunId: "owner", sourceRunId: "source" }],
+    };
+    expect(
+      applyRetention([source, owner, fresh], { ...policy, maxRuns: 1, maxBytes: 1 }, now, context).map((row) => row.id),
+    ).toEqual(["owner", "source"]);
+  });
+
   it("hides a record finished 31 days ago under retentionDays 30 and keeps a 29-day-old one", () => {
     const kept = applyRetention([item("old", now - 31 * DAY), item("fresh", now - 29 * DAY)], policy, now);
     expect(kept.map((r) => r.id)).toEqual(["fresh"]);
@@ -1562,6 +1575,19 @@ describe("durable branch publication contract", () => {
       { ...complete, branches: Array.from({ length: 21 }, (_, i) => ({ ref: `branch/${i}`, pr: i + 1 })) },
     ])
       expect(isRunRecord({ ...record({ repo: "acme/api" }), branchPublication: value })).toBe(false);
+    const targets = [{ pr: 7, headSha: "a".repeat(40) }];
+    expect(isRunRecord(record({ repo: "acme/api", branchPublication: { ...complete, branches: [], targets } }))).toBe(
+      true,
+    );
+    for (const invalidTargets of [
+      [{ pr: 0, headSha: "a".repeat(40) }],
+      [{ pr: 7, headSha: "bad" }],
+      [...targets, ...targets],
+      Array.from({ length: 21 }, (_, i) => ({ pr: i + 1, headSha: "a".repeat(40) })),
+    ])
+      expect(
+        isRunRecord({ ...record({ repo: "acme/api" }), branchPublication: { ...complete, targets: invalidTargets } }),
+      ).toBe(false);
     const { events: _events, ...summary } = record({ branchPublication: complete });
     expect(isRunListItem(summary)).toBe(false);
   });

@@ -1,6 +1,7 @@
 import {
   isCoordinatorUnit,
   isCoordinatorEnding,
+  isRecoveryAdmissionFields,
   INSTANCE_ID_PATTERN,
   mainTaskClaimMatches,
   preserveWorkBrief,
@@ -68,7 +69,7 @@ export type RecoveryTransition = { expected: CoordinatorUnit; replacement: Coord
 );
 export type RecoveryTransitionResult =
   | { ok: true; unit: CoordinatorUnit; replayed?: true }
-  | { ok: false; reason: "stale" | "conflict" | "capacity" | "unavailable" };
+  | { ok: false; reason: "stale" | "conflict" | "capacity" | "unavailable" | "owned" | "incomplete" };
 
 export const RECOVERY_HISTORY_LIMITS = {
   actions: 32,
@@ -179,6 +180,37 @@ export function isRecoveryAction(v: unknown): v is RecoveryAction {
     recoveryBytes(v) <= RECOVERY_HISTORY_LIMITS.actionBytes
   );
 }
+/** Read intent from the existing digest-bound admission payload after the live claim is gone. */
+export async function recoveryActionRenewed(action: RecoveryAction): Promise<boolean | null> {
+  if (!isRecoveryAction(action)) return null;
+  try {
+    const payload: unknown = JSON.parse(action.payload);
+    if (
+      !object(payload) ||
+      payload.version !== 1 ||
+      payload.instanceId !== action.instanceId ||
+      payload.unit !== action.unit ||
+      payload.branch !== action.branch ||
+      payload.predecessorId !== action.predecessorId ||
+      canonical(payload.request) !== canonical(action.request) ||
+      !object(payload.transition) ||
+      !isRecoveryAdmissionFields(payload.transition) ||
+      payload.transition.workflowId !== action.workflowId ||
+      payload.transition.expectedHeadSha !== action.expectedHeadSha ||
+      payload.transition.reviewRunId !== action.reviewRunId ||
+      payload.transition.codingRunId !== action.codingRunId ||
+      (object(payload.transition.externalReview) ? payload.transition.externalReview.id : undefined) !==
+        action.externalReviewId ||
+      canonical(payload) !== action.payload ||
+      (await digest(payload)) !== action.payloadDigest
+    )
+      return null;
+    return payload.transition.renewed === true;
+  } catch {
+    return null;
+  }
+}
+
 export function isRecoveryReceipt(v: unknown): v is RecoveryReceipt {
   if (!object(v)) return false;
   const fields = [

@@ -1,3 +1,4 @@
+import { seedCoordinatorInstance, seedCoordinatorUnit } from "../testing/coordinatorInstance.js";
 import { describe, expect, it, vi } from "vitest";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { contextThreadSessionKey } from "../runLedger/sessionLog.js";
@@ -8,7 +9,7 @@ import { freezeCoordinatorReport } from "./reportContext.js";
 
 export function statusFixture() {
   const ledger = new InMemoryRunLedger();
-  const instances = new InMemoryCoordinatorInstanceStore();
+  const instances = new InMemoryCoordinatorInstanceStore(ledger);
   const instance: CoordinatorInstance = {
     id: "plan-status",
     kind: "ship",
@@ -61,9 +62,12 @@ describe("committed coordinator status context", () => {
       const list = f.instances.listUnits.bind(f.instances);
       vi.spyOn(f.instances, "listUnits").mockImplementationOnce(async (id) => {
         const units = await list(id);
-        expect(
-          await f.instances.replace({ ...f.instance, userId: "cli:another-user", runId: "another-run", attempt: 1 }),
-        ).toEqual({ ok: true });
+        seedCoordinatorInstance(f.instances, {
+          ...f.instance,
+          userId: "cli:another-user",
+          runId: "another-run",
+          attempt: 1,
+        });
         await f.instances.putUnits(units);
         return units;
       });
@@ -156,7 +160,7 @@ describe("committed coordinator status context", () => {
       },
     };
     await f.instances.put(f.instance);
-    await f.instances.putUnits([f.unit]);
+    seedCoordinatorUnit(f.instances, f.unit);
     const ref = await appendCoordinatorStatus(f, f);
     expect(ref).toBeDefined();
     expect(await readCoordinatorStatus(f.ledger, ref!)).toMatchObject({

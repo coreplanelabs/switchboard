@@ -1,3 +1,4 @@
+import { InMemoryRunLedger } from "./runLedger/inMemory.js";
 import { describe, expect, it } from "vitest";
 import { InMemoryCoordinatorInstanceStore } from "./coordinator/instanceStore.js";
 import type { CoordinatorInstance, CoordinatorUnit } from "./coordinator/contract.js";
@@ -27,7 +28,7 @@ const unit = (instanceId: string, unitId: string, pr: number, ending?: Coordinat
 
 describe("recoverRunnerOwnedPulls", () => {
   it("rebuilds an unfinished resumed runner's pull ownership from durable unit rows after process-local state was lost", async () => {
-    const instances = new InMemoryCoordinatorInstanceStore();
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await instances.put(instance("runner_live", "acme/api"));
     await instances.putUnits([unit("runner_live", "unit", 77)]);
 
@@ -37,7 +38,7 @@ describe("recoverRunnerOwnedPulls", () => {
   });
 
   it("does not restore ownership for a unit that already ended", async () => {
-    const instances = new InMemoryCoordinatorInstanceStore();
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await instances.put(instance("runner_ended", "acme/api"));
     await instances.putUnits([unit("runner_ended", "unit", 78, { kind: "merge_ready", report: "ready", at: 2 })]);
 
@@ -45,7 +46,7 @@ describe("recoverRunnerOwnedPulls", () => {
   });
 
   it("rebuilds an active recovery claim even though its original parent Workflow is terminal", async () => {
-    const instances = new InMemoryCoordinatorInstanceStore();
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await instances.put(instance("runner_recovery", "acme/api"));
     await instances.putUnits([
       {
@@ -74,7 +75,7 @@ describe("RunnerOwnershipFence", () => {
   it("clears an orphaned local recovery only after a complete durable rebuild", async () => {
     const fence = new RunnerOwnershipFence(false);
     const original = { instanceId: "runner_recovery", unit: "unit", recoveryActionId: "first" };
-    const instances = new InMemoryCoordinatorInstanceStore();
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await instances.put(instance(original.instanceId, "acme/api"));
     await instances.putUnits([
       unit(original.instanceId, original.unit, 77, { kind: "aborted", report: "ended", at: 2 }),
@@ -97,7 +98,7 @@ describe("RunnerOwnershipFence", () => {
     const token = fence.reserve("acme/api", 77, pending)!;
     await fence.recover(
       { liveListingComplete: true, liveHosted: [], resumable: [], liveElsewhere: [] },
-      new InMemoryCoordinatorInstanceStore(),
+      new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger()),
     );
     expect(fence.owner("acme/api", 77)).toEqual(pending);
     expect(fence.owns("acme/api", 77)).toBe(true);
@@ -214,7 +215,7 @@ describe("RunnerOwnershipFence", () => {
   });
 
   it("refuses sweep ownership reads until a complete live-run listing rebuilds durable ownership", async () => {
-    const instances = new InMemoryCoordinatorInstanceStore();
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await instances.put(instance("runner_live", "acme/api"));
     await instances.putUnits([unit("runner_live", "unit", 77)]);
     const fence = new RunnerOwnershipFence(true);
@@ -246,7 +247,7 @@ describe("RunnerOwnershipFence", () => {
   });
 
   it("recovers a current-generation hosted runner even when classification omitted it from resumable", async () => {
-    const instances = new InMemoryCoordinatorInstanceStore();
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await instances.put(instance("runner_failed", "acme/api"));
     await instances.putUnits([unit("runner_failed", "unit", 79)]);
     const fence = new RunnerOwnershipFence(true);
@@ -265,7 +266,7 @@ describe("RunnerOwnershipFence", () => {
   });
 
   it("recovers a foreign-generation hosted runner while its lease remains live", async () => {
-    const instances = new InMemoryCoordinatorInstanceStore();
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await instances.put(instance("runner_foreign", "acme/api"));
     await instances.putUnits([unit("runner_foreign", "unit", 80)]);
     const fence = new RunnerOwnershipFence(true);

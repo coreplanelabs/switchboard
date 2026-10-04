@@ -9,6 +9,24 @@
 // process without a Worker-backed run history get the in-memory double or the
 // null store, which knows no instance and refuses every write by name.
 
+import { isRunRecord } from "../runRecord.js";
+import type { InMemoryRunLedger } from "../runLedger/inMemory.js";
+import {
+  findPullOwnersInRows,
+  pullBindingChanges,
+  needsPullBindingAdmission,
+  isPullBindingRefusal,
+  type PullBindingRefusal,
+  unitPullBindingRefusal,
+  type PullOwnershipRows,
+  isPullTarget,
+  isPullOwnerLiveMeta,
+  PULL_OWNER_SCAN_MAX,
+  PULL_OWNER_SCAN_MAX_BYTES,
+  isPullOwnersResult,
+  type PullTarget,
+  type PullOwnersResult,
+} from "./pullOwnership.js";
 import type { MainTaskLink } from "./mainTaskLink.js";
 export type { MainTaskLink } from "./mainTaskLink.js";
 import type { Secrets } from "../../secrets.js";
@@ -25,6 +43,7 @@ import {
   prepareUnfencedUnitWrite,
   permitsRecoveryMetadataWrite,
   CoordinatorUnitWriteConflict,
+  coordinatorUnitCanBeDiscarded,
   isThreadEvent,
   type CoordinatorInstance,
   type CoordinatorUnit,
@@ -62,16 +81,17 @@ import {
  *  idempotent); `unavailable`: no durable store in this process. */
 export type PutInstanceResult = { ok: true } | { ok: false; reason: "exists" | "unavailable" };
 export type ConfirmCreatedResult = { ok: true } | { ok: false; reason: "stale" | "unavailable" };
-export type PutUnitsResult = { ok: true } | { ok: false; reason: "unavailable" };
-export type CompareAndReplaceUnitResult = { ok: true } | { ok: false; reason: "stale" | "unavailable" };
+export type PutUnitsResult = { ok: true } | { ok: false; reason: PullBindingRefusal };
+export type CompareAndReplaceUnitResult =
+  { ok: true } | { ok: false; reason: "stale" | "unavailable" | "owned" | "incomplete" };
 export type AppendEventResult =
   { ok: true; seq: number; event?: ThreadEvent } | { ok: false; reason: "ended" | "stale" | "unavailable" };
 export type MarkConsumedResult = { ok: true } | { ok: false; reason: "unavailable" };
-export type AnswerWakeResult = { ok: true } | { ok: false; reason: "unavailable" };
+export type AnswerWakeResult = { ok: true } | { ok: false; reason: PullBindingRefusal };
 export type MarkStoppedResult = { ok: true } | { ok: false; reason: "unknown_instance" | "stale" | "unavailable" };
 export type ReserveDecisionRecordResult = { ok: true; number: string } | { ok: false; reason: "unavailable" };
 export type ClaimMainTaskResult =
-  { ok: true; created: boolean; link: MainTaskLink } | { ok: false; reason: "conflict" | "unavailable" };
+  { ok: true; created: boolean; link: MainTaskLink } | { ok: false; reason: "conflict" | PullBindingRefusal };
 
 /** The (instance, unit) a thread event belongs to. */
 export interface UnitEventKey {
@@ -101,6 +121,8 @@ function mainTaskUnitSnapshot(rows: unknown, key: UnitEventKey): MainTaskUnitSna
 }
 
 export interface CoordinatorInstanceStore {
+  /** Complete canonical owner snapshot; reservation must share this owner transaction. */
+  findPullOwners(target: PullTarget): Promise<PullOwnersResult>;
   transitionRecovery(input: RecoveryTransition): Promise<RecoveryTransitionResult>;
   getRecoveryAction(key: UnitEventKey, request: RecoveryRequest): Promise<RecoveryAction | null>;
   listRecoveryHistory(key: UnitEventKey, after?: number): Promise<RecoveryHistoryPage>;
@@ -123,7 +145,7 @@ export interface CoordinatorInstanceStore {
   /** The record written over whatever the id holds and the id's unit rows
    *  dropped — an attempt starting over: the leftover of one whose Workflow
    *  instance was never created, once the shim has said so. A private-task
-   *  claim or typed settlement refuses replacement as `exists`. */
+   *  claim, publication or execution evidence refuses replacement as `exists`. */
   replace(instance: CoordinatorInstance): Promise<PutInstanceResult>;
   /** Mark only the exact saved pre-create record as created. Unit rows remain
    * untouched; a duplicate or a replaced owner cannot cross this fence. */
@@ -189,6 +211,107 @@ export interface CoordinatorInstanceStore {
 const unitKey = (u: Pick<CoordinatorUnit, "instanceId" | "unit">) => `${u.instanceId}\0${u.unit}`;
 
 export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStore {
+  constructor(
+    private readonly runOwner?: Pick<
+      InMemoryRunLedger,
+      "live" | "finished" | "finishedWorkEvidence" | "workspacePublicationRows"
+    >,
+  ) {}
+  async findPullOwners(target: PullTarget): Promise<PullOwnersResult> {
+    if (!isPullTarget(target)) return { ok: false, reason: "invalid" };
+    if (!this.runOwner) return { ok: false, reason: "unavailable" };
+    try {
+      return findPullOwnersInRows(target, this.pullOwnershipRows());
+    } catch {
+      return { ok: false, reason: "incomplete" };
+    }
+  }
+  private pullOwnershipRows(): PullOwnershipRows {
+    if (!this.runOwner) throw new Error("pull owner unavailable");
+    let count = 0,
+      bytes = 0;
+    const visit = (...text: string[]) => {
+      count++;
+      bytes += text.reduce((sum, item) => sum + 3 * item.length, 0);
+      if (count > PULL_OWNER_SCAN_MAX || bytes > PULL_OWNER_SCAN_MAX_BYTES)
+        throw new Error("pull owner scan incomplete");
+    };
+    for (const text of this.units.values()) {
+      const unit = JSON.parse(text);
+      visit(text, this.rows.get(unit.instanceId) ?? "");
+    }
+    for (const row of this.runOwner.live.values()) visit(JSON.stringify(row.meta), JSON.stringify(row.state));
+    for (const record of this.runOwner.finished.values()) {
+      const { events: _events, ...summary } = record;
+      visit(JSON.stringify(summary), JSON.stringify(this.runOwner.finishedWorkEvidence.get(record.id) ?? {}));
+    }
+    const settlements = this.runOwner.workspacePublicationRows();
+    for (const row of settlements) visit(JSON.stringify(row));
+    if (
+      [...this.runOwner.live.values()].some(
+        (row) =>
+          !isPullOwnerLiveMeta(row.meta) || !row.state || typeof row.state !== "object" || Array.isArray(row.state),
+      )
+    )
+      throw new Error("unreadable pull owner");
+    if ([...this.runOwner.finishedWorkEvidence.keys()].some((id) => !this.runOwner!.finished.has(id)))
+      throw new Error("unreadable pull owner");
+    return {
+      complete: true,
+      units: [...this.units.values()].map((text) => {
+        const unit = JSON.parse(text);
+        const owner = this.rows.get(unit.instanceId);
+        return { unit, instance: owner === undefined ? undefined : JSON.parse(owner) };
+      }),
+      runs: [
+        ...[...this.runOwner.live.values()].map((row) => ({
+          runId: row.runId,
+          repo: row.meta.repo,
+          live: true,
+          publication: row.state.branchPublication,
+          door: row.state.doorPublicationPending,
+        })),
+        ...[...this.runOwner.finished.values()].map((row) => {
+          if (!isRunRecord(row)) throw new Error("unreadable terminal producer");
+          return {
+            runId: row.id,
+            repo: row.repo,
+            live: false,
+            publication: Object.hasOwn(this.runOwner!.finishedWorkEvidence.get(row.id) ?? {}, "branchPublication")
+              ? this.runOwner!.finishedWorkEvidence.get(row.id)!.branchPublication
+              : row.branchPublication,
+            door: Object.hasOwn(this.runOwner!.finishedWorkEvidence.get(row.id) ?? {}, "doorPublicationPending")
+              ? this.runOwner!.finishedWorkEvidence.get(row.id)!.doorPublicationPending
+              : row.doorPublicationPending,
+          };
+        }),
+      ],
+      effects: [],
+      settlements,
+    };
+  }
+  private bindingRefusal(
+    current: CoordinatorUnit | undefined,
+    next: CoordinatorUnit,
+    force = false,
+    staged: readonly CoordinatorUnit[] = [],
+    owner?: CoordinatorInstance,
+  ): PullBindingRefusal | undefined {
+    force ||= current?.startedAt === undefined && next.startedAt !== undefined;
+    if (!force && !needsPullBindingAdmission(current, next)) return;
+    try {
+      const instance = owner ?? JSON.parse(this.rows.get(next.instanceId) ?? "null");
+      if (!isCoordinatorInstance(instance)) return "incomplete";
+      if (!force && !pullBindingChanges(instance, current, next)) return;
+      if (!this.runOwner) return "unavailable";
+      const rows = this.pullOwnershipRows();
+      for (const unit of staged)
+        rows.units.push({ unit, instance: JSON.parse(this.rows.get(unit.instanceId) ?? "null") });
+      return unitPullBindingRefusal(rows, instance, current, next);
+    } catch {
+      return "incomplete";
+    }
+  }
   private readonly recoveryActions = new Map<string, string>();
   private readonly recoveryReceipts = new Map<string, string>();
   async transitionRecovery(input: RecoveryTransition): Promise<RecoveryTransitionResult> {
@@ -211,6 +334,10 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
       },
     );
     if (!result.ok) return result;
+    if (input.kind === "claim" && !result.replayed) {
+      const reason = this.bindingRefusal(input.expected, result.unit, true);
+      if (reason) return { ok: false, reason };
+    }
     if (result.receipt) this.recoveryReceipts.set(`${key}\0${result.receipt.id}`, JSON.stringify(result.receipt));
     if (result.action) this.recoveryActions.set(`${key}\0${result.action.id}`, JSON.stringify(result.action));
     this.units.set(key, JSON.stringify(result.unit));
@@ -292,9 +419,13 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     if (current?.messageId !== authority.sourceMessageId || current.revision !== authority.revision)
       return { ok: false, reason: "conflict" };
     if (this.rows.has(instance.id) || this.units.has(unitKey(unit))) return { ok: false, reason: "conflict" };
+    const reason = this.bindingRefusal(undefined, unit, true, [], instance);
+    if (reason) return { ok: false, reason };
     const link = { instanceId: instance.id, unit: unit.unit, authority };
-    this.rows.set(instance.id, JSON.stringify(instance));
-    this.units.set(unitKey(unit), JSON.stringify(unit));
+    const instanceText = JSON.stringify(instance);
+    const unitText = JSON.stringify(unit);
+    this.rows.set(instance.id, instanceText);
+    this.units.set(unitKey(unit), unitText);
     this.mainTasks.set(this.mainTaskKey(key), link);
     return { ok: true, created: true, link };
   }
@@ -306,15 +437,15 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     return { ok: true };
   }
   async replace(instance: CoordinatorInstance): Promise<PutInstanceResult> {
-    if ([...this.mainTasks.values()].some((link) => link.instanceId === instance.id))
+    if (
+      [...this.mainTasks.values()].some((link) => link.instanceId === instance.id) ||
+      [...this.recoveryActions.keys(), ...this.recoveryReceipts.keys()].some((key) =>
+        key.startsWith(`${instance.id}\0`),
+      )
+    )
       return { ok: false, reason: "exists" };
     if (
-      [...this.units].some(
-        ([key, text]) =>
-          key.startsWith(`${instance.id}\0`) &&
-          ((JSON.parse(text) as CoordinatorUnit).ending?.outcome !== undefined ||
-            (JSON.parse(text) as CoordinatorUnit).history !== undefined),
-      )
+      [...this.units].some(([key, text]) => key.startsWith(`${instance.id}\0`) && !coordinatorUnitCanBeDiscarded(text))
     )
       return { ok: false, reason: "exists" };
     this.rows.set(instance.id, JSON.stringify(instance));
@@ -335,13 +466,18 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     return text === undefined ? null : (JSON.parse(text) as CoordinatorInstance);
   }
   async putUnits(units: readonly CoordinatorUnit[]): Promise<PutUnitsResult> {
-    const pending = new Map<string, string>();
+    const pending = new Map<string, CoordinatorUnit>();
     for (const u of units) {
-      const key = unitKey(u);
-      const current = pending.get(key) ?? this.units.get(key);
-      pending.set(key, JSON.stringify(prepareUnfencedUnitWrite(current ? JSON.parse(current) : undefined, u)));
+      const current = pending.get(unitKey(u)) ?? this.units.get(unitKey(u));
+      pending.set(unitKey(u), prepareUnfencedUnitWrite(typeof current === "string" ? JSON.parse(current) : current, u));
     }
-    for (const [key, text] of pending) this.units.set(key, text);
+    for (const [key, next] of pending) {
+      const current = this.units.get(key);
+      const reason = this.bindingRefusal(current ? JSON.parse(current) : undefined, next, false, [...pending.values()]);
+      if (reason) return { ok: false, reason };
+    }
+    const serialized = [...pending].map(([key, next]) => [key, JSON.stringify(next)] as const);
+    for (const [key, text] of serialized) this.units.set(key, text);
     return { ok: true };
   }
   async compareAndReplaceUnit(
@@ -355,6 +491,8 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
       !permitsRecoveryMetadataWrite(expected, replacement, true)
     )
       return { ok: false, reason: "stale" };
+    const reason = this.bindingRefusal(expected, replacement);
+    if (reason) return { ok: false, reason };
     this.units.set(key, JSON.stringify(preserveWorkBrief(expected, replacement)));
     return { ok: true };
   }
@@ -464,10 +602,11 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
   ): Promise<AnswerWakeResult> {
     const updated = { ...unit, wakes: { ...(unit.wakes ?? {}), [waitId]: answer } };
     const current = this.units.get(unitKey(updated));
-    this.units.set(
-      unitKey(updated),
-      JSON.stringify(prepareUnfencedUnitWrite(current ? JSON.parse(current) : undefined, updated)),
-    );
+    const existing = current ? JSON.parse(current) : undefined;
+    const prepared = prepareUnfencedUnitWrite(existing, updated);
+    const reason = this.bindingRefusal(existing, prepared);
+    if (reason) return { ok: false, reason };
+    this.units.set(unitKey(prepared), JSON.stringify(prepared));
     const list = this.events.get(unitKey(unit)) ?? [];
     for (const e of list) if (seqs.includes(e.seq) && e.consumedBy === undefined) e.consumedBy = by;
     return { ok: true };
@@ -477,6 +616,9 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
 /** Without a durable state Worker, writes refuse and unit-owner reads are
  *  unavailable rather than evidence that the instance has no units. */
 export class NullCoordinatorInstanceStore implements CoordinatorInstanceStore {
+  async findPullOwners(_target: PullTarget): Promise<PullOwnersResult> {
+    return { ok: false, reason: "unavailable" };
+  }
   async transitionRecovery(): Promise<RecoveryTransitionResult> {
     return { ok: false, reason: "unavailable" };
   }
@@ -583,6 +725,15 @@ export interface WorkerCoordinatorInstanceStoreOptions {
  *  the run store's client. An answer this client cannot read is thrown, never
  *  read as "no instance": a spawn on a guess would be a spawn nobody asked for. */
 export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore {
+  async findPullOwners(target: PullTarget): Promise<PullOwnersResult> {
+    try {
+      const response = await this.post("/runs/coordinator/pull-owners", { target });
+      if (response.status !== 200 || !isPullOwnersResult(response.data)) return { ok: false, reason: "unavailable" };
+      return response.data;
+    } catch {
+      return { ok: false, reason: "unavailable" };
+    }
+  }
   async transitionRecovery(input: RecoveryTransition): Promise<RecoveryTransitionResult> {
     const response = await this.post("/runs/coordinator/recovery/transition", { input });
     const data = response.data as { ok?: unknown; reason?: unknown; unit?: unknown; replayed?: unknown };
@@ -598,7 +749,9 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
       (data.reason === "stale" ||
         data.reason === "conflict" ||
         data.reason === "capacity" ||
-        data.reason === "unavailable")
+        data.reason === "unavailable" ||
+        data.reason === "owned" ||
+        data.reason === "incomplete")
     )
       return { ok: false, reason: data.reason };
     throw new Error(`recovery transition unavailable (HTTP ${response.status})`);
@@ -749,6 +902,7 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     const r = await this.post("/runs/coordinator/units/put", { units });
     const d = r.data as { ok?: unknown; reason?: unknown };
     if (r.status === 409 && d.reason === "settled") throw new CoordinatorUnitWriteConflict();
+    if (r.status === 409 && isPullBindingRefusal(d.reason)) return { ok: false, reason: d.reason };
     if (d.ok === true) return { ok: true };
     throw new Error(`coordinator store /runs/coordinator/units/put: unexpected answer (HTTP ${r.status})`);
   }
@@ -764,7 +918,11 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
       recovered: replacement,
     });
     const d = r.data as { ok?: unknown; reason?: unknown };
-    if (r.status === 409 && d.reason === "stale") return { ok: false, reason: "stale" };
+    if (
+      r.status === 409 &&
+      (d.reason === "stale" || d.reason === "owned" || d.reason === "incomplete" || d.reason === "unavailable")
+    )
+      return { ok: false, reason: d.reason };
     if (d.ok === true) return { ok: true };
     throw new Error(
       `coordinator store /runs/coordinator/units/claim-legacy-continuation: unexpected answer (HTTP ${r.status})`,
@@ -868,6 +1026,7 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     const r = await this.post("/runs/coordinator/wake", { unit, waitId, answer, seqs: [...seqs], by });
     const d = r.data as { ok?: unknown; reason?: unknown };
     if (r.status === 409 && d.reason === "settled") throw new CoordinatorUnitWriteConflict();
+    if (r.status === 409 && isPullBindingRefusal(d.reason)) return { ok: false, reason: d.reason };
     if (d.ok === true) return { ok: true };
     throw new Error(`coordinator store /runs/coordinator/wake: unexpected answer (HTTP ${r.status})`);
   }

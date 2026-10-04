@@ -3051,7 +3051,7 @@ describe("the unit page and what a run is the parent of (item 28)", () => {
     let n = 0;
     const registry = new RunRegistry({ genId: () => `run-${++n}`, genToken: () => `tok-${n}`, now: () => NOW });
     const store = new InMemoryRunStore({ now: () => NOW });
-    const instances = new InMemoryCoordinatorInstanceStore();
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await instances.put(instance);
     await instances.putUnits([u1, u2]);
     await store.put(record("c0", { threadKey: "slack:C1:u1", agent: "coding", startedAt: T0 + 1_000 }));

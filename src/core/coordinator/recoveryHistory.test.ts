@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { CoordinatorInstance, CoordinatorUnit } from "./contract.js";
+import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { InMemoryCoordinatorInstanceStore } from "./instanceStore.js";
 import { generatedTaskOf } from "./generatedTask.js";
-import { isRecoveryReceipt, RECOVERY_HISTORY_LIMITS } from "./recoveryHistory.js";
+import { isRecoveryReceipt, recoveryActionRenewed, RECOVERY_HISTORY_LIMITS } from "./recoveryHistory.js";
 
 const instance: CoordinatorInstance = {
   id: "ship_acme_api_1",
@@ -67,8 +68,31 @@ const settled = (row: CoordinatorUnit, number = 1): CoordinatorUnit => {
 };
 
 describe("recovery history store", () => {
+  it("refuses recovery ownership conflict before journaling any action or receipt", async () => {
+    const store = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
+    await store.put(instance);
+    const row = { ...ended(), pr: { number: 7, url: "https://github.com/acme/api/pull/7" } };
+    // The retained ended row is preexisting canonical evidence, not a new admission.
+    (store as unknown as { units: Map<string, string> }).units.set(
+      `${row.instanceId}\0${row.unit}`,
+      JSON.stringify(row),
+    );
+    const held: CoordinatorUnit = { ...row, unit: "OTHER", branch: "fix/other", ending: undefined };
+    expect(await store.putUnits([held])).toEqual({ ok: true });
+    expect(
+      await store.transitionRecovery({
+        kind: "claim",
+        expected: row,
+        replacement: recovering(row),
+        request: request(),
+      }),
+    ).toEqual({ ok: false, reason: "owned" });
+    expect(await store.listUnits(instance.id)).toEqual([row, held]);
+    expect(await store.getRecoveryAction(row, request())).toBeNull();
+    expect((await store.listRecoveryHistory(row)).receipts).toEqual([]);
+  });
   it("requires reconciled admission and preserves history through confirmation replay", async () => {
-    const store = new InMemoryCoordinatorInstanceStore();
+    const store = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     const pending: CoordinatorInstance = { ...instance, admission: "unreconciled" };
     await store.put(pending);
     const row = ended();
@@ -103,8 +127,54 @@ describe("recovery history store", () => {
     expect(await store.get(instance.id)).toEqual({ ...pending, admission: "created" });
   });
 
+  it("replay reads recover or renew intent only from complete digest-bound admission fields", async () => {
+    const store = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
+    await store.put(instance);
+    const row = ended();
+    await store.putUnits([row]);
+    const claimed = await store.transitionRecovery({
+      kind: "claim",
+      expected: row,
+      replacement: recovering(row),
+      request: request(),
+    });
+    if (!claimed.ok) throw new Error(claimed.reason);
+    const action = (await store.getRecoveryAction(row, request()))!;
+    expect(await recoveryActionRenewed(action)).toBe(false);
+    const admission = JSON.parse(action.payload) as { transition: Record<string, unknown> };
+    const resigned = async (transition: Record<string, unknown>) => {
+      const payload = JSON.stringify({ ...admission, transition }, (_key, part: unknown) =>
+        typeof part === "object" && part !== null && !Array.isArray(part)
+          ? Object.fromEntries(Object.entries(part).sort(([a], [b]) => a.localeCompare(b)))
+          : part,
+      );
+      const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(payload)));
+      const payloadDigest = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+      return { ...action, payload, payloadDigest };
+    };
+    const renewed = {
+      ...admission.transition,
+      renewed: true,
+      accounting: {
+        spendUsd: 1,
+        children: [{ runId: "coding", key: "coding-key", usd: 1 }],
+        grant: { renewals: 1 },
+        renewalsSpent: 1,
+      },
+    };
+    expect(await recoveryActionRenewed(await resigned(renewed))).toBe(true);
+    for (const transition of [
+      {},
+      { ...admission.transition, workflowId: "foreign" },
+      { ...admission.transition, reviewRunId: "foreign" },
+      { ...admission.transition, renewed: false },
+    ])
+      expect(await recoveryActionRenewed(await resigned(transition))).toBeNull();
+    expect(await recoveryActionRenewed({ ...action, payloadDigest: "0".repeat(64) })).toBeNull();
+  });
+
   it("rejects identity and provenance changes in every recovery transition", async () => {
-    const store = new InMemoryCoordinatorInstanceStore();
+    const store = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await store.put(instance);
     const row = ended();
     await store.putUnits([row]);
@@ -163,7 +233,7 @@ describe("recovery history store", () => {
   });
 
   it("retains both predecessors across two recovery settlements", async () => {
-    const store = new InMemoryCoordinatorInstanceStore();
+    const store = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await store.put(instance);
     let row = ended();
     await store.putUnits([row]);
@@ -204,7 +274,7 @@ describe("recovery history store", () => {
   });
 
   it("binds action replay to its request and preserves a definitive refusal", async () => {
-    const store = new InMemoryCoordinatorInstanceStore();
+    const store = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await store.put(instance);
     const row = ended();
     await store.putUnits([row]);
@@ -243,7 +313,7 @@ describe("recovery history store", () => {
   });
 
   it("fences alternate writers without losing history or consuming wake events", async () => {
-    const store = new InMemoryCoordinatorInstanceStore();
+    const store = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await store.put(instance);
     const row = ended();
     await store.putUnits([row]);
@@ -272,7 +342,7 @@ describe("recovery history store", () => {
   });
 
   it("refuses oversized transitions before changing the unit", async () => {
-    const store = new InMemoryCoordinatorInstanceStore();
+    const store = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await store.put(instance);
     const row = {
       ...ended(),
@@ -297,7 +367,7 @@ describe("recovery history store", () => {
   });
 
   it("reserves terminal row space before admitting a large but valid task", async () => {
-    const store = new InMemoryCoordinatorInstanceStore();
+    const store = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await store.put(instance);
     const row = {
       ...ended(),
@@ -321,7 +391,7 @@ describe("recovery history store", () => {
   });
 
   it("reserves the final receipt slot and pages history without trimming predecessors", async () => {
-    const store = new InMemoryCoordinatorInstanceStore();
+    const store = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await store.put(instance);
     let row = ended();
     await store.putUnits([row]);

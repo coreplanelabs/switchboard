@@ -1,3 +1,4 @@
+const RECOVERY_ACTION = `r_${"a".repeat(64)}`;
 import type { PublicationSettlement } from "../publicationSettlement.js";
 import { describe, expect, it } from "vitest";
 import { shipRoundHeader } from "../shipPipeline.js";
@@ -124,6 +125,7 @@ describe("original-unit recovery accounting", () => {
         grant: granted,
         idleDays: 7,
         recovery: {
+          actionId: RECOVERY_ACTION,
           remainingMs: 180 * MIN,
           unitKey: "plan-old:U10",
           renewalsSpent: 1,
@@ -163,6 +165,7 @@ describe("original-unit recovery accounting", () => {
         caps: { maxRounds: 2, maxMinutes: 240 },
         merge: "person",
         recovery: {
+          actionId: RECOVERY_ACTION,
           remainingMs: 180 * MIN,
           unitKey: "plan-old:U10",
           coding: { from: HEAD_A, previousRunId: "run-original-coding" },
@@ -175,7 +178,7 @@ describe("original-unit recovery accounting", () => {
     expect(state.spendUsd).toBe(0.25);
     expect(nextAction(state)).toMatchObject({
       type: "spawn",
-      step: "U10/recovery/0/coding",
+      step: `U10/recovery/${RECOVERY_ACTION}/0/coding`,
       brief: { kind: "contract", continue: { from: HEAD_A, previousRunId: "run-original-coding", recovery: true } },
     });
   });
@@ -193,7 +196,7 @@ describe("original-unit recovery accounting", () => {
       input({
         caps: { maxRounds: 2, maxMinutes: 180 },
         merge: "person",
-        recovery: { remainingMs: 100 * MIN, unitKey: "plan-old:U10" },
+        recovery: { actionId: RECOVERY_ACTION, remainingMs: 100 * MIN, unitKey: "plan-old:U10" },
       }),
       T0,
       {
@@ -232,7 +235,7 @@ describe("original-unit recovery accounting", () => {
       input({
         caps: { maxRounds: 2, maxMinutes: 120 },
         merge: "person",
-        recovery: { remainingMs: 90 * MIN, unitKey: "plan-old:U10" },
+        recovery: { actionId: RECOVERY_ACTION, remainingMs: 90 * MIN, unitKey: "plan-old:U10" },
       }),
       T0,
       {
@@ -264,7 +267,7 @@ describe("original-unit recovery accounting", () => {
       input({
         merge: "person",
         grant: { renewals: 2, costCapUsd: 50 },
-        recovery: { remainingMs: 60 * MIN, unitKey: "plan-old:U10", renewalsSpent: 1 },
+        recovery: { actionId: RECOVERY_ACTION, remainingMs: 60 * MIN, unitKey: "plan-old:U10", renewalsSpent: 1 },
       }),
       T0,
       { kind: "review", round: 2, pr, expectedHeadSha: HEAD_A, reviewRunId: "run-original-review", spendUsd: 15 },
@@ -279,7 +282,10 @@ describe("original-unit recovery accounting", () => {
 
   it("refuses a capped recovery whose durable spend carry is missing", () => {
     const state = openRecoveredUnitPipeline(
-      input({ grant: { renewals: 0, costCapUsd: 50 }, recovery: { remainingMs: 60 * MIN, unitKey: "plan-old:U10" } }),
+      input({
+        grant: { renewals: 0, costCapUsd: 50 },
+        recovery: { actionId: RECOVERY_ACTION, remainingMs: 60 * MIN, unitKey: "plan-old:U10" },
+      }),
       T0,
       {
         kind: "review",
@@ -298,7 +304,7 @@ describe("original-unit recovery accounting", () => {
       input({
         merge: "person",
         grant: { renewals: 2, costCapUsd: 50 },
-        recovery: { remainingMs: 64 * MIN, unitKey: "plan-old:U10" },
+        recovery: { actionId: RECOVERY_ACTION, remainingMs: 64 * MIN, unitKey: "plan-old:U10" },
       }),
       T0,
       {
@@ -327,7 +333,11 @@ describe("original-unit recovery accounting", () => {
       },
       at: T0 + MIN,
     });
-    expect(d.action).toMatchObject({ type: "pr-check", step: "U10/recovery/1/findings/pr-check", pr: 7 });
+    expect(d.action).toMatchObject({
+      type: "pr-check",
+      step: `U10/recovery/${RECOVERY_ACTION}/1/findings/pr-check`,
+      pr: 7,
+    });
     d.answer({
       type: "pr-check",
       pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
@@ -348,7 +358,7 @@ describe("original-unit recovery accounting", () => {
         input({
           merge: "person",
           grant: { renewals: 2, costCapUsd: 50 },
-          recovery: { remainingMs: 64 * MIN, unitKey: "plan-old:U10" },
+          recovery: { actionId: RECOVERY_ACTION, remainingMs: 64 * MIN, unitKey: "plan-old:U10" },
         }),
         T0,
         {
@@ -377,7 +387,11 @@ describe("original-unit recovery accounting", () => {
         },
         at: T0 + MIN,
       });
-      expect(d.action).toMatchObject({ type: "pr-check", step: "U10/recovery/1/findings/pr-check", pr: 7 });
+      expect(d.action).toMatchObject({
+        type: "pr-check",
+        step: `U10/recovery/${RECOVERY_ACTION}/1/findings/pr-check`,
+        pr: 7,
+      });
       d.answer({
         type: "pr-check",
         pr: { state: "open", prNumber: 7, url: PR_URL, headSha: remoteHead, headBranchExists: true },
@@ -398,7 +412,7 @@ describe("original-unit recovery accounting", () => {
             merge: "person",
             idleDays: 1,
             grant: { renewals: 2, costCapUsd: 50 },
-            recovery: { remainingMs: 64 * MIN, unitKey: "plan-old:U10" },
+            recovery: { actionId: RECOVERY_ACTION, remainingMs: 64 * MIN, unitKey: "plan-old:U10" },
           }),
           T0,
           {
@@ -466,7 +480,7 @@ describe("original-unit recovery accounting", () => {
         input({
           merge: "person",
           grant: { renewals: 2, costCapUsd: 50 },
-          recovery: { remainingMs: 60 * MIN, unitKey: "plan-old:U10" },
+          recovery: { actionId: RECOVERY_ACTION, remainingMs: 60 * MIN, unitKey: "plan-old:U10" },
         }),
         T0,
         {
@@ -509,7 +523,7 @@ describe("original-unit recovery accounting", () => {
       input({
         merge: "person",
         grant: { renewals: 0, costCapUsd: 50 },
-        recovery: { remainingMs: 60 * MIN, unitKey: "plan-old:U10" },
+        recovery: { actionId: RECOVERY_ACTION, remainingMs: 60 * MIN, unitKey: "plan-old:U10" },
       }),
       T0,
       {
@@ -535,7 +549,7 @@ describe("original-unit recovery accounting", () => {
       input({
         merge: "person",
         grant: { renewals: 0, costCapUsd: 50 },
-        recovery: { remainingMs: 60 * MIN, unitKey: "plan-old:U10" },
+        recovery: { actionId: RECOVERY_ACTION, remainingMs: 60 * MIN, unitKey: "plan-old:U10" },
       }),
       T0,
       {
@@ -568,7 +582,7 @@ describe("original-unit recovery accounting", () => {
         input({
           merge: "person",
           grant: { renewals: 2, costCapUsd: 50 },
-          recovery: { remainingMs: 60 * MIN, unitKey: "plan-old:U10" },
+          recovery: { actionId: RECOVERY_ACTION, remainingMs: 60 * MIN, unitKey: "plan-old:U10" },
         }),
         T0,
         {
@@ -612,7 +626,7 @@ describe("original-unit recovery accounting", () => {
   it("never opens a recovery review beyond the original round cap", () => {
     const state = openRecoveredUnitPipeline(
       input({
-        recovery: { remainingMs: 60 * MIN, unitKey: "plan-old:U10" },
+        recovery: { actionId: RECOVERY_ACTION, remainingMs: 60 * MIN, unitKey: "plan-old:U10" },
       }),
       T0,
       {
@@ -629,7 +643,7 @@ describe("original-unit recovery accounting", () => {
 
   it("labels elapsed categories as checkpoint-local instead of claiming the legacy unit's missing lifetime history", () => {
     const state = openRecoveredUnitPipeline(
-      input({ recovery: { remainingMs: 60 * MIN, unitKey: "plan-old:U10" } }),
+      input({ recovery: { actionId: RECOVERY_ACTION, remainingMs: 60 * MIN, unitKey: "plan-old:U10" } }),
       T0,
       {
         kind: "review",
@@ -948,7 +962,7 @@ describe("completed findings recovery — typed completion plus independently ve
           merge: "person",
           generated: true,
           grant: { renewals: 0, costCapUsd: 10 },
-          recovery: { remainingMs: 90 * MIN, unitKey: "plan-old:U10" },
+          recovery: { actionId: RECOVERY_ACTION, remainingMs: 90 * MIN, unitKey: "plan-old:U10" },
         }),
         T0,
         {
@@ -970,7 +984,10 @@ describe("completed findings recovery — typed completion plus independently ve
       pullRequest: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_C, headBranchExists: true },
       at: T0 + 30 * MIN,
     });
-    expect(d.action).toMatchObject({ type: "pr-check", step: "U10/recovery/1/findings/superseded/pr-check" });
+    expect(d.action).toMatchObject({
+      type: "pr-check",
+      step: `U10/recovery/${RECOVERY_ACTION}/1/findings/superseded/pr-check`,
+    });
     d.answer({
       type: "pr-check",
       pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B, headBranchExists: true },
@@ -1157,7 +1174,7 @@ describe("completed findings recovery — typed completion plus independently ve
           merge: "person",
           generated: true,
           grant: { renewals: 0, costCapUsd: 2 },
-          recovery: { remainingMs: 64 * MIN, unitKey: "plan-old:U10" },
+          recovery: { actionId: RECOVERY_ACTION, remainingMs: 64 * MIN, unitKey: "plan-old:U10" },
         }),
         T0,
         {

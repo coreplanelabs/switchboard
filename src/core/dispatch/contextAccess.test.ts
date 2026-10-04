@@ -136,7 +136,7 @@ function setup() {
 }
 
 async function workerFixture(f: ReturnType<typeof setup>) {
-  const instances = new InMemoryCoordinatorInstanceStore();
+  const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
   const instance: CoordinatorInstance = {
     id: "plan_context",
     kind: "ship",

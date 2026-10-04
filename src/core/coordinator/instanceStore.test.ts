@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { secretsFrom } from "../../secrets.js";
 import {
   capThreadEvent,
@@ -9,6 +10,7 @@ import {
   preserveWorkBrief,
   prepareUnfencedUnitWrite,
   CoordinatorUnitWriteConflict,
+  coordinatorUnitCanBeDiscarded,
   type CoordinatorInstance,
   type CoordinatorUnit,
   type ThreadEvent,
@@ -116,12 +118,7 @@ function workerDouble() {
       const inst = body.instance as CoordinatorInstance;
       if ([...mainTasks.values()].some((link) => link.instanceId === inst.id))
         return Response.json({ ok: false, reason: "exists" }, { status: 409 });
-      if (
-        [...units].some(
-          ([key, text]) =>
-            key.startsWith(`${inst.id}/`) && (JSON.parse(text) as CoordinatorUnit).ending?.outcome !== undefined,
-        )
-      )
+      if ([...units].some(([key, text]) => key.startsWith(`${inst.id}/`) && !coordinatorUnitCanBeDiscarded(text)))
         return Response.json({ ok: false, reason: "exists" }, { status: 409 });
       rows.set(inst.id, JSON.stringify(inst));
       for (const key of [...units.keys()]) if (key.startsWith(`${inst.id}/`)) units.delete(key);
@@ -276,13 +273,13 @@ const contract = (name: string, make: () => CoordinatorInstanceStore) => {
         { ...stale, pr: { number: 7, url: "https://github.com/acme/api/pull/7" } },
         { ...stale, rounds: [{ index: 1, agent: "review", outcome: "approve", at: 3_000 }] },
       ]) {
-        await expect(store.putUnits([unitRow("U13"), late])).rejects.toThrow(/settled/);
+        await expect(store.putUnits([unitRow("U13"), late])).rejects.toThrow(CoordinatorUnitWriteConflict);
         expect(await store.listUnits(instance.id)).toEqual([settled]);
       }
       expect(await store.putUnits([settled])).toEqual({ ok: true });
       await expect(
         store.answerWake(stale, "U12/wait/1", { kind: "answered", reply: "Proceed" }, [1], "wake"),
-      ).rejects.toThrow(/settled/);
+      ).rejects.toThrow(CoordinatorUnitWriteConflict);
       expect(await store.listUnits(instance.id)).toEqual([settled]);
       expect(await store.listEvents(key, true)).toMatchObject([{ seq: 1, text: "Proceed" }]);
       expect(await store.replace(instance)).toEqual({ ok: false, reason: "exists" });
@@ -299,6 +296,38 @@ const contract = (name: string, make: () => CoordinatorInstanceStore) => {
       expect(await store.put({ ...instance, branch: "other" })).toEqual({ ok: false, reason: "exists" });
       expect(await store.get(instance.id)).toEqual(instance);
       expect(await store.get("ship_none")).toBeNull();
+    });
+
+    it.each([
+      { pr: { number: 7, url: "https://github.com/acme/api/pull/7" } },
+      { resume: { pr: 7 } },
+      { lastPush: "a".repeat(40) },
+      { progress: { phase: "publication-pending" } },
+      {
+        wakes: {
+          wait: {
+            kind: "segment" as const,
+            index: 1,
+            runId: "prior-run",
+            spendUsd: 0,
+            texts: [],
+            senders: [],
+            leaseMs: 1000,
+          },
+        },
+      },
+      { ending: { kind: "interrupted", report: "legacy ending", at: 1000 } },
+    ])("replacement retains existing publication or execution evidence: %j", async (facts) => {
+      const store = make();
+      await store.put(instance);
+      const unit = unitRow("U12", facts as Partial<CoordinatorUnit>);
+      await store.putUnits([unit]);
+      expect(await store.replace({ ...instance, runId: "replacement", createdAt: 2000 })).toEqual({
+        ok: false,
+        reason: "exists",
+      });
+      expect(await store.get(instance.id)).toEqual(instance);
+      expect(await store.listUnits(instance.id)).toEqual([unit]);
     });
 
     // A re-issue over the leftover of an attempt whose create failed: the
@@ -334,6 +363,8 @@ const contract = (name: string, make: () => CoordinatorInstanceStore) => {
     // as the runner reaches a unit, listed in the order first written.
     it("putUnits writes the rows and listUnits reads an instance's back in first-written order; a row is replaced whole and keeps its place; another instance's rows never appear", async () => {
       const store = make();
+      await store.put(instance);
+      await store.put({ ...instance, id: "ship_other" });
       expect(await store.putUnits([unitRow("U12"), unitRow("U13", { dependsOn: ["U12"] })])).toEqual({ ok: true });
       expect(await store.putUnits([{ ...unitRow("U99"), instanceId: "ship_other" }])).toEqual({ ok: true });
       expect((await store.listUnits(instance.id)).map((u) => u.unit)).toEqual(["U12", "U13"]);
@@ -348,6 +379,7 @@ const contract = (name: string, make: () => CoordinatorInstanceStore) => {
 
     it("claimLegacyContinuation replaces only the exact expected row, so one caller wins and stale state is never overwritten", async () => {
       const store = make();
+      await store.put(instance);
       const legacy = unitRow("U12", {
         pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
         ending: { kind: "merge_ready", report: "ready", at: 2_000 },
@@ -378,6 +410,7 @@ const contract = (name: string, make: () => CoordinatorInstanceStore) => {
 
     it("compareAndReplaceUnit atomically binds an ordinary open pull request without exposing a PR-only row", async () => {
       const store = make();
+      await store.put(instance);
       const unbound = unitRow("U12");
       const head = "a".repeat(40);
       const bound = {
@@ -458,7 +491,7 @@ const contract = (name: string, make: () => CoordinatorInstanceStore) => {
   });
 };
 
-contract("InMemoryCoordinatorInstanceStore", () => new InMemoryCoordinatorInstanceStore());
+contract("InMemoryCoordinatorInstanceStore", () => new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger()));
 contract(
   "WorkerCoordinatorInstanceStore (over a state Worker double)",
   () =>
@@ -472,7 +505,7 @@ contract(
 
 describe("main-agent task claims", () => {
   for (const [name, make] of [
-    ["memory", () => new InMemoryCoordinatorInstanceStore()],
+    ["memory", () => new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger())],
     [
       "Worker wire",
       () =>
@@ -527,14 +560,24 @@ describe("main-agent task claims", () => {
       const raced = await Promise.all([
         store.claimMainTask(
           { ...key, actId: "act-race" },
-          { ...instance, id: "ship_race_a" },
-          { ...row, instanceId: "ship_race_a", workBrief: { ...row.workBrief!, actId: "act-race" } },
+          { ...instance, id: "ship_race_a", branch: "fix/race-a" },
+          {
+            ...row,
+            instanceId: "ship_race_a",
+            branch: "fix/race-a",
+            workBrief: { ...row.workBrief!, actId: "act-race" },
+          },
           authority,
         ),
         store.claimMainTask(
           { ...key, actId: "act-race" },
-          { ...instance, id: "ship_race_b" },
-          { ...row, instanceId: "ship_race_b", workBrief: { ...row.workBrief!, actId: "act-race" } },
+          { ...instance, id: "ship_race_b", branch: "fix/race-b" },
+          {
+            ...row,
+            instanceId: "ship_race_b",
+            branch: "fix/race-b",
+            workBrief: { ...row.workBrief!, actId: "act-race" },
+          },
           authority,
         ),
       ]);

@@ -1,5 +1,5 @@
 import { PUSHED_MAX } from "../../execution/residentRebind.js";
-import { branchPublicationOf, type BranchPublication } from "../branchPublication.js";
+import { doorPublicationOf, branchPublicationOf, type BranchPublication } from "../branchPublication.js";
 import { createWorkFreshness } from "./workFreshness.js";
 import { appendRunReport } from "../runLedger/threadSession.js";
 import { directAudienceStampOf } from "../runLedger/inboxMessage.js";
@@ -536,6 +536,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     if (kind !== "accepted" && tailSkipped()) throw new Error("publication stopped");
     if (
       (ownsBranch && !target.ref) ||
+      (target.pr !== undefined && (!Number.isSafeInteger(target.pr) || target.pr < 1)) ||
       (!target.ref && (!Number.isSafeInteger(target.pr) || target.pr! < 1)) ||
       !/^[0-9a-f]{40}$/.test(target.headSha)
     )
@@ -552,6 +553,14 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     if (ownsBranch && !current.branches.some((b) => b.ref === target.ref) && current.branches.length >= PUSHED_MAX) {
       branchPublication = { ...current, complete: false };
       await ledgerRun?.commitState({ branchPublication });
+      throw new Error("publication mapping capacity");
+    }
+    if (
+      kind === "pending" &&
+      !ownsBranch &&
+      !current.targets?.some((t) => t.pr === target.pr) &&
+      (current.targets?.length ?? 0) >= PUSHED_MAX
+    ) {
       throw new Error("publication mapping capacity");
     }
     let proposed: BranchPublication;
@@ -588,10 +597,18 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       const branches = ownsBranch
         ? [...current.branches.filter((b) => b.ref !== target.ref), { ref: target.ref!, pr: target.pr! }]
         : current.branches;
+      const targets =
+        kind === "accepted" && !ownsBranch
+          ? [
+              ...(current.targets ?? []).filter((t) => t.pr !== target.pr),
+              { pr: target.pr!, ...(target.ref ? { ref: target.ref } : {}), headSha: target.headSha },
+            ]
+          : current.targets;
       proposed = {
         version: 1,
         repo: target.repo,
         branches,
+        ...(targets ? { targets } : {}),
         complete: [...branchReceipts, ...publicationReceipts].every((receipt) =>
           branches.some((branch) => branch.ref === receipt.ref),
         ),
@@ -617,6 +634,21 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   const unresolvedDoorPublication =
     restoredDoorIntent !== undefined && restoredDoorIntent !== null && !restoredDoorIntent.outcome;
   const resumedDoorPublication = unresolvedDoorPublication ? restoredDoorIntent : undefined;
+  const newDoorIntent = (update: GitPublicationUpdate) =>
+    doorPublicationOf({
+      id: randomUUID(),
+      update,
+      repo: coordinator?.publication?.repo ?? repoCtx.repo ?? deps.githubBindings?.get(run.id)?.repo,
+      ...(coordinator?.publication ? { pr: coordinator.publication.pr } : {}),
+      ...(coordinator && unitOfIdempotencyKey(coordinator.idempotencyKey) !== undefined
+        ? {
+            owner: {
+              instanceId: coordinator.parentInstanceId,
+              unit: unitOfIdempotencyKey(coordinator.idempotencyKey)!,
+            },
+          }
+        : {}),
+    });
   let activeDoorPublication: { id: string; update: GitPublicationUpdate } | undefined;
   let lastDoorRefusal = restoredDoorIntent?.outcome === "rejected" ? restoredDoorIntent : undefined;
   // The bounded display backlog may trim a push during a long test run. Its
@@ -2113,7 +2145,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                 update.old !== authority.expectedHeadSha
               )
                 return;
-              const pending = { id: randomUUID(), update };
+              const pending = newDoorIntent(update);
+              if (!pending) return;
               if (branchPublication && !branchPublication.branches.some((branch) => branch.ref === authority.ref))
                 branchPublication = { ...branchPublication, complete: false };
               committed = await ledgerRun.setStateAndFlush({
@@ -2241,7 +2274,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             let committed = false;
             await events.write(async () => {
               if (!ledgerRun?.tracked() || activeDoorPublication) return;
-              const pending = { id: randomUUID(), update };
+              const pending = newDoorIntent(update);
+              if (!pending) return;
               const ref = update.ref.slice("refs/heads/".length);
               if (branchPublication && !branchPublication.branches.some((branch) => branch.ref === ref))
                 branchPublication = { ...branchPublication, complete: false };

@@ -2117,7 +2117,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     });
     const channelId = "slack:DPRIVATE";
     const threadKey = `${channelId}:1.0`;
-    const instances = new InMemoryCoordinatorInstanceStore();
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     const instance = {
       id: "ship_signup_1",
       kind: "ship" as const,
@@ -2395,7 +2395,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
 
   it("a later orchestrator turn reads only its linked private worker projection through the tool context", async () => {
     const dmThread = "slack:DMAIN:1.0";
-    const instances = new InMemoryCoordinatorInstanceStore();
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     const instance = {
       id: "ship_signup_1",
       kind: "ship" as const,
@@ -2511,7 +2511,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     const threadKey = "slack:DMAIN:1.0",
       channelId = "slack:DMAIN",
       userId = "slack:UX";
-    const instances = new InMemoryCoordinatorInstanceStore();
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     const instance = {
       id: "status-work",
       kind: "ship" as const,
@@ -2618,7 +2618,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
 
   it("revokes private progress when an app follow-up folds into the live main run", async () => {
     const threadKey = "slack:DMAIN:1.0";
-    const instances = new InMemoryCoordinatorInstanceStore();
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     const instance = {
       id: "ship_signup_2",
       kind: "ship" as const,
@@ -8681,6 +8681,8 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     "accepted",
     "metadata only",
     "PR-only metadata",
+    "metadata capacity",
+    "invalid metadata PR",
     "observed capacity",
     "unmapped push",
     "unobservable push",
@@ -8734,7 +8736,10 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       state: {
         ...(mode === "observed capacity" || mode === "unmapped push" ? {} : { prDescription: description }),
         branchPushReceipts:
-          mode === "metadata only" || mode === "PR-only metadata"
+          mode === "metadata only" ||
+          mode === "PR-only metadata" ||
+          mode === "metadata capacity" ||
+          mode === "invalid metadata PR"
             ? []
             : [{ type: "pushed_head", ref, sha: head, by: "push" }],
         ...(mode === "legacy"
@@ -8744,6 +8749,9 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
                 version: 1,
                 repo: "o/r",
                 complete: true,
+                ...(mode === "metadata capacity"
+                  ? { targets: Array.from({ length: 20 }, (_, i) => ({ pr: i + 10, headSha: head })) }
+                  : {}),
                 branches:
                   mode === "capacity" || mode === "observed capacity"
                     ? Array.from({ length: 20 }, (_, i) => ({ ref: `other/${i}`, pr: i + 1 }))
@@ -8793,7 +8801,9 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     });
     s.deps.openPullRequest = open;
     s.deps.findOpenPrByHead = async () =>
-      mode === "unmapped push" ? null : { number: 7, htmlUrl: "https://github.com/o/r/pull/7", headSha: head };
+      mode === "unmapped push"
+        ? null
+        : { number: mode === "invalid metadata PR" ? 0 : 7, htmlUrl: "https://github.com/o/r/pull/7", headSha: head };
     const update = vi.fn(async () => undefined);
     s.deps.updatePullRequest = update;
     const release = vi.fn(async (_input?: unknown) => undefined);
@@ -8821,6 +8831,9 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
         repo: "o/r",
         complete: true,
         branches: mode === "accepted" ? [{ ref, pr: 7 }] : [],
+        ...(mode !== "accepted"
+          ? { targets: [{ pr: 7, ...(mode === "metadata only" ? { ref } : {}), headSha: head }] }
+          : {}),
       });
       if (mode === "accepted")
         expect(release).toHaveBeenCalledWith(expect.objectContaining({ pushed: [{ ref, pr: 7 }] }));
@@ -8828,6 +8841,20 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
         expect(release).toHaveBeenCalledOnce();
         expect(release.mock.calls[0]?.[0]).not.toHaveProperty("pushed");
       }
+    } else if (mode === "invalid metadata PR") {
+      expect(open).not.toHaveBeenCalled();
+      expect(update).not.toHaveBeenCalled();
+      expect(record?.branchPublication?.pending).toBeUndefined();
+    } else if (mode === "metadata capacity") {
+      expect(open).not.toHaveBeenCalled();
+      expect(update).not.toHaveBeenCalled();
+      expect(record?.branchPublication).toMatchObject({
+        complete: true,
+        targets: Array.from({ length: 20 }, (_, i) => ({ pr: i + 10, headSha: head })),
+      });
+      expect(record?.branchPublication?.pending).toBeUndefined();
+      expect(release).toHaveBeenCalledOnce();
+      expect(release.mock.calls[0]?.[0]).not.toHaveProperty("pushed");
     } else {
       expect(open).toHaveBeenCalledTimes(mode === "response lost" || mode === "acceptance unavailable" ? 1 : 0);
       if (mode !== "hard stop") expect(release).not.toHaveBeenCalled();
@@ -8972,7 +8999,12 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     const old = "a".repeat(40);
     const next = "b".repeat(40);
     const ref = "unit-branch";
-    const pending = { id: "intent-before-restart", update: { ref: `refs/heads/${ref}`, old, next } };
+    const pending = {
+      id: "intent-before-restart",
+      repo: "o/r",
+      owner: { instanceId: "coord-p", unit: "U12" },
+      update: { ref: `refs/heads/${ref}`, old, next },
+    };
     const description: PrDescription = {
       title: "fix(core): hold an uncertain branch push",
       tldr: "Keeps the unit PR unpublished while the prior Git result is uncertain.",

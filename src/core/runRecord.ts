@@ -1,4 +1,9 @@
-import { branchPublicationOf, type BranchPublication } from "./branchPublication.js";
+import {
+  branchPublicationOf,
+  doorPublicationOf,
+  type BranchPublication,
+  type DoorPublication,
+} from "./branchPublication.js";
 import { answerOutcomeOf, type AnswerOutcome } from "./answerOutcome.js";
 import {
   isMainContextRefusalCode,
@@ -339,13 +344,7 @@ export interface RunRecord {
    * ref transition until head reconciliation. A PR number exists only for a
    * verified existing-PR publication. */
   branchPublication?: BranchPublication;
-  doorPublicationPending?: {
-    id: string;
-    repo: string;
-    pr?: number;
-    owner?: { instanceId: string; unit: string };
-    update: { ref: string; old: string; next: string };
-  };
+  doorPublicationPending?: DoorPublication;
   /** What the run cost in tokens, per model, summed from its `model.turn`
    *  spans at finish (`usageOfEvents`; docs/reference/specs/costs.md, cost by user).
    *  Every record written since carries it (zero turns included); one written
@@ -1314,27 +1313,7 @@ export function isRunRecord(v: unknown): v is RunRecord {
     return false;
   if (r.branchPublication !== undefined && !branchPublicationOf(r.branchPublication, r.repo as string | undefined))
     return false;
-  if (r.doorPublicationPending !== undefined) {
-    const pending = r.doorPublicationPending;
-    if (typeof pending !== "object" || pending === null) return false;
-    const { id, repo, pr, owner, update } = pending as Record<string, unknown>;
-    if (
-      typeof id !== "string" ||
-      !id ||
-      typeof repo !== "string" ||
-      !repo ||
-      (pr !== undefined && (!Number.isInteger(pr) || (pr as number) < 1))
-    )
-      return false;
-    if (owner !== undefined && (typeof owner !== "object" || owner === null)) return false;
-    if (typeof update !== "object" || update === null) return false;
-    const o = owner as Record<string, unknown> | undefined;
-    const u = update as Record<string, unknown>;
-    if (o !== undefined && (typeof o.instanceId !== "string" || typeof o.unit !== "string")) return false;
-    if (typeof u.ref !== "string" || !u.ref.startsWith("refs/heads/")) return false;
-    if (typeof u.old !== "string" || !/^[0-9a-f]{40}$/.test(u.old)) return false;
-    if (typeof u.next !== "string" || !/^[0-9a-f]{40}$/.test(u.next)) return false;
-  }
+  if (r.doorPublicationPending !== undefined && !doorPublicationOf(r.doorPublicationPending)) return false;
   // A parent is named by a run id (item 46): the same shape as the record's own.
   if (r.parentRunId !== undefined && (typeof r.parentRunId !== "string" || !RUN_ID_PATTERN.test(r.parentRunId)))
     return false;
@@ -1492,7 +1471,7 @@ export type RetentionKey = Pick<RunListItem, "id" | "finishedAt" | "bytes" | "ch
  * The one retention function both the bot and the Worker run, in this order:
  * (1) drop everything finished before `nowMs - retentionDays`; (2) keep the
  * newest `maxRuns`; (3) drop the oldest while the cumulative `bytes` of what is
- * kept exceeds `maxBytes` (missing `bytes` counts as 0); (4) retain existing
+ * kept exceeds `maxBytes` (missing `bytes` counts as 0); (4) keep existing protected records and retain existing
  * sources referenced by those roots or live holders, without recursively
  * promoting a pinned source. Returns newest-first; never mutates `items`.
  */
@@ -1500,7 +1479,11 @@ export function applyRetention<T extends RetentionKey>(
   items: readonly T[],
   policy: RetentionPolicy,
   nowMs: number,
-  context: { references?: readonly ContextReference[]; liveHolderIds?: readonly string[] } = {},
+  context: {
+    references?: readonly ContextReference[];
+    liveHolderIds?: readonly string[];
+    protectedIds?: readonly string[];
+  } = {},
 ): T[] {
   const cutoff = nowMs - policy.retentionDays * 86_400_000;
   const kept = items
@@ -1519,7 +1502,9 @@ export function applyRetention<T extends RetentionKey>(
   const references =
     context.references ??
     items.flatMap((item) => contextReferencesOf(item.id, item.childHandoff, item.contextDependencies));
-  return retainContextSources(items, kept.slice(0, end), references, context.liveHolderIds).sort(newestFirst);
+  const protectedIds = new Set(context.protectedIds);
+  const roots = [...kept.slice(0, end), ...items.filter((item) => protectedIds.has(item.id))];
+  return retainContextSources(items, roots, references, context.liveHolderIds).sort(newestFirst);
 }
 
 // ---- byte budget ------------------------------------------------------------

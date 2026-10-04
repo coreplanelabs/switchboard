@@ -1,4 +1,5 @@
-import { branchPublicationOf } from "../../src/core/branchPublication.js";
+import { terminalPublicationRetentionRequired } from "../../src/core/branchPublication.ts";
+import { branchPublicationOf, doorPublicationOf } from "../../src/core/branchPublication.js";
 import {
   terminalWorkspaceSettlement,
   terminalThreadKey,
@@ -188,6 +189,20 @@ import {
   type PlaneState,
   type PlaneWrite,
 } from "../../src/core/plane/decide.ts";
+import {
+  findPullOwnersInRows,
+  pullBindingChanges,
+  needsPullBindingAdmission,
+  unitPullBindingRefusal,
+  type PullBindingRefusal,
+  isPullTarget,
+  isPullOwnerLiveMeta,
+  PULL_OWNER_SCAN_MAX,
+  PULL_OWNER_SCAN_MAX_BYTES,
+  type PullTarget,
+  type PullOwnersResult,
+  type PullOwnershipRows,
+} from "../../src/core/coordinator/pullOwnership.ts";
 import { mergePlaneFindings, planeFindingKey, type PlaneFinding } from "../../src/core/plane/findings.ts";
 import {
   IDEMPOTENCY_KEY_PATTERN,
@@ -203,6 +218,7 @@ import {
   CoordinatorUnitWriteConflict,
   isCoordinatorInstance,
   isCoordinatorUnit,
+  coordinatorUnitCanBeDiscarded,
   isThreadEvent,
   isUnitWakeAnswer,
   sendChildSignal,
@@ -3107,7 +3123,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     | { ok: true; created: boolean; link: { instanceId: string; unit: string; authority: MainTaskAuthority } }
     | {
         ok: false;
-        reason: "conflict";
+        reason: "conflict" | PullBindingRefusal;
       }
   > {
     return this.withRangePins(
@@ -3117,7 +3133,7 @@ export class RunHistoryDO extends DurableObject<Env> {
           | { ok: true; created: boolean; link: { instanceId: string; unit: string; authority: MainTaskAuthority } }
           | {
               ok: false;
-              reason: "conflict";
+              reason: "conflict" | PullBindingRefusal;
             } = {
           ok: false,
           reason: "conflict",
@@ -3176,6 +3192,11 @@ export class RunHistoryDO extends DurableObject<Env> {
             this.sql.exec(`SELECT 1 FROM coordinator_instances WHERE instance_id = ?`, instance.id).toArray().length > 0
           )
             return;
+          const reason = this.bindingRefusal(undefined, unit, true, [], instance);
+          if (reason) {
+            out = { ok: false, reason };
+            return;
+          }
           this.pinUnitContext(unit, undefined, now);
           this.sql.exec(
             `INSERT INTO coordinator_instances (instance_id, json, created_at) VALUES (?, ?, ?)`,
@@ -3249,11 +3270,7 @@ export class RunHistoryDO extends DurableObject<Env> {
           this.sql
             .exec<{ json: string }>(`SELECT json FROM coordinator_units WHERE instance_id = ?`, instance.id)
             .toArray()
-            .some(
-              (row) =>
-                (JSON.parse(row.json) as CoordinatorUnit).ending?.outcome !== undefined ||
-                (JSON.parse(row.json) as CoordinatorUnit).history !== undefined,
-            ) ||
+            .some((row) => !coordinatorUnitCanBeDiscarded(row.json)) ||
           this.sql
             .exec(`SELECT 1 FROM coordinator_recovery_journal WHERE instance_id = ? LIMIT 1`, instance.id)
             .toArray().length > 0
@@ -3274,7 +3291,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         );
         this.sql.exec(`DELETE FROM coordinator_units WHERE instance_id = ?`, instance.id);
       });
-      await this.syncRangePins();
+      if (out.ok) await this.syncRangePins();
       return out;
     });
   }
@@ -3435,10 +3452,44 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   // ---- the units of the plan an instance runs (run-history item 50) -----------
 
-  private writeUnfencedUnit(write: () => void): { ok: true } | { ok: false; reason: "settled" } {
+  private bindingRefusal(
+    current: CoordinatorUnit | undefined,
+    next: CoordinatorUnit,
+    force = false,
+    staged: readonly CoordinatorUnit[] = [],
+    owner?: CoordinatorInstance,
+  ): PullBindingRefusal | undefined {
+    force ||= current?.startedAt === undefined && next.startedAt !== undefined;
+    if (!force && !needsPullBindingAdmission(current, next)) return;
     try {
-      this.ctx.storage.transactionSync(write);
-      return { ok: true };
+      const saved =
+        owner === undefined
+          ? this.sql
+              .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, next.instanceId)
+              .toArray()[0]
+          : undefined;
+      const instance = owner ?? (saved ? JSON.parse(saved.json) : null);
+      if (!isCoordinatorInstance(instance)) return "incomplete";
+      if (!force && !pullBindingChanges(instance, current, next)) return;
+      const rows = this.pullOwnershipRows();
+      for (const unit of staged) {
+        const saved = this.sql
+          .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, unit.instanceId)
+          .toArray()[0];
+        rows.units.push({ unit, instance: saved ? JSON.parse(saved.json) : null });
+      }
+      return unitPullBindingRefusal(rows, instance, current, next);
+    } catch {
+      return "incomplete";
+    }
+  }
+
+  private writeUnfencedUnit(
+    write: () => PullBindingRefusal | undefined,
+  ): { ok: true } | { ok: false; reason: "settled" | PullBindingRefusal } {
+    try {
+      const reason = this.ctx.storage.transactionSync(write);
+      return reason ? { ok: false, reason } : { ok: true };
     } catch (error) {
       if (error instanceof CoordinatorUnitWriteConflict) return { ok: false, reason: "settled" };
       throw error;
@@ -3446,33 +3497,45 @@ export class RunHistoryDO extends DurableObject<Env> {
   }
 
   /** Each row replaced whole under its (instance, unit); a replace keeps the row's place. */
-  async putUnits(units: CoordinatorUnit[], now: number): Promise<{ ok: true } | { ok: false; reason: "settled" }> {
+  async putUnits(
+    units: CoordinatorUnit[],
+    now: number,
+  ): Promise<{ ok: true } | { ok: false; reason: "settled" | PullBindingRefusal }> {
     return this.withRangePins(
       units.map((unit) => ({ id: `@unit:${unit.instanceId}:${unit.unit}`, handoff: unit.context?.handoff })),
-      async () => {
-        return this.writeUnfencedUnit(() => {
-          for (const u of units) {
+      async () =>
+        this.writeUnfencedUnit(() => {
+          const pending = new Map<string, { current: CoordinatorUnit | undefined; next: CoordinatorUnit }>();
+          for (const unit of units) {
+            const key = `${unit.instanceId}\0${unit.unit}`;
             const row = this.sql
               .exec<{ json: string }>(
                 `SELECT json FROM coordinator_units WHERE instance_id = ? AND unit = ?`,
-                u.instanceId,
-                u.unit,
+                unit.instanceId,
+                unit.unit,
               )
               .toArray()[0];
             const current = row ? (JSON.parse(row.json) as CoordinatorUnit) : undefined;
-            const updated = prepareUnfencedUnitWrite(current, u);
-            this.pinUnitContext(updated, current, now);
+            const prior = pending.get(key);
+            pending.set(key, { current, next: prepareUnfencedUnitWrite(prior?.next ?? current, unit) });
+          }
+          const staged = [...pending.values()].map((row) => row.next);
+          for (const { current, next } of pending.values()) {
+            const reason = this.bindingRefusal(current, next, false, staged);
+            if (reason) return reason;
+          }
+          for (const { current, next } of pending.values()) {
+            this.pinUnitContext(next, current, now);
             this.sql.exec(
               `INSERT INTO coordinator_units (instance_id, unit, json, updated_at) VALUES (?, ?, ?, ?)
-           ON CONFLICT(instance_id, unit) DO UPDATE SET json = excluded.json, updated_at = excluded.updated_at`,
-              u.instanceId,
-              u.unit,
-              JSON.stringify(updated),
+             ON CONFLICT(instance_id, unit) DO UPDATE SET json = excluded.json, updated_at = excluded.updated_at`,
+              next.instanceId,
+              next.unit,
+              JSON.stringify(next),
               now,
             );
           }
-        });
-      },
+        }),
     );
   }
 
@@ -3483,8 +3546,8 @@ export class RunHistoryDO extends DurableObject<Env> {
     expected: CoordinatorUnit,
     replacement: CoordinatorUnit,
     now: number,
-  ): Promise<{ ok: true } | { ok: false; reason: "stale" }> {
-    let out: { ok: true } | { ok: false; reason: "stale" } = { ok: true };
+  ): Promise<{ ok: true } | { ok: false; reason: PullBindingRefusal }> {
+    let out: { ok: true } | { ok: false; reason: PullBindingRefusal } = { ok: true };
     this.ctx.storage.transactionSync(() => {
       const row = this.sql
         .exec<{ json: string }>(
@@ -3498,6 +3561,11 @@ export class RunHistoryDO extends DurableObject<Env> {
         return;
       }
       const preserved = preserveWorkBrief(expected, replacement);
+      const reason = this.bindingRefusal(expected, preserved);
+      if (reason) {
+        out = { ok: false, reason };
+        return;
+      }
       this.pinUnitContext(preserved, expected, now);
       this.sql.exec(
         `UPDATE coordinator_units SET json = ?, updated_at = ? WHERE instance_id = ? AND unit = ?`,
@@ -3557,6 +3625,13 @@ export class RunHistoryDO extends DurableObject<Env> {
       if (!planned.ok) {
         result = planned;
         return;
+      }
+      if (input.kind === "claim" && !planned.replayed) {
+        const reason = this.bindingRefusal(input.expected, planned.unit, true);
+        if (reason) {
+          result = { ok: false, reason };
+          return;
+        }
       }
       this.pinUnitContext(planned.unit, saved ? (JSON.parse(saved.json) as CoordinatorUnit) : undefined, now);
       if (planned.receipt)
@@ -3622,6 +3697,134 @@ export class RunHistoryDO extends DurableObject<Env> {
       .exec<{ json: string }>(`SELECT json FROM coordinator_units WHERE instance_id = ? ORDER BY rowid`, instanceId)
       .toArray()
       .map((r) => JSON.parse(r.json) as CoordinatorUnit);
+  }
+
+  /** Reads are also consumed by admission inside this existing owner transaction. */
+  private pullOwnershipRows(): PullOwnershipRows {
+    let count = 0,
+      bytes = 0;
+    const bounded = function* <T extends Record<string, unknown>>(cursor: Iterable<T>) {
+      for (const row of cursor) {
+        count++;
+        // UTF-8 needs at most three bytes per UTF-16 code unit. Refuse before parsing.
+        bytes += Object.values(row).reduce<number>(
+          (sum, value) => sum + (typeof value === "string" ? 3 * value.length : 0),
+          0,
+        );
+        if (count > PULL_OWNER_SCAN_MAX || bytes > PULL_OWNER_SCAN_MAX_BYTES)
+          throw new Error("pull owner scan incomplete");
+        yield row;
+      }
+    };
+    const limit = PULL_OWNER_SCAN_MAX + 1;
+    const effects = [
+      ...bounded(
+        this.sql.exec<{ body_json: string }>(
+          `SELECT body_json FROM plane_effects WHERE acked_at IS NULL LIMIT ?`,
+          limit,
+        ),
+      ),
+    ].map((row) => JSON.parse(row.body_json));
+    const rows: PullOwnershipRows = { complete: true, units: [], runs: [], effects, settlements: [] };
+    for (const row of bounded(
+      this.sql.exec<{ unit_json: string; instance_json: string | null }>(
+        `SELECT u.json AS unit_json, i.json AS instance_json FROM coordinator_units u LEFT JOIN coordinator_instances i ON i.instance_id = u.instance_id LIMIT ?`,
+        limit,
+      ),
+    ))
+      rows.units.push({
+        unit: JSON.parse(row.unit_json),
+        instance: row.instance_json === null ? undefined : JSON.parse(row.instance_json),
+      });
+    for (const row of bounded(
+      this.sql.exec<{
+        run_id: string;
+        thread_key: string;
+        owner_gen: string;
+        phase: string;
+        meta_json: string;
+        state_json: string;
+      }>(`SELECT run_id, thread_key, owner_gen, phase, meta_json, state_json FROM live_runs LIMIT ?`, limit),
+    )) {
+      const meta = JSON.parse(row.meta_json),
+        state = JSON.parse(row.state_json);
+      const admitted =
+        row.owner_gen === "plane" &&
+        row.phase === "attaching" &&
+        meta &&
+        typeof meta === "object" &&
+        !Array.isArray(meta) &&
+        Object.keys(meta).length === 1 &&
+        meta.request &&
+        typeof meta.request === "object" &&
+        !Array.isArray(meta.request) &&
+        effects.some(
+          (effect) =>
+            effect?.kind === "admit" &&
+            effect.runId === row.run_id &&
+            effect.threadKey === row.thread_key &&
+            JSON.stringify(effect.request) === JSON.stringify(meta.request),
+        );
+      if ((!isPullOwnerLiveMeta(meta) && !admitted) || !state || typeof state !== "object" || Array.isArray(state))
+        throw new Error("unreadable live producer");
+      rows.runs.push({
+        runId: row.run_id,
+        repo: meta.repo,
+        live: true,
+        publication: state.branchPublication,
+        door: state.doorPublicationPending,
+      });
+    }
+    for (const row of bounded(
+      this.sql.exec<{ run_id: string; summary_json: string; work_evidence_json: string | null }>(
+        `SELECT run_id, summary_json, work_evidence_json FROM runs LIMIT ?`,
+        limit,
+      ),
+    )) {
+      const raw = JSON.parse(row.summary_json);
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("unreadable terminal producer");
+      const { branchPublication, ...summary } = raw;
+      if (!isRunListItem(summary) || summary.id !== row.run_id) throw new Error("unreadable terminal producer");
+      const evidence =
+        row.work_evidence_json === null ? undefined : parseWorkEvidence(JSON.parse(row.work_evidence_json), summary);
+      if (row.work_evidence_json !== null && !evidence) throw new Error("unreadable private producer");
+      rows.runs.push({
+        runId: row.run_id,
+        repo: summary.repo,
+        live: false,
+        publication:
+          evidence && Object.hasOwn(evidence, "branchPublication") ? evidence.branchPublication : branchPublication,
+        door:
+          evidence && Object.hasOwn(evidence, "doorPublicationPending")
+            ? evidence.doorPublicationPending
+            : raw.doorPublicationPending,
+      });
+    }
+    for (const row of bounded(
+      this.sql.exec<{ owner_key: string; revision: number; json: string }>(
+        `SELECT owner_key, revision, json FROM workspace_settlements WHERE json IS NOT NULL LIMIT ?`,
+        limit,
+      ),
+    )) {
+      const value = workspaceSettlementOf(JSON.parse(row.json));
+      if (!value || workspaceOwnerKey(value.owner) !== row.owner_key || value.revision !== row.revision)
+        throw new Error("unreadable workspace owner");
+      rows.settlements!.push(value);
+    }
+    return rows;
+  }
+
+  async findPullOwners(target: PullTarget): Promise<PullOwnersResult> {
+    if (!isPullTarget(target)) return { ok: false, reason: "invalid" };
+    let result: PullOwnersResult = { ok: false, reason: "incomplete" };
+    try {
+      this.ctx.storage.transactionSync(() => {
+        result = findPullOwnersInRows(target, this.pullOwnershipRows());
+      });
+    } catch {
+      return { ok: false, reason: "incomplete" };
+    }
+    return result;
   }
 
   async listActiveRecoveries(): Promise<CoordinatorUnit[]> {
@@ -3779,7 +3982,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     seqs: number[],
     by: string,
     now: number,
-  ): Promise<{ ok: true } | { ok: false; reason: "settled" }> {
+  ): Promise<{ ok: true } | { ok: false; reason: "settled" | PullBindingRefusal }> {
     return this.writeUnfencedUnit(() => {
       const updated = { ...unit, wakes: { ...(unit.wakes ?? {}), [waitId]: answer } };
       const row = this.sql
@@ -3791,6 +3994,8 @@ export class RunHistoryDO extends DurableObject<Env> {
         .toArray()[0];
       const current = row ? (JSON.parse(row.json) as CoordinatorUnit) : undefined;
       const prepared = prepareUnfencedUnitWrite(current, updated);
+      const reason = this.bindingRefusal(current, prepared);
+      if (reason) return reason;
       this.pinUnitContext(prepared, current, now);
       this.sql.exec(
         `INSERT INTO coordinator_units (instance_id, unit, json, updated_at) VALUES (?, ?, ?, ?)
@@ -4461,6 +4666,46 @@ export class RunHistoryDO extends DurableObject<Env> {
       }));
   }
 
+  /** Derive protective roots from private facts only for policy-excluded records. */
+  private publicationRetentionIds(rows: readonly RetentionRow[], policy: RetentionPolicy, now: number): string[] {
+    const ordinary = RunHistoryDO.keptIds(rows, policy, now);
+    return this.sql
+      .exec<{ run_id: string; summary_json: string; work_evidence_json: string | null }>(
+        `SELECT run_id, summary_json, work_evidence_json FROM runs WHERE run_id NOT IN (SELECT value FROM json_each(?))`,
+        JSON.stringify([...ordinary]),
+      )
+      .toArray()
+      .filter((row) => this.publicationRetainsRow(row))
+      .map((row) => row.run_id);
+  }
+
+  private publicationRetainsRow(row: { summary_json: string; work_evidence_json: string | null }): boolean {
+    const summary = parseSummary(row);
+    if (!summary) return true;
+    try {
+      const evidence =
+        row.work_evidence_json === null ? undefined : parseWorkEvidence(JSON.parse(row.work_evidence_json), summary);
+      if (row.work_evidence_json !== null && evidence === undefined) return true;
+      return (
+        terminalPublicationRetentionRequired(JSON.parse(row.summary_json)) ||
+        evidence?.branchPublication !== undefined ||
+        evidence?.doorPublicationPending !== undefined
+      );
+    } catch {
+      return true;
+    }
+  }
+
+  private publicationRetains(runId: string): boolean {
+    const row = this.sql
+      .exec<{ summary_json: string; work_evidence_json: string | null }>(
+        `SELECT summary_json, work_evidence_json FROM runs WHERE run_id = ?`,
+        runId,
+      )
+      .toArray()[0];
+    return row !== undefined && this.publicationRetainsRow(row);
+  }
+
   private contextKeptIds(rows: readonly RetentionRow[], policy: RetentionPolicy, now: number): Set<string> {
     const kept = applyRetention(
       rows.map((r) => ({ id: r.run_id, finishedAt: r.finished_at, bytes: r.bytes })),
@@ -4468,6 +4713,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       now,
       {
         references: this.contextReferences(),
+        protectedIds: this.publicationRetentionIds(rows, policy, now),
         liveHolderIds: this.sql
           .exec<{ run_id: string }>(`SELECT run_id FROM live_runs`)
           .toArray()
@@ -5428,7 +5674,7 @@ export class RunHistoryDO extends DurableObject<Env> {
    * order is the JS string order `newestFirst` uses.
    */
   private isKept(row: RetentionRow, policy: RetentionPolicy, now: number): boolean {
-    if (this.isKeptByPolicy(row, policy, now)) return true;
+    if (this.isKeptByPolicy(row, policy, now) || this.publicationRetains(row.run_id)) return true;
     const holders = this.sql
       .exec<{ holder_run_id: string }>(
         `SELECT DISTINCT holder_run_id FROM context_refs WHERE source_run_id = ? AND (retention_pin = 1 OR ordinary_pin = 1)`,
@@ -5446,7 +5692,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     const holder = this.sql
       .exec<RetentionRow>(`SELECT run_id, finished_at, bytes FROM runs WHERE run_id = ?`, runId)
       .toArray()[0];
-    return holder !== undefined && this.isKeptByPolicy(holder, policy, now);
+    return holder !== undefined && (this.isKeptByPolicy(holder, policy, now) || this.publicationRetains(runId));
   }
 
   private isKeptByPolicy(row: RetentionRow, policy: RetentionPolicy, now: number): boolean {
@@ -5601,14 +5847,32 @@ export class RunHistoryDO extends DurableObject<Env> {
           stored.id,
         )
         .toArray()[0];
-      const canonicalWork = this.liveRow(stored.id)?.state ?? {
-        ...(priorRecord?.work_evidence_json ? JSON.parse(priorRecord.work_evidence_json) : {}),
-        ...(priorRecord
+      const priorEvidence =
+        priorRecord?.work_evidence_json != null
+          ? parseWorkEvidence(JSON.parse(priorRecord.work_evidence_json), stored)
+          : undefined;
+      if (priorRecord?.work_evidence_json != null && priorEvidence === undefined)
+        throw new Error("work evidence is unreadable");
+      const liveWork = this.liveRow(stored.id)?.state;
+      const canonicalWork = liveWork ?? {
+        ...priorEvidence,
+        ...(priorRecord &&
+        (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).branchPublication !== undefined
           ? { branchPublication: (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).branchPublication }
           : {}),
       };
       // Terminal outcome and cost do not depend on a process-local publication
       // acknowledgment. Only saved producer state can authorize branch release.
+      const canonicalDoor = liveWork
+        ? liveWork.doorPublicationPending
+        : priorRecord
+          ? priorEvidence && Object.hasOwn(priorEvidence, "doorPublicationPending")
+            ? priorEvidence.doorPublicationPending
+            : JSON.parse(priorRecord.summary_json).doorPublicationPending
+          : stored.doorPublicationPending;
+      delete stored.doorPublicationPending;
+      const doorPublicationPending = doorPublicationOf(canonicalDoor);
+      if (doorPublicationPending !== undefined) stored.doorPublicationPending = doorPublicationPending;
       delete stored.branchPublication;
       const branchPublication = branchPublicationOf(canonicalWork.branchPublication, stored.repo);
       if (branchPublication !== undefined) stored.branchPublication = branchPublication;
@@ -5632,7 +5896,19 @@ export class RunHistoryDO extends DurableObject<Env> {
       this.pinContext(stored.id, stored.childHandoff, stored.contextDependencies);
       const { events, sourceReads, workReads, unitSeedReceipt, contextCheckpointReceipt, directAudience, ...summary } =
         stored;
-      const bytes = utf8ByteLength(JSON.stringify(stored));
+      const unreadableDoor =
+        doorPublicationPending === undefined && canonicalDoor !== undefined && canonicalDoor !== null
+          ? { doorPublicationPending: canonicalDoor }
+          : {};
+      const bytes = utf8ByteLength(
+        JSON.stringify({
+          ...unreadableDoor,
+          ...stored,
+          ...(branchPublication === undefined && canonicalWork.branchPublication !== undefined
+            ? { branchPublication: canonicalWork.branchPublication }
+            : {}),
+        }),
+      );
       const existing = this.sql
         .exec<{ event_count: number; finished_at: number; bytes: number; summary_json: string }>(
           `SELECT event_count, finished_at, bytes, summary_json FROM runs WHERE run_id = ?`,
@@ -5704,9 +5980,20 @@ export class RunHistoryDO extends DurableObject<Env> {
         sourceReads === undefined ? null : JSON.stringify(sourceReads),
         contextCheckpointReceipt === undefined ? null : JSON.stringify(contextCheckpointReceipt),
         directAudience === undefined ? null : JSON.stringify(directAudience),
-        workReads === undefined && unitSeedReceipt === undefined
+        workReads === undefined &&
+          unitSeedReceipt === undefined &&
+          !(branchPublication === undefined && canonicalWork.branchPublication !== undefined) &&
+          Object.keys(unreadableDoor).length === 0
           ? null
-          : JSON.stringify({ version: 1, workReads, unitSeedReceipt }),
+          : JSON.stringify({
+              version: 1,
+              ...unreadableDoor,
+              workReads,
+              unitSeedReceipt,
+              ...(branchPublication === undefined && canonicalWork.branchPublication !== undefined
+                ? { branchPublication: canonicalWork.branchPublication }
+                : {}),
+            }),
       );
       // The session's registry row learns its newest finish (session-log item
       // 7); a record that reaches the store without a claim (the plain put
@@ -5762,13 +6049,21 @@ export class RunHistoryDO extends DurableObject<Env> {
   }
 
   /** Remove a run and its events. Returns whether a run row existed. */
-  async delete(id: string): Promise<boolean> {
+  async delete(id: string): Promise<boolean | { ok: false; reason: "publication_pending" }> {
     return this.ctx.blockConcurrencyWhile(async () => {
       let deleted = false;
+      let refused = false;
       this.ctx.storage.transactionSync(() => {
         deleted = this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM runs WHERE run_id = ?`, id).one().n === 1;
+        if (!deleted) return;
+        if (this.publicationRetains(id)) {
+          refused = true;
+          return;
+        }
         this.deleteRuns([id], true);
       });
+      if (refused) return { ok: false as const, reason: "publication_pending" as const };
+      if (!deleted) return false;
       await this.syncRangePins();
       return deleted;
     });
@@ -5957,17 +6252,8 @@ export class RunHistoryDO extends DurableObject<Env> {
       if (branchPublication !== undefined && !branchPublicationOf(branchPublication, summary.repo)) return null;
       sourceReads = row.source_reads_json == null ? undefined : JSON.parse(row.source_reads_json);
       if (row.work_evidence_json != null) {
-        const evidence: unknown = JSON.parse(row.work_evidence_json);
-        if (
-          !evidence ||
-          typeof evidence !== "object" ||
-          Array.isArray(evidence) ||
-          (evidence as { version?: unknown }).version !== 1 ||
-          Object.keys(evidence).some(
-            (field) => field !== "version" && field !== "workReads" && field !== "unitSeedReceipt",
-          )
-        )
-          return null;
+        const evidence = parseWorkEvidence(JSON.parse(row.work_evidence_json), summary);
+        if (evidence === undefined) return null;
         workReads = (evidence as { workReads?: unknown }).workReads;
         unitSeedReceipt = (evidence as { unitSeedReceipt?: unknown }).unitSeedReceipt;
       }
@@ -6181,8 +6467,10 @@ export class RunHistoryDO extends DurableObject<Env> {
     // manifest rows with neither pin are not edges. Check existence without
     // materializing the graph (or scanning runs) on ordinary pages.
     const hasContext =
+      boundExceeded ||
       this.sql.exec(`SELECT 1 FROM context_refs WHERE retention_pin = 1 OR ordinary_pin = 1 LIMIT 1`).toArray().length >
-      0;
+        0 ||
+      this.sql.exec(`SELECT 1 FROM runs WHERE finished_at < ? LIMIT 1`, cutoff).toArray().length > 0;
     const before = q.before ?? Number.MAX_SAFE_INTEGER;
     const addFilters = (where: string[], params: (string | number)[]): void => {
       if (q.sinceMs !== undefined) {
@@ -6293,9 +6581,9 @@ export class RunHistoryDO extends DurableObject<Env> {
       items,
     };
     if (q.recoveryEvidence !== undefined) out.evidenceComplete = !malformed && rows.length < limit;
-    if (items.length === limit) {
-      const last = items[items.length - 1];
-      out.nextBefore = { finishedAt: last.finishedAt, id: last.id };
+    if (rows.length === limit) {
+      const last = rows[rows.length - 1];
+      out.nextBefore = { finishedAt: last.finished_at, id: last.run_id };
     }
     return out;
   }
@@ -6401,6 +6689,26 @@ function identityOfSummary(raw: string): {
   } catch {
     return {};
   }
+}
+
+/** Private evidence can carry an unreadable producer projection for preservation only. */
+function parseWorkEvidence(value: unknown, owner: RunListItem | RunRecord): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const evidence = value as Record<string, unknown>;
+  if (
+    evidence.version !== 1 ||
+    Object.keys(evidence).some(
+      (field) =>
+        field !== "version" &&
+        field !== "workReads" &&
+        field !== "unitSeedReceipt" &&
+        field !== "branchPublication" &&
+        field !== "doorPublicationPending",
+    ) ||
+    !workEvidenceBelongsToRun(evidence, owner)
+  )
+    return undefined;
+  return evidence;
 }
 
 function parseSummary(row: Pick<RunRow, "summary_json">): RunListItem | null {
@@ -7733,6 +8041,7 @@ const LEDGER_ROUTES = new Set([
   "/runs/coordinator/recovery/action",
   "/runs/coordinator/recovery/history",
   "/runs/coordinator/units/list-active-recoveries",
+  "/runs/coordinator/pull-owners",
   "/runs/coordinator/units/list",
   "/runs/coordinator/events/append",
   "/runs/coordinator/events/list",
@@ -8694,6 +9003,10 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
       return json({ error: "instanceId must be a Workflow instance id" }, 400);
     return json({ units: await stub.listUnits(b.instanceId) });
   }
+  if (pathname === "/runs/coordinator/pull-owners") {
+    if (!isPullTarget(b.target)) return json({ error: "target must name a repository and PR or ref" }, 400);
+    return json(await stub.findPullOwners(b.target));
+  }
   if (pathname === "/runs/coordinator/units/list-active-recoveries")
     return json({ units: await stub.listActiveRecoveries() });
   if (pathname === "/runs/coordinator/wake") {
@@ -8960,6 +9273,7 @@ async function handleRuns(pathname: string, body: unknown, env: Env): Promise<Re
   const parsed = parseRunTarget(body);
   if (!parsed.ok) return json({ error: parsed.error }, 400);
   const deleted = await stub(parsed.value.storeKey).delete(parsed.value.id);
+  if (typeof deleted !== "boolean") return json(deleted, 409);
   console.log(`[runs/delete] ${parsed.value.storeKey} ${parsed.value.id} -> deleted=${deleted}`);
   return json({ ok: true, deleted });
 }

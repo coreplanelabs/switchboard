@@ -1,3 +1,4 @@
+import { recoveryStepPrefix } from "../coordinator/recoveryStep.js";
 import {
   publicationHasNoWork,
   publicationSettlementSummary,
@@ -1201,6 +1202,7 @@ export interface UnitPipelineInput {
    * exact remaining lease is carried in milliseconds; the step prefix keeps
    * every new durable step under `<original instance>:<unit>/recovery/...`. */
   recovery?: {
+    actionId: string;
     remainingMs: number;
     unitKey: string;
     renewalsSpent?: number;
@@ -1606,7 +1608,9 @@ export const stepPrefixOf = (unit: string, session: LeaseSegmentProgress | undef
   return session?.resume !== undefined ? `${segment}/r${session.resume.attempt}` : segment;
 };
 const stepPrefix = (s: UnitPipelineState) =>
-  s.input.recovery !== undefined ? `${s.input.unit.id}/recovery` : stepPrefixOf(s.input.unit.id, s.input.session);
+  s.input.recovery !== undefined
+    ? recoveryStepPrefix(s.input.unit.id, s.input.recovery.actionId)
+    : stepPrefixOf(s.input.unit.id, s.input.session);
 const roundStep = (s: UnitPipelineState, round: RoundRef) =>
   `${stepPrefix(s)}/${round.index}/${round.kind}${round.attempt !== undefined ? `/a${round.attempt}` : ""}`;
 

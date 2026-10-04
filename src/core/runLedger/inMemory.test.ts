@@ -261,6 +261,28 @@ describe("resident workspace settlement", () => {
 });
 
 describe("InMemoryRunLedger", () => {
+  it.each(["valid", "malformed", "clear"])("folds canonical Door evidence at finish: %s", async (mode) => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    const door =
+      mode === "clear"
+        ? null
+        : mode === "malformed"
+          ? {}
+          : {
+              id: "call",
+              repo: "private/repo",
+              update: { ref: "refs/heads/fix/door", old: "a".repeat(40), next: "b".repeat(40) },
+            };
+    await ledger.claim({ ...claimReq("door", "slack:C1:1.0"), state: { doorPublicationPending: door } });
+    expect(await ledger.finish("door", "g1", record("door"))).toEqual({ ok: true, stored: true });
+    expect(ledger.live.has("door")).toBe(false);
+    if (mode === "valid") expect(ledger.finished.get("door")?.doorPublicationPending).toEqual(door);
+    else if (mode === "malformed") expect(ledger.finishedWorkEvidence.get("door")?.doorPublicationPending).toEqual({});
+    else {
+      expect(ledger.finishedWorkEvidence.has("door")).toBe(false);
+      expect(ledger.finished.get("door")?.doorPublicationPending).toBeUndefined();
+    }
+  });
   it.each(["missing", "malformed", "different"])(
     "retains the terminal outcome using only saved producer publication: %s",
     async (mode) => {

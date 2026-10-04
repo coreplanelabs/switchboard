@@ -1,3 +1,4 @@
+import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { booleanAudienceVerifier } from "../testing/audienceVerifier.js";
 import { describe, expect, it } from "vitest";
 import { privateWorkerThreadKey } from "../../channels/privateWorker.js";
@@ -81,7 +82,7 @@ async function claimLinkedWork(
 
 describe("main worker capability", () => {
   it("restores the exact progress observation and refreshes a later canonical settlement", async () => {
-    const instances = new InMemoryCoordinatorInstanceStore();
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await claimLinkedWork(instances);
     const deps = {
       config: { grantsFor: () => ALL_GRANTS },
@@ -151,7 +152,7 @@ describe("main worker capability", () => {
   it("keeps private worker reports out of shared and web conversation run events", async () => {
     const deps = {
       config: { grantsFor: () => ALL_GRANTS },
-      coordinatorInstances: new InMemoryCoordinatorInstanceStore(),
+      coordinatorInstances: new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger()),
       privateWorkerLog: new InMemoryPrivateWorkerLog(),
     };
     const shared = { userId: "slack:UALICE", channelId: "slack:CMAIN", threadKey: "slack:CMAIN:1.0", text: "status?" };
@@ -198,7 +199,7 @@ describe("main worker capability", () => {
   });
 
   it("binds a later main turn to the resolved requester and current thread", async () => {
-    const instances = new InMemoryCoordinatorInstanceStore();
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await claimLinkedWork(instances);
     const log = new InMemoryPrivateWorkerLog();
     await log.append(privateWorkerThreadKey({ instanceId: instance.id, unit: unit.unit }), {
@@ -265,7 +266,7 @@ describe("main worker capability", () => {
   it("hides private progress for an unverified, shared, external, or pending Slack D conversation", async () => {
     const deps = {
       config: { grantsFor: () => ALL_GRANTS },
-      coordinatorInstances: new InMemoryCoordinatorInstanceStore(),
+      coordinatorInstances: new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger()),
       privateWorkerLog: new InMemoryPrivateWorkerLog(),
     };
     const msg = {
@@ -324,7 +325,7 @@ describe("main worker capability", () => {
   });
 
   it("rechecks the direct audience on every private read and denies a changed audience", async () => {
-    const instances = new InMemoryCoordinatorInstanceStore();
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await claimLinkedWork(instances);
     const log = new InMemoryPrivateWorkerLog();
     await log.append(privateWorkerThreadKey({ instanceId: instance.id, unit: unit.unit }), {
@@ -366,7 +367,7 @@ describe("main worker capability", () => {
   });
 
   it("drops a private result when the audience changes during a read", async () => {
-    const instances = new InMemoryCoordinatorInstanceStore();
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await claimLinkedWork(instances);
     const log = new InMemoryPrivateWorkerLog();
     await log.append(privateWorkerThreadKey({ instanceId: instance.id, unit: unit.unit }), {
@@ -397,7 +398,7 @@ describe("main worker capability", () => {
   });
 
   it("accepts a verified Slack W requester on its own linked work", async () => {
-    const instances = new InMemoryCoordinatorInstanceStore();
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     const userId = "slack:WALICE";
     await claimLinkedWork(
       instances,
@@ -424,7 +425,7 @@ describe("main worker capability", () => {
   });
 
   it("permanently revokes private reads when an app follow-up joins the main run", async () => {
-    const instances = new InMemoryCoordinatorInstanceStore();
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await claimLinkedWork(instances);
     const log = new InMemoryPrivateWorkerLog();
     await log.append(privateWorkerThreadKey({ instanceId: instance.id, unit: unit.unit }), {

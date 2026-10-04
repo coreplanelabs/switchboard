@@ -1,5 +1,7 @@
+import { seedCoordinatorUnit } from "../testing/coordinatorInstance.js";
 import { describe, expect, it } from "vitest";
 import type { CoordinatorInstance, CoordinatorUnit } from "./contract.js";
+import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { InMemoryCoordinatorInstanceStore, NullCoordinatorInstanceStore } from "./instanceStore.js";
 import { handOffToCoordinator, type HandOffDeps, type HandOffInput } from "./handOff.js";
 import { generatedTaskOf } from "./generatedTask.js";
@@ -80,7 +82,7 @@ function harness(
   } = {},
 ) {
   const files = over.files ?? { "docs/plans/fixture.md": PLAN };
-  const instances = over.store ?? new InMemoryCoordinatorInstanceStore();
+  const instances = over.store ?? new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
   void instances.recordRequesterTurn({
     threadKey: "slack:C1:1.0",
     requesterId: "slack:UALICE",
@@ -475,63 +477,13 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     expect(row.threadEvidence).toBe(evidence);
     expect(row.title).toBe("Fix it.");
   });
-  it("a hand-off refusal before the final start gate never reserves a legacy transition", async () => {
-    const h = harness();
-    let reserved = 0;
 
-    const out = await handOffToCoordinator(
-      h.deps,
-      input({
-        agentSource: "route",
-        beforeStart: async () => {
-          reserved += 1;
-          throw new Error("must not reserve");
-        },
-      }),
-    );
-
-    expect(out).toMatchObject({ status: "aborted", refusal: { code: "plan_routed_seed" } });
-    expect(reserved).toBe(0);
-  });
-
-  it("a provisional legacy transition transfers to the durable new attempt before create and rolls back when creation refuses", async () => {
+  it("a refused initial Workflow create retains its exact unconfirmed admission", async () => {
     const h = harness({ create: { kind: "failed", id: "plan-fixture", reason: "workflow unavailable" } });
-    let reserved = 0;
-    let committed = 0;
-    let completed = 0;
-    let aborted = 0;
-    let owner: { instanceId: string; unit: string } | undefined;
-
-    const out = await handOffToCoordinator(
-      h.deps,
-      input({
-        beforeStart: async () => {
-          reserved += 1;
-          return {
-            ok: true,
-            commit: async (next) => {
-              committed += 1;
-              owner = next;
-            },
-            complete: () => {
-              completed += 1;
-            },
-            abort: async () => {
-              aborted += 1;
-            },
-          };
-        },
-      }),
-    );
-
+    const out = await handOffToCoordinator(h.deps, input());
     expect(out).toMatchObject({ status: "aborted", refusal: { code: "plan_start_failed" } });
-    expect(owner).toEqual({ instanceId: "plan-fixture", unit: "U10" });
-    expect({ reserved, committed, completed, aborted }).toEqual({
-      reserved: 1,
-      committed: 1,
-      completed: 0,
-      aborted: 1,
-    });
+    expect(h.created).toEqual(["plan-fixture"]);
+    expect(await h.instances.get("plan-fixture")).toMatchObject({ admission: "unreconciled" });
   });
 
   it("initial Workflow admission keeps its identity and owner when the reply is lost", async () => {
@@ -539,35 +491,17 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
       create: { kind: "unanswered", reason: "reply lost" },
       status: { "plan-fixture": { kind: "unanswered", reason: "status unavailable" } },
     });
-    let owner: { instanceId: string; unit: string } | undefined;
-    let completed = 0;
-    let aborted = 0;
-    const out = await handOffToCoordinator(
-      h.deps,
-      input({
-        beforeStart: async () => ({
-          ok: true,
-          commit: async (next) => {
-            owner = next;
-          },
-          complete: () => {
-            completed += 1;
-          },
-          abort: async () => {
-            aborted += 1;
-            owner = undefined;
-          },
-        }),
-      }),
-    );
-
+    const out = await handOffToCoordinator(h.deps, input());
     expect(out).toMatchObject({ status: "pending", instanceId: "plan-fixture" });
     expect(out.reply).not.toContain("nothing ran");
-    expect(owner).toEqual({ instanceId: "plan-fixture", unit: "U10" });
-    expect({ completed, aborted }).toEqual({ completed: 1, aborted: 0 });
     expect(h.created).toEqual(["plan-fixture"]);
     expect(h.statusAsked).toEqual(["plan-fixture"]);
-    expect(await h.instances.get("plan-fixture")).not.toBeNull();
+    expect(await h.instances.get("plan-fixture")).toMatchObject({ admission: "unreconciled" });
+    expect(await h.instances.listUnits("plan-fixture")).toMatchObject([
+      { instanceId: "plan-fixture", unit: "U10" },
+      { unit: "U11" },
+      { unit: "U12" },
+    ]);
   });
 
   it("a lost reply with visible same-id Workflow status stays pending until its create is attributable", async () => {
@@ -585,55 +519,11 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
 
   it("an answer naming another Workflow retains the pending owner instead of claiming this one started", async () => {
     const h = harness({ create: { kind: "created", id: "plan-other" } });
-    let completed = 0;
-    let aborted = 0;
-    const out = await handOffToCoordinator(
-      h.deps,
-      input({
-        beforeStart: async () => ({
-          ok: true,
-          commit: async () => {},
-          complete: () => {
-            completed += 1;
-          },
-          abort: async () => {
-            aborted += 1;
-          },
-        }),
-      }),
-    );
+    const out = await handOffToCoordinator(h.deps, input());
     expect(out).toMatchObject({ status: "pending", instanceId: "plan-fixture" });
     expect(out.reply).not.toContain("Handed to the plan runner");
-    expect({ completed, aborted }).toEqual({ completed: 1, aborted: 0 });
-  });
-
-  it("a refused ownership transfer aborts before the Workflow can start", async () => {
-    const h = harness();
-    let completed = 0;
-    let aborted = 0;
-
-    const out = await handOffToCoordinator(
-      h.deps,
-      input({
-        beforeStart: async () => ({
-          ok: true,
-          commit: async () => {
-            throw new Error("reservation owner changed");
-          },
-          complete: () => {
-            completed += 1;
-          },
-          abort: async () => {
-            aborted += 1;
-          },
-        }),
-      }),
-    );
-
-    expect(out).toMatchObject({ status: "aborted", refusal: { code: "setup_failed" } });
-    expect(out.reply).toContain("reservation owner changed");
-    expect(h.created).toEqual([]);
-    expect({ completed, aborted }).toEqual({ completed: 0, aborted: 1 });
+    expect(await h.instances.get("plan-fixture")).toMatchObject({ admission: "unreconciled" });
+    expect(await h.instances.get("plan-other")).toBeNull();
   });
 
   it("a plan request: the plan is read at the base ref, the instance is written under the plan's id with the requester, thread, card, caps and run id, one row per unit in the plan's order, the Workflow instance is created, and the reply says where the plan runs", async () => {
@@ -1014,7 +904,7 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     await handOffToCoordinator(initial.deps, req);
     const first = (await initial.instances.get(id))!;
     const { generatedTask: _missing, ...legacy } = first;
-    const store = new InMemoryCoordinatorInstanceStore();
+    const store = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await store.put(legacy);
     const h = harness({ store, status: { [id]: { kind: "absent" } } });
     const again = await handOffToCoordinator(h.deps, req);
@@ -1147,14 +1037,12 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     await handOffToCoordinator(h.deps, req);
     await handOffToCoordinator(h.deps, req);
     const [second] = await h.instances.listUnits(secondId);
-    await h.instances.putUnits([
-      {
-        ...second!,
-        pr: { number: 42, url: "https://github.com/acme/api/pull/42" },
-        lastPush: "b".repeat(40),
-        ending: { kind: "stopped", report: "stopped", at: NOW },
-      },
-    ]);
+    seedCoordinatorUnit(h.instances as InMemoryCoordinatorInstanceStore, {
+      ...second!,
+      pr: { number: 42, url: "https://github.com/acme/api/pull/42" },
+      lastPush: "b".repeat(40),
+      ending: { kind: "stopped", report: "stopped", at: NOW },
+    });
 
     const retry = await handOffToCoordinator(h.deps, {
       ...req,
@@ -1178,10 +1066,10 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
         adopt: { pr: 42, headSha: "c".repeat(40) },
       },
     });
-    expect(samePr).toMatchObject({ status: "completed", instanceId: `${id}-3` });
-    expect(await h.instances.listUnits(`${id}-3`)).toMatchObject([
-      { publication: { pr: 42 }, lastPush: "b".repeat(40) },
-    ]);
+    expect(samePr).toMatchObject({ status: "aborted", refusal: { code: "plan_runner_conflict" } });
+    expect(await h.instances.listUnits(`${id}-3`)).toEqual([]);
+    expect(await h.instances.listUnits(secondId)).toMatchObject([{ pr: { number: 42 }, lastPush: "b".repeat(40) }]);
+    expect(h.created).toEqual([id, secondId]);
   });
 
   it("replaces an absent first Workflow after its instance was written without a unit", async () => {
@@ -1192,7 +1080,7 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     const initial = harness();
     await handOffToCoordinator(initial.deps, req);
     const first = (await initial.instances.get(id))!;
-    const store = new InMemoryCoordinatorInstanceStore();
+    const store = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await store.put(first);
     const h = harness({ store, status: { [id]: { kind: "absent" } } });
 
@@ -1227,7 +1115,7 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     ).resolves.toBeDefined();
   });
 
-  it("carries a recovered legacy unit's saved push and record into the generated unit", async () => {
+  it("retains a recovered legacy unit's saved push and record under its original owner", async () => {
     const requestText = "in acme/api: fix sandbox recovery";
     const planId = generatedPlanId("fix sandbox recovery", "slack:C1:1.0");
     const id = `plan-${planId}`;
@@ -1236,7 +1124,7 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     await handOffToCoordinator(initial.deps, input({ entry: { repo: "acme/api", base: "main" }, requestText }));
     const first = (await initial.instances.get(id))!;
     const [firstUnit] = await initial.instances.listUnits(id);
-    const store = new InMemoryCoordinatorInstanceStore();
+    const store = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await store.put({ ...first, branch });
     await store.putUnits([
       {
@@ -1259,10 +1147,12 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
       }),
     );
 
-    expect(retry).toMatchObject({ status: "completed", instanceId: `${id}-2` });
-    expect(await h.instances.listUnits(`${id}-2`)).toMatchObject([
-      { unit: ["U", "1"].join(""), branch, lastPush: "b".repeat(40), record: "0050" },
+    expect(retry).toMatchObject({ status: "aborted", refusal: { code: "plan_runner_conflict" } });
+    expect(await h.instances.listUnits(`${id}-2`)).toEqual([]);
+    expect(await h.instances.listUnits(id)).toMatchObject([
+      { unit: ["U", "12"].join(""), branch, lastPush: "b".repeat(40), record: "0050", pr: { number: 42 } },
     ]);
+    expect(h.created).toEqual([]);
   });
 
   it("refuses to carry work recorded on another branch into a generated unit's original branch", async () => {
@@ -1378,7 +1268,7 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     }
   });
 
-  it("keeps an originally adopted PR when the same PR is still the entry", async () => {
+  it("refuses to transfer an originally adopted PR into a replacement attempt", async () => {
     const requestText = "in acme/api: fix sandbox recovery";
     const planId = generatedPlanId("fix sandbox recovery", "slack:C1:1.0");
     const id = `plan-${planId}`;
@@ -1398,45 +1288,12 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
       input({ entry: { ...entry, adopt: { pr: 42, headSha: "b".repeat(40) } }, requestText }),
     );
 
-    expect(retry).toMatchObject({ status: "completed", instanceId: `${id}-2` });
-    expect(await h.instances.listUnits(`${id}-2`)).toMatchObject([
-      {
-        branch: "feat/recovery",
-        publication: {
-          pr: 42,
-          expectedHeadSha: "b".repeat(40),
-          owner: { instanceId: `${id}-2`, unit: ["U", "1"].join("") },
-        },
-      },
+    expect(retry).toMatchObject({ status: "aborted", refusal: { code: "plan_runner_conflict" } });
+    expect(await h.instances.listUnits(`${id}-2`)).toEqual([]);
+    expect(await h.instances.listUnits(id)).toMatchObject([
+      { branch: "feat/recovery", publication: { pr: 42, expectedHeadSha: "a".repeat(40), owner: { instanceId: id } } },
     ]);
-  });
-
-  it("an owned generated thread pins its re-issue to the recorded plan id and branch even if the durable task's display text would hash differently", async () => {
-    const id = "plan-owned-task";
-    const h = harness({ status: { [id]: { kind: "status", status: "complete" } } });
-    const first = await handOffToCoordinator(
-      h.deps,
-      input({
-        entry: { repo: "acme/api", base: "main" },
-        requestText: "in acme/api: fix the login redirect",
-        reissuePlanId: "owned-task",
-      }),
-    );
-    const second = await handOffToCoordinator(
-      h.deps,
-      input({
-        entry: { repo: "acme/api", base: "main" },
-        requestText: "in acme/api: fix the login redirect (attachment display note)",
-        reissuePlanId: "owned-task",
-      }),
-    );
-    expect(first.instanceId).toBe(id);
-    expect(second.instanceId).toBe(`${id}-2`);
-    expect(await h.instances.listUnits(id)).toMatchObject([{ branch: "plan/owned-task/u1" }]);
-    expect(await h.instances.listUnits(`${id}-2`)).toMatchObject([{ branch: "plan/owned-task/u1" }]);
-    expect((await h.instances.listUnits(`${id}-2`))[0]?.generatedTask).toEqual(
-      (await h.instances.listUnits(id))[0]?.generatedTask,
-    );
+    expect(h.created).toEqual([id]);
   });
 
   it("a re-issue after a review_pending ending carries the row's lastPush — the coding child's own last push — onto the next attempt's row, so its pre-check starts at the review round", async () => {
@@ -1551,7 +1408,7 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     expect(out.status).toBe("aborted");
     expect(out.reply).toContain("⚠️ The plan runner needs run history on the state Worker");
     expect(noStore.created).toEqual([]);
-    const leftover = new InMemoryCoordinatorInstanceStore();
+    const leftover = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     const first = await handOffToCoordinator(
       harness({ store: leftover, create: { kind: "failed", id: "plan-fixture", reason: "engine down" } }).deps,
       input(),
@@ -1582,7 +1439,7 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
   });
 
   it("a live runner's records are never touched: a re-issue for a plan whose latest attempt still runs is refused naming the instance and its status, writes nothing and asks for no instance", async () => {
-    const live = new InMemoryCoordinatorInstanceStore();
+    const live = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     const started = await handOffToCoordinator(harness({ store: live }).deps, input());
     expect(started.status).toBe("completed");
     // The runner has been at work: threads, rounds, a pull request and an ending on the rows.
@@ -1637,7 +1494,7 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
   it("a plan whose latest attempt ended is resumed as the next attempt: the units the earlier attempts merged are skipped, the rest run under `plan-<plan-id>-<n>` with the attempt on the record, a dependency on a merged unit stays on the row and counts as done, the reply names what is left and what was merged; a third re-issue finds the latest attempt; every named unit merged is a refusal", async () => {
     /** A store holding attempt 1's records, ended: U10 merged, U11's merge refused, U12 capped. */
     async function afterFirstAttempt() {
-      const store = new InMemoryCoordinatorInstanceStore();
+      const store = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
       expect((await handOffToCoordinator(harness({ store }).deps, input())).status).toBe("completed");
       const rows = await store.listUnits("plan-fixture");
       await store.putUnits([
@@ -1716,7 +1573,7 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
 
   it("a leftover at a later attempt — a resume whose create failed — is replaced under the same attempt id with the units the earlier attempts merged skipped, never rerun; every named unit merged already is a refusal there too", async () => {
     // Attempt 1 ended with U10 merged; the resume to attempt 2 wrote its records but its create failed.
-    const store = new InMemoryCoordinatorInstanceStore();
+    const store = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     expect((await handOffToCoordinator(harness({ store }).deps, input())).status).toBe("completed");
     const rows = await store.listUnits("plan-fixture");
     await store.putUnits([
@@ -1776,7 +1633,7 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
   });
 
   it("an unreconciled duplicate cannot become a new plan attempt after its Workflow ends", async () => {
-    const store = new InMemoryCoordinatorInstanceStore();
+    const store = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     const first = harness({ store, create: { kind: "duplicate", id: "plan-fixture", status: "complete" } });
     expect(await handOffToCoordinator(first.deps, input())).toMatchObject({ status: "pending" });
     expect((await store.get("plan-fixture"))?.admission).toBe("unreconciled");
@@ -1849,7 +1706,7 @@ describe("main-agent work hand-off", () => {
       requirements: undefined,
       acceptance: undefined,
     };
-    const restored = new InMemoryCoordinatorInstanceStore();
+    const restored = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await restored.recordRequesterTurn({ threadKey: instance.threadKey, requesterId: instance.userId, messageId: "1" });
     await restored.claimMainTask(request.mainTask!, instance, { ...unit, workBrief: legacy }, MAIN_AUTHORITY);
     h.deps.instances = restored;

@@ -1,3 +1,4 @@
+import { seedCoordinatorUnit } from "./testing/coordinatorInstance.js";
 import { booleanAudienceVerifier } from "./testing/audienceVerifier.js";
 import { testSlackCapability, testSessionSources } from "./testing/slackSources.js";
 import { sourceHash, type SessionSources } from "./references/receipts.js";
@@ -11276,7 +11277,7 @@ workspaceDir: __WORKDIR__
     deps.statusUpdateMinMs = 0;
     deps.fetchRepoShipInfo = vi.fn(async () => ({ defaultBranch: "main" }));
     deps.fetchPrFacts = vi.fn(async () => openBotPr());
-    const instances = new InMemoryCoordinatorInstanceStore();
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     const created: string[] = [];
     deps.coordinatorInstances = instances;
     deps.createCoordinatorInstance = vi.fn(async (id: string) => {
@@ -14480,7 +14481,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         if (result.ok) await h.store.put(args[2]);
         return result;
       });
-      const instances = new InMemoryCoordinatorInstanceStore();
+      const instances = new InMemoryCoordinatorInstanceStore(h.ledger);
       const instance: CoordinatorInstance = {
         id: "ship_producer",
         kind: "ship",
@@ -22799,6 +22800,9 @@ describe("the references step in dispatch (record 0037)", () => {
 // answered with the receipt first, and ended on any failure with the command's
 // own line; one model call, never a second route.
 describe("a unit-owned thread (record 0051's reply-as-event and gone-instance rules)", () => {
+  const seedRetainedUnits = (store: InMemoryCoordinatorInstanceStore, units: CoordinatorUnit[]) => {
+    for (const unit of units) seedCoordinatorUnit(store, unit);
+  };
   const INSTANCE = "plan-fix-the-login-6435ec";
   const THREAD = "slack:CX:1.0";
   const OPERATOR_ON_YAML = YAML_FIXTURE.replace("routing: { operator: off }\n", "routing: { operator: on }\n");
@@ -22822,8 +22826,8 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       parentInstanceId: INSTANCE,
       idempotencyKey: `${INSTANCE}:U12/0/coding`,
     });
-    const instances = new InMemoryCoordinatorInstanceStore();
-    await instances.putUnits([unitRow(over)]);
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
+    seedCoordinatorUnit(instances, unitRow(over));
     deps.coordinatorInstances = instances;
     const sends: Array<{ instance: string; type: string }> = [];
     deps.workflow = {
@@ -22909,60 +22913,36 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
 
   it("continues at a durable publication head when an external PR unit has no push", async () => {
     const s = await endedPrContinuationSetup();
-    const [row] = await s.instances.listUnits(INSTANCE);
-    const { lastPush: _lastPush, ...withoutPush } = row!;
-    await s.instances.putUnits([
-      {
-        ...withoutPush,
-        publication: {
-          repo: "acme/api",
-          pr: 7,
-          headRef: s.branch,
-          baseRef: "main",
-          expectedHeadSha: s.recordedHead,
-          publicationRef: s.branch,
-          owner: { instanceId: INSTANCE, unit: "U12" },
-        },
+    useOriginalRecovery(s);
+    const row = (await s.instances.listUnits(INSTANCE))[0]!;
+    const { lastPush: _lastPush, ...withoutPush } = row;
+    const original = {
+      ...withoutPush,
+      publication: {
+        repo: "acme/api",
+        pr: 7,
+        headRef: s.branch,
+        baseRef: "main",
+        expectedHeadSha: s.recordedHead,
+        publicationRef: s.branch,
+        owner: { instanceId: INSTANCE, unit: "U12" },
       },
-    ]);
-    s.deps.fetchPrFacts = vi.fn(async () => ({
-      state: "open" as const,
-      sameRepoHead: true,
-      headBranchExists: true,
-      headRef: s.branch,
-      headSha: s.recordedHead,
-      verifiedHead: { repo: "acme/api", ref: s.branch, sha: s.recordedHead },
-      baseRef: "main",
-      htmlUrl: "https://github.com/acme/api/pull/7",
-    }));
-    const { io, replies } = fakeIO();
-
-    await dispatch(s.deps, msg("continue", "slack:UADMIN"), io, { thread: [s.shipParent] });
-
-    expect(replies.join(" ")).not.toContain("durable expected head");
-    expect(s.shipBranch).toHaveBeenCalledOnce();
-
-    s.deps.fetchPrFacts = vi.fn(async () => ({
-      state: "open" as const,
-      sameRepoHead: true,
-      headBranchExists: true,
-      headRef: s.branch,
-      headSha: s.recordedHead,
-      verifiedHead: { repo: "acme/api", ref: s.branch, sha: s.recordedHead },
-      baseRef: "release",
-      htmlUrl: "https://github.com/acme/api/pull/7",
-    }));
-    const changedBase = fakeIO();
-    await dispatch(s.deps, msg("continue", "slack:UADMIN"), changedBase.io, { thread: [s.shipParent] });
-    expect(changedBase.replies.join(" ")).toContain("verifiable base ref");
-    expect(s.shipBranch).toHaveBeenCalledOnce();
+    };
+    seedRetainedUnits(s.instances, [original]);
+    await dispatch(s.deps, msg("continue", "slack:UADMIN"), fakeIO().io, { thread: [s.shipParent] });
+    expect(s.deps.recoverOriginalUnit).toHaveBeenCalledWith(
+      { instanceId: INSTANCE, unit: "U12" },
+      expect.objectContaining({ userId: "slack:UADMIN", threadKey: THREAD }),
+    );
+    expect(await s.instances.listUnits(INSTANCE)).toEqual([original]);
+    expect(await s.instances.get(`${INSTANCE}-2`)).toBeNull();
   });
 
   it("routes original-unit recovery past the ended pipeline continuation gate", async () => {
     const s = await endedPrContinuationSetup();
     const [row] = await s.instances.listUnits(INSTANCE);
     const { lastPush: _lastPush, ...withoutExpectedHead } = row!;
-    await s.instances.putUnits([withoutExpectedHead]);
+    seedRetainedUnits(s.instances, [withoutExpectedHead]);
     const { io, replies } = fakeIO();
 
     await dispatch(s.deps, msg(`agent:ship recover unit ${INSTANCE}:U12`, "slack:UADMIN"), io, {
@@ -22978,7 +22958,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     const s = await endedPrContinuationSetup();
     const [row] = await s.instances.listUnits(INSTANCE);
     const { pr: _pr, ...withoutPr } = row!;
-    await s.instances.putUnits([withoutPr]);
+    seedRetainedUnits(s.instances, [withoutPr]);
     const { io, replies } = fakeIO();
 
     await dispatch(s.deps, msg(`agent:ship adopt unit ${INSTANCE}:U12`, "slack:UADMIN"), io, {
@@ -23008,11 +22988,73 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     expect(s.shipBranch).not.toHaveBeenCalled();
   });
 
+  function useOriginalRecovery(s: Awaited<ReturnType<typeof endedPrContinuationSetup>>) {
+    delete s.deps.shipBranch;
+    s.deps.recoverOriginalUnit = vi.fn(async () => ({ status: 409, body: { error: "recovery_claim_mismatch" } }));
+  }
+
+  it("plain continuation delegates to exact original-unit recovery without replacing its owner", async () => {
+    const s = await endedPrContinuationSetup();
+    const original = (await s.instances.listUnits(INSTANCE))[0];
+    delete s.deps.shipBranch;
+    s.deps.recoverOriginalUnit = vi.fn(async () => ({
+      status: 200,
+      body: { outcome: "already_started", workflowId: "original-checkpoint" },
+    }));
+    const { io, replies } = fakeIO();
+
+    await dispatch(s.deps, { ...msg("continue", "slack:UADMIN"), messageId: "source-continuation" }, io, {
+      thread: [s.shipParent],
+    });
+
+    expect(s.deps.recoverOriginalUnit).toHaveBeenCalledExactlyOnceWith(
+      { instanceId: INSTANCE, unit: "U12" },
+      { userId: "slack:UADMIN", threadKey: THREAD, messageId: "source-continuation" },
+    );
+    expect((await s.instances.listUnits(INSTANCE))[0]).toEqual(original);
+    expect(await s.instances.get(`${INSTANCE}-2`)).toBeNull();
+    expect(s.deps.runs!.getRun).not.toHaveBeenCalled();
+    expect(s.provider.requests).toHaveLength(0);
+    expect(replies.join(" ")).not.toContain("another attempt");
+  });
+
+  it.each([
+    ["renew", "U12", true, "off"],
+    ["recover", "OTHER", false, "off"],
+    ["renew", "U12", true, "on"],
+    ["recover", "OTHER", false, "on"],
+  ] as const)("bare %s preserves its named original unit and intent (%s)", async (verb, unit, renew, operator) => {
+    const s = await endedPrContinuationSetup();
+    s.deps.config.config.routing = { operator };
+    delete s.deps.shipBranch;
+    s.deps.recoverOriginalUnit = vi.fn(async () => ({
+      status: 409,
+      body: { error: "recovery_claim_mismatch" },
+    }));
+    await dispatch(
+      s.deps,
+      { ...msg(`${verb} unit ${INSTANCE}:${unit}`, "slack:UADMIN"), messageId: "exact-intent" },
+      fakeIO().io,
+      {
+        thread: [s.shipParent],
+      },
+    );
+    expect(s.deps.recoverOriginalUnit).toHaveBeenCalledExactlyOnceWith(
+      { instanceId: INSTANCE, unit, ...(renew ? { renew: true } : {}) },
+      { userId: "slack:UADMIN", threadKey: THREAD, messageId: "exact-intent" },
+    );
+    expect(s.provider.requests).toHaveLength(0);
+    expect(await s.instances.get(`${INSTANCE}-2`)).toBeNull();
+  });
+
   async function repeatedEndedPrSetup() {
     const s = await endedPrContinuationSetup();
     const original = (await s.instances.listUnits(INSTANCE))[0]!;
     const otherInstances = ["attempt-one", "attempt-two"];
-    await s.instances.putUnits(otherInstances.map((instanceId) => ({ ...original, instanceId })));
+    seedRetainedUnits(
+      s.instances,
+      otherInstances.map((instanceId) => ({ ...original, instanceId })),
+    );
     const otherParents = otherInstances.map((instanceId, index) => ({
       ...s.shipParent,
       id: `ship-attempt-${index}`,
@@ -23097,7 +23139,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
   it("an unfinished claim on the named PR blocks review beside ended attempts", async () => {
     const s = await repeatedEndedPrSetup();
     const [unit] = await s.instances.listUnits(s.otherInstances[0]!);
-    await s.instances.putUnits([{ ...unit!, ending: undefined }]);
+    seedRetainedUnits(s.instances, [{ ...unit!, ending: undefined }]);
     s.deps.operatorModel = vi.fn(async () => ({
       tool: "bind_preset",
       input: { preset: "review", reason: "review the PR" },
@@ -23116,7 +23158,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       rounds: [{ index: 3, agent: "review", outcome: "request_changes", at: 900 }],
       ending: { kind: "round_cap", report: "Round cap reached: 1 blocker", at: 1_000 },
     };
-    await s.instances.putUnits([unit]);
+    seedRetainedUnits(s.instances, [unit]);
     const instance = await s.instances.get(INSTANCE);
     let runIndex = 0;
     const registry = new RunRegistry({ genId: () => `fresh-review-${++runIndex}` });
@@ -23233,15 +23275,23 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       },
     ]) {
       const s = await endedPrContinuationSetup();
+      useOriginalRecovery(s);
+      s.deps.recoverOriginalUnit = vi.fn(async () => ({ status: 409, body: { error: "recovery_rounds_exhausted" } }));
       const unit = {
         ...(await s.instances.listUnits(INSTANCE))[0]!,
         ending: { kind: "round_cap", report: "round cap", at: 1_000 },
       };
-      await s.instances.putUnits([unit]);
+      seedRetainedUnits(s.instances, [unit]);
       s.deps.operatorModel = vi.fn(async () => answer);
       const { io, replies } = fakeIO();
       await dispatch(s.deps, msg("continue https://github.com/acme/api/pull/7", "slack:UADMIN"), io);
-      expect(replies).toEqual([expected]);
+      if (answer.tool === "bind_preset") {
+        expect(s.deps.recoverOriginalUnit).toHaveBeenCalledOnce();
+        expect(replies.join(" ")).toContain("recovery_rounds_exhausted");
+      } else {
+        expect(replies).toEqual([expected]);
+        expect(s.deps.recoverOriginalUnit).not.toHaveBeenCalled();
+      }
       expect(s.deps.operatorModel).toHaveBeenCalledOnce();
       expect(s.shipBranch).not.toHaveBeenCalled();
       expect(s.deps.invoked).toEqual([]);
@@ -23252,7 +23302,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
   it("an exact-PR review cannot bypass an unfinished owner or an unknown review head", async () => {
     const s = await endedPrContinuationSetup();
     const unit = (await s.instances.listUnits(INSTANCE))[0]!;
-    await s.instances.putUnits([{ ...unit, ending: undefined }]);
+    seedRetainedUnits(s.instances, [{ ...unit, ending: undefined }]);
     s.deps.operatorModel = vi.fn(async () => ({
       tool: "bind_preset",
       input: {
@@ -23271,7 +23321,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     expect(s.deps.operatorModel).not.toHaveBeenCalled();
     expect(s.deps.resolveRepoContext).not.toHaveBeenCalled();
 
-    await s.instances.putUnits([{ ...unit, ending: { kind: "round_cap", report: "round cap", at: 1_000 } }]);
+    seedRetainedUnits(s.instances, [{ ...unit, ending: { kind: "round_cap", report: "round cap", at: 1_000 } }]);
     const unknown = fakeIO();
     await dispatch(s.deps, request, unknown.io);
     expect(s.deps.operatorModel).toHaveBeenCalledOnce();
@@ -23284,6 +23334,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
 
   it("an explicit ship reply naming the owned PR checks the original unit before starting work", async () => {
     const s = await endedPrContinuationSetup();
+    useOriginalRecovery(s);
     const movedHead = "2222222222222222222222222222222222222222";
     s.deps.fetchPrFacts = vi.fn(async () => ({
       state: "open" as const,
@@ -23295,7 +23346,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       baseRef: "main",
       htmlUrl: "https://github.com/acme/api/pull/7",
     }));
-    const { io, replies } = fakeIO();
+    const { io } = fakeIO();
 
     await dispatch(
       s.deps,
@@ -23304,10 +23355,10 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       { thread: [s.shipParent] },
     );
 
-    expect(replies).toEqual([
-      `acme/api#7 moved from the pipeline's expected head \`${s.recordedHead}\` to \`${movedHead}\`, so continuation did not start. Nothing else ran.`,
-    ]);
-    expect(s.deps.fetchPrFacts).toHaveBeenCalledExactlyOnceWith({ repo: "acme/api", number: 7 });
+    expect(s.deps.recoverOriginalUnit).toHaveBeenCalledWith(
+      { instanceId: INSTANCE, unit: "U12" },
+      expect.objectContaining({ userId: "slack:UADMIN", threadKey: THREAD }),
+    );
     expect(s.shipBranch).not.toHaveBeenCalled();
     expect(s.operator).toHaveBeenCalledOnce();
     expect(s.deps.invoked).toEqual([]);
@@ -23315,6 +23366,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
 
   it("a tokenized Ship continue request checks the original PR and head instead of issuing a second writer", async () => {
     const s = await endedPrContinuationSetup();
+    useOriginalRecovery(s);
     const movedHead = "2".repeat(40);
     s.deps.fetchPrFacts = vi.fn(async () => ({
       state: "open" as const,
@@ -23326,18 +23378,22 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       baseRef: "main",
       htmlUrl: "https://github.com/acme/api/pull/7",
     }));
-    const { io, replies } = fakeIO();
+    const { io } = fakeIO();
     await dispatch(s.deps, msg("agent:ship continue https://github.com/acme/api/pull/7", "slack:UADMIN"), io, {
       thread: [s.shipParent],
     });
     expect(s.operator).not.toHaveBeenCalled();
-    expect(s.deps.fetchPrFacts).toHaveBeenCalledExactlyOnceWith({ repo: "acme/api", number: 7 });
-    expect(replies.join(" ")).toContain("moved from the pipeline's expected head");
+    expect(s.deps.recoverOriginalUnit).toHaveBeenCalledWith(
+      { instanceId: INSTANCE, unit: "U12" },
+      expect.objectContaining({ userId: "slack:UADMIN", threadKey: THREAD }),
+    );
     expect(s.shipBranch).not.toHaveBeenCalled();
   });
 
   it("a typed Ship continuation without a PR target resumes the verified owned unit", async () => {
     const s = await endedPrContinuationSetup();
+    useOriginalRecovery(s);
+    useOriginalRecovery(s);
     s.deps.fetchPrFacts = vi.fn(async () => ({
       state: "open" as const,
       sameRepoHead: true,
@@ -23353,12 +23409,10 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     await dispatch(s.deps, msg("agent:ship continue", "slack:UADMIN"), io, { thread: [s.shipParent] });
 
     expect(s.operator).toHaveBeenCalledOnce();
-    expect(s.deps.fetchPrFacts).toHaveBeenCalledExactlyOnceWith({ repo: "acme/api", number: 7 });
-    expect(s.shipBranch).toHaveBeenCalledOnce();
-    expect(s.shipBranch.mock.calls[0]?.[3]).toMatchObject({
-      reissuePlanId: "fix-the-login-6435ec",
-      directives: { text: "in acme/api: fix the login redirect" },
-    });
+    expect(s.deps.recoverOriginalUnit).toHaveBeenCalledWith(
+      { instanceId: INSTANCE, unit: "U12" },
+      expect.objectContaining({ userId: "slack:UADMIN", threadKey: THREAD }),
+    );
     expect(replies.join(" ")).not.toContain("no unit to continue");
   });
 
@@ -23472,6 +23526,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
 
   it("a review-continuation reply naming the owned PR checks the original unit", async () => {
     const s = await endedPrContinuationSetup();
+    useOriginalRecovery(s);
     const movedHead = "2222222222222222222222222222222222222222";
     s.deps.fetchPrFacts = vi.fn(async () => ({
       state: "open" as const,
@@ -23483,7 +23538,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       baseRef: "main",
       htmlUrl: "https://github.com/acme/api/pull/7",
     }));
-    const { io, replies } = fakeIO();
+    const { io } = fakeIO();
 
     await dispatch(
       s.deps,
@@ -23491,9 +23546,10 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       io,
     );
 
-    expect(replies).toEqual([
-      `acme/api#7 moved from the pipeline's expected head \`${s.recordedHead}\` to \`${movedHead}\`, so continuation did not start. Nothing else ran.`,
-    ]);
+    expect(s.deps.recoverOriginalUnit).toHaveBeenCalledWith(
+      { instanceId: INSTANCE, unit: "U12" },
+      expect.objectContaining({ userId: "slack:UADMIN", threadKey: THREAD }),
+    );
     expect(s.shipBranch).not.toHaveBeenCalled();
     expect(s.operator).toHaveBeenCalledOnce();
     expect(s.deps.invoked).toEqual([]);
@@ -23501,6 +23557,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
 
   it("a same-line connector-attributed review continuation checks its original PR owner after Slack intake", async () => {
     const s = await endedPrContinuationSetup();
+    useOriginalRecovery(s);
     const movedHead = "2222222222222222222222222222222222222222";
     s.deps.fetchPrFacts = vi.fn(async () => ({
       state: "open" as const,
@@ -23512,15 +23569,16 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       baseRef: "main",
       htmlUrl: "https://github.com/acme/api/pull/7",
     }));
-    const { io, replies } = fakeIO();
+    const { io } = fakeIO();
     const raw =
       "agent:ship in acme/api: Please continue the review of <https://github.com/acme/api/pull/7> *Sent using* Another App";
 
     await dispatch(s.deps, msg(stripMention(raw), "slack:UADMIN"), io);
 
-    expect(replies).toEqual([
-      `acme/api#7 moved from the pipeline's expected head \`${s.recordedHead}\` to \`${movedHead}\`, so continuation did not start. Nothing else ran.`,
-    ]);
+    expect(s.deps.recoverOriginalUnit).toHaveBeenCalledWith(
+      { instanceId: INSTANCE, unit: "U12" },
+      expect.objectContaining({ userId: "slack:UADMIN", threadKey: THREAD }),
+    );
     expect(s.shipBranch).not.toHaveBeenCalled();
     expect(s.operator).toHaveBeenCalledOnce();
     expect(s.deps.invoked).toEqual([]);
@@ -23528,7 +23586,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
 
   it("a new Ship task on a completed PR starts fresh work with fresh caps", async () => {
     const s = await endedPrContinuationSetup();
-    await s.instances.putUnits([
+    seedRetainedUnits(s.instances, [
       unitRow({
         branch: s.branch,
         pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
@@ -23577,8 +23635,9 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
 
   it("an exact PR reply selects its original unit behind a later held plan", async () => {
     const s = await endedPrContinuationSetup();
+    useOriginalRecovery(s);
     const laterId = "plan-continue-pr-7";
-    await s.instances.putUnits([
+    seedRetainedUnits(s.instances, [
       unitRow({
         instanceId: laterId,
         branch: "plan/continue-pr-7/u12",
@@ -23607,22 +23666,22 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       "agent:ship in acme/api: Continue https://github.com/acme/api/pull/7",
       "Continue https://github.com/acme/api/pull/7",
     ]) {
-      const { io, replies } = fakeIO();
+      const { io } = fakeIO();
       await dispatch(s.deps, msg(request, "slack:UADMIN"), io, { thread: [later, s.shipParent] });
-      expect(replies).toEqual([
-        `acme/api#7 moved from the pipeline's expected head \`${s.recordedHead}\` to \`${movedHead}\`, so continuation did not start. Nothing else ran.`,
-      ]);
+      expect(s.deps.recoverOriginalUnit).toHaveBeenCalledWith(
+        { instanceId: INSTANCE, unit: "U12" },
+        expect.objectContaining({ userId: "slack:UADMIN", threadKey: THREAD }),
+      );
     }
-    expect(s.deps.fetchPrFacts).toHaveBeenCalledTimes(2);
-    expect(s.deps.fetchPrFacts).toHaveBeenCalledWith({ repo: "acme/api", number: 7 });
     expect(s.shipBranch).not.toHaveBeenCalled();
     expect(s.operator).toHaveBeenCalledTimes(2);
   });
 
   it("an exact PR reply ignores a prefetched short page and reaches its original unit", async () => {
     const s = await endedPrContinuationSetup();
+    useOriginalRecovery(s);
     const laterId = "plan-continue-pr-7";
-    await s.instances.putUnits([
+    seedRetainedUnits(s.instances, [
       unitRow({ instanceId: laterId, ending: { kind: "held", report: "publication blocked", at: 2_000 } }),
     ]);
     const newer = {
@@ -23655,15 +23714,16 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       baseRef: "main",
       htmlUrl: "https://github.com/acme/api/pull/7",
     }));
-    const { io, replies } = fakeIO([{ role: "user", text: "earlier work" }]);
+    const { io } = fakeIO([{ role: "user", text: "earlier work" }]);
 
     await dispatch(s.deps, msg("Continue https://github.com/acme/api/pull/7", "slack:UADMIN"), io, {
       thread: [newer, ...filler.slice(0, 7)],
     });
 
-    expect(replies).toEqual([
-      `acme/api#7 moved from the pipeline's expected head \`${s.recordedHead}\` to \`${movedHead}\`, so continuation did not start. Nothing else ran.`,
-    ]);
+    expect(s.deps.recoverOriginalUnit).toHaveBeenCalledWith(
+      { instanceId: INSTANCE, unit: "U12" },
+      expect.objectContaining({ userId: "slack:UADMIN", threadKey: THREAD }),
+    );
     expect(s.operator).toHaveBeenCalledOnce();
     expect(s.shipBranch).not.toHaveBeenCalled();
     expect(s.deps.runs!.listRuns).toHaveBeenCalledTimes(2);
@@ -23671,8 +23731,9 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
 
   it("an exact PR reply selects its ended PR owner behind a newer idle unit", async () => {
     const s = await endedPrContinuationSetup();
+    useOriginalRecovery(s);
     const laterId = "plan-continue-pr-7";
-    await s.instances.putUnits([unitRow({ instanceId: laterId, branch: "plan/continue-pr-7/u12" })]);
+    seedRetainedUnits(s.instances, [unitRow({ instanceId: laterId, branch: "plan/continue-pr-7/u12" })]);
     const later = {
       ...s.shipParent,
       id: "later-ship-parent",
@@ -23692,7 +23753,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       baseRef: "main",
       htmlUrl: "https://github.com/acme/api/pull/7",
     }));
-    const { io, replies } = fakeIO([{ role: "user", text: "earlier work" }]);
+    const { io } = fakeIO([{ role: "user", text: "earlier work" }]);
 
     await dispatch(
       s.deps,
@@ -23700,9 +23761,10 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       io,
     );
 
-    expect(replies).toEqual([
-      `acme/api#7 moved from the pipeline's expected head \`${s.recordedHead}\` to \`${movedHead}\`, so continuation did not start. Nothing else ran.`,
-    ]);
+    expect(s.deps.recoverOriginalUnit).toHaveBeenCalledWith(
+      { instanceId: INSTANCE, unit: "U12" },
+      expect.objectContaining({ userId: "slack:UADMIN", threadKey: THREAD }),
+    );
     expect(s.shipBranch).not.toHaveBeenCalled();
     expect(s.operator).toHaveBeenCalledOnce();
   });
@@ -23710,7 +23772,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
   it("an exact PR reply refuses an ended owner when a newer unfinished unit owns the same PR", async () => {
     const s = await endedPrContinuationSetup();
     const laterId = "plan-continue-pr-7";
-    await s.instances.putUnits([
+    seedRetainedUnits(s.instances, [
       unitRow({
         instanceId: laterId,
         branch: "plan/continue-pr-7/u12",
@@ -23741,6 +23803,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
 
   it("an exact PR reply keeps its run-history owner when channel history is empty", async () => {
     const s = await endedPrContinuationSetup();
+    useOriginalRecovery(s);
     const movedHead = "2222222222222222222222222222222222222222";
     s.deps.fetchPrFacts = vi.fn(async () => ({
       state: "open" as const,
@@ -23752,13 +23815,14 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       baseRef: "main",
       htmlUrl: "https://github.com/acme/api/pull/7",
     }));
-    const { io, replies } = fakeIO();
+    const { io } = fakeIO();
 
     await dispatch(s.deps, msg("Continue https://github.com/acme/api/pull/7", "slack:UADMIN"), io);
 
-    expect(replies).toEqual([
-      `acme/api#7 moved from the pipeline's expected head \`${s.recordedHead}\` to \`${movedHead}\`, so continuation did not start. Nothing else ran.`,
-    ]);
+    expect(s.deps.recoverOriginalUnit).toHaveBeenCalledWith(
+      { instanceId: INSTANCE, unit: "U12" },
+      expect.objectContaining({ userId: "slack:UADMIN", threadKey: THREAD }),
+    );
     expect(s.shipBranch).not.toHaveBeenCalled();
     expect(s.operator).toHaveBeenCalledOnce();
   });
@@ -23848,7 +23912,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
   it("a task after a completed merge-ready pipeline routes through the operator as fresh ship work on its PR", async () => {
     const s = await endedPrContinuationSetup();
     const pr = { number: 7, url: "https://github.com/acme/api/pull/7" };
-    await s.instances.putUnits([
+    seedRetainedUnits(s.instances, [
       unitRow({
         branch: s.branch,
         pr,
@@ -23915,7 +23979,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       },
     }));
     const stoppedId = "ship-stopped";
-    await s.instances.putUnits([
+    seedRetainedUnits(s.instances, [
       unitRow({
         pr: { number: 8, url: "https://github.com/acme/api/pull/8" },
         publication: {
@@ -23967,7 +24031,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       input: { preset: "explore", request: "agent:explore PR #8. Read only.", reason: "read the named PR" },
     }));
     const newerId = "ship-newer";
-    await s.instances.putUnits([
+    seedRetainedUnits(s.instances, [
       unitRow({
         pr: { number: 8, url: "https://github.com/acme/api/pull/8" },
         publication: {
@@ -24048,7 +24112,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
 
   it("a newer completed run's PR supersedes an older released unit PR", async () => {
     const s = await endedPrContinuationSetup();
-    await s.instances.putUnits([
+    seedRetainedUnits(s.instances, [
       unitRow({
         branch: s.branch,
         pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
@@ -24095,211 +24159,6 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     expect(s.shipBranch).toHaveBeenCalledOnce();
     expect(s.shipBranch.mock.calls[0]?.[3]).toMatchObject({ repoCtx: { repo: "acme/api", pr: 8 } });
   });
-
-  async function legacyMergeReadySetup(
-    over: {
-      codingHeads?: readonly string[];
-      reviewHeads?: readonly string[];
-      codingCompleted?: boolean;
-      reviewCompleted?: boolean;
-      childUserId?: string;
-      childRepo?: string;
-      childBinding?: "exact" | "standalone" | "foreign-parent" | "wrong-unit";
-      codingPr?: number;
-      codingRef?: string;
-      codingEvidence?: "pushed" | "head";
-      reviewRepo?: string;
-      reviewPr?: number;
-      listedBranch?: string;
-      listedPr?: number;
-      facts?: Partial<Awaited<ReturnType<NonNullable<CoreDeps["fetchPrFacts"]>>>>;
-      owner?: { instanceId: string; unit: string };
-    } = {},
-  ) {
-    const s = await endedPrContinuationSetup();
-    const head = s.recordedHead;
-    const [stored] = await s.instances.listUnits(INSTANCE);
-    const legacy = { ...stored!, ending: { kind: "merge_ready", report: "ready", at: 1_000 } };
-    delete legacy.lastPush;
-    delete legacy.publication;
-    await s.instances.putUnits([legacy]);
-    const codingHeads = over.codingHeads ?? [head];
-    const reviewHeads = over.reviewHeads ?? [head];
-    const child = (id: string, agent: "coding" | "review", key: string, artifacts: Partial<RunView>): RunView => ({
-      id,
-      agent,
-      repo: over.childRepo ?? "acme/api",
-      userId: over.childUserId ?? "slack:UADMIN",
-      threadKey: THREAD,
-      ...(over.childBinding === "standalone"
-        ? {}
-        : {
-            parentInstanceId: over.childBinding === "foreign-parent" ? "plan-other" : INSTANCE,
-            idempotencyKey: `${INSTANCE}:${over.childBinding === "wrong-unit" ? "U13" : "U12"}/${key}`,
-          }),
-      startedAt: 600,
-      finishedAt: 900,
-      finished: true,
-      status: "completed",
-      eventCount: 1,
-      ...artifacts,
-    });
-    const childRuns = [
-      ...codingHeads.map((candidate, index) =>
-        child(`run-c${index}`, "coding", `${index}/findings`, {
-          ...(over.codingCompleted === false ? { status: "failed" as const } : {}),
-          ...(over.codingEvidence === "head"
-            ? { headSha: candidate }
-            : { pushed: [{ ref: over.codingRef ?? s.branch, sha: candidate, by: "push" as const }] }),
-          pr: {
-            number: over.codingPr ?? 7,
-            url: `https://github.com/acme/api/pull/${over.codingPr ?? 7}`,
-          },
-        }),
-      ),
-      ...reviewHeads.map((candidate, index) =>
-        child(`run-r${index}`, "review", `${index + 1}/review`, {
-          ...(over.reviewCompleted === false ? { status: "failed" as const } : {}),
-          reviewHead: candidate,
-          verdict: { verdict: "approve", summary: "clean", head: candidate, findings: [] },
-          reviewPost: {
-            posted: true,
-            target: { repo: over.reviewRepo ?? "acme/api", number: over.reviewPr ?? 7 },
-            head: candidate,
-            verdict: "approve",
-          },
-        }),
-      ),
-    ];
-    const getRun = vi.fn(async (id: string) =>
-      id === s.shipParent.id
-        ? {
-            ok: true as const,
-            value: {
-              ...s.shipParent,
-              events: [
-                {
-                  type: "input" as const,
-                  text: "budget:180 in acme/api: fix the login redirect",
-                  messageId: "source",
-                  at: 500,
-                },
-              ],
-            },
-          }
-        : { ok: false as const, error: "not_found" as const },
-    );
-    const runs = {
-      listRuns: vi.fn(async () => ({ runs: [s.shipParent] })),
-      getRun,
-      listUnitRuns: vi.fn(async () => ({
-        ok: true as const,
-        value: {
-          unit: `${INSTANCE}:U12`,
-          instanceId: INSTANCE,
-          id: "U12",
-          branch: over.listedBranch ?? s.branch,
-          threads: { coding: THREAD },
-          sourceUrls: {},
-          pr: {
-            number: over.listedPr ?? 7,
-            url: `https://github.com/acme/api/pull/${over.listedPr ?? 7}`,
-          },
-          rounds: legacy.rounds,
-          ending: legacy.ending,
-          instance: { id: INSTANCE, repo: "acme/api", base: "main", createdAt: 500 },
-          runs: childRuns,
-        },
-      })),
-    } as unknown as NonNullable<CoreDeps["runs"]>;
-    s.deps.runs = runs;
-    s.deps.fetchPrFacts = vi.fn(async () => ({
-      state: "open" as const,
-      sameRepoHead: true,
-      headBranchExists: true,
-      headRef: s.branch,
-      headSha: head,
-      verifiedHead: { repo: "acme/api", ref: s.branch, sha: head },
-      baseRef: "main",
-      htmlUrl: "https://github.com/acme/api/pull/7",
-      ...over.facts,
-    }));
-    let currentOwner = over.owner;
-    let reservation: symbol | undefined;
-    let reservationOwner: { instanceId: string; unit: string } | undefined;
-    const ownership = {
-      owner: vi.fn(() => currentOwner),
-      reserve: vi.fn((_repo: string, _pr: number, next: { instanceId: string; unit: string }) => {
-        if (currentOwner !== undefined || reservation !== undefined) return undefined;
-        reservation = Symbol("legacy-continuation");
-        reservationOwner = next;
-        currentOwner = next;
-        return reservation;
-      }),
-      transferReservation: vi.fn(
-        (
-          _repo: string,
-          _pr: number,
-          token: symbol,
-          expected: { instanceId: string; unit: string },
-          next: { instanceId: string; unit: string },
-        ) => {
-          if (
-            reservation !== token ||
-            currentOwner?.instanceId !== expected.instanceId ||
-            currentOwner.unit !== expected.unit
-          )
-            return false;
-          reservation = undefined;
-          reservationOwner = undefined;
-          currentOwner = next;
-          return true;
-        },
-      ),
-      releaseReservation: vi.fn((_repo: string, _pr: number, token: symbol) => {
-        if (reservation !== token) return false;
-        reservation = undefined;
-        if (currentOwner?.instanceId === reservationOwner?.instanceId && currentOwner?.unit === reservationOwner?.unit)
-          currentOwner = undefined;
-        reservationOwner = undefined;
-        return true;
-      }),
-      release: vi.fn((_repo: string, _pr: number, expected: { instanceId: string; unit: string }) => {
-        if (currentOwner?.instanceId !== expected.instanceId || currentOwner.unit !== expected.unit) return false;
-        currentOwner = undefined;
-        return true;
-      }),
-    };
-    Object.assign(s.deps, { runnerOwnership: ownership });
-    let rowAtReissue: CoordinatorUnit | undefined;
-    let handoffsStarted = 0;
-    s.deps.shipBranch = vi.fn(async (_deps, _msg, branchIo, ctx) => {
-      const reserved = await ctx.beforeCoordinatorStart?.();
-      if (reserved?.ok === false) {
-        await branchIo.reply(reserved.refusal.text);
-        return { hostedLive: false };
-      }
-      handoffsStarted += 1;
-      [rowAtReissue] = await s.instances.listUnits(INSTANCE);
-      if (reserved?.ok === true) {
-        await reserved.commit({ instanceId: `${INSTANCE}-2`, unit: "task" });
-        reserved.complete();
-      }
-      return { hostedLive: false };
-    });
-    return {
-      ...s,
-      head,
-      childRuns,
-      runs,
-      ownership,
-      setOwnershipOwner: (next: { instanceId: string; unit: string } | undefined) => {
-        currentOwner = next;
-      },
-      handoffsStarted: () => handoffsStarted,
-      rowAtReissue: () => rowAtReissue,
-    };
-  }
 
   it("a plain reply appends one event with mode steer, sends one nudge, acks, calls no router and starts no run", async () => {
     const s = await unitOwnedSetup();
@@ -24505,858 +24364,18 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       userId: "slack:UADMIN",
       instanceId: INSTANCE,
     };
-    const { io, replies } = fakeIO();
-
-    await dispatch(s.deps, msg("continue", "slack:UADMIN"), io, { thread: [shipParent] });
-
-    expect(replies).toEqual([
-      `The original-unit recovery for \`${INSTANCE}:U12\` is terminal and its evidence is consumed. This reply was not turned into replacement work.`,
-    ]);
-    expect(s.provider.requests).toHaveLength(0);
-  });
-
-  it("a reply after an aborted generated pipeline requires the current remote head before re-issuing its durable task and remaining budgets", async () => {
-    const branch = "plan/fix-the-login-6435ec/u12";
-    const originalTask = "in acme/api: fix the login redirect and its regression";
-    const durableRequest = `budget:180 ${originalTask}`;
-    const recordedHead = "1111111111111111111111111111111111111111";
-    const movedHead = "2222222222222222222222222222222222222222";
-    const startedAt = 500;
-    const s = await unitOwnedSetup(
-      {
-        branch,
-        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
-        lastPush: recordedHead,
-        startedAt,
-        rounds: [
-          { index: 1, agent: "review", outcome: "started", at: startedAt + 30 * MINUTE_MS },
-          { index: 1, agent: "review", outcome: "request_changes", at: startedAt + 40 * MINUTE_MS },
-        ],
-        ending: { kind: "aborted", report: "aborted after review", at: startedAt + 45 * MINUTE_MS },
-      },
-      OPERATOR_ON_YAML,
-    );
-    const operator = armContinuationOperator(s.deps);
-    await s.instances.put({
-      id: INSTANCE,
-      kind: "ship",
-      userId: "slack:UADMIN",
-      channelId: "slack:CX",
-      threadKey: THREAD,
-      repo: "acme/api",
-      branch,
-      base: "main",
-      createdAt: 500,
-      plan: { id: "fix-the-login-6435ec" },
-      merge: "person",
-      caps: { maxRounds: 3, maxMinutes: 180 },
-      runId: "ship-parent",
-    });
-    const shipParent: RunView = {
-      id: "ship-parent",
-      startedAt: 500,
-      finishedAt: 1_000,
-      finished: true,
-      status: "failed",
-      eventCount: 3,
-      agent: "ship",
-      repo: "acme/api",
-      threadKey: THREAD,
-      userId: "slack:UADMIN",
-      instanceId: INSTANCE,
-    };
-    const getRun = vi
-      .fn()
-      .mockResolvedValueOnce({ ok: false as const, reason: "not_found" as const })
-      .mockResolvedValue({
-        ok: true as const,
-        value: {
-          ...shipParent,
-          events: [{ type: "input" as const, text: durableRequest, messageId: "source", at: 500 }],
-        },
-      });
-    s.deps.runs = {
-      listRuns: vi.fn(async () => ({ runs: [shipParent] })),
-      getRun,
-    } as unknown as NonNullable<CoreDeps["runs"]>;
-    s.deps.fetchPrFacts = vi
-      .fn()
-      .mockResolvedValueOnce({
-        state: "open" as const,
-        sameRepoHead: true,
-        headBranchExists: true,
-        headRef: "plan/stale/u12",
-        headSha: movedHead,
-        baseRef: "main",
-        htmlUrl: "https://github.com/acme/api/pull/7",
-      })
-      .mockResolvedValueOnce({
-        state: "open" as const,
-        sameRepoHead: true,
-        headBranchExists: false,
-        headRef: branch,
-        headSha: recordedHead,
-        baseRef: "main",
-        htmlUrl: "https://github.com/acme/api/pull/7",
-      })
-      .mockResolvedValueOnce({
-        state: "open" as const,
-        sameRepoHead: true,
-        headRef: branch,
-        headSha: recordedHead,
-        baseRef: "main",
-        htmlUrl: "https://github.com/acme/api/pull/7",
-      })
-      .mockRejectedValueOnce(new Error("GitHub branch ref lookup failed"))
-      .mockResolvedValueOnce({
-        state: "open" as const,
-        sameRepoHead: true,
-        headBranchExists: true,
-        headRef: branch,
-        headSha: movedHead,
-        verifiedHead: { repo: "acme/api", ref: branch, sha: movedHead },
-        baseRef: "main",
-        htmlUrl: "https://github.com/acme/api/pull/7",
-      })
-      // A prior existence read may say true while the branch-tip read fails.
-      // The PR object's matching sha is stale fallback data, not attributable
-      // proof that the expected ref still points at the durable head.
-      .mockResolvedValueOnce({
-        state: "open" as const,
-        sameRepoHead: true,
-        headBranchExists: true,
-        headRef: branch,
-        headSha: recordedHead,
-        baseRef: "main",
-        htmlUrl: "https://github.com/acme/api/pull/7",
-      })
-      .mockResolvedValue({
-        state: "open" as const,
-        sameRepoHead: true,
-        headBranchExists: true,
-        headRef: branch,
-        headSha: recordedHead,
-        verifiedHead: { repo: "acme/api", ref: branch, sha: recordedHead },
-        baseRef: "main",
-        htmlUrl: "https://github.com/acme/api/pull/7",
-      });
-    let reissued:
-      | {
-          agent: string;
-          task: string;
-          budget: number;
-          remainingCaps?: { maxRounds: number; maxMinutes: number };
-          planId?: string;
-        }
-      | undefined;
-    const shipBranch = vi.fn(async (_deps, _msg, _io, ctx) => {
-      reissued = {
-        agent: ctx.agent.name,
-        task: ctx.directives.text,
-        budget: ctx.profile.minutes,
-        ...("reissueCaps" in ctx && ctx.reissueCaps !== undefined ? { remainingCaps: ctx.reissueCaps } : {}),
-        ...(ctx.reissuePlanId !== undefined ? { planId: ctx.reissuePlanId } : {}),
-      };
-      return { hostedLive: false };
-    });
-    s.deps.shipBranch = shipBranch;
-
-    const denied = fakeIO();
-    await dispatch(s.deps, msg("continue", "slack:UX"), denied.io, { thread: [shipParent] });
-    expect(denied.replies).toEqual([STEER_OWNER_REFUSED]);
-    expect(s.deps.runs.getRun).not.toHaveBeenCalled();
-    expect(reissued).toBeUndefined();
-
-    const missing = fakeIO();
-    await dispatch(s.deps, msg("continue", "slack:UADMIN"), missing.io, { thread: [shipParent] });
-    expect(missing.replies).toEqual([
-      "The ended pipeline's original task is unavailable from run `ship-parent`, so continuation did not start.",
-    ]);
-    expect(reissued).toBeUndefined();
-
-    const [persistedUnit] = await s.instances.listUnits(INSTANCE);
-    const unitWithoutExpectedHead = { ...persistedUnit! };
-    delete unitWithoutExpectedHead.lastPush;
-    await s.instances.putUnits([unitWithoutExpectedHead]);
-    const headless = fakeIO();
-    await dispatch(s.deps, msg("continue", "slack:UADMIN"), headless.io, { thread: [shipParent] });
-    expect(headless.replies).toEqual([
-      "Unit U12 does not retain the pull request's durable expected head, so continuation did not start. Nothing else ran.",
-    ]);
-    expect(s.deps.fetchPrFacts).not.toHaveBeenCalled();
-    expect(shipBranch).not.toHaveBeenCalled();
-    await s.instances.putUnits([{ ...unitWithoutExpectedHead, lastPush: recordedHead }]);
-
-    const stale = fakeIO();
-    await dispatch(s.deps, msg("continue", "slack:UADMIN"), stale.io, { thread: [shipParent] });
-    expect(stale.replies).toEqual([
-      `acme/api#7 no longer has the pipeline's verifiable \`${branch}\` head, so continuation did not start.`,
-    ]);
-    expect(reissued).toBeUndefined();
-
-    const deleted = fakeIO();
-    await dispatch(s.deps, msg("continue", "slack:UADMIN"), deleted.io, { thread: [shipParent] });
-    expect(deleted.replies).toEqual([
-      `acme/api#7 no longer has the pipeline's verifiable \`${branch}\` head, so continuation did not start.`,
-    ]);
-    expect(shipBranch).not.toHaveBeenCalled();
-
-    const unverified = fakeIO();
-    await dispatch(s.deps, msg("continue", "slack:UADMIN"), unverified.io, { thread: [shipParent] });
-    expect(unverified.replies).toEqual([
-      `acme/api#7 no longer has the pipeline's verifiable \`${branch}\` head, so continuation did not start.`,
-    ]);
-    expect(shipBranch).not.toHaveBeenCalled();
-
-    const unreadable = fakeIO();
-    await dispatch(s.deps, msg("continue", "slack:UADMIN"), unreadable.io, { thread: [shipParent] });
-    expect(unreadable.replies).toEqual([
-      "GitHub did not return current facts for acme/api#7, so continuation did not start.",
-    ]);
-    expect(shipBranch).not.toHaveBeenCalled();
-
-    const moved = fakeIO();
-    await dispatch(s.deps, msg("continue", "slack:UADMIN"), moved.io, { thread: [shipParent] });
-    expect(moved.replies).toEqual([
-      `acme/api#7 moved from the pipeline's expected head \`${recordedHead}\` to \`${movedHead}\`, so continuation did not start. Nothing else ran.`,
-    ]);
-    expect(shipBranch).not.toHaveBeenCalled();
-
-    const tipUnreadable = fakeIO();
-    await dispatch(s.deps, msg("continue", "slack:UADMIN"), tipUnreadable.io, { thread: [shipParent] });
-    expect(tipUnreadable.replies).toEqual([
-      `acme/api#7 no longer has the pipeline's verifiable \`${branch}\` head, so continuation did not start.`,
-    ]);
-    expect(shipBranch).not.toHaveBeenCalled();
-    expect(operator).toHaveBeenCalledTimes(8);
-    expect(s.deps.invoked).toEqual([]);
-    expect(s.provider.requests).toHaveLength(0);
-
-    await dispatch(s.deps, msg("hold after this round", "slack:UADMIN"), fakeIO().io, { thread: [shipParent] });
-
-    expect(operator).toHaveBeenCalledTimes(9);
-    expect(s.deps.invoked).toEqual([]);
-    expect(reissued).toEqual({
-      agent: "ship",
-      task: originalTask,
-      budget: 135,
-      remainingCaps: { maxRounds: 2, maxMinutes: 135 },
-      planId: "fix-the-login-6435ec",
-    });
-    expect(shipBranch).toHaveBeenCalledOnce();
-    expect(s.deps.runs.getRun).toHaveBeenCalledTimes(9);
-    expect(s.deps.fetchPrFacts).toHaveBeenCalledTimes(7);
-    for (let call = 1; call <= 7; call += 1)
-      expect(s.deps.fetchPrFacts).toHaveBeenNthCalledWith(call, { repo: "acme/api", number: 7 });
-    expect(await s.instances.listUnits(INSTANCE)).toMatchObject([{ branch, lastPush: recordedHead }]);
-    expect(s.provider.requests).toHaveLength(0);
-  });
-
-  it("a legacy merge-ready row recovers one exact approved child head for the same unit, persists the full binding before reissue, and starts no substitute run", async () => {
-    const s = await legacyMergeReadySetup();
-    const { io, replies } = fakeIO();
-
-    await dispatch(s.deps, msg("continue", "slack:UADMIN"), io, { thread: [s.shipParent] });
-
-    expect(replies).toEqual([]);
-    expect(s.runs.listUnitRuns).toHaveBeenCalledExactlyOnceWith(`${INSTANCE}:U12`, { kind: "all" });
-    expect(s.childRuns.find((run) => run.agent === "coding")).toMatchObject({
-      parentInstanceId: INSTANCE,
-      idempotencyKey: `${INSTANCE}:U12/0/findings`,
-      repo: "acme/api",
-      userId: "slack:UADMIN",
-      pr: { number: 7 },
-      pushed: [{ ref: s.branch, sha: s.head }],
-    });
-    expect(s.childRuns.find((run) => run.agent === "coding")).not.toHaveProperty("headSha");
-    expect(s.deps.fetchPrFacts).toHaveBeenCalledExactlyOnceWith({ repo: "acme/api", number: 7 });
-    expect(s.ownership.owner).toHaveBeenCalledTimes(2);
-    expect(s.ownership.owner).toHaveBeenCalledWith("acme/api", 7);
-    expect(s.deps.shipBranch).toHaveBeenCalledOnce();
-    expect(s.rowAtReissue()).toMatchObject({
-      instanceId: INSTANCE,
-      unit: "U12",
-      lastPush: s.head,
-      publication: {
-        repo: "acme/api",
-        pr: 7,
-        headRef: s.branch,
-        baseRef: "main",
-        expectedHeadSha: s.head,
-        publicationRef: s.branch,
-        owner: { instanceId: INSTANCE, unit: "U12" },
-      },
-    });
-    expect(s.operator).toHaveBeenCalledOnce();
-    expect(s.provider.requests).toHaveLength(0);
-  });
-
-  it("does not reissue a publication-bound merge-ready unit without a coding push", async () => {
-    const s = await legacyMergeReadySetup({ codingHeads: [], reviewHeads: [] });
-    const [row] = await s.instances.listUnits(INSTANCE);
-    await s.instances.putUnits([
-      {
-        ...row!,
-        publication: {
-          repo: "acme/api",
-          pr: 7,
-          headRef: s.branch,
-          baseRef: "main",
-          expectedHeadSha: s.head,
-          publicationRef: s.branch,
-          owner: { instanceId: INSTANCE, unit: "U12" },
-        },
-      },
-    ]);
-    const { io, replies } = fakeIO();
-
-    await dispatch(s.deps, msg("continue", "slack:UADMIN"), io, { thread: [s.shipParent] });
-
-    expect(replies).toEqual([
-      "bound: `agent:ship continue` — write — continue the original unit",
-      "acme/api#7 is already merge-ready, so there is no ended unit to continue. Name a separate task to start new work. Nothing started.",
-    ]);
-    expect(s.runs.listUnitRuns).not.toHaveBeenCalled();
-    expect(s.deps.shipBranch).not.toHaveBeenCalled();
-    expect(s.handoffsStarted()).toBe(0);
-  });
-
-  it("legacy merge-ready recovery retains a coding record's exact final-head evidence", async () => {
-    const s = await legacyMergeReadySetup({ codingEvidence: "head" });
-    const { io, replies } = fakeIO();
-
-    await dispatch(s.deps, msg("continue", "slack:UADMIN"), io, { thread: [s.shipParent] });
-
-    expect(replies).toEqual([]);
-    expect(s.deps.shipBranch).toHaveBeenCalledOnce();
-    expect(s.rowAtReissue()).toMatchObject({ lastPush: s.head });
-  });
-
-  it("a real reissue transfers the recovered pull request to the new attempt, whose coding spawn passes the publication-owner gate", async () => {
-    const s = await legacyMergeReadySetup();
-    const claimLegacy = vi.spyOn(s.instances, "compareAndReplaceUnit");
-    const fence = new RunnerOwnershipFence(false);
-    const reserve = vi.spyOn(fence, "reserve");
-    const transfer = vi.spyOn(fence, "transferReservation");
-    s.deps.runnerOwnership = fence;
-    Object.assign(s.shipParent, { pr: { number: 7, url: "https://github.com/acme/api/pull/7" } });
-    delete s.deps.shipBranch;
-    s.deps.resolveRepoContext = () => ({
-      repo: "acme/api",
-      ref: s.branch,
-      refFromPr: true,
-      pr: 7,
-      prFromRecord: true,
-      prIsThreadOwn: true,
-      headSha: s.head,
-      baseRef: "main",
-    });
-    s.deps.fetchRepoShipInfo = vi.fn(async () => ({ defaultBranch: "main" }));
-    s.deps.fetchRefExists = vi.fn(async () => true);
-    s.deps.fetchCoordinatorInstanceStatus = vi.fn(async (id) =>
-      id === INSTANCE ? { kind: "status" as const, status: "complete" } : { kind: "absent" as const },
-    );
-    s.deps.createCoordinatorInstance = vi.fn(async (id) => ({ kind: "created" as const, id }));
-    const requestIo = fakeIO();
-    requestIo.io.openThread = async () => ({ thread: { threadKey: THREAD }, io: requestIo.io });
-
-    await dispatch(s.deps, msg("continue", "slack:UADMIN"), requestIo.io, { thread: [s.shipParent] });
-
-    const nextId = `${INSTANCE}-2`;
-    const [next] = await s.instances.listUnits(nextId);
-    const nextUnit = next!.unit;
-    expect(nextId).not.toBe(INSTANCE);
-    expect(next).toMatchObject({
-      instanceId: nextId,
-      publication: {
-        repo: "acme/api",
-        pr: 7,
-        headRef: s.branch,
-        baseRef: "main",
-        expectedHeadSha: s.head,
-        publicationRef: s.branch,
-        owner: { instanceId: nextId, unit: nextUnit },
-      },
-    });
-    expect(claimLegacy).toHaveBeenCalledOnce();
-    expect(reserve).toHaveBeenCalledExactlyOnceWith("acme/api", 7, { instanceId: INSTANCE, unit: "U12" });
-    expect(transfer).toHaveBeenCalledExactlyOnceWith(
-      "acme/api",
-      7,
-      expect.any(Symbol),
-      { instanceId: INSTANCE, unit: "U12" },
-      { instanceId: nextId, unit: nextUnit },
-    );
-    expect(s.deps.fetchPrFacts).toHaveBeenCalledTimes(2);
-    expect(s.deps.fetchPrFacts).toHaveBeenNthCalledWith(1, { repo: "acme/api", number: 7 });
-    expect(s.deps.fetchPrFacts).toHaveBeenNthCalledWith(2, { repo: "acme/api", number: 7 });
-    expect(fence.owner("acme/api", 7)).toEqual(next!.publication!.owner);
-
-    const childRegistry = new RunRegistry();
-    const childStore = new InMemoryRunStore();
-    const childRunsService = createRunsService({ registry: childRegistry, store: childStore });
-    const dispatched: Array<{ coordinator?: { publication?: CoordinatorUnit["publication"] } }> = [];
-    const childIo = fakeIO();
-    const adminDeps = {
-      tokens: new Secret(JSON.stringify({ "tok-coord": { subject: "coordinator" } }), "TEST_COORDINATOR_TOKENS"),
-      grantsFor: (id: string) =>
-        id === "http:coordinator"
-          ? { actions: new Set(["coordinator:step"]), channels: new Set<string>(), repos: new Set<string>() }
-          : NO_GRANTS,
-      instances: s.instances,
-      runs: childRunsService,
-      registry: childRegistry,
-      ledgerRuns: () => [],
-      dispatch: async (_childMsg: IncomingMessage, childChannel: ChannelIO, opts?: { coordinator: never }) => {
-        dispatched.push({ coordinator: opts?.coordinator });
-        childChannel.runStarted?.({ id: "run-reissued-child" });
-        return { status: "completed" as const };
-      },
-      ioFor: () => childIo.io,
-      runnerOwnership: fence,
-      clock: () => 1_700_000_000_000,
-    } as unknown as AdminCoordinatorDeps;
-    const unitStart = await handleCoordinatorRequest(
-      {
-        method: "POST",
-        path: `${COORDINATOR_ADMIN_PREFIX}unit-start`,
-        headers: { authorization: "Bearer tok-coord" },
-        body: JSON.stringify({ parentInstanceId: nextId, unit: nextUnit }),
-      },
-      adminDeps,
-    );
-    expect(unitStart).toMatchObject({
+    s.deps.recoverOriginalUnit = vi.fn(async () => ({
       status: 200,
-      body: { ok: true, threadKey: THREAD, branch: s.branch, base: "main" },
-    });
-
-    const spawn = await handleCoordinatorRequest(
-      {
-        method: "POST",
-        path: `${COORDINATOR_ADMIN_PREFIX}spawn`,
-        headers: { authorization: "Bearer tok-coord" },
-        body: JSON.stringify({
-          parentInstanceId: nextId,
-          unit: nextUnit,
-          step: `${nextUnit}/0/coding`,
-          preset: "coding",
-          prompt: "continue the existing pull request",
-        }),
-      },
-      adminDeps,
+      body: { outcome: "already_completed", workflowId: "recovery-review-1" },
+    }));
+    const { io, replies } = fakeIO();
+    await dispatch(s.deps, msg("continue", "slack:UADMIN"), io, { thread: [shipParent] });
+    expect(s.deps.recoverOriginalUnit).toHaveBeenCalledWith(
+      { instanceId: INSTANCE, unit: "U12" },
+      expect.objectContaining({ userId: "slack:UADMIN", threadKey: THREAD }),
     );
-
-    expect(spawn).toMatchObject({ status: 200, body: { ok: true, runId: "run-reissued-child" } });
-    expect(dispatched).toHaveLength(1);
-    expect(dispatched[0]!.coordinator?.publication).toEqual(next!.publication);
-    expect(dispatched[0]!.coordinator?.publication).toMatchObject({
-      repo: "acme/api",
-      pr: 7,
-      headRef: s.branch,
-      expectedHeadSha: s.head,
-      publicationRef: s.branch,
-      owner: { instanceId: nextId, unit: nextUnit },
-    });
-
-    expect(fence.release("acme/api", 7, next!.publication!.owner)).toBe(true);
-    expect(fence.claim("acme/api", 7, { instanceId: "runner-other", unit: "other" })).toBe(true);
-    const refused = await handleCoordinatorRequest(
-      {
-        method: "POST",
-        path: `${COORDINATOR_ADMIN_PREFIX}spawn`,
-        headers: { authorization: "Bearer tok-coord" },
-        body: JSON.stringify({
-          parentInstanceId: nextId,
-          unit: nextUnit,
-          step: `${nextUnit}/1/findings`,
-          preset: "coding",
-          prompt: "continue the existing pull request",
-        }),
-      },
-      adminDeps,
-    );
-    expect(refused).toMatchObject({ status: 409, body: { ok: false, error: "publication_ownership_changed" } });
-    expect(dispatched).toHaveLength(1);
-  });
-
-  it("two concurrent legacy recoveries conditionally replace the same row once, so the losing caller fails closed without reissue", async () => {
-    const s = await legacyMergeReadySetup();
-    const fetchFacts = s.deps.fetchPrFacts!;
-    let arrivals = 0;
-    let release!: () => void;
-    const together = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    s.deps.fetchPrFacts = vi.fn(async (target) => {
-      arrivals += 1;
-      if (arrivals === 2) release();
-      await together;
-      return fetchFacts(target);
-    });
-    const first = fakeIO();
-    const second = fakeIO();
-
-    await Promise.all([
-      dispatch(s.deps, msg("continue", "slack:UADMIN"), first.io, { thread: [s.shipParent] }),
-      dispatch(s.deps, msg("continue", "slack:UADMIN"), second.io, { thread: [s.shipParent] }),
-    ]);
-
-    expect(s.deps.shipBranch).toHaveBeenCalledOnce();
-    expect(s.handoffsStarted()).toBe(1);
-    expect([...first.replies, ...second.replies]).toEqual([
-      "Unit U12 changed while its legacy continuation was being reserved, so continuation did not start. Nothing else ran.",
-    ]);
-    expect(s.ownership.reserve).toHaveBeenCalledTimes(2);
-    expect(s.ownership.reserve).toHaveBeenCalledWith("acme/api", 7, {
-      instanceId: INSTANCE,
-      unit: "U12",
-    });
-  });
-
-  it("a legacy continuation returns publication_ownership_unknown when periodic ownership recovery starts before reservation", async () => {
-    const s = await legacyMergeReadySetup();
-    const fence = new RunnerOwnershipFence(false);
-    const readOwner = fence.owner.bind(fence);
-    let finishRecovery!: (rows: CoordinatorUnit[]) => void;
-    const activeRecoveries = new Promise<CoordinatorUnit[]>((resolve) => {
-      finishRecovery = resolve;
-    });
-    let recovery: Promise<void> | undefined;
-    vi.spyOn(fence, "owner").mockImplementation((repo, pr) => {
-      const owner = readOwner(repo, pr);
-      recovery ??= fence.recover(
-        { liveListingComplete: true, liveHosted: [], resumable: [], liveElsewhere: [] },
-        {
-          get: s.instances.get.bind(s.instances),
-          listUnits: s.instances.listUnits.bind(s.instances),
-          listActiveRecoveries: () => activeRecoveries,
-        },
-      );
-      return owner;
-    });
-    s.deps.runnerOwnership = fence;
-    const { io, replies } = fakeIO();
-
-    const outcome = await dispatch(s.deps, msg("continue", "slack:UADMIN"), io, { thread: [s.shipParent] });
-
-    expect(outcome).toMatchObject({ status: "refused", refusal: "publication_ownership_unknown" });
-    expect(replies).toEqual([
-      "Runner ownership for acme/api#7 is being rebuilt, so continuation did not start. Nothing else ran.",
-    ]);
-    expect(s.deps.shipBranch).not.toHaveBeenCalled();
-
-    finishRecovery([]);
-    await recovery;
-  });
-
-  it("an ownership claim that lands during the durable compare makes the legacy continuation lose without overwriting ownership or starting work", async () => {
-    const s = await legacyMergeReadySetup();
-    const foreign = { instanceId: "runner-other", unit: "other" };
-    const compare = s.instances.compareAndReplaceUnit.bind(s.instances);
-    let compares = 0;
-    vi.spyOn(s.instances, "compareAndReplaceUnit").mockImplementation(async (expected, recovered) => {
-      const result = await compare(expected, recovered);
-      compares += 1;
-      if (compares === 1) s.setOwnershipOwner(foreign);
-      return result;
-    });
-    const { io, replies } = fakeIO();
-
-    await dispatch(s.deps, msg("continue", "slack:UADMIN"), io, { thread: [s.shipParent] });
-
-    expect(replies).toEqual([
-      "acme/api#7 changed runner ownership while its legacy continuation was being reserved, so continuation did not start. Nothing else ran.",
-    ]);
-    expect(s.ownership.owner()).toEqual(foreign);
-    expect(s.rowAtReissue()).toBeUndefined();
-    const [row] = await s.instances.listUnits(INSTANCE);
-    expect(row).not.toHaveProperty("lastPush");
-    expect(row).not.toHaveProperty("publication");
-    expect(s.operator).toHaveBeenCalledOnce();
-    expect(s.provider.requests).toHaveLength(0);
-  });
-
-  it("an ownership change whose exact rollback loses a CAS race surfaces the failure without clobbering newer state or starting work", async () => {
-    const s = await legacyMergeReadySetup();
-    const foreign = { instanceId: "runner-other", unit: "other" };
-    const compare = s.instances.compareAndReplaceUnit.bind(s.instances);
-    let newer: CoordinatorUnit | undefined;
-    let compares = 0;
-    vi.spyOn(s.instances, "compareAndReplaceUnit").mockImplementation(async (expected, recovered) => {
-      compares += 1;
-      if (compares !== 1) return compare(expected, recovered);
-      const result = await compare(expected, recovered);
-      newer = {
-        ...recovered,
-        ending: { kind: "merge_ready", report: "newer concurrent row", at: 1_001 },
-      };
-      await s.instances.putUnits([newer]);
-      s.setOwnershipOwner(foreign);
-      return result;
-    });
-    const { io, replies } = fakeIO();
-
-    await dispatch(s.deps, msg("continue", "slack:UADMIN"), io, { thread: [s.shipParent] });
-
-    expect(replies).toEqual([
-      "acme/api#7 changed runner ownership while its legacy continuation was being reserved, and the exact legacy row could not be restored (stale); continuation did not start. Nothing else ran.",
-    ]);
-    expect(s.ownership.owner()).toEqual(foreign);
-    expect(await s.instances.listUnits(INSTANCE)).toEqual([newer]);
-    expect(s.handoffsStarted()).toBe(0);
-    expect(s.operator).toHaveBeenCalledOnce();
-    expect(s.provider.requests).toHaveLength(0);
-  });
-
-  it("legacy merge-ready recovery rechecks the original requester before reading child or GitHub evidence", async () => {
-    const s = await legacyMergeReadySetup();
-    const { io, replies } = fakeIO();
-
-    await dispatch(s.deps, msg("continue", "slack:UX"), io, { thread: [s.shipParent] });
-
-    expect(replies).toEqual([STEER_OWNER_REFUSED]);
-    expect(s.runs.listUnitRuns).not.toHaveBeenCalled();
-    expect(s.deps.fetchPrFacts).not.toHaveBeenCalled();
-    expect(s.ownership.owner).not.toHaveBeenCalled();
-    expect(s.deps.shipBranch).not.toHaveBeenCalled();
-  });
-
-  it("a later ship authorization refusal leaves a legacy row unrepaired and ownership unclaimed", async () => {
-    const s = await legacyMergeReadySetup();
-    const realCanRunAgent = s.deps.config.canRunAgent.bind(s.deps.config);
-    s.deps.config.canRunAgent = (actor, agent) => agent !== "ship" && realCanRunAgent(actor, agent);
-    const { io } = fakeIO();
-
-    await dispatch(s.deps, msg("continue", "slack:UADMIN"), io, { thread: [s.shipParent] });
-
-    expect(s.ownership.reserve).not.toHaveBeenCalled();
-    expect(s.deps.shipBranch).not.toHaveBeenCalled();
-    const [row] = await s.instances.listUnits(INSTANCE);
-    expect(row).not.toHaveProperty("lastPush");
-    expect(row).not.toHaveProperty("publication");
-  });
-
-  it.each([
-    ["no same-unit child evidence", { codingHeads: [], reviewHeads: [] }],
-    ["only coding evidence", { reviewHeads: [] }],
-    ["only review evidence", { codingHeads: [] }],
-    [
-      "two approved coding heads",
-      { codingHeads: ["1".repeat(40), "2".repeat(40)], reviewHeads: ["1".repeat(40), "2".repeat(40)] },
-    ],
-    ["failed coding evidence", { codingCompleted: false }],
-    ["failed review evidence", { reviewCompleted: false }],
-    ["a same-thread standalone run and review", { childBinding: "standalone" }],
-    ["children recorded for another parent", { childBinding: "foreign-parent" }],
-    ["children recorded for another unit", { childBinding: "wrong-unit" }],
-    ["a child recorded for another requester", { childUserId: "slack:UOTHER" }],
-    ["a child recorded for another repository", { childRepo: "other/api" }],
-    ["the unit view names another branch", { listedBranch: "plan/other/u12" }],
-    ["the unit view names another pull request", { listedPr: 8 }],
-    ["coding pushed another branch", { codingRef: "plan/other/u12" }],
-    ["coding and review attest different heads", { codingHeads: ["1".repeat(40)], reviewHeads: ["2".repeat(40)] }],
-    ["coding names another pull request", { codingPr: 8 }],
-    ["review names another repository", { reviewRepo: "other/api" }],
-    ["review names another pull request", { reviewPr: 8 }],
-  ] as const)("legacy merge-ready recovery fails closed on %s", async (_name, setup) => {
-    const s = await legacyMergeReadySetup(setup);
-    const { io, replies } = fakeIO();
-
-    await dispatch(s.deps, msg("continue", "slack:UADMIN"), io, { thread: [s.shipParent] });
-
-    expect(replies).toEqual([
-      "Unit U12 has no single exact reviewed head in its durable child records, so continuation did not start. Nothing else ran.",
-    ]);
-    expect(s.deps.fetchPrFacts).not.toHaveBeenCalled();
-    expect(s.ownership.owner).not.toHaveBeenCalled();
-    expect(s.deps.shipBranch).not.toHaveBeenCalled();
-    const [row] = await s.instances.listUnits(INSTANCE);
-    expect(row).not.toHaveProperty("lastPush");
-    expect(row).not.toHaveProperty("publication");
-  });
-
-  it("legacy merge-ready recovery fails closed when the exact unit's child evidence is unreadable", async () => {
-    const s = await legacyMergeReadySetup();
-    vi.mocked(s.runs.listUnitRuns).mockRejectedValueOnce(new Error("run history unavailable"));
-    const { io, replies } = fakeIO();
-
-    await dispatch(s.deps, msg("continue", "slack:UADMIN"), io, { thread: [s.shipParent] });
-
-    expect(replies).toEqual([
-      "Unit U12 has no single exact reviewed head in its durable child records, so continuation did not start. Nothing else ran.",
-    ]);
-    expect(s.deps.fetchPrFacts).not.toHaveBeenCalled();
-    expect(s.ownership.owner).not.toHaveBeenCalled();
-    expect(s.deps.shipBranch).not.toHaveBeenCalled();
-    const [row] = await s.instances.listUnits(INSTANCE);
-    expect(row).not.toHaveProperty("lastPush");
-    expect(row).not.toHaveProperty("publication");
-  });
-
-  it.each([
-    [
-      "moved head",
-      {
-        headSha: "2".repeat(40),
-        verifiedHead: { repo: "acme/api", ref: `${INSTANCE.replace(/^plan-/, "plan/")}/u12`, sha: "2".repeat(40) },
-      },
-    ],
-    ["foreign head repository", { sameRepoHead: false }],
-    ["closed pull request", { state: "closed" as const }],
-    ["wrong base", { baseRef: "release" }],
-    [
-      "wrong head branch",
-      { headRef: "feature/other", verifiedHead: { repo: "acme/api", ref: "feature/other", sha: "1".repeat(40) } },
-    ],
-  ] as const)("legacy merge-ready recovery fails closed when the live pull request has a %s", async (_name, facts) => {
-    const s = await legacyMergeReadySetup({ facts });
-    const { io } = fakeIO();
-
-    await dispatch(s.deps, msg("continue", "slack:UADMIN"), io, { thread: [s.shipParent] });
-
-    expect(s.deps.shipBranch).not.toHaveBeenCalled();
-    expect(s.ownership.owner).not.toHaveBeenCalled();
-    const [row] = await s.instances.listUnits(INSTANCE);
-    expect(row).not.toHaveProperty("lastPush");
-    expect(row).not.toHaveProperty("publication");
-  });
-
-  it("legacy merge-ready recovery refuses a changed runner owner before writing the recovered binding", async () => {
-    const s = await legacyMergeReadySetup({ owner: { instanceId: "runner-other", unit: "other" } });
-    const { io, replies } = fakeIO();
-
-    await dispatch(s.deps, msg("continue", "slack:UADMIN"), io, { thread: [s.shipParent] });
-
-    expect(replies).toEqual([
-      `acme/api#7 is owned by another runner, so continuation of ${INSTANCE}:U12 did not start. Nothing else ran.`,
-    ]);
-    expect(s.deps.shipBranch).not.toHaveBeenCalled();
-    const [row] = await s.instances.listUnits(INSTANCE);
-    expect(row).not.toHaveProperty("lastPush");
-    expect(row).not.toHaveProperty("publication");
-  });
-
-  it("legacy merge-ready recovery fails closed when runner ownership cannot be verified", async () => {
-    const s = await legacyMergeReadySetup();
-    delete s.deps.runnerOwnership;
-    const { io, replies } = fakeIO();
-
-    await dispatch(s.deps, msg("continue", "slack:UADMIN"), io, { thread: [s.shipParent] });
-
-    expect(replies).toEqual([
-      "Runner ownership for acme/api#7 could not be verified, so continuation did not start. Nothing else ran.",
-    ]);
-    expect(s.deps.shipBranch).not.toHaveBeenCalled();
-    const [row] = await s.instances.listUnits(INSTANCE);
-    expect(row).not.toHaveProperty("lastPush");
-    expect(row).not.toHaveProperty("publication");
-  });
-
-  it.each([
-    ["durable PR identity missing", "pr-unrecorded"],
-    ["durable expected head missing", "expected-head-unrecorded"],
-    ["PR facts unknown", "pr-unknown"],
-    ["PR facts error", "pr-error"],
-    ["branch existence false", "ref-missing"],
-    ["branch existence/tip unknown", "ref-unknown"],
-    ["branch existence/tip error", "ref-error"],
-    ["tip missing from a successful ref response", "tip-missing"],
-    ["PR head missing", "pr-head-missing"],
-    ["PR head stale behind the branch tip", "pr-stale"],
-    ["PR and branch moved together", "both-moved"],
-    ["PR head mismatches the branch tip", "pr-mismatch"],
-    ["wrong PR branch", "wrong-branch"],
-    ["exact verified agreement", "exact"],
-  ] as const)("the production PR reader fails closed before continuation side effects: %s", async (_name, scenario) => {
-    const s = await endedPrContinuationSetup();
-    if (scenario === "pr-unrecorded" || scenario === "expected-head-unrecorded") {
-      const [unit] = await s.instances.listUnits(INSTANCE);
-      const incomplete = { ...unit! };
-      if (scenario === "pr-unrecorded") delete incomplete.pr;
-      else delete incomplete.lastPush;
-      await s.instances.putUnits([incomplete]);
-    }
-    const movedHead = "2222222222222222222222222222222222222222";
-    const prSha =
-      scenario === "pr-head-missing"
-        ? undefined
-        : scenario === "both-moved" || scenario === "pr-mismatch"
-          ? movedHead
-          : s.recordedHead;
-    const headRef = scenario === "wrong-branch" ? "plan/stale/u12" : s.branch;
-    const branchSha = scenario === "pr-stale" || scenario === "both-moved" ? movedHead : s.recordedHead;
-    const urls: string[] = [];
-    vi.stubEnv("GH_TOKEN", "ghp_read_only_fixture");
-    vi.stubEnv("GITHUB_APP_ID", "");
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (rawUrl: string | URL | Request) => {
-        const url = String(rawUrl);
-        urls.push(url);
-        if (url.endsWith("/pulls/7")) {
-          if (scenario === "pr-error") throw new Error("pull request read reset");
-          if (scenario === "pr-unknown") return new Response("{}", { status: 503 });
-          return new Response(
-            JSON.stringify({
-              state: "open",
-              html_url: "https://github.com/acme/api/pull/7",
-              head: {
-                ref: headRef,
-                ...(prSha === undefined ? {} : { sha: prSha }),
-                repo: { full_name: "acme/api" },
-              },
-              base: { ref: "main" },
-            }),
-            { status: 200 },
-          );
-        }
-        if (url.includes("/git/ref/heads/")) {
-          if (scenario === "ref-error") throw new Error("branch ref read reset");
-          if (scenario === "ref-missing") return new Response("{}", { status: 404 });
-          if (scenario === "ref-unknown") return new Response("{}", { status: 503 });
-          if (scenario === "tip-missing") return new Response("{}", { status: 200 });
-          return new Response(JSON.stringify({ object: { type: "commit", sha: branchSha } }), { status: 200 });
-        }
-        throw new Error(`unexpected fetch: ${url}`);
-      }),
-    );
-    const { io, replies } = fakeIO();
-
-    try {
-      await dispatch(s.deps, msg("continue", "slack:UADMIN"), io, { thread: [s.shipParent] });
-    } finally {
-      vi.unstubAllGlobals();
-      vi.unstubAllEnvs();
-    }
-
-    if (scenario === "exact") {
-      expect(replies).toEqual([]);
-      expect(s.shipBranch).toHaveBeenCalledOnce();
-    } else {
-      const expectedReply =
-        scenario === "pr-unrecorded"
-          ? "Unit U12 does not retain a durable pull request identity, so continuation did not start. Nothing else ran."
-          : scenario === "expected-head-unrecorded"
-            ? "Unit U12 does not retain the pull request's durable expected head, so continuation did not start. Nothing else ran."
-            : scenario === "pr-error" || scenario === "pr-unknown"
-              ? "GitHub did not return current facts for acme/api#7, so continuation did not start."
-              : scenario === "both-moved"
-                ? `acme/api#7 moved from the pipeline's expected head \`${s.recordedHead}\` to \`${movedHead}\`, so continuation did not start. Nothing else ran.`
-                : `acme/api#7 no longer has the pipeline's verifiable \`${s.branch}\` head, so continuation did not start.`;
-      expect(replies).toEqual([expectedReply]);
-      expect(s.shipBranch).not.toHaveBeenCalled();
-    }
-    if (scenario === "pr-unrecorded" || scenario === "expected-head-unrecorded") expect(urls).toEqual([]);
-    expect(urls.filter((url) => url.includes("/git/ref/heads/"))).toHaveLength(
-      scenario === "pr-unrecorded" ||
-        scenario === "expected-head-unrecorded" ||
-        scenario === "pr-error" ||
-        scenario === "pr-unknown"
-        ? 0
-        : 1,
-    );
-    expect(s.operator).toHaveBeenCalledOnce();
-    expect(s.deps.invoked).toEqual([]);
+    expect(replies.join(" ")).toContain("already completed");
+    expect(await s.instances.get(`${INSTANCE}-2`)).toBeNull();
     expect(s.provider.requests).toHaveLength(0);
   });
 
@@ -25433,131 +24452,28 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
 
     const first = dispatch(s.deps, msg("continue", "slack:UADMIN"), fakeIO().io, { thread: [shipParent] });
     await continuationStarted;
-    const repeats = await Promise.all([
-      dispatch(s.deps, msg("continue", "slack:UADMIN"), fakeIO().io, { thread: [shipParent] }),
-      dispatch(s.deps, msg("continue", "slack:UADMIN"), fakeIO().io, { thread: [shipParent] }),
-    ]);
-    expect(repeats.every((outcome) => outcome.status === "completed")).toBe(true);
-    expect(s.deps.shipBranch).toHaveBeenCalledOnce();
-    expect(s.deps.fetchPrFacts).toHaveBeenCalledOnce();
-    expect(s.deps.runs.getRun).toHaveBeenCalledOnce();
-    expect(operator).toHaveBeenCalled();
-    expect(s.deps.invoked).toEqual([]);
-    expect(s.provider.requests).toHaveLength(0);
-    release();
-    await first;
-  });
-
-  it("an ended pipeline with no remaining wall-clock budget names the blocker and starts no replacement lease", async () => {
-    const s = await unitOwnedSetup(
-      {
-        ending: { kind: "wall_clock_cap", report: "budget exhausted", at: 1_000 },
-      },
-      OPERATOR_ON_YAML,
-    );
-    const operator = armContinuationOperator(s.deps);
-    await s.instances.put({
-      id: INSTANCE,
-      kind: "ship",
-      userId: "slack:UADMIN",
-      channelId: "slack:CX",
-      threadKey: THREAD,
-      repo: "acme/api",
-      branch: "plan/fix-the-login-6435ec/u12",
-      createdAt: 500,
-      plan: { id: "fix-the-login-6435ec" },
-      merge: "person",
-      runId: "ship-parent",
-    });
-    const shipParent = {
-      id: "ship-parent",
-      startedAt: 500,
-      finishedAt: 1_000,
-      finished: true,
-      status: "failed",
-      eventCount: 3,
-      agent: "ship",
-      repo: "acme/api",
-      threadKey: THREAD,
-      userId: "slack:UADMIN",
-      instanceId: INSTANCE,
-    } satisfies RunView;
-    s.deps.runs = {
-      listRuns: vi.fn(async () => ({ runs: [shipParent] })),
-      getRun: vi.fn(),
-    } as unknown as NonNullable<CoreDeps["runs"]>;
-    s.deps.shipBranch = vi.fn(async () => ({ hostedLive: false }));
-    const { io, replies } = fakeIO();
-
-    await dispatch(s.deps, msg("continue", "slack:UADMIN"), io, { thread: [shipParent] });
-
-    expect(replies).toEqual([
-      "Unit U12 exhausted the ended pipeline's wall-clock budget, so continuation did not start. Nothing else ran.",
-    ]);
-    expect(s.deps.runs.getRun).not.toHaveBeenCalled();
-    expect(s.deps.shipBranch).not.toHaveBeenCalled();
-    expect(operator).toHaveBeenCalledOnce();
-    expect(s.deps.invoked).toEqual([]);
-    expect(s.provider.requests).toHaveLength(0);
-  });
-
-  it("an ended pipeline with no remaining review-round budget names the blocker and starts no replacement lease", async () => {
-    const s = await unitOwnedSetup(
-      {
-        ending: { kind: "round_cap", report: "rounds exhausted", at: 1_000 },
-      },
-      OPERATOR_ON_YAML,
-    );
-    const operator = armContinuationOperator(s.deps);
-    await s.instances.put({
-      id: INSTANCE,
-      kind: "ship",
-      userId: "slack:UADMIN",
-      channelId: "slack:CX",
-      threadKey: THREAD,
-      repo: "acme/api",
-      branch: "plan/fix-the-login-6435ec/u12",
-      createdAt: 500,
-      plan: { id: "fix-the-login-6435ec" },
-      merge: "person",
-      runId: "ship-parent",
-    });
-    const shipParent = {
-      id: "ship-parent",
-      startedAt: 500,
-      finishedAt: 1_000,
-      finished: true,
-      status: "failed",
-      eventCount: 3,
-      agent: "ship",
-      repo: "acme/api",
-      threadKey: THREAD,
-      userId: "slack:UADMIN",
-      instanceId: INSTANCE,
-    } satisfies RunView;
-    s.deps.runs = {
-      listRuns: vi.fn(async () => ({ runs: [shipParent] })),
-      getRun: vi.fn(),
-    } as unknown as NonNullable<CoreDeps["runs"]>;
-    s.deps.shipBranch = vi.fn(async () => ({ hostedLive: false }));
-    const { io, replies } = fakeIO();
-
-    await dispatch(s.deps, msg("continue", "slack:UADMIN"), io, { thread: [shipParent] });
-
-    expect(replies).toEqual([
-      "Unit U12 exhausted the ended pipeline's review-round budget, so continuation did not start. Nothing else ran.",
-    ]);
-    expect(s.deps.runs.getRun).not.toHaveBeenCalled();
-    expect(s.deps.shipBranch).not.toHaveBeenCalled();
-    expect(operator).toHaveBeenCalledOnce();
-    expect(s.deps.invoked).toEqual([]);
-    expect(s.provider.requests).toHaveLength(0);
+    try {
+      const repeats = await Promise.all([
+        dispatch(s.deps, msg("continue", "slack:UADMIN"), fakeIO().io, { thread: [shipParent] }),
+        dispatch(s.deps, msg("continue", "slack:UADMIN"), fakeIO().io, { thread: [shipParent] }),
+      ]);
+      expect(repeats.every((outcome) => outcome.status === "completed")).toBe(true);
+      expect(s.deps.shipBranch).toHaveBeenCalledOnce();
+      expect(vi.mocked(s.deps.shipBranch!).mock.calls[0]?.[3].directives.text).toBe(`recover unit ${INSTANCE}:U12`);
+      expect(s.deps.runs.getRun).not.toHaveBeenCalled();
+      expect(operator).toHaveBeenCalled();
+      expect(s.deps.invoked).toEqual([]);
+      expect(s.provider.requests).toHaveLength(0);
+    } finally {
+      release();
+      await first;
+    }
   });
 
   it("an ended thread claimed by multiple units names the ambiguity and starts no substitute work", async () => {
     const s = await unitOwnedSetup({ ending: { kind: "aborted", report: "aborted", at: 1_000 } }, OPERATOR_ON_YAML);
     const operator = armContinuationOperator(s.deps);
-    await s.instances.putUnits([
+    seedRetainedUnits(s.instances, [
       unitRow({
         unit: "U13",
         slug: "u13",
@@ -26775,7 +25691,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       threadKey,
     });
     registry.finish(stale.id, "completed");
-    const instances = new InMemoryCoordinatorInstanceStore();
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await instances.put({
       id: instanceId,
       kind: "ship",
@@ -26849,7 +25765,6 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       reissued = {
         agent: ctx.agent.name,
         task: ctx.directives.text,
-        ...(ctx.reissuePlanId !== undefined ? { planId: ctx.reissuePlanId } : {}),
       };
       return { hostedLive: false };
     };
@@ -26859,9 +25774,8 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
 
     expect(deps.operatorModel).toHaveBeenCalledOnce();
     expect(deps.invoked).toEqual([]);
-    expect(reissued).toEqual({ agent: "ship", task: originalTask, planId: "fix-the-login-6435ec" });
-    expect(deps.runs.getRun).toHaveBeenCalledOnce();
-    expect(deps.fetchPrFacts).toHaveBeenCalledOnce();
+    expect(reissued).toEqual({ agent: "ship", task: `recover unit ${instanceId}:U12` });
+    expect(deps.runs.getRun).not.toHaveBeenCalled();
     expect(replies.some((r) => r.includes("Plane"))).toBe(false);
   });
 

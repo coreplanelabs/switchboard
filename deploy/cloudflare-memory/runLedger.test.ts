@@ -1683,6 +1683,79 @@ describe("run ledger — the coordinator instance record (item 49)", () => {
     expect((await post("/runs/coordinator/stop", { storeKey: key, instanceId: instance.id })).status).toBe(400);
   });
 
+  it.each([
+    { pr: { number: 7, url: "https://github.com/acme/api/pull/7" } },
+    { resume: { pr: 7 } },
+    { lastPush: "a".repeat(40) },
+    { progress: { phase: "publication-pending" } },
+    {
+      wakes: {
+        wait: {
+          kind: "segment" as const,
+          index: 1,
+          runId: "prior-run",
+          spendUsd: 0,
+          texts: [],
+          senders: [],
+          leaseMs: 1000,
+        },
+      },
+    },
+    { ending: { kind: "interrupted", report: "legacy ending", at: 1000 } },
+  ])("replacement retains existing publication or execution evidence: %j", async (facts) => {
+    const key = storeKey();
+    const unit: CoordinatorUnit = {
+      instanceId: instance.id,
+      unit: "U12",
+      slug: "u12",
+      branch: "plan/orchestration/u12",
+      dependsOn: [],
+      rounds: [],
+      ...facts,
+    };
+    expect((await post("/runs/coordinator/put", { storeKey: key, instance })).status).toBe(200);
+    expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [unit] })).status).toBe(200);
+    expect(
+      await post("/runs/coordinator/replace", {
+        storeKey: key,
+        instance: { ...instance, runId: "replacement", createdAt: 2000 },
+      }),
+    ).toMatchObject({ status: 409, data: { ok: false, reason: "exists" } });
+    expect((await post("/runs/coordinator/get", { storeKey: key, id: instance.id })).data.instance).toEqual(instance);
+    expect((await post("/runs/coordinator/units/list", { storeKey: key, instanceId: instance.id })).data.units).toEqual(
+      [unit],
+    );
+  });
+
+  it("refuses replacement of unreadable unit bytes without deleting the original owner", async () => {
+    const key = storeKey();
+    await post("/runs/coordinator/put", { storeKey: key, instance });
+    const unit = {
+      instanceId: instance.id,
+      unit: "U12",
+      slug: "u12",
+      branch: "plan/orchestration/u12",
+      dependsOn: [],
+      rounds: [],
+    };
+    await post("/runs/coordinator/units/put", { storeKey: key, units: [unit] });
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (_instance: RunHistoryDO, state) => {
+      state.storage.sql.exec(`UPDATE coordinator_units SET json = '{' WHERE instance_id = ?`, instance.id);
+    });
+    expect(
+      await post("/runs/coordinator/replace", { storeKey: key, instance: { ...instance, runId: "replacement" } }),
+    ).toMatchObject({ status: 409, data: { ok: false, reason: "exists" } });
+    expect((await post("/runs/coordinator/get", { storeKey: key, id: instance.id })).data.instance).toEqual(instance);
+    await runInDurableObject(stub, async (_instance: RunHistoryDO, state) => {
+      expect(
+        state.storage.sql
+          .exec<{ json: string }>(`SELECT json FROM coordinator_units WHERE instance_id = ?`, instance.id)
+          .one().json,
+      ).toBe("{");
+    });
+  });
+
   it("replace writes the record over whatever the id holds — a different record, or none — drops the id's unit rows and no other instance's; a malformed record is 400", async () => {
     const key = storeKey();
     expect(await post("/runs/coordinator/put", { storeKey: key, instance })).toEqual({
@@ -2188,6 +2261,18 @@ describe("run ledger — the coordinator's unit rows (item 50)", () => {
     );
   });
   const INSTANCE_ID = "ship_acme_api_1";
+  const instance: CoordinatorInstance = {
+    id: INSTANCE_ID,
+    kind: "ship",
+    userId: "slack:UALICE",
+    channelId: "slack:C1",
+    threadKey: "slack:C1:1.0",
+    repo: "acme/api",
+    branch: "plan/orchestration",
+    base: "main",
+    merge: "person",
+    createdAt: 1000,
+  };
   const unit = (name: string, over: Partial<CoordinatorUnit> = {}): CoordinatorUnit => ({
     instanceId: INSTANCE_ID,
     unit: name,
@@ -2290,6 +2375,7 @@ describe("run ledger — the coordinator's unit rows (item 50)", () => {
 
   it("persists a typed outcome and rejects malformed or foreign pull request facts without changing the stored row", async () => {
     const key = storeKey();
+    expect((await post("/runs/coordinator/put", { storeKey: key, instance })).status).toBe(200);
     const pr = { number: 7, url: "https://github.com/acme/api/pull/7" };
     const row = unit("U12", {
       pr,
@@ -2311,6 +2397,9 @@ describe("run ledger — the coordinator's unit rows (item 50)", () => {
         },
       },
     });
+    expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [unit("U12", { pr })] })).status).toBe(
+      200,
+    );
     expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [row] })).status).toBe(200);
     for (const bad of [
       { ...row, ending: { ...row.ending, kind: "merged" } },
@@ -2326,6 +2415,10 @@ describe("run ledger — the coordinator's unit rows (item 50)", () => {
 
   it("put writes the rows and list reads an instance's back in first-written order; a row is replaced whole and keeps its place; another instance's rows never appear; an unknown instance lists none", async () => {
     const key = storeKey();
+    expect((await post("/runs/coordinator/put", { storeKey: key, instance })).status).toBe(200);
+    expect(
+      (await post("/runs/coordinator/put", { storeKey: key, instance: { ...instance, id: "ship_other" } })).status,
+    ).toBe(200);
     expect(
       await post("/runs/coordinator/units/put", {
         storeKey: key,
@@ -2359,6 +2452,7 @@ describe("run ledger — the coordinator's unit rows (item 50)", () => {
 
   it("claim-legacy-continuation atomically replaces only the exact expected row, so a concurrent or stale caller cannot erase newer state", async () => {
     const key = storeKey();
+    expect((await post("/runs/coordinator/put", { storeKey: key, instance })).status).toBe(200);
     const legacy = unit("U12", {
       pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
       ending: { kind: "merge_ready", report: "ready", at: 2_000 },
@@ -2391,6 +2485,7 @@ describe("run ledger — the coordinator's unit rows (item 50)", () => {
 
   it("the full-row CAS atomically binds an ordinary open pull request and rejects a stale PR-only write", async () => {
     const key = storeKey();
+    expect((await post("/runs/coordinator/put", { storeKey: key, instance })).status).toBe(200);
     const unbound = unit("U12");
     const head = "a".repeat(40);
     const bound = {
@@ -2429,6 +2524,7 @@ describe("run ledger — the coordinator's unit rows (item 50)", () => {
 
   it("lists only active recovery rows in SQL, ignores terminal history, and fails closed on malformed candidate JSON", async () => {
     const key = storeKey();
+    expect((await post("/runs/coordinator/put", { storeKey: key, instance })).status).toBe(200);
     const active = unit("U12", {
       pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
       recovery: {
@@ -2469,6 +2565,7 @@ describe("run ledger — the coordinator's unit rows (item 50)", () => {
 
   it("the validating wake boundary accepts a first-segment resume without inventing a renewal segment row", async () => {
     const key = storeKey();
+    expect((await post("/runs/coordinator/put", { storeKey: key, instance })).status).toBe(200);
     const row = unit("U12", {
       startedAt: 1_000,
       idle: { why: "stopped", at: 2_000, renewalsLeft: 2, spendUsd: null, wakes: 1 },
@@ -3214,6 +3311,7 @@ describe("the plane's admission stage — /plane/admit, reservations, the seal's
       const row = live.find((r) => r.runId === queuedId)!;
       expect(row).toMatchObject({ threadKey: t, ownerGen: "plane", phase: "attaching" });
       expect(row.meta.request).toEqual({ text: "two" });
+      expect(await inst.findPullOwners({ repo: "acme/api", pr: 7 })).toEqual({ ok: true, owners: [] });
     });
   });
 
@@ -4124,6 +4222,68 @@ describe("the plane's endings and the alarm — the cause on close, /plane/recla
 });
 
 describe("run ledger — durable branch publication", () => {
+  it.each(["", "[]", "null", '{"version":2}', "{"])(
+    "preserves unreadable private publication evidence and refuses replacement: %s",
+    async (raw) => {
+      const key = storeKey();
+      const id = "unreadable-publication";
+      const terminal = record(id, "slack:C1:unreadable-publication");
+      expect((await post("/runs/put", { storeKey: key, record: terminal })).status).toBe(200);
+      const stub = env.RUNS.get(env.RUNS.idFromName(key));
+      await runInDurableObject(stub, async (instance: RunHistoryDO, state) => {
+        state.storage.sql.exec(`UPDATE runs SET work_evidence_json = ?, finished_at = 1 WHERE run_id = ?`, raw, id);
+        await expect(instance.put(terminal)).rejects.toThrow();
+        (instance as unknown as { trim(policy: Record<string, number>, now: number, fence: undefined): unknown }).trim(
+          { retentionDays: 1, maxRuns: 1, maxBytes: 16 * 1024 * 1024 },
+          Date.now(),
+          undefined,
+        );
+        expect(
+          state.storage.sql
+            .exec<{ work_evidence_json: string }>(`SELECT work_evidence_json FROM runs WHERE run_id = ?`, id)
+            .one().work_evidence_json,
+        ).toBe(raw);
+      });
+      expect((await post("/runs/get", { storeKey: key, id })).data.record).toBeNull();
+    },
+  );
+
+  it("advances listing past unreadable protected bytes to an older unresolved producer", async () => {
+    const key = storeKey();
+    const id = "older-intent";
+    const thread = "slack:C1:older-intent";
+    expect((await post("/runs/claim", claimBody(key, id, thread))).status).toBe(200);
+    await post("/runs/state", {
+      storeKey: key,
+      runId: id,
+      gen: "g1",
+      state: {
+        branchPublication: { version: 1, repo: "private/repo", branches: [], complete: false },
+      },
+    });
+    await post("/runs/finish", { storeKey: key, runId: id, gen: "g1", record: record(id, thread) });
+    await post("/runs/put", { storeKey: key, record: record("newer-unreadable", "slack:C1:newer-unreadable") });
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (_instance: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        `UPDATE runs SET summary_json = '{}', finished_at = ? WHERE run_id = 'newer-unreadable'`,
+        Date.now(),
+      );
+    });
+    const first = (await post("/runs/list", { storeKey: key, limit: 1 })).data;
+    expect(first.items).toEqual([]);
+    expect(first.nextBefore).toMatchObject({ id: "newer-unreadable" });
+    const next = (
+      await post("/runs/list", {
+        storeKey: key,
+        limit: 1,
+        before: first.nextBefore.finishedAt,
+        beforeId: first.nextBefore.id,
+      })
+    ).data;
+    expect(next.items.map((item: { id: string }) => item.id)).toEqual([id]);
+  });
+
   it.each(["missing", "malformed", "different"])(
     "retains the terminal outcome using only saved producer publication: %s",
     async (mode) => {
@@ -4150,9 +4310,71 @@ describe("run ledger — durable branch publication", () => {
       const stored = (await post("/runs/get", { storeKey: key, id })).data.record;
       expect(stored).toMatchObject({ id, status: "completed" });
       expect(stored.branchPublication).toEqual(mode === "different" ? projection : undefined);
+      if (mode === "malformed") {
+        const stub = env.RUNS.get(env.RUNS.idFromName(key));
+        await runInDurableObject(stub, async (instance: RunHistoryDO, state) => {
+          const row = state.storage.sql
+            .exec<{ work_evidence_json: string }>(`SELECT work_evidence_json FROM runs WHERE run_id = ?`, id)
+            .one();
+          expect(JSON.parse(row.work_evidence_json).branchPublication).toEqual({ ...projection, version: 2 });
+          state.storage.sql.exec(`UPDATE runs SET finished_at = 1 WHERE run_id = ?`, id);
+          (
+            instance as unknown as { trim(policy: Record<string, number>, now: number, fence: undefined): unknown }
+          ).trim({ retentionDays: 1, maxRuns: 1, maxBytes: 16 * 1024 * 1024 }, Date.now(), undefined);
+          expect(state.storage.sql.exec(`SELECT run_id FROM runs WHERE run_id = ?`, id).toArray()).toHaveLength(1);
+        });
+      }
       expect((await post("/runs/live", { storeKey: key })).data.runs).toEqual([]);
     },
   );
+
+  it("retains unresolved direct publication through finish and physical history trimming", async () => {
+    const key = storeKey();
+    const id = "unresolved-publication";
+    const thread = "slack:C1:unresolved-publication";
+    const branchPublication = {
+      version: 1,
+      repo: "private/repo",
+      complete: false,
+      branches: [],
+      pending: { id: "intent-a", ref: "private/branch", headSha: "a".repeat(40), pr: 7 },
+    };
+    expect((await post("/runs/claim", claimBody(key, id, thread))).status).toBe(200);
+    expect(
+      (await post("/runs/state", { storeKey: key, runId: id, gen: "g1", state: { branchPublication } })).status,
+    ).toBe(200);
+    const terminal = record(id, thread);
+    terminal.startedAt = Date.now() - 3 * 86_400_000;
+    terminal.finishedAt = Date.now() - 2 * 86_400_000;
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (_instance: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO meta (key, value) VALUES ('policy', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+        JSON.stringify({ retentionDays: 1, maxRuns: 1, maxBytes: 16 * 1024 * 1024, policyUpdatedAt: Date.now() }),
+      );
+    });
+    expect((await post("/runs/finish", { storeKey: key, runId: id, gen: "g1", record: terminal })).status).toBe(200);
+    await post("/runs/put", { storeKey: key, record: record("ordinary-publication", "slack:C1:ordinary") });
+    const newer = record("newer-publication", "slack:C1:newer");
+    newer.finishedAt = Date.now();
+    await post("/runs/put", { storeKey: key, record: newer });
+    expect((await post("/runs/get", { storeKey: key, id })).data.record?.branchPublication).toEqual(branchPublication);
+    expect((await post("/runs/events", { storeKey: key, id })).data.events).not.toBeNull();
+    const summaries = (await post("/runs/list", { storeKey: key })).data.items;
+    expect(summaries.map((item: { id: string }) => item.id)).toEqual(["newer-publication", id]);
+    for (const summary of [(await post("/runs/summary", { storeKey: key, id })).data.summary, ...summaries]) {
+      expect(summary).not.toHaveProperty("branchPublication");
+      expect(JSON.stringify(summary)).not.toContain("private/branch");
+    }
+    await runInDurableObject(stub, async (_instance: RunHistoryDO, state) => {
+      expect(state.storage.sql.exec(`SELECT run_id FROM runs ORDER BY run_id`).toArray()).toEqual([
+        { run_id: "newer-publication" },
+        { run_id: id },
+      ]);
+      expect(state.storage.sql.exec(`SELECT run_id FROM live_runs`).toArray()).toEqual([]);
+      expect(state.storage.sql.exec(`SELECT unit FROM coordinator_units`).toArray()).toEqual([]);
+    });
+  });
 
   it("folds the fenced producer projection at finish independently of events and hides it on summaries", async () => {
     const key = storeKey();
@@ -4185,5 +4407,383 @@ describe("run ledger — durable branch publication", () => {
       expect(summary).not.toHaveProperty("branchPublication");
       expect(JSON.stringify(summary)).not.toContain("uncertain/branch");
     }
+  });
+});
+
+describe("complete canonical pull ownership", () => {
+  it("refuses competing PR reservations inside the unit compare-and-replace transaction", async () => {
+    const key = storeKey();
+    const instance: CoordinatorInstance = {
+      id: "atomic_owner",
+      kind: "ship",
+      userId: "slack:UALICE",
+      channelId: "slack:C1",
+      threadKey: "slack:C1:atomic-owner",
+      repo: "acme/api",
+      branch: "fix/atomic",
+      base: "main",
+      merge: "person",
+      createdAt: 1,
+    };
+    const draft: CoordinatorUnit = {
+      instanceId: instance.id,
+      unit: "FIRST",
+      slug: "first",
+      branch: "fix/first",
+      dependsOn: [],
+      rounds: [],
+    };
+    const held = {
+      ...draft,
+      unit: "HELD",
+      branch: "fix/held",
+      pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+    };
+    expect((await post("/runs/coordinator/put", { storeKey: key, instance })).status).toBe(200);
+    expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [draft, held] })).status).toBe(200);
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (owner: RunHistoryDO, state) => {
+      expect(await owner.compareAndReplaceUnit(draft, { ...draft, pr: held.pr }, 3)).toEqual({
+        ok: false,
+        reason: "owned",
+      });
+      const fresh = { ...draft, unit: "FRESH", branch: "fix/fresh" };
+      const bindingsBefore = state.storage.sql.exec(`SELECT * FROM context_refs`).toArray();
+      expect(await owner.putUnits([fresh, { ...draft, pr: held.pr }], 4)).toEqual({ ok: false, reason: "owned" });
+      expect(await owner.listUnits(instance.id)).toEqual([draft, held]);
+      expect(state.storage.sql.exec(`SELECT * FROM context_refs`).toArray()).toEqual(bindingsBefore);
+      expect(
+        await owner.appendUnitEvent(instance.id, draft.unit, {
+          sender: instance.userId,
+          text: "keep me",
+          mode: "wake",
+          at: 2,
+        }),
+      ).toMatchObject({ ok: true });
+      expect(
+        await owner.answerUnitWake(
+          { ...draft, pr: held.pr },
+          "wait/1",
+          { kind: "answered", reply: "go" },
+          [1],
+          "wake",
+          5,
+        ),
+      ).toEqual({ ok: false, reason: "owned" });
+      expect(await owner.listUnitEvents(instance.id, draft.unit, true)).toEqual([
+        expect.objectContaining({ text: "keep me" }),
+      ]);
+      expect(
+        JSON.parse(
+          state.storage.sql
+            .exec<{ json: string }>(
+              `SELECT json FROM coordinator_units WHERE instance_id = ? AND unit = ?`,
+              instance.id,
+              draft.unit,
+            )
+            .one().json,
+        ),
+      ).toEqual(draft);
+      const started = { ...draft, startedAt: 6 };
+      expect(await owner.putUnits([started], 6)).toEqual({ ok: true });
+      expect(await owner.putUnits([draft], 7)).toEqual({ ok: false, reason: "settled" });
+      expect(await owner.answerUnitWake(draft, "wait/2", { kind: "answered", reply: "go" }, [1], "wake", 7)).toEqual({
+        ok: false,
+        reason: "settled",
+      });
+      expect(await owner.compareAndReplaceUnit(started, draft, 7)).toEqual({ ok: false, reason: "stale" });
+      const rival = { ...draft, unit: "RIVAL" };
+      expect(await owner.putUnits([rival], 8)).toEqual({ ok: true });
+      expect(await owner.putUnits([{ ...rival, startedAt: 9 }], 9)).toEqual({ ok: false, reason: "owned" });
+      expect(await owner.listUnits(instance.id)).toEqual([started, held, rival]);
+    });
+  });
+  it("preserves live events and pins when history deletion names no terminal row", async () => {
+    const key = storeKey(),
+      id = "live_delete",
+      thread = "slack:C1:live-delete";
+    expect((await post("/runs/claim", claimBody(key, id, thread))).status).toBe(200);
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO context_refs (holder_run_id, source_run_id, session_key) VALUES (?, ?, '')`,
+        id,
+        id,
+      );
+      const before = state.storage.sql
+        .exec<{ n: number }>(`SELECT COUNT(*) AS n FROM run_events WHERE run_id = ?`, id)
+        .one().n;
+      expect(await _owner.delete(id)).toBe(false);
+      expect(
+        state.storage.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM run_events WHERE run_id = ?`, id).one().n,
+      ).toBe(before);
+      expect(
+        state.storage.sql
+          .exec<{ n: number }>(`SELECT COUNT(*) AS n FROM context_refs WHERE holder_run_id = ?`, id)
+          .one().n,
+      ).toBe(1);
+    });
+  });
+  it("folds canonical Door intent at finish and refuses mismatched settlement bindings", async () => {
+    const key = storeKey(),
+      id = "reclaimed_door",
+      thread = "slack:C1:reclaimed-door";
+    const door = {
+      id: "call",
+      repo: "acme/api",
+      update: { ref: "refs/heads/fix/door", old: "a".repeat(40), next: "b".repeat(40) },
+    };
+    expect(
+      (
+        await post(
+          "/runs/claim",
+          claimBody(key, id, thread, "g1", {
+            meta: { channelId: "slack:C1", userId: "slack:UALICE", threadKey: thread, repo: "acme/api" },
+            state: { doorPublicationPending: door },
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await post("/runs/finish", {
+          storeKey: key,
+          runId: id,
+          gen: "g1",
+          record: { ...record(id, thread), repo: "acme/api" },
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      await post("/runs/coordinator/pull-owners", { storeKey: key, target: { repo: "acme/api", ref: "fix/door" } }),
+    ).toMatchObject({ data: { ok: true, owners: [{ kind: "run", runId: id }] } });
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (_owner: RunHistoryDO, state) => {
+      const settlement = {
+        version: 1,
+        revision: 1,
+        owner: { runId: "settlement", ownerGen: "g1", ownerFence: 1 },
+        binding: null,
+        record: { id: "settlement", threadKey: thread, status: "completed", userId: "slack:UALICE", repo: "acme/api" },
+        publication: {
+          version: 1,
+          repo: "acme/api",
+          branches: [],
+          complete: false,
+          pending: { id: "call", pr: 7, headSha: "a".repeat(40) },
+        },
+      };
+      state.storage.sql.exec(
+        `INSERT INTO workspace_settlements (owner_key, revision, json) VALUES ('wrong-owner', 1, ?)`,
+        JSON.stringify(settlement),
+      );
+      expect(await _owner.findPullOwners({ repo: "acme/api", pr: 7 })).toEqual({ ok: false, reason: "incomplete" });
+    });
+  });
+  it("reads unhosted units, direct private intent and unsettled effects without public listing authority", async () => {
+    const key = storeKey();
+    const instance: CoordinatorInstance = {
+      id: "unhosted_pull_owner",
+      kind: "ship",
+      userId: "slack:UALICE",
+      channelId: "slack:C1",
+      threadKey: "slack:C1:owner",
+      repo: "acme/api",
+      branch: "fix/task",
+      base: "main",
+      merge: "person",
+      createdAt: 1,
+    };
+    const unit: CoordinatorUnit = {
+      instanceId: instance.id,
+      unit: "UOWNER",
+      slug: "task",
+      branch: "fix/task",
+      dependsOn: [],
+      rounds: [],
+      pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+    };
+    expect((await post("/runs/coordinator/put", { storeKey: key, instance })).status).toBe(200);
+    expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [unit] })).status).toBe(200);
+    const lookup = (target: unknown) => post("/runs/coordinator/pull-owners", { storeKey: key, target });
+    expect(await lookup({ repo: "ACME/API", pr: 7 })).toMatchObject({
+      status: 200,
+      data: { ok: true, owners: [{ kind: "unit", instanceId: instance.id, unit: "UOWNER" }] },
+    });
+    const runId = "direct_pull_owner";
+    const threadKey = "slack:C1:direct-pull";
+    expect(
+      (
+        await post(
+          "/runs/claim",
+          claimBody(key, runId, threadKey, "g1", {
+            state: {
+              binding: {
+                backend: "resident",
+                ownerGen: "g1",
+                ownerFence: 7,
+                ref: "fix/direct",
+                workspace: "/workspace/threads/t/direct",
+                user: "worker2",
+                container: "vm-1",
+              },
+              branchPublication: {
+                version: 1,
+                repo: "acme/api",
+                branches: [],
+                complete: false,
+                pending: { id: "call", pr: 8, headSha: "a".repeat(40) },
+              },
+            },
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await post("/runs/finish", {
+          storeKey: key,
+          runId,
+          gen: "g1",
+          record: { ...record(runId, threadKey), repo: "acme/api" },
+        })
+      ).status,
+    ).toBe(200);
+    expect(await lookup({ repo: "acme/api", pr: 8 })).toMatchObject({
+      status: 200,
+      data: { ok: true, owners: [{ kind: "run", runId }] },
+    });
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO plane_effects (id, body_json, offered_at) VALUES (?, ?, 1)`,
+        "rebase:acme/api#9",
+        JSON.stringify({
+          id: "rebase:acme/api#9",
+          kind: "rebase_round",
+          repo: "acme/api",
+          number: 9,
+          headSha: "a".repeat(40),
+          brief: "rebase",
+        }),
+      );
+    });
+    expect(await lookup({ repo: "acme/api", pr: 9 })).toMatchObject({
+      status: 200,
+      data: { ok: true, owners: [{ kind: "effect", id: "rebase:acme/api#9" }] },
+    });
+    await runInDurableObject(stub, async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        `UPDATE runs SET work_evidence_json = ? WHERE run_id = ?`,
+        JSON.stringify({ version: 1, branchPublication: null }),
+        runId,
+      );
+    });
+    expect(await lookup({ repo: "acme/api", pr: 8 })).toMatchObject({
+      status: 200,
+      data: { ok: false, reason: "incomplete" },
+    });
+    await runInDurableObject(stub, async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        `UPDATE runs SET work_evidence_json = ? WHERE run_id = ?`,
+        JSON.stringify({
+          version: 1,
+          branchPublication: {
+            version: 1,
+            repo: "acme/api",
+            complete: false,
+            branches: [],
+            pending: { id: "call", pr: 8, headSha: "a".repeat(40) },
+          },
+        }),
+        runId,
+      );
+    });
+    expect(await lookup({ repo: "other/repo", pr: 7 })).toMatchObject({ status: 200, data: { ok: true, owners: [] } });
+    expect((await lookup({ repo: "acme/api" })).status).toBe(400);
+    const doorId = "terminal_door_owner";
+    expect(
+      (
+        await post("/runs/put", {
+          storeKey: key,
+          record: {
+            ...record(doorId, "slack:C1:door-owner"),
+            startedAt: 0,
+            finishedAt: 1,
+            repo: "acme/api",
+            doorPublicationPending: {
+              id: "door-call",
+              repo: "acme/api",
+              update: { ref: "refs/heads/fix/door", old: "a".repeat(40), next: "b".repeat(40) },
+            },
+          },
+        })
+      ).status,
+    ).toBe(200);
+    expect(await lookup({ repo: "acme/api", ref: "fix/door" })).toMatchObject({
+      status: 200,
+      data: { ok: true, owners: [{ kind: "run", runId: doorId }] },
+    });
+    expect(await post("/runs/delete", { storeKey: key, id: runId })).toMatchObject({
+      status: 409,
+      data: { ok: false, reason: "publication_pending" },
+    });
+    expect(await lookup({ repo: "acme/api", pr: 8 })).toMatchObject({
+      status: 200,
+      data: { ok: true, owners: [{ kind: "run", runId }] },
+    });
+    expect((await post("/runs/claim", claimBody(key, "corrupt_live", "slack:C1:corrupt-live"))).status).toBe(200);
+    expect(await lookup({ repo: "other/repo", pr: 7 })).toMatchObject({ status: 200, data: { ok: true, owners: [] } });
+    for (const meta of [[], 7, {}]) {
+      await runInDurableObject(stub, async (_owner: RunHistoryDO, state) => {
+        state.storage.sql.exec(
+          `UPDATE live_runs SET meta_json = ? WHERE run_id = 'corrupt_live'`,
+          JSON.stringify(meta),
+        );
+      });
+      expect(await lookup({ repo: "other/repo", pr: 7 })).toMatchObject({
+        status: 200,
+        data: { ok: false, reason: "incomplete" },
+      });
+    }
+    await runInDurableObject(stub, async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(`DELETE FROM live_runs WHERE run_id = 'corrupt_live'`);
+    });
+
+    await runInDurableObject(stub, async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(`UPDATE runs SET work_evidence_json = '{' WHERE run_id = ?`, runId);
+    });
+    expect(await lookup({ repo: "acme/api", pr: 8 })).toMatchObject({
+      status: 200,
+      data: { ok: false, reason: "incomplete" },
+    });
+    await runInDurableObject(stub, async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(`DELETE FROM runs WHERE run_id = ?`, runId);
+    });
+    expect(await lookup({ repo: "acme/api", pr: 8 })).toMatchObject({
+      status: 200,
+      data: { ok: true, owners: [{ kind: "run", runId }] },
+    });
+  });
+
+  it("bounds source bytes before parsing or retaining an entire permitted history", async () => {
+    const key = storeKey(),
+      stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (owner: RunHistoryDO, state) => {
+      const label = "x".repeat(Math.floor(1.4 * 1024 * 1024));
+      for (let i = 0; i < 4; i++) {
+        const row = { ...record(`large_${i}`, `slack:C1:large-${i}`), label };
+        state.storage.sql.exec(
+          `INSERT INTO runs (run_id, channel_id, user_id, thread_key, started_at, finished_at, stored_at, status, event_count, stored_event_count, truncated, bytes, diagnosis_json, summary_json) VALUES (?, 'slack:C1', 'slack:UALICE', ?, 1, 2, 2, 'completed', 0, 0, 0, ?, '{}', ?)`,
+          row.id,
+          row.threadKey,
+          label.length,
+          JSON.stringify(row),
+        );
+        expect(await owner.findPullOwners({ repo: "acme/api", pr: 7 })).toEqual(
+          i === 3 ? { ok: false, reason: "incomplete" } : { ok: true, owners: [] },
+        );
+      }
+    });
   });
 });

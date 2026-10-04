@@ -119,6 +119,12 @@ import {
 } from "./privateWorker.js";
 import type { CreateInstanceAnswer, InstanceStatusAnswer } from "../core/coordinator/instancesRoute.js";
 import type { OriginalUnitRecoveryParams } from "../core/coordinator/driver.js";
+import {
+  parseRecoveryStep,
+  recoveryStepName,
+  recoveryStepPrefix,
+  recoveryWorkflowId,
+} from "../core/coordinator/recoveryStep.js";
 import type { DispatchOptions } from "../core/dispatcher.js";
 import type { DispatchOutcome } from "../core/dispatch/outcome.js";
 import { childRequestText, spawnTierRefusal } from "../core/dispatch/spawn.js";
@@ -173,6 +179,7 @@ import { systemClock } from "../core/trace/clock.js";
 import {
   isRecoveryRequest,
   recoveryActionId,
+  recoveryActionRenewed,
   type RecoveryRequest,
   type RecoveryAction,
 } from "../core/coordinator/recoveryHistory.js";
@@ -1020,6 +1027,17 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   };
   const threadKey = thread.threadKey;
   const key = idempotencyKeyFor(instance.id, req.step);
+  const recoveryStep = parseRecoveryStep(req.step);
+  if (row?.recovery !== undefined || req.step.includes("/recovery/")) {
+    if (
+      row?.recovery?.actionId === undefined ||
+      recoveryStep?.unit !== row.unit ||
+      recoveryStep.actionId !== row.recovery.actionId ||
+      body.recoveryActionId !== row.recovery.actionId ||
+      body.recoveryWorkflowId !== row.recovery.workflowId
+    )
+      return json(409, { ok: false, error: "recovery_claim_mismatch", at });
+  }
   // Retry-safe before anything starts: the step's child, live or finished, or
   // another run holding the unit's thread.
   const live = await liveOnThread(deps.runs, instance, threadKey);
@@ -1053,7 +1071,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
     if (open !== null || merged !== null) return json(409, { ok: false, error: "recovery_stage_changed", at });
   } else if (row?.recovery !== undefined) {
     const expectedKind = req.preset === "coding" ? "findings" : "review";
-    const stepMatch = new RegExp(`^${row.unit}/recovery/[1-9][0-9]*/${expectedKind}(?:/a[1-9][0-9]*)?$`).test(req.step);
+    const stepMatch = recoveryStep?.kind === expectedKind;
     const briefHead =
       req.brief !== undefined && "headSha" in req.brief && typeof req.brief.headSha === "string"
         ? req.brief.headSha
@@ -1100,7 +1118,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
             ? undefined
             : await deps.runs.getRun(reviewId, { privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ });
         const run = review?.ok ? review.value : undefined;
-        const round = Number(req.step.split("/")[2]);
+        const round = recoveryStep!.round;
         const priorRound = req.preset === "review" ? round - 1 : round;
         if (
           run === undefined ||
@@ -1114,7 +1132,10 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
           run.threadKey !== (row.reviewThread?.threadKey ?? row.threadKey ?? instance.threadKey) ||
           priorRound < row.recovery.round ||
           round > (instance.caps?.maxRounds ?? 0) + (row.recovery.patternContinuations ?? 0) ||
-          !isStepAttempt(run.idempotencyKey, `${instance.id}:${row.unit}/recovery/${priorRound}/review`) ||
+          !isStepAttempt(
+            run.idempotencyKey,
+            `${instance.id}:${recoveryStepName({ unit: row.unit, actionId: row.recovery.actionId!, round: priorRound, kind: "review" })}`,
+          ) ||
           run.verdict === undefined ||
           run.reviewPost?.posted !== true ||
           run.reviewPost.target.repo.toLowerCase() !== instance.repo.toLowerCase() ||
@@ -1335,6 +1356,21 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
       merged !== null ||
       rows?.filter((candidate) => candidate.unit === row.unit).length !== 1 ||
       JSON.stringify(rows.find((candidate) => candidate.unit === row.unit)) !== JSON.stringify(row)
+    )
+      return json(409, { ok: false, error: "recovery_claim_mismatch", at });
+  }
+  if (row?.recovery !== undefined) {
+    const [currentInstance, currentRows] = await Promise.all([
+      deps.instances.get(instance.id),
+      deps.instances.listUnits(instance.id),
+    ]);
+    const matches = currentRows.filter((candidate) => candidate.unit === row.unit);
+    if (
+      currentInstance === null ||
+      currentInstance.stop !== undefined ||
+      matches.length !== 1 ||
+      JSON.stringify(matches[0]!.recovery) !== JSON.stringify(row.recovery) ||
+      JSON.stringify(matches[0]!.publication) !== JSON.stringify(row.publication)
     )
       return json(409, { ok: false, error: "recovery_claim_mismatch", at });
   }
@@ -1901,7 +1937,14 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
         : undefined;
     if (coordinatorUnit !== undefined && pushedPrRef !== undefined && coordinatorUnit.branch !== pushedPrRef) {
       coordinatorUnit = { ...coordinatorUnit, branch: pushedPrRef };
-      await deps.instances.putUnits([coordinatorUnit]);
+      const written = await deps.instances.putUnits([coordinatorUnit]);
+      if (!written.ok)
+        return json(written.reason === "unavailable" ? 503 : 409, {
+          ok: false,
+          error: "unit_write_refused",
+          reason: written.reason,
+          at,
+        });
     }
   }
   // An interrupted child that restarted from its request (issue 1903: a
@@ -2447,7 +2490,8 @@ async function advanceFindingsPublication(
   });
   const owner = { instanceId: instance.id, unit: row.unit };
   const latestReview = [...row.rounds].reverse().find((round) => round.agent === "review");
-  const prefix = row.recovery !== undefined ? `${row.unit}/recovery` : publicationStepPrefix(row);
+  const prefix =
+    row.recovery !== undefined ? recoveryStepPrefix(row.unit, row.recovery.actionId!) : publicationStepPrefix(row);
   const findingsPrefix = `${instance.id}:${prefix}/${latestReview?.index}/findings`;
   let reconciledPush = false;
   // Ordinary findings must carry the exact authority used at dispatch, not
@@ -2524,10 +2568,7 @@ async function advanceFindingsPublication(
     child.value.userId !== instance.userId ||
     child.value.repo?.toLowerCase() !== instance.repo.toLowerCase() ||
     child.value.threadKey !== (row.threadKey ?? instance.threadKey) ||
-    (row.recovery !== undefined
-      ? child.value.idempotencyKey?.startsWith(`${instance.id}:${row.unit}/recovery/`) !== true ||
-        !/\/findings(?:\/a[1-9][0-9]*)?$/.test(child.value.idempotencyKey ?? "")
-      : !isStepAttempt(child.value.idempotencyKey, findingsPrefix)) ||
+    !isStepAttempt(child.value.idempotencyKey, findingsPrefix) ||
     !fullHead(facts.headSha) ||
     child.value.headSha !== facts.headSha ||
     (!reconciledPush &&
@@ -4308,6 +4349,8 @@ async function recoverOriginalCodingUnit(
         costCapUsd: grant.costCapUsd,
         at,
       });
+    if (request === undefined) return json(409, { ok: false, error: "recovery_request_identity_required", at });
+    const actionId = await recoveryActionId(row, request);
     claim = {
       kind: "coding",
       round: 0,
@@ -4323,10 +4366,10 @@ async function recoverOriginalCodingUnit(
       },
       remainingMs: deadlineAt - at,
       claimedAt: at,
-      step: `${row.unit}/recovery/0/coding`,
+      step: recoveryStepName({ unit: row.unit, actionId, round: 0, kind: "coding" }),
       previousEnding: row.ending!,
       ...(row.lastPush !== undefined ? {} : { previousBinding: {} }),
-      workflowId: `recovery-coding-${coding.id}`,
+      workflowId: recoveryWorkflowId(actionId),
       deadlineAt,
     };
   }
@@ -4426,6 +4469,7 @@ async function recoverOriginalCodingUnit(
       kind: "recover-original-unit",
       parentInstanceId: instance.id,
       unit: row.unit,
+      recoveryActionId: codingClaim.actionId!,
     })
     .catch(() => ({ kind: "unanswered" as const }));
   if (started === undefined) return rollback("recovery_workflow_unavailable");
@@ -4474,6 +4518,14 @@ export async function recoverOriginalUnit(
   if (matches.length !== 1) return json(409, { ok: false, error: "unit_evidence_ambiguous", at });
   const row = matches[0]!;
   if (row.instanceId !== instance.id) return json(409, { ok: false, error: "recovery_identity_mismatch", at });
+  if (
+    requestedWorkflowId !== undefined &&
+    (row.recovery?.workflowId !== requestedWorkflowId ||
+      row.recovery.actionId === undefined ||
+      body.recoveryActionId !== row.recovery.actionId ||
+      recoveryWorkflowId(row.recovery.actionId) !== requestedWorkflowId)
+  )
+    return json(409, { ok: false, error: "recovery_claim_mismatch", at });
   if (caller !== undefined && caller.threadKey !== (row.threadKey ?? instance.threadKey))
     return json(403, { ok: false, error: "recovery_requester_mismatch", at });
   const request: RecoveryRequest | undefined = caller !== undefined && isRecoveryRequest(caller) ? caller : undefined;
@@ -4495,6 +4547,11 @@ export async function recoverOriginalUnit(
       savedAction.actId !== row.workBrief?.actId
     )
       return json(409, { ok: false, error: "recovery_identity_mismatch", at });
+    if (requestedWorkflowId === undefined) {
+      const renewed = await recoveryActionRenewed(savedAction);
+      if (renewed === null) return json(409, { ok: false, error: "recovery_history_invalid", at });
+      if (renew !== renewed) return json(409, { ok: false, error: "recovery_claim_mismatch", at });
+    }
     if (savedAction.state === "refused") {
       // A refusal can commit while every response is lost. Only its action
       // may release the old fence; the same unit can already have a successor.
@@ -5571,12 +5628,10 @@ export async function recoverOriginalUnit(
     }
     if (!Number.isFinite(remainingMs) || remainingMs < floor)
       return json(409, { ok: false, error: "recovery_wall_clock_exhausted", at });
-    stepName = `${row.unit}/recovery/${round}/${kind}`;
-    workflowId = renew
-      ? `recovery-renewal-${reviewRunId}`
-      : externalReview !== undefined
-        ? `recovery-review-${externalReview.id}`
-        : `recovery-${findingsRunId ?? reviewRunId}`;
+    if (request === undefined) return json(409, { ok: false, error: "recovery_request_identity_required", at });
+    const admittedActionId = await recoveryActionId(row, request);
+    stepName = recoveryStepName({ unit: row.unit, actionId: admittedActionId, round, kind });
+    workflowId = recoveryWorkflowId(admittedActionId);
     deadlineAt = at + remainingMs;
     findings = kind === "findings" ? candidates[0]!.verdict?.findings : undefined;
     if (kind === "review" && round >= 2) {
@@ -6044,6 +6099,7 @@ export async function recoverOriginalUnit(
     kind: "recover-original-unit",
     parentInstanceId: instance.id,
     unit: row.unit,
+    recoveryActionId: claimedRow.recovery!.actionId!,
   }).catch((err) => ({ kind: "unanswered" as const, reason: describe(err) }));
   if (started.kind !== "created" && started.kind !== "duplicate") {
     if (started.kind === "failed") return rollback("recovery_workflow_failed");
@@ -6130,7 +6186,14 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   // their one atomic {pr, publication} transition.
   const rememberTerminal = async (pr: { number: number; url: string }) => {
     if (!unit.row || (unit.row.pr?.number === pr.number && unit.row.pr.url === pr.url)) return;
-    await deps.instances.putUnits([{ ...unit.row, pr }]);
+    const written = await deps.instances.putUnits([{ ...unit.row, pr }]);
+    if (!written.ok)
+      return json(written.reason === "unavailable" ? 503 : 409, {
+        ok: false,
+        error: "unit_write_refused",
+        reason: written.reason,
+        at,
+      });
   };
   try {
     // Once the machine has adopted a pull request, its number is the authority:
@@ -6147,7 +6210,8 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       if (state === undefined) throw new Error(headBranchStateError(instance.repo, follow));
       const followedPr = { number: follow, url: String(state.url) };
       if (state.state !== "open") {
-        await rememberTerminal(followedPr);
+        const refused = await rememberTerminal(followedPr);
+        if (refused !== undefined) return refused;
         return json(200, { ok: true, ...state, at });
       }
       const bindingRow =
@@ -6210,7 +6274,8 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       if (current === undefined) throw new Error(headBranchStateError(instance.repo, open.number));
       const discoveredPr = { number: open.number, url: open.htmlUrl };
       if (current.state !== "open") {
-        await rememberTerminal(discoveredPr);
+        const refused = await rememberTerminal(discoveredPr);
+        if (refused !== undefined) return refused;
         return json(200, { ok: true, ...current, at });
       }
       await bindOpenPullRequest(deps, instance, unit.row, discoveredPr, liveFacts);
@@ -6319,7 +6384,10 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
         const recoveredPr = { number: recovered.pr.number, url: recovered.pr.htmlUrl };
         if (recoveredState.state === "open")
           await bindOpenPullRequest(deps, instance, unit.row, recoveredPr, recoveredFacts);
-        else await rememberTerminal(recoveredPr);
+        else {
+          const refused = await rememberTerminal(recoveredPr);
+          if (refused !== undefined) return refused;
+        }
         return json(200, { ok: true, ...recoveredState, at });
       }
       return json(200, { ok: true, state: "none", unrecovered: recovered.why, at });
@@ -6328,7 +6396,8 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     if (mergedFacts === undefined) throw new Error(`could not read ${instance.repo}#${merged.number}`);
     const state = pullRequestState(merged.number, merged.htmlUrl, mergedFacts);
     if (state?.state !== "merged") throw new Error(`${instance.repo}#${merged.number} no longer reads merged`);
-    await rememberTerminal({ number: merged.number, url: merged.htmlUrl });
+    const refused = await rememberTerminal({ number: merged.number, url: merged.htmlUrl });
+    if (refused !== undefined) return refused;
     return json(200, { ok: true, ...state, at });
   } catch (err) {
     if (err instanceof PublicationBindingRefusal)
@@ -6531,6 +6600,7 @@ async function unitStart(body: Record<string, unknown>, deps: AdminCoordinatorDe
   const unit = await unitRowOf(deps, instance, body.unit);
   if (!unit.ok) return unit.response;
   let row = unit.row!;
+  if (instance.stop !== undefined) return json(409, { ok: false, error: "instance_stopped", at });
   if (row.workBrief !== undefined) {
     const threadKey = privateWorkerThreadKey({ instanceId: instance.id, unit: row.unit });
     if (deps.privateWorkerLog === undefined)
@@ -6565,7 +6635,14 @@ async function unitStart(body: Record<string, unknown>, deps: AdminCoordinatorDe
     if (issue !== undefined) row = { ...row, issue };
   }
   row = { ...row, startedAt: row.startedAt ?? at };
-  await deps.instances.putUnits([row]);
+  const written = await deps.instances.putUnits([row]);
+  if (!written.ok)
+    return json(written.reason === "unavailable" ? 503 : 409, {
+      ok: false,
+      error: "unit_write_refused",
+      reason: written.reason,
+      at,
+    });
   if (host.kind === "host")
     await hostPublish(
       deps,
@@ -6836,7 +6913,16 @@ async function round(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
         error: replaced?.reason === "stale" ? "recovery_claim_stale" : "recovery_store_unavailable",
         at,
       });
-  } else await deps.instances.putUnits([updated]);
+  } else {
+    const written = await deps.instances.putUnits([updated]);
+    if (!written.ok)
+      return json(written.reason === "unavailable" ? 503 : 409, {
+        ok: false,
+        error: "unit_write_refused",
+        reason: written.reason,
+        at,
+      });
+  }
   if (host.kind === "host") {
     const thread = unitThread(instance, updated, units.length);
     await hostPublish(
@@ -6967,7 +7053,14 @@ async function unitWake(body: Record<string, unknown>, deps: AdminCoordinatorDep
   }
   if (!row.idle) {
     const answer: UnitWakeAnswer = row.ending?.kind === "stopped" ? { kind: "stopped" } : { kind: "expired" };
-    await deps.instances.answerWake(row, body.waitId, answer, [], body.waitId);
+    const written = await deps.instances.answerWake(row, body.waitId, answer, [], body.waitId);
+    if (!written.ok)
+      return json(written.reason === "unavailable" ? 503 : 409, {
+        ok: false,
+        error: "unit_write_refused",
+        reason: written.reason,
+        at,
+      });
     return json(200, { ok: true, answer, at });
   }
 
@@ -7091,13 +7184,20 @@ async function unitWake(body: Record<string, unknown>, deps: AdminCoordinatorDep
       : {}),
   };
   const by = answer.kind === "segment" ? `segment:${answer.index}` : body.waitId;
-  await deps.instances.answerWake(
+  const written = await deps.instances.answerWake(
     updated,
     body.waitId,
     answer,
     events.map((e) => e.seq),
     by,
   );
+  if (!written.ok)
+    return json(written.reason === "unavailable" ? 503 : 409, {
+      ok: false,
+      error: "unit_write_refused",
+      reason: written.reason,
+      at,
+    });
   const visible = { ...updated, wakes: { ...(updated.wakes ?? {}), [body.waitId]: answer } };
   if (answer.kind === "answered") {
     if (row.workBrief !== undefined) {
@@ -7159,6 +7259,19 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   const units = await deps.instances.listUnits(instance.id);
   const row = units.find((u) => u.unit === body.unit);
   if (!row) return json(404, { ok: false, error: "unit_not_found", unit: body.unit });
+  // A committed recovery clears its live claim. Its exact terminal receipt is
+  // still the authority for retrying that report, never for starting more work.
+  if (row.recovery?.actionId !== undefined || body.recoveryActionId !== undefined) {
+    const actionId = row.recovery?.actionId ?? row.history?.receiptId;
+    const workflowId = row.recovery?.workflowId ?? row.recoveryReceipt?.workflowId;
+    if (
+      actionId !== body.recoveryActionId ||
+      workflowId !== body.recoveryWorkflowId ||
+      (row.recovery === undefined && row.ending === undefined)
+    )
+      return json(409, { ok: false, error: "recovery_claim_mismatch", at });
+  }
+
   if (
     body.deliveryId !== undefined &&
     (typeof body.deliveryId !== "string" || !STEP_NAME_PATTERN.test(body.deliveryId))
@@ -8465,6 +8578,27 @@ export async function answerCoordinatorStep(
   const parsed = parseObject(body);
   if (!parsed.ok) return json(400, { ok: false, error: parsed.error });
   const answer = async (): Promise<IngressResponse> => {
+    const request = parsed.value;
+    if (door.step !== "unit-end" && typeof request.parentInstanceId === "string" && typeof request.unit === "string") {
+      const id = parseInstanceId(request.parentInstanceId);
+      if (!id.ok) return json(400, { ok: false, error: "recovery_identity_invalid" });
+      const rows = await deps.instances.listUnits(id.value);
+      const matches = rows.filter((row) => row.unit === request.unit);
+      const claim = matches.length === 1 ? matches[0]!.recovery : undefined;
+      if (claim !== undefined || request.recoveryActionId !== undefined || request.recoveryWorkflowId !== undefined) {
+        if (
+          claim?.actionId === undefined ||
+          claim.actionId !== request.recoveryActionId ||
+          claim.workflowId !== request.recoveryWorkflowId
+        )
+          return json(409, { ok: false, error: "recovery_claim_mismatch", at: (deps.clock ?? systemClock)() });
+      }
+    } else if (
+      door.step !== "unit-end" &&
+      (request.recoveryActionId !== undefined || request.recoveryWorkflowId !== undefined)
+    ) {
+      return json(400, { ok: false, error: "recovery_identity_invalid" });
+    }
     switch (door.step) {
       case "plan":
         return plan(parsed.value, deps);

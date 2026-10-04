@@ -1,3 +1,4 @@
+import { recoveryStepPrefix, recoveryWorkflowId } from "./recoveryStep.js";
 import { isPublicationSettlement } from "../publicationSettlement.js";
 // The plan runner's driver (docs/reference/specs/http-ingress.md item 9;
 // docs/decisions/0031-the-coordinator-runs-a-plan-not-a-pull-request.md): the
@@ -170,6 +171,7 @@ export interface OriginalUnitRecoveryParams {
   kind: "recover-original-unit";
   parentInstanceId: string;
   unit: string;
+  recoveryActionId: string;
 }
 
 // ---- reading the bot ---------------------------------------------------------------------------------
@@ -1138,7 +1140,7 @@ async function runUnit(
   // one's results (decision 0046).
   const row = plan.units.find((u) => u.unit === unit);
   const prefix =
-    row?.recovery !== undefined ? `${unit}/recovery/${row.recovery.workflowId}` : stepPrefixOf(unit, session);
+    row?.recovery !== undefined ? recoveryStepPrefix(unit, row.recovery.actionId!) : stepPrefixOf(unit, session);
   const tag = { parentInstanceId: instanceId, unit };
   // Where the machine is, tracked for the step-threw ending (issue 2100). The
   // start belongs in the same net as the rest of the unit even though no
@@ -1210,6 +1212,7 @@ async function runUnit(
     ...(row?.recovery !== undefined
       ? {
           recovery: {
+            actionId: row.recovery.actionId!,
             remainingMs: row.recovery.remainingMs,
             unitKey: `${instanceId}:${unit}`,
             ...(row.recovery.accounting !== undefined ? { renewalsSpent: row.recovery.accounting.renewalsSpent } : {}),
@@ -1404,7 +1407,7 @@ async function endUnrunUnit(
     unit,
     ...(row?.recovery !== undefined ? { recoveryWorkflowId: row.recovery.workflowId } : {}),
   };
-  const prefix = row?.recovery !== undefined ? `${unit}/recovery/${row.recovery.workflowId}` : unit;
+  const prefix = row?.recovery !== undefined ? recoveryStepPrefix(unit, row.recovery.actionId!) : unit;
   const endStep = `${prefix}/end`;
   try {
     await confirmedUnitEnd(step, bot, endStep, { ...tag, ending });
@@ -1741,7 +1744,7 @@ async function runUnitLifetime(
     return ending;
   } catch (error) {
     if (plan.instance !== undefined) {
-      const prefix = row?.recovery !== undefined ? `${node.id}/recovery/${row.recovery.workflowId}` : node.id;
+      const prefix = row?.recovery !== undefined ? recoveryStepPrefix(node.id, row.recovery.actionId!) : node.id;
       const canonical = await reconcileNegativeEnding(step, bot, prefix, instanceId, plan, row);
       if (canonical !== undefined) return canonical;
     }
@@ -1914,6 +1917,20 @@ export async function runOriginalUnitRecovery(
   workflowId: string,
   params: OriginalUnitRecoveryParams,
 ): Promise<PlanRunSummary> {
+  if (recoveryWorkflowId(params.recoveryActionId) !== workflowId)
+    throw new Error("recovery Workflow does not name its action");
+  const transport = bot;
+  bot = {
+    async step(route, body) {
+      if (body.unit !== undefined && body.unit !== params.unit) throw new Error("recovery unit mismatch");
+      return transport.step(route, {
+        ...body,
+        unit: params.unit,
+        recoveryActionId: params.recoveryActionId,
+        recoveryWorkflowId: workflowId,
+      });
+    },
+  };
   const claim = answerOf(
     "recover-unit",
     await step.do("recovery-claim", STEP_CONFIG, async () => {
@@ -1938,7 +1955,11 @@ export async function runOriginalUnitRecovery(
     ),
   );
   const row = plan.units.filter((candidate) => candidate.unit === params.unit);
-  if (row.length !== 1 || row[0]!.recovery?.workflowId !== workflowId)
+  if (
+    row.length !== 1 ||
+    row[0]!.recovery?.workflowId !== workflowId ||
+    row[0]!.recovery?.actionId !== params.recoveryActionId
+  )
     throw new Error("the original unit's durable recovery claim no longer names this Workflow");
   const unit = row[0]!;
   const ending = await runUnitLifetime(

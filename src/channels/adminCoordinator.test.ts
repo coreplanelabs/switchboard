@@ -1,3 +1,4 @@
+import { seedCoordinatorInstance, seedCoordinatorUnit } from "../core/testing/coordinatorInstance.js";
 import { booleanAudienceVerifier } from "../core/testing/audienceVerifier.js";
 import { describe, expect, it, vi } from "vitest";
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
@@ -304,7 +305,7 @@ function harness(
     fallback: { put: (r) => store.put(r), abandoned: () => {} },
     warn: () => {},
   });
-  const instances = new InMemoryCoordinatorInstanceStore();
+  const instances = new InMemoryCoordinatorInstanceStore(ledger);
   const dispatched: Array<{ msg: IncomingMessage; opts?: { coordinator: CoordinatorTag } }> = [];
   const replies: string[] = [];
   const io: ChannelIO = {
@@ -2581,6 +2582,44 @@ describe("pr-check keeps the machine's adopted pull request authoritative before
     ]);
   });
 
+  it("refuses terminal PR success when its durable ownership write is rejected", async () => {
+    for (const path of ["follow", "discovered", "merged"] as const) {
+      for (const reason of ["owned", "unavailable"] as const) {
+        const pr = { number: 7, htmlUrl: "https://github.com/acme/api/pull/7", headSha: SHA };
+        const h = harness({
+          ...(path === "discovered" ? { pr } : {}),
+          ...(path === "merged" ? { mergedPr: { ...pr, sha: SHA, mergedAt: new Date(NOW).toISOString() } } : {}),
+          prFacts: { state: "closed", sameRepoHead: true, mergedAt: new Date(NOW).toISOString(), mergeCommitSha: SHA },
+        });
+        await h.instances.put(INSTANCE);
+        const row: CoordinatorUnit = {
+          instanceId: INSTANCE.id,
+          unit: "u12",
+          slug: "u12",
+          branch: INSTANCE.branch,
+          dependsOn: [],
+          rounds: [],
+          threadKey: INSTANCE.threadKey,
+        };
+        await h.instances.putUnits([row]);
+        vi.spyOn(h.instances, "putUnits").mockResolvedValueOnce({ ok: false, reason });
+        const response = await handleCoordinatorRequest(
+          post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+            parentInstanceId: INSTANCE.id,
+            unit: row.unit,
+            ...(path === "follow" ? { pr: 7 } : {}),
+          }),
+          h.deps,
+        );
+        expect(response, `${path}/${reason}`).toMatchObject({
+          status: reason === "unavailable" ? 503 : 409,
+          body: { ok: false, error: "unit_write_refused", reason },
+        });
+        expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+      }
+    }
+  });
+
   it("a followed pull request that merged answers merged with the merge receipt; one closed unmerged answers the terminal closed state with its closer", async () => {
     const mergedHead = "8".repeat(40);
     const merged = harness({
@@ -3309,7 +3348,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     idle: Partial<NonNullable<CoordinatorUnit["idle"]>> = {},
   ) {
     const h = await planHarness(over);
-    await h.instances.replace({ ...PLAN_INSTANCE, caps: { maxRounds: 2, maxMinutes: 240 } });
+    seedCoordinatorInstance(h.instances, { ...PLAN_INSTANCE, caps: { maxRounds: 2, maxMinutes: 240 } });
     await h.instances.putUnits([
       unitRow("U10", {
         threadKey: "slack:C1:2.0",
@@ -3452,7 +3491,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
           mixed = true;
           const readUnits = h.instances.listUnits.bind(h.instances);
           vi.spyOn(h.instances, "listUnits").mockImplementationOnce(async (id) => {
-            expect(await h.instances.replace({ ...PLAN_INSTANCE, userId: "slack:UOTHER" })).toEqual({ ok: true });
+            seedCoordinatorInstance(h.instances, { ...PLAN_INSTANCE, userId: "slack:UOTHER" });
             await h.instances.putUnits([committed, unitRow("U11")]);
             return readUnits(id);
           });
@@ -3465,18 +3504,16 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
         if (route === "unit-end" && body.unit === "U10" && !installed) {
           installed = true;
           if (scenario !== "original owner" && scenario !== "mixed snapshot" && scenario !== "foreign report owner") {
-            expect(
-              await h.instances.replace({
-                ...PLAN_INSTANCE,
-                ...(scenario === "changed requester"
-                  ? { userId: "slack:UOTHER" }
-                  : scenario === "changed run"
-                    ? { runId: "another-host" }
-                    : scenario === "changed attempt"
-                      ? { attempt: 2 }
-                      : { admission: "unreconciled" as const }),
-              }),
-            ).toEqual({ ok: true });
+            seedCoordinatorInstance(h.instances, {
+              ...PLAN_INSTANCE,
+              ...(scenario === "changed requester"
+                ? { userId: "slack:UOTHER" }
+                : scenario === "changed run"
+                  ? { runId: "another-host" }
+                  : scenario === "changed attempt"
+                    ? { attempt: 2 }
+                    : { admission: "unreconciled" as const }),
+            });
             await h.instances.putUnits([unitRow("U10"), unitRow("U11")]);
           }
           expect(await h.instances.compareAndReplaceUnit(unitRow("U10"), committed)).toEqual({ ok: true });
@@ -6034,7 +6071,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     // A verbose instance's round header names the severity in force and its
     // source (agent-ship item 6): this instance carries none, so the org
     // default shows.
-    await h.instances.replace({ ...PLAN_INSTANCE, verbosity: "verbose" });
+    seedCoordinatorInstance(h.instances, { ...PLAN_INSTANCE, verbosity: "verbose" });
     await h.instances.putUnits([unitRow("U10", { threadKey: "slack:C1:2.0" })]);
     frames.length = 0;
     expect(
@@ -6533,7 +6570,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
 
     const short = await idleHarness({ grantFact: { grant: { renewals: 2 }, source: "org" } }, { why: "stopped" });
     const [row] = await short.instances.listUnits(PLAN_INSTANCE.id);
-    await short.instances.putUnits([{ ...row!, startedAt: NOW - minutesToMs(239) }]);
+    seedCoordinatorUnit(short.instances, { ...row!, startedAt: NOW - minutesToMs(239) });
     await short.instances.appendEvent(key, {
       sender: PLAN_INSTANCE.userId,
       text: "use a renewal instead",
@@ -6563,7 +6600,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
 
     const unfit = await idleHarness({ grantFact: { grant: { renewals: 2 }, source: "org" } });
     const unfitRows = await unfit.instances.listUnits(PLAN_INSTANCE.id);
-    await unfit.instances.replace({ ...PLAN_INSTANCE, caps: { maxRounds: 3, maxMinutes: 40 } });
+    seedCoordinatorInstance(unfit.instances, { ...PLAN_INSTANCE, caps: { maxRounds: 3, maxMinutes: 40 } });
     await unfit.instances.putUnits(unfitRows);
     await unfit.instances.appendEvent(key, {
       sender: PLAN_INSTANCE.userId,
@@ -6987,6 +7024,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     await h.instances.putUnits([
       {
         ...unitRow("U10"),
+        startedAt: NOW,
         instanceId: solo.id,
         threadKey: INSTANCE.threadKey,
         ending: { kind: "merge_ready", report: "ready", at: NOW },
@@ -7841,7 +7879,13 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     const [board, prIssue] = (await held.github.listIssues("acme/api", { state: "open", limit: 10 })).sort(
       (a, b) => a.number - b.number,
     );
-    await held.instances.putUnits([row({ issue: board!.number })]);
+    seedCoordinatorUnit(
+      held.instances,
+      row({
+        issue: board!.number,
+        pr: { number: prIssue!.number, url: `https://github.com/acme/api/pull/${prIssue!.number}` },
+      }),
+    );
     const heldReport =
       "⏸️ Approved but held after 1 review round — F1 (minor) — the entry replay receipt is human-gated";
     expect(
@@ -7860,7 +7904,7 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     expect((await held.github.getIssue("acme/api", board!.number)).comments.map((c) => c.body)).toEqual([
       `**Plan runner — U10 ended \`held\`** · https://github.com/acme/api/pull/${prIssue!.number}\n\n${heldReport}`,
     ]);
-    const heldGone = await mergeHarness();
+    const heldGone = await mergeHarness({}, { pr: { number: 4242, url: "https://github.com/acme/api/pull/4242" } });
     expect(
       (
         await call(heldGone, "unit-end", {
@@ -8382,7 +8426,7 @@ describe("original committed head adoption — create-only draft PR", () => {
   ) {
     const h = harness({ branchHead: head, ahead: 1, runPageBase: "https://bot.example/runs" });
     await h.instances.put(instance);
-    await h.instances.putUnits([row]);
+    seedCoordinatorUnit(h.instances, row);
     await h.store.put(child);
     h.deps.verifyIdentitiesReadOnly = async () => ({ kind: "clean", tip: head });
     const prs: NonNullable<AdminCoordinatorDeps["listAnyPrByHead"]> extends (...args: never[]) => Promise<infer T>
@@ -8594,9 +8638,17 @@ describe("POST /admin/coordinator/recover-unit — pre-PR same-unit coding", () 
     expect(await recover(h)).toMatchObject({ status: 200, body: { outcome: "already_started" } });
     expect(h.recoveries).toHaveLength(1);
     const workflowId = (h.recoveries[0] as { id: string }).id;
-    expect(await recoverOriginalUnit({ parentInstanceId: INSTANCE.id, unit: "U12", workflowId }, h.deps)).toMatchObject(
-      { status: 200, body: { workflowId } },
-    );
+    expect(
+      await recoverOriginalUnit(
+        {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          recoveryActionId: h.recoveries[0]!.params.recoveryActionId,
+          workflowId,
+        },
+        h.deps,
+      ),
+    ).toMatchObject({ status: 200, body: { workflowId } });
   });
 
   it("spawns only the original coding step and refuses a ref move before dispatch", async () => {
@@ -8608,7 +8660,9 @@ describe("POST /admin/coordinator/recover-unit — pre-PR same-unit coding", () 
     const body = {
       parentInstanceId: INSTANCE.id,
       unit: "U12",
-      step: "U12/recovery/0/coding",
+      recoveryActionId: h.recoveries[0]!.params.recoveryActionId,
+      recoveryWorkflowId: h.recoveries[0]!.id,
+      step: `U12/recovery/${h.recoveries[0]!.params.recoveryActionId}/0/coding`,
       preset: "coding",
       brief: {
         kind: "contract",
@@ -8625,7 +8679,7 @@ describe("POST /admin/coordinator/recover-unit — pre-PR same-unit coding", () 
       opts: { coordinator: { parentInstanceId: INSTANCE.id, unit: "U12", branch: INSTANCE.branch } },
     });
     const second = await handleCoordinatorRequest(
-      post(`${COORDINATOR_ADMIN_PREFIX}spawn`, { ...body, step: "U12/recovery/0/coding/a1" }),
+      post(`${COORDINATOR_ADMIN_PREFIX}spawn`, { ...body, step: `${body.step}/a1` }),
       h.deps,
     );
     expect(second).toMatchObject({ status: 409, body: { error: "recovery_claim_mismatch" } });
@@ -8655,6 +8709,7 @@ describe("POST /admin/coordinator/recover-unit — pre-PR same-unit coding", () 
     const body = {
       parentInstanceId: INSTANCE.id,
       unit: "U12",
+      recoveryActionId: h.recoveries[0]!.params.recoveryActionId,
       recoveryWorkflowId: workflowId,
       ending: {
         kind: "aborted",
@@ -8680,7 +8735,7 @@ describe("POST /admin/coordinator/recover-unit — pre-PR same-unit coding", () 
         post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, { ...body, recoveryWorkflowId: "foreign-recovery" }),
         h.deps,
       ),
-    ).toMatchObject({ status: 409, body: { error: "recovery_outcome_mismatch" } });
+    ).toMatchObject({ status: 409, body: { error: "recovery_claim_mismatch" } });
     expect((await h.instances.listUnits(INSTANCE.id))[0]).toEqual(settled);
     expect((await h.instances.listRecoveryHistory(unit())).receipts).toHaveLength(2);
     expect(await recover(h, INSTANCE.userId, "recovery-2")).toMatchObject({
@@ -8728,6 +8783,7 @@ describe("POST /admin/coordinator/recover-unit — pre-PR same-unit coding", () 
         post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
           parentInstanceId: INSTANCE.id,
           unit: "U12",
+          recoveryActionId: h.recoveries[0]!.params.recoveryActionId,
           recoveryWorkflowId: workflowId,
           ending: {
             kind: "held",
@@ -8819,6 +8875,9 @@ describe("POST /admin/coordinator/recover-unit — pre-PR same-unit coding", () 
 // Feature: docs/reference/specs/agent-ship.md item 10 — an explicit original-unit
 // recovery reads only durable instance, unit and child evidence. It claims the
 // exact row and pull-request owner before admitting one durable checkpoint.
+const REVIEW_ACTION = "r_bfd48a0cfcfb547bf85c9ef3037a3369bcb4aace9f52cd0e979862e881f139c7";
+const REVIEW_WORKFLOW = `recovery-${REVIEW_ACTION}`;
+
 describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit recovery", () => {
   const HEAD = "7".repeat(40);
   const PR = { number: 77, url: "https://github.com/acme/api/pull/77" };
@@ -8985,6 +9044,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
           parentInstanceId: INSTANCE.id,
           unit: "U12",
+          recoveryActionId: h.recoveries[0]!.params.recoveryActionId,
           recoveryWorkflowId: (result.body as Record<string, unknown>).workflowId,
           ending: {
             kind: "aborted",
@@ -9023,6 +9083,42 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(creates).toBe(1);
     expect(await call("slack:C1:11.0")).toMatchObject({ status: 200 });
     expect(creates).toBe(2);
+  });
+
+  it("a retired delayed create cannot bind to a later action using the same source review", async () => {
+    const h = harness({
+      prFacts: exactRecoveryFacts(HEAD),
+      startRecovery: async (id) => ({ kind: "failed", id, reason: "confirmed absent" }),
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    const firstRequest = { userId: INSTANCE.userId, threadKey: INSTANCE.threadKey, messageId: "slack:C1:10.0" };
+    const laterRequest = { ...firstRequest, messageId: "slack:C1:11.0" };
+    const target = { parentInstanceId: INSTANCE.id, unit: "U12" };
+    await recoverOriginalUnit(target, h.deps, firstRequest);
+    const retired = await h.instances.getRecoveryAction({ instanceId: INSTANCE.id, unit: "U12" }, firstRequest);
+    h.deps.startRecovery = async (id) => ({ kind: "created", id });
+    expect(await recoverOriginalUnit(target, h.deps, laterRequest)).toMatchObject({ status: 200 });
+    const current = (await h.instances.listUnits(INSTANCE.id))[0]!;
+    expect(current.recovery!.workflowId).not.toBe(retired!.workflowId);
+    expect(current.recovery!.step).toContain(current.recovery!.actionId);
+    expect(
+      await recoverOriginalUnit({ ...target, workflowId: retired!.workflowId, recoveryActionId: retired!.id }, h.deps),
+    ).toMatchObject({ status: 409, body: { error: "recovery_claim_mismatch" } });
+    expect(
+      await recoverOriginalUnit(
+        { ...target, workflowId: current.recovery!.workflowId, recoveryActionId: retired!.id },
+        h.deps,
+      ),
+    ).toMatchObject({ status: 409, body: { error: "recovery_claim_mismatch" } });
+    expect(
+      await recoverOriginalUnit(
+        { ...target, workflowId: current.recovery!.workflowId, recoveryActionId: current.recovery!.actionId },
+        h.deps,
+      ),
+    ).toMatchObject({ status: 200 });
+    expect(h.dispatched).toEqual([]);
   });
 
   it("reconciles a committed refusal after a lost acknowledgment and releases the original owner", async () => {
@@ -9100,15 +9196,89 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(creates).toBe(2);
   });
 
+  it("requires the current action before rerunning recovery checks", async () => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD), rerunOk: true });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    expect((await callRecovery(h)).status).toBe(200);
+    const rerun = vi.spyOn(h.deps, "rerunFailedChecks");
+    const base = { parentInstanceId: INSTANCE.id, unit: "U12", pr: PR.number, headSha: HEAD, retry: ["tests"] };
+    for (const identity of [
+      {},
+      { recoveryWorkflowId: REVIEW_WORKFLOW },
+      { recoveryActionId: `r_${"c".repeat(64)}`, recoveryWorkflowId: REVIEW_WORKFLOW },
+    ]) {
+      expect(
+        await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}checks`, { ...base, ...identity }), h.deps),
+      ).toMatchObject({ status: 409, body: { error: "recovery_claim_mismatch" } });
+    }
+    expect(rerun).not.toHaveBeenCalled();
+  });
+
+  it("refuses a recovery child retired while its brief and events are read", async () => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    expect((await callRecovery(h)).status).toBe(200);
+    let entered!: () => void;
+    let release!: () => void;
+    const reading = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const resume = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const list = h.instances.listEvents.bind(h.instances);
+    vi.spyOn(h.instances, "listEvents").mockImplementationOnce(async (...args) => {
+      entered();
+      await resume;
+      return list(...args);
+    });
+    const spawning = handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}spawn`, {
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
+        step: `U12/recovery/${REVIEW_ACTION}/1/findings`,
+        preset: "coding",
+        budget: 20,
+        brief: { kind: "findings", unit: "U12", pr: PR.number, headSha: HEAD, reviewRunId: "run-original-review" },
+      }),
+      h.deps,
+    );
+    await reading;
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          recoveryActionId: REVIEW_ACTION,
+          recoveryWorkflowId: REVIEW_WORKFLOW,
+          ending: { kind: "aborted", report: "retired before dispatch" },
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 200 });
+    release();
+    expect(await spawning).toMatchObject({ status: 409, body: { error: "recovery_claim_mismatch" } });
+    expect(h.dispatched).toHaveLength(0);
+  });
+
   it("refuses an older private settlement while a successor recovery owns the same unit", async () => {
     const log = new InMemoryPrivateWorkerLog();
     const h = harness({ prFacts: exactRecoveryFacts(HEAD), privateWorkerLog: log });
     const key = await privateRecovery(h);
+    const REVIEW_ACTION = h.recoveries[0]!.params.recoveryActionId;
+    const REVIEW_WORKFLOW = h.recoveries[0]!.id;
     const body = {
       parentInstanceId: INSTANCE.id,
       unit: "U12",
-      recoveryWorkflowId: "recovery-run-original-review",
-      deliveryId: "U12/recovery/end",
+      recoveryActionId: REVIEW_ACTION,
+      recoveryWorkflowId: REVIEW_WORKFLOW,
+      deliveryId: `U12/recovery/${REVIEW_ACTION}/end`,
       ending: { kind: "aborted", report: "first result" },
       pr: PR,
     };
@@ -9133,7 +9303,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           expectedHeadSha: HEAD,
           remainingMs: 60000,
           claimedAt: NOW,
-          step: "U12/recovery/2/review",
+          step: `U12/recovery/${REVIEW_ACTION}/2/review`,
           reviewRunId: "later-review",
           reviewKey: "later-key",
           previousEnding: ending!,
@@ -9150,7 +9320,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, owner)).toBe(true);
     for (const replay of [
       body,
-      { ...body, deliveryId: "U12/recovery/changed", ending: { ...body.ending, report: "changed" } },
+      { ...body, deliveryId: `U12/recovery/${REVIEW_ACTION}/changed`, ending: { ...body.ending, report: "changed" } },
     ])
       expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, replay), h.deps)).toMatchObject(
         { status: 409, body: { error: "recovery_claim_mismatch" } },
@@ -9183,7 +9353,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       }),
     );
 
-    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: "recovery-run-original-review" } });
+    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: REVIEW_WORKFLOW } });
     const [claimed] = await h.instances.listUnits(INSTANCE.id);
     expect(claimed).toMatchObject({
       lastPush: HEAD,
@@ -9472,13 +9642,13 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     if (scenario === "wrong PR head") h.deps.fetchPrFacts = async () => exactRecoveryFacts("e".repeat(40));
     if (scenario === "unpriced child") await h.store.put({ ...child, usage: undefined });
     if (scenario === "round cap")
-      await h.instances.replace({ ...recoveryInstance(), caps: { maxRounds: 1, maxMinutes: 120 } });
+      seedCoordinatorInstance(h.instances, { ...recoveryInstance(), caps: { maxRounds: 1, maxMinutes: 120 } });
     if (scenario === "competing owner") {
       h.deps.runnerOwnership!.release(INSTANCE.repo, PR.number, owner);
       h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
     }
     if (scenario === "spent cap")
-      await h.instances.replace({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 0.5 } });
+      seedCoordinatorInstance(h.instances, { ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 0.5 } });
     if (scenario === "expired lease") h.deps.clock = () => NOW + minutesToMs(121);
     if (
       [
@@ -9501,7 +9671,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
 
   it("a saved unpushed findings child restarts required findings at the requester-moved head without push credit", async () => {
     const { h, patch } = await unpushedHarness();
-    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: "recovery-run-original-review" } });
+    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: REVIEW_WORKFLOW } });
     const [claimed] = await h.instances.listUnits(INSTANCE.id);
     expect(claimed).toMatchObject({
       lastPush: HEAD,
@@ -9595,7 +9765,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     const [before] = await h.instances.listUnits(INSTANCE.id);
     const outcomes = await Promise.all([callRecovery(h), callRecovery(h)]);
     expect(outcomes.some((result) => result.status === 200)).toBe(true);
-    expect(new Set(h.recoveries.map((entry) => entry.id))).toEqual(new Set(["recovery-run-original-review"]));
+    expect(new Set(h.recoveries.map((entry) => entry.id))).toEqual(new Set([REVIEW_WORKFLOW]));
     const [claimed] = await h.instances.listUnits(INSTANCE.id);
     expect(claimed).toMatchObject({
       branch: INSTANCE.branch,
@@ -9631,7 +9801,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     const failed = (await h.store.get("run-original-findings"))!;
     await h.store.put({ ...failed, status: "failed", dispositions: undefined, events: failed.events.slice(0, 1) });
     const original = (await h.instances.listUnits(INSTANCE.id))[0]!;
-    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: "recovery-run-original-review" } });
+    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: REVIEW_WORKFLOW } });
     const [claimed] = await h.instances.listUnits(INSTANCE.id);
     expect(claimed).toMatchObject({
       unit: original.unit,
@@ -9714,7 +9884,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
   it("keeps prior review evidence within its renewed segment when pricing findings", async () => {
     const h = await salvageHarness();
     const row = (await h.instances.listUnits(INSTANCE.id))[0]!;
-    await h.instances.replace({ ...recoveryInstance(), grant: { renewals: 1, costCapUsd: 5 } });
+    seedCoordinatorInstance(h.instances, { ...recoveryInstance(), grant: { renewals: 1, costCapUsd: 5 } });
     row.startedAt = NOW - minutesToMs(120);
     row.segments = [{ index: 2, at: NOW - minutesToMs(60) }];
     row.rounds = [
@@ -9724,7 +9894,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       { index: 1, agent: "coding", outcome: "completed", at: NOW - minutesToMs(85) },
       ...row.rounds,
     ];
-    await h.instances.putUnits([row]);
+    seedCoordinatorUnit(h.instances, row);
     const currentReview = (await h.store.get("run-original-review"))!;
     const currentFindings = (await h.store.get("run-original-findings"))!;
     await h.store.put({ ...currentReview, idempotencyKey: `${INSTANCE.id}:U12/s2/1/review` });
@@ -9912,11 +10082,11 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       }));
     }
     if (scenario === "round cap")
-      await h.instances.replace({ ...recoveryInstance(), caps: { maxRounds: 1, maxMinutes: 120 } });
+      seedCoordinatorInstance(h.instances, { ...recoveryInstance(), caps: { maxRounds: 1, maxMinutes: 120 } });
     if (scenario === "wall-clock cap") row = { ...row!, startedAt: NOW - minutesToMs(120) };
     if (scenario === "unknown spend")
-      await h.instances.replace({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
-    await h.instances.putUnits([row!]);
+      seedCoordinatorInstance(h.instances, { ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
+    seedCoordinatorUnit(h.instances, row!);
     const priorOwner = h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number);
     expect((await callRecovery(h)).status).toBe(409);
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
@@ -9959,6 +10129,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     async (scenario) => {
       const h = await salvageHarness(124);
       expect((await callRecovery(h, "slack:C1:later-request")).status).toBe(200);
+      const REVIEW_ACTION = h.recoveries[0]!.params.recoveryActionId;
+      const REVIEW_WORKFLOW = h.recoveries[0]!.id;
       let head = SALVAGED;
       const fixed = "c".repeat(40);
       h.deps.fetchPrFacts = async () => exactRecoveryFacts(head);
@@ -9975,9 +10147,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         children.push(tag);
         expect(msg.userId).toBe(INSTANCE.userId);
         expect(msg.threadKey).toBe(INSTANCE.threadKey);
-        expect(tag.transportWorkflowId).toBe("recovery-run-original-review");
+        expect(tag.transportWorkflowId).toBe(REVIEW_WORKFLOW);
         if (children.length === 1) {
-          expect(tag.idempotencyKey).toBe(`${INSTANCE.id}:U12/recovery/1/findings`);
+          expect(tag.idempotencyKey).toBe(`${INSTANCE.id}:U12/recovery/${REVIEW_ACTION}/1/findings`);
           expect(tag.publication).toMatchObject({ ...publication, expectedHeadSha: SALVAGED });
           expect(msg.text).toContain("F1");
           expect(msg.text).toContain("F2");
@@ -10012,7 +10184,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           );
           io.runStarted?.({ id: "run-recovered-fix" });
         } else if (children.length === 2) {
-          expect(tag.idempotencyKey).toBe(`${INSTANCE.id}:U12/recovery/2/review`);
+          expect(tag.idempotencyKey).toBe(`${INSTANCE.id}:U12/recovery/${REVIEW_ACTION}/2/review`);
           expect(tag.recovery?.expectedHeadSha).toBe(fixed);
           expect(msg.text).toContain(fixed);
           const verdict = scenario === "human consent" ? "request_changes" : "approve";
@@ -10035,7 +10207,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         } else {
           expect(scenario).toBe("red CI");
           expect(children).toHaveLength(3);
-          expect(tag.idempotencyKey).toBe(`${INSTANCE.id}:U12/recovery/2/findings`);
+          expect(tag.idempotencyKey).toBe(`${INSTANCE.id}:U12/recovery/${REVIEW_ACTION}/2/findings`);
           expect(msg.text).toContain("test");
           // The red check requires a repair contract, not a merge-ready ending.
           await h.store.put(
@@ -10069,8 +10241,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         },
         waitForEvent: async () => ({ ok: true }),
       };
-      const result = await runOriginalUnitRecovery(steps, bot, "recovery-run-original-review", {
+      const result = await runOriginalUnitRecovery(steps, bot, REVIEW_WORKFLOW, {
         kind: "recover-original-unit",
+        recoveryActionId: h.recoveries.at(-1)!.params.recoveryActionId,
         parentInstanceId: INSTANCE.id,
         unit: "U12",
       });
@@ -10171,7 +10344,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     row.rounds.unshift({ index: 0, agent: "coding", outcome: "started", at: NOW - minutesToMs(58) });
     await h.instances.putUnits([row]);
     const before = (await h.instances.listUnits(INSTANCE.id))[0]!;
-    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: "recovery-review-5324414426" } });
+    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: REVIEW_WORKFLOW } });
     const claimed = (await h.instances.listUnits(INSTANCE.id))[0]!;
     expect(claimed).toMatchObject({
       branch: before.branch,
@@ -10213,7 +10386,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       const h = await approvedHarness();
       const start = vi.fn(async () => ({ kind: "unanswered" as const, reason: "create response lost" }));
       h.deps.startRecovery = start;
-      const workflowId = "recovery-review-5324414426";
+      const workflowId = REVIEW_WORKFLOW;
       expect(await callRecovery(h)).toMatchObject({ status: 200, body: { outcome: "indeterminate", workflowId } });
       const claimed = await h.instances.listUnits(INSTANCE.id);
       const savedInstance = await h.instances.get(INSTANCE.id);
@@ -10253,7 +10426,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     "revalidates an absent external-review Workflow before retrying its original create (%s)",
     async (review) => {
       const h = await approvedHarness();
-      const workflowId = "recovery-review-5324414426";
+      const workflowId = REVIEW_WORKFLOW;
       const start = vi
         .fn<NonNullable<AdminCoordinatorDeps["startRecovery"]>>()
         .mockResolvedValueOnce({ kind: "unanswered", reason: "create response lost" })
@@ -10293,10 +10466,10 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     ).toMatchObject({ status: 409, body: { error: "recovery_claim_mismatch" } });
     expect(
       await recoverOriginalUnit(
-        { parentInstanceId: INSTANCE.id, unit: "U12", workflowId: "recovery-review-5324414426" },
+        { parentInstanceId: INSTANCE.id, unit: "U12", recoveryActionId: REVIEW_ACTION, workflowId: REVIEW_WORKFLOW },
         h.deps,
       ),
-    ).toMatchObject({ status: 200, body: { workflowId: "recovery-review-5324414426" } });
+    ).toMatchObject({ status: 200, body: { workflowId: REVIEW_WORKFLOW } });
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual(claimed);
     expect(h.recoveries).toHaveLength(1);
     expect(h.dispatched).toEqual([]);
@@ -10304,7 +10477,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
 
   it("does not revoke a concurrent external-review retry after observing its Workflow absent", async () => {
     const h = await approvedHarness();
-    const workflowId = "recovery-review-5324414426";
+    const workflowId = REVIEW_WORKFLOW;
     const start = vi
       .fn<NonNullable<AdminCoordinatorDeps["startRecovery"]>>()
       .mockResolvedValueOnce({ kind: "unanswered", reason: "create response lost" })
@@ -10394,7 +10567,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       { index: 0, agent: "coding", outcome: "started", at: NOW - minutesToMs(175) },
       { index: 0, agent: "coding", outcome: "aborted", at: NOW - minutesToMs(165) },
     );
-    await h.instances.putUnits([row]);
+    seedCoordinatorUnit(h.instances, row);
     const coding = (await h.store.get("run-original-coding"))!;
     const review = (await h.store.get("run-original-review"))!;
     await h.store.put({ ...coding, idempotencyKey: `${INSTANCE.id}:U12/s2/0/coding` });
@@ -10437,7 +10610,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       callRecovery(h, "slack:C1:later-request"),
     ]);
     expect(responses.map((r) => r.status).sort()).toEqual([200, 409]);
-    expect(admitted).toEqual(["recovery-review-5324414426"]);
+    expect(admitted).toEqual(["recovery-r_2a7b4146107649167ee86be55a3153f9a6a6441cf82602934e7507102be544e1"]);
   });
 
   it.each([
@@ -10579,8 +10752,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
     if (scenario === "CAS loss")
       vi.spyOn(h.instances, "transitionRecovery").mockResolvedValueOnce({ ok: false, reason: "stale" });
-    await h.instances.replace(instance);
-    await h.instances.putUnits([row]);
+    seedCoordinatorInstance(h.instances, instance);
+    seedCoordinatorUnit(h.instances, row);
     expect((await callRecovery(h)).status).toBe(409);
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
     expect(h.recoveries).toEqual([]);
@@ -10630,12 +10803,12 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         children.push(tag);
         expect(msg.userId).toBe(INSTANCE.userId);
         expect(msg.threadKey).toBe(INSTANCE.threadKey);
-        expect(tag.transportWorkflowId).toBe("recovery-review-5324414426");
+        expect(tag.transportWorkflowId).toBe(REVIEW_WORKFLOW);
         expect(tag.recovery?.deadlineAt).toBe(NOW + minutesToMs(60));
         const n = children.length;
         const id = `run-recovered-${n}`;
         if (n === 1 || n === 3) {
-          expect(tag.idempotencyKey).toBe(`${INSTANCE.id}:U12/recovery/${n === 1 ? 2 : 3}/review`);
+          expect(tag.idempotencyKey).toBe(`${INSTANCE.id}:U12/recovery/${REVIEW_ACTION}/${n === 1 ? 2 : 3}/review`);
           expect(msg.text).toContain(head);
           if (n === 1) {
             expect(msg.text).toContain("full read-only review");
@@ -10661,7 +10834,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           );
         } else {
           expect(n).toBe(2);
-          expect(tag.idempotencyKey).toBe(`${INSTANCE.id}:U12/recovery/2/findings`);
+          expect(tag.idempotencyKey).toBe(`${INSTANCE.id}:U12/recovery/${REVIEW_ACTION}/2/findings`);
           expect(tag.publication?.expectedHeadSha).toBe(POST_HEAD);
           expect(msg.text).toContain("F1");
           head = fixed;
@@ -10701,8 +10874,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         },
         waitForEvent: async () => ({ ok: true }),
       };
-      const result = await runOriginalUnitRecovery(steps, bot, "recovery-review-5324414426", {
+      const result = await runOriginalUnitRecovery(steps, bot, REVIEW_WORKFLOW, {
         kind: "recover-original-unit",
+        recoveryActionId: h.recoveries.at(-1)!.params.recoveryActionId,
         parentInstanceId: INSTANCE.id,
         unit: "U12",
       });
@@ -10723,6 +10897,16 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         accounting: { spendUsd: 15 },
       });
       expect(await callRecovery(h)).toMatchObject({ status: 200, body: { outcome: "already_completed" } });
+      const actionsBeforeReplay = h.recoveries.length;
+      expect(
+        await recoverOriginalUnit({ parentInstanceId: INSTANCE.id, unit: "U12", renew: true }, h.deps, {
+          userId: INSTANCE.userId,
+          threadKey: INSTANCE.threadKey,
+          messageId: "slack:C1:recovery-request",
+        }),
+      ).toMatchObject({ status: 409, body: { error: "recovery_claim_mismatch" } });
+      expect(h.recoveries).toHaveLength(actionsBeforeReplay);
+      expect((await h.instances.listUnits(INSTANCE.id))[0]).toEqual(settled);
     },
   );
 
@@ -10739,7 +10923,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         {
           parentInstanceId: INSTANCE.id,
           unit: "U12",
-          workflowId: scenario === "wrong workflow" ? "other-workflow" : "recovery-review-5324414426",
+          workflowId: scenario === "wrong workflow" ? "other-workflow" : REVIEW_WORKFLOW,
         },
         h.deps,
       );
@@ -10756,7 +10940,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       expect((await callRecovery(h)).status).toBe(200);
       const recoveredReview = reviewRecord({
         id: "run-recovered-review",
-        idempotencyKey: `${INSTANCE.id}:U12/recovery/2/review`,
+        idempotencyKey: `${INSTANCE.id}:U12/recovery/${REVIEW_ACTION}/2/review`,
         startedAt: NOW,
         finishedAt: NOW,
         reviewHead: POST_HEAD,
@@ -10777,7 +10961,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           post(`${COORDINATOR_ADMIN_PREFIX}spawn`, {
             parentInstanceId: INSTANCE.id,
             unit: "U12",
-            step: "U12/recovery/2/review",
+            recoveryActionId: REVIEW_ACTION,
+            recoveryWorkflowId: REVIEW_WORKFLOW,
+            step: `U12/recovery/${REVIEW_ACTION}/2/review`,
             preset: "review",
             budget: 10,
             brief: { kind: "review", unit: "U12", pr: PR.number, headSha: POST_HEAD, round: 2 },
@@ -10798,7 +10984,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           post(`${COORDINATOR_ADMIN_PREFIX}spawn`, {
             parentInstanceId: INSTANCE.id,
             unit: "U12",
-            step: `U12/recovery/${child === "findings" ? "2/findings" : "3/review"}`,
+            recoveryActionId: REVIEW_ACTION,
+            recoveryWorkflowId: REVIEW_WORKFLOW,
+            step: `U12/recovery/${REVIEW_ACTION}/${child === "findings" ? "2/findings" : "3/review"}`,
             preset: child === "findings" ? "coding" : "review",
             budget: 10,
             brief:
@@ -10885,7 +11073,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       post(`${COORDINATOR_ADMIN_PREFIX}spawn`, {
         parentInstanceId: INSTANCE.id,
         unit: "U12",
-        step: "U12/recovery/2/findings",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
+        step: `U12/recovery/${REVIEW_ACTION}/2/findings`,
         preset: "coding",
         budget: 10,
         brief: { kind: "findings", unit: "U12", pr: PR.number, headSha: POST_HEAD, reviewRunId: "run-original-review" },
@@ -10980,7 +11170,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
 
     it("carries complete priced history into a cost-capped original unit", async () => {
       const h = await legacyHarness();
-      await h.instances.replace({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
+      seedCoordinatorInstance(h.instances, { ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
       await h.instances.putUnits([legacyRow()]);
       expect(await callRecovery(h)).toMatchObject({ status: 200 });
       expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
@@ -11620,7 +11810,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         ...historicalUsage,
         byModel: { "test/historical": { ...historicalUsage.byModel["test/historical"], usd } },
       });
-      await h.instances.replace({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
+      seedCoordinatorInstance(h.instances, { ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
       const row = legacyRow();
       row.rounds.push({ index: 1, agent: "coding", outcome: "started", at: NOW - minutesToMs(14) });
       await h.instances.putUnits([row]);
@@ -11717,7 +11907,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         await fillUnrelatedHistory(h);
         let error = "recovery_budget_unknown";
         if (scenario === "cost cap") {
-          await h.instances.replace({
+          seedCoordinatorInstance(h.instances, {
             ...recoveryInstance(),
             grant: { renewals: 0, costCapUsd: 0.5 },
           });
@@ -12054,7 +12244,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
 
     it("refuses a claimed cost-capped recovery when its original grant changes", async () => {
       const h = await legacyHarness();
-      await h.instances.replace({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
+      seedCoordinatorInstance(h.instances, { ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
       await h.instances.putUnits([legacyRow()]);
       expect((await callRecovery(h)).status).toBe(200);
       const claimed = (await h.instances.listUnits(INSTANCE.id))[0]!;
@@ -12069,7 +12259,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
 
     it("refuses a proven spent cost cap without resetting the cumulative total", async () => {
       const h = await legacyHarness();
-      await h.instances.replace({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 0.5 } });
+      seedCoordinatorInstance(h.instances, { ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 0.5 } });
       await h.instances.putUnits([legacyRow()]);
       expect(await callRecovery(h)).toMatchObject({
         status: 409,
@@ -12192,8 +12382,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       "refuses %s without borrowing present configuration or changing the original row",
       async (reason, instanceOver, rowOver) => {
         const h = await legacyHarness();
-        await h.instances.replace({ ...recoveryInstance(), ...instanceOver });
-        await h.instances.putUnits([{ ...legacyRow(), ...rowOver }]);
+        seedCoordinatorInstance(h.instances, { ...recoveryInstance(), ...instanceOver });
+        seedCoordinatorUnit(h.instances, { ...legacyRow(), ...rowOver });
         h.deps.shipGrantFor = () => {
           throw new Error("current configuration is not historical authority");
         };
@@ -12210,7 +12400,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
 
     it("accepts a retained grant at the renewal maximum without consulting current configuration", async () => {
       const h = await legacyHarness();
-      await h.instances.replace({ ...recoveryInstance(), grant: { renewals: 12 } });
+      seedCoordinatorInstance(h.instances, { ...recoveryInstance(), grant: { renewals: 12 } });
       await h.instances.putUnits([legacyRow()]);
       h.deps.shipGrantFor = () => {
         throw new Error("current configuration is not historical authority");
@@ -12258,7 +12448,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       h.deps,
       { userId: INSTANCE.userId, threadKey: INSTANCE.threadKey, messageId: "slack:C1:recovery-request" },
     );
-    expect(result).toMatchObject({ status: 200, body: { workflowId: "recovery-run-original-review" } });
+    expect(result).toMatchObject({ status: 200, body: { workflowId: REVIEW_WORKFLOW } });
     expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
       publication,
       lastPush: HEAD,
@@ -12412,7 +12602,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         post(`${COORDINATOR_ADMIN_PREFIX}round`, {
           parentInstanceId: INSTANCE.id,
           unit: "U12",
-          recoveryWorkflowId: "recovery-run-original-review",
+          recoveryActionId: REVIEW_ACTION,
+          recoveryWorkflowId: REVIEW_WORKFLOW,
           index: 1,
           agent: "coding",
           outcome: "started",
@@ -12443,7 +12634,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       expect(msg.userId).toBe(INSTANCE.userId);
       expect(msg.threadKey).toBe(INSTANCE.threadKey);
       expect(tag.parentInstanceId).toBe(INSTANCE.id);
-      expect(tag.transportWorkflowId).toBe("recovery-run-original-review");
+      expect(tag.transportWorkflowId).toBe(REVIEW_WORKFLOW);
       if (tag.idempotencyKey.endsWith("/findings")) {
         const [row] = await h.instances.listUnits(INSTANCE.id);
         expect(
@@ -12481,7 +12672,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         );
         io.runStarted?.({ id: "run-recovered-fix" });
       } else {
-        expect(tag.idempotencyKey).toBe(`${INSTANCE.id}:U12/recovery/2/review`);
+        expect(tag.idempotencyKey).toBe(`${INSTANCE.id}:U12/recovery/${REVIEW_ACTION}/2/review`);
         expect(tag.recovery?.expectedHeadSha).toBe(fixed);
         expect(msg.text).toContain(fixed);
         await h.store.put(
@@ -12522,8 +12713,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       waitForEvent: async () => ({ ok: true }),
     };
     expect(
-      await runOriginalUnitRecovery(steps, bot, "recovery-run-original-review", {
+      await runOriginalUnitRecovery(steps, bot, REVIEW_WORKFLOW, {
         kind: "recover-original-unit",
+        recoveryActionId: h.recoveries.at(-1)!.params.recoveryActionId,
         parentInstanceId: INSTANCE.id,
         unit: "U12",
       }),
@@ -12662,7 +12854,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.store.put(missingReceiptRecord());
     expect(await callRecovery(h)).toMatchObject({
       status: 200,
-      body: { workflowId: "recovery-run-original-findings" },
+      body: { workflowId: REVIEW_WORKFLOW },
     });
     expect(await h.instances.get(INSTANCE.id)).toEqual(instance);
     expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
@@ -13775,7 +13967,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
   ])("attributes an unknown recovery budget to %s without guessing", async (reason, instanceOver, rowOver) => {
     const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
     await h.instances.put({ ...recoveryInstance(), ...instanceOver });
-    await h.instances.putUnits([{ ...requestChangesRow(), ...rowOver }]);
+    seedCoordinatorUnit(h.instances, { ...requestChangesRow(), ...rowOver });
     expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_budget_unknown", reason } });
     expect(h.recoveries).toEqual([]);
   });
@@ -13801,13 +13993,18 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
 
     expect(response).toMatchObject({
       status: 200,
-      body: { ok: true, outcome: "started", workflowId: "recovery-run-original-review" },
+      body: { ok: true, outcome: "started", workflowId: REVIEW_WORKFLOW },
     });
     expect(h.dispatched).toHaveLength(0);
     expect(h.recoveries).toEqual([
       {
-        id: "recovery-run-original-review",
-        params: { kind: "recover-original-unit", parentInstanceId: INSTANCE.id, unit: "U12" },
+        id: REVIEW_WORKFLOW,
+        params: {
+          kind: "recover-original-unit",
+          recoveryActionId: REVIEW_ACTION,
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+        },
       },
     ]);
     const [claimed] = await h.instances.listUnits(INSTANCE.id);
@@ -13823,7 +14020,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
   });
 
   it.each([
-    ["earned", true, true, true, "recovery-run-original-review-2"],
+    ["earned", true, true, true, REVIEW_WORKFLOW],
     ["unposted", false, true, true, undefined],
     ["not a strict widening", true, false, true, undefined],
     ["no durable credit", true, true, false, undefined],
@@ -13947,7 +14144,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     );
     expect(await callRecovery(h)).toMatchObject({
       status: 200,
-      body: { workflowId: "recovery-run-original-findings-2" },
+      body: { workflowId: REVIEW_WORKFLOW },
     });
     const [claimed] = await h.instances.listUnits(INSTANCE.id);
     expect(claimed?.recovery).toMatchObject({
@@ -14020,7 +14217,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       }),
     );
     await h.store.put(review(3, ["source", "endpoint", "composition"], 15, 10));
-    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: "recovery-run-review-3" } });
+    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: REVIEW_WORKFLOW } });
     expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toMatchObject({
       round: 3,
       patternContinuations: 2,
@@ -14074,7 +14271,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
 
     expect(response).toMatchObject({
       status: 200,
-      body: { workflowId: "recovery-run-original-findings" },
+      body: { workflowId: REVIEW_WORKFLOW },
     });
     const [claimed] = await h.instances.listUnits(INSTANCE.id);
     expect(claimed).toMatchObject({
@@ -14254,7 +14451,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(priorOwner);
         return;
       }
-      expect(admission).toMatchObject({ status: 200, body: { workflowId: "recovery-run-original-findings" } });
+      expect(admission).toMatchObject({ status: 200, body: { workflowId: REVIEW_WORKFLOW } });
       h.deps.fetchCommitChecks = async () => ({ total: 1, pending: [], failed: [] });
       h.deps.fixupCommitSubjects = async () => [];
       const children: CoordinatorTag[] = [];
@@ -14263,7 +14460,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         children.push(tag);
         expect(tag).toMatchObject({
           parentInstanceId: INSTANCE.id,
-          idempotencyKey: `${INSTANCE.id}:U12/recovery/2/review`,
+          idempotencyKey: `${INSTANCE.id}:U12/recovery/${REVIEW_ACTION}/2/review`,
           recovery: { expectedHeadSha: fixed },
         });
         expect(msg.text).toContain(fixed);
@@ -14304,8 +14501,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         },
         waitForEvent: async () => ({ ok: true }),
       };
-      const result = await runOriginalUnitRecovery(steps, bot, "recovery-run-original-findings", {
+      const result = await runOriginalUnitRecovery(steps, bot, REVIEW_WORKFLOW, {
         kind: "recover-original-unit",
+        recoveryActionId: h.recoveries.at(-1)!.params.recoveryActionId,
         parentInstanceId: INSTANCE.id,
         unit: "U12",
       });
@@ -14606,7 +14804,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.store.put(reviewRecord());
     await h.store.put(failedDuringDrainWait());
 
-    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: "recovery-run-original-review" } });
+    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: REVIEW_WORKFLOW } });
     const [claimed] = await h.instances.listUnits(INSTANCE.id);
     expect(claimed?.recovery).toMatchObject({ kind: "findings", round: 1, expectedHeadSha: HEAD });
     expect(claimed?.lastPush).toBeUndefined();
@@ -14669,7 +14867,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(failed.events.slice(12, 17).map((event) => event.type)).toEqual(Array(5).fill("context"));
     await h.store.put(failed);
 
-    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: "recovery-run-original-review" } });
+    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: REVIEW_WORKFLOW } });
     const [claimed] = await h.instances.listUnits(INSTANCE.id);
     expect(claimed?.recovery).toMatchObject({
       kind: "findings",
@@ -14701,7 +14899,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.store.put(reviewRecord());
     await h.store.put(failedBeforeWork());
 
-    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: "recovery-run-original-review" } });
+    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: REVIEW_WORKFLOW } });
     const [claimed] = await h.instances.listUnits(INSTANCE.id);
     expect(claimed?.recovery).toMatchObject({
       kind: "findings",
@@ -14738,7 +14936,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     if (scenario === "foreign binding owner") row.publication = { ...publication, owner: { ...owner, unit: "U13" } };
     if (scenario === "missing publication") row.publication = undefined;
     if (scenario === "exhausted original lease") row.startedAt = NOW - minutesToMs(121);
-    await h.instances.putUnits([row]);
+    seedCoordinatorUnit(h.instances, row);
     await h.store.put(reviewRecord());
     await h.store.put(failedBeforeWork());
     if (scenario === "rival findings child")
@@ -14928,7 +15126,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
 
     const response = await callRecovery(h);
 
-    expect(response).toMatchObject({ status: 200, body: { workflowId: "recovery-run-original-findings" } });
+    expect(response).toMatchObject({ status: 200, body: { workflowId: REVIEW_WORKFLOW } });
     const [claimed] = await h.instances.listUnits(INSTANCE.id);
     expect(claimed!.recovery).toMatchObject({ kind: "review", round: 2, findingsRunId: "run-original-findings" });
   });
@@ -15944,15 +16142,15 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
 
     expect(first).toMatchObject({
       status: 200,
-      body: { outcome: "started", workflowId: "recovery-run-original-review" },
+      body: { outcome: "started", workflowId: REVIEW_WORKFLOW },
     });
     expect(replay).toMatchObject({
       status: 200,
-      body: { outcome: "already_started", workflowId: "recovery-run-original-review" },
+      body: { outcome: "already_started", workflowId: REVIEW_WORKFLOW },
     });
     expect(h.dispatched).toHaveLength(0);
     expect(h.recoveries).toHaveLength(1);
-    expect(new Set(h.recoveries.map((entry) => entry.id))).toEqual(new Set(["recovery-run-original-review"]));
+    expect(new Set(h.recoveries.map((entry) => entry.id))).toEqual(new Set([REVIEW_WORKFLOW]));
   });
 
   it("refuses a requester replay after the original absolute lease expires without minting another Workflow", async () => {
@@ -16168,7 +16366,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       post(`${COORDINATOR_ADMIN_PREFIX}recover-unit`, {
         parentInstanceId: INSTANCE.id,
         unit: "U12",
-        workflowId: "recovery-run-original-review",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
+        workflowId: REVIEW_WORKFLOW,
       }),
       h.deps,
     );
@@ -16203,7 +16403,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       post(`${COORDINATOR_ADMIN_PREFIX}spawn`, {
         parentInstanceId: INSTANCE.id,
         unit: "U12",
-        step: "U12/recovery/1/findings",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
+        step: `U12/recovery/${REVIEW_ACTION}/1/findings`,
         preset: "coding",
         budget: 20,
         brief: { kind: "findings", unit: "U12", pr: PR.number, headSha: HEAD, reviewRunId: "run-original-review" },
@@ -16216,7 +16418,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(h.dispatched[0]!.opts).toMatchObject({
       coordinator: {
         parentInstanceId: INSTANCE.id,
-        transportWorkflowId: "recovery-run-original-review",
+        transportWorkflowId: REVIEW_WORKFLOW,
       },
       recovery: {
         repo: INSTANCE.repo,
@@ -16253,7 +16455,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       post(`${COORDINATOR_ADMIN_PREFIX}spawn`, {
         parentInstanceId: INSTANCE.id,
         unit: "U12",
-        step: "U12/recovery/1/findings",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
+        step: `U12/recovery/${REVIEW_ACTION}/1/findings`,
         preset: "coding",
         budget: 20,
         brief: { kind: "findings", unit: "U12", pr: PR.number, headSha: HEAD, reviewRunId: "run-original-review" },
@@ -16298,7 +16502,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       post(`${COORDINATOR_ADMIN_PREFIX}spawn`, {
         parentInstanceId: INSTANCE.id,
         unit: "U12",
-        step: "U12/recovery/1/findings",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
+        step: `U12/recovery/${REVIEW_ACTION}/1/findings`,
         preset: "coding",
         budget: 20,
         brief: { kind: "findings", unit: "U12", pr: PR.number, headSha: HEAD, reviewRunId: "run-original-review" },
@@ -16332,7 +16538,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       reviewRecord({
         id: "run-recovery-fix",
         agent: "coding",
-        idempotencyKey: `${INSTANCE.id}:U12/recovery/1/findings`,
+        idempotencyKey: `${INSTANCE.id}:U12/recovery/${REVIEW_ACTION}/1/findings`,
         verdict: undefined,
         reviewPost: undefined,
         reviewHead: undefined,
@@ -16355,6 +16561,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
         parentInstanceId: INSTANCE.id,
         unit: "U12",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
         pr: PR.number,
         recover: { runId: "run-recovery-fix" },
       }),
@@ -16429,7 +16637,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       ...owner,
       recoveryActionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId,
     });
-    expect((await h.instances.listUnits(INSTANCE.id))[0]!.recovery?.workflowId).toBe("recovery-run-original-review");
+    expect((await h.instances.listUnits(INSTANCE.id))[0]!.recovery?.workflowId).toBe(REVIEW_WORKFLOW);
   });
 
   it("rolls the exact row and owner back when Workflow admission fails definitively", async () => {
@@ -16523,10 +16731,10 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
 
     expect(first).toMatchObject({
       status: 200,
-      body: { outcome: "indeterminate", workflowId: "recovery-run-original-review" },
+      body: { outcome: "indeterminate", workflowId: REVIEW_WORKFLOW },
     });
     expect(replay).toMatchObject({ status: 200, body: { outcome: "already_started" } });
-    expect(h.recoveries.map((entry) => entry.id)).toEqual(["recovery-run-original-review"]);
+    expect(h.recoveries.map((entry) => entry.id)).toEqual([REVIEW_WORKFLOW]);
     expect((await h.instances.listUnits(INSTANCE.id))[0]!.recovery).toEqual(claimed!.recovery);
   });
 
@@ -16564,7 +16772,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       post(`${COORDINATOR_ADMIN_PREFIX}recover-unit`, {
         parentInstanceId: INSTANCE.id,
         unit: "U12",
-        workflowId: "recovery-run-original-review",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
+        workflowId: REVIEW_WORKFLOW,
       }),
       h.deps,
     );
@@ -16599,7 +16809,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
         parentInstanceId: INSTANCE.id,
         unit: "U12",
-        recoveryWorkflowId: "recovery-run-original-review",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
         ending: { kind: "merge_ready", report: "ready at the recovered head" },
         pr: PR,
         headSha: HEAD,
@@ -16612,7 +16823,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(settled!.recovery).toBeUndefined();
     expect(settled!.recoveryReceipt).toMatchObject({
       reviewRunId: "run-original-review",
-      workflowId: "recovery-run-original-review",
+      workflowId: REVIEW_WORKFLOW,
       accounting: { spendUsd: 0.25, grant: { renewals: 0, costCapUsd: 5 } },
     });
     expect(settled!.ending?.kind).toBe("merge_ready");
@@ -16646,7 +16857,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
           parentInstanceId: INSTANCE.id,
           unit: "U12",
-          recoveryWorkflowId: "recovery-run-original-review",
+          recoveryActionId: REVIEW_ACTION,
+          recoveryWorkflowId: REVIEW_WORKFLOW,
           ending: { kind: "merge_ready", report: "ready at the recovered head" },
           pr: PR,
           headSha: HEAD,
@@ -16679,7 +16891,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       const body = {
         parentInstanceId: INSTANCE.id,
         unit: "U12",
-        recoveryWorkflowId: "recovery-run-original-review",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
         ending: { kind: "merge_ready", report: "ready at the recovered head" },
         pr: PR,
         headSha: HEAD,
@@ -16773,11 +16986,14 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       };
       const h = harness({ prFacts: exactRecoveryFacts(HEAD), privateWorkerLog: log });
       const key = await privateRecovery(h);
+      const REVIEW_ACTION = h.recoveries[0]!.params.recoveryActionId;
+      const REVIEW_WORKFLOW = h.recoveries[0]!.id;
       const body = {
         parentInstanceId: INSTANCE.id,
         unit: "U12",
-        recoveryWorkflowId: "recovery-run-original-review",
-        deliveryId: "U12/recovery/end",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
+        deliveryId: `U12/recovery/${REVIEW_ACTION}/end`,
         ending: {
           kind: outcome?.kind ?? "merge_ready",
           report: "ready at the recovered head",
@@ -16791,14 +17007,14 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         body: { error: "private_worker_log_unavailable" },
       });
       expect((await h.instances.listUnits(INSTANCE.id))[0]?.recoveryReceipt).toMatchObject({
-        workflowId: "recovery-run-original-review",
+        workflowId: REVIEW_WORKFLOW,
       });
       if (outcome) {
         expect(
           await handleCoordinatorRequest(
             post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
               ...body,
-              deliveryId: "U12/recovery/changed-id",
+              deliveryId: `U12/recovery/${REVIEW_ACTION}/changed-id`,
             }),
             h.deps,
           ),
@@ -16816,7 +17032,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           await handleCoordinatorRequest(
             post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
               ...body,
-              deliveryId: "U12/recovery/conflicting",
+              deliveryId: `U12/recovery/${REVIEW_ACTION}/conflicting`,
               ending: {
                 ...body.ending,
                 outcome: { ...outcome, reviewRounds: 3 },
@@ -16826,7 +17042,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           ),
         ).toMatchObject({ status: 409, body: { error: "settlement_conflict" } });
         expect((await backing.list(key)).filter((event) => event.kind === "reply")).toMatchObject([
-          { kind: "reply", id: "U12/recovery/end", text: "ready at the recovered head" },
+          { kind: "reply", id: `U12/recovery/${REVIEW_ACTION}/end`, text: "ready at the recovered head" },
         ]);
       }
       expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps)).toMatchObject({
@@ -16838,7 +17054,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         body: { ok: true, alreadySettled: true, told: true },
       });
       expect((await backing.list(key)).filter((event) => event.kind === "reply")).toMatchObject([
-        { kind: "reply", id: "U12/recovery/end", text: "ready at the recovered head" },
+        { kind: "reply", id: `U12/recovery/${REVIEW_ACTION}/end`, text: "ready at the recovered head" },
       ]);
     }
   });
@@ -16846,6 +17062,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
   it("keeps the recovered delivery admission when immutable report storage fails after settlement", async () => {
     const h = harness({ prFacts: exactRecoveryFacts(HEAD), privateWorkerLog: new InMemoryPrivateWorkerLog() });
     await privateRecovery(h);
+    const REVIEW_ACTION = h.recoveries[0]!.params.recoveryActionId;
+    const REVIEW_WORKFLOW = h.recoveries[0]!.id;
     const append = h.deps.reportLedger!.appendSession.bind(h.deps.reportLedger);
     vi.spyOn(h.deps.reportLedger!, "appendSession").mockImplementationOnce(async () => ({
       ok: false,
@@ -16854,8 +17072,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     const body = {
       parentInstanceId: INSTANCE.id,
       unit: "U12",
-      recoveryWorkflowId: "recovery-run-original-review",
-      deliveryId: "U12/recovery/end",
+      recoveryActionId: REVIEW_ACTION,
+      recoveryWorkflowId: REVIEW_WORKFLOW,
+      deliveryId: `U12/recovery/${REVIEW_ACTION}/end`,
       ending: {
         kind: "aborted",
         report: "recovered detail",
@@ -16893,11 +17112,14 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     const log = new InMemoryPrivateWorkerLog();
     const h = harness({ prFacts: exactRecoveryFacts(HEAD), privateWorkerLog: log });
     const key = await privateRecovery(h);
+    const REVIEW_ACTION = h.recoveries[0]!.params.recoveryActionId;
+    const REVIEW_WORKFLOW = h.recoveries[0]!.id;
     const body = {
       parentInstanceId: INSTANCE.id,
       unit: "U12",
-      recoveryWorkflowId: "recovery-run-original-review",
-      deliveryId: "U12/recovery/legacy",
+      recoveryActionId: REVIEW_ACTION,
+      recoveryWorkflowId: REVIEW_WORKFLOW,
+      deliveryId: `U12/recovery/${REVIEW_ACTION}/legacy`,
       ending: { kind: "merge_ready", report: "Legacy report" },
       pr: PR,
       headSha: HEAD,
@@ -16907,7 +17129,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         await handleCoordinatorRequest(
           post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
             ...body,
-            deliveryId: "U12/recovery/typed",
+            deliveryId: `U12/recovery/${REVIEW_ACTION}/typed`,
             ending: {
               kind: "aborted",
               report: "Typed report",
@@ -16924,11 +17146,11 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       body: { error: "recovery_claim_stale" },
     });
     expect((await log.list(key)).filter((event) => event.kind === "reply")).toMatchObject([
-      { id: "U12/recovery/typed", text: "Typed report" },
+      { id: `U12/recovery/${REVIEW_ACTION}/typed`, text: "Typed report" },
     ]);
     expect((await h.instances.listUnits(INSTANCE.id))[0]?.ending).toMatchObject({
       kind: "aborted",
-      deliveryId: "U12/recovery/typed",
+      deliveryId: `U12/recovery/${REVIEW_ACTION}/typed`,
       report: "Typed report",
     });
   });
@@ -17017,7 +17239,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
         parentInstanceId: INSTANCE.id,
         unit: "U12",
-        recoveryWorkflowId: "recovery-run-original-review",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
         ending: { kind: "merge_ready", report: "settled" },
         pr: PR,
       }),
@@ -17048,7 +17271,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     const body = {
       parentInstanceId: INSTANCE.id,
       unit: "U12",
-      recoveryWorkflowId: "recovery-run-original-review",
+      recoveryActionId: REVIEW_ACTION,
+      recoveryWorkflowId: REVIEW_WORKFLOW,
       ending: { kind: "merge_ready", report: "ready at the recovered head" },
       pr: PR,
       headSha: HEAD,
@@ -17096,7 +17320,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
         parentInstanceId: INSTANCE.id,
         unit: "U12",
-        recoveryWorkflowId: "recovery-run-original-review",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
         ending: { kind: "held", report: "a person must choose", humanGate },
         pr: PR,
       }),
@@ -17121,7 +17346,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
         parentInstanceId: INSTANCE.id,
         unit: "U12",
-        recoveryWorkflowId: "recovery-run-original-review",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
         ending: { kind: "held", holdCause: "draft", report: "mark ready" },
         pr: PR,
       }),
@@ -17184,7 +17410,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
         parentInstanceId: INSTANCE.id,
         unit: "U12",
-        recoveryWorkflowId: "recovery-run-original-review",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
         ending: { kind: "continued", report: "renew", segment: 2 },
         segment: { index: 2 },
       }),
@@ -17221,7 +17448,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
         parentInstanceId: INSTANCE.id,
         unit: "U12",
-        recoveryWorkflowId: "recovery-run-original-review",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
         ending: { kind: "merge_ready", report: "must not settle" },
         pr: PR,
         headSha: HEAD,

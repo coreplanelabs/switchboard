@@ -42,9 +42,9 @@ export const COORDINATOR_STEP_PATH_PREFIX = "/admin/coordinator/";
 /** A Workflow instance id: the platform's own alphabet, at most 100 characters. */
 export const INSTANCE_ID_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,99}$/;
 /** A step name: `<unit>/<round>/<kind>` and its kin — no colon, which separates it from the instance in the key. */
-export const STEP_NAME_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_./-]{0,119}$/;
+export const STEP_NAME_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_./-]{0,255}$/;
 /** `<parentInstanceId>:<step>` — the idempotency key a spawn carries and the child's claim stores. */
-export const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,99}:[A-Za-z0-9_][A-Za-z0-9_./-]{0,119}$/;
+export const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,99}:[A-Za-z0-9_][A-Za-z0-9_./-]{0,255}$/;
 
 export function idempotencyKeyFor(parentInstanceId: string, step: string): string {
   return `${parentInstanceId}:${step}`;
@@ -1126,9 +1126,43 @@ export function preserveWorkBrief(current: CoordinatorUnit | undefined, replacem
   };
 }
 
+/** Failed-create cleanup can discard a draft, never evidence owned by prior work. */
+export function coordinatorUnitCanBeDiscarded(json: string): boolean {
+  let value: unknown;
+  try {
+    value = JSON.parse(json);
+  } catch {
+    return false;
+  }
+  return (
+    isCoordinatorUnit(value) &&
+    value.rounds.length === 0 &&
+    Object.keys(value).every((field) =>
+      [
+        "instanceId",
+        "unit",
+        "slug",
+        "title",
+        "branch",
+        "dependsOn",
+        "rounds",
+        "workBrief",
+        "context",
+        "generatedTask",
+        "threadEvidence",
+        "threadKey",
+        "sourceUrl",
+        "reviewThread",
+        "issue",
+        "record",
+      ].includes(field),
+    )
+  );
+}
+
 export class CoordinatorUnitWriteConflict extends Error {
   constructor() {
-    super("coordinator unit is settled; replacement requires compare-and-replace");
+    super("coordinator unit write conflicts with retained state");
     this.name = "CoordinatorUnitWriteConflict";
   }
 }
@@ -1167,6 +1201,7 @@ export function permitsRecoveryMetadataWrite(
   replacement: CoordinatorUnit,
   checked = false,
 ): boolean {
+  if (current?.startedAt !== undefined && replacement.startedAt !== current.startedAt) return false;
   if (current?.adoption !== undefined && !checked && JSON.stringify(current) !== JSON.stringify(replacement))
     return false;
   if (JSON.stringify(current?.adoption) !== JSON.stringify(replacement.adoption)) {
@@ -1255,10 +1290,12 @@ const isFinite = (v: unknown): v is number => typeof v === "number" && Number.is
 /** A count the writers produce: a non-negative integer, never a fraction, a negative or NaN. */
 const isCount = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0;
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
-const isPr = (v: unknown): boolean => isObject(v) && isFinite(v.number) && isText(v.url, 2048);
+const isPr = (v: unknown): boolean =>
+  isObject(v) && Number.isSafeInteger(v.number) && (v.number as number) > 0 && isText(v.url, 2048);
 const isResume = (v: unknown): boolean =>
   isObject(v) &&
-  isFinite(v.pr) &&
+  Number.isSafeInteger(v.pr) &&
+  (v.pr as number) > 0 &&
   (v.headSha === undefined || isText(v.headSha)) &&
   (v.url === undefined || isText(v.url, 2048));
 const isFullSha = (v: unknown): v is string => typeof v === "string" && /^[0-9a-f]{40}$/i.test(v);
@@ -1287,7 +1324,7 @@ const isPublication = (v: unknown): v is ExistingPrPublicationBinding =>
   typeof v.repo === "string" &&
   REPO_SLUG.test(v.repo) &&
   typeof v.pr === "number" &&
-  Number.isInteger(v.pr) &&
+  Number.isSafeInteger(v.pr) &&
   v.pr > 0 &&
   isText(v.headRef) &&
   isText(v.baseRef) &&
@@ -1471,6 +1508,62 @@ export function isCoordinatorEnding(v: unknown): v is NonNullable<CoordinatorUni
   );
 }
 
+/** Admission fields retained by the recovery journal; lease timing stays on the unit. */
+export function isRecoveryAdmissionFields(r: unknown): boolean {
+  return (
+    isObject(r) &&
+    (r.kind === "findings" || r.kind === "review" || r.kind === "coding") &&
+    typeof r.round === "number" &&
+    Number.isInteger(r.round) &&
+    (r.kind === "coding" ? r.round === 0 : r.round >= 1) &&
+    (r.patternContinuations === undefined ||
+      (Number.isSafeInteger(r.patternContinuations) &&
+        (r.patternContinuations as number) >= 0 &&
+        (r.patternContinuations as number) <= 2 &&
+        (r.patternContinuations as number) < r.round)) &&
+    typeof r.expectedHeadSha === "string" &&
+    /^[0-9a-f]{40}$/i.test(r.expectedHeadSha) &&
+    typeof r.step === "string" &&
+    STEP_NAME_PATTERN.test(r.step) &&
+    (r.kind === "coding"
+      ? isText(r.codingRunId) &&
+        isText(r.codingKey) &&
+        r.accounting !== undefined &&
+        r.externalReview === undefined &&
+        r.reviewRunId === undefined &&
+        r.reviewKey === undefined &&
+        r.findings === undefined &&
+        r.findingsRunId === undefined &&
+        r.patch === undefined
+      : isText(r.reviewRunId) && isText(r.reviewKey)) &&
+    (r.accounting === undefined || isRecoveryAccounting(r.accounting)) &&
+    (r.renewed === undefined ||
+      (r.renewed === true &&
+        r.kind === "findings" &&
+        isRecoveryAccounting(r.accounting) &&
+        r.accounting.renewalsSpent > 0)) &&
+    (r.externalReview === undefined ||
+      (isRecoveryReview(r.externalReview) &&
+        r.kind === "review" &&
+        isRecoveryAccounting(r.accounting) &&
+        r.findings === undefined &&
+        r.findingsRunId === undefined)) &&
+    (r.findingsRunId === undefined || isText(r.findingsRunId)) &&
+    (r.findingsKey === undefined || isText(r.findingsKey)) &&
+    ((r.findingsRunId === undefined && r.findingsKey === undefined) ||
+      (r.kind === "review" && r.findingsRunId !== undefined && r.findingsKey !== undefined)) &&
+    (r.findings === undefined || (Array.isArray(r.findings) && r.findings.every(isFindingShape))) &&
+    (r.priorFindings === undefined ||
+      (r.kind === "review" &&
+        r.round >= 2 &&
+        Array.isArray(r.priorFindings) &&
+        r.priorFindings.every(isFindingShape))) &&
+    (r.patch === undefined || (r.kind === "findings" && isSavedFindingsPatch(r.patch))) &&
+    typeof r.workflowId === "string" &&
+    INSTANCE_ID_PATTERN.test(r.workflowId)
+  );
+}
+
 export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
   if (!isObject(v)) return false;
   const r = v;
@@ -1553,59 +1646,13 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
         (r.history !== undefined &&
           typeof r.recovery.actionId === "string" &&
           /^r_[a-f0-9]{64}$/.test(r.recovery.actionId))) &&
-      (r.recovery.kind === "findings" || r.recovery.kind === "review" || r.recovery.kind === "coding") &&
-      typeof r.recovery.round === "number" &&
-      Number.isInteger(r.recovery.round) &&
-      (r.recovery.kind === "coding" ? r.recovery.round === 0 : r.recovery.round >= 1) &&
-      (r.recovery.patternContinuations === undefined ||
-        (Number.isSafeInteger(r.recovery.patternContinuations) &&
-          (r.recovery.patternContinuations as number) >= 0 &&
-          (r.recovery.patternContinuations as number) <= 2 &&
-          (r.recovery.patternContinuations as number) < r.recovery.round)) &&
-      typeof r.recovery.expectedHeadSha === "string" &&
-      /^[0-9a-f]{40}$/i.test(r.recovery.expectedHeadSha) &&
+      isRecoveryAdmissionFields(r.recovery) &&
       isFinite(r.recovery.remainingMs) &&
       r.recovery.remainingMs > 0 &&
       isFinite(r.recovery.claimedAt) &&
-      typeof r.recovery.step === "string" &&
-      STEP_NAME_PATTERN.test(r.recovery.step) &&
-      (r.recovery.kind === "coding"
-        ? isText(r.recovery.codingRunId) &&
-          isText(r.recovery.codingKey) &&
-          r.recovery.accounting !== undefined &&
-          r.recovery.externalReview === undefined &&
-          r.recovery.reviewRunId === undefined &&
-          r.recovery.reviewKey === undefined &&
-          r.recovery.findings === undefined &&
-          r.recovery.findingsRunId === undefined &&
-          r.recovery.patch === undefined
-        : isText(r.recovery.reviewRunId) && isText(r.recovery.reviewKey)) &&
-      (r.recovery.accounting === undefined || isRecoveryAccounting(r.recovery.accounting)) &&
       (r.recovery.renewed === undefined ||
-        (r.recovery.renewed === true &&
-          r.recovery.kind === "findings" &&
-          isRecoveryAccounting(r.recovery.accounting) &&
+        (isRecoveryAccounting(r.recovery.accounting) &&
           r.recovery.accounting.renewalsSpent > (r.segments?.length ?? 0))) &&
-      (r.recovery.externalReview === undefined ||
-        (isRecoveryReview(r.recovery.externalReview) &&
-          r.recovery.kind === "review" &&
-          isRecoveryAccounting(r.recovery.accounting) &&
-          r.recovery.findings === undefined &&
-          r.recovery.findingsRunId === undefined)) &&
-      (r.recovery.findingsRunId === undefined || isText(r.recovery.findingsRunId)) &&
-      (r.recovery.findingsKey === undefined || isText(r.recovery.findingsKey)) &&
-      ((r.recovery.findingsRunId === undefined && r.recovery.findingsKey === undefined) ||
-        (r.recovery.kind === "review" &&
-          r.recovery.findingsRunId !== undefined &&
-          r.recovery.findingsKey !== undefined)) &&
-      (r.recovery.findings === undefined ||
-        (Array.isArray(r.recovery.findings) && r.recovery.findings.every(isFindingShape))) &&
-      (r.recovery.priorFindings === undefined ||
-        (r.recovery.kind === "review" &&
-          r.recovery.round >= 2 &&
-          Array.isArray(r.recovery.priorFindings) &&
-          r.recovery.priorFindings.every(isFindingShape))) &&
-      (r.recovery.patch === undefined || (r.recovery.kind === "findings" && isSavedFindingsPatch(r.recovery.patch))) &&
       (r.recovery.previousBinding === undefined ||
         (isObject(r.recovery.previousBinding) &&
           (r.recovery.previousBinding.publication === undefined ||

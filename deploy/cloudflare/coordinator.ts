@@ -16,10 +16,16 @@
 // by a scan: the container binding (its loopback into the bot) and the token
 // map (the `coordinator` entry it presents to the bot's steps) — no model,
 // Slack or GitHub credential, and no fetch but the container binding's.
+import { RECOVERY_ACTION_ID_PATTERN, recoveryWorkflowId } from "../../src/core/coordinator/recoveryStep.ts";
 import { getContainer } from "@cloudflare/containers";
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
-import { COORDINATOR_IDENTITY, COORDINATOR_STEP_PATH_PREFIX } from "../../src/core/coordinator/contract.ts";
+import {
+  COORDINATOR_IDENTITY,
+  COORDINATOR_STEP_PATH_PREFIX,
+  INSTANCE_ID_PATTERN,
+  UNIT_PATTERN,
+} from "../../src/core/coordinator/contract.ts";
 import {
   readBotAnswer,
   runOriginalUnitRecovery,
@@ -47,10 +53,19 @@ function originalUnitRecoveryParams(value: ShipCoordinatorParams): OriginalUnitR
   if (
     value.kind !== "recover-original-unit" ||
     typeof value.parentInstanceId !== "string" ||
-    typeof value.unit !== "string"
+    !INSTANCE_ID_PATTERN.test(value.parentInstanceId) ||
+    typeof value.unit !== "string" ||
+    !UNIT_PATTERN.test(value.unit) ||
+    typeof value.recoveryActionId !== "string" ||
+    !RECOVERY_ACTION_ID_PATTERN.test(value.recoveryActionId)
   )
     return undefined;
-  return { kind: value.kind, parentInstanceId: value.parentInstanceId, unit: value.unit };
+  return {
+    kind: value.kind,
+    parentInstanceId: value.parentInstanceId,
+    unit: value.unit,
+    recoveryActionId: value.recoveryActionId,
+  };
 }
 
 /** The bot behind the container binding: the reply as the wire carried it.
@@ -93,6 +108,8 @@ export class ShipCoordinator extends WorkflowEntrypoint<CoordinatorEnv, ShipCoor
     if (event.payload.kind === "recover-original-unit") {
       const params = originalUnitRecoveryParams(event.payload);
       if (params === undefined) throw new NonRetryableError("the original-unit recovery params are malformed");
+      if (recoveryWorkflowId(params.recoveryActionId) !== event.instanceId)
+        throw new NonRetryableError("the recovery Workflow does not name its action");
       return runOriginalUnitRecovery(workflowSteps(step), containerBot(this.env), event.instanceId, params);
     }
     return runPlan(workflowSteps(step), containerBot(this.env), event.instanceId);

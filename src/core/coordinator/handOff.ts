@@ -60,20 +60,6 @@ import type { CreateInstanceAnswer, InstanceStatusAnswer } from "./instancesRout
 import { privateWorkerThreadKey, type PrivateWorkerLog } from "../privateWorkerLog.js";
 import { generatedTaskAdmissionSource, generatedTaskOf, generatedTaskText } from "./generatedTask.js";
 
-export type BeforeCoordinatorStart = () => Promise<
-  | {
-      ok: true;
-      /** Transfer the reserved pull request to the durable attempt immediately
-       * before its Workflow create. A refusal here starts no work. */
-      commit: (owner: { instanceId: string; unit: string }) => Promise<void>;
-      /** Mark the accepted Workflow as the owner so dispatch cleanup retains it. */
-      complete: () => void;
-      /** Restore the exact legacy row and release only this transition's owner. */
-      abort: () => Promise<void>;
-    }
-  | { ok: false; refusal: Refusal }
->;
-
 export interface HandOffInput {
   /** Trusted source snapshot, independent of the model's task and target. */
   context?: UnitContext;
@@ -96,14 +82,6 @@ export interface HandOffInput {
   };
   /** Set by the trusted caller only when the private worker log is configured. */
   privateWorkerReady?: boolean;
-  /** A generated plan this thread already owns and is re-issuing. Internal:
-   *  the dispatcher read it from the coordinator row, so formatting in the
-   *  stored request can never mint a nearby but different plan id. */
-  reissuePlanId?: string;
-  /** A legacy continuation's last atomic gate. It runs only after planning,
-   * attempt selection and every refusal gate succeeded, immediately before
-   * records are written. Any later refusal aborts its provisional transition. */
-  beforeStart?: BeforeCoordinatorStart;
   /** A main-agent run's liveness fence. Durable claim and Workflow creation
    * both check it after awaited preflight work; absent for ordinary Ship. */
   stillLive?: () => boolean;
@@ -441,7 +419,7 @@ async function plan(
     const planId =
       input.mainTask !== undefined
         ? generatedPlanId(text, `${input.mainTask.mainThreadKey}:${input.mainTask.actId}`)
-        : (input.reissuePlanId ?? generatedPlanId(text, msg.threadKey));
+        : generatedPlanId(text, msg.threadKey);
     const proposedBrief =
       input.mainTask !== undefined
         ? {
@@ -746,7 +724,6 @@ async function handOffToCoordinatorUnchecked(deps: HandOffDeps, input: HandOffIn
     if (input.mainTask.mainThreadKey !== input.msg.threadKey)
       return refused("setup_failed", "🚫 The main task must come from its own conversation; no worker started.");
     if (
-      input.beforeStart !== undefined ||
       input.entry.resume !== undefined ||
       input.entry.adopt !== undefined ||
       input.entry.branch !== undefined ||
@@ -1248,207 +1225,172 @@ async function start(
   write: "put" | "replace",
 ): Promise<HandOffOutcome> {
   const log = deps.log ?? console.log;
-  const reservation = await input.beforeStart?.();
-  if (reservation?.ok === false)
-    return { status: "aborted", reply: reservation.refusal.text, refusal: reservation.refusal };
-  let retainedOwner = false;
-  try {
-    const pendingInstance: CoordinatorInstance = { ...instance, admission: "unreconciled" };
-    let mainClaim;
+  const pendingInstance: CoordinatorInstance = { ...instance, admission: "unreconciled" };
+  let mainClaim;
+  if (!mainRunLiveAtGate(input)) return refused("setup_failed", "The main run stopped; no worker started.");
+  if (!(await privateAtGate(input)))
+    return refused("setup_failed", "This is no longer a private conversation; no worker started.");
+  if (!mainRunLiveAtGate(input)) return refused("setup_failed", "The main run stopped; no worker started.");
+  if (input.mainTask !== undefined) {
+    const unit = units[0];
+    if (unit === undefined || !(await privateWorkerLogReachable(deps, instance.id, unit.unit)))
+      return refused("setup_failed", "The private worker conversation could not be verified; no worker started.");
     if (!mainRunLiveAtGate(input)) return refused("setup_failed", "The main run stopped; no worker started.");
     if (!(await privateAtGate(input)))
       return refused("setup_failed", "This is no longer a private conversation; no worker started.");
-    if (!mainRunLiveAtGate(input)) return refused("setup_failed", "The main run stopped; no worker started.");
-    if (input.mainTask !== undefined) {
-      const unit = units[0];
-      if (unit === undefined || !(await privateWorkerLogReachable(deps, instance.id, unit.unit)))
-        return refused("setup_failed", "The private worker conversation could not be verified; no worker started.");
-      if (!mainRunLiveAtGate(input)) return refused("setup_failed", "The main run stopped; no worker started.");
-      if (!(await privateAtGate(input)))
-        return refused("setup_failed", "This is no longer a private conversation; no worker started.");
-    }
-    try {
-      mainClaim =
-        input.mainTask !== undefined
-          ? await deps.instances.claimMainTask(input.mainTask, pendingInstance, units[0]!, input.mainTask.authority!)
-          : undefined;
-    } catch (err) {
+  }
+  try {
+    mainClaim =
+      input.mainTask !== undefined
+        ? await deps.instances.claimMainTask(input.mainTask, pendingInstance, units[0]!, input.mainTask.authority!)
+        : undefined;
+  } catch (err) {
+    return refused(
+      "plan_history_unavailable",
+      `⚠️ The main task could not be recorded on the state Worker (${describe(err)}); no worker started.`,
+    );
+  }
+  if (mainClaim?.ok === true && !mainClaim.created) return linkedTask(deps, input, mainClaim.link);
+  if (mainClaim?.ok === false)
+    return refused(
+      mainClaim.reason === "unavailable" ? "plan_history_unavailable" : "plan_runner_conflict",
+      mainClaim.reason === "unavailable"
+        ? "⚠️ The main task could not be recorded on the state Worker; no worker started."
+        : "🚫 This main task's instance id is already owned by another unit; no worker started.",
+    );
+  const put =
+    mainClaim !== undefined
+      ? { ok: true as const }
+      : write === "replace"
+        ? await deps.instances.replace(pendingInstance)
+        : await deps.instances.put(pendingInstance);
+  if (!put.ok) {
+    if (put.reason === "unavailable")
       return refused(
         "plan_history_unavailable",
-        `⚠️ The main task could not be recorded on the state Worker (${describe(err)}); no worker started.`,
+        "⚠️ The plan runner needs run history on the state Worker (`runHistory.worker`): the instance record could not be written, so nothing ran.",
       );
-    }
-    if (mainClaim?.ok === true && !mainClaim.created) return linkedTask(deps, input, mainClaim.link);
-    if (mainClaim?.ok === false)
-      return refused(
-        mainClaim.reason === "unavailable" ? "plan_history_unavailable" : "plan_runner_conflict",
-        mainClaim.reason === "unavailable"
-          ? "⚠️ The main task could not be recorded on the state Worker; no worker started."
-          : "🚫 This main task's instance id is already owned by another unit; no worker started.",
-      );
-    const put =
-      mainClaim !== undefined
-        ? { ok: true as const }
-        : write === "replace"
-          ? await deps.instances.replace(pendingInstance)
-          : await deps.instances.put(pendingInstance);
-    if (!put.ok) {
-      if (put.reason === "unavailable")
-        return refused(
-          "plan_history_unavailable",
-          "⚠️ The plan runner needs run history on the state Worker (`runHistory.worker`): the instance record could not be written, so nothing ran.",
-        );
-      // Another record took the id between the read and the write: a race two
-      // requesters lose together — neither touches what is there.
-      return refused(
-        "plan_runner_conflict",
-        `🚫 A runner for \`${instance.id}\` was just recorded by another request, so this request started nothing; the recorded runner owns the pipeline.`,
-      );
-    }
-    const rows = mainClaim !== undefined ? { ok: true as const } : await deps.instances.putUnits(units);
-    if (!rows.ok)
+    // Another record took the id between the read and the write: a race two
+    // requesters lose together — neither touches what is there.
+    return refused(
+      "plan_runner_conflict",
+      `🚫 A runner for \`${instance.id}\` was just recorded by another request, so this request started nothing; the recorded runner owns the pipeline.`,
+    );
+  }
+  const rows = mainClaim !== undefined ? { ok: true as const } : await deps.instances.putUnits(units);
+  if (!rows.ok)
+    return refused(
+      rows.reason === "owned" || rows.reason === "stale" ? "plan_runner_conflict" : "plan_history_unavailable",
+      rows.reason === "owned" || rows.reason === "stale"
+        ? "The original unit retains its branch and pull request; no replacement runner started."
+        : "The plan runner could not verify durable ownership: no runner started.",
+    );
+  // A generated task's accepted inline media enters the same durable event
+  // list as a later thread reply. The unit row exists first, and the Workflow
+  // starts only after the append, so its first coding spawn can fold the bytes.
+  // `appendEvent` deduplicates the stable id: a re-issue after create failed
+  // cannot make the retry stage the same file twice. Seeded plans do not copy
+  // one request's media onto several independent units.
+  const accepted = [...(input.msg.images ?? []), ...(input.msg.documents ?? [])];
+  if (instance.plan?.path === undefined && accepted.length > 0) {
+    const unit = units[0]!;
+    const seeded = await deps.instances.appendEvent(
+      { instanceId: instance.id, unit: unit.unit },
+      {
+        id: `${instance.id}:${unit.unit}:ship-request`,
+        sender: input.msg.userId,
+        ...(input.msg.userName !== undefined ? { senderName: input.msg.userName } : {}),
+        text: "Attachments from the ship request.",
+        attachments: accepted,
+        mode: "steer",
+        at: input.now,
+      },
+    );
+    if (!seeded.ok)
       return refused(
         "plan_history_unavailable",
-        "⚠️ The plan runner needs run history on the state Worker: the unit rows could not be written, so nothing ran.",
+        "⚠️ The plan runner needs run history on the state Worker: the ship request's attachments could not be written, so nothing ran.",
       );
-    // A generated task's accepted inline media enters the same durable event
-    // list as a later thread reply. The unit row exists first, and the Workflow
-    // starts only after the append, so its first coding spawn can fold the bytes.
-    // `appendEvent` deduplicates the stable id: a re-issue after create failed
-    // cannot make the retry stage the same file twice. Seeded plans do not copy
-    // one request's media onto several independent units.
-    const accepted = [...(input.msg.images ?? []), ...(input.msg.documents ?? [])];
-    if (instance.plan?.path === undefined && accepted.length > 0) {
-      const unit = units[0]!;
-      const seeded = await deps.instances.appendEvent(
-        { instanceId: instance.id, unit: unit.unit },
-        {
-          id: `${instance.id}:${unit.unit}:ship-request`,
-          sender: input.msg.userId,
-          ...(input.msg.userName !== undefined ? { senderName: input.msg.userName } : {}),
-          text: "Attachments from the ship request.",
-          attachments: accepted,
-          mode: "steer",
-          at: input.now,
-        },
-      );
-      if (!seeded.ok)
-        return refused(
-          "plan_history_unavailable",
-          "⚠️ The plan runner needs run history on the state Worker: the ship request's attachments could not be written, so nothing ran.",
-        );
-    }
-    if (reservation?.ok === true) {
-      const unit = units[0];
-      if (unit === undefined)
-        return refused(
-          "setup_failed",
-          "⚠️ The plan runner had no durable unit to own at its final start gate, so nothing ran.",
-        );
-      try {
-        // Commit process-local ownership only after every durable row and
-        // attachment gate passed, but before Workflow create can start work.
-        await reservation.commit({ instanceId: instance.id, unit: unit.unit });
-      } catch (err) {
-        return refused(
-          "setup_failed",
-          `⚠️ The plan runner could not transfer existing-pull-request ownership to its new attempt (${describe(err)}), so nothing ran.`,
-        );
-      }
-    }
-    let answer: CreateInstanceAnswer;
-    if (!mainRunLiveAtGate(input))
-      return refused("setup_failed", "The main run stopped; its task is saved for a safe retry.");
-    if (!(await privateAtGate(input)))
-      return refused("setup_failed", "This is no longer a private conversation; its task is saved for a safe retry.");
-    if (input.mainTask !== undefined && !(await privateWorkerLogReachable(deps, instance.id, units[0]!.unit)))
-      return refused("setup_failed", "The private worker conversation could not be verified; no worker started.");
-    if (!(await privateAtGate(input)))
-      return refused("setup_failed", "This is no longer a private conversation; its task is saved for a safe retry.");
-    if (!mainRunLiveAtGate(input))
-      return refused("setup_failed", "The main run stopped; its task is saved for a safe retry.");
-    if (input.mainTask !== undefined) {
-      const revision = await requesterRevisionCurrent(deps, input.mainTask.mainThreadKey, input.mainTask.authority!);
-      if (revision === "unavailable")
-        return refused(
-          "plan_history_unavailable",
-          "I couldn't verify this request; its task is saved for a safe retry.",
-        );
-      if (revision === "newer")
-        return refused("setup_failed", "A newer request arrived before this worker started; no worker started.");
-    }
-    if (!mainRunLiveAtGate(input))
-      return refused("setup_failed", "The main run stopped; its task is saved for a safe retry.");
-    try {
-      answer = await deps.create(instance.id);
-    } catch (err) {
-      answer = { kind: "unanswered", reason: describe(err) };
-    }
-    switch (answer.kind) {
-      case "created": {
-        if (answer.id !== instance.id) {
-          if (reservation?.ok === true) reservation.complete();
-          retainedOwner = true;
-          return privateAdmissionObservation(
-            deps,
-            input,
-            pending(instance.id, "the create response named another instance"),
-          );
-        }
-        // The Workflow and its durable attempt now agree on the same owner.
-        // Cleanup must retain that owner across any later reply/card failure.
-        if (reservation?.ok === true) reservation.complete();
-        retainedOwner = true;
-        if (!(await confirmCreated(deps, pendingInstance)))
-          return privateAdmissionObservation(
-            deps,
-            input,
-            pending(instance.id, "the confirmed create could not be marked on the saved instance"),
-          );
-        log(`[ship] ${input.msg.threadKey}: handed to the plan runner ${instance.id} (${units.length} unit(s))`);
-        const replaced =
-          write === "replace" ? ["the records of an earlier attempt that never started were replaced"] : [];
-        return privateAdmissionObservation(deps, input, {
-          status: "completed",
-          admission: "created",
-          reply: handedOff([...where, ...replaced]),
-          instanceId: instance.id,
-        });
-      }
-      case "duplicate": {
-        // The platform reports a duplicate for the saved id. Its ownership
-        // needs reconciliation before this answer can claim a new start.
-        const status = answer.status !== undefined ? `, status: ${answer.status}` : "";
-        if (reservation?.ok === true) reservation.complete();
-        retainedOwner = true;
+  }
+  let answer: CreateInstanceAnswer;
+  if (!mainRunLiveAtGate(input))
+    return refused("setup_failed", "The main run stopped; its task is saved for a safe retry.");
+  if (!(await privateAtGate(input)))
+    return refused("setup_failed", "This is no longer a private conversation; its task is saved for a safe retry.");
+  if (input.mainTask !== undefined && !(await privateWorkerLogReachable(deps, instance.id, units[0]!.unit)))
+    return refused("setup_failed", "The private worker conversation could not be verified; no worker started.");
+  if (!(await privateAtGate(input)))
+    return refused("setup_failed", "This is no longer a private conversation; its task is saved for a safe retry.");
+  if (!mainRunLiveAtGate(input))
+    return refused("setup_failed", "The main run stopped; its task is saved for a safe retry.");
+  if (input.mainTask !== undefined) {
+    const revision = await requesterRevisionCurrent(deps, input.mainTask.mainThreadKey, input.mainTask.authority!);
+    if (revision === "unavailable")
+      return refused("plan_history_unavailable", "I couldn't verify this request; its task is saved for a safe retry.");
+    if (revision === "newer")
+      return refused("setup_failed", "A newer request arrived before this worker started; no worker started.");
+  }
+  if (!mainRunLiveAtGate(input))
+    return refused("setup_failed", "The main run stopped; its task is saved for a safe retry.");
+  try {
+    answer = await deps.create(instance.id);
+  } catch (err) {
+    answer = { kind: "unanswered", reason: describe(err) };
+  }
+  switch (answer.kind) {
+    case "created": {
+      if (answer.id !== instance.id) {
         return privateAdmissionObservation(
           deps,
           input,
-          pending(
-            instance.id,
-            `a Workflow instance already exists on the platform${status}; its ownership needs reconciliation`,
-          ),
+          pending(instance.id, "the create response named another instance"),
         );
       }
-      case "not_attempted":
-      case "failed":
-        log(`[ship] ${input.msg.threadKey}: the plan runner ${instance.id} could not be started — ${answer.reason}`);
-        return refused(
-          "plan_start_failed",
-          `⚠️ This is a bug: the plan runner could not be started (${answer.reason}), nothing ran, and no automatic start retry was scheduled.`,
+      // The Workflow and its durable attempt now agree on the same owner.
+      // Cleanup must retain that owner across any later reply/card failure.
+      if (!(await confirmCreated(deps, pendingInstance)))
+        return privateAdmissionObservation(
+          deps,
+          input,
+          pending(instance.id, "the confirmed create could not be marked on the saved instance"),
         );
-      case "unanswered": {
-        const observed = await observeCreateUncertainty(deps, pendingInstance, answer.reason);
-        if (reservation?.ok === true) reservation.complete();
-        retainedOwner = true;
-        return privateAdmissionObservation(deps, input, observed);
-      }
+      log(`[ship] ${input.msg.threadKey}: handed to the plan runner ${instance.id} (${units.length} unit(s))`);
+      const replaced =
+        write === "replace" ? ["the records of an earlier attempt that never started were replaced"] : [];
+      return privateAdmissionObservation(deps, input, {
+        status: "completed",
+        admission: "created",
+        reply: handedOff([...where, ...replaced]),
+        instanceId: instance.id,
+      });
     }
-    const unreachable: never = answer;
-    return unreachable;
-  } finally {
-    if (!retainedOwner && reservation?.ok === true) await reservation.abort();
+    case "duplicate": {
+      // The platform reports a duplicate for the saved id. Its ownership
+      // needs reconciliation before this answer can claim a new start.
+      const status = answer.status !== undefined ? `, status: ${answer.status}` : "";
+      return privateAdmissionObservation(
+        deps,
+        input,
+        pending(
+          instance.id,
+          `a Workflow instance already exists on the platform${status}; its ownership needs reconciliation`,
+        ),
+      );
+    }
+    case "not_attempted":
+    case "failed":
+      log(`[ship] ${input.msg.threadKey}: the plan runner ${instance.id} could not be started — ${answer.reason}`);
+      return refused(
+        "plan_start_failed",
+        `⚠️ This is a bug: the plan runner could not be started (${answer.reason}), nothing ran, and no automatic start retry was scheduled.`,
+      );
+    case "unanswered": {
+      const observed = await observeCreateUncertainty(deps, pendingInstance, answer.reason);
+      return privateAdmissionObservation(deps, input, observed);
+    }
   }
+  const unreachable: never = answer;
+  return unreachable;
 }
 
 /** The accepted hand-off's reply (routing-and-config item 28, `verbose`

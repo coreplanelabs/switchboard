@@ -29,7 +29,7 @@ import {
   fetchRepoShipInfo,
   type PullRequestFacts,
 } from "../../execution/githubPulls.js";
-import { handOffToCoordinator, type BeforeCoordinatorStart, type HandOffOutcome } from "../coordinator/handOff.js";
+import { handOffToCoordinator, type HandOffOutcome } from "../coordinator/handOff.js";
 import {
   affordableShipRounds,
   ALLOWANCES,
@@ -203,15 +203,6 @@ export interface ShipContext {
   confirmedPrWork?: PrWorkBinding;
   /** The validated source of the operator's repository slot. */
   shipRepoSource?: "request" | "attachment" | "thread" | "channel" | "context";
-  /** The stable generated plan this ended thread is re-issuing. */
-  reissuePlanId?: string;
-  /** Deferred legacy repair and ownership reservation, after every hand-off
-   * refusal gate and immediately before the new attempt's records. */
-  beforeCoordinatorStart?: BeforeCoordinatorStart;
-  /** The prior attempt's durable remaining caps. They are upper bounds: the
-   *  current deployment may tighten them, but a re-issue never restores time
-   *  or review rounds the earlier attempt spent. */
-  reissueCaps?: { maxRounds: number; maxMinutes: number };
   sticky: ThreadDirectives;
   history: HistoryItem[];
   repoCtx: RepoContext;
@@ -431,8 +422,8 @@ export async function runShipBranch(
   // THAT. A re-issued ended pipeline also carries its durable remainder; the
   // current config may tighten it, but can never replenish either cap.
   const configuredCaps = resolveShipCaps(deps.config.config.ship);
-  const maxMinutes = Math.min(profile.minutes, ctx.reissueCaps?.maxMinutes ?? profile.minutes);
-  const maxRounds = Math.min(configuredCaps.maxRounds, ctx.reissueCaps?.maxRounds ?? configuredCaps.maxRounds);
+  const maxMinutes = profile.minutes;
+  const maxRounds = configuredCaps.maxRounds;
   const caps = { maxRounds: affordableShipRounds(maxMinutes, maxRounds), maxMinutes };
   // The fit at the fork (agent-ship item 8, decision 0046): a boundary or a
   // `budget:` directive that clipped the pipeline below one round is
@@ -767,8 +758,6 @@ export async function runShipBranch(
               ...(ctx.shipEntry !== undefined ? { intent: ctx.shipEntry } : {}),
               ...(threadEvidence !== undefined ? { threadEvidence } : {}),
               ...(requiresThreadEvidence ? { requiresThreadEvidence: true } : {}),
-              ...(ctx.reissuePlanId !== undefined ? { reissuePlanId: ctx.reissuePlanId } : {}),
-              ...(ctx.beforeCoordinatorStart !== undefined ? { beforeStart: ctx.beforeCoordinatorStart } : {}),
               msg,
               agentSource: ctx.agentSource,
               runId: run.id,

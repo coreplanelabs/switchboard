@@ -1092,7 +1092,7 @@ describe("run history routes", () => {
     expect(result.data.evidenceComplete).toBe(false);
   });
 
-  it("recovery evidence validates past the evidence cap but only within retention", async () => {
+  it("recovery evidence refuses unreadable protected bytes beyond ordinary retention limits", async () => {
     const key = storeKey();
     const now = Date.now();
     const recoveryEvidence = { instanceId: "original", unit: "U12", threadKeys: ["slack:C1:original"] };
@@ -1107,7 +1107,7 @@ describe("run history routes", () => {
     const result = await post("/runs/list", { storeKey: key, limit: 200, recoveryEvidence });
     expect(result.status).toBe(200);
     expect(result.data.evidenceComplete).toBe(false);
-    // Each policy independently excludes the corrupt row without deleting it.
+    // Ordinary limits cannot prove an unreadable record has no unsettled publication.
     for (const policy of [
       { retentionDays: 1, maxRuns: 5000, maxBytes: 64 * MIB },
       { retentionDays: 30, maxRuns: 206, maxBytes: 64 * MIB },
@@ -1121,8 +1121,8 @@ describe("run history routes", () => {
       });
       const retained = await post("/runs/list", { storeKey: key, limit: 200, recoveryEvidence });
       expect(retained.status).toBe(200);
-      expect(retained.data.evidenceComplete).toBe(true);
-      expect((retained.data.items as RunRecord[]).map((row) => row.id)).toEqual(["original"]);
+      expect(retained.data.evidenceComplete).toBe(false);
+      expect(retained.data.items).toEqual([]);
       expect(await rowCount(key, "runs")).toBe(207);
     }
   });
