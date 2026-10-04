@@ -259,6 +259,16 @@ RUN set -eux; \
     if dpkg -s sudo >/dev/null 2>&1; then apt-get remove -y --purge sudo; fi; \
     passwd -l root
 
+# The diagnostic timeout must also kill a blocked unprivileged Node probe.
+# --session-command keeps su and its descendants in timeout's process group.
+RUN set -eu; \
+    mkfifo /tmp/dependency-probe-fifo; \
+    code=0; \
+    /usr/bin/timeout -s KILL 1 /usr/bin/su -s /bin/sh worker1 --session-command "exec node -e \"require('node:fs').readFileSync('/tmp/dependency-probe-fifo')\"" || code=$?; \
+    test "$code" = 137; \
+    ! /usr/bin/pgrep -u worker1; \
+    rm /tmp/dependency-probe-fifo
+
 # The browser proof once more, as worker1 — exactly how a thread's commands
 # run (`su -s /bin/bash workerN -c …`, root's environment kept). The layer
 # above proved it as root; this one proves an unprivileged user can read the

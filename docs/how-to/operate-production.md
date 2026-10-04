@@ -66,6 +66,8 @@ npx --yes @coreplane/switchboard@<version> deploy restart    # the running conta
 
 ## Read the bot's span log
 
+For an invalid dependency view on a retained resident, the admin-only `POST /debug` operation `inspect-dependencies` takes `resource` and an `input` containing the exact `threadKey`, `ref` and forty-character `head`. It checks the original terminal owner and fence on the existing running container. It returns `result.kind` as `ready`, `invalid` or `unknown`; an invalid result names a fixed reason and, where applicable, the package and executable. A completed observation also includes the retained owner identity. It never wakes, reattaches, installs or repairs the workspace. Unknown ownership, active processes, changed heads or incomplete output remain unknown. Use the failure to scope an owner-preserving repair; an inspection is not a repair receipt.
+
 The bot keeps every span end in a ring (20 000 lines or 8 MiB) that empties with the container, so read before you deploy.
 
 ```bash

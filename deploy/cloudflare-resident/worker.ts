@@ -89,6 +89,12 @@ import {
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { DirectoryBackup, SandboxCommand } from "@cloudflare/sandbox";
 import { createExtensionProcessSandbox } from "@cloudflare/sandbox/extensions";
+import {
+  dependencyInspectionCommand,
+  dependencyInspectionInputSchema,
+  collectDependencyInspection,
+  type DependencyInspection,
+} from "../../src/execution/dependencyInspection.js";
 import { DurableObject } from "cloudflare:workers";
 import {
   legacyCredentialScrubCommand,
@@ -114,7 +120,7 @@ import {
   registeredRunNeedsProtection,
   registeredRunOwnsRelease,
 } from "./runRegistration.js";
-import { DAY_MS, RUN_REGISTRATION_GRACE_MS } from "../../src/core/budgets.js";
+import { CREDENTIAL_INSPECTION_MAX_MS, DAY_MS, RUN_REGISTRATION_GRACE_MS, SECOND_MS } from "../../src/core/budgets.js";
 import { BASH_TIMEOUT_MAX_MS, BASH_TIMEOUT_MS, clampBashTimeout } from "../../src/execution/bashTimeout.js";
 import { RESIDENT_MIRROR_PERMISSIONS, verifyGithubMintScope } from "../../src/execution/githubMintScope.js";
 import { selectBindingsToPurge } from "../../src/execution/bindingPurge.js";
@@ -4363,7 +4369,7 @@ export class ResidentDO extends Sandbox<Env> {
         await this.recordRefreshError(`${reason} — workspace-preservation: ${detail}`);
         return false;
       };
-      if (this.runsInFlightCount() > ownAdmissions || this.workspaceEvictionsInFlight.size > 0)
+      if (this.runsInFlightCount() > ownAdmissions || this.workspaceExclusiveOpsInFlight.size > 0)
         return defer("resident activity changed before VM loss check");
       const runtimeActive = await this.isRuntimeActive().catch(() => false);
       const bindings = (await this.liveBindings()).sort((a, b) => a.threadKey.localeCompare(b.threadKey));
@@ -4381,7 +4387,7 @@ export class ResidentDO extends Sandbox<Env> {
           return false;
         }
       }
-      if (this.runsInFlightCount() > ownAdmissions || this.workspaceEvictionsInFlight.size > 0)
+      if (this.runsInFlightCount() > ownAdmissions || this.workspaceExclusiveOpsInFlight.size > 0)
         return defer("resident activity changed during VM loss check");
       const latest = (await this.liveBindings()).sort((a, b) => a.threadKey.localeCompare(b.threadKey));
       if (
@@ -6377,7 +6383,7 @@ export class ResidentDO extends Sandbox<Env> {
           // container under it (and isIdle never parks the cycle mid-attach).
           this.attachesInFlight++;
           const priorTree = !reuse ? await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey)) : undefined;
-          if (priorTree && !priorTree.evicted && priorTree.user) this.workspaceEvictionsInFlight.add(threadKey);
+          if (priorTree && !priorTree.evicted && priorTree.user) this.workspaceExclusiveOpsInFlight.add(threadKey);
           try {
             const res = await this.attachThreadBody(
               threadKey,
@@ -6396,7 +6402,7 @@ export class ResidentDO extends Sandbox<Env> {
             if (!("error" in res)) await this.registerRun(threadKey, runBudgetMs, runId, ownerGen, ownerFence);
             return res;
           } finally {
-            if (priorTree && !priorTree.evicted && priorTree.user) this.workspaceEvictionsInFlight.delete(threadKey);
+            if (priorTree && !priorTree.evicted && priorTree.user) this.workspaceExclusiveOpsInFlight.delete(threadKey);
             this.attachesInFlight--;
           }
         }),
@@ -7897,7 +7903,7 @@ export class ResidentDO extends Sandbox<Env> {
    *  binding, worktree actually on disk (the container may have slept since
    *  the last attach — disk is cache, re-attach recreates). */
   private async threadPreflight(threadKey: string): Promise<{ binding: ThreadBinding } | ThreadErr> {
-    if (this.workspaceEvictionsInFlight.has(threadKey))
+    if (this.workspaceExclusiveOpsInFlight.has(threadKey))
       return { error: "workspace-preservation: automatic release is checking this thread", status: 503 };
     if (await this.recreateAdmission.blocked()) return this.recreateRefusal();
     try {
@@ -7950,9 +7956,9 @@ export class ResidentDO extends Sandbox<Env> {
    *  run's release can never yank a worktree out from under a concurrent
    *  command on the same thread (a queued follow-up message, two runs racing). */
   private threadOpsInFlight = new Map<string, number>();
-  /** A release holds the thread attach lock and refuses new file operations
-   *  until its final owner check and directory removal have settled. */
-  private workspaceEvictionsInFlight = new Set<string>();
+  /** Release and dependency inspection hold the attach lock and exclude new
+   *  thread operations until their final observation or removal settles. */
+  private workspaceExclusiveOpsInFlight = new Set<string>();
 
   private async withDeployAdmission<T>(fn: () => Promise<T>): Promise<T | ThreadErr> {
     const registry = this.registry();
@@ -7973,6 +7979,8 @@ export class ResidentDO extends Sandbox<Env> {
 
   private async withThreadBusy<T>(threadKey: string, fn: () => Promise<T>): Promise<T | ThreadErr> {
     return this.withDeployAdmission(async () => {
+      if (this.workspaceExclusiveOpsInFlight.has(threadKey))
+        return { error: "workspace is busy", status: 409, reason: "busy", cause: "system" } satisfies ThreadErr;
       this.threadOpsInFlight.set(threadKey, (this.threadOpsInFlight.get(threadKey) ?? 0) + 1);
       try {
         return await fn();
@@ -8006,6 +8014,124 @@ export class ResidentDO extends Sandbox<Env> {
     return res;
   }
 
+  /** Inspect an existing terminal owner's tree without waking, reattaching or repairing it. */
+  async inspectThreadDependencies(
+    input: unknown,
+  ): Promise<{ result: DependencyInspection; owner?: { runId: string; ownerGen: string; ownerFence: number } }> {
+    const unknown = (): { result: DependencyInspection } => ({ result: { kind: "unknown" } });
+    const parsed = dependencyInspectionInputSchema.safeParse(input);
+    if (!parsed.success) return unknown();
+    const { threadKey, ref, head } = parsed.data;
+    try {
+      const inspection = await this.withDeployAdmission(() =>
+        this.threadAttaches.run(threadKey, async () => {
+          if (
+            this.destroying ||
+            this.ctx.container?.running !== true ||
+            (await this.ctx.storage.get(DESTROY_UNCONFIRMED_KEY)) ||
+            (await this.recreateAdmission.blocked()) ||
+            this.memoryGuard.gate("exec")
+          )
+            return unknown();
+          const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
+          const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
+          const fence = await this.ctx.storage.get<unknown>(runFenceKey(threadKey));
+          if (
+            !binding ||
+            binding.evicted ||
+            binding.threadKey !== threadKey ||
+            binding.ref !== ref ||
+            !THREAD_USERS.includes(binding.user) ||
+            this.workspaceExclusiveOpsInFlight.has(threadKey) ||
+            (this.threadOpsInFlight.get(threadKey) ?? 0) > 0 ||
+            this.opUsersInUse.has(binding.user)
+          )
+            return unknown();
+          if (
+            !registration ||
+            registration.threadKey !== threadKey ||
+            !validRunOwner(registration.runId, registration.ownerGen, registration.ownerFence)
+          )
+            return unknown();
+          const owner = {
+            runId: registration.runId!,
+            ownerGen: registration.ownerGen!,
+            ownerFence: registration.ownerFence!,
+          };
+          if (
+            JSON.stringify(fence) !== JSON.stringify(owner) ||
+            !(await this.poolUserOwnerMatches(binding.user, `thread:${threadKey}`))
+          )
+            return unknown();
+          const observation = (await this.observeRunForEviction(registration, binding)) as {
+            kind?: string;
+            record?: { id?: string; threadKey?: string; provisional?: boolean; status?: string };
+          } | null;
+          if (
+            observation?.kind !== "terminal" ||
+            observation.record?.id !== owner.runId ||
+            observation.record.threadKey !== threadKey ||
+            observation.record.provisional === true ||
+            !["completed", "failed", "interrupted", "stopped_soft", "stopped_hard"].includes(
+              observation.record.status ?? "",
+            )
+          )
+            return unknown();
+          const canonical = await threadWorktreePath(threadKey, ref);
+          if (
+            binding.worktreePath !== canonical &&
+            binding.worktreePath !== (await replacementWorktreePath(threadKey, ref, canonical))
+          )
+            return unknown();
+          return this.withThreadBusy(threadKey, async () => {
+            if ((this.threadOpsInFlight.get(threadKey) ?? 0) !== 1) return unknown();
+            this.workspaceExclusiveOpsInFlight.add(threadKey);
+            try {
+              if (this.ctx.container?.running !== true) return unknown();
+              const command = [
+                `/usr/bin/pgrep -u ${shellQuote(binding.user)} >/dev/null 2>&1`,
+                "code=$?",
+                'if test "$code" != 1; then printf \'{"kind":"unknown"}\'; exit 1; fi',
+                `exec /usr/bin/su -s /bin/sh ${shellQuote(binding.user)} --session-command ${shellQuote(dependencyInspectionCommand(binding.worktreePath, head))}`,
+              ].join("\n");
+              // Native container exec cannot start a stopped runtime. No model environment, SDK recovery or retry is used.
+              const process = await this.ctx.container.exec([
+                "/usr/bin/env",
+                "-i",
+                "PATH=/usr/local/bin:/usr/bin:/bin",
+                "/usr/bin/timeout",
+                "-s",
+                "KILL",
+                String(CREDENTIAL_INSPECTION_MAX_MS / SECOND_MS),
+                "/bin/sh",
+                "-c",
+                command,
+              ]);
+              const result = await collectDependencyInspection(process);
+              const current = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
+              const currentRegistration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
+              const currentFence = await this.ctx.storage.get<unknown>(runFenceKey(threadKey));
+              if (
+                this.ctx.container?.running !== true ||
+                JSON.stringify(current) !== JSON.stringify(binding) ||
+                JSON.stringify(currentRegistration) !== JSON.stringify(registration) ||
+                JSON.stringify(currentFence) !== JSON.stringify(fence) ||
+                (this.threadOpsInFlight.get(threadKey) ?? 0) !== 1
+              )
+                return unknown();
+              return result.kind === "unknown" ? unknown() : { result, owner };
+            } finally {
+              this.workspaceExclusiveOpsInFlight.delete(threadKey);
+            }
+          });
+        }),
+      );
+      return "error" in inspection ? unknown() : inspection;
+    } catch {
+      return unknown();
+    }
+  }
+
   /** A fixed diagnostic over the existing runtime; only counts leave this DO. */
   async inspectThreadCredentials(
     threadKey: string,
@@ -8014,7 +8140,7 @@ export class ResidentDO extends Sandbox<Env> {
   ): Promise<CredentialInspection> {
     try {
       const inspection = await this.withThreadBusy(threadKey, async () => {
-        if (this.workspaceEvictionsInFlight.has(threadKey)) return emptyCredentialInspection();
+        if (this.workspaceExclusiveOpsInFlight.has(threadKey)) return emptyCredentialInspection();
         if (await this.memoryGate("exec")) return emptyCredentialInspection();
         // Inspection cannot hydrate, reattach or repair the selected runtime.
         const parsed = credentialInspectionInputSchema.safeParse(input);
@@ -8496,7 +8622,7 @@ export class ResidentDO extends Sandbox<Env> {
     )
       return "changed";
     if ((this.threadOpsInFlight.get(binding.threadKey) ?? 0) > 0) return "changed";
-    this.workspaceEvictionsInFlight.add(binding.threadKey);
+    this.workspaceExclusiveOpsInFlight.add(binding.threadKey);
     try {
       const decision = await this.workspaceRemovalDecision(before, runtimeActive, true);
       if (decision.removable === false) {
@@ -8585,7 +8711,7 @@ export class ResidentDO extends Sandbox<Env> {
         console.log(`${logCtx}: ${binding.threadKey} evicted (${why}) — ${evictedTreeSentence(recordedTree)}`);
       return "evicted";
     } finally {
-      this.workspaceEvictionsInFlight.delete(binding.threadKey);
+      this.workspaceExclusiveOpsInFlight.delete(binding.threadKey);
     }
   }
 
@@ -11752,6 +11878,8 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
     }
     case "threads":
       return json(await stub.debugThreads());
+    case "inspect-dependencies":
+      return json(await stub.inspectThreadDependencies(body.input));
     case "reconcile-owner": {
       const thread = parseThreadKey(body.threadKey);
       if ("error" in thread) return json({ error: thread.error }, 400);

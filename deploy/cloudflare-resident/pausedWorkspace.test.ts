@@ -164,7 +164,7 @@ type UnderTest = {
   observeRunForEviction: ReturnType<typeof vi.fn>;
   observePrivateTree: ReturnType<typeof vi.fn>;
   withMirrorLock: (fn: () => Promise<unknown>) => Promise<{ value: unknown }>;
-  workspaceEvictionsInFlight: Set<string>;
+  workspaceExclusiveOpsInFlight: Set<string>;
 };
 
 function probe(
@@ -235,7 +235,7 @@ function probe(
     },
     threadAttaches: { run: async (_key: string, action: () => Promise<unknown>) => action() },
     threadOpsInFlight: new Map(),
-    workspaceEvictionsInFlight: new Set(),
+    workspaceExclusiveOpsInFlight: new Set(),
     isRuntimeActive: async () => options.runtimeActive ?? true,
     measureTreeBeforeEviction: async () => undefined,
     poolUserOwnerMatches: async () => true,

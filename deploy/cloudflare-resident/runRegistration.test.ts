@@ -1065,7 +1065,7 @@ async function ownerFlow(pathForm: "canonical" | "collision-safe replacement" | 
     threadOpsInFlight: new Map(),
     opUsersInUse: new Map(),
     poolUsersInspecting: new Set(),
-    workspaceEvictionsInFlight: new Set(),
+    workspaceExclusiveOpsInFlight: new Set(),
     recreateAdmission: { blocked: async () => false },
     ensureHydrated: async () => {},
     inFlightCount: () => 0,
