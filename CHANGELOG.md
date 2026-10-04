@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.284.8](https://github.com/coreplanelabs/switchboard/compare/v1.284.7...v1.284.8) (2026-10-04)
+
+
+### Bug fixes
+
+* **review:** require explicit closure of prior findings ([#2748](https://github.com/coreplanelabs/switchboard/issues/2748)) ([1cf8bd2](https://github.com/coreplanelabs/switchboard/commit/1cf8bd2f258f91f92186e0807269df0761ee4ca6))
+
 ## [1.284.7](https://github.com/coreplanelabs/switchboard/compare/v1.284.6...v1.284.7) (2026-10-04)
 
 
