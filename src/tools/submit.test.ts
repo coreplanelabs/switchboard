@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { validateToolArguments, type Tool, type ToolCall } from "@earendil-works/pi-ai";
 import { TITLE_GATE_REPOSITORY, visibleLength, type PrDescription } from "../core/prDescription.js";
 import type { RunEvent } from "../core/runEvents.js";
 import type { Handoff } from "../core/ship/handoff.js";
@@ -14,6 +15,55 @@ import type { ToolContext } from "./runnableTool.js";
 describe("submit_verdict tool", () => {
   const ctxWith = (onVerdict?: ToolContext["onVerdict"]): ToolContext =>
     ({ executor: {} as ToolContext["executor"], onVerdict }) as ToolContext;
+
+  it("rejects contradictory finding variants in the provider-visible schema", () => {
+    const tool: Tool = {
+      name: submitVerdictTool.name,
+      description: submitVerdictTool.description,
+      parameters: submitVerdictTool.inputSchema as Tool["parameters"],
+    };
+    const base = { id: "F1", severity: "major", file: "a.ts", title: "unsafe" };
+    const matrix = { invariant: "checked trees", cases: [{ scenario: "write", expected: "refuse" }] };
+    const check = (finding: ToolCall["arguments"][string]) =>
+      validateToolArguments(tool, {
+        type: "toolCall",
+        id: "probe",
+        name: tool.name,
+        arguments: { verdict: "request_changes", summary: "unsafe", head: "a".repeat(40), findings: [finding] },
+      });
+    for (const finding of [
+      { ...base, kind: "single", ...matrix },
+      { ...base, kind: "pattern" },
+      { ...base, kind: "pattern", ...matrix, cases: [] },
+      { ...base, kind: "pattern", ...matrix, cases: [{ scenario: " ", expected: "refuse" }] },
+    ])
+      expect(() => check(finding)).toThrow();
+    for (const finding of [
+      { ...base, kind: "single" },
+      { ...base, kind: "pattern", ...matrix },
+    ])
+      expect(() => check(finding)).not.toThrow();
+  });
+
+  it("refuses malformed findings atomically even without bound PR history", async () => {
+    const got: unknown[] = [];
+    const ctx = ctxWith((v) => got.push(v));
+    const valid = { id: "F1", severity: "major", file: "a.ts", title: "unsafe", kind: "single" };
+    await submitVerdictTool.run({ verdict: "request_changes", findings: [valid] }, ctx);
+    for (const findings of [
+      [valid, { ...valid, id: "F2", severity: "typo" }],
+      [valid, { ...valid, id: "" }],
+      [valid, { ...valid, id: "F2", file: "" }],
+      {},
+      "bad",
+      null,
+    ]) {
+      const result = await submitVerdictTool.run({ verdict: "approve", findings }, ctx);
+      expect(String(result)).toMatch(/^error:/);
+      expect(String(result)).toContain("no verdict recorded");
+      expect(got).toHaveLength(1);
+    }
+  });
 
   it("requires a complete exact-head history read and explicit prior-finding coverage for a bound PR review", async () => {
     const got: unknown[] = [];
@@ -200,7 +250,7 @@ describe("submit_verdict tool", () => {
     it("declares `findings` in the input schema — optional, with the finding field shapes and the severity vocabulary", () => {
       const props = submitVerdictTool.inputSchema.properties as Record<string, any>;
       expect(props.findings?.type).toBe("array");
-      const item = props.findings.items;
+      const item = props.findings.items.anyOf[0];
       expect(item.required).toEqual(expect.arrayContaining(["id", "severity", "file", "title"]));
       expect(item.required).not.toContain("line");
       expect(item.properties.severity.enum).toEqual(["blocking", "major", "minor", "nit"]);
@@ -209,8 +259,8 @@ describe("submit_verdict tool", () => {
     });
 
     it("exposes a typed invariant and case matrix for pattern findings, with concrete push axes in the tool contract", async () => {
-      const item = (submitVerdictTool.inputSchema.properties as Record<string, any>).findings.items;
-      expect(item.properties.kind.enum).toEqual(["single", "pattern"]);
+      const item = (submitVerdictTool.inputSchema.properties as Record<string, any>).findings.items.anyOf[1];
+      expect(item.properties.kind.enum).toEqual(["pattern"]);
       expect(item.required).toContain("kind");
       expect(item.properties.invariant.type).toBe("string");
       expect(item.properties.cases.items.required).toEqual(["scenario", "expected"]);

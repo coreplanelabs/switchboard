@@ -10,6 +10,7 @@
 // holds them equal. The toolset wiring stays in src/tools/workspace.ts.
 
 import { z } from "zod";
+import { reviewFindingInputSchema } from "../core/reviewFindingSchema.js";
 import {
   describeDescriptionIssues,
   describeIssueLine,
@@ -40,7 +41,7 @@ export const submitVerdictTool: RunnableTool = {
     "references findings by these ids, so never renumber them. Severity is exactly one of blocking|major|minor|nit; " +
     "the entry carries the file (plus line when it points at one) and a one-line title, while the full explanation " +
     "stays in your review text keyed by the same ids. Every new finding declares kind: single or pattern. " +
-    "For a pattern, declare kind: pattern, name its invariant and enumerate " +
+    "A single finding omits invariant and cases entirely. For a pattern, declare kind: pattern, name its invariant and enumerate " +
     "independently checkable {scenario, expected} cases, including all selection and execution paths in the diff; " +
     "for a push, check source, destination, endpoint and command composition, not just the first counterexample. " +
     "A missing or malformed matrix is refused before recording the verdict; you must judge whether its cases cover the invariant. An `approve` carrying a finding at or above the severity to address " +
@@ -62,51 +63,7 @@ export const submitVerdictTool: RunnableTool = {
       findings: {
         type: "array",
         description: "Every issue you report, one entry each, in the order reported — rendered under the verdict line",
-        items: {
-          type: "object",
-          properties: {
-            id: {
-              type: "string",
-              description: 'Stable id assigned in order: "F1", "F2", … — dispositions reference it',
-            },
-            severity: {
-              type: "string",
-              enum: ["blocking", "major", "minor", "nit"],
-              description: "blocking | major | minor | nit",
-            },
-            file: { type: "string", description: "Repo-relative file the finding points at" },
-            line: { type: "integer", description: "1-based line number, when the finding points at one" },
-            title: {
-              type: "string",
-              description: "One line naming the issue (the full explanation goes in your review text)",
-            },
-            kind: {
-              type: "string",
-              enum: ["single", "pattern"],
-              description: "single issue or pattern spanning multiple cases; pattern requires invariant and cases",
-            },
-            invariant: { type: "string", description: "The shared safety/correctness rule this pattern must hold" },
-            cases: {
-              type: "array",
-              description:
-                "All independently checkable cases of the invariant found in this diff, including selection and execution paths",
-              items: {
-                type: "object",
-                properties: {
-                  scenario: { type: "string", description: "Concrete input or path through the invariant" },
-                  expected: { type: "string", description: "Required behavior on that path" },
-                },
-                required: ["scenario", "expected"],
-              },
-            },
-            humanGated: {
-              type: "boolean",
-              description:
-                "true ONLY when the remedy is a receipt only a person can produce (a credential-gated replay, a live procedure) — never for work a fix round could do",
-            },
-          },
-          required: ["id", "severity", "file", "title", "kind"],
-        },
+        items: reviewFindingInputSchema,
       },
       resolutions: {
         type: "array",
@@ -141,6 +98,8 @@ export const submitVerdictTool: RunnableTool = {
     if (!verdict)
       return "error: verdict must be exactly `approve` or `request_changes`, and resolutions must have unique exact finding IDs, fixed|declined and an evidence note";
     const rawFindings = input.findings;
+    if (rawFindings !== undefined && !Array.isArray(rawFindings))
+      return "error: findings must be an array; no verdict recorded";
     if (Array.isArray(rawFindings)) {
       const untyped = rawFindings.flatMap((raw, index) =>
         typeof raw === "object" &&
@@ -157,6 +116,14 @@ export const submitVerdictTool: RunnableTool = {
     );
     if (invalidCases?.length)
       return `error: invalid invariant case table; ${invalidCases.join("; ")}; no verdict recorded`;
+    if (verdict.droppedFindings?.length)
+      return `error: invalid findings; ${verdict.droppedFindings.join("; ")}; no verdict recorded`;
+    if (
+      Array.isArray(rawFindings) &&
+      (verdict.findings?.some((finding, i) => finding.id !== (rawFindings[i] as Record<string, unknown>)?.id) ||
+        new Set(verdict.findings?.map((finding) => finding.id)).size !== verdict.findings?.length)
+    )
+      return "error: findings require unique exact IDs; no verdict recorded";
     if (ctx.reviewHistory) {
       if (!verdict.head)
         return "error: a valid reviewed commit head is required for a bound PR verdict; run git rev-parse HEAD and refresh complete history at that head; no verdict recorded";
@@ -167,12 +134,6 @@ export const submitVerdictTool: RunnableTool = {
         return "error: read complete PR history with github_pull_get and includeReviewHistory: true before submitting; no verdict recorded";
       if (verdict.head !== snapshot.head)
         return "error: reviewed head differs from the history snapshot; refresh github_pull_get with includeReviewHistory: true at the reviewed head; no verdict recorded";
-      if (
-        verdict.droppedFindings?.length ||
-        (Array.isArray(rawFindings) &&
-          verdict.findings?.some((f, i) => f.id !== (rawFindings[i] as Record<string, unknown>)?.id))
-      )
-        return "error: all findings must be valid with exact IDs; no verdict recorded";
       const invalid = validateReviewFollowup(verdict, snapshot.findings);
       if (invalid) return `error: ${invalid}; no verdict recorded`;
     } else if (verdict.resolutions?.length) return "error: prior finding history is unavailable; no verdict recorded";
