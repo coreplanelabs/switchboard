@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.285.0](https://github.com/coreplanelabs/switchboard/compare/v1.284.8...v1.285.0) (2026-10-04)
+
+
+### Features
+
+* **resident:** inspect retained dependency failures safely ([#2750](https://github.com/coreplanelabs/switchboard/issues/2750)) ([bb38837](https://github.com/coreplanelabs/switchboard/commit/bb388372bd67c39200bd34f44636fee012a365ff))
+
+
+### Bug fixes
+
+* **review:** reject contradictory or partial finding submissions ([#2751](https://github.com/coreplanelabs/switchboard/issues/2751)) ([be8d907](https://github.com/coreplanelabs/switchboard/commit/be8d907331245adc5de8a5aff25b7b26d880d1fe))
+
 ## [1.284.8](https://github.com/coreplanelabs/switchboard/compare/v1.284.7...v1.284.8) (2026-10-04)
 
 
