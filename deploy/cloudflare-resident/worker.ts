@@ -1237,7 +1237,7 @@ interface ThreadBinding {
    *  16a) — written before any eviction decision, so the fact outlives the
    *  tree: the tree is released the moment its run ends, and this is what
    *  lets the follow-up's attach move onto the branch and provision the tree
-   *  there. Newest last; the oldest fall off past `OWN_BRANCHES_MAX`. */
+   *  there. Newest last; capacity refuses a merge rather than losing facts. */
   ownBranches?: OwnBranch[];
   /** Allocated OS user (worker2..worker17); "" once evicted (pool released). */
   user: string;
@@ -6806,12 +6806,17 @@ export class ResidentDO extends Sandbox<Env> {
    *  tree, since it is what a follow-up's rebind onto the thread's own pull
    *  request branch reads once the tree is gone. No binding → nothing to
    *  remember on (the detach answers its 404 next). */
-  private async rememberOwnBranches(threadKey: string, pushed: readonly PushedBranch[]): Promise<void> {
+  private async rememberOwnBranches(
+    threadKey: string,
+    pushed: readonly PushedBranch[],
+  ): Promise<ThreadErr | undefined> {
     const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
     if (!binding) return;
+    const remembered = rememberOwnBranches(binding.ownBranches, pushed, new Date(systemClock()).toISOString());
+    if ("error" in remembered) return { error: remembered.error, status: 409 };
     await this.putThreadBinding({
       ...binding,
-      ownBranches: rememberOwnBranches(binding.ownBranches, pushed, new Date(systemClock()).toISOString()),
+      ownBranches: remembered.ownBranches,
     } satisfies ThreadBinding);
   }
 
@@ -8739,14 +8744,19 @@ export class ResidentDO extends Sandbox<Env> {
         const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
         if (!binding) return { error: `no-binding: ${threadKey} has never attached to this resident`, status: 404 };
         if (binding.evicted || !binding.user) {
-          if (pushed.length > 0 && registeredRunOwnsRelease(binding.lastRunOwner, runId, ownerGen, ownerFence))
-            await this.rememberOwnBranches(threadKey, pushed);
+          if (pushed.length > 0 && registeredRunOwnsRelease(binding.lastRunOwner, runId, ownerGen, ownerFence)) {
+            const refused = await this.rememberOwnBranches(threadKey, pushed);
+            if (refused !== undefined) return refused;
+          }
           return { released: false, reason: "already-evicted" };
         }
         const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
         if (!registeredRunOwnsRelease(registration, runId, ownerGen, ownerFence))
           return { released: false, reason: "run-registration-mismatch: the workspace belongs to another run" };
-        if (pushed.length > 0) await this.rememberOwnBranches(threadKey, pushed);
+        if (pushed.length > 0) {
+          const refused = await this.rememberOwnBranches(threadKey, pushed);
+          if (refused !== undefined) return refused;
+        }
         if (!(await this.poolUserOwnerMatches(binding.user, `thread:${threadKey}`)))
           return { error: "pool-owner-mismatch: detach refused for conflicting UID owner", status: 503 };
         const plan = planForceDetach({

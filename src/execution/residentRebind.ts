@@ -102,7 +102,7 @@ export interface OwnBranch extends PushedBranch {
 
 /** The most branches one release may hand over: a run pushes a handful at most. */
 export const PUSHED_MAX = 20;
-/** The most branches a binding remembers: the newest are kept. */
+/** The most branches a binding remembers; new facts cannot evict older evidence. */
 export const OWN_BRANCHES_MAX = 50;
 
 export type ParsedPushed = { pushed: PushedBranch[] } | { error: string };
@@ -129,17 +129,17 @@ export function parsePushed(value: unknown): ParsedPushed {
 
 /** The binding's memory after a release: every branch handed over is
  *  remembered once — a branch pushed again moves to the end with its current
- *  pull request and time — and only the newest `OWN_BRANCHES_MAX` are kept.
- *  Stored BEFORE any eviction decision, so the fact survives the tree. */
+ *  pull request and time. Capacity refuses before any eviction decision. */
 export function rememberOwnBranches(
   existing: readonly OwnBranch[] | undefined,
   pushed: readonly PushedBranch[],
   at: string,
-): OwnBranch[] {
+): { ownBranches: OwnBranch[] } | { error: "own-branches-capacity" } {
   const refs = new Set(pushed.map((p) => p.ref));
-  const kept = (existing ?? []).filter((b) => !refs.has(b.ref));
-  const added = pushed.map((p) => ({ ref: p.ref, pr: p.pr, at }));
-  return [...kept, ...added].slice(-OWN_BRANCHES_MAX);
+  const kept = [...new Map((existing ?? []).map((b) => [b.ref, b])).values()].filter((b) => !refs.has(b.ref));
+  const added = [...new Map(pushed.map((p) => [p.ref, { ref: p.ref, pr: p.pr, at }])).values()];
+  const ownBranches = [...kept, ...added];
+  return ownBranches.length > OWN_BRANCHES_MAX ? { error: "own-branches-capacity" } : { ownBranches };
 }
 
 /** The binding's memory of `ref` as a branch the thread's own runs pushed —

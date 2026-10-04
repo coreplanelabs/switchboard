@@ -9,6 +9,7 @@ export interface ShipOutcome {
   schemaVersion: 1;
   kind: TerminalKind;
   reviewRounds: number;
+  recoveryStop?: "continuation_not_admitted";
   terminalPr?:
     | { state: "closed"; number: number; url: string }
     | { state: "merged"; number: number; url: string; mergeSha: string; headSha?: string };
@@ -39,6 +40,7 @@ export function sameShipOutcome(a: ShipOutcome | undefined, b: ShipOutcome | und
     value.schemaVersion,
     value.kind,
     value.reviewRounds,
+    value.recoveryStop,
     value.terminalPr === undefined
       ? null
       : [
@@ -103,10 +105,16 @@ const head = (value: unknown) => typeof value === "string" && /^[a-f0-9]{40}$/i.
 export function isShipOutcome(value: unknown): value is ShipOutcome {
   if (
     !object(value) ||
-    !only(value, ["schemaVersion", "kind", "reviewRounds", "terminalPr", "findings"]) ||
+    !only(value, ["schemaVersion", "kind", "reviewRounds", "terminalPr", "findings", "recoveryStop"]) ||
     value.schemaVersion !== 1 ||
     !isShipOutcomeKind(value.kind) ||
-    !count(value.reviewRounds)
+    !count(value.reviewRounds) ||
+    (value.recoveryStop !== undefined &&
+      (value.kind !== "aborted" ||
+        value.recoveryStop !== "continuation_not_admitted" ||
+        value.reviewRounds !== 0 ||
+        value.terminalPr !== undefined ||
+        value.findings !== undefined))
   )
     return false;
   const pr = value.terminalPr;
@@ -187,8 +195,11 @@ export function shipOutcomeOf(ending: UnitEnding): ShipOutcome | undefined {
     schemaVersion: 1 as const,
     kind: ending.kind,
     reviewRounds: ending.reviewRounds,
+    ...(ending.kind === "aborted" && ending.recoveryStop !== undefined ? { recoveryStop: ending.recoveryStop } : {}),
     ...(terminalPr !== undefined ? { terminalPr } : {}),
     ...(Object.keys(findings).length > 0 ? { findings } : {}),
   };
-  return isShipOutcome(outcome) ? outcome : undefined;
+  if (isShipOutcome(outcome)) return outcome;
+  if (ending.kind === "aborted" && ending.recoveryStop !== undefined) throw new Error("invalid recovery outcome");
+  return undefined;
 }

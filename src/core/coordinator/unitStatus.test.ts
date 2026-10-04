@@ -50,6 +50,29 @@ export function statusFixture() {
 }
 
 describe("committed coordinator status context", () => {
+  it.each(["first", "cached"] as const)(
+    "refuses a mixed owner snapshot before the %s status acknowledgement",
+    async (receipt) => {
+      const f = statusFixture();
+      f.unit.ending = { kind: "stopped", at: 2, report: "Original report" };
+      await f.instances.put(f.instance);
+      await f.instances.putUnits([f.unit]);
+      if (receipt === "cached") expect(await appendCoordinatorStatus(f, f)).toBeDefined();
+      const list = f.instances.listUnits.bind(f.instances);
+      vi.spyOn(f.instances, "listUnits").mockImplementationOnce(async (id) => {
+        const units = await list(id);
+        expect(
+          await f.instances.replace({ ...f.instance, userId: "cli:another-user", runId: "another-run", attempt: 1 }),
+        ).toEqual({ ok: true });
+        await f.instances.putUnits(units);
+        return units;
+      });
+      const append = vi.spyOn(f.ledger, "appendSession");
+      expect(await appendCoordinatorStatus(f, f)).toBeUndefined();
+      expect(append).not.toHaveBeenCalled();
+    },
+  );
+
   it("retains only a committed typed projection beside an unreadable raw report", async () => {
     const f = statusFixture();
     await f.instances.put(f.instance);

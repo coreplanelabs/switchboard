@@ -29,6 +29,7 @@ import {
   type PlanRunSummary,
   type StepRunner,
 } from "../../src/core/coordinator/driver.ts";
+import { workflowSteps as adaptWorkflowSteps } from "../../src/core/coordinator/steps.ts";
 import { parseIngressTokenMap, tokenForSubject } from "../../src/core/ingressTokens.ts";
 import { INSTANCE, INTERNAL } from "./shared";
 import type { Env } from "./worker";
@@ -84,11 +85,7 @@ function containerBot(env: CoordinatorEnv): CoordinatorBot {
 /** The platform's step as the driver types it. Every stored step output is a
  *  bot answer — a JSON object — so the platform's serializable bound holds. */
 function workflowSteps(step: WorkflowStep): StepRunner {
-  return {
-    do: (name, config, callback) => step.do(name, config, callback),
-    sleep: (name, ms) => step.sleep(name, ms),
-    waitForEvent: (name, options) => step.waitForEvent(name, options),
-  };
+  return adaptWorkflowSteps(step, (message) => new NonRetryableError(message));
 }
 
 export class ShipCoordinator extends WorkflowEntrypoint<CoordinatorEnv, ShipCoordinatorParams> {

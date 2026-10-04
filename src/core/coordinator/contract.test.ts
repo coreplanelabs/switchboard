@@ -332,6 +332,34 @@ describe("isCoordinatorUnit — one unit's row", () => {
     startedAt: 900,
   };
 
+  it("binds terminal recovery facts to a coding receipt and held ending", () => {
+    const receipt = { codingRunId: "run-coding", workflowId: "recovery-coding", at: 2000 };
+    const ending = {
+      kind: "aborted",
+      report: "No continuation admitted",
+      at: 2000,
+      outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 0, recoveryStop: "continuation_not_admitted" },
+    };
+    expect(isCoordinatorUnit({ ...unit, ending, recoveryReceipt: receipt })).toBe(true);
+    expect(isCoordinatorUnit({ ...unit, ending })).toBe(false);
+    expect(
+      isCoordinatorUnit({
+        ...unit,
+        ending,
+        recoveryReceipt: { reviewRunId: "run-review", workflowId: "recovery-review", at: 2000 },
+      }),
+    ).toBe(false);
+    const held = {
+      ...unit,
+      ending: { kind: "held", report: "Blocked", at: 2000 },
+      recoveryReceipt: receipt,
+      recoveryHold: { cause: "blocked" },
+    };
+    expect(isCoordinatorUnit(held)).toBe(true);
+    expect(isCoordinatorUnit({ ...held, ending: unit.ending })).toBe(false);
+    expect(isCoordinatorUnit({ ...held, recoveryReceipt: undefined })).toBe(false);
+  });
+
   it("rejects malformed or retargeted report delivery admission", () => {
     const reportDelivery = {
       version: 1,

@@ -116,6 +116,47 @@ const FIXED: FindingDisposition = { findingId: "F1", disposition: "fixed", note:
 const DECLINED: FindingDisposition = { findingId: "F1", disposition: "declined", note: "the loop is exclusive" };
 
 describe("original-unit recovery accounting", () => {
+  it("coding recovery cannot renew its admitted checkpoint despite pushed progress", () => {
+    const granted = { renewals: 2, costCapUsd: 50 };
+    const state = openRecoveredUnitPipeline(
+      input({
+        merge: "person",
+        grant: granted,
+        idleDays: 7,
+        recovery: {
+          remainingMs: 180 * MIN,
+          unitKey: "plan-old:U10",
+          renewalsSpent: 1,
+          coding: { from: HEAD_A, previousRunId: "run-original-coding" },
+        },
+      }),
+      T0,
+      { kind: "coding", round: 0, expectedHeadSha: HEAD_A, codingRunId: "run-original-coding", spendUsd: 3 },
+    );
+    const d = new Driver(state);
+    runChild(
+      d,
+      "run-recovered-coding",
+      finished({
+        status: "completed",
+        costUsd: 2,
+        pushed: [{ ref: state.input.unit.branch, sha: HEAD_B, at: T0 + 30 * MIN }],
+        leaseStartedAt: T0,
+      }),
+      T0 + 45 * MIN,
+    );
+    d.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 45 * MIN });
+    expect(d.action).toMatchObject({
+      type: "end",
+      ending: { kind: "aborted", recoveryStop: "continuation_not_admitted" },
+    });
+    expect(d.state.input.grant).toEqual(granted);
+    expect(d.state.input.recovery?.renewalsSpent).toBe(1);
+    expect(d.state.spendUsd).toBe(5);
+    expect(renderUnitReport(d.state)).toContain("1 of 2");
+    expect(d.state.ending).not.toHaveProperty("renewal");
+  });
+
   it("opens a pre-PR coding checkpoint with the original spend and no PR", () => {
     const state = openRecoveredUnitPipeline(
       input({

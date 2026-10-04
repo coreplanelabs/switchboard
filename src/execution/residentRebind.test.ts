@@ -204,27 +204,50 @@ describe("parsePushed and rememberOwnBranches: the `pushed` detach body field an
     });
   });
 
-  it("remembering appends new branches, replaces a re-pushed one in place (its PR and time move), and keeps the newest up to the cap", () => {
+  it("remembering appends and replaces branch facts, but refuses capacity without dropping older evidence", () => {
     const first = rememberOwnBranches(undefined, [{ ref: "fix/x", pr: 7 }], "2026-01-01T00:00:00.000Z");
-    expect(first).toEqual([{ ref: "fix/x", pr: 7, at: "2026-01-01T00:00:00.000Z" }]);
+    expect(first).toEqual({ ownBranches: [{ ref: "fix/x", pr: 7, at: "2026-01-01T00:00:00.000Z" }] });
+    if ("error" in first) throw new Error(first.error);
     const second = rememberOwnBranches(
-      first,
+      first.ownBranches,
       [
         { ref: "fix/y", pr: 8 },
         { ref: "fix/x", pr: 9 },
       ],
       "2026-01-02T00:00:00.000Z",
     );
-    expect(second).toEqual([
-      { ref: "fix/y", pr: 8, at: "2026-01-02T00:00:00.000Z" },
-      { ref: "fix/x", pr: 9, at: "2026-01-02T00:00:00.000Z" },
-    ]);
-    const many = Array.from({ length: OWN_BRANCHES_MAX + 3 }, (_, i) => ({ ref: `b${i}`, pr: i + 1, at: "t" }));
-    const capped = rememberOwnBranches(many, [{ ref: "newest", pr: 999 }], "u");
-    expect(capped).toHaveLength(OWN_BRANCHES_MAX);
-    expect(capped.at(-1)).toEqual({ ref: "newest", pr: 999, at: "u" });
-    // 53 remembered + 1 new = 54; the oldest four fall off.
-    expect(capped[0]).toEqual({ ref: "b4", pr: 5, at: "t" });
+    expect(second).toEqual({
+      ownBranches: [
+        { ref: "fix/y", pr: 8, at: "2026-01-02T00:00:00.000Z" },
+        { ref: "fix/x", pr: 9, at: "2026-01-02T00:00:00.000Z" },
+      ],
+    });
+    const duplicateHistory = Array.from({ length: OWN_BRANCHES_MAX }, (_, i) => ({
+      ref: i < 20 ? "a" : i < 40 ? "b" : "c",
+      pr: i + 1,
+      at: "t",
+    }));
+    expect(rememberOwnBranches(duplicateHistory, [{ ref: "d", pr: 99 }], "u")).toEqual({
+      ownBranches: [
+        { ref: "a", pr: 20, at: "t" },
+        { ref: "b", pr: 40, at: "t" },
+        { ref: "c", pr: 50, at: "t" },
+        { ref: "d", pr: 99, at: "u" },
+      ],
+    });
+    const full = Array.from({ length: OWN_BRANCHES_MAX }, (_, i) => ({ ref: `b${i}`, pr: i + 1, at: "t" }));
+    const snapshot = structuredClone(full);
+    expect(rememberOwnBranches(full, [{ ref: "newest", pr: 999 }], "u")).toEqual({ error: "own-branches-capacity" });
+    expect(full).toEqual(snapshot);
+    const replaced = rememberOwnBranches(
+      full,
+      [
+        { ref: "b0", pr: 999 },
+        { ref: "b0", pr: 1000 },
+      ],
+      "u",
+    );
+    expect(replaced).toEqual({ ownBranches: [...full.slice(1), { ref: "b0", pr: 1000, at: "u" }] });
   });
 });
 

@@ -1,5 +1,7 @@
 import {
   isCoordinatorUnit,
+  isCoordinatorEnding,
+  INSTANCE_ID_PATTERN,
   mainTaskClaimMatches,
   preserveWorkBrief,
   hasRecoverySettlementCapacity,
@@ -198,18 +200,10 @@ export function isRecoveryReceipt(v: unknown): v is RecoveryReceipt {
     object(v.ending) &&
     Number.isSafeInteger(v.seq) &&
     (v.seq as number) > 0 &&
-    isCoordinatorUnit({
-      instanceId: v.instanceId,
-      unit: v.unit,
-      slug: "history",
-      branch: "history",
-      dependsOn: [],
-      rounds: [],
-      ending: v.ending,
-      ...(object(v.ending) && object(v.ending.outcome) && object(v.ending.outcome.terminalPr)
-        ? { pr: { number: v.ending.outcome.terminalPr.number, url: v.ending.outcome.terminalPr.url } }
-        : {}),
-    }) &&
+    typeof v.instanceId === "string" &&
+    INSTANCE_ID_PATTERN.test(v.instanceId) &&
+    text(v.unit, 32) &&
+    isCoordinatorEnding(v.ending) &&
     ((v.provenance === "observed_predecessor" &&
       v.predecessorId === undefined &&
       v.actionId === undefined &&

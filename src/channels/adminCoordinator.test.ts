@@ -10,6 +10,7 @@ import { ALL_GRANTS } from "../core/authz/grants.js";
 import { InMemoryCoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import { createMainTaskStarter } from "../core/coordinator/mainStart.js";
 import { generatedTaskOf } from "../core/coordinator/generatedTask.js";
+import { workflowSteps } from "../core/coordinator/steps.js";
 import {
   InMemoryPrivateWorkerLog,
   UnavailablePrivateWorkerLog,
@@ -3266,6 +3267,43 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     await h.instances.putUnits([unitRow("U10"), unitRow("U11")]);
     return h;
   }
+  async function privatePlanHarness(over: Parameters<typeof harness>[0] = {}) {
+    const h = harness(over);
+    const instance: CoordinatorInstance = {
+      ...PLAN_INSTANCE,
+      plan: { id: "fixture" },
+      merge: "person",
+      branch: unitRow("U10").branch,
+      base: "main",
+    };
+    const unit = unitRow("U10", {
+      threadKey: `worker:${instance.id}:U10`,
+      workBrief: {
+        requesterId: instance.userId,
+        mainThreadKey: instance.threadKey,
+        actId: "act-1",
+        repo: instance.repo,
+        base: "main",
+        question: "Why?",
+        findings: [],
+        requestedChange: "Fix it",
+      },
+    });
+    await h.instances.recordRequesterTurn({
+      threadKey: instance.threadKey,
+      requesterId: instance.userId,
+      messageId: "1",
+    });
+    expect(
+      await h.instances.claimMainTask({ mainThreadKey: instance.threadKey, actId: "act-1" }, instance, unit, {
+        requesterId: instance.userId,
+        sourceMessageId: "1",
+        revision: 1,
+        repo: instance.repo,
+      }),
+    ).toMatchObject({ ok: true });
+    return h;
+  }
   async function idleHarness(
     over: Parameters<typeof harness>[0] = {},
     idle: Partial<NonNullable<CoordinatorUnit["idle"]>> = {},
@@ -3369,12 +3407,184 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       tools: [],
     });
 
+  it.each([
+    "original owner",
+    "changed requester",
+    "changed run",
+    "changed attempt",
+    "unreconciled admission",
+    "mixed snapshot",
+    "foreign report owner",
+  ] as const)("reconciles a concurrent terminal ending only under the %s", async (scenario) => {
+    const h = await planHarness();
+    await hostParent(h);
+    const canonical = { kind: "terminated", report: "The original execution ended", at: NOW };
+    const committed = unitRow("U10", {
+      ending: canonical,
+      ...(scenario === "foreign report owner"
+        ? {
+            reportDelivery: {
+              version: 1 as const,
+              proposalHash: "c".repeat(64),
+              owner: {
+                instanceId: PLAN_INSTANCE.id,
+                unit: "U10",
+                attempt: 0,
+                requester: "slack:UOTHER",
+                channelId: PLAN_INSTANCE.channelId,
+                threadKey: PLAN_INSTANCE.threadKey,
+                deliveryId: "U10/end",
+              },
+            },
+          }
+        : {}),
+    });
+    expect(isCoordinatorUnit(committed)).toBe(true);
+    let installed = false;
+    let mixed = false;
+    let mixedResponseStatus: number | undefined;
+    const calls: string[] = [];
+    const bot: CoordinatorBot = {
+      async step(route, body) {
+        calls.push(route);
+        const mixing = scenario === "mixed snapshot" && installed && route === "plan" && !mixed;
+        if (mixing) {
+          mixed = true;
+          const readUnits = h.instances.listUnits.bind(h.instances);
+          vi.spyOn(h.instances, "listUnits").mockImplementationOnce(async (id) => {
+            expect(await h.instances.replace({ ...PLAN_INSTANCE, userId: "slack:UOTHER" })).toEqual({ ok: true });
+            await h.instances.putUnits([committed, unitRow("U11")]);
+            return readUnits(id);
+          });
+        }
+        if (route === "pr-check") return { status: 200, text: JSON.stringify({ ok: true, state: "none", at: NOW }) };
+        if (route === "unit-start")
+          return { status: 200, text: JSON.stringify({ ok: true, threadKey: PLAN_INSTANCE.threadKey, at: NOW }) };
+        if (route === "branch")
+          return { status: 200, text: JSON.stringify({ ok: false, reason: "branch creation refused", at: NOW }) };
+        if (route === "unit-end" && body.unit === "U10" && !installed) {
+          installed = true;
+          if (scenario !== "original owner" && scenario !== "mixed snapshot" && scenario !== "foreign report owner") {
+            expect(
+              await h.instances.replace({
+                ...PLAN_INSTANCE,
+                ...(scenario === "changed requester"
+                  ? { userId: "slack:UOTHER" }
+                  : scenario === "changed run"
+                    ? { runId: "another-host" }
+                    : scenario === "changed attempt"
+                      ? { attempt: 2 }
+                      : { admission: "unreconciled" as const }),
+              }),
+            ).toEqual({ ok: true });
+            await h.instances.putUnits([unitRow("U10"), unitRow("U11")]);
+          }
+          expect(await h.instances.compareAndReplaceUnit(unitRow("U10"), committed)).toEqual({ ok: true });
+        }
+        const response = await call(h, route, body);
+        if (mixing) mixedResponseStatus = response.status;
+        return { status: response.status, text: JSON.stringify(response.body) };
+      },
+    };
+    class PermanentError extends Error {}
+    const steps = workflowSteps(
+      {
+        async do(_name, config, callback) {
+          for (let attempt = 0; ; attempt++) {
+            try {
+              return await callback();
+            } catch (error) {
+              if (error instanceof PermanentError || attempt >= config.retries.limit) throw error;
+            }
+          }
+        },
+        sleep: async () => {},
+        waitForEvent: async () => {
+          throw new Error("no child should start");
+        },
+      },
+      (message) => new PermanentError(message),
+    );
+
+    const result = runPlan(steps, bot, PLAN_INSTANCE.id);
+    if (scenario === "original owner") {
+      expect(await result).toMatchObject({ units: { U10: "terminated", U11: "blocked" }, outcome: "failed" });
+      expect((await h.instances.listUnits(PLAN_INSTANCE.id)).find((row) => row.unit === "U11")?.ending?.kind).toBe(
+        "blocked",
+      );
+    } else {
+      await expect(result).rejects.toThrow();
+      expect((await h.instances.listUnits(PLAN_INSTANCE.id)).find((row) => row.unit === "U11")?.ending).toBeUndefined();
+    }
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id)).find((row) => row.unit === "U10")).toEqual(committed);
+    expect(calls).not.toContain("spawn");
+    if (scenario === "mixed snapshot") expect(mixedResponseStatus).toBe(503);
+  });
+
+  it.each(["stopped selection", "blocked dependent", "recorded step failure"] as const)(
+    "keeps recorded terminal endings while settling a %s",
+    async (scenario) => {
+      const h = await planHarness();
+      await hostParent(h);
+      const canonical =
+        scenario === "recorded step failure"
+          ? {
+              kind: "failed",
+              cause: "step_threw" as const,
+              step: "U10/start",
+              report: "The original execution failed",
+              at: NOW,
+            }
+          : { kind: "terminated", report: "The original execution ended", at: NOW };
+      await h.instances.putUnits([
+        unitRow("U10", { ending: canonical }),
+        unitRow("U11", scenario === "blocked dependent" ? { ending: canonical } : {}),
+      ]);
+      if (scenario === "stopped selection")
+        expect(await h.instances.markStopped(PLAN_INSTANCE.id, NOW)).toEqual({ ok: true });
+      const calls: string[] = [];
+      const bot: CoordinatorBot = {
+        async step(route, body) {
+          calls.push(route);
+          const response = await call(h, route, body);
+          return { status: response.status, text: JSON.stringify(response.body) };
+        },
+      };
+      const steps: StepRunner = {
+        do: async (_name, _config, callback) => callback(),
+        sleep: async () => {},
+        waitForEvent: async () => {
+          throw new Error("no child should start");
+        },
+      };
+      expect(
+        await runPlan(
+          workflowSteps(steps, (message) => new Error(message)),
+          bot,
+          PLAN_INSTANCE.id,
+        ),
+      ).toMatchObject({
+        units: {
+          U10: canonical.kind,
+          U11:
+            scenario === "stopped selection" ? "stopped" : scenario === "blocked dependent" ? "terminated" : "blocked",
+        },
+        outcome: "failed",
+      });
+      expect((await h.instances.listUnits(PLAN_INSTANCE.id)).find((row) => row.unit === "U10")).toEqual(
+        unitRow("U10", { ending: canonical }),
+      );
+      expect(calls).not.toContain("spawn");
+    },
+  );
+
   it("plan answers the instance's units with where each stands, who merges from the instance's field, the caps as clipped and the base; an instance without the field is a person's merge; an unknown instance is 404", async () => {
     const h = await planHarness();
     expect(await call(h, "plan", { parentInstanceId: PLAN_INSTANCE.id })).toEqual({
       status: 200,
       body: {
         ok: true,
+        instance: PLAN_INSTANCE,
         planId: "fixture",
         merge: "runner",
         // Absent on the record: the machine reads the default, named as the org's.
@@ -3939,6 +4149,47 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(offline.threadsAsked).toEqual([]);
   });
 
+  it("keeps a legacy terminal row immutable before report admission exists", async () => {
+    const h = await planHarness();
+    const ended = unitRow("U10", { ending: { kind: "terminated", report: "Workflow is gone", at: NOW } });
+    await h.instances.putUnits([ended]);
+    await hostParent(h);
+    expect(
+      await call(h, "unit-end", {
+        parentInstanceId: PLAN_INSTANCE.id,
+        unit: "U10",
+        deliveryId: "U10/end/threw",
+        ending: { kind: "failed", report: "A late producer tried to replace termination" },
+      }),
+    ).toMatchObject({ status: 409, body: { error: "settlement_conflict" } });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]).toEqual(ended);
+  });
+
+  it("keeps an unprojected terminal report immutable across a different delivery id", async () => {
+    const h = await planHarness();
+    await h.instances.putUnits([unitRow("U10")]);
+    await hostParent(h);
+    const body = {
+      parentInstanceId: PLAN_INSTANCE.id,
+      unit: "U10",
+      deliveryId: "U10/end",
+      ending: { kind: "stopped", report: "Stopped before dispatch" },
+    };
+    expect(await call(h, "unit-end", body)).toMatchObject({ status: 200 });
+    const settled = (await h.instances.listUnits(PLAN_INSTANCE.id))[0];
+    expect(
+      await call(h, "unit-end", {
+        ...body,
+        deliveryId: "U10/end/threw",
+        ending: { kind: "failed", report: "A late producer tried to replace the result" },
+      }),
+    ).toMatchObject({
+      status: 409,
+      body: { error: "settlement_conflict" },
+    });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]).toEqual(settled);
+  });
+
   it("persists typed settlement facts and refuses a mismatched ending before publication", async () => {
     const h = await planHarness();
     const pr = { number: 7, url: "https://github.com/acme/api/pull/7" };
@@ -4194,7 +4445,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
           return saved;
         },
       };
-      const h = await planHarness({ privateWorkerLog: log });
+      const h = await privatePlanHarness({ privateWorkerLog: log });
       await h.instances.putUnits([
         unitRow("U10", {
           workBrief: {
@@ -4233,6 +4484,35 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       ).toMatchObject([{ kind: "reply", id: "U10/end", text: "Stopped" }]);
       expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]?.ending).toMatchObject({ deliveryId: "U10/end" });
     }
+  });
+
+  it.each(["missing", "foreign"] as const)("refuses private report replay when its Main claim is %s", async (claim) => {
+    const log = new InMemoryPrivateWorkerLog();
+    const h = await privatePlanHarness({ privateWorkerLog: log });
+    await hostParent(h);
+    const body = {
+      parentInstanceId: PLAN_INSTANCE.id,
+      unit: "U10",
+      deliveryId: "U10/end",
+      ending: {
+        kind: "aborted",
+        report: "Private report",
+        outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 1 },
+      },
+    };
+    expect((await call(h, "unit-end", body)).status).toBe(200);
+    const key = `worker:${PLAN_INSTANCE.id}:U10`;
+    const before = await log.list(key);
+    const link = await h.instances.getMainTask({ mainThreadKey: PLAN_INSTANCE.threadKey, actId: "act-1" });
+    expect(link).not.toBeNull();
+    vi.spyOn(h.instances, "getMainTask").mockResolvedValue(
+      claim === "missing" ? null : { ...link!, unit: "another-unit" },
+    );
+    expect(await call(h, "unit-end", body)).toMatchObject({
+      status: 503,
+      body: { error: "report_context_unavailable" },
+    });
+    expect(await log.list(key)).toEqual(before);
   });
 
   it.each(["round", "pr-check", "unit-start"] as const)(
@@ -4298,7 +4578,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
         return backing.append(threadKey, event);
       },
     };
-    const h = await planHarness({ privateWorkerLog: log });
+    const h = await privatePlanHarness({ privateWorkerLog: log });
     const key = `worker:${PLAN_INSTANCE.id}:U10`;
     await h.instances.putUnits([
       unitRow("U10", {
@@ -4339,7 +4619,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     "keeps a private worker's %s report out of hosted events and pull request comments",
     async (kind) => {
       const log = new InMemoryPrivateWorkerLog();
-      const h = await planHarness({ privateWorkerLog: log });
+      const h = await privatePlanHarness({ privateWorkerLog: log });
       const key = `worker:${PLAN_INSTANCE.id}:U10`;
       const pr = { number: 12, url: "https://github.com/acme/api/pull/12" };
       await h.instances.putUnits([
@@ -6466,9 +6746,12 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     // A review_pending ending's headSha — the coding child's own last push —
     // is persisted on the row as lastPush, so the next attempt's pre-check can
     // start at the review round; a value that is not a sha leaves the row alone.
+    const capped = await planHarness();
+    await hostParent(capped);
+    await capped.instances.putUnits([unitRow("U10")]);
     expect(
       (
-        await call(h, "unit-end", {
+        await call(capped, "unit-end", {
           parentInstanceId: PLAN_INSTANCE.id,
           unit: "U10",
           ending: { kind: "review_pending", report: "⏸ capped" },
@@ -6476,22 +6759,25 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
         })
       ).status,
     ).toBe(200);
-    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0].lastPush).toBe(
+    expect((await capped.instances.listUnits(PLAN_INSTANCE.id))[0].lastPush).toBe(
       "abcdef1234abcdef1234abcdef1234abcdef1234",
     );
-    await call(h, "unit-end", {
+    await call(capped, "unit-end", {
       parentInstanceId: PLAN_INSTANCE.id,
       unit: "U10",
       ending: { kind: "review_pending", report: "⏸ capped" },
       headSha: "not-a-sha",
     });
-    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0].lastPush).toBe(
+    expect((await capped.instances.listUnits(PLAN_INSTANCE.id))[0].lastPush).toBe(
       "abcdef1234abcdef1234abcdef1234abcdef1234",
     );
     // A merge_ready ending persists the exact final reviewed head too: this is
     // the durable expected head an ended generated pipeline continues from.
+    const ready = await planHarness();
+    await hostParent(ready);
+    await ready.instances.putUnits([unitRow("U10")]);
     const reviewedHead = "FEDCBA9876fedcba9876fedcba9876fedcba9876";
-    await call(h, "unit-end", {
+    await call(ready, "unit-end", {
       parentInstanceId: PLAN_INSTANCE.id,
       unit: "U10",
       ending: {
@@ -6501,7 +6787,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
       headSha: reviewedHead,
     });
-    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0].lastPush).toBe(reviewedHead.toLowerCase());
+    expect((await ready.instances.listUnits(PLAN_INSTANCE.id))[0].lastPush).toBe(reviewedHead.toLowerCase());
 
     // The hosted parent (record 0060): finish publishes the answer,
     // finishes the registry row and seals the ONE record — the run's own
@@ -6535,14 +6821,11 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       "run_state",
       "run_state",
       "ship_unit",
-      "ship_unit",
-      "ship_unit",
-      "ship_unit",
       "run_state",
       "answer",
       "run_state",
     ]);
-    expect(rec.events.map((e) => e.seq)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    expect(rec.events.map((e) => e.seq)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
     // The record names the instance whose story it is (agent-ship item 17) in
     // its LAST run_meta carrying one, so its page can list the units.
     expect(rec.events[1]).toMatchObject({ type: "run_meta", agent: "ship", instanceId: PLAN_INSTANCE.id });
@@ -7491,26 +7774,29 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     // from its record, a run of this instance and no other — a run outside the
     // instance, one the history lacks, or a record without a handoff leaves the
     // comment as the report alone.
+    const handoffs = await mergeHarness({ issues: [] });
+    await handoffs.github.createIssue("acme/api", { title: "U10: Warm the cache (unit)", body: "" });
+    await handoffs.instances.putUnits([row({ issue: issue.number })]);
     const handoff = {
       deviations: [{ from: "one table", to: "two tables", why: "the row outgrew the record" }],
       followUps: [],
       unproven: [{ criterion: "the live receipt", why: "needs staging" }],
     };
-    await h.store.put(
+    await handoffs.store.put(
       record("run-c0", {
         parentInstanceId: PLAN_INSTANCE.id,
         idempotencyKey: `${PLAN_INSTANCE.id}:U10/1/fix`,
         handoff,
       }),
     );
-    await h.store.put(
+    await handoffs.store.put(
       record("run-else", { parentInstanceId: "ship_other_1", idempotencyKey: "ship_other_1:x", handoff }),
     );
-    await h.store.put(
+    await handoffs.store.put(
       record("run-bare", { parentInstanceId: PLAN_INSTANCE.id, idempotencyKey: `${PLAN_INSTANCE.id}:y` }),
     );
     const ended = (codingRunId: unknown) =>
-      call(h, "unit-end", {
+      call(handoffs, "unit-end", {
         parentInstanceId: PLAN_INSTANCE.id,
         unit: "U10",
         ending: { kind: "merged", report: "✅ Merged after 1 review round" },
@@ -7518,7 +7804,7 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
         codingRunId,
       });
     for (const id of ["run-c0", "run-else", "run-bare", "run-missing", 42]) expect((await ended(id)).status).toBe(200);
-    const bodies = (await h.github.getIssue("acme/api", issue.number)).comments.slice(1).map((c) => c.body);
+    const bodies = (await handoffs.github.getIssue("acme/api", issue.number)).comments.map((c) => c.body);
     expect(bodies[0]).toBe(
       "**Plan runner — U10 ended `merged`** · https://github.com/acme/api/pull/7\n\n✅ Merged after 1 review round\n\n" +
         "**Handoff — U10** · pull request [#7](https://github.com/acme/api/pull/7)\n\n" +
@@ -8226,6 +8512,7 @@ describe("POST /admin/coordinator/recover-unit — pre-PR same-unit coding", () 
     plan: { id: "orchestration" },
     caps: { maxRounds: 3, maxMinutes: 240 },
     grant: { renewals: 0, costCapUsd: 2 },
+    grantSource: "channel",
   });
   const unit = (): CoordinatorUnit => ({
     instanceId: INSTANCE.id,
@@ -8302,6 +8589,7 @@ describe("POST /admin/coordinator/recover-unit — pre-PR same-unit coding", () 
     expect(row).toMatchObject({ branch: INSTANCE.branch, recovery: { kind: "coding", expectedHeadSha: HEAD } });
     expect(row?.generatedTask?.text).toBe(task);
     expect(row?.recovery?.accounting?.spendUsd).toBe(0.25);
+    expect(row?.recovery?.accounting?.grantSource).toBe("channel");
     expect(h.recoveries).toHaveLength(1);
     expect(await recover(h)).toMatchObject({ status: 200, body: { outcome: "already_started" } });
     expect(h.recoveries).toHaveLength(1);
@@ -8356,13 +8644,84 @@ describe("POST /admin/coordinator/recover-unit — pre-PR same-unit coding", () 
     expect(moved.dispatched).toHaveLength(0);
   });
 
-  it("settles the coding recovery without inventing a review receipt", async () => {
+  it("settles and replays the coding recovery refusal only under its exact claim", async () => {
     const h = harness({ branchHead: HEAD });
     await h.instances.put(original());
     await h.instances.putUnits([unit()]);
     await h.store.put(coding());
     const response = await recover(h);
     expect(response).toMatchObject({ status: 200 });
+    const workflowId = (response.body as { workflowId: string }).workflowId;
+    const body = {
+      parentInstanceId: INSTANCE.id,
+      unit: "U12",
+      recoveryWorkflowId: workflowId,
+      ending: {
+        kind: "aborted",
+        report: "the second coding attempt ended",
+        outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 0, recoveryStop: "continuation_not_admitted" },
+      },
+    };
+    const settlement = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps);
+    expect(settlement, JSON.stringify(settlement)).toMatchObject({
+      status: 200,
+      body: { ok: true },
+    });
+    const [settled] = await h.instances.listUnits(INSTANCE.id);
+    expect(settled?.recovery).toBeUndefined();
+    expect(settled?.recoveryReceipt).toMatchObject({ codingRunId: "run-original-coding", workflowId });
+    expect(settled?.recoveryReceipt?.reviewRunId).toBeUndefined();
+    expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps)).toMatchObject({
+      status: 200,
+      body: { alreadySettled: true },
+    });
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, { ...body, recoveryWorkflowId: "foreign-recovery" }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 409, body: { error: "recovery_outcome_mismatch" } });
+    expect((await h.instances.listUnits(INSTANCE.id))[0]).toEqual(settled);
+    expect((await h.instances.listRecoveryHistory(unit())).receipts).toHaveLength(2);
+    expect(await recover(h, INSTANCE.userId, "recovery-2")).toMatchObject({
+      status: 409,
+      body: { error: "recovery_already_completed" },
+    });
+  });
+
+  it("refuses a recovery-only outcome on an ordinary unit", async () => {
+    const h = harness();
+    await h.instances.put(original());
+    await h.instances.putUnits([{ ...unit(), ending: undefined }]);
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          ending: {
+            kind: "aborted",
+            report: "No continuation admitted",
+            outcome: {
+              schemaVersion: 1,
+              kind: "aborted",
+              reviewRounds: 0,
+              recoveryStop: "continuation_not_admitted",
+            },
+          },
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 409, body: { error: "recovery_outcome_mismatch" } });
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.ending).toBeUndefined();
+  });
+
+  it("persists a recovered coding deviation as a blocked hold without inventing a human gate", async () => {
+    const h = harness({ branchHead: HEAD });
+    await h.instances.put(original());
+    await h.instances.putUnits([unit()]);
+    await h.store.put(coding());
+    const response = await recover(h);
+    expect(response.status).toBe(200);
     const workflowId = (response.body as { workflowId: string }).workflowId;
     expect(
       await handleCoordinatorRequest(
@@ -8371,23 +8730,22 @@ describe("POST /admin/coordinator/recover-unit — pre-PR same-unit coding", () 
           unit: "U12",
           recoveryWorkflowId: workflowId,
           ending: {
-            kind: "aborted",
-            report: "the second coding attempt ended",
-            outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 0 },
+            kind: "held",
+            holdCause: "blocked",
+            report: "The recorded precondition does not hold",
+            outcome: { schemaVersion: 1, kind: "held", reviewRounds: 0 },
           },
         }),
         h.deps,
       ),
     ).toMatchObject({ status: 200 });
-    const [settled] = await h.instances.listUnits(INSTANCE.id);
-    expect(settled?.recovery).toBeUndefined();
-    expect(settled?.recoveryReceipt).toMatchObject({ codingRunId: "run-original-coding", workflowId });
-    expect(settled?.recoveryReceipt?.reviewRunId).toBeUndefined();
-    expect((await h.instances.listRecoveryHistory(unit())).receipts).toHaveLength(2);
-    expect(await recover(h, INSTANCE.userId, "recovery-2")).toMatchObject({
-      status: 409,
-      body: { error: "recovery_already_completed" },
-    });
+    const settled = (await h.instances.listUnits(INSTANCE.id))[0]!;
+    expect(settled).toMatchObject({ ending: { kind: "held" }, recoveryHold: { cause: "blocked" } });
+    expect(isCoordinatorUnit(JSON.parse(JSON.stringify(settled)))).toBe(true);
+    expect(isCoordinatorUnit({ ...settled, recoveryHold: { cause: "blocked", gate: {} } })).toBe(false);
+    expect(settled.pr).toBeUndefined();
+    expect(settled.recovery).toBeUndefined();
+    expect(await recover(h, INSTANCE.userId, "recovery-2")).toMatchObject({ status: 409 });
   });
 
   it("refuses unverified work and moved heads before claiming", async () => {
@@ -9716,7 +10074,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         parentInstanceId: INSTANCE.id,
         unit: "U12",
       });
-      const ending = scenario === "complete" ? "merge_ready" : scenario === "human consent" ? "idle" : "aborted";
+      const ending = scenario === "complete" ? "merge_ready" : scenario === "human consent" ? "held" : "aborted";
       expect(h.logs.filter((line) => line.includes("dispatch threw"))).toEqual([]);
       expect(result, JSON.stringify(h.logs)).toMatchObject({ instance: INSTANCE.id, units: { U12: ending } });
       expect(children).toHaveLength(scenario.startsWith("missing") ? 1 : scenario === "red CI" ? 3 : 2);
@@ -16261,6 +16619,142 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
   });
 
+  it.each([
+    ["unavailable", 503, "recovery_store_unavailable"],
+    ["stale", 409, "recovery_claim_stale"],
+    ["conflict", 409, "settlement_conflict"],
+    ["capacity", 409, "recovery_history_capacity"],
+    ["unreadable", 503, "recovery_store_unavailable"],
+  ] as const)("preserves recovery ownership when settlement returns %s", async (reason, status, error) => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    expect((await callRecovery(h)).status).toBe(200);
+    const before = await h.instances.listUnits(INSTANCE.id);
+    const publicationOwner = h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number);
+    expect(publicationOwner).toBeDefined();
+    if (reason === "unreadable")
+      vi.spyOn(h.instances, "transitionRecovery").mockImplementationOnce(async () => {
+        vi.spyOn(h.instances, "listUnits").mockRejectedValueOnce(new Error("store unreachable"));
+        throw new Error("settlement response lost");
+      });
+    else vi.spyOn(h.instances, "transitionRecovery").mockResolvedValueOnce({ ok: false, reason });
+
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          recoveryWorkflowId: "recovery-run-original-review",
+          ending: { kind: "merge_ready", report: "ready at the recovered head" },
+          pr: PR,
+          headSha: HEAD,
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status, body: { error } });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(publicationOwner);
+  });
+
+  it.each(["changed", "missing", "changed on replay", "missing on replay"] as const)(
+    "refuses a committed recovery report when its owner becomes %s",
+    async (owner) => {
+      const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+      const instance = recoveryInstance();
+      await h.instances.put(instance);
+      await h.instances.putUnits([requestChangesRow()]);
+      await h.store.put(reviewRecord());
+      expect((await callRecovery(h)).status).toBe(200);
+      const publicationOwner = h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number);
+      const changed = owner.startsWith("missing")
+        ? null
+        : {
+            ...instance,
+            userId: "slack:another-requester",
+            runId: "another-run",
+            attempt: 1,
+          };
+      const body = {
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+        recoveryWorkflowId: "recovery-run-original-review",
+        ending: { kind: "merge_ready", report: "ready at the recovered head" },
+        pr: PR,
+        headSha: HEAD,
+      };
+      if (owner.endsWith("on replay")) {
+        expect((await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps)).status).toBe(
+          200,
+        );
+        expect(h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, publicationOwner!)).toBe(true);
+        vi.spyOn(h.instances, "get").mockResolvedValueOnce(instance).mockResolvedValueOnce(changed);
+      } else {
+        const settle = h.instances.transitionRecovery.bind(h.instances);
+        vi.spyOn(h.instances, "transitionRecovery").mockImplementationOnce(async (transition) => {
+          const result = await settle(transition);
+          expect(result.ok).toBe(true);
+          vi.spyOn(h.instances, "get").mockResolvedValueOnce(changed);
+          throw new Error("settlement response lost");
+        });
+      }
+      expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps)).toMatchObject({
+        status: 503,
+        body: { error: "report_context_unavailable" },
+      });
+      expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(publicationOwner);
+    },
+  );
+
+  it.each(["unavailable", "stale", "conflicting reread", "unreadable reread", "unchanged reread"] as const)(
+    "keeps legacy recovery replay retryable only when storage is %s",
+    async (reason) => {
+      const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+      await h.instances.put(recoveryInstance());
+      const committed: CoordinatorUnit = {
+        ...requestChangesRow(),
+        ending: { kind: "merge_ready", report: "canonical legacy report", at: NOW },
+        recoveryReceipt: { reviewRunId: "run-original-review", workflowId: "recovery-run-original-review", at: NOW },
+      };
+      expect(isCoordinatorUnit(committed)).toBe(true);
+      await h.instances.putUnits([committed]);
+      const next = { ...committed, threadKey: "slack:C1:another-owner" };
+      if (reason === "unavailable" || reason === "stale")
+        vi.spyOn(h.instances, "compareAndReplaceUnit").mockResolvedValueOnce({ ok: false, reason });
+      else {
+        const cas = h.instances.compareAndReplaceUnit.bind(h.instances);
+        vi.spyOn(h.instances, "compareAndReplaceUnit").mockImplementationOnce(async () => {
+          if (reason === "conflicting reread") expect(await cas(committed, next)).toEqual({ ok: true });
+          if (reason === "unreadable reread")
+            vi.spyOn(h.instances, "listUnits").mockRejectedValueOnce(new Error("store unreachable"));
+          throw new Error("CAS response lost");
+        });
+      }
+      const body = {
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+        recoveryWorkflowId: "recovery-run-original-review",
+        ending: { kind: "merge_ready", report: committed.ending!.report },
+        pr: PR,
+        headSha: HEAD,
+      };
+      const unavailable = reason !== "stale" && reason !== "conflicting reread";
+      expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps)).toMatchObject({
+        status: unavailable ? 503 : 409,
+        body: { error: unavailable ? "settlement_store_unavailable" : "settlement_conflict" },
+      });
+      expect(await h.instances.listUnits(INSTANCE.id)).toEqual([reason === "conflicting reread" ? next : committed]);
+      if (reason === "unavailable")
+        expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps)).toMatchObject(
+          {
+            status: 200,
+            body: { ok: true, alreadySettled: true },
+          },
+        );
+    },
+  );
+
   it("replays a recovered private unit report after its settlement committed but the log failed", async () => {
     for (const outcome of [undefined, { schemaVersion: 1, kind: "aborted", reviewRounds: 2 }]) {
       const backing = new InMemoryPrivateWorkerLog();
@@ -16459,6 +16953,52 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
 
     expect(response).toMatchObject({ status: 409, body: { error: "recovery_claim_mismatch" } });
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+  });
+
+  it("rejects a different legacy terminal result after a lost settlement response", async () => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+    await h.instances.put(recoveryInstance());
+    const row: CoordinatorUnit = {
+      ...requestChangesRow(),
+      ending: undefined,
+      recovery: {
+        kind: "review",
+        workflowId: "recovery-run-original-review",
+        reviewRunId: "run-original-review",
+        reviewKey: `${INSTANCE.id}:U12/2/review`,
+        round: 2,
+        expectedHeadSha: HEAD,
+        remainingMs: minutesToMs(30),
+        claimedAt: NOW,
+        deadlineAt: NOW + minutesToMs(30),
+        step: "U12/recovery/2/review",
+        previousEnding: requestChangesRow().ending!,
+      },
+    };
+    expect(isCoordinatorUnit(row)).toBe(true);
+    await h.instances.putUnits([row]);
+    const cas = h.instances.compareAndReplaceUnit.bind(h.instances);
+    let canonical: CoordinatorUnit | undefined;
+    vi.spyOn(h.instances, "compareAndReplaceUnit").mockImplementationOnce(async (expected, proposed) => {
+      canonical = { ...proposed, ending: { ...proposed.ending!, kind: "aborted" } };
+      expect(isCoordinatorUnit(canonical)).toBe(true);
+      expect(await cas(expected, canonical)).toEqual({ ok: true });
+      throw new Error("settlement response lost");
+    });
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          recoveryWorkflowId: "recovery-run-original-review",
+          ending: { kind: "merge_ready", report: "same legacy report" },
+          pr: PR,
+          headSha: HEAD,
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 409, body: { error: "recovery_claim_stale" } });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([canonical]);
   });
 
   it("reconciles a committed terminal CAS with a lost response and releases only the original owner", async () => {

@@ -88,10 +88,12 @@ import {
   childInterruptedEventType,
   childResumedEventType,
   isCoordinatorUnit,
+  isCoordinatorInstance,
   isUnitWakeAnswer,
   runFinishedEventType,
   unitNudgeEventType,
   type CoordinatorUnit,
+  type CoordinatorInstance,
   type UnitWakeAnswer,
 } from "./contract.js";
 import { shipOutcomeOf } from "./shipOutcome.js";
@@ -227,6 +229,9 @@ class UnreadableAnswer extends Error {
   }
 }
 
+/** A deterministic refusal cannot become a successful write by retrying it. */
+export class SettlementRefused extends Error {}
+
 class TransientBotRefusal extends Error {
   constructor(
     readonly code: string,
@@ -237,6 +242,8 @@ class TransientBotRefusal extends Error {
 }
 
 interface PlanFacts {
+  /** The existing admission row, retained for exact owner comparison on reconciliation. */
+  instance?: CoordinatorInstance;
   planId?: string;
   /** Who merges, as the instance's field has it: the plan route answers it, `person` when absent. */
   merge: "runner" | "person";
@@ -290,13 +297,18 @@ function readIdleDays(raw: unknown): number {
 
 function readPlan(a: BotAnswer): PlanFacts {
   const b = a.body;
-  if (b.ok !== true) throw new UnreadableAnswer("plan", a, "not ok");
+  if (a.status !== 200 || b.ok !== true) throw new UnreadableAnswer("plan", a, "not ok");
+  if (b.instance !== undefined && !isCoordinatorInstance(b.instance))
+    throw new UnreadableAnswer("plan", a, "instance admission");
   if (typeof b.repo !== "string" || typeof b.base !== "string") throw new UnreadableAnswer("plan", a, "repo and base");
+  if (isCoordinatorInstance(b.instance) && (b.instance.repo !== b.repo || (b.instance.base ?? "main") !== b.base))
+    throw new UnreadableAnswer("plan", a, "instance target");
   if (!isMinutes(b.caps) || typeof b.caps.maxRounds !== "number" || typeof b.caps.maxMinutes !== "number")
     throw new UnreadableAnswer("plan", a, "caps");
   const units: unknown = b.units;
   if (!Array.isArray(units) || !units.every(isCoordinatorUnit)) throw new UnreadableAnswer("plan", a, "units");
   return {
+    ...(isCoordinatorInstance(b.instance) ? { instance: b.instance } : {}),
     ...(typeof b.planId === "string" ? { planId: b.planId } : {}),
     merge: b.merge === "runner" ? "runner" : "person",
     addressSeverity: isAddressSeverity(b.addressSeverity) ? b.addressSeverity : "minor",
@@ -691,6 +703,8 @@ async function call(
   const read = readBotAnswer(reply.status, reply.text);
   if (!read.ok) {
     if (acceptOpaqueNotFound && isOpaqueNotFound(reply)) return reply;
+    if (route === "unit-end" && reply.status >= 400 && reply.status < 500)
+      throw new SettlementRefused(`the bot did not confirm successful settlement: ${read.reason}`);
     throw new Error(`the bot did not answer ${route}: ${read.reason}`);
   }
   const transient = transientRefusal(read.answer);
@@ -952,6 +966,29 @@ interface StepAt {
   round?: { index: number; kind: string };
 }
 
+/** A terminal write is complete only after the bot confirms its settlement. */
+async function confirmedUnitEnd(
+  step: StepRunner,
+  bot: CoordinatorBot,
+  name: string,
+  body: Record<string, unknown>,
+): Promise<BotAnswer> {
+  return answerOf(
+    "unit-end",
+    await step.do(name, STEP_CONFIG, async () => {
+      const reply = await call(bot, "unit-end", { ...body, deliveryId: name });
+      const answer = answerOf("unit-end", reply);
+      if (answer.status !== 200 || answer.body.ok !== true) {
+        const detail = new UnreadableAnswer("unit-end", answer, "successful settlement");
+        if (answer.status === 200 || (answer.status >= 400 && answer.status < 500))
+          throw new SettlementRefused(detail.message);
+        throw detail;
+      }
+      return reply;
+    }),
+  );
+}
+
 /** A step that throws inside the walk becomes the unit's ending (issue 2100):
  *  kind `failed`, cause `step_threw`, the step and round it was in and the
  *  throw's one line, posted in the user's words — best effort, before the
@@ -1008,9 +1045,7 @@ async function tellStepThrew(
     ...(pr !== undefined ? { pr } : {}),
   };
   try {
-    await step.do(`${prefix}/end/threw`, STEP_CONFIG, () =>
-      call(bot, "unit-end", { ...body, deliveryId: `${prefix}/end/threw` }),
-    );
+    await confirmedUnitEnd(step, bot, `${prefix}/end/threw`, body);
   } catch {
     // Best effort: the rethrow still fails the instance, and a bot that could
     // not record the ending leaves the seal's line as before.
@@ -1020,6 +1055,74 @@ async function tellStepThrew(
 /** One unit's pipeline: its start, then the machine's steps until it ends;
  *  every round boundary and the ending told to the bot as they happen. */
 type DrivenEnding = UnitEnding & { endedAt?: number };
+
+/** One projection for every machine ending, including an initially ended recovery. */
+function unitEndBody(
+  tag: { parentInstanceId: string; unit: string },
+  state: UnitPipelineState,
+  ending: UnitEnding,
+  recoveryWorkflowId?: string,
+  endFacts?: MergeReadyFacts,
+): Record<string, unknown> {
+  const outcome = shipOutcomeOf(
+    recoveryWorkflowId !== undefined && ending.kind === "idle" && ending.humanGate !== undefined
+      ? ending.idled
+      : ending,
+  );
+  return {
+    ...tag,
+    ...(recoveryWorkflowId !== undefined ? { recoveryWorkflowId: recoveryWorkflowId } : {}),
+    // Two copies (routing-and-config item 28): the full report for the
+    // row and the board, and the thread's at the request's verbosity.
+    ending: {
+      kind:
+        recoveryWorkflowId !== undefined && ending.kind === "idle" && ending.humanGate !== undefined
+          ? "held"
+          : ending.kind,
+      ...(ending.kind === "held" && ending.cause !== undefined ? { holdCause: ending.cause } : {}),
+      report: renderUnitReport(state, endFacts),
+      ...(outcome !== undefined ? { outcome } : {}),
+      threadReport: renderUnitReport(state, endFacts, state.input.verbosity ?? DEFAULT_VERBOSITY),
+      // An idle ending carries its continuation facts (record 0051): the
+      // bot writes them on the row's `idle` in place of an ending, with
+      // the coding run id it already receives below.
+      ...(ending.kind === "idle"
+        ? {
+            why: ending.why,
+            renewalsLeft: ending.renewalsLeft,
+            ...(ending.from !== undefined ? { from: ending.from } : {}),
+            spendUsd: ending.spendUsd,
+            ...(ending.handoff !== undefined ? { handoff: ending.handoff } : {}),
+            ...(ending.humanGate !== undefined ? { humanGate: ending.humanGate } : {}),
+          }
+        : {}),
+    },
+    ...(state.pr !== undefined ? { pr: state.pr } : {}),
+    // A merge_ready ending retains the exact head its final approval
+    // reviewed. Review-pending endings retain the coding child's push;
+    // both become the row's durable lastPush for a later attempt.
+    ...(ending.kind === "merge_ready" && state.lastReviewHead !== undefined
+      ? { headSha: state.lastReviewHead }
+      : ending.kind === "review_pending" && ending.headSha !== undefined
+        ? { headSha: ending.headSha }
+        : ending.kind === "idle" && ending.why === "review_pending" && ending.from !== undefined
+          ? { headSha: ending.from }
+          : {}),
+    ...(state.lastCodingRunId !== undefined ? { codingRunId: state.lastCodingRunId } : {}),
+    // A continued ending is a segment's end, not the unit's: the bot
+    // writes the renewal as a row keyed by the next segment's index
+    // (decision 0046), so a runner reclaimed here never renews twice.
+    ...(ending.kind === "continued"
+      ? {
+          segment: {
+            index: ending.segment,
+            ...(ending.from !== undefined ? { from: ending.from } : {}),
+            runId: ending.runId,
+          },
+        }
+      : {}),
+  };
+}
 
 async function runUnit(
   step: StepRunner,
@@ -1034,7 +1137,8 @@ async function runUnit(
   // the Workflow's durable step cache never answers segment two with segment
   // one's results (decision 0046).
   const row = plan.units.find((u) => u.unit === unit);
-  const prefix = row?.recovery !== undefined ? `${unit}/recovery` : stepPrefixOf(unit, session);
+  const prefix =
+    row?.recovery !== undefined ? `${unit}/recovery/${row.recovery.workflowId}` : stepPrefixOf(unit, session);
   const tag = { parentInstanceId: instanceId, unit };
   // Where the machine is, tracked for the step-threw ending (issue 2100). The
   // start belongs in the same net as the rest of the unit even though no
@@ -1094,7 +1198,7 @@ async function runUnit(
           (plan.grant?.costCapUsd !== undefined
             ? { renewals: 0, costCapUsd: plan.grant.costCapUsd }
             : { renewals: 0 })),
-    grantSource: plan.grantSource,
+    grantSource: row?.recovery === undefined ? plan.grantSource : row.recovery.accounting?.grantSource,
     verbosity: plan.verbosity,
     idleDays: row?.recovery !== undefined ? 0 : plan.idleDays,
     generated: plan.generated,
@@ -1143,27 +1247,9 @@ async function runUnit(
       if (action.type === "end") {
         if (row?.recovery !== undefined && endedAt === undefined) {
           const endStep = `${prefix}/end`;
-          const ending = action.ending;
-          const body = {
-            ...tag,
-            recoveryWorkflowId: row.recovery.workflowId,
-            ending: {
-              kind: ending.kind === "idle" && ending.humanGate !== undefined ? "held" : ending.kind,
-              ...(ending.kind === "held" && ending.cause !== undefined ? { holdCause: ending.cause } : {}),
-              report: renderUnitReport(state),
-              threadReport: renderUnitReport(state, undefined, state.input.verbosity ?? DEFAULT_VERBOSITY),
-              ...(ending.kind === "idle" && ending.humanGate !== undefined ? { humanGate: ending.humanGate } : {}),
-            },
-            ...(state.pr !== undefined ? { pr: state.pr } : {}),
-          };
-          const reply = await step.do(endStep, STEP_CONFIG, async () => {
-            const candidate = await call(bot, "unit-end", { ...body, deliveryId: endStep });
-            const answer = answerOf("unit-end", candidate);
-            if (answer.status !== 200 || answer.body.ok !== true)
-              throw new UnreadableAnswer("unit-end", answer, "successful settlement");
-            return candidate;
-          });
-          endedAt = answerOf("unit-end", reply).body.at;
+          last = { ...last, step: endStep };
+          const body = unitEndBody(tag, state, action.ending, row.recovery.workflowId);
+          endedAt = (await confirmedUnitEnd(step, bot, endStep, body)).body.at;
         }
         return { ...action.ending, ...(endedAt !== undefined ? { endedAt } : {}) };
       }
@@ -1256,85 +1342,16 @@ async function runUnit(
             continue pipeline;
           }
           const ending = state.ending ?? note.ending;
-          const outcome = shipOutcomeOf(ending);
-          // The last coding child's run is named so the bot can put its handoff
-          // — the deviations it recorded — on the unit's board issue beside the
-          // ending (agent-ship item 14).
-          const body = {
-            ...tag,
-            ...(row?.recovery !== undefined ? { recoveryWorkflowId: row.recovery.workflowId } : {}),
-            // Two copies (routing-and-config item 28): the full report for the
-            // row and the board, and the thread's at the request's verbosity.
-            ending: {
-              kind:
-                row?.recovery !== undefined && ending.kind === "idle" && ending.humanGate !== undefined
-                  ? "held"
-                  : ending.kind,
-              ...(ending.kind === "held" && ending.cause !== undefined ? { holdCause: ending.cause } : {}),
-              report: renderUnitReport(state, endFacts),
-              ...(outcome !== undefined ? { outcome } : {}),
-              threadReport: renderUnitReport(state, endFacts, state.input.verbosity ?? DEFAULT_VERBOSITY),
-              // An idle ending carries its continuation facts (record 0051): the
-              // bot writes them on the row's `idle` in place of an ending, with
-              // the coding run id it already receives below.
-              ...(ending.kind === "idle"
-                ? {
-                    why: ending.why,
-                    renewalsLeft: ending.renewalsLeft,
-                    ...(ending.from !== undefined ? { from: ending.from } : {}),
-                    spendUsd: ending.spendUsd,
-                    ...(ending.handoff !== undefined ? { handoff: ending.handoff } : {}),
-                    ...(ending.humanGate !== undefined ? { humanGate: ending.humanGate } : {}),
-                  }
-                : {}),
-              ...(row?.recovery !== undefined && ending.kind === "idle" && ending.humanGate !== undefined
-                ? { humanGate: ending.humanGate }
-                : {}),
-            },
-            ...(state.pr !== undefined ? { pr: state.pr } : {}),
-            // A merge_ready ending retains the exact head its final approval
-            // reviewed. Review-pending endings retain the coding child's push;
-            // both become the row's durable lastPush for a later attempt.
-            ...(ending.kind === "merge_ready" && state.lastReviewHead !== undefined
-              ? { headSha: state.lastReviewHead }
-              : ending.kind === "review_pending" && ending.headSha !== undefined
-                ? { headSha: ending.headSha }
-                : ending.kind === "idle" && ending.why === "review_pending" && ending.from !== undefined
-                  ? { headSha: ending.from }
-                  : {}),
-            ...(state.lastCodingRunId !== undefined ? { codingRunId: state.lastCodingRunId } : {}),
-            // A continued ending is a segment's end, not the unit's: the bot
-            // writes the renewal as a row keyed by the next segment's index
-            // (decision 0046), so a runner reclaimed here never renews twice.
-            ...(ending.kind === "continued"
-              ? {
-                  segment: {
-                    index: ending.segment,
-                    ...(ending.from !== undefined ? { from: ending.from } : {}),
-                    runId: ending.runId,
-                  },
-                }
-              : {}),
-          };
+          const body = unitEndBody(tag, state, ending, row?.recovery?.workflowId, endFacts);
           const endStep = `${prefix}/end`;
           last = { step: endStep, ...(last.round !== undefined ? { round: last.round } : {}) };
-          const endAnswer = answerOf(
-            "unit-end",
-            await step.do(endStep, STEP_CONFIG, async () => {
-              const reply = await call(bot, "unit-end", { ...body, deliveryId: endStep });
-              const answer = answerOf("unit-end", reply);
-              if (answer.status !== 200 || answer.body.ok !== true)
-                throw new UnreadableAnswer("unit-end", answer, "successful settlement");
-              return reply;
-            }),
-          );
-          endedAt = endAnswer.body.at;
+          endedAt = (await confirmedUnitEnd(step, bot, endStep, body)).body.at;
         }
       }
     }
   } catch (err) {
-    // A private report can fail after unit-end committed the original result.
-    // Retrying that same step preserves it; a second failure ending would not.
+    // This refusal can precede or follow commitment. Keep the same delivery
+    // identity; only an acknowledged settlement proves completion.
     if (
       last.step === `${prefix}/end` &&
       err instanceof TransientBotRefusal &&
@@ -1377,15 +1394,40 @@ async function endUnrunUnit(
   instanceId: string,
   unit: string,
   ending: { kind: "stopped" | "blocked"; report: string },
-): Promise<void> {
-  const tag = { parentInstanceId: instanceId, unit };
-  const endStep = `${unit}/end`;
+  row?: CoordinatorUnit,
+  plan?: PlanFacts,
+): Promise<{ kind: string }> {
+  const recorded = plan === undefined ? undefined : recordedNegativeEnding(instanceId, plan, row, plan);
+  if (recorded !== undefined) return recorded;
+  const tag = {
+    parentInstanceId: instanceId,
+    unit,
+    ...(row?.recovery !== undefined ? { recoveryWorkflowId: row.recovery.workflowId } : {}),
+  };
+  const prefix = row?.recovery !== undefined ? `${unit}/recovery/${row.recovery.workflowId}` : unit;
+  const endStep = `${prefix}/end`;
   try {
-    await step.do(endStep, STEP_CONFIG, () => call(bot, "unit-end", { ...tag, ending, deliveryId: endStep }));
+    await confirmedUnitEnd(step, bot, endStep, { ...tag, ending });
   } catch (err) {
-    await tellStepThrew(step, bot, unit, tag, undefined, { step: endStep }, err);
+    if (err instanceof TransientBotRefusal && err.code === "private_worker_log_unavailable") throw err;
+    if (plan !== undefined) {
+      const canonical = await reconcileNegativeEnding(step, bot, prefix, instanceId, plan, row);
+      if (canonical !== undefined) return canonical;
+    }
+    await tellStepThrew(
+      step,
+      bot,
+      prefix,
+      tag,
+      undefined,
+      { step: endStep },
+      err,
+      row?.recovery !== undefined ? `${instanceId}:${unit}` : undefined,
+      row?.recovery?.workflowId,
+    );
     throw err;
   }
+  return ending;
 }
 
 /** The graph as one plan answer carries it: the instance's unit rows, in the plan's order. */
@@ -1459,17 +1501,14 @@ async function waitOnIdle(
     } catch {
       const ending = { kind: "idle_expired" as const, reviewRounds: idle.reviewRounds };
       const endStep = `${waitId}/end`;
-      await step.do(endStep, STEP_CONFIG, () =>
-        call(bot, "unit-end", {
-          parentInstanceId: instanceId,
-          unit,
-          deliveryId: endStep,
-          ending: {
-            kind: ending.kind,
-            report: "⌛ Idle expired: no reply continued this unit before its idle window closed.",
-          },
-        }),
-      );
+      await confirmedUnitEnd(step, bot, endStep, {
+        parentInstanceId: instanceId,
+        unit,
+        ending: {
+          kind: ending.kind,
+          report: "⌛ Idle expired: no reply continued this unit before its idle window closed.",
+        },
+      });
       return { kind: "ending", ending };
     }
     let wake: { answer: UnitWakeAnswer; at: number };
@@ -1496,28 +1535,22 @@ async function waitOnIdle(
     if (answer.kind === "answered") continue;
     if (answer.kind === "expired") {
       const ending = { kind: "idle_expired" as const, reviewRounds: idle.reviewRounds };
-      await step.do(`${waitId}/end`, STEP_CONFIG, () =>
-        call(bot, "unit-end", {
-          parentInstanceId: instanceId,
-          unit,
-          deliveryId: `${waitId}/end`,
-          ending: {
-            kind: ending.kind,
-            report: "⌛ Idle expired: the unit reached its indexed wake limit.",
-          },
-        }),
-      );
+      await confirmedUnitEnd(step, bot, `${waitId}/end`, {
+        parentInstanceId: instanceId,
+        unit,
+        ending: {
+          kind: ending.kind,
+          report: "⌛ Idle expired: the unit reached its indexed wake limit.",
+        },
+      });
       return { kind: "ending", ending };
     }
     if (answer.kind === "stopped") {
-      await step.do(`${waitId}/end`, STEP_CONFIG, () =>
-        call(bot, "unit-end", {
-          parentInstanceId: instanceId,
-          unit,
-          deliveryId: `${waitId}/end`,
-          ending: { kind: "stopped", report: "⏹ Stopped: the idle unit was ended by an operator." },
-        }),
-      );
+      await confirmedUnitEnd(step, bot, `${waitId}/end`, {
+        parentInstanceId: instanceId,
+        unit,
+        ending: { kind: "stopped", report: "⏹ Stopped: the idle unit was ended by an operator." },
+      });
       return { kind: "ending", ending: { kind: "stopped" } };
     }
     return {
@@ -1539,42 +1572,134 @@ async function waitOnIdle(
   }
 }
 
-/** The plan: its units one at a time in dependency order, then the endings of the units it never reached. */
-async function walk(step: StepRunner, bot: CoordinatorBot, instanceId: string): Promise<PlanRunSummary> {
-  // The selection is read at every unit boundary (the orchestration-plane plan): the first read opens
-  // the cursor, and each boundary's — its own durable step, `plan/<n>`, so a
-  // replay meets the same read — rebuilds it, so a later bot can append a unit
-  // to a live instance or drop one merged by hand without killing it.
-  let reads = 0;
-  const readSelection = async (): Promise<PlanFacts> => {
-    reads += 1;
-    const name = reads === 1 ? "plan" : `plan/${reads}`;
-    return readPlan(
-      answerOf("plan", await step.do(name, STEP_CONFIG, () => call(bot, "plan", { parentInstanceId: instanceId }))),
-    );
-  };
-  let plan = await readSelection();
-  let graph = graphOf(plan, instanceId);
-  let cursor = openPlanCursor(graph);
-  const endings: Record<string, string> = {};
-  for (;;) {
-    // The hard stop's mark (record 0060; issue 1924), read before every unit
-    // start: the walk ends every unit not yet ended `stopped` — the rows say
-    // why they never ran — and starts nothing more. A stop that lands once
-    // every unit has ended changes nothing: there is nothing left to end.
+/** A negative terminal result can block dependents without asserting report delivery or successful work. */
+function recordedNegativeEnding(
+  instanceId: string,
+  original: PlanFacts,
+  expected: CoordinatorUnit | undefined,
+  current: PlanFacts,
+): NonNullable<CoordinatorUnit["ending"]> | undefined {
+  if (
+    expected === undefined ||
+    original.instance?.id !== instanceId ||
+    current.instance?.id !== instanceId ||
+    original.instance.admission === "unreconciled" ||
+    JSON.stringify({ ...original.instance, stop: undefined }) !==
+      JSON.stringify({ ...current.instance, stop: undefined })
+  )
+    return undefined;
+  const rows = current.units.filter((row) => row.unit === expected.unit);
+  if (rows.length !== 1) return undefined;
+  const row = rows[0]!;
+  const reportOwner = row.reportDelivery?.owner;
+  const publication = row.publication;
+  if (
+    (reportOwner !== undefined &&
+      (reportOwner.instanceId !== instanceId ||
+        reportOwner.unit !== expected.unit ||
+        reportOwner.requester !== original.instance.userId ||
+        reportOwner.attempt !== (original.instance.attempt ?? 0) ||
+        reportOwner.channelId !== original.instance.channelId ||
+        reportOwner.threadKey !== (row.threadKey ?? original.instance.threadKey))) ||
+    (publication !== undefined &&
+      (publication.owner.instanceId !== instanceId ||
+        publication.owner.unit !== expected.unit ||
+        publication.repo !== original.instance.repo ||
+        publication.headRef !== expected.branch ||
+        publication.baseRef !== (original.instance.base ?? "main")))
+  )
+    return undefined;
+  if (
+    row.instanceId !== instanceId ||
+    expected.instanceId !== instanceId ||
+    row.branch !== expected.branch ||
+    (expected.threadKey !== undefined && row.threadKey !== expected.threadKey) ||
+    row.workBrief !== undefined ||
+    expected.workBrief !== undefined ||
+    row.recovery !== undefined ||
+    JSON.stringify(row.context) !== JSON.stringify(expected.context) ||
+    JSON.stringify(row.generatedTask) !== JSON.stringify(expected.generatedTask) ||
+    JSON.stringify(row.dependsOn) !== JSON.stringify(expected.dependsOn)
+  )
+    return undefined;
+  if (expected.recovery !== undefined) {
+    const claim = expected.recovery;
+    if (
+      claim.actionId === undefined ||
+      row.history?.receiptId !== claim.actionId ||
+      row.recoveryReceipt?.workflowId !== claim.workflowId ||
+      (claim.kind === "coding"
+        ? row.recoveryReceipt.codingRunId !== claim.codingRunId
+        : row.recoveryReceipt.reviewRunId !== claim.reviewRunId) ||
+      JSON.stringify(row.recoveryReceipt.accounting) !== JSON.stringify(claim.accounting)
+    )
+      return undefined;
+  } else if (
+    JSON.stringify(row.history) !== JSON.stringify(expected.history) ||
+    JSON.stringify(row.recoveryReceipt) !== JSON.stringify(expected.recoveryReceipt)
+  )
+    return undefined;
+  const ending = row.ending;
+  if (
+    ending === undefined ||
+    (ending.cause === "step_threw" && JSON.stringify(ending) !== JSON.stringify(expected.ending)) ||
+    ending.kind === "idle" ||
+    ending.kind === "continued" ||
+    isSettledOutcome(ending.kind)
+  )
+    return undefined;
+  return ending;
+}
+
+async function reconcileNegativeEnding(
+  step: StepRunner,
+  bot: CoordinatorBot,
+  prefix: string,
+  instanceId: string,
+  plan: PlanFacts,
+  row: CoordinatorUnit | undefined,
+): Promise<NonNullable<CoordinatorUnit["ending"]> | undefined> {
+  if (plan.instance === undefined) return undefined;
+  const current = await step
+    .do(`${prefix}/end/plan`, STEP_CONFIG, () => call(bot, "plan", { parentInstanceId: instanceId }))
+    .catch(() => undefined);
+  if (current === undefined) return undefined;
+  return recordedNegativeEnding(instanceId, plan, row, readPlan(answerOf("plan", current)));
+}
+
+/** Drive a unit through every continuation and indexed idle wait before returning its final ending. */
+async function runUnitLifetime(
+  step: StepRunner,
+  bot: CoordinatorBot,
+  instanceId: string,
+  node: PlanUnitNode,
+  plan: PlanFacts,
+): Promise<DrivenEnding | { kind: string }> {
+  const row = plan.units.find((candidate) => candidate.unit === node.id);
+  const recorded = recordedNegativeEnding(instanceId, plan, row, plan);
+  if (recorded !== undefined) return recorded;
+  if (plan.instance !== undefined && row?.ending !== undefined)
+    throw new Error("the recorded ending requires confirmed report reconciliation");
+  try {
     if (plan.stopped) {
-      for (const id of cursor.order.filter((u) => endings[u] === undefined)) {
-        endings[id] = "stopped";
-        await endUnrunUnit(step, bot, instanceId, id, { kind: "stopped", report: stoppedReport(id) });
-      }
-      break;
+      return await endUnrunUnit(
+        step,
+        bot,
+        instanceId,
+        node.id,
+        { kind: "stopped", report: stoppedReport(node.id) },
+        row,
+        plan,
+      );
     }
-    const [next] = readyUnits(graph, cursor);
-    if (next === undefined) break;
-    cursor = startUnit(graph, cursor, next);
-    const node = graph.units.find((u) => u.id === next)!;
     let session: LeaseSegmentProgress | undefined;
     let ending: DrivenEnding | { kind: "stopped" } = await runUnit(step, bot, instanceId, node, plan);
+    if (row?.recovery !== undefined) {
+      if (ending.kind === "idle" && ending.humanGate !== undefined)
+        return { ...ending.idled, ...(ending.endedAt !== undefined ? { endedAt: ending.endedAt } : {}) };
+      if (ending.kind === "continued" || ending.kind === "idle")
+        throw new Error("the original recovery has no admitted continuation");
+    }
     // A machine-renewed continuation opens at once. An idle continuation parks
     // the whole walk and opens only when the durable wake answer names the
     // segment (or settles as stopped/expired).
@@ -1597,8 +1722,8 @@ async function walk(step: StepRunner, bot: CoordinatorBot, instanceId: string): 
           step,
           bot,
           instanceId,
-          next,
-          stepPrefixOf(next, session),
+          node.id,
+          stepPrefixOf(node.id, session),
           ending,
           ending.parkDays ?? plan.idleDays,
           session,
@@ -1613,12 +1738,68 @@ async function walk(step: StepRunner, bot: CoordinatorBot, instanceId: string): 
       }
       break;
     }
+    return ending;
+  } catch (error) {
+    if (plan.instance !== undefined) {
+      const prefix = row?.recovery !== undefined ? `${node.id}/recovery/${row.recovery.workflowId}` : node.id;
+      const canonical = await reconcileNegativeEnding(step, bot, prefix, instanceId, plan, row);
+      if (canonical !== undefined) return canonical;
+    }
+    throw error;
+  }
+}
+
+/** The plan: its units one at a time in dependency order, then the endings of the units it never reached. */
+async function walk(
+  step: StepRunner,
+  bot: CoordinatorBot,
+  instanceId: string,
+  initial: PlanFacts,
+): Promise<PlanRunSummary> {
+  // The selection is read at every unit boundary (the orchestration-plane plan): the first read opens
+  // the cursor, and each boundary's — its own durable step, `plan/<n>`, so a
+  // replay meets the same read — rebuilds it, so a later bot can append a unit
+  // to a live instance or drop one merged by hand without killing it.
+  let reads = 1;
+  const readSelection = async (): Promise<PlanFacts> => {
+    reads += 1;
+    const name = `plan/${reads}`;
+    return readPlan(
+      answerOf("plan", await step.do(name, STEP_CONFIG, () => call(bot, "plan", { parentInstanceId: instanceId }))),
+    );
+  };
+  let plan = initial;
+  let graph = graphOf(plan, instanceId);
+  let cursor = openPlanCursor(graph);
+  const endings: Record<string, string> = {};
+  for (;;) {
+    // The hard stop's mark (record 0060; issue 1924), read before every unit
+    // start: the walk ends every unit not yet ended `stopped` — the rows say
+    // why they never ran — and starts nothing more. A stop that lands once
+    // every unit has ended changes nothing: there is nothing left to end.
+    if (plan.stopped) {
+      for (const id of cursor.order.filter((u) => endings[u] === undefined)) {
+        const ending = await endUnrunUnit(
+          step,
+          bot,
+          instanceId,
+          id,
+          { kind: "stopped", report: stoppedReport(id) },
+          plan.units.find((candidate) => candidate.unit === id),
+          plan,
+        );
+        endings[id] = ending.kind;
+      }
+      break;
+    }
+    const [next] = readyUnits(graph, cursor);
+    if (next === undefined) break;
+    cursor = startUnit(graph, cursor, next);
+    const node = graph.units.find((u) => u.id === next)!;
+    const ending = await runUnitLifetime(step, bot, instanceId, node, plan);
     endings[next] = ending.kind;
     // A unit is done for its dependents when the base carries its scope: the
     // runner's merge, or a scope that had already landed before the attempt.
-    // An `idle` ending settles the unit `failed` for now: nothing waits yet —
-    // the indexed wait and the wake land with the fifth unit of record 0051's
-    // plan — so the walk is unchanged until then and the flag ships at zero.
     cursor = settleUnit(graph, cursor, next, isSettledDone(ending.kind) ? "done" : "failed");
     // The unit boundary's re-read (the orchestration-plane plan): the fresh rows are the selection now.
     plan = await readSelection();
@@ -1633,14 +1814,30 @@ async function walk(step: StepRunner, bot: CoordinatorBot, instanceId: string): 
   // dependency that blocks it. A stopped walk skips this: every unended unit
   // was already ended `stopped` above, and its cursor never finishes.
   const blocked = plan.stopped ? [] : cursor.order.filter((id) => cursor.status[id] === "blocked");
-  for (const id of blocked) endings[id] = "blocked";
+  for (const id of blocked)
+    endings[id] =
+      recordedNegativeEnding(
+        instanceId,
+        plan,
+        plan.units.find((row) => row.unit === id),
+        plan,
+      )?.kind ?? "blocked";
   for (const id of blocked) {
     const node = graph.units.find((u) => u.id === id)!;
     const dep = node.dependsOn.find((d) => cursor.status[d] === "failed" || cursor.status[d] === "blocked")!;
-    await endUnrunUnit(step, bot, instanceId, id, {
-      kind: "blocked",
-      report: blockedReport(id, dep, endings[dep]!),
-    });
+    const ending = await endUnrunUnit(
+      step,
+      bot,
+      instanceId,
+      id,
+      {
+        kind: "blocked",
+        report: blockedReport(id, dep, endings[dep]!),
+      },
+      plan.units.find((candidate) => candidate.unit === id),
+      plan,
+    );
+    endings[id] = ending.kind;
   }
   if (!plan.stopped && !cursorFinished(cursor))
     throw new Error(`the plan's cursor did not finish: ${JSON.stringify(cursor.status)}`);
@@ -1673,7 +1870,33 @@ export async function runPlan(step: StepRunner, bot: CoordinatorBot, instanceId:
     step.do("finish", STEP_CONFIG, () => call(bot, "finish", { parentInstanceId: instanceId, outcome }));
   let summary: PlanRunSummary;
   try {
-    summary = await walk(step, bot, instanceId);
+    const plan = readPlan(
+      answerOf("plan", await step.do("plan", STEP_CONFIG, () => call(bot, "plan", { parentInstanceId: instanceId }))),
+    );
+    if (plan.generated) {
+      const [unit] = plan.units;
+      if (plan.units.length !== 1 || unit === undefined || unit.dependsOn.length !== 0)
+        throw new Error("generated execution requires one independent unit");
+      const ending = await runUnitLifetime(
+        step,
+        bot,
+        instanceId,
+        {
+          id: unit.unit,
+          title: unit.title ?? unit.unit,
+          slug: unit.slug,
+          branch: unit.branch,
+          dependsOn: unit.dependsOn,
+        },
+        plan,
+      );
+      summary = {
+        instance: instanceId,
+        ...(plan.planId !== undefined ? { planId: plan.planId } : {}),
+        units: { [unit.unit]: ending.kind },
+        outcome: isSettledOutcome(ending.kind) ? "completed" : "failed",
+      };
+    } else summary = await walk(step, bot, instanceId, plan);
   } catch (err) {
     await finish("failed").catch(() => {});
     throw err;
@@ -1718,7 +1941,7 @@ export async function runOriginalUnitRecovery(
   if (row.length !== 1 || row[0]!.recovery?.workflowId !== workflowId)
     throw new Error("the original unit's durable recovery claim no longer names this Workflow");
   const unit = row[0]!;
-  const ending = await runUnit(
+  const ending = await runUnitLifetime(
     step,
     bot,
     params.parentInstanceId,

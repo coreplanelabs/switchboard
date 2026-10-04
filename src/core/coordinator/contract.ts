@@ -893,6 +893,7 @@ export interface RecoveryAccounting {
   spendUsd: number;
   children: { runId: string; key: string; usd: number }[];
   grant: Grant;
+  grantSource?: GrantSource;
   renewalsSpent: number;
 }
 
@@ -1091,7 +1092,10 @@ export interface CoordinatorUnit {
   recoveryReceipt?: OriginalUnitRecoveryReceipt;
   /** A recovered review that reached a person-only question. Recovery settles
    * truthfully instead of opening an idle renewal or replacement pipeline. */
-  recoveryHold?: { cause: "human"; gate: HumanGatePending } | { cause: "draft"; pr: { number: number; url: string } };
+  recoveryHold?:
+    | { cause: "human"; gate: HumanGatePending }
+    | { cause: "draft"; pr: { number: number; url: string } }
+    | { cause: "blocked" };
   /** How the unit ended: the ending's kind and the thread's report, when it
    *  has. `cause` names the machine's reason behind a driver-posted kind;
    *  `step` and `round` locate that reason without parsing the report. For a
@@ -1448,8 +1452,24 @@ const isRecoveryAccounting = (v: unknown): v is RecoveryAccounting =>
   Number.isSafeInteger(v.grant.renewals) &&
   (v.grant.costCapUsd === undefined || (isDollars(v.grant.costCapUsd) && v.grant.costCapUsd > v.spendUsd)) &&
   isDollars(v.renewalsSpent) &&
+  (v.grantSource === undefined || ["org", "channel", "user", "run"].includes(v.grantSource as string)) &&
   Number.isSafeInteger(v.renewalsSpent) &&
   v.renewalsSpent <= v.grant.renewals;
+
+/** Decode a recorded result; owner and PR binding belong to the containing row. */
+export function isCoordinatorEnding(v: unknown): v is NonNullable<CoordinatorUnit["ending"]> {
+  return (
+    isObject(v) &&
+    isText(v.kind) &&
+    isText(v.report, MAX_REPORT) &&
+    isFinite(v.at) &&
+    (v.deliveryId === undefined || (typeof v.deliveryId === "string" && STEP_NAME_PATTERN.test(v.deliveryId))) &&
+    (v.outcome === undefined || (isShipOutcome(v.outcome) && v.outcome.kind === v.kind)) &&
+    (v.cause === undefined || isText(v.cause, 64)) &&
+    (v.step === undefined || (typeof v.step === "string" && STEP_NAME_PATTERN.test(v.step))) &&
+    (v.round === undefined || (typeof v.round === "number" && Number.isInteger(v.round) && v.round >= 0))
+  );
+}
 
 export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
   if (!isObject(v)) return false;
@@ -1619,6 +1639,7 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
     r.recoveryHold !== undefined &&
     (!isObject(r.recoveryHold) ||
       !(
+        (r.recoveryHold.cause === "blocked" && Object.keys(r.recoveryHold).length === 1) ||
         (r.recoveryHold.cause === "human" && isHumanGatePending(r.recoveryHold.gate)) ||
         (r.recoveryHold.cause === "draft" &&
           isObject(r.recoveryHold.pr) &&
@@ -1629,27 +1650,29 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
   )
     return false;
   if (r.recovery !== undefined && (r.idle !== undefined || r.ending !== undefined)) return false;
+  if (r.ending !== undefined && !isCoordinatorEnding(r.ending)) return false;
   if (
-    r.ending !== undefined &&
-    !(
-      isObject(r.ending) &&
-      isText(r.ending.kind) &&
-      isText(r.ending.report, MAX_REPORT) &&
-      isFinite(r.ending.at) &&
-      (r.ending.deliveryId === undefined ||
-        (typeof r.ending.deliveryId === "string" && STEP_NAME_PATTERN.test(r.ending.deliveryId))) &&
-      (r.ending.outcome === undefined ||
-        (isShipOutcome(r.ending.outcome) &&
-          r.ending.outcome.kind === r.ending.kind &&
-          (r.ending.outcome.terminalPr === undefined ||
-            (isObject(r.pr) &&
-              r.ending.outcome.terminalPr.number === r.pr.number &&
-              r.ending.outcome.terminalPr.url === r.pr.url)))) &&
-      (r.ending.cause === undefined || isText(r.ending.cause, 64)) &&
-      (r.ending.step === undefined || (typeof r.ending.step === "string" && STEP_NAME_PATTERN.test(r.ending.step))) &&
-      (r.ending.round === undefined ||
-        (typeof r.ending.round === "number" && Number.isInteger(r.ending.round) && r.ending.round >= 0))
-    )
+    isObject(r.ending) &&
+    isShipOutcome(r.ending.outcome) &&
+    r.ending.outcome.terminalPr !== undefined &&
+    (!isObject(r.pr) ||
+      r.ending.outcome.terminalPr.number !== r.pr.number ||
+      r.ending.outcome.terminalPr.url !== r.pr.url)
+  )
+    return false;
+  if (
+    isObject(r.ending) &&
+    isObject(r.ending.outcome) &&
+    r.ending.outcome.recoveryStop !== undefined &&
+    (!isObject(r.recoveryReceipt) || !isText(r.recoveryReceipt.codingRunId))
+  )
+    return false;
+  if (
+    r.recoveryHold !== undefined &&
+    (!isObject(r.ending) ||
+      r.ending.kind !== "held" ||
+      !isObject(r.recoveryReceipt) ||
+      (isObject(r.recoveryHold) && r.recoveryHold.cause === "blocked" && !isText(r.recoveryReceipt.codingRunId)))
   )
     return false;
   if (r.startedAt !== undefined && !isFinite(r.startedAt)) return false;

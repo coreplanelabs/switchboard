@@ -4314,7 +4314,13 @@ async function recoverOriginalCodingUnit(
       codingRunId: coding.id,
       codingKey: key,
       expectedHeadSha: coding.headSha,
-      accounting: { spendUsd: spend.usd, children: spend.children, grant: { ...grant }, renewalsSpent: 0 },
+      accounting: {
+        spendUsd: spend.usd,
+        children: spend.children,
+        grant: { ...grant },
+        ...(instance.grantSource !== undefined ? { grantSource: instance.grantSource } : {}),
+        renewalsSpent: 0,
+      },
       remainingMs: deadlineAt - at,
       claimedAt: at,
       step: `${row.unit}/recovery/0/coding`,
@@ -4884,6 +4890,7 @@ export async function recoverOriginalUnit(
         spendUsd: spend.usd,
         children: spend.children,
         grant: { ...grant },
+        ...(instance.grantSource !== undefined ? { grantSource: instance.grantSource } : {}),
         renewalsSpent: latestSegmentIndex - 1,
       };
     if (postApproval) {
@@ -5558,6 +5565,7 @@ export async function recoverOriginalUnit(
         spendUsd: spend.usd,
         children: spend.children,
         grant: { ...grant },
+        ...(instance.grantSource !== undefined ? { grantSource: instance.grantSource } : {}),
         renewalsSpent: segments.length + 1,
       };
     }
@@ -6458,8 +6466,12 @@ async function plan(body: Record<string, unknown>, deps: AdminCoordinatorDeps): 
   const instance = await deps.instances.get(id.value);
   if (!instance) return json(404, { ok: false, error: "unknown_instance" });
   const units = await deps.instances.listUnits(instance.id);
+  const confirmed = await deps.instances.get(instance.id);
+  if (JSON.stringify(confirmed) !== JSON.stringify(instance))
+    return json(503, { ok: false, error: "coordinator_snapshot_unavailable", at });
   return json(200, {
     ok: true,
+    instance,
     ...(instance.plan !== undefined ? { planId: instance.plan.id } : {}),
     // Who merges: the instance's field; a record written before it existed is a person's merge.
     merge: instance.merge ?? "person",
@@ -7226,7 +7238,6 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   // Recovery first claims and removes the old ending under its own fenced path.
   if (
     row.ending !== undefined &&
-    (outcome !== undefined || row.ending.outcome !== undefined || row.history !== undefined) &&
     (row.ending.kind !== ending.kind ||
       row.ending.report !== ending.report ||
       !sameShipOutcome(row.ending.outcome, outcome))
@@ -7264,11 +7275,11 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   };
   const recordStatus = async (committed: CoordinatorUnit): Promise<boolean> => {
     try {
-      await appendCoordinatorStatus(
+      const status = await appendCoordinatorStatus(
         { ledger: deps.reportLedger!, instances: deps.instances },
         { owner: reportOwner, instance, unit: committed },
       );
-      return true;
+      return status !== undefined;
     } catch {
       return false;
     }
@@ -7281,6 +7292,23 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     return json(400, { ok: false, error: "recoveryWorkflowId must be a Workflow instance id", at });
   if (row.recovery !== undefined && recoveryWorkflowId !== row.recovery.workflowId)
     return json(409, { ok: false, error: "recovery_claim_mismatch", at });
+  if (
+    recoveryWorkflowId !== undefined &&
+    row.recoveryReceipt?.workflowId === recoveryWorkflowId &&
+    row.ending === undefined
+  )
+    return json(409, { ok: false, error: "settlement_conflict", at });
+  if (
+    outcome?.recoveryStop !== undefined &&
+    !(
+      (row.recovery?.kind === "coding" && row.recovery.round === 0 && row.recovery.workflowId === recoveryWorkflowId) ||
+      (row.recovery === undefined &&
+        row.recoveryReceipt?.codingRunId !== undefined &&
+        row.recoveryReceipt.workflowId === recoveryWorkflowId &&
+        sameShipOutcome(row.ending?.outcome, outcome))
+    )
+  )
+    return json(409, { ok: false, error: "recovery_outcome_mismatch", at });
   const settlementActionId =
     row.recovery?.actionId ?? (row.history?.receiptId !== "observed" ? row.history?.receiptId : undefined);
   const settlementOwner: RunnerPullOwner = {
@@ -7296,8 +7324,7 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   if (
     row.reportDelivery !== undefined &&
     !sameReport &&
-    (sameCoordinatorReportOwner(row.reportDelivery.owner, reportOwner) ||
-      (row.ending !== undefined && (row.ending.outcome !== undefined || row.history !== undefined)))
+    (sameCoordinatorReportOwner(row.reportDelivery.owner, reportOwner) || row.ending !== undefined)
   )
     return json(409, { ok: false, error: "settlement_conflict", at });
   if (recoveryWorkflowId !== undefined && row.recoveryReceipt?.workflowId === recoveryWorkflowId) {
@@ -7305,14 +7332,19 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     if (!sameReport) {
       try {
         const accepted = await deps.instances.compareAndReplaceUnit(row, committed);
-        if (!accepted.ok) return json(409, { ok: false, error: "settlement_conflict", at });
+        if (!accepted.ok)
+          return json(accepted.reason === "unavailable" ? 503 : 409, {
+            ok: false,
+            error: accepted.reason === "unavailable" ? "settlement_store_unavailable" : "settlement_conflict",
+            at,
+          });
       } catch {
         const current = await deps.instances.listUnits(instance.id).catch(() => undefined);
-        if (
-          current?.filter((candidate) => candidate.unit === row.unit).length !== 1 ||
-          JSON.stringify(current.find((candidate) => candidate.unit === row.unit)) !== JSON.stringify(committed)
-        )
+        const matches = current?.filter((candidate) => candidate.unit === row.unit);
+        if (matches === undefined || (matches.length === 1 && JSON.stringify(matches[0]) === JSON.stringify(row)))
           return json(503, { ok: false, error: "settlement_store_unavailable", at });
+        if (matches.length !== 1 || JSON.stringify(matches[0]) !== JSON.stringify(committed))
+          return json(409, { ok: false, error: "settlement_conflict", at });
       }
     }
     try {
@@ -7364,7 +7396,9 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
           typeof pr.number === "number" &&
           typeof pr.url === "string"
         ? ({ cause: "draft", pr: { number: pr.number, url: pr.url } } as const)
-        : undefined;
+        : row.recovery !== undefined && ending.kind === "held" && ending.holdCause === "blocked"
+          ? ({ cause: "blocked" } as const)
+          : undefined;
   if (row.recovery !== undefined && ending.kind === "held" && recoveryHold === undefined)
     return json(400, { ok: false, error: "a recovered held ending must carry a typed hold cause", at });
   if (row.recovery !== undefined && (idle !== undefined || segment !== undefined))
@@ -7381,7 +7415,7 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   // stop is dropped with it, so the row says one thing about how the unit stands.
   const { idle: _idle, recovery: _recovery, ...rowWithoutLifecycle } = row;
   let updated: CoordinatorUnit =
-    sameReport || (row.ending !== undefined && (row.ending.outcome !== undefined || row.history !== undefined))
+    sameReport || row.ending !== undefined
       ? row
       : {
           ...(idle !== undefined || segment !== undefined ? row : rowWithoutLifecycle),
@@ -7433,31 +7467,23 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   // a stale legacy or idle write must not erase a newer typed settlement.
   const storeError = row.recovery !== undefined ? "recovery_store_unavailable" : "settlement_store_unavailable";
   const staleError = row.recovery !== undefined ? "recovery_claim_stale" : "settlement_conflict";
-  let replaced: Awaited<ReturnType<CoordinatorInstanceStore["compareAndReplaceUnit"]>> | undefined;
+  let replaced:
+    | Awaited<ReturnType<CoordinatorInstanceStore["compareAndReplaceUnit"]>>
+    | Awaited<ReturnType<CoordinatorInstanceStore["transitionRecovery"]>>
+    | undefined;
   try {
     if (row.recovery?.actionId !== undefined) {
       const replacement = updated;
       updated = { ...updated, history: { version: 1, receiptId: row.recovery.actionId } };
       const result = await deps.instances.transitionRecovery({ kind: "settle", expected: row, replacement });
-      replaced = result.ok ? { ok: true } : { ok: false, reason: result.reason === "stale" ? "stale" : "unavailable" };
+      replaced = result;
       if (result.ok) updated = result.unit;
     } else replaced = await deps.instances.compareAndReplaceUnit(row, updated);
   } catch {
     const reread = await deps.instances.listUnits(instance.id).catch(() => undefined);
     const current = reread?.filter((candidate) => candidate.unit === row.unit);
-    if (
-      current?.length === 1 &&
-      (JSON.stringify(current[0]) === JSON.stringify(updated) ||
-        (outcome === undefined &&
-          row.history === undefined &&
-          current[0]!.ending?.outcome === undefined &&
-          row.recovery !== undefined &&
-          current[0]!.recovery === undefined &&
-          current[0]!.recoveryReceipt?.workflowId === row.recovery.workflowId &&
-          (row.recovery.kind === "coding"
-            ? current[0]!.recoveryReceipt?.codingRunId === row.recovery.codingRunId
-            : current[0]!.recoveryReceipt?.reviewRunId === row.recovery.reviewRunId)))
-    ) {
+    if (current === undefined) return json(503, { ok: false, error: storeError, at });
+    if (current?.length === 1 && JSON.stringify(current[0]) === JSON.stringify(updated)) {
       replaced = { ok: true };
       updated = current[0]!;
     } else if (current?.length === 1 && JSON.stringify(current[0]) === JSON.stringify(row))
@@ -7465,9 +7491,16 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     else return json(409, { ok: false, error: staleError, at });
   }
   if (replaced?.ok !== true)
-    return json(409, {
+    return json(replaced?.reason === "unavailable" || replaced === undefined ? 503 : 409, {
       ok: false,
-      error: replaced?.reason === "stale" ? staleError : storeError,
+      error:
+        replaced?.reason === "stale"
+          ? staleError
+          : replaced?.reason === "conflict"
+            ? "settlement_conflict"
+            : replaced?.reason === "capacity"
+              ? "recovery_history_capacity"
+              : storeError,
       at,
     });
   try {

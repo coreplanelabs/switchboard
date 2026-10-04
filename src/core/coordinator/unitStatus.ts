@@ -156,20 +156,15 @@ export async function appendCoordinatorStatus(
   const repo = instance.repo.toLowerCase();
   const key = contextThreadSessionKey(destinationThreadKey);
   const rowId = await rowIdOf(owner);
-  const prior = await deps.ledger.readSessionEntry(key, rowId);
-  if (prior !== undefined) {
-    if (prior.length !== 1) throw new Error("original coordinator status is unavailable");
-    const snapshot = JSON.parse(prior[0]!.json).coordinatorStatus;
-    const ref = { ...owner, destinationThreadKey, repo, snapshotHash: await sourceHash(snapshot) };
-    if (!(await readCoordinatorStatus(deps.ledger, ref))) throw new Error("original coordinator status is invalid");
-    return ref;
-  }
   const actualInstance = await deps.instances.get(instance.id);
   const actualUnits = await deps.instances.listUnits(instance.id);
+  const confirmedInstance = await deps.instances.get(instance.id);
   const actual = actualUnits.filter((u) => u.unit === unit.unit);
   if (
     !actualInstance ||
+    !confirmedInstance ||
     !(await same(actualInstance, instance)) ||
+    !(await same(confirmedInstance, instance)) ||
     actual.length !== 1 ||
     !(await same(actual[0], unit))
   )
@@ -186,8 +181,15 @@ export async function appendCoordinatorStatus(
       link.authority.repo.toLowerCase() !== repo
     )
       return undefined;
-  } else if (owner.threadKey !== (unit.threadKey ?? (actualUnits.length === 1 ? instance.threadKey : undefined)))
-    return undefined;
+  } else if (owner.threadKey !== (unit.threadKey ?? instance.threadKey)) return undefined;
+  const prior = await deps.ledger.readSessionEntry(key, rowId);
+  if (prior !== undefined) {
+    if (prior.length !== 1) throw new Error("original coordinator status is unavailable");
+    const snapshot = JSON.parse(prior[0]!.json).coordinatorStatus;
+    const ref = { ...owner, destinationThreadKey, repo, snapshotHash: await sourceHash(snapshot) };
+    if (!(await readCoordinatorStatus(deps.ledger, ref))) throw new Error("original coordinator status is invalid");
+    return ref;
+  }
   const outcome = unit.ending?.outcome;
   const status: CoordinatorStatusSnapshot["status"] =
     outcome && isShipOutcome(outcome)

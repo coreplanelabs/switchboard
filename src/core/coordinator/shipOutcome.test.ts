@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { UnitEnding } from "../ship/coordinator.js";
-import { isShipOutcome, shipOutcomeOf } from "./shipOutcome.js";
+import { isShipOutcome, shipOutcomeOf, sameShipOutcome } from "./shipOutcome.js";
 
 const observed = "a".repeat(40);
 const remote = "b".repeat(40);
@@ -8,6 +8,39 @@ const merge = "c".repeat(40);
 const pr = { number: 7, url: "https://github.com/acme/api/pull/7" };
 
 describe("typed Ship outcome", () => {
+  it("fails closed when a recovery refusal contradicts its terminal facts", () => {
+    expect(() =>
+      shipOutcomeOf({
+        kind: "aborted",
+        reason: "display only",
+        reviewRounds: 1,
+        recoveryStop: "continuation_not_admitted",
+      }),
+    ).toThrow("invalid recovery outcome");
+  });
+
+  it("retains and strictly binds a recovery continuation refusal", () => {
+    const outcome = shipOutcomeOf({
+      kind: "aborted",
+      reason: "display only",
+      reviewRounds: 0,
+      recoveryStop: "continuation_not_admitted",
+    });
+    expect(outcome).toEqual({
+      schemaVersion: 1,
+      kind: "aborted",
+      reviewRounds: 0,
+      recoveryStop: "continuation_not_admitted",
+    });
+    expect(isShipOutcome(JSON.parse(JSON.stringify(outcome)))).toBe(true);
+    expect(isShipOutcome({ ...outcome, kind: "held" })).toBe(false);
+    expect(isShipOutcome({ ...outcome, recoveryStop: "allow_renewal" })).toBe(false);
+    expect(isShipOutcome({ ...outcome, terminalPr: { state: "closed", ...pr } })).toBe(false);
+    expect(isShipOutcome({ ...outcome, findings: { stop: "unfinished" } })).toBe(false);
+    expect(isShipOutcome({ ...outcome, reviewRounds: 1 })).toBe(false);
+    expect(sameShipOutcome(outcome, { schemaVersion: 1, kind: "aborted", reviewRounds: 0 })).toBe(false);
+  });
+
   it("preserves a terminal pull request without crediting missing findings as landed", () => {
     const ending: UnitEnding = {
       kind: "aborted",

@@ -483,7 +483,9 @@ describe("the owning run's pushed branches survive release", () => {
       evicted,
     );
     const keep = method("rememberOwnBranches");
-    expect(keep).toMatch(/ownBranches: rememberOwnBranches\(binding\.ownBranches, pushed, /);
+    expect(keep).toMatch(/ownBranches: remembered\.ownBranches/);
+    expect(keep.indexOf('if ("error" in remembered)')).toBeLessThan(keep.indexOf("await this.putThreadBinding("));
+    expect(detach.match(/if \(refused !== undefined\) return refused;/g)).toHaveLength(2);
     expect(keep).toMatch(/await this\.putThreadBinding\(/);
   });
 
