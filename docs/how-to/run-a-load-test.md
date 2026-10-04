@@ -110,3 +110,11 @@ Post the receipt on the change's PR; never commit `load-results/`.
 
 - [Load harness](../reference/specs/load-harness.md): the contract.
 - [Capacity and sizing](../explanation/capacity-and-sizing.md)
+
+## Check the configured front door before deployment
+
+```
+DOOR_SMOKE_TRUSTED_ORIGIN=https://api.openai.com npm run load -- route --smoke --profile-model
+```
+
+The deployment profile supplies the config source. Set its provider key in the configured environment variable. This gate uses the same resolved `operator` model, effort, reasoning output budget and preset settings as production. It exercises typed routing without starting agents or writing to the run store. The configured provider must use the trusted HTTPS origin; redirects and requests to other origins are refused.

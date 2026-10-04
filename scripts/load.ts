@@ -137,6 +137,8 @@ import { ROUTE_DIRECTIVE_FIXTURES } from "../src/load/routeDirectiveFixtures.js"
 import { ROUTE_PLANTED_FIXTURES } from "../src/load/routePlantedFixtures.js";
 import { COMPOUND_PRESET } from "../src/agents/registry.js";
 import { parseAppConfigText } from "../src/config.js";
+import { settingsForAgent } from "../src/config/agents.js";
+import { operatorCompletion } from "../src/core/dispatch/operatorCompletion.js";
 import { CommandRegistry } from "../src/core/commandRegistry.js";
 import { registerCoreCommands, type CoreCommandDeps } from "../src/core/commands/all.js";
 import { ALL_CAPABILITIES } from "../src/core/capabilities.js";
@@ -148,6 +150,7 @@ import {
 } from "../src/core/dispatch/route.js";
 import {
   OPERATOR_TIMEOUT_MS,
+  operatorMaxOutputTokens,
   operatorPresets,
   presetBindOf,
   runOperator,
@@ -220,7 +223,7 @@ commands
              --concurrency N  --smoke  --profile-model]
              --smoke: before deployment, use the candidate source and a real model on an ordinary read, a read with review/severity words, an
              existing-PR Ship review, standalone Review with head context, review with renewals and explicit settings; starts no agent or writer
-             --profile-model: with --smoke, read the deployment profile's config and test its default general model
+             --profile-model: with --smoke, test the deployment config's operator model, effort and preset settings
              [--verify: one more call on every bind of a write- or destructive-class command in the checked-in command set,
              shown the sentence and the bound line and asked whether the line does what was asked; printed beside the command
              rows as write misbinds removed and correct binds rejected — a measurement for the production decision, never a
@@ -1210,10 +1213,10 @@ async function routeReplay(f: Flags): Promise<boolean> {
           return parseAppConfigText(read.text);
         })()
       : undefined;
-  const configuredRef = profileConfig?.defaults.models.general;
+  const configuredRef = profileConfig ? settingsForAgent(profileConfig, "operator").model : undefined;
   const separator = configuredRef?.indexOf("/") ?? -1;
   if (profileConfig !== undefined && separator < 1)
-    throw new Error("load route: the deployment config needs defaults.models.general as provider/model");
+    throw new Error("load route: the deployment config needs an operator model as provider/model");
   const providerName = configuredRef ? configuredRef.slice(0, separator) : str(f, "provider", "anthropic");
   const modelId = configuredRef ? configuredRef.slice(separator + 1) : str(f, "model");
   const configuredProvider = profileConfig?.providers[providerName];
@@ -1268,12 +1271,16 @@ async function routeReplay(f: Flags): Promise<boolean> {
   // line sums the usage fields (cost and prompt caching) and counts the
   // answers refused for carrying two tool calls (load-harness item 17).
   const counters = emptyCounters();
-  const model = providerStructuredModel(tallyingProvider(providers.get(providerName), counters), modelId);
+  const completion = profileConfig
+    ? operatorCompletion(profileConfig, { get: (name) => tallyingProvider(providers.get(name), counters) })
+    : undefined;
+  const model =
+    completion?.model ?? providerStructuredModel(tallyingProvider(providers.get(providerName), counters), modelId);
   const modelRef = `${providerName}/${modelId}`;
   if (f.smoke === true) {
     const commandRegistry = new CommandRegistry<CoreCommandDeps>({ audit: () => {}, capabilities: ALL_CAPABILITIES });
     registerCoreCommands(commandRegistry);
-    const projection = { presets: operatorPresets(), commands: routableCommands(commandRegistry) };
+    const projection = { presets: operatorPresets(profileConfig), commands: routableCommands(commandRegistry) };
     const probes: {
       name: string;
       text: string;
@@ -1386,6 +1393,7 @@ async function routeReplay(f: Flags): Promise<boolean> {
         model,
         {
           timeoutMs: OPERATOR_TIMEOUT_MS,
+          ...(completion ? { maxOutputTokens: operatorMaxOutputTokens(completion) } : {}),
         },
       );
       const bind =
