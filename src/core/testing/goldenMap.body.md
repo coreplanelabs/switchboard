@@ -33,7 +33,7 @@ Coding-agent PR bodies grew with the diff: a median of 6,800 characters with sev
 | Criterion | Proof |
 |---|---|
 | The schema refuses an eighth pointer and any field over its cap, naming the field and the count | `[unit]` `src/core/prDescription.test.ts::caps every map field…`, `::caps the pointers at seven…` |
-| A rendered body contains no bare permalink line; every pointer is `N. [label](url) text`, ⚠ only with a risk | `[unit]` `::never writes a bare permalink line…`, `::a pointer is…` |
+| A rendered body contains no bare permalink line; every pointer is `N. [label](url) text`, ⚠ only with a risk | `[unit]` `::golden: a full PR description rendered through the pipeline::fixture → markdown equals the checked-in body byte for byte`, `::a pointer is…` |
 | A maximal object renders a map under 3,800 visible characters | `[unit]` `::a maximal object renders a map under 3,800 visible characters` |
 | Decisions, validation and agent notes render as `<details>` after the map; footer last | `[unit]` `::renders the map in the contract order…`, `::the folds…` |
 | Render then parse returns the same pointers with each anchor's render sha; the golden renders byte for byte | `[unit]` `::golden round trip…`, `golden: a full PR description rendered through the pipeline` |
