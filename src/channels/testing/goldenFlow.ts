@@ -488,7 +488,36 @@ workspaceDir: ${join(world.dir, "workspaces")}
       dispatch: (message, io, options) => {
         const work = (async () => {
           workerCalls.push({ message, options: structuredClone(options), hasOpenThread: io.openThread !== undefined });
-          io.runStarted?.({ id: `worker-${instanceId}` });
+          const owner = await instances.get(instanceId);
+          if (!owner || !options?.coordinator) throw new Error("The admitted worker owner is missing");
+          const runId = `worker-${instanceId}`;
+          const claim = await ledger.claim({
+            runId,
+            threadKey: message.threadKey,
+            gen: "golden-worker",
+            leaseMs: 30_000,
+            startedAt: coordinator.clock!(),
+            meta: {
+              agent: "coding",
+              channelId: message.channelId,
+              userId: message.userId,
+              threadKey: message.threadKey,
+              ...(owner.authenticatedAs !== undefined ? { authenticatedAs: owner.authenticatedAs } : {}),
+              ...(owner.postedBy !== undefined ? { postedBy: owner.postedBy } : {}),
+              repo: owner.repo,
+              ref: options.coordinator.branch,
+              parentInstanceId: instanceId,
+              coordinatorUnit: unit,
+              coordinatorAttempt: owner.attempt ?? 0,
+              idempotencyKey: options.coordinator.idempotencyKey,
+            },
+            system: "",
+            tools: [],
+            state: {},
+          });
+          if (!claim.ok) throw new Error(`The worker claim failed: ${claim.reason}`);
+          await ledger.append(runId, "golden-worker", [{ type: "coordinator_tag", seq: 1, ...options.coordinator }]);
+          io.runStarted?.({ id: runId });
           await io.reply(reply);
           return { status: "completed" as const };
         })();
@@ -505,6 +534,7 @@ workspaceDir: ${join(world.dir, "workspaces")}
       openPullRequest: unexpected,
       commitsOverBase: unexpected,
       createBranchRef: unexpected,
+      fetchBranchRef: async (_repo, ref) => ({ kind: "verified", ref: `refs/heads/${ref}`, sha: "a".repeat(40) }),
       fetchPrReviews: unexpected,
       commenterAuthorized: unexpected,
       selfIdentity: unexpected,
@@ -530,6 +560,10 @@ workspaceDir: ${join(world.dir, "workspaces")}
     const spawned = await step("spawn", {
       parentInstanceId: instanceId,
       step: `${unit}/0/coding`,
+      effectId: `${unit}/0/coding`,
+      effectOrdinal: (row.currentEffect?.ordinal ?? 0) + 1,
+      executionWorkflowId: row.recovery?.workflowId ?? instance.id,
+      ...(row.recovery ? { recoveryActionId: row.recovery.actionId } : {}),
       preset: "coding",
       brief: { kind: "contract", unit, rebase: { branch: row.branch, onto: instance.base } },
     });

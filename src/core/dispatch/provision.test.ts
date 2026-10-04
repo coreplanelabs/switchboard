@@ -571,6 +571,63 @@ describe("registerRun — the run's row on every surface before the attach", () 
     expect(registry.getById("run-public")?.label).toContain("acme/api");
   });
 
+  it("publishes the coordinator admission tag before attachment and never duplicates it on restart", async () => {
+    const coordinator = {
+      parentInstanceId: "plan-p-2",
+      idempotencyKey: "plan-p-2:U16/1/coding",
+      branch: "plan/p/u16",
+      base: "feat/trunk",
+      costCapUsd: 50,
+      issuedFindingIds: ["F1", "check:ci / bot"],
+    };
+    const d = deps();
+    const r = request(d, "agent:coding fix the login bug", "coding");
+    const registry = new RunRegistry({ genId: () => "run-p", genToken: () => "tok" });
+    const { io, started } = fakeIO([]);
+    const input = {
+      agentSource: "directive" as const,
+      msg: r.message,
+      io,
+      agent: r.agent,
+      resolved: r.resolved,
+      directives: r.directives,
+      history: [],
+      repoCtx,
+      carriedRow: undefined,
+      resume: undefined,
+      startedAt: NOW,
+      receivedAt: NOW,
+      clock: () => NOW,
+      root: r.root,
+      trace: r.trace,
+      registry,
+      shell: r.shell,
+      admitted: r.admitted,
+      coordinator,
+    };
+    await registerRun(d, input);
+    const tags = registry.snapshotById("run-p")!.events.filter((event) => event.type === "coordinator_tag");
+    expect(tags).toEqual([
+      expect.objectContaining({
+        type: "coordinator_tag",
+        parentInstanceId: "plan-p-2",
+        unit: "U16",
+        branch: "plan/p/u16",
+        base: "feat/trunk",
+        costCapUsd: 50,
+        issuedFindingIds: ["F1", "check:ci / bot"],
+      }),
+    ]);
+    expect(started).toEqual([]);
+    const restarted = new RunRegistry({ genId: () => "run-p", genToken: () => "tok" });
+    await registerRun(d, {
+      ...input,
+      registry: restarted,
+      restart: { row: {} as LiveRunRow, inbox: [], events: tags.map((event) => ({ ...event, seq: event.seq! })) },
+    });
+    expect(restarted.snapshotById("run-p")!.events.filter((event) => event.type === "coordinator_tag")).toHaveLength(1);
+  });
+
   it("creates the registry row under the minted id with its label and meta, links the run page, and publishes the request, the run meta and the thread context", async () => {
     vi.stubEnv("PUBLIC_BASE_URL", "https://sb.example");
     const d = deps();
@@ -998,7 +1055,7 @@ describe("reserveRun — the ledger reservation before the attach", () => {
     };
     expect(await reserveRun(d, { ...base, resume, restart: undefined })).toBeUndefined();
     expect(
-      await reserveRun(d, { ...base, resume: undefined, restart: { row: resume.row, inbox: [] } }),
+      await reserveRun(d, { ...base, resume: undefined, restart: { row: resume.row, events: [], inbox: [] } }),
     ).toBeUndefined();
     expect(d.ledger.reserved).toEqual([]);
     expect(r.admitted.runId).toBeUndefined();

@@ -18,6 +18,7 @@ import {
   isPullBindingRefusal,
   type PullBindingRefusal,
   unitPullBindingRefusal,
+  unitPullTargetsRefusal,
   type PullOwnershipRows,
   isPullTarget,
   isPullOwnerLiveMeta,
@@ -27,6 +28,17 @@ import {
   type PullTarget,
   type PullOwnersResult,
 } from "./pullOwnership.js";
+import {
+  isUnitEffectTransition,
+  isUnitEffectTransitionResult,
+  unitEffectResultMatches,
+  planUnitEffectTransition,
+  unitEffectRunId,
+  unitEffectTombstoneMatches,
+  type UnitEffectRunEvidence,
+  type UnitEffectTransition,
+  type UnitEffectTransitionResult,
+} from "./unitEffect.js";
 import type { MainTaskLink } from "./mainTaskLink.js";
 export type { MainTaskLink } from "./mainTaskLink.js";
 import type { Secrets } from "../../secrets.js";
@@ -124,6 +136,8 @@ export interface CoordinatorInstanceStore {
   /** Complete canonical owner snapshot; reservation must share this owner transaction. */
   findPullOwners(target: PullTarget): Promise<PullOwnersResult>;
   transitionRecovery(input: RecoveryTransition): Promise<RecoveryTransitionResult>;
+  /** Reads stop, execution, complete owner facts and the whole unit in one transaction. */
+  transitionUnitEffect(input: UnitEffectTransition): Promise<UnitEffectTransitionResult>;
   getRecoveryAction(key: UnitEventKey, request: RecoveryRequest): Promise<RecoveryAction | null>;
   listRecoveryHistory(key: UnitEventKey, after?: number): Promise<RecoveryHistoryPage>;
   /** The authenticated requester turn, outside model and session content. */
@@ -214,7 +228,7 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
   constructor(
     private readonly runOwner?: Pick<
       InMemoryRunLedger,
-      "live" | "finished" | "finishedWorkEvidence" | "workspacePublicationRows"
+      "live" | "finished" | "events" | "finishedWorkEvidence" | "workspacePublicationRows"
     >,
   ) {}
   async findPullOwners(target: PullTarget): Promise<PullOwnersResult> {
@@ -312,6 +326,51 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
       return "incomplete";
     }
   }
+  async transitionUnitEffect(input: UnitEffectTransition): Promise<UnitEffectTransitionResult> {
+    if (!isUnitEffectTransition(input)) return { ok: false, reason: "conflict" };
+    try {
+      const instance = JSON.parse(this.rows.get(input.expected.instanceId) ?? "null");
+      const current = JSON.parse(this.units.get(unitKey(input.expected)) ?? "null");
+      if ((instance !== null && !isCoordinatorInstance(instance)) || (current !== null && !isCoordinatorUnit(current)))
+        return { ok: false, reason: "incomplete" };
+      const runId = unitEffectRunId(input);
+      let evidence: UnitEffectRunEvidence | undefined;
+      if (runId !== undefined && this.runOwner) {
+        const live = this.runOwner.live.get(runId),
+          finished = this.runOwner.finished.get(runId);
+        if (live && (live.runId !== runId || live.threadKey !== live.meta.threadKey))
+          return { ok: false, reason: "incomplete" };
+        if (finished && (!isRunRecord(finished) || finished.id !== runId)) return { ok: false, reason: "incomplete" };
+        if (live && finished && !unitEffectTombstoneMatches(live.meta, live.startedAt, finished))
+          return { ok: false, reason: "incomplete" };
+        if (!live && finished?.provisional === true) return { ok: false, reason: "unavailable" };
+        const meta = live?.meta ?? finished;
+        if (meta)
+          evidence = {
+            runId,
+            meta,
+            reviewTarget: live?.meta ?? finished!.events.find((e) => e.type === "run_meta"),
+            startedAt: live?.startedAt ?? finished!.startedAt,
+            tags: (live ? (this.runOwner.events.get(runId) ?? []) : finished!.events).filter(
+              (e) => e.type === "coordinator_tag",
+            ),
+          };
+      }
+      const result = planUnitEffectTransition(input, instance, current ?? undefined, evidence);
+      if (!result.ok) return result;
+      if (input.kind === "admit") {
+        if (!this.runOwner) return { ok: false, reason: "unavailable" };
+        const reason = unitPullTargetsRefusal(this.pullOwnershipRows(), instance, result.unit);
+        if (reason) return { ok: false, reason };
+      }
+      // No awaits separate these owner reads from their single mutation.
+      const serialized = JSON.stringify(result.unit);
+      this.units.set(unitKey(input.expected), serialized);
+      return result;
+    } catch {
+      return { ok: false, reason: "incomplete" };
+    }
+  }
   private readonly recoveryActions = new Map<string, string>();
   private readonly recoveryReceipts = new Map<string, string>();
   async transitionRecovery(input: RecoveryTransition): Promise<RecoveryTransitionResult> {
@@ -403,6 +462,7 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
       !isMainTaskKey(key) ||
       !isCoordinatorInstance(instance) ||
       !isCoordinatorUnit(unit) ||
+      unit.currentEffect !== undefined ||
       !mainTaskClaimMatches(key, instance, unit) ||
       authority.requesterId !== instance.userId ||
       authority.repo.toLowerCase() !== instance.repo.toLowerCase()
@@ -619,6 +679,9 @@ export class NullCoordinatorInstanceStore implements CoordinatorInstanceStore {
   async findPullOwners(_target: PullTarget): Promise<PullOwnersResult> {
     return { ok: false, reason: "unavailable" };
   }
+  async transitionUnitEffect(_input: UnitEffectTransition): Promise<UnitEffectTransitionResult> {
+    return { ok: false, reason: "unavailable" };
+  }
   async transitionRecovery(): Promise<RecoveryTransitionResult> {
     return { ok: false, reason: "unavailable" };
   }
@@ -730,6 +793,25 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
       const response = await this.post("/runs/coordinator/pull-owners", { target });
       if (response.status !== 200 || !isPullOwnersResult(response.data)) return { ok: false, reason: "unavailable" };
       return response.data;
+    } catch {
+      return { ok: false, reason: "unavailable" };
+    }
+  }
+  async transitionUnitEffect(input: UnitEffectTransition): Promise<UnitEffectTransitionResult> {
+    if (!isUnitEffectTransition(input)) return { ok: false, reason: "conflict" };
+    try {
+      const response = await this.post("/runs/coordinator/units/effect-transition", { input });
+      if (!isUnitEffectTransitionResult(response.data)) return { ok: false, reason: "unavailable" };
+      const result = response.data;
+      if (!result.ok) return response.status === 409 ? result : { ok: false, reason: "unavailable" };
+      if (
+        response.status !== 200 ||
+        result.unit.instanceId !== input.expected.instanceId ||
+        result.unit.unit !== input.expected.unit ||
+        !unitEffectResultMatches(input, result.unit)
+      )
+        return { ok: false, reason: "unavailable" };
+      return result;
     } catch {
       return { ok: false, reason: "unavailable" };
     }

@@ -13,7 +13,7 @@ import {
 import { publicationSettlementForRun, type PublicationSettlement } from "./publicationSettlement.js";
 import { audienceRefusalOf, type AudienceRefusalReceipt } from "./audienceDecision.js";
 import type { ChannelVisibility, Predicate } from "./authz/types.js";
-import type { BoundaryScope, Identity, MachineClass, RunProfile } from "../config/profile.js";
+import { isRunProfile, type RunProfile } from "../config/profile.js";
 import type { RunEvent } from "./runEvents.js";
 import type { ProviderFailureCause } from "./provider.js";
 import type { Effort } from "../effort.js";
@@ -764,38 +764,9 @@ export function isRunSession(v: unknown): v is RunSession {
 /** The profile as the record stores it: the run's effective profile plus the preset it came from. */
 export type RunProfileRecord = RunProfile & { preset: string };
 
-// The vocabularies the profile is checked against, typed against the unions
-// (a class or identity added without a row here fails to compile) — the record
-// contract stays node-free and imports the registry's types only.
-const MACHINE_CLASSES_IN_RECORD: Record<MachineClass, true> = {
-  none: true,
-  blank: true,
-  "repo-cold": true,
-  "repo-resident": true,
-};
-const IDENTITIES_IN_RECORD: Record<Identity, true> = { none: true, read: true, write: true };
-const BOUNDARY_SCOPES_IN_RECORD: Record<BoundaryScope, true> = {
-  defaults: true,
-  channel: true,
-  user: true,
-  directive: true,
-  parent: true,
-};
-
 /** Structural check on a stored profile (item 3's rule for the field). */
 function isRunProfileRecord(v: unknown): v is RunProfileRecord {
-  if (typeof v !== "object" || v === null) return false;
-  const p = v as Record<string, unknown>;
-  if (typeof p.preset !== "string") return false;
-  if (typeof p.machine !== "string" || !Object.hasOwn(MACHINE_CLASSES_IN_RECORD, p.machine)) return false;
-  if (typeof p.identity !== "string" || !Object.hasOwn(IDENTITIES_IN_RECORD, p.identity)) return false;
-  if (!isFiniteNumber(p.minutes) || p.minutes <= 0) return false;
-  if (
-    p.boundedBy !== undefined &&
-    (typeof p.boundedBy !== "string" || !Object.hasOwn(BOUNDARY_SCOPES_IN_RECORD, p.boundedBy))
-  )
-    return false;
-  return true;
+  return isRunProfile(v) && typeof (v as unknown as Record<string, unknown>).preset === "string";
 }
 
 /** A run as a listing shows it: the record minus its events. `diagnosis` stays —

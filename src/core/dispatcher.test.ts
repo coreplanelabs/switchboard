@@ -1,3 +1,4 @@
+import type { ResumeContext } from "./dispatch/admission.js";
 import { seedCoordinatorUnit } from "./testing/coordinatorInstance.js";
 import { booleanAudienceVerifier } from "./testing/audienceVerifier.js";
 import { testSlackCapability, testSessionSources } from "./testing/slackSources.js";
@@ -13167,7 +13168,10 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     vi.mocked(makeExecutor).mockClear();
   });
 
-  function wired(provider: Provider, over: { ledger?: InMemoryRunLedger; gen?: string; yaml?: string } = {}) {
+  function wired(
+    provider: Provider,
+    over: { ledger?: InMemoryRunLedger; gen?: string; yaml?: string; now?: () => number } = {},
+  ) {
     // The first row is the run's (`run-l`, what every assertion names); a later
     // one — a refusal's `door` record (record 0054, as amended) — gets its own id.
     let minted = 0;
@@ -13175,7 +13179,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       genId: () => (++minted === 1 ? "run-l" : `run-l${minted}`),
       genToken: () => "tok",
     });
-    const store = new InMemoryRunStore();
+    const store = new InMemoryRunStore({ now: over.now });
     const ledger = over.ledger ?? new InMemoryRunLedger();
     const warnings: string[] = [];
     const fallbackPuts: string[] = [];
@@ -13292,7 +13296,8 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
   });
 
   it("restarts an attaching private child from its durable coordinator row", async () => {
-    const ledger = new InMemoryRunLedger(() => 10_000);
+    const start = Date.now();
+    const ledger = new InMemoryRunLedger(() => start + 5_000);
     const provider = capturingProvider("private work resumed");
     const { deps, writer } = wired(provider, { ledger });
     const identity = { instanceId: "ship_private_1", unit: "U12" };
@@ -13310,30 +13315,39 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       threadKey,
       gen: "gen-OLD",
       leaseMs: 30_000,
-      startedAt: 5_000,
+      startedAt: start,
       phase: "attaching",
       meta: {
         channelId: request.channelId,
         userId: request.userId,
         threadKey,
         agent: "coding",
+        profile: { machine: AGENTS.coding.machine, identity: "write", minutes: 20 },
         model: "anthropic/coding-model",
         repo: "acme/api",
         ref: unitBranch("private-task", "u1"),
         parentInstanceId: identity.instanceId,
         idempotencyKey: spawnKey,
-        request: durableInboxMessage(request, request.text, 5_000),
+        request: durableInboxMessage(request, request.text, start),
       },
       system: "",
       tools: [],
     });
+    await ledger.assignLiveState("run-old", "gen-OLD", {
+      expectedSeq: 0,
+      eventSeq: 1,
+      at: start,
+      state: "admitted",
+      bound: start + minutesToMs(20),
+    });
+    const events = await ledger.readEvents("run-old");
     ledger.live.get("run-old")!.leaseUntil = 0;
-    const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
+    const [reclaimed] = await ledger.reclaim("gen-T", start + 5_000, 30_000);
     expect(reclaimed.reclaimedFrom).toBe("attaching");
-    const restored = messageFromInbox(reclaimed.row.meta.request!, 5_000)!;
+    const restored = messageFromInbox(reclaimed.row.meta.request!, start)!;
     const log = new InMemoryPrivateWorkerLog();
     const io = privateWorkerIO(log, identity, {
-      clock: () => 10_000,
+      clock: () => start + 5_000,
       currentInputId: spawnKey,
       audience: {
         actId: "m_original",
@@ -13347,7 +13361,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         verify: async () => ({ ok: true }),
       },
     });
-    const outcome = await dispatch(deps, restored.msg, io, { restart: { row: reclaimed.row, inbox: [] } });
+    const outcome = await dispatch(deps, restored.msg, io, { restart: { row: reclaimed.row, events, inbox: [] } });
     await writer.settled();
     expect(outcome.status, JSON.stringify(outcome)).toBe("completed");
     expect(provider.requests).toHaveLength(1);
@@ -13637,7 +13651,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
 
     const { io, replies } = ioWithCard();
     const restored = messageFromInbox(reclaimed.row.meta.request!, 5_000)!;
-    const outcome = await dispatch(deps, restored.msg, io, { restart: { row: reclaimed.row, inbox: [] } });
+    const outcome = await dispatch(deps, restored.msg, io, { restart: { row: reclaimed.row, events: [], inbox: [] } });
     await writer.settled();
     expect(outcome.status).toBe("stopped");
     expect(replies).toEqual([]);
@@ -14461,6 +14475,61 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(warnings).toEqual([]);
   });
 
+  it("coordinator registration waits for the durable identity and exact setup tag before notifying its owner", async () => {
+    const h = wired(capturingProvider(), { yaml: REMOTE_YAML_FIXTURE });
+    h.deps.admission = new ThreadAdmission<DispatchFollowUp>();
+    const tag = {
+      parentInstanceId: "ship_identity",
+      idempotencyKey: "ship_identity:ONE/0/coding",
+      unit: "ONE",
+      instanceAttempt: 0,
+      branch: "main",
+      base: "main",
+      transportWorkflowId: "original-workflow",
+    };
+    let reached!: () => void, release!: () => void;
+    const pending = new Promise<void>((resolve) => (reached = resolve));
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const assign = h.ledger.assignLiveState.bind(h.ledger);
+    h.ledger.assignLiveState = async (...args) => {
+      if (args[2].state === "admitted") {
+        reached();
+        await gate;
+      }
+      return assign(...args);
+    };
+    const { io } = ioWithCard();
+    const started = vi.fn(({ id }: { id: string }) => {
+      expect(h.ledger.live.get(id)).toMatchObject({
+        phase: "attaching",
+        meta: {
+          parentInstanceId: tag.parentInstanceId,
+          coordinatorUnit: "ONE",
+          idempotencyKey: tag.idempotencyKey,
+        },
+      });
+      expect(h.ledger.events.get(id)?.filter((event) => event.type === "coordinator_tag")).toEqual([
+        expect.objectContaining({
+          type: "coordinator_tag",
+          parentInstanceId: tag.parentInstanceId,
+          unit: "ONE",
+          branch: "main",
+          base: "main",
+          transportWorkflowId: tag.transportWorkflowId,
+        }),
+      ]);
+    });
+    io.runStarted = started;
+    const running = dispatch(h.deps, msg("agent:coding work on main", "slack:UADMIN"), io, { coordinator: tag });
+    await pending;
+    expect(started).not.toHaveBeenCalled();
+    release();
+    await running;
+    await h.writer.settled();
+    expect(started).toHaveBeenCalledExactlyOnceWith({ id: "run-l" });
+    expect(h.ledger.finished.get("run-l")?.events.filter((event) => event.type === "coordinator_tag")).toHaveLength(1);
+  });
+
   describe("coordinator producer identity", () => {
     async function setup(preset: "coding" | "review" = "coding") {
       vi.mocked(runPiHarnessOpen).mockClear();
@@ -14494,6 +14563,27 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         createdAt: Date.now() - 1_000,
       };
       await instances.put(instance);
+      const publication = {
+        repo: instance.repo,
+        pr: 7,
+        headRef: ref,
+        baseRef: "main",
+        publicationRef: ref,
+        expectedHeadSha: "a".repeat(40),
+        owner: { instanceId: instance.id, unit: "U12" },
+      };
+      await instances.putUnits([
+        {
+          instanceId: instance.id,
+          unit: "U12",
+          slug: "u1",
+          branch: ref,
+          threadKey: instance.threadKey,
+          dependsOn: [],
+          rounds: [],
+          ...(preset === "review" ? { pr: { number: 7, url: "https://github.com/acme/api/pull/7" }, publication } : {}),
+        },
+      ]);
       const { io, replies } = ioWithCard();
       const started = vi.fn();
       io.runStarted = started;
@@ -14508,6 +14598,12 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
           repos: new Set<string>(),
         }),
         instances,
+        fetchBranchRef: async (_repo: string, branch: string) => ({
+          kind: "verified",
+          ref: `refs/heads/${branch}`,
+          sha: "a".repeat(40),
+        }),
+        readRepoFile: async () => "",
         registry: h.registry,
         runs: createRunsService({ registry: h.registry, store: h.store, ledger: h.ledger }),
         ledgerRuns: () => h.deps.runLedger.liveRuns(),
@@ -14534,13 +14630,321 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         );
       const spawnBody = {
         parentInstanceId: instance.id,
-        step: `U12/0/${preset}`,
+        unit: "U12",
+        step: `U12/${preset === "review" ? 1 : 0}/${preset}`,
+        effectId: `U12/${preset === "review" ? 1 : 0}/${preset}`,
+        effectOrdinal: 1,
+        executionWorkflowId: instance.id,
         preset,
         budget: 10,
-        prompt: `work on ref ${ref}${preset === "review" ? " https://github.com/acme/api/pull/7" : ""}`,
+        ...(preset === "review"
+          ? { brief: { kind: "review", unit: "U12", pr: 7, headSha: "a".repeat(40), round: 1 } }
+          : { prompt: `work on ref ${ref}` }),
       };
       return { ...h, provider, repoCtx, instance, admin, call, spawnBody, io, replies, started, finished, dispatched };
     }
+
+    it("a restarted coordinator review retains its original publication before resolving a moved head", async () => {
+      const h = await setup("review");
+      const request = msg("agent:review in acme/api: https://github.com/acme/api/pull/7", h.instance.userId);
+      const row = (await h.admin.instances.listUnits(h.instance.id))[0]!;
+      const original = {
+        type: "coordinator_tag" as const,
+        seq: 1,
+        parentInstanceId: h.instance.id,
+        unit: "U12",
+        branch: h.instance.branch,
+        base: "main",
+        publication: row.publication,
+      };
+      expect(
+        await h.ledger.claim({
+          runId: "run-old",
+          threadKey: request.threadKey,
+          gen: "gen-OLD",
+          leaseMs: 30_000,
+          startedAt: Date.now(),
+          phase: "attaching",
+          meta: {
+            agent: "review",
+            channelId: request.channelId,
+            userId: request.userId,
+            threadKey: request.threadKey,
+            repo: h.instance.repo,
+            ref: h.instance.branch,
+            pr: 7,
+            profile: { machine: AGENTS.review.machine, identity: "read", minutes: 20 },
+            headSha: "a".repeat(40),
+            parentInstanceId: h.instance.id,
+            coordinatorUnit: "U12",
+            coordinatorAttempt: 0,
+            idempotencyKey: `${h.instance.id}:U12/1/review`,
+            request: durableInboxMessage(request, request.text, Date.now()),
+          },
+          card: null,
+          system: "",
+          tools: [],
+          state: {},
+        }),
+      ).toMatchObject({ ok: true });
+      expect(await h.ledger.append("run-old", "gen-OLD", [original])).toMatchObject({ ok: true });
+      await h.ledger.assignLiveState("run-old", "gen-OLD", {
+        expectedSeq: 0,
+        eventSeq: 2,
+        at: Date.now(),
+        state: "admitted",
+        bound: Date.now() + minutesToMs(20),
+      });
+      const events = await h.ledger.readEvents("run-old");
+      h.ledger.live.get("run-old")!.leaseUntil = 0;
+      const [reclaimed] = await h.ledger.reclaim("gen-T", Date.now(), 30_000);
+      h.deps.resolveRepoContext = () => ({ ...h.repoCtx, headSha: "b".repeat(40) });
+      const callsBefore = vi.mocked(makeExecutor).mock.calls.length;
+      const result = await dispatch(h.deps, request, h.io, {
+        restart: { row: reclaimed.row, inbox: [], events },
+      });
+      await h.writer.settled();
+      expect(result).toMatchObject({ refusal: "workspace_head_mismatch" });
+      expect(vi.mocked(makeExecutor).mock.calls.length).toBe(callsBefore);
+      expect(h.provider.requests).toEqual([]);
+    });
+
+    it.each(["attaching", "live resume", "relaunch fallback", "missing resume remainder", "invalid resume remainder"])(
+      "a canonical child retains its original profile and absolute budget through %s",
+      async (kind) => {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        try {
+          const start = Date.now();
+          const h = await setup("review");
+          const request = msg("agent:review in acme/api: https://github.com/acme/api/pull/7", h.instance.userId);
+          const row = (await h.admin.instances.listUnits(h.instance.id))[0]!;
+          const original = {
+            type: "coordinator_tag" as const,
+            seq: 1,
+            parentInstanceId: h.instance.id,
+            unit: "U12",
+            branch: h.instance.branch,
+            base: "main",
+            publication: row.publication,
+          };
+          expect(
+            await h.ledger.claim({
+              runId: "run-old",
+              threadKey: request.threadKey,
+              gen: "gen-OLD",
+              leaseMs: 30_000,
+              startedAt: start,
+              phase: "attaching",
+              meta: {
+                agent: "review",
+                channelId: request.channelId,
+                userId: request.userId,
+                threadKey: request.threadKey,
+                repo: h.instance.repo,
+                ref: h.instance.branch,
+                pr: 7,
+                headSha: "a".repeat(40),
+                parentInstanceId: h.instance.id,
+                coordinatorUnit: "U12",
+                coordinatorAttempt: 0,
+                idempotencyKey: `${h.instance.id}:U12/1/review`,
+                profile: { machine: AGENTS.review.machine, identity: "read", minutes: 20 },
+                request: durableInboxMessage(request, request.text, start),
+              },
+              card: null,
+              system: "",
+              tools: [],
+              state: {},
+            }),
+          ).toMatchObject({ ok: true });
+          expect(await h.ledger.append("run-old", "gen-OLD", [original])).toMatchObject({ ok: true });
+          expect(
+            await h.ledger.assignLiveState("run-old", "gen-OLD", {
+              expectedSeq: 0,
+              eventSeq: 2,
+              at: start,
+              state: "admitted",
+              bound: start + minutesToMs(20),
+            }),
+          ).toMatchObject({ ok: true });
+          const savedEvents = await h.ledger.readEvents("run-old");
+          vi.setSystemTime(start + minutesToMs(12));
+          h.ledger.live.get("run-old")!.leaseUntil = 0;
+          const [reclaimed] = await h.ledger.reclaim("gen-T", Date.now(), 30_000);
+          let observed: { minutes: number; bound: number | undefined; remaining: number | undefined } | undefined;
+          if (!kind.endsWith("remainder"))
+            vi.mocked(makeExecutor).mockImplementationOnce(async (_config, context) => {
+              await context.onLiveStateObservation?.({
+                state: "waiting_deploy",
+                reason: "deploy",
+                bound: start + minutesToMs(40),
+                attempt: 1,
+              });
+              observed = {
+                minutes: context.profile!.minutes,
+                bound: h.ledger.live.get("run-old")!.liveState?.bound,
+                remaining: context.remainingMs?.(),
+              };
+              throw new Error("stop after confirming the carried budget");
+            });
+          const resume: ResumeContext = {
+            row: reclaimed.row,
+            inbox: [],
+            events: savedEvents,
+            lastSeq: 2,
+            repoCtx: h.repoCtx,
+            lastStep: {
+              step: 1,
+              seq: 2,
+              turnIndex: 0,
+              inFlight: [],
+              inboxConsumedSeq: 0,
+              remainingMs: minutesToMs(10),
+              turn: 1,
+              iteration: 1,
+            },
+            plan: {
+              kind: "resume",
+              messages: [],
+              compactions: [],
+              settlements: [],
+              remainingMs: minutesToMs(10),
+              turn: 1,
+              iteration: 1,
+              inboxConsumedSeq: 0,
+              step: 1,
+              stepRecorded: true,
+            },
+          };
+          if (kind === "missing resume remainder") Object.assign(resume.plan, { remainingMs: undefined });
+          if (kind === "invalid resume remainder") Object.assign(resume.plan, { remainingMs: NaN });
+          if (kind === "relaunch fallback") await h.ledger.abandon("run-old", "gen-T");
+          const outcome = await dispatch(
+            h.deps,
+            request,
+            h.io,
+            kind === "attaching"
+              ? { restart: { row: reclaimed.row, inbox: [], events: savedEvents } }
+              : kind.includes("resume")
+                ? { resume }
+                : {
+                    restartOf: "run-old",
+                    restartCarried: {
+                      events: savedEvents,
+                      token: "kept-token",
+                      startedAt: start,
+                      note: "container replaced",
+                      profile: reclaimed.row.meta.profile,
+                    },
+                    coordinator: {
+                      parentInstanceId: h.instance.id,
+                      idempotencyKey: `${h.instance.id}:U12/1/review`,
+                      unit: "U12",
+                      branch: h.instance.branch,
+                      base: "main",
+                      publication: row.publication,
+                    },
+                  },
+          );
+          await h.writer.settled();
+          if (kind.endsWith("remainder")) {
+            expect(outcome).toMatchObject({ refusal: "run_budget_exhausted" });
+            expect(observed).toBeUndefined();
+            expect(h.ledger.live.has("run-old")).toBe(true);
+            expect(h.provider.requests).toEqual([]);
+            return;
+          }
+          expect(observed, JSON.stringify(outcome)).toEqual({
+            minutes: 20,
+            bound: start + minutesToMs(20),
+            remaining: minutesToMs(8),
+          });
+          expect(h.provider.requests).toEqual([]);
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it.each([
+      "missing",
+      "expired",
+      "missing minutes",
+      "invalid machine",
+      "invalid identity",
+      "invalid scope",
+      "missing parent",
+      "missing spawn key",
+    ])("a canonical attachment restart with a %s admitted deadline executes nothing", async (kind) => {
+      const h = await setup("review");
+      const start = Date.now() - minutesToMs(kind === "expired" ? 21 : 1);
+      const request = msg("agent:review in acme/api: https://github.com/acme/api/pull/7", h.instance.userId);
+      const row = (await h.admin.instances.listUnits(h.instance.id))[0]!;
+      await h.ledger.claim({
+        runId: "run-old",
+        threadKey: request.threadKey,
+        gen: "gen-OLD",
+        leaseMs: 30_000,
+        startedAt: start,
+        phase: "attaching",
+        meta: {
+          agent: "review",
+          channelId: request.channelId,
+          userId: request.userId,
+          threadKey: request.threadKey,
+          repo: h.instance.repo,
+          ref: h.instance.branch,
+          pr: 7,
+          profile: { machine: AGENTS.review.machine, identity: "read", minutes: 20 },
+          headSha: "a".repeat(40),
+          parentInstanceId: h.instance.id,
+          coordinatorUnit: "U12",
+          coordinatorAttempt: 0,
+          idempotencyKey: `${h.instance.id}:U12/1/review`,
+          request: durableInboxMessage(request, request.text, start),
+        },
+        card: null,
+        system: "",
+        tools: [],
+        state: {},
+      });
+      await h.ledger.append("run-old", "gen-OLD", [
+        {
+          type: "coordinator_tag",
+          seq: 1,
+          parentInstanceId: h.instance.id,
+          unit: "U12",
+          branch: h.instance.branch,
+          base: "main",
+          publication: row.publication,
+        },
+      ]);
+      if (kind !== "missing")
+        await h.ledger.assignLiveState("run-old", "gen-OLD", {
+          expectedSeq: 0,
+          eventSeq: 2,
+          at: start,
+          state: "admitted",
+          bound: start + minutesToMs(20),
+        });
+      const saved = h.ledger.live.get("run-old")!;
+      if (kind === "missing minutes") delete (saved.meta.profile as unknown as Record<string, unknown>).minutes;
+      if (kind === "invalid machine") Object.assign(saved.meta.profile!, { machine: "unrecognized" });
+      if (kind === "invalid identity") Object.assign(saved.meta.profile!, { identity: "admin" });
+      if (kind === "invalid scope") Object.assign(saved.meta.profile!, { boundedBy: "unrecognized" });
+      if (kind === "missing parent") delete saved.meta.parentInstanceId;
+      if (kind === "missing spawn key") delete saved.meta.idempotencyKey;
+      const events = await h.ledger.readEvents("run-old");
+      h.ledger.live.get("run-old")!.leaseUntil = 0;
+      const [reclaimed] = await h.ledger.reclaim("gen-T", Date.now(), 30_000);
+      const before = vi.mocked(makeExecutor).mock.calls.length;
+      const outcome = await dispatch(h.deps, request, h.io, { restart: { row: reclaimed.row, inbox: [], events } });
+      await h.writer.settled();
+      expect(outcome).toMatchObject({ refusal: "run_budget_exhausted" });
+      expect(vi.mocked(makeExecutor).mock.calls.length).toBe(before);
+      expect(h.provider.requests).toEqual([]);
+      if (kind !== "expired") expect(h.ledger.live.has("run-old")).toBe(true);
+    });
 
     it("a spawned write child keeps the parent's operation repository and ref when its prompt cites a foreign PR", async () => {
       const h = await setup();
@@ -14590,7 +14994,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
           agent: preset,
           status: "failed",
           parentInstanceId: h.instance.id,
-          idempotencyKey: `${h.instance.id}:U12/0/${preset}`,
+          idempotencyKey: `${h.instance.id}:${h.spawnBody.step}`,
           threadKey: h.instance.threadKey,
           repo: h.instance.repo,
         });
@@ -14940,6 +15344,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
             dependsOn: [],
             rounds: [],
             threadKey: h.instance.threadKey,
+            pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
             publication: {
               repo: h.instance.repo,
               pr: 7,
@@ -15244,7 +15649,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     const restored = messageFromInbox(reclaimed.row.meta.request!, 5_000)!;
     // The route reason is a debug note on the card (routing-and-config item 28): asked for here so the label shows it.
     await deps.config.setChannelOverride("slack:CX", { verbosity: "debug" });
-    await dispatch(deps, restored.msg, io, { restart: { row: reclaimed.row, inbox: reclaimed.inbox } });
+    await dispatch(deps, restored.msg, io, { restart: { row: reclaimed.row, events: [], inbox: reclaimed.inbox } });
     await writer.settled();
     expect(replies).toEqual(["restarted and done"]); // the carried follow-up gets no second ack
     expect(rowAtFirstCall).toMatchObject({
@@ -15315,7 +15720,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fake });
     const restored = messageFromInbox(reclaimed.row.meta.request!, 5_000)!;
     const outcome = await dispatch(deps, restored.msg, ioWithCard().io, {
-      restart: { row: reclaimed.row, inbox: reclaimed.inbox },
+      restart: { row: reclaimed.row, events: [], inbox: reclaimed.inbox },
     });
     await writer.settled();
     expect(outcome.status).toBe("completed");
@@ -15374,7 +15779,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     const restored = messageFromInbox(reclaimed.row.meta.request!, 5_000)!;
     // The route reason is a debug note on the card (routing-and-config item 28): asked for here so the label shows it.
     await deps.config.setChannelOverride("slack:CX", { verbosity: "debug" });
-    await dispatch(deps, restored.msg, io, { restart: { row: reclaimed.row, inbox: reclaimed.inbox } });
+    await dispatch(deps, restored.msg, io, { restart: { row: reclaimed.row, events: [], inbox: reclaimed.inbox } });
     await writer.settled();
     expect(deps.operatorModel).not.toHaveBeenCalled();
     expect(statuses[0].title).toContain("*review* on `anthropic/review-model` · route reason: a review ask");
@@ -15409,7 +15814,9 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     deps.admission = new ThreadAdmission();
     deps.admission.claim("slack:CX:1.0", { agent: "general" }); // the user re-mentioned the bot after the kill
     const { io, replies } = ioWithCard();
-    await dispatch(deps, msg("hello there"), io, { restart: { row: reclaimed.row, inbox: reclaimed.inbox } });
+    await dispatch(deps, msg("hello there"), io, {
+      restart: { row: reclaimed.row, events: [], inbox: reclaimed.inbox },
+    });
     await writer.settled();
     expect(replies).toEqual([]);
     expect(registry.listActive()).toEqual([]);
@@ -15545,6 +15952,11 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         userId: "slack:UX",
         threadKey: "slack:CX:1.0",
         agent: "general",
+        profile: {
+          machine: AGENTS.general.machine,
+          identity: AGENTS.general.identity,
+          minutes: AGENTS.general.maxMinutes,
+        },
         // The segment before the restart ran on a model that is still valid but
         // is no longer this preset's configured default.
         model: "anthropic/review-model",
@@ -15588,6 +16000,15 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       { type: "tool_call", tool: "update_status", summary: "s", at: 3, seq: 3 },
       { type: "tool_call", tool: "bash", summary: "make", at: 4, seq: 4 },
     ]);
+    expect(
+      await ledger.assignLiveState("run-old", "gen-OLD", {
+        expectedSeq: 0,
+        eventSeq: 5,
+        at: 10_000,
+        state: "admitted",
+        bound: 5_000 + minutesToMs(AGENTS.general.maxMinutes),
+      }),
+    ).toMatchObject({ ok: true });
     ledger.live.get("run-old")!.leaseUntil = 0;
     const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
     expect(reclaimed.row.ownerGen).toBe("gen-T");
@@ -15603,6 +16024,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       },
     };
     const { deps, registry, writer, fallbackPuts, warnings } = wired(provider, { ledger });
+    deps.clock = () => 10_000;
     const plan = planResume({
       transcript: { complete: true, turns: 2, messages: transcript, compactions: [] },
       lastStep: reclaimed.lastStep!,
@@ -15615,7 +16037,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       { role: "user", text: "model:anthropic/review-model effort:high run the old child segment" },
     ];
     await dispatch(deps, resumeMessage(reclaimed.row, "hello there"), io, {
-      resume: { row: reclaimed.row, lastStep: reclaimed.lastStep!, plan, events, lastSeq: 4, repoCtx: {}, inbox: [] },
+      resume: { row: reclaimed.row, lastStep: reclaimed.lastStep!, plan, events, lastSeq: 5, repoCtx: {}, inbox: [] },
     });
     await writer.settled();
 
@@ -15990,6 +16412,11 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         userId: "slack:UADMIN",
         threadKey: "slack:CX:1.0",
         agent: "coding",
+        profile: {
+          machine: AGENTS.coding.machine,
+          identity: AGENTS.coding.identity,
+          minutes: AGENTS.coding.maxMinutes,
+        },
         model: "anthropic/coding-model",
         repo: "acme/api",
         ref: "main",
@@ -16061,6 +16488,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       "    baseUrl: https://resident.example\n  readyPilotRepos:\n    acme/api:\n      testCommand: npm test\n      dependencyDir: node_modules\n      requiredTools: [node, npm]",
     );
     const { deps, registry, writer } = wired(provider, { ledger, yaml: yamlWithNewPilot });
+    deps.clock = () => 10_000;
     const plan = planResume({
       transcript: {
         complete: true,
@@ -16168,6 +16596,11 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
           userId: "slack:UADMIN",
           threadKey: "slack:CX:1.0",
           agent: "coding",
+          profile: {
+            machine: AGENTS.coding.machine,
+            identity: AGENTS.coding.identity,
+            minutes: AGENTS.coding.maxMinutes,
+          },
           model: "anthropic/coding-model",
           repo: "acme/api",
           ref: "main",
@@ -16223,6 +16656,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
       const provider = capturingProvider("must not run");
       const { deps, registry, writer } = wired(provider, { ledger, yaml: RESIDENT_YAML_FIXTURE });
+      deps.clock = () => 10_000;
       if (failure !== "projection-rejection") {
         const assign = ledger.assignLiveState.bind(ledger);
         vi.spyOn(ledger, "assignLiveState").mockImplementation((runId, gen, assignment) =>
@@ -16316,6 +16750,11 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         userId: "slack:UADMIN",
         threadKey: "slack:CX:1.0",
         agent: "coding",
+        profile: {
+          machine: AGENTS.coding.machine,
+          identity: AGENTS.coding.identity,
+          minutes: AGENTS.coding.maxMinutes,
+        },
         model: "anthropic/coding-model",
         repo: "acme/api",
         ref: "main",
@@ -16353,6 +16792,15 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       },
       [],
     );
+    expect(
+      await ledger.assignLiveState("run-held", "gen-OLD", {
+        expectedSeq: 0,
+        eventSeq: 1,
+        at: 10_000,
+        state: "admitted",
+        bound: 5_000 + minutesToMs(AGENTS.coding.maxMinutes),
+      }),
+    ).toMatchObject({ ok: true });
     ledger.live.get("run-held")!.leaseUntil = 0;
     const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
     const originalSetState = ledger.setState.bind(ledger);
@@ -16375,6 +16823,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       });
     const provider = capturingProvider("must not run");
     const { deps, writer } = wired(provider, { ledger, yaml: RESIDENT_YAML_FIXTURE });
+    deps.clock = () => 10_000;
     const plan = planResume({
       transcript: {
         complete: true,
@@ -16393,7 +16842,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         lastStep: reclaimed.lastStep!,
         plan,
         events: await ledger.readEvents("run-held"),
-        lastSeq: 0,
+        lastSeq: 1,
         repoCtx: { repo: "acme/api", ref: "main" },
         inbox: [],
       },
@@ -16891,6 +17340,11 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         userId: "slack:UADMIN",
         threadKey: "slack:CX:1.0",
         agent: "coding",
+        profile: {
+          machine: AGENTS.coding.machine,
+          identity: AGENTS.coding.identity,
+          minutes: AGENTS.coding.maxMinutes,
+        },
         model: "anthropic/coding-model",
         repo: "acme/api",
         ref: "main",
@@ -16920,10 +17374,20 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       { type: "input", messageId: "m1", text: "fix it", at: 1, seq: 1 },
       { type: "coordinator_tag", parentInstanceId: "plan-p", base: "main", at: 1, seq: 2 },
     ]);
+    expect(
+      await ledger.assignLiveState("run-old", "gen-OLD", {
+        expectedSeq: 0,
+        eventSeq: 3,
+        at: 10_000,
+        state: "admitted",
+        bound: 5_000 + minutesToMs(AGENTS.coding.maxMinutes),
+      }),
+    ).toMatchObject({ ok: true });
     ledger.live.get("run-old")!.leaseUntil = 0;
     const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
     const provider = capturingProvider("started over and done");
     const { deps, registry, writer } = wired(provider, { ledger, yaml: RESIDENT_YAML_FIXTURE });
+    deps.clock = () => 10_000;
     const resolve = vi.fn(
       (_msg, _history, _records, _fallback, _review, target?: { repo: string; ref?: string }) =>
         target ?? { repo: "acme/web", ref: "foreign" },
@@ -16948,7 +17412,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         lastStep: reclaimed.lastStep!,
         plan,
         events,
-        lastSeq: 1,
+        lastSeq: 3,
         repoCtx: { repo: "acme/api", ref: "main" },
         inbox: [],
       },
@@ -17029,6 +17493,11 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         userId: "slack:UADMIN",
         threadKey: "slack:CX:1.0",
         agent: "coding",
+        profile: {
+          machine: AGENTS.coding.machine,
+          identity: AGENTS.coding.identity,
+          minutes: AGENTS.coding.maxMinutes,
+        },
         model: "anthropic/coding-model",
         repo: "acme/api",
         ref: "main",
@@ -17053,10 +17522,24 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       [],
     );
     await ledger.append("run-old", "gen-OLD", [{ type: "input", messageId: "m1", text: "fix it", at: 1, seq: 1 }]);
+    expect(
+      await ledger.assignLiveState("run-old", "gen-OLD", {
+        expectedSeq: 0,
+        eventSeq: 2,
+        at: 10_000,
+        state: "admitted",
+        bound: 5_000 + minutesToMs(AGENTS.coding.maxMinutes),
+      }),
+    ).toMatchObject({ ok: true });
     ledger.live.get("run-old")!.leaseUntil = 0;
     const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
     const provider = capturingProvider("never reached");
-    const { deps, registry, store, writer } = wired(provider, { ledger, yaml: RESIDENT_YAML_FIXTURE });
+    const { deps, registry, store, writer } = wired(provider, {
+      ledger,
+      yaml: RESIDENT_YAML_FIXTURE,
+      now: () => 10_000,
+    });
+    deps.clock = () => 10_000;
     // The death between the close and the claim: the restart's dispatch (the
     // resume itself reads `resume.repoCtx` and never calls this) throws before
     // its run is registered, so no successor ever claims the carried id.
@@ -17082,7 +17565,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         lastStep: reclaimed.lastStep!,
         plan,
         events,
-        lastSeq: 1,
+        lastSeq: 2,
         repoCtx: { repo: "acme/api", ref: "main" },
         inbox: [],
       },

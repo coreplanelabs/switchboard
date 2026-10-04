@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import type { CoordinatorInstance, CoordinatorUnit } from "./contract.js";
+import {
+  hasRecoverySettlementCapacity,
+  RECOVERY_ROW_MAX_BYTES,
+  RECOVERY_SETTLEMENT_MAX_BYTES,
+  type CoordinatorInstance,
+  type CoordinatorUnit,
+} from "./contract.js";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { InMemoryCoordinatorInstanceStore } from "./instanceStore.js";
 import { generatedTaskOf } from "./generatedTask.js";
@@ -91,6 +97,121 @@ describe("recovery history store", () => {
     expect(await store.getRecoveryAction(row, request())).toBeNull();
     expect((await store.listRecoveryHistory(row)).receipts).toEqual([]);
   });
+  it.each(["claim replay", "execution key order"] as const)("active recovery effect preserves %s", async (proof) => {
+    const store = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
+    expect(await store.put(instance)).toEqual({ ok: true });
+    const row = ended();
+    expect(await store.putUnits([row])).toEqual({ ok: true });
+    const input = { kind: "claim" as const, expected: row, replacement: recovering(row), request: request() };
+    const result = await store.transitionRecovery(input);
+    if (!result.ok) throw new Error(result.reason);
+    const execution = {
+      workflowId: result.unit.recovery!.workflowId,
+      recoveryActionId: result.unit.recovery!.actionId!,
+    };
+    const admitted = await store.transitionUnitEffect({
+      kind: "admit",
+      expected: result.unit,
+      execution,
+      effect: {
+        version: 1,
+        id: "recovery/spawn",
+        ordinal: 1,
+        phase: "active",
+        execution,
+        target: { repo: instance.repo, ref: row.branch, base: instance.base!, headSha: "a".repeat(40) },
+        calls: [{ operation: "spawn", state: "unstarted" }],
+      },
+    });
+    if (!admitted.ok) throw new Error(admitted.reason);
+    if (proof === "claim replay") {
+      // Re-send the original admission fields, excluding the store-assigned action ID.
+      const { actionId: _assigned, ...originalClaim } = admitted.unit.recovery!;
+      const action = await store.getRecoveryAction(row, request());
+      expect(
+        await store.transitionRecovery({
+          kind: "claim",
+          expected: admitted.unit,
+          replacement: { ...admitted.unit, recovery: originalClaim },
+          request: request(),
+        }),
+      ).toEqual({ ok: true, unit: admitted.unit, replayed: true });
+      expect(await store.getRecoveryAction(row, request())).toEqual(action);
+      expect(await store.listUnits(instance.id)).toEqual([admitted.unit]);
+    } else {
+      const reverseExecution = { recoveryActionId: execution.recoveryActionId, workflowId: execution.workflowId };
+      expect(
+        await store.transitionUnitEffect({
+          kind: "begin",
+          expected: admitted.unit,
+          execution: reverseExecution,
+          effectId: "recovery/spawn",
+          call: 0,
+        }),
+      ).toMatchObject({ ok: true });
+    }
+  });
+  it.each([100, 2000, 7000])(
+    "effect admission retains recovery settlement space with %s bytes remaining",
+    async (remaining) => {
+      const store = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
+      expect(await store.put(instance)).toEqual({ ok: true });
+      const source = {
+        requesterId: instance.userId,
+        threadKey: instance.threadKey,
+        runId: "source-run",
+        repo: instance.repo,
+      };
+      const row = { ...ended(), generatedTask: generatedTaskOf("x", source) };
+      expect(await store.putUnits([row])).toEqual({ ok: true });
+      const claim = await store.transitionRecovery({
+        kind: "claim",
+        expected: row,
+        replacement: recovering(row),
+        request: request(),
+      });
+      if (!claim.ok) throw new Error(claim.reason);
+      const { recovery, ...rest } = claim.unit;
+      const { previousEnding: _previous, ...metadataClaim } = recovery!;
+      const size = new TextEncoder().encode(JSON.stringify({ ...rest, recovery: metadataClaim })).byteLength;
+      const textLength = RECOVERY_ROW_MAX_BYTES - RECOVERY_SETTLEMENT_MAX_BYTES - size - remaining + 1;
+      const retained = { ...claim.unit, generatedTask: generatedTaskOf("x".repeat(textLength), source) };
+      (store as unknown as { units: Map<string, string> }).units.set(
+        `${row.instanceId}\0${row.unit}`,
+        JSON.stringify(retained),
+      );
+      expect(hasRecoverySettlementCapacity(retained)).toBe(true);
+      const execution = { workflowId: retained.recovery!.workflowId, recoveryActionId: retained.recovery!.actionId! };
+      const admitted = await store.transitionUnitEffect({
+        kind: "admit",
+        expected: retained,
+        execution,
+        effect: {
+          version: 1,
+          id: "recovery/spawn",
+          ordinal: 1,
+          phase: "active",
+          execution,
+          target: { repo: instance.repo, ref: row.branch, base: instance.base!, headSha: "a".repeat(40) },
+          calls: Array.from({ length: remaining === 100 ? 1 : 32 }, () => ({
+            operation: "spawn" as const,
+            state: "unstarted" as const,
+          })),
+        },
+      });
+      if (remaining === 7000) {
+        if (!admitted.ok) throw new Error(admitted.reason);
+        expect(
+          await store.compareAndReplaceUnit(admitted.unit, { ...admitted.unit, threadEvidence: "x".repeat(4000) }),
+        ).toEqual({ ok: false, reason: "stale" });
+        expect(await store.listUnits(instance.id)).toEqual([admitted.unit]);
+      } else {
+        expect(admitted).toEqual({ ok: false, reason: "conflict" });
+        expect(await store.listUnits(instance.id)).toEqual([retained]);
+      }
+    },
+  );
+
   it("requires reconciled admission and preserves history through confirmation replay", async () => {
     const store = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     const pending: CoordinatorInstance = { ...instance, admission: "unreconciled" };

@@ -118,6 +118,7 @@ export interface RestartRun {
   kind: "restart";
   row: LiveRunRow;
   reclaimedFrom: "attaching";
+  events: AppendableEvent[];
   inbox: InboxItem[];
 }
 
@@ -305,7 +306,8 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
         // restarted from the request the row carries — or, without one (a row
         // this build cannot read), closed like any run with nothing to resume.
         if (typeof row.meta.request === "object" && row.meta.request !== null) {
-          outcome.resumable.push({ kind: "restart", row, reclaimedFrom: "attaching", inbox: run.inbox });
+          const events = await ledger.readEvents(row.runId);
+          outcome.resumable.push({ kind: "restart", row, reclaimedFrom: "attaching", events, inbox: run.inbox });
           resumingIds.add(row.runId);
           log(
             `[reclaim] ${row.runId} ${row.threadKey} restartable (from attaching; killed before its prompt existed; ${run.inbox.length} follow-up(s) pending) — handed to the launcher`,

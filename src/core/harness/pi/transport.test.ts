@@ -39,6 +39,32 @@ async function collect(t: PiRpcTransport, max: number): Promise<string[]> {
 }
 
 describe("PiRpcTransport", () => {
+  it("expires queued model instructions at the FIFO write while permitting abort and gate replies", async () => {
+    const c = new FakeHarnessContainer();
+    await c.start({ paths, command: "pi", args: [], env: {} });
+    let allowance = true;
+    const t = new PiRpcTransport({
+      container: c,
+      paths,
+      pid: c.pid,
+      pollMs: 250,
+      sleep: async () => {},
+      admitWrite: (command) => allowance || (command.type !== "prompt" && command.type !== "steer"),
+    });
+    const first = t.write({ type: "get_state" });
+    const prompt = t.write({ type: "prompt", message: "late prompt" });
+    const steer = t.write({ type: "steer", message: "late write-up" });
+    allowance = false;
+    expect(await first).toBe("landed");
+    expect(await prompt).toBe("dropped");
+    expect(await steer).toBe("dropped");
+    expect(await t.write({ type: "abort" })).toBe("landed");
+    expect(await t.write({ type: "extension_ui_response", id: "gate", confirmed: false })).toBe("landed");
+    expect(c.commands().map((command) => command.type)).toEqual(["get_state", "abort", "extension_ui_response"]);
+    expect(t.pendingSend).toBeUndefined();
+    expect(t.takeUnsent("reattach")).toEqual([]);
+  });
+
   it("sends commands to the FIFO in order, one JSON line each", async () => {
     const c = new FakeHarnessContainer();
     await c.start({ paths, command: "pi", args: [], env: {} });

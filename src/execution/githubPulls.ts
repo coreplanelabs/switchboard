@@ -316,51 +316,36 @@ export async function refirePullRequestEvent(repo: string, number: number): Prom
   throw new Error(`pull request ${repo}#${number} could not be reopened after its event re-fire`);
 }
 
-/**
- * Create `refs/heads/<branch>` at the current tip of `fromRef` (ship round 0,
- * docs/reference/specs/agent-ship.md item 3). The resident binds a thread's
- * worktree to a ref that must already exist on origin — an attach naming a
- * branch GitHub has never heard of is refused, and the executor factory's
- * sandbox fallback would then misreport "onboard the repo" on every fresh
- * pipeline — so the BOT creates the pipeline branch itself BEFORE the first
- * attach. Two REST calls with the App token (`contents:write`), same
- * conventions as the PR writes above, never a `gh` shell-out:
- *
- *   GET  /repos/{repo}/git/ref/heads/{fromRef}  → the base tip's sha
- *   POST /repos/{repo}/git/refs                 → refs/heads/<branch> at it
- *
- * A 422 "already exists" on the create is SUCCESS: a restarted pipeline
- * recreates the same deterministic branch name, and the existing ref — with
- * any work already pushed to it — is exactly what the restart wants
- * (recreatability, AGENTS.md invariant 6). Everything else throws so the
- * caller can abort honestly instead of dispatching a round that cannot bind.
- */
-export async function createBranchRef(repo: string, branch: string, fromRef: string): Promise<void> {
-  const token = await requireToken();
-  // Segment-encode the base ref: slashes are path structure (`release/1.x`),
-  // everything else inside a segment is escaped.
-  const basePath = fromRef.split("/").map(encodeURIComponent).join("/");
-  const baseRes = await fetch(`https://api.github.com/repos/${repo}/git/ref/heads/${basePath}`, {
-    headers: apiHeaders(token),
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
-  if (!baseRes.ok) {
-    const text = await baseRes.text().catch(() => "");
-    throw new Error(`base ref lookup failed for ${fromRef}: HTTP ${baseRes.status} ${redactAndCap(text, 300)}`);
+/** A frozen commit is posted once. HTTP/network uncertainty is not a refusal. */
+export type BranchRefCreateResult =
+  { state: "accepted"; commitSha: string } | { state: "refused"; status?: number } | { state: "uncertain" };
+export async function createBranchRef(repo: string, branch: string, sha: string): Promise<BranchRefCreateResult> {
+  if (!/^[a-f0-9]{40}$/i.test(sha)) return { state: "refused" };
+  const token = await requireToken().catch(() => undefined);
+  if (!token) return { state: "refused" };
+  let res: Response;
+  try {
+    res = await fetch(`https://api.github.com/repos/${repo}/git/refs`, {
+      method: "POST",
+      headers: apiHeaders(token, true),
+      body: JSON.stringify({ ref: `refs/heads/${branch}`, sha }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    return { state: "uncertain" };
   }
-  const base = (await baseRes.json().catch(() => null)) as { object?: { sha?: unknown } } | null;
-  const sha = typeof base?.object?.sha === "string" && base.object.sha ? base.object.sha : undefined;
-  if (!sha) throw new Error(`base ref lookup for ${fromRef} answered without a sha`);
-  const res = await fetch(`https://api.github.com/repos/${repo}/git/refs`, {
-    method: "POST",
-    headers: apiHeaders(token, true),
-    body: JSON.stringify({ ref: `refs/heads/${branch}`, sha }),
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
-  if (res.ok) return;
-  const text = await res.text().catch(() => "");
-  if (res.status === 422 && /already exists/i.test(text)) return;
-  throw new Error(`branch create failed for ${branch}: HTTP ${res.status} ${redactAndCap(text, 300)}`);
+  if (res.status >= 400 && res.status < 500) return { state: "refused", status: res.status };
+  if (res.status !== 201) return { state: "uncertain" };
+  const body = (await res.json().catch(() => null)) as {
+    ref?: unknown;
+    object?: { type?: unknown; sha?: unknown };
+  } | null;
+  return body?.ref === `refs/heads/${branch}` &&
+    body.object?.type === "commit" &&
+    typeof body.object.sha === "string" &&
+    body.object.sha.toLowerCase() === sha.toLowerCase()
+    ? { state: "accepted", commitSha: sha }
+    : { state: "uncertain" };
 }
 
 // ---- read-only repo/PR facts for the ship gate (docs/reference/specs/agent-ship.md) ----
@@ -536,7 +521,7 @@ export interface PullRequestFacts {
   closedBy?: string;
 }
 
-type HeadRefRead = { kind: "verified"; sha: string } | { kind: "missing" } | { kind: "unverified" };
+type HeadRefRead = { kind: "verified"; sha: string; ref?: string } | { kind: "missing" } | { kind: "unverified" };
 
 /** One read of `refs/heads/<branch>` on `repo`. A valid commit target is the
  * only positive result; 404 is known missing; every other status, network
@@ -555,12 +540,29 @@ async function readHeadRef(repo: string, branch: string, headers: Record<string,
   }
   if (res.status === 404) return { kind: "missing" };
   if (!res.ok) return { kind: "unverified" };
-  const data = (await res.json().catch(() => null)) as { object?: { sha?: unknown; type?: unknown } } | null;
+  const data = (await res.json().catch(() => null)) as {
+    ref?: unknown;
+    object?: { sha?: unknown; type?: unknown };
+  } | null;
   // A branch ref points at a commit; anything else (an annotated tag object,
   // a malformed answer) is not a head to pin a review to.
   const sha = data?.object?.sha;
   return data?.object?.type === "commit" && typeof sha === "string" && /^[0-9a-f]{40}$/.test(sha)
-    ? { kind: "verified", sha }
+    ? { kind: "verified", sha, ...(typeof data.ref === "string" ? { ref: data.ref } : {}) }
+    : { kind: "unverified" };
+}
+
+export type BranchRefRead =
+  { kind: "verified"; sha: string; ref: string } | { kind: "missing" } | { kind: "unverified" };
+
+/** Exact authenticated ref observation; absence never proves an earlier POST unstarted. */
+export async function fetchBranchRef(repo: string, branch: string): Promise<BranchRefRead> {
+  const token = await resolveGithubToken("read").catch(() => null);
+  if (!token) return { kind: "unverified" };
+  const read = await readHeadRef(repo, branch, apiHeaders(token));
+  if (read.kind !== "verified") return read;
+  return read.ref === `refs/heads/${branch}`
+    ? { kind: "verified", sha: read.sha, ref: read.ref }
     : { kind: "unverified" };
 }
 

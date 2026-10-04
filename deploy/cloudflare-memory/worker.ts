@@ -194,6 +194,7 @@ import {
   pullBindingChanges,
   needsPullBindingAdmission,
   unitPullBindingRefusal,
+  unitPullTargetsRefusal,
   type PullBindingRefusal,
   isPullTarget,
   isPullOwnerLiveMeta,
@@ -203,6 +204,15 @@ import {
   type PullOwnersResult,
   type PullOwnershipRows,
 } from "../../src/core/coordinator/pullOwnership.ts";
+import {
+  isUnitEffectTransition,
+  planUnitEffectTransition,
+  unitEffectRunId,
+  unitEffectTombstoneMatches,
+  type UnitEffectRunEvidence,
+  type UnitEffectTransition,
+  type UnitEffectTransitionResult,
+} from "../../src/core/coordinator/unitEffect.ts";
 import { mergePlaneFindings, planeFindingKey, type PlaneFinding } from "../../src/core/plane/findings.ts";
 import {
   IDEMPOTENCY_KEY_PATTERN,
@@ -3189,6 +3199,7 @@ export class RunHistoryDO extends DurableObject<Env> {
             authority.requesterId !== instance.userId ||
             authority.repo.toLowerCase() !== instance.repo.toLowerCase() ||
             unit.instanceId !== instance.id ||
+            unit.currentEffect !== undefined ||
             this.sql.exec(`SELECT 1 FROM coordinator_instances WHERE instance_id = ?`, instance.id).toArray().length > 0
           )
             return;
@@ -3576,6 +3587,116 @@ export class RunHistoryDO extends DurableObject<Env> {
       );
     });
     return out;
+  }
+
+  async transitionUnitEffect(input: UnitEffectTransition, now: number): Promise<UnitEffectTransitionResult> {
+    if (!isUnitEffectTransition(input)) return { ok: false, reason: "conflict" };
+    let result: UnitEffectTransitionResult = { ok: false, reason: "unavailable" };
+    this.ctx.storage.transactionSync(() => {
+      const { instanceId, unit } = input.expected;
+      const saved = this.sql
+        .exec<{ json: string }>(
+          `SELECT json FROM coordinator_units WHERE instance_id = ? AND unit = ?`,
+          instanceId,
+          unit,
+        )
+        .toArray()[0];
+      const savedInstance = this.sql
+        .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, instanceId)
+        .toArray()[0];
+      let current: unknown, instance: unknown;
+      try {
+        current = saved ? JSON.parse(saved.json) : undefined;
+        instance = savedInstance ? JSON.parse(savedInstance.json) : null;
+      } catch {
+        result = { ok: false, reason: "incomplete" };
+        return;
+      }
+      if (
+        (instance !== null && !isCoordinatorInstance(instance)) ||
+        (current !== undefined && !isCoordinatorUnit(current))
+      ) {
+        result = { ok: false, reason: "incomplete" };
+        return;
+      }
+      const runId = unitEffectRunId(input);
+      let evidence: UnitEffectRunEvidence | undefined;
+      if (runId !== undefined) {
+        try {
+          const live = this.sql
+            .exec<{ meta_json: string; started_at: number; thread_key: string }>(
+              `SELECT meta_json, started_at, thread_key FROM live_runs WHERE run_id = ?`,
+              runId,
+            )
+            .toArray()[0];
+          const finished = this.sql
+            .exec<{ summary_json: string }>(`SELECT summary_json FROM runs WHERE run_id = ?`, runId)
+            .toArray()[0];
+          const liveMeta = live ? JSON.parse(live.meta_json) : undefined;
+          const record = finished ? JSON.parse(finished.summary_json) : undefined;
+          if (live && live.thread_key !== liveMeta?.threadKey) throw new Error("unreadable child claim");
+          if (finished && (!isRunRecord({ ...record, events: [] }) || record.id !== runId))
+            throw new Error("unreadable child receipt");
+          if (live && finished && !unitEffectTombstoneMatches(liveMeta, live.started_at, record))
+            throw new Error("ambiguous child receipt");
+          const meta = liveMeta ?? (record?.provisional === true ? undefined : record);
+          if (meta)
+            evidence = {
+              runId,
+              meta,
+              reviewTarget:
+                liveMeta ??
+                (() => {
+                  const original = this.sql
+                    .exec<{ json: string }>(
+                      `SELECT json FROM run_events WHERE run_id = ? AND json_extract(json, '$.type') = 'run_meta' ORDER BY seq ASC LIMIT 1`,
+                      runId,
+                    )
+                    .toArray()[0];
+                  return original ? JSON.parse(original.json) : undefined;
+                })(),
+              startedAt: live?.started_at ?? meta.startedAt,
+              tags: this.sql
+                .exec<{ json: string }>(
+                  `SELECT json FROM run_events WHERE run_id = ? AND json_extract(json, '$.type') = 'coordinator_tag' LIMIT 2`,
+                  runId,
+                )
+                .toArray()
+                .map((row) => JSON.parse(row.json)),
+            };
+        } catch {
+          result = { ok: false, reason: "incomplete" };
+          return;
+        }
+      }
+      const planned = planUnitEffectTransition(input, instance, current, evidence);
+      if (!planned.ok) {
+        result = planned;
+        return;
+      }
+      if (input.kind === "admit") {
+        let reason: PullBindingRefusal | undefined;
+        try {
+          reason = unitPullTargetsRefusal(this.pullOwnershipRows(), instance!, planned.unit);
+        } catch {
+          reason = "incomplete";
+        }
+        if (reason) {
+          result = { ok: false, reason };
+          return;
+        }
+      }
+      const serialized = JSON.stringify(planned.unit);
+      this.sql.exec(
+        `UPDATE coordinator_units SET json = ?, updated_at = ? WHERE instance_id = ? AND unit = ?`,
+        serialized,
+        now,
+        instanceId,
+        unit,
+      );
+      result = planned;
+    });
+    return result;
   }
 
   async transitionRecovery(input: RecoveryTransition, now: number): Promise<RecoveryTransitionResult> {
@@ -6054,8 +6175,12 @@ export class RunHistoryDO extends DurableObject<Env> {
       let deleted = false;
       let refused = false;
       this.ctx.storage.transactionSync(() => {
+        // A live owner may also have a provisional terminal record. Neither
+        // that record nor its events and context pins can be erased here.
+        if (this.liveRow(id)) return;
         deleted = this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM runs WHERE run_id = ?`, id).one().n === 1;
-        if (!deleted) return;
+        // Retention may have removed the record while its checkpoint alias
+        // survives. Explicit deletion still revokes the alias.
         if (this.publicationRetains(id)) {
           refused = true;
           return;
@@ -6063,7 +6188,6 @@ export class RunHistoryDO extends DurableObject<Env> {
         this.deleteRuns([id], true);
       });
       if (refused) return { ok: false as const, reason: "publication_pending" as const };
-      if (!deleted) return false;
       await this.syncRangePins();
       return deleted;
     });
@@ -8038,6 +8162,7 @@ const LEDGER_ROUTES = new Set([
   "/runs/coordinator/units/put",
   "/runs/coordinator/units/claim-legacy-continuation",
   "/runs/coordinator/recovery/transition",
+  "/runs/coordinator/units/effect-transition",
   "/runs/coordinator/recovery/action",
   "/runs/coordinator/recovery/history",
   "/runs/coordinator/units/list-active-recoveries",
@@ -8953,6 +9078,11 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
   }
   // The units of the plan an instance runs (run-history item 50): rows
   // validated by the shared contract, each replaced whole; a list by instance.
+  if (pathname === "/runs/coordinator/units/effect-transition") {
+    if (!isUnitEffectTransition(b.input)) return json({ error: "invalid unit effect transition" }, 400);
+    const result = await stub.transitionUnitEffect(b.input, now);
+    return json(result, result.ok ? 200 : 409);
+  }
   if (pathname === "/runs/coordinator/recovery/transition") {
     if (recoveryBytes(b) > RECOVERY_HISTORY_LIMITS.requestBytes) return json({ ok: false, reason: "capacity" }, 409);
     if (!isRecoveryTransition(b.input)) return json({ error: "invalid recovery transition" }, 400);

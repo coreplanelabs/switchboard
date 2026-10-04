@@ -151,6 +151,8 @@ export interface ResumeContext {
  *  steered in meanwhile. */
 export interface RestartContext {
   row: LiveRunRow;
+  /** Durable setup stream, including the original canonical target. */
+  events: AppendableEvent[];
   inbox: InboxItem[];
 }
 
@@ -206,7 +208,12 @@ export async function closeRestartRow(adopted: LedgerRun, restart: RestartContex
     // closer stays best-effort whatever the row holds.
     await putOnce(
       adopted.sink,
-      reclaimedRunRecord({ row: restart.row, events: [], status: "interrupted", finishedAt: systemClock() }),
+      reclaimedRunRecord({
+        row: restart.row,
+        events: restart.events,
+        status: "interrupted",
+        finishedAt: systemClock(),
+      }),
     );
   } catch (err) {
     console.warn(

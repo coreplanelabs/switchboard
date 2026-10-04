@@ -140,17 +140,17 @@ async function sweepOne(pr: SweepPullRequest, deps: PullSweepDeps, owner: "runne
     outcome,
     line: line(pr, text),
   });
-  if (owner !== "runner" && (await deps.runnerOwns?.(pr)) === true)
-    return at("skipped", "deferred — its pipeline runner owns the rebase");
-  const dirty = pr.mergeableState === "dirty";
-  // GitHub recomputes `mergeable_state` after every base move — exactly the
-  // moment the sweep exists for — so an unknown state is named, never claimed
-  // current: the next sweep reads the settled answer.
-  if (!dirty && (pr.mergeableState === "unknown" || pr.mergeableState === ""))
-    return at("skipped", "mergeability still computing — no rebase was attempted");
-  // A stale-but-clean pull request is never rebased: it merges as it is.
-  if (!dirty) return at("skipped", "skipped, already current");
   try {
+    if (owner !== "runner" && (await deps.runnerOwns?.(pr)) === true)
+      return at("skipped", "deferred — its pipeline runner owns the rebase");
+    const dirty = pr.mergeableState === "dirty";
+    // GitHub recomputes `mergeable_state` after every base move — exactly the
+    // moment the sweep exists for — so an unknown state is named, never claimed
+    // current: the next sweep reads the settled answer.
+    if (!dirty && (pr.mergeableState === "unknown" || pr.mergeableState === ""))
+      return at("skipped", "mergeability still computing — no rebase was attempted");
+    // A stale-but-clean pull request is never rebased: it merges as it is.
+    if (!dirty) return at("skipped", "skipped, already current");
     const rebased = await deps.git.rebase(pr);
     const decision =
       rebased.kind === "conflict"

@@ -4787,3 +4787,427 @@ describe("complete canonical pull ownership", () => {
     });
   });
 });
+
+describe("unit effect owner transaction", () => {
+  it("canonical competing branch owners refuse effect admission without changing either row or context pins", async () => {
+    const key = storeKey();
+    const instance: CoordinatorInstance = {
+      id: "effect_conflict",
+      kind: "ship",
+      userId: "slack:UALICE",
+      channelId: "slack:C1",
+      threadKey: "slack:C1:effect-conflict",
+      repo: "acme/api",
+      branch: "fix/effect",
+      base: "main",
+      merge: "person",
+      createdAt: 1,
+    };
+    const unit: CoordinatorUnit = {
+      instanceId: instance.id,
+      unit: "ONE",
+      slug: "one",
+      branch: instance.branch,
+      dependsOn: [],
+      rounds: [],
+    };
+    const rival = { ...unit, unit: "OTHER" };
+    expect((await post("/runs/coordinator/put", { storeKey: key, instance })).status).toBe(200);
+    expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [unit, rival] })).status).toBe(200);
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (owner: RunHistoryDO, state) => {
+      const before = state.storage.sql.exec(`SELECT * FROM context_refs`).toArray();
+      const execution = { workflowId: instance.id };
+      expect(
+        await owner.transitionUnitEffect(
+          {
+            kind: "admit",
+            expected: unit,
+            execution,
+            effect: {
+              version: 1,
+              id: "one/branch",
+              ordinal: 1,
+              phase: "active",
+              execution,
+              target: { repo: instance.repo, ref: unit.branch, base: instance.base!, headSha: "a".repeat(40) },
+              calls: [{ operation: "branch_create", state: "unstarted" }],
+            },
+          },
+          2,
+        ),
+      ).toEqual({ ok: false, reason: "owned" });
+      expect(await owner.listUnits(instance.id)).toEqual([unit, rival]);
+      expect(state.storage.sql.exec(`SELECT * FROM context_refs`).toArray()).toEqual(before);
+    });
+  });
+  it("retains partial accepted work after stop and denies stale writers and unknown replay", async () => {
+    const key = storeKey();
+    const instance: CoordinatorInstance = {
+      id: "effect_owner",
+      kind: "ship",
+      userId: "slack:UALICE",
+      channelId: "slack:C1",
+      threadKey: "slack:C1:effect",
+      repo: "acme/api",
+      branch: "fix/effect",
+      base: "main",
+      merge: "person",
+      createdAt: 1,
+    };
+    const unit: CoordinatorUnit = {
+      instanceId: instance.id,
+      unit: "ONE",
+      slug: "one",
+      branch: instance.branch,
+      dependsOn: [],
+      rounds: [],
+    };
+    const execution = { workflowId: instance.id };
+    const effect = {
+      version: 1,
+      id: "one/branch",
+      ordinal: 1,
+      execution,
+      target: { repo: instance.repo, ref: unit.branch, base: instance.base, headSha: "a".repeat(40) },
+      phase: "active",
+      calls: [
+        { operation: "branch_create", state: "unstarted" },
+        { operation: "spawn", state: "unstarted" },
+      ],
+    } as const;
+    expect((await post("/runs/coordinator/put", { storeKey: key, instance })).status).toBe(200);
+    expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [unit] })).status).toBe(200);
+    const route = (input: unknown) => post("/runs/coordinator/units/effect-transition", { storeKey: key, input });
+    expect(await route({ kind: "admit", expected: unit, execution: { workflowId: "wrong" }, effect })).toMatchObject({
+      status: 409,
+      data: { reason: "execution" },
+    });
+    expect(
+      await route({
+        kind: "admit",
+        expected: unit,
+        execution,
+        effect: { ...effect, calls: [{ operation: "merge", state: "unstarted", resourceId: 2 }] },
+      }),
+    ).toMatchObject({ status: 400 });
+    const activeResponse = await route({ kind: "admit", expected: unit, execution, effect });
+    expect(activeResponse).toMatchObject({ status: 200, data: { ok: true } });
+    const active = activeResponse.data.unit as CoordinatorUnit;
+    const pendingResponse = await route({ kind: "begin", expected: active, execution, effectId: effect.id, call: 0 });
+    expect(pendingResponse).toMatchObject({ status: 200, data: { ok: true } });
+    const pending = pendingResponse.data.unit as CoordinatorUnit;
+    expect(await route({ kind: "begin", expected: active, execution, effectId: effect.id, call: 0 })).toMatchObject({
+      status: 409,
+      data: { reason: "stale" },
+    });
+    expect(await route({ kind: "begin", expected: pending, execution, effectId: effect.id, call: 0 })).toMatchObject({
+      status: 409,
+      data: { reason: "uncertain" },
+    });
+    expect(
+      await post("/runs/coordinator/units/claim-legacy-continuation", {
+        storeKey: key,
+        expected: pending,
+        recovered: unit,
+      }),
+    ).toMatchObject({ status: 409, data: { reason: "stale" } });
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (owner: RunHistoryDO, state) => {
+      const before = state.storage.sql.exec(`SELECT * FROM context_refs`).toArray();
+      expect(await owner.putUnits([{ ...unit, unit: "OTHER", branch: "fix/other" }, unit], 4)).toEqual({
+        ok: false,
+        reason: "settled",
+      });
+      expect(await owner.listUnits(instance.id)).toEqual([pending]);
+      expect(state.storage.sql.exec(`SELECT * FROM context_refs`).toArray()).toEqual(before);
+    });
+    expect((await post("/runs/coordinator/stop", { storeKey: key, instanceId: instance.id, at: 5 })).status).toBe(200);
+    expect(
+      await route({
+        kind: "complete",
+        expected: pending,
+        execution,
+        effectId: effect.id,
+        call: 0,
+        outcome: { state: "refused", cause: "not_started" },
+      }),
+    ).toMatchObject({ status: 400 });
+    const complete = await route({
+      kind: "complete",
+      expected: pending,
+      execution,
+      effectId: effect.id,
+      call: 0,
+      outcome: { state: "accepted", commitSha: "b".repeat(40) },
+    });
+    expect(complete).toMatchObject({ status: 200, data: { ok: true } });
+    expect(
+      await route({ kind: "begin", expected: complete.data.unit, execution, effectId: effect.id, call: 1 }),
+    ).toMatchObject({ status: 409, data: { reason: "stopped" } });
+    const cancelled = await route({
+      kind: "cancel",
+      expected: complete.data.unit,
+      execution,
+      effectId: effect.id,
+      call: 1,
+    });
+    expect(cancelled).toMatchObject({ status: 200, data: { ok: true } });
+    const settled = await route({ kind: "settle", expected: cancelled.data.unit, execution, effectId: effect.id });
+    expect(settled).toMatchObject({ status: 200, data: { unit: { currentEffect: { phase: "settled" } } } });
+    expect(
+      await route({
+        kind: "admit",
+        expected: settled.data.unit,
+        execution,
+        effect: { ...effect, id: "next", ordinal: 2 },
+      }),
+    ).toMatchObject({ status: 409, data: { reason: "stopped" } });
+    await runInDurableObject(stub, async (owner: RunHistoryDO, state) => {
+      const row = settled.data.unit as CoordinatorUnit;
+      const unknown = {
+        ...row,
+        currentEffect: { ...effect, calls: [{ operation: "branch_create", state: "uncertain" }] },
+      } as CoordinatorUnit;
+      state.storage.sql.exec(
+        `UPDATE coordinator_units SET json = ? WHERE instance_id = ? AND unit = ?`,
+        JSON.stringify(unknown),
+        instance.id,
+        unit.unit,
+      );
+      expect(
+        await owner.transitionUnitEffect({ kind: "settle", expected: unknown, execution, effectId: effect.id }, 6),
+      ).toEqual({ ok: false, reason: "uncertain" });
+      expect(await owner.listUnits(instance.id)).toEqual([unknown]);
+      const proof = {
+        kind: "branch_ref" as const,
+        repo: instance.repo,
+        ref: unit.branch,
+        headSha: effect.target.headSha,
+      };
+      expect(
+        await owner.transitionUnitEffect(
+          {
+            kind: "resolve",
+            expected: unknown,
+            execution,
+            effectId: effect.id,
+            call: 0,
+            observation: { ...proof, headSha: "b".repeat(40) },
+          },
+          6,
+        ),
+      ).toEqual({ ok: false, reason: "conflict" });
+      expect(await owner.listUnits(instance.id)).toEqual([unknown]);
+      const resolved = await owner.transitionUnitEffect(
+        { kind: "resolve", expected: unknown, execution, effectId: effect.id, call: 0, observation: proof },
+        6,
+      );
+      expect(resolved).toMatchObject({
+        ok: true,
+        unit: { currentEffect: { calls: [{ state: "accepted", commitSha: effect.target.headSha }] } },
+      });
+      // A corrupt retained private row refuses, and its bytes survive.
+      state.storage.sql.exec(
+        `UPDATE coordinator_units SET json = 'private-invalid' WHERE instance_id = ? AND unit = ?`,
+        instance.id,
+        unit.unit,
+      );
+      expect(await owner.transitionUnitEffect({ kind: "admit", expected: unit, execution, effect }, 7)).toEqual({
+        ok: false,
+        reason: "incomplete",
+      });
+      expect(
+        state.storage.sql
+          .exec<{ json: string }>(
+            `SELECT json FROM coordinator_units WHERE instance_id = ? AND unit = ?`,
+            instance.id,
+            unit.unit,
+          )
+          .one().json,
+      ).toBe("private-invalid");
+    });
+  });
+});
+
+describe("spawn effect durable receipt transaction", () => {
+  it.each(["coding", "review"] as const)(
+    "reads the exact %s child and retained admission inside the unit transaction, preserving unknown work on absent or foreign evidence",
+    async (preset) => {
+      const key = storeKey();
+      const instance: CoordinatorInstance = {
+        id: "spawn_exact",
+        kind: "ship",
+        userId: "slack:UALICE",
+        channelId: "slack:C1",
+        threadKey: "slack:C1:spawn-exact",
+        repo: "acme/api",
+        branch: "fix/spawn",
+        base: "main",
+        merge: "person",
+        createdAt: 1,
+      };
+      const execution = { workflowId: instance.id };
+      const unit: CoordinatorUnit = {
+        instanceId: instance.id,
+        unit: "ONE",
+        slug: "one",
+        branch: instance.branch,
+        threadKey: instance.threadKey,
+        dependsOn: [],
+        rounds: [],
+        currentEffect: {
+          version: 1,
+          ordinal: 1,
+          id: preset === "review" ? "ONE/1/review" : "ONE/0/coding",
+          execution,
+          target: {
+            repo: instance.repo,
+            ref: instance.branch,
+            base: "main",
+            headSha: "a".repeat(40),
+            ...(preset === "review" ? { pr: 7 } : {}),
+          },
+          phase: "active",
+          calls: [{ operation: "spawn", state: "uncertain" }],
+        },
+      };
+      if (preset === "review") {
+        unit.pr = { number: 7, url: "https://github.com/acme/api/pull/7" };
+        unit.publication = {
+          repo: instance.repo,
+          pr: 7,
+          headRef: unit.branch,
+          baseRef: "main",
+          expectedHeadSha: "a".repeat(40),
+          publicationRef: unit.branch,
+          owner: { instanceId: instance.id, unit: unit.unit },
+        };
+      }
+      expect((await post("/runs/coordinator/put", { storeKey: key, instance })).status).toBe(200);
+      const stub = env.RUNS.get(env.RUNS.idFromName(key));
+      await runInDurableObject(stub, async (_owner: RunHistoryDO, state) => {
+        state.storage.sql.exec(
+          `INSERT INTO coordinator_units (instance_id, unit, json, updated_at) VALUES (?, ?, ?, ?)`,
+          instance.id,
+          unit.unit,
+          JSON.stringify(unit),
+          2,
+        );
+      });
+      const input = {
+        kind: "resolve",
+        expected: unit,
+        execution,
+        effectId: unit.currentEffect!.id,
+        call: 0,
+        observation: { kind: "spawn_run", runId: "spawn-child" },
+      };
+      const resolve = () => post("/runs/coordinator/units/effect-transition", { storeKey: key, input });
+      expect(await resolve()).toMatchObject({ status: 409, data: { reason: "unavailable" } });
+      const meta = {
+        agent: preset,
+        channelId: instance.channelId,
+        userId: instance.userId,
+        threadKey: instance.threadKey,
+        repo: instance.repo,
+        ref: unit.branch,
+        parentInstanceId: instance.id,
+        coordinatorUnit: unit.unit,
+        coordinatorAttempt: 0,
+        idempotencyKey: `${instance.id}:${unit.currentEffect!.id}`,
+        ...(preset === "review" ? { pr: 7, headSha: "a".repeat(40) } : {}),
+      };
+      expect(
+        (await post("/runs/claim", claimBody(key, "spawn-child", instance.threadKey, "g1", { meta }))).status,
+      ).toBe(200);
+      expect(await resolve()).toMatchObject({ status: 409, data: { reason: "incomplete" } });
+      const tag = {
+        type: "coordinator_tag",
+        parentInstanceId: instance.id,
+        unit: unit.unit,
+        branch: unit.branch,
+        base: "main",
+        seq: 2,
+        ...(unit.publication ? { publication: unit.publication } : {}),
+      };
+      const original = {
+        type: "run_meta",
+        agent: preset,
+        seq: 1,
+        repo: instance.repo,
+        ref: unit.branch,
+        pr: 7,
+        headSha: "a".repeat(40),
+      };
+      expect(
+        (await post("/runs/append", { storeKey: key, runId: "spawn-child", gen: "g1", events: [original, tag] }))
+          .status,
+      ).toBe(200);
+      await runInDurableObject(stub, async (owner: RunHistoryDO, state) => {
+        state.storage.sql.exec(
+          `UPDATE live_runs SET meta_json = ? WHERE run_id = ?`,
+          JSON.stringify({ ...meta, userId: "slack:UBOB" }),
+          "spawn-child",
+        );
+        expect(await resolve()).toMatchObject({ status: 409, data: { reason: "conflict" } });
+        expect(await owner.listUnits(instance.id)).toEqual([unit]);
+        state.storage.sql.exec(
+          `UPDATE live_runs SET meta_json = ? WHERE run_id = ?`,
+          JSON.stringify(meta),
+          "spawn-child",
+        );
+      });
+      const { pr: _pr, ...summaryMeta } = meta;
+      const tombstone = {
+        ...record("spawn-child", instance.threadKey),
+        ...summaryMeta,
+        startedAt: 1000,
+        status: "interrupted",
+        provisional: true,
+        events: [original, tag],
+      };
+      expect((await post("/runs/put", { storeKey: key, record: tombstone })).status).toBe(200);
+      expect(await resolve()).toMatchObject({ status: 200, data: { ok: true } });
+      await runInDurableObject(stub, async (_owner: RunHistoryDO, state) => {
+        // Retained uncertain input, not a successful rollback of a recorded receipt.
+        state.storage.sql.exec(
+          `UPDATE coordinator_units SET json = ? WHERE instance_id = ? AND unit = ?`,
+          JSON.stringify(unit),
+          instance.id,
+          unit.unit,
+        );
+        state.storage.sql.exec(`DELETE FROM live_runs WHERE run_id = ?`, "spawn-child");
+      });
+      expect(await resolve()).toMatchObject({ status: 409, data: { reason: "unavailable" } });
+      await runInDurableObject(stub, async (owner: RunHistoryDO, state) => {
+        expect(await owner.listUnits(instance.id)).toEqual([unit]);
+        state.storage.sql.exec(
+          `UPDATE runs SET summary_json = ? WHERE run_id = ?`,
+          JSON.stringify({
+            ...tombstone,
+            status: "completed",
+            headSha: "c".repeat(40),
+            provisional: undefined,
+            events: undefined,
+          }),
+          "spawn-child",
+        );
+      });
+      expect((await post("/runs/coordinator/stop", { storeKey: key, instanceId: instance.id, at: 3 })).status).toBe(
+        200,
+      );
+      expect(await resolve()).toMatchObject({
+        status: 200,
+        data: {
+          ok: true,
+          unit: {
+            currentEffect: {
+              calls: [{ operation: "spawn", state: "accepted", runId: "spawn-child" }],
+            },
+          },
+        },
+      });
+    },
+  );
+});

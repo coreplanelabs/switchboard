@@ -300,6 +300,15 @@ describe("reclaimRuns", () => {
         meta: { channelId: "slack:C1", userId: "slack:UA", threadKey: "slack:C1:1.0", agent: "review", request },
       }),
     );
+    const tag = {
+      type: "coordinator_tag" as const,
+      seq: 1,
+      parentInstanceId: "ship_restart",
+      unit: "ONE",
+      branch: "fix/original",
+      base: "main",
+    };
+    await ledger.append("reserved", "g1", [tag]);
     await ledger.pushInbox("reserved", { text: "and this", userId: "slack:UB" });
     await ledger.claim(claim("bare", "slack:C1:2.0", "g1", { phase: "attaching", system: "" }));
     const outcome = await run();
@@ -309,6 +318,7 @@ describe("reclaimRuns", () => {
     expect(restart.reclaimedFrom).toBe("attaching");
     expect(restart.row).toMatchObject({ runId: "reserved", ownerGen: "g2", phase: "attaching" });
     expect(restart.row.meta.request).toEqual(request);
+    expect(restart.events).toEqual([tag]);
     expect(restart.inbox.map((i) => i.message.text)).toEqual(["and this"]);
     expect(ledger.live.get("reserved")).toBeDefined();
     expect(logs.some((l) => /reserved slack:C1:1.0 restartable \(from attaching/.test(l))).toBe(true);

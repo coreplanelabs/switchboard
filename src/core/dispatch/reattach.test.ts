@@ -177,6 +177,48 @@ describe("carriedCoordinatorTag: the tag a resumed run carries forward", () => {
   });
   const tagged = row({}, { parentInstanceId: "plan-p-2", idempotencyKey: "plan-p-2:U16/1/coding" });
 
+  it("a carried publication requires one tag matching the exact typed child and claim target", () => {
+    const claim = row(
+      {},
+      {
+        agent: "review",
+        parentInstanceId: "ship_review",
+        idempotencyKey: "ship_review:ONE/1/review",
+        coordinatorUnit: "ONE",
+        repo: "acme/api",
+        ref: "fix/review",
+        pr: 7,
+        headSha: "a".repeat(40),
+      },
+    );
+    const publication = {
+      repo: "acme/api",
+      pr: 7,
+      headRef: "fix/review",
+      baseRef: "main",
+      publicationRef: "fix/review",
+      expectedHeadSha: "a".repeat(40),
+      owner: { instanceId: "ship_review", unit: "ONE" },
+    };
+    const tag = {
+      type: "coordinator_tag" as const,
+      parentInstanceId: "ship_review",
+      unit: "ONE",
+      branch: "fix/review",
+      base: "main",
+      publication,
+    };
+    expect(carriedCoordinatorTag(claim, [tag])?.publication).toEqual(publication);
+    for (const events of [
+      [tag, tag],
+      [{ ...tag, parentInstanceId: "foreign" }],
+      [{ ...tag, publication: { ...publication, owner: { instanceId: "foreign", unit: "ONE" } } }],
+      [{ ...tag, publication: { ...publication, expectedHeadSha: "b".repeat(40) } }],
+    ]) {
+      expect(carriedCoordinatorTag(claim, events)).not.toHaveProperty("publication");
+    }
+  });
+
   it("rebuilds the tag from the row's meta with the base the coordinator_tag event carried", () => {
     const recovery = {
       repo: "acme/api",

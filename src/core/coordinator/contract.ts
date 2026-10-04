@@ -19,6 +19,12 @@ import {
 } from "../ship/coordinator.js";
 import { isHandoffShape, type Handoff } from "../ship/handoff.js";
 import { isShipOutcome, type ShipOutcome } from "./shipOutcome.js";
+import {
+  isUnitCurrentEffect,
+  reserveUnitEffectOutcomes,
+  UNIT_EFFECT_MAX_BYTES,
+  type UnitCurrentEffect,
+} from "./unitEffect.js";
 import { isUnitContext, type UnitContext } from "../dispatch/unitContext.js";
 import { isCoordinatorReportAdmission, type CoordinatorReportAdmission } from "./reportAdmission.js";
 
@@ -1067,6 +1073,8 @@ export interface CoordinatorUnit {
    *  (null once any run's cost is unknown), `handoff` that child's lists, and
    *  `wakes` how many wakes this idle has answered — zero at the write. */
   idle?: UnitIdle;
+  /** Current action and per-call outcomes; only the owner effect transition may change it. */
+  currentEffect?: UnitCurrentEffect;
   /** Exact display proposal admitted with the latest settlement CAS. */
   reportDelivery?: CoordinatorReportAdmission;
   /** Answers to indexed idle waits, keyed by the wait step's durable identity. */
@@ -1187,7 +1195,7 @@ export function prepareUnfencedUnitWrite(
 export const RECOVERY_ROW_MAX_BYTES = 224 * 1024;
 export const RECOVERY_SETTLEMENT_MAX_BYTES = 160 * 1024;
 export function hasRecoverySettlementCapacity(unit: CoordinatorUnit): boolean {
-  const { ending: _ending, recovery, ...rest } = unit;
+  const { ending: _ending, recovery, ...rest } = reserveActiveEffect(unit);
   const { previousEnding: _previousEnding, ...claim } = recovery ?? {};
   const metadata = { ...rest, ...(recovery ? { recovery: claim } : {}) };
   return (
@@ -1196,11 +1204,39 @@ export function hasRecoverySettlementCapacity(unit: CoordinatorUnit): boolean {
   );
 }
 
+/** Account for receipts not yet written; the projection is never stored. */
+function reserveActiveEffect(unit: CoordinatorUnit): CoordinatorUnit {
+  return unit.currentEffect?.phase === "active"
+    ? { ...unit, currentEffect: reserveUnitEffectOutcomes(unit.currentEffect) }
+    : unit;
+}
+export function hasUnitEffectCapacity(unit: CoordinatorUnit): boolean {
+  const maximum = reserveActiveEffect(unit);
+  const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
+  return (
+    bytes(maximum.currentEffect) <= UNIT_EFFECT_MAX_BYTES &&
+    bytes(maximum) <= RECOVERY_ROW_MAX_BYTES &&
+    (unit.recovery === undefined || hasRecoverySettlementCapacity(unit))
+  );
+}
+
 export function permitsRecoveryMetadataWrite(
   current: CoordinatorUnit | undefined,
   replacement: CoordinatorUnit,
   checked = false,
 ): boolean {
+  if (JSON.stringify(current?.currentEffect) !== JSON.stringify(replacement.currentEffect)) return false;
+  if (replacement.currentEffect?.phase === "active" && !hasUnitEffectCapacity(replacement)) return false;
+  if (
+    current?.currentEffect?.phase === "active" &&
+    (current.branch !== replacement.branch ||
+      current.threadKey !== replacement.threadKey ||
+      current.lastPush !== replacement.lastPush ||
+      JSON.stringify(current.pr) !== JSON.stringify(replacement.pr) ||
+      JSON.stringify(current.publication) !== JSON.stringify(replacement.publication) ||
+      JSON.stringify(current.recovery) !== JSON.stringify(replacement.recovery))
+  )
+    return false;
   if (current?.startedAt !== undefined && replacement.startedAt !== current.startedAt) return false;
   if (current?.adoption !== undefined && !checked && JSON.stringify(current) !== JSON.stringify(replacement))
     return false;
@@ -1319,7 +1355,7 @@ export const isSavedFindingsPatch = (v: unknown): v is SavedFindingsPatch =>
   isFullSha(v.sourceHeadSha) &&
   v.baseHeadSha !== v.sourceHeadSha &&
   (v.kind === "bundle" ? v.baseHeadSha === v.targetHeadSha : v.baseHeadSha !== v.targetHeadSha);
-const isPublication = (v: unknown): v is ExistingPrPublicationBinding =>
+export const isExistingPrPublicationBinding = (v: unknown): v is ExistingPrPublicationBinding =>
   isObject(v) &&
   typeof v.repo === "string" &&
   REPO_SLUG.test(v.repo) &&
@@ -1567,6 +1603,7 @@ export function isRecoveryAdmissionFields(r: unknown): boolean {
 export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
   if (!isObject(v)) return false;
   const r = v;
+  if (r.currentEffect !== undefined && !isUnitCurrentEffect(r.currentEffect)) return false;
   if (
     r.history !== undefined &&
     (!isObject(r.history) ||
@@ -1595,7 +1632,7 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
   if (r.issue !== undefined && !isFinite(r.issue)) return false;
   if (r.pr !== undefined && !isPr(r.pr)) return false;
   if (r.resume !== undefined && !isResume(r.resume)) return false;
-  if (r.publication !== undefined && !isPublication(r.publication)) return false;
+  if (r.publication !== undefined && !isExistingPrPublicationBinding(r.publication)) return false;
   if (
     r.adoption !== undefined &&
     (!isObject(r.adoption) ||
@@ -1656,7 +1693,7 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
       (r.recovery.previousBinding === undefined ||
         (isObject(r.recovery.previousBinding) &&
           (r.recovery.previousBinding.publication === undefined ||
-            isPublication(r.recovery.previousBinding.publication)) &&
+            isExistingPrPublicationBinding(r.recovery.previousBinding.publication)) &&
           (r.recovery.previousBinding.lastPush === undefined ||
             (typeof r.recovery.previousBinding.lastPush === "string" &&
               /^[0-9a-f]{40}$/i.test(r.recovery.previousBinding.lastPush))))) &&

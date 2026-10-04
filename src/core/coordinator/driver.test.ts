@@ -97,9 +97,15 @@ const planAnswer = (
 
 const started = (unit: string, at = T0): BotReply =>
   ok({ ok: true, threadKey: `slack:C1:${unit}`, branch: `plan/fixture/${unit.toLowerCase()}`, base: "main" }, at);
+const effectFixtures = new WeakSet<BotReply>();
+const effectReply = (body: object, at: number): BotReply => {
+  const reply = ok(body, at);
+  effectFixtures.add(reply);
+  return reply;
+};
 const branched = (unit: string, at = T0): BotReply =>
-  ok({ ok: true, branch: `plan/fixture/${unit.toLowerCase()}`, base: "main" }, at);
-const spawned = (runId: string, at = T0): BotReply => ok({ ok: true, runId, threadKey: "slack:C1:x" }, at);
+  effectReply({ ok: true, branch: `plan/fixture/${unit.toLowerCase()}`, base: "main" }, at);
+const spawned = (runId: string, at = T0): BotReply => effectReply({ ok: true, runId, threadKey: "slack:C1:x" }, at);
 const record = (run: object, at = T0): BotReply => ok({ ok: true, run }, at);
 const codingDone = (runId: string, at: number) =>
   record(
@@ -188,6 +194,7 @@ describe("runOriginalUnitRecovery", () => {
       unit: "U10",
     });
     expect(result.units).toEqual({ U10: "stopped" });
+    expect(b.calls.every((call) => call.body.executionWorkflowId === WORKFLOW)).toBe(true);
     expect(b.of("spawn")).toEqual([]);
     expect(b.of("unit-start")).toEqual([]);
     expect(b.of("round")).toEqual([]);
@@ -450,6 +457,9 @@ describe("runOriginalUnitRecovery", () => {
         recover: { runId: "run-f1" },
       },
     ]);
+    expect(
+      b.wireOf("spawn").every((body) => body.executionWorkflowId === WORKFLOW && body.effectId === body.step),
+    ).toBe(true);
     expect(b.of("spawn")).toEqual([
       {
         parentInstanceId: INSTANCE,
@@ -1134,11 +1144,19 @@ function bot(script: Partial<Record<CoordinatorStepRoute, Scripted[]>>) {
       const answer = typeof next === "function" ? next(body) : next;
       if (answer instanceof Error) throw answer;
       if (route === "plan" && !(answer instanceof Error)) lastPlan = answer;
+      // Only the explicit effect fixtures model a persisted receipt. Raw replies remain available for malformed-wire proofs.
+      if ((route === "branch" || route === "spawn") && effectFixtures.has(answer))
+        return { ...answer, text: JSON.stringify({ ...JSON.parse(answer.text), effectOrdinal: body.effectOrdinal }) };
       return answer;
     },
   };
-  const of = (route: CoordinatorStepRoute) => calls.filter((c) => c.route === route).map((c) => c.body);
-  return { client, calls, of };
+  const wireOf = (route: CoordinatorStepRoute) => calls.filter((c) => c.route === route).map((c) => c.body);
+  // Pipeline assertions read their fields; transport identity has its own wire proof.
+  const of = (route: CoordinatorStepRoute) =>
+    wireOf(route).map(
+      ({ executionWorkflowId: _execution, effectId: _effect, effectOrdinal: _ordinal, ...body }) => body,
+    );
+  return { client, calls, of, wireOf };
 }
 
 const wakeReply = (answer: object, at = T0 + 46 * MIN): BotReply => ok({ ok: true, answer }, at);
@@ -1193,6 +1211,20 @@ function idleWakeRun(input: {
 }
 
 describe("the plan runner's driver — the Workflow body over the step runner (item 9)", () => {
+  it("carries the actual Workflow and action step on branch requests", async () => {
+    const s = steps();
+    const b = bot({
+      plan: [planAnswer([row("U10")], T0, "person", { generated: true })],
+      "unit-start": [started("U10")],
+      "pr-check": [prNone()],
+      branch: [ok({ ok: false, reason: "refused" })],
+      "unit-end": [acked()],
+      finish: [acked()],
+    });
+    await runPlan(s.runner, b.client, INSTANCE);
+    expect(b.wireOf("branch")[0]).toMatchObject({ executionWorkflowId: INSTANCE, effectId: "U10/branch" });
+    expect(b.calls.every((call) => call.body.executionWorkflowId === INSTANCE)).toBe(true);
+  });
   it.each(["new task", "exact PR", "stopped task"] as const)(
     "drives a generated %s without rereading graph selection",
     async (request) => {
@@ -1389,6 +1421,9 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(b.of("plan")).toEqual([{ parentInstanceId: INSTANCE }, { parentInstanceId: INSTANCE }]);
     expect(b.of("unit-start")).toEqual([{ parentInstanceId: INSTANCE, unit: "U10" }]);
     expect(b.of("branch")).toEqual([{ parentInstanceId: INSTANCE, unit: "U10" }]);
+    expect(
+      b.wireOf("spawn").every((body) => body.executionWorkflowId === INSTANCE && body.effectId === body.step),
+    ).toBe(true);
     expect(b.of("spawn")).toEqual([
       {
         parentInstanceId: INSTANCE,
@@ -2430,7 +2465,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     const tb = bot({
       plan: [planAnswer([row("task", { slug: "task", branch: "ship/warm-the-cache-abc123" })], T0, "person")],
       "unit-start": [started("task")],
-      branch: [ok({ ok: true, branch: "ship/warm-the-cache-abc123", base: "main" })],
+      branch: [ok({ ok: true, branch: "ship/warm-the-cache-abc123", base: "main", effectOrdinal: 0 })],
       spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN)],
       "read-record": [codingDone("run-c0", T0 + 10 * MIN), reviewApproved("run-r1", T0 + 20 * MIN)],
       "pr-check": [prNone(), prOpen(T0 + 10 * MIN)],
@@ -2460,7 +2495,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       return bot({
         plan: [ok(generated === undefined ? base : { ...base, generated })],
         "unit-start": [started("U10")],
-        branch: [ok({ ok: true, branch: "plan/warm-the-cache-abc123/u10", base: "main" })],
+        branch: [ok({ ok: true, branch: "plan/warm-the-cache-abc123/u10", base: "main", effectOrdinal: 0 })],
         spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN)],
         "read-record": [
           codingDone("run-c0", T0 + 10 * MIN),
@@ -3235,7 +3270,7 @@ describe("the plan runner's driver — a shipped pull request at the wall-clock 
         }),
       ],
       "unit-start": [ok({ ok: true, threadKey: "slack:C1:1.0" })],
-      branch: [ok({ ok: true })],
+      branch: [ok({ ok: true, effectOrdinal: 0 })],
       spawn: [spawned("run-c0")],
       "read-record": [codingDone("run-c0", T0 + 205 * MIN)],
       // The pre-check, then the round's check: the pull request is open at the child's head with 35 minutes
@@ -3280,7 +3315,7 @@ describe("the plan runner's driver — a shipped pull request at the wall-clock 
         }),
       ],
       "unit-start": [ok({ ok: true, threadKey: "slack:C1:1.0" })],
-      branch: [ok({ ok: true })],
+      branch: [ok({ ok: true, effectOrdinal: 0 })],
       spawn: [spawned("run-c0")],
       "read-record": [codingDone("run-c0", T0 + 205 * MIN)],
       "pr-check": [prNone(), prOpen(T0 + 205 * MIN)],
@@ -4373,5 +4408,50 @@ describe("the plan runner's driver — the hosted parent's hard stop stops the r
     expect(summary).toEqual({ instance: INSTANCE, planId: "fixture", units: { U10: "merged" }, outcome: "completed" });
     expect(b.of("unit-end")).toHaveLength(1);
     expect(b.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "completed" }]);
+  });
+});
+
+describe("Workflow effect receipt ordinals", () => {
+  function flow(branch: BotReply, spawn: BotReply) {
+    const b = bot({
+      plan: [planAnswer([row("U10")], T0, "person", { generated: true })],
+      "unit-start": [started("U10")],
+      branch: [branch],
+      spawn: [spawn],
+      "pr-check": [prNone(), prOpen(T0 + 205 * MIN)],
+      "read-record": [codingDone("run-c0", T0 + 205 * MIN)],
+      round: [acked(), acked()],
+      "unit-end": [acked(T0 + 205 * MIN)],
+      finish: [acked()],
+    });
+    const s = steps({ "U10/0/coding/wait/1": "event" });
+    return { b, s };
+  }
+  it("advances from a branch creation receipt to the next exact child ordinal", async () => {
+    const { b, s } = flow(
+      ok({ ok: true, effectOrdinal: 1 }),
+      ok({ ok: true, runId: "run-c0", threadKey: "slack:C1:x", effectOrdinal: 2 }),
+    );
+    await runPlan(s.runner, b.client, INSTANCE);
+    expect(b.wireOf("branch")[0].effectOrdinal).toBe(1);
+    expect(b.wireOf("spawn")[0].effectOrdinal).toBe(2);
+  });
+  it("a verified existing branch spends no ordinal before child admission", async () => {
+    const { b, s } = flow(
+      ok({ ok: true, effectOrdinal: 0 }),
+      ok({ ok: true, runId: "run-c0", threadKey: "slack:C1:x", effectOrdinal: 1 }),
+    );
+    await runPlan(s.runner, b.client, INSTANCE);
+    expect(b.wireOf("spawn")[0].effectOrdinal).toBe(1);
+  });
+  it("missing and non-consuming child receipts cannot be cached as successful admission", async () => {
+    for (const receipt of [{}, { effectOrdinal: 0 }, { effectOrdinal: 2 }]) {
+      const { b, s } = flow(
+        ok({ ok: true, effectOrdinal: 0 }),
+        ok({ ok: true, runId: "run-c0", threadKey: "slack:C1:x", ...receipt }),
+      );
+      await expect(runPlan(s.runner, b.client, INSTANCE)).rejects.toThrow("effect ordinal");
+      expect(b.wireOf("read-record")).toEqual([]);
+    }
   });
 });

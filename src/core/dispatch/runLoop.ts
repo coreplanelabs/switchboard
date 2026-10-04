@@ -159,7 +159,8 @@ import type { RunHandle, RunRegistry } from "../runRegistry.js";
 import type { LedgerRun } from "../runLedger/writeThrough.js";
 import { assignRunLiveState } from "../runLiveState.js";
 import { causeOfClose } from "../plane/decide.js";
-import { RefusalError } from "../refusal.js";
+import { RefusalError, refusalOf } from "../refusal.js";
+import { shellQuote } from "../../execution/shellQuote.js";
 import type { RunsReadCapability, SteerCapability } from "../../tools/runs.js";
 import type { WaitCapability } from "./awaitChildren.js";
 import type { SpawnCapability } from "./spawn.js";
@@ -312,6 +313,7 @@ export interface RunLoopContext {
    *  first open. Relaunches continue the harness's lease instead. */
   assertAdmissionBudget: () => void;
   admissionRemainingMs?: () => number;
+  admissionDeadlineAt?: number;
   channelVisibility: ChannelVisibility;
   slackContext?: SlackContextBinding;
   privateAudienceLatch?: PrivateAudienceLatch;
@@ -2024,7 +2026,13 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // replayed `review_posted` event is the post-step's outcome, so neither the
   // settle nor the post runs again, and the reviewed head is the event's.
   const postedBefore = resume ? reviewPostedBefore(resume.events) : undefined;
-  if (postedBefore) reviewHead = postedBefore.head;
+  const replayedPostMismatch =
+    postedBefore !== undefined &&
+    coordinator?.publication !== undefined &&
+    (postedBefore.target.repo !== coordinator.publication.repo ||
+      postedBefore.target.number !== coordinator.publication.pr ||
+      postedBefore.head.toLowerCase() !== coordinator.publication.expectedHeadSha.toLowerCase());
+  if (postedBefore && !replayedPostMismatch) reviewHead = postedBefore.head;
   // The row's harness facts (harness.md item 7; harness-pi item 8), read by
   // whichever harness wrote them: for the harness's re-attach or, on a finish,
   // for ending the process the previous generation left behind. The row's
@@ -2087,6 +2095,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     });
   }
   try {
+    if (replayedPostMismatch)
+      throw new RefusalError(
+        refusalOf("workspace_head_mismatch", "The replayed post does not match the saved review target."),
+      );
     if (resumedUnsettledCheckpoint)
       throw new Error(
         `The original coding checkpoint needs reconciliation before another writer can run: ${publicationSettlementSummary(publicationSettlement ?? null)}`,
@@ -2473,7 +2485,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         // lease), so the control's clock starts here from the remainder the
         // record kept — the run loop's reading of the same lease the harness
         // continues, a moment earlier than the harness's own.
-        const resumeDeadline = clock() + reentry.remainingMs;
+        const resumeDeadline = Math.min(clock() + reentry.remainingMs, ctx.admissionDeadlineAt ?? Infinity);
         run.control.startLease(() => resumeDeadline - clock());
         updateResidentRunDeadline(resumeDeadline - clock());
       }
@@ -2522,6 +2534,54 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             })
           : undefined;
       const openRun = async () => {
+        ctx.assertAdmissionBudget();
+        if (agent.name === "review" && coordinator?.publication !== undefined) {
+          const publication = coordinator.publication;
+          const workspace = currentCheckout;
+          const command = `${workspace ? `git -C ${shellQuote(workspace)}` : "git"} rev-parse HEAD`;
+          const probe = await executor
+            .execResult?.(command, {
+              timeoutMs: Math.min(30_000, ctx.admissionRemainingMs?.() ?? 30_000),
+              signal: run.control.hardSignal,
+            })
+            .catch(() => undefined);
+          const head =
+            probe?.exitCode === 0 && probe.truncated === false && /^[a-f0-9]{40}$/i.test(probe.stdout.trim())
+              ? probe.stdout.trim().toLowerCase()
+              : undefined;
+          const fresh = await (deps.fetchPrFacts ?? fetchPullRequestFacts)({
+            repo: publication.repo,
+            number: publication.pr,
+          }).catch(() => undefined);
+          const selected = firstTestSelection.binding ?? firstTestSelection.seeded ?? firstTestSelection.cold;
+          const verified = verifyExistingPrPublication(
+            publication,
+            {
+              repo: repoCtx.repo,
+              pr: repoCtx.pr,
+              ref: repoCtx.ref,
+              baseRef: repoCtx.baseRef,
+              requestHeadSha: repoCtx.headSha,
+              workspaceRef: selected?.ref,
+              workspaceHeadSha: head,
+              owner: {
+                instanceId: coordinator.parentInstanceId,
+                unit: unitOfIdempotencyKey(coordinator.idempotencyKey) ?? "",
+              },
+            },
+            fresh,
+          );
+          if (
+            !verified.ok ||
+            fresh?.verifiedHead?.repo !== publication.repo ||
+            fresh.verifiedHead.ref !== publication.headRef ||
+            fresh.verifiedHead.sha.toLowerCase() !== publication.expectedHeadSha.toLowerCase()
+          )
+            throw new RefusalError(
+              refusalOf("workspace_head_mismatch", "The reattached workspace does not match the saved review target."),
+            );
+          ctx.assertAdmissionBudget();
+        }
         const container =
           harnessDeps.containerFor?.(executor, profile.machine) ?? harnessContainerFor(executor, profile.machine);
         const requirement = ctx.readyRequirementOverride;
@@ -2586,6 +2646,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           {
             runId: run.id,
             agent,
+            ...(ctx.admissionDeadlineAt !== undefined ? { deadlineAt: ctx.admissionDeadlineAt } : {}),
             ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
             model: { id: modelId, provider: providerName, providerType: providerCfg.type },
             ...(ctx.modelCard ? { card: ctx.modelCard } : {}),
@@ -2860,6 +2921,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // gate (agent-review item 10).
     if (isPrReview && repoCtx.repo && repoCtx.pr !== undefined && !tailSkipped() && postedBefore === undefined) {
       const settled = await settleReviewedHead({
+        ...(coordinator?.publication ? { publication: coordinator.publication } : {}),
         span: root,
         pr: { repo: repoCtx.repo, number: repoCtx.pr },
         baseRef: repoCtx.baseRef,
@@ -3525,6 +3587,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     else if (agent.name === "review" && !tailSkipped())
       reviewPost = await root.span("run.review_post_step", () =>
         runReviewPostStep({
+          ...(coordinator?.publication ? { publication: coordinator.publication } : {}),
           agent,
           requestText: ctx.requestText,
           repoCtx,

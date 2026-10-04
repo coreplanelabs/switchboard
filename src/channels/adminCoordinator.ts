@@ -77,6 +77,7 @@ import {
   isHumanGatePending,
   isSavedFindingsPatch,
   INSTANCE_ID_PATTERN,
+  isCoordinatorUnit,
   STEP_NAME_PATTERN,
   unitOfIdempotencyKey,
   type CoordinatorInstance,
@@ -95,6 +96,7 @@ import { isShipOutcome, sameShipOutcome } from "../core/coordinator/shipOutcome.
 import { foldThreadAttachments } from "../core/dispatch/admission.js";
 import { attributedText, foldThreadEvents } from "../core/threadEvents.js";
 import { assembleRunRecord } from "../core/dispatch/record.js";
+import type { UnitEffectTransition, UnitEffectRefusal } from "../core/coordinator/unitEffect.js";
 import type { CoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import {
   freezeCoordinatorReport,
@@ -121,6 +123,7 @@ import type { CreateInstanceAnswer, InstanceStatusAnswer } from "../core/coordin
 import type { OriginalUnitRecoveryParams } from "../core/coordinator/driver.js";
 import {
   parseRecoveryStep,
+  childPresetOfStep,
   recoveryStepName,
   recoveryStepPrefix,
   recoveryWorkflowId,
@@ -204,6 +207,8 @@ import {
   type PullRequestFacts,
   type PullRequestReview,
   type PullRequestTarget,
+  type BranchRefRead,
+  type BranchRefCreateResult,
 } from "../execution/githubPulls.js";
 import { EMPTY_START_STATE, type BranchStartState, type RewriteResult } from "../execution/identityRewrite.js";
 import type { Secret } from "../secrets.js";
@@ -384,8 +389,9 @@ export interface AdminCoordinatorDeps {
    *  issues (a unit's board issue) and the comment a unit's ending leaves there
    *  — the App's GitHub reads and the one write beside the merge. */
   github: Pick<GithubApi, "readFile" | "listIssues" | "commentIssue">;
-  /** Round 0's branch create (githubPulls.createBranchRef): 422 already-exists is success inside. */
-  createBranchRef: (repo: string, branch: string, fromRef: string) => Promise<void>;
+  /** Exact reads freeze a base before admission; the write consumes only that SHA. */
+  fetchBranchRef: (repo: string, branch: string) => Promise<BranchRefRead>;
+  createBranchRef: (repo: string, branch: string, sha: string) => Promise<BranchRefCreateResult>;
   /** The reviews on a pull request (githubPulls.fetchPullRequestReviews) and the
    *  identity this bot posts as: whether the bot's verdict stands at a head. */
   fetchPrReviews: (pr: { repo: string; number: number }) => Promise<PullRequestReview[] | undefined>;
@@ -993,7 +999,6 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   // The hard stop's mark (record 0060; issue 1924): a sealed parent's runner
   // spawns nothing more — the refusal is terminal, and the machine ends the
   // unit stopped on it.
-  if (instance.stop !== undefined) return json(409, { ok: false, error: "stopped", at });
   const unit = await unitRowOf(deps, instance, req.unit);
   if (!unit.ok) return unit.response;
   if (unit.rows.some((candidate) => candidate.workBrief !== undefined) && unit.row?.workBrief === undefined)
@@ -1017,9 +1022,58 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   // there. A row a bot wrote before record 0055 names a review thread; its
   // review rounds stay there, so a unit in flight across the release keeps
   // its review session where it began.
-  const row = unit.row;
+  const initialRow = unit.row;
+  if (!initialRow || !isCoordinatorUnit(initialRow)) return json(409, { ok: false, error: "effect_unit_required", at });
+  let row: CoordinatorUnit = initialRow;
+  const execution = {
+    workflowId: body.executionWorkflowId as string,
+    ...(body.recoveryActionId === undefined ? {} : { recoveryActionId: body.recoveryActionId as string }),
+  };
+  if (
+    execution.workflowId !== (row.recovery?.workflowId ?? instance.id) ||
+    execution.recoveryActionId !== row.recovery?.actionId ||
+    body.effectId !== req.step ||
+    !req.step.startsWith(`${row.unit}/`) ||
+    childPresetOfStep(req.step) !== req.preset ||
+    !Number.isSafeInteger(body.effectOrdinal) ||
+    (body.effectOrdinal as number) < 1
+  )
+    return json(409, { ok: false, error: "effect_execution_mismatch", at });
+  const effectId = req.step,
+    effectOrdinal = body.effectOrdinal as number;
+  const unavailable = () => json(503, { ok: false, error: "spawn_unavailable", at });
+  const move = async (input: UnitEffectTransition) => {
+    const result = await deps.instances.transitionUnitEffect(input);
+    if (result.ok) row = result.unit;
+    return result;
+  };
+  const cell = row.currentEffect;
+  if (cell?.id === effectId) {
+    if (
+      cell.ordinal !== effectOrdinal ||
+      cell.execution.workflowId !== execution.workflowId ||
+      cell.execution.recoveryActionId !== execution.recoveryActionId ||
+      cell.calls.length !== 1 ||
+      cell.calls[0].operation !== "spawn"
+    )
+      return json(409, { ok: false, error: "effect_execution_mismatch", at });
+  } else if (effectOrdinal !== (cell?.ordinal ?? 0) + 1 || cell?.phase === "active") {
+    return json(409, { ok: false, error: "effect_execution_mismatch", at });
+  }
   if (row?.workBrief !== undefined && req.brief === undefined)
     return json(409, { ok: false, error: "private_worker_brief_required", at });
+  if (
+    req.preset === "review" &&
+    (req.brief?.kind !== "review" || req.brief.headSha !== row.publication?.expectedHeadSha)
+  )
+    return json(409, { ok: false, error: "effect_target_mismatch", at });
+  if (
+    req.brief !== undefined &&
+    "pr" in req.brief &&
+    (req.brief.pr !== row.pr?.number ||
+      ("headSha" in req.brief && req.brief.headSha !== row.publication?.expectedHeadSha))
+  )
+    return json(409, { ok: false, error: "effect_target_mismatch", at });
   const legacy = req.preset === "review" ? row?.reviewThread : undefined;
   const thread: OpenedThreadRef = legacy ?? {
     threadKey: own.threadKey,
@@ -1038,12 +1092,61 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
     )
       return json(409, { ok: false, error: "recovery_claim_mismatch", at });
   }
-  // Retry-safe before anything starts: the step's child, live or finished, or
-  // another run holding the unit's thread.
+  const known = (alreadySpawned: boolean) => {
+    const call = row!.currentEffect!.calls[0];
+    return call.state === "accepted" && call.runId !== undefined
+      ? json(200, {
+          ok: true,
+          runId: call.runId,
+          threadKey,
+          effectOrdinal,
+          ...(alreadySpawned ? { alreadySpawned: true } : {}),
+          at,
+        })
+      : json(403, { ok: false, error: "spawn_refused", effectOrdinal, at });
+  };
+  if (cell?.id === effectId && cell.phase === "settled") return known(true);
+  if (cell?.id === effectId && cell.calls[0].state !== "unstarted") {
+    if (cell.calls[0].state === "pending" || cell.calls[0].state === "uncertain") {
+      const live = await liveOnThread(deps.runs, instance, threadKey).catch(() => undefined);
+      const candidate =
+        live?.idempotencyKey === key
+          ? live
+          : await finishedWithKey(deps.runs, instance, threadKey, key).catch(() => undefined);
+      if (!candidate) return unavailable();
+      const resolved = await move({
+        kind: "resolve",
+        expected: row,
+        execution,
+        effectId,
+        call: 0,
+        observation: { kind: "spawn_run", runId: candidate.id },
+      });
+      if (!resolved.ok) return unavailable();
+    }
+    if (!(await move({ kind: "settle", expected: row, execution, effectId })).ok) return unavailable();
+    return known(true);
+  }
+  const cancelUnstarted = async () => {
+    if (row!.currentEffect?.id !== effectId) return true;
+    if (!(await move({ kind: "cancel", expected: row!, execution, effectId, call: 0 })).ok) return false;
+    return (await move({ kind: "settle", expected: row!, execution, effectId })).ok;
+  };
+  if (instance.stop !== undefined)
+    return (await cancelUnstarted())
+      ? json(409, { ok: false, error: "stopped", effectOrdinal: row.currentEffect?.ordinal, at })
+      : unavailable();
+  // Listings locate occupied threads; they cannot admit a same-key child without its effect receipt.
   const live = await liveOnThread(deps.runs, instance, threadKey);
-  if (live) return answerForLive(live, key, threadKey, at);
-  const done = await finishedWithKey(deps.runs, instance, threadKey, key);
-  if (done) return json(200, { ok: true, runId: done.id, threadKey, alreadySpawned: true, at });
+  if (live) {
+    if (live.idempotencyKey === key || !(await cancelUnstarted())) return unavailable();
+    const answer = answerForLive(live, key, threadKey, at);
+    return {
+      ...answer,
+      body: { ...(answer.body as object), ...(row.currentEffect?.id === effectId ? { effectOrdinal } : {}) },
+    };
+  }
+  if (await finishedWithKey(deps.runs, instance, threadKey, key)) return unavailable();
   if (row?.recovery?.kind === "coding") {
     if (
       req.preset !== "coding" ||
@@ -1172,12 +1275,6 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
             : "recovery_facts_mismatch",
         at,
       });
-    try {
-      if (deps.runnerOwnership?.claim(instance.repo, row.publication.pr, row.publication.owner) !== true)
-        return json(409, { ok: false, error: "publication_ownership_changed", at });
-    } catch (err) {
-      return json(409, { ok: false, error: "publication_ownership_unknown", message: describe(err), at });
-    }
   }
   const io =
     row?.workBrief !== undefined
@@ -1236,40 +1333,6 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
         message: "the existing pull request has no durable publication binding",
         at,
       });
-    try {
-      // A recovery Workflow can outlive the bot process that admitted it. Its
-      // durable claim is sufficient to rebuild only this exact owner before
-      // every write-child admission; a rival process-local owner still wins.
-      if (
-        row.recovery !== undefined &&
-        deps.runnerOwnership?.claim(instance.repo, row.publication.pr, row.publication.owner) !== true
-      )
-        return json(409, {
-          ok: false,
-          error: "publication_ownership_changed",
-          message: "the durable recovery claim no longer owns the pull request",
-          at,
-        });
-      const owner = deps.runnerOwnership?.owner(instance.repo, row.publication.pr);
-      if (
-        owner === undefined ||
-        owner.instanceId !== row.publication.owner.instanceId ||
-        owner.unit !== row.publication.owner.unit
-      )
-        return json(409, {
-          ok: false,
-          error: "publication_ownership_changed",
-          message: "the durable existing-PR publication owner is no longer the runner's sole owner",
-          at,
-        });
-    } catch (err) {
-      return json(409, {
-        ok: false,
-        error: "publication_ownership_unknown",
-        message: describe(err),
-        at,
-      });
-    }
   }
   // The child's message is the one the requester would have typed, in the
   // child's thread, as the requester the parent record names. The directive is
@@ -1374,13 +1437,67 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
     )
       return json(409, { ok: false, error: "recovery_claim_mismatch", at });
   }
-  // The definitive drain fence sits beside dispatch, after every asynchronous
-  // read. Its synchronous permit acquisition and dispatch call cannot have a
-  // signal callback interleave; once dispatch yields, the drain counts this
-  // permit until a registry row exists (or dispatch ends without one).
+  // Hold the drain permit through durable admission and dispatch setup until registration or a closed dispatch outcome.
+  const head = await deps.fetchBranchRef(instance.repo, row.branch).catch(() => ({ kind: "unverified" as const }));
+  if (head.kind !== "verified" || head.ref !== `refs/heads/${row.branch}` || !fullHead(head.sha)) return unavailable();
   const leaveAdmission = deps.childAdmission?.enter();
   if (deps.childAdmission !== undefined && leaveAdmission === undefined) return queued();
   const releaseAdmission = leaveAdmission ?? (() => {});
+  try {
+    if (!row.currentEffect || row.currentEffect.id !== effectId) {
+      const admitted = await move({
+        kind: "admit",
+        expected: row,
+        execution,
+        effect: {
+          version: 1,
+          id: effectId,
+          ordinal: effectOrdinal,
+          execution,
+          phase: "active",
+          target: {
+            repo: instance.repo,
+            ref: row.branch,
+            base: instance.base ?? "main",
+            headSha: head.sha,
+            ...(row.pr ? { pr: row.pr.number } : {}),
+          },
+          calls: [{ operation: "spawn", state: "unstarted" }],
+        },
+      });
+      if (!admitted.ok) {
+        releaseAdmission();
+        return admitted.reason === "stopped" ? json(409, { ok: false, error: "stopped", at }) : unavailable();
+      }
+    }
+    const begun = await move({ kind: "begin", expected: row, execution, effectId, call: 0 });
+    if (!begun.ok) {
+      if (begun.reason === "stopped") {
+        if (!(await cancelUnstarted())) {
+          releaseAdmission();
+          return unavailable();
+        }
+      }
+      releaseAdmission();
+      return begun.reason === "stopped" ? json(409, { ok: false, error: "stopped", at }) : unavailable();
+    }
+  } catch {
+    releaseAdmission();
+    return unavailable();
+  }
+  const finishEffect = async (
+    outcome:
+      { state: "accepted"; runId: string } | { state: "refused"; cause: "external_refused" } | { state: "uncertain" },
+  ) => {
+    // Child setup may acknowledge context on this row. Refresh metadata only when the exact pending cell survives.
+    const current = (await deps.instances.listUnits(instance.id)).filter((u) => u.unit === row!.unit);
+    if (current.length !== 1 || JSON.stringify(current[0].currentEffect) !== JSON.stringify(row!.currentEffect))
+      return false;
+    row = current[0];
+    const completed = await move({ kind: "complete", expected: row, execution, effectId, call: 0, outcome });
+    if (!completed.ok) return false;
+    return outcome.state === "uncertain" || (await move({ kind: "settle", expected: row, execution, effectId })).ok;
+  };
   let startedId: string | undefined;
   let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
   let lastReply: string | undefined;
@@ -1416,7 +1533,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
         ? req.brief.continue?.from
         : undefined;
   const publication =
-    req.preset === "coding" && row?.publication !== undefined
+    row?.publication !== undefined
       ? {
           ...row.publication,
           ...(roundExpectedHead !== undefined ? { expectedHeadSha: roundExpectedHead } : {}),
@@ -1442,7 +1559,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
           },
         }
       : {}),
-    ...(instance.base !== undefined ? { base: instance.base } : {}),
+    base: instance.base ?? "main",
     ...(publication !== undefined ? { publication } : {}),
     ...(req.brief?.kind === "findings" && turn.issuedFindingIds !== undefined
       ? { issuedFindingIds: turn.issuedFindingIds }
@@ -1481,9 +1598,10 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
         : {}),
       ...(turn.contract !== undefined ? { contract: turn.contract } : {}),
     });
-  } catch (err) {
+  } catch {
     releaseAdmission();
-    return json(502, { ok: false, error: "spawn_failed", message: describe(err), at });
+    await finishEffect({ state: "uncertain" }).catch(() => false);
+    return unavailable();
   }
   const settled = dispatching.then(
     (outcome) => ({ kind: "ended" as const, outcome }),
@@ -1502,6 +1620,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   const first = await Promise.race([started.then((id) => ({ kind: "started" as const, id })), settled]);
   if (first.kind === "started" || startedId !== undefined) {
     const runId = first.kind === "started" ? first.id : startedId!;
+    if (!(await finishEffect({ state: "accepted", runId }).catch(() => false))) return unavailable();
     if (folded.length > 0) {
       // Consumed by the spawn's step (record 0051's fold rule): the same identity a
       // replay carries, so the marks and the retry answer agree. A failed mark
@@ -1519,23 +1638,35 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
       );
     }
     log(`[coordinator] ${instance.id} ${req.step}: spawned ${req.preset} run ${runId} in ${threadKey}`);
-    return json(200, { ok: true, runId, threadKey, at });
+    return json(200, { ok: true, runId, threadKey, effectOrdinal, at });
   }
-  if (first.kind === "threw") return json(502, { ok: false, error: "spawn_failed", message: describe(first.err), at });
+  if (first.kind === "threw") {
+    await finishEffect({ state: "uncertain" }).catch(() => false);
+    return unavailable();
+  }
   const refusal = first.outcome.refusal;
+  if (
+    !(await finishEffect(
+      refusal === undefined ? { state: "uncertain" } : { state: "refused", cause: "external_refused" },
+    ).catch(() => false))
+  )
+    return unavailable();
+  if (refusal === undefined) return unavailable();
   if (refusal === "coordinator_thread_live") {
     // A run took the thread between the read above and the claim: answer from it.
     const now = await liveOnThread(deps.runs, instance, threadKey);
-    if (now) return answerForLive(now, key, threadKey, at);
-    return json(409, { ok: false, error: "busy", at });
+    if (now && now.idempotencyKey !== key) {
+      const answer = answerForLive(now, key, threadKey, at);
+      return { ...answer, body: { ...(answer.body as object), effectOrdinal } };
+    }
+    return json(409, { ok: false, error: "busy", effectOrdinal, at });
   }
   log(`[coordinator] ${instance.id} ${req.step}: ${req.preset} child not started (${refusal ?? first.outcome.status})`);
-  if (refusal !== undefined)
-    return json(403, { ok: false, error: refusal, ...(lastReply !== undefined ? { message: lastReply } : {}), at });
-  return json(502, {
+  return json(403, {
     ok: false,
-    error: "spawn_failed",
-    message: lastReply ?? `the child ended (${first.outcome.status}) before it started`,
+    error: refusal,
+    effectOrdinal,
+    ...(lastReply !== undefined ? { message: lastReply } : {}),
     at,
   });
 }
@@ -3048,29 +3179,29 @@ const unavailableReviewStart = (reason: string): RecoveryReviewStartDiagnostic =
   reason,
 });
 
-/** Zero-turn review starts are evidence only with the complete final attach
- * refusal, not merely a zero-usage summary or an absent review post. */
-async function verifiedReviewAttachRefusal(
+/** A complete final setup refusal proves zero model spend, not completed work. */
+async function verifiedSetupAttachRefusal(
   run: RunView,
   service: RunsService,
+  target: { repo: string; ref: string; pr?: number },
 ): Promise<"verified" | "invalid" | "unavailable"> {
   if (
-    run.agent !== "review" ||
     !run.finished ||
     run.status !== "failed" ||
-    (run.liveState?.state !== "preparing" && run.liveState?.state !== "admitted") ||
+    !["preparing", "admitted", "waiting_deploy"].includes(run.liveState?.state ?? "") ||
     run.usage?.turns !== 0 ||
     run.usage.byModel === undefined ||
     Object.keys(run.usage.byModel).length !== 0 ||
-    run.reviewHead !== undefined ||
+    run.pushed !== undefined ||
     run.verdict !== undefined ||
     run.reviewPost !== undefined ||
-    run.headSha !== undefined ||
-    run.pushed !== undefined ||
-    run.pr !== undefined ||
+    run.reviewHead !== undefined ||
+    run.dispositions !== undefined ||
     run.doorPublicationPending !== undefined
   )
     return "invalid";
+  // Zero tokens are not a price receipt. Only a complete final server
+  // record that stopped in setup before any model/tool/work is $0 evidence.
   let final: Awaited<ReturnType<RunsService["getRun"]>>;
   try {
     final = await service.getRun(run.id, {
@@ -3081,36 +3212,74 @@ async function verifiedReviewAttachRefusal(
   } catch {
     return "unavailable";
   }
-  const child = final.ok === true ? final.value : undefined;
+  if (final.ok !== true) return "invalid";
+  const child = final.value;
   const events = child?.events;
-  const preparing = events?.findIndex((event) => event.type === "run_state" && event.state === "preparing") ?? -1;
-  const attachStart =
+  const preparingIndex = events?.findIndex((event) => event.type === "run_state" && event.state === "preparing") ?? -1;
+  const waitingDeployIndex =
+    events?.findIndex((event) => event.type === "run_state" && event.state === "waiting_deploy") ?? -1;
+  const drainStartIndex =
+    events?.findIndex(
+      (event) => event.type === "span_start" && event.name === "dispatch.workspace.attach.drain-wait",
+    ) ?? -1;
+  const drainEndIndex =
+    events?.findIndex(
+      (event) =>
+        event.type === "span_end" && event.name === "dispatch.workspace.attach.drain-wait" && event.status === "error",
+    ) ?? -1;
+  const attachStartIndex =
     events?.findIndex((event) => event.type === "span_start" && event.name === "dispatch.workspace.attach") ?? -1;
-  const attachEnd =
+  const attachEndIndex =
     events?.findIndex(
       (event) => event.type === "span_end" && event.name === "dispatch.workspace.attach" && event.status === "error",
     ) ?? -1;
-  const refusal =
-    events?.findIndex(
-      (event) => event.type === "refusal" && event.code === "setup_failed" && event.cause === "workspace",
-    ) ?? -1;
-  const start = events?.[attachStart];
-  const end = events?.[attachEnd];
-  const admitted = events?.findIndex((event) => event.type === "run_state" && event.state === "admitted") ?? -1;
-  const memoryStart =
-    events?.findIndex((event) => event.type === "span_start" && event.name === "dispatch.memory_read") ?? -1;
-  const memoryEnd =
+  const refusalIndex = events?.findIndex((event) => event.type === "refusal" && event.code === "setup_failed") ?? -1;
+  const attachStart = events?.[attachStartIndex];
+  const attachEnd = events?.[attachEndIndex];
+  const drainStart = events?.[drainStartIndex];
+  const drainEnd = events?.[drainEndIndex];
+  const drainWaitSetupRefusal =
+    run.liveState?.state === "waiting_deploy" &&
+    child?.liveState?.state === "waiting_deploy" &&
+    preparingIndex < 0 &&
+    attachStartIndex >= 0 &&
+    attachStartIndex < waitingDeployIndex &&
+    waitingDeployIndex < drainStartIndex &&
+    drainStartIndex < drainEndIndex &&
+    drainEndIndex < attachEndIndex &&
+    attachEndIndex < refusalIndex &&
+    attachStart?.type === "span_start" &&
+    attachEnd?.type === "span_end" &&
+    attachStart.spanId === attachEnd.spanId &&
+    drainStart?.type === "span_start" &&
+    drainEnd?.type === "span_end" &&
+    drainStart.spanId === drainEnd.spanId &&
+    events?.slice(waitingDeployIndex + 1).every((event) => event.type !== "run_state") === true &&
+    events?.[refusalIndex]?.type === "refusal" &&
+    events[refusalIndex].cause === "system";
+  const admittedIndex = events?.findIndex((event) => event.type === "run_state" && event.state === "admitted") ?? -1;
+  const memoryEndIndex =
     events?.findIndex((event) => event.type === "span_end" && event.name === "dispatch.memory_read") ?? -1;
-  const systemRefusal =
-    events?.findIndex(
-      (event) => event.type === "refusal" && event.code === "setup_failed" && event.cause === "system",
-    ) ?? -1;
-  const memoryOpened = events?.[memoryStart];
-  const memoryClosed = events?.[memoryEnd];
-  const postRefusal = events?.slice(systemRefusal + 1) ?? [];
-  const matchingCleanupPair = (offset: number, name: string): boolean => {
-    const opened = postRefusal[offset];
-    const closed = postRefusal[offset + 1];
+  const memoryEnd = events?.[memoryEndIndex];
+  const memoryStartIndex =
+    events?.findIndex((event) => event.type === "span_start" && event.name === "dispatch.memory_read") ?? -1;
+  const memoryStart = events?.[memoryStartIndex];
+  const concurrentMemoryEnd =
+    memoryEndIndex > admittedIndex &&
+    memoryStartIndex >= 0 &&
+    memoryStartIndex < admittedIndex &&
+    memoryStart?.type === "span_start" &&
+    memoryEnd?.type === "span_end" &&
+    memoryStart.spanId === memoryEnd.spanId;
+  const adjacentAttachSetup = concurrentMemoryEnd
+    ? ((attachStartIndex === admittedIndex + 1 && memoryEndIndex === admittedIndex + 2) ||
+        (memoryEndIndex === admittedIndex + 1 && attachStartIndex === admittedIndex + 2)) &&
+      attachEndIndex === admittedIndex + 3
+    : attachStartIndex === admittedIndex + 1 && attachEndIndex === admittedIndex + 2;
+  const cleanup = events?.slice(refusalIndex + 1) ?? [];
+  const cleanupPair = (offset: number, name: string) => {
+    const opened = cleanup[offset];
+    const closed = cleanup[offset + 1];
     return (
       opened?.type === "span_start" &&
       opened.name === name &&
@@ -3123,34 +3292,41 @@ async function verifiedReviewAttachRefusal(
       ).length === 2
     );
   };
-  // The memory read may finish while attach is in flight. Previously opened
-  // setup spans may close after refusal; the only newly opened spans are the
-  // ordered refusal and reply cleanup pairs, never another dispatch action.
-  const pairedRefusalReply =
-    postRefusal.length === 4 && matchingCleanupPair(0, "dispatch.refuse") && matchingCleanupPair(2, "post.reply");
-  // The already-started memory read may end just before attach starts or
-  // while attach runs. Both orders are setup-only when the three events are
-  // adjacent after admission and attach itself ends in an error.
-  const adjacentAttachSetup =
-    (attachStart === admitted + 1 && memoryEnd === admitted + 2) ||
-    (memoryEnd === admitted + 1 && attachStart === admitted + 2);
+  const outerScopes = new Set(["request", "slack.receive", "post.card_close", "dispatch.track"]);
+  const cleanupOffset =
+    cleanup[0]?.type === "span_start"
+      ? cleanupPair(0, "dispatch.refuse") && cleanupPair(2, "post.reply")
+        ? 4
+        : -1
+      : 0;
+  const cleanupBoundary = admittedIndex >= 0 ? admittedIndex : preparingIndex;
+  const permittedCleanup =
+    cleanupOffset >= 0 &&
+    cleanup.slice(cleanupOffset).every((event) => {
+      if (event.type !== "span_end" || !outerScopes.has(event.name)) return false;
+      const opened =
+        events?.findIndex(
+          (prior) => prior.type === "span_start" && prior.name === event.name && prior.spanId === event.spanId,
+        ) ?? -1;
+      return opened >= 0 && opened < cleanupBoundary;
+    });
   const admittedAttachRefusal =
     run.liveState?.state === "admitted" &&
     child?.liveState?.state === "admitted" &&
-    preparing < 0 &&
-    admitted >= 0 &&
+    preparingIndex < 0 &&
+    waitingDeployIndex < 0 &&
+    admittedIndex >= 0 &&
     events?.filter((event) => event.type === "run_state").length === 1 &&
-    memoryStart >= 0 &&
-    memoryStart < admitted &&
     adjacentAttachSetup &&
-    attachEnd === admitted + 3 &&
-    systemRefusal === attachEnd + 1 &&
-    memoryOpened?.type === "span_start" &&
-    memoryClosed?.type === "span_end" &&
-    memoryOpened.spanId === memoryClosed.spanId &&
-    events?.every((event, index) => {
-      if (event.seq !== index + 1) return false;
-      if (index < admitted)
+    refusalIndex === attachEndIndex + 1 &&
+    attachStart?.type === "span_start" &&
+    attachEnd?.type === "span_end" &&
+    attachStart.spanId === attachEnd.spanId &&
+    events?.[refusalIndex]?.type === "refusal" &&
+    events[refusalIndex].cause === "system" &&
+    permittedCleanup &&
+    events.every((event, index) => {
+      if (index < admittedIndex)
         return (
           event.type === "input" ||
           event.type === "run_meta" ||
@@ -3163,92 +3339,165 @@ async function verifiedReviewAttachRefusal(
               event.name === "post.reply" ||
               (event.name.startsWith("dispatch.") && event.name !== "dispatch.workspace.attach")))
         );
-      if (index === admitted) return event.type === "run_state" && event.state === "admitted";
-      if (index === attachStart || index === memoryEnd || index === attachEnd) return true;
-      if (index === systemRefusal) return event.type === "refusal";
-      if (pairedRefusalReply && index > systemRefusal) return true;
-      if (event.type !== "span_end" || index < systemRefusal) return false;
-      if (
-        event.name !== "request" &&
-        event.name !== "slack.receive" &&
-        event.name !== "post.card_close" &&
-        event.name !== "post.reply" &&
-        (!event.name.startsWith("dispatch.") ||
-          event.name === "dispatch.workspace.attach" ||
-          event.name === "dispatch.memory_read")
-      )
-        return false;
-      const opened = events.findIndex(
-        (prior) => prior.type === "span_start" && prior.spanId === event.spanId && prior.name === event.name,
-      );
       return (
-        opened >= 0 &&
-        opened < admitted &&
-        events.filter((prior) => prior.type === "span_end" && prior.spanId === event.spanId).length === 1
+        index === admittedIndex ||
+        (concurrentMemoryEnd && index === memoryEndIndex) ||
+        index === attachStartIndex ||
+        index === attachEndIndex ||
+        index === refusalIndex ||
+        index > refusalIndex
       );
-    }) === true;
-  return child !== undefined &&
-    child.id === run.id &&
-    child.idempotencyKey === run.idempotencyKey &&
-    child.parentInstanceId === run.parentInstanceId &&
-    child.userId === run.userId &&
-    child.repo === run.repo &&
-    child.threadKey === run.threadKey &&
-    child.agent === "review" &&
-    child.startedAt === run.startedAt &&
-    child.finishedAt === run.finishedAt &&
-    child.status === "failed" &&
-    (child.liveState?.state === "preparing" || child.liveState?.state === "admitted") &&
-    child.truncated === false &&
-    child.eventCount === run.eventCount &&
-    child.storedEventCount === run.eventCount &&
-    events !== undefined &&
-    events.length === run.eventCount &&
-    child.usage?.turns === 0 &&
-    child.usage.byModel !== undefined &&
-    Object.keys(child.usage.byModel).length === 0 &&
-    child.reviewHead === undefined &&
-    child.verdict === undefined &&
-    child.reviewPost === undefined &&
-    child.headSha === undefined &&
-    child.pushed === undefined &&
-    child.pr === undefined &&
-    child.dispositions === undefined &&
-    child.doorPublicationPending === undefined &&
-    child.lease === undefined &&
-    (admittedAttachRefusal ||
-      (run.liveState?.state === "preparing" &&
-        preparing >= 0 &&
-        attachStart > preparing &&
-        attachEnd > attachStart &&
-        refusal > attachEnd)) &&
-    start?.type === "span_start" &&
-    end?.type === "span_end" &&
-    start.spanId === end.spanId &&
-    events.filter((event) => event.type === "refusal").length === 1 &&
-    events.filter((event) => event.type === "run_meta" && event.agent === "review").length === 1 &&
-    (admittedAttachRefusal ||
-      events.every(
-        (event, index) =>
-          event.seq === index + 1 &&
-          (event.type === "input" ||
-            event.type === "run_meta" ||
-            (event.type === "coordinator_tag" && index < preparing) ||
-            (event.type === "context" && index < preparing) ||
-            (event.type === "refusal" && index === refusal) ||
-            (event.type === "run_state" && ["admitted", "waiting_repository", "preparing"].includes(event.state)) ||
-            ((event.type === "span_start" || event.type === "span_end") &&
-              (index === attachStart ||
-                index === attachEnd ||
-                (index < preparing &&
-                  (event.name === "request" ||
-                    event.name === "slack.receive" ||
-                    event.name === "post.card_close" ||
-                    event.name === "post.reply" ||
-                    event.name.startsWith("dispatch.")))))),
-      ))
-    ? "verified"
-    : "invalid";
+    });
+  const preparingAttachRefusal =
+    run.liveState?.state === "preparing" &&
+    child?.liveState?.state === "preparing" &&
+    preparingIndex >= 0 &&
+    attachStartIndex > preparingIndex &&
+    attachEndIndex > attachStartIndex &&
+    refusalIndex > attachEndIndex &&
+    attachStart?.type === "span_start" &&
+    attachEnd?.type === "span_end" &&
+    attachStart.spanId === attachEnd.spanId &&
+    events?.[refusalIndex]?.type === "refusal" &&
+    ["workspace", "system"].includes(events[refusalIndex].cause);
+  // Resolved input PR/head fields survive an attach failure. Only the first
+  // retained metadata can identify them; output or later metadata cannot.
+  const metadata = events?.filter((event) => event.type === "run_meta") ?? [];
+  const input = metadata[0];
+  const setupBoundary = admittedAttachRefusal
+    ? admittedIndex
+    : drainWaitSetupRefusal
+      ? waitingDeployIndex
+      : preparingIndex;
+  const validInputMetadata =
+    metadata.length === 1 &&
+    input?.type === "run_meta" &&
+    events!.indexOf(input) < setupBoundary &&
+    input.agent === run.agent &&
+    (input.repo === undefined || input.repo.toLowerCase() === target.repo.toLowerCase()) &&
+    (input.ref === undefined || input.ref === target.ref) &&
+    ((run.headSha === undefined && run.pr === undefined) ||
+      (input.repo?.toLowerCase() === target.repo.toLowerCase() && input.ref === target.ref)) &&
+    input.headSha === run.headSha &&
+    child?.headSha === run.headSha &&
+    (input.headSha === undefined || fullHead(input.headSha)) &&
+    input.pr === run.pr?.number &&
+    child?.pr?.number === run.pr?.number &&
+    child?.pr?.url === run.pr?.url &&
+    child?.pr?.head === run.pr?.head &&
+    (run.pr === undefined ||
+      (run.pr.number === target.pr && (run.pr.head === undefined || run.pr.head === target.ref)));
+  const resolvedInputTarget =
+    (admittedAttachRefusal || preparingAttachRefusal || drainWaitSetupRefusal) && validInputMetadata;
+  const spans = new Map<string, { name: string; index: number }>();
+  const closedSpans = new Set<string>();
+  // The final snapshot precedes closure of outer dispatcher scopes. Setup
+  // spans must pair; only known parents opened before setup may remain open.
+  const completeSetupSpans =
+    events?.every((event, index) => {
+      if (event.type === "span_start") {
+        if (
+          typeof event.spanId !== "string" ||
+          !event.spanId.trim() ||
+          typeof event.name !== "string" ||
+          !event.name.trim() ||
+          spans.has(event.spanId)
+        )
+          return false;
+        spans.set(event.spanId, { name: event.name, index });
+      } else if (event.type === "span_end") {
+        if (
+          typeof event.spanId !== "string" ||
+          !event.spanId.trim() ||
+          typeof event.name !== "string" ||
+          !event.name.trim() ||
+          (event.status !== "ok" && event.status !== "error") ||
+          !Number.isFinite(event.startedAt) ||
+          !Number.isFinite(event.durationMs) ||
+          event.durationMs < 0
+        )
+          return false;
+        const opened = spans.get(event.spanId);
+        if (!opened || opened.name !== event.name || opened.index >= index || closedSpans.has(event.spanId))
+          return false;
+        closedSpans.add(event.spanId);
+      }
+      return true;
+    }) === true &&
+    [...spans].every(
+      ([id, opened]) =>
+        closedSpans.has(id) ||
+        (opened.index < setupBoundary &&
+          outerScopes.has(opened.name) &&
+          [...spans.values()].filter((span) => span.name === opened.name).length === 1),
+    );
+  const setupBoundaryIndex = admittedAttachRefusal
+    ? admittedIndex
+    : drainWaitSetupRefusal
+      ? waitingDeployIndex
+      : preparingIndex;
+  if (
+    !permittedCleanup ||
+    !validInputMetadata ||
+    !completeSetupSpans ||
+    child === undefined ||
+    child.id !== run.id ||
+    child.idempotencyKey !== run.idempotencyKey ||
+    child.parentInstanceId !== run.parentInstanceId ||
+    child.userId !== run.userId ||
+    child.repo !== run.repo ||
+    child.agent !== run.agent ||
+    child.threadKey !== run.threadKey ||
+    child.startedAt !== run.startedAt ||
+    child.finishedAt !== run.finishedAt ||
+    run.status !== "failed" ||
+    (!preparingAttachRefusal && !drainWaitSetupRefusal && !admittedAttachRefusal) ||
+    child.status !== "failed" ||
+    (!preparingAttachRefusal && !drainWaitSetupRefusal && !admittedAttachRefusal) ||
+    child.truncated !== false ||
+    child.eventCount !== run.eventCount ||
+    child.storedEventCount !== run.eventCount ||
+    events === undefined ||
+    events.length !== run.eventCount ||
+    child.usage?.turns !== 0 ||
+    child.usage.byModel === undefined ||
+    Object.keys(child.usage.byModel).length !== 0 ||
+    ((run.headSha !== undefined || run.pr !== undefined || child.headSha !== undefined || child.pr !== undefined) &&
+      !resolvedInputTarget) ||
+    run.pushed !== undefined ||
+    child.pushed !== undefined ||
+    child.verdict !== undefined ||
+    child.reviewPost !== undefined ||
+    child.reviewHead !== undefined ||
+    child.dispositions !== undefined ||
+    child.doorPublicationPending !== undefined ||
+    child.lease !== undefined ||
+    events.filter((event) => event.type === "refusal" && event.code === "setup_failed").length !== 1 ||
+    setupBoundaryIndex < 0 ||
+    events.some(
+      (event, index) =>
+        event.seq !== index + 1 ||
+        !(
+          event.type === "input" ||
+          event.type === "run_meta" ||
+          event.type === "coordinator_tag" ||
+          // The dispatcher records prior-thread context before setup; later
+          // narrative events cannot attest to a pre-model refusal.
+          (event.type === "context" && typeof event.text === "string" && index < setupBoundaryIndex) ||
+          (event.type === "refusal" && event.code === "setup_failed") ||
+          (event.type === "run_state" &&
+            ["admitted", "waiting_deploy", "waiting_repository", "falling_back", "preparing"].includes(event.state)) ||
+          ((event.type === "span_start" || event.type === "span_end") &&
+            (event.name === "request" ||
+              event.name === "slack.receive" ||
+              event.name === "post.card_close" ||
+              event.name === "post.reply" ||
+              event.name.startsWith("dispatch.")))
+        ),
+    )
+  )
+    return "invalid";
+  return "verified";
 }
 
 /** Audit the retained original children, not today's cost projection. A known
@@ -3372,138 +3621,24 @@ async function historicalRecoverySpend(
     if (run.startedAt < segmentStart || run.finishedAt > segmentEnd) return { reason: "child_round_mismatch" };
     const models = Object.values(run.usage?.byModel ?? {});
     let childUsd: number;
-    if (run.usage?.turns === 0 && models.length === 0 && action === "review") {
-      const refusal = await verifiedReviewAttachRefusal(run, service);
+    if (run.usage?.turns === 0 && models.length === 0) {
+      const refusal = await verifiedSetupAttachRefusal(run, service, {
+        repo: instance.repo,
+        ref: row.branch,
+        ...(row.pr !== undefined ? { pr: row.pr.number } : {}),
+      });
       if (refusal !== "verified")
         return {
-          reason: refusal === "unavailable" ? "review_start_store_unavailable" : "review_start_evidence_unavailable",
+          reason:
+            action === "review"
+              ? refusal === "unavailable"
+                ? "review_start_store_unavailable"
+                : "review_start_evidence_unavailable"
+              : "child_price_unknown",
         };
       childUsd = 0;
-      noWorkReviews.push(run.id);
-    } else if (run.usage?.turns === 0 && models.length === 0 && action === "findings") {
-      // Zero tokens are not a price receipt. Only a complete final server
-      // record that stopped in setup before any model/tool/work is $0 evidence.
-      const final = await service
-        .getRun(run.id, {
-          include: "messages",
-          requireFinalRecord: true,
-          privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
-        })
-        .catch(() => undefined);
-      const child = final?.ok === true ? final.value : undefined;
-      const events = child?.events;
-      const preparingIndex =
-        events?.findIndex((event) => event.type === "run_state" && event.state === "preparing") ?? -1;
-      const waitingDeployIndex =
-        events?.findIndex((event) => event.type === "run_state" && event.state === "waiting_deploy") ?? -1;
-      const drainStartIndex =
-        events?.findIndex(
-          (event) => event.type === "span_start" && event.name === "dispatch.workspace.attach.drain-wait",
-        ) ?? -1;
-      const drainEndIndex =
-        events?.findIndex(
-          (event) =>
-            event.type === "span_end" &&
-            event.name === "dispatch.workspace.attach.drain-wait" &&
-            event.status === "error",
-        ) ?? -1;
-      const attachStartIndex =
-        events?.findIndex((event) => event.type === "span_start" && event.name === "dispatch.workspace.attach") ?? -1;
-      const attachEndIndex =
-        events?.findIndex(
-          (event) =>
-            event.type === "span_end" && event.name === "dispatch.workspace.attach" && event.status === "error",
-        ) ?? -1;
-      const refusalIndex =
-        events?.findIndex((event) => event.type === "refusal" && event.code === "setup_failed") ?? -1;
-      const attachStart = events?.[attachStartIndex];
-      const attachEnd = events?.[attachEndIndex];
-      const drainStart = events?.[drainStartIndex];
-      const drainEnd = events?.[drainEndIndex];
-      const drainWaitSetupRefusal =
-        run.liveState?.state === "waiting_deploy" &&
-        child?.liveState?.state === "waiting_deploy" &&
-        preparingIndex < 0 &&
-        attachStartIndex >= 0 &&
-        attachStartIndex < waitingDeployIndex &&
-        waitingDeployIndex < drainStartIndex &&
-        drainStartIndex < drainEndIndex &&
-        drainEndIndex < attachEndIndex &&
-        attachEndIndex < refusalIndex &&
-        attachStart?.type === "span_start" &&
-        attachEnd?.type === "span_end" &&
-        attachStart.spanId === attachEnd.spanId &&
-        drainStart?.type === "span_start" &&
-        drainEnd?.type === "span_end" &&
-        drainStart.spanId === drainEnd.spanId &&
-        events?.slice(waitingDeployIndex + 1).every((event) => event.type !== "run_state") === true &&
-        events?.[refusalIndex]?.type === "refusal" &&
-        events[refusalIndex].cause === "system";
-      const setupBoundaryIndex = drainWaitSetupRefusal ? waitingDeployIndex : preparingIndex;
-      if (
-        child === undefined ||
-        child.id !== run.id ||
-        child.idempotencyKey !== run.idempotencyKey ||
-        child.parentInstanceId !== run.parentInstanceId ||
-        child.userId !== run.userId ||
-        child.repo !== run.repo ||
-        child.agent !== run.agent ||
-        child.threadKey !== run.threadKey ||
-        child.startedAt !== run.startedAt ||
-        child.finishedAt !== run.finishedAt ||
-        run.status !== "failed" ||
-        (run.liveState?.state !== "preparing" && !drainWaitSetupRefusal) ||
-        child.status !== "failed" ||
-        (child.liveState?.state !== "preparing" && !drainWaitSetupRefusal) ||
-        child.truncated !== false ||
-        child.eventCount !== run.eventCount ||
-        child.storedEventCount !== run.eventCount ||
-        events === undefined ||
-        events.length !== run.eventCount ||
-        child.usage?.turns !== 0 ||
-        child.usage.byModel === undefined ||
-        Object.keys(child.usage.byModel).length !== 0 ||
-        run.headSha !== undefined ||
-        run.pushed !== undefined ||
-        run.pr !== undefined ||
-        child.headSha !== undefined ||
-        child.pushed !== undefined ||
-        child.pr !== undefined ||
-        child.verdict !== undefined ||
-        child.reviewPost !== undefined ||
-        child.reviewHead !== undefined ||
-        child.dispositions !== undefined ||
-        child.doorPublicationPending !== undefined ||
-        child.lease !== undefined ||
-        events.filter((event) => event.type === "refusal" && event.code === "setup_failed").length !== 1 ||
-        setupBoundaryIndex < 0 ||
-        events.some(
-          (event, index) =>
-            event.seq !== index + 1 ||
-            !(
-              event.type === "input" ||
-              event.type === "run_meta" ||
-              event.type === "coordinator_tag" ||
-              // The dispatcher records prior-thread context before setup; later
-              // narrative events cannot attest to a pre-model refusal.
-              (event.type === "context" && typeof event.text === "string" && index < setupBoundaryIndex) ||
-              (event.type === "refusal" && event.code === "setup_failed") ||
-              (event.type === "run_state" &&
-                ["admitted", "waiting_deploy", "waiting_repository", "falling_back", "preparing"].includes(
-                  event.state,
-                )) ||
-              ((event.type === "span_start" || event.type === "span_end") &&
-                (event.name === "request" ||
-                  event.name === "slack.receive" ||
-                  event.name === "post.card_close" ||
-                  event.name === "post.reply" ||
-                  event.name.startsWith("dispatch.")))
-            ),
-        )
-      )
-        return { reason: "child_price_unknown" };
-      childUsd = 0;
-      noWork.push(run.id);
+      if (action === "review") noWorkReviews.push(run.id);
+      else if (action === "findings") noWork.push(run.id);
     } else if (
       models.length === 0 ||
       !Number.isSafeInteger(run.usage?.turns) ||
@@ -6679,26 +6814,150 @@ function unitLead(instance: CoordinatorInstance, row: CoordinatorUnit): string {
   return `↳ *ship* unit ${row.unit}${row.title ? ` — ${row.title}` : ""} for ${who}, from ${from}: \`${row.branch}\` in ${instance.repo}`;
 }
 
-/** Round 0's pipeline branch: `refs/heads/<branch>` at the base's tip, on
- *  origin before any attach; a branch already there is success inside. */
+/** Branch creation uses the existing owner transaction; a retry only observes unknown work. */
 async function branch(body: Record<string, unknown>, deps: AdminCoordinatorDeps): Promise<IngressResponse> {
   const id = parseInstanceId(body.parentInstanceId);
   if (!id.ok) return json(400, { ok: false, error: id.error });
-  if (body.unit !== undefined && (typeof body.unit !== "string" || !UNIT_ID.test(body.unit)))
-    return json(400, { ok: false, error: "unit must be a unit id" });
   const at = (deps.clock ?? systemClock)();
   const instance = await deps.instances.get(id.value);
   if (!instance) return json(404, { ok: false, error: "unknown_instance" });
-  const unit = await unitRowOf(deps, instance, body.unit as string | undefined);
-  if (!unit.ok) return unit.response;
-  const name = unit.row?.branch ?? instance.branch;
   const base = instance.base;
   if (base === undefined) return json(200, { ok: false, reason: `no base branch is known for ${instance.repo}`, at });
+  if (typeof body.unit !== "string" || !UNIT_ID.test(body.unit))
+    return json(400, { ok: false, error: "unit must be a unit id" });
+  const found = await unitRowOf(deps, instance, body.unit);
+  if (!found.ok) return found.response;
+  let row = found.row!;
+  if (!isCoordinatorUnit(row)) return json(503, { ok: false, error: "github_unavailable", at });
+  const execution = {
+    workflowId: body.executionWorkflowId as string,
+    ...(body.recoveryActionId === undefined ? {} : { recoveryActionId: body.recoveryActionId as string }),
+  };
+  if (
+    execution.workflowId !== (row.recovery?.workflowId ?? instance.id) ||
+    execution.recoveryActionId !== row.recovery?.actionId ||
+    typeof body.effectId !== "string" ||
+    !STEP_NAME_PATTERN.test(body.effectId)
+  )
+    return json(409, { ok: false, error: "effect_execution_mismatch", at });
+  const effectId = body.effectId;
+  if (
+    !Number.isSafeInteger(body.effectOrdinal) ||
+    (body.effectOrdinal as number) < 1 ||
+    (row.currentEffect?.id === effectId
+      ? body.effectOrdinal !== row.currentEffect.ordinal
+      : body.effectOrdinal !== (row.currentEffect?.ordinal ?? 0) + 1)
+  )
+    return json(409, { ok: false, error: "effect_execution_mismatch", at });
+  const ok = () =>
+    json(200, { ok: true, branch: row.branch, base, effectOrdinal: row.currentEffect?.ordinal ?? 0, at });
+  const unavailable = () =>
+    json(503, { ok: false, error: "github_unavailable", message: "branch creation outcome remains unverified", at });
+  const refused = (reason: UnitEffectRefusal) =>
+    reason === "stopped"
+      ? json(409, { ok: false, error: "stopped", at })
+      : ["stale", "busy", "uncertain", "unavailable", "incomplete"].includes(reason)
+        ? unavailable()
+        : json(409, { ok: false, error: "effect_admission_refused", reason, at });
+  const move = async (input: UnitEffectTransition) => {
+    const result = await deps.instances.transitionUnitEffect(input);
+    if (result.ok) row = result.unit;
+    return result;
+  };
+  const read = async (ref: string): Promise<BranchRefRead> => {
+    const fact = await deps.fetchBranchRef(instance.repo, ref).catch(() => ({ kind: "unverified" as const }));
+    return fact.kind === "verified" && (fact.ref !== `refs/heads/${ref}` || !fullHead(fact.sha))
+      ? { kind: "unverified" }
+      : fact;
+  };
   try {
-    await deps.createBranchRef(instance.repo, name, base);
-    return json(200, { ok: true, branch: name, base, at });
-  } catch (err) {
-    return json(200, { ok: false, reason: describe(err), at });
+    let cell = row.currentEffect;
+    if (cell && cell.id !== effectId && cell.phase === "active") return unavailable();
+    if (!cell || cell.id !== effectId) {
+      if (instance.stop) return refused("stopped");
+      const existing = await read(row.branch);
+      if (existing.kind === "verified") return ok();
+      if (existing.kind !== "missing") return unavailable();
+      const source = await read(base);
+      if (source.kind !== "verified") return unavailable();
+      const admitted = await move({
+        kind: "admit",
+        expected: row,
+        execution,
+        effect: {
+          version: 1,
+          id: effectId,
+          ordinal: body.effectOrdinal as number,
+          phase: "active",
+          execution,
+          target: {
+            repo: instance.repo,
+            ref: row.branch,
+            base,
+            headSha: source.sha,
+            ...(row.pr ? { pr: row.pr.number } : {}),
+          },
+          calls: [{ operation: "branch_create", state: "unstarted" }],
+        },
+      });
+      if (!admitted.ok) return refused(admitted.reason);
+      cell = row.currentEffect!;
+    }
+    if (
+      cell.execution.workflowId !== execution.workflowId ||
+      cell.execution.recoveryActionId !== execution.recoveryActionId ||
+      cell.calls.length !== 1 ||
+      cell.calls[0].operation !== "branch_create"
+    )
+      return refused("conflict");
+    if (cell.phase === "settled")
+      return cell.calls[0].state === "accepted"
+        ? ok()
+        : json(200, { ok: false, reason: "branch creation was refused", at });
+    let call = cell.calls[0];
+    if (call.state === "unstarted") {
+      const begun = await move({ kind: "begin", expected: row, execution, effectId, call: 0 });
+      if (!begun.ok) {
+        if (begun.reason === "stopped") {
+          const cancelled = await move({ kind: "cancel", expected: row, execution, effectId, call: 0 });
+          if (!cancelled.ok) return refused(cancelled.reason);
+          const settled = await move({ kind: "settle", expected: row, execution, effectId });
+          if (!settled.ok) return refused(settled.reason);
+        }
+        return refused(begun.reason);
+      }
+      const result = await deps
+        .createBranchRef(instance.repo, cell.target.ref, cell.target.headSha)
+        .catch(() => ({ state: "uncertain" as const }));
+      const outcome =
+        result.state === "accepted" && sameCommit(result.commitSha, cell.target.headSha)
+          ? { state: "accepted" as const, commitSha: cell.target.headSha }
+          : result.state === "refused"
+            ? { state: "refused" as const, cause: "external_refused" as const }
+            : { state: "uncertain" as const };
+      const completed = await move({ kind: "complete", expected: row, execution, effectId, call: 0, outcome });
+      if (!completed.ok) return refused(completed.reason);
+      call = row.currentEffect!.calls[0];
+    }
+    if (call.state === "pending" || call.state === "uncertain") {
+      const fact = await read(cell.target.ref);
+      if (fact.kind !== "verified" || !sameCommit(fact.sha, cell.target.headSha)) return unavailable();
+      const resolved = await move({
+        kind: "resolve",
+        expected: row,
+        execution,
+        effectId,
+        call: 0,
+        observation: { kind: "branch_ref", repo: instance.repo, ref: cell.target.ref, headSha: fact.sha },
+      });
+      if (!resolved.ok) return refused(resolved.reason);
+      call = row.currentEffect!.calls[0];
+    }
+    const settled = await move({ kind: "settle", expected: row, execution, effectId });
+    if (!settled.ok) return refused(settled.reason);
+    return call.state === "accepted" ? ok() : json(200, { ok: false, reason: "branch creation was refused", at });
+  } catch {
+    return unavailable();
   }
 }
 

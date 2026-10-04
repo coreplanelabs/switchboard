@@ -2,9 +2,15 @@
 // the machine class its tools execute on, the identity it acts as, and the
 // minutes it may run. A preset declares one; the run's EFFECTIVE profile is
 // what the pipeline hands the factory, the ledger and the runner — never the
-// preset's fields read again downstream. Pure and near-leaf: the only value
-// import is the registry's `runawayTurnCap`, itself pure.
-import { runawayTurnCap, type AgentDef, type Identity, type MachineClass } from "../agents/registry.js";
+// preset's fields read again downstream. Pure and near-leaf: its value
+// imports are the registry's pure machine vocabulary and turn-cap policy.
+import {
+  MACHINE_CLASSES,
+  runawayTurnCap,
+  type AgentDef,
+  type Identity,
+  type MachineClass,
+} from "../agents/registry.js";
 
 export type { Identity, MachineClass };
 
@@ -41,6 +47,23 @@ export interface RunProfile {
   /** The scope whose boundary clipped `minutes` below the preset's own; absent
    *  when the preset's declared budget stands. */
   boundedBy?: BoundaryScope;
+}
+
+/** Validate the same persisted profile before resolution or record adoption. */
+export function isRunProfile(value: unknown): value is RunProfile {
+  if (typeof value !== "object" || value === null) return false;
+  const profile = value as Record<string, unknown>;
+  return (
+    typeof profile.machine === "string" &&
+    MACHINE_CLASSES.includes(profile.machine as MachineClass) &&
+    typeof profile.identity === "string" &&
+    Object.hasOwn(IDENTITY_ORDER, profile.identity) &&
+    typeof profile.minutes === "number" &&
+    Number.isFinite(profile.minutes) &&
+    profile.minutes > 0 &&
+    (profile.boundedBy === undefined ||
+      (typeof profile.boundedBy === "string" && BOUNDARY_SCOPES.includes(profile.boundedBy as BoundaryScope)))
+  );
 }
 
 /** The identity order `none < read < write`: a boundary's `maxIdentity` admits

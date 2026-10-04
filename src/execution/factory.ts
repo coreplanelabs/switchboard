@@ -660,9 +660,17 @@ export async function makeExecutor(
    *  probe and the attach become its `http.client` children (tracing.md item 21). */
   span?: Span,
 ): Promise<ExecutorSelection> {
+  if (ctx.reattach === undefined) assertRemainingAllowance(ctx);
   const sandboxKey = physicalSandboxKey(opts, ctx);
   const selection = await selectExecutor(opts, ctx, sandboxKey, span);
   return selection.backend === "sandbox" && sandboxKey !== undefined ? { ...selection, sandboxKey } : selection;
+}
+
+function assertRemainingAllowance(ctx: ExecutorContext): void {
+  const remaining = ctx.remainingMs?.();
+  if (remaining === undefined) return;
+  const bound = attachBoundWithinRun(remaining);
+  if (bound.kind === "exhausted") throw new ResidentLeaseSpentError("/attach", bound.note, remaining);
 }
 
 /** A recorded key wins on recovery. An older binding used the thread key; it must not
@@ -905,8 +913,10 @@ async function selectExecutor(
   // The same ledger owner must authorize both resident attach and every cold
   // fallback. A stale generation cannot bypass the fence when the probe fails.
   if (ctx.residentClaim !== undefined) await ctx.residentClaim();
-  const recheckOwner = async (): Promise<number | undefined> =>
-    ctx.residentClaim === undefined ? undefined : ctx.residentClaim();
+  const recheckOwner = async (): Promise<number | undefined> => {
+    assertRemainingAllowance(ctx);
+    return ctx.residentClaim === undefined ? undefined : ctx.residentClaim();
+  };
 
   // `repo-resident`. Resident selection: only when a target repo was resolved
   // AND the resident backend is configured. A SERVICEABLE state → ResidentExecutor;
@@ -929,12 +939,20 @@ async function selectExecutor(
     const token = processSecrets.named(tokenEnv);
     if (!token) throw new Error(`execution.resident is configured but ${tokenEnv} is not set`);
     const resource = repoResourceId(ctx.repo);
-    const through = await probeThroughBlip(resident, token, resource, span, ctx.stopSignal);
+    const through = await probeThroughBlip(
+      resident,
+      token,
+      resource,
+      span,
+      ctx.stopSignal,
+      leaseClippedBudget(ctx.remainingMs?.()),
+    );
     let probe: ResidentStatusProbe = through.probe;
     /** How long the selection probe waited through a blip the Worker typed
      *  transient (execution.md item 9): drawn from the first attach's budget
      *  and named on the card with the attach's own wait. */
     const probeWaitMs = through.waitedMs;
+    assertRemainingAllowance(ctx);
     /** Set when the run held the one /await-restore request (item 27) — the
      *  card names the wait whichever way the answer went. */
     let waitedForRestore = false;
@@ -947,13 +965,14 @@ async function selectExecutor(
         resident.baseUrl,
         token.reveal(),
         resource,
-        AWAIT_RESTORE_TIMEOUT_MS,
+        restoreHoldBudget(ctx.remainingMs?.()),
         span,
         ctx.stopSignal,
       );
       // The run's own stop ended the hold: the stop's typed shape, read by the
       // dispatch as the stop it is — a stopped run is never provisioned cold.
       if (wait.kind === "stopped") throw wakeStopped("/await-restore");
+      assertRemainingAllowance(ctx);
       if (wait.kind === "status") {
         waitedForRestore = true;
         // The state the restore landed on; the probe's seed handle (item 25)
@@ -1743,6 +1762,7 @@ async function probeResident(
    *  operator who set it to keep a cold fallback fast gets that pace through
    *  the wait too. */
   stop?: AbortSignal,
+  remainingMs?: number,
 ): Promise<ResidentStatusProbe> {
   if (probeOutage && systemClock() < probeOutage.until) {
     return { kind: "unreachable", error: `${probeOutage.error}; probe skipped during outage window`, transport: true };
@@ -1751,7 +1771,7 @@ async function probeResident(
     cfg.baseUrl,
     token.reveal(),
     resource,
-    cfg.probeTimeoutMs ?? PROBE_TIMEOUT_MS,
+    Math.max(1, Math.min(cfg.probeTimeoutMs ?? PROBE_TIMEOUT_MS, remainingMs ?? Infinity)),
     span,
     stop,
   );
@@ -1802,7 +1822,12 @@ async function probeThroughBlip(
   budgetMs: number = FIRST_ATTACH_WAIT_MS,
 ): Promise<{ probe: ResidentStatusProbe; waitedMs: number }> {
   const since = systemClock();
-  const first = await probeResident(cfg, token, resource, span, stopSignal);
+  const left = () => Math.max(0, budgetMs - (systemClock() - since));
+  const probeWithinAllowance = (signal?: AbortSignal) => {
+    const remaining = left();
+    return probeResident(cfg, token, resource, span, signal, remaining);
+  };
+  const first = await probeWithinAllowance(stopSignal);
   // The stop aborted the probe: the stop's own typed error, as the loop throws
   // it after each of its probes — never a cold fallback on the view the stop
   // itself produced. A stop pending beside an answer is read where the
@@ -1830,7 +1855,7 @@ async function probeThroughBlip(
   return waitOnStatus<{ probe: ResidentStatusProbe; waitedMs: number }>({
     first,
     since,
-    probe: (signal) => probeResident(cfg, token, resource, span, signal),
+    probe: probeWithinAllowance,
     budgetMs,
     signal: stopSignal,
     route: "/status",

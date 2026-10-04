@@ -333,6 +333,7 @@ function harness(
   const recoveries: Array<{ id: string; params: OriginalUnitRecoveryParams }> = [];
   let reviewFetches = 0;
   const github = new InMemoryGithubApi({ "acme/api": { files: over.files ?? {}, issues: over.issues ?? [] } });
+  let dispatchScript = over.script ?? registers("run-child");
   const deps: AdminCoordinatorDeps = {
     tokens: "tokens" in over ? over.tokens : TOKENS,
     childAdmission: createCoordinatorChildAdmission(() => over.draining === true),
@@ -353,7 +354,95 @@ function harness(
     reportLedger: ledger,
     dispatch: async (msg, dispatchIo, opts) => {
       dispatched.push({ msg, opts });
-      return (over.script ?? registers("run-child"))(msg, dispatchIo, opts);
+      const tag = opts!.coordinator;
+      let registration: Promise<void> = Promise.resolve();
+      let registeredId: string | undefined;
+      const fixtureIO: ChannelIO = {
+        ...dispatchIo,
+        runStarted: ({ id }) => {
+          registration = (async () => {
+            const agent = msg.text.startsWith("agent:review") ? "review" : "coding";
+            const claimed = await ledger.claim({
+              runId: id,
+              threadKey: msg.threadKey,
+              gen: "gen-A",
+              leaseMs: 30_000,
+              startedAt: NOW,
+              meta: {
+                agent,
+                channelId: msg.channelId,
+                userId: msg.userId,
+                threadKey: msg.threadKey,
+                authenticatedAs: msg.authenticatedAs,
+                postedBy: msg.postedBy,
+                repo: opts!.operationTarget!.repo,
+                ref: tag.branch,
+                parentInstanceId: tag.parentInstanceId,
+                coordinatorUnit: tag.unit,
+                coordinatorAttempt: tag.instanceAttempt,
+                idempotencyKey: tag.idempotencyKey,
+                ...(agent === "review" ? { pr: tag.publication?.pr, headSha: tag.publication?.expectedHeadSha } : {}),
+              },
+              card: null,
+              system: "",
+              tools: [],
+              state: {},
+            });
+            expect(claimed).toMatchObject({ ok: true });
+            expect(
+              await ledger.append(id, "gen-A", [
+                {
+                  type: "run_meta",
+                  agent,
+                  seq: 1,
+                  repo: opts!.operationTarget!.repo,
+                  ref: tag.branch,
+                  ...(agent === "review" ? { pr: tag.publication?.pr, headSha: tag.publication?.expectedHeadSha } : {}),
+                },
+                {
+                  type: "coordinator_tag",
+                  seq: 2,
+                  parentInstanceId: tag.parentInstanceId,
+                  unit: tag.unit,
+                  branch: tag.branch,
+                  base: tag.base,
+                  publication: tag.publication,
+                  transportWorkflowId: tag.transportWorkflowId,
+                },
+              ]),
+            ).toMatchObject({ ok: true });
+            registeredId = id;
+            dispatchIo.runStarted?.({ id });
+          })();
+        },
+      };
+      const result = await dispatchScript(msg, fixtureIO, opts);
+      await registration;
+      if (registeredId) {
+        const live = ledger.live.get(registeredId)!;
+        const stored = await store.get(registeredId);
+        const events = [
+          ...(ledger.events.get(registeredId) ?? []),
+          ...(stored?.events ?? []).filter((e) => e.type !== "coordinator_tag" && e.type !== "run_meta"),
+        ].map((event, index) => ({ ...event, seq: index + 1 }));
+        const { profile: _profile, pr: _targetPr, ...meta } = live.meta;
+        expect(
+          await ledger.finish(
+            registeredId,
+            "gen-A",
+            record(registeredId, {
+              ...stored,
+              ...meta,
+              startedAt: NOW,
+              finishedAt: NOW,
+              events,
+              eventCount: events.length,
+              storedEventCount: events.length,
+            }),
+          ),
+        ).toMatchObject({ ok: true });
+      }
+      return result;
     },
     ioFor: (thread) => {
       threadsAsked.push(thread);
@@ -397,9 +486,21 @@ function harness(
       return over.ahead;
     },
     github,
-    createBranchRef: async (repo, branch, fromRef) => {
-      branches.push([repo, branch, fromRef]);
-      if (over.branchError) throw over.branchError;
+    fetchBranchRef: async (_repo, ref) => {
+      const facts = ref === "main" ? undefined : await deps.fetchPrFacts?.({ repo: _repo, number: 77 });
+      const sha =
+        ref !== "main" && deps.fetchBranchHeadSha
+          ? await deps.fetchBranchHeadSha(_repo, ref)
+          : facts?.headRef === ref
+            ? facts.headSha
+            : typeof over.branchHead === "string"
+              ? over.branchHead
+              : "a".repeat(40);
+      return typeof sha === "string" ? { kind: "verified", ref: `refs/heads/${ref}`, sha } : { kind: "unverified" };
+    },
+    createBranchRef: async (repo, branch, sha) => {
+      branches.push([repo, branch, sha]);
+      return over.branchError ? { state: "refused", status: 403 } : { state: "accepted", commitSha: sha };
     },
     fetchPrReviews: async () => {
       const i = reviewFetches++;
@@ -522,6 +623,9 @@ function harness(
   };
   return {
     deps,
+    setScript: (script: Script) => {
+      dispatchScript = script;
+    },
     sleeps,
     compares,
     reviewFetches: () => reviewFetches,
@@ -553,14 +657,76 @@ function harness(
 }
 
 /** A POST with the coordinator's bearer by default; `null` sends none. */
-const post = (path: string, body: unknown, auth: string | null = "Bearer tok-coord") => ({
-  method: "POST",
-  path,
-  headers: auth !== null ? { authorization: auth } : {},
-  body: typeof body === "string" ? body : JSON.stringify(body),
-});
+const post = (path: string, input: unknown, auth: string | null = "Bearer tok-coord") => {
+  let body = input;
+  if (typeof input === "object" && input !== null && path.endsWith("/spawn") && !("effectId" in input)) {
+    const fields = input as Record<string, unknown>;
+    body = {
+      ...fields,
+      effectId: fields.step,
+      effectOrdinal: fields.effectOrdinal ?? 1,
+      executionWorkflowId: fields.recoveryWorkflowId ?? fields.parentInstanceId,
+    };
+  }
+  return {
+    method: "POST",
+    path,
+    headers: auth !== null ? { authorization: auth } : {},
+    body: typeof body === "string" ? body : JSON.stringify(body),
+  };
+};
 
-const spawnBody = { parentInstanceId: INSTANCE.id, step: "u12/0/coding", preset: "coding", prompt: "do the unit" };
+const spawnBody = {
+  parentInstanceId: INSTANCE.id,
+  unit: "u12",
+  step: "u12/0/coding",
+  effectId: "u12/0/coding",
+  effectOrdinal: 1,
+  executionWorkflowId: INSTANCE.id,
+  preset: "coding",
+  prompt: "do the unit",
+};
+async function seedSpawnUnit(h: ReturnType<typeof harness>, instance: CoordinatorInstance = INSTANCE) {
+  await h.instances.put(instance);
+  expect(
+    await h.instances.putUnits([
+      {
+        instanceId: instance.id,
+        unit: "u12",
+        slug: "u12",
+        branch: instance.branch!,
+        threadKey: instance.threadKey,
+        dependsOn: [],
+        rounds: [],
+      },
+    ]),
+  ).toEqual({ ok: true });
+  h.deps.fetchBranchRef = async (_repo, ref) => ({ kind: "verified", ref: `refs/heads/${ref}`, sha: "a".repeat(40) });
+}
+async function fixtureStep(h: ReturnType<typeof harness>, route: string, input: Record<string, unknown>) {
+  const body = { ...input };
+  if ((route === "spawn" || route === "branch") && !Object.hasOwn(body, "effectOrdinal")) {
+    const brief = body.brief as { unit?: string } | undefined;
+    const unit = body.unit ?? brief?.unit;
+    const row = (await h.instances.listUnits(body.parentInstanceId as string)).find((row) => row.unit === unit);
+    const effectId = route === "spawn" ? body.step : body.effectId;
+    Object.assign(body, {
+      effectId,
+      effectOrdinal:
+        row?.currentEffect && row.currentEffect.id === effectId
+          ? row.currentEffect.ordinal
+          : (row?.currentEffect?.ordinal ?? 0) + 1,
+      executionWorkflowId: body.recoveryWorkflowId ?? body.parentInstanceId,
+    });
+    if (route === "spawn")
+      h.deps.fetchBranchRef = async (_repo, ref) => ({
+        kind: "verified",
+        ref: `refs/heads/${ref}`,
+        sha: row?.publication?.expectedHeadSha ?? row?.lastPush ?? "a".repeat(40),
+      });
+  }
+  return handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}${route}`, body), h.deps);
+}
 
 describe("the coordinator routes — the bearer (item 9)", () => {
   it("names its paths", () => {
@@ -643,7 +809,7 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
           return { status: "completed" };
         },
       });
-      await h.instances.put({ ...instance, ...(testCase.postedBy ? { postedBy: testCase.postedBy } : {}) });
+      await seedSpawnUnit(h, { ...instance, ...(testCase.postedBy ? { postedBy: testCase.postedBy } : {}) });
       const response = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps);
       expect(response.status).toBe(200);
       expect(h.dispatched[0].msg.directAudience).toEqual(testCase.stamped ? audience : undefined);
@@ -655,7 +821,7 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
 
   it("dispatches the child as the instance's user, channel and thread — a body naming another user is ignored — with the preset directive, the repository and the prompt as its text and the coordinator tag as its option; answers the run id and thread at registration", async () => {
     const h = harness();
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
     const res = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}spawn`, {
         ...spawnBody,
@@ -667,7 +833,7 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
     );
     expect(res).toEqual({
       status: 200,
-      body: { ok: true, runId: "run-child", threadKey: INSTANCE.threadKey, at: NOW },
+      body: { ok: true, runId: "run-child", threadKey: INSTANCE.threadKey, effectOrdinal: 1, at: NOW },
     });
     expect(h.dispatched).toHaveLength(1);
     expect(h.dispatched[0].msg).toEqual({
@@ -681,14 +847,14 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
       receivedAt: NOW,
     });
     expect(h.dispatched[0].opts).toEqual({
-      coordinator: { ...TAG, branch: INSTANCE.branch },
+      coordinator: { ...TAG, branch: INSTANCE.branch, unit: "u12", instanceAttempt: 0 },
       operationTarget: { repo: INSTANCE.repo, ref: INSTANCE.branch },
     });
   });
 
   it("the decision's tier rides the child's request: `model` and `effort` on the body become the child's own directives, ahead of every scope (the one-door plan's tiers rule)", async () => {
     const h = harness();
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
     const res = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}spawn`, { ...spawnBody, model: "anthropic/strong-model", effort: "high" }),
       h.deps,
@@ -701,7 +867,7 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
 
   it("every configured child model is strong after the classifier tier retires, and a malformed model or effort is refused by name", async () => {
     const h = harness();
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
     const res = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}spawn`, { ...spawnBody, model: "anthropic/fast-model" }),
       h.deps,
@@ -725,19 +891,22 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
 
   it("the tag carries the instance's base — the branch the child's pull request targets — and no base field at all for an instance that knows none, so the post-step's own resolution runs", async () => {
     const h = harness();
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
     await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps);
     expect(h.dispatched[0].opts!.coordinator.base).toBe("main");
     const { base: _base, ...baseless } = INSTANCE;
     const noBase = harness();
-    await noBase.instances.put(baseless);
+    await seedSpawnUnit(noBase, baseless);
     await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), noBase.deps);
     expect(noBase.dispatched[0].opts!.coordinator).toEqual({
       parentInstanceId: INSTANCE.id,
       idempotencyKey: KEY,
       branch: INSTANCE.branch,
+      base: "main",
+      unit: "u12",
+      instanceAttempt: 0,
     });
-    expect("base" in noBase.dispatched[0].opts!.coordinator).toBe(false);
+    expect(noBase.dispatched[0].opts!.coordinator.base).toBe("main");
   });
 
   it("an existing-PR coding spawn carries the durable publication binding only for its sole owner and fails closed after ownership changes", async () => {
@@ -760,6 +929,7 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
       threadKey: INSTANCE.threadKey,
       rounds: [],
       publication,
+      pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
     };
     const ownership = (owner: { instanceId: string; unit: string } | undefined) => ({
       claim: () => true,
@@ -781,13 +951,22 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
     await changed.instances.put(INSTANCE);
     await changed.instances.putUnits([row]);
     changed.deps.runnerOwnership = ownership({ instanceId: "ship_other", unit: "u12" });
+    const rival = {
+      ...row,
+      unit: "OTHER",
+      publication: { ...publication, owner: { instanceId: INSTANCE.id, unit: "OTHER" } },
+    };
+    (changed.instances as unknown as { units: Map<string, string> }).units.set(
+      `${INSTANCE.id}\0OTHER`,
+      JSON.stringify(rival),
+    );
     const blocked = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}spawn`, { ...spawnBody, unit: "u12" }),
       changed.deps,
     );
     expect(blocked).toMatchObject({
-      status: 409,
-      body: { ok: false, error: "publication_ownership_changed" },
+      status: 503,
+      body: { ok: false, error: "spawn_unavailable" },
     });
     expect(changed.dispatched).toEqual([]);
 
@@ -808,7 +987,7 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
 
   it("SIGTERM closes child admission immediately: a spawn is held for the next generation and dispatch is never entered", async () => {
     const h = harness({ draining: true });
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
     const res = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps);
     expect(res).toEqual({
       status: 409,
@@ -820,7 +999,7 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
   it("SIGTERM fences a spawn that was already reading its parent before the drain boundary", async () => {
     const state = { draining: false };
     const h = harness(state);
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
     const get = h.deps.instances.get.bind(h.deps.instances);
     let reading!: () => void;
     const readStarted = new Promise<void>((resolve) => {
@@ -865,7 +1044,7 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
         return { status: "completed" };
       },
     });
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
 
     const response = handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps);
     await dispatchStarted;
@@ -883,10 +1062,10 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
     expect(h.dispatched).toEqual([]);
   });
 
-  it("a live run on the instance's thread carrying the same key answers its id with alreadySpawned and starts nothing", async () => {
+  it("a registry-only child carrying the same key cannot authorize adoption and starts nothing", async () => {
     const h = harness();
-    await h.instances.put(INSTANCE);
-    const live = h.registry.create("coding · child", {
+    await seedSpawnUnit(h);
+    const _live = h.registry.create("coding · child", {
       agent: "coding",
       channelId: INSTANCE.channelId,
       userId: INSTANCE.userId,
@@ -894,16 +1073,13 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
       ...TAG,
     });
     const res = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps);
-    expect(res).toEqual({
-      status: 200,
-      body: { ok: true, runId: live.id, threadKey: INSTANCE.threadKey, alreadySpawned: true, at: NOW },
-    });
+    expect(res).toEqual({ status: 503, body: { ok: false, error: "spawn_unavailable", at: NOW } });
     expect(h.dispatched).toEqual([]);
   });
 
   it("a live run on the thread without the key — another step's child, or a person's run — answers busy (409) naming it and starts nothing; a run live on another generation's ledger row counts the same", async () => {
     const h = harness();
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
     const other = h.registry.create("review · previous", {
       agent: "review",
       channelId: INSTANCE.channelId,
@@ -920,7 +1096,7 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
     expect(h.dispatched).toEqual([]);
 
     const far = harness();
-    await far.instances.put(INSTANCE);
+    await seedSpawnUnit(far);
     await far.ledger.claim({
       runId: "run-far",
       threadKey: INSTANCE.threadKey,
@@ -944,7 +1120,7 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
   // thread — a one-unit task's child spawns into the requesting thread beside it.
   it("a hosted parent live in the requesting thread — unfinished on the registry and on the ledger under the host key — does not make the spawn busy: the one-unit task's coding child is dispatched, and the child's own ledger claim on the thread is accepted", async () => {
     const h = harness();
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
     h.registry.create("ship · acme/api", {
       agent: "ship",
       hosted: true,
@@ -972,7 +1148,7 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
     const res = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps);
     expect(res).toEqual({
       status: 200,
-      body: { ok: true, runId: "run-child", threadKey: INSTANCE.threadKey, at: NOW },
+      body: { ok: true, runId: "run-child", threadKey: INSTANCE.threadKey, effectOrdinal: 1, at: NOW },
     });
     expect(h.dispatched).toHaveLength(1);
     // The child's ledger claim on the thread key itself is accepted (tracked):
@@ -993,14 +1169,11 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
 
   it("a finished run in the instance's thread carrying the key answers its id with alreadySpawned and starts nothing — a retry that lands after the child ended never spawns a second one", async () => {
     const h = harness();
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
     await h.store.put(record("run-done", { ...TAG }));
     await h.store.put(record("run-other-thread", { threadKey: "slack:C1:2.0", ...TAG }));
     const res = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps);
-    expect(res).toEqual({
-      status: 200,
-      body: { ok: true, runId: "run-done", threadKey: INSTANCE.threadKey, alreadySpawned: true, at: NOW },
-    });
+    expect(res).toEqual({ status: 503, body: { ok: false, error: "spawn_unavailable", at: NOW } });
     expect(h.dispatched).toEqual([]);
   });
 
@@ -1011,13 +1184,14 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
         return { status: "refused", refusal: "agent_allowlist" };
       },
     });
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
     const res = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps);
     expect(res).toEqual({
       status: 403,
       body: {
         ok: false,
         error: "agent_allowlist",
+        effectOrdinal: 1,
         message: "🚫 You're not on the allowlist for the `coding` agent.",
         at: NOW,
       },
@@ -1038,9 +1212,9 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
         return { status: "refused", refusal: "coordinator_thread_live" };
       },
     });
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
     const res = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps);
-    expect(res).toMatchObject({ status: 200, body: { ok: true, runId: "run-1", alreadySpawned: true } });
+    expect(res).toMatchObject({ status: 409, body: { ok: false, error: "busy", effectOrdinal: 1 } });
   });
 
   it("a dispatch that ended with no run and no gate's name is a failed spawn (502) naming what the thread saw; an instance whose channel cannot be rebuilt is 503", async () => {
@@ -1050,13 +1224,13 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
         return { status: "failed" };
       },
     });
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
     expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps)).toEqual({
-      status: 502,
-      body: { ok: false, error: "spawn_failed", message: "⚠️ the resident could not be attached", at: NOW },
+      status: 503,
+      body: { ok: false, error: "spawn_unavailable", at: NOW },
     });
     const noChannel = harness();
-    await noChannel.instances.put(INSTANCE);
+    await seedSpawnUnit(noChannel);
     noChannel.deps.ioFor = () => undefined;
     expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), noChannel.deps)).toEqual(
       {
@@ -1069,7 +1243,7 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
 
   it("validates the body before anything is read: a bad instance id, a step with a colon, an unknown preset, the ship preset, an empty prompt, a budget under two minutes and non-JSON are 400", async () => {
     const h = harness();
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
     const bad = [
       { ...spawnBody, parentInstanceId: "has:colon" },
       { ...spawnBody, step: "a:b" },
@@ -3147,7 +3321,7 @@ describe("createAdminCoordinatorHandler — the node adapter decides the door fr
 
   it("an admitted POST reads the body once the door is open and answers the step; the bearer is looked at exactly once per request", async () => {
     const h = harness();
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
     // The secret is frozen, so the count is a proxy in front of it: one `reveal` per request.
     let reveals = 0;
     const counted = new Proxy(TOKENS, {
@@ -3164,7 +3338,13 @@ describe("createAdminCoordinatorHandler — the node adapter decides the door fr
     handler(r.req, r.res);
     const out = await r.answered;
     expect(out.status).toBe(200);
-    expect(JSON.parse(out.body!)).toEqual({ ok: true, runId: "run-child", threadKey: INSTANCE.threadKey, at: NOW });
+    expect(JSON.parse(out.body!)).toEqual({
+      ok: true,
+      runId: "run-child",
+      threadKey: INSTANCE.threadKey,
+      effectOrdinal: 1,
+      at: NOW,
+    });
     expect(r.bodyRead()).toBe(true);
     expect(reveals).toBe(1);
   });
@@ -3286,6 +3466,19 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     dependsOn: unit === "U11" ? ["U10"] : [],
     rounds: [],
     ...over,
+    ...(over.pr !== undefined && over.publication === undefined
+      ? {
+          publication: {
+            repo: PLAN_INSTANCE.repo,
+            pr: over.pr.number,
+            headRef: `plan/fixture/${unit.toLowerCase()}`,
+            baseRef: "main",
+            expectedHeadSha: over.lastPush ?? "a".repeat(40),
+            publicationRef: `plan/fixture/${unit.toLowerCase()}`,
+            owner: { instanceId: PLAN_INSTANCE.id, unit },
+          },
+        }
+      : {}),
   });
   const issue = (number: number, title: string): IssueSummary => ({
     number,
@@ -3298,12 +3491,13 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     createdAt: "2000-01-01T00:00:00.000Z",
     updatedAt: "2000-01-01T00:00:00.000Z",
   });
-  const call = (h: ReturnType<typeof harness>, step: string, body: Record<string, unknown>) =>
-    handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}${step}`, body), h.deps);
+  const call = fixtureStep;
   async function planHarness(over: Parameters<typeof harness>[0] = {}) {
     const h = harness({ files: { "docs/plans/fixture.md": PLAN_TEXT, "AGENTS.md": "# Rules" }, ...over });
     await h.instances.put(PLAN_INSTANCE);
     await h.instances.putUnits([unitRow("U10"), unitRow("U11")]);
+    h.deps.fetchBranchRef = async (_repo, ref) =>
+      ref === "main" ? { kind: "verified", ref: "refs/heads/main", sha: "a".repeat(40) } : { kind: "missing" };
     return h;
   }
   async function privatePlanHarness(over: Parameters<typeof harness>[0] = {}) {
@@ -4813,7 +5007,10 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     ]);
     // One thread per unit (record 0055): the review child runs in the unit's thread.
     const res = await call(h, "spawn", review("U10/1/review"));
-    expect(res).toEqual({ status: 200, body: { ok: true, runId: "run-child", threadKey: "slack:C1:2.0", at: NOW } });
+    expect(res).toEqual({
+      status: 200,
+      body: { ok: true, runId: "run-child", threadKey: "slack:C1:2.0", effectOrdinal: 1, at: NOW },
+    });
     expect(h.dispatched).toHaveLength(1);
     const { msg, opts } = h.dispatched[0];
     expect(msg.threadKey).toBe("slack:C1:2.0");
@@ -4827,6 +5024,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       idempotencyKey: "plan-fixture:U10/1/review",
       unit: "U10",
       instanceAttempt: 0,
+      publication: (await h.instances.listUnits(PLAN_INSTANCE.id))[0].publication,
       branch: "plan/fixture/u10",
       base: "main",
     });
@@ -4836,7 +5034,9 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     // A run live in the unit's thread (a person's, since the runner awaited its
     // own child) is what makes a review spawn busy.
     const busy = await planHarness();
-    await busy.instances.putUnits([unitRow("U10", { threadKey: "slack:C1:2.0" })]);
+    await busy.instances.putUnits([
+      unitRow("U10", { threadKey: "slack:C1:2.0", pr: { number: 7, url: "https://github.com/acme/api/pull/7" } }),
+    ]);
     const other = busy.registry.create("coding · person", {
       agent: "coding",
       channelId: PLAN_INSTANCE.channelId,
@@ -4857,10 +5057,14 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       unitRow("U10", {
         threadKey: "slack:C1:9.0",
         reviewThread: { threadKey: "slack:C1:3.0", sourceUrl: "https://acme.slack.com/archives/C1/p3" },
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
       }),
     ]);
     const late = await call(older, "spawn", review("U10/1/review"));
-    expect(late).toEqual({ status: 200, body: { ok: true, runId: "run-child", threadKey: "slack:C1:3.0", at: NOW } });
+    expect(late).toEqual({
+      status: 200,
+      body: { ok: true, runId: "run-child", threadKey: "slack:C1:3.0", effectOrdinal: 1, at: NOW },
+    });
     expect(opened).toHaveLength(0);
     expect(older.dispatched[0].msg.threadKey).toBe("slack:C1:3.0");
     expect(older.dispatched[0].msg.sourceUrl).toBe("https://acme.slack.com/archives/C1/p3");
@@ -4886,7 +5090,13 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       reviewHead: "a".repeat(40),
       events: [{ type: "answer", text: "Changes requested: one nit.", seq: 1 }],
     });
-    const rows = () => [unitRow("U10", { threadKey: "slack:C1:2.0", reviewThread: { threadKey: "slack:C1:3.0" } })];
+    const rows = () => [
+      unitRow("U10", {
+        threadKey: "slack:C1:2.0",
+        reviewThread: { threadKey: "slack:C1:3.0" },
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+      }),
+    ];
     const live = await planHarness();
     await live.instances.putUnits(rows());
     await live.store.put(reviewRecord);
@@ -4914,7 +5124,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     });
     expect(await call(free, "spawn", findings)).toEqual({
       status: 200,
-      body: { ok: true, runId: "run-child", threadKey: "slack:C1:2.0", at: NOW },
+      body: { ok: true, runId: "run-child", threadKey: "slack:C1:2.0", effectOrdinal: 1, at: NOW },
     });
     expect(free.dispatched).toHaveLength(1);
     expect(free.dispatched[0].msg.threadKey).toBe("slack:C1:2.0");
@@ -4939,17 +5149,149 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     });
   });
 
+  it("branch freezes its base, persists pending before the POST and never replays an unknown outcome", async () => {
+    const h = await planHarness();
+    const head = "a".repeat(40);
+    let observed = "missing";
+    let posts = 0;
+    h.deps.fetchBranchRef = async (_repo, ref) =>
+      ref === "main"
+        ? { kind: "verified", ref: "refs/heads/main", sha: head }
+        : observed === "missing"
+          ? { kind: "missing" }
+          : { kind: "verified", ref: `refs/heads/${ref}`, sha: observed };
+    h.deps.createBranchRef = async (_repo, _ref, sha) => {
+      posts++;
+      expect(sha).toBe(head);
+      const row = (await h.instances.listUnits(PLAN_INSTANCE.id)).find((row) => row.unit === "U10")!;
+      expect(row.currentEffect?.calls[0].state).toBe("pending");
+      expect(row.currentEffect?.target.headSha).toBe(head);
+      return { state: "uncertain" };
+    };
+    const input = {
+      parentInstanceId: PLAN_INSTANCE.id,
+      unit: "U10",
+      executionWorkflowId: PLAN_INSTANCE.id,
+      effectId: "U10/branch",
+      effectOrdinal: 1,
+    };
+    expect((await call(h, "branch", input)).status).toBe(503);
+    observed = "b".repeat(40);
+    expect((await call(h, "branch", input)).status).toBe(503);
+    expect(posts).toBe(1);
+    observed = head;
+    await h.instances.markStopped(PLAN_INSTANCE.id, NOW);
+    expect(await call(h, "branch", input)).toMatchObject({ body: { ok: true } });
+    expect(await call(h, "branch", input)).toMatchObject({ body: { ok: true } });
+    expect(posts).toBe(1);
+    const cell = (await h.instances.listUnits(PLAN_INSTANCE.id)).find((row) => row.unit === "U10")!.currentEffect!;
+    expect(cell.phase).toBe("settled");
+    expect(cell.calls).toEqual([{ operation: "branch_create", state: "accepted", commitSha: head }]);
+  });
+  it("a verified existing branch is reused without a creation POST", async () => {
+    const h = await planHarness();
+    h.deps.fetchBranchRef = async (_repo, ref) => ({ kind: "verified", ref: `refs/heads/${ref}`, sha: "c".repeat(40) });
+    expect(
+      await call(h, "branch", {
+        parentInstanceId: PLAN_INSTANCE.id,
+        unit: "U10",
+        executionWorkflowId: PLAN_INSTANCE.id,
+        effectId: "U10/branch",
+        effectOrdinal: 1,
+      }),
+    ).toMatchObject({ status: 200, body: { ok: true } });
+    expect(h.branches).toEqual([]);
+    expect(
+      (await h.instances.listUnits(PLAN_INSTANCE.id)).find((row) => row.unit === "U10")!.currentEffect,
+    ).toBeUndefined();
+  });
+  it("a known 422 remains refused and does not become unknown or permit another POST", async () => {
+    const h = await planHarness();
+    let posts = 0;
+    h.deps.createBranchRef = async () => {
+      posts++;
+      return { state: "refused", status: 422 };
+    };
+    const input = {
+      parentInstanceId: PLAN_INSTANCE.id,
+      unit: "U10",
+      executionWorkflowId: PLAN_INSTANCE.id,
+      effectId: "U10/branch",
+      effectOrdinal: 1,
+    };
+    expect(await call(h, "branch", input)).toMatchObject({ status: 200, body: { ok: false } });
+    expect(await call(h, "branch", input)).toMatchObject({ status: 200, body: { ok: false } });
+    expect(posts).toBe(1);
+    const cell = (await h.instances.listUnits(PLAN_INSTANCE.id)).find((row) => row.unit === "U10")!.currentEffect!;
+    expect(cell.phase).toBe("settled");
+    expect(cell.calls).toEqual([{ operation: "branch_create", state: "refused", cause: "external_refused" }]);
+  });
+  it("stop between admission and begin cancels only the provably unstarted creation", async () => {
+    const h = await planHarness();
+    const transition = h.instances.transitionUnitEffect.bind(h.instances);
+    h.instances.transitionUnitEffect = async (input) => {
+      const result = await transition(input);
+      if (input.kind === "admit" && result.ok) await h.instances.markStopped(PLAN_INSTANCE.id, NOW);
+      return result;
+    };
+    expect(
+      await call(h, "branch", {
+        parentInstanceId: PLAN_INSTANCE.id,
+        unit: "U10",
+        executionWorkflowId: PLAN_INSTANCE.id,
+        effectId: "U10/branch",
+        effectOrdinal: 1,
+      }),
+    ).toMatchObject({ status: 409, body: { error: "stopped" } });
+    expect(h.branches).toEqual([]);
+    const cell = (await h.instances.listUnits(PLAN_INSTANCE.id)).find((row) => row.unit === "U10")!.currentEffect!;
+    expect(cell.phase).toBe("settled");
+    expect(cell.calls).toEqual([{ operation: "branch_create", state: "refused", cause: "not_started" }]);
+  });
+  it("branch rejects missing or stale execution identity before a GitHub mutation", async () => {
+    const h = await planHarness();
+    for (const executionWorkflowId of [undefined, "retired-workflow"]) {
+      expect(
+        (
+          await call(h, "branch", {
+            parentInstanceId: PLAN_INSTANCE.id,
+            unit: "U10",
+            executionWorkflowId,
+            effectId: "U10/branch",
+            effectOrdinal: 1,
+          })
+        ).status,
+      ).toBe(409);
+    }
+    expect(h.branches).toEqual([]);
+  });
   it("branch creates the unit's branch from the base on origin and answers ok; a create that fails answers ok: false with the reason, never a throw; an instance without a base says so", async () => {
     const h = await planHarness();
-    expect(await call(h, "branch", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" })).toEqual({
+    expect(
+      await call(h, "branch", {
+        parentInstanceId: PLAN_INSTANCE.id,
+        unit: "U10",
+        executionWorkflowId: PLAN_INSTANCE.id,
+        effectId: "U10/branch",
+        effectOrdinal: 1,
+      }),
+    ).toEqual({
       status: 200,
-      body: { ok: true, branch: "plan/fixture/u10", base: "main", at: NOW },
+      body: { ok: true, branch: "plan/fixture/u10", base: "main", effectOrdinal: 1, at: NOW },
     });
-    expect(h.branches).toEqual([["acme/api", "plan/fixture/u10", "main"]]);
+    expect(h.branches).toEqual([["acme/api", "plan/fixture/u10", "a".repeat(40)]]);
     const failing = await planHarness({ branchError: new Error("HTTP 403 forbidden") });
-    expect(await call(failing, "branch", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" })).toEqual({
+    expect(
+      await call(failing, "branch", {
+        parentInstanceId: PLAN_INSTANCE.id,
+        unit: "U10",
+        executionWorkflowId: PLAN_INSTANCE.id,
+        effectId: "U10/branch",
+        effectOrdinal: 1,
+      }),
+    ).toEqual({
       status: 200,
-      body: { ok: false, reason: "HTTP 403 forbidden", at: NOW },
+      body: { ok: false, reason: "branch creation was refused", at: NOW },
     });
     const noBase = harness();
     await noBase.instances.put({ ...INSTANCE, base: undefined });
@@ -4968,7 +5310,10 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       preset: "coding",
       brief: { kind: "contract", unit: "U10", rebase: { branch: "plan/fixture/u10", onto: "main" } },
     });
-    expect(res).toEqual({ status: 200, body: { ok: true, runId: "run-child", threadKey: "slack:C1:2.0", at: NOW } });
+    expect(res).toEqual({
+      status: 200,
+      body: { ok: true, runId: "run-child", threadKey: "slack:C1:2.0", effectOrdinal: 1, at: NOW },
+    });
     expect(h.dispatched).toHaveLength(1);
     const { msg, opts } = h.dispatched[0];
     expect(msg.threadKey).toBe("slack:C1:2.0");
@@ -5007,6 +5352,11 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
         events: [{ type: "answer", text: "Changes requested: one nit.", seq: 1 }],
       }),
     );
+    const codingRow = (await h.instances.listUnits(PLAN_INSTANCE.id)).find((row) => row.unit === "U10")!;
+    await h.instances.putUnits([
+      unitRow("U10", { ...codingRow, pr: { number: 7, url: "https://github.com/acme/api/pull/7" } }),
+    ]);
+    h.setScript(registers("run-findings"));
     const findings = await call(h, "spawn", {
       parentInstanceId: PLAN_INSTANCE.id,
       step: "U10/1/findings",
@@ -5015,7 +5365,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     });
     expect(findings).toEqual({
       status: 200,
-      body: { ok: true, runId: "run-child", threadKey: "slack:C1:2.0", at: NOW },
+      body: { ok: true, runId: "run-findings", threadKey: "slack:C1:2.0", effectOrdinal: 2, at: NOW },
     });
     const findingsDispatch = h.dispatched[1];
     expect(findingsDispatch.msg.threadKey).toBe("slack:C1:2.0");
@@ -5034,6 +5384,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
         idempotencyKey: "plan-fixture:U10/1/findings",
         unit: "U10",
         instanceAttempt: 0,
+        publication: (await h.instances.listUnits(PLAN_INSTANCE.id)).find((row) => row.unit === "U10")!.publication,
         branch: "plan/fixture/u10",
         base: "main",
         issuedFindingIds: ["F1"],
@@ -5490,9 +5841,14 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
           case "unit-start":
             return wire({ ok: true, threadKey: "slack:C1:2.0", branch: "plan/fixture/u10", base: "main" });
           case "branch":
-            return wire({ ok: true, branch: "plan/fixture/u10", base: "main" });
+            return wire({ ok: true, branch: "plan/fixture/u10", base: "main", effectOrdinal: 0 });
           case "spawn":
-            return wire({ ok: true, runId: n === 1 ? "run-c0" : "run-r1", threadKey: "slack:C1:2.0" });
+            return wire({
+              ok: true,
+              runId: n === 1 ? "run-c0" : "run-r1",
+              threadKey: "slack:C1:2.0",
+              effectOrdinal: n,
+            });
           case "pr-check":
             if (n === 1) return wire({ ok: true, state: "none" });
             return wire({
@@ -8037,8 +8393,7 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
 // arrival order, and marks them consumed by the spawn's step; a review spawn
 // leaves them; leftovers at a final ending run once as one fresh turn.
 describe("the fold — a unit's thread events reach the pipeline's next step (record 0051's fold rule)", () => {
-  const call = (h: ReturnType<typeof harness>, step: string, body: Record<string, unknown>) =>
-    handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}${step}`, body), h.deps);
+  const call = fixtureStep;
   const key = { instanceId: INSTANCE.id, unit: "u12" };
   const row: CoordinatorUnit = {
     instanceId: INSTANCE.id,
@@ -8078,7 +8433,7 @@ describe("the fold — a unit's thread events reach the pipeline's next step (re
     });
     const res = await call(h, "spawn", {
       parentInstanceId: INSTANCE.id,
-      step: "u12/1/fix",
+      step: "u12/1/findings",
       preset: "coding",
       prompt: "Address the findings.",
       unit: "u12",
@@ -8092,12 +8447,13 @@ describe("the fold — a unit's thread events reach the pipeline's next step (re
     // The stored attachments ride the child's message as its own images and documents.
     expect(h.dispatched[0]!.msg.images).toEqual([shot]);
     expect(h.dispatched[0]!.msg.documents).toEqual([note]);
-    expect((await h.instances.listEvents(key)).map((e) => e.consumedBy)).toEqual(["u12/1/fix", "u12/1/fix"]);
+    expect((await h.instances.listEvents(key)).map((e) => e.consumedBy)).toEqual(["u12/1/findings", "u12/1/findings"]);
     expect(await h.instances.listEvents(key, true)).toEqual([]);
 
+    h.setScript(registers("run-child-2"));
     const roundTwo = await call(h, "spawn", {
       parentInstanceId: INSTANCE.id,
-      step: "u12/2/fix",
+      step: "u12/2/findings",
       preset: "coding",
       prompt: "Address the next findings.",
       unit: "u12",
@@ -8201,7 +8557,7 @@ describe("the fold — a unit's thread events reach the pipeline's next step (re
     expect(artifacts).toHaveLength(1);
   });
 
-  it("a coding spawn that fails before registration leaves its attachment event unconsumed, so the retry carries and consumes it", async () => {
+  it("an uncertain coding dispatch leaves its attachment unconsumed and never replays on retry", async () => {
     const h = await foldHarness({ script: async () => ({ status: "failed" }) });
     await h.instances.appendEvent(key, {
       ...event(1, "Attachments from the ship request.", "slack:UALICE", "alice"),
@@ -8216,27 +8572,41 @@ describe("the fold — a unit's thread events reach the pipeline's next step (re
       unit: "u12",
     };
 
-    expect((await call(h, "spawn", body)).status).toBe(502);
+    expect((await call(h, "spawn", body)).status).toBe(503);
     expect(h.dispatched[0]!.msg.images).toEqual([shot]);
     expect(await h.instances.listEvents(key, true)).toHaveLength(1);
 
-    h.deps.dispatch = async (msg, io, opts) => {
-      h.dispatched.push({ msg, opts });
+    h.setScript(async (msg, io, opts) => {
       return registers("run-retry")(msg, io, opts);
-    };
-    expect((await call(h, "spawn", body)).status).toBe(200);
-    expect(h.dispatched[1]!.msg.images).toEqual([shot]);
-    expect((await h.instances.listEvents(key))[0]!.consumedBy).toBe("u12/0/coding");
+    });
+    expect((await call(h, "spawn", body)).status).toBe(503);
+    expect(h.dispatched).toHaveLength(1);
+    expect(await h.instances.listEvents(key, true)).toHaveLength(1);
   });
 
   it("a review spawn leaves the events unconsumed and folds nothing", async () => {
     const h = await foldHarness();
     await h.instances.appendEvent(key, event(1, "also update the readme"));
+    await h.instances.putUnits([
+      {
+        ...row,
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+        publication: {
+          repo: INSTANCE.repo,
+          pr: 7,
+          headRef: row.branch,
+          baseRef: "main",
+          publicationRef: row.branch,
+          expectedHeadSha: "a".repeat(40),
+          owner: { instanceId: INSTANCE.id, unit: row.unit },
+        },
+      },
+    ]);
     const res = await call(h, "spawn", {
       parentInstanceId: INSTANCE.id,
       step: "u12/1/review",
       preset: "review",
-      prompt: "Review the pull request.",
+      brief: { kind: "review", unit: "u12", pr: 7, headSha: "a".repeat(40), round: 1 },
       unit: "u12",
     });
     expect(res.status).toBe(200);
@@ -8291,7 +8661,7 @@ describe("the fold — a unit's thread events reach the pipeline's next step (re
     );
   });
 
-  it("a spawn replayed after a reclaim answers alreadySpawned before the events are read and folds nothing twice", async () => {
+  it("a registry-only spawn candidate cannot authorize adoption or consume queued thread events", async () => {
     const h = await foldHarness();
     h.registry.create("coding · child", {
       agent: "coding",
@@ -8299,18 +8669,18 @@ describe("the fold — a unit's thread events reach the pipeline's next step (re
       userId: INSTANCE.userId,
       threadKey: INSTANCE.threadKey,
       parentInstanceId: INSTANCE.id,
-      idempotencyKey: `${INSTANCE.id}:u12/1/fix`,
+      idempotencyKey: `${INSTANCE.id}:u12/1/findings`,
     });
     await h.instances.appendEvent(key, event(1, "also update the readme"));
     const res = await call(h, "spawn", {
       parentInstanceId: INSTANCE.id,
-      step: "u12/1/fix",
+      step: "u12/1/findings",
       preset: "coding",
       prompt: "Address the findings.",
       unit: "u12",
     });
-    expect(res.status).toBe(200);
-    expect((res.body as { alreadySpawned?: boolean }).alreadySpawned).toBe(true);
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({ error: "spawn_unavailable" });
     expect(h.dispatched).toHaveLength(0);
     expect(await h.instances.listEvents(key, true)).toHaveLength(1);
   });
@@ -8341,7 +8711,7 @@ describe("the runner's routes read the hard stop's mark (record 0060; issue 1924
 
   it("spawn refuses `stopped` over a marked row before any child is dispatched — a terminal refusal, never a retry", async () => {
     const h = harness();
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
     await h.instances.markStopped(INSTANCE.id, NOW - 1_000);
     const res = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps);
     expect(res).toEqual({ status: 409, body: { ok: false, error: "stopped", at: NOW } });
@@ -8682,7 +9052,7 @@ describe("POST /admin/coordinator/recover-unit — pre-PR same-unit coding", () 
       post(`${COORDINATOR_ADMIN_PREFIX}spawn`, { ...body, step: `${body.step}/a1` }),
       h.deps,
     );
-    expect(second).toMatchObject({ status: 409, body: { error: "recovery_claim_mismatch" } });
+    expect(second).toMatchObject({ status: 409, body: { error: "effect_execution_mismatch" } });
     expect(h.dispatched).toHaveLength(1);
 
     const moved = harness({ branchHead: HEAD });
@@ -10142,7 +10512,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       });
       h.deps.fixupCommitSubjects = async () => [];
       const children: CoordinatorTag[] = [];
-      h.deps.dispatch = async (msg, io, opts) => {
+      h.setScript(async (msg, io, opts) => {
         const tag = opts!.coordinator;
         children.push(tag);
         expect(msg.userId).toBe(INSTANCE.userId);
@@ -10224,7 +10594,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           io.runStarted?.({ id: "run-ci-repair" });
         }
         return { status: "completed" };
-      };
+      });
       const routes: string[] = [];
       const bot: CoordinatorBot = {
         step: async (route, body) => {
@@ -10798,7 +11168,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       });
       h.deps.fixupCommitSubjects = async () => [];
       const children: CoordinatorTag[] = [];
-      h.deps.dispatch = async (msg, io, opts) => {
+      h.setScript(async (msg, io, opts) => {
         const tag = opts!.coordinator;
         children.push(tag);
         expect(msg.userId).toBe(INSTANCE.userId);
@@ -10857,7 +11227,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         }
         io.runStarted?.({ id });
         return { status: "completed" };
-      };
+      });
       const routes: string[] = [];
       const bot: CoordinatorBot = {
         step: async (route, body) => {
@@ -10951,11 +11321,11 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           verdict: "request_changes",
         },
       });
-      h.deps.dispatch = async (_msg, io) => {
+      h.setScript(async (_msg, io) => {
         await h.store.put(recoveredReview);
         io.runStarted?.({ id: recoveredReview.id });
         return { status: "completed" };
-      };
+      });
       expect(
         await handleCoordinatorRequest(
           post(`${COORDINATOR_ADMIN_PREFIX}spawn`, {
@@ -10983,6 +11353,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         handleCoordinatorRequest(
           post(`${COORDINATOR_ADMIN_PREFIX}spawn`, {
             parentInstanceId: INSTANCE.id,
+            effectOrdinal: 2,
             unit: "U12",
             recoveryActionId: REVIEW_ACTION,
             recoveryWorkflowId: REVIEW_WORKFLOW,
@@ -11004,7 +11375,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           h.deps,
         );
       const laterDispatch = vi.fn(registers("run-next-child"));
-      h.deps.dispatch = laterDispatch;
+      h.setScript(laterDispatch);
       const before = await h.instances.listUnits(INSTANCE.id);
       for (const scenario of [
         "dismissed",
@@ -11061,7 +11432,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       }
       h.deps.fetchPrReviews = async () => [laterReview(), independentReview];
       h.deps.commenterAuthorized = async () => true;
-      h.deps.dispatch = registers("run-next-child");
+      h.setScript(registers("run-next-child"));
       expect(await admit()).toMatchObject({ status: 200, body: { runId: "run-next-child" } });
     },
   );
@@ -12628,7 +12999,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     h.deps.fetchPrFacts = async () => exactRecoveryFacts(head);
     h.deps.fetchCommitChecks = async () => ({ total: 1, pending: [], failed: [] });
     h.deps.fixupCommitSubjects = async () => [];
-    h.deps.dispatch = async (msg, io, opts) => {
+    h.setScript(async (msg, io, opts) => {
       const tag = opts!.coordinator;
       children.push(tag);
       expect(msg.userId).toBe(INSTANCE.userId);
@@ -12694,7 +13065,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         io.runStarted?.({ id: "run-recovered-review" });
       }
       return { status: "completed" };
-    };
+    });
     expect((await callRecovery(h)).status).toBe(200);
     const routes: string[] = [];
     const bot: CoordinatorBot = {
@@ -14455,7 +14826,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       h.deps.fetchCommitChecks = async () => ({ total: 1, pending: [], failed: [] });
       h.deps.fixupCommitSubjects = async () => [];
       const children: CoordinatorTag[] = [];
-      h.deps.dispatch = async (msg, io, opts) => {
+      h.setScript(async (msg, io, opts) => {
         const tag = opts!.coordinator;
         children.push(tag);
         expect(tag).toMatchObject({
@@ -14484,7 +14855,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         );
         io.runStarted?.({ id: "run-recovered-review" });
         return { status: "completed" };
-      };
+      });
       const routes: string[] = [];
       const bot: CoordinatorBot = {
         step: async (route, body) => {
@@ -14852,6 +15223,270 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     candidate.storedEventCount = candidate.events.length;
     await h.store.put(candidate);
 
+    expect((await callRecovery(h)).status).toBe(409);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+    expect(h.recoveries).toEqual([]);
+  });
+
+  const admittedCodingSetupRefusal = (stage: "coding" | "findings"): RunRecord => {
+    const source: RunEvent[] = [
+      { type: "input", messageId: "m1", text: "continue the original task" },
+      { type: "run_meta", agent: "coding", repo: INSTANCE.repo, ref: INSTANCE.branch, pr: PR.number, headSha: HEAD },
+      ...Array.from({ length: 4 }, (_, index): RunEvent[] => [
+        { type: "span_start", spanId: `gate-${index}`, name: "dispatch.admission" },
+        {
+          type: "span_end",
+          spanId: `gate-${index}`,
+          name: "dispatch.admission",
+          startedAt: NOW,
+          durationMs: 1,
+          status: "ok",
+        },
+      ]).flat(),
+      { type: "span_start", spanId: "memory", name: "dispatch.memory_read" },
+      { type: "context", text: "user: prior request" },
+      { type: "run_state", state: "admitted", since: NOW - minutesToMs(20), bound: NOW },
+      { type: "span_end", spanId: "memory", name: "dispatch.memory_read", startedAt: NOW, durationMs: 1, status: "ok" },
+      { type: "span_start", spanId: "attach", name: "dispatch.workspace.attach" },
+      {
+        type: "span_end",
+        spanId: "attach",
+        name: "dispatch.workspace.attach",
+        startedAt: NOW,
+        durationMs: 1,
+        status: "error",
+      },
+      { type: "refusal", code: "setup_failed", cause: "system", text: "dependencies_invalid" },
+      { type: "span_start", spanId: "refuse", name: "dispatch.refuse" },
+      { type: "span_end", spanId: "refuse", name: "dispatch.refuse", startedAt: NOW, durationMs: 1, status: "ok" },
+      { type: "span_start", spanId: "reply", name: "post.reply" },
+      { type: "span_end", spanId: "reply", name: "post.reply", startedAt: NOW, durationMs: 1, status: "ok" },
+    ];
+    const events = source.map((event, index) => ({ ...event, seq: index + 1 }));
+    return failedBeforeWork({
+      id: stage === "coding" ? "run-original-coding" : "run-setup-refused-findings",
+      idempotencyKey: `${INSTANCE.id}:U12/${stage === "coding" ? "0/coding" : "1/findings"}`,
+      startedAt: NOW - minutesToMs(stage === "coding" ? 55 : 20),
+      finishedAt: NOW - minutesToMs(stage === "coding" ? 50 : 15),
+      liveState: { state: "admitted", since: NOW - minutesToMs(stage === "coding" ? 55 : 20), bound: NOW },
+      headSha: HEAD,
+      pr: { ...PR, head: INSTANCE.branch },
+      events,
+      eventCount: events.length,
+      storedEventCount: events.length,
+    });
+  };
+
+  const admittedCodingBudgetHarness = async (stage: "coding" | "findings", mutate?: (child: RunRecord) => void) => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD), branchHead: HEAD });
+    await h.instances.put({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 0.5 } });
+    const row =
+      stage === "findings"
+        ? setupRefusalRow()
+        : ({
+            ...requestChangesRow(),
+            rounds: [
+              { index: 0, agent: "coding", outcome: "started", at: NOW - minutesToMs(54) },
+              { index: 0, agent: "coding", outcome: "pr_opened", at: NOW - minutesToMs(49) },
+              ...requestChangesRow().rounds,
+            ],
+          } as CoordinatorUnit);
+    await h.instances.putUnits([row]);
+    await h.store.put(reviewRecord());
+    const child = admittedCodingSetupRefusal(stage);
+    mutate?.(child);
+    await h.store.put(child);
+    return { h, row, child };
+  };
+
+  it.each(["coding", "findings"] as const)(
+    "prices the complete admitted %s attach refusal at zero while preserving prior spend and input target",
+    async (stage) => {
+      const { h, child } = await admittedCodingBudgetHarness(stage);
+      expect(child.events).toHaveLength(21);
+      expect(child.events.slice(12, 17).map((event) => event.type)).toEqual([
+        "run_state",
+        "span_end",
+        "span_start",
+        "span_end",
+        "refusal",
+      ]);
+      expect(await callRecovery(h)).toMatchObject({ status: 200 });
+      const [claimed] = await h.instances.listUnits(INSTANCE.id);
+      expect(claimed?.recovery).toMatchObject({
+        kind: "findings",
+        expectedHeadSha: HEAD,
+        remainingMs: minutesToMs(60),
+        accounting: {
+          spendUsd: 0.25,
+          renewalsSpent: 0,
+          grant: { renewals: 0, costCapUsd: 0.5 },
+          children: expect.arrayContaining([
+            { runId: child.id, key: child.idempotencyKey, usd: 0 },
+            { runId: "run-original-review", key: `${INSTANCE.id}:U12/1/review`, usd: 0.25 },
+          ]),
+        },
+      });
+      expect(h.dispatched).toEqual([]);
+    },
+  );
+
+  it.each([
+    "model activity",
+    "tool activity",
+    "missing metadata",
+    "foreign input head",
+    "wrong attach span",
+    "successful attach",
+    "missing refusal",
+    "truncated record",
+    "unmatched setup span",
+    "foreign metadata without summary",
+    "preparing without attach proof",
+  ] as const)(
+    "refuses admitted coding setup evidence with %s without changing allowance or owner",
+    async (scenario) => {
+      const { h, row } = await admittedCodingBudgetHarness("findings", (child) => {
+        if (scenario === "model activity")
+          child.events[19] = { type: "span_start", name: "model.turn", spanId: "model", seq: 20 };
+        if (scenario === "tool activity")
+          child.events[19] = { type: "tool_call", tool: "bash", summary: "git status", seq: 20 };
+        if (scenario === "missing metadata")
+          child.events[1] = { type: "context", text: "metadata unavailable", seq: 2 };
+        if (scenario === "foreign input head")
+          child.events[1] = {
+            type: "run_meta",
+            agent: "coding",
+            repo: INSTANCE.repo,
+            ref: INSTANCE.branch,
+            pr: PR.number,
+            headSha: "9".repeat(40),
+            seq: 2,
+          };
+        if (scenario === "wrong attach span") child.events[15] = { ...child.events[15], spanId: "other" } as RunEvent;
+        if (scenario === "successful attach") child.events[15] = { ...child.events[15], status: "ok" } as RunEvent;
+        if (scenario === "missing refusal") child.events[16] = { type: "context", text: "failed", seq: 17 };
+        if (scenario === "truncated record") child.truncated = true;
+        if (scenario === "unmatched setup span")
+          child.events[3] = { ...child.events[3], spanId: "unknown" } as RunEvent;
+        if (scenario === "foreign metadata without summary") {
+          child.headSha = undefined;
+          child.pr = undefined;
+          child.events[1] = {
+            type: "run_meta",
+            agent: "coding",
+            repo: "foreign/repo",
+            ref: "foreign-ref",
+            pr: 999,
+            headSha: "9".repeat(40),
+            seq: 2,
+          };
+        }
+        if (scenario === "preparing without attach proof") {
+          child.headSha = undefined;
+          child.pr = undefined;
+          child.liveState = { state: "preparing", since: NOW, bound: NOW };
+          child.events = [
+            { type: "run_meta", agent: "coding", seq: 1 },
+            { type: "run_state", state: "preparing", since: NOW, bound: NOW, seq: 2 },
+            { type: "refusal", code: "setup_failed", cause: "workspace", text: "setup failed", seq: 3 },
+          ];
+          child.eventCount = child.events.length;
+          child.storedEventCount = child.events.length;
+        }
+      });
+      expect((await callRecovery(h)).status).toBe(409);
+      expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+      expect(h.recoveries).toEqual([]);
+      expect(h.dispatched).toEqual([]);
+    },
+  );
+
+  it.each(["preparing", "drain"] as const)(
+    "prices a complete %s setup refusal carrying only its resolved input target at zero",
+    async (phase) => {
+      const h = harness({ prFacts: exactRecoveryFacts(HEAD), branchHead: HEAD });
+      await h.instances.put({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 0.5 } });
+      await h.instances.putUnits([setupRefusalRow()]);
+      await h.store.put(reviewRecord());
+      const child = phase === "preparing" ? failedBeforeWork() : failedDuringDrainWait();
+      child.headSha = HEAD;
+      child.pr = { ...PR, head: INSTANCE.branch };
+      child.events[1] = {
+        type: "run_meta",
+        agent: "coding",
+        repo: INSTANCE.repo,
+        ref: INSTANCE.branch,
+        pr: PR.number,
+        headSha: HEAD,
+        seq: 2,
+      };
+      await h.store.put(child);
+      expect(await callRecovery(h)).toMatchObject({ status: 200 });
+      const [claimed] = await h.instances.listUnits(INSTANCE.id);
+      expect(claimed?.recovery?.accounting).toMatchObject({
+        spendUsd: 0.25,
+        renewalsSpent: 0,
+        grant: { renewals: 0, costCapUsd: 0.5 },
+      });
+      expect(claimed?.recovery?.accounting?.children).toContainEqual({
+        runId: child.id,
+        key: child.idempotencyKey,
+        usd: 0,
+      });
+      expect(claimed?.publication).toEqual(publication);
+      expect(h.dispatched).toEqual([]);
+    },
+  );
+
+  it.each([
+    "missing status",
+    "invalid status",
+    "negative duration",
+    "nonfinite duration",
+    "missing start time",
+    "empty span identity",
+  ] as const)("refuses zero-spend setup evidence with %s", async (scenario) => {
+    const { h, row } = await admittedCodingBudgetHarness("findings", (child) => {
+      const event = { ...child.events[3] } as unknown as Record<string, unknown>;
+      if (scenario === "missing status") delete event.status;
+      if (scenario === "invalid status") event.status = "unknown";
+      if (scenario === "negative duration") event.durationMs = -1;
+      if (scenario === "nonfinite duration") event.durationMs = Infinity;
+      if (scenario === "missing start time") delete event.startedAt;
+      if (scenario === "empty span identity") {
+        event.spanId = "";
+        child.events[2] = { ...child.events[2], spanId: "" } as RunEvent;
+      }
+      child.events[3] = event as unknown as RunEvent;
+    });
+    expect((await callRecovery(h)).status).toBe(409);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+    expect(h.recoveries).toEqual([]);
+  });
+
+  it.each(["preparing", "drain"] as const)("refuses new attach work after a %s setup refusal", async (phase) => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD), branchHead: HEAD });
+    await h.instances.put(recoveryInstance());
+    const row = setupRefusalRow();
+    await h.instances.putUnits([row]);
+    await h.store.put(reviewRecord());
+    const child = phase === "preparing" ? failedBeforeWork() : failedDuringDrainWait();
+    child.events.push(
+      { type: "span_start", spanId: "second-attach", name: "dispatch.workspace.attach" },
+      {
+        type: "span_end",
+        spanId: "second-attach",
+        name: "dispatch.workspace.attach",
+        startedAt: NOW,
+        durationMs: 1,
+        status: "ok",
+      },
+    );
+    child.events = child.events.map((event, index) => ({ ...event, seq: index + 1 }));
+    child.eventCount = child.events.length;
+    child.storedEventCount = child.events.length;
+    await h.store.put(child);
     expect((await callRecovery(h)).status).toBe(409);
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
     expect(h.recoveries).toEqual([]);
@@ -15281,6 +15916,69 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       failed.storedEventCount = failed.events.length;
       await change?.(failed, h);
     });
+
+  it("prices an admitted review input target without crediting work or resetting earlier spend", async () => {
+    const { h, row, fixed } = await admittedReviewWithRefusalReply((child) => {
+      child.headSha = "8".repeat(40);
+      child.pr = { ...PR, head: INSTANCE.branch };
+      child.events[1] = {
+        type: "run_meta",
+        agent: "review",
+        repo: INSTANCE.repo,
+        ref: INSTANCE.branch,
+        pr: PR.number,
+        headSha: "8".repeat(40),
+        seq: 2,
+      };
+    });
+    expect(await callRecovery(h)).toMatchObject({ status: 200 });
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    expect(claimed?.recovery).toMatchObject({
+      kind: "review",
+      expectedHeadSha: fixed,
+      accounting: { spendUsd: 0.5, renewalsSpent: 0 },
+    });
+    expect(claimed?.recovery?.accounting?.children).toContainEqual({
+      runId: "run-h2-attach",
+      key: `${INSTANCE.id}:U12/2/review`,
+      usd: 0,
+    });
+    expect(claimed?.publication).toEqual(row.publication);
+    expect(claimed?.lastPush).toBe(row.lastPush);
+    expect(h.dispatched).toEqual([]);
+  });
+
+  it("prices ordered review refusal cleanup followed by closure of its original outer scopes at zero", async () => {
+    const { h, row, fixed } = await admittedReviewWithRefusalReply((child) => {
+      child.events.push(
+        ...[
+          ["card", "post.card_close"],
+          ["track", "dispatch.track"],
+          ["receive", "slack.receive"],
+          ["request", "request"],
+        ].map(([spanId, name]): RunEvent => ({
+          type: "span_end",
+          spanId: spanId!,
+          name: name!,
+          startedAt: NOW,
+          durationMs: 1,
+          status: "ok",
+        })),
+      );
+      child.events = child.events.map((event, index) => ({ ...event, seq: index + 1 }));
+      child.eventCount = child.events.length;
+      child.storedEventCount = child.events.length;
+    });
+    expect(await callRecovery(h)).toMatchObject({ status: 200 });
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    expect(claimed?.recovery).toMatchObject({
+      kind: "review",
+      expectedHeadSha: fixed,
+      accounting: { spendUsd: 0.5, renewalsSpent: 0 },
+    });
+    expect(claimed?.publication).toEqual(row.publication);
+    expect(h.dispatched).toEqual([]);
+  });
 
   it("recovers admitted review attach refusal followed by ordered refusal and reply cleanup", async () => {
     const { h, row, fixed } = await admittedReviewWithRefusalReply();
@@ -16429,7 +17127,11 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         deadlineAt: NOW + minutesToMs(60),
       },
     });
-    expect(h.deps.runnerOwnership.owner(INSTANCE.repo, PR.number)).toEqual(owner);
+    expect(h.deps.runnerOwnership.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect(await h.instances.findPullOwners({ repo: INSTANCE.repo, pr: PR.number })).toMatchObject({
+      ok: true,
+      owners: [{ instanceId: INSTANCE.id, unit: "U12" }],
+    });
   });
 
   it("revalidates the fixed head and absolute deadline at actual recovery child admission", async () => {
@@ -17551,4 +18253,290 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
     },
   );
+});
+
+describe("spawn durable effect admission", () => {
+  const body = {
+    ...spawnBody,
+    unit: "u12",
+    effectId: "u12/0/coding",
+    effectOrdinal: 1,
+    executionWorkflowId: INSTANCE.id,
+  };
+  async function setup() {
+    const h = harness();
+    await h.instances.put(INSTANCE);
+    const row: CoordinatorUnit = {
+      instanceId: INSTANCE.id,
+      unit: "u12",
+      slug: "unit",
+      branch: INSTANCE.branch!,
+      threadKey: INSTANCE.threadKey,
+      dependsOn: [],
+      rounds: [],
+    };
+    expect(await h.instances.putUnits([row])).toEqual({ ok: true });
+    h.deps.fetchBranchRef = async (_repo, ref) => ({ kind: "verified", ref: `refs/heads/${ref}`, sha: "a".repeat(40) });
+    return h;
+  }
+  async function register(
+    h: ReturnType<typeof harness>,
+    msg: IncomingMessage,
+    io: ChannelIO,
+    tag: CoordinatorTag,
+    agent = "coding",
+  ) {
+    expect((await h.instances.listUnits(INSTANCE.id))[0].currentEffect?.calls[0].state).toBe("pending");
+    expect(
+      await h.ledger.claim({
+        runId: "durable-child",
+        gen: "gen-A",
+        leaseMs: 30_000,
+        startedAt: NOW,
+        threadKey: msg.threadKey,
+        meta: {
+          agent,
+          channelId: msg.channelId,
+          userId: msg.userId,
+          authenticatedAs: msg.authenticatedAs,
+          postedBy: msg.postedBy,
+          threadKey: msg.threadKey,
+          repo: INSTANCE.repo,
+          ref: tag.branch,
+          parentInstanceId: tag.parentInstanceId,
+          coordinatorUnit: tag.unit,
+          coordinatorAttempt: tag.instanceAttempt,
+          idempotencyKey: tag.idempotencyKey,
+          ...(agent === "review" ? { pr: tag.publication?.pr, headSha: tag.publication?.expectedHeadSha } : {}),
+        },
+        card: null,
+        system: "",
+        tools: [],
+        state: {},
+      }),
+    ).toMatchObject({ ok: true });
+    await h.ledger.append("durable-child", "gen-A", [
+      {
+        type: "run_meta",
+        agent,
+        seq: 1,
+        repo: INSTANCE.repo,
+        ref: tag.branch,
+        ...(agent === "review" ? { pr: tag.publication?.pr, headSha: tag.publication?.expectedHeadSha } : {}),
+      },
+      {
+        type: "coordinator_tag",
+        seq: 2,
+        parentInstanceId: tag.parentInstanceId,
+        unit: tag.unit,
+        branch: tag.branch,
+        base: tag.base,
+        publication: tag.publication,
+        transportWorkflowId: tag.transportWorkflowId,
+      },
+    ]);
+    io.runStarted?.({ id: "durable-child" });
+    return { status: "completed" as const };
+  }
+  it("persists begun permission before dispatch and records the exact child before acknowledging registration", async () => {
+    const h = await setup();
+    let calls = 0;
+    h.deps.dispatch = async (msg, io, opts) => {
+      calls++;
+      return register(h, msg, io, opts!.coordinator);
+    };
+    const response = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, body), h.deps);
+    expect(response).toEqual({
+      status: 200,
+      body: { ok: true, runId: "durable-child", threadKey: INSTANCE.threadKey, effectOrdinal: 1, at: NOW },
+    });
+    expect((await h.instances.listUnits(INSTANCE.id))[0].currentEffect).toMatchObject({
+      phase: "settled",
+      calls: [{ operation: "spawn", state: "accepted", runId: "durable-child" }],
+    });
+    expect((await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, body), h.deps)).body).toMatchObject(
+      { alreadySpawned: true },
+    );
+    expect(calls).toBe(1);
+  });
+  it("lost dispatch response retains uncertainty and never dispatches again without an exact child receipt", async () => {
+    const h = await setup();
+    let calls = 0;
+    h.deps.dispatch = async () => {
+      calls++;
+      throw new Error("response lost");
+    };
+    expect((await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, body), h.deps)).status).toBe(503);
+    expect((await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, body), h.deps)).status).toBe(503);
+    expect(calls).toBe(1);
+    expect((await h.instances.listUnits(INSTANCE.id))[0].currentEffect?.calls[0].state).toBe("uncertain");
+  });
+  it("missing execution, foreign Workflow and stale ordinal cannot adopt a same-key listing or dispatch", async () => {
+    const h = await setup();
+    h.registry.create("foreign child", {
+      agent: "coding",
+      channelId: INSTANCE.channelId,
+      userId: "slack:UOTHER",
+      threadKey: INSTANCE.threadKey,
+      ...TAG,
+    });
+    for (const changed of [
+      { executionWorkflowId: undefined },
+      { executionWorkflowId: "retired" },
+      { effectOrdinal: 0 },
+    ]) {
+      expect(
+        (await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, { ...body, ...changed }), h.deps))
+          .status,
+      ).toBe(409);
+    }
+    expect(h.dispatched).toEqual([]);
+    expect((await h.instances.listUnits(INSTANCE.id))[0].currentEffect).toBeUndefined();
+  });
+  it("stop between admission and begin cancels only the unstarted call and dispatches nothing", async () => {
+    const h = await setup();
+    const transition = h.instances.transitionUnitEffect.bind(h.instances);
+    h.instances.transitionUnitEffect = async (input) => {
+      const result = await transition(input);
+      if (input.kind === "admit" && result.ok) await h.instances.markStopped(INSTANCE.id, NOW);
+      return result;
+    };
+    expect((await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, body), h.deps)).status).toBe(409);
+    expect(h.dispatched).toEqual([]);
+    expect((await h.instances.listUnits(INSTANCE.id))[0].currentEffect).toMatchObject({
+      phase: "settled",
+      calls: [{ operation: "spawn", state: "refused", cause: "not_started" }],
+    });
+  });
+  async function published() {
+    const h = await setup();
+    const previous = (await h.instances.listUnits(INSTANCE.id))[0];
+    const publication = {
+      repo: INSTANCE.repo,
+      pr: 77,
+      headRef: previous.branch,
+      baseRef: "main",
+      expectedHeadSha: "a".repeat(40),
+      publicationRef: previous.branch,
+      owner: { instanceId: INSTANCE.id, unit: previous.unit },
+    };
+    expect(
+      await h.instances.compareAndReplaceUnit(previous, {
+        ...previous,
+        pr: { number: 77, url: "https://github.com/acme/api/pull/77" },
+        publication,
+      }),
+    ).toEqual({ ok: true });
+    return h;
+  }
+  const reviewBody = {
+    ...body,
+    prompt: undefined,
+    step: "u12/1/review",
+    effectId: "u12/1/review",
+    preset: "review",
+    brief: { kind: "review", unit: "u12", pr: 77, headSha: "a".repeat(40), round: 1 },
+  };
+  it("a published review carries the canonical publication receipt and settles its exact child", async () => {
+    const h = await published();
+    h.deps.dispatch = (msg, io, opts) => register(h, msg, io, opts!.coordinator!, "review");
+    expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, reviewBody), h.deps)).toMatchObject({
+      status: 200,
+      body: { runId: "durable-child" },
+    });
+    expect((await h.instances.listUnits(INSTANCE.id))[0].currentEffect?.phase).toBe("settled");
+  });
+  it("a lost dispatch reply resolves from the exact finished review without dispatching it again", async () => {
+    const h = await published();
+    let calls = 0;
+    h.deps.dispatch = async (msg, io, opts) => {
+      calls++;
+      await register(h, msg, { ...io, runStarted: undefined }, opts!.coordinator!, "review");
+      const live = h.ledger.live.get("durable-child")!;
+      const { profile: _profile, pr: _pr, ...meta } = live.meta;
+      const events = await h.ledger.readEvents("durable-child");
+      const finished = record("durable-child", {
+        ...meta,
+        startedAt: NOW,
+        finishedAt: NOW + 1,
+        events,
+        eventCount: events.length,
+        storedEventCount: events.length,
+      });
+      expect(await h.ledger.finish("durable-child", "gen-A", finished)).toMatchObject({ ok: true });
+      await h.store.put(finished);
+      throw new Error("dispatch reply lost after finishing");
+    };
+    expect((await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, reviewBody), h.deps)).status).toBe(
+      503,
+    );
+    expect((await h.instances.listUnits(INSTANCE.id))[0].currentEffect?.calls[0].state).toBe("uncertain");
+    expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, reviewBody), h.deps)).toMatchObject({
+      status: 200,
+      body: { runId: "durable-child", alreadySpawned: true },
+    });
+    expect(calls).toBe(1);
+    expect((await h.instances.listUnits(INSTANCE.id))[0].currentEffect?.phase).toBe("settled");
+  });
+
+  it("a review cannot dispatch for another pull or head under the original unit permission", async () => {
+    for (const change of [{ pr: 88 }, { headSha: "b".repeat(40) }]) {
+      const h = await published();
+      expect(
+        await handleCoordinatorRequest(
+          post(`${COORDINATOR_ADMIN_PREFIX}spawn`, {
+            ...reviewBody,
+            brief: { ...reviewBody.brief, ...change },
+          }),
+          h.deps,
+        ),
+      ).toMatchObject({ status: 409, body: { error: "effect_target_mismatch" } });
+      expect(h.dispatched).toEqual([]);
+      expect((await h.instances.listUnits(INSTANCE.id))[0].currentEffect).toBeUndefined();
+    }
+  });
+  it("a stopped retry cancels and settles an admitted call that never began", async () => {
+    const h = await setup();
+    const previous = (await h.instances.listUnits(INSTANCE.id))[0];
+    expect(
+      await h.instances.transitionUnitEffect({
+        kind: "admit",
+        expected: previous,
+        execution: { workflowId: INSTANCE.id },
+        effect: {
+          version: 1,
+          id: body.effectId,
+          ordinal: 1,
+          execution: { workflowId: INSTANCE.id },
+          target: { repo: INSTANCE.repo, ref: previous.branch, base: "main", headSha: "a".repeat(40) },
+          phase: "active",
+          calls: [{ operation: "spawn", state: "unstarted" }],
+        },
+      }),
+    ).toMatchObject({ ok: true });
+    await h.instances.markStopped(INSTANCE.id, NOW);
+    expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, body), h.deps)).toMatchObject({
+      status: 409,
+      body: { error: "stopped" },
+    });
+    expect(h.dispatched).toEqual([]);
+    expect((await h.instances.listUnits(INSTANCE.id))[0].currentEffect).toMatchObject({
+      phase: "settled",
+      calls: [{ state: "refused", cause: "not_started" }],
+    });
+  });
+
+  it("a review prompt cannot bypass the canonical typed pull target and coding cannot use a review step", async () => {
+    const h = await published();
+    for (const changed of [
+      { ...reviewBody, brief: undefined, prompt: "Review https://github.com/acme/api/pull/88" },
+      { ...body, step: "u12/1/review", effectId: "u12/1/review" },
+    ]) {
+      expect((await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, changed), h.deps)).status).toBe(
+        409,
+      );
+      expect(h.dispatched).toEqual([]);
+      expect((await h.instances.listUnits(INSTANCE.id))[0].currentEffect).toBeUndefined();
+    }
+  });
 });

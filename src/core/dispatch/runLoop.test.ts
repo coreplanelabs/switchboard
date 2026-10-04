@@ -6506,6 +6506,75 @@ describe("the pi harness — the container replaced under a living bot: the rela
     }
   });
 
+  it.each(["moved", "failed", "truncated", "stderr"])(
+    "a canonical review rejects an unverified %s workspace before reopening its harness after container replacement",
+    async (kind) => {
+      const head = "a".repeat(40),
+        moved = "b".repeat(40),
+        ref = "fix/bound";
+      const registry = new HarnessRegistry();
+      const old = new FakeHarnessContainer();
+      old.onStdin = piThatMeetsTheRoll(registry);
+      const replacement = new FakeHarnessContainer();
+      replacement.vm = "vm-new";
+      const replacementProvider = provider("must not execute");
+      scriptPiFromProvider(replacement, { provider: replacementProvider, registry });
+      const publication = {
+        repo: "o/r",
+        pr: 42,
+        headRef: ref,
+        baseRef: "main",
+        publicationRef: ref,
+        expectedHeadSha: head,
+        owner: { instanceId: "coord-p", unit: "ONE" },
+      };
+      const probe = vi.spyOn(LocalExecutor.prototype, "execResult").mockResolvedValue({
+        exitCode: kind === "failed" ? 1 : 0,
+        stdout: kind === "moved" ? moved : kind === "stderr" ? "" : head,
+        stderr: kind === "stderr" ? head : "",
+        truncated: kind === "truncated",
+      });
+      const exec = vi
+        .spyOn(LocalExecutor.prototype, "exec")
+        .mockImplementation(async (command) => (command.includes("rev-parse HEAD") ? moved : ""));
+      try {
+        let opens = 0;
+        const s = setup("unused", {
+          agent: "review",
+          yaml: yamlWithWorkspace(),
+          harness: harnessOver(registry, () => (opens++ === 0 ? old : replacement)),
+          repoCtx: { repo: "o/r", pr: 42, ref, baseRef: "main", headSha: head },
+          binding: { ref, sha: head, workspace: "/workspace/old-checkout" },
+          coordinator: {
+            parentInstanceId: "coord-p",
+            idempotencyKey: "coord-p:ONE/1/review",
+            base: "main",
+            publication,
+          },
+          executor: {
+            exec: async (command) => (command.includes("rev-parse HEAD") ? head : ""),
+            execResult: async () => ({ exitCode: 0, stdout: head, stderr: "", truncated: false }),
+          },
+          review: { head, post: async () => {} },
+        });
+        s.deps.fetchPrFacts = async () => ({
+          state: "open",
+          headRef: ref,
+          baseRef: "main",
+          headSha: head,
+          sameRepoHead: true,
+          headBranchExists: true,
+          verifiedHead: { repo: "o/r", ref, sha: head },
+        });
+        await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("saved review target");
+        expect(replacement.commands().filter((command) => command.type === "prompt")).toEqual([]);
+      } finally {
+        exec.mockRestore();
+        probe.mockRestore();
+      }
+    },
+  );
+
   it("a coordinator's child relaunched in the replacement container publishes child_resumed on its record — the roll survived under the run's own id, tag and budget, never a restart", async () => {
     const registry = new HarnessRegistry();
     const a = new FakeHarnessContainer();
@@ -9544,6 +9613,57 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       expect(JSON.stringify(saved.transcript)).toContain("Saved final answer.");
       if (agent === "review") expect(posts).toHaveLength(1);
       else expect(posts).toHaveLength(0);
+    },
+  );
+
+  it.each(["head", "repo", "pr"])(
+    "a canonical finish rejects a replayed review post with a different %s",
+    async (drift) => {
+      const publication = {
+        repo: "o/r",
+        pr: 42,
+        headRef: "fix/the-pr-head",
+        baseRef: "main",
+        publicationRef: "fix/the-pr-head",
+        expectedHeadSha: HEAD,
+        owner: { instanceId: "coord-p", unit: "ONE" },
+      };
+      const post = vi.fn(async () => {});
+      const s = setup("", {
+        agent: "review",
+        provider: neverCalled(),
+        ...prThread,
+        repoCtx: { ...prThread.repoCtx, headSha: HEAD },
+        coordinator: { parentInstanceId: "coord-p", idempotencyKey: "coord-p:ONE/1/review", base: "main", publication },
+        review: { head: HEAD, post },
+        executor: { exec: async () => HEAD },
+      });
+      s.deps.fetchPrFacts = async () => ({
+        state: "open",
+        headRef: publication.headRef,
+        baseRef: "main",
+        headSha: HEAD,
+        sameRepoHead: true,
+        headBranchExists: true,
+        verifiedHead: { repo: "o/r", ref: publication.headRef, sha: HEAD },
+      });
+      const resume = finishing("Saved review.", {
+        agent: "review",
+        state: { verdict: VERDICT },
+        repoCtx: s.ctx.repoCtx,
+        events: [
+          {
+            type: "review_posted",
+            repo: drift === "repo" ? "other/repo" : "o/r",
+            number: drift === "pr" ? 43 : 42,
+            head: drift === "head" ? "b".repeat(40) : HEAD,
+            at: NOW,
+            seq: 1,
+          },
+        ],
+      });
+      await expect(runLoop(s.deps, { ...s.ctx, resume })).rejects.toThrow("saved review target");
+      expect(post).not.toHaveBeenCalled();
     },
   );
 

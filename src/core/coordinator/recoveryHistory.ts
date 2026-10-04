@@ -330,6 +330,7 @@ export function planRecoveryTransition(
     )
   )
     return { ok: false, reason: "conflict" };
+  if (!same(expected.currentEffect, input.replacement.currentEffect)) return { ok: false, reason: "conflict" };
   // Each transition is a whole-row write, but none can move the original
   // conversation, request, or pull request to a different identity.
   for (const field of [
@@ -357,6 +358,12 @@ export function planRecoveryTransition(
       return { ok: true, unit: current, replayed: true };
     return { ok: false, reason: "conflict" };
   }
+  // Exact journal replay above changes no cell, execution, owner or allowance.
+  if (
+    current.currentEffect?.phase === "active" &&
+    (input.kind === "claim" || !same(current.recovery, input.replacement.recovery))
+  )
+    return { ok: false, reason: "conflict" };
   let unit = preserveWorkBrief(expected, input.replacement);
   if (input.kind === "refuse" && unit.history === undefined && expected.history !== undefined)
     unit = { ...unit, history: expected.history };

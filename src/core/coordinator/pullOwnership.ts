@@ -15,12 +15,19 @@ export interface PullTarget {
 }
 
 export function unitPullTargets(instance: CoordinatorInstance, unit: CoordinatorUnit): PullTarget[] {
+  const activeEffect = unit.currentEffect?.phase === "active" ? unit.currentEffect : undefined;
   const numbers = [
-    ...new Set([unit.pr?.number, unit.resume?.pr, unit.publication?.pr, unit.adoption?.pr?.number]),
+    ...new Set([
+      unit.pr?.number,
+      unit.resume?.pr,
+      unit.publication?.pr,
+      unit.adoption?.pr?.number,
+      activeEffect?.target.pr,
+    ]),
   ].filter((pr): pr is number => pr !== undefined);
-  const refs = [...new Set([unit.branch, unit.publication?.headRef, unit.publication?.publicationRef])].filter(
-    (ref): ref is string => ref !== undefined,
-  );
+  const refs = [
+    ...new Set([unit.branch, unit.publication?.headRef, unit.publication?.publicationRef, activeEffect?.target.ref]),
+  ].filter((ref): ref is string => ref !== undefined);
   return [
     ...numbers.map((pr) => ({ repo: instance.repo, pr })),
     ...refs.map((ref) => ({ repo: instance.repo, ref })),
@@ -90,7 +97,18 @@ export function unitPullBindingRefusal(
     )
   )
     return "stale";
-  for (const target of targets) {
+  return unitPullTargetsRefusal(rows, instance, next);
+}
+
+/** Exact canonical targets, checked inside the existing owner transaction. */
+export function unitPullTargetsRefusal(
+  rows: PullOwnershipRows,
+  instance: CoordinatorInstance,
+  next: CoordinatorUnit,
+): PullBindingRefusal | undefined {
+  if (!isCoordinatorInstance(instance) || !isCoordinatorUnit(next) || next.instanceId !== instance.id)
+    return "incomplete";
+  for (const target of unitPullTargets(instance, next)) {
     const owners = findPullOwnersInRows(target, rows);
     if (!owners.ok) return owners.reason === "unavailable" ? "unavailable" : "incomplete";
     if (
@@ -144,6 +162,7 @@ export function isPullOwnerLiveMeta(value: unknown): value is { repo?: string } 
 
 export function unitHoldsPulls(unit: CoordinatorUnit): boolean {
   return (
+    unit.currentEffect?.phase === "active" ||
     !unit.ending ||
     !unit.ending.outcome ||
     !!unit.recovery ||
@@ -176,6 +195,13 @@ export function findPullOwnersInRows(target: PullTarget, rows: PullOwnershipRows
         unit.publication.owner.unit !== unit.unit)
     )
       return { ok: false, reason: "incomplete" };
+    if (
+      unit.currentEffect?.phase === "active" &&
+      (unit.currentEffect.target.repo.toLowerCase() !== row.instance.repo.toLowerCase() ||
+        unit.currentEffect.target.ref !== unit.branch ||
+        unit.currentEffect.target.pr !== unit.pr?.number)
+    )
+      return { ok: false, reason: "incomplete" };
     if (!sameRepo(row.instance.repo)) continue;
     const held = unitHoldsPulls(unit);
     if (
@@ -184,7 +210,9 @@ export function findPullOwnersInRows(target: PullTarget, rows: PullOwnershipRows
         matches(unit.resume?.pr) ||
         matches(unit.publication?.pr, unit.publication?.publicationRef) ||
         matches(undefined, unit.publication?.headRef) ||
-        matches(unit.adoption?.pr?.number))
+        matches(unit.adoption?.pr?.number) ||
+        (unit.currentEffect?.phase === "active" &&
+          matches(unit.currentEffect.target.pr, unit.currentEffect.target.ref)))
     )
       add({
         kind: "unit",

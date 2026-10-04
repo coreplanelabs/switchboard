@@ -549,8 +549,16 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
   // held back so both run inside the lease; the warning lands at `warnAt`.
   // A resume continues the lease the record holds — the remainder at the
   // death — and publishes no second `lease` event.
-  const remainingMs = run.resume?.remainingMs ?? run.agent.maxMinutes * MINUTE_MS;
-  const lease = loopClock(now(), remainingMs, run.agent.name);
+  const startedAt = now();
+  if (run.deadlineAt !== undefined && startedAt >= run.deadlineAt)
+    throw new Error("The admitted run deadline ended before model admission.");
+  const admitModelWrite = (command: Record<string, unknown>): boolean =>
+    (command.type !== "prompt" && command.type !== "steer") || now() < (run.deadlineAt ?? Infinity);
+  const remainingMs = Math.min(
+    run.resume?.remainingMs ?? run.agent.maxMinutes * MINUTE_MS,
+    run.deadlineAt === undefined ? Infinity : Math.max(0, run.deadlineAt - startedAt),
+  );
+  const lease = loopClock(startedAt, remainingMs, run.agent.name);
   const { deadline, loopEnd, warnAt } = lease;
   run.toolContext.remainingMs = () => deadline - now();
   // The bearer outlives the lease by its grace, measured from here — not from
@@ -940,6 +948,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       };
       mirrored = recorded.logOffset;
       transport = new PiRpcTransport({
+        admitWrite: admitModelWrite,
         container,
         paths,
         pid,
@@ -1126,7 +1135,14 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         relaunches: recorded?.relaunches ?? 0,
       };
       save();
-      transport = new PiRpcTransport({ container, paths, pid, pollMs: deps.pollMs ?? 750, sleep: deps.sleep });
+      transport = new PiRpcTransport({
+        admitWrite: admitModelWrite,
+        container,
+        paths,
+        pid,
+        pollMs: deps.pollMs ?? 750,
+        sleep: deps.sleep,
+      });
     }
 
     // This generation's command ids carry the moment it began and a nonce: the
@@ -1161,6 +1177,8 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     const quietClock = (): void => {
       if (transport!.caughtUp) sends.quiet(now());
     };
+    if (now() >= (run.deadlineAt ?? Infinity))
+      throw new Error("The admitted run deadline ended before model admission.");
     sends.send({ id: ids.retry, type: "set_auto_retry", enabled: false });
     sends.send({ id: ids.state, type: "get_state" });
     if (reattached)
@@ -1311,6 +1329,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       // upstream with `tool_choice: none` (model-proxy item 6; decision 0046's
       // amendment) — the model is shown its tools and may call none.
       deps.bearers?.markLoopEnded(run.runId);
+      if (run.deadlineAt !== undefined && now() >= run.deadlineAt) {
+        finaleAborted = true;
+        abortPi();
+        return;
+      }
       // The clock starts when the steer has LANDED — the transport's write
       // settled, not the hand-off to a chain that only holds it for the
       // re-attach — and the callback rides the very object through a re-send.
@@ -1330,6 +1353,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       // instruction into the turn. `writeUpSteer` stays only as the handle that
       // tells whether the wrap-up steer was among the dropped.
       const ask = (): void => {
+        if (now() >= (run.deadlineAt ?? Infinity)) {
+          finaleAborted = true;
+          abortPi();
+          return;
+        }
         const steer = { type: "steer", message: instruction };
         writeUpSteer = steer;
         sends.send(steer, (landing) => {
@@ -1572,7 +1600,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       }
       askOwedAbort();
       if (writeUp) {
-        if (writeUpAt !== undefined && now() - writeUpAt >= lease.finaleMs) {
+        if ((writeUpAt !== undefined && now() - writeUpAt >= lease.finaleMs) || now() >= (run.deadlineAt ?? Infinity)) {
           // The write-up itself is bounded by its allowance: past it the
           // run closes without one — by the wind-down's own answer, never as a
           // failed model call: the abort below kills whatever call is in
@@ -1647,6 +1675,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       // the failure left unknown; the fresh one reads on from the last record
       // boundary.
       const fresh = reattachTransport(transport!, {
+        admitWrite: admitModelWrite,
         container,
         paths: paths!,
         pid: pid!,
@@ -2288,6 +2317,8 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
      *  for the run's end, as it does on the native loop's post-turns. */
     const followUp: FollowUpTurn = async (input) => {
       if (sessionEnded) throw new Error("the pi session has ended: no follow-up turn can run on it");
+      if (run.deadlineAt !== undefined && now() >= run.deadlineAt)
+        throw new Error("The admitted run deadline ended before the follow-up turn.");
       const turnSpan = input.span?.start("run.agent");
       if (turnSpan) deps.bearers?.reparent(run.runId, turnSpan);
       bridge.under(turnSpan);
@@ -2300,7 +2331,10 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       const turnStartedAt = now();
       const turnLease = loopClock(
         turnStartedAt,
-        turnLeaseMs(input.maxMinutes, deadline - turnStartedAt),
+        Math.min(
+          turnLeaseMs(input.maxMinutes, deadline - turnStartedAt),
+          run.deadlineAt === undefined ? Infinity : Math.max(0, run.deadlineAt - turnStartedAt),
+        ),
         run.agent.name,
         "turn",
       );
@@ -2308,7 +2342,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       /** The turn's end, its write-up included: the turn's loop ends at its
        *  deadline and the finale runs its allowance past it (`turnCheck`), so
        *  a wait under the turn gives up here, never at the deadline. */
-      const turnEnd = turnDeadline + turnLease.finaleMs;
+      const turnEnd = Math.min(turnDeadline + turnLease.finaleMs, run.deadlineAt ?? Infinity);
       input.toolContext.remainingMs = () => turnDeadline - now();
       // The turn's loop ends at its own deadline: a timeout is judged against that, not the run's loop end.
       live.rules = { ...rules, loopEndsIn: () => turnLease.loopEnd - now() };
@@ -2394,7 +2428,10 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         }
         askOwedAbort();
         if (writeUp) {
-          if (writeUpAt !== undefined && now() - writeUpAt >= turnLease.finaleMs) {
+          if (
+            (writeUpAt !== undefined && now() - writeUpAt >= turnLease.finaleMs) ||
+            now() >= (run.deadlineAt ?? Infinity)
+          ) {
             writeUpAt = undefined;
             finaleAborted = true;
             run.onProgress?.(finaleTimedOutNote("turn"));

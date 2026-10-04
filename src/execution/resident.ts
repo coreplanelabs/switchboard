@@ -522,6 +522,9 @@ export async function waitOnStatus<T>(input: {
     if (spentMs >= input.budgetMs) return input.spent(view, spentMs);
     if (verdict === "wait")
       await wakePause(Math.min(WAKE_POLL_MS, input.budgetMs - spentMs), input.signal, input.route);
+    // A pause can consume the last allowance. Retain the last observed state
+    // and use the caller's spent outcome without starting another probe.
+    if (spent() >= input.budgetMs) return input.spent(view, spent());
     view = await input.probe(input.signal);
     // The run's stop rides into the probe as into every send: a stop during one
     // is the stop's own typed error, as the pause throws it — never a verdict on

@@ -457,6 +457,8 @@ export interface HarnessRun {
   runId: string;
   /** The preset with its effective budget (`budgetedAgent`). */
   agent: AgentDef;
+  /** Absolute admitted bound; setup, downtime and relaunch never renew it. */
+  deadlineAt?: number;
   effort?: Effort;
   model: { id: string; provider: string; providerType: ProviderConfig["type"] };
   /** The run's resolved model card (record 0052), what the dispatcher decided

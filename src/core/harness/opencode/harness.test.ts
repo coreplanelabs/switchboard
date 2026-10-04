@@ -950,7 +950,13 @@ describe("the post-turn on the run's session — refused, answered by silence, o
   /** A run opened through the seam over the scripted serve's bare-container
    *  door, its spans recorded, the session held open for a post-turn; the
    *  serve has the run's clock and its lease for a script that moves them. */
-  function openRun(options: FakeServeOptions, script: RunScript = oneTurn, alsoTo?: (e: RunEvent) => void) {
+  function openRun(
+    options: FakeServeOptions,
+    script: RunScript = oneTurn,
+    alsoTo?: (e: RunEvent) => void,
+    deadlineAt?: number,
+    prepare?: (run: HarnessRun, clock: { now: number }) => void,
+  ) {
     const container = new FakeHarnessContainer();
     const registry = new HarnessRegistry();
     const clock = { now: NOW };
@@ -1008,8 +1014,30 @@ describe("the post-turn on the run's session — refused, answered by silence, o
       pollMs: 1,
       tickMs: 5,
     };
+    Object.assign(run, deadlineAt === undefined ? {} : { deadlineAt });
+    prepare?.(run, clock);
     return { opened: openThroughSeam(new OpenCodeHarness(), deps, run), events, progress, container, sink, lease };
   }
+  it("expiry after lease admission prevents the OpenCode initial model request", async () => {
+    const bound = NOW + 4 * MINUTE_MS;
+    const o = openRun({}, oneTurn, undefined, bound, (run, clock) => {
+      const emit = run.onEvent;
+      run.onEvent = (event) => {
+        emit?.(event);
+        if (event.type === "lease") clock.now = bound;
+      };
+    });
+    await expect(o.opened).rejects.toThrow("deadline");
+    expect(o.container.requests.filter((request) => request.path.endsWith("/prompt"))).toEqual([]);
+  });
+
+  it("an absolute admitted deadline bounds the OpenCode lease after attachment downtime", async () => {
+    const o = openRun({}, oneTurn, undefined, NOW + 4 * MINUTE_MS);
+    const session = await o.opened;
+    expect(o.events.find((event) => event.type === "lease")).toMatchObject({ endsAt: NOW + 4 * MINUTE_MS });
+    await session.end();
+  });
+
   const postTurn = { text: "describe the change", maxTurns: 5, maxMinutes: 5, toolContext: { executor } };
 
   it("refused: the turn throws OpenCodeRequestRefusedError naming the follow-up turn's prompt and the answer, the note is on the record, and the session still ends", async () => {

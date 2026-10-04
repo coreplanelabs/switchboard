@@ -178,6 +178,23 @@ describe("the sweep — one line per pull request, in user words", () => {
     const none = await service.sweep({ repo: "acme/api", number: 9 });
     expect(none.results[0]?.line).toBe("#9 not swept — no open pull request the pipeline owns has this number");
   });
+  it("an unavailable owner lookup is a per-PR error and leaves that target untouched while other results finish", async () => {
+    const { service, calls } = fixture({
+      prs: [pr({ number: 1 }), pr({ number: 2 })],
+      runnerOwns: (pull) => {
+        if (pull.number === 1) throw new Error("owner facts unavailable");
+        return false;
+      },
+    });
+    const report = await service.sweep({ repo: "acme/api" });
+    expect(report.repo).toBe("acme/api");
+    expect(report.results).toEqual([
+      expect.objectContaining({ number: 1, outcome: "error", line: "#1 not rebased — owner facts unavailable" }),
+      expect.objectContaining({ number: 2, outcome: "carried" }),
+    ]);
+    expect(calls.some((call) => call.includes("acme/api#1"))).toBe(false);
+    expect(calls).toContain("push acme/api#2 bbb222");
+  });
   it("a git failure on one pull request is its own line; the sweep goes on", async () => {
     const { service } = fixture({
       prs: [pr({ number: 1 }), pr({ number: 2 })],

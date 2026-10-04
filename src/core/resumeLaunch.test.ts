@@ -236,6 +236,23 @@ describe("the pure pieces", () => {
     expect(resumeIoTarget(row({ card: null }))).toEqual({ threadKey: "slack:C1:1.0", userId: "slack:UALICE" });
   });
 
+  it("repoContextOf restores the coordinator review base from its durable admission tag", () => {
+    const publication = {
+      repo: "acme/api",
+      pr: 12,
+      headRef: "feat/x",
+      baseRef: "release",
+      publicationRef: "feat/x",
+      expectedHeadSha: "a".repeat(40),
+      owner: { instanceId: "ship_review", unit: "ONE" },
+    };
+    expect(
+      repoContextOf(row(), [
+        { type: "coordinator_tag", parentInstanceId: "ship_review", base: "release", publication },
+      ]),
+    ).toEqual({ repo: "acme/api", ref: "feat/x", pr: 12, headSha: "a".repeat(40), baseRef: "release" });
+  });
+
   it("repoContextOf carries repo/ref/pr/headSha and nothing else", () => {
     expect(repoContextOf(row())).toEqual({ repo: "acme/api", ref: "feat/x", pr: 12, headSha: "a".repeat(40) });
     expect(repoContextOf(row({ meta: { channelId: "c", userId: "u", threadKey: "t" } }))).toEqual({});
@@ -370,6 +387,7 @@ describe("launchResumes", () => {
       kind: "restart",
       row: row({ phase: "attaching", meta: { ...row().meta, request } }),
       reclaimedFrom: "attaching",
+      events: [{ type: "coordinator_tag", seq: 1, parentInstanceId: "ship_restart", base: "main" }],
       inbox: [{ seq: 1, message: { text: "also the numbers", userId: "slack:UB" } }],
     };
     const outcome = await h.run([restart]);
@@ -388,7 +406,7 @@ describe("launchResumes", () => {
       images: [{ mediaType: "image/png", data: "QUJD" }],
     });
     expect(opts.resume).toBeUndefined();
-    expect(opts.restart).toEqual({ row: restart.row, inbox: restart.inbox });
+    expect(opts.restart).toEqual({ row: restart.row, inbox: restart.inbox, events: restart.events });
     expect(h.logs[0]).toMatch(
       /r1 slack:C1:1.0: restarting from its request \(killed while attaching; 1 follow-up\(s\) pending\)/,
     );

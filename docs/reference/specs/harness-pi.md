@@ -199,3 +199,12 @@
 | 16, `[gap]` a pid-reuse guard on the re-attach — comparing the process's start time or command line to the row's facts — is not built: the container seam's `alive` is a bare `kill -0 <pid>`, so it exposes no process facts to compare, and the pid alone answers the ask-2 probe; a driver that gains process facts closes this | `[gap]` the container seam exposes no process start time or command line |
 | 16, live: a control reset over a live pi across a resident WORKER-only deploy | `[agent]` Start a coding run of a few minutes on a resident, then deploy the resident Worker code alone (no image change) so its Durable Object resets under the live pi → the run keeps its card and finishes on the SAME pi; its run page shows one `resumed` note reading `the resident's control plane reset under the run …`, no `sandbox_restarted` note, the row's facts read `relaunches: 0`, and no second pi is orphaned in the container (`ps` on the resident shows one pi for the run); owed after the next release |
 | 13, live: the operator and a memory reflection both run through pi’s provider library; a no-call repair makes no classifier call | `[agent]` On a deployment with memory enabled, send a plain request whose first and second operator turns both end without a tool call; the second operator request is on the same configured model, no run starts, the failed door record carries `non_decision`, and logs contain no `dispatch.route` span; a tool-using run still writes reflection without a failure line |
+
+## Canonical child allowance
+
+A canonical child uses the absolute bound committed at its original admission. Setup, downtime, resume and container recovery consume that allowance. Post-loop turns and finales cannot extend it; their one-minute minimum is capped by the actual remainder. Expiry admits no model prompt. Ordinary runs retain their existing lease policy.
+
+| Criterion | Proof |
+| --- | --- |
+| Both harnesses preserve the absolute bound when model admission follows attachment downtime. | `[unit]` `src/core/harness/pi/harness.test.ts::a carried absolute deadline bounds…`, `src/core/harness/opencode/harness.test.ts::an absolute admitted deadline bounds…` |
+| Post-loop turns consume only the absolute remainder; expiry prevents further prompts and a hung turn cannot admit a finale afterward. | `[unit]` `src/core/harness/pi/harness.test.ts::a canonical post-loop turn…`, `::an absolute deadline ends a hung post-loop turn…` |

@@ -10,12 +10,7 @@ import type { AudienceCheck } from "../audienceDecision.js";
 import type { ConfigStore, ResolvedRequest } from "../../config.js";
 import type { AgentDef } from "../../agents/registry.js";
 import type { RouteDecided } from "./route.js";
-import {
-  coordinatorFields,
-  unitOfIdempotencyKey,
-  type CoordinatorTag,
-  type WorkflowSender,
-} from "../coordinator/contract.js";
+import { coordinatorFields, type CoordinatorTag, type WorkflowSender } from "../coordinator/contract.js";
 import type { CoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import type { MainStartInput, MainStartResult } from "../coordinator/mainStart.js";
 import type { RunProfile } from "../../config/profile.js";
@@ -544,30 +539,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
       });
     }
   }
-  // The coordinator tag as a fact of the run (run-history item 48a): published
-  // once at dispatch — after the claim's subscription, so the ledger row
-  // carries it — so a run re-attached after a bot roll, whose spawn's dispatch
-  // options are gone with the process, reads the plan's base back off its own
-  // events (carriedCoordinatorTag, dispatch/reattach.ts). A resume republishes
-  // nothing: the event is on the adopted row already.
-  if (!resume && coordinator) {
-    const unit = unitOfIdempotencyKey(coordinator.idempotencyKey);
-    registry.publish(run.id, {
-      type: "coordinator_tag",
-      parentInstanceId: coordinator.parentInstanceId,
-      ...(coordinator.costCapUsd !== undefined ? { costCapUsd: coordinator.costCapUsd } : {}),
-      ...(unit !== undefined ? { unit } : {}),
-      ...(coordinator.branch !== undefined ? { branch: coordinator.branch } : {}),
-      ...(coordinator.transportWorkflowId !== undefined
-        ? { transportWorkflowId: coordinator.transportWorkflowId }
-        : {}),
-      ...(coordinator.recovery !== undefined ? { recovery: coordinator.recovery } : {}),
-      ...(coordinator.base !== undefined ? { base: coordinator.base } : {}),
-      ...(coordinator.publication !== undefined ? { publication: coordinator.publication } : {}),
-      ...(coordinator.issuedFindingIds !== undefined ? { issuedFindingIds: coordinator.issuedFindingIds } : {}),
-      at: clock(),
-    });
-  }
+
   if (resume && ledgerRun) {
     // The events before the restart are on the ledger already (and in the
     // registry by replay); only what this generation publishes is appended.

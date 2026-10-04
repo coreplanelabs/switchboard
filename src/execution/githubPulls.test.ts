@@ -22,6 +22,7 @@ import {
   branchHeadSubject,
   fetchRefExists,
   fetchBranchHeadSha,
+  fetchBranchRef,
   fetchRepoShipInfo,
   findMergedPrByHead,
   findOpenPrByHead,
@@ -412,73 +413,65 @@ describe("githubPulls", () => {
   // pipeline branch on origin BEFORE the first attach: the resident refuses to
   // bind a thread to a ref GitHub does not have. 422 "already exists" is
   // success (a restarted pipeline reuses its own deterministic branch name).
-  describe("createBranchRef (ship round 0)", () => {
-    const BASE_SHA = "c".repeat(40);
-
-    /** Base-ref lookup answers `main`'s tip; the ref create answers `createStatus`. */
-    function stubRefPath(createStatus = 201, createBody = "{}") {
-      return stubFetch((url, init) =>
-        (init.method ?? "GET") === "GET"
-          ? new Response(JSON.stringify({ ref: "refs/heads/main", object: { sha: BASE_SHA, type: "commit" } }), {
-              status: 200,
-            })
-          : new Response(createBody, { status: createStatus }),
+  it("exact branch reads reject foreign or missing ref identities and distinguish missing from unavailable", async () => {
+    stubToken();
+    const sha = "a".repeat(40);
+    for (const ref of [undefined, "refs/heads/foreign", "refs/heads/release/one"]) {
+      const calls = stubFetch(() => Response.json({ ref, object: { type: "commit", sha } }));
+      expect(await fetchBranchRef("acme/api", "release/one")).toEqual(
+        ref === "refs/heads/release/one" ? { kind: "verified", ref, sha } : { kind: "unverified" },
       );
+      expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/git/ref/heads/release/one");
     }
-
-    it("GETs the base ref's sha and POSTs the new ref at it", async () => {
-      stubToken();
-      const calls = stubRefPath();
-      await createBranchRef("acme/api", "ship/fix-login-abc123", "main");
-      expect(calls).toHaveLength(2);
-      expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/git/ref/heads/main");
-      expect(calls[0].init.method ?? "GET").toBe("GET");
-      expect(calls[1].url).toBe("https://api.github.com/repos/acme/api/git/refs");
-      expect(calls[1].init.method).toBe("POST");
-      expect(JSON.parse(String(calls[1].init.body))).toEqual({
-        ref: "refs/heads/ship/fix-login-abc123",
-        sha: BASE_SHA,
+    for (const status of [404, 403, 503]) {
+      stubFetch(() => new Response("{}", { status }));
+      expect(await fetchBranchRef("acme/api", "release/one")).toEqual({
+        kind: status === 404 ? "missing" : "unverified",
       });
-      expect((calls[1].init.headers as Record<string, string>).authorization).toBe("Bearer ghtok");
-    });
+    }
+  });
 
-    it("a 422 'already exists' is success — a restarted pipeline reuses its own branch", async () => {
+  describe("createBranchRef (ship round 0)", () => {
+    const SHA = "c".repeat(40);
+    it("POSTs only the frozen full SHA and returns an exact typed receipt", async () => {
       stubToken();
-      stubRefPath(422, '{"message":"Reference already exists"}');
-      await expect(createBranchRef("acme/api", "ship/fix-login-abc123", "main")).resolves.toBeUndefined();
+      const calls = stubFetch(() =>
+        Response.json({ ref: "refs/heads/fix/unit", object: { type: "commit", sha: SHA } }, { status: 201 }),
+      );
+      expect(await createBranchRef("acme/api", "fix/unit", SHA)).toEqual({ state: "accepted", commitSha: SHA });
+      expect(calls).toHaveLength(1);
+      expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/git/refs");
+      expect(JSON.parse(String(calls[0].init.body))).toEqual({ ref: "refs/heads/fix/unit", sha: SHA });
     });
-
-    it("anything else throws: a non-already-exists 422, another non-2xx, a failed base lookup, a sha-less answer, a missing credential", async () => {
+    it("keeps malformed success, server failure and transport loss uncertain", async () => {
       stubToken();
-      stubRefPath(422, '{"message":"Object does not exist"}');
-      await expect(createBranchRef("acme/api", "b", "main")).rejects.toThrow(/HTTP 422/);
-
-      stubRefPath(403, '{"message":"Resource not accessible"}');
-      await expect(createBranchRef("acme/api", "b", "main")).rejects.toThrow(/HTTP 403/);
-
-      stubFetch(() => new Response("{}", { status: 404 }));
-      await expect(createBranchRef("acme/api", "b", "missing-base")).rejects.toThrow(/HTTP 404/);
-
-      stubFetch(() => new Response('{"object":{}}', { status: 200 }));
-      await expect(createBranchRef("acme/api", "b", "main")).rejects.toThrow(/without a sha/);
-
+      for (const [status, body] of [
+        [201, {}],
+        [201, { ref: "refs/heads/foreign", object: { type: "commit", sha: SHA } }],
+        [201, { ref: "refs/heads/fix/unit", object: { type: "commit", sha: "d".repeat(40) } }],
+        [503, {}],
+      ] as const) {
+        stubFetch(() => Response.json(body, { status }));
+        expect(await createBranchRef("acme/api", "fix/unit", SHA)).toEqual({ state: "uncertain" });
+      }
+      stubFetch(() => {
+        throw new Error("connection lost");
+      });
+      expect(await createBranchRef("acme/api", "fix/unit", SHA)).toEqual({ state: "uncertain" });
+    });
+    it("known HTTP refusal and unavailable credentials never claim an accepted ref", async () => {
+      stubToken();
+      for (const status of [403, 409, 422]) {
+        stubFetch(() => new Response('{"message":"Reference already exists"}', { status }));
+        expect(await createBranchRef("acme/api", "fix/unit", SHA)).toEqual({ state: "refused", status });
+      }
       vi.stubEnv("GH_TOKEN", "");
-      const calls = stubFetch(() => new Response("{}", { status: 200 }));
-      await expect(createBranchRef("acme/api", "b", "main")).rejects.toThrow(/credential/);
-      expect(calls).toHaveLength(0); // refused before any fetch
-    });
-
-    it("a base ref with slashes stays a path (segment-encoded, never a single escaped blob)", async () => {
-      stubToken();
-      const calls = stubRefPath();
-      await createBranchRef("acme/api", "ship/x", "release/1.x");
-      expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/git/ref/heads/release/1.x");
+      const calls = stubFetch(() => new Response("{}", { status: 201 }));
+      expect(await createBranchRef("acme/api", "fix/unit", SHA)).toEqual({ state: "refused" });
+      expect(calls).toHaveLength(0);
     });
   });
 
-  // The fact the round-0 ending reads (docs/reference/specs/agent-ship.md
-  // item 12, issue 1699): how many commits the unit's branch has over the
-  // base, from GitHub's compare — zero is a branch with nothing to ship.
   describe("commitsOverBase (the branch's commits over the base)", () => {
     it("GETs the compare of base...branch (each ref's segments encoded) and answers `ahead_by`", async () => {
       stubToken();

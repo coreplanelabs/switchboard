@@ -209,6 +209,7 @@ export function readBotAnswer(
  *  child is admitted, and the instance is never failed over a full plane. */
 const TRANSIENT = new Set([
   "github_unavailable",
+  "spawn_unavailable",
   "no_channel",
   "thread_failed",
   "unit_not_started",
@@ -822,28 +823,44 @@ async function perform(
   instanceId: string,
   unit: string,
   action: Exclude<CoordinatorAction, { type: "end" }>,
+  cursor: { ordinal: number },
 ): Promise<StepReturn> {
-  const tag = { parentInstanceId: instanceId, unit };
+  const tag = { parentInstanceId: instanceId, unit, effectId: action.step, effectOrdinal: cursor.ordinal + 1 };
+  const receipt = (answer: BotAnswer, route: "branch" | "spawn") => {
+    const ordinal = answer.body.effectOrdinal;
+    if (ordinal !== undefined) {
+      if (
+        !Number.isSafeInteger(ordinal) ||
+        (ordinal !== cursor.ordinal + 1 && !(route === "branch" && ordinal === cursor.ordinal))
+      )
+        throw new UnreadableAnswer(route, answer, "effect ordinal");
+      cursor.ordinal = ordinal as number;
+    } else if (answer.body.ok === true) throw new UnreadableAnswer(route, answer, "effect ordinal");
+    return answer;
+  };
   switch (action.type) {
     case "branch":
       return branchReturn(
         action.step,
-        answerOf("branch", await step.do(action.step, STEP_CONFIG, () => call(bot, "branch", tag))),
+        receipt(answerOf("branch", await step.do(action.step, STEP_CONFIG, () => call(bot, "branch", tag))), "branch"),
       );
     case "spawn":
       return spawnReturn(
         action.step,
-        answerOf(
-          "spawn",
-          await step.do(action.step, SPAWN_STEP_CONFIG, () =>
-            call(bot, "spawn", {
-              ...tag,
-              step: action.step,
-              preset: action.preset,
-              budget: action.budgetMinutes,
-              brief: action.brief,
-            }),
+        receipt(
+          answerOf(
+            "spawn",
+            await step.do(action.step, SPAWN_STEP_CONFIG, () =>
+              call(bot, "spawn", {
+                ...tag,
+                step: action.step,
+                preset: action.preset,
+                budget: action.budgetMinutes,
+                brief: action.brief,
+              }),
+            ),
           ),
+          "spawn",
         ),
       );
     case "wait":
@@ -1132,6 +1149,7 @@ async function runUnit(
   instanceId: string,
   node: PlanUnitNode,
   plan: PlanFacts,
+  cursor: { ordinal: number },
   session?: LeaseSegmentProgress,
 ): Promise<DrivenEnding> {
   const unit = node.id;
@@ -1266,7 +1284,7 @@ async function runUnit(
             ? { round: last.round }
             : {}),
       };
-      const transition = applyReturn(state, await perform(step, bot, instanceId, unit, action));
+      const transition = applyReturn(state, await perform(step, bot, instanceId, unit, action, cursor));
       state = transition.state;
       for (const note of transition.notes) {
         if (note.type === "round") {
@@ -1696,7 +1714,9 @@ async function runUnitLifetime(
       );
     }
     let session: LeaseSegmentProgress | undefined;
-    let ending: DrivenEnding | { kind: "stopped" } = await runUnit(step, bot, instanceId, node, plan);
+    // Rebuilt from the cached initial row and exact step receipts on Workflow replay, across every segment.
+    const cursor = { ordinal: row?.currentEffect?.ordinal ?? 0 };
+    let ending: DrivenEnding | { kind: "stopped" } = await runUnit(step, bot, instanceId, node, plan, cursor);
     if (row?.recovery !== undefined) {
       if (ending.kind === "idle" && ending.humanGate !== undefined)
         return { ...ending.idled, ...(ending.endedAt !== undefined ? { endedAt: ending.endedAt } : {}) };
@@ -1717,7 +1737,7 @@ async function runUnitLifetime(
           previousRunId: c.runId,
           ...(c.handoff !== undefined ? { previousHandoff: c.handoff } : {}),
         };
-        ending = await runUnit(step, bot, instanceId, node, plan, session);
+        ending = await runUnit(step, bot, instanceId, node, plan, cursor, session);
         continue;
       }
       if (ending.kind === "idle") {
@@ -1736,7 +1756,7 @@ async function runUnitLifetime(
           break;
         }
         session = parked.session;
-        ending = await runUnit(step, bot, instanceId, node, plan, session);
+        ending = await runUnit(step, bot, instanceId, node, plan, cursor, session);
         continue;
       }
       break;
@@ -1869,6 +1889,8 @@ function isSettledOutcome(kind: string): boolean {
  *  effort, when the walk threw — and the cause is rethrown, so the instance's
  *  own status says what happened and the parent's record exists either way. */
 export async function runPlan(step: StepRunner, bot: CoordinatorBot, instanceId: string): Promise<PlanRunSummary> {
+  const transport = bot;
+  bot = { step: (route, body) => transport.step(route, { ...body, executionWorkflowId: instanceId }) };
   const finish = (outcome: PlanRunSummary["outcome"]) =>
     step.do("finish", STEP_CONFIG, () => call(bot, "finish", { parentInstanceId: instanceId, outcome }));
   let summary: PlanRunSummary;
@@ -1928,6 +1950,7 @@ export async function runOriginalUnitRecovery(
         unit: params.unit,
         recoveryActionId: params.recoveryActionId,
         recoveryWorkflowId: workflowId,
+        executionWorkflowId: workflowId,
       });
     },
   };

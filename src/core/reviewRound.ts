@@ -1,3 +1,4 @@
+import type { ExistingPrPublicationBinding } from "./coordinator/contract.js";
 // Per-round review + workspace machinery, extracted from dispatch() as
 // callable units (zero behavior change): everything a
 // review or coding round must invoke — workspace attach/release paired on the
@@ -597,6 +598,8 @@ export class ReviewWorkspaceAdvanceError extends Error {
 }
 
 export interface SettleReviewedHeadInput {
+  /** Canonical child permission stays at this exact head through settlement. */
+  publication?: ExistingPrPublicationBinding;
   /** The parent span, when the run is traced. */
   span?: Span;
   pr: { repo: string; number: number };
@@ -658,6 +661,20 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
   let observedHead = await probeHead();
   const outcome = (): SettledReviewHead => ({ answer, verdict, reviewHead, observedHead, carried });
   if (stopped()) return outcome();
+  if (input.publication) {
+    const bound = input.publication;
+    if (
+      pr.repo.toLowerCase() !== bound.repo.toLowerCase() ||
+      pr.number !== bound.pr ||
+      input.baseRef !== bound.baseRef ||
+      !sameCommit(reviewHead ?? "", bound.expectedHeadSha) ||
+      !sameCommit(observedHead ?? "", bound.expectedHeadSha) ||
+      (verdict?.head !== undefined && !sameCommit(verdict.head, bound.expectedHeadSha))
+    )
+      throw new ReviewWorkspaceAdvanceError(bound.expectedHeadSha, "the saved review target was not confirmed");
+    // The existing post gate rechecks the remote. A moved head requires a new canonical action.
+    return outcome();
+  }
   const where = `${pr.repo}#${pr.number}`;
   const currentHead = async () => normalizeHead(await input.fetchPrHead(pr).catch(() => undefined));
   const expected = normalizeHead(reviewHead);
@@ -854,7 +871,8 @@ export async function runReviewPostStep(
   input: {
     agent: AgentDef;
     requestText: string;
-    repoCtx: Pick<RepoContext, "repo" | "pr" | "prUnpostable" | "prSize">;
+    repoCtx: Pick<RepoContext, "repo" | "pr" | "prUnpostable" | "prSize" | "ref" | "baseRef">;
+    publication?: ExistingPrPublicationBinding;
     /** The pinned head and the workspace HEAD observed after the turn. */
     heads: { reviewHead: string | undefined; observedHead: string | undefined };
     verdict: ReviewVerdict | undefined;
@@ -928,6 +946,20 @@ export async function runReviewPostStep(
   let postTarget: ReviewPostTarget | null = null;
   // Why nothing was posted, carried into the typed outcome — every path that
   // leaves `postTarget` null fills it (the hard-stop skip is the default).
+  const bound = input.publication;
+  if (
+    bound &&
+    (repoCtx.repo?.toLowerCase() !== bound.repo.toLowerCase() ||
+      repoCtx.pr !== bound.pr ||
+      repoCtx.ref !== bound.headRef ||
+      repoCtx.baseRef !== bound.baseRef ||
+      !sameCommit(reviewHead ?? "", bound.expectedHeadSha) ||
+      !sameCommit(observedHead ?? "", bound.expectedHeadSha) ||
+      (verdict?.head !== undefined && !sameCommit(verdict.head, bound.expectedHeadSha)) ||
+      (carried !== undefined &&
+        (!sameCommit(carried.reviewed, bound.expectedHeadSha) || !sameCommit(carried.current, bound.expectedHeadSha))))
+  )
+    return record({ posted: false, reason: "the saved review target was not confirmed" });
   let skipReason = "the round was hard-stopped — nothing is posted after an abort";
   if (!input.hardStopped) {
     postTarget = decideReviewPost({
@@ -1000,16 +1032,28 @@ export async function runReviewPostStep(
       postTarget = null;
     }
   }
-  if (input.guardTransition === true && postTarget && reviewHead) {
+  if ((input.guardTransition === true || bound !== undefined) && postTarget && reviewHead) {
     // Final transition guard immediately before the write: one fresh facts
     // read must prove the pull request is open, its head ref still exists and
     // that ref is at the commit this verdict covers. A head-only read can keep
     // reporting the last commit after a same-repository branch is deleted.
     const where = `${postTarget.repo}#${postTarget.number}`;
     const pinned = carried?.current ?? reviewHead;
-    const facts = await input.fetchPrFacts({ repo: postTarget.repo, number: postTarget.number }).catch(() => undefined);
+    const facts = await input
+      .fetchPrFacts?.({ repo: postTarget.repo, number: postTarget.number })
+      .catch(() => undefined);
+    const exactBinding =
+      bound === undefined ||
+      (facts?.headRef === bound.headRef &&
+        facts.baseRef === bound.baseRef &&
+        facts.sameRepoHead === true &&
+        facts.verifiedHead?.repo === bound.repo &&
+        facts.verifiedHead.ref === bound.headRef &&
+        sameCommit(facts.verifiedHead.sha, bound.expectedHeadSha));
     const current =
-      facts?.state === "open" && facts.headBranchExists === true ? normalizeHead(facts.headSha) : undefined;
+      exactBinding && facts?.state === "open" && facts.headBranchExists === true
+        ? normalizeHead(facts.headSha)
+        : undefined;
     if (current === undefined || !sameCommit(current, pinned)) {
       const reason =
         current === undefined

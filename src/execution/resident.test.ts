@@ -2042,8 +2042,8 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
     expect((settled as Error).message).toContain("waited 10s for the resident to come back");
     expect((settled as Error).message).not.toContain("to wake");
     expect(classificationOf(settled)).toEqual({ kind: "infra", code: "transient-refusal" });
-    // A probe and a re-attach at t=0, 5 s and at the budget's edge; then the strike.
-    expect(calls.map(route)).toEqual(["/attach", "/status", "/attach", "/status", "/attach", "/status", "/attach"]);
+    // A probe and a re-attach at t=0 and 5 s; none starts at the budget's edge; then the strike.
+    expect(calls.map(route)).toEqual(["/attach", "/status", "/attach", "/status", "/attach"]);
     const notTransient = stubFetch({
       status: 409,
       body: { error: "reuse-refused: the tree is gone", needs: "recreate", transient: true },
@@ -2084,7 +2084,7 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
     expect(infraMayClear(settled as ExecInfraError)).toBe(true);
     expect((settled as Error).message).toContain("waited 10s for the resident to come back (last seen unreachable (");
     expect(classificationOf(settled)).toEqual({ kind: "infra", code: "transient-refusal" });
-    expect(calls.map(route)).toEqual(["/attach", "/status", "/status", "/status"]);
+    expect(calls.map(route)).toEqual(["/attach", "/status", "/status"]);
   });
 
   it("the run's stop rides into the first attach request itself, not only the wake wait's re-attach: a stop while it is in flight is the call's own aborted error at once", async () => {
@@ -2334,7 +2334,7 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
     const err = await p;
     expect(err).toBeInstanceOf(ExecInfraError);
     expect((err as ExecInfraError).reason).toBe("worker-unavailable");
-    expect(calls.map(route)).toEqual(["/exec", "/status", "/status"]);
+    expect(calls.map(route)).toEqual(["/exec", "/status"]);
   });
 
   it("a refusal streamed by /exec over HTTP 200 is typed by the status and the lifecycle pair IN the document, as the Worker's stream writes them: a busy mirror on a degraded-but-serviceable resident is the resident unavailable, never a deterministic answer; a definite state refuses", async () => {
@@ -2400,7 +2400,7 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
     // harness's one more command keeps waiting on it (its own five-minute
     // bound), so the strike is the resident unavailable, never a refusal.
     expect((settled as ExecInfraError).reason).toBe("worker-unavailable");
-    expect(calls.map(route)).toEqual(["/exec", "/status", "/status", "/status", "/status", "/status"]);
+    expect(calls.map(route)).toEqual(["/exec", "/status", "/status", "/status", "/status"]);
   });
 
   it("the wait is capped at the three-minute ceiling whatever the command's budget", async () => {
@@ -2554,8 +2554,8 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
     await p;
     expect(settled).toBeInstanceOf(ExecInfraError);
     expect((settled as Error).message).toContain("waited 20s for the resident to wake");
-    // The slow first probe (t=3 s), then one every 5 s and a last at the budget's edge: t=8, 13, 18, 20; the strike at t=20.
-    expect(calls.map(route)).toEqual(["/exec", "/status", "/status", "/status", "/status", "/status"]);
+    // The slow first probe (t=3 s), then one every 5 s before the budget's edge: t=8, 13, 18; the strike at t=20.
+    expect(calls.map(route)).toEqual(["/exec", "/status", "/status", "/status", "/status"]);
   });
 
   it("the wake clock starts at the first wait, never at the first call: an /exec whose call took 25s before the container's exit was answered still waits the command's whole budget for the wake", async () => {
@@ -2568,7 +2568,7 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
     await p;
     expect(settled).toBeInstanceOf(ExecInfraError);
     expect((settled as Error).message).toContain("waited 30s");
-    expect(calls.map(route)).toEqual(["/exec", ...Array.from({ length: 7 }, () => "/status")]);
+    expect(calls.map(route)).toEqual(["/exec", ...Array.from({ length: 6 }, () => "/status")]);
   });
 
   it("the rolling wake's re-attach — the one recovery that always recreates the worktree from the mirror — runs under the attach's own timeout like every attach request an operation opens: a 30s /exec whose re-attach clones and installs for two minutes after the exit is handed the restart, never struck 'did not answer' at its own call bound and counted as a rollout strike", async () => {
@@ -2704,7 +2704,7 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
     expect(struck).toBeInstanceOf(ExecInfraError);
     expect((struck as ExecInfraError).reason).toBe("worker-unavailable");
     expect((struck as Error).message).toContain("HTTP 502 with no Worker document in the answer");
-    expect(spent.calls.map(route).filter((r) => r === "/status")).toHaveLength(5);
+    expect(spent.calls.map(route).filter((r) => r === "/status")).toHaveLength(4);
   });
 
   it("a recovery attach after a worktree eviction has the attach default as its floor: a 30s /exec whose re-attach installs deps for two minutes on a healthy resident still re-issues and answers, never deadline-passed at the op's own call bound", async () => {

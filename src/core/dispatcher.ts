@@ -30,6 +30,7 @@ import {
 } from "./audienceDecision.js";
 import { sourceBinding, type SessionSources } from "./references/receipts.js";
 import { configuredAgent } from "../config/agents.js";
+import { isRunProfile } from "../config/profile.js";
 import { MINUTE_MS, minutesToMs } from "./budgets.js";
 import type { LedgerRun } from "./runLedger/writeThrough.js";
 import { settleRetryPause } from "./runLedger/threadsElsewhere.js";
@@ -654,7 +655,7 @@ export async function dispatch(
     (resume
       ? carriedCoordinatorTag(resume.row, resume.events)
       : restart
-        ? carriedCoordinatorTag(restart.row, [])
+        ? carriedCoordinatorTag(restart.row, restart.events)
         : undefined);
   const recovery = opts.recovery ?? coordinator?.recovery;
   const clock = deps.clock ?? systemClock;
@@ -888,6 +889,7 @@ export async function dispatch(
          *  a restart dispatch that dies before the successor's claim ends that
          *  record for real instead of leaving it answering still-running. */
         closed?: RunRecord;
+        profile?: CarriedRunIdentity["profile"];
       }
     | undefined;
   let pendingStop: StopMode | undefined;
@@ -1875,6 +1877,42 @@ export async function dispatch(
         : recoveryRemainingMs === undefined
           ? parent.remainingMs
           : Math.min(parent.remainingMs, recoveryRemainingMs);
+    const originalEvents = resume?.events ?? restart?.events ?? opts.restartCarried?.events;
+    const savedMeta = (resume ?? restart)?.row.meta;
+    const hadCoordinator =
+      coordinator !== undefined ||
+      savedMeta?.parentInstanceId !== undefined ||
+      savedMeta?.idempotencyKey !== undefined ||
+      savedMeta?.coordinatorUnit !== undefined ||
+      originalEvents?.some((event) => event.type === "coordinator_tag") === true;
+    const recoveringCanonical =
+      hadCoordinator && (resume !== undefined || restart !== undefined || opts.restartOf !== undefined);
+    const originalProfile = recoveringCanonical
+      ? (resume?.row.meta.profile ?? restart?.row.meta.profile ?? opts.restartCarried?.profile)
+      : undefined;
+    const originalAdmission = originalEvents?.find((event) => event.type === "run_state" && event.state === "admitted");
+    if (
+      recoveringCanonical &&
+      (coordinator === undefined ||
+        (resume !== undefined &&
+          (typeof resume.plan.remainingMs !== "number" ||
+            !Number.isFinite(resume.plan.remainingMs) ||
+            resume.plan.remainingMs <= 0)) ||
+        !isRunProfile(originalProfile) ||
+        originalAdmission?.type !== "run_state" ||
+        typeof originalAdmission.at !== "number" ||
+        !Number.isFinite(originalAdmission.at) ||
+        typeof originalAdmission.bound !== "number" ||
+        !Number.isFinite(originalAdmission.bound) ||
+        originalAdmission.bound <= originalAdmission.at)
+    ) {
+      resumeRowRetained = true;
+      await refuseSilently("run_budget_exhausted", async () => {});
+      return ended;
+    }
+    const originalDeadline =
+      recoveringCanonical && originalAdmission?.type === "run_state" ? originalAdmission.bound : undefined;
+
     const profileGate = await authorizeProfile(deps, {
       msg,
       io,
@@ -1884,6 +1922,8 @@ export async function dispatch(
         agent,
         resolved,
         resume,
+        ...(coordinator && restart ? { restart } : {}),
+        ...(coordinator && opts.restartCarried?.profile ? { carriedProfile: opts.restartCarried.profile } : {}),
         budget: directives.budget,
         ...(inheritedRemainingMs !== undefined ? { parentRemainingMs: inheritedRemainingMs } : {}),
       }),
@@ -2659,6 +2699,10 @@ export async function dispatch(
     // back with a named note that rides on every status frame below.
     // Unknown-head check (dispatch/authorize.ts): a review whose PR head could
     // not be resolved is not started, before any attach.
+    if (coordinator && agent.name === "review" && !coordinator.publication) {
+      await refuse(refusalOf("workspace_head_mismatch", "The saved review target could not be verified."));
+      return ended;
+    }
     const headPreflight = await authorizePrHead({
       msg,
       io,
@@ -2670,6 +2714,7 @@ export async function dispatch(
       agent,
       directives,
       repoCtx,
+      ...(coordinator?.publication ? { publication: coordinator.publication } : {}),
     });
     if (headPreflight.kind === "refused") return ended;
     if (agent.name === "review" && repoCtx.repo !== undefined && repoCtx.pr !== undefined)
@@ -2866,6 +2911,7 @@ export async function dispatch(
       repoCtx,
       carriedRow,
       resume,
+      restart,
       startedAt,
       receivedAt,
       clock,
@@ -2895,7 +2941,6 @@ export async function dispatch(
       run.control.requestStop(pendingStop);
       pendingStop = undefined;
     }
-    if (coordinator) io.runStarted?.({ id: runId });
     // What the session seed could not do (session-log item 9), on the record
     // before the first turn — the run is not changed by it.
     for (const summary of seedNotes)
@@ -3016,9 +3061,11 @@ export async function dispatch(
     const resumeNeedsSegment =
       resume !== undefined && (resume.row.liveState !== undefined || registry.getById(runId)?.liveState !== undefined);
     const admissionAt = clock();
-    const admissionBound = resume
+    const segmentBound = resume
       ? admissionAt + resume.plan.remainingMs
       : Math.max(startedAt, admissionAt) + minutesToMs(profile.minutes);
+    const admissionBound = originalDeadline === undefined ? segmentBound : Math.min(originalDeadline, segmentBound);
+
     if (typeof registry.commitLiveState === "function") {
       await events.write(async () => {
         const current = registry.getById(runId);
@@ -3074,6 +3121,13 @@ export async function dispatch(
           }
         }
       });
+    }
+
+    // Admission commits the reserved identity and setup stream, including the coordinator tag, before notifying its owner.
+    if (coordinator) {
+      if (!(reserved ?? ledgerRun)?.tracked() || typeof registry.commitLiveState !== "function")
+        throw new Error("the coordinator child has no durable admission receipt");
+      io.runStarted?.({ id: runId });
     }
 
     type LiveCommit = { ok: true } | LiveCommitFailure;
@@ -3137,7 +3191,7 @@ export async function dispatch(
       if (observation.attempt < residentAttachAttempt) return;
       residentAttachAttempt = observation.attempt;
       const accepted = await assignLive(
-        { state: observation.state, bound: observation.bound },
+        { state: observation.state, bound: Math.min(observation.bound, admissionBound) },
         clock(),
         liveStateWords(observation.state),
       );
@@ -3333,6 +3387,8 @@ export async function dispatch(
         throw error;
       }
     }
+    if (originalDeadline !== undefined && admissionBound <= clock())
+      throw new RefusalError(refusalOf("run_budget_exhausted", "The original child budget ended before attachment."));
     const control = registered?.control;
     const attach = await attachWorkspace(deps, {
       runId: run.id,
@@ -3363,7 +3419,9 @@ export async function dispatch(
       ...(control
         ? {
             stopSignal: control.hardSignal,
-            remainingMs: () => control.remainingMs() ?? (resume ? Math.max(0, admissionBound - clock()) : undefined),
+            remainingMs: () =>
+              control.remainingMs() ??
+              (resume || coordinator !== undefined ? Math.max(0, admissionBound - clock()) : undefined),
           }
         : {}),
       onLiveStateObservation: observeResidentLiveState,
@@ -3423,6 +3481,7 @@ export async function dispatch(
         if (abandoned)
           restartRequest = {
             request: abandoned.request,
+            profile,
             restartOf: resume.row.runId,
             note: "workspace lost, resumed from the request",
             ...(abandoned.closed !== undefined ? { closed: abandoned.closed } : {}),
@@ -3584,6 +3643,7 @@ export async function dispatch(
       resume,
       selection: round.selection,
       repoCtx,
+      ...(coordinator?.publication ? { publication: coordinator.publication } : {}),
       ...(githubDoor ? { githubDoor } : {}),
       stopSignal: run.control.hardSignal,
       root,
@@ -4211,6 +4271,7 @@ export async function dispatch(
       loopStartedAt,
       assertAdmissionBudget,
       admissionRemainingMs: () => Math.max(0, admissionBound - clock()),
+      ...(coordinator ? { admissionDeadlineAt: admissionBound } : {}),
       channelVisibility,
       slackContext,
       privateAudienceLatch,
@@ -4292,6 +4353,7 @@ export async function dispatch(
       // reason.
       restartRequest = {
         ...ran.restart,
+        profile,
         ...(operationTarget !== undefined ? { operationTarget } : {}),
         note:
           ran.refusal === "container_replaced" || ran.refusal === "workspace_lost"
@@ -4671,7 +4733,16 @@ export async function dispatch(
         pending,
         clock,
         ...(restartRequest.restartOf !== undefined ? { restartOf: restartRequest.restartOf } : {}),
-        ...(restartIdentity !== undefined ? { carried: restartIdentity } : {}),
+        ...(restartIdentity !== undefined
+          ? {
+              carried: {
+                ...restartIdentity,
+                ...((restartRequest.profile ?? restartRequest.closed?.profile)
+                  ? { profile: restartRequest.profile ?? restartRequest.closed!.profile }
+                  : {}),
+              },
+            }
+          : {}),
         ...(restartRequest.coordinator !== undefined ? { coordinator: restartRequest.coordinator } : {}),
         ...(restartRequest.operationTarget !== undefined ? { operationTarget: restartRequest.operationTarget } : {}),
       });

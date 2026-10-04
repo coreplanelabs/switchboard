@@ -178,6 +178,7 @@ import {
   fetchPullRequestComments,
   fetchPullRequestFacts,
   fetchBranchHeadSha,
+  fetchBranchRef,
   fetchRepoShipInfo,
   fetchPullRequestTitleBody,
   fixupCommitSubjects,
@@ -1350,6 +1351,7 @@ export async function runBot(): Promise<void> {
       // gate's "the verdict stands" question is answered from.
       github: deps.githubApi ?? new RestGithubApi(),
       createBranchRef,
+      fetchBranchRef,
       fetchPrReviews: fetchPullRequestReviews,
       fetchPrComments: fetchPullRequestComments,
       commenterAuthorized,

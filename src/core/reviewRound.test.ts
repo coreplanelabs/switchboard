@@ -538,6 +538,86 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
     };
   }
 
+  it("a canonical review cannot post a carried verdict at another saved head", async () => {
+    const h = harness();
+    const publication = {
+      repo: "acme/api",
+      pr: 42,
+      headRef: "fix/review",
+      baseRef: "main",
+      publicationRef: "fix/review",
+      expectedHeadSha: HEAD,
+      owner: { instanceId: "ship_review", unit: "ONE" },
+    };
+    const out = await runReviewPostStep({
+      agent: AGENTS.review,
+      requestText: "review acme/api#42",
+      repoCtx: { repo: "acme/api", pr: 42, ref: "fix/review", baseRef: "main" },
+      publication,
+      heads: { reviewHead: OTHER, observedHead: OTHER },
+      verdict: { ...verdict, head: OTHER },
+      digest: undefined,
+      answer,
+      carried: { reviewed: HEAD, current: OTHER, commits: 1 },
+      hardStopped: false,
+      post: h.post,
+      fetchPrHead: async () => OTHER,
+      reply: h.reply,
+      logKey: "t",
+    });
+    expect(out.posted).toBe(false);
+    expect(h.posts).toEqual([]);
+  });
+
+  it.each(["base", "ref", "repository", "receipt"])(
+    "a canonical review refuses fresh %s drift before posting",
+    async (drift) => {
+      const h = harness();
+      const publication = {
+        repo: "acme/api",
+        pr: 42,
+        headRef: "fix/review",
+        baseRef: "main",
+        publicationRef: "fix/review",
+        expectedHeadSha: HEAD,
+        owner: { instanceId: "ship_review", unit: "ONE" },
+      };
+      const facts = {
+        state: "open" as const,
+        headSha: HEAD,
+        headRef: "fix/review",
+        baseRef: "main",
+        sameRepoHead: true,
+        headBranchExists: true,
+        verifiedHead: { repo: "acme/api", ref: "fix/review", sha: HEAD },
+      };
+      if (drift === "base") facts.baseRef = "other";
+      if (drift === "ref") facts.headRef = "other";
+      if (drift === "repository") facts.sameRepoHead = false;
+      if (drift === "receipt") Object.assign(facts, { verifiedHead: undefined });
+      const out = await runReviewPostStep({
+        agent: AGENTS.review,
+        requestText: "review acme/api#42",
+        repoCtx: { repo: "acme/api", pr: 42, ref: "fix/review", baseRef: "main" },
+        publication,
+        heads: { reviewHead: HEAD, observedHead: HEAD },
+        verdict,
+        digest: undefined,
+        answer,
+        carried: undefined,
+        hardStopped: false,
+        guardTransition: true,
+        fetchPrFacts: async () => facts,
+        post: h.post,
+        fetchPrHead: async () => HEAD,
+        reply: h.reply,
+        logKey: "t",
+      });
+      expect(out.posted).toBe(false);
+      expect(h.posts).toEqual([]);
+    },
+  );
+
   it("a standalone review with a verified head posts exactly as before, with only the post-publication head read", async () => {
     const h = harness();
     let headReads = 0;
@@ -1054,6 +1134,29 @@ describe("settleReviewedHead — the head-move re-review", () => {
     };
     return { input, executor, events, replies, labels, moves };
   }
+
+  it.each(["substantive", "rebase"])(
+    "a canonical review never follows or carries a %s move outside its saved publication",
+    async (kind) => {
+      const followUp = vi.fn(async () => "must not run");
+      const w = moved({ followUp });
+      const publication = {
+        repo: "acme/api",
+        pr: 42,
+        headRef: "fix/review",
+        baseRef: "main",
+        publicationRef: "fix/review",
+        expectedHeadSha: HEAD,
+        owner: { instanceId: "ship_review", unit: "ONE" },
+      };
+      if (kind === "rebase") w.input.fetchPrCommits = async () => list(["feat: the change"]);
+      const out = await settleReviewedHead({ ...w.input, publication });
+      expect(out.reviewHead).toBe(HEAD);
+      expect(out.carried).toBeUndefined();
+      expect(w.moves).toEqual([]);
+      expect(followUp).not.toHaveBeenCalled();
+    },
+  );
 
   it("a substantive move's one more turn is a prompt on the run's session: the worktree moved first, the follow-up text as the appended user turn, the round's budget, the turn's own verdict capture, the head re-probed after", async () => {
     const followUp = vi.fn(async (input: FollowUpTurnInput) => {

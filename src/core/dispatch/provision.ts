@@ -11,7 +11,7 @@
 // before the next step that can throw and its outer finally releases exactly
 // what the inline code did.
 import type { ConfigStore, ResolvedRequest } from "../../config.js";
-import { coordinatorFields, type CoordinatorTag } from "../coordinator/contract.js";
+import { coordinatorFields, unitOfIdempotencyKey, type CoordinatorTag } from "../coordinator/contract.js";
 import { AGENTS, type AgentDef } from "../../agents/registry.js";
 import { chatActorOf } from "../authz/actor.js";
 import { clipSourceLabel, type RunProfile } from "../../config/profile.js";
@@ -364,6 +364,7 @@ export interface RegisterRunContext {
   repoCtx: RepoContext;
   carriedRow: LiveRunRow | undefined;
   resume: ResumeContext | undefined;
+  restart?: RestartContext;
   startedAt: number;
   receivedAt: number;
   clock: Clock;
@@ -438,6 +439,7 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
     repoCtx,
     carriedRow,
     resume,
+    restart,
     startedAt,
     receivedAt,
     clock,
@@ -546,9 +548,11 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
         : {}),
       ...(resume
         ? { replay: resume.events }
-        : ctx.restartCarried
-          ? { replay: ctx.restartCarried.events, token: ctx.restartCarried.token, resetLiveState: true }
-          : {}),
+        : restart
+          ? { replay: restart.events }
+          : ctx.restartCarried
+            ? { replay: ctx.restartCarried.events, token: ctx.restartCarried.token, resetLiveState: true }
+            : {}),
     },
   );
   ctx.afterCreate?.({ runId, channelVisibility });
@@ -713,6 +717,29 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
   // not the thread its lead was posted in: the record shows what the model saw.
   if (!resume && deps.config.config.runHistory?.includeContext !== false) {
     for (const text of contextMessageTexts(seedTurns ?? history, humanize)) publishText("context", text);
+  }
+  // Admission persists this setup tag with the reserved identity before registration can be acknowledged.
+  if (
+    !resume &&
+    coordinator &&
+    !(restart?.events ?? ctx.restartCarried?.events)?.some((event) => event.type === "coordinator_tag")
+  ) {
+    const unit = unitOfIdempotencyKey(coordinator.idempotencyKey);
+    registry.publish(run.id, {
+      type: "coordinator_tag",
+      parentInstanceId: coordinator.parentInstanceId,
+      ...(coordinator.costCapUsd !== undefined ? { costCapUsd: coordinator.costCapUsd } : {}),
+      ...(unit !== undefined ? { unit } : {}),
+      ...(coordinator.branch !== undefined ? { branch: coordinator.branch } : {}),
+      ...(coordinator.transportWorkflowId !== undefined
+        ? { transportWorkflowId: coordinator.transportWorkflowId }
+        : {}),
+      ...(coordinator.recovery !== undefined ? { recovery: coordinator.recovery } : {}),
+      ...(coordinator.base !== undefined ? { base: coordinator.base } : {}),
+      ...(coordinator.publication !== undefined ? { publication: coordinator.publication } : {}),
+      ...(coordinator.issuedFindingIds !== undefined ? { issuedFindingIds: coordinator.issuedFindingIds } : {}),
+      at: clock(),
+    });
   }
   return { run, runId, channelVisibility, liveUrl, events, publishText, publishMeta };
 }
