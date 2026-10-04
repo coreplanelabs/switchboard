@@ -7,6 +7,9 @@ import {
   NullCoordinatorInstanceStore,
 } from "./instanceStore.js";
 import {
+  isUnitCurrentEffect,
+  isUnitEffectTransition,
+  unitEffectResultMatches,
   type UnitEffectTransition,
   type UnitEffectTransitionResult,
   type UnitEffectCompletionOutcome,
@@ -68,6 +71,105 @@ function accepted(result: UnitEffectTransitionResult): CoordinatorUnit {
 }
 
 describe("unit current effect", () => {
+  it("an accepted queue retains ownership after stop until exact terminal evidence, and an unknown enqueue cannot resolve from absence", async () => {
+    const published: CoordinatorUnit = {
+      ...unit,
+      pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+      publication: {
+        repo: instance.repo,
+        pr: 7,
+        headRef: unit.branch,
+        baseRef: "main",
+        publicationRef: unit.branch,
+        expectedHeadSha: "a".repeat(40),
+        owner: { instanceId: instance.id, unit: unit.unit },
+      },
+    };
+    for (const state of ["accepted", "uncertain"] as const) {
+      const store = await retained(published);
+      const job = {
+        ...admitted,
+        target: { ...admitted.target, pr: 7 },
+        calls: [{ operation: "enqueue" as const, state: "unstarted" as const }],
+      };
+      let row = accepted(await transition(store, { kind: "admit", expected: published, execution, effect: job }));
+      row = accepted(await transition(store, { kind: "begin", expected: row, execution, effectId: job.id, call: 0 }));
+      row = accepted(
+        await transition(store, {
+          kind: "complete",
+          expected: row,
+          execution,
+          effectId: job.id,
+          call: 0,
+          outcome: { state },
+        }),
+      );
+      await store.markStopped(instance.id, 2);
+      expect(await transition(store, { kind: "settle", expected: row, execution, effectId: job.id })).toEqual({
+        ok: false,
+        reason: "uncertain",
+      });
+      const target = { repo: instance.repo, ref: unit.branch, base: "main", pr: 7, headSha: "a".repeat(40) };
+      expect(
+        await transition(store, {
+          kind: "resolve",
+          expected: row,
+          execution,
+          effectId: job.id,
+          call: 0,
+          observation: { kind: "pull_merged", ...target, headSha: "b".repeat(40), commitSha: "9".repeat(40) },
+        }),
+      ).toEqual({ ok: false, reason: "conflict" });
+      if (state === "uncertain")
+        expect(
+          await transition(store, {
+            kind: "resolve",
+            expected: row,
+            execution,
+            effectId: job.id,
+            call: 0,
+            observation: { kind: "pull_dequeued", ...target },
+          }),
+        ).toEqual({ ok: false, reason: "conflict" });
+      row = accepted(
+        await transition(store, {
+          kind: "resolve",
+          expected: row,
+          execution,
+          effectId: job.id,
+          call: 0,
+          observation: { kind: "pull_merged", ...target, commitSha: "9".repeat(40) },
+        }),
+      );
+      expect(row.currentEffect).toMatchObject({
+        phase: "settled",
+        calls: [{ operation: "enqueue", state: "accepted" }],
+      });
+    }
+  });
+
+  it("decoder and transport cannot accept a merge without its native commit receipt or an enqueue with unrelated receipts", () => {
+    for (const operation of ["merge", "enqueue"] as const) {
+      const malformed =
+        operation === "merge"
+          ? { state: "accepted" as const }
+          : { state: "accepted" as const, commitSha: "9".repeat(40) };
+      const pending = { ...unit, currentEffect: { ...effect, calls: [{ operation, state: "pending" as const }] } };
+      const bad = { ...pending, currentEffect: { ...effect, calls: [{ operation, ...malformed }] } };
+      const input: UnitEffectTransition = {
+        kind: "complete",
+        expected: pending,
+        execution,
+        effectId: effect.id,
+        call: 0,
+        outcome: malformed,
+      };
+      expect(isUnitCurrentEffect(bad.currentEffect)).toBe(false);
+      expect(isUnitEffectTransition(input)).toBe(false);
+      expect(unitEffectResultMatches(input, bad)).toBe(false);
+    }
+  });
+
   it("stop-first refuses admission while admission-first retains an accepted outcome after stop", async () => {
     const stopped = await retained(unit);
     await stopped.markStopped(instance.id, 2);
@@ -309,7 +411,7 @@ describe("unit current effect", () => {
     const store = await retained(unit);
     const plan = {
       ...admitted,
-      calls: Array.from({ length: 32 }, () => ({ operation: "enqueue" as const, state: "unstarted" as const })),
+      calls: Array.from({ length: 32 }, () => ({ operation: "rebase_push" as const, state: "unstarted" as const })),
     };
     let row = accepted(await transition(store, { kind: "admit", expected: unit, execution, effect: plan }));
     const options = { baseUrl: "https://memory.test", token: "test-token", storeKey: "effect-test" };

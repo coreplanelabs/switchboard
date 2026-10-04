@@ -67,7 +67,13 @@ const row = (unit: string, over: Partial<CoordinatorUnit> = {}): CoordinatorUnit
 });
 
 /** The bot's reply as the wire carries it: the fixture object, stamped with the bot's clock, as text. */
-const ok = (body: object, at = T0, status = 200): BotReply => ({ status, text: JSON.stringify({ ...body, at }) });
+const ok = (body: object, at = T0, status = 200): BotReply => {
+  const reply = { status, text: JSON.stringify({ ...body, at }) };
+  const value = body as Record<string, unknown>;
+  if (["merged", "enqueued"].includes(value.outcome as string) && value.by === undefined && !("effectOrdinal" in value))
+    effectFixtures.add(reply);
+  return reply;
+};
 /** The same, read — what the mappers see. */
 const answer = (body: object, at = T0, status = 200): BotAnswer => ({
   status,
@@ -1145,7 +1151,15 @@ function bot(script: Partial<Record<CoordinatorStepRoute, Scripted[]>>) {
       if (answer instanceof Error) throw answer;
       if (route === "plan" && !(answer instanceof Error)) lastPlan = answer;
       // Only the explicit effect fixtures model a persisted receipt. Raw replies remain available for malformed-wire proofs.
-      if ((route === "branch" || route === "spawn") && effectFixtures.has(answer))
+      if (
+        (route === "branch" ||
+          route === "spawn" ||
+          (route === "merge" &&
+            body.queued !== true &&
+            ["merged", "enqueued"].includes(JSON.parse(answer.text).outcome) &&
+            JSON.parse(answer.text).by !== "other")) &&
+        effectFixtures.has(answer)
+      )
         return { ...answer, text: JSON.stringify({ ...JSON.parse(answer.text), effectOrdinal: body.effectOrdinal }) };
       return answer;
     },
@@ -4427,6 +4441,30 @@ describe("Workflow effect receipt ordinals", () => {
     const s = steps({ "U10/0/coding/wait/1": "event" });
     return { b, s };
   }
+  it("a merge success without its committed ordinal or full native SHA cannot complete the unit", async () => {
+    for (const reply of [
+      { ok: true, outcome: "merged", sha: MERGED },
+      { ok: true, outcome: "enqueued", reason: "queued" },
+      { ok: true, outcome: "merged", sha: "short", effectOrdinal: 4 },
+    ]) {
+      const b = bot({
+        plan: [planAnswer([row("U10")], T0, "runner")],
+        "unit-start": [started("U10")],
+        branch: [branched("U10")],
+        spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN)],
+        "read-record": [codingDone("run-c0", T0 + 10 * MIN), reviewApproved("run-r1", T0 + 20 * MIN)],
+        "pr-check": [prNone(), prOpen(T0 + 10 * MIN)],
+        round: [acked(), acked(), acked(), acked()],
+        merge: [{ status: 200, text: JSON.stringify({ ...reply, at: T0 + 21 * MIN }) }],
+        "unit-end": [acked()],
+        finish: [acked()],
+      });
+      const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
+      await expect(runPlan(s.runner, b.client, INSTANCE)).rejects.toThrow();
+      expect(b.of("unit-end")[0]).toMatchObject({ ending: { kind: "failed" } });
+    }
+  });
+
   it("advances from a branch creation receipt to the next exact child ordinal", async () => {
     const { b, s } = flow(
       ok({ ok: true, effectOrdinal: 1 }),

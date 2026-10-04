@@ -1175,6 +1175,41 @@ describe("githubPulls", () => {
   // the bot squashes a plan branch's pull request itself at the approved head,
   // the title as the commit and an empty body, and reads the checks at the head.
   describe("the merge queue — the rule, the enqueue and the queue's outcome (issue 2011)", () => {
+    it("enqueue requires a native receipt for the exact PR and head; prose and partial data cannot acknowledge a write", async () => {
+      stubToken();
+      for (const receipt of [
+        {},
+        { data: { enqueuePullRequest: null } },
+        { errors: [{ message: "The pull request is already in the merge queue" }] },
+        {
+          data: {
+            enqueuePullRequest: {
+              mergeQueueEntry: { id: "MQ_one", pullRequest: { id: "PR_other", headRefOid: "a".repeat(40) } },
+            },
+          },
+        },
+      ]) {
+        const replies = [
+          { data: { repository: { pullRequest: { id: "PR_one", headRefOid: "a".repeat(40) } } } },
+          receipt,
+        ];
+        const calls = stubFetch(() => new Response(JSON.stringify(replies.shift()), { status: 200 }));
+        await expect(enqueuePullRequest({ repo: "acme/api", number: 7 }, { sha: "a".repeat(40) })).rejects.toThrow();
+        expect(calls).toHaveLength(2);
+      }
+    });
+
+    it("an incomplete or errored queue read cannot report removal", async () => {
+      stubToken();
+      for (const reply of [
+        { data: { repository: { pullRequest: {} } } },
+        { data: { repository: { pullRequest: { mergeQueueEntry: null } } }, errors: [{ message: "unavailable" }] },
+        { data: { repository: { pullRequest: { mergeQueueEntry: "queued" } } } },
+      ]) {
+        stubFetch(() => new Response(JSON.stringify(reply), { status: 200 }));
+        expect(await fetchMergeQueueState({ repo: "acme/api", number: 7 })).toBeUndefined();
+      }
+    });
     it("branchHasMergeQueue reads the base branch's rules: a merge_queue rule answers true, none false, and an unreadable or out-of-shape answer undefined", async () => {
       stubToken();
       const calls = stubFetch(
@@ -1194,46 +1229,30 @@ describe("githubPulls", () => {
       expect(await branchHasMergeQueue("acme/api", "main")).toBeUndefined();
     });
 
-    it("enqueuePullRequest pins the mutation to the reviewed head; already-queued is success, any other GraphQL error is an answer in GitHub's words", async () => {
+    it("enqueuePullRequest pins the mutation and validates the native entry; a failed lookup or write cannot acknowledge it", async () => {
       stubToken();
+      const head = "a".repeat(40);
       const answers = [
-        { data: { repository: { pullRequest: { id: "PR_node1" } } } },
-        { data: { enqueuePullRequest: { mergeQueueEntry: { position: 1 } } } },
+        { data: { repository: { pullRequest: { id: "PR_node1", headRefOid: head } } } },
+        {
+          data: {
+            enqueuePullRequest: {
+              mergeQueueEntry: { id: "MQ_one", pullRequest: { id: "PR_node1", headRefOid: head } },
+            },
+          },
+        },
       ];
       const calls = stubFetch(() => new Response(JSON.stringify(answers.shift()), { status: 200 }));
-      expect(await enqueuePullRequest({ repo: "acme/api", number: 7 }, { sha: "a".repeat(40) })).toEqual({ ok: true });
+      expect(await enqueuePullRequest({ repo: "acme/api", number: 7 }, { sha: head })).toEqual({ ok: true });
       expect(calls.map((c) => c.url)).toEqual(["https://api.github.com/graphql", "https://api.github.com/graphql"]);
-      expect(String(calls[1].init.body)).toContain("enqueuePullRequest");
       expect(String(calls[1].init.body)).toContain("expectedHeadOid: $sha");
-      expect(JSON.parse(String(calls[1].init.body)).variables).toEqual({ id: "PR_node1", sha: "a".repeat(40) });
-      // Already in the queue — a replayed step: the ask is satisfied.
-      const replay = [
-        { data: { repository: { pullRequest: { id: "PR_node1" } } } },
-        { errors: [{ message: "The pull request is already in the merge queue" }] },
-      ];
-      stubFetch(() => new Response(JSON.stringify(replay.shift()), { status: 200 }));
-      expect(await enqueuePullRequest({ repo: "acme/api", number: 7 }, { sha: "a".repeat(40) })).toEqual({ ok: true });
-      // Any other GraphQL error is an answer, never a throw.
-      const refused = [
-        { data: { repository: { pullRequest: { id: "PR_node1" } } } },
-        { errors: [{ message: "Pull request is not mergeable" }] },
-      ];
-      stubFetch(() => new Response(JSON.stringify(refused.shift()), { status: 200 }));
-      expect(await enqueuePullRequest({ repo: "acme/api", number: 7 }, { sha: "a".repeat(40) })).toEqual({
-        ok: false,
-        reason: "Pull request is not mergeable",
-      });
-      // No node id — the lookup's own error rides the answer.
+      expect(JSON.parse(String(calls[1].init.body)).variables).toEqual({ id: "PR_node1", sha: head });
       stubFetch(() => new Response(JSON.stringify({ errors: [{ message: "Could not resolve" }] }), { status: 200 }));
-      expect(await enqueuePullRequest({ repo: "acme/api", number: 7 }, { sha: "a".repeat(40) })).toEqual({
-        ok: false,
-        reason: "Could not resolve",
-      });
-      // An HTTP failure throws, like every write here.
-      stubFetch(() => new Response("bad gateway", { status: 502 }));
-      await expect(enqueuePullRequest({ repo: "acme/api", number: 7 }, { sha: "a".repeat(40) })).rejects.toThrow(
-        /HTTP 502/,
+      await expect(enqueuePullRequest({ repo: "acme/api", number: 7 }, { sha: head })).rejects.toThrow(
+        /Could not resolve/,
       );
+      stubFetch(() => new Response("bad gateway", { status: 502 }));
+      await expect(enqueuePullRequest({ repo: "acme/api", number: 7 }, { sha: head })).rejects.toThrow(/HTTP 502/);
     });
 
     it("fetchMergeQueueState reads the entry and the last removal's reason: queued with the position, removed with the queue's reason (or without one), undefined when GitHub cannot be read", async () => {
@@ -1281,6 +1300,43 @@ describe("githubPulls", () => {
   });
 
   describe("the plan runner's merge — mergePullRequest and fetchCommitChecks", () => {
+    it("a successful HTTP response without native merged true is not a merge receipt", async () => {
+      stubToken();
+      for (const merged of [false, undefined, "true"]) {
+        stubFetch(() => new Response(JSON.stringify({ sha: "9".repeat(40), merged }), { status: 200 }));
+        await expect(
+          mergePullRequest({ repo: "acme/api", number: 7 }, { sha: "a".repeat(40), title: "title" }),
+        ).rejects.toThrow();
+      }
+    });
+
+    it("the complete check listing includes a failure beyond the first page and rejects duplicate or foreign-head pages", async () => {
+      stubToken();
+      const head = "c".repeat(40);
+      const first = Array.from({ length: 100 }, (_, i) => ({
+        id: i + 1,
+        head_sha: head,
+        name: `check ${i}`,
+        status: "completed",
+        conclusion: "success",
+      }));
+      for (const last of [
+        { id: 101, head_sha: head, name: "last check", status: "completed", conclusion: "failure" },
+        first[0],
+        { id: 101, head_sha: "d".repeat(40), name: "other head", status: "completed", conclusion: "success" },
+      ]) {
+        const replies = [
+          { total_count: 101, check_runs: first },
+          { total_count: 101, check_runs: [last] },
+        ];
+        const calls = stubFetch(() => new Response(JSON.stringify(replies.shift()), { status: 200 }));
+        const result = await fetchCommitChecks("acme/api", head);
+        expect(result).toEqual(
+          last.id === 101 && last.head_sha === head ? { total: 101, pending: [], failed: ["last check"] } : undefined,
+        );
+        expect(calls).toHaveLength(2);
+      }
+    });
     it("the facts carry the pull request's title", async () => {
       stubToken();
       const titled = {
@@ -1353,6 +1409,7 @@ describe("githubPulls", () => {
         () =>
           new Response(
             JSON.stringify({
+              total_count: 7,
               check_runs: [
                 { name: "ci / bot / lint", status: "completed", conclusion: "success" },
                 { name: "ci / deploy the docs site", status: "completed", conclusion: "skipped" },
@@ -1360,8 +1417,8 @@ describe("githubPulls", () => {
                 { name: "ci / bot / test 1 of 4", status: "in_progress", conclusion: null },
                 { name: "ci / web", status: "queued" },
                 { name: "ci / package", status: "completed", conclusion: "failure" },
-                { status: "completed", conclusion: "cancelled" },
-              ],
+                { name: "cancelled check", status: "completed", conclusion: "cancelled" },
+              ].map((run, i) => ({ ...run, id: i + 1, head_sha: "c".repeat(40) })),
             }),
             { status: 200 },
           ),
@@ -1369,12 +1426,12 @@ describe("githubPulls", () => {
       expect(await fetchCommitChecks("acme/api", "c".repeat(40))).toEqual({
         total: 7,
         pending: ["ci / bot / test 1 of 4", "ci / web"],
-        failed: ["ci / package", "(unnamed)"],
+        failed: ["ci / package", "cancelled check"],
       });
       expect(calls[0].url).toBe(
-        `https://api.github.com/repos/acme/api/commits/${"c".repeat(40)}/check-runs?per_page=100`,
+        `https://api.github.com/repos/acme/api/commits/${"c".repeat(40)}/check-runs?per_page=100&page=1`,
       );
-      stubFetch(() => new Response(JSON.stringify({ check_runs: [] }), { status: 200 }));
+      stubFetch(() => new Response(JSON.stringify({ total_count: 0, check_runs: [] }), { status: 200 }));
       expect(await fetchCommitChecks("acme/api", "c".repeat(40))).toEqual({ total: 0, pending: [], failed: [] });
       stubFetch(() => new Response("nope", { status: 502 }));
       expect(await fetchCommitChecks("acme/api", "c".repeat(40))).toBeUndefined();

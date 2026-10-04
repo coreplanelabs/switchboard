@@ -4789,6 +4789,108 @@ describe("complete canonical pull ownership", () => {
 });
 
 describe("unit effect owner transaction", () => {
+  it("HTTP queue receipts retain the stopped owner until exact native terminal resolution", async () => {
+    const key = storeKey();
+    const instance: CoordinatorInstance = {
+      id: "effect_queue_contract",
+      kind: "ship",
+      userId: "slack:UALICE",
+      channelId: "slack:C1",
+      threadKey: "slack:C1:effect-queue",
+      repo: "acme/api",
+      branch: "fix/effect",
+      base: "main",
+      merge: "person",
+      createdAt: 1,
+    };
+    const execution = { workflowId: instance.id };
+    const target = { repo: instance.repo, ref: instance.branch, base: "main", headSha: "a".repeat(40), pr: 7 };
+    const unit: CoordinatorUnit = {
+      instanceId: instance.id,
+      unit: "ONE",
+      slug: "one",
+      branch: instance.branch,
+      dependsOn: [],
+      rounds: [],
+      pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+      publication: {
+        repo: instance.repo,
+        pr: 7,
+        headRef: instance.branch,
+        publicationRef: instance.branch,
+        baseRef: "main",
+        expectedHeadSha: target.headSha,
+        owner: { instanceId: instance.id, unit: "ONE" },
+      },
+    };
+    expect((await post("/runs/coordinator/put", { storeKey: key, instance })).status).toBe(200);
+    expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [unit] })).status).toBe(200);
+    const route = (input: unknown) => post("/runs/coordinator/units/effect-transition", { storeKey: key, input });
+    const effect = {
+      version: 1,
+      id: "ONE/merge/0",
+      ordinal: 1,
+      execution,
+      target,
+      phase: "active",
+      calls: [{ operation: "enqueue", state: "unstarted" }],
+    };
+    let answer = await route({ kind: "admit", expected: unit, execution, effect });
+    expect(answer.status).toBe(200);
+    let row = answer.data.unit;
+    answer = await route({ kind: "begin", expected: row, execution, effectId: effect.id, call: 0 });
+    expect(answer.status).toBe(200);
+    row = answer.data.unit;
+    expect(
+      (
+        await route({
+          kind: "complete",
+          expected: row,
+          execution,
+          effectId: effect.id,
+          call: 0,
+          outcome: { state: "accepted", commitSha: "9".repeat(40) },
+        })
+      ).status,
+    ).toBe(400);
+    answer = await route({
+      kind: "complete",
+      expected: row,
+      execution,
+      effectId: effect.id,
+      call: 0,
+      outcome: { state: "accepted" },
+    });
+    expect(answer.status).toBe(200);
+    row = answer.data.unit;
+    await post("/runs/coordinator/stop", { storeKey: key, instanceId: instance.id, at: 2 });
+    expect(await route({ kind: "settle", expected: row, execution, effectId: effect.id })).toMatchObject({
+      status: 409,
+      data: { reason: "uncertain" },
+    });
+    expect(
+      (
+        await route({
+          kind: "resolve",
+          expected: row,
+          execution,
+          effectId: effect.id,
+          call: 0,
+          observation: { kind: "pull_merged", ...target, headSha: "b".repeat(40), commitSha: "9".repeat(40) },
+        })
+      ).status,
+    ).toBe(409);
+    answer = await route({
+      kind: "resolve",
+      expected: row,
+      execution,
+      effectId: effect.id,
+      call: 0,
+      observation: { kind: "pull_dequeued", ...target },
+    });
+    expect(answer).toMatchObject({ status: 200, data: { unit: { currentEffect: { phase: "settled" } } } });
+  });
+
   it("canonical competing branch owners refuse effect admission without changing either row or context pins", async () => {
     const key = storeKey();
     const instance: CoordinatorInstance = {

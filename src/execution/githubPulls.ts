@@ -782,6 +782,7 @@ export async function mergePullRequest(
   pr: { repo: string; number: number },
   opts: { sha: string; title: string; mergedBy?: string },
 ): Promise<MergeResult> {
+  if (!/^[0-9a-f]{40}$/i.test(opts.sha)) throw new Error("merge requires an exact full head sha");
   const token = await requireToken();
   const res = await fetch(`https://api.github.com/repos/${pr.repo}/pulls/${pr.number}/merge`, {
     method: "PUT",
@@ -797,15 +798,17 @@ export async function mergePullRequest(
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   const text = await res.text().catch(() => "");
-  let body: { sha?: unknown; message?: unknown } | null;
+  let body: { sha?: unknown; message?: unknown; merged?: unknown } | null;
   try {
-    body = JSON.parse(text) as { sha?: unknown; message?: unknown };
+    body = JSON.parse(text) as { sha?: unknown; message?: unknown; merged?: unknown };
   } catch {
     body = null;
   }
   if (res.ok) {
     const sha = typeof body?.sha === "string" && /^[0-9a-f]{40}$/.test(body.sha) ? body.sha : undefined;
     if (sha === undefined) throw new Error(`merge of ${pr.repo}#${pr.number} answered without a merge commit sha`);
+    if (res.status !== 200 || body?.merged !== true)
+      throw new Error(`merge of ${pr.repo}#${pr.number} returned no native merge receipt`);
     return { ok: true, sha };
   }
   if (res.status === 405 || res.status === 409 || res.status === 422) {
@@ -816,11 +819,6 @@ export async function mergePullRequest(
 }
 
 // ---- the merge queue (agent-ship item 9; issue 2011) --------------------------------------------------
-
-/** GitHub's own wording when a ruleset routes every change through the merge
- *  queue: the merge door recognises it on a 405 even when the base branch's
- *  rules could not be read ahead of the attempt. */
-export const MERGE_QUEUE_405 = /must be made through the merge queue|merge queue/i;
 
 /** `GET /repos/{repo}/rules/branches/{branch}`: whether a `merge_queue` rule
  *  protects the branch. Undefined when GitHub cannot be read or answers out of
@@ -838,8 +836,8 @@ export async function branchHasMergeQueue(repo: string, branch: string): Promise
   }
   if (!res.ok) return undefined;
   const data = (await res.json().catch(() => null)) as Array<{ type?: unknown }> | null;
-  if (!Array.isArray(data)) return undefined;
-  return data.some((rule) => rule && rule.type === "merge_queue");
+  if (!Array.isArray(data) || data.some((rule) => !rule || typeof rule.type !== "string")) return undefined;
+  return data.some((rule) => rule.type === "merge_queue");
 }
 
 /** One GraphQL call on the App token: the parsed `data`, or a throw naming the
@@ -871,50 +869,74 @@ const prGraphqlArgs = (pr: { repo: string; number: number }) => {
 
 export type EnqueueResult = { ok: true } | { ok: false; reason: string };
 
-/** The GraphQL `enqueuePullRequest` mutation — the same act `gh pr merge
- *  --auto` performs on a merge-queue repository. `expectedHeadOid` makes the
- *  mutation atomic with the review fence: GitHub refuses if the branch moved
- *  after its approved head was read. A pull request already in the queue is
- *  success (a replayed step enqueues nothing twice); any other GraphQL error is
- *  an answer with GitHub's words, never a throw — a person decides. A call that
- *  fails (network, HTTP) throws, like every write here. */
+/** One exact-head enqueue. Only the native entry acknowledges the write;
+ * errors or partial responses leave its outcome unknown to the durable caller. */
 export async function enqueuePullRequest(
   pr: { repo: string; number: number },
   opts: { sha: string },
 ): Promise<EnqueueResult> {
+  if (!/^[0-9a-f]{40}$/i.test(opts.sha)) throw new Error("enqueue requires an exact full head sha");
   const looked = await graphql(
     `
       query ($owner: String!, $name: String!, $number: Int!) {
         repository(owner: $owner, name: $name) {
           pullRequest(number: $number) {
             id
+            headRefOid
           }
         }
       }
     `,
     prGraphqlArgs(pr),
   );
-  const nodeId = (looked.data as { repository?: { pullRequest?: { id?: unknown } } } | undefined)?.repository
-    ?.pullRequest?.id;
-  if (typeof nodeId !== "string")
-    return { ok: false, reason: firstGraphqlError(looked) ?? `${pr.repo}#${pr.number} has no node id` };
+  const node = (looked.data as { repository?: { pullRequest?: { id?: unknown; headRefOid?: unknown } } } | undefined)
+    ?.repository?.pullRequest;
+  if (looked.errors !== undefined && (!Array.isArray(looked.errors) || looked.errors.length > 0))
+    throw new Error(`enqueue lookup unavailable: ${firstGraphqlError(looked) ?? "invalid errors"}`);
+  if (
+    typeof node?.id !== "string" ||
+    node.id.length === 0 ||
+    typeof node.headRefOid !== "string" ||
+    !/^[0-9a-f]{40}$/i.test(node.headRefOid)
+  )
+    throw new Error("enqueue lookup returned incomplete native identity");
+  if (node.headRefOid.toLowerCase() !== opts.sha.toLowerCase())
+    return { ok: false, reason: `${pr.repo}#${pr.number} no longer has the exact enqueue head` };
   const answer = await graphql(
     `
       mutation ($id: ID!, $sha: GitObjectID!) {
         enqueuePullRequest(input: { pullRequestId: $id, expectedHeadOid: $sha }) {
           mergeQueueEntry {
-            position
+            id
+            pullRequest {
+              id
+              headRefOid
+            }
           }
         }
       }
     `,
-    { id: nodeId, sha: opts.sha },
+    { id: node.id, sha: opts.sha },
   );
-  const error = firstGraphqlError(answer);
-  if (error === undefined) return { ok: true };
-  // Already queued — an earlier attempt's enqueue landed: the ask is satisfied.
-  if (/already.{0,20}queue/i.test(error)) return { ok: true };
-  return { ok: false, reason: error };
+  const entry = (
+    answer.data as
+      | {
+          enqueuePullRequest?: {
+            mergeQueueEntry?: { id?: unknown; pullRequest?: { id?: unknown; headRefOid?: unknown } };
+          };
+        }
+      | undefined
+  )?.enqueuePullRequest?.mergeQueueEntry;
+  if (
+    (answer.errors !== undefined && (!Array.isArray(answer.errors) || answer.errors.length > 0)) ||
+    typeof entry?.id !== "string" ||
+    entry.id.length === 0 ||
+    entry.pullRequest?.id !== node.id ||
+    typeof entry.pullRequest.headRefOid !== "string" ||
+    entry.pullRequest.headRefOid.toLowerCase() !== opts.sha.toLowerCase()
+  )
+    throw new Error(`enqueue outcome unverified: ${firstGraphqlError(answer) ?? "native entry unavailable"}`);
+  return { ok: true };
 }
 
 function firstGraphqlError(answer: { errors?: Array<{ message?: unknown }> }): string | undefined {
@@ -925,7 +947,8 @@ function firstGraphqlError(answer: { errors?: Array<{ message?: unknown }> }): s
 /** Where an open pull request stands with the base's merge queue: in it, or
  *  out of it — with the queue's own removal reason when the timeline carries a
  *  `RemovedFromMergeQueueEvent` (a failing check in the queue, a conflict). */
-export type MergeQueueState = { queued: true; position?: number } | { queued: false; reason?: string };
+export type MergeQueueState =
+  { queued: true; position?: number; headSha?: string } | { queued: false; reason?: string };
 
 /** The pull request's `mergeQueueEntry` and the last removal's reason, over
  *  GraphQL. Undefined when GitHub cannot be read — the caller treats unknown
@@ -939,6 +962,12 @@ export async function fetchMergeQueueState(pr: { repo: string; number: number })
           repository(owner: $owner, name: $name) {
             pullRequest(number: $number) {
               mergeQueueEntry {
+                headCommit {
+                  oid
+                }
+                pullRequest {
+                  headRefOid
+                }
                 position
               }
               timelineItems(last: 10, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT]) {
@@ -962,17 +991,37 @@ export async function fetchMergeQueueState(pr: { repo: string; number: number })
       | {
           repository?: {
             pullRequest?: {
-              mergeQueueEntry?: { position?: unknown } | null;
+              mergeQueueEntry?: {
+                position?: unknown;
+                headCommit?: { oid?: unknown } | null;
+                pullRequest?: { headRefOid?: unknown };
+              } | null;
               timelineItems?: { nodes?: Array<{ reason?: unknown } | null> };
             } | null;
           };
         }
       | undefined
   )?.repository?.pullRequest;
-  if (node === undefined || node === null) return undefined;
+  if (
+    (answer.errors !== undefined && (!Array.isArray(answer.errors) || answer.errors.length > 0)) ||
+    node === undefined ||
+    node === null
+  )
+    return undefined;
   const entry = node.mergeQueueEntry;
-  if (entry !== null && entry !== undefined)
-    return { queued: true, ...(typeof entry.position === "number" ? { position: entry.position } : {}) };
+  if (entry === undefined) return undefined;
+  if (entry !== null) {
+    if (typeof entry !== "object" || !Number.isSafeInteger(entry.position) || (entry.position as number) < 1)
+      return undefined;
+    const headSha = entry.headCommit?.oid;
+    return {
+      queued: true,
+      position: entry.position as number,
+      ...(typeof headSha === "string" && /^[0-9a-f]{40}$/i.test(headSha) && entry.pullRequest?.headRefOid === headSha
+        ? { headSha }
+        : {}),
+    };
+  }
   const reasons = (node.timelineItems?.nodes ?? []).filter(
     (n): n is { reason: string } => n !== null && typeof n?.reason === "string" && n.reason.length > 0,
   );
@@ -990,31 +1039,83 @@ export interface CommitChecks {
 
 const GREEN_CONCLUSIONS = new Set(["success", "skipped", "neutral"]);
 
-/** `GET /repos/{repo}/commits/{sha}/check-runs` (one page of 100) → the checks
- *  at the sha, or undefined when GitHub cannot be read or the answer is not
- *  the route's. Never throws — the caller treats unknown as not green. */
+/** Read every page the native endpoint exposes. Count changes, duplicate IDs
+ * or foreign heads make the read unavailable, never an all-green prefix. */
 export async function fetchCommitChecks(repo: string, sha: string): Promise<CommitChecks | undefined> {
+  if (!/^[0-9a-f]{40}$/i.test(sha)) return undefined;
   const token = await resolveGithubToken().catch(() => null);
-  let res: Response;
+  const out: CommitChecks = { total: 0, pending: [], failed: [] };
+  const ids = new Set<number>();
+  let total: number | undefined;
   try {
-    res = await fetch(`https://api.github.com/repos/${repo}/commits/${sha}/check-runs?per_page=100`, {
-      headers: apiHeaders(token),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
+    for (let page = 1; page <= 100; page++) {
+      const res = await fetch(
+        `https://api.github.com/repos/${repo}/commits/${sha}/check-runs?per_page=100&page=${page}`,
+        {
+          headers: apiHeaders(token),
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        },
+      );
+      if (!res.ok) return undefined;
+      const data = (await res.json()) as { total_count?: unknown; check_runs?: unknown } | null;
+      if (
+        !data ||
+        !Number.isSafeInteger(data.total_count) ||
+        (data.total_count as number) < 0 ||
+        !Array.isArray(data.check_runs)
+      )
+        return undefined;
+      total ??= data.total_count as number;
+      if (data.total_count !== total || data.check_runs.length !== Math.min(100, total - out.total)) return undefined;
+      for (const run of data.check_runs as Array<{
+        id?: unknown;
+        head_sha?: unknown;
+        name?: unknown;
+        status?: unknown;
+        conclusion?: unknown;
+      }>) {
+        if (
+          !run ||
+          !Number.isSafeInteger(run.id) ||
+          (run.id as number) < 1 ||
+          ids.has(run.id as number) ||
+          typeof run.head_sha !== "string" ||
+          run.head_sha.toLowerCase() !== sha.toLowerCase() ||
+          typeof run.name !== "string" ||
+          run.name.length === 0 ||
+          !["queued", "in_progress", "completed", "waiting", "requested", "pending"].includes(run.status as string)
+        )
+          return undefined;
+        ids.add(run.id as number);
+        out.total++;
+        if (run.status !== "completed") out.pending.push(run.name);
+        else {
+          if (
+            typeof run.conclusion !== "string" ||
+            ![
+              "success",
+              "failure",
+              "neutral",
+              "cancelled",
+              "skipped",
+              "timed_out",
+              "action_required",
+              "waiting",
+              "pending",
+              "startup_failure",
+              "stale",
+            ].includes(run.conclusion)
+          )
+            return undefined;
+          if (!GREEN_CONCLUSIONS.has(run.conclusion)) out.failed.push(run.name);
+        }
+      }
+      if (out.total === total) return /rel="next"/.test(res.headers.get("link") ?? "") ? undefined : out;
+    }
   } catch {
     return undefined;
   }
-  if (!res.ok) return undefined;
-  const data = (await res.json().catch(() => null)) as { check_runs?: unknown } | null;
-  if (!data || !Array.isArray(data.check_runs)) return undefined;
-  const out: CommitChecks = { total: 0, pending: [], failed: [] };
-  for (const run of data.check_runs as Array<{ name?: unknown; status?: unknown; conclusion?: unknown }>) {
-    const name = typeof run.name === "string" ? run.name : "(unnamed)";
-    out.total++;
-    if (run.status !== "completed") out.pending.push(name);
-    else if (typeof run.conclusion !== "string" || !GREEN_CONCLUSIONS.has(run.conclusion)) out.failed.push(name);
-  }
-  return out;
+  return undefined;
 }
 
 /** `GET /repos/{repo}/rules/branches/{branch}` → the contexts the branch's

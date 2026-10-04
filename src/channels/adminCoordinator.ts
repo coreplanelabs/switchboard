@@ -96,7 +96,11 @@ import { isShipOutcome, sameShipOutcome } from "../core/coordinator/shipOutcome.
 import { foldThreadAttachments } from "../core/dispatch/admission.js";
 import { attributedText, foldThreadEvents } from "../core/threadEvents.js";
 import { assembleRunRecord } from "../core/dispatch/record.js";
-import type { UnitEffectTransition, UnitEffectRefusal } from "../core/coordinator/unitEffect.js";
+import type {
+  UnitEffectTransition,
+  UnitEffectRefusal,
+  UnitEffectCompletionOutcome,
+} from "../core/coordinator/unitEffect.js";
 import type { CoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import {
   freezeCoordinatorReport,
@@ -194,7 +198,6 @@ import type { GithubApi } from "../execution/githubApi.js";
 import { isReleasePullRequest } from "../core/commands/merge.js";
 import type { GithubIdentity } from "../execution/githubApp.js";
 import {
-  MERGE_QUEUE_405,
   type CommitChecks,
   type EnqueueResult,
   type MergedPrRef,
@@ -4198,12 +4201,6 @@ export async function adoptOriginalPublishedHead(
   if (row.adoption?.state === "bound")
     return json(200, { ok: true, outcome: "already_bound", pr: found.number, head, at });
   const owner = { instanceId: instance.id, unit: row.unit };
-  try {
-    if (deps.runnerOwnership?.claim(instance.repo, found.number, owner) !== true)
-      return json(409, { ok: false, error: "publication_ownership_changed", at });
-  } catch {
-    return json(503, { ok: false, error: "publication_ownership_unknown", at });
-  }
   const pr = { number: found.number, url: found.htmlUrl };
   const replacement: CoordinatorUnit = {
     ...row,
@@ -4220,14 +4217,12 @@ export async function adoptOriginalPublishedHead(
     },
     adoption: { ...row.adoption!, state: "bound", pr },
   };
-  const saved = await deps.instances.compareAndReplaceUnit(row, replacement).catch(() => undefined);
-  deps.runnerOwnership?.release(instance.repo, found.number, owner);
-  if (saved?.ok !== true)
-    return json(saved?.reason === "stale" ? 409 : 503, {
-      ok: false,
-      error: saved?.reason === "stale" ? "adoption_claim_stale" : "adoption_store_unavailable",
-      at,
-    });
+  try {
+    await replacePublicationUnit(deps, row, replacement);
+  } catch (error) {
+    const cause = error instanceof PublicationBindingRefusal ? error.reason : "publication_store_unavailable";
+    return json(cause === "publication_store_unavailable" ? 503 : 409, { ok: false, error: cause, at });
+  }
   return json(200, { ok: true, outcome: "bound", pr: found.number, url: found.htmlUrl, head, at });
 }
 
@@ -7941,8 +7936,8 @@ async function codingHandoffOf(
  *
  * A base that takes changes only through a merge queue is enqueued, never
  * squashed and never refused (issue 2011): the base branch's ruleset says so
- * ahead of the attempt, or — when the rules could not be read — GitHub's own
- * 405 wording does; either way the door enqueues (the GraphQL
+ * ahead of the attempt; an unreadable rule is a retryable read, never permission
+ * inferred from error prose. The door enqueues (the GraphQL
  * `enqueuePullRequest` mutation, the same act `gh pr merge --auto` performs)
  * and answers `enqueued`. A `queued: true` re-ask reads the queue's outcome
  * instead: merged from the facts, still `enqueued`, or `removed` with the
@@ -7995,22 +7990,7 @@ async function advanceRunnerRebasePublication(
     ...(reportedHead !== undefined ? { lastPush: to } : {}),
     publication: { ...binding, expectedHeadSha: to },
   };
-  const replaced = await deps.instances.compareAndReplaceUnit(row, updated).catch(() => undefined);
-  if (replaced?.ok !== true)
-    throw new PublicationBindingRefusal(
-      replaced?.reason === "stale" ? "publication_binding_stale" : "publication_store_unavailable",
-    );
-  let stillOwned = false;
-  try {
-    stillOwned = samePublicationOwner(deps.runnerOwnership?.owner(instance.repo, binding.pr), owner);
-  } catch {
-    /* Unknown ownership also requires rollback. */
-  }
-  if (!stillOwned) {
-    const restored = await deps.instances.compareAndReplaceUnit(updated, row).catch(() => undefined);
-    if (restored?.ok !== true) throw new PublicationBindingRefusal("publication_rollback_failed");
-    throw new PublicationBindingRefusal("publication_ownership_changed");
-  }
+  await replacePublicationUnit(deps, row, updated);
   return to;
 }
 
@@ -8085,6 +8065,287 @@ async function rebaseStep(body: Record<string, unknown>, deps: AdminCoordinatorD
   }
 }
 
+/** The existing unit owns one merge or enqueue call, including an unknown reply. */
+async function mergeEffect(
+  body: Record<string, unknown>,
+  deps: AdminCoordinatorDeps,
+  instance: CoordinatorInstance,
+  input: CoordinatorUnit,
+  facts?: PullRequestFacts,
+): Promise<IngressResponse | undefined> {
+  let row = input;
+  const at = (deps.clock ?? systemClock)();
+  const execution = {
+    workflowId: body.executionWorkflowId as string,
+    ...(body.recoveryActionId === undefined ? {} : { recoveryActionId: body.recoveryActionId as string }),
+  };
+  const effectId = body.effectId as string;
+  if (
+    execution.workflowId !== (row.recovery?.workflowId ?? instance.id) ||
+    execution.recoveryActionId !== row.recovery?.actionId ||
+    typeof effectId !== "string" ||
+    !STEP_NAME_PATTERN.test(effectId) ||
+    !Number.isSafeInteger(body.effectOrdinal) ||
+    (row.currentEffect?.id === effectId
+      ? body.effectOrdinal !== row.currentEffect.ordinal
+      : body.effectOrdinal !== (row.currentEffect?.ordinal ?? 0) + 1)
+  )
+    return json(409, { ok: false, error: "effect_execution_mismatch", at });
+  const unavailable = () =>
+    json(502, {
+      ok: false,
+      error: "github_unavailable",
+      message: "the merge or enqueue outcome remains unverified",
+      at,
+    });
+  const move = async (change: UnitEffectTransition) => {
+    const answer = await deps.instances.transitionUnitEffect(change);
+    if (!answer.ok) throw new Error(answer.reason);
+    row = answer.unit;
+  };
+  const answer = (by?: "other", reason?: string): IngressResponse => {
+    const call = row.currentEffect!.calls[0]!;
+    return call.state === "accepted"
+      ? json(200, {
+          ok: true,
+          effectOrdinal: row.currentEffect!.ordinal,
+          ...(call.operation === "merge"
+            ? { outcome: "merged", sha: call.commitSha, ...(by ? { by } : {}) }
+            : { outcome: "enqueued", reason: `enqueued at \`${row.currentEffect!.target.headSha.slice(0, 7)}\`` }),
+          at,
+        })
+      : json(200, {
+          ok: true,
+          outcome: "refused",
+          effectOrdinal: row.currentEffect!.ordinal,
+          reason: reason ?? "GitHub refused the recorded merge or enqueue",
+          at,
+        });
+  };
+  try {
+    let cell = row.currentEffect;
+    if (cell?.id === effectId) {
+      if (
+        cell.execution.workflowId !== execution.workflowId ||
+        cell.execution.recoveryActionId !== execution.recoveryActionId ||
+        cell.target.repo.toLowerCase() !== instance.repo.toLowerCase() ||
+        cell.target.ref !== row.branch ||
+        cell.target.base !== instance.base ||
+        cell.target.pr !== body.prNumber ||
+        cell.target.headSha !== body.headSha ||
+        cell.calls.length !== 1 ||
+        !["merge", "enqueue"].includes(cell.calls[0]!.operation)
+      )
+        return unavailable();
+      if (cell.phase === "settled") return answer();
+      const call = cell.calls[0]!;
+      if (
+        call.state === "pending" ||
+        call.state === "uncertain" ||
+        (call.operation === "enqueue" && call.state === "accepted")
+      ) {
+        const observed = await deps.fetchPrFacts({ repo: cell.target.repo, number: cell.target.pr! });
+        if (
+          !observed ||
+          observed.sameRepoHead !== true ||
+          observed.headRef !== cell.target.ref ||
+          observed.baseRef !== cell.target.base ||
+          !fullHead(observed.headSha) ||
+          (observed.headSha !== cell.target.headSha && !(call.operation === "enqueue" && call.state === "accepted"))
+        )
+          return unavailable();
+        const target = {
+          repo: cell.target.repo,
+          ref: cell.target.ref,
+          base: cell.target.base,
+          pr: cell.target.pr!,
+          headSha: cell.target.headSha,
+        };
+        if (
+          observed.state === "closed" &&
+          observed.headSha === cell.target.headSha &&
+          observed.mergedAt !== undefined &&
+          fullHead(observed.mergeCommitSha)
+        ) {
+          await move({
+            kind: "resolve",
+            expected: row,
+            execution,
+            effectId,
+            call: 0,
+            observation: { kind: "pull_merged", ...target, commitSha: observed.mergeCommitSha },
+          });
+          if (row.currentEffect!.phase !== "settled")
+            await move({ kind: "settle", expected: row, execution, effectId });
+          return json(200, {
+            ok: true,
+            outcome: "merged",
+            by: "other",
+            sha: observed.mergeCommitSha,
+            mergedAt: observed.mergedAt,
+            effectOrdinal: cell.ordinal,
+            at,
+          });
+        }
+        if (call.operation !== "enqueue") return unavailable();
+        const queued = await deps.fetchMergeQueueState?.({ repo: cell.target.repo, number: cell.target.pr! });
+        if (queued === undefined) return unavailable();
+        if (
+          call.state === "accepted" &&
+          (!queued.queued ||
+            (queued.headSha !== undefined &&
+              queued.headSha !== cell.target.headSha &&
+              queued.headSha === observed.headSha))
+        ) {
+          await move({
+            kind: "resolve",
+            expected: row,
+            execution,
+            effectId,
+            call: 0,
+            observation: { kind: "pull_dequeued", ...target },
+          });
+          if (observed.headSha !== cell.target.headSha || observed.state !== "open") {
+            const pullRequest = pullRequestState(cell.target.pr!, row.pr!.url, observed);
+            return pullRequest
+              ? json(200, { ok: true, outcome: "recheck", pullRequest, effectOrdinal: cell.ordinal, at })
+              : unavailable();
+          }
+          return json(200, {
+            ok: true,
+            outcome: "removed",
+            reason: queued.queued
+              ? "the queue now names a replacement head"
+              : (queued.reason ?? "removed from the merge queue with no reason given"),
+            effectOrdinal: cell.ordinal,
+            at,
+          });
+        }
+        if (observed.state !== "open" || observed.headSha !== cell.target.headSha || !queued.queued)
+          return unavailable();
+        if (call.state !== "accepted") {
+          if (queued.headSha !== cell.target.headSha) return unavailable();
+          await move({
+            kind: "resolve",
+            expected: row,
+            execution,
+            effectId,
+            call: 0,
+            observation: { kind: "pull_enqueued", ...target },
+          });
+        }
+        return json(200, {
+          ok: true,
+          outcome: "enqueued",
+          reason:
+            queued.position !== undefined ? `position ${queued.position} in the merge queue` : "in the merge queue",
+          effectOrdinal: cell.ordinal,
+          at,
+        });
+      }
+      if (call.state === "accepted" || call.state === "refused") {
+        if (call.operation !== "enqueue" || call.state !== "accepted")
+          await move({ kind: "settle", expected: row, execution, effectId });
+        return answer();
+      }
+      if (instance.stop) {
+        await move({ kind: "cancel", expected: row, execution, effectId, call: 0 });
+        await move({ kind: "settle", expected: row, execution, effectId });
+        return json(409, { ok: false, error: "stopped", effectOrdinal: cell.ordinal, at });
+      }
+    } else if (cell?.phase === "active") return unavailable();
+    if (facts === undefined) return undefined;
+    if (
+      !isCoordinatorUnit(row) ||
+      instance.base === undefined ||
+      facts.sameRepoHead !== true ||
+      facts.baseRef !== instance.base ||
+      facts.headRef !== row.branch ||
+      facts.headSha !== body.headSha
+    )
+      return unavailable();
+    if (!cell || cell.id !== effectId) {
+      const queue = await deps.branchHasMergeQueue?.(instance.repo, instance.base);
+      if (queue === undefined) return unavailable();
+      if (queue && deps.enqueuePullRequest === undefined)
+        return json(502, { ok: false, error: "github_unavailable", message: "merge queue enqueue is unavailable", at });
+      await move({
+        kind: "admit",
+        expected: row,
+        execution,
+        effect: {
+          version: 1,
+          id: effectId,
+          ordinal: body.effectOrdinal as number,
+          execution,
+          phase: "active",
+          target: {
+            repo: instance.repo,
+            ref: row.branch,
+            base: instance.base,
+            pr: body.prNumber as number,
+            headSha: body.headSha as string,
+          },
+          calls: [{ operation: queue ? "enqueue" : "merge", state: "unstarted" }],
+        },
+      });
+      cell = row.currentEffect!;
+    }
+    const begun = await deps.instances.transitionUnitEffect({
+      kind: "begin",
+      expected: row,
+      execution,
+      effectId,
+      call: 0,
+    });
+    if (!begun.ok) {
+      if (begun.reason === "stopped") {
+        await move({ kind: "cancel", expected: row, execution, effectId, call: 0 });
+        await move({ kind: "settle", expected: row, execution, effectId });
+        return json(409, { ok: false, error: "stopped", effectOrdinal: cell.ordinal, at });
+      }
+      return unavailable();
+    }
+    row = begun.unit;
+    let outcome: UnitEffectCompletionOutcome = { state: "uncertain" };
+    let reason: string | undefined;
+    try {
+      const target = { repo: cell.target.repo, number: cell.target.pr! };
+      if (cell.calls[0]!.operation === "enqueue") {
+        const queued = await deps.enqueuePullRequest!(target, { sha: cell.target.headSha });
+        outcome = queued.ok ? { state: "accepted" } : { state: "refused", cause: "external_refused" };
+        if (!queued.ok) reason = `GitHub refused to enqueue ${instance.repo}#${target.number}: ${queued.reason}`;
+      } else {
+        const merged = await deps.mergePullRequest(target, {
+          sha: cell.target.headSha,
+          title: facts.title ?? `Merge pull request #${target.number}`,
+        });
+        outcome =
+          merged.ok && fullHead(merged.sha)
+            ? { state: "accepted", commitSha: merged.sha }
+            : !merged.ok
+              ? { state: "refused", cause: "external_refused" }
+              : { state: "uncertain" };
+        if (!merged.ok)
+          reason = `GitHub refused the merge of ${instance.repo}#${target.number} (HTTP ${merged.status}): ${merged.reason}`;
+      }
+    } catch {
+      /* A begun call without a native response retains the owner. */
+    }
+    await move({ kind: "complete", expected: row, execution, effectId, call: 0, outcome });
+    if (outcome.state === "uncertain") return unavailable();
+    if (cell.calls[0]!.operation !== "enqueue" || outcome.state !== "accepted")
+      await move({ kind: "settle", expected: row, execution, effectId });
+    const response = answer(undefined, reason);
+    (deps.log ?? console.log)(
+      `[coordinator] ${instance.id} ${row.unit}: ${cell.calls[0]!.operation === "enqueue" ? "enqueued" : "merged"} ${instance.repo}#${cell.target.pr} — ${outcome.state}`,
+    );
+    return response;
+  } catch {
+    return unavailable();
+  }
+}
+
 async function merge(
   body: Record<string, unknown>,
   deps: AdminCoordinatorDeps,
@@ -8097,7 +8358,7 @@ async function merge(
   if (typeof body.prNumber !== "number" || !Number.isInteger(body.prNumber) || body.prNumber < 1)
     return json(400, { ok: false, error: "prNumber must be a pull request number" });
   const headSha = normalizeHead(body.headSha);
-  if (headSha === undefined) return json(400, { ok: false, error: "headSha must be the approved head (7 to 40 hex)" });
+  if (!fullHead(headSha)) return json(400, { ok: false, error: "headSha must be the exact approved head (40 hex)" });
   const at = (deps.clock ?? systemClock)();
   const refused = (reason: string) => json(200, { ok: true, outcome: "refused", reason, at });
   const instance = await deps.instances.get(id.value);
@@ -8105,7 +8366,38 @@ async function merge(
   const unit = await unitRowOf(deps, instance, body.unit);
   if (!unit.ok) return unit.response;
   const row = unit.row!;
-  const log = deps.log ?? console.log;
+  const bindingMatches =
+    isCoordinatorUnit(row) &&
+    row.pr?.number === body.prNumber &&
+    row.publication?.pr === body.prNumber &&
+    row.publication.repo.toLowerCase() === instance.repo.toLowerCase() &&
+    row.publication.headRef === row.branch &&
+    row.publication.publicationRef === row.branch &&
+    row.publication.baseRef === instance.base &&
+    row.publication.expectedHeadSha === headSha &&
+    row.publication.owner.instanceId === instance.id &&
+    row.publication.owner.unit === row.unit;
+  const staleBinding = () => json(409, { ok: false, error: "publication_binding_stale", at });
+  const retained = row.currentEffect;
+  if (
+    retained?.phase === "active" &&
+    retained.calls.length === 1 &&
+    ["merge", "enqueue"].includes(retained.calls[0]!.operation) &&
+    retained.calls[0]!.state !== "unstarted"
+  ) {
+    if (!bindingMatches) return staleBinding();
+    const observed = await mergeEffect(
+      body.queued === true ? { ...body, effectId: retained.id, effectOrdinal: retained.ordinal } : body,
+      deps,
+      instance,
+      row,
+    );
+    if (observed !== undefined) {
+      if (body.queued !== true) return observed;
+      const { effectOrdinal: _ordinal, ...answer } = observed.body as Record<string, unknown>;
+      return { ...observed, body: answer };
+    }
+  }
   // The grant: the bearer's actor on `plan:merge`, decided here beside the
   // door's `coordinator:step`. Withdrawn, every merge is a person's.
   const actor = resolveActor({ surface: "http", subjectId: subject }, deps.grantsFor);
@@ -8124,6 +8416,11 @@ async function merge(
     return refused(
       `the instance's \`merge\` field says runner but \`${row.branch}\` is not a branch of plan \`${instance.plan?.id ?? "(none)"}\` — waits for a person's merge`,
     );
+  if (!bindingMatches) return staleBinding();
+  if (body.queued !== true) {
+    const replay = await mergeEffect(body, deps, instance, row);
+    if (replay !== undefined) return replay;
+  }
   const pr = { repo: instance.repo, number: body.prNumber };
   const where = `${instance.repo}#${pr.number}`;
   let facts: PullRequestFacts | undefined;
@@ -8143,12 +8440,28 @@ async function merge(
     });
   if (isReleasePullRequest(facts))
     return refused(`${where} is the release pull request — always a person's merge, never the runner's`);
+  if (
+    facts.state !== "open" &&
+    (facts.sameRepoHead !== true ||
+      facts.headRef !== row.branch ||
+      facts.baseRef !== instance.base ||
+      facts.headSha !== headSha)
+  ) {
+    const current = pullRequestState(
+      pr.number,
+      row.pr?.url ?? `https://github.com/${instance.repo}/pull/${pr.number}`,
+      facts,
+    );
+    return current === undefined
+      ? json(502, { ok: false, error: "github_unavailable", at })
+      : json(200, { ok: true, outcome: "recheck", pullRequest: current, at });
+  }
   if (facts.state !== "open") {
     // Already merged — auto-merge fired, a person merged after the approval,
     // or the merge queue merged what the door enqueued: the unit is done, not
     // refused. The door merged nothing, so the outcome says `by: other` with
     // the merge commit and the time (spec item 9).
-    if (facts.mergedAt !== undefined && facts.mergeCommitSha !== undefined)
+    if (facts.mergedAt !== undefined && facts.mergeCommitSha !== undefined) {
       return json(200, {
         ok: true,
         outcome: "merged",
@@ -8158,6 +8471,7 @@ async function merge(
         ...(facts.mergedBy !== undefined ? { mergedBy: facts.mergedBy } : {}),
         at,
       });
+    }
     const pullRequest = pullRequestState(
       body.prNumber,
       row.pr?.url ?? `https://github.com/${instance.repo}/pull/${body.prNumber}`,
@@ -8174,6 +8488,22 @@ async function merge(
       facts,
     );
     if (pullRequest !== undefined) return json(200, { ok: true, outcome: "recheck", pullRequest, at });
+  }
+  if (
+    body.queued === true &&
+    (facts.headRef !== row.branch ||
+      facts.headSha !== headSha ||
+      facts.sameRepoHead !== true ||
+      facts.baseRef !== instance.base)
+  ) {
+    const current = pullRequestState(
+      pr.number,
+      row.pr?.url ?? `https://github.com/${instance.repo}/pull/${pr.number}`,
+      facts,
+    );
+    return current === undefined
+      ? json(502, { ok: false, error: "github_unavailable", at })
+      : json(200, { ok: true, outcome: "recheck", pullRequest: current, at });
   }
   if (body.queued === true) {
     // The pull request is in the base's merge queue (issue 2011): the door
@@ -8269,54 +8599,9 @@ async function merge(
       at,
     });
   }
-  // The merge queue (issue 2011): a base whose ruleset routes every change
-  // through the queue is enqueued — the same act `gh pr merge --auto` performs
-  // — and never squashed; an unreadable ruleset decides nothing, and the 405's
-  // own wording below catches what the read missed.
-  const enqueue = async (): Promise<IngressResponse> => {
-    if (deps.enqueuePullRequest === undefined)
-      return refused(
-        `\`${facts.baseRef ?? "the base"}\` takes changes only through a merge queue and the door cannot enqueue — this is a bug: automatic merge-queue enqueue is unavailable; the approved work stands`,
-      );
-    let queued: EnqueueResult;
-    try {
-      queued = await deps.enqueuePullRequest(pr, { sha: headSha });
-    } catch (err) {
-      return json(502, { ok: false, error: "github_unavailable", message: describe(err), at });
-    }
-    if (!queued.ok) return refused(`GitHub refused to enqueue ${where}: ${queued.reason}`);
-    log(
-      `[coordinator] ${instance.id} ${row.unit}: enqueued ${where} at ${headSha.slice(0, 7)} — the base takes changes through a merge queue`,
-    );
-    return json(200, { ok: true, outcome: "enqueued", reason: `enqueued at \`${headSha.slice(0, 7)}\``, at });
-  };
-  const queueRuled =
-    deps.branchHasMergeQueue !== undefined && facts.baseRef !== undefined
-      ? await deps.branchHasMergeQueue(instance.repo, facts.baseRef).catch(() => undefined)
-      : undefined;
-  if (queueRuled === true) return enqueue();
-  let merged: MergeResult;
-  try {
-    merged = await deps.mergePullRequest(pr, {
-      sha: headSha,
-      title: facts.title ?? `Merge pull request #${pr.number}`,
-    });
-  } catch (err) {
-    return json(502, { ok: false, error: "github_unavailable", message: describe(err), at });
-  }
-  if (!merged.ok) {
-    // The rules read missed the queue (or could not run): GitHub's own 405
-    // wording says the base merges through the queue, so enqueue (issue 2011).
-    if (merged.status === 405 && MERGE_QUEUE_405.test(merged.reason)) return enqueue();
-    log(
-      `[coordinator] ${instance.id} ${row.unit}: GitHub refused the merge of ${where} (HTTP ${merged.status}): ${merged.reason}`,
-    );
-    return refused(`GitHub refused the merge of ${where} (HTTP ${merged.status}): ${merged.reason}`);
-  }
-  log(
-    `[coordinator] ${instance.id} ${row.unit}: merged ${where} at ${headSha.slice(0, 7)} → ${merged.sha.slice(0, 7)}`,
+  return (
+    (await mergeEffect(body, deps, instance, row, facts)) ?? json(502, { ok: false, error: "github_unavailable", at })
   );
-  return json(200, { ok: true, outcome: "merged", sha: merged.sha, at });
 }
 
 /** The round's checks step (record 0055, agent-ship item 9): the check runs

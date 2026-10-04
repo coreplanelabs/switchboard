@@ -7701,6 +7701,15 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     rounds: [],
     threadKey: "slack:C1:2.0",
     pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+    publication: {
+      repo: PLAN_INSTANCE.repo,
+      pr: 7,
+      headRef: "plan/fixture/u10-warm",
+      baseRef: "main",
+      publicationRef: "plan/fixture/u10-warm",
+      expectedHeadSha: HEAD,
+      owner: { instanceId: PLAN_INSTANCE.id, unit: "U10" },
+    },
     ...over,
   });
   const facts = (over: Partial<PullRequestFacts> = {}): PullRequestFacts => ({
@@ -7718,7 +7727,15 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     { author: { login: "acme-switchboard[bot]", id: 4242 }, state: "COMMENTED", commitId: HEAD, body: "LGTM: clean" },
   ];
   const green: CommitChecks = { total: 3, pending: [], failed: [] };
-  const body = { parentInstanceId: PLAN_INSTANCE.id, unit: "U10", prNumber: 7, headSha: HEAD };
+  const body = {
+    parentInstanceId: PLAN_INSTANCE.id,
+    unit: "U10",
+    prNumber: 7,
+    headSha: HEAD,
+    effectId: "U10/merge/0",
+    effectOrdinal: 1,
+    executionWorkflowId: PLAN_INSTANCE.id,
+  };
   async function mergeHarness(over: Parameters<typeof harness>[0] = {}, unit: Partial<CoordinatorUnit> = {}) {
     const h = harness({ prFacts: facts(), reviews: approving, checks: green, ...over });
     await h.instances.put(PLAN_INSTANCE);
@@ -7729,6 +7746,121 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}${step}`, b), h.deps);
   const merge = (h: ReturnType<typeof harness>, b: Record<string, unknown> = body, auth?: string) =>
     handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}merge`, b, auth), h.deps);
+
+  it("merge persists permission and acceptance under the durable owner, then replays without another write", async () => {
+    const h = await mergeHarness();
+    const original = h.deps.mergePullRequest;
+    h.deps.mergePullRequest = async (pr, opts) => {
+      expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]?.currentEffect).toMatchObject({
+        phase: "active",
+        calls: [{ operation: "merge", state: "pending" }],
+      });
+      return original(pr, opts);
+    };
+    const request = { ...body, effectId: "U10/merge/0", effectOrdinal: 1, executionWorkflowId: PLAN_INSTANCE.id };
+    expect((await merge(h, request)).body).toMatchObject({ outcome: "merged", effectOrdinal: 1 });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]?.currentEffect).toMatchObject({
+      phase: "settled",
+      calls: [{ state: "accepted", commitSha: MERGED }],
+    });
+    expect((await merge(h, request)).body).toMatchObject({ outcome: "merged", effectOrdinal: 1 });
+    expect(h.merges).toHaveLength(1);
+  });
+
+  it("a lost merge response stays owned and cannot replay when fresh facts are still open", async () => {
+    const h = await mergeHarness({ merge: new Error("lost response") });
+    const request = { ...body, effectId: "U10/merge/0", effectOrdinal: 1, executionWorkflowId: PLAN_INSTANCE.id };
+    expect((await merge(h, request)).status).toBe(502);
+    expect((await merge(h, request)).status).toBe(502);
+    expect(h.merges).toHaveLength(1);
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]?.currentEffect).toMatchObject({
+      phase: "active",
+      calls: [{ state: "uncertain" }],
+    });
+  });
+
+  it("an exact terminal merge resolves a lost reply after stop without another mutation", async () => {
+    const h = await mergeHarness({ merge: new Error("lost response") });
+    expect((await merge(h)).status).toBe(502);
+    await h.instances.markStopped(PLAN_INSTANCE.id, NOW);
+    h.deps.fetchPrFacts = async () =>
+      facts({ state: "closed", mergedAt: "2026-09-20T00:01:00Z", mergeCommitSha: MERGED });
+    expect((await merge(h)).body).toMatchObject({ outcome: "merged", by: "other", effectOrdinal: 1 });
+    expect(h.merges).toHaveLength(1);
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]?.currentEffect?.phase).toBe("settled");
+  });
+
+  it("enqueue acceptance stays active through stop until a native queued poll proves terminal removal", async () => {
+    const h = await mergeHarness({ queueRule: true, enqueue: { ok: true }, queueState: { queued: false } });
+    expect((await merge(h)).body).toMatchObject({ outcome: "enqueued", effectOrdinal: 1 });
+    await h.instances.markStopped(PLAN_INSTANCE.id, NOW);
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]?.currentEffect?.phase).toBe("active");
+    expect((await merge(h, { ...body, queued: true, effectId: "U10/merge/1", effectOrdinal: 2 })).body).toMatchObject({
+      outcome: "removed",
+    });
+    expect(h.enqueues).toHaveLength(1);
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]?.currentEffect?.phase).toBe("settled");
+  });
+
+  it("a stop racing merge admission cancels only unstarted work and issues no GitHub mutation", async () => {
+    const h = await mergeHarness();
+    const move = h.instances.transitionUnitEffect.bind(h.instances);
+    h.instances.transitionUnitEffect = async (input) => {
+      const result = await move(input);
+      if (input.kind === "admit" && result.ok) await h.instances.markStopped(PLAN_INSTANCE.id, NOW);
+      return result;
+    };
+    expect((await merge(h)).body).toMatchObject({ error: "stopped", effectOrdinal: 1 });
+    expect(h.merges).toEqual([]);
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]?.currentEffect).toMatchObject({
+      phase: "settled",
+      calls: [{ state: "refused", cause: "not_started" }],
+    });
+  });
+
+  it("a moved head releases only a known accepted queue with native absence before projecting the replacement", async () => {
+    const h = await mergeHarness({ queueRule: true, enqueue: { ok: true }, queueState: { queued: false } });
+    await merge(h);
+    h.deps.fetchPrFacts = async () => facts({ headSha: "b".repeat(40) });
+    expect((await merge(h, { ...body, queued: true, effectId: "U10/merge/1", effectOrdinal: 2 })).body).toMatchObject({
+      outcome: "recheck",
+      pullRequest: { headSha: "b".repeat(40) },
+    });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]?.currentEffect?.phase).toBe("settled");
+    expect(h.enqueues).toHaveLength(1);
+  });
+
+  it("a terminal replacement head is projected as a recheck rather than a merge of the frozen head", async () => {
+    const h = await mergeHarness({
+      prFacts: facts({
+        state: "closed",
+        headSha: "b".repeat(40),
+        mergedAt: "2026-09-20T00:01:00Z",
+        mergeCommitSha: MERGED,
+      }),
+    });
+    expect((await merge(h)).body).toMatchObject({ outcome: "recheck", pullRequest: { headSha: "b".repeat(40) } });
+    expect(h.merges).toEqual([]);
+  });
+
+  it("an already merged PR cannot complete a different durable PR or publication head", async () => {
+    for (const foreign of ["pull", "head"] as const) {
+      const h = await mergeHarness({
+        prFacts: facts({ state: "closed", mergedAt: "2026-09-20T00:01:00Z", mergeCommitSha: MERGED }),
+      });
+      const current = (await h.instances.listUnits(PLAN_INSTANCE.id))[0]!;
+      seedCoordinatorUnit(h.instances, {
+        ...current,
+        ...(foreign === "pull" ? { pr: { number: 8, url: "https://github.com/acme/api/pull/8" } } : {}),
+        publication: {
+          ...current.publication!,
+          ...(foreign === "pull" ? { pr: 8 } : { expectedHeadSha: "b".repeat(40) }),
+        },
+      });
+      expect((await merge(h)).status).toBe(409);
+      expect(h.merges).toEqual([]);
+    }
+  });
 
   it("the runner's rebase route maps the shared resolver's clean carry, changed patch and conflict outcomes", async () => {
     const newHead = "b".repeat(40);
@@ -7745,13 +7877,19 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
         },
       ],
     });
-    const carried = await mergeHarness({
-      runnerRebase: async () => result("carried", "#7 rebased, patch unchanged, approval carried", newHead),
-    });
+    const carried = await mergeHarness(
+      {
+        runnerRebase: async () => result("carried", "#7 rebased, patch unchanged, approval carried", newHead),
+      },
+      { publication: undefined },
+    );
     expect((await call(carried, "rebase", body)).body).toMatchObject({ outcome: "carried", headSha: newHead });
-    const changed = await mergeHarness({
-      runnerRebase: async () => result("delta-review", "#7 rebased, patch changed", newHead),
-    });
+    const changed = await mergeHarness(
+      {
+        runnerRebase: async () => result("delta-review", "#7 rebased, patch changed", newHead),
+      },
+      { publication: undefined },
+    );
     expect((await call(changed, "rebase", body)).body).toMatchObject({ outcome: "changed", headSha: newHead });
     const conflict = await mergeHarness({
       runnerRebase: async () => result("conflict", "#7 conflict in config.ts"),
@@ -7807,6 +7945,42 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
       ),
     ).toMatchObject({ status: 200, body: { headSha: newHead } });
   });
+
+  it.each(["throw", "unavailable"] as const)(
+    "confirms the exact rebase binding after a lost %s acknowledgement",
+    async (lost) => {
+      const newHead = "b".repeat(40);
+      const h = await mergeHarness({
+        prFacts: {
+          ...facts({ headSha: newHead }),
+          verifiedHead: { repo: PLAN_INSTANCE.repo, ref: "plan/fixture/u10-warm", sha: newHead },
+        },
+        runnerRebase: async () => ({
+          repo: PLAN_INSTANCE.repo,
+          results: [
+            { repo: PLAN_INSTANCE.repo, number: 7, outcome: "delta-review", line: "changed", headSha: newHead },
+          ],
+        }),
+      });
+      const replace = h.instances.compareAndReplaceUnit.bind(h.instances);
+      vi.spyOn(h.instances, "compareAndReplaceUnit").mockImplementation(async (before, after) => {
+        const result = await replace(before, after);
+        if (result.ok && after.publication?.expectedHeadSha === newHead) {
+          if (lost === "throw") throw new Error("binding response lost");
+          return { ok: false, reason: "unavailable" };
+        }
+        return result;
+      });
+      expect(await call(h, "rebase", body)).toMatchObject({
+        status: 200,
+        body: { outcome: "changed", headSha: newHead },
+      });
+      expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]).toMatchObject({
+        publication: { expectedHeadSha: newHead },
+        lastPush: newHead,
+      });
+    },
+  );
 
   it("the runner's rebase refuses a reported push when the PR ref points elsewhere", async () => {
     const newHead = "b".repeat(40);
@@ -7969,13 +8143,17 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
 
   it("every guard green: the bot squashes the pull request at exactly the approved head with the title as the commit, and answers merged with the squash's sha", async () => {
     const h = await mergeHarness();
-    expect(await merge(h)).toEqual({ status: 200, body: { ok: true, outcome: "merged", sha: MERGED, at: NOW } });
+    expect(await merge(h)).toEqual({
+      status: 200,
+      body: { ok: true, outcome: "merged", sha: MERGED, effectOrdinal: 1, at: NOW },
+    });
     expect(h.merges).toEqual([
       { pr: { repo: "acme/api", number: 7 }, opts: { sha: HEAD, title: "feat(cache): warm on wake" } },
     ]);
-    // A seven-hex approved head still pins the squash to what GitHub has.
+    // A mutation requires the complete approved target, not an abbreviated head.
     const short = await mergeHarness();
-    expect((await merge(short, { ...body, headSha: HEAD.slice(0, 7) })).body).toMatchObject({ outcome: "merged" });
+    expect((await merge(short, { ...body, headSha: HEAD.slice(0, 7) })).status).toBe(400);
+    expect(short.merges).toEqual([]);
   });
 
   it("agent-ship item 10: an unknown head-branch state dispatches no merge and returns a retryable GitHub error", async () => {
@@ -8366,47 +8544,36 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     const h = await mergeHarness({ queueRule: true, enqueue: { ok: true } });
     expect(await merge(h)).toEqual({
       status: 200,
-      body: { ok: true, outcome: "enqueued", reason: `enqueued at \`${HEAD.slice(0, 7)}\``, at: NOW },
+      body: { ok: true, outcome: "enqueued", effectOrdinal: 1, reason: `enqueued at \`${HEAD.slice(0, 7)}\``, at: NOW },
     });
     expect(h.enqueues).toEqual([{ pr: { repo: "acme/api", number: 7 }, opts: { sha: HEAD } }]);
     expect(h.merges).toEqual([]);
     expect(h.logs.some((l) => l.includes("enqueued acme/api#7"))).toBe(true);
   });
 
-  it("a 405 with the queue's wording on a repository whose rules could not be read enqueues too; any other refusal keeps GitHub's words; a queue ruled but with no enqueue wired is refused naming the hand enqueue", async () => {
-    const h = await mergeHarness({
-      queueRule: new Error("rules unreadable"),
-      merge: {
-        ok: false,
-        status: 405,
-        reason: "Repository rule violations found — Changes must be made through the merge queue",
-      },
+  it("unreadable queue rules authorize no write, and queue error prose cannot choose an enqueue", async () => {
+    for (const queueRule of [undefined, new Error("rules unreadable")]) {
+      const h = await mergeHarness({
+        queueRule,
+        merge: { ok: false, status: 405, reason: "must use merge queue" },
+        enqueue: { ok: true },
+      });
+      expect((await merge(h)).status).toBe(502);
+      expect(h.merges).toEqual([]);
+      expect(h.enqueues).toEqual([]);
+    }
+    const falseRule = await mergeHarness({
+      queueRule: false,
+      merge: { ok: false, status: 405, reason: "must use merge queue" },
       enqueue: { ok: true },
     });
-    expect((await merge(h)).body).toMatchObject({ outcome: "enqueued" });
-    // The squash was attempted (the rules read decided nothing) and the 405's
-    // own wording routed it to the queue.
-    expect(h.merges).toHaveLength(1);
-    expect(h.enqueues).toEqual([{ pr: { repo: "acme/api", number: 7 }, opts: { sha: HEAD } }]);
-    // A 405 without the queue's wording keeps today's refusal in GitHub's words.
-    const plain = await mergeHarness({
-      queueRule: undefined,
-      merge: { ok: false, status: 405, reason: "Pull Request is not mergeable" },
-      enqueue: { ok: true },
-    });
-    expect((await merge(plain)).body).toMatchObject({
+    expect((await merge(falseRule)).body).toMatchObject({
       outcome: "refused",
-      reason: "GitHub refused the merge of acme/api#7 (HTTP 405): Pull Request is not mergeable",
+      reason: "GitHub refused the merge of acme/api#7 (HTTP 405): must use merge queue",
     });
-    expect(plain.enqueues).toEqual([]);
-    // The queue is ruled but the door cannot enqueue: refused naming the hand act.
+    expect(falseRule.enqueues).toEqual([]);
     const bare = await mergeHarness({ queueRule: true });
-    expect((await merge(bare)).body).toMatchObject({
-      outcome: "refused",
-      reason:
-        "`main` takes changes only through a merge queue and the door cannot enqueue — this is a bug: automatic merge-queue enqueue is unavailable; the approved work stands",
-    });
-    // GitHub refusing the enqueue itself is a refusal in GitHub's words.
+    expect((await merge(bare)).status).toBe(502);
     const refused = await mergeHarness({ queueRule: true, enqueue: { ok: false, reason: "queue is locked" } });
     expect((await merge(refused)).body).toMatchObject({
       outcome: "refused",
@@ -8925,6 +9092,32 @@ describe("original committed head adoption — create-only draft PR", () => {
     expect(await adopt(h)).toMatchObject({ status: 200, body: { outcome: "already_bound", pr: 99 } });
     expect(posts).toHaveLength(1);
   });
+
+  it.each(["throw", "unavailable"] as const)(
+    "confirms the exact adoption binding after a lost %s acknowledgement without local ownership",
+    async (lost) => {
+      const { h, posts } = await setup();
+      h.deps.runnerOwnership = undefined;
+      const replace = h.instances.compareAndReplaceUnit.bind(h.instances);
+      vi.spyOn(h.instances, "compareAndReplaceUnit").mockImplementation(async (before, after) => {
+        const result = await replace(before, after);
+        if (result.ok && after.adoption?.state === "bound") {
+          if (lost === "throw") throw new Error("binding response lost");
+          return { ok: false, reason: "unavailable" };
+        }
+        return result;
+      });
+      expect(await adopt(h)).toMatchObject({ status: 200, body: { outcome: "bound", pr: 99, head } });
+      expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
+        adoption: { state: "bound" },
+        publication: { expectedHeadSha: head, pr: 99 },
+        lastPush: head,
+      });
+      expect(posts).toHaveLength(1);
+      expect(await adopt(h)).toMatchObject({ status: 200, body: { outcome: "already_bound", pr: 99 } });
+      expect(posts).toHaveLength(1);
+    },
+  );
 
   it("a stopped original instance can adopt only its terminal child's accepted head", async () => {
     const child = coding();

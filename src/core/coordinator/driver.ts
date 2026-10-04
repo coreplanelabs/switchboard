@@ -646,7 +646,14 @@ function mergeReturn(step: string, a: BotAnswer): StepReturn {
   const { ok, outcome, by, sha, mergedAt, mergedBy, reason, at } = a.body;
   // The door found the pull request already merged after the approval: the
   // merge commit and the time ride the answer, and the unit ends `by: other`.
-  if (ok === true && outcome === "merged" && by === "other" && typeof sha === "string" && typeof mergedAt === "string")
+  if (
+    ok === true &&
+    outcome === "merged" &&
+    by === "other" &&
+    typeof sha === "string" &&
+    /^[0-9a-f]{40}$/i.test(sha) &&
+    typeof mergedAt === "string"
+  )
     return {
       type: "merge",
       step,
@@ -668,7 +675,7 @@ function mergeReturn(step: string, a: BotAnswer): StepReturn {
       }).pr,
       at,
     };
-  if (ok === true && outcome === "merged" && typeof sha === "string")
+  if (ok === true && outcome === "merged" && by === undefined && typeof sha === "string" && /^[0-9a-f]{40}$/i.test(sha))
     return { type: "merge", step, outcome: "merged", sha, at };
   if (
     ok === true &&
@@ -826,7 +833,7 @@ async function perform(
   cursor: { ordinal: number },
 ): Promise<StepReturn> {
   const tag = { parentInstanceId: instanceId, unit, effectId: action.step, effectOrdinal: cursor.ordinal + 1 };
-  const receipt = (answer: BotAnswer, route: "branch" | "spawn") => {
+  const receipt = (answer: BotAnswer, route: "branch" | "spawn" | "merge", required = true) => {
     const ordinal = answer.body.effectOrdinal;
     if (ordinal !== undefined) {
       if (
@@ -835,7 +842,14 @@ async function perform(
       )
         throw new UnreadableAnswer(route, answer, "effect ordinal");
       cursor.ordinal = ordinal as number;
-    } else if (answer.body.ok === true) throw new UnreadableAnswer(route, answer, "effect ordinal");
+    } else if (
+      required &&
+      answer.body.ok === true &&
+      (route !== "merge" ||
+        answer.body.outcome === "enqueued" ||
+        (answer.body.outcome === "merged" && answer.body.by !== "other"))
+    )
+      throw new UnreadableAnswer(route, answer, "effect ordinal");
     return answer;
   };
   switch (action.type) {
@@ -946,16 +960,20 @@ async function perform(
     case "merge":
       return mergeReturn(
         action.step,
-        answerOf(
-          "merge",
-          await step.do(action.step, STEP_CONFIG, () =>
-            call(bot, "merge", {
-              ...tag,
-              prNumber: action.prNumber,
-              headSha: action.headSha,
-              ...(action.queued === true ? { queued: true } : {}),
-            }),
+        receipt(
+          answerOf(
+            "merge",
+            await step.do(action.step, STEP_CONFIG, () =>
+              call(bot, "merge", {
+                ...tag,
+                prNumber: action.prNumber,
+                headSha: action.headSha,
+                ...(action.queued === true ? { queued: true } : {}),
+              }),
+            ),
           ),
+          "merge",
+          action.queued !== true,
         ),
       );
     case "rebase":

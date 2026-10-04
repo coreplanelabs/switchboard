@@ -60,7 +60,25 @@ export type UnitEffectTransition = { expected: CoordinatorUnit; execution: UnitE
       effectId: string;
       call: number;
       observation:
-        { kind: "branch_ref"; repo: string; ref: string; headSha: string } | { kind: "spawn_run"; runId: string };
+        | { kind: "branch_ref"; repo: string; ref: string; headSha: string }
+        | { kind: "spawn_run"; runId: string }
+        | {
+            kind: "pull_merged";
+            repo: string;
+            ref: string;
+            base: string;
+            pr: number;
+            headSha: string;
+            commitSha: string;
+          }
+        | {
+            kind: "pull_enqueued" | "pull_dequeued";
+            repo: string;
+            ref: string;
+            base: string;
+            pr: number;
+            headSha: string;
+          };
     }
   | { kind: "settle"; effectId: string }
 );
@@ -105,6 +123,17 @@ function isUnitEffectCompletionOutcome(v: unknown): v is UnitEffectCompletionOut
   return isUnitEffectOutcome(v) && (v.state !== "refused" || v.cause === "external_refused");
 }
 
+function validOperationOutcome(operation: UnitEffectOperation | undefined, outcome: UnitEffectOutcome): boolean {
+  return (
+    outcome.state !== "accepted" ||
+    (operation === "merge"
+      ? sha(outcome.commitSha) && outcome.runId === undefined
+      : operation === "enqueue"
+        ? outcome.commitSha === undefined && outcome.runId === undefined
+        : true)
+  );
+}
+
 export function isUnitCurrentEffect(v: unknown): v is UnitCurrentEffect {
   if (
     !object(v) ||
@@ -143,6 +172,9 @@ export function isUnitCurrentEffect(v: unknown): v is UnitCurrentEffect {
     const { operation: _operation, resourceId: _resource, ...outcome } = call;
     if (!(same(outcome, { state: "unstarted" }) || same(outcome, { state: "pending" }) || isUnitEffectOutcome(outcome)))
       return false;
+    if (isUnitEffectOutcome(outcome) && !validOperationOutcome(call.operation as UnitEffectOperation, outcome))
+      return false;
+    if (call.operation === "enqueue" && v.calls.length !== 1) return false;
     if (v.phase === "settled" && call.state !== "accepted" && call.state !== "refused") return false;
   }
   try {
@@ -177,7 +209,9 @@ export function isUnitEffectTransition(v: unknown): v is UnitEffectTransition {
       "call",
       ...(v.kind === "complete" ? ["outcome"] : v.kind === "resolve" ? ["observation"] : []),
     ]) &&
-    (v.kind !== "complete" || isUnitEffectCompletionOutcome(v.outcome)) &&
+    (v.kind !== "complete" ||
+      (isUnitEffectCompletionOutcome(v.outcome) &&
+        validOperationOutcome(v.expected.currentEffect?.calls[v.call as number]?.operation, v.outcome))) &&
     (v.kind !== "resolve" ||
       (object(v.observation) &&
         ((v.observation.kind === "branch_ref" &&
@@ -188,7 +222,23 @@ export function isUnitEffectTransition(v: unknown): v is UnitEffectTransition {
           (v.observation.kind === "spawn_run" &&
             keys(v.observation, ["kind", "runId"]) &&
             typeof v.observation.runId === "string" &&
-            RUN_ID_PATTERN.test(v.observation.runId)))))
+            RUN_ID_PATTERN.test(v.observation.runId)) ||
+          (["pull_merged", "pull_enqueued", "pull_dequeued"].includes(v.observation.kind as string) &&
+            keys(v.observation, [
+              "kind",
+              "repo",
+              "ref",
+              "base",
+              "pr",
+              "headSha",
+              ...(v.observation.kind === "pull_merged" ? ["commitSha"] : []),
+            ]) &&
+            isPublicationRepo(v.observation.repo) &&
+            text(v.observation.ref) &&
+            text(v.observation.base) &&
+            positive(v.observation.pr) &&
+            sha(v.observation.headSha) &&
+            (v.observation.kind !== "pull_merged" || sha(v.observation.commitSha))))))
   );
 }
 export function isUnitEffectTransitionResult(v: unknown): v is UnitEffectTransitionResult {
@@ -232,14 +282,45 @@ function observationMatches(
   call: UnitEffectCall,
   proof: Extract<UnitEffectTransition, { kind: "resolve" }>["observation"],
 ): boolean {
-  if (effect.phase !== "active" || (call.state !== "pending" && call.state !== "uncertain")) return false;
+  if (
+    effect.phase !== "active" ||
+    (call.state !== "pending" &&
+      call.state !== "uncertain" &&
+      !(
+        call.operation === "enqueue" &&
+        call.state === "accepted" &&
+        (proof.kind === "pull_merged" || proof.kind === "pull_dequeued")
+      ))
+  )
+    return false;
   if (proof.kind === "spawn_run") return call.operation === "spawn";
+  if (proof.kind === "pull_merged" || proof.kind === "pull_enqueued" || proof.kind === "pull_dequeued")
+    return (
+      (proof.kind === "pull_merged" ? ["merge", "enqueue"].includes(call.operation) : call.operation === "enqueue") &&
+      (proof.kind !== "pull_dequeued" || call.state === "accepted") &&
+      proof.pr === effect.target.pr &&
+      proof.base === effect.target.base &&
+      proof.ref === effect.target.ref &&
+      proof.repo.toLowerCase() === effect.target.repo.toLowerCase() &&
+      proof.headSha.toLowerCase() === effect.target.headSha.toLowerCase()
+    );
   return (
     call.operation === "branch_create" &&
     proof.repo.toLowerCase() === effect.target.repo.toLowerCase() &&
     proof.ref === effect.target.ref &&
     proof.headSha.toLowerCase() === effect.target.headSha.toLowerCase()
   );
+}
+
+function observationOutcome(
+  proof: Extract<UnitEffectTransition, { kind: "resolve" }>["observation"],
+  call: UnitEffectCall,
+): UnitEffectCompletionOutcome {
+  return proof.kind === "spawn_run"
+    ? { state: "accepted", runId: proof.runId }
+    : call.operation === "enqueue"
+      ? { state: "accepted" }
+      : { state: "accepted", commitSha: proof.kind === "pull_merged" ? proof.commitSha : proof.headSha };
 }
 
 /** Private facts read by the existing run owner, never supplied by a caller. */
@@ -391,7 +472,13 @@ export function planUnitEffectTransition(
   }
   if (effect.id !== input.effectId || effect.phase !== "active") return { ok: false, reason: "conflict" };
   if (input.kind === "settle") {
-    if (effect.calls.some((call) => call.state !== "accepted" && call.state !== "refused"))
+    if (
+      effect.calls.some(
+        (call) =>
+          (call.state !== "accepted" && call.state !== "refused") ||
+          (call.operation === "enqueue" && call.state === "accepted"),
+      )
+    )
       return { ok: false, reason: "uncertain" };
     return { ok: true, unit: { ...current, currentEffect: { ...effect, phase: "settled" } } };
   }
@@ -451,12 +538,19 @@ export function planUnitEffectTransition(
         ...current,
         currentEffect: {
           ...effect,
+          ...(call.operation === "enqueue" &&
+          (proof.kind === "pull_merged" || proof.kind === "pull_dequeued") &&
+          effect.calls.length === 1
+            ? { phase: "settled" as const }
+            : {}),
           calls: effect.calls.map((part, index) =>
             index === input.call
               ? {
                   operation: call.operation,
-                  state: "accepted",
-                  ...(proof.kind === "branch_ref" ? { commitSha: effect.target.headSha } : { runId: proof.runId }),
+                  ...observationOutcome(
+                    proof.kind === "branch_ref" ? { ...proof, headSha: effect.target.headSha } : proof,
+                    call,
+                  ),
                 }
               : part,
           ),
@@ -465,6 +559,12 @@ export function planUnitEffectTransition(
     };
   }
   if (call.state !== "pending" || !isUnitEffectCompletionOutcome(input.outcome))
+    return { ok: false, reason: "conflict" };
+  if (
+    input.outcome.state === "accepted" &&
+    ((call.operation === "merge" && (!sha(input.outcome.commitSha) || input.outcome.runId !== undefined)) ||
+      (call.operation === "enqueue" && (input.outcome.commitSha !== undefined || input.outcome.runId !== undefined)))
+  )
     return { ok: false, reason: "conflict" };
   if (call.operation === "spawn" && input.outcome.state === "accepted") {
     const reason = spawnEvidenceRefusal(instance, current, effect, input.outcome.runId, runEvidence);
@@ -484,13 +584,18 @@ export function planUnitEffectTransition(
 
 /** A successful transport receipt proves only this requested whole-row change. */
 export function unitEffectResultMatches(input: UnitEffectTransition, unit: CoordinatorUnit): boolean {
+  if (!isUnitEffectTransition(input) || !isCoordinatorUnit(unit)) return false;
   const { currentEffect: _before, ...expectedFields } = input.expected;
   const { currentEffect: effect, ...actualFields } = unit;
   if (!same(expectedFields, actualFields) || !effect) return false;
   if (input.kind === "admit") return same(effect, input.effect);
   const previous = input.expected.currentEffect;
   if (!previous || previous.id !== input.effectId) return false;
-  if (input.kind === "settle") return same(effect, { ...previous, phase: "settled" });
+  if (input.kind === "settle")
+    return (
+      !previous.calls.some((call) => call.operation === "enqueue" && call.state === "accepted") &&
+      same(effect, { ...previous, phase: "settled" })
+    );
   const call = previous.calls[input.call];
   if (!call || (input.kind === "resolve" && !observationMatches(previous, call, input.observation))) return false;
   const identity = {
@@ -505,14 +610,22 @@ export function unitEffectResultMatches(input: UnitEffectTransition, unit: Coord
         : input.kind === "resolve"
           ? {
               ...identity,
-              state: "accepted",
-              ...(input.observation.kind === "branch_ref"
-                ? { commitSha: previous.target.headSha }
-                : { runId: input.observation.runId }),
+              ...observationOutcome(
+                input.observation.kind === "branch_ref"
+                  ? { ...input.observation, headSha: previous.target.headSha }
+                  : input.observation,
+                call,
+              ),
             }
           : { ...input.outcome, ...identity };
   return same(effect, {
     ...previous,
+    ...(input.kind === "resolve" &&
+    call.operation === "enqueue" &&
+    ["pull_merged", "pull_dequeued"].includes(input.observation.kind) &&
+    previous.calls.length === 1
+      ? { phase: "settled" }
+      : {}),
     calls: previous.calls.map((part, index) => (index === input.call ? next : part)),
   });
 }
