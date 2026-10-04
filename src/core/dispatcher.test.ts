@@ -23572,12 +23572,16 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     s.deps.postReviewComment = vi.fn(async () => {});
     const executor = {
       exec: async (command: string) => (/git rev-parse HEAD/.test(command) ? `${head}\n` : ""),
+      execResult: async () => ({ exitCode: 0, stdout: `${head}\n`, stderr: "", truncated: false }),
       readFile: async () => "",
       writeFile: async () => "",
       release: async () => ({ released: true }),
     };
     const harness = vi.fn<typeof runPiHarnessOpen>(async (_deps, run) => {
       expect(run.agent.name).toBe("review");
+      expect(run.toolContext.reviewHistory?.target).toEqual({ repo: "acme/api", number: 7 });
+      // This scripted harness supplies a complete current-head history read.
+      run.toolContext.reviewHistory!.snapshot = { head, findings: [] };
       await run.tools
         .find((tool) => tool.name === "submit_verdict")!
         .run({ verdict: "approve", summary: "Reviewed the new head", head, findings: [] }, run.toolContext);
@@ -23679,12 +23683,16 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       s.deps.fetchPrHead = async () => head;
       const executor = {
         exec: async (command: string) => (/git rev-parse HEAD/.test(command) ? `${head}\n` : ""),
+        execResult: async () => ({ exitCode: 0, stdout: `${head}\n`, stderr: "", truncated: false }),
         readFile: async () => "",
         writeFile: async () => "",
         release: async () => ({ released: true }),
       };
       const harness = vi.fn<typeof runPiHarnessOpen>(async (_deps, run) => {
         expect(run.agent.name).toBe("review");
+        expect(run.toolContext.reviewHistory?.target).toEqual({ repo: "acme/api", number: 7 });
+        // This scripted harness supplies a complete current-head history read.
+        run.toolContext.reviewHistory!.snapshot = { head, findings: [] };
         expect(run.system).toContain(`- Head commit: ${head}`);
         expect(run.system).toContain(`- Head branch: ${s.branch}`);
         await run.tools

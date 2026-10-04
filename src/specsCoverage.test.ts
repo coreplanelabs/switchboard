@@ -112,6 +112,27 @@ beforeEach(() => {
 afterEach(() => rmSync(fixture, { recursive: true, force: true }));
 
 describe("specs:coverage working-tree blobs", () => {
+  it("checks large committed test snapshots without losing the proof-removal guard", () => {
+    const padding = `/* ${"x".repeat(1024 * 1024)} */\n`;
+    write(testFile, originalTest + padding);
+    git("add", testFile);
+    git("commit", "-qm", "large base");
+    git("tag", "-f", "base");
+    write(testFile, keeper + padding);
+    git("add", testFile);
+    git("commit", "-qm", "remove proof");
+    const unchangedOwner = guard("base..HEAD");
+    expect(unchangedOwner.status, unchangedOwner.stderr).toBe(1);
+    expect(unchangedOwner.stdout).toContain('removed: test "lost"');
+    expect(unchangedOwner.stdout).toContain("test-guard FAILED");
+    write(owner, `${originalSpec}\n`);
+    git("add", owner);
+    git("commit", "-qm", "revise contract");
+    const revisedOwner = guard("base...HEAD");
+    expect(revisedOwner.status, revisedOwner.stderr).toBe(0);
+    expect(revisedOwner.stdout).toContain(`allowed by ${owner}`);
+  });
+
   it("does not follow a test replaced by a symlink between checking and reading", () => {
     write(testFile, keeper);
     write("attacker-target", originalTest);

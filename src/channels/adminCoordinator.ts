@@ -2604,6 +2604,33 @@ function findingsRoundAuthorized(
   );
 }
 
+/** Confirm a whole-row transition, including a committed CAS with a lost reply. */
+async function replacePublicationUnit(
+  deps: AdminCoordinatorDeps,
+  row: CoordinatorUnit,
+  updated: CoordinatorUnit,
+): Promise<void> {
+  let replaced: Awaited<ReturnType<CoordinatorInstanceStore["compareAndReplaceUnit"]>> | undefined;
+  try {
+    replaced = await deps.instances.compareAndReplaceUnit(row, updated);
+  } catch {
+    // The owner may have committed before its transport failed.
+  }
+  if (replaced === undefined || (!replaced.ok && replaced.reason === "unavailable")) {
+    const reread = await deps.instances.listUnits(row.instanceId).catch(() => undefined);
+    const current = reread?.filter((candidate) => candidate.unit === row.unit);
+    if (current?.length === 1 && JSON.stringify(current[0]) === JSON.stringify(updated)) replaced = { ok: true };
+  }
+  if (replaced?.ok !== true)
+    throw new PublicationBindingRefusal(
+      replaced?.reason === "stale"
+        ? "publication_binding_stale"
+        : replaced?.reason === "owned"
+          ? "publication_ownership_changed"
+          : "publication_store_unavailable",
+    );
+}
+
 /** Advance a publication binding only to the exact head recorded by its completed
  * authorized findings child. An unrelated force-push can never rewrite the durable
  * publication binding merely because the branch currently points there. */
@@ -2735,15 +2762,6 @@ async function advanceFindingsPublication(
     fresh.verifiedHead.sha !== facts.headSha
   )
     throw new PublicationBindingRefusal("publication_facts_mismatch");
-  try {
-    if (row.recovery !== undefined && deps.runnerOwnership?.claim(instance.repo, row.publication.pr, owner) !== true)
-      throw new PublicationBindingRefusal("publication_ownership_changed");
-    if (!samePublicationOwner(deps.runnerOwnership?.owner(instance.repo, row.publication.pr), owner))
-      throw new PublicationBindingRefusal("publication_ownership_changed");
-  } catch (err) {
-    if (err instanceof PublicationBindingRefusal) throw err;
-    throw new PublicationBindingRefusal("publication_ownership_unknown");
-  }
   const updated: CoordinatorUnit = {
     ...row,
     lastPush: facts.headSha,
@@ -2752,29 +2770,7 @@ async function advanceFindingsPublication(
       ? { recovery: { ...row.recovery, previousBinding: undefined, expectedHeadSha: facts.headSha } }
       : {}),
   };
-  let replaced: Awaited<ReturnType<CoordinatorInstanceStore["compareAndReplaceUnit"]>> | undefined;
-  try {
-    replaced = await deps.instances.compareAndReplaceUnit(row, updated);
-  } catch {
-    const reread = await deps.instances.listUnits(instance.id).catch(() => undefined);
-    const current = reread?.filter((candidate) => candidate.unit === row.unit);
-    if (current?.length === 1 && JSON.stringify(current[0]) === JSON.stringify(updated)) replaced = { ok: true };
-  }
-  if (replaced?.ok !== true)
-    throw new PublicationBindingRefusal(
-      replaced?.reason === "stale" ? "publication_binding_stale" : "publication_store_unavailable",
-    );
-  let stillOwned = false;
-  try {
-    stillOwned = samePublicationOwner(deps.runnerOwnership?.owner(instance.repo, row.publication.pr), owner);
-  } catch {
-    /* Unknown ownership also requires rollback. */
-  }
-  if (!stillOwned) {
-    const restored = await deps.instances.compareAndReplaceUnit(updated, row).catch(() => undefined);
-    if (restored?.ok !== true) throw new PublicationBindingRefusal("publication_rollback_failed");
-    throw new PublicationBindingRefusal("publication_ownership_changed");
-  }
+  await replacePublicationUnit(deps, row, updated);
   return updated;
 }
 
@@ -2893,37 +2889,8 @@ async function advanceCodingPublication(
     fresh.verifiedHead.sha !== facts.headSha
   )
     throw new PublicationBindingRefusal("publication_facts_mismatch");
-  try {
-    if (!samePublicationOwner(deps.runnerOwnership?.owner(instance.repo, binding.pr), owner))
-      throw new PublicationBindingRefusal("publication_ownership_changed");
-  } catch (err) {
-    if (err instanceof PublicationBindingRefusal) throw err;
-    throw new PublicationBindingRefusal("publication_ownership_unknown");
-  }
   const updated = { ...row, lastPush: facts.headSha, publication: { ...binding, expectedHeadSha: facts.headSha } };
-  let replaced: Awaited<ReturnType<CoordinatorInstanceStore["compareAndReplaceUnit"]>> | undefined;
-  try {
-    replaced = await deps.instances.compareAndReplaceUnit(row, updated);
-  } catch {
-    const reread = await deps.instances.listUnits(instance.id).catch(() => undefined);
-    const current = reread?.filter((candidate) => candidate.unit === row.unit);
-    if (current?.length === 1 && JSON.stringify(current[0]) === JSON.stringify(updated)) replaced = { ok: true };
-  }
-  if (replaced?.ok !== true)
-    throw new PublicationBindingRefusal(
-      replaced?.reason === "stale" ? "publication_binding_stale" : "publication_store_unavailable",
-    );
-  let stillOwned = false;
-  try {
-    stillOwned = samePublicationOwner(deps.runnerOwnership?.owner(instance.repo, binding.pr), owner);
-  } catch {
-    /* An unknown owner cannot credit the child either. */
-  }
-  if (!stillOwned) {
-    const restored = await deps.instances.compareAndReplaceUnit(updated, row).catch(() => undefined);
-    if (restored?.ok !== true) throw new PublicationBindingRefusal("publication_rollback_failed");
-    throw new PublicationBindingRefusal("publication_ownership_changed");
-  }
+  await replacePublicationUnit(deps, row, updated);
   return updated;
 }
 
@@ -3008,63 +2975,20 @@ async function adoptSupersededHead(
   // receives lastPush credit; incomplete evidence must not become adoption.
   if (findings && child.status === "completed" && child.headSha === facts.headSha)
     return advanceFindingsPublication(deps, instance, row, facts, source.runId);
-  const fence = deps.runnerOwnership;
-  if (fence === undefined) throw new PublicationBindingRefusal("publication_ownership_unknown");
-  let priorOwner: { instanceId: string; unit: string } | undefined;
-  try {
-    priorOwner = fence.owner(instance.repo, binding.pr);
-    if (priorOwner !== undefined && !samePublicationOwner(priorOwner, owner))
-      throw new PublicationBindingRefusal("publication_ownership_changed");
-    if (!fence.claim(instance.repo, binding.pr, owner))
-      throw new PublicationBindingRefusal("publication_ownership_changed");
-  } catch (err) {
-    if (err instanceof PublicationBindingRefusal) throw err;
-    throw new PublicationBindingRefusal("publication_ownership_unknown");
-  }
-  const releaseClaim = () => {
-    if (priorOwner === undefined) fence.release(instance.repo, binding.pr, owner);
-  };
   const fresh = await deps.fetchPrFacts({ repo: instance.repo, number: binding.pr }).catch(() => undefined);
   if (fresh === undefined || !validFacts(fresh) || fresh.headSha !== facts.headSha) {
-    releaseClaim();
     throw new PublicationBindingRefusal("publication_facts_mismatch");
   }
   const updated: CoordinatorUnit = {
     ...row,
     publication: { ...binding, expectedHeadSha: fresh.headSha! },
   };
-  let replaced: Awaited<ReturnType<CoordinatorInstanceStore["compareAndReplaceUnit"]>>;
-  try {
-    replaced = await deps.instances.compareAndReplaceUnit(row, updated);
-  } catch {
-    releaseClaim();
-    throw new PublicationBindingRefusal("publication_store_unavailable");
-  }
-  if (!replaced.ok) {
-    releaseClaim();
-    throw new PublicationBindingRefusal(
-      replaced.reason === "stale" ? "publication_binding_stale" : "publication_store_unavailable",
-    );
-  }
-  let stillOwned = false;
-  try {
-    stillOwned = samePublicationOwner(fence.owner(instance.repo, binding.pr), owner);
-  } catch {
-    /* Unknown ownership also requires rollback. */
-  }
-  if (!stillOwned) {
-    const restored = await deps.instances.compareAndReplaceUnit(updated, row).catch(() => undefined);
-    if (restored?.ok !== true) throw new PublicationBindingRefusal("publication_rollback_failed");
-    releaseClaim();
-    throw new PublicationBindingRefusal("publication_ownership_changed");
-  }
+  await replacePublicationUnit(deps, row, updated);
   return updated;
 }
 
-/** One fail-closed transition from a freshly read open pull request to the
- * exact durable authority later coding rounds require. The ownership claim is
- * synchronous and precedes the full-row CAS; only a claim acquired by this
- * call is conditionally released after a failed durable transition. */
+/** Bind fresh GitHub facts through the existing exclusive durable owner transaction.
+ * An identical binding is a read-only replay, never permission for an effect. */
 async function bindOpenPullRequest(
   deps: AdminCoordinatorDeps,
   instance: CoordinatorInstance,
@@ -3113,55 +3037,9 @@ async function bindOpenPullRequest(
   )
     throw new PublicationBindingRefusal("publication_facts_mismatch");
 
-  const fence = deps.runnerOwnership;
-  if (fence === undefined) throw new PublicationBindingRefusal("publication_ownership_unknown");
-  let priorOwner: { instanceId: string; unit: string } | undefined;
-  try {
-    priorOwner = fence.owner(instance.repo, pr.number);
-  } catch {
-    throw new PublicationBindingRefusal("publication_ownership_unknown");
-  }
-  if (priorOwner !== undefined && !samePublicationOwner(priorOwner, owner))
-    throw new PublicationBindingRefusal("publication_ownership_changed");
-  try {
-    if (!fence.claim(instance.repo, pr.number, owner))
-      throw new PublicationBindingRefusal("publication_ownership_changed");
-  } catch (err) {
-    if (err instanceof PublicationBindingRefusal) throw err;
-    throw new PublicationBindingRefusal("publication_ownership_unknown");
-  }
-  let claimedHere = priorOwner === undefined;
-  const releaseClaim = () => {
-    if (!claimedHere) return;
-    fence.release(instance.repo, pr.number, owner);
-    claimedHere = false;
-  };
-  try {
-    if (!samePublicationOwner(fence.owner(instance.repo, pr.number), owner)) {
-      releaseClaim();
-      throw new PublicationBindingRefusal("publication_ownership_unknown");
-    }
-  } catch (err) {
-    releaseClaim();
-    if (err instanceof PublicationBindingRefusal) throw err;
-    throw new PublicationBindingRefusal("publication_ownership_unknown");
-  }
-
   const replacement = { ...row, pr, publication };
   if (JSON.stringify(replacement) === JSON.stringify(row)) return;
-  let replaced: Awaited<ReturnType<CoordinatorInstanceStore["compareAndReplaceUnit"]>>;
-  try {
-    replaced = await deps.instances.compareAndReplaceUnit(row, replacement);
-  } catch {
-    releaseClaim();
-    throw new PublicationBindingRefusal("publication_store_unavailable");
-  }
-  if (!replaced.ok) {
-    releaseClaim();
-    throw new PublicationBindingRefusal(
-      replaced.reason === "stale" ? "publication_binding_stale" : "publication_store_unavailable",
-    );
-  }
+  await replacePublicationUnit(deps, row, replacement);
 }
 
 const fullHead = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f]{40}$/i.test(value);

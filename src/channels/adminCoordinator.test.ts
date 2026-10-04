@@ -217,6 +217,21 @@ const registers =
     return { status: "completed" };
   };
 
+// Retained competing evidence is not a claim that a new conflicting admission succeeds.
+function seedPublicationRival(h: ReturnType<typeof harness>, pr: number): void {
+  const rival = { ...INSTANCE, id: "ship_rival", branch: "plan/rival/u99" };
+  seedCoordinatorInstance(h.instances, rival);
+  seedCoordinatorUnit(h.instances, {
+    instanceId: rival.id,
+    unit: "U99",
+    slug: "u99",
+    branch: rival.branch,
+    dependsOn: [],
+    rounds: [],
+    pr: { number: pr, url: `https://github.com/acme/api/pull/${pr}` },
+  });
+}
+
 function harness(
   over: {
     script?: Script;
@@ -2582,8 +2597,98 @@ describe("pr-check recover — the answer says why nothing was recovered, and Gi
 
     expect(await recoverBinding(h.deps)).toMatchObject({ status: 200 });
     expect((await h.instances.listUnits(INSTANCE.id))[0]!.pr?.number).toBe(77);
-    expect(fence.owner(INSTANCE.repo, 77)).toEqual({ instanceId: INSTANCE.id, unit: "U12" });
-    expect(fence.owns(INSTANCE.repo, 77)).toBe(true);
+    expect(await h.instances.findPullOwners({ repo: INSTANCE.repo, pr: 77 })).toMatchObject({
+      ok: true,
+      owners: [expect.objectContaining({ kind: "unit", instanceId: INSTANCE.id, unit: "U12" })],
+    });
+  });
+
+  it("binds publication through the canonical owner without reading process-local claims", async () => {
+    const h = await bindingHarness(bindingFacts());
+    const obsolete = vi.fn(() => {
+      throw new Error("obsolete local owner");
+    });
+    h.deps.runnerOwnership = { claim: obsolete, release: obsolete, owner: obsolete };
+    expect(await recoverBinding(h.deps)).toMatchObject({ status: 200 });
+    const [bound] = await h.instances.listUnits(INSTANCE.id);
+    expect(bound!.publication).toMatchObject({
+      pr: 77,
+      expectedHeadSha: "a".repeat(40),
+      owner: { instanceId: INSTANCE.id, unit: "U12" },
+    });
+    expect(obsolete).not.toHaveBeenCalled();
+    expect(h.dispatched).toEqual([]);
+  });
+
+  it.each(["throw", "unavailable"] as const)(
+    "confirms only an exact publication binding after a committed CAS with %s response loss",
+    async (failure) => {
+      const h = await bindingHarness(bindingFacts());
+      const replace = h.instances.compareAndReplaceUnit.bind(h.instances);
+      const cas = vi.spyOn(h.instances, "compareAndReplaceUnit").mockImplementation(async (before, after) => {
+        expect(await replace(before, after)).toEqual({ ok: true });
+        if (failure === "throw") throw new Error("reply lost");
+        return { ok: false, reason: "unavailable" };
+      });
+      expect(await recoverBinding(h.deps)).toMatchObject({ status: 200 });
+      expect(cas).toHaveBeenCalledOnce();
+      expect((await h.instances.listUnits(INSTANCE.id))[0]!.publication?.expectedHeadSha).toBe("a".repeat(40));
+      expect(h.dispatched).toEqual([]);
+    },
+  );
+
+  it.each(["missing", "foreign", "duplicate", "unreadable"] as const)(
+    "retains publication uncertainty after a %s CAS readback",
+    async (scenario) => {
+      const h = await bindingHarness(bindingFacts());
+      const read = h.instances.listUnits.bind(h.instances);
+      let proposal: CoordinatorUnit | undefined;
+      const cas = vi.spyOn(h.instances, "compareAndReplaceUnit").mockImplementation(async (_before, after) => {
+        proposal = after;
+        return { ok: false, reason: "unavailable" };
+      });
+      vi.spyOn(h.instances, "listUnits").mockImplementation(async (id) => {
+        if (!proposal) return read(id);
+        if (scenario === "unreadable") throw new Error("read unavailable");
+        return scenario === "missing"
+          ? []
+          : scenario === "duplicate"
+            ? [proposal, proposal]
+            : [{ ...proposal, instanceId: "foreign" }];
+      });
+      expect(await recoverBinding(h.deps)).toMatchObject({
+        status: 409,
+        body: { error: "publication_store_unavailable" },
+      });
+      expect(cas).toHaveBeenCalledOnce();
+      expect(await read(INSTANCE.id)).toEqual([bindingRow()]);
+      expect(h.dispatched).toEqual([]);
+    },
+  );
+
+  it("a canonical rival refuses the publication binding without rollback or displacement", async () => {
+    const h = await bindingHarness(bindingFacts());
+    const rival = { ...INSTANCE, id: "ship_rival", branch: "plan/other/u12" };
+    await h.instances.put(rival);
+    expect(
+      await h.instances.putUnits([
+        {
+          ...bindingRow(),
+          instanceId: rival.id,
+          branch: rival.branch,
+          pr: { number: 77, url: "https://github.com/acme/api/pull/77" },
+        },
+      ]),
+    ).toEqual({ ok: true });
+    const cas = vi.spyOn(h.instances, "compareAndReplaceUnit");
+    expect(await recoverBinding(h.deps)).toMatchObject({
+      status: 409,
+      body: { error: "publication_ownership_changed" },
+    });
+    expect(cas).toHaveBeenCalledOnce();
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([bindingRow()]);
+    expect((await h.instances.listUnits(rival.id))[0]!.pr?.number).toBe(77);
+    expect(h.dispatched).toEqual([]);
   });
 
   it.each([
@@ -2627,61 +2732,30 @@ describe("pr-check recover — the answer says why nothing was recovered, and Gi
     expect(h.dispatched).toEqual([]);
   });
 
-  it("a refused ownership claim, an unknown fence, a stale row and an unavailable store all release only this attempt's owner and store no PR-only row", async () => {
-    const refused = await bindingHarness(bindingFacts());
-    refused.deps.runnerOwnership = { claim: () => false, release: () => true, owner: () => undefined };
-    expect(await recoverBinding(refused.deps)).toMatchObject({
-      status: 409,
-      body: { error: "publication_ownership_changed" },
-    });
-    expect(await refused.instances.listUnits(INSTANCE.id)).toEqual([bindingRow()]);
-
-    const unknown = await bindingHarness(bindingFacts());
-    delete unknown.deps.runnerOwnership;
-    expect(await recoverBinding(unknown.deps)).toMatchObject({
-      status: 409,
-      body: { error: "publication_ownership_unknown" },
-    });
-    expect(await unknown.instances.listUnits(INSTANCE.id)).toEqual([bindingRow()]);
-
-    const stale = await bindingHarness(bindingFacts());
-    const staleFence = stale.deps.runnerOwnership!;
-    stale.instances.compareAndReplaceUnit = async () => ({ ok: false, reason: "stale" });
-    expect(await recoverBinding(stale.deps)).toMatchObject({
-      status: 409,
-      body: { error: "publication_binding_stale" },
-    });
-    expect(staleFence.owner(INSTANCE.repo, 77)).toBeUndefined();
-    expect(await stale.instances.listUnits(INSTANCE.id)).toEqual([bindingRow()]);
-
-    const unavailable = await bindingHarness(bindingFacts());
-    const unavailableFence = unavailable.deps.runnerOwnership!;
-    unavailable.instances.compareAndReplaceUnit = async () => ({ ok: false, reason: "unavailable" });
-    expect(await recoverBinding(unavailable.deps)).toMatchObject({
-      status: 409,
-      body: { error: "publication_store_unavailable" },
-    });
-    expect(unavailableFence.owner(INSTANCE.repo, 77)).toBeUndefined();
-    expect(await unavailable.instances.listUnits(INSTANCE.id)).toEqual([bindingRow()]);
+  it("canonical owned, incomplete, stale and unavailable refusals store no PR-only row", async () => {
+    for (const [reason, error] of [
+      ["owned", "publication_ownership_changed"],
+      ["incomplete", "publication_store_unavailable"],
+      ["stale", "publication_binding_stale"],
+      ["unavailable", "publication_store_unavailable"],
+    ] as const) {
+      const h = await bindingHarness(bindingFacts());
+      const cas = vi.spyOn(h.instances, "compareAndReplaceUnit").mockResolvedValue({ ok: false, reason });
+      expect(await recoverBinding(h.deps)).toMatchObject({ status: 409, body: { error } });
+      expect(cas).toHaveBeenCalledOnce();
+      expect(await h.instances.listUnits(INSTANCE.id)).toEqual([bindingRow()]);
+      expect(h.dispatched).toEqual([]);
+    }
   });
 
-  it("a rival owner cannot be displaced, while exact already-bound replay is idempotent", async () => {
-    const rival = await bindingHarness(bindingFacts());
-    const rivalFence = rival.deps.runnerOwnership!;
-    expect(rivalFence.claim(INSTANCE.repo, 77, { instanceId: "ship_other", unit: "other" })).toBe(true);
-    expect(await recoverBinding(rival.deps)).toMatchObject({
-      status: 409,
-      body: { error: "publication_ownership_changed" },
-    });
-    expect(rivalFence.owner(INSTANCE.repo, 77)).toEqual({ instanceId: "ship_other", unit: "other" });
-    expect(await rival.instances.listUnits(INSTANCE.id)).toEqual([bindingRow()]);
-
+  it("already-bound read-only replay is idempotent without process-local ownership", async () => {
     const replay = await bindingHarness(bindingFacts());
+    delete replay.deps.runnerOwnership;
     expect((await recoverBinding(replay.deps)).status).toBe(200);
     const bound = (await replay.instances.listUnits(INSTANCE.id))[0]!;
     expect((await recoverBinding(replay.deps)).status).toBe(200);
     expect(await replay.instances.listUnits(INSTANCE.id)).toEqual([bound]);
-    expect(replay.deps.runnerOwnership!.owner(INSTANCE.repo, 77)).toEqual({ instanceId: INSTANCE.id, unit: "U12" });
+    expect(replay.dispatched).toEqual([]);
   });
 });
 
@@ -13312,8 +13386,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     if (scenario === "foreign head") run.headSha = "c".repeat(40);
     if (scenario === "unpriced") run.usage = undefined;
     if (scenario === "rival owner") {
-      h.deps.runnerOwnership!.release(INSTANCE.repo, PR.number, owner);
-      h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
+      seedPublicationRival(h, PR.number);
     }
     if (scenario === "competing push")
       await h.store.put({
@@ -13430,8 +13503,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         .mockResolvedValueOnce(exactRecoveryFacts("b".repeat(40)))
         .mockResolvedValue(exactRecoveryFacts("c".repeat(40)));
     if (scenario === "rival owner") {
-      h.deps.runnerOwnership!.release(INSTANCE.repo, PR.number, owner);
-      h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
+      seedPublicationRival(h, PR.number);
     }
     expect((await check()).status).toBe(409);
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
@@ -13955,8 +14027,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         await h.store.put({ ...child, userId: "slack:UOTHER" });
       }
       if (scenario === "changed owner") {
-        h.deps.runnerOwnership!.release(INSTANCE.repo, PR.number, owner);
-        h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U99" });
+        seedPublicationRival(h, PR.number);
       }
       const before = (await h.instances.listUnits(INSTANCE.id))[0]!;
       const checked = await handleCoordinatorRequest(
@@ -14245,8 +14316,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     if (scenario === "unrecorded push") await h.store.put({ ...run, pushed: undefined });
     if (scenario === "moved head") h.deps.fetchPrFacts = async () => exactRecoveryFacts("c".repeat(40));
     if (scenario === "rival owner") {
-      h.deps.runnerOwnership!.release(INSTANCE.repo, PR.number, owner);
-      h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
+      seedPublicationRival(h, PR.number);
     }
     if (scenario === "CAS loss")
       vi.spyOn(h.instances, "compareAndReplaceUnit").mockResolvedValueOnce({ ok: false, reason: "stale" });
@@ -14288,19 +14358,18 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(h.recoveries).toEqual([]);
   });
 
-  it("ordinary findings publication restores its prior binding when ownership changes during the CAS", async () => {
+  it("ordinary findings publication refuses a canonical competitor observed before its CAS", async () => {
     const h = await ordinaryFindingsHarness();
     const before = await h.instances.listUnits(INSTANCE.id);
     const replace = h.instances.compareAndReplaceUnit.bind(h.instances);
-    h.instances.compareAndReplaceUnit = async (expected, replacement) => {
-      const result = await replace(expected, replacement);
-      h.deps.runnerOwnership!.release(INSTANCE.repo, PR.number, owner);
-      h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
-      return result;
-    };
+    const cas = vi.spyOn(h.instances, "compareAndReplaceUnit").mockImplementation(async (expected, replacement) => {
+      seedPublicationRival(h, PR.number);
+      return replace(expected, replacement);
+    });
     expect(await ordinaryPrCheck(h)).toMatchObject({ status: 409, body: { error: "publication_ownership_changed" } });
+    expect(cas).toHaveBeenCalledOnce();
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)?.instanceId).toBe("rival");
+    expect((await h.instances.listUnits("ship_rival"))[0]!.pr?.number).toBe(PR.number);
   });
 
   it.each([
