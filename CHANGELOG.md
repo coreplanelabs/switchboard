@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.284.7](https://github.com/coreplanelabs/switchboard/compare/v1.284.6...v1.284.7) (2026-10-04)
+
+
+### Bug fixes
+
+* **config:** preflight the resolved front-door settings ([#2743](https://github.com/coreplanelabs/switchboard/issues/2743)) ([5f43c19](https://github.com/coreplanelabs/switchboard/commit/5f43c191d701106c041dfc411ff0fc2ad5729e4d))
+
 ## [1.284.6](https://github.com/coreplanelabs/switchboard/compare/v1.284.5...v1.284.6) (2026-10-03)
 
 
