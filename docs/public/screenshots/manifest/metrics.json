@@ -64,7 +64,7 @@
     "scripts/web-preview-reading-diff.ts": "24dea75cb4b61c011fa75878b138dde75e8a260d3c5b06c05c1e6fe2f2a58649",
     "scripts/web-preview.ts": "89cdd4b3679df8dd4a879d6db28301a2551ae740f7750bac523cd7465a02bf5c",
     "src/agents/defaults.json": "0c29d4de8ec73b4c9a7819541e001d3a8495bfa7417095cbd962358aae10ff03",
-    "src/agents/registry.ts": "864c877a8c67bb557ab538c484f1cb66e093348725b94ea2963fc2bac69908fd",
+    "src/agents/registry.ts": "e5ad53300307f0ac7718c07d723c7bc46350b82a95c8fdcc5d88b1758e44ebc0",
     "src/artifacts/config.ts": "4aefd5a56a6b68599a994e31ae640e7729c3cc72221c30a1c003728a4ed35db9",
     "src/channels/costsView.ts": "ee3d02a3cbe020521d844ecf97db8848423474e9721cf6fc48683c415a7cbfc0",
     "src/channels/favicon.ts": "1d9ac4fe06c7ab46ac05e4bbaaaf60382b8f8695cb343566e2bc5f3b6e226d9d",

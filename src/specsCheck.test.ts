@@ -141,6 +141,18 @@ describe("collectTestTitles", () => {
     ]);
   });
 
+  it("carries skip ancestry from actual nesting, keeping explicit focus and same-title siblings distinct", () => {
+    const blocks = collectTestTitles(
+      'describe("d", () => { it("active", () => {}); }); describe.skip("d", () => { it.only("focused", () => {}); });',
+    );
+    expect(blocks.map((b) => [b.parts.at(-1), b.mode, b.inheritedMode])).toEqual([
+      ["d", undefined, undefined],
+      ["active", undefined, undefined],
+      ["d", "skip", undefined],
+      ["focused", "only", "skip"],
+    ]);
+  });
+
   it("carries the arguments after the title with whitespace collapsed, so the same body under two titles can be told apart from a new test", () => {
     const [a, b, c] = collectTestTitles(`
       it("a", () => {
