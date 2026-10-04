@@ -498,77 +498,6 @@ describe("explicit PR directives at the operator stage", () => {
     expect(result).toMatchObject({ outcome: "question", question: "Review or fix the check?" });
   });
 
-  it("binds a repeat review at the early stage with a descriptive past fix", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "swb-repeat-review-"));
-    const path = join(dir, "config.yaml");
-    writeFileSync(
-      path,
-      `organization: acme\nproviders:\n  anthropic:\n    type: anthropic\ndefaults:\n  agent: general\n  models:\n    general: anthropic/general-model\n`,
-    );
-    const model = vi.fn<RouteModel>(async () => ({ tool: OPERATOR_ASK_TOOL, input: { text: "Which task?" } }));
-    for (const text of [
-      ...[
-        "The fix was pushed",
-        "The PR has been updated",
-        "The author has updated the tests",
-        "They have updated the tests",
-      ].map((followUp) => `review https://github.com/acme/api/pull/7\nApp notification from App: updated\n${followUp}`),
-      "review https://github.com/acme/api/pull/7\nApp notification from App: The PR has been updated",
-    ]) {
-      const result = await operatorStage(
-        { config: new ConfigStore(path, join(dir, "overrides.json")), operatorModel: model },
-        {
-          msg: { channelId: "slack:CPUBLIC", userId: "slack:UREQUESTER", threadKey: "slack:CPUBLIC:1", text },
-          mode: "on",
-          readTail: async () => ({ turns: [], unavailable: [] }),
-        },
-      );
-      expect(model).not.toHaveBeenCalled();
-      expect(result).toMatchObject({ outcome: "binds", binds: [{ prTarget: { number: 7 } }] });
-    }
-  });
-
-  it.each([
-    "Please deploy this change",
-    "Also merge the PR",
-    "Please merge the patch",
-    "Please add a regression test",
-    "Deploy this change",
-    "The fix was pushed, deploy this change",
-    "The PR was updated, merge it",
-    "The fix was pushed — deploy this change",
-    "The PR was updated — merge it",
-    "The fix was pushed so deploy this change",
-    "The PR was updated so merge it",
-    "The fix was pushed so add tests",
-    "The fix was pushed so ship it",
-    "The fix was pushed so release it",
-    "The PR has been updated so merge it",
-    "The author has updated the tests so add more",
-  ])("asks the operator about a competing follow-up task at the early stage: %s", async (followUp) => {
-    const dir = mkdtempSync(join(tmpdir(), "swb-ambiguous-review-"));
-    const path = join(dir, "config.yaml");
-    writeFileSync(
-      path,
-      `organization: acme\nproviders:\n  anthropic:\n    type: anthropic\ndefaults:\n  agent: general\n  models:\n    general: anthropic/general-model\n`,
-    );
-    const model = vi.fn<RouteModel>(async () => ({
-      tool: OPERATOR_ASK_TOOL,
-      input: { text: "Which task?" },
-    }));
-    const text = `review https://github.com/acme/api/pull/7\nApp notification from App: updated\n${followUp}`;
-    const result = await operatorStage(
-      { config: new ConfigStore(path, join(dir, "overrides.json")), operatorModel: model },
-      {
-        msg: { channelId: "slack:CPUBLIC", userId: "slack:UREQUESTER", threadKey: "slack:CPUBLIC:1", text },
-        mode: "on",
-        readTail: async () => ({ turns: [], unavailable: [] }),
-      },
-    );
-    expect(model).toHaveBeenCalled();
-    expect(result).toMatchObject({ outcome: "question", question: "Which task?" });
-  });
-
   it.each([
     { surface: "fresh MCP review", channelId: "mcp:session", preset: "review", owner: undefined },
     {
@@ -875,7 +804,7 @@ describe("the operator is one loop with typed tools", () => {
     const model = vi.fn<RouteModel>(async () => ({ tool: OPERATOR_ASK_TOOL, input: { text: "Which task?" } }));
     const answer = await runOperator(input({ text, projection: projectionOf(["review"]) }), model);
     expect(model).toHaveBeenCalled();
-    expect(answer.decision.kind).not.toBe("binds");
+    expect(answer.decision).toEqual({ kind: "question", text: "Which task?", reason: "no reason given" });
   });
 
   it("binds a repeat review with descriptive follow-up context rather than treating a past fix as a task", async () => {

@@ -25,12 +25,14 @@ None open. The panel renderer is [reading-diff.md](reading-diff.md) item 12: the
 
 ## Validation criteria
 
+Complete literal rendered bodies prove title exclusion and inline permalink placement; subset-only renderer checks use those same independent oracles. Negative description-turn fixtures carry accepted-push evidence so each later refusal condition is exercised.
+
 | Criterion | Proof |
 |---|---|
 | Schema: complete object accepted, lines trimmed; no pointers, missing fields and blank strings rejected naming the field; decisions may be empty, criteria may not | `[unit]` `src/core/prDescription.test.ts::parsePrDescription (the schema)` (7) |
 | Anchors: absolute or traversing path, non-positive line, `to < from` rejected | `[unit]` `::rejects a bad anchor…` |
 | The map renders in contract order — tldr first with no heading, the bold labels, the numbered pointers — then the folds, then the footer; no heading anywhere | `[unit]` `::renders the map in the contract order…` |
-| A pointer is `N. [label](permalink) text ⚠ risk`, numbered from 1, ⚠ only with a risk, a `]` in a label escaped; no bare permalink line anywhere in a rendered body | `[unit]` `::a pointer is …`, `::never writes a bare permalink line…` |
+| A pointer is `N. [label](permalink) text ⚠ risk`, numbered from 1, ⚠ only with a risk, a `]` in a label escaped; no bare permalink line anywhere in a rendered body | `[unit]` `::a pointer is …`, `src/core/prDescription.test.ts::golden: a full PR description rendered through the pipeline::fixture → markdown equals the checked-in body byte for byte` |
 | Sha is a render input: same object, different head → different anchors; `anchorUrl` shape | `[unit]` `::anchors take the sha from the render context…` |
 | Short sha / branch ref / non `owner/name` refused | `[unit]` `::refuses a short sha or a non owner\/name repo` |
 | Every field capped in visible characters with the cap and the count named, a link's target not counted; pointers at most seven; the collapsed half capped too | `[unit]` `::caps every map field…`, `::caps the pointers at seven…` |

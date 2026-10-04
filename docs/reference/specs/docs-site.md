@@ -62,7 +62,7 @@ The site is an **assets-only Cloudflare Worker**, deliberately not part of the b
 | A region whose marker note is older is still found, and the note is rewritten | `[unit]` `::still finds a region whose opening marker carries an older note, and rewrites the note` |
 | A missing region is refused, not appended; an unclosed region is refused | `[unit]` `::refuses when the region is missing, rather than appending or silently doing nothing`, `::refuses an unclosed region` |
 | Every region a page declares is listed, ignoring ordinary comments | `[unit]` `src/docs/regions.test.ts::declaredRegions::lists every generated region a page declares, in order`, `::ignores ordinary HTML comments and closing markers` |
-| An enum positional prints its values (`config set <me\|channel>`) | `[unit]` `src/docs/reference.test.ts::usageFor::prints an enum positional as its values, since a table has no help text under it` |
+| An enum positional prints its values (`config set <me\|channel>`) | `[unit]` `src/docs/reference.test.ts::usageFor::keeps the argument's name when its schema is not an enum, and brackets optional flags` |
 | Pipes, newlines, and prose angle brackets are table-safe; code spans are left alone | `[unit]` `src/docs/reference.test.ts::cell::*` (four cases) |
 | The CLI table sections by group in registration order and names each command's surfaces | `[unit]` `src/docs/reference.test.ts::renderCliCommands::*` |
 | The chat table omits chat-opted-out commands and states who may run each | `[unit]` `src/docs/reference.test.ts::renderChatCommands::*` |

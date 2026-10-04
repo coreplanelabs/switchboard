@@ -14,6 +14,8 @@ export interface TestNode {
   leaf: boolean;
   /** The modifier that takes the block out of the run; absent when it runs. */
   mode?: "skip" | "only" | "todo";
+  /** Suppression from actual enclosing suites; titles do not identify parents. */
+  inheritedMode?: "skip" | "todo";
   /** Runtime-dependent selection cannot prove an exact active boundary test. */
   conditional?: boolean;
   parameterized?: boolean;

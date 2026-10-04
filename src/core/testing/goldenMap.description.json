@@ -89,7 +89,7 @@
       },
       {
         "criterion": "A rendered body contains no bare permalink line; every pointer is `N. [label](url) text`, ⚠ only with a risk",
-        "proof": "`[unit]` `::never writes a bare permalink line…`, `::a pointer is…`"
+        "proof": "`[unit]` `::golden: a full PR description rendered through the pipeline::fixture → markdown equals the checked-in body byte for byte`, `::a pointer is…`"
       },
       {
         "criterion": "A maximal object renders a map under 3,800 visible characters",

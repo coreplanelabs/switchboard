@@ -213,7 +213,6 @@ describe("makeExecutor per-agent provisioning", () => {
 
   it("a repo-requiring agent gets the Cloudflare backend when configured", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
-    vi.stubEnv("GITHUB_APP_ID", ""); // keep githubEnvs off the network
     const { executor: ex, backend } = await makeExecutor(
       { execution: { type: "cloudflare", url: "https://sandbox.example" }, ...dirs() },
       ctx("review"),
@@ -434,7 +433,6 @@ describe("makeExecutor resident selection", () => {
   function stubEnvs() {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
-    vi.stubEnv("GITHUB_APP_ID", ""); // keep githubEnvs off the network
   }
 
   /** A fetch whose canned answers may arrive late (`afterMs`, on the fake clock); the request's signal ends one first. */
@@ -3118,7 +3116,6 @@ describe("makeExecutor seeded sandbox", () => {
   const stubEnvs = () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
-    vi.stubEnv("GITHUB_APP_ID", "");
   };
   function stubFetch(...responses: Array<{ status?: number; body?: unknown; reject?: string }>) {
     const calls: string[] = [];
@@ -3398,7 +3395,6 @@ describe("makeExecutor pilot ready environment", () => {
   const envs = () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
-    vi.stubEnv("GITHUB_APP_ID", "");
   };
   function fetches(...answers: Array<{ status?: number; body: unknown }>) {
     const calls: string[] = [];

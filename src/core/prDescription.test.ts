@@ -502,11 +502,6 @@ describe("renderPrDescriptionMarkdown", () => {
     expect(md.split("\n").filter((l) => /^#{1,6}\s/.test(l))).toEqual([]); // no headings anywhere
   });
 
-  it("the title is metadata for the PR's own title field — never rendered into the body", () => {
-    const md = renderPrDescriptionMarkdown(desc({ title: "UNIQUE-TITLE-NEVER-IN-BODY" }), CTX);
-    expect(md).not.toContain("UNIQUE-TITLE-NEVER-IN-BODY");
-  });
-
   it("a pointer is `N. [label](permalink) text ⚠ risk`, numbered from 1, the ⚠ only when a risk is set; a `]` in a label is escaped", () => {
     const md = renderPrDescriptionMarkdown(
       desc({
@@ -520,15 +515,6 @@ describe("renderPrDescriptionMarkdown", () => {
     expect(md).toContain(
       `1. [First](${URL_A}) One. ⚠ the guard\n2. [Second [x\\]](https://github.com/acme/api/blob/${CTX.headSha}/src/b.ts#L10-L10) Two.\n\n${MAP_LABELS.feedbackWanted}`,
     );
-  });
-
-  // docs/decisions/0050 "Links, not embeds": a bare permalink on its own line
-  // is what GitHub embeds as a code block; the map is links.
-  it("never writes a bare permalink line — every anchor sits inside link syntax", () => {
-    const md = renderPrDescriptionMarkdown(goldenFixture(), CTX);
-    const bare = md.split("\n").filter((l) => /^https:\/\/github\.com\/\S+\/blob\//.test(l.trim()));
-    expect(bare).toEqual([]);
-    expect(md).toMatch(/\]\(https:\/\/github\.com\/acme\/api\/blob\/[0-9a-f]{40}\/[^)]+#L\d+-L\d+\)/);
   });
 
   it("anchors take the sha from the render context — a repush is a re-render, never an edit of the data", () => {

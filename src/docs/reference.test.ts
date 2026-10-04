@@ -54,10 +54,6 @@ function fixture(): CommandDef<unknown>[] {
 const docs = docCommands(fixture());
 
 describe("usageFor", () => {
-  it("prints an enum positional as its values, since a table has no help text under it", () => {
-    expect(usageFor(fixture()[0])).toContain("thing show <me|channel>");
-  });
-
   it("keeps the argument's name when its schema is not an enum, and brackets optional flags", () => {
     expect(usageFor(fixture()[1])).toBe("thing wipe <id>");
     expect(usageFor(fixture()[0])).toBe("thing show <me|channel> [--dry-run] [--limit <integer>]");

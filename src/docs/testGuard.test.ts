@@ -113,6 +113,84 @@ describe("compareTestFile — what one changed test file lost between base and h
       const head = snapshot(`${BASE}\nit.todo("later");`);
       expect(compareTestFile(snapshot(BASE), head)).toEqual([]);
     });
+
+    it.each(["it.only", "describe.only"])("an added %s block reports focus loss", (call) => {
+      const head = snapshot(`${BASE}\n${call}("focused", () => {});`);
+      expect(compareTestFile(snapshot(BASE), head)).toEqual([
+        { kind: "removed", what: 'every test but "focused" from the run — marked only' },
+      ]);
+    });
+
+    it.each(["describe.skip", "xdescribe"])("a test moved under %s reports inherited skip loss", (call) => {
+      const base = snapshot('it("existing", () => { expect(1).toBe(1); });');
+      const head = snapshot(`${call}("later", () => { it("existing", () => { expect(1).toBe(1); }); });`);
+      expect(compareTestFile(base, head)).toEqual([
+        {
+          kind: "removed",
+          what: 'test "later > existing" from the run — under marked skip group',
+        },
+      ]);
+    });
+
+    it("a retitled test under a skipped describe reports removal as well as the retitle", () => {
+      const base = snapshot('it("existing", () => { expect(1).toBe(1); });');
+      const head = snapshot('describe.skip("later", () => { it("renamed", () => { expect(1).toBe(1); }); });');
+      expect(compareTestFile(base, head)).toEqual([
+        { kind: "check", what: 'test "existing" retitled "later > renamed", body unchanged' },
+        { kind: "removed", what: 'test "later > renamed" from the run — under marked skip group' },
+      ]);
+    });
+
+    it.each(["skip", "todo"])("a base focus changed to %s removes its executed test", (mode) => {
+      expect(
+        compareTestFile(snapshot('it.only("existing", () => {});'), snapshot(`it.${mode}("existing", () => {});`)),
+      ).toEqual([{ kind: "removed", what: `test "existing" from the run — marked ${mode}` }]);
+    });
+  });
+
+  it("moving an existing focused test preserves its focus without claiming a new loss", () => {
+    const base = snapshot('describe("old", () => { it.only("existing", () => { expect(1).toBe(1); }); });');
+    const head = snapshot('describe("new", () => { it.only("existing", () => { expect(1).toBe(1); }); });');
+    expect(compareTestFile(base, head)).toEqual([
+      { kind: "check", what: 'describe "old" retitled "new", body unchanged' },
+    ]);
+  });
+
+  it("an explicit focus inside a newly skipped group still reports the focus marker", () => {
+    const head = snapshot(`${BASE} describe.skip("later", () => { it.only("focused", () => {}); });`);
+    expect(compareTestFile(snapshot(BASE), head)).toEqual([
+      { kind: "removed", what: 'every test but "later > focused" from the run — marked only' },
+    ]);
+  });
+
+  it("same-title siblings preserve selection when their bodies also change", () => {
+    const base = snapshot(
+      'describe("d", () => { it("b", () => { expect(1).toBe(1); }); }); describe.skip("d", () => { it.todo("later"); });',
+    );
+    const head = snapshot(
+      'describe.skip("d", () => { it.todo("later"); }); describe("d", () => { it("b", () => { expect(1).toBe(2); }); });',
+    );
+    expect(compareTestFile(base, head)).toEqual([]);
+  });
+
+  it.each(["skip", "todo"])("missing inactive %s titles still require owning-spec review", (mode) => {
+    expect(compareTestFile(snapshot(`it.${mode}("inactive", () => {});`), snapshot(""))).toEqual([
+      { kind: "removed", what: 'test "inactive"' },
+    ]);
+  });
+
+  it("reordering identical same-title active and skipped siblings preserves their selections", () => {
+    const active = 'describe("d", () => { it("b", () => {}); });';
+    const skipped = 'describe.skip("d", () => { it("b", () => {}); });';
+    expect(compareTestFile(snapshot(active + skipped), snapshot(skipped + active))).toEqual([]);
+  });
+
+  it("an added skipped sibling with the same title does not suppress an active sibling", () => {
+    const base = snapshot('describe("d", () => { it("b", () => {}); });');
+    const head = snapshot(
+      'describe("d", () => { it("b", () => {}); }); describe.skip("d", () => { it.todo("later"); });',
+    );
+    expect(compareTestFile(base, head)).toEqual([]);
   });
 
   describe("class B, check: heuristic signals the reviewer disposes of", () => {
@@ -216,7 +294,7 @@ describe("testGuard — a line is allowed only when a spec covering the test fil
   const both = ["docs/reference/specs/a.md", "docs/reference/specs/core.md"];
 
   it("names the covering specs on each line and allows none of them when no such spec changed", () => {
-    const result = testGuard([removed], ["src/core/a.test.ts", "src/core/a.ts"], specs);
+    const result = testGuard([removed], [], specs);
     expect(result.testFiles).toBe(1);
     expect(result.findings).toEqual([
       { file: "src/core/a.test.ts", kind: "removed", what: 'test "thing > subtracts"', specs: both, allowed: false },
@@ -225,7 +303,7 @@ describe("testGuard — a line is allowed only when a spec covering the test fil
   });
 
   it("class A and class B lines alike are allowed when any spec covering the test file is among the changed paths", () => {
-    const result = testGuard([removed], ["src/core/a.test.ts", "docs/reference/specs/core.md"], specs);
+    const result = testGuard([removed], ["docs/reference/specs/core.md"], specs);
     expect(result.findings.map((f) => [f.kind, f.allowed])).toEqual([
       ["removed", true],
       ["check", true],
@@ -233,12 +311,12 @@ describe("testGuard — a line is allowed only when a spec covering the test fil
   });
 
   it("a changed spec that does not cover the test file allows nothing", () => {
-    const result = testGuard([removed], ["src/core/a.test.ts", "docs/reference/specs/b.md"], specs);
+    const result = testGuard([removed], ["docs/reference/specs/b.md"], specs);
     expect(result.findings.map((f) => f.allowed)).toEqual([false, false]);
   });
 
   it("a test file no spec covers can never be allowed — the finding carries no spec", () => {
-    const result = testGuard([{ ...removed, path: "src/orphan.test.ts" }], ["src/orphan.test.ts"], specs);
+    const result = testGuard([{ ...removed, path: "src/orphan.test.ts" }], [], specs);
     expect(result.findings.map((f) => [f.specs, f.allowed])).toEqual([
       [[], false],
       [[], false],
@@ -246,14 +324,21 @@ describe("testGuard — a line is allowed only when a spec covering the test fil
   });
 
   it("a deleted test file is a class A finding against the specs whose headers cover it", () => {
-    const result = testGuard(
-      [{ path: "src/core/a.test.ts", base: snapshot(BASE), head: null }],
-      ["src/core/a.test.ts"],
-      specs,
-    );
+    const result = testGuard([{ path: "src/core/a.test.ts", base: snapshot(BASE), head: null }], [], specs);
     expect(result.findings).toEqual([
       { file: "src/core/a.test.ts", kind: "removed", what: "the test file", specs: both, allowed: false },
     ]);
+  });
+
+  it("a renamed test uses the old path and refuses absent or untouchable base ownership", () => {
+    const renamed = { ...removed, path: "src/new/a.test.ts", basePath: removed.path };
+    const result = testGuard([renamed], ["docs/reference/specs/a.md"], specs);
+    expect(result.findings.map((f) => [f.specs, f.allowed])).toEqual([
+      [both, true],
+      [both, true],
+    ]);
+    expect(testGuard([renamed], ["docs/reference/specs/b.md"], specs).findings.every((f) => !f.allowed)).toBe(true);
+    expect(testGuard([renamed], ["docs/reference/specs/a.md"], []).findings.every((f) => !f.allowed)).toBe(true);
   });
 
   it("files with nothing lost count as changed and produce no finding", () => {
@@ -263,7 +348,7 @@ describe("testGuard — a line is allowed only when a spec covering the test fil
       head: snapshot(`${BASE}\nit("more", () => { expect(1).toBe(1); });`),
     };
     const fresh: ChangedTestFile = { path: "src/core/new.test.ts", base: null, head: snapshot(BASE) };
-    expect(testGuard([grown, fresh], ["src/core/a.test.ts", "src/core/new.test.ts"], specs)).toEqual({
+    expect(testGuard([grown, fresh], [], specs)).toEqual({
       testFiles: 2,
       findings: [],
     });
@@ -308,7 +393,7 @@ describe("formatTestGuard — the lines the command prints and whether it passes
 
   it("class A on a test file no spec covers says so instead of naming a spec", () => {
     expect(formatTestGuard({ testFiles: 1, findings: [removed(false, [])] }).lines[0]).toBe(
-      `test-guard: ${file} — removed: test "thing > subtracts" — no spec covers it; add its spec in this PR or restore the test`,
+      `test-guard: ${file} — removed: test "thing > subtracts" — no base spec covers it; restore the test and establish ownership before removing it`,
     );
   });
 

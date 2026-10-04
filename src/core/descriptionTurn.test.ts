@@ -81,6 +81,7 @@ describe("descriptionTurnTarget — when a description turn is due", () => {
     const findOpenPr = vi.fn(async () => PR);
     const t = await descriptionTurnTarget({
       observed: observation(),
+      confirmedPush: true,
       description: DESCRIPTION,
       target,
       findOpenPr,
@@ -95,6 +96,7 @@ describe("descriptionTurnTarget — when a description turn is due", () => {
     for (const remoteHead of [undefined, "0000000000000000000000000000000000000000"]) {
       const t = await descriptionTurnTarget({
         observed: observation({ remoteHead }),
+        confirmedPush: true,
         description: undefined,
         target,
         findOpenPr,
@@ -129,7 +131,9 @@ describe("descriptionTurnTarget — when a description turn is due", () => {
       { observed: observation(), target: { ...target, repo: undefined } }, // no dispatch repo and no origin remote
     ];
     for (const c of cases) {
-      expect(await descriptionTurnTarget({ ...c, description: undefined, findOpenPr, logKey: "t" })).toBeUndefined();
+      expect(
+        await descriptionTurnTarget({ ...c, confirmedPush: true, description: undefined, findOpenPr, logKey: "t" }),
+      ).toBeUndefined();
     }
     expect(findOpenPr).not.toHaveBeenCalled();
   });
@@ -152,6 +156,7 @@ describe("descriptionTurnTarget — when a description turn is due", () => {
     expect(
       await descriptionTurnTarget({
         observed: observation(),
+        confirmedPush: true,
         description: undefined,
         target,
         findOpenPr: async () => null,
@@ -161,6 +166,7 @@ describe("descriptionTurnTarget — when a description turn is due", () => {
     expect(
       await descriptionTurnTarget({
         observed: observation(),
+        confirmedPush: true,
         description: undefined,
         target,
         findOpenPr: async () => {

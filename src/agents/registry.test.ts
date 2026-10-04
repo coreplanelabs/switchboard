@@ -1034,7 +1034,7 @@ describe("review prompts: the spec contradiction check (agent-review item 14)", 
 // line is a finding at minor or above quoting the line verbatim; a `check:`
 // line is disposed of explicitly — weakened (a minor finding) or a refactor
 // with verification intact, one clause of why — never silently. A line the
-// guard allowed by a spec change is neither. The text is one constant, so the
+// guard allowed by a spec change requires semantic proof review. The text is one constant, so the
 // sandbox and resident variants cannot drift apart on it.
 describe("review prompts: the test guard (agent-review item 16)", () => {
   const prompts = () => [AGENTS.review.system, AGENTS.review.residentSystem!];
@@ -1054,7 +1054,7 @@ describe("review prompts: the test guard (agent-review item 16)", () => {
       expect(sys).toMatch(/removed: …` line is deterministic.*?finding of severity `minor` or higher/);
       expect(sys).toContain("Test removed — <file>: <what>");
       expect(sys).toMatch(/quotes the guard's line exactly as printed/);
-      for (const marker of [".skip(", ".only(", "xit(", "xdescribe(", "it.todo(", "test.todo("])
+      for (const marker of [".skip(", ".only(", "xit(", "xtest(", "xdescribe(", "it.todo(", "test.todo("])
         expect(sys).toContain(marker);
     }
   });
@@ -1062,18 +1062,21 @@ describe("review prompts: the test guard (agent-review item 16)", () => {
   it("a `check:` line is disposed of explicitly — weakened (minor) or refactor with verification intact — never silently", () => {
     for (const sys of prompts()) {
       expect(sys).toContain("`test-guard: <file> — check: …` line");
+      expect(sys).toContain("a title retitled with its body unchanged");
       expect(sys).toMatch(/dispose of every one of them explicitly[^.]*never silently/);
       expect(sys).toMatch(/"weakened", which makes it a finding at `minor`/);
       expect(sys).toMatch(/"refactor, verification intact" with one clause/);
     }
   });
 
-  it("an allowed line and the ok line are nothing to report; a failing command is judged by hand, never by installing", () => {
+  it("allowed losses require semantic review; a failing command is judged by hand, never by installing", () => {
     for (const sys of prompts()) {
-      expect(sys).toMatch(/`— allowed by <spec>` is licensed by a spec change in the same diff and is neither/);
-      expect(sys).toMatch(/`test-guard ok` is nothing to report/);
+      expect(sys).toMatch(/Review every test-loss group, including allowed lines and rename\/split checks/);
+      expect(sys).toMatch(/green `test-guard ok` does not waive this review/);
       expect(sys).toMatch(/judge the same facts from the diff by hand/);
       expect(sys).toMatch(/never install or build to make it run/);
+      expect(sys).toContain("including an added only block");
+      expect(sys).toContain("a move under a skipped group");
     }
   });
 

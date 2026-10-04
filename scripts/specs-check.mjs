@@ -164,7 +164,7 @@ function titlePattern(arg) {
 }
 
 /**
- * Pure: every describe and it in a test source, as `{ parts, leaf, mode, body }`
+ * Pure: every describe and it in a test source, as `{ parts, leaf, mode, inheritedMode, body }`
  * — the title path from the outermost describe down, whether it is a leaf,
  * the modifier that takes it out of the run (`skip` / `only` / `todo`, absent
  * when it runs), and the source of its arguments after the title with
@@ -175,7 +175,7 @@ function titlePattern(arg) {
 export function collectTestTitles(source, fileName = "x.test.ts") {
   const sf = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const nodes = [];
-  const visit = (node, ancestry) => {
+  const visit = (node, ancestry, inheritedMode) => {
     if (ts.isCallExpression(node)) {
       const call = testFn(node.expression);
       if (call) {
@@ -190,16 +190,19 @@ export function collectTestTitles(source, fileName = "x.test.ts") {
             .replace(/\s+/g, " ");
           const entry = { parts, leaf: fn !== "describe" && fn !== "suite", body };
           if (mode) entry.mode = mode;
+          if (inheritedMode) entry.inheritedMode = inheritedMode;
           if (conditional) entry.conditional = true;
           if (parameterized) entry.parameterized = true;
           nodes.push(entry);
-          const next = fn === "describe" || fn === "suite" ? parts : ancestry;
-          ts.forEachChild(node, (c) => visit(c, next));
+          const isSuite = fn === "describe" || fn === "suite";
+          const next = isSuite ? parts : ancestry;
+          const nextMode = isSuite && (mode === "skip" || mode === "todo") ? mode : inheritedMode;
+          ts.forEachChild(node, (c) => visit(c, next, nextMode));
           return;
         }
       }
     }
-    ts.forEachChild(node, (c) => visit(c, ancestry));
+    ts.forEachChild(node, (c) => visit(c, ancestry, inheritedMode));
   };
   visit(sf, []);
   return nodes;

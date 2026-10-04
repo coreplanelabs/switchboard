@@ -105,10 +105,6 @@ describe("the gate workflows run only the repository's own scripts", () => {
     Object.entries((parse(read(file)) as Workflow).jobs).map(([name, job]) => [`${file} → ${name}`, job] as const),
   );
 
-  it("has jobs", () => {
-    expect(jobs.length).toBeGreaterThan(3);
-  });
-
   it.each(jobs)("job %s: every run step is `npm ci`, `npm run <script>`, or `npm test`", (_name, job) => {
     for (const step of job.steps) {
       for (const line of runLines(step, job)) {

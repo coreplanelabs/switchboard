@@ -592,6 +592,11 @@ describe("per-scope cap", () => {
     for (const t of ["alpha note", "beta note", "gamma note"]) {
       expect((await post("/write", { scopeKey: s, records: [cand(t)], cap: 3 })).data).toMatchObject({ evicted: 0 });
     }
+    // Distinct creation times make a missing usage bump evict alpha even
+    // when consecutive requests share a millisecond.
+    await runInDurableObject(memStub(s), async (_i: MemoryDO, state) => {
+      state.storage.sql.exec("UPDATE records SET created_at = 1000 + seq, last_used_at = NULL WHERE scope_key = ?", s);
+    });
     // Touch alpha so beta is the least recently used.
     await post("/retrieve", { scopeKey: s, query: "alpha", limit: 8 });
     const w = await post("/write", { scopeKey: s, records: [cand("delta note"), cand("epsilon note")], cap: 3 });

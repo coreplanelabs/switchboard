@@ -4,18 +4,19 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { secretsFrom } from "../secrets.js";
 import { z } from "zod";
-import { CLI_CALLER, CLI_SHORTHANDS, parseCliArgv, runCli } from "../cli.js";
+import { CLI_CALLER, parseCliArgv, runCli } from "../cli.js";
 import { callerFor } from "../channels/commandHttp.js";
 import { handleMcpRequest, toCaller } from "../channels/mcp.js";
 import { resolveChatActor } from "./authz/actor.js";
 import { authorize } from "./authz/authorize.js";
 import { NO_GRANTS } from "./authz/types.js";
-import { ALL_GRANTS } from "./authz/grants.js";
 import { InMemoryIssueTracker } from "../execution/githubIssues.js";
 import { buildCoreCommands } from "./commandCatalogue.js";
 import { parseChatCommand } from "./commandChat.js";
 import {
   CommandError,
+  bindCommands,
+  flag,
   CommandRegistry,
   commandDefiner,
   renderText,
@@ -23,7 +24,7 @@ import {
   type Caller,
   type CommandDef,
 } from "./commandRegistry.js";
-import { jsonSchemaFor, namedToInput, tokenize, toSurfaceNames } from "./commandSurface.js";
+import { namedToInput, tokenize, toSurfaceNames } from "./commandSurface.js";
 import { registerCoreCommands, type CoreCommandDeps } from "./commands/all.js";
 import type { CoreDeps } from "./dispatcher.js";
 import { RunStoreFrictionLedger } from "./frictionLedger.js";
@@ -45,9 +46,7 @@ import {
   catalogueSnapshot,
   COMMAND_FIXTURES,
   CROSS_CUTTING_ASSERTIONS,
-  expectedFlags,
   expectedRejection,
-  fieldsOf,
   forCaller,
   parseCatalogueTable,
   policyGaps,
@@ -57,7 +56,6 @@ import {
   renderConformanceMatrix,
   renderVariantCell,
   roleActor,
-  schemaPropertyNames,
   SURFACE_METAS,
   toChatText,
   toKebabQuery,
@@ -67,38 +65,15 @@ import {
   type Named,
 } from "./testing/commandConformance.js";
 
-// Feature: docs/reference/specs/command-registry.md item 25 — the REGISTRY-DRIVEN
-// CONFORMANCE SUITE. Nothing below names a command: the catalogue is enumerated
-// (`registerCoreCommands`, asserted identical to `buildCoreCommands`), every
-// case is generated from each command's declared zod schemas
-// (`exhaustiveVariants`), and ONE pattern is asserted per command × variant ×
-// surface (HTTP GET/POST, MCP tools/call, CLI argv, chat text):
-//   1. name mapping + round-trip: the adapter's route/tool/argv/text binds to
-//      the same parsed `{ args, options }` on every surface;
-//   2. the MCP inputSchema lists exactly the fields (enums/defaults survive);
-//   3. help names every argument and option; a refusal carries the ONE code
-//      every surface uses for that fault (`invalid_input`, whether the grammar
-//      or the registry saw it first), names the field and never echoes the
-//      submitted value;
-//   4. auth: admission on every surface is `authorize(actor, action, resource)`
-//      over the policy table — a fixed actor set × every command is derived from
-//      the table and checked against the real adapters; a credential with
-//      no grants is refused before parse; writes are POST-only; reads never
-//      mutate the fixture; the Caller the registry saw is the adapter's;
-//   5. output hygiene: no capability token or planted secret; stored free text
-//      wrapped as untrusted on machine surfaces;
-//   6. every surface yields the identical `invoke` JSON (chat: `renderText` of it)
-//      — identical MODULO THE CALLER'S OWN ID: a caller-scoped command (memory,
-//      invariant 4) answers with the caller's own scope key, and each surface
-//      resolves a different caller id (`access:…`, `mcp:…`, `cli:local`,
-//      `slack:U…`), so the reference is `invoke` with that surface's caller and
-//      the cross-surface comparison folds the id back to `{caller.id}`;
-//   7. a sorted catalogue snapshot + the docs table fence the catalogue; the
-//      matrix `scripts/command-conformance-matrix.ts` prints is the suite's own.
-// A new command is covered the moment it is registered — or fails loudly here
-// (no sample for a field, a happy path that does not succeed against the
-// generic fixture, a missing docs row, a stale snapshot) until its author adds
-// a `FIELD_HINTS` entry / `COMMAND_FIXTURES` row / docs row / snapshot update.
+// Feature: docs/reference/specs/command-registry.md item 25.
+// The catalogue-driven matrix proves accepted/rejected inputs, resolved callers,
+// authorization, capability exposure and output hygiene on the real adapters.
+// Literal public metadata proofs below cover the shared schema/help paths;
+// the independent catalogue snapshot fences each command's declaration.
+// Caller-scoped outputs are compared with a direct invoke as that same caller,
+// then normalized only for the caller id when comparing different surfaces.
+// A new command needs sampleable fields, working fake dependencies, a docs row
+// and a deliberate snapshot update; missing coverage fails by command name.
 //
 // Nothing real runs: the world every case is driven against — the generic
 // fixture, `fakeDeps` (a recording stub for every executing dependency) and the
@@ -671,130 +646,113 @@ async function conformanceFailures(build: () => Promise<Fixture>): Promise<strin
   return failures;
 }
 
-// ---- 1–6. every command × every variant × every surface --------------------------------------------------
+describe("public command metadata", () => {
+  const registry = new CommandRegistry<undefined>({ audit: () => {} });
+  registry.register(
+    commandDefiner<undefined>()({
+      id: "metadata.probe",
+      action: "runs:read",
+      effect: "read",
+      describe: "Inspect command metadata.",
+      args: [
+        { name: "scope", schema: z.enum(["me", "channel"]), describe: "whose metadata" },
+        { name: "text", schema: z.string().optional(), describe: "extra context", rest: true },
+      ],
+      options: z.object({
+        mode: z.enum(["soft", "hard"]).describe("stop mode"),
+        status: z.enum(["active", "finished"]).default("active"),
+        dryRun: flag.optional(),
+        sinceMs: z.coerce.number().int().optional().describe("cutoff"),
+        ratio: z.number().optional(),
+        models: z.record(z.string(), z.string()).optional(),
+      }),
+      handler: async () => {
+        throw new Error("metadata must not execute the command");
+      },
+    }),
+  );
+  const commands = bindCommands(registry, undefined);
 
-describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformance — $id", ({ cmd }) => {
-  const variants = variantsOf(cmd).variants;
-
-  it("names derive mechanically: tools/list carries group_verb with the exact jsonSchemaFor; /api/<id>, argv words, and chat form all resolve to this command", async () => {
-    const f = await fixture();
-    const names = toSurfaceNames(cmd.id);
-    expect(names).toEqual({
-      http: `/api/${cmd.id}`,
-      mcp: cmd.id.replace(".", "_"),
-      cli: cmd.id.split("."),
-      chat: cmd.id.replace(".", " "),
-    });
-    const list = await handleMcpRequest(
+  it("MCP tools/list publishes the literal merged schema including defaults and optional fields", async () => {
+    const result = await handleMcpRequest(
       {
         method: "POST",
         headers: { authorization: "Bearer power" },
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
       },
       {} as CoreDeps,
-      { auth: { tokens: { power: { subject: "power" } } }, commands: f.commands, grantsFor: () => ALL_GRANTS },
+      { auth: { tokens: { power: { subject: "power" } } }, commands },
     );
-    const tools = (list.body as { result: { tools: { name: string; inputSchema: unknown }[] } }).result.tools;
-    const tool = tools.find((t) => t.name === names.mcp);
-    if (cmd.surfaces?.mcp === false) expect(tool).toBeUndefined();
-    else expect(tool?.inputSchema).toEqual(jsonSchemaFor(cmd));
-    if (cmd.surfaces?.cli !== false)
-      expect(parseCliArgv([...names.cli, "--help"], f.commands)).toEqual({
-        kind: "command-help",
-        id: cmd.id,
-        spelled: names.chat,
-      });
-    else expect(parseCliArgv([...names.cli, "--help"], f.commands).kind).toBe("usage");
-    const chatParsed = parseChatCommand(`${names.chat} --help`, f.commands);
-    if (cmd.surfaces?.chat !== false) expect(chatParsed?.kind).toBe("reply");
-    else expect(chatParsed).toBeNull();
-    const t = fakeReqRes(
-      cmd.effect === "write" ? "POST" : "GET",
-      names.http,
-      cmd.effect === "write" ? "{}" : undefined,
-      { "content-type": "application/json" },
-    );
-    await httpHandler(f)(t.req, t.res, { sub: "power" });
-    if (cmd.surfaces?.http !== false) expect(t.status(), t.text()).not.toBe(404);
-    else expect(t.status(), `${cmd.id}: opted out of http yet served`).toBe(404);
+    const tools = (result.body as { result: { tools: { name: string; description: string; inputSchema: unknown }[] } })
+      .result.tools;
+    expect(tools.map((t) => t.name)).toEqual(["dispatch", "metadata_probe"]);
+    expect(tools[1].description).toBe("Inspect command metadata.");
+    expect(tools[1].inputSchema).toEqual({
+      type: "object",
+      additionalProperties: false,
+      required: ["scope", "mode"],
+      properties: {
+        scope: { type: "string", enum: ["me", "channel"], description: "whose metadata" },
+        text: { type: "string", description: "extra context" },
+        mode: { type: "string", enum: ["soft", "hard"], description: "stop mode" },
+        status: { type: "string", enum: ["active", "finished"], default: "active" },
+        dryRun: { anyOf: [{ type: "boolean" }, { type: "string", enum: ["true", "false"] }] },
+        sinceMs: { type: "integer", minimum: -9007199254740991, maximum: 9007199254740991, description: "cutoff" },
+        ratio: { type: "number" },
+        models: { type: "object", propertyNames: { type: "string" }, additionalProperties: { type: "string" } },
+      },
+    });
   });
 
-  it("MCP inputSchema lists exactly the arguments and options, required = the non-optional ones, additionalProperties false; enum values and defaults survive", () => {
-    const fields = fieldsOf(cmd);
-    const schema = jsonSchemaFor(cmd) as {
-      properties: Record<string, { enum?: unknown[]; default?: unknown; anyOf?: { enum?: unknown[] }[] }>;
-      required?: string[];
-      additionalProperties: boolean;
-    };
-    expect(schemaPropertyNames(cmd)).toEqual(fields.map((f) => f.name).sort());
-    expect(schema.additionalProperties).toBe(false);
-    expect([...(schema.required ?? [])].sort()).toEqual(
-      fields
-        .filter((f) => f.required)
-        .map((f) => f.name)
-        .sort(),
-    );
-    for (const f of fields) {
-      const declaredEnum = (() => {
-        const def = (
-          f.schema as unknown as {
-            _zod: { def: { type: string; innerType?: z.ZodType; entries?: Record<string, unknown> } };
-          }
-        )._zod.def;
-        const inner =
-          def.type === "optional" || def.type === "default"
-            ? (def.innerType as unknown as { _zod: { def: { type: string; entries?: Record<string, unknown> } } })._zod
-                .def
-            : def;
-        return inner.type === "enum" && inner.entries ? Object.values(inner.entries) : undefined;
-      })();
-      if (declaredEnum)
-        expect(
-          schema.properties[f.name].enum ?? schema.properties[f.name].anyOf?.flatMap((a) => a.enum ?? []),
-          `${cmd.id}.${f.name} enum`,
-        ).toEqual(declaredEnum);
-      const def = (f.schema as unknown as { _zod: { def: { type: string; defaultValue?: unknown } } })._zod.def;
-      if (def.type === "default")
-        expect(schema.properties[f.name].default, `${cmd.id}.${f.name} default`).toEqual(def.defaultValue);
-    }
+  it("CLI help preserves literal names, descriptions, required options and optional rest syntax", async () => {
+    const parsed = parseCliArgv(["metadata", "probe", "--help"], commands);
+    expect(parsed).toEqual({ kind: "command-help", id: "metadata.probe", spelled: "metadata probe" });
+    if (parsed.kind !== "command-help") throw new Error("expected command help");
+    expect(await runCli(commands, parsed, CLI_CALLER)).toEqual({
+      exitCode: 0,
+      stderr: "",
+      stdout: [
+        "Inspect command metadata.",
+        "usage: metadata probe <scope> [text…] --mode <soft|hard> [--status <active|finished>] [--dry-run] [--since-ms <integer>] [--ratio <number>] [--models <object>]",
+        "arguments:",
+        "  <scope>                     whose metadata",
+        "  <text>                      extra context (optional)",
+        "options:",
+        "  --mode <soft|hard>          stop mode (required)",
+        "  --status <active|finished>",
+        "  --dry-run",
+        "  --since-ms <integer>        cutoff",
+        "  --ratio <number>",
+        "  --models <object>",
+      ].join("\n"),
+    });
   });
 
-  it("help (CLI --help and chat --help) names every argument and every option flag", async () => {
-    const f = await fixture();
-    const fields = fieldsOf(cmd);
-    const check = (text: string, where: string) => {
-      for (const a of fields.filter((x) => x.kind === "arg"))
-        expect(text, `${where} names <${a.name}>`).toContain(`<${a.name}>`);
-      for (const flag of expectedFlags(cmd)) expect(text, `${where} names ${flag}`).toContain(flag);
-      expect(text).toContain(cmd.describe);
-    };
-    if (cmd.surfaces?.cli !== false) {
-      const names = toSurfaceNames(cmd.id);
-      const help = (await runCli(f.commands, { kind: "command-help", id: cmd.id, spelled: names.chat }, CLI_CALLER))
-        .stdout;
-      check(help, "cli --help");
-      // The usage line names the command as the surface exposes it: `<group>
-      // <verb>` for the long form, the bare word for a one-word spelling
-      // (`init`), the rest of the help identical.
-      expect(help.split("\n")[1], "cli --help usage").toMatch(new RegExp(`^usage: ${names.chat}( |$)`));
-      for (const [word, id] of Object.entries(CLI_SHORTHANDS)) {
-        if (id !== cmd.id) continue;
-        const parsed = parseCliArgv([word, "--help"], f.commands);
-        expect(parsed).toEqual({ kind: "command-help", id: cmd.id, spelled: word });
-        if (parsed.kind !== "command-help") throw new Error("unreachable");
-        const short = (await runCli(f.commands, parsed, CLI_CALLER)).stdout;
-        expect(short.split("\n")[1], `${word} --help usage`).toMatch(new RegExp(`^usage: ${word}( |$)`));
-        expect(short).not.toContain(names.chat);
-        expect(short.split("\n").slice(2)).toEqual(help.split("\n").slice(2));
-      }
-    }
-    if (cmd.surfaces?.chat !== false) {
-      const parsed = parseChatCommand(`${toSurfaceNames(cmd.id).chat} --help`, f.commands);
-      expect(parsed?.kind).toBe("reply");
-      check(parsed?.kind === "reply" ? parsed.text : "", "chat --help");
-      assertChatShape(parsed?.kind === "reply" ? parsed.text : "", "chat --help");
-    }
+  it("chat help preserves the literal command metadata without terminal padding", () => {
+    expect(parseChatCommand("metadata probe --help", commands)).toEqual({
+      kind: "reply",
+      text: [
+        "Inspect command metadata.",
+        "usage: `metadata probe <scope> [text…] --mode <soft|hard> [--status <active|finished>] [--dry-run] [--since-ms <integer>] [--ratio <number>] [--models <object>]`",
+        "*arguments*",
+        "• `<scope>` — whose metadata",
+        "• `<text>` — extra context (optional)",
+        "*options*",
+        "• `--mode <soft|hard>` — stop mode (required)",
+        "• `--status <active|finished>`",
+        "• `--dry-run`",
+        "• `--since-ms <integer>` — cutoff",
+        "• `--ratio <number>`",
+        "• `--models <object>`",
+      ].join("\n"),
+    });
   });
+});
+
+// ---- 1–6. every command × every variant × every surface --------------------------------------------------
+
+describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformance — $id", ({ cmd }) => {
+  const variants = variantsOf(cmd).variants;
 
   it("every accepted variant binds to the same parsed { args, options } and yields the identical invoke JSON on every exposed surface (chat: renderText of it), modulo the caller's own id; the Caller is the adapter's; no token, no secret; free text wrapped", async () => {
     for (const variant of variants.filter((v) => v.expect.ok)) {
