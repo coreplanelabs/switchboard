@@ -16,6 +16,10 @@ import {
   fetchPullRequestFacts,
   fetchPullRequestTitleBody,
   fetchCommitChecks,
+  fetchCheckRetryTargets,
+  setPullRequestState,
+  rerunActionsFailedJobs,
+  rerequestCheckRun,
   listOpenPullRequests,
   fixupCommitSubjects,
   fetchPullRequestReviews,
@@ -30,8 +34,6 @@ import {
   openPullRequest,
   listAnyPrByHead,
   createDraftPullRequest,
-  refirePullRequestEvent,
-  rerunFailedJobs,
   updatePullRequest,
 } from "./githubPulls.js";
 
@@ -336,51 +338,207 @@ describe("githubPulls", () => {
     );
   });
 
-  it("refirePullRequestEvent closes then reopens the known pull request so GitHub emits pull_request again, retrying a failed reopen so the pull request is restored open", async () => {
-    stubToken();
-    const calls = stubFetch(() => new Response("{}", { status: 200 }));
-    expect(await refirePullRequestEvent("acme/api", 31)).toBe(true);
-    expect(calls.map((c) => ({ method: c.init.method, body: JSON.parse(String(c.init.body)) }))).toEqual([
-      { method: "PATCH", body: { state: "closed" } },
-      { method: "PATCH", body: { state: "open" } },
-    ]);
-    expect(calls.every((c) => c.url === "https://api.github.com/repos/acme/api/pulls/31")).toBe(true);
-
-    let request = 0;
-    const unavailableCalls = stubFetch(
-      () => new Response(request++ === 1 ? "unavailable" : "{}", { status: request === 2 ? 503 : 200 }),
-    );
-    expect(await refirePullRequestEvent("acme/api", 31)).toBe(true);
-    expect(unavailableCalls.map((c) => JSON.parse(String(c.init.body)))).toEqual([
-      { state: "closed" },
-      { state: "open" },
-      { state: "open" },
-    ]);
-
-    request = 0;
-    const timeoutCalls = stubFetch(() => {
-      if (request++ === 1) throw new DOMException("The operation was aborted", "TimeoutError");
-      return new Response("{}", { status: 200 });
+  describe("frozen check retry and PR state writes", () => {
+    const sha = "c".repeat(40);
+    const target = { headSha: sha, headRef: "fix/unit", baseRef: "main" };
+    const check = (id: number, name = "ci / depot") => ({
+      id,
+      name,
+      head_sha: sha,
+      status: "completed",
+      conclusion: "failure",
+      details_url: "https://depot.dev/run/one",
+      check_suite: { id: 5 },
     });
-    expect(await refirePullRequestEvent("acme/api", 31)).toBe(true);
-    expect(timeoutCalls.map((c) => JSON.parse(String(c.init.body)))).toEqual([
-      { state: "closed" },
-      { state: "open" },
-      { state: "open" },
-    ]);
-  });
+    const pull = (state: "open" | "closed") => ({
+      number: 31,
+      state,
+      merged: false,
+      head: { sha, ref: target.headRef, repo: { full_name: "acme/api" } },
+      base: { ref: target.baseRef, repo: { full_name: "acme/api" } },
+    });
+    const listing = (rows: unknown[], total = rows.length) => ({ total_count: total, check_runs: rows });
+    it("accepts canonical repository casing without losing a native close or refusing its retry IDs", async () => {
+      stubToken();
+      const closed = pull("closed");
+      stubFetch(() =>
+        Response.json({
+          ...closed,
+          head: { ...closed.head, repo: { full_name: "Acme/API" } },
+          base: { ...closed.base, repo: { full_name: "Acme/API" } },
+        }),
+      );
+      expect(await setPullRequestState({ repo: "acme/api", number: 31 }, target, "closed")).toEqual({
+        state: "accepted",
+      });
+      const row = { ...check(11), details_url: "https://github.com/Acme/API/actions/runs/99/job/5" };
+      stubFetch((url) =>
+        Response.json(
+          url.includes("/check-runs?")
+            ? listing([row])
+            : {
+                id: 99,
+                head_sha: sha,
+                check_suite_id: 5,
+                repository: { full_name: "Acme/API" },
+              },
+        ),
+      );
+      expect(await fetchCheckRetryTargets("acme/api", sha, ["ci / depot"])).toEqual([
+        { operation: "actions_rerun", resourceId: 99 },
+      ]);
+    });
 
-  it("never reports a completed refire after an accepted close while reopening is unavailable", async () => {
-    stubToken();
-    let request = 0;
-    const calls = stubFetch(() => new Response("unavailable", { status: request++ === 0 ? 200 : 503 }));
-    await expect(refirePullRequestEvent("acme/api", 31)).rejects.toThrow(/could not be reopened/);
-    expect(calls.map((c) => JSON.parse(String(c.init.body)))).toEqual([
-      { state: "closed" },
-      { state: "open" },
-      { state: "open" },
-      { state: "open" },
-    ]);
+    it("freezes native retry IDs after complete exact-head reads and verifies Actions URL locators against native run facts", async () => {
+      stubToken();
+      const rows = [
+        { ...check(11, "shard 2"), details_url: "https://github.com/acme/api/actions/runs/99/job/5" },
+        { ...check(12, "shard 3"), details_url: "https://github.com/acme/api/actions/runs/99/job/6" },
+        check(42),
+      ];
+      const calls = stubFetch((url) =>
+        Response.json(
+          url.includes("/check-runs?")
+            ? listing(rows)
+            : {
+                id: 99,
+                head_sha: sha,
+                check_suite_id: 5,
+                repository: { full_name: "acme/api" },
+              },
+        ),
+      );
+      expect(await fetchCheckRetryTargets("acme/api", sha, ["shard 2", "shard 3", "ci / depot"])).toEqual([
+        { operation: "actions_rerun", resourceId: 99 },
+        { operation: "check_rerequest", resourceId: 42 },
+      ]);
+      expect(calls.every((call) => (call.init.method ?? "GET") === "GET")).toBe(true);
+      expect(calls.filter((call) => call.url.endsWith("/actions/runs/99"))).toHaveLength(1);
+    });
+
+    it("reads the final check page before freezing a target and refuses unstable, duplicate, foreign or incomplete native evidence", async () => {
+      stubToken();
+      const page = Array.from({ length: 100 }, (_, i) => check(i + 1, `other-${i}`));
+      const calls = stubFetch((url) => Response.json(listing(url.endsWith("page=1") ? page : [check(101)], 101)));
+      expect(await fetchCheckRetryTargets("acme/api", sha, ["ci / depot"])).toEqual([
+        { operation: "check_rerequest", resourceId: 101 },
+      ]);
+      expect(calls).toHaveLength(2);
+      for (const row of [
+        { ...check(42), id: 0 },
+        { ...check(42), head_sha: "d".repeat(40) },
+        { ...check(42), status: "in_progress" },
+        { ...check(42), conclusion: "success" },
+      ]) {
+        stubFetch(() => Response.json(listing([row])));
+        expect(await fetchCheckRetryTargets("acme/api", sha, ["ci / depot"])).toBeUndefined();
+      }
+      for (const body of [listing([check(42)], 2), listing([check(42), check(42)]), listing([check(42, "other")])]) {
+        stubFetch(() => Response.json(body));
+        expect(await fetchCheckRetryTargets("acme/api", sha, ["ci / depot"])).toBeUndefined();
+      }
+      stubFetch((url) =>
+        Response.json(listing(url.endsWith("page=1") ? page : [check(101)], url.endsWith("page=1") ? 101 : 102)),
+      );
+      expect(await fetchCheckRetryTargets("acme/api", sha, ["ci / depot"])).toBeUndefined();
+      stubFetch(
+        () =>
+          new Response(JSON.stringify(listing([check(42)])), {
+            headers: { link: '<https://api.github.com/next>; rel="next"' },
+          }),
+      );
+      expect(await fetchCheckRetryTargets("acme/api", sha, ["ci / depot"])).toBeUndefined();
+    });
+
+    it("does not let a URL, malformed native Actions identity, or unavailable read grant a retry", async () => {
+      stubToken();
+      const row = { ...check(11), details_url: "https://github.com/acme/api/actions/runs/99/job/5" };
+      const native = { id: 99, head_sha: sha, check_suite_id: 5, repository: { full_name: "acme/api" } };
+      for (const run of [
+        { ...native, id: 98 },
+        { ...native, head_sha: "d".repeat(40) },
+        { ...native, check_suite_id: 6 },
+        { ...native, repository: { full_name: "other/api" } },
+        {},
+      ]) {
+        stubFetch((url) => Response.json(url.includes("/check-runs?") ? listing([row]) : run));
+        expect(await fetchCheckRetryTargets("acme/api", sha, ["ci / depot"])).toBeUndefined();
+      }
+      const calls = stubFetch(() =>
+        Response.json(listing([{ ...row, details_url: "https://github.com/other/api/actions/runs/99" }])),
+      );
+      expect(await fetchCheckRetryTargets("acme/api", sha, ["ci / depot"])).toBeUndefined();
+      expect(calls).toHaveLength(1);
+      stubFetch(() => {
+        throw new Error("offline");
+      });
+      expect(await fetchCheckRetryTargets("acme/api", sha, ["ci / depot"])).toBeUndefined();
+    });
+
+    it("writes one PR state and accepts only the exact native target and requested state", async () => {
+      stubToken();
+      for (const state of ["closed", "open"] as const) {
+        const calls = stubFetch(() => Response.json(pull(state)));
+        expect(await setPullRequestState({ repo: "acme/api", number: 31 }, target, state)).toEqual({
+          state: "accepted",
+        });
+        expect(calls).toHaveLength(1);
+        expect(calls[0].init.method).toBe("PATCH");
+        expect(calls[0].init.redirect).toBe("error");
+        expect(JSON.parse(String(calls[0].init.body))).toEqual({ state });
+      }
+      for (const body of [
+        {},
+        { ...pull("closed"), number: 32 },
+        pull("open"),
+        { ...pull("closed"), merged: true },
+        { ...pull("closed"), head: { ...pull("closed").head, sha: "d".repeat(40) } },
+        { ...pull("closed"), base: { ...pull("closed").base, ref: "other" } },
+      ]) {
+        const calls = stubFetch(() => Response.json(body));
+        expect(await setPullRequestState({ repo: "acme/api", number: 31 }, target, "closed")).toEqual({
+          state: "uncertain",
+        });
+        expect(calls).toHaveLength(1);
+      }
+    });
+
+    it("keeps server, timeout, transport and unexpected success uncertain without a second request", async () => {
+      stubToken();
+      for (const write of [
+        () => setPullRequestState({ repo: "acme/api", number: 31 }, target, "open"),
+        () => rerunActionsFailedJobs("acme/api", 99),
+        () => rerequestCheckRun("acme/api", 42),
+      ]) {
+        for (const status of [202, 408, 503]) {
+          const calls = stubFetch(() => new Response("{}", { status }));
+          expect(await write()).toEqual({ state: "uncertain" });
+          expect(calls).toHaveLength(1);
+        }
+        const calls = stubFetch(() => {
+          throw new Error("lost reply");
+        });
+        expect(await write()).toEqual({ state: "uncertain" });
+        expect(calls).toHaveLength(1);
+        stubFetch(() => new Response("{}", { status: 403 }));
+        expect(await write()).toEqual({ state: "refused", status: 403 });
+      }
+    });
+
+    it("accepts only native 201 retry dispatch acknowledgments and refuses invalid IDs without calling GitHub", async () => {
+      stubToken();
+      const calls = stubFetch(() => new Response(null, { status: 201 }));
+      expect(await rerunActionsFailedJobs("acme/api", 99)).toEqual({ state: "accepted" });
+      expect(await rerequestCheckRun("acme/api", 42)).toEqual({ state: "accepted" });
+      expect(calls.map((call) => call.url)).toEqual([
+        "https://api.github.com/repos/acme/api/actions/runs/99/rerun-failed-jobs",
+        "https://api.github.com/repos/acme/api/check-runs/42/rerequest",
+      ]);
+      expect(calls.every((call) => call.init.method === "POST" && call.init.redirect === "error")).toBe(true);
+      expect(await rerunActionsFailedJobs("acme/api", 0)).toEqual({ state: "refused" });
+      expect(await rerequestCheckRun("acme/api", Number.MAX_SAFE_INTEGER + 1)).toEqual({ state: "refused" });
+      expect(calls).toHaveLength(2);
+    });
   });
 
   it("clips an oversized body with a visible note so a huge description still lands", async () => {
@@ -1476,60 +1634,6 @@ describe("githubPulls", () => {
         throw new Error("offline");
       });
       expect(await fixupCommitSubjects({ repo: "acme/api", number: 7 })).toBeUndefined();
-    });
-  });
-
-  // Feature: docs/reference/specs/agent-ship.md item 9 (record 0055's flake
-  // rule): the one re-run dispatches through the retry the check run's host
-  // understands — rerun-failed-jobs for a check backed by an Actions run,
-  // GitHub's check-run rerequest (which asks the creating app to run it again)
-  // for any other, this repository's Depot CI legs included — and answers
-  // false when nothing could be dispatched, never a silent no-op.
-  describe("rerunFailedJobs — the flake rule's one re-run (record 0055)", () => {
-    const listing = {
-      check_runs: [
-        { id: 11, name: "test 2 of 4", details_url: "https://github.com/acme/api/actions/runs/99/job/5" },
-        { id: 12, name: "test 3 of 4", details_url: "https://github.com/acme/api/actions/runs/99/job/6" },
-        { id: 42, name: "ci / depot", details_url: "https://depot.dev/orgs/acme/workflows/runs/abc" },
-        { id: 13, name: "untouched", details_url: "https://github.com/acme/api/actions/runs/77/job/1" },
-      ],
-    };
-
-    it("re-runs an Actions run's failed jobs once per run and rerequests a non-Actions check run by id — the Depot CI case — true when every dispatch was accepted", async () => {
-      stubToken();
-      const calls = stubFetch((url) =>
-        url.includes("/check-runs?")
-          ? new Response(JSON.stringify(listing), { status: 200 })
-          : new Response("{}", { status: 201 }),
-      );
-      expect(await rerunFailedJobs("acme/api", "c".repeat(40), ["test 2 of 4", "test 3 of 4", "ci / depot"])).toBe(
-        true,
-      );
-      const posts = calls.filter((c) => c.init.method === "POST").map((c) => c.url);
-      // The two shards share run 99: one rerun-failed-jobs, never two; and the
-      // Depot check run is rerequested by its check-run id, untouched runs untouched.
-      expect(posts).toEqual([
-        "https://api.github.com/repos/acme/api/actions/runs/99/rerun-failed-jobs",
-        "https://api.github.com/repos/acme/api/check-runs/42/rerequest",
-      ]);
-    });
-
-    it("answers false — never a silent no-op — when no named check is found, when the listing cannot be read, or when a dispatch is refused", async () => {
-      stubToken();
-      stubFetch(() => new Response(JSON.stringify({ check_runs: [] }), { status: 200 }));
-      expect(await rerunFailedJobs("acme/api", "c".repeat(40), ["ci / depot"])).toBe(false);
-      stubFetch(() => new Response("nope", { status: 502 }));
-      expect(await rerunFailedJobs("acme/api", "c".repeat(40), ["ci / depot"])).toBe(false);
-      stubFetch((url) =>
-        url.includes("/check-runs?")
-          ? new Response(JSON.stringify(listing), { status: 200 })
-          : new Response(JSON.stringify({ message: "Forbidden" }), { status: 403 }),
-      );
-      expect(await rerunFailedJobs("acme/api", "c".repeat(40), ["ci / depot"])).toBe(false);
-      vi.stubGlobal("fetch", async () => {
-        throw new Error("offline");
-      });
-      expect(await rerunFailedJobs("acme/api", "c".repeat(40), ["ci / depot"])).toBe(false);
     });
   });
 });

@@ -8,6 +8,7 @@ import {
   idempotencyKeyFor,
   INSTANCE_ID_PATTERN,
   isCoordinatorInstance,
+  isCoordinatorEnding,
   runFinishedEventType,
   childInterruptedEventType,
   childResumedEventType,
@@ -923,5 +924,17 @@ describe("capThreadEvent and isThreadEvent — one event row of a unit's list", 
     expect(isThreadEvent({ ...event, seq: 0 })).toBe(false);
     expect(isThreadEvent({ ...event, seq: 1, mode: "queue" })).toBe(false);
     expect(isThreadEvent({ seq: 1, text: "x", mode: "steer", at: 1 })).toBe(false); // no sender
+  });
+});
+
+// Feature: docs/reference/specs/orchestration-plane.md — the original terminal rendering survives a crash before immutable report freeze.
+describe("retained terminal report rendering", () => {
+  it("accepts a bounded original thread rendering including silence and rejects malformed bytes", () => {
+    const ending = { kind: "terminated", report: "original detail", at: 1 };
+    expect(isCoordinatorEnding(ending)).toBe(true);
+    expect(isCoordinatorEnding({ ...ending, threadReport: "original summary" })).toBe(true);
+    expect(isCoordinatorEnding({ ...ending, threadReport: "" })).toBe(true);
+    for (const threadReport of [null, 1, {}, "x".repeat(20_001)])
+      expect(isCoordinatorEnding({ ...ending, threadReport })).toBe(false);
   });
 });

@@ -29,6 +29,26 @@ const unit: CoordinatorUnit = {
 };
 
 describe("complete canonical pull ownership", () => {
+  it("retains the canonical target for a pending original report without making its envelope a new owner", () => {
+    const effect = {
+      id: `coordinator-reconcile:${"a".repeat(64)}`,
+      kind: "coordinator_reconcile",
+      instanceId: instance.id,
+      unit: unit.unit,
+      workflowId: instance.id,
+      admissionHash: "b".repeat(64),
+    };
+    const rows = { complete: true, units: [{ instance, unit }], runs: [], effects: [effect] };
+    expect(findPullOwnersInRows({ repo: instance.repo, pr: 7 }, rows)).toEqual({
+      ok: true,
+      owners: [{ kind: "unit", instanceId: instance.id, unit: unit.unit }],
+    });
+    expect(findPullOwnersInRows({ repo: "other/repo", pr: 7 }, rows)).toEqual({ ok: true, owners: [] });
+    expect(findPullOwnersInRows({ repo: instance.repo, pr: 7 }, { ...rows, units: [] })).toEqual({
+      ok: false,
+      reason: "incomplete",
+    });
+  });
   it("keeps the original start fence through delayed whole-row and wake writes", async () => {
     const store = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await store.put(instance);

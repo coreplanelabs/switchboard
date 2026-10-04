@@ -13,6 +13,522 @@ import {
 import { PRIVATE_WORKER_REPLY_MAX_CHARS } from "../../src/core/privateWorkerLog.ts";
 import { assertNoPendingBackgroundTasks } from "./backgroundTasks.ts";
 import type { RunHistoryDO, SessionLogDO } from "./worker.ts";
+import {
+  coordinatorReportAdmission,
+  freezeAdmittedCoordinatorReport,
+} from "../../src/core/coordinator/reportContext.ts";
+import { appendCoordinatorStatus } from "../../src/core/coordinator/unitStatus.ts";
+import type { ContextDependencies } from "../../src/core/references/contextDependencies.ts";
+
+// Feature: docs/reference/specs/orchestration-plane.md — exact Workflow discovery and durable report obligations.
+describe("durable coordinator Workflow reconciliation", () => {
+  const instance: CoordinatorInstance = {
+    id: "reconcile_workflow",
+    kind: "ship",
+    userId: "slack:UALICE",
+    channelId: "slack:C1",
+    threadKey: "slack:C1:reconcile",
+    repo: "acme/api",
+    branch: "fix/reconcile",
+    base: "main",
+    createdAt: 1000,
+    admission: "created",
+  };
+  const unit: CoordinatorUnit = {
+    instanceId: instance.id,
+    unit: "ROOT",
+    slug: "reconcile",
+    branch: instance.branch,
+    dependsOn: [],
+    rounds: [],
+  };
+  async function seed(key: string, admission: CoordinatorInstance["admission"] = "created") {
+    expect((await post("/runs/coordinator/put", { storeKey: key, instance: { ...instance, admission } })).status).toBe(
+      200,
+    );
+    expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [unit] })).status).toBe(200);
+  }
+  async function native(key: string, status: string, race = false) {
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+      const holder = owner as unknown as { env: Record<string, unknown> };
+      holder.env = {
+        ...holder.env,
+        SHIP_COORDINATOR: {
+          get: async () => ({
+            status: async () => {
+              if (race)
+                state.storage.sql.exec(
+                  `UPDATE coordinator_units SET json = ? WHERE instance_id = ? AND unit = ?`,
+                  JSON.stringify({ ...unit, title: "changed during observation" }),
+                  instance.id,
+                  unit.unit,
+                );
+              return { status };
+            },
+          }),
+        },
+      };
+    });
+  }
+  it("offers terminal execution before bot delivery and retains its original row through a lost acknowledgement", async () => {
+    const key = storeKey();
+    await seed(key);
+    await native(key, "errored");
+    expect(
+      (await post("/runs/coordinator/reconcile/offer", { storeKey: key, instanceId: instance.id, unit: unit.unit }))
+        .status,
+    ).toBe(200);
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+      expect(owner.openPlaneEffects()).toMatchObject([
+        { kind: "coordinator_reconcile", instanceId: instance.id, unit: unit.unit, workflowId: instance.id },
+      ]);
+      expect(await owner.listUnits(instance.id)).toEqual([unit]);
+      const effect = owner.openPlaneEffects()[0]!;
+      await owner.planeAck(effect.id, "done", 2000);
+      expect(owner.openPlaneEffects()).toHaveLength(1);
+      expect(await state.storage.getAlarm()).not.toBeNull();
+    });
+  });
+  it("retains unknown status, raced rows and unattributed same-id admissions without offering settlement", async () => {
+    for (const [status, admission, race] of [
+      ["unfamiliar", "created", false],
+      ["complete", "unreconciled", false],
+      ["terminated", "created", true],
+    ] as const) {
+      const key = storeKey();
+      await seed(key, admission);
+      await native(key, status, race);
+      expect(
+        (await post("/runs/coordinator/reconcile/offer", { storeKey: key, instanceId: instance.id, unit: unit.unit }))
+          .status,
+      ).toBe(200);
+      await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO) => {
+        expect(owner.openPlaneEffects()).toEqual([]);
+        expect((await owner.listUnits(instance.id))[0]?.ending).toBeUndefined();
+      });
+    }
+  });
+  it("refuses an acknowledgement for a workspace owner with no retained revision", async () => {
+    const key = storeKey();
+    expect(
+      await post("/runs/workspace-ack", {
+        storeKey: key,
+        runId: "never_known",
+        ownerGen: "g1",
+        ownerFence: 7,
+        revision: 1,
+      }),
+    ).toMatchObject({ status: 409, data: { ok: false, reason: "unverified" } });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+      expect(state.storage.sql.exec(`SELECT * FROM workspace_settlements`).toArray()).toEqual([]);
+    });
+  });
+  it("finishes only the original frozen report and status before acknowledging, then permits reentry", async () => {
+    const key = storeKey();
+    await seed(key);
+    await native(key, "errored");
+    await post("/runs/coordinator/reconcile/offer", { storeKey: key, instanceId: instance.id, unit: unit.unit });
+    const reportOwner = {
+      instanceId: instance.id,
+      unit: unit.unit,
+      requester: instance.userId,
+      channelId: instance.channelId,
+      threadKey: instance.threadKey,
+      attempt: 0,
+      deliveryId: "reconcile-end",
+    };
+    const proposal = {
+      text: "Execution ended; source result remains unverified.",
+      threadText: "Execution ended; source result remains unverified.",
+    };
+    const admission = await coordinatorReportAdmission(reportOwner, proposal);
+    const ended: CoordinatorUnit = {
+      ...unit,
+      ending: { kind: "aborted", report: proposal.text, at: 2000 },
+      reportDelivery: admission,
+    };
+    let effectId = "";
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO) => {
+      effectId = owner.openPlaneEffects()[0]!.id;
+      expect(await owner.compareAndReplaceUnit(unit, ended, 2000)).toEqual({ ok: true });
+      expect(await owner.compareAndReplaceUnit(ended, unit, 2001)).toEqual({ ok: false, reason: "stale" });
+    });
+    const ledger = {
+      appendSession: async (
+        sessionKey: string,
+        rowId: string,
+        rows: Array<{ part: number; json: string }>,
+        context?: ContextDependencies,
+      ) => env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(sessionKey)).appendKeyed(rowId, rows, context),
+      readSessionEntry: async (sessionKey: string, rowId: string) =>
+        env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(sessionKey)).readEntry(rowId),
+    };
+    const store = {
+      get: async () =>
+        (await post("/runs/coordinator/get", { storeKey: key, id: instance.id })).data.instance as CoordinatorInstance,
+      listUnits: async () =>
+        (await post("/runs/coordinator/units/list", { storeKey: key, instanceId: instance.id })).data
+          .units as CoordinatorUnit[],
+      getMainTask: async () => null,
+    };
+    const status = await appendCoordinatorStatus(
+      { ledger, instances: store },
+      { owner: reportOwner, instance, unit: ended },
+    );
+    expect(status).toBeDefined();
+    const ack = (reportDelivery = admission) =>
+      post("/plane/ack", { storeKey: key, id: effectId, outcome: "done", reconciliation: { reportDelivery, status } });
+    expect((await ack()).status).toBe(409); // Status alone is not canonical report durability.
+    expect(await freezeAdmittedCoordinatorReport(ledger, admission, reportOwner, proposal)).toEqual(proposal);
+    expect((await ack({ ...admission, proposalHash: "b".repeat(64) })).status).toBe(409);
+    expect((await ack()).status).toBe(200);
+    expect((await ack()).status).toBe(200); // Lost ACK is idempotent.
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO) => {
+      expect(owner.openPlaneEffects()).toEqual([]);
+      expect(await owner.offerCoordinatorReconciliation(instance.id, unit.unit, 2100)).toEqual({ offered: false });
+      expect(await owner.compareAndReplaceUnit(ended, unit, 2101)).toEqual({ ok: true });
+    });
+  });
+  it("admits only the first report owner on an unchanged saved ending while the durable offer remains pending", async () => {
+    const key = storeKey();
+    await seed(key);
+    const ended: CoordinatorUnit = {
+      ...unit,
+      ending: {
+        kind: "aborted",
+        report: "Original report",
+        threadReport: "Original summary",
+        deliveryId: "original/end",
+        at: 2000,
+      },
+    };
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO) => {
+      expect(await owner.compareAndReplaceUnit(unit, ended, 2000)).toEqual({ ok: true });
+    });
+    await native(key, "errored");
+    await post("/runs/coordinator/reconcile/offer", { storeKey: key, instanceId: instance.id, unit: unit.unit });
+    const admission = await coordinatorReportAdmission(
+      {
+        instanceId: instance.id,
+        unit: unit.unit,
+        requester: instance.userId,
+        channelId: instance.channelId,
+        threadKey: instance.threadKey,
+        attempt: 0,
+        deliveryId: ended.ending!.deliveryId!,
+      },
+      { text: ended.ending!.report, threadText: ended.ending!.threadReport! },
+    );
+    const admitted = { ...ended, reportDelivery: admission };
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO) => {
+      expect(owner.openPlaneEffects()).toHaveLength(1);
+      expect(
+        await owner.compareAndReplaceUnit(
+          ended,
+          { ...admitted, ending: { ...ended.ending!, report: "Changed" } },
+          2001,
+        ),
+      ).toEqual({ ok: false, reason: "stale" });
+      expect(await owner.compareAndReplaceUnit(ended, admitted, 2002)).toEqual({ ok: true });
+      expect(
+        await owner.compareAndReplaceUnit(
+          admitted,
+          { ...admitted, reportDelivery: { ...admission, proposalHash: "b".repeat(64) } },
+          2003,
+        ),
+      ).toEqual({ ok: false, reason: "stale" });
+      expect(await owner.listUnits(instance.id)).toEqual([admitted]);
+      expect(owner.openPlaneEffects()).toHaveLength(1);
+    });
+  });
+  it("bounds discovery with a persisted cursor and re-arms after an alarm failure while maintenance is paused", async () => {
+    const key = storeKey();
+    await seed(key);
+    await native(key, "terminated");
+    const rows = Array.from({ length: 20 }, (_, i) => ({
+      ...unit,
+      unit: `U${String(i + 1).padStart(2, "0")}`,
+      slug: `u${i + 1}`,
+    }));
+    await post("/runs/coordinator/units/put", { storeKey: key, units: rows });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+      await owner.alarm();
+      expect(owner.openPlaneEffects()).toHaveLength(16);
+      expect(
+        state.storage.sql.exec(`SELECT value FROM meta WHERE key = 'coordinator_reconcile_cursor'`).toArray(),
+      ).toHaveLength(1);
+      await owner.alarm();
+      expect(owner.openPlaneEffects()).toHaveLength(21);
+      for (let i = 0; i < 33; i++)
+        state.storage.sql.exec(
+          `INSERT INTO plane_effects(id, body_json, offered_at, acked_at) VALUES (?, ?, 0, NULL)`,
+          `reissue:old_${i}`,
+          JSON.stringify({
+            id: `reissue:old_${i}`,
+            kind: "reissue",
+            instanceId: `old_${i}`,
+            attempt: 1,
+            units: ["ONE"],
+          }),
+        );
+      const pushes: Array<{ kind: string }[]> = [];
+      const holder = owner as unknown as { env: Record<string, unknown> };
+      holder.env = {
+        ...holder.env,
+        BOT: {
+          fetch: async (_url: string, init: { body: string }) => {
+            pushes.push(JSON.parse(init.body).effects);
+            return new Response("ok");
+          },
+        },
+      };
+      expect(owner.openPlaneEffects().every((effect) => effect.kind === "reissue")).toBe(true);
+      await owner.alarm();
+      await vi.waitFor(() =>
+        expect(pushes.flat().filter((effect) => effect.kind === "coordinator_reconcile")).toHaveLength(21),
+      );
+      await vi.waitFor(() => expect(() => assertNoPendingBackgroundTasks()).not.toThrow());
+      const mutable = owner as unknown as { discoverCoordinatorWorkflows(now: number): Promise<void> };
+      const original = mutable.discoverCoordinatorWorkflows;
+      mutable.discoverCoordinatorWorkflows = async () => {
+        throw new Error("native status unavailable");
+      };
+      await state.storage.deleteAlarm();
+      try {
+        await expect(owner.alarm()).rejects.toThrow("native status unavailable");
+      } finally {
+        mutable.discoverCoordinatorWorkflows = original;
+      }
+      expect(await state.storage.getAlarm()).not.toBeNull();
+      expect(
+        Number(
+          state.storage.sql
+            .exec<{ n: number }>(
+              `SELECT COUNT(*) AS n FROM plane_effects WHERE json_extract(body_json, '$.kind') = 'coordinator_reconcile' AND acked_at IS NULL`,
+            )
+            .one().n,
+        ),
+      ).toBe(21);
+    });
+  });
+  it("refuses only the exact absent recovery without consuming its source and fences later check events", async () => {
+    const key = storeKey();
+    await seed(key);
+    const ended: CoordinatorUnit = { ...unit, ending: { kind: "aborted", report: "Original report", at: 1100 } };
+    const { ending, ...active } = ended;
+    const replacement: CoordinatorUnit = {
+      ...active,
+      recovery: {
+        kind: "review",
+        round: 1,
+        expectedHeadSha: "a".repeat(40),
+        remainingMs: 1000,
+        claimedAt: 1200,
+        deadlineAt: 2200,
+        step: "ROOT/recovery/1/review",
+        reviewRunId: "original_review",
+        reviewKey: "original_review_key",
+        previousEnding: ending!,
+        workflowId: "exact_recovery",
+      },
+    };
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    let claimed: CoordinatorUnit | undefined;
+    await runInDurableObject(stub, async (owner: RunHistoryDO) => {
+      expect(await owner.compareAndReplaceUnit(unit, ended, 1100)).toEqual({ ok: true });
+      const result = await owner.transitionRecovery(
+        {
+          kind: "claim",
+          expected: ended,
+          replacement,
+          request: { userId: instance.userId, threadKey: instance.threadKey, messageId: "slack:C1:2.0" },
+        },
+        1200,
+      );
+      expect(result.ok).toBe(true);
+      if (result.ok) claimed = result.unit;
+    });
+    const guard = { actionId: claimed!.recovery!.actionId!, workflowId: "exact_recovery" };
+    await native(key, "errored");
+    await runInDurableObject(stub, async (owner: RunHistoryDO) => {
+      expect(await owner.offerCoordinatorReconciliation(instance.id, unit.unit, 1250)).toEqual({ offered: false });
+      expect(owner.openPlaneEffects()).toEqual([]);
+    });
+    const address = { instanceId: instance.id, unit: unit.unit };
+    expect(
+      (await post("/runs/coordinator/recovery/action", { storeKey: key, key: address, actionId: guard.actionId })).data,
+    ).toMatchObject({ action: { id: guard.actionId, workflowId: guard.workflowId } });
+    expect(
+      (
+        await post("/runs/coordinator/recovery/action", {
+          storeKey: key,
+          key: { ...address, unit: "OTHER" },
+          actionId: guard.actionId,
+        })
+      ).data,
+    ).toEqual({ action: null });
+    expect(
+      (
+        await post("/runs/coordinator/recovery/action", {
+          storeKey: key,
+          key: address,
+          actionId: guard.actionId,
+          request: {},
+        })
+      ).status,
+    ).toBe(400);
+    const event = { id: "check-settled", sender: "github:checks", mode: "steer", text: "Checks settled", at: 1300 };
+    const append = (exact = guard) =>
+      post("/runs/coordinator/events/append", {
+        storeKey: key,
+        instanceId: instance.id,
+        unit: unit.unit,
+        requireActive: true,
+        expectedRecovery: exact,
+        event,
+      });
+    expect((await append({ ...guard, workflowId: "other_recovery" })).status).toBe(409);
+    expect((await append()).status).toBe(200);
+    await runInDurableObject(stub, async (owner: RunHistoryDO) => {
+      const holder = owner as unknown as { env: Record<string, unknown> };
+      holder.env = {
+        ...holder.env,
+        SHIP_COORDINATOR: {
+          get: async () => {
+            throw new Error("instance.not_found");
+          },
+        },
+      };
+      await owner.offerCoordinatorReconciliation(instance.id, unit.unit, 1400);
+      const row = (await owner.listUnits(instance.id))[0]!;
+      expect(row.ending).toEqual(ended.ending);
+      expect(row.recovery).toBeUndefined();
+      const action = await owner.getRecoveryAction(row, {
+        userId: instance.userId,
+        threadKey: instance.threadKey,
+        messageId: "slack:C1:2.0",
+      });
+      expect(action).toMatchObject({ state: "refused", consumed: false });
+      expect(owner.openPlaneEffects()).toEqual([]);
+    });
+    expect((await append()).status).toBe(409); // A duplicate event cannot bypass the retired action fence.
+  });
+  it("holds private completion until the exact durable worker reply matches the frozen report", async () => {
+    const key = storeKey();
+    const privateInstance: CoordinatorInstance = { ...instance, plan: { id: "private-reconcile" }, merge: "person" };
+    const taskKey = { mainThreadKey: instance.threadKey, actId: "private-reconcile" };
+    const taskUnit: CoordinatorUnit = {
+      ...unit,
+      workBrief: {
+        requesterId: instance.userId,
+        mainThreadKey: instance.threadKey,
+        actId: taskKey.actId,
+        repo: instance.repo,
+        base: instance.base!,
+        question: "What happened?",
+        findings: [],
+        requestedChange: "Resolve this work",
+      },
+    };
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (owner: RunHistoryDO) => {
+      await owner.recordRequesterTurn({
+        threadKey: instance.threadKey,
+        requesterId: instance.userId,
+        messageId: "2.0",
+      });
+      expect(
+        (
+          await owner.claimMainTask(
+            taskKey,
+            privateInstance,
+            taskUnit,
+            { requesterId: instance.userId, sourceMessageId: "2.0", revision: 1, repo: instance.repo },
+            1000,
+          )
+        ).ok,
+      ).toBe(true);
+    });
+    await native(key, "errored");
+    await post("/runs/coordinator/reconcile/offer", { storeKey: key, instanceId: instance.id, unit: unit.unit });
+    const reportOwner = {
+      instanceId: instance.id,
+      unit: unit.unit,
+      attempt: 0,
+      requester: instance.userId,
+      channelId: instance.channelId,
+      threadKey: `worker:${instance.id}:${unit.unit}`,
+      deliveryId: "private-end",
+    };
+    const proposal = { text: "Original private report", threadText: "Original private summary" };
+    const reportDelivery = await coordinatorReportAdmission(reportOwner, proposal);
+    const ended = {
+      ...taskUnit,
+      ending: { kind: "aborted", report: proposal.text, at: 2000, deliveryId: "private-end" },
+      reportDelivery,
+    };
+    let effectId = "";
+    await runInDurableObject(stub, async (owner: RunHistoryDO) => {
+      effectId = owner.openPlaneEffects()[0]!.id;
+      expect(await owner.compareAndReplaceUnit(taskUnit, ended, 2000)).toEqual({ ok: true });
+    });
+    const ledger = {
+      appendSession: async (
+        sessionKey: string,
+        rowId: string,
+        rows: Array<{ part: number; json: string }>,
+        context?: ContextDependencies,
+      ) => env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(sessionKey)).appendKeyed(rowId, rows, context),
+      readSessionEntry: async (sessionKey: string, rowId: string) =>
+        env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(sessionKey)).readEntry(rowId),
+    };
+    const store = {
+      get: async () =>
+        (await post("/runs/coordinator/get", { storeKey: key, id: instance.id })).data.instance as CoordinatorInstance,
+      listUnits: async () =>
+        (await post("/runs/coordinator/units/list", { storeKey: key, instanceId: instance.id })).data
+          .units as CoordinatorUnit[],
+      getMainTask: async () =>
+        (await post("/runs/coordinator/main-task/get", { storeKey: key, key: taskKey })).data.link as {
+          instanceId: string;
+          unit: string;
+          authority: { requesterId: string; sourceMessageId: string; revision: number; repo: string };
+        },
+    };
+    await freezeAdmittedCoordinatorReport(ledger, reportDelivery, reportOwner, proposal);
+    const status = await appendCoordinatorStatus(
+      { ledger, instances: store },
+      { owner: reportOwner, instance: privateInstance, unit: ended },
+    );
+    expect(status).toBeDefined();
+    const ack = () =>
+      post("/plane/ack", {
+        storeKey: key,
+        id: effectId,
+        outcome: "done",
+        reconciliation: { reportDelivery, status, privateReplyId: "private-end" },
+      });
+    expect((await ack()).status).toBe(409);
+    await runInDurableObject(stub, async (owner: RunHistoryDO) => {
+      await owner.appendPrivateWorkerEvent(reportOwner.threadKey, {
+        kind: "reply",
+        id: "other-end",
+        text: proposal.text,
+        at: 2000,
+      });
+    });
+    expect((await ack()).status).toBe(409);
+    await runInDurableObject(stub, async (owner: RunHistoryDO) => {
+      await owner.appendPrivateWorkerEvent(reportOwner.threadKey, {
+        kind: "reply",
+        id: "private-end",
+        text: proposal.text,
+        at: 2000,
+      });
+    });
+    expect((await ack()).status).toBe(200);
+  });
+});
 
 describe("run ledger — alarm retention of live events", () => {
   it("abandon syncs only range pins touched by the abandoned run", async () => {

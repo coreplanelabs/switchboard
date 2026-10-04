@@ -9,9 +9,10 @@
 // Check completions address the head wait directly. Pull-request conversation
 // comments take the general outside-fact path: resolve the live owner, append
 // one durable unit event, then nudge that owner to re-read its pending state.
+import { unitPullTargets } from "./pullOwnership.js";
 import { sendChecksSettled, sendUnitNudge, type RunFinishedSend, type WorkflowSender } from "./contract.js";
 import type { CoordinatorInstanceStore } from "./instanceStore.js";
-import type { RunnerPullOwner } from "../runnerOwnership.js";
+import type { RunnerPullOwner, RunnerPullOwnerResult } from "../runnerOwnership.js";
 import type { MergeWatch, WatchResult } from "../mergeWatch.js";
 
 /** The webhook header GitHub signs the raw body into: `sha256=<hex hmac>`. */
@@ -130,9 +131,10 @@ export async function handleCheckRunIntake(
 export interface IssueCommentIntakeDeps {
   /** The webhook secret; absent, the intake is disabled — never open. */
   secret: string | undefined;
-  /** The live runner that owns this pull request, if one does. */
-  ownerOf(repo: string, prNumber: number): RunnerPullOwner | undefined;
-  instances: Pick<CoordinatorInstanceStore, "appendEvent" | "get" | "listUnits">;
+  /** One complete canonical owner read; it grants no external-effect authority. */
+  ownerOf(repo: string, prNumber: number): Promise<RunnerPullOwnerResult>;
+  instances: Pick<CoordinatorInstanceStore, "appendEvent" | "get" | "listUnits"> &
+    Partial<Pick<CoordinatorInstanceStore, "offerReconciliation">>;
   /** Resolve the commenter's GitHub identity against the requester and admit
    * only the account trusted to speak for that write-capable pipeline. */
   commenterAuthorized(requester: string, author: { login: string; id?: number }): Promise<boolean>;
@@ -190,13 +192,17 @@ export async function handleIssueCommentIntake(
   if (comment.user.type !== "User") return { status: 200, body: { ok: true, ignored: "sender" } };
   let owner: RunnerPullOwner | undefined;
   try {
-    owner = deps.ownerOf(repo, prNumber);
+    const result = await deps.ownerOf(repo, prNumber);
+    if (!result.ok) return { status: 503, body: { error: "ownership_unavailable" } };
+    owner = result.owner;
   } catch {
     return { status: 503, body: { error: "ownership_unavailable" } };
   }
   if (owner === undefined) return { status: 200, body: { ok: true, ignored: "unowned" } };
   const instance = await deps.instances.get(owner.instanceId);
   if (instance === null) return { status: 200, body: { ok: true, ignored: "ended" } };
+  if (instance.repo.toLowerCase() !== repo.toLowerCase())
+    return { status: 503, body: { error: "ownership_unavailable" } };
   const authorized = await deps
     .commenterAuthorized(instance.userId, {
       login: comment.user.login,
@@ -205,18 +211,46 @@ export async function handleIssueCommentIntake(
     .catch(() => false);
   if (!authorized) return { status: 200, body: { ok: true, ignored: "sender" } };
   const row = (await deps.instances.listUnits(owner.instanceId)).find((unit) => unit.unit === owner.unit);
-  if (row === undefined || row.ending !== undefined) return { status: 200, body: { ok: true, ignored: "ended" } };
+  if (row === undefined || row.ending !== undefined || instance.stop !== undefined)
+    return { status: 200, body: { ok: true, ignored: "ended" } };
+  if (
+    row.instanceId !== owner.instanceId ||
+    !unitPullTargets(instance, row).some((target) => target.pr === prNumber) ||
+    row.recovery?.actionId !== owner.recoveryActionId ||
+    (row.recovery !== undefined && row.recovery.actionId === undefined)
+  )
+    return { status: 503, body: { error: "ownership_unavailable" } };
+  const recovery = row.recovery;
   const created = Date.parse(comment.created_at);
-  const appended = await deps.instances.appendEvent(owner, {
-    id: `github:issue-comment:${comment.id}`,
-    sender: `github:${typeof comment.user.id === "number" ? comment.user.id : comment.user.login}`,
-    senderName: comment.user.login,
-    text: comment.body,
-    mode: row.idle !== undefined ? "wake" : "steer",
-    at: Number.isFinite(created) ? created : deps.now(),
-  });
-  if (!appended.ok) return { status: 503, body: { error: "store_unavailable" } };
-  const sent = await sendUnitNudge(deps.workflow, owner);
+  const appended = await deps.instances.appendEvent(
+    owner,
+    {
+      id: `github:issue-comment:${comment.id}`,
+      sender: `github:${typeof comment.user.id === "number" ? comment.user.id : comment.user.login}`,
+      senderName: comment.user.login,
+      text: comment.body,
+      mode: row.idle !== undefined ? "wake" : "steer",
+      at: Number.isFinite(created) ? created : deps.now(),
+    },
+    true,
+    undefined,
+    recovery === undefined || owner.recoveryActionId === undefined
+      ? undefined
+      : { actionId: owner.recoveryActionId, workflowId: recovery.workflowId },
+  );
+  if (!appended.ok)
+    return appended.reason === "ended"
+      ? { status: 200, body: { ok: true, ignored: "ended" } }
+      : { status: 503, body: { error: appended.reason === "stale" ? "ownership_unavailable" : "store_unavailable" } };
+  const workflow = deps.workflow;
+  const sent = await sendUnitNudge(
+    recovery !== undefined && workflow ? { get: () => workflow.get(recovery.workflowId) } : workflow,
+    owner,
+  );
+  if (sent.kind !== "sent")
+    await deps.instances
+      .offerReconciliation?.({ instanceId: owner.instanceId, unit: owner.unit })
+      .catch(() => undefined);
   return { status: 200, body: { ok: true, appended: true, seq: appended.seq, nudge: sent.kind } };
 }
 

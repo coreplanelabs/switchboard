@@ -3,6 +3,7 @@
 // durable coordinator rows of every hosted runner that survived the process.
 
 import type { CoordinatorInstanceStore } from "./coordinator/instanceStore.js";
+import { isPullOwnersResult, type PullOwnersResult } from "./coordinator/pullOwnership.js";
 
 export const runnerOwnedPullKey = (repo: string, prNumber: number): string => `${repo}#${prNumber}`;
 
@@ -14,6 +15,39 @@ export interface RunnerPullOwner {
   unit: string;
   /** The durable action distinguishes successive recoveries of the same unit. */
   recoveryActionId?: string;
+}
+
+export type RunnerPullOwnerResult = { ok: true; owner?: RunnerPullOwner } | Extract<PullOwnersResult, { ok: false }>;
+
+/** A read can route outside input, never reserve a pull or authorize a write. */
+export function runnerPullOwnerOf(result: unknown): RunnerPullOwnerResult {
+  if (!isPullOwnersResult(result)) return { ok: false, reason: "unavailable" };
+  if (!result.ok) return result;
+  if (result.owners.length === 0) return { ok: true };
+  const owner = result.owners[0];
+  if (result.owners.length !== 1 || owner?.kind !== "unit") return { ok: false, reason: "incomplete" };
+  return {
+    ok: true,
+    owner: {
+      instanceId: owner.instanceId,
+      unit: owner.unit,
+      ...(owner.actionId === undefined ? {} : { recoveryActionId: owner.actionId }),
+    },
+  };
+}
+
+/** Every request reads the existing canonical owner, including unhosted units
+ * and unresolved effects retained after an ending or process restart. */
+export async function findRunnerPullOwner(
+  instances: Pick<CoordinatorInstanceStore, "findPullOwners">,
+  repo: string,
+  prNumber: number,
+): Promise<RunnerPullOwnerResult> {
+  try {
+    return runnerPullOwnerOf(await instances.findPullOwners({ repo, pr: prNumber }));
+  } catch {
+    return { ok: false, reason: "unavailable" };
+  }
 }
 
 const ownerOf = (unit: { instanceId: string; unit: string; recovery?: { actionId?: string } }): RunnerPullOwner => ({

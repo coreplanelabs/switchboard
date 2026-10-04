@@ -15,6 +15,25 @@ import {
   type WorkspaceAck,
 } from "../../src/core/workspaceSettlement.js";
 import type { UnitSeedReceipt } from "../../src/core/coordinator/unitSeedReceipt.js";
+import {
+  coordinatorReconciliationEffect,
+  coordinatorWorkflowCanReconcile,
+  coordinatorExecutionWasStarted,
+  isCoordinatorReconcileEffect,
+  isCoordinatorReconcileReceipt,
+  type CoordinatorReconcileReceipt,
+  type CoordinatorReconcileEffect,
+} from "../../src/core/coordinator/workflowReconciliation.js";
+import {
+  readCoordinatorReport,
+  coordinatorReportAdmission,
+  sameCoordinatorReportAdmission,
+  sameCoordinatorReportOwner,
+} from "../../src/core/coordinator/reportContext.js";
+import { readCoordinatorStatus } from "../../src/core/coordinator/unitStatus.js";
+import { isCoordinatorReportAdmission } from "../../src/core/coordinator/reportAdmission.js";
+import { privateWorkerThreadKey } from "../../src/core/privateWorkerLog.js";
+import { isInstanceNotFound } from "../../src/core/coordinator/instancesRoute.js";
 import { isPersonalToken } from "../../src/core/personalToken.js";
 import { preserveCheckpointState } from "../../src/core/runLedger/checkpointState.js";
 import {
@@ -291,6 +310,7 @@ import {
   recoveryHistoryPage,
   isRecoveryTransition,
   isRecoveryRequest,
+  isRecoveryAction,
   RECOVERY_HISTORY_LIMITS,
   recoveryBytes,
   type RecoveryTransition,
@@ -1833,6 +1853,7 @@ function planeAgreementOf(outcome: string, decider: "proceed" | "queued"): boole
 
 /** The most effects one answer carries (record 0064; orchestration-plane item 7): the rest ride the next heartbeat. */
 const PLANE_EFFECTS_PER_ANSWER = 32;
+const COORDINATOR_SCAN_LIMIT = 16;
 
 export class RunHistoryDO extends DurableObject<Env> {
   private readonly sql: SqlStorage;
@@ -2173,6 +2194,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         .map((column) => column.name),
     );
     if (!planeLevelColumns.has("cause")) this.sql.exec(`ALTER TABLE plane_levels ADD COLUMN cause TEXT`);
+    this.ctx.blockConcurrencyWhile(() => this.armCoordinatorReconciliation(systemClock()));
   }
 
   // ---- the orchestration plane (record 0064; orchestration-plane.md) ----------
@@ -2622,6 +2644,11 @@ export class RunHistoryDO extends DurableObject<Env> {
       }
     }
     if (this.planeWaitsOnResident()) dues.push(reoffer);
+    const coordinatorDue = this.sql
+      .exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'coordinator_reconcile_due'`)
+      .toArray()[0];
+    if (coordinatorDue && Number.isFinite(Number(coordinatorDue.value)))
+      dues.push(Number(coordinatorDue.value) > now ? Number(coordinatorDue.value) : reoffer);
     return dues.length === 0 ? undefined : Math.min(...dues);
   }
 
@@ -2912,6 +2939,9 @@ export class RunHistoryDO extends DurableObject<Env> {
       .toArray()[0];
     if (!offered) return { ok: true };
     const effect = JSON.parse(offered.body_json) as PlaneEffect;
+    // A terminal execution's offer is not closed by a transport word. Its
+    // canonical report obligations are independently checked below.
+    if (effect.kind === "coordinator_reconcile") return { ok: true };
     if (effect.kind === "steer") {
       if (!owner || owner.runId !== effect.runId) return { ok: true };
       const live = this.sql
@@ -2924,6 +2954,325 @@ export class RunHistoryDO extends DurableObject<Env> {
   }
 
   // ---- the coordinator's parent records (run-history item 49) -----------------
+
+  private coordinatorSnapshot(
+    instanceId: string,
+    unit: string,
+  ): { instance: CoordinatorInstance; unit: CoordinatorUnit; action?: RecoveryAction } | undefined {
+    const savedInstance = this.sql
+      .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, instanceId)
+      .toArray()[0];
+    const savedUnit = this.sql
+      .exec<{ json: string }>(`SELECT json FROM coordinator_units WHERE instance_id = ? AND unit = ?`, instanceId, unit)
+      .toArray()[0];
+    if (!savedInstance || !savedUnit) return;
+    try {
+      const instance = JSON.parse(savedInstance.json),
+        row = JSON.parse(savedUnit.json);
+      if (!isCoordinatorInstance(instance) || !isCoordinatorUnit(row) || row.instanceId !== instance.id) return;
+      const actionId = row.recovery?.actionId ?? (row.recoveryReceipt ? row.history?.receiptId : undefined);
+      let action: RecoveryAction | undefined;
+      if (row.recovery || row.recoveryReceipt) {
+        if (!actionId) return;
+        const record = this.sql
+          .exec<{ json: string }>(
+            `SELECT json FROM coordinator_recovery_journal WHERE instance_id = ? AND unit = ? AND kind = 'action' AND id = ?`,
+            instanceId,
+            unit,
+            actionId,
+          )
+          .toArray()[0];
+        if (!record) return;
+        const parsed = JSON.parse(record.json);
+        if (
+          !isRecoveryAction(parsed) ||
+          parsed.instanceId !== instance.id ||
+          parsed.unit !== row.unit ||
+          parsed.workflowId !== (row.recovery?.workflowId ?? row.recoveryReceipt?.workflowId) ||
+          (row.recovery ? parsed.state !== "pending" : parsed.state !== "settled")
+        )
+          return;
+        action = parsed;
+      }
+      return { instance, unit: row, ...(action ? { action } : {}) };
+    } catch {
+      return;
+    }
+  }
+
+  private async coordinatorNativeStatus(id: string): Promise<string | "absent" | undefined> {
+    if (!this.env.SHIP_COORDINATOR) return;
+    try {
+      const result = await (await this.env.SHIP_COORDINATOR.get(id)).status();
+      return typeof result.status === "string" ? result.status : undefined;
+    } catch (error) {
+      return isInstanceNotFound(error instanceof Error ? error.message : String(error)) ? "absent" : undefined;
+    }
+  }
+
+  private async armCoordinatorReconciliation(now: number): Promise<void> {
+    if (!this.sql.exec(`SELECT 1 FROM coordinator_units LIMIT 1`).toArray().length) return;
+    this.sql.exec(
+      `INSERT OR IGNORE INTO meta (key, value) VALUES ('coordinator_reconcile_due', ?)`,
+      String(now + this.planeReaskMs()),
+    );
+    await this.ensurePlaneAlarm(now);
+  }
+
+  /** Discovery only: native ended status offers settlement; it never fabricates
+   * a final ending or replaces a report admitted by the original writer. */
+  async offerCoordinatorReconciliation(instanceId: string, unit: string, now: number): Promise<{ offered: boolean }> {
+    const before = this.coordinatorSnapshot(instanceId, unit);
+    if (!before) return { offered: false };
+    const effect = await coordinatorReconciliationEffect(before.instance, before.unit, before.action);
+    if (this.sql.exec(`SELECT 1 FROM plane_effects WHERE id = ?`, effect.id).toArray().length)
+      return { offered: false };
+    const status = await this.coordinatorNativeStatus(effect.workflowId);
+    const after = this.coordinatorSnapshot(instanceId, unit);
+    if (!after || JSON.stringify(after) !== JSON.stringify(before)) return { offered: false };
+    if (
+      status === "absent" &&
+      before.unit.recovery &&
+      before.action?.state === "pending" &&
+      !coordinatorWorkflowCanReconcile(before.instance, before.unit, before.action, status)
+    ) {
+      if (
+        before.unit.currentEffect?.execution.workflowId === effect.workflowId ||
+        this.sql
+          .exec(
+            `SELECT 1 FROM run_events WHERE json_extract(json, '$.type') = 'coordinator_tag' AND json_extract(json, '$.transportWorkflowId') = ? LIMIT 1`,
+            effect.workflowId,
+          )
+          .toArray().length
+      )
+        return { offered: false };
+      const { recovery: claim, ...retained } = before.unit;
+      let restored: CoordinatorUnit = { ...retained, ending: claim.previousEnding };
+      if (claim.previousBinding !== undefined) {
+        const { publication: _publication, lastPush: _lastPush, ...original } = restored;
+        restored = { ...original, ...claim.previousBinding };
+      }
+      // Absence consumes no execution/source evidence, refunds no allowance,
+      // and retires only this journal action's delayed-create authority.
+      await this.transitionRecovery(
+        {
+          kind: "refuse",
+          expected: before.unit,
+          replacement: restored,
+          error: "workflow_absent",
+          consumed: false,
+        },
+        now,
+      );
+      return { offered: false };
+    }
+    // The same native ID is not attribution of an unanswered create. An exact
+    // durable effect execution is affirmative saved evidence; status alone is not.
+    if (before.instance.admission === "unreconciled") {
+      if (
+        !coordinatorExecutionWasStarted(before.unit, effect.workflowId, effect.actionId) ||
+        !["queued", "running", "paused", "waiting", "waitingForPause", "complete", "errored", "terminated"].includes(
+          status ?? "",
+        )
+      )
+        return { offered: false };
+      if (!(await this.confirmInstanceCreated(before.instance)).ok) return { offered: false };
+      before.instance = { ...before.instance, admission: "created" };
+    }
+    if (!coordinatorWorkflowCanReconcile(before.instance, before.unit, before.action, status))
+      return { offered: false };
+    let offered = false;
+    this.ctx.storage.transactionSync(() => {
+      const current = this.coordinatorSnapshot(instanceId, unit);
+      if (!current || JSON.stringify(current) !== JSON.stringify(before)) return;
+      // An acknowledged request is a retained finalization receipt, not a new
+      // offer. Reopening it on every scan would loop forever on ended rows.
+      if (this.sql.exec(`SELECT 1 FROM plane_effects WHERE id = ?`, effect.id).toArray().length) return;
+      this.applyPlaneWrites([{ table: "plane_effects", op: "offer", effect, at: now }]);
+      offered = true;
+    });
+    await this.armCoordinatorReconciliation(now);
+    if (offered) this.pushPlaneEffects([effect]);
+    return { offered };
+  }
+
+  /** A bounded worklist survives bot outages independently of physical history
+   * maintenance and user nudges. Cursor and due live in the existing meta. */
+  private async discoverCoordinatorWorkflows(now: number): Promise<void> {
+    const cursor = this.sql
+      .exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'coordinator_reconcile_cursor'`)
+      .toArray()[0];
+    let after: [string, string] = ["", ""];
+    try {
+      if (cursor) {
+        const value = JSON.parse(cursor.value);
+        if (Array.isArray(value) && value.length === 2 && value.every((v) => typeof v === "string"))
+          after = value as [string, string];
+      }
+    } catch {
+      /* Restart a malformed cursor without guessing owner state. */
+    }
+    const rows = this.sql
+      .exec<{ instance_id: string; unit: string }>(
+        `SELECT instance_id, unit FROM coordinator_units WHERE instance_id > ? OR (instance_id = ? AND unit > ?) ORDER BY instance_id, unit LIMIT ?`,
+        after[0],
+        after[0],
+        after[1],
+        COORDINATOR_SCAN_LIMIT,
+      )
+      .toArray();
+    for (const row of rows) {
+      try {
+        await this.offerCoordinatorReconciliation(row.instance_id, row.unit, now);
+      } catch (error) {
+        console.warn(
+          "[coordinator/reconcile] discovery retained an unavailable owner",
+          error instanceof Error ? error.name : "unavailable",
+        );
+      }
+    }
+    this.sql.exec(
+      `INSERT OR REPLACE INTO meta (key, value) VALUES ('coordinator_reconcile_cursor', ?)`,
+      JSON.stringify(rows.length === COORDINATOR_SCAN_LIMIT ? [rows.at(-1)!.instance_id, rows.at(-1)!.unit] : ["", ""]),
+    );
+    if (this.sql.exec(`SELECT 1 FROM coordinator_units LIMIT 1`).toArray().length)
+      this.sql.exec(
+        `INSERT OR REPLACE INTO meta (key, value) VALUES ('coordinator_reconcile_due', ?)`,
+        String(now + this.planeReaskMs()),
+      );
+    else this.sql.exec(`DELETE FROM meta WHERE key IN ('coordinator_reconcile_due', 'coordinator_reconcile_cursor')`);
+    // Unsupported move effects must not hide report obligations behind the
+    // general answer's oldest entries when the bot returns after an outage.
+    const deliveryCursor =
+      this.sql
+        .exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'coordinator_reconcile_delivery_cursor'`)
+        .toArray()[0]?.value ?? "";
+    const pending = this.sql
+      .exec<{ body_json: string }>(
+        `SELECT body_json FROM plane_effects WHERE acked_at IS NULL AND json_extract(body_json, '$.kind') = 'coordinator_reconcile' AND id > ? ORDER BY id LIMIT ?`,
+        deliveryCursor,
+        PLANE_EFFECTS_PER_ANSWER,
+      )
+      .toArray()
+      .map((row) => JSON.parse(row.body_json) as CoordinatorReconcileEffect);
+    this.sql.exec(
+      `INSERT OR REPLACE INTO meta (key, value) VALUES ('coordinator_reconcile_delivery_cursor', ?)`,
+      pending.length === PLANE_EFFECTS_PER_ANSWER ? pending.at(-1)!.id : "",
+    );
+    this.pushPlaneEffects(pending);
+  }
+
+  private pendingCoordinatorReport(current: CoordinatorUnit | undefined, next: CoordinatorUnit): boolean {
+    if (
+      !current?.ending ||
+      (current.reportDelivery === undefined &&
+        isCoordinatorReportAdmission(next.reportDelivery) &&
+        JSON.stringify(current) === JSON.stringify({ ...next, reportDelivery: undefined })) ||
+      (JSON.stringify(current.ending) === JSON.stringify(next.ending) &&
+        JSON.stringify(current.reportDelivery) === JSON.stringify(next.reportDelivery))
+    )
+      return false;
+    return (
+      this.sql
+        .exec(
+          `SELECT 1 FROM plane_effects WHERE acked_at IS NULL AND json_extract(body_json, '$.kind') = 'coordinator_reconcile' AND json_extract(body_json, '$.instanceId') = ? AND json_extract(body_json, '$.unit') = ? LIMIT 1`,
+          next.instanceId,
+          next.unit,
+        )
+        .toArray().length > 0
+    );
+  }
+
+  async ackCoordinatorReconciliation(
+    id: string,
+    receipt: CoordinatorReconcileReceipt,
+    now: number,
+  ): Promise<{ ok: boolean }> {
+    const offered = this.sql
+      .exec<{ body_json: string }>(`SELECT body_json FROM plane_effects WHERE id = ? AND acked_at IS NULL`, id)
+      .toArray()[0];
+    if (!offered) return { ok: true };
+    const effect: unknown = JSON.parse(offered.body_json);
+    if (!isCoordinatorReconcileEffect(effect) || !isCoordinatorReconcileReceipt(receipt)) return { ok: false };
+    const before = this.coordinatorSnapshot(effect.instanceId, effect.unit);
+    if (
+      !before ||
+      !before.unit.ending ||
+      before.unit.recovery ||
+      before.unit.idle ||
+      (before.unit.currentEffect && before.unit.currentEffect.phase !== "settled") ||
+      JSON.stringify(await coordinatorReconciliationEffect(before.instance, before.unit, before.action)) !==
+        JSON.stringify(effect) ||
+      !(await sameCoordinatorReportAdmission(before.unit.reportDelivery, receipt.reportDelivery)) ||
+      !sameCoordinatorReportOwner(receipt.reportDelivery.owner, receipt.status)
+    )
+      return { ok: false };
+    const owner = receipt.reportDelivery.owner;
+    if (
+      owner.requester !== before.instance.userId ||
+      owner.channelId !== before.instance.channelId ||
+      owner.attempt !== (before.instance.attempt ?? 0) ||
+      owner.threadKey !==
+        (before.unit.workBrief
+          ? privateWorkerThreadKey(before.unit)
+          : (before.unit.threadKey ?? before.instance.threadKey)) ||
+      (effect.actionId !== undefined && !owner.deliveryId.startsWith(`recovery:${effect.workflowId}:`))
+    )
+      return { ok: false };
+    const ledger = {
+      readSessionEntry: async (key: string, rowId: string) =>
+        this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(key)).readEntry(rowId),
+    };
+    const frozen = await readCoordinatorReport(ledger, owner),
+      status = await readCoordinatorStatus(ledger, receipt.status);
+    if (
+      !frozen ||
+      !status ||
+      before.unit.ending.report !== frozen.text ||
+      !(await sameCoordinatorReportAdmission(
+        receipt.reportDelivery,
+        await coordinatorReportAdmission(owner, frozen),
+      )) ||
+      status.observedAt !== before.unit.ending.at ||
+      status.repo !== before.instance.repo.toLowerCase()
+    )
+      return { ok: false };
+    if (before.unit.workBrief) {
+      if (!receipt.privateReplyId || before.unit.ending.deliveryId !== receipt.privateReplyId) return { ok: false };
+      const reply = this.sql
+        .exec<{ json: string }>(
+          `SELECT json FROM coordinator_private_worker_events WHERE thread_key = ? AND event_id = ?`,
+          owner.threadKey,
+          receipt.privateReplyId,
+        )
+        .toArray()[0];
+      if (!reply) return { ok: false };
+      const event = JSON.parse(reply.json);
+      if (event.kind !== "reply" || event.text !== frozen.text) return { ok: false };
+    } else if (receipt.privateReplyId !== undefined) return { ok: false };
+    if (
+      !coordinatorWorkflowCanReconcile(
+        before.instance,
+        before.unit,
+        before.action,
+        await this.coordinatorNativeStatus(effect.workflowId),
+      )
+    )
+      return { ok: false };
+    let ok = false;
+    this.ctx.storage.transactionSync(() => {
+      if (JSON.stringify(this.coordinatorSnapshot(effect.instanceId, effect.unit)) !== JSON.stringify(before)) return;
+      if (
+        this.sql
+          .exec<{ body_json: string }>(`SELECT body_json FROM plane_effects WHERE id = ? AND acked_at IS NULL`, id)
+          .toArray()[0]?.body_json !== offered.body_json
+      )
+        return;
+      this.sql.exec(`UPDATE plane_effects SET acked_at = ? WHERE id = ? AND acked_at IS NULL`, now, id);
+      ok = true;
+    });
+    return { ok };
+  }
 
   async recordRequesterTurn(
     input: RequesterTurnInput,
@@ -3136,7 +3485,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         reason: "conflict" | PullBindingRefusal;
       }
   > {
-    return this.withRangePins(
+    const result = await this.withRangePins(
       [{ id: `@unit:${unit.instanceId}:${unit.unit}`, handoff: unit.context?.handoff }],
       async () => {
         let out:
@@ -3244,6 +3593,8 @@ export class RunHistoryDO extends DurableObject<Env> {
         return out;
       },
     );
+    if (result.ok) await this.armCoordinatorReconciliation(now);
+    return result;
   }
 
   /** Idempotent for the same record; a different record under a taken id is refused. */
@@ -3470,6 +3821,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     staged: readonly CoordinatorUnit[] = [],
     owner?: CoordinatorInstance,
   ): PullBindingRefusal | undefined {
+    if (this.pendingCoordinatorReport(current, next)) return "stale";
     force ||= current?.startedAt === undefined && next.startedAt !== undefined;
     if (!force && !needsPullBindingAdmission(current, next)) return;
     try {
@@ -3512,7 +3864,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     units: CoordinatorUnit[],
     now: number,
   ): Promise<{ ok: true } | { ok: false; reason: "settled" | PullBindingRefusal }> {
-    return this.withRangePins(
+    const result = await this.withRangePins(
       units.map((unit) => ({ id: `@unit:${unit.instanceId}:${unit.unit}`, handoff: unit.context?.handoff })),
       async () =>
         this.writeUnfencedUnit(() => {
@@ -3548,6 +3900,8 @@ export class RunHistoryDO extends DurableObject<Env> {
           }
         }),
     );
+    if (result.ok) await this.armCoordinatorReconciliation(now);
+    return result;
   }
 
   /** One compare-and-replace transaction updates a unit for exactly one
@@ -3785,9 +4139,9 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   async getRecoveryAction(
     key: { instanceId: string; unit: string },
-    request: RecoveryRequest,
+    request: RecoveryRequest | string,
   ): Promise<RecoveryAction | null> {
-    const id = await recoveryActionId(key, request);
+    const id = typeof request === "string" ? request : await recoveryActionId(key, request);
     const row = this.sql
       .exec<{ json: string }>(
         `SELECT json FROM coordinator_recovery_journal WHERE instance_id = ? AND unit = ? AND kind = 'action' AND id = ?`,
@@ -3796,7 +4150,14 @@ export class RunHistoryDO extends DurableObject<Env> {
         id,
       )
       .toArray()[0];
-    return row ? (JSON.parse(row.json) as RecoveryAction) : null;
+    if (!row) return null;
+    const action = JSON.parse(row.json) as RecoveryAction;
+    return isRecoveryAction(action) &&
+      action.id === id &&
+      action.instanceId === key.instanceId &&
+      action.unit === key.unit
+      ? action
+      : null;
   }
 
   async listRecoveryHistory(key: { instanceId: string; unit: string }, after = 0): Promise<RecoveryHistoryPage> {
@@ -3990,12 +4351,13 @@ export class RunHistoryDO extends DurableObject<Env> {
     event: Omit<ThreadEvent, "seq">,
     requireActive = false,
     binding?: MainTaskBinding,
+    expectedRecovery?: { actionId: string; workflowId: string },
   ): Promise<{ ok: true; seq: number; event?: ThreadEvent } | { ok: false; reason: "ended" | "stale" }> {
     let seq = 1;
     let refusal: "ended" | "stale" | undefined;
     let storedEvent: ThreadEvent | undefined;
     this.ctx.storage.transactionSync(() => {
-      if (requireActive || binding !== undefined) {
+      if (requireActive || binding !== undefined || expectedRecovery !== undefined) {
         const instanceText = this.sql
           .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, instanceId)
           .toArray()[0]?.json;
@@ -4018,7 +4380,23 @@ export class RunHistoryDO extends DurableObject<Env> {
           refusal = "stale";
           return;
         }
-        if (!instance || !row || instance.stop || row.ending || row.recovery || row.recoveryHold) {
+        if (expectedRecovery !== undefined) {
+          const snapshot = this.coordinatorSnapshot(instanceId, unit);
+          if (
+            !requireActive ||
+            !snapshot ||
+            snapshot.unit.recovery?.actionId !== expectedRecovery.actionId ||
+            snapshot.unit.recovery.workflowId !== expectedRecovery.workflowId ||
+            snapshot.action?.state !== "pending"
+          ) {
+            refusal = "stale";
+            return;
+          }
+          if (snapshot.instance.stop || snapshot.unit.ending || snapshot.unit.recoveryHold) {
+            refusal = "ended";
+            return;
+          }
+        } else if (!instance || !row || instance.stop || row.ending || row.recovery || row.recoveryHold) {
           refusal = "ended";
           return;
         }
@@ -6201,6 +6579,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     const root = startAdoptedRoot(tracer, "state.alarm", { sinks: traceSinks });
     try {
       const now = systemClock();
+      await this.discoverCoordinatorWorkflows(now);
       let deleted = 0;
       if (this.env.RUN_HISTORY_MAINTENANCE === "enabled") {
         const { policy } = this.policyState();
@@ -6268,13 +6647,20 @@ export class RunHistoryDO extends DurableObject<Env> {
         );
         this.pushPlaneEffects(this.openPlaneEffects());
       }
-      await this.ctx.storage.setAlarm(now + RUN_SWEEP_INTERVAL_MS);
-      await this.ensurePlaneAlarm(now);
       root.end("ok", { swept: deleted });
     } catch (err) {
       root.fail(err);
       root.end("error");
       throw err;
+    } finally {
+      // Platform alarm retries are bounded. Persist the next due and arm it
+      // even when discovery or physical maintenance failed in this pass.
+      const now = systemClock();
+      const set = await this.ctx.storage.getAlarm();
+      if (set === null || set > now + RUN_SWEEP_INTERVAL_MS)
+        await this.ctx.storage.setAlarm(now + RUN_SWEEP_INTERVAL_MS);
+      await this.armCoordinatorReconciliation(now);
+      await this.ensurePlaneAlarm(now);
     }
   }
 
@@ -8168,6 +8554,7 @@ const LEDGER_ROUTES = new Set([
   "/runs/coordinator/units/list-active-recoveries",
   "/runs/coordinator/pull-owners",
   "/runs/coordinator/units/list",
+  "/runs/coordinator/reconcile/offer",
   "/runs/coordinator/events/append",
   "/runs/coordinator/events/list",
   "/runs/coordinator/events/mark-consumed",
@@ -8302,6 +8689,12 @@ async function handlePlane(pathname: string, body: unknown, env: Env): Promise<R
       if (typeof rawOwner.gen !== "string" || rawOwner.gen.length === 0)
         return json({ error: "owner generation must be a non-empty string" }, 400);
       owner = { runId: runId.value, gen: rawOwner.gen };
+    }
+    if (b.reconciliation !== undefined) {
+      if (!isCoordinatorReconcileReceipt(b.reconciliation) || b.outcome !== "done")
+        return json({ error: "invalid reconciliation acknowledgement" }, 400);
+      const result = await stub.ackCoordinatorReconciliation(b.id, b.reconciliation, now);
+      return json(result, result.ok ? 200 : 409);
     }
     return json(await stub.planeAck(b.id, b.outcome as PlaneAckOutcome, now, owner));
   }
@@ -9101,12 +9494,29 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
       return json({ error: "invalid recovery work key" }, 400);
     const recoveryKey = { instanceId: address.instanceId, unit: address.unit };
     if (pathname.endsWith("/action")) {
-      if (!isRecoveryRequest(b.request)) return json({ error: "invalid recovery request" }, 400);
-      return json({ action: await stub.getRecoveryAction(recoveryKey, b.request) });
+      const byId = typeof b.actionId === "string" && /^r_[a-f0-9]{64}$/.test(b.actionId);
+      if (byId ? b.request !== undefined : b.actionId !== undefined || !isRecoveryRequest(b.request))
+        return json({ error: "invalid recovery request" }, 400);
+      return json({
+        action: await stub.getRecoveryAction(
+          recoveryKey,
+          byId ? (b.actionId as string) : (b.request as RecoveryRequest),
+        ),
+      });
     }
     if (!Number.isSafeInteger(b.after) || (b.after as number) < 0)
       return json({ error: "invalid recovery cursor" }, 400);
     return json(await stub.listRecoveryHistory(recoveryKey, b.after as number));
+  }
+  if (pathname === "/runs/coordinator/reconcile/offer") {
+    if (
+      typeof b.instanceId !== "string" ||
+      !INSTANCE_ID_PATTERN.test(b.instanceId) ||
+      typeof b.unit !== "string" ||
+      !UNIT_PATTERN.test(b.unit)
+    )
+      return json({ error: "invalid reconciliation work key" }, 400);
+    return json(await stub.offerCoordinatorReconciliation(b.instanceId, b.unit, now));
   }
   if (pathname === "/runs/coordinator/units/put") {
     if (!Array.isArray(b.units) || b.units.length === 0 || b.units.length > MAX_UNITS_PER_PUT)
@@ -9166,6 +9576,21 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
         return json({ error: "requireActive must be boolean" }, 400);
       if (b.binding !== undefined && !isMainTaskBinding(b.binding))
         return json({ error: "binding must name one main task claim" }, 400);
+      if (b.expectedRecovery !== undefined) {
+        const exact = b.expectedRecovery as { actionId?: unknown; workflowId?: unknown };
+        if (
+          !exact ||
+          typeof exact !== "object" ||
+          Array.isArray(exact) ||
+          Object.keys(exact).length !== 2 ||
+          typeof exact.actionId !== "string" ||
+          !/^r_[a-f0-9]{64}$/.test(exact.actionId) ||
+          typeof exact.workflowId !== "string" ||
+          !INSTANCE_ID_PATTERN.test(exact.workflowId) ||
+          b.requireActive !== true
+        )
+          return json({ error: "expectedRecovery must name an active exact action and Workflow" }, 400);
+      }
       // The store assigns the sequence and the consumer: a caller's `seq` or
       // `consumedBy` is dropped, so no row is born consumed in its JSON while
       // its column still lists it unconsumed.
@@ -9176,6 +9601,7 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
         event as Omit<ThreadEvent, "seq" | "consumedBy">,
         b.requireActive === true,
         b.binding as MainTaskBinding | undefined,
+        b.expectedRecovery as { actionId: string; workflowId: string } | undefined,
       );
       if (!r.ok) return json(r, 409);
       console.log(`[runs/coordinator/events/append] ${key.value} ${b.instanceId}:${b.unit} seq ${r.seq}`);

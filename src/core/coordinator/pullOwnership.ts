@@ -1,5 +1,6 @@
 import { doorPublicationOf, branchPublicationOf, isPublicationRepo } from "../branchPublication.js";
 import { workspaceSettlementOf } from "../workspaceSettlement.js";
+import { isCoordinatorReconcileEffect } from "./workflowReconciliation.js";
 import {
   isCoordinatorInstance,
   isCoordinatorUnit,
@@ -269,6 +270,31 @@ export function findPullOwnersInRows(target: PullTarget, rows: PullOwnershipRows
     if (!value || typeof value !== "object" || Array.isArray(value)) return { ok: false, reason: "incomplete" };
     const effect = value as Record<string, unknown>;
     if (typeof effect.id !== "string" || !effect.id) return { ok: false, reason: "incomplete" };
+    if (effect.kind === "coordinator_reconcile") {
+      if (!isCoordinatorReconcileEffect(effect)) return { ok: false, reason: "incomplete" };
+      const bound = rows.units.filter(
+        (row) =>
+          isCoordinatorInstance(row.instance) &&
+          isCoordinatorUnit(row.unit) &&
+          row.instance.id === effect.instanceId &&
+          row.unit.instanceId === effect.instanceId &&
+          row.unit.unit === effect.unit,
+      );
+      if (bound.length !== 1) return { ok: false, reason: "incomplete" };
+      const { instance, unit } = bound[0] as { instance: CoordinatorInstance; unit: CoordinatorUnit };
+      if (
+        unitPullTargets(instance, unit).some(
+          (candidate) => sameRepo(candidate.repo) && matches(candidate.pr, candidate.ref),
+        )
+      )
+        add({
+          kind: "unit",
+          instanceId: instance.id,
+          unit: unit.unit,
+          ...(unit.recovery ? { actionId: unit.recovery.actionId } : {}),
+        });
+      continue;
+    }
     if (["admit", "probe", "steer", "reissue"].includes(effect.kind as string)) continue;
     if (!["retitle", "pr_open", "rebase_round"].includes(effect.kind as string) || !isPublicationRepo(effect.repo))
       return { ok: false, reason: "incomplete" };

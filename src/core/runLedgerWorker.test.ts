@@ -405,6 +405,37 @@ describe("WorkerRunLedger", () => {
     ]);
   });
 
+  it("requires an exact confirmed reconciliation acknowledgement and carries only its typed durable receipts", async () => {
+    const owner = {
+      instanceId: "instance",
+      unit: "ONE",
+      attempt: 0,
+      requester: "cli:user",
+      channelId: "cli:main",
+      threadKey: "cli:main:1",
+      deliveryId: "report",
+    };
+    const receipt = {
+      reportDelivery: { version: 1 as const, owner, proposalHash: "a".repeat(64) },
+      status: { ...owner, destinationThreadKey: owner.threadKey, repo: "acme/api", snapshotHash: "b".repeat(64) },
+    };
+    const confirmed = stubWorker();
+    await confirmed.ledger.planeAck("coordinator-reconcile:" + "c".repeat(64), "done", undefined, receipt);
+    expect(confirmed.calls[0]?.body.reconciliation).toEqual(receipt);
+    for (const answer of [
+      { status: 409, data: { ok: false } },
+      { status: 200, data: { ok: false } },
+    ]) {
+      const unavailable = stubWorker(() => answer);
+      await expect(
+        unavailable.ledger.planeAck("coordinator-reconcile:" + "c".repeat(64), "done", undefined, receipt),
+      ).rejects.toBeInstanceOf(TransientStoreError);
+    }
+    await expect(
+      confirmed.ledger.planeAck("coordinator-reconcile:" + "c".repeat(64), "skipped", undefined, receipt),
+    ).rejects.toBeInstanceOf(PermanentStoreError);
+  });
+
   it("append with no events posts nothing; finish clears nothing and releases the session's owner best-effort when the record names one; reclaim re-owns a session log for a row with a session and the transcript object for one without", async () => {
     const session = { key: "slack:C1:1.0:review", seedFrom: 0, request: 0, range: { from: 0 } };
     const w = stubWorker((path) =>

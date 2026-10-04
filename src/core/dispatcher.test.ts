@@ -135,7 +135,6 @@ import { capabilitiesFrom } from "./capabilities.js";
 import { NO_FLEET } from "./residentFleet.js";
 import { InMemoryCoordinatorInstanceStore } from "./coordinator/instanceStore.js";
 import type { CoordinatorInstance, CoordinatorUnit } from "./coordinator/contract.js";
-import { RunnerOwnershipFence } from "./runnerOwnership.js";
 import {
   COORDINATOR_ADMIN_PREFIX,
   handleCoordinatorRequest,
@@ -15356,8 +15355,6 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
             },
           },
         ]);
-        h.admin.runnerOwnership = new RunnerOwnershipFence(false);
-        expect(h.admin.runnerOwnership.claim(h.instance.repo, 7, owner)).toBe(true);
         const release = vi.fn(async () => ({ released: true }));
         const exec = vi.fn(async () => "");
         let commandsBeforeFacts = 0;

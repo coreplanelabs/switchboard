@@ -5,6 +5,7 @@ import {
   coordinatorReportAdmission,
   freezeAdmittedCoordinatorReport,
   freezeCoordinatorReport,
+  readCoordinatorReport,
 } from "./reportContext.js";
 
 const owner = {
@@ -18,6 +19,15 @@ const owner = {
 };
 
 describe("coordinator report snapshots", () => {
+  it("uses canonical owner identity regardless of object field order", async () => {
+    const ledger = new InMemoryRunLedger();
+    const reordered = Object.fromEntries(Object.entries(owner).reverse()) as typeof owner;
+    const proposal = { text: "original detail", threadText: "original summary" };
+    const admission = await coordinatorReportAdmission(owner, proposal);
+    expect(await freezeAdmittedCoordinatorReport(ledger, admission, reordered, proposal)).toEqual(proposal);
+    expect(await readCoordinatorReport(ledger, owner)).toEqual(proposal);
+    expect((await ledger.readSessionTail(contextThreadSessionKey(owner.threadKey), 100_000)).transcript.turns).toBe(1);
+  });
   it("requires the exact admitted proposal before creating immutable report bytes", async () => {
     const ledger = new InMemoryRunLedger();
     const proposal = { text: "accepted detail", threadText: "accepted summary" };

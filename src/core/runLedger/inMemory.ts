@@ -23,6 +23,7 @@ import {
   type ContextCheckpointResult,
 } from "../references/contextCheckpoint.js";
 import { contextDependenciesContain } from "../references/contextDependencies.js";
+import type { CoordinatorReconcileReceipt } from "../coordinator/workflowReconciliation.js";
 import {
   handoffRangePins,
   sessionRangesAvailable,
@@ -74,6 +75,7 @@ import {
   causeOfClose,
   causeOfReclaim,
   type PlaneAckOutcome,
+  type PlaneEffect,
   type PlaneAskAnswer,
   type PlaneEnding,
   type PlaneEndingCause,
@@ -551,7 +553,11 @@ export class InMemoryRunLedger implements RunLedger {
 
   /** The shadow posts and the acks, kept for assertions (orchestration-plane items 7 and 8). */
   readonly planeOutcomes: PlaneOutcomePost[] = [];
-  readonly planeAcks: Array<{ id: string; outcome: PlaneAckOutcome }> = [];
+  readonly planeAcks: Array<{ id: string; outcome: PlaneAckOutcome; reconciliation?: CoordinatorReconcileReceipt }> =
+    [];
+  /** The same outbox seam as the Worker; reconciliation remains open until
+   * durable report obligations can be verified, which this double cannot infer. */
+  readonly planeOffers = new Map<string, PlaneEffect>();
 
   async planeOutcome(post: PlaneOutcomePost): Promise<{ ok: boolean; decider?: string; agreed?: boolean | null }> {
     this.planeOutcomes.push(post);
@@ -566,8 +572,17 @@ export class InMemoryRunLedger implements RunLedger {
     return true;
   }
 
-  async planeAck(id: string, outcome: PlaneAckOutcome): Promise<void> {
-    this.planeAcks.push({ id, outcome });
+  async planeAck(
+    id: string,
+    outcome: PlaneAckOutcome,
+    _owner?: { runId: string; gen: string },
+    reconciliation?: CoordinatorReconcileReceipt,
+  ): Promise<void> {
+    this.planeAcks.push({
+      id,
+      outcome,
+      ...(reconciliation ? { reconciliation: structuredClone(reconciliation) } : {}),
+    });
   }
 
   /** The admission asks, kept for assertions; the answer is settable per test

@@ -72,6 +72,7 @@ const ok = (body: object, at = T0, status = 200): BotReply => {
   const value = body as Record<string, unknown>;
   if (["merged", "enqueued"].includes(value.outcome as string) && value.by === undefined && !("effectOrdinal" in value))
     effectFixtures.add(reply);
+  if ((value.retried === true || value.refired === true) && !("effectOrdinal" in value)) effectFixtures.add(reply);
   return reply;
 };
 /** The same, read — what the mappers see. */
@@ -1154,6 +1155,8 @@ function bot(script: Partial<Record<CoordinatorStepRoute, Scripted[]>>) {
       if (
         (route === "branch" ||
           route === "spawn" ||
+          (route === "checks" &&
+            (JSON.parse(answer.text).retried === true || JSON.parse(answer.text).refired === true)) ||
           (route === "merge" &&
             body.queued !== true &&
             ["merged", "enqueued"].includes(JSON.parse(answer.text).outcome) &&
@@ -3528,6 +3531,31 @@ describe("the plan runner's driver — the entry checks resume a re-issued plan'
     expect(b.of("round")).toContainEqual(
       expect.objectContaining({ unit: "U10", index: 1, agent: "review", outcome: "checks_restarted" }),
     );
+    expect(b.wireOf("checks")[3].effectOrdinal).toBe((b.wireOf("checks")[2].effectOrdinal as number) + 1);
+  });
+
+  it("refuses a positive check recovery wire reply without its next exact effect ordinal", async () => {
+    for (const receipt of [{}, { effectOrdinal: 0 }, { effectOrdinal: "unreadable" }]) {
+      const empty = { total: 1, pending: [], failed: [], required: ["ci / bot"], expected: ["ci / bot"] };
+      const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
+      const b = bot({
+        plan: [planAnswer([row("U10")], T0, "person")],
+        "unit-start": [started("U10")],
+        branch: [branched("U10")],
+        spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN)],
+        "read-record": [codingDone("run-c0", T0 + 10 * MIN), reviewApproved("run-r1", T0 + 20 * MIN)],
+        "pr-check": [prNone(), prOpen(T0 + 10 * MIN)],
+        checks: [
+          ok({ ok: true, checks: empty }, T0 + 20 * MIN),
+          ok({ ok: true, checks: empty }, T0 + 25 * MIN),
+          { status: 200, text: JSON.stringify({ ok: true, refired: true, at: T0 + 25 * MIN, ...receipt }) },
+        ],
+        round: Array.from({ length: 8 }, () => acked()),
+        "unit-end": [acked()],
+        finish: [acked()],
+      });
+      await expect(runPlan(s.runner, b.client, INSTANCE)).rejects.toThrow("effect ordinal");
+    }
   });
 
   it("the seal's remedy holds (issue 2100): a re-issue in a thread whose pull request is approved and clean resumes at the checks step — under merge: runner the merge door is asked at exactly the approved head with no branch step and no coding child, never a fresh coding round", async () => {

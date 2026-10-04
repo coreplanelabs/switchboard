@@ -11,6 +11,7 @@ import { ALL_GRANTS } from "../core/authz/grants.js";
 import { InMemoryCoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import { createMainTaskStarter } from "../core/coordinator/mainStart.js";
 import { generatedTaskOf } from "../core/coordinator/generatedTask.js";
+import { coordinatorReconciliationEffect } from "../core/coordinator/workflowReconciliation.js";
 import { workflowSteps } from "../core/coordinator/steps.js";
 import {
   InMemoryPrivateWorkerLog,
@@ -88,6 +89,7 @@ import {
   isCoordinatorAdminPath,
   planSummary,
   recoverOriginalUnit,
+  reconcileCoordinatorReport,
   adoptOriginalPublishedHead,
   recoveredFallbackTitle,
   type AdminCoordinatorDeps,
@@ -579,17 +581,24 @@ function harness(
       : {}),
     ...(over.rerunOk !== undefined
       ? {
-          rerunFailedChecks: async (_repo: string, sha: string, names: string[]) => {
+          fetchCheckRetryTargets: async (_repo: string, sha: string, names: string[]) => {
             reruns.push({ sha, names });
-            return over.rerunOk === true;
+            return [{ operation: "actions_rerun" as const, resourceId: 8 }];
           },
+          rerunActionsFailedJobs: async () => ({
+            state: over.rerunOk === true ? ("accepted" as const) : ("refused" as const),
+          }),
         }
       : {}),
     ...(over.refireOk !== undefined
       ? {
-          refirePullRequest: async (repo: string, prNumber: number) => {
-            refires.push({ repo, prNumber });
-            return over.refireOk === true;
+          setPullRequestState: async (
+            pr: { repo: string; number: number },
+            _target: unknown,
+            state: "closed" | "open",
+          ) => {
+            if (state === "closed") refires.push({ repo: pr.repo, prNumber: pr.number });
+            return { state: over.refireOk === true ? ("accepted" as const) : ("refused" as const) };
           },
         }
       : {}),
@@ -2608,7 +2617,7 @@ describe("pr-check recover — the answer says why nothing was recovered, and Gi
     const obsolete = vi.fn(() => {
       throw new Error("obsolete local owner");
     });
-    h.deps.runnerOwnership = { claim: obsolete, release: obsolete, owner: obsolete };
+    h.deps.runnerOwnership = { claim: obsolete };
     expect(await recoverBinding(h.deps)).toMatchObject({ status: 200 });
     const [bound] = await h.instances.listUnits(INSTANCE.id);
     expect(bound!.publication).toMatchObject({
@@ -4719,8 +4728,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     const pr = { number: 7, url: "https://github.com/acme/api/pull/7" };
     await h.instances.putUnits([unitRow("U10", { pr })]);
     await hostParent(h);
-    const fence = h.deps.runnerOwnership!;
-    expect(fence.claim(PLAN_INSTANCE.repo, pr.number, { instanceId: PLAN_INSTANCE.id, unit: "U10" })).toBe(true);
+
     const body = {
       parentInstanceId: PLAN_INSTANCE.id,
       unit: "U10",
@@ -4728,10 +4736,18 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       ending: { kind: "aborted", report: "Stopped", outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 1 } },
     };
     expect(await call(h, "unit-end", body)).toMatchObject({ status: 200 });
-    const successor = { instanceId: "runner-successor", unit: "task" };
-    expect(fence.claim(PLAN_INSTANCE.repo, pr.number, successor)).toBe(true);
+    const successor = { instanceId: "runner-successor", unit: "U11" };
+    seedCoordinatorInstance(h.instances, { ...PLAN_INSTANCE, id: successor.instanceId });
+    const successorRow = unitRow(successor.unit, { instanceId: successor.instanceId, pr });
+    seedCoordinatorUnit(h.instances, {
+      ...successorRow,
+      publication: { ...successorRow.publication!, owner: successor },
+    });
     expect(await call(h, "unit-end", body)).toMatchObject({ status: 200 });
-    expect(fence.owner(PLAN_INSTANCE.repo, pr.number)).toEqual(successor);
+    expect(await h.instances.findPullOwners({ repo: PLAN_INSTANCE.repo, pr: pr.number })).toEqual({
+      ok: true,
+      owners: [{ kind: "unit", ...successor }],
+    });
   });
 
   it("binds a typed private report to its original delivery id across retries", async () => {
@@ -7083,6 +7099,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       step: "U10/2/review/read/1",
       round: 2,
       report,
+      threadReport: report,
       at: NOW,
     });
     expect(replies).toEqual([{ threadKey: "slack:C1:2.0", text: report }]);
@@ -7149,6 +7166,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(rows[0].ending).toEqual({
       kind: "merge_ready",
       report: "✅ Merge-ready after 1 review round: https://github.com/acme/api/pull/7",
+      threadReport: "✅ Merge-ready after 1 review round: https://github.com/acme/api/pull/7",
       at: NOW,
     });
     expect(rows[0].pr).toEqual({ number: 7, url: "https://github.com/acme/api/pull/7" });
@@ -7516,7 +7534,15 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
 // and every check is green; refused by reason otherwise, so a person decides.
 describe("POST /admin/coordinator/checks — the round's checks read at the reviewed head (record 0055, item 9)", () => {
   const HEAD = "a".repeat(40);
-  const body = { parentInstanceId: INSTANCE.id, unit: "U10", prNumber: 7, headSha: HEAD };
+  const body = {
+    parentInstanceId: INSTANCE.id,
+    unit: "U10",
+    prNumber: 7,
+    headSha: HEAD,
+    effectId: "U10/checks/0",
+    effectOrdinal: 1,
+    executionWorkflowId: INSTANCE.id,
+  };
   const rowU10: Partial<CoordinatorUnit> = {};
   async function checksHarness(over: Parameters<typeof harness>[0] = {}) {
     const h = harness(over);
@@ -7530,9 +7556,34 @@ describe("POST /admin/coordinator/checks — the round's checks read at the revi
         dependsOn: [],
         rounds: [],
         threadKey: "slack:C1:2.0",
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+        publication: {
+          repo: INSTANCE.repo,
+          pr: 7,
+          headRef: "ship/warm-abc123",
+          baseRef: "main",
+          publicationRef: "ship/warm-abc123",
+          expectedHeadSha: HEAD,
+          owner: { instanceId: INSTANCE.id, unit: "U10" },
+        },
         ...rowU10,
       },
     ]);
+    if (over.prFacts === undefined) {
+      const read = h.deps.fetchPrFacts;
+      h.deps.fetchPrFacts = async (pr) => {
+        const facts = await read(pr);
+        return (
+          facts && {
+            ...facts,
+            baseRef: "main",
+            headRef: "ship/warm-abc123",
+            verifiedHead: { repo: INSTANCE.repo, ref: "ship/warm-abc123", sha: HEAD },
+            ...(over.refireOk === true && h.refires.length > 0 ? { state: "closed" as const } : {}),
+          }
+        );
+      };
+    }
     return h;
   }
   const checks = (h: ReturnType<typeof harness>, b: Record<string, unknown> = body) =>
@@ -7643,15 +7694,11 @@ describe("POST /admin/coordinator/checks — the round's checks read at the revi
     const h = await checksHarness({ rerunOk: true });
     expect(await checks(h, { ...body, retry: ["test 2 of 4"] })).toEqual({
       status: 200,
-      body: { ok: true, retried: true, at: NOW },
+      body: { ok: true, retried: true, effectOrdinal: 1, at: NOW },
     });
     expect(h.reruns).toEqual([{ sha: HEAD, names: ["test 2 of 4"] }]);
     const bare = await checksHarness();
-    expect((await checks(bare, { ...body, retry: ["test 2 of 4"] })).body).toEqual({
-      ok: true,
-      retried: false,
-      at: NOW,
-    });
+    expect((await checks(bare, { ...body, retry: ["test 2 of 4"] })).status).toBe(503);
     // A malformed retry is a 400, never a silent read.
     expect((await checks(bare, { ...body, retry: [] })).status).toBe(400);
     expect((await checks(bare, { ...body, retry: [7] })).status).toBe(400);
@@ -7661,15 +7708,46 @@ describe("POST /admin/coordinator/checks — the round's checks read at the revi
     const h = await checksHarness({ refireOk: true });
     expect(await checks(h, { ...body, refire: true })).toEqual({
       status: 200,
-      body: { ok: true, refired: true, at: NOW },
+      body: { ok: true, refired: true, effectOrdinal: 1, at: NOW },
     });
     expect(h.refires).toEqual([{ repo: "acme/api", prNumber: 7 }]);
 
     const bare = await checksHarness();
-    expect((await checks(bare, { ...body, refire: true })).body).toEqual({ ok: true, refired: false, at: NOW });
+    expect((await checks(bare, { ...body, refire: true })).status).toBe(503);
     expect((await checks(bare, { ...body, refire: false })).status).toBe(400);
     expect((await checks(bare, { ...body, refire: true, retry: ["ci / bot"] })).status).toBe(400);
   });
+
+  it.each(["moved head", "foreign ref", "unknown head"] as const)(
+    "check recovery refuses the native %s before admitting a write",
+    async (mismatch) => {
+      const h = await checksHarness({
+        rerunOk: true,
+        prFacts: {
+          state: "open",
+          sameRepoHead: true,
+          headBranchExists: true,
+          headRef: "ship/warm-abc123",
+          baseRef: "main",
+          ...(mismatch === "unknown head"
+            ? {}
+            : {
+                verifiedHead: {
+                  repo: INSTANCE.repo,
+                  ref: mismatch === "foreign ref" ? "other" : "ship/warm-abc123",
+                  sha: mismatch === "moved head" ? "b".repeat(40) : HEAD,
+                },
+              }),
+        },
+      });
+      expect(await checks(h, { ...body, retry: ["ci / tests"] })).toMatchObject({
+        status: mismatch === "unknown head" ? 503 : 409,
+        body: { error: mismatch === "unknown head" ? "effect_reconciliation_pending" : "effect_target_mismatch" },
+      });
+      expect(h.reruns).toEqual([]);
+      expect((await h.instances.listUnits(INSTANCE.id))[0]?.currentEffect).toBeUndefined();
+    },
+  );
 
   it("holds its body to shape: a bad instance, unit, prNumber or head is a 400/404 by name", async () => {
     const h = await checksHarness({ roundChecks: { total: 1, pending: [], failed: [] } });
@@ -9663,6 +9741,86 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     return key;
   }
 
+  const pullOwners = async (h: ReturnType<typeof harness>) => {
+    const result = await h.instances.findPullOwners({ repo: INSTANCE.repo, pr: PR.number });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("canonical ownership unavailable");
+    return result.owners;
+  };
+  const seedRivalOwner = (h: ReturnType<typeof harness>, id = "rival", unit = "U10") => {
+    seedCoordinatorInstance(h.instances, { ...recoveryInstance(), id });
+    seedCoordinatorUnit(h.instances, {
+      ...requestChangesRow(),
+      instanceId: id,
+      unit,
+      ending: undefined,
+      publication: { ...publication, owner: { instanceId: id, unit } },
+    });
+  };
+
+  it("admits and settles the original recovery without process-local ownership state", async () => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    delete h.deps.runnerOwnership;
+    expect(await callRecovery(h)).toMatchObject({ status: 200 });
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    expect(await h.instances.findPullOwners({ repo: INSTANCE.repo, pr: PR.number })).toEqual({
+      ok: true,
+      owners: [{ kind: "unit", instanceId: INSTANCE.id, unit: "U12", actionId: claimed!.recovery!.actionId }],
+    });
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          recoveryActionId: claimed!.recovery!.actionId,
+          recoveryWorkflowId: claimed!.recovery!.workflowId,
+          ending: {
+            kind: "aborted",
+            report: "original recovery stopped",
+            outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 1 },
+          },
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 200 });
+    expect((await h.instances.getRecoveryAction(claimed!, claimed!.recovery!.actionId!))?.state).toBe("settled");
+    expect(await h.instances.findPullOwners({ repo: INSTANCE.repo, pr: PR.number })).toEqual({ ok: true, owners: [] });
+  });
+
+  it.each(["unavailable", "incomplete"] as const)("defers recovery on a %s canonical owner read", async (reason) => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    const before = await h.instances.listUnits(INSTANCE.id);
+    vi.spyOn(h.instances, "findPullOwners").mockResolvedValueOnce({ ok: false, reason });
+    const claim = vi.spyOn(h.instances, "transitionRecovery");
+    expect(await callRecovery(h)).toMatchObject({ status: 503, body: { error: "publication_ownership_unknown" } });
+    expect(claim).not.toHaveBeenCalled();
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+    expect(h.recoveries).toEqual([]);
+  });
+
+  it("a canonical rival arriving after the owner read refuses atomic recovery admission", async () => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    const before = await h.instances.listUnits(INSTANCE.id);
+    const transition = h.instances.transitionRecovery.bind(h.instances);
+    vi.spyOn(h.instances, "transitionRecovery").mockImplementationOnce(async (input) => {
+      seedRivalOwner(h);
+      return transition(input);
+    });
+    expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "publication_ownership_changed" } });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+    expect(h.recoveries).toEqual([]);
+    expect(await pullOwners(h)).toEqual(expect.arrayContaining([{ kind: "unit", instanceId: "rival", unit: "U10" }]));
+  });
+
   it("preserves the predecessor and final receipt at the recovery owner", async () => {
     const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
     await h.instances.put(recoveryInstance());
@@ -9777,12 +9935,12 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       return result;
     });
     expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_workflow_failed" } });
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
     expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_workflow_failed" } });
     expect(h.recoveries).toHaveLength(1);
   });
 
-  it("refuses unsupported history storage before reserving or creating recovery", async () => {
+  it("refuses unsupported history storage before admitting or creating recovery", async () => {
     const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
     await h.instances.put(recoveryInstance());
     await h.instances.putUnits([requestChangesRow()]);
@@ -9790,7 +9948,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     vi.spyOn(h.instances, "getRecoveryAction").mockRejectedValue(new Error("old Worker"));
     expect(await callRecovery(h)).toMatchObject({ status: 503, body: { error: "recovery_history_unavailable" } });
     expect(h.recoveries).toEqual([]);
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
   });
 
   it("refuses recovery while original admission remains unreconciled", async () => {
@@ -9800,7 +9958,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.store.put(reviewRecord());
     expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_admission_unreconciled" } });
     expect(h.recoveries).toEqual([]);
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
     expect((await h.instances.listRecoveryHistory(requestChangesRow())).receipts).toEqual([]);
   });
 
@@ -9822,14 +9980,25 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       return result;
     });
     expect(await callRecovery(h)).toMatchObject({ status: 500, body: { error: "recovery_rollback_failed" } });
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeDefined();
+    expect(
+      (
+        await h.instances.getRecoveryAction(
+          { instanceId: INSTANCE.id, unit: "U12" },
+          {
+            userId: INSTANCE.userId,
+            threadKey: INSTANCE.threadKey,
+            messageId: "slack:C1:recovery-request",
+          },
+        )
+      )?.state,
+    ).toBe("refused");
     expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_workflow_failed" } });
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
     expect(await callRecovery(h, "later-request")).toMatchObject({ status: 200 });
-    const owner = h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number);
+    const owner = await pullOwners(h);
     expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_workflow_failed" } });
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(owner);
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeDefined();
+    expect(await pullOwners(h)).toEqual(owner);
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery?.actionId).toBeDefined();
     expect(creates).toBe(2);
   });
 
@@ -9839,7 +10008,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.instances.putUnits([requestChangesRow()]);
     await h.store.put(reviewRecord());
     expect((await callRecovery(h)).status).toBe(200);
-    const rerun = vi.spyOn(h.deps, "rerunFailedChecks");
+    const rerun = vi.spyOn(h.deps, "rerunActionsFailedJobs");
     const base = { parentInstanceId: INSTANCE.id, unit: "U12", pr: PR.number, headSha: HEAD, retry: ["tests"] };
     for (const identity of [
       {},
@@ -9952,9 +10121,13 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     });
     expect(claimed.ok).toBe(true);
     if (!claimed.ok) throw new Error(claimed.reason);
-    const owner = { instanceId: INSTANCE.id, unit: "U12", recoveryActionId: claimed.unit.recovery!.actionId };
+    const successorOwner = {
+      kind: "unit",
+      instanceId: INSTANCE.id,
+      unit: "U12",
+      actionId: claimed.unit.recovery!.actionId,
+    };
     expect(first?.state).toBe("settled");
-    expect(h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, owner)).toBe(true);
     for (const replay of [
       body,
       { ...body, deliveryId: `U12/recovery/${REVIEW_ACTION}/changed`, ending: { ...body.ending, report: "changed" } },
@@ -9963,7 +10136,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         { status: 409, body: { error: "recovery_claim_mismatch" } },
       );
     expect((await log.list(key)).filter((event) => event.kind === "reply")).toHaveLength(1);
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(owner);
+    expect(await pullOwners(h)).toEqual([successorOwner]);
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual([claimed.unit]);
   });
 
@@ -10281,8 +10454,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     if (scenario === "round cap")
       seedCoordinatorInstance(h.instances, { ...recoveryInstance(), caps: { maxRounds: 1, maxMinutes: 120 } });
     if (scenario === "competing owner") {
-      h.deps.runnerOwnership!.release(INSTANCE.repo, PR.number, owner);
-      h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
+      seedRivalOwner(h);
     }
     if (scenario === "spent cap")
       seedCoordinatorInstance(h.instances, { ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 0.5 } });
@@ -10422,10 +10594,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       },
     });
     expect(claimed!.recovery).not.toHaveProperty("findingsRunId");
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual({
-      ...owner,
-      recoveryActionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId,
-    });
+    expect(await pullOwners(h)).toEqual([
+      { kind: "unit", ...owner, actionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId },
+    ]);
     expect((await h.instances.get(INSTANCE.id))!.caps).toEqual(recoveryInstance().caps);
     expect(await callRecovery(h)).toMatchObject({ status: 200, body: { outcome: "already_started" } });
     expect((await h.instances.listUnits(INSTANCE.id))[0]).toEqual(claimed);
@@ -10475,8 +10646,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           }),
         );
       if (scenario === "moving ref") h.deps.fetchPrFacts = async () => exactRecoveryFacts("c".repeat(40));
-      if (scenario === "rival owner")
-        h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
+      if (scenario === "rival owner") seedRivalOwner(h);
       const before = await h.instances.listUnits(INSTANCE.id);
       expect((await callRecovery(h)).status).toBe(409);
       expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
@@ -10707,8 +10877,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       h.deps.fetchPrFacts = async () => ({ ...exactRecoveryFacts(SALVAGED), headRef: "other" });
     if (scenario === "closed PR")
       h.deps.fetchPrFacts = async () => ({ ...exactRecoveryFacts(SALVAGED), state: "closed" });
-    if (scenario === "rival owner")
-      h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
+    if (scenario === "rival owner") seedRivalOwner(h);
     if (scenario === "stale CAS")
       vi.spyOn(h.instances, "transitionRecovery").mockResolvedValueOnce({ ok: false, reason: "stale" });
     if (scenario === "partial listing") {
@@ -10724,10 +10893,10 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     if (scenario === "unknown spend")
       seedCoordinatorInstance(h.instances, { ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
     seedCoordinatorUnit(h.instances, row!);
-    const priorOwner = h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number);
+    const priorOwner = await pullOwners(h);
     expect((await callRecovery(h)).status).toBe(409);
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(priorOwner);
+    expect(await pullOwners(h)).toEqual(priorOwner);
     expect(h.recoveries).toEqual([]);
     expect(h.dispatched).toEqual([]);
     expect(h.branches).toEqual([]);
@@ -10755,7 +10924,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual(
       before.map((row) => ({ ...row, history: { version: 1, receiptId: "observed" } })),
     );
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
     h.deps.startRecovery = async (id) => ({ kind: "created", id });
     expect((await callRecovery(h, "slack:C1:later-request")).status).toBe(200);
     expect((await h.instances.listUnits(INSTANCE.id))[0]!.recovery?.kind).toBe("findings");
@@ -11034,7 +11203,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           : { kind: "unanswered" as const, reason: "status response lost" },
       );
       h.deps.recoveryStatus = readStatus;
-      h.deps.runnerOwnership = new RunnerOwnershipFence(false);
+      delete h.deps.runnerOwnership;
       const readReviews = vi.fn(async () => {
         if (review === "unavailable") throw new Error("GitHub unavailable");
         return [{ ...laterReview(), id: laterReview().id! + 1 }];
@@ -11051,10 +11220,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       expect(await h.instances.listUnits(INSTANCE.id)).toEqual(claimed);
       expect(await h.instances.get(INSTANCE.id)).toEqual(savedInstance);
       expect(await h.instances.listRecoveryHistory({ instanceId: INSTANCE.id, unit: "U12" })).toEqual(history);
-      expect(h.deps.runnerOwnership.owner(INSTANCE.repo, PR.number)).toEqual({
-        ...owner,
-        recoveryActionId: claimed[0]!.recovery!.actionId,
-      });
+      expect(await pullOwners(h)).toEqual([{ kind: "unit", ...owner, actionId: claimed[0]!.recovery!.actionId }]);
       expect(h.dispatched).toEqual([]);
     },
   );
@@ -11148,10 +11314,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(start.mock.calls.map(([id]) => id)).toEqual([workflowId, workflowId]);
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual(claimed);
     expect(await h.instances.listRecoveryHistory({ instanceId: INSTANCE.id, unit: "U12" })).toEqual(history);
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual({
-      ...owner,
-      recoveryActionId: claimed[0]!.recovery!.actionId,
-    });
+    expect(await pullOwners(h)).toEqual([{ kind: "unit", ...owner, actionId: claimed[0]!.recovery!.actionId }]);
   });
 
   it("persists cost accounting that remains valid after children are sorted", async () => {
@@ -11246,8 +11409,13 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       callRecovery(h, "slack:C1:later-request"),
       callRecovery(h, "slack:C1:later-request"),
     ]);
-    expect(responses.map((r) => r.status).sort()).toEqual([200, 409]);
-    expect(admitted).toEqual(["recovery-r_2a7b4146107649167ee86be55a3153f9a6a6441cf82602934e7507102be544e1"]);
+    expect(responses.map((r) => r.status)).toEqual([200, 200]);
+    expect([...new Set(admitted)]).toEqual([
+      "recovery-r_2a7b4146107649167ee86be55a3153f9a6a6441cf82602934e7507102be544e1",
+    ]);
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    expect((await h.instances.getRecoveryAction(claimed!, claimed!.recovery!.actionId!))?.state).toBe("pending");
+    expect(await pullOwners(h)).toEqual([{ kind: "unit", ...owner, actionId: claimed!.recovery!.actionId }]);
   });
 
   it.each([
@@ -11385,8 +11553,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         stopped: { kind: "segment", index: 1, spendUsd: 15, texts: [], senders: [], leaseMs: minutesToMs(20) },
       };
     if (scenario === "invalid renewal") row.segments = [{ index: 5, at: NOW - minutesToMs(1) }];
-    if (scenario === "rival owner")
-      h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
+    if (scenario === "rival owner") seedRivalOwner(h);
     if (scenario === "CAS loss")
       vi.spyOn(h.instances, "transitionRecovery").mockResolvedValueOnce({ ok: false, reason: "stale" });
     seedCoordinatorInstance(h.instances, instance);
@@ -12503,10 +12670,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           ...(scenario === "unpriced child" ? { usage: undefined } : {}),
         }),
       );
-      const reserve = vi.spyOn(h.deps.runnerOwnership!, "reserve");
       const cas = vi.spyOn(h.instances, "transitionRecovery");
       expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_budget_unknown", reason } });
-      expect(reserve).not.toHaveBeenCalled();
       expect(cas).not.toHaveBeenCalled();
       expect(await h.instances.listUnits(INSTANCE.id)).toEqual([legacyRow()]);
       expect(h.recoveries).toEqual([]);
@@ -12525,13 +12690,11 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
             threadKey: "slack:COTHER:hidden",
           }),
         );
-        const reserve = vi.spyOn(h.deps.runnerOwnership!, "reserve");
         const cas = vi.spyOn(h.instances, "transitionRecovery");
         expect(await callRecovery(h)).toMatchObject({
           status: 409,
           body: { error: "recovery_budget_unknown", reason: "child_identity_mismatch" },
         });
-        expect(reserve).not.toHaveBeenCalled();
         expect(cas).not.toHaveBeenCalled();
         expect(await h.instances.listUnits(INSTANCE.id)).toEqual([legacyRow()]);
         expect(h.recoveries).toEqual([]);
@@ -12565,7 +12728,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           error = "recovery_facts_mismatch";
         }
         if (scenario === "lost ownership") {
-          h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
+          seedRivalOwner(h);
           error = "publication_ownership_changed";
         }
         if (scenario === "missing review") {
@@ -12614,16 +12777,14 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         system: "sys",
         tools: [],
       });
-      const reserve = vi.spyOn(h.deps.runnerOwnership!, "reserve");
       const cas = vi.spyOn(h.instances, "transitionRecovery");
       expect(await callRecovery(h)).toMatchObject({ status: 409, body: { reason: "child_active" } });
-      expect(reserve).not.toHaveBeenCalled();
       expect(cas).not.toHaveBeenCalled();
       expect(h.recoveries).toEqual([]);
     });
 
     it.each(["store unavailable", "ambiguous duplicate", "full relevant set"])(
-      "refuses %s at the evidence boundary before reservation or row CAS",
+      "refuses %s at the evidence boundary before native recovery admission",
       async (scenario) => {
         const h = await legacyHarness();
         await fillUnrelatedHistory(h);
@@ -12635,7 +12796,6 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
             ? Array.from({ length: 200 }, () => rows[0]!)
             : [...rows, { ...rows[0]!, userId: "slack:UOTHER" }];
         });
-        const reserve = vi.spyOn(h.deps.runnerOwnership!, "reserve");
         const cas = vi.spyOn(h.instances, "transitionRecovery");
         expect(await callRecovery(h)).toMatchObject({
           status: 409,
@@ -12644,7 +12804,6 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
               ? { error: "recovery_budget_unknown", reason: "child_history_ambiguous" }
               : { error: "recovery_evidence_incomplete" },
         });
-        expect(reserve).not.toHaveBeenCalled();
         expect(cas).not.toHaveBeenCalled();
         expect(h.recoveries).toEqual([]);
       },
@@ -12754,7 +12913,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           },
         });
         expect(await h.instances.listUnits(INSTANCE.id)).toEqual([legacyRow()]);
-        expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+        expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
         expect(h.recoveries).toEqual([]);
       },
     );
@@ -12785,14 +12944,12 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           });
         }
         const listLive = vi.spyOn(h.ledger, "listLive").mockRejectedValueOnce(new Error("HTTP 503"));
-        const claim = vi.spyOn(h.deps.runnerOwnership!, "claim");
         const cas = vi.spyOn(h.instances, "transitionRecovery");
         expect(await callRecovery(h)).toMatchObject({
           status: 409,
           body: { error: "recovery_evidence_incomplete" },
         });
         expect(await h.instances.listUnits(INSTANCE.id)).toEqual([legacyRow()]);
-        expect(claim).not.toHaveBeenCalled();
         expect(cas).not.toHaveBeenCalled();
         expect(h.recoveries).toEqual([]);
         expect(h.dispatched).toEqual([]);
@@ -12824,7 +12981,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           body: { error: "recovery_evidence_incomplete" },
         });
         expect(await h.instances.listUnits(INSTANCE.id)).toEqual([legacyRow()]);
-        expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+        expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
         expect(h.recoveries).toEqual([]);
       },
     );
@@ -12876,7 +13033,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       };
       expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_wall_clock_exhausted" } });
       expect(await h.instances.listUnits(INSTANCE.id)).toEqual([legacyRow()]);
-      expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+      expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
       expect(h.recoveries).toEqual([]);
     });
 
@@ -13032,7 +13189,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         });
         expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
         expect(h.recoveries).toEqual([]);
-        expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+        expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
       },
     );
 
@@ -13092,10 +13249,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       lastPush: HEAD,
       recovery: { kind: "findings", round: 1 },
     });
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual({
-      ...owner,
-      recoveryActionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId,
-    });
+    expect(await pullOwners(h)).toEqual([
+      { kind: "unit", ...owner, actionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId },
+    ]);
   });
 
   it("legacy binding repair admits a retained initial coding checkpoint and no-verdict review without requiring a PR-created event", async () => {
@@ -13173,9 +13329,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       h.deps.fetchPrFacts = async () => ({ ...exactRecoveryFacts(HEAD), baseRef: "other" });
     if (scenario === "foreign remote")
       h.deps.fetchPrFacts = async () => ({ ...exactRecoveryFacts(HEAD), sameRepoHead: false });
-    if (scenario === "rival owner")
-      h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
-    if (scenario === "active owner") h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, owner);
+    if (scenario === "rival owner") seedRivalOwner(h);
+    if (scenario === "active owner") seedRivalOwner(h, "active-owner");
     if (scenario === "CAS loss")
       vi.spyOn(h.instances, "transitionRecovery").mockResolvedValueOnce({ ok: false, reason: "stale" });
     if (scenario === "contradictory hint") await h.instances.putUnits([{ ...legacyRow(), lastPush: "b".repeat(40) }]);
@@ -13215,21 +13370,21 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual([
       { ...legacyRow(), history: { version: 1, receiptId: "observed" } },
     ]);
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
   });
 
   it("legacy binding repair restores absent authority after an indeterminate start and process restart", async () => {
     const h = await legacyHarness();
     h.deps.startRecovery = async () => ({ kind: "unanswered", reason: "response lost" });
     expect(await callRecovery(h)).toMatchObject({ status: 200, body: { outcome: "indeterminate" } });
-    h.deps.runnerOwnership = new RunnerOwnershipFence(false);
+    delete h.deps.runnerOwnership;
     h.deps.recoveryStatus = async () => ({ kind: "absent" });
     h.deps.startRecovery = async (id) => ({ kind: "failed", id, reason: "confirmed absent" });
     expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_workflow_failed" } });
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual([
       { ...legacyRow(), history: { version: 1, receiptId: "observed" } },
     ]);
-    expect(h.deps.runnerOwnership.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
   });
 
   it("legacy binding repair keeps proven authority once the recovery transport has recorded progress", async () => {
@@ -13286,7 +13441,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
               requestHeadSha: HEAD,
               workspaceRef: INSTANCE.branch,
               workspaceHeadSha: HEAD,
-              owner: h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number),
+              owner,
             },
             exactRecoveryFacts(HEAD),
           ),
@@ -13367,7 +13522,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       ending: { kind: "merge_ready" },
       recoveryReceipt: { reviewRunId: "run-original-review" },
     });
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
   });
 
   const ordinaryFindingsHarness = async () => {
@@ -13376,7 +13531,6 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.instances.put(recoveryInstance());
     const { ending: _ending, ...row } = requestChangesRow();
     await h.instances.putUnits([row]);
-    h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, owner);
     await h.store.put(
       completedOriginalFindings(fixed, {
         events: [{ type: "coordinator_tag", parentInstanceId: INSTANCE.id, unit: "U12", base: "main", publication }],
@@ -13619,7 +13773,6 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     };
     delete row.ending;
     await h.instances.putUnits([row]);
-    h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, owner);
     await h.store.put(
       originalCoding({
         id: "run-original-coding",
@@ -13714,7 +13867,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     });
     expect(row).not.toHaveProperty("recovery");
     expect(await ordinaryPrCheck(h)).toMatchObject({ status: 200 });
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(owner);
+    expect(await pullOwners(h)).toEqual([{ kind: "unit", ...owner }]);
   });
 
   it.each([false, true])(
@@ -14646,10 +14799,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       publication,
     });
     expect(claimed).not.toHaveProperty("ending");
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual({
-      ...owner,
-      recoveryActionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId,
-    });
+    expect(await pullOwners(h)).toEqual([
+      { kind: "unit", ...owner, actionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId },
+    ]);
   });
 
   it.each([
@@ -15034,7 +15186,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           parentInstanceId: INSTANCE.id,
           idempotencyKey: `${INSTANCE.id}:U12/1/findings/a3`,
         });
-      const priorOwner = h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number);
+      const priorOwner = await pullOwners(h);
       if (scenario === "stale head") h.deps.fetchPrFacts = async () => exactRecoveryFacts("c".repeat(40));
       if (scenario === "ambiguous push")
         await h.store.put({ ...findings, id: "run-other-push", idempotencyKey: `${INSTANCE.id}:U12/1/findings/a3` });
@@ -15081,7 +15233,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         expect(h.dispatched).toEqual([]);
         expect(h.branches).toEqual([]);
         expect(h.opens).toEqual([]);
-        expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(priorOwner);
+        expect(await pullOwners(h)).toEqual(priorOwner);
         return;
       }
       expect(admission).toMatchObject({ status: 200, body: { workflowId: REVIEW_WORKFLOW } });
@@ -15334,8 +15486,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         parentInstanceId: INSTANCE.id,
         idempotencyKey: `${INSTANCE.id}:U12/1/findings/a2`,
       });
-    if (scenario === "rival owner")
-      h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
+    if (scenario === "rival owner") seedRivalOwner(h);
     const before = await h.instances.listUnits(INSTANCE.id);
     const result = await recoverOriginalUnit({ parentInstanceId: INSTANCE.id, unit: "U12", renew: true }, h.deps, {
       userId: INSTANCE.userId,
@@ -16355,7 +16506,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     }
     expect((await callRecovery(h)).status, scenario).toBe(409);
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
     expect(h.recoveries).toEqual([]);
     expect(h.dispatched).toEqual([]);
   });
@@ -16493,7 +16644,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     }
     expect((await callRecovery(h)).status, scenario).toBe(409);
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
     expect(h.recoveries).toEqual([]);
     expect(h.dispatched).toEqual([]);
   });
@@ -16689,7 +16840,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     });
     expect(reads).toBe(2);
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
     expect(h.recoveries).toEqual([]);
   });
 
@@ -16710,7 +16861,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     });
     expect(reads).toBe(1);
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
     expect(h.recoveries).toEqual([]);
   });
 
@@ -16774,7 +16925,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(reads).toBe(2);
     expect(remoteReads).toBe(1);
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
     expect(h.recoveries).toEqual([]);
   });
 
@@ -17154,7 +17305,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     const [restored] = await h.instances.listUnits(INSTANCE.id);
     expect(restored!.recovery).toBeUndefined();
     expect(restored!.ending).toBeDefined();
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
   });
 
   it("refuses a different requester or thread before reading evidence or claiming ownership", async () => {
@@ -17320,7 +17471,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.instances.putUnits([requestChangesRow()]);
     await h.store.put(reviewRecord());
     expect((await callRecovery(h)).status).toBe(200);
-    h.deps.runnerOwnership = new RunnerOwnershipFence(false);
+    delete h.deps.runnerOwnership;
 
     const response = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}recover-unit`, {
@@ -17334,13 +17485,12 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     );
 
     expect(response.status).toBe(200);
-    expect(h.deps.runnerOwnership.owner(INSTANCE.repo, PR.number)).toEqual({
-      ...owner,
-      recoveryActionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId,
-    });
+    expect(await pullOwners(h)).toEqual([
+      { kind: "unit", ...owner, actionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId },
+    ]);
   });
 
-  it("reconstructs the durable recovery owner at a later findings spawn after the bot process restarts", async () => {
+  it("reads the durable recovery owner at a later findings spawn after the bot process restarts", async () => {
     const h = harness({
       prFacts: {
         state: "open",
@@ -17357,7 +17507,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.instances.putUnits([requestChangesRow()]);
     await h.store.put(reviewRecord());
     expect((await callRecovery(h)).status).toBe(200);
-    h.deps.runnerOwnership = new RunnerOwnershipFence(false);
+    delete h.deps.runnerOwnership;
 
     const response = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}spawn`, {
@@ -17389,7 +17539,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         deadlineAt: NOW + minutesToMs(60),
       },
     });
-    expect(h.deps.runnerOwnership.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery?.actionId).toBe(REVIEW_ACTION);
     expect(await h.instances.findPullOwners({ repo: INSTANCE.repo, pr: PR.number })).toMatchObject({
       ok: true,
       owners: [{ instanceId: INSTANCE.id, unit: "U12" }],
@@ -17564,7 +17714,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(response).toMatchObject({ status: 409, body: { error: "recovery_claim_stale" } });
     expect(replace).toHaveBeenCalledTimes(1);
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
   });
 
   it("reconciles a claim CAS whose committed response was lost and keeps ownership through Workflow admission", async () => {
@@ -17597,10 +17747,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     const response = await callRecovery(h);
 
     expect(response).toMatchObject({ status: 200, body: { outcome: "started" } });
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual({
-      ...owner,
-      recoveryActionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId,
-    });
+    expect(await pullOwners(h)).toEqual([
+      { kind: "unit", ...owner, actionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId },
+    ]);
     expect((await h.instances.listUnits(INSTANCE.id))[0]!.recovery?.workflowId).toBe(REVIEW_WORKFLOW);
   });
 
@@ -17629,10 +17778,10 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual(
       before.map((row) => ({ ...row, history: { version: 1, receiptId: "observed" } })),
     );
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
   });
 
-  it("surfaces rollback CAS loss and leaves the durable claim fenced", async () => {
+  it("surfaces rollback CAS loss and retains the durable claim", async () => {
     const h = harness({
       prFacts: {
         state: "open",
@@ -17663,10 +17812,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       body: { error: "recovery_rollback_failed", cause: "recovery_workflow_failed", reason: "stale" },
     });
     expect((await h.instances.listUnits(INSTANCE.id))[0]!.recovery).toBeDefined();
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual({
-      ...owner,
-      recoveryActionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId,
-    });
+    expect(await pullOwners(h)).toEqual([
+      { kind: "unit", ...owner, actionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId },
+    ]);
   });
 
   it("keeps an ambiguous Workflow admission claimed so retry can meet the same Workflow id without a second budget charge", async () => {
@@ -17747,10 +17895,10 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual(
       before.map((row) => ({ ...row, history: { version: 1, receiptId: "observed" } })),
     );
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
   });
 
-  it("terminal settlement clears the durable claim by CAS and releases the original publication owner", async () => {
+  it("terminal settlement clears the durable recovery action by CAS", async () => {
     const h = harness({
       prFacts: {
         state: "open",
@@ -17767,7 +17915,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.instances.putUnits([requestChangesRow()]);
     await h.store.put(reviewRecord());
     expect((await callRecovery(h)).status).toBe(200);
-    h.deps.runnerOwnership = new RunnerOwnershipFence(false);
+    delete h.deps.runnerOwnership;
 
     const response = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
@@ -17791,7 +17939,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       accounting: { spendUsd: 0.25, grant: { renewals: 0, costCapUsd: 5 } },
     });
     expect(settled!.ending?.kind).toBe("merge_ready");
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
   });
 
   it.each([
@@ -17807,8 +17955,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.store.put(reviewRecord());
     expect((await callRecovery(h)).status).toBe(200);
     const before = await h.instances.listUnits(INSTANCE.id);
-    const publicationOwner = h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number);
-    expect(publicationOwner).toBeDefined();
+    const publicationOwner = await pullOwners(h);
+    expect(publicationOwner).toHaveLength(1);
     if (reason === "unreadable")
       vi.spyOn(h.instances, "transitionRecovery").mockImplementationOnce(async () => {
         vi.spyOn(h.instances, "listUnits").mockRejectedValueOnce(new Error("store unreachable"));
@@ -17831,7 +17979,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       ),
     ).toMatchObject({ status, body: { error } });
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(publicationOwner);
+    expect(await pullOwners(h)).toEqual(publicationOwner);
   });
 
   it.each(["changed", "missing", "changed on replay", "missing on replay"] as const)(
@@ -17843,7 +17991,6 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       await h.instances.putUnits([requestChangesRow()]);
       await h.store.put(reviewRecord());
       expect((await callRecovery(h)).status).toBe(200);
-      const publicationOwner = h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number);
       const changed = owner.startsWith("missing")
         ? null
         : {
@@ -17865,7 +18012,6 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         expect((await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps)).status).toBe(
           200,
         );
-        expect(h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, publicationOwner!)).toBe(true);
         vi.spyOn(h.instances, "get").mockResolvedValueOnce(instance).mockResolvedValueOnce(changed);
       } else {
         const settle = h.instances.transitionRecovery.bind(h.instances);
@@ -17880,7 +18026,10 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         status: 503,
         body: { error: "report_context_unavailable" },
       });
-      expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(publicationOwner);
+      expect(await pullOwners(h)).toEqual([{ kind: "unit", instanceId: INSTANCE.id, unit: "U12" }]);
+      expect(
+        (await h.instances.getRecoveryAction({ instanceId: INSTANCE.id, unit: "U12" }, REVIEW_ACTION))?.state,
+      ).toBe("settled");
     },
   );
 
@@ -18212,7 +18361,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     );
 
     expect(response).toMatchObject({ status: 200, body: { ok: true } });
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
   });
 
   it("acknowledges a lost settlement response without rewriting the row or releasing a successor owner", async () => {
@@ -18245,12 +18394,12 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       200,
     );
     const successor = { instanceId: "runner-successor", unit: "U10" };
-    expect(h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, successor)).toBe(true);
+    seedRivalOwner(h, successor.instanceId, successor.unit);
 
     const replay = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps);
 
     expect(replay).toMatchObject({ status: 200, body: { alreadySettled: true } });
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(successor);
+    expect(await pullOwners(h)).toEqual(expect.arrayContaining([{ kind: "unit", ...successor }]));
   });
 
   it("settles a recovered human-only verdict as a typed hold without opening idle or renewal", async () => {
@@ -18348,7 +18497,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     const [settled] = await h.instances.listUnits(INSTANCE.id);
     expect(settled!.recovery).toBeUndefined();
     expect(settled!.recoveryReceipt?.reviewRunId).toBe("run-original-review");
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
   });
 
   it("refuses recovered idle or renewal settlement and keeps the claim valid", async () => {
@@ -18404,9 +18553,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.store.put(reviewRecord());
     expect((await callRecovery(h)).status).toBe(200);
     const before = await h.instances.listUnits(INSTANCE.id);
-    const restarted = new RunnerOwnershipFence(false);
-    restarted.claim(INSTANCE.repo, PR.number, { instanceId: "runner-rival", unit: "U10" });
-    h.deps.runnerOwnership = restarted;
+    delete h.deps.runnerOwnership;
+    seedRivalOwner(h, "runner-rival", "U10");
 
     const response = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
@@ -18423,7 +18571,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
 
     expect(response).toMatchObject({ status: 409, body: { error: "publication_ownership_changed" } });
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
-    expect(restarted.owner(INSTANCE.repo, PR.number)).toEqual({ instanceId: "runner-rival", unit: "U10" });
+    expect(await pullOwners(h)).toEqual(
+      expect.arrayContaining([{ kind: "unit", instanceId: "runner-rival", unit: "U10" }]),
+    );
   });
 
   it.each([
@@ -18800,5 +18950,143 @@ describe("spawn durable effect admission", () => {
       expect(h.dispatched).toEqual([]);
       expect((await h.instances.listUnits(INSTANCE.id))[0].currentEffect).toBeUndefined();
     }
+  });
+});
+
+describe("original Workflow report reconciliation through the admin settlement", () => {
+  const setup = async (privateUnit = false) => {
+    const log = new InMemoryPrivateWorkerLog();
+    const h = harness({
+      privateWorkerLog: log,
+      recoveryStatus: async () => ({ kind: "status", status: "terminated" }),
+    });
+    const instance: CoordinatorInstance = {
+      ...INSTANCE,
+      admission: "created",
+      ...(privateUnit
+        ? { channelId: "slack:DMAIN", threadKey: "slack:DMAIN:1.0", plan: { id: "private-task" }, merge: "person" }
+        : {}),
+    };
+    const unit: CoordinatorUnit = {
+      instanceId: instance.id,
+      unit: "U12",
+      slug: "u12",
+      branch: instance.branch,
+      dependsOn: [],
+      rounds: [],
+      startedAt: NOW - 10,
+      ...(privateUnit
+        ? {
+            workBrief: {
+              requesterId: instance.userId,
+              mainThreadKey: instance.threadKey,
+              actId: "act-1",
+              repo: instance.repo,
+              base: "main",
+              question: "Why?",
+              findings: [],
+              requestedChange: "Fix it",
+            },
+          }
+        : {}),
+    };
+    if (privateUnit) await claimPrivateUnit(h.instances, instance, unit);
+    else {
+      await h.instances.put(instance);
+      expect(await h.instances.putUnits([unit])).toMatchObject({ ok: true });
+    }
+    delete h.deps.runnerOwnership;
+    const effect = await coordinatorReconciliationEffect(instance, unit);
+    return { h, instance, unit, effect, log };
+  };
+
+  it("settles the stopped original unit and delivers one public report without redispatching leftovers", async () => {
+    const { h, instance, unit, effect } = await setup();
+    expect(
+      await h.instances.appendEvent(unit, {
+        mode: "steer",
+        sender: instance.userId,
+        text: "one more detail",
+        at: NOW,
+      }),
+    ).toMatchObject({ ok: true });
+    const receipt = await reconcileCoordinatorReport(effect, h.deps);
+    expect(receipt?.reportDelivery.owner.deliveryId).toBe("lifecycle/reconcile");
+    expect(h.replies).toHaveLength(1);
+    expect(h.dispatched).toEqual([]);
+    const [ended] = await h.instances.listUnits(instance.id);
+    expect(ended?.ending).toMatchObject({
+      kind: "terminated",
+      deliveryId: "lifecycle/reconcile",
+      threadReport: h.replies[0],
+    });
+    expect(ended?.ending?.outcome).toBeUndefined();
+    expect(await h.instances.listEvents(unit, true)).toHaveLength(1);
+  });
+
+  it.each(["missing", "failed"] as const)(
+    "defers the receipt when required original public delivery is %s",
+    async (failure) => {
+      const { h, instance, effect } = await setup();
+      h.deps.ioFor =
+        failure === "missing"
+          ? () => undefined
+          : () => ({
+              reply: async () => {
+                throw new Error("unanswered");
+              },
+              status: async () => ({ update: () => {}, done: async () => {} }),
+              history: async () => [],
+            });
+      expect(await reconcileCoordinatorReport(effect, h.deps)).toBeUndefined();
+      expect((await h.instances.listUnits(instance.id))[0]?.ending?.kind).toBe("terminated");
+      expect(h.dispatched).toEqual([]);
+    },
+  );
+
+  it("admits the saved original private ending without replacing its time or report bytes", async () => {
+    const { h, instance, unit, effect, log } = await setup(true);
+    const ending = {
+      kind: "terminated" as const,
+      report: "saved original private report",
+      threadReport: "saved original short copy",
+      deliveryId: "U12/end",
+      at: NOW - 50,
+      cause: "provider_failed",
+      step: "U12/0/coding",
+      round: 0,
+    };
+    expect(await h.instances.compareAndReplaceUnit(unit, { ...unit, ending })).toEqual({ ok: true });
+    const receipt = await reconcileCoordinatorReport(effect, h.deps);
+    expect(receipt?.privateReplyId).toBe("U12/end");
+    const [confirmed] = await h.instances.listUnits(instance.id);
+    expect(confirmed?.ending).toEqual(ending);
+    expect(confirmed?.reportDelivery?.owner.deliveryId).toBe("U12/end");
+    expect((await log.list(`worker:${instance.id}:U12`)).filter((event) => event.kind === "reply")).toMatchObject([
+      { id: "U12/end", text: ending.report },
+    ]);
+    expect(h.replies).toEqual([]);
+    expect(h.dispatched).toEqual([]);
+  });
+
+  it("restarts an exact private settlement after its first report freeze was unavailable", async () => {
+    const { h, instance, effect, log } = await setup(true);
+    const append = h.ledger.appendSession.bind(h.ledger);
+    vi.spyOn(h.ledger, "appendSession").mockRejectedValue(new Error("report storage unavailable"));
+    expect(await reconcileCoordinatorReport(effect, h.deps)).toBeUndefined();
+    const [committed] = await h.instances.listUnits(instance.id);
+    expect(committed?.ending).toMatchObject({ kind: "terminated", deliveryId: "lifecycle/reconcile" });
+    expect(committed?.ending?.threadReport).toBe(committed?.ending?.report);
+    expect(committed?.ending?.outcome).toBeUndefined();
+    expect(await log.list(`worker:${instance.id}:U12`)).toEqual([]);
+    vi.mocked(h.ledger.appendSession).mockImplementation(append);
+    const receipt = await reconcileCoordinatorReport(effect, h.deps);
+    expect(receipt?.privateReplyId).toBe("lifecycle/reconcile");
+    const replies = (await log.list(`worker:${instance.id}:U12`)).filter((event) => event.kind === "reply");
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatchObject({ id: "lifecycle/reconcile", text: committed?.ending?.report });
+    expect(await h.instances.listUnits(instance.id)).toEqual([committed]);
+    expect(h.replies).toEqual([]);
+    expect(h.dispatched).toEqual([]);
   });
 });

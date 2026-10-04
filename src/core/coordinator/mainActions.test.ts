@@ -508,8 +508,9 @@ describe("main task actions", () => {
     expect(events.some((event) => event.sender === INSTANCE.userId)).toBe(true);
   });
 
-  it("a failed nudge leaves the event queued", async () => {
+  it("a failed nudge leaves the event queued and offers reconciliation to its original owner", async () => {
     const { instances } = await fixture();
+    const offer = vi.spyOn(instances, "offerReconciliation");
     const actions = createMainTaskActions({
       instances,
       workflow: {
@@ -526,6 +527,7 @@ describe("main task actions", () => {
       nudge: "pending",
     });
     expect(await instances.listEvents({ instanceId: INSTANCE.id, unit: "task" })).toHaveLength(1);
+    expect(offer).toHaveBeenCalledExactlyOnceWith({ instanceId: INSTANCE.id, unit: "task" });
   });
 
   it("a persisted steer is nudged without reading the unit's full event history", async () => {

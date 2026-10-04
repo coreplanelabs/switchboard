@@ -508,8 +508,14 @@ export function planUnitEffectTransition(
     };
   }
   if (input.kind === "begin") {
-    if (instance.stop) return { ok: false, reason: "stopped" };
-    if (current.ending || current.idle) return { ok: false, reason: "execution" };
+    const restoreAcceptedClose =
+      input.call === 1 &&
+      effect.calls.length === 2 &&
+      effect.calls[0]?.operation === "pull_close" &&
+      effect.calls[0].state === "accepted" &&
+      call.operation === "pull_reopen";
+    if (instance.stop && !restoreAcceptedClose) return { ok: false, reason: "stopped" };
+    if ((current.ending || current.idle) && !restoreAcceptedClose) return { ok: false, reason: "execution" };
     // A pending receipt cannot prove whether its caller crossed the external boundary.
     if (effect.calls.some((part) => part.state === "pending" || part.state === "uncertain"))
       return { ok: false, reason: "uncertain" };

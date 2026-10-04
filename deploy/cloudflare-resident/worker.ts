@@ -193,11 +193,13 @@ import {
   evictedTreeSentence,
   parseWorktreeCleanliness,
   parsePrivateTreeObservation,
+  collectPrivateTreeObservation,
   privateTreeObservationScript,
   worktreeCleanlinessScript,
   type EvictedTree,
   type LeftBehind,
   type WorktreeCleanliness,
+  type PrivateTreeObservation,
 } from "../../src/execution/residentCleanliness.js";
 import {
   base64LengthOf,
@@ -8110,6 +8112,192 @@ export class ResidentDO extends Sandbox<Env> {
     return res;
   }
 
+  /** Observe the original terminal workspace under its existing exclusion.
+   * The ordinary release guard judges the measured tree; this method never releases it. */
+  async inspectThreadPreservation(input: unknown): Promise<
+    | { kind: "unknown"; reason: string }
+    | {
+        kind: "observed";
+        binding: Pick<ThreadBinding, "threadKey" | "ref" | "sha" | "user" | "worktreePath" | "container">;
+        owner: WorkspaceOwner;
+        fence: WorkspaceOwner;
+        ownerStatus: string;
+        ownerEvidence: { kind: "terminal" | "acknowledged"; revision: number | null };
+        soleClaimant: true;
+        uidProcesses: 0;
+        tree: PrivateTreeObservation;
+        decision: PreservationDecision;
+      }
+  > {
+    const unknown = (reason: string) => ({ kind: "unknown" as const, reason });
+    if (!input || typeof input !== "object" || Array.isArray(input)) return unknown("invalid-input");
+    const { runId, ...request } = input as Record<string, unknown>;
+    const parsed = dependencyInspectionInputSchema.safeParse(request);
+    if (!parsed.success || typeof runId !== "string" || !runId || runId.length > 512) return unknown("invalid-input");
+    const { threadKey, ref, head } = parsed.data;
+    try {
+      const inspection = await this.withDeployAdmission(() =>
+        this.threadAttaches.run(threadKey, async () => {
+          if (
+            this.destroying ||
+            this.ctx.container?.running !== true ||
+            (await this.ctx.storage.get(DESTROY_UNCONFIRMED_KEY)) ||
+            (await this.recreateAdmission.blocked()) ||
+            this.memoryGuard.gate("exec")
+          )
+            return unknown("runtime-unavailable");
+          const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
+          const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
+          const fence = await this.ctx.storage.get<unknown>(runFenceKey(threadKey));
+          if (
+            !binding ||
+            binding.evicted ||
+            binding.threadKey !== threadKey ||
+            binding.ref !== ref ||
+            !THREAD_USERS.includes(binding.user)
+          )
+            return unknown("binding-unverified");
+          if (
+            this.workspaceExclusiveOpsInFlight.has(threadKey) ||
+            (this.threadOpsInFlight.get(threadKey) ?? 0) > 0 ||
+            this.opUsersInUse.has(binding.user)
+          )
+            return unknown("workspace-busy");
+          if (
+            !registration ||
+            registration.threadKey !== threadKey ||
+            registration.runId !== runId ||
+            !validRunOwner(registration.runId, registration.ownerGen, registration.ownerFence)
+          )
+            return unknown("owner-registration-incomplete");
+          const owner = {
+            runId: registration.runId!,
+            ownerGen: registration.ownerGen!,
+            ownerFence: registration.ownerFence!,
+          };
+          if (!isWorkspaceOwner(fence) || workspaceOwnerKey(fence) !== workspaceOwnerKey(owner))
+            return unknown("owner-fence-mismatch");
+          const soleClaimant = async () => {
+            const claims = parsePoolBindings(await this.ctx.storage.get(poolBindingKey(binding.user)));
+            return (
+              claims?.length === 1 &&
+              claims[0] === threadKey &&
+              (await this.poolUserOwnerMatches(binding.user, `thread:${threadKey}`))
+            );
+          };
+          if (!(await soleClaimant())) return unknown("uid-owner-unverified");
+          const canonical = await threadWorktreePath(threadKey, ref);
+          if (
+            binding.worktreePath !== canonical &&
+            binding.worktreePath !== (await replacementWorktreePath(threadKey, ref, canonical))
+          )
+            return unknown("workspace-path-unverified");
+          if (!binding.container || (this.containerIdMemo !== undefined && this.containerIdMemo !== binding.container))
+            return unknown("workspace-incarnation-mismatch");
+          const answer = (await this.observeRunForEviction(registration, binding)) as {
+            kind?: string;
+            record?: { id?: string; threadKey?: string; status?: string; provisional?: boolean };
+            owner?: unknown;
+            revision?: unknown;
+          } | null;
+          const saved = workspaceSettlementOf(binding.workspaceSettlement);
+          const record =
+            answer?.kind === "terminal"
+              ? answer.record
+              : answer?.kind === "acknowledged" &&
+                  isWorkspaceOwner(answer.owner) &&
+                  saved &&
+                  workspaceOwnerKey(answer.owner) === workspaceOwnerKey(owner) &&
+                  workspaceOwnerKey(saved.owner) === workspaceOwnerKey(owner) &&
+                  answer.revision === saved.revision
+                ? saved.record
+                : undefined;
+          if (
+            record?.id !== runId ||
+            record.threadKey !== threadKey ||
+            ("provisional" in record && record.provisional === true) ||
+            !["completed", "failed", "interrupted", "stopped_soft", "stopped_hard"].includes(record.status ?? "")
+          )
+            return unknown("owner-unverified");
+          return this.withThreadBusy(threadKey, async () => {
+            if ((this.threadOpsInFlight.get(threadKey) ?? 0) !== 1) return unknown("workspace-busy");
+            this.workspaceExclusiveOpsInFlight.add(threadKey);
+            try {
+              if (this.ctx.container?.running !== true) return unknown("runtime-unavailable");
+              const path = shellQuote(binding.worktreePath);
+              const command = [
+                'printf "container=%s\\n" "$(/bin/cat /proc/sys/kernel/random/boot_id)"',
+                `test -d ${path} && test ! -L ${path} || exit 1`,
+                `test "$(/usr/bin/stat -c %u ${path})" = "$(/usr/bin/id -u ${shellQuote(binding.user)})" || exit 1`,
+                `/usr/bin/pgrep -u ${shellQuote(binding.user)} >/dev/null 2>&1`,
+                'test "$?" = 1 || exit 1',
+                privateTreeObservationScript(binding.worktreePath, binding.user, true),
+                'code=$?; test "$code" = 0 || exit "$code"',
+                `/usr/bin/pgrep -u ${shellQuote(binding.user)} >/dev/null 2>&1`,
+                'test "$?" = 1 || exit 1',
+              ].join("\n");
+              const process = await this.ctx.container.exec([
+                "/usr/bin/env",
+                "-i",
+                "PATH=/usr/local/bin:/usr/bin:/bin",
+                "/usr/bin/timeout",
+                "-s",
+                "KILL",
+                String(CREDENTIAL_INSPECTION_MAX_MS / SECOND_MS),
+                "/bin/sh",
+                "-c",
+                command,
+              ]);
+              const tree = await collectPrivateTreeObservation(process, binding.container!);
+              if (!tree || tree.branch !== ref || tree.head !== head) return unknown("private-tree-unverified");
+              const unchanged = async () =>
+                this.ctx.container?.running === true &&
+                JSON.stringify(await this.ctx.storage.get(threadBindingKey(threadKey))) === JSON.stringify(binding) &&
+                JSON.stringify(await this.ctx.storage.get(runRegKey(threadKey))) === JSON.stringify(registration) &&
+                JSON.stringify(await this.ctx.storage.get(runFenceKey(threadKey))) === JSON.stringify(fence) &&
+                (this.threadOpsInFlight.get(threadKey) ?? 0) === 1 &&
+                (await soleClaimant()) &&
+                (this.containerIdMemo === undefined || this.containerIdMemo === binding.container);
+              if (!(await unchanged())) return unknown("observation-changed");
+              const decision = await this.workspaceRemovalDecision(binding, true, false, {
+                tree,
+                container: binding.container!,
+              });
+              if (!(await unchanged())) return unknown("observation-changed");
+              return {
+                kind: "observed" as const,
+                binding: {
+                  threadKey,
+                  ref,
+                  sha: binding.sha,
+                  user: binding.user,
+                  worktreePath: binding.worktreePath,
+                  container: binding.container,
+                },
+                owner,
+                fence: owner,
+                ownerStatus: record.status!,
+                ownerEvidence: {
+                  kind: answer!.kind === "acknowledged" ? ("acknowledged" as const) : ("terminal" as const),
+                  revision: answer!.kind === "acknowledged" ? saved!.revision : null,
+                },
+                soleClaimant: true as const,
+                uidProcesses: 0 as const,
+                tree,
+                decision,
+              };
+            } finally {
+              this.workspaceExclusiveOpsInFlight.delete(threadKey);
+            }
+          });
+        }),
+      );
+      return "error" in inspection ? unknown("deploy-admission-unavailable") : inspection;
+    } catch {
+      return unknown("observation-unavailable");
+    }
+  }
+
   /** Inspect an existing terminal owner's tree without waking, reattaching or repairing it. */
   async inspectThreadDependencies(
     input: unknown,
@@ -9000,6 +9188,7 @@ export class ResidentDO extends Sandbox<Env> {
     binding: ThreadBinding,
     canObserveTree = true,
     recoverAbsent = false,
+    observation?: { tree: PrivateTreeObservation; container: string },
   ): Promise<PreservationDecision> {
     const pending = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(binding.threadKey));
     if (
@@ -9053,8 +9242,12 @@ export class ResidentDO extends Sandbox<Env> {
     }
     decision = decideWorkspaceRemoval(input);
     if (decision.removable || decision.reason !== "private-tree-unverified" || !canObserveTree) return decision;
-    input.tree = await this.observePrivateTree(binding);
-    if (binding.container && input.tree !== null && (await this.containerIdentity()) !== binding.container)
+    input.tree = observation?.tree ?? (await this.observePrivateTree(binding));
+    if (
+      binding.container &&
+      input.tree !== null &&
+      (observation?.container ?? (await this.containerIdentity())) !== binding.container
+    )
       return { removable: false, reason: "workspace-incarnation-mismatch" };
     decision = decideWorkspaceRemoval(input);
     if (decision.removable || !recoverAbsent || input.tree !== null) return decision;
@@ -12400,6 +12593,8 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
       return json(await stub.debugThreads());
     case "inspect-dependencies":
       return json(await stub.inspectThreadDependencies(body.input));
+    case "inspect-preservation":
+      return json(await stub.inspectThreadPreservation(body.input));
     case "reconcile-owner": {
       const thread = parseThreadKey(body.threadKey);
       if ("error" in thread) return json({ error: thread.error }, 400);

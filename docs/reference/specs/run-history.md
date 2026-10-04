@@ -553,3 +553,11 @@ Terminal PR reads propagate refused durable writes before reporting merged or cl
 | The first resident status request and retry requests consume the clipped allowance; an expired bound cannot provision a fallback. | `[unit]` `src/execution/factory.test.ts::makeExecutor resident selection::a restoring resident — the one held /await-restore request (item 27)::the first resident probe cannot outlast…` |
 | Incomplete original profile or coordinator ownership cannot turn a saved child into an ordinary restart. Missing evidence refuses before executor effects and retains the original row. | `[unit]` `src/core/dispatcher.test.ts::run ledger write-through (docs/reference/specs/run-history.md item 35)::coordinator producer identity::a canonical attachment restart with a…` |
 | Explicit source deletion revokes ordinary checkpoint aliases after retention expiry, while a live owner retains events and context pins even beside a provisional record. | `[unit]` `deploy/cloudflare-memory/sessionUnification.test.ts::unified sessions — durable owner and retention lifecycle::bounds 384 ordinary continuations across retention and reconstruction while frozen units keep their originals`, `::explicit deletion keeps a live owner's events and context pins with a provisional record…` |
+
+| Criterion | Proof |
+| --- | --- |
+| A workspace ACK refuses an unknown run, generation or fence with no retained revision. Duplicate ACKs require a known retained version; live ownership still refuses. ACK success never authorizes removal of private files. | `[unit]` `src/core/workspaceSettlement.test.ts::exact retained workspace acknowledgment::*`; `deploy/cloudflare-memory/runLedger.test.ts::durable coordinator Workflow reconciliation::*` |
+
+| Criterion | Proof |
+| --- | --- |
+| A pending original report retains its canonical unit target; its envelope cannot assign repository authority or become a competing owner. | `[unit]` `src/core/coordinator/pullOwnership.test.ts::complete canonical pull ownership::retains the canonical target for a pending original report*` |

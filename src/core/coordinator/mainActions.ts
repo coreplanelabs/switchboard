@@ -89,7 +89,7 @@ export async function unitSeedProofFor(
  * The actor's origin, never model text, selects the main conversation. */
 export interface MainTaskActionsDeps {
   instances: Pick<CoordinatorInstanceStore, "getMainTask" | "get" | "listUnits" | "appendEvent"> &
-    Partial<Pick<CoordinatorInstanceStore, "readMainTaskUnit">>;
+    Partial<Pick<CoordinatorInstanceStore, "readMainTaskUnit" | "offerReconciliation">>;
   workflow?: WorkflowSender;
   plane: Pick<PlaneService, "stop">;
   clock: () => number;
@@ -348,6 +348,7 @@ export function createMainTaskActions(deps: MainTaskActionsDeps) {
       if (persisted.id !== id || persisted.sender !== event.sender || persisted.text !== event.text)
         return { kind: "conflict" };
       const nudge = await sendUnitNudge(deps.workflow, key);
+      if (nudge.kind !== "sent") await deps.instances.offerReconciliation?.(key).catch(() => undefined);
       return { kind: "queued", seq: appended.seq, nudge: nudge.kind === "sent" ? "sent" : "pending" };
     } catch {
       return { kind: "unavailable" };

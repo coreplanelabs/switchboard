@@ -84,3 +84,11 @@ The composed request thread key must fit the ledger's 256-character claim key af
 | 10: the shim answers three paths itself and forwards every other path to the container, knows nothing of the proxy's paths, and holds the model keys only for the container's environment; its route table names the three paths `model-proxy` | `[unit]` `deploy/cloudflare/modelProxyForwarding.test.ts::the shim forwards the model proxy's paths to the container blind::*`, `src/core/trace/workerTrace.test.ts::shimRoute::names the model proxy's three paths as one route word, and no other /v1 path…` |
 | 12: a verified pull-request comment from the requester's bound GitHub account appends one attributed durable unit event and nudges the owner; an unbound or differently bound account cannot wake or steer the unit; bot comments and unowned pull requests are ignored | `[unit]` `src/core/coordinator/checksIntake.test.ts::the pull-request comment intake — a person's answer wakes the owning unit::*` |
 | 12, live: the merge wait wakes on the settled delivery, not the fallback timeout | `[agent]` A checked-in plan unit under the runner's merge grant whose review approves before its checks finish; the GitHub App's delivery for the last check run at the approved head answers 200 with `settled: true` and `sent: 1` of `1`; the unit's card reads merged within seconds of that delivery; the unit's run record shows the merge wait ended on the event, not on the fallback timeout. The receipt for this procedure is posted on the agent-ship receipts issue in the tracker. |
+
+| Criterion | Proof |
+| --- | --- |
+| Requester comments resolve canonical durable unit ownership after restart. Incomplete ownership refuses; an ended append is ignored, and an exact recovery journal guard precedes dedup and addresses the original recovery Workflow. | `[unit]` `src/core/coordinator/checksIntake.test.ts::the pull-request comment intake — a person's answer wakes the owning unit::*`; `src/core/runnerOwnership.test.ts::*::*` |
+
+| Criterion | Proof |
+| --- | --- |
+| A failed Workflow nudge retains the committed requester comment and offers the same original unit for reconciliation; it cannot dispatch replacement work. | `[unit]` `src/core/coordinator/checksIntake.test.ts::*::retains a committed comment and offers the original owner for reconciliation after a failed nudge` |

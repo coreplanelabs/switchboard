@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
+import { coordinatorReportAdmission } from "./reportContext.js";
 import { secretsFrom } from "../../secrets.js";
 import {
   capThreadEvent,
@@ -235,6 +236,179 @@ const unitRow = (unit: string, over: Partial<CoordinatorUnit> = {}): Coordinator
   dependsOn: [],
   rounds: [],
   ...over,
+});
+
+describe("durable reconciliation store seam", () => {
+  it("requires the exact pending recovery journal and active guard before event deduplication", async () => {
+    const store = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
+    const actionId = "r_" + "d".repeat(64),
+      workflowId = "recovery_one";
+    const row = unitRow("ONE", {
+      history: { version: 1, receiptId: "p_" + "c".repeat(64) },
+      recovery: {
+        kind: "review",
+        round: 1,
+        expectedHeadSha: "a".repeat(40),
+        remainingMs: 1000,
+        claimedAt: 1000,
+        deadlineAt: 2000,
+        step: "ONE/review",
+        reviewRunId: "review_one",
+        reviewKey: "review_key",
+        previousEnding: { kind: "aborted", report: "old", at: 900 },
+        actionId,
+        workflowId,
+      },
+    });
+    await store.put(instance);
+    // Model a retained row whose journal is missing or corrupt, independently
+    // of the guarded admission path that refuses to create that state.
+    (store as unknown as { units: Map<string, string> }).units.set(
+      `${row.instanceId}\0${row.unit}`,
+      JSON.stringify(row),
+    );
+    const event = {
+      id: "settled_check",
+      sender: "github:checks",
+      text: "Checks settled",
+      mode: "steer" as const,
+      at: 1001,
+    };
+    await store.appendEvent(row, event);
+    const journal = (store as unknown as { recoveryActions: Map<string, string> }).recoveryActions;
+    const key = `${row.instanceId}\0${row.unit}\0${actionId}`;
+    const action = {
+      version: 1,
+      id: actionId,
+      instanceId: row.instanceId,
+      unit: row.unit,
+      workflowId,
+      request: { userId: instance.userId, threadKey: instance.threadKey, messageId: "slack:C1:2.0" },
+      repo: instance.repo,
+      base: instance.base,
+      branch: row.branch,
+      mainThreadKey: instance.threadKey,
+      workerThreadKey: "slack:C1:worker",
+      predecessorId: "p_" + "c".repeat(64),
+      reviewRunId: "review_one",
+      expectedHeadSha: "a".repeat(40),
+      payloadDigest: "b".repeat(64),
+      payload: "{}",
+      consumed: false,
+    };
+    for (const state of [undefined, "refused", "settled"] as const) {
+      if (state)
+        journal.set(
+          key,
+          JSON.stringify({
+            ...action,
+            state,
+            ...(state === "refused" ? { error: "workflow_absent" } : { consumed: true, receiptId: actionId }),
+          }),
+        );
+      else journal.delete(key);
+      expect(await store.appendEvent(row, event, true, undefined, { actionId, workflowId })).toEqual({
+        ok: false,
+        reason: "stale",
+      });
+      expect(await store.listEvents(row)).toHaveLength(1);
+    }
+    journal.set(key, JSON.stringify({ ...action, state: "pending" }));
+    expect(await store.appendEvent(row, event, false, undefined, { actionId, workflowId })).toEqual({
+      ok: false,
+      reason: "stale",
+    });
+    expect(await store.appendEvent(row, event, true, undefined, { actionId, workflowId })).toMatchObject({
+      ok: true,
+      seq: 1,
+    });
+  });
+  it("uses the paired outbox to retain terminal report ownership and refuses native uncertainty", async () => {
+    const ledger = new InMemoryRunLedger();
+    let native: string | undefined = "errored";
+    const store = new InMemoryCoordinatorInstanceStore(ledger, async () => native);
+    const owner = { ...instance, admission: "created" as const };
+    const row = unitRow("ONE", { ending: { kind: "aborted", report: "Original frozen report", at: 2000 } });
+    await store.put(owner);
+    await store.putUnits([row]);
+    native = "unfamiliar";
+    expect(await store.offerReconciliation(row)).toEqual({ offered: false });
+    native = "errored";
+    expect(await store.offerReconciliation(row)).toEqual({ offered: true });
+    expect(ledger.planeOffers.size).toBe(1);
+    const { ending: _ending, ...reentry } = row;
+    expect(await store.compareAndReplaceUnit(row, reentry)).toEqual({ ok: false, reason: "stale" });
+    expect(await store.putUnits([reentry])).toEqual({ ok: false, reason: "stale" });
+    await ledger.planeAck([...ledger.planeOffers.keys()][0]!, "done");
+    expect(ledger.planeOffers.size).toBe(1);
+    expect(await store.offerReconciliation(row)).toEqual({ offered: false });
+    expect(await new InMemoryCoordinatorInstanceStore(ledger).offerReconciliation(row)).toEqual({ offered: false });
+  });
+  it("requires a typed successful offer reply from the existing Worker route", async () => {
+    const key = { instanceId: instance.id, unit: "ONE" };
+    let status = 200;
+    let result: unknown = { offered: true };
+    const calls: unknown[] = [];
+    const store = new WorkerCoordinatorInstanceStore({
+      baseUrl: "https://memory.test",
+      token: "tok",
+      storeKey: "runs:default",
+      fetch: async (input, init) => {
+        calls.push({ url: String(input), body: JSON.parse(String(init?.body)) });
+        return Response.json(result, { status });
+      },
+    });
+    expect(await store.offerReconciliation(key)).toEqual({ offered: true });
+    expect(calls).toEqual([
+      { url: "https://memory.test/runs/coordinator/reconcile/offer", body: { storeKey: "runs:default", ...key } },
+    ]);
+    status = 409;
+    await expect(store.offerReconciliation(key)).rejects.toThrow("unavailable");
+    status = 200;
+    result = { ok: true };
+    await expect(store.offerReconciliation(key)).rejects.toThrow("unavailable");
+  });
+
+  it("permits only the first report admission on an unchanged ending while reconciliation retains its owner", async () => {
+    const ledger = new InMemoryRunLedger();
+    const store = new InMemoryCoordinatorInstanceStore(ledger, async () => "errored");
+    await store.put({ ...instance, admission: "created" });
+    const row = unitRow("ONE", {
+      ending: {
+        kind: "aborted",
+        report: "Original report",
+        threadReport: "Original summary",
+        deliveryId: "original/end",
+        at: 2000,
+      },
+    });
+    await store.putUnits([row]);
+    expect(await store.offerReconciliation(row)).toEqual({ offered: true });
+    const admission = await coordinatorReportAdmission(
+      {
+        instanceId: instance.id,
+        unit: row.unit,
+        requester: instance.userId,
+        channelId: instance.channelId,
+        threadKey: row.threadKey ?? instance.threadKey,
+        attempt: 0,
+        deliveryId: row.ending!.deliveryId!,
+      },
+      { text: row.ending!.report, threadText: row.ending!.threadReport! },
+    );
+    const admitted = { ...row, reportDelivery: admission };
+    expect(
+      await store.compareAndReplaceUnit(row, { ...admitted, ending: { ...row.ending!, report: "Changed" } }),
+    ).toEqual({ ok: false, reason: "stale" });
+    expect(await store.compareAndReplaceUnit(row, admitted)).toEqual({ ok: true });
+    expect(
+      await store.compareAndReplaceUnit(admitted, {
+        ...admitted,
+        reportDelivery: { ...admission, proposalHash: "b".repeat(64) },
+      }),
+    ).toEqual({ ok: false, reason: "stale" });
+    expect(ledger.planeOffers.size).toBe(1);
+  });
 });
 
 const contract = (name: string, make: () => CoordinatorInstanceStore) => {

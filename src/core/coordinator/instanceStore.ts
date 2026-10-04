@@ -10,7 +10,14 @@
 // null store, which knows no instance and refuses every write by name.
 
 import { isRunRecord } from "../runRecord.js";
+import { isCoordinatorReportAdmission } from "./reportAdmission.js";
 import type { InMemoryRunLedger } from "../runLedger/inMemory.js";
+import { PLANE_EFFECTS_TOTAL_CAP } from "../plane/decide.js";
+import {
+  coordinatorReconciliationEffect,
+  coordinatorWorkflowCanReconcile,
+  isCoordinatorReconcileEffect,
+} from "./workflowReconciliation.js";
 import {
   findPullOwnersInRows,
   pullBindingChanges,
@@ -135,10 +142,12 @@ function mainTaskUnitSnapshot(rows: unknown, key: UnitEventKey): MainTaskUnitSna
 export interface CoordinatorInstanceStore {
   /** Complete canonical owner snapshot; reservation must share this owner transaction. */
   findPullOwners(target: PullTarget): Promise<PullOwnersResult>;
+  /** Native ended execution discovery persists an exact existing outbox offer. */
+  offerReconciliation(key: UnitEventKey): Promise<{ offered: boolean }>;
   transitionRecovery(input: RecoveryTransition): Promise<RecoveryTransitionResult>;
   /** Reads stop, execution, complete owner facts and the whole unit in one transaction. */
   transitionUnitEffect(input: UnitEffectTransition): Promise<UnitEffectTransitionResult>;
-  getRecoveryAction(key: UnitEventKey, request: RecoveryRequest): Promise<RecoveryAction | null>;
+  getRecoveryAction(key: UnitEventKey, request: RecoveryRequest | string): Promise<RecoveryAction | null>;
   listRecoveryHistory(key: UnitEventKey, after?: number): Promise<RecoveryHistoryPage>;
   /** The authenticated requester turn, outside model and session content. */
   recordRequesterTurn(input: RequesterTurnInput): Promise<RecordRequesterTurnResult>;
@@ -206,6 +215,7 @@ export interface CoordinatorInstanceStore {
     event: ThreadEventInput,
     requireActive?: boolean,
     binding?: MainTaskBinding,
+    expectedRecovery?: { actionId: string; workflowId: string },
   ): Promise<AppendEventResult>;
   /** The unit's events in sequence order; `unconsumedOnly` filters to the rows no spawn or run has consumed. */
   listEvents(key: UnitEventKey, unconsumedOnly?: boolean): Promise<ThreadEvent[]>;
@@ -228,9 +238,37 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
   constructor(
     private readonly runOwner?: Pick<
       InMemoryRunLedger,
-      "live" | "finished" | "events" | "finishedWorkEvidence" | "workspacePublicationRows"
+      "live" | "finished" | "events" | "finishedWorkEvidence" | "workspacePublicationRows" | "planeOffers"
     >,
+    private readonly workflowStatus?: (workflowId: string) => Promise<string | undefined>,
   ) {}
+  async offerReconciliation(key: UnitEventKey): Promise<{ offered: boolean }> {
+    if (!this.runOwner || !this.workflowStatus) return { offered: false };
+    const instance = await this.get(key.instanceId);
+    const unit = (await this.listUnits(key.instanceId)).find((row) => row.unit === key.unit);
+    if (!instance || !unit || !isCoordinatorInstance(instance) || !isCoordinatorUnit(unit)) return { offered: false };
+    const actionId = unit.recovery?.actionId ?? (unit.recoveryReceipt ? unit.history?.receiptId : undefined);
+    const action = actionId ? await this.getRecoveryAction(key, actionId) : undefined;
+    if (
+      (unit.recovery || unit.recoveryReceipt) &&
+      (!action ||
+        action.workflowId !== (unit.recovery?.workflowId ?? unit.recoveryReceipt?.workflowId) ||
+        action.state !== (unit.recovery ? "pending" : "settled"))
+    )
+      return { offered: false };
+    const effect = await coordinatorReconciliationEffect(instance, unit, action ?? undefined);
+    if (this.runOwner.planeOffers.has(effect.id)) return { offered: false };
+    const status = await this.workflowStatus(effect.workflowId);
+    if (
+      !coordinatorWorkflowCanReconcile(instance, unit, action ?? undefined, status) ||
+      this.rows.get(instance.id) !== JSON.stringify(instance) ||
+      this.units.get(unitKey(unit)) !== JSON.stringify(unit)
+    )
+      return { offered: false };
+    if (this.runOwner.planeOffers.size >= PLANE_EFFECTS_TOTAL_CAP) throw new Error("plane_effects total cap");
+    this.runOwner.planeOffers.set(effect.id, effect);
+    return { offered: true };
+  }
   async findPullOwners(target: PullTarget): Promise<PullOwnersResult> {
     if (!isPullTarget(target)) return { ok: false, reason: "invalid" };
     if (!this.runOwner) return { ok: false, reason: "unavailable" };
@@ -300,7 +338,7 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
           };
         }),
       ],
-      effects: [],
+      effects: [...this.runOwner.planeOffers.values()],
       settlements,
     };
   }
@@ -311,6 +349,23 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     staged: readonly CoordinatorUnit[] = [],
     owner?: CoordinatorInstance,
   ): PullBindingRefusal | undefined {
+    if (
+      current?.ending &&
+      !(
+        current.reportDelivery === undefined &&
+        isCoordinatorReportAdmission(next.reportDelivery) &&
+        JSON.stringify(current) === JSON.stringify({ ...next, reportDelivery: undefined })
+      ) &&
+      (JSON.stringify(current.ending) !== JSON.stringify(next.ending) ||
+        JSON.stringify(current.reportDelivery) !== JSON.stringify(next.reportDelivery)) &&
+      [...(this.runOwner?.planeOffers.values() ?? [])].some(
+        (effect) =>
+          isCoordinatorReconcileEffect(effect) &&
+          effect.instanceId === current.instanceId &&
+          effect.unit === current.unit,
+      )
+    )
+      return "stale";
     force ||= current?.startedAt === undefined && next.startedAt !== undefined;
     if (!force && !needsPullBindingAdmission(current, next)) return;
     try {
@@ -402,8 +457,10 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     this.units.set(key, JSON.stringify(result.unit));
     return { ok: true, unit: result.unit, ...(result.replayed ? { replayed: true } : {}) };
   }
-  async getRecoveryAction(key: UnitEventKey, request: RecoveryRequest): Promise<RecoveryAction | null> {
-    const value = this.recoveryActions.get(`${unitKey(key)}\0${await recoveryActionId(key, request)}`);
+  async getRecoveryAction(key: UnitEventKey, request: RecoveryRequest | string): Promise<RecoveryAction | null> {
+    const actionId = typeof request === "string" ? request : await recoveryActionId(key, request);
+    if (!/^r_[a-f0-9]{64}$/.test(actionId)) throw new Error("invalid recovery action identity");
+    const value = this.recoveryActions.get(`${unitKey(key)}\0${actionId}`);
     return value ? (JSON.parse(value) as RecoveryAction) : null;
   }
   async listRecoveryHistory(key: UnitEventKey, after = 0): Promise<RecoveryHistoryPage> {
@@ -615,8 +672,9 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     event: ThreadEventInput,
     requireActive = false,
     binding?: MainTaskBinding,
+    expectedRecovery?: { actionId: string; workflowId: string },
   ): Promise<AppendEventResult> {
-    if (requireActive || binding !== undefined) {
+    if (requireActive || binding !== undefined || expectedRecovery !== undefined) {
       const instanceText = this.rows.get(key.instanceId);
       const unitText = this.units.get(unitKey(key));
       const instance = instanceText ? (JSON.parse(instanceText) as CoordinatorInstance) : undefined;
@@ -628,7 +686,34 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
           !mainTaskBindingMatches(binding, this.mainTasks.get(this.mainTaskKey(binding.key)) ?? null, instance, unit))
       )
         return { ok: false, reason: "stale" };
-      if (!instance || !unit || instance.stop || unit.ending || unit.recovery || unit.recoveryHold)
+      if (expectedRecovery !== undefined) {
+        const actionText = this.recoveryActions.get(`${unitKey(key)}\0${expectedRecovery.actionId}`);
+        const action = actionText ? JSON.parse(actionText) : undefined;
+        if (
+          !requireActive ||
+          !instance ||
+          !unit ||
+          !isCoordinatorInstance(instance) ||
+          !isCoordinatorUnit(unit) ||
+          !isRecoveryAction(action) ||
+          action.state !== "pending" ||
+          action.id !== expectedRecovery.actionId ||
+          action.instanceId !== key.instanceId ||
+          action.unit !== key.unit ||
+          action.workflowId !== expectedRecovery.workflowId ||
+          unit.recovery?.actionId !== expectedRecovery.actionId ||
+          unit.recovery.workflowId !== expectedRecovery.workflowId
+        )
+          return { ok: false, reason: "stale" };
+      }
+      if (
+        !instance ||
+        !unit ||
+        instance.stop ||
+        unit.ending ||
+        (unit.recovery && !expectedRecovery) ||
+        unit.recoveryHold
+      )
         return { ok: false, reason: "ended" };
     }
     const list = this.events.get(unitKey(key)) ?? [];
@@ -676,6 +761,9 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
 /** Without a durable state Worker, writes refuse and unit-owner reads are
  *  unavailable rather than evidence that the instance has no units. */
 export class NullCoordinatorInstanceStore implements CoordinatorInstanceStore {
+  async offerReconciliation(): Promise<{ offered: boolean }> {
+    return { offered: false };
+  }
   async findPullOwners(_target: PullTarget): Promise<PullOwnersResult> {
     return { ok: false, reason: "unavailable" };
   }
@@ -754,6 +842,7 @@ export class NullCoordinatorInstanceStore implements CoordinatorInstanceStore {
     _event: ThreadEventInput,
     _requireActive = false,
     _binding?: MainTaskBinding,
+    _expectedRecovery?: { actionId: string; workflowId: string },
   ): Promise<AppendEventResult> {
     return { ok: false, reason: "unavailable" };
   }
@@ -788,6 +877,12 @@ export interface WorkerCoordinatorInstanceStoreOptions {
  *  the run store's client. An answer this client cannot read is thrown, never
  *  read as "no instance": a spawn on a guess would be a spawn nobody asked for. */
 export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore {
+  async offerReconciliation(key: UnitEventKey): Promise<{ offered: boolean }> {
+    const response = await this.post("/runs/coordinator/reconcile/offer", { ...key });
+    const result = response.data as { offered?: unknown };
+    if (response.status === 200 && typeof result.offered === "boolean") return { offered: result.offered };
+    throw new Error(`coordinator reconciliation unavailable (HTTP ${response.status})`);
+  }
   async findPullOwners(target: PullTarget): Promise<PullOwnersResult> {
     try {
       const response = await this.post("/runs/coordinator/pull-owners", { target });
@@ -838,15 +933,20 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
       return { ok: false, reason: data.reason };
     throw new Error(`recovery transition unavailable (HTTP ${response.status})`);
   }
-  async getRecoveryAction(key: UnitEventKey, request: RecoveryRequest): Promise<RecoveryAction | null> {
-    const response = await this.post("/runs/coordinator/recovery/action", { key, request });
+  async getRecoveryAction(key: UnitEventKey, request: RecoveryRequest | string): Promise<RecoveryAction | null> {
+    const actionId = typeof request === "string" ? request : await recoveryActionId(key, request);
+    if (!/^r_[a-f0-9]{64}$/.test(actionId)) throw new Error("invalid recovery action identity");
+    const response = await this.post("/runs/coordinator/recovery/action", {
+      key,
+      ...(typeof request === "string" ? { actionId } : { request }),
+    });
     const action = (response.data as { action?: unknown }).action;
     if (action === null) return null;
     if (
       !isRecoveryAction(action) ||
       action.instanceId !== key.instanceId ||
       action.unit !== key.unit ||
-      action.id !== (await recoveryActionId(key, request))
+      action.id !== actionId
     )
       throw new Error("invalid recovery action response");
     return action;
@@ -1069,13 +1169,20 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     event: ThreadEventInput,
     requireActive = false,
     binding?: MainTaskBinding,
+    expectedRecovery?: { actionId: string; workflowId: string },
   ): Promise<AppendEventResult> {
     // The state Worker caps again after assigning the sequence, but its HTTP
     // request-body fence runs first. Cap here too so an accepted 5–10 MB file
     // reaches that boundary as the small dropped-count row the store contract
     // promises, never as a transport-level 413.
     const capped = capThreadEvent(event);
-    const r = await this.post("/runs/coordinator/events/append", { ...key, event: capped, requireActive, binding });
+    const r = await this.post("/runs/coordinator/events/append", {
+      ...key,
+      event: capped,
+      requireActive,
+      binding,
+      expectedRecovery,
+    });
     const d = r.data as { ok?: unknown; seq?: unknown; event?: unknown; reason?: unknown };
     if (d.ok === true && typeof d.seq === "number" && (d.event === undefined || isThreadEvent(d.event)))
       return { ok: true, seq: d.seq, ...(d.event === undefined ? {} : { event: d.event }) };

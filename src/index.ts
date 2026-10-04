@@ -85,7 +85,11 @@ import {
   type ReclaimOutcome,
 } from "./core/boot.js";
 import { launchResumes, resumeIoTarget } from "./core/resumeLaunch.js";
-import { RunnerOwnershipFence } from "./core/runnerOwnership.js";
+import { RunnerOwnershipFence, findRunnerPullOwner } from "./core/runnerOwnership.js";
+import type {
+  CoordinatorReconcileEffect,
+  CoordinatorReconcileReceipt,
+} from "./core/coordinator/workflowReconciliation.js";
 import { ThreadsElsewhere } from "./core/runLedger/threadsElsewhere.js";
 import { LedgerTakeover } from "./core/runLedger/takeover.js";
 import { nullChannelIO } from "./core/nullChannelIo.js";
@@ -142,6 +146,7 @@ import { PROJECT_DOCS_URL, docsRedirectTarget } from "./core/docsLink.js";
 import { activeRunCount, dispatch, type CoreDeps } from "./core/dispatcher.js";
 import {
   createAdminCoordinatorHandler,
+  reconcileCoordinatorReport,
   createCoordinatorChildAdmission,
   isCoordinatorAdminPath,
   recoverOriginalUnit,
@@ -191,9 +196,11 @@ import {
   mergePullRequest,
   openPullRequest,
   pullRequestChangedPaths,
-  refirePullRequestEvent,
+  setPullRequestState,
+  fetchCheckRetryTargets,
+  rerunActionsFailedJobs,
+  rerequestCheckRun,
   requiredCheckContexts,
-  rerunFailedJobs,
   updatePullRequest,
 } from "./execution/githubPulls.js";
 import { postReviewComment } from "./execution/githubComments.js";
@@ -489,12 +496,16 @@ export async function runBot(): Promise<void> {
   // — the restart-from-request path (run-history item 42). Wired once the boot
   // reclaim exists (below); until then every effect defers and stays offered.
   let planeAdmitPass: (() => Promise<void>) | undefined;
+  let planeReconcilePass:
+    ((effect: CoordinatorReconcileEffect) => Promise<CoordinatorReconcileReceipt | undefined>) | undefined;
   // ONE executor for both transports (orchestration-plane item 44): the
   // heartbeat/reclaim answers (writeThrough) and the state Worker's push
   // (`POST /plane/effects` below) run an effect through this same object, so
   // the two paths cannot disagree on what an admit does.
   const planeEffectExecutor = {
     draining: () => draining,
+    reconcile: async (effect: CoordinatorReconcileEffect): Promise<CoordinatorReconcileReceipt | undefined> =>
+      planeReconcilePass?.(effect),
     admit: async (effect: Extract<PlaneEffect, { kind: "admit" }>): Promise<PlaneAckOutcome> => {
       // A duplicate admit after a roll: the run is already live here.
       if (defaultRunRegistry.getById(effect.runId)) return "skipped";
@@ -802,7 +813,6 @@ export async function runBot(): Promise<void> {
   // A ledger-backed process fails closed until one complete live listing has
   // supplied that durable view.
   const runnerOwnership = new RunnerOwnershipFence(capabilities.runLedger);
-  deps.runnerOwnership = runnerOwnership;
   const pullsWiring: PullsCommandDeps["pulls"] = (() => {
     const state = sweepState;
     const chains = new Map<string, Promise<unknown>>();
@@ -826,7 +836,11 @@ export async function runBot(): Promise<void> {
             git: createSweepGit({ cloneUrl: sweepCloneUrl, authHeader: sweepAuthHeader }),
             origin,
             state,
-            runnerOwns: async (pr) => runnerOwnership.owns(pr.repo, pr.number),
+            runnerOwns: async (pr) => {
+              const owners = await coordinatorInstances.findPullOwners({ repo: pr.repo, pr: pr.number });
+              if (!owners.ok) throw new Error(`pull ownership ${owners.reason}`);
+              return owners.owners.length > 0;
+            },
             dispatch: async (m) => {
               const io = threadIoFor({ threadKey: m.threadKey, userId: m.userId }) ?? nullChannelIO(m.threadKey);
               await dispatch(deps, m, io);
@@ -1248,7 +1262,7 @@ export async function runBot(): Promise<void> {
     const githubWebhook = createGithubWebhookHandler({
       secret: processSecrets.get("GITHUB_WEBHOOK_SECRET")?.reveal(),
       watch: mergeWatch,
-      ownerOf: (repo, prNumber) => runnerOwnership.owner(repo, prNumber),
+      ownerOf: (repo, prNumber) => findRunnerPullOwner(coordinatorInstances, repo, prNumber),
       instances: coordinatorInstances,
       ...(artifacts !== undefined ? { artifacts } : {}),
       commenterAuthorized,
@@ -1385,11 +1399,14 @@ export async function runBot(): Promise<void> {
         const required = baseRef !== undefined ? await requiredCheckContexts(repo, baseRef) : undefined;
         return classifyRoundChecks(runs, changed, required);
       },
-      rerunFailedChecks: rerunFailedJobs,
-      refirePullRequest: refirePullRequestEvent,
+      fetchCheckRetryTargets,
+      rerunActionsFailedJobs,
+      rerequestCheckRun,
+      setPullRequestState,
       startRecovery: (id, params) => createInstanceViaShim(processShimOptions(), id, params),
       recoveryStatus: (id) => fetchInstanceStatusViaShim(processShimOptions(), id),
     };
+    planeReconcilePass = (effect) => reconcileCoordinatorReport(effect, coordinatorDeps);
     const coordinatorAdmin = createAdminCoordinatorHandler(coordinatorDeps);
     deps.recoverOriginalUnit = async (key, caller) => {
       const answer = await recoverOriginalUnit(
@@ -1741,12 +1758,13 @@ export async function runBot(): Promise<void> {
           execute: ledgerClient ? planeEffectExecutor : undefined,
           fenceSteer: async (effect) =>
             (await ledgerClient?.planeFenceSteer(effect.id, effect.runId, generation, LEASE_MS)) ?? false,
-          ack: async (effect, outcome) => {
+          ack: async (effect, outcome, reconciliation) => {
             if (ledgerClient)
               await ledgerClient.planeAck(
                 effect.id,
                 outcome,
                 effect.kind === "steer" ? { runId: effect.runId, gen: generation } : undefined,
+                reconciliation,
               );
           },
           warn: (w) => console.warn(w),
@@ -2032,9 +2050,17 @@ export async function runBot(): Promise<void> {
   const storedStatus = async (runId: string) => (await runStore.get(runId))?.status;
   const hostedInstanceLive = async (instanceId: string): Promise<boolean | undefined> => {
     const answer = await fetchInstanceStatusViaShim(processShimOptions(), instanceId);
-    if (answer.kind !== "status") return answer.kind === "absent" ? false : undefined;
+    const terminal =
+      answer.kind === "absent" ||
+      (answer.kind === "status" && ["complete", "errored", "terminated"].includes(answer.status));
+    if (terminal) {
+      const units = await coordinatorInstances.listUnits(instanceId).catch(() => []);
+      for (const unit of units)
+        await coordinatorInstances.offerReconciliation({ instanceId, unit: unit.unit }).catch(() => undefined);
+      return false;
+    }
+    if (answer.kind !== "status") return undefined;
     if (["queued", "running", "paused", "waiting", "waitingForPause"].includes(answer.status)) return true;
-    if (["complete", "errored", "terminated"].includes(answer.status)) return false;
     return undefined;
   };
   let bootReclaim: ReclaimOutcome | undefined;

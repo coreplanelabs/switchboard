@@ -44,6 +44,11 @@
 // like the ingress; `createAdminCoordinatorHandler` is the node:http adapter.
 
 import type { RunnerPullOwner } from "../core/runnerOwnership.js";
+import { isPullOwnersResult } from "../core/coordinator/pullOwnership.js";
+import { performCheckRecovery } from "../core/coordinator/checkRecoveryEffect.js";
+import { finalizeCoordinatorReport } from "../core/coordinator/reportFinalization.js";
+import { reconcileCoordinatorExecution } from "../core/coordinator/reconcileExecution.js";
+import type { CoordinatorReconcileReceipt } from "../core/coordinator/workflowReconciliation.js";
 import {
   DEFAULT_GRANT,
   carve,
@@ -212,6 +217,8 @@ import {
   type PullRequestTarget,
   type BranchRefRead,
   type BranchRefCreateResult,
+  type CheckRetryTarget,
+  type GithubWriteResult,
 } from "../execution/githubPulls.js";
 import { EMPTY_START_STATE, type BranchStartState, type RewriteResult } from "../execution/identityRewrite.js";
 import type { Secret } from "../secrets.js";
@@ -286,21 +293,10 @@ export interface AdminCoordinatorDeps {
    *  approval-carry rules are reused, but a conflict returns to this runner
    *  instead of starting a detached fix round. */
   runnerRebase?: (instance: CoordinatorInstance, prNumber: number) => Promise<SweepReport>;
-  /** Process-local ownership fence shared with the sweep. The durable runner
-   *  remains authoritative; this fence only makes a simultaneous command defer. */
+  /** Temporary rebase admission until its external writes use the durable
+   * effect journal. Recovery and settlement use canonical store transactions. */
   runnerOwnership?: {
     claim(repo: string, prNumber: number, owner?: RunnerPullOwner): boolean;
-    reserve?(repo: string, prNumber: number, owner: RunnerPullOwner): symbol | undefined;
-    transferReservation?(
-      repo: string,
-      prNumber: number,
-      token: symbol,
-      currentOwner: RunnerPullOwner,
-      nextOwner: RunnerPullOwner,
-    ): boolean;
-    releaseReservation?(repo: string, prNumber: number, token: symbol): boolean;
-    release(repo: string, prNumber: number, owner?: RunnerPullOwner): boolean;
-    owner(repo: string, prNumber: number): RunnerPullOwner | undefined;
   };
   /** The ship grant as the requester's channel and user scopes say now. Idle
    * waits can outlive a config change, so a wake never relies on the grant
@@ -454,14 +450,14 @@ export interface AdminCoordinatorDeps {
     prNumber: number,
     baseRef?: string,
   ) => Promise<RoundChecks | undefined>;
-  /** The flake rule's one re-run (record 0055): re-run the failed jobs behind
-   *  the named check runs at the head (githubPulls.rerunFailedJobs — the same
-   *  `rerun-failed-jobs` retry the deploy pipeline documents). Optional:
-   *  without it a retry ask answers false and the second read makes the finding. */
-  rerunFailedChecks?: (repo: string, sha: string, names: string[]) => Promise<boolean>;
-  /** Empty required-check recovery: close and reopen the pull request once so
-   *  GitHub emits `pull_request` again without moving the reviewed head. */
-  refirePullRequest?: (repo: string, prNumber: number) => Promise<boolean>;
+  fetchCheckRetryTargets?: (repo: string, sha: string, names: string[]) => Promise<CheckRetryTarget[] | undefined>;
+  rerunActionsFailedJobs?: (repo: string, id: number) => Promise<GithubWriteResult>;
+  rerequestCheckRun?: (repo: string, id: number) => Promise<GithubWriteResult>;
+  setPullRequestState?: (
+    pr: { repo: string; number: number },
+    target: { headSha: string; headRef: string; baseRef: string },
+    state: "closed" | "open",
+  ) => Promise<GithubWriteResult>;
   /** Where the parent's record goes when the instance ends. */
   runHistoryWriter: RunHistoryWriter;
   /** The channel's visibility stamp for that record (dispatch/record.ts `channelVisibilityOf`). */
@@ -2555,7 +2551,7 @@ async function reconcileMissingFindingsPush(
       return false;
   }
   // Evidence reads may take time. Recheck the ref after them, immediately
-  // before the caller reserves ownership and compares the original row.
+  // before the caller atomically admits the original recovery action.
   const fresh = await deps.fetchPrFacts({ repo: instance.repo, number: binding.pr }).catch(() => undefined);
   return (
     fresh?.state === "open" &&
@@ -2605,6 +2601,33 @@ function findingsRoundAuthorized(
           round.at <= childStartedAt,
       ))
   );
+}
+
+/** A routing observation can refuse unsafe work; only the following native
+ * action transition may admit it. Missing or contradictory owners never clear
+ * a retained original recovery action. */
+async function recoveryPullOwnership(
+  deps: AdminCoordinatorDeps,
+  instance: CoordinatorInstance,
+  row: CoordinatorUnit,
+  at: number,
+): Promise<IngressResponse | undefined> {
+  if (!row.pr) return undefined;
+  const owners = await deps.instances.findPullOwners({ repo: instance.repo, pr: row.pr.number }).catch(() => undefined);
+  if (!isPullOwnersResult(owners) || !owners.ok)
+    return json(503, { ok: false, error: "publication_ownership_unknown", at });
+  if (
+    (row.recovery && owners.owners.length !== 1) ||
+    owners.owners.some(
+      (owner) =>
+        owner.kind !== "unit" ||
+        owner.instanceId !== instance.id ||
+        owner.unit !== row.unit ||
+        owner.actionId !== row.recovery?.actionId,
+    )
+  )
+    return json(409, { ok: false, error: "publication_ownership_changed", at });
+  return undefined;
 }
 
 /** Confirm a whole-row transition, including a committed CAS with a lost reply. */
@@ -4561,14 +4584,6 @@ export async function recoverOriginalUnit(
       if (renew !== renewed) return json(409, { ok: false, error: "recovery_claim_mismatch", at });
     }
     if (savedAction.state === "refused") {
-      // A refusal can commit while every response is lost. Only its action
-      // may release the old fence; the same unit can already have a successor.
-      if (row.pr !== undefined)
-        deps.runnerOwnership?.release(instance.repo, row.pr.number, {
-          instanceId: instance.id,
-          unit: row.unit,
-          recoveryActionId: savedAction.id,
-        });
       return json(409, { ok: false, error: savedAction.error, workflowId: savedAction.workflowId, at });
     }
     if (savedAction.state === "settled")
@@ -5678,35 +5693,11 @@ export async function recoverOriginalUnit(
 
   const actionId =
     existingClaim?.actionId ?? (request === undefined ? undefined : await recoveryActionId(row, request));
-  const fenceOwner: RunnerPullOwner = {
-    ...originalOwner,
-    ...(actionId !== undefined ? { recoveryActionId: actionId } : {}),
-  };
-  const fence = deps.runnerOwnership;
-  if (
-    fence === undefined ||
-    fence.reserve === undefined ||
-    fence.transferReservation === undefined ||
-    fence.releaseReservation === undefined
-  )
-    return json(503, { ok: false, error: "publication_ownership_unknown", at });
-  const releaseReservation = fence.releaseReservation.bind(fence);
-  if (existingClaim !== undefined) {
-    try {
-      // The claim is durable while the ownership fence is process-local. A
-      // Workflow can outlive a bot process, so reconstruct this exact owner's
-      // fence from the claim before revalidating it; a rival claim still wins.
-      if (!fence.claim(instance.repo, pr.number, fenceOwner))
-        return json(409, { ok: false, error: "publication_ownership_changed", at });
-    } catch (err) {
-      return json(503, { ok: false, error: "publication_ownership_unknown", message: describe(err), at });
-    }
-  }
+  const ownershipRefusal = await recoveryPullOwnership(deps, instance, row, at);
+  if (ownershipRefusal) return ownershipRefusal;
 
   let claimedRow = row;
   let claimReplayed = false;
-  let token: symbol | undefined;
-  let transferred = existingClaim !== undefined;
   const rollback = async (error: string, consumed = false): Promise<IngressResponse> => {
     // A committed renewal is spent even if Workflow admission fails: a later
     // request must not mint another lease from the same original grant.
@@ -5739,12 +5730,6 @@ export async function recoverOriginalUnit(
           at,
         });
     }
-    const released = transferred
-      ? fence.release(instance.repo, pr.number, fenceOwner)
-      : token !== undefined
-        ? releaseReservation(instance.repo, pr.number, token)
-        : true;
-    if (!released) return json(500, { ok: false, error: "recovery_cleanup_failed", cause: error, at });
     return json(409, { ok: false, error, at });
   };
 
@@ -6008,12 +5993,6 @@ export async function recoverOriginalUnit(
           at,
         });
     }
-    try {
-      token = fence.reserve(instance.repo, pr.number, fenceOwner);
-    } catch (err) {
-      return json(503, { ok: false, error: "publication_ownership_unknown", message: describe(err), at });
-    }
-    if (token === undefined) return json(409, { ok: false, error: "publication_ownership_changed", at });
     const { ending: _ending, ...withoutEnding } = claimRow;
     claimedRow = {
       ...withoutEnding,
@@ -6062,36 +6041,29 @@ export async function recoverOriginalUnit(
       replaced = result.ok ? { ok: true } : { ok: false, reason: result.reason === "stale" ? "stale" : "unavailable" };
       if (!result.ok && (result.reason === "capacity" || result.reason === "conflict"))
         historyError = `recovery_history_${result.reason}`;
+      if (!result.ok && result.reason === "owned") historyError = "publication_ownership_changed";
+      if (!result.ok && result.reason === "incomplete") historyError = "publication_ownership_unknown";
       if (result.ok) {
         claimedRow = result.unit;
         claimReplayed = result.replayed === true;
       }
     } catch (err) {
       // A lost CAS response is not a definite failure. Re-read the exact row:
-      // committed means continue under the still-held reservation; unchanged
-      // means release; unreadable or another value stays fenced for restart
-      // reconciliation rather than exposing a claimed row as unowned.
+      // committed means continue under its canonical action; unchanged means
+      // defer; unreadable or another value retains the durable claim for
+      // restart reconciliation rather than exposing it as unowned.
       const reread = await deps.instances.listUnits(instance.id).catch(() => undefined);
       const current = reread?.filter((candidate) => candidate.unit === row.unit);
       if (current?.length === 1 && JSON.stringify(current[0]) === JSON.stringify(claimedRow)) replaced = { ok: true };
       else if (current?.length === 1 && JSON.stringify(current[0]) === JSON.stringify(row)) {
-        const released = releaseReservation(instance.repo, pr.number, token);
-        if (!released)
-          return json(500, { ok: false, error: "recovery_cleanup_failed", cause: "recovery_store_unavailable", at });
         return json(503, { ok: false, error: "recovery_store_unavailable", message: describe(err), at });
       } else return json(503, { ok: false, error: "recovery_claim_unanswered", message: describe(err), at });
     }
     if (replaced.ok !== true) {
       const error =
         historyError ?? (replaced.reason === "stale" ? "recovery_claim_stale" : "recovery_store_unavailable");
-      const released = releaseReservation(instance.repo, pr.number, token);
-      if (!released) return json(500, { ok: false, error: "recovery_cleanup_failed", cause: error, at });
-      return json(409, { ok: false, error, at });
+      return json(error === "publication_ownership_unknown" ? 503 : 409, { ok: false, error, at });
     }
-    if (!fence.transferReservation(instance.repo, pr.number, token, fenceOwner, fenceOwner))
-      return rollback("publication_ownership_changed");
-    token = undefined;
-    transferred = true;
   }
   if (requestedWorkflowId !== undefined)
     return json(200, { ok: true, parentInstanceId: instance.id, unit: row.unit, workflowId, at });
@@ -7351,7 +7323,52 @@ async function unitWake(body: Record<string, unknown>, deps: AdminCoordinatorDep
 }
 
 /** A unit ended: the row says how, the unit's thread gets the report, the card is redrawn. */
-async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps): Promise<IngressResponse> {
+/** Finish the offered original Workflow through the existing settlement and
+ * report paths. The core validates its native status and canonical identity. */
+export async function reconcileCoordinatorReport(
+  effect: unknown,
+  deps: AdminCoordinatorDeps,
+): Promise<CoordinatorReconcileReceipt | undefined> {
+  if (!deps.recoveryStatus || !deps.reportLedger) return undefined;
+  const ledger = deps.reportLedger;
+  return reconcileCoordinatorExecution(effect, {
+    instances: deps.instances,
+    status: deps.recoveryStatus,
+    settle: async (body) => (await unitEnd({ ...body }, deps, { reconciliation: true })).status === 200,
+    readReport: (owner) => readCoordinatorReport(ledger, owner),
+    finalize: async (input) => {
+      const finalized = await finalizeCoordinatorReport(
+        {
+          ledger,
+          instances: deps.instances,
+          deliverPrivate: async (delivery) => {
+            if (!deps.privateWorkerLog) return undefined;
+            await appendPrivateWorkerReply(
+              deps.privateWorkerLog,
+              { instanceId: delivery.instance.id, unit: delivery.unit.unit },
+              { id: delivery.deliveryId, text: delivery.report.text, at: delivery.unit.ending!.at },
+            );
+            return delivery.deliveryId;
+          },
+        },
+        input,
+      );
+      if (!finalized) return undefined;
+      if (!input.unit.workBrief && finalized.report.threadText.length > 0) {
+        const io = unitIO(deps, input.instance, input.unit);
+        if (!io) return undefined;
+        await io.reply(finalized.report.threadText);
+      }
+      return finalized;
+    },
+  });
+}
+
+async function unitEnd(
+  body: Record<string, unknown>,
+  deps: AdminCoordinatorDeps,
+  options: { reconciliation?: boolean } = {},
+): Promise<IngressResponse> {
   const id = parseInstanceId(body.parentInstanceId);
   if (!id.ok) return json(400, { ok: false, error: id.error });
   if (typeof body.unit !== "string" || !UNIT_ID.test(body.unit))
@@ -7529,6 +7546,43 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       return false;
     }
   };
+  let finalizationError = "report_context_unavailable";
+  const finalizeReport = async (committed: CoordinatorUnit): Promise<boolean> => {
+    if (committed.ending === undefined) {
+      await freezeReport(committed);
+      return recordStatus(committed);
+    }
+    const finalized = await finalizeCoordinatorReport(
+      {
+        ledger: deps.reportLedger!,
+        instances: deps.instances,
+        deliverPrivate: async (input) => {
+          try {
+            if (!deps.privateWorkerLog) throw new Error("private worker log unavailable");
+            await appendPrivateWorkerReply(
+              deps.privateWorkerLog,
+              { instanceId: input.instance.id, unit: input.unit.unit },
+              { id: input.deliveryId, text: input.report.text, at: input.unit.ending!.at },
+            );
+            return input.deliveryId;
+          } catch {
+            finalizationError = "private_worker_log_unavailable";
+            return undefined;
+          }
+        },
+      },
+      {
+        instance,
+        unit: committed,
+        owner: reportOwner,
+        proposed: { text: fullReport, threadText: threadReport as string },
+      },
+    );
+    if (!finalized) return false;
+    fullReport = finalized.report.text;
+    threadReport = finalized.report.threadText;
+    return true;
+  };
   const recoveryWorkflowId =
     typeof body.recoveryWorkflowId === "string" && INSTANCE_ID_PATTERN.test(body.recoveryWorkflowId)
       ? body.recoveryWorkflowId
@@ -7554,13 +7608,6 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     )
   )
     return json(409, { ok: false, error: "recovery_outcome_mismatch", at });
-  const settlementActionId =
-    row.recovery?.actionId ?? (row.history?.receiptId !== "observed" ? row.history?.receiptId : undefined);
-  const settlementOwner: RunnerPullOwner = {
-    instanceId: instance.id,
-    unit: row.unit,
-    ...(settlementActionId !== undefined ? { recoveryActionId: settlementActionId } : {}),
-  };
   const reportAdmission = await coordinatorReportAdmission(reportOwner, {
     text: fullReport,
     threadText: threadReport as string,
@@ -7593,15 +7640,9 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       }
     }
     try {
-      await freezeReport(committed);
+      if (!(await finalizeReport(committed))) return json(503, { ok: false, error: finalizationError, at });
     } catch {
       return json(503, { ok: false, error: "report_context_unavailable", at });
-    }
-    if (!(await recordStatus(committed))) return json(503, { ok: false, error: "report_context_unavailable", at });
-    if (row.workBrief !== undefined && !(await deliverPrivateReport()))
-      return json(503, { ok: false, error: "private_worker_log_unavailable", at });
-    if (row.pr !== undefined) {
-      deps.runnerOwnership?.release(instance.repo, row.pr.number, settlementOwner);
     }
     return json(200, {
       ok: true,
@@ -7611,8 +7652,12 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     });
   }
 
-  const host = row.recovery !== undefined ? ({ kind: "not_host" } as const) : await hostRunOf(deps, instance);
-  if (host.kind === "not_host" && row.recovery === undefined) return json(409, { ok: false, error: "not_host", at });
+  const host =
+    row.recovery !== undefined || options.reconciliation
+      ? ({ kind: "not_host" } as const)
+      : await hostRunOf(deps, instance);
+  if (host.kind === "not_host" && row.recovery === undefined && !options.reconciliation)
+    return json(409, { ok: false, error: "not_host", at });
   // The driver's `headSha` is the exact continuation boundary: the coding
   // child's last push for review_pending, or the final approved head for
   // merge_ready. Persist it as `lastPush` for the next attempt's pre-check.
@@ -7648,13 +7693,9 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     return json(400, { ok: false, error: "a recovered held ending must carry a typed hold cause", at });
   if (row.recovery !== undefined && (idle !== undefined || segment !== undefined))
     return json(409, { ok: false, error: "recovery_continuation_unsupported", at });
-  if (row.recovery !== undefined && row.pr !== undefined) {
-    try {
-      if (deps.runnerOwnership?.claim(instance.repo, row.pr.number, settlementOwner) !== true)
-        return json(409, { ok: false, error: "publication_ownership_changed", at });
-    } catch (err) {
-      return json(409, { ok: false, error: "publication_ownership_unknown", message: describe(err), at });
-    }
+  if (row.recovery) {
+    const ownershipRefusal = await recoveryPullOwnership(deps, instance, row, at);
+    if (ownershipRefusal) return ownershipRefusal;
   }
   // A real ending is the unit's end: an idle the row carried from an earlier
   // stop is dropped with it, so the row says one thing about how the unit stands.
@@ -7694,10 +7735,9 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
                   ending: {
                     kind: ending.kind,
                     report: fullReport,
+                    threadReport: threadReport as string,
                     ...(outcome !== undefined ? { outcome } : {}),
-                    ...((outcome !== undefined || row.history !== undefined) && row.workBrief !== undefined
-                      ? { deliveryId: body.deliveryId as string }
-                      : {}),
+                    ...(typeof body.deliveryId === "string" ? { deliveryId: body.deliveryId as string } : {}),
                     // Machine-readable failure context (issue 2100): readers do not
                     // need to parse the person's report to locate a thrown step.
                     ...(cause !== undefined ? { cause } : {}),
@@ -7749,13 +7789,10 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       at,
     });
   try {
-    await freezeReport(updated);
+    if (!(await finalizeReport(updated))) return json(503, { ok: false, error: finalizationError, at });
   } catch {
     return json(503, { ok: false, error: "report_context_unavailable", at });
   }
-  if (!(await recordStatus(updated))) return json(503, { ok: false, error: "report_context_unavailable", at });
-  if (segment === undefined && idle === undefined && updated.pr !== undefined)
-    deps.runnerOwnership?.release(instance.repo, updated.pr.number, settlementOwner);
   const thread = unitThread(instance, updated, units.length);
   if (host.kind === "host")
     await hostPublish(
@@ -7787,7 +7824,13 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   // the log says so by count — a loss the operator can read, never a silent one.
   // An idle unit has not ended: its events wait for the fold or the wake
   // (record 0051; the wait lands with this plan's fifth unit).
-  if (segment === undefined && idle === undefined && row.recovery === undefined && row.workBrief === undefined) {
+  if (
+    !options.reconciliation &&
+    segment === undefined &&
+    idle === undefined &&
+    row.recovery === undefined &&
+    row.workBrief === undefined
+  ) {
     const leftovers = await deps.instances
       .listEvents({ instanceId: instance.id, unit: row.unit }, true)
       .catch(() => [] as ThreadEvent[]);
@@ -7844,8 +7887,12 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   }
   let told = false;
   if (row.workBrief !== undefined) {
-    if (!(await deliverPrivateReport())) return json(503, { ok: false, error: "private_worker_log_unavailable", at });
+    if (updated.ending === undefined && !(await deliverPrivateReport()))
+      return json(503, { ok: false, error: "private_worker_log_unavailable", at });
     told = true;
+  } else if (options.reconciliation) {
+    // The reconciliation finalizer confirms the original public delivery.
+    told = threadReport.length === 0;
   } else if (io && threadReport.length === 0)
     told = true; // nothing owed to the thread at this level
   else if (io) {
@@ -7863,7 +7910,7 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   // refused, a cap, a stop — and under it the last coding child's typed handoff
   // as the parent renders it, so a deviation the child recorded reaches the
   // board without a person copying it over. Best effort, like the thread's.
-  if (row.issue !== undefined && row.workBrief === undefined) {
+  if (!options.reconciliation && row.issue !== undefined && row.workBrief === undefined) {
     const handoff = await codingHandoffOf(deps, instance, body.codingRunId);
     const rendered =
       handoff !== undefined
@@ -8628,6 +8675,91 @@ async function checksStep(body: Record<string, unknown>, deps: AdminCoordinatorD
   const unit = await unitRowOf(deps, instance, body.unit);
   if (!unit.ok) return unit.response;
   const log = deps.log ?? console.log;
+  if (body.retry !== undefined || body.refire !== undefined) {
+    if (body.retry !== undefined && body.refire !== undefined)
+      return json(400, { ok: false, error: "checks recovery must be retry or refire, not both" });
+    if (
+      body.retry !== undefined &&
+      (!Array.isArray(body.retry) ||
+        body.retry.length === 0 ||
+        !body.retry.every((name) => typeof name === "string" && name.length > 0))
+    )
+      return json(400, { ok: false, error: "retry must name the failed checks" });
+    if (body.refire !== undefined && body.refire !== true)
+      return json(400, { ok: false, error: "refire must be true" });
+    const row = unit.row!;
+    if (
+      !fullHead(headSha) ||
+      typeof body.effectId !== "string" ||
+      !STEP_NAME_PATTERN.test(body.effectId) ||
+      !Number.isSafeInteger(body.effectOrdinal) ||
+      typeof body.executionWorkflowId !== "string"
+    )
+      return json(409, { ok: false, error: "effect_execution_mismatch", at });
+    if (row.pr?.number !== body.prNumber || row.publication?.expectedHeadSha !== headSha)
+      return json(409, { ok: false, error: "publication_binding_stale", at });
+    if (body.refire === true && deps.setPullRequestState === undefined)
+      return json(503, { ok: false, error: "github_unavailable", at });
+    const result = await performCheckRecovery(
+      {
+        instance,
+        unit: row,
+        execution: {
+          workflowId: body.executionWorkflowId,
+          ...(typeof body.recoveryActionId === "string" ? { recoveryActionId: body.recoveryActionId } : {}),
+        },
+        effectId: body.effectId,
+        ordinal: body.effectOrdinal as number,
+        pr: body.prNumber,
+        headSha,
+        ...(Array.isArray(body.retry) ? { retry: body.retry as string[] } : { refire: true }),
+      },
+      {
+        instances: deps.instances,
+        readPull: () => deps.fetchPrFacts({ repo: instance.repo, number: body.prNumber as number }),
+        retryTargets: () =>
+          deps.fetchCheckRetryTargets?.(instance.repo, headSha, body.retry as string[]) ?? Promise.resolve(undefined),
+        canWrite: (call) =>
+          call.operation === "pull_close" || call.operation === "pull_reopen"
+            ? deps.setPullRequestState !== undefined
+            : call.operation === "actions_rerun"
+              ? deps.rerunActionsFailedJobs !== undefined
+              : deps.rerequestCheckRun !== undefined,
+        write: (call) => {
+          if (call.operation === "pull_close" || call.operation === "pull_reopen")
+            return (
+              deps.setPullRequestState?.(
+                { repo: instance.repo, number: body.prNumber as number },
+                { headSha, headRef: row.branch, baseRef: instance.base ?? "main" },
+                call.operation === "pull_close" ? "closed" : "open",
+              ) ?? Promise.resolve({ state: "uncertain" })
+            );
+          return (
+            (call.operation === "actions_rerun"
+              ? deps.rerunActionsFailedJobs?.(instance.repo, call.resourceId!)
+              : deps.rerequestCheckRun?.(instance.repo, call.resourceId!)) ?? Promise.resolve({ state: "uncertain" })
+          );
+        },
+      },
+    );
+    if (!result.ok)
+      return json(["stopped", "execution", "conflict"].includes(result.reason) ? 409 : 503, {
+        ok: false,
+        error:
+          result.reason === "execution"
+            ? "effect_execution_mismatch"
+            : result.reason === "conflict"
+              ? "effect_target_mismatch"
+              : "effect_reconciliation_pending",
+        at,
+      });
+    return json(200, {
+      ok: true,
+      ...(body.refire === true ? { refired: result.dispatched } : { retried: result.dispatched }),
+      ...(result.effectOrdinal === undefined ? {} : { effectOrdinal: result.effectOrdinal }),
+      at,
+    });
+  }
   // State, head and branch existence are read before even a recovery effect:
   // checks on a terminal, moved or deleted head are no longer this unit's act.
   const facts = await deps.fetchPrFacts({ repo: instance.repo, number: body.prNumber }).catch(() => undefined);
@@ -8651,25 +8783,6 @@ async function checksStep(body: Record<string, unknown>, deps: AdminCoordinatorD
       (typeof pullRequest.headSha === "string" && !sameCommit(pullRequest.headSha, headSha)))
   )
     return json(200, { ok: true, pullRequest, at });
-  if (body.retry !== undefined && body.refire !== undefined)
-    return json(400, { ok: false, error: "checks recovery must be retry or refire, not both" });
-  if (body.retry !== undefined) {
-    if (!Array.isArray(body.retry) || body.retry.length === 0 || !body.retry.every((n) => typeof n === "string"))
-      return json(400, { ok: false, error: "retry must name the failed checks" });
-    const retried = (await deps.rerunFailedChecks?.(instance.repo, headSha, body.retry as string[])) ?? false;
-    log(
-      `[coordinator] ${instance.id} ${body.unit}: flake re-run ${retried ? "dispatched" : "not dispatched"} for ${(body.retry as string[]).join(", ")} at ${headSha.slice(0, 7)}`,
-    );
-    return json(200, { ok: true, retried, at });
-  }
-  if (body.refire !== undefined) {
-    if (body.refire !== true) return json(400, { ok: false, error: "refire must be true" });
-    const refired = (await deps.refirePullRequest?.(instance.repo, body.prNumber)) ?? false;
-    log(
-      `[coordinator] ${instance.id} ${body.unit}: pull_request event ${refired ? "re-fired" : "not re-fired"} for ${instance.repo}#${body.prNumber} at ${headSha.slice(0, 7)}`,
-    );
-    return json(200, { ok: true, refired, at });
-  }
   // The pull request's own facts beside the runs (issue 2063): a draft head
   // is the machine's to hold — never to merge — and the base names the branch
   // whose required checks say what the head must still gain.

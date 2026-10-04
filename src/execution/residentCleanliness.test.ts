@@ -6,7 +6,62 @@ import {
   leftBehindSentence,
   parseWorktreeCleanliness,
   worktreeCleanlinessScript,
+  collectPrivateTreeObservation,
 } from "./residentCleanliness.js";
+
+describe("bounded native private-tree observation", () => {
+  const metadata =
+    "container=original-vm\npresent=yes\nbranch=codex/original\nhead=" +
+    "b".repeat(40) +
+    "\ntracked=0\nuntracked=0\nunpushed=1\n";
+  const stream = (bytes: Uint8Array) =>
+    new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(bytes);
+        c.close();
+      },
+    });
+  const process = (stdout = metadata, stderr = "", exit = Promise.resolve(0)) => ({
+    stdout: stream(new TextEncoder().encode(stdout)),
+    stderr: stream(new TextEncoder().encode(stderr)),
+    exitCode: exit,
+  });
+  it("returns measured counts only after both streams and a successful native exit", async () => {
+    expect(await collectPrivateTreeObservation(process(), "original-vm")).toMatchObject({
+      head: "b".repeat(40),
+      uncommittedChanges: 0,
+      untrackedNonIgnored: 0,
+      unpushedCommits: 1,
+    });
+  });
+  it.each(["private stdout", "private stderr", "oversize bytes", "duplicate field", "different VM", "failed exit"])(
+    "withholds %s instead of inferring a clean tree",
+    async (scenario) => {
+      const p =
+        scenario === "private stdout"
+          ? process(metadata + "private bytes\n")
+          : scenario === "private stderr"
+            ? process(metadata, "private bytes")
+            : scenario === "oversize bytes"
+              ? process(metadata + "é".repeat(1500))
+              : scenario === "duplicate field"
+                ? process(metadata + "unpushed=0\n")
+                : scenario === "different VM"
+                  ? process(metadata.replace("original-vm", "other-vm"))
+                  : process(metadata, "", Promise.resolve(1));
+      expect(await collectPrivateTreeObservation(p, "original-vm")).toBeNull();
+    },
+  );
+  it("rejects a rejected exit promise and missing stream without leaking the error", async () => {
+    expect(
+      await collectPrivateTreeObservation(
+        process(metadata, "", Promise.reject(new Error("private process error"))),
+        "original-vm",
+      ),
+    ).toBeNull();
+    expect(await collectPrivateTreeObservation({ ...process(), stderr: null }, "original-vm")).toBeNull();
+  });
+});
 
 const r = (stdout: string, over: Partial<{ stderr: string; exitCode: number; timedOut: boolean }> = {}) => ({
   stdout,

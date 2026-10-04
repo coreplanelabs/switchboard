@@ -1,5 +1,9 @@
 import { isContextCheckpointReceipt, type CanonicalCheckpointSource } from "./references/contextCheckpoint.js";
 import {
+  isCoordinatorReconcileReceipt,
+  type CoordinatorReconcileReceipt,
+} from "./coordinator/workflowReconciliation.js";
+import {
   workspaceSettlementOf,
   workspaceOwnerKey,
   isWorkspaceOwner,
@@ -553,9 +557,24 @@ export class WorkerRunLedger implements RunLedger {
     return r.data.accepted === true;
   }
 
-  async planeAck(id: string, outcome: PlaneAckOutcome, owner?: { runId: string; gen: string }): Promise<void> {
+  async planeAck(
+    id: string,
+    outcome: PlaneAckOutcome,
+    owner?: { runId: string; gen: string },
+    reconciliation?: CoordinatorReconcileReceipt,
+  ): Promise<void> {
     if (owner) this.checkIds(owner.runId, owner.gen);
-    await this.post("/plane/ack", { storeKey: this.opts.storeKey, id, outcome, ...(owner ? { owner } : {}) });
+    if (reconciliation !== undefined && (!isCoordinatorReconcileReceipt(reconciliation) || outcome !== "done"))
+      throw new PermanentStoreError("run ledger: invalid reconciliation acknowledgement");
+    const response = await this.post("/plane/ack", {
+      storeKey: this.opts.storeKey,
+      id,
+      outcome,
+      ...(owner ? { owner } : {}),
+      ...(reconciliation ? { reconciliation } : {}),
+    });
+    if (reconciliation !== undefined && (response.status !== 200 || response.data.ok !== true))
+      throw new TransientStoreError("run ledger: reconciliation acknowledgement unconfirmed");
   }
 
   async planeAdmit(post: PlaneAdmitPost): Promise<PlaneAskAnswer> {

@@ -833,7 +833,7 @@ async function perform(
   cursor: { ordinal: number },
 ): Promise<StepReturn> {
   const tag = { parentInstanceId: instanceId, unit, effectId: action.step, effectOrdinal: cursor.ordinal + 1 };
-  const receipt = (answer: BotAnswer, route: "branch" | "spawn" | "merge", required = true) => {
+  const receipt = (answer: BotAnswer, route: "branch" | "spawn" | "merge" | "checks", required = true) => {
     const ordinal = answer.body.effectOrdinal;
     if (ordinal !== undefined) {
       if (
@@ -843,7 +843,7 @@ async function perform(
         throw new UnreadableAnswer(route, answer, "effect ordinal");
       cursor.ordinal = ordinal as number;
     } else if (
-      required &&
+      (required || (route === "checks" && (answer.body.retried === true || answer.body.refired === true))) &&
       answer.body.ok === true &&
       (route !== "merge" ||
         answer.body.outcome === "enqueued" ||
@@ -944,17 +944,21 @@ async function perform(
       // of the step's bounded recovery effects first.
       return checksReturn(
         action.step,
-        answerOf(
-          "checks",
-          await step.do(action.step, STEP_CONFIG, () =>
-            call(bot, "checks", {
-              ...tag,
-              prNumber: action.prNumber,
-              headSha: action.headSha,
-              ...(action.retry !== undefined ? { retry: action.retry } : {}),
-              ...(action.refire === true ? { refire: true } : {}),
-            }),
+        receipt(
+          answerOf(
+            "checks",
+            await step.do(action.step, STEP_CONFIG, () =>
+              call(bot, "checks", {
+                ...tag,
+                prNumber: action.prNumber,
+                headSha: action.headSha,
+                ...(action.retry !== undefined ? { retry: action.retry } : {}),
+                ...(action.refire === true ? { refire: true } : {}),
+              }),
+            ),
           ),
+          "checks",
+          false,
         ),
       );
     case "merge":

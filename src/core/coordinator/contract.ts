@@ -1118,6 +1118,8 @@ export interface CoordinatorUnit {
     round?: number;
     /** Producer facts; absence identifies a legacy or unprojected ending. */
     outcome?: ShipOutcome;
+    /** Original thread rendering retained before immutable report freeze. */
+    threadReport?: string;
     /** Original private report delivery identity, committed with its outcome. */
     deliveryId?: string;
   };
@@ -1535,6 +1537,7 @@ export function isCoordinatorEnding(v: unknown): v is NonNullable<CoordinatorUni
     isObject(v) &&
     isText(v.kind) &&
     isText(v.report, MAX_REPORT) &&
+    (v.threadReport === undefined || (typeof v.threadReport === "string" && v.threadReport.length <= MAX_REPORT)) &&
     isFinite(v.at) &&
     (v.deliveryId === undefined || (typeof v.deliveryId === "string" && STEP_NAME_PATTERN.test(v.deliveryId))) &&
     (v.outcome === undefined || (isShipOutcome(v.outcome) && v.outcome.kind === v.kind)) &&

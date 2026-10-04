@@ -7,6 +7,10 @@ import type { RunLedger } from "../core/runLedger/ledger.js";
 import { LEASE_MS } from "../core/runLedger/types.js";
 import { createLedgerWriteThrough, deliverPlaneSteer } from "../core/runLedger/writeThrough.js";
 import { handlePlaneEffects, type PlaneEffectsDeps } from "./planeEffects.js";
+import type {
+  CoordinatorReconcileEffect,
+  CoordinatorReconcileReceipt,
+} from "../core/coordinator/workflowReconciliation.js";
 import type { PlaneAckOutcome, PlaneEffect } from "../core/plane/decide.js";
 
 // `POST /plane/effects` — the plane transport's push half (record 0064, "Where
@@ -86,6 +90,120 @@ function harness(over: Partial<PlaneEffectsDeps> = {}) {
 const settle = () => new Promise((r) => setTimeout(r, 0));
 
 describe("POST /plane/effects — the push transport (record 0064)", () => {
+  it("reconciles a closed offer without a runId and passes its verified report receipt to ACK", async () => {
+    const offered: CoordinatorReconcileEffect = {
+      id: `coordinator-reconcile:${"a".repeat(64)}`,
+      kind: "coordinator_reconcile",
+      instanceId: "instance-1",
+      unit: "unit-1",
+      workflowId: "instance-1",
+      admissionHash: "b".repeat(64),
+    };
+    const owner = {
+      instanceId: "instance-1",
+      unit: "unit-1",
+      attempt: 0,
+      requester: "slack:U11",
+      channelId: "slack:C1",
+      threadKey: "slack:C1:1.0",
+      deliveryId: "unit-1/end",
+    };
+    const receipt: CoordinatorReconcileReceipt = {
+      reportDelivery: { version: 1, owner, proposalHash: "c".repeat(64) },
+      status: { ...owner, destinationThreadKey: owner.threadKey, repo: "acme/api", snapshotHash: "d".repeat(64) },
+    };
+    const executed: unknown[] = [];
+    const acked: unknown[] = [];
+    const h = harness({
+      execute: {
+        draining: () => false,
+        admit: async () => "done",
+        steer: async () => "done",
+        reconcile: async (effect) => {
+          executed.push(effect);
+          return receipt;
+        },
+      },
+      ack: async (...args) => {
+        acked.push(args);
+      },
+    });
+    const r = request({ effects: [offered] }, { bearer: "memory-token" });
+    handlePlaneEffects(r.req, r.res, h.deps);
+    await settle();
+    expect(executed).toEqual([offered]);
+    expect(acked).toEqual([[offered, "done", receipt]]);
+    expect(JSON.parse(r.writes.body!).acks).toEqual([{ id: offered.id, outcome: "done" }]);
+  });
+
+  it("defers reconciliation without an executor, during drain, or without a valid settlement receipt", async () => {
+    const offered = {
+      id: `coordinator-reconcile:${"a".repeat(64)}`,
+      kind: "coordinator_reconcile",
+      instanceId: "instance-1",
+      unit: "unit-1",
+      workflowId: "instance-1",
+      admissionHash: "b".repeat(64),
+    };
+    let executed = 0;
+    for (const execute of [
+      undefined,
+      {
+        draining: () => true,
+        admit: async () => "done" as const,
+        steer: async () => "done" as const,
+        reconcile: async () => {
+          executed++;
+          return undefined;
+        },
+      },
+      { draining: () => false, admit: async () => "done" as const, steer: async () => "done" as const },
+      {
+        draining: () => false,
+        admit: async () => "done" as const,
+        steer: async () => "done" as const,
+        reconcile: async () => undefined,
+      },
+      {
+        draining: () => false,
+        admit: async () => "done" as const,
+        steer: async () => "done" as const,
+        reconcile: async () => "done" as unknown as CoordinatorReconcileReceipt,
+      },
+    ]) {
+      const h = harness({ execute });
+      const r = request({ effects: [offered] }, { bearer: "memory-token" });
+      handlePlaneEffects(r.req, r.res, h.deps);
+      await settle();
+      expect(h.acked).toEqual([{ id: offered.id, outcome: "deferred" }]);
+    }
+    expect(executed).toBe(0);
+  });
+
+  it("rejects malformed reconciliation identity before executing any neighboring effect", async () => {
+    const offered = {
+      id: `coordinator-reconcile:${"a".repeat(64)}`,
+      kind: "coordinator_reconcile",
+      instanceId: "instance-1",
+      unit: "unit-1",
+      workflowId: "instance-1",
+      admissionHash: "b".repeat(64),
+    };
+    for (const invalid of [
+      { ...offered, runId: "other" },
+      { ...offered, admissionHash: "bad" },
+      { ...offered, actionId: "other" },
+    ]) {
+      const h = harness();
+      const r = request({ effects: [effect(), invalid] }, { bearer: "memory-token" });
+      handlePlaneEffects(r.req, r.res, h.deps);
+      await settle();
+      expect(r.writes.status).toBe(400);
+      expect(h.admitted).toEqual([]);
+      expect(h.acked).toEqual([]);
+    }
+  });
+
   it("runs each pushed effect through the wired executor and acks its word on the object", async () => {
     const h = harness();
     const { req, res, writes } = request({ effects: [effect()] }, { bearer: "memory-token" });

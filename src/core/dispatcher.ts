@@ -298,10 +298,6 @@ export interface CoreDeps
   /** The one runs service (`RunDeps.runs`): the run tools, the thread read and stage A's paste check
    *  (record 0044) all read it — declared here so the two bases that name it agree. */
   runs?: RunsService;
-  /** Release projections follow confirmed original-unit settlement. */
-  runnerOwnership?: {
-    release(repo: string, prNumber: number, owner: { instanceId: string; unit: string }): boolean;
-  };
   /** The tracer behind every root this process starts; the no-gaps test injects one with its `SpanContext`. */
   tracer?: Tracer;
   /** The root's leading sinks (a test's recording sink); default: the one log sink at `tracing.log`. */
@@ -405,7 +401,6 @@ async function answerUnitOwnedThread(
       const why = status.kind === "absent" ? "no such instance" : status.status;
       if (owner.unit.recovery !== undefined) {
         const recovery = owner.unit.recovery;
-        const recoveryInstance = await store.get(owner.instanceId).catch(() => null);
         const { recovery: _recovery, ...withoutRecovery } = owner.unit;
         const closed = {
           ...withoutRecovery,
@@ -431,11 +426,6 @@ async function answerUnitOwnedThread(
           );
           return "acked";
         }
-        if (recoveryInstance !== null && owner.unit.pr !== undefined)
-          deps.runnerOwnership?.release(recoveryInstance.repo, owner.unit.pr.number, {
-            instanceId: owner.instanceId,
-            unit: owner.unit.unit,
-          });
         await store
           .markConsumed(key, [appended.seq], `recovery-terminal:${recovery.workflowId}`)
           .catch(() => undefined);

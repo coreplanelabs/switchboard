@@ -193,11 +193,10 @@ export function workspaceAcknowledgment(
 ): WorkspaceAck {
   if (live) return { ok: false, reason: "owner-live" };
   if (value === null) return { ok: false, reason: "unverified" };
-  if (
-    !positive(revision) ||
-    (currentRevision !== undefined && revision > currentRevision) ||
-    (value && value.revision !== revision)
-  )
+  // Only retained revision history proves an absent version was already
+  // acknowledged. A missing owner cannot manufacture a successful receipt.
+  if (!positive(currentRevision)) return { ok: false, reason: "unverified" };
+  if (!positive(revision) || revision > currentRevision || (value && value.revision !== revision))
     return { ok: false, reason: "stale" };
   if (
     value &&

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { CoordinatorReconcileEffect, CoordinatorReconcileReceipt } from "../coordinator/workflowReconciliation.js";
 import type { StepReport } from "./stepReport.js";
 import type { ChatMessage } from "../chatMessage.js";
 import { isRunRecord, type RunRecord } from "../runRecord.js";
@@ -1553,6 +1554,67 @@ describe("events, state, heartbeat", () => {
     // runLedgerWorker.test.ts's to prove).
     await t.beat();
     expect(inner.planeAcks).toHaveLength(2);
+  });
+
+  it("reconciliation heartbeat carries its settlement receipt to ACK and defers missing or malformed receipts", async () => {
+    const offered: CoordinatorReconcileEffect = {
+      id: `coordinator-reconcile:${"a".repeat(64)}`,
+      kind: "coordinator_reconcile",
+      instanceId: "instance-1",
+      unit: "unit-1",
+      workflowId: "instance-1",
+      admissionHash: "b".repeat(64),
+    };
+    const owner = {
+      instanceId: "instance-1",
+      unit: "unit-1",
+      attempt: 0,
+      requester: "slack:U11",
+      channelId: "slack:C1",
+      threadKey: "slack:C1:1.0",
+      deliveryId: "unit-1/end",
+    };
+    const receipt: CoordinatorReconcileReceipt = {
+      reportDelivery: { version: 1, owner, proposalHash: "c".repeat(64) },
+      status: { ...owner, destinationThreadKey: owner.threadKey, repo: "acme/api", snapshotHash: "d".repeat(64) },
+    };
+    for (const result of [receipt, undefined, "done" as unknown as CoordinatorReconcileReceipt]) {
+      const inner = new InMemoryRunLedger(() => 10_000);
+      const acked: unknown[][] = [];
+      const ledger = overriding(inner, {
+        heartbeat: async (runId, gen, leaseMs) => {
+          const r = await inner.heartbeat(runId, gen, leaseMs);
+          return r.ok ? { ...r, effects: [offered] } : r;
+        },
+        planeAck: async (...args) => {
+          acked.push(args);
+        },
+      });
+      let executed = 0;
+      let draining = false;
+      const { wt, t } = harness({
+        ledger,
+        planeEffects: {
+          draining: () => draining,
+          admit: async () => "done",
+          reconcile: async (effect) => {
+            expect(effect).toEqual(offered);
+            executed++;
+            return result;
+          },
+        },
+      });
+      await openRun(wt, openReq());
+      await t.beat();
+      expect(executed).toBe(1);
+      expect(acked).toEqual([
+        [offered.id, result === receipt ? "done" : "deferred", undefined, result === receipt ? receipt : undefined],
+      ]);
+      draining = true;
+      await t.beat();
+      expect(executed).toBe(1);
+      expect(acked[1]).toEqual([offered.id, "deferred", undefined, undefined]);
+    }
   });
 
   it("an admit effect runs through the wired executor and its word is the ack; a draining generation defers it instead (record 0064)", async () => {
