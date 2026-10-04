@@ -13,6 +13,7 @@ import { githubDoorEdgeRoute } from "../../src/channels/githubDoorPaths.ts";
 // NOT special: a `run` schedule is POSTed to the bot's generic /ingress as the
 // `cron` identity, so it becomes an ordinary run.
 import { Container, getContainer } from "@cloudflare/containers";
+import { isNoContainerInstanceError, noContainerInstanceResponse } from "./containerStart.ts";
 import { parseHealthz } from "../../src/deploy/liveGate.ts";
 import {
   COORDINATOR_AUTHORIZE_PATH,
@@ -197,7 +198,18 @@ export class SwitchboardServer extends Container<Env> {
   }
 
   override async fetch(request: Request): Promise<Response> {
-    await this.startBot();
+    try {
+      await this.startBot();
+    } catch (error) {
+      // A deploy or a container-application roll replaces the single instance,
+      // and a request that lands in that moment has no instance to start. That
+      // condition is retryable — the roll settles and the same request succeeds —
+      // so it answers 503 rather than escaping as an uncaught 500, which a
+      // caller reads as a broken endpoint and GitHub records as a failed
+      // delivery. Anything else is a real fault and still surfaces.
+      if (isNoContainerInstanceError(error)) return noContainerInstanceResponse();
+      throw error;
+    }
     return super.fetch(request);
   }
 

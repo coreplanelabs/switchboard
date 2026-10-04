@@ -18,6 +18,7 @@ export default defineConfig({
       "prImages.test.ts",
       "depotCi.test.ts",
       "knownLength.test.ts",
+      "containerStart.test.ts",
       "coordinator.test.ts",
       "modelProxyForwarding.test.ts",
       "githubDoorForwarding.test.ts",
