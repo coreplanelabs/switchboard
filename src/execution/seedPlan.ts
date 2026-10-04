@@ -93,8 +93,8 @@ const READY_LOCKFILES = [
  * package scripts, install dependencies, or select a test. This checks direct
  * required dependencies of the root and declared workspaces, not the entire
  * transitive graph. Optional packages may legitimately be absent. */
-export function dependencyLayoutCommand(workspace: string): string {
-  return `node -e ${shellQuote(String.raw`
+export function dependencyLayoutProgram(): string {
+  return String.raw`
 const fs = require('node:fs');
 const path = require('node:path');
 const root = path.resolve(process.argv[1]);
@@ -164,7 +164,11 @@ try {
     }
   }
 } catch { process.exit(2); }
-`)} ${shellQuote(workspace)}`;
+`;
+}
+
+export function dependencyLayoutCommand(workspace: string): string {
+  return `node -e ${shellQuote(dependencyLayoutProgram())} ${shellQuote(workspace)}`;
 }
 
 /** Model-free, fixed-output probe on the bound checkout. `bash -n` parses the
