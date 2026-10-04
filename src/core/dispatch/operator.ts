@@ -105,15 +105,12 @@ import type { FastPathDeps } from "./fastPath.js";
 import { recordOperatorDecision, runChatCommand, type OperatorEventFields } from "./commandRun.js";
 import { renderConfirmationOffer, renderOperatorReceipt, replyCommandOutput } from "./reply.js";
 import { OPERATOR_TAIL_BYTES, operatorTail, type OperatorTailTurn } from "./seed.js";
-import { turnEffort } from "./turnEffort.js";
+import { operatorCompletion } from "./operatorCompletion.js";
 import { newestFinishedRunOf, type NewestFinishedRun } from "./thread.js";
-import { resolveModelCard } from "../modelCard.js";
-import { installedModelRegistry } from "../installedModelRegistry.js";
 import {
   OutputCapError,
   outputCapRetry,
   outputCapWithReasoning,
-  providerStructuredModel,
   quoteRequest,
   renderPresetTable,
   routableCommands,
@@ -2786,15 +2783,11 @@ export async function operatorStage(
       return unavailable();
     }
     try {
-      const ref = parseModelRef(modelRef);
-      // Resolve model and effort together against the selected operator card.
-      const effort = turnEffort(modelRef, settingsForAgent(cfg, "operator").effort, cfg.providers);
-      if (effort.note) console.log(`[operator] ${msg.threadKey} effort: ${effort.note}`);
-      const card = resolveModelCard(modelRef, cfg.providers, installedModelRegistry);
-      maxOutputTokens = operatorMaxOutputTokens({ capField: card.capField });
-      model = providerStructuredModel(deps.completions.get(ref.provider), ref.model, {
-        ...(effort.request ? { effort: effort.request } : {}),
-      });
+      const completion = operatorCompletion(cfg, deps.completions, (note) =>
+        console.log(`[operator] ${msg.threadKey} effort: ${note}`),
+      )!;
+      maxOutputTokens = operatorMaxOutputTokens(completion);
+      model = completion.model;
     } catch (err) {
       console.log(`[operator] ${msg.threadKey} not run: ${err instanceof Error ? err.message : String(err)}`);
       return unavailable();
