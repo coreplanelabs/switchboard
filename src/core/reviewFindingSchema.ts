@@ -1,5 +1,5 @@
 /** The finding shape advertised to native and load-harness reviewers. */
-export const reviewFindingInputSchema = {
+const finding = {
   type: "object",
   properties: {
     id: {
@@ -43,4 +43,41 @@ export const reviewFindingInputSchema = {
     },
   },
   required: ["id", "severity", "file", "title", "kind"],
+};
+
+const { invariant, cases, ...singleProperties } = finding.properties;
+const text = { type: "string", minLength: 1, pattern: "\\S" };
+
+/** Discriminated alternatives prevent a single issue from advertising a pattern matrix. */
+export const reviewFindingInputSchema = {
+  anyOf: [
+    {
+      type: "object",
+      properties: { ...singleProperties, kind: { type: "string", enum: ["single"] } },
+      required: finding.required,
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      properties: {
+        ...singleProperties,
+        kind: { type: "string", enum: ["pattern"] },
+        invariant: { ...invariant, ...text },
+        cases: {
+          ...cases,
+          minItems: 1,
+          items: {
+            ...cases.items,
+            properties: {
+              scenario: { ...cases.items.properties.scenario, ...text },
+              expected: { ...cases.items.properties.expected, ...text },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      required: [...finding.required, "invariant", "cases"],
+      additionalProperties: false,
+    },
+  ],
 };

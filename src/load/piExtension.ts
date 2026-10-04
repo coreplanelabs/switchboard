@@ -198,7 +198,7 @@ const SUBMIT_VERDICT: PiToolDeclaration = {
     "references findings by these ids, so never renumber them. Severity is exactly one of blocking|major|minor|nit; " +
     "the entry carries the file (plus line when it points at one) and a one-line title, while the full explanation " +
     "stays in your review text keyed by the same ids. Every new finding declares kind: single or pattern. " +
-    "For a pattern, declare kind: pattern, name its invariant and enumerate " +
+    "A single finding omits invariant and cases entirely. For a pattern, declare kind: pattern, name its invariant and enumerate " +
     "independently checkable {scenario, expected} cases, including all selection and execution paths in the diff; " +
     "for a push, check source, destination, endpoint and command composition, not just the first counterexample. " +
     "A missing or malformed matrix is refused before recording the verdict; you must judge whether its cases cover the invariant. An `approve` carrying a finding at or above the severity to address " +
@@ -221,49 +221,113 @@ const SUBMIT_VERDICT: PiToolDeclaration = {
         type: "array",
         description: "Every issue you report, one entry each, in the order reported — rendered under the verdict line",
         items: {
-          type: "object",
-          properties: {
-            id: {
-              type: "string",
-              description: 'Stable id assigned in order: "F1", "F2", … — dispositions reference it',
-            },
-            severity: {
-              type: "string",
-              enum: ["blocking", "major", "minor", "nit"],
-              description: "blocking | major | minor | nit",
-            },
-            file: { type: "string", description: "Repo-relative file the finding points at" },
-            line: { type: "integer", description: "1-based line number, when the finding points at one" },
-            title: {
-              type: "string",
-              description: "One line naming the issue (the full explanation goes in your review text)",
-            },
-            kind: {
-              type: "string",
-              enum: ["single", "pattern"],
-              description: "single issue or pattern spanning multiple cases; pattern requires invariant and cases",
-            },
-            invariant: { type: "string", description: "The shared safety/correctness rule this pattern must hold" },
-            cases: {
-              type: "array",
-              description:
-                "All independently checkable cases of the invariant found in this diff, including selection and execution paths",
-              items: {
-                type: "object",
-                properties: {
-                  scenario: { type: "string", description: "Concrete input or path through the invariant" },
-                  expected: { type: "string", description: "Required behavior on that path" },
+          anyOf: [
+            {
+              type: "object",
+              properties: {
+                id: {
+                  type: "string",
+                  description: 'Stable id assigned in order: "F1", "F2", … — dispositions reference it',
                 },
-                required: ["scenario", "expected"],
+                severity: {
+                  type: "string",
+                  enum: ["blocking", "major", "minor", "nit"],
+                  description: "blocking | major | minor | nit",
+                },
+                file: {
+                  type: "string",
+                  description: "Repo-relative file the finding points at",
+                },
+                line: {
+                  type: "integer",
+                  description: "1-based line number, when the finding points at one",
+                },
+                title: {
+                  type: "string",
+                  description: "One line naming the issue (the full explanation goes in your review text)",
+                },
+                kind: {
+                  type: "string",
+                  enum: ["single"],
+                },
+                humanGated: {
+                  type: "boolean",
+                  description:
+                    "true ONLY when the remedy is a receipt only a person can produce (a credential-gated replay, a live procedure) — never for work a fix round could do",
+                },
               },
+              required: ["id", "severity", "file", "title", "kind"],
+              additionalProperties: false,
             },
-            humanGated: {
-              type: "boolean",
-              description:
-                "true ONLY when the remedy is a receipt only a person can produce (a credential-gated replay, a live procedure) — never for work a fix round could do",
+            {
+              type: "object",
+              properties: {
+                id: {
+                  type: "string",
+                  description: 'Stable id assigned in order: "F1", "F2", … — dispositions reference it',
+                },
+                severity: {
+                  type: "string",
+                  enum: ["blocking", "major", "minor", "nit"],
+                  description: "blocking | major | minor | nit",
+                },
+                file: {
+                  type: "string",
+                  description: "Repo-relative file the finding points at",
+                },
+                line: {
+                  type: "integer",
+                  description: "1-based line number, when the finding points at one",
+                },
+                title: {
+                  type: "string",
+                  description: "One line naming the issue (the full explanation goes in your review text)",
+                },
+                kind: {
+                  type: "string",
+                  enum: ["pattern"],
+                },
+                humanGated: {
+                  type: "boolean",
+                  description:
+                    "true ONLY when the remedy is a receipt only a person can produce (a credential-gated replay, a live procedure) — never for work a fix round could do",
+                },
+                invariant: {
+                  type: "string",
+                  description: "The shared safety/correctness rule this pattern must hold",
+                  minLength: 1,
+                  pattern: "\\S",
+                },
+                cases: {
+                  type: "array",
+                  description:
+                    "All independently checkable cases of the invariant found in this diff, including selection and execution paths",
+                  items: {
+                    type: "object",
+                    properties: {
+                      scenario: {
+                        type: "string",
+                        description: "Concrete input or path through the invariant",
+                        minLength: 1,
+                        pattern: "\\S",
+                      },
+                      expected: {
+                        type: "string",
+                        description: "Required behavior on that path",
+                        minLength: 1,
+                        pattern: "\\S",
+                      },
+                    },
+                    required: ["scenario", "expected"],
+                    additionalProperties: false,
+                  },
+                  minItems: 1,
+                },
+              },
+              required: ["id", "severity", "file", "title", "kind", "invariant", "cases"],
+              additionalProperties: false,
             },
-          },
-          required: ["id", "severity", "file", "title", "kind"],
+          ],
         },
       },
       resolutions: {
