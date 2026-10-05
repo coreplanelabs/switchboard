@@ -27,7 +27,10 @@ import { defineConfig } from "vitest/config";
 // document by those builders), and for the fleet drain's record, refusal and
 // wiring (drain.test.ts), and for the memory guard's pure gate
 // (memoryGuard.test.ts — loads the pure module, like drain) with its Worker
-// wiring read as text (memoryGate.test.ts); testing/sourceScan.ts is their
+// wiring read as text (memoryGate.test.ts); and for the streamed root's one outcome
+// word — that only a throw no route named is the failure word and a designed refusal
+// is never a span error (rootOutcome.test.ts — loads the pure module);
+// testing/sourceScan.ts is their
 // helper. Every
 // test file of this directory is listed here — src/vitestWorkspace.test.ts
 // holds that.
@@ -75,6 +78,7 @@ export default defineConfig({
       "imageReconcileState.test.ts",
       "memoryGuard.test.ts",
       "memoryGate.test.ts",
+      "rootOutcome.test.ts",
       "levels.test.ts",
     ],
   },
