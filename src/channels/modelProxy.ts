@@ -47,6 +47,7 @@ import {
 } from "../core/provider.js";
 import type { Secrets } from "../secrets.js";
 import { readBody } from "./http.js";
+import { ResponsesFailureBoundary } from "./modelProxyResponses.js";
 
 export const ANTHROPIC_MESSAGES_PATH = "/v1/messages";
 export const OPENAI_CHAT_COMPLETIONS_PATH = "/v1/chat/completions";
@@ -754,7 +755,11 @@ const MODEL_STREAM_HEARTBEAT = new TextEncoder().encode(": switchboard keepalive
  *  or cancelled stream. */
 function meteredStream(
   source: ReadableStream<Uint8Array>,
-  hooks: { onChunk: (chunk: Uint8Array) => void; onDone: () => void; onError: (err: unknown) => void },
+  hooks: {
+    onChunk: (chunk: Uint8Array) => void;
+    onDone: () => void;
+    onError: (err: unknown, source: "read" | "cancel") => void;
+  },
 ): ReadableStream<Uint8Array> {
   const reader = source.getReader();
   let pendingRead: Promise<ReadableStreamReadResult<Uint8Array>> | undefined;
@@ -800,13 +805,13 @@ function meteredStream(
         hooks.onChunk(value);
         controller.enqueue(value);
       } catch (err) {
-        settle(() => hooks.onError(err));
+        settle(() => hooks.onError(err, "read"));
         controller.error(err);
       }
     },
     cancel(reason) {
       const wake = wakeHeartbeat;
-      settle(() => hooks.onError(reason ?? new Error("cancelled")));
+      settle(() => hooks.onError(reason ?? new Error("cancelled"), "cancel"));
       wake?.();
       void reader.cancel(reason).catch(() => {});
     },
@@ -1012,36 +1017,79 @@ export async function handleAdmitted(
   }
   // A relayed success is the provider's level `up` (record 0064): the plane
   // re-issues every turn held parked on the provider, whichever run relayed it.
-  deps.plane?.level(grant.providerName, "up");
   const contentType = res.headers.get("content-type") ?? "";
+  const responsesStream = shape === "openai-responses" && contentType.includes("text/event-stream") && res.body;
+  if (!responsesStream) deps.plane?.level(grant.providerName, "up");
   if (contentType.includes("text/event-stream") && res.body) {
     const meter = new SseMeter(shape);
+    const boundary = responsesStream
+      ? new ResponsesFailureBoundary(schemaShaped.body, (event) => meter.observe(event))
+      : undefined;
     let firstAt: number | undefined;
     let outBytes = 0;
-    const stream = meteredStream(res.body, {
+    const consumedResult = (): TurnMeter => {
+      const result = meter.result();
+      if (boundary?.terminal === "failed") delete result.stopReason;
+      return result;
+    };
+    const usageState = (result: TurnMeter): SpanAttrs =>
+      boundary && result.usage
+        ? { usageComplete: boundary.terminal === "completed" || boundary.terminal === "incomplete" }
+        : {};
+    const terminalFailure = () => {
+      if (boundary?.terminal !== "failed") return false;
+      if (boundary.failure) {
+        span.fail(boundary.failure);
+        if (providerFailureParks(boundary.failure.cause) && !aborted()) providerDown(boundary.failure);
+      }
+      span.end("error");
+      return true;
+    };
+    const stream = meteredStream(boundary ? res.body.pipeThrough(boundary.transform()) : res.body, {
       onChunk: (chunk) => {
         firstAt ??= deps.clock();
         outBytes += chunk.byteLength;
-        meter.feed(chunk);
+        if (!boundary) meter.feed(chunk);
       },
       onDone: () => {
-        const result = meter.result();
-        span.setAttrs(
-          turnAttrs(grant, result, firstAt !== undefined ? firstAt - startedAt : undefined, offered, priceOf(result)),
-        );
-        span.end("ok");
+        const result = consumedResult();
+        span.setAttrs({
+          ...turnAttrs(
+            grant,
+            result,
+            firstAt !== undefined ? firstAt - startedAt : undefined,
+            offered,
+            priceOf(result),
+          ),
+          ...usageState(result),
+        });
+        if (!terminalFailure()) {
+          if (boundary?.terminal === "completed" && !aborted()) deps.plane?.level(grant.providerName, "up");
+          span.end(boundary && boundary.terminal === undefined ? "error" : "ok");
+        }
         log(outcome(res.status, outBytes));
       },
-      onError: (err) => {
-        providerDown(
-          classifyProviderFailure({ status: 503, error: err, provider: grant.providerName, model: grant.model }),
-        );
-        const result = meter.result();
-        span.setAttrs(
-          turnAttrs(grant, result, firstAt !== undefined ? firstAt - startedAt : undefined, offered, priceOf(result)),
-        );
-        span.fail(err);
-        span.end("error");
+      onError: (err, source) => {
+        const result = consumedResult();
+        span.setAttrs({
+          ...turnAttrs(
+            grant,
+            result,
+            firstAt !== undefined ? firstAt - startedAt : undefined,
+            offered,
+            priceOf(result),
+          ),
+          ...usageState(result),
+        });
+        if (!terminalFailure()) {
+          // A requester close is local cancellation, not provider-down proof.
+          if (source === "read" && !aborted())
+            providerDown(
+              classifyProviderFailure({ status: 503, error: err, provider: grant.providerName, model: grant.model }),
+            );
+          span.fail(err);
+          span.end("error");
+        }
         log(
           `[model-proxy] run=${grant.runId} turn=${turn.turn}/${grant.maxTurns} ${shape} → stream broke after ${outBytes} bytes`,
         );

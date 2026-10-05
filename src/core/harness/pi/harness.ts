@@ -447,6 +447,9 @@ const terminalFailureIsRecoverable = (terminal: PiTerminalFailure): boolean =>
   terminal.kind === "local_stream" ||
   (terminal.kind === "provider_failure" && providerFailureParks(terminal.failure.cause));
 
+const unknownTerminalNote = (terminal: Extract<PiTerminalFailure, { kind: "unknown" }>, followUp = false): string =>
+  `the ${followUp ? "follow-up " : ""}model call ended without a classified result; no provider failure was established — pi stop: ${JSON.stringify(terminal.stops.pi)}; provider stop: ${JSON.stringify(terminal.stops.provider)}`;
+
 /** The restart note a call in flight when the container was replaced is
  *  settled with (item 16): item 8's note for a call the bot lost, said of the
  *  container — the tool ran in the container and its result died with it, so
@@ -2139,11 +2142,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           note("harness_error", windDownFailureNote(writeUpFailed));
         } else {
           terminalFailure = terminal;
-          if (terminal.kind === "unknown")
-            note(
-              "harness_error",
-              "the model call ended without a classified result; no provider failure was established",
-            );
+          if (terminal.kind === "unknown") note("harness_error", unknownTerminalNote(terminal));
         }
       }
       if (obs.settled && !catchingUp) {
@@ -2624,11 +2623,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
               else run.onProgress?.(progress);
             } else {
               turnFailure = terminal;
-              if (terminal.kind === "unknown")
-                note(
-                  "harness_error",
-                  "the follow-up model call ended without a classified result; no provider failure was established",
-                );
+              if (terminal.kind === "unknown") note("harness_error", unknownTerminalNote(terminal, true));
             }
           }
           if (obs.settled) {

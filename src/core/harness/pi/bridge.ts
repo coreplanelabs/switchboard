@@ -23,7 +23,10 @@ import {
   type RunEvent,
   type RunNoteKind,
 } from "../../runEvents.js";
-import { proxyProviderFailureIsAuthenticated } from "../../modelProxy/providerFailureAuth.js";
+import {
+  proxyProviderFailureIsAuthenticated,
+  proxyUnknownTerminalIsAuthenticated,
+} from "../../modelProxy/providerFailureAuth.js";
 import type { CompactionEntry } from "../../runLedger/types.js";
 import { classifyProviderFailure, type ProviderFailure } from "../../provider.js";
 import type { Clock, Span } from "../../trace/types.js";
@@ -109,7 +112,7 @@ const LOCAL_STREAM_ENDINGS: ReadonlySet<string> = new Set([
 export type PiTerminalFailure =
   | { kind: "local_abort"; detail: string }
   | { kind: "local_stream"; detail: string }
-  | { kind: "unknown"; detail: string }
+  | { kind: "unknown"; detail: string; stops: { pi: string; provider: string } }
   | { kind: "provider_refusal"; detail: string; failure: ProviderFailure }
   | { kind: "provider_failure"; detail: string; failure: ProviderFailure };
 
@@ -161,6 +164,14 @@ export interface BridgeDeps {
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 const str = (v: unknown): string => (typeof v === "string" ? v : String(v ?? ""));
+const unknownTerminal = (message: PiAssistantMessage, detail: string): PiTerminalFailure => ({
+  kind: "unknown",
+  detail,
+  stops: {
+    pi: redactAndCap(typeof message.stopReason === "string" ? message.stopReason : "missing", 80),
+    provider: redactAndCap(typeof message.rawStopReason === "string" ? message.rawStopReason : "missing", 80),
+  },
+});
 
 /** The one line a call is announced with — the native loop's `describeToolCall`
  *  over pi's argument object: bash's command, else the conventional target keys. */
@@ -377,6 +388,18 @@ export class PiBridge {
         out.policyRefusal = true;
         return;
       }
+      // pi can observe the terminal failure and then race a local abort in
+      // its catch. Authenticated terminal evidence owns that ending.
+      if (proxyUnknownTerminalIsAuthenticated(raw)) {
+        out.terminalFailure = unknownTerminal(message, detail);
+        return;
+      }
+      if (raw !== undefined && proxyProviderFailureIsAuthenticated(raw)) {
+        const failure = classifyProviderFailure({ error: raw, trustedEnvelope: true });
+        out.terminalFailure = { kind: "provider_failure", detail, failure };
+        out.providerFailure = failure;
+        return;
+      }
       if (
         message.stopReason === "aborted" ||
         (raw !== undefined && /^(?:(?:AbortError:\s*)?(?:This|The) operation was aborted)\.?$/i.test(raw.trim()))
@@ -385,30 +408,23 @@ export class PiBridge {
         return;
       }
       if (raw === undefined) {
-        out.terminalFailure = { kind: "unknown", detail };
+        out.terminalFailure = unknownTerminal(message, detail);
         return;
       }
       // A provider's successful stream can contain forged error prose. Only a
       // proxy-signed envelope can assign a provider cause from this flattened
       // pi string; a stream EOF is retryable locally without a provider claim.
-      const trustedEnvelope = proxyProviderFailureIsAuthenticated(raw);
-      if (trustedEnvelope) {
-        const failure = classifyProviderFailure({ error: raw, trustedEnvelope: true });
-        out.terminalFailure = { kind: "provider_failure", detail, failure };
-        out.providerFailure = failure;
-        return;
-      }
       if (LOCAL_STREAM_ENDINGS.has(raw.trim().toLowerCase())) {
         out.terminalFailure = { kind: "local_stream", detail };
         return;
       }
-      out.terminalFailure = { kind: "unknown", detail };
+      out.terminalFailure = unknownTerminal(message, detail);
       return;
     }
     if (!SUCCESSFUL_STOP_REASONS.has(message.stopReason ?? "")) {
       const detail = `pi ended the model call with unclassified stop reason ${JSON.stringify(message.stopReason ?? "missing")}`;
       out.providerError = detail;
-      out.terminalFailure = { kind: "unknown", detail };
+      out.terminalFailure = unknownTerminal(message, detail);
       return;
     }
     const content = Array.isArray(message.content) ? message.content : [];

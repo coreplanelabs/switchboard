@@ -32,8 +32,11 @@
 
 ## Validation criteria
 
+Unknown terminal diagnostics retain bounded, redacted pi and provider stop words for investigation. These words do not change the unknown outcome or authorize a retry.
+
 | Criterion | Proof |
 |---|---|
+| 6: unknown endings retain stop-word diagnostics without retry or provider-failure authority | `[unit]` `src/core/harness/pi/harness.test.ts::runPiHarness — a run on pi from the first file to the answer::an unknown terminal model result fails honestly without retrying or claiming a provider refusal` |
 | 16: a FIFO send timeout before pi's first line ends the run immediately as `PiStartFailureError`, with one `harness_error`, no replacement probe and no relaunch verdict | `[unit]` `src/core/harness/pi/harness.test.ts::runPiHarness — the container replaced under a live run::a send timeout before pi's first line is a start failure at once — no replacement probe or relaunch verdict` |
 | 1: one loop — the deleted modules are absent, no module imports them or calls the deleted code by name, the run stage has the harness's open form, no harness class and no selection between two loops, no preset declares a harness and the registry exports no table of them, no roster names and no pick, the roster is constructed in `src/index.ts` and `src/cli.ts`, the toolset table holds none of pi's own workspace tools, `run-loop.md` is gone from the tree and the specs index | `[unit]` `src/core/harness/oneHarness.test.ts::one harness — the native loop, both provider adapters and the native tool table are gone (harness-pi.md item 1)::*` |
 | 1: the `harness` block parses as a mapping of presets to the roster's words, an absent block leaves the field unset (every preset on pi), and an unknown preset, `native` (the deleted loop), any other word and a non-mapping fail the load by name, naming the two harnesses; the same words under a channel's or a user's scope resolve user > channel > the block and are refused by name at load with their path, a stored overrides document included | `[unit]` `src/config.test.ts::harness block (harness.<preset>: pi or opencode)::*`, `src/config.test.ts::harness as a scope setting (users.<id>.harness, channels.<id>.harness)::*` |
