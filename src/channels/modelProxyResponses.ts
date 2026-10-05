@@ -3,6 +3,7 @@
 import {
   authenticateProxyProviderFailure,
   authenticateProxyUnknownTerminal,
+  type ProxyUnknownTerminalReason,
 } from "../core/modelProxy/providerFailureAuth.js";
 import { ProviderFailure, renderProviderFailure, type ProviderFailureCause } from "../core/provider.js";
 import { ResponsesConsumer } from "./responsesConsumer.js";
@@ -103,14 +104,14 @@ export class ResponsesFailureBoundary {
     });
   }
 
-  private async unknown(): Promise<string> {
+  private async unknown(reason: ProxyUnknownTerminalReason): Promise<string> {
     this.terminal = "failed";
     this.failure = undefined;
     this.dataEnded = true;
     await this.consumer.close();
     // Preserve the consumer's fatal ending, including for malformed thread
     // wrappers. Its replacement must not inherit the wrapper's event name.
-    return `data: ${JSON.stringify({ type: "error", code: "unclassified_stream_failure", message: JSON.stringify(authenticateProxyUnknownTerminal()), param: null })}\n\n`;
+    return `data: ${JSON.stringify({ type: "error", code: "unclassified_stream_failure", message: JSON.stringify(authenticateProxyUnknownTerminal(reason)), param: null })}\n\n`;
   }
 
   private async frame(frame: string): Promise<string> {
@@ -134,12 +135,12 @@ export class ResponsesFailureBoundary {
       value = JSON.parse(data);
       event = record(value);
     } catch {
-      return this.unknown();
+      return this.unknown("malformed_json");
     }
     // Valid thread wrappers are ignored by pi; malformed JSON still fails in
     // the SDK before it creates that wrapper.
     if (eventName?.startsWith("thread.")) return frame;
-    if (!event) return (await this.consumer.consume(value)) ? frame : this.unknown();
+    if (!event) return (await this.consumer.consume(value)) ? frame : this.unknown("consumer_rejected");
     const response = record(event.response);
     const terminalOutputValid =
       response?.output === undefined ||
@@ -156,7 +157,7 @@ export class ResponsesFailureBoundary {
       terminalOutputValid &&
       this.terminal === undefined
     ) {
-      if (!(await this.consumer.consume(event))) return this.unknown();
+      if (!(await this.consumer.consume(event))) return this.unknown("consumer_rejected");
       this.terminal = "completed";
       this.observe(event);
       return frame;
@@ -168,14 +169,14 @@ export class ResponsesFailureBoundary {
         !terminalOutputValid ||
         record(response?.incomplete_details)?.reason !== "max_output_tokens");
     if (!sdkError && event.type === "response.incomplete" && !incomplete && this.terminal === undefined) {
-      if (!(await this.consumer.consume(event))) return this.unknown();
+      if (!(await this.consumer.consume(event))) return this.unknown("consumer_rejected");
       this.terminal = "incomplete";
       this.observe(event);
       return frame;
     }
     const malformedCompletion = event.type === "response.completed";
     if (!sdkError && !failed && !incomplete && !malformedCompletion && event.type !== "error") {
-      if (!(await this.consumer.consume(event))) return this.unknown();
+      if (!(await this.consumer.consume(event))) return this.unknown("consumer_rejected");
       this.observe(event);
       return frame;
     }
@@ -197,7 +198,7 @@ export class ResponsesFailureBoundary {
       localOutputOnly &&
       (!failed || response?.status === "failed");
     let replacementCode = "unclassified_stream_failure";
-    let message = JSON.stringify(authenticateProxyUnknownTerminal());
+    let message = JSON.stringify(authenticateProxyUnknownTerminal("unverified_terminal"));
     if (verified) {
       this.failure = new ProviderFailure(cause);
       replacementCode = "provider_failure";

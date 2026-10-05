@@ -448,7 +448,7 @@ const terminalFailureIsRecoverable = (terminal: PiTerminalFailure): boolean =>
   (terminal.kind === "provider_failure" && providerFailureParks(terminal.failure.cause));
 
 const unknownTerminalNote = (terminal: Extract<PiTerminalFailure, { kind: "unknown" }>, followUp = false): string =>
-  `the ${followUp ? "follow-up " : ""}model call ended without a classified result; no provider failure was established — pi stop: ${JSON.stringify(terminal.stops.pi)}; provider stop: ${JSON.stringify(terminal.stops.provider)}`;
+  `the ${followUp ? "follow-up " : ""}model call ended without a classified result; no provider failure was established — pi stop: ${JSON.stringify(terminal.stops.pi)}; provider stop: ${JSON.stringify(terminal.stops.provider)}; terminal evidence: ${JSON.stringify(terminal.diagnostic)}`;
 
 /** The restart note a call in flight when the container was replaced is
  *  settled with (item 16): item 8's note for a call the bot lost, said of the

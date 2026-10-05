@@ -132,24 +132,39 @@ export function proxyProviderFailureIsAuthenticated(value: unknown): boolean {
 // An unknown terminal is not a ProviderFailure. Its separate signed type keeps
 // pi's abort race from turning missing recovery evidence into a local retry.
 const UNKNOWN_TERMINAL_TYPE = "model_terminal_unknown";
-const unknownSignature = (nonce: string): Buffer =>
+export type ProxyUnknownTerminalReason = "malformed_json" | "consumer_rejected" | "unverified_terminal";
+export interface ProxyUnknownTerminalEnvelope {
+  type: typeof UNKNOWN_TERMINAL_TYPE;
+  reason?: ProxyUnknownTerminalReason;
+}
+const isUnknownReason = (value: unknown): value is ProxyUnknownTerminalReason =>
+  value === "malformed_json" || value === "consumer_rejected" || value === "unverified_terminal";
+const unknownSignature = (nonce: string, reason?: ProxyUnknownTerminalReason): Buffer =>
   createHmac("sha256", AUTH_KEY)
-    .update(JSON.stringify([AUTH_VERSION, nonce, UNKNOWN_TERMINAL_TYPE]))
+    .update(JSON.stringify([AUTH_VERSION, nonce, UNKNOWN_TERMINAL_TYPE, ...(reason === undefined ? [] : [reason])]))
     .digest();
 
-export function authenticateProxyUnknownTerminal(): { type: string; [PROXY_PROVIDER_FAILURE_AUTH_FIELD]: string } {
+export function authenticateProxyUnknownTerminal(
+  reason?: ProxyUnknownTerminalReason,
+): ProxyUnknownTerminalEnvelope & { [PROXY_PROVIDER_FAILURE_AUTH_FIELD]: string } {
+  if (reason !== undefined && !isUnknownReason(reason)) throw new Error("Unknown terminal diagnostic reason");
   const nonce = randomBytes(NONCE_BYTES).toString("base64url");
   return {
     type: UNKNOWN_TERMINAL_TYPE,
-    [PROXY_PROVIDER_FAILURE_AUTH_FIELD]: `${AUTH_VERSION}.${nonce}.${unknownSignature(nonce).toString("base64url")}`,
+    ...(reason === undefined ? {} : { reason }),
+    [PROXY_PROVIDER_FAILURE_AUTH_FIELD]: `${AUTH_VERSION}.${nonce}.${unknownSignature(nonce, reason).toString("base64url")}`,
   };
 }
 
-export function proxyUnknownTerminalIsAuthenticated(value: unknown): boolean {
+/** Read only authenticated structural evidence. A reason-less marker keeps
+ * its original signature; adding, changing or removing a reason invalidates it. */
+export function readProxyUnknownTerminal(value: unknown): ProxyUnknownTerminalEnvelope | undefined {
   const found = candidates(parseBody(value), [], UNKNOWN_TERMINAL_TYPE);
-  if (found.length !== 1) return false;
+  if (found.length !== 1) return undefined;
+  const reason = found[0].reason;
+  if (reason !== undefined && !isUnknownReason(reason)) return undefined;
   const marker = found[0][PROXY_PROVIDER_FAILURE_AUTH_FIELD];
-  if (typeof marker !== "string") return false;
+  if (typeof marker !== "string") return undefined;
   const [version, nonce, mac, extra] = marker.split(".");
   if (
     version !== AUTH_VERSION ||
@@ -157,8 +172,13 @@ export function proxyUnknownTerminalIsAuthenticated(value: unknown): boolean {
     !/^[A-Za-z0-9_-]{22}$/.test(nonce ?? "") ||
     !/^[A-Za-z0-9_-]{43}$/.test(mac ?? "")
   )
-    return false;
+    return undefined;
   const offered = Buffer.from(mac, "base64url");
-  const expected = unknownSignature(nonce);
-  return offered.length === expected.length && timingSafeEqual(offered, expected);
+  const expected = unknownSignature(nonce, reason);
+  if (offered.length !== expected.length || !timingSafeEqual(offered, expected)) return undefined;
+  return { type: UNKNOWN_TERMINAL_TYPE, ...(reason === undefined ? {} : { reason }) };
+}
+
+export function proxyUnknownTerminalIsAuthenticated(value: unknown): boolean {
+  return readProxyUnknownTerminal(value) !== undefined;
 }
