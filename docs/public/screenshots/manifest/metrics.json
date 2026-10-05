@@ -146,7 +146,7 @@
     "src/core/runLedger/inboxMessage.ts": "daac9f5ec1ae5a180d20cb589b5c0154c913e8c4b7b597f7907a7ffc2c0ba6ba",
     "src/core/runMetrics.ts": "3fcf56c30ffac9dedf68e901fba21fd12c021b94c5e79512905c6bcde73ec2ff",
     "src/core/runPace.ts": "5bec2b2a007c7db8461b6414fe18d94775bf93763336268c60fcc83177874e97",
-    "src/core/runRecord.ts": "4d75f44e639d3546684e0a9f848bc8eeb04af44da0f2315e0b61453843e526ca",
+    "src/core/runRecord.ts": "8c46472313bb6ed630cd59c003bfe8a521baff02cfed724402e69bfff83c7cc1",
     "src/core/runShape.ts": "0962881b1f2201c02214b8ee6d897f279dc90f64feb9a57c3950b23e7ea8d1f2",
     "src/core/runStore.ts": "59d87a1f951fac863c489d643b94591cfdaee4c0b335cd1d22a1cc9af4c0606c",
     "src/core/runStoreConstants.ts": "c9b1b1cc9b3d8532fce25f41bea2c49000d5a4debd6671d6f5139a8cba49632e",
