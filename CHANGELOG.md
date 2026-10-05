@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.287.1](https://github.com/coreplanelabs/switchboard/compare/v1.287.0...v1.287.1) (2026-10-05)
+
+
+### Bug fixes
+
+* **harness:** report exhausted model call budgets honestly ([#2783](https://github.com/coreplanelabs/switchboard/issues/2783)) ([671bd26](https://github.com/coreplanelabs/switchboard/commit/671bd265462ed9b1b9b39ac57f4cc37b0e3d6fd5))
+
 ## [1.287.0](https://github.com/coreplanelabs/switchboard/compare/v1.286.2...v1.287.0) (2026-10-05)
 
 
