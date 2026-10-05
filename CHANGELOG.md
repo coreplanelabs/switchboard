@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.286.1](https://github.com/coreplanelabs/switchboard/compare/v1.286.0...v1.286.1) (2026-10-05)
+
+
+### Bug fixes
+
+* **core:** adopt accepted final heads after multiple pushes ([#2777](https://github.com/coreplanelabs/switchboard/issues/2777)) ([8e49a09](https://github.com/coreplanelabs/switchboard/commit/8e49a090b1cd4a9d8f6c48c4b59bf189ec20b467))
+
 ## [1.286.0](https://github.com/coreplanelabs/switchboard/compare/v1.285.6...v1.286.0) (2026-10-05)
 
 
