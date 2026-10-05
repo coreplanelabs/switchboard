@@ -1,5 +1,6 @@
 // The same incremental consuming function pi uses. Acceptance is acknowledged
 // only when that function asks for its next event, or fails on this one.
+import { setImmediate as yieldToIo } from "node:timers/promises";
 import { processResponsesStream } from "@earendil-works/pi-ai/api/openai-responses-shared";
 import { AssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
@@ -71,6 +72,9 @@ export class ResponsesConsumer {
   }
 
   async consume(event: unknown): Promise<boolean> {
+    // Ready events otherwise drain through microtasks and starve HTTP, lease
+    // renewals and cancellation timers in the bot process.
+    await yieldToIo();
     if (this.stopped) return false;
     return new Promise((resolve) => {
       this.acknowledged = resolve;
