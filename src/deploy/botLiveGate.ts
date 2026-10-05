@@ -1,16 +1,15 @@
 import { MINUTE_MS } from "../core/budgets.js";
 import { LIVE_GATE_DEADLINE_MS, servedCommit } from "./liveGate.js";
-import type { AppState, HealthRead, Read, RolloutTarget } from "./sandboxLiveGate.js";
+import type { AppState, HealthRead, Read, ContainerInstance } from "./sandboxLiveGate.js";
 
 /** The facts the bot gate combines after a full Worker + container application deploy. */
 export interface BotLiveInput {
   containerApp: string;
   health: HealthRead;
   app: Read<AppState>;
-  /** Application state read before the full deploy. */
-  before: Read<AppState>;
-  /** The container application target printed by wrangler; null means Worker-only. */
-  target: RolloutTarget | null;
+  /** Exact release image from the plan; null for a locally built image. */
+  expectedImage: string | null;
+  instances: Read<ContainerInstance[]>;
   expectedCommit: string;
   elapsedMs: number;
 }
@@ -24,24 +23,29 @@ function judge(input: BotLiveInput): BotLiveDecision {
   if ("error" in input.app)
     return waiting(`container application ${input.containerApp} unreadable: ${input.app.error}`);
   const app = input.app.value;
-  let rollout: string;
-  if (input.target) {
-    if (input.target.image !== null && app.image !== input.target.image)
-      return waiting(
-        `container application ${input.containerApp} still targets ${app.image ?? "an unknown image"}; expected ${input.target.image}`,
-      );
-    if ("error" in input.before)
-      return waiting(
-        `container application ${input.containerApp} pre-deploy version unreadable (${input.before.error}); cannot prove the application version advanced`,
-      );
-    if (app.version <= input.before.value.version)
-      return waiting(
-        `container application ${input.containerApp} is still at pre-deploy version ${input.before.value.version}; expected a newer application version`,
-      );
-    rollout = ` at version ${app.version} (up from ${input.before.value.version})`;
-  } else {
-    rollout = ` at version ${app.version} (Worker-only deploy; no application change printed)`;
-  }
+  if (!app.image || !Number.isSafeInteger(app.version) || app.version < 0)
+    return waiting(`container application ${input.containerApp} has incomplete image/version evidence`);
+  if (input.expectedImage !== null && app.image !== input.expectedImage)
+    return waiting(
+      `container application ${input.containerApp} still targets ${app.image}; expected ${input.expectedImage}`,
+    );
+  if ("error" in input.instances)
+    return waiting(`container instances ${input.containerApp} unreadable: ${input.instances.error}`);
+  if (
+    input.instances.value.some(
+      (instance) =>
+        !["running", "stopped", "stopping", "failed", "provisioning", "unhealthy", "inactive"].includes(
+          instance.state.toLowerCase(),
+        ),
+    )
+  )
+    return waiting(`container application ${input.containerApp} has an instance with unknown state`);
+  const running = input.instances.value.filter((instance) => instance.state.toLowerCase() === "running");
+  const singleton = running.find((instance) => instance.name === "singleton");
+  if (running.length !== 1 || !singleton || singleton.version !== app.version)
+    return waiting(
+      `container application ${input.containerApp} singleton is not the only running instance on version ${app.version}`,
+    );
 
   if ("error" in input.health) return waiting(`health: GET /healthz failed: ${input.health.error}`);
   if (input.health.status !== 200)
@@ -57,16 +61,16 @@ function judge(input: BotLiveInput): BotLiveDecision {
   if (input.health.body.draining === true)
     return waiting("health: the exact deployed commit answers but its container is draining");
 
-  const target = input.target?.image ?? app.image ?? "an unchanged image";
+  const target = app.image;
   return {
     kind: "live",
-    summary: `container application ${input.containerApp} targets ${target}${rollout}; /healthz serves exact ${commit}`,
+    summary: `container application ${input.containerApp} targets ${target} at version ${app.version}; singleton runs on version ${singleton.version}; /healthz serves exact ${commit}`,
   };
 }
 
 /**
  * A bot upload is live only when the independently managed container application
- * moved to wrangler's target and `/healthz` reports the full expected commit.
+ * targets the selected release image and its singleton runs on that version and `/healthz` reports the full expected commit.
  * At the ordinary live deadline, the first missing fact becomes the failure.
  */
 export function decideBotLive(input: BotLiveInput, deadlineMs: number = LIVE_GATE_DEADLINE_MS): BotLiveDecision {

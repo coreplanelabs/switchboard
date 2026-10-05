@@ -27,6 +27,7 @@ const botStep: DeployStep = {
   retryOnPreflightRefusal: true,
   healthUrl: "https://switchboard.example.test/healthz",
   liveGate: gate,
+  botImage: PRIOR_IMAGE,
   why: "container shim",
 };
 const plan = { waitMaxMs: 10 * 60_000, pollMs: 60_000 };
@@ -42,6 +43,8 @@ const deployOutput = [
 interface Scripted {
   app: Read<AppState>[];
   health: HealthRead[];
+  listed?: Read<AppState>;
+  output?: string;
 }
 
 function harness(script: Scripted) {
@@ -67,8 +70,11 @@ function harness(script: Scripted) {
       calls.push("readAppState");
       return next(script.app, "app");
     },
+    readListedAppState: async () => script.listed ?? script.app[0]!,
     readInstances: async () => {
-      throw new Error("bot gate does not list instances");
+      calls.push("readInstances");
+      const app = script.app[Math.min(indexes.app - 1, script.app.length - 1)]!;
+      return "value" in app ? { value: [{ name: "singleton", state: "running", version: app.value.version }] } : app;
     },
     probeExec: async () => {
       throw new Error("bot gate does not probe /exec");
@@ -77,12 +83,72 @@ function harness(script: Scripted) {
   const io = { log: (line: string) => lines.push(line), warn: (line: string) => lines.push(line), stream: () => {} };
   const exec: StepExec = async () => {
     calls.push("exec");
-    return { code: 0, output: deployOutput };
+    return { code: 0, output: script.output ?? deployOutput };
   };
   return { deps, io, exec, calls, lines };
 }
 
 describe("deployStep (bot rollback fence)", () => {
+  it("refuses the stale list that makes Wrangler skip rollback before any upload even by force", async () => {
+    const h = harness({
+      app: [before],
+      listed: { value: { version: 16, image: PRIOR_IMAGE } },
+      health: [serving(NEWER_COMMIT)],
+    });
+    const outcome = await deployStep(
+      { ...botStep, forcedBy: "SWITCHBOARD_DEPLOY_FORCE" },
+      plan,
+      PRIOR_COMMIT,
+      h.io,
+      h.deps,
+      h.exec,
+    );
+    expect(outcome).toMatchObject({
+      ok: false,
+      live: "not deployed",
+      reason: expect.stringContaining("application list/direct mismatch"),
+    });
+    expect(h.calls).toEqual(["readAppState"]);
+  });
+
+  it("ignores no-changes prose and accepts reused prior target only after runtime and exact health agree", async () => {
+    const reused = { value: { version: 16, image: PRIOR_IMAGE } };
+    const h = harness({
+      app: [before, before, reused],
+      health: [serving(NEWER_COMMIT), serving(PRIOR_COMMIT)],
+      output: `no changes ${APP}\nCurrent Version ID: ${WORKER_VERSION}`,
+    });
+    expect(await deployStep(botStep, plan, PRIOR_COMMIT, h.io, h.deps, h.exec)).toEqual({
+      ok: true,
+      versionId: WORKER_VERSION,
+      live: "live",
+    });
+    expect(h.lines.join("\n")).not.toContain("Worker-only");
+  });
+
+  it("also admits a forward version only after application and runtime uptake", async () => {
+    const initial = { value: { version: 16, image: PRIOR_IMAGE } };
+    const final = { value: { version: 17, image: NEWER_IMAGE } };
+    const h = harness({ app: [initial, initial, final], health: [serving(PRIOR_COMMIT), serving(NEWER_COMMIT)] });
+    expect(
+      await deployStep({ ...botStep, botImage: NEWER_IMAGE }, plan, NEWER_COMMIT, h.io, h.deps, h.exec),
+    ).toMatchObject({ ok: true, live: "live" });
+  });
+
+  it.each([
+    { error: "denied" },
+    { value: { version: 17, image: null } },
+    { value: { version: 17.5, image: NEWER_IMAGE } },
+    { value: { version: 17, image: PRIOR_IMAGE } },
+  ])("refuses unreadable or inconsistent list evidence before upload: %j", async (listed) => {
+    const h = harness({ app: [before], listed, health: [serving(NEWER_COMMIT)] });
+    expect(await deployStep(botStep, plan, PRIOR_COMMIT, h.io, h.deps, h.exec)).toMatchObject({
+      ok: false,
+      live: "not deployed",
+    });
+    expect(h.calls).not.toContain("exec");
+  });
+
   it("binds the bot gate to the profile-derived application name", () => {
     expect(gate).toEqual({
       kind: "bot",
@@ -97,18 +163,27 @@ describe("deployStep (bot rollback fence)", () => {
     const outcome = await deployStep(botStep, plan, PRIOR_COMMIT, h.io, h.deps, h.exec);
 
     expect(outcome).toEqual({ ok: true, versionId: WORKER_VERSION, live: "live" });
-    expect(h.calls).toEqual(["readAppState", "exec", "readAppState", "readHealth", "readAppState", "readHealth"]);
+    expect(h.calls).toEqual([
+      "readAppState",
+      "exec",
+      "readAppState",
+      "readInstances",
+      "readHealth",
+      "readAppState",
+      "readInstances",
+      "readHealth",
+    ]);
     expect(h.lines).toContain(
       `[deploy:all] bot: container application at version 17 (image ${NEWER_IMAGE}) before the upload`,
     );
     expect(h.lines).toContain(
-      `[deploy:all] bot: wrangler printed a container change — image ${PRIOR_IMAGE}; the application must leave version 17`,
+      `[deploy:all] bot: gate requires ${PRIOR_IMAGE}, the running singleton version and exact commit ${PRIOR_COMMIT}`,
     );
     expect(h.lines).toContain(
       `[deploy:all] bot: deployed, not live yet — container application ${APP} still targets ${NEWER_IMAGE}; expected ${PRIOR_IMAGE} (0m 0s)`,
     );
     expect(h.lines).toContain(
-      `[deploy:all] bot: live (container application ${APP} targets ${PRIOR_IMAGE} at version 18 (up from 17); /healthz serves exact ${PRIOR_COMMIT}; ${LIVE_GATE_POLL_MS / 1000}s after the upload)`,
+      `[deploy:all] bot: live (container application ${APP} targets ${PRIOR_IMAGE} at version 18; singleton runs on version 18; /healthz serves exact ${PRIOR_COMMIT}; ${LIVE_GATE_POLL_MS / 1000}s after the upload)`,
     );
   });
 

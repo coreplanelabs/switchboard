@@ -666,6 +666,8 @@ export interface SandboxGateDeps {
   readAppState(dir: string, containerApp: string): Promise<Read<AppState>>;
   /** `wrangler containers instances <app> --json`, every page, run in `dir`. */
   readInstances(dir: string, containerApp: string): Promise<Read<ContainerInstance[]>>;
+  /** The application list Wrangler uses to compute its deploy diff. */
+  readListedAppState?(dir: string, containerApp: string): Promise<Read<AppState>>;
   /** `POST /exec` `echo ok` on the probe thread; the streamed body parsed. */
   probeExec(execUrl: string, bearer: string, threadKey: string): Promise<ProbeResult>;
   now(): number;
@@ -709,6 +711,13 @@ export const defaultSandboxGateDeps: SandboxGateDeps = {
   env: process.env,
   postJson,
   readHealth: (url, bearer, timeoutMs) => readHealthz(url, bearer, timeoutMs),
+  readListedAppState: async (dir, containerApp) => {
+    const listing = await wranglerJson(dir, ["containers", "list", "--json"]);
+    if ("error" in listing) return listing;
+    const row = Array.isArray(listing.value) ? listing.value.find((app) => app?.name === containerApp) : undefined;
+    const state = parseAppState(row);
+    return state ? { value: state } : { error: `container application ${containerApp}: list has no image/version` };
+  },
   readAppState: async (dir, containerApp) => {
     const id = await resolveContainerAppId(dir, containerApp);
     if ("error" in id) return id;
@@ -756,6 +765,21 @@ export const defaultSandboxGateDeps: SandboxGateDeps = {
   sleep,
 };
 
+/** Wrangler diffs the list endpoint; an inconsistent direct read cannot authorize an upload. */
+export function botUploadProblem(direct: Read<AppState>, listed: Read<AppState>): string | undefined {
+  if ("error" in direct) return `direct application read unavailable: ${direct.error}`;
+  if ("error" in listed) return `application list unavailable: ${listed.error}`;
+  if (
+    !direct.value.image ||
+    !listed.value.image ||
+    ![direct.value.version, listed.value.version].every((version) => Number.isSafeInteger(version) && version >= 0)
+  )
+    return "application image/version evidence incomplete";
+  if (direct.value.version !== listed.value.version || direct.value.image !== listed.value.image)
+    return `application list/direct mismatch: list version ${listed.value.version} image ${listed.value.image}; direct version ${direct.value.version} image ${direct.value.image}; Wrangler cannot compute a reliable container diff`;
+  return undefined;
+}
+
 /** What an application gate knows about the rollout it waits for: the application as read BEFORE
  *  the upload, and the target wrangler's deploy output named (`null`: no container change printed). */
 export interface SandboxRollout {
@@ -765,14 +789,13 @@ export interface SandboxRollout {
 
 /**
  * After a bot deploy, poll the two independently managed surfaces: the container
- * application must advance to wrangler's intended image, and `/healthz` must
+ * application and running singleton must match the selected release, and `/healthz` must
  * serve the full expected commit. Either fact alone is not rollback success.
  */
 export async function waitUntilBotLive(
-  step: Pick<DeployStep, "name" | "dir">,
+  step: Pick<DeployStep, "name" | "dir" | "botImage">,
   gate: BotLiveGate,
   expectedCommit: string,
-  rollout: SandboxRollout,
   io: Pick<DeployRunnerIO, "log">,
   deps: SandboxGateDeps = defaultSandboxGateDeps,
 ): Promise<GateOutcome> {
@@ -780,13 +803,14 @@ export async function waitUntilBotLive(
   for (;;) {
     const elapsed = deps.now() - started;
     const app = await deps.readAppState(step.dir, gate.containerApp);
+    const instances = await deps.readInstances(step.dir, gate.containerApp);
     const health = await deps.readHealth(gate.healthUrl);
     const decision = decideBotLive({
       containerApp: gate.containerApp,
       health,
       app,
-      before: rollout.before,
-      target: rollout.target,
+      expectedImage: step.botImage ?? null,
+      instances,
       expectedCommit,
       elapsedMs: elapsed,
     });
@@ -866,7 +890,7 @@ export async function waitUntilSandboxLive(
 
 /** A container application as it stands BEFORE the upload — the version a full deploy must leave.
  *  A failed sandbox read can fall back to the target image; the bot gate fails closed because rollback
- *  needs both version advancement and the intended image. */
+ *  needs coherent pre-upload reads before Wrangler computes its diff. */
 async function readAppBeforeUpload(
   step: Pick<DeployStep, "name" | "dir">,
   gate: BotLiveGate | SandboxLiveGate,
@@ -879,7 +903,7 @@ async function readAppBeforeUpload(
       ? `[deploy:all] ${step.name}: container application at version ${before.value.version}${before.value.image ? ` (image ${shortImage(before.value.image)})` : ""} before the upload`
       : gate.kind === "sandbox"
         ? `[deploy:all] ${step.name}: could not read the container application before the upload — ${before.error}; the gate will need the deploy's image to show`
-        : `[deploy:all] ${step.name}: could not read the container application before the upload — ${before.error}; the gate requires a readable pre-deploy version to prove advancement`,
+        : `[deploy:all] ${step.name}: could not read the container application before the upload — ${before.error}; the upload requires a coherent application list/direct read`,
   );
   return before;
 }
@@ -1252,6 +1276,13 @@ async function deployStepLoop(
     const application = step.liveGate
       ? { before: await readAppBeforeUpload(step, step.liveGate, io, deps) }
       : undefined;
+    if (step.liveGate?.kind === "bot") {
+      const listed = deps.readListedAppState
+        ? await deps.readListedAppState(step.dir, step.liveGate.containerApp)
+        : { error: "application list read unavailable" };
+      const problem = botUploadProblem(application!.before, listed);
+      if (problem) return { ok: false, live: "not deployed", reason: `bot upload refused: ${problem}` };
+    }
     if (step.name === "resident") {
       const beforeRead = await readResidentBeforeUpload();
       const before = residentApplicationChange(beforeRead, beforeRead, step.residentContainerApp);
@@ -1275,14 +1306,19 @@ async function deployStepLoop(
       // "live" line below prints, so the log and the span cannot disagree.
       const gate = await root.span("deploy.wait_live", async (wait) => {
         if (!application) throw new Error(`${step.name}: live gate has no application state`);
-        const target = rolloutTargetFromDeployOutput(r.output);
+        const target = liveGate.kind === "sandbox" ? rolloutTargetFromDeployOutput(r.output) : null;
         const from =
           "value" in application.before ? `version ${application.before.value.version}` : "its pre-deploy version";
-        io.log(
-          target
-            ? `[deploy:all] ${step.name}: wrangler printed a container change — ${target.image ? `image ${shortImage(target.image)}` : "configuration only, image unchanged"}; the application must leave ${from}`
-            : `[deploy:all] ${step.name}: wrangler printed no container change — Worker-only deploy, no rollout expected`,
-        );
+        if (liveGate.kind === "bot")
+          io.log(
+            `[deploy:all] bot: gate requires ${step.botImage ?? "the directly read application image"}, the running singleton version and exact commit ${expectedCommit}`,
+          );
+        else
+          io.log(
+            target
+              ? `[deploy:all] ${step.name}: wrangler printed a container change — ${target.image ? `image ${shortImage(target.image)}` : "configuration only, image unchanged"}; the application must leave ${from}`
+              : `[deploy:all] ${step.name}: wrangler printed no container change — Worker-only deploy, no rollout expected`,
+          );
         const g: GateOutcome =
           liveGate.kind === "sandbox"
             ? await waitUntilSandboxLive(
@@ -1293,7 +1329,7 @@ async function deployStepLoop(
                 io,
                 deps,
               )
-            : await waitUntilBotLive(step, liveGate, expectedCommit, { before: application.before, target }, io, deps);
+            : await waitUntilBotLive(step, liveGate, expectedCommit, io, deps);
         wait.setAttrs(g.live ? { outcome: "live", waitedMs: g.waitedMs } : { outcome: "not_live" });
         return g;
       });

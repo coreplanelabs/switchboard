@@ -113,7 +113,7 @@ export function containerApplicationName(script: string, className: string): str
 
 /** The static half of a live gate — WHICH proof a step needs; the profile supplies where to read it. */
 export type LiveGateSpec =
-  /** The bot: its application advances to wrangler's target AND `/healthz` reports
+  /** The bot: its application targets the selected image and its singleton runs on that version AND `/healthz` reports
    *  the full deployed commit (src/deploy/botLiveGate.ts `decideBotLive`). */
   | { kind: "bot"; containerClass: string }
   /** The sandbox: the Worker serves the deployed commit (bearer from `bearerEnv`),
@@ -252,7 +252,7 @@ export const WORKER_SPECS: readonly WorkerSpec[] = [
     liveGate: { kind: "bot", containerClass: BOT_CONTAINER_CLASS },
     // The preflight reads the container application and the deploy pushes the image: both need Containers.
     capabilities: [CONTAINERS_CAPABILITY],
-    why: "container shim — preflight refuses only over a rollout in progress (runs in flight hand off); done only when the application advances to the deployed image and /healthz serves the exact commit. A rotated bot secret needs no build: `wrangler secret put` alone leaves the running container on its old env — `deploy restart` restarts it on the current application target",
+    why: "container shim — preflight refuses only over a rollout in progress (runs in flight hand off); done only when the selected application image, running singleton version and exact health commit agree. A rotated bot secret needs no build: `wrangler secret put` alone leaves the running container on its old env — `deploy restart` restarts it on the current application target",
   },
   {
     name: "resident",
@@ -380,6 +380,8 @@ export interface DeployStep {
   liveGate?: LiveGate;
   /** The named resident Containers application, needed for a Worker-only upload receipt. */
   residentContainerApp?: string;
+  /** Registry bot image selected by this plan, never parsed from deploy output. */
+  botImage?: string;
   why: string;
 }
 
@@ -514,6 +516,15 @@ export function planDeploy(
     ...(w.preflight?.healthUrl ? { healthUrl: w.preflight.healthUrl } : {}),
     ...(w.drain ? { drain: { url: w.baseUrl, tokenEnv: w.drain.tokenEnv } } : {}),
     ...(w.liveGate ? { liveGate: w.liveGate } : {}),
+    ...(w.name === "bot" && images.mode === "registry"
+      ? {
+          botImage: accountRegistryImage(
+            profile.account,
+            registryName(images.published.names.bot),
+            images.published.version,
+          ),
+        }
+      : {}),
     ...(w.residentContainerApp ? { residentContainerApp: w.residentContainerApp } : {}),
     ...(!w.liveGate && !w.healthBearerEnv ? { wakeUrl: w.healthUrl } : {}),
     // The plan says where a run's points will land (run-metrics.md item 6): the state Worker's
@@ -607,7 +618,7 @@ export function formatPlan(plan: DeployPlan): string {
         : "";
     const live = s.liveGate
       ? s.liveGate.kind === "bot"
-        ? ` — then wait until live (${s.liveGate.containerApp} advances to the deployed image + ${s.liveGate.healthUrl} build.commit exactly == HEAD)`
+        ? ` — then wait until live (${s.liveGate.containerApp} targets the selected image + singleton on its version + ${s.liveGate.healthUrl} build.commit exactly == HEAD)`
         : ` — then wait until live (${s.liveGate.healthUrl} build.commit == HEAD + every running ${s.liveGate.containerApp} instance on the app version + an /exec probe answers ok from one)`
       : "";
     const cap =
