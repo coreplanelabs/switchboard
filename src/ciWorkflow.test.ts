@@ -800,9 +800,29 @@ describe("the production deploy is one reusable workflow", () => {
     });
     // A scoped dispatch skips the blanket image warm-up and lets deploy all
     // copy only its selected Workers' missing images.
-    expect(Object.keys(workflow.on.workflow_dispatch.inputs)).toEqual(["targets", "force", "copy-images"]);
+    expect(Object.keys(workflow.on.workflow_dispatch.inputs)).toEqual([
+      "cli",
+      "version",
+      "targets",
+      "force",
+      "copy-images",
+    ]);
     for (const k of ["targets", "force", "copy-images"])
       expect(workflow.on.workflow_dispatch.inputs[k]).toEqual(inputs[k]);
+  });
+
+  it("a manual rollback selects an exact published CLI through the existing package deploy path", () => {
+    const inputs = workflow.on.workflow_dispatch.inputs;
+    expect(inputs.cli).toMatchObject({ type: "choice", default: "checkout", options: ["checkout", "package"] });
+    expect(inputs.version).toMatchObject({ type: "string", default: "" });
+    expect(cliStep.env?.MODE).toBe("${{ inputs.cli }}");
+    expect(cliStep.env?.VERSION).toBe("${{ inputs.version }}");
+    expect(cliStep.run).toContain(`cli=npx --yes ${facts.npmPackage}@$v`);
+    expect(cliStep.run).toContain("package mode needs the CLI's version");
+    expect(steps.find((s) => s.name === "deploy")?.run).toContain("$CLI deploy all $ARGS --allow-branch");
+    expect(steps.find((s) => s.name === "the selection")?.run).toContain(
+      'if [ "$FORCE" = "true" ]; then args="$args --force"; fi',
+    );
   });
 
   it("declares every secret by name so another repository can pass them, none required — `secrets: inherit` still works", () => {
