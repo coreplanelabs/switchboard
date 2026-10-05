@@ -1947,7 +1947,7 @@ describe("receiveSlackMessage — the intake gate (docs/reference/specs/slack-ch
     expect(s.calls[0]).toBe("reactions.add");
   });
 
-  it("quiet suppresses the acceptance reaction and catch-up lifecycle note without suppressing intake, downloads or dispatch", async () => {
+  it("quiet acknowledges acceptance before downloads while suppressing the catch-up lifecycle note", async () => {
     const s = gateClient();
     stubDownloads(s.calls);
     const { gate, decide } = gateOf({ mode: "always" });
@@ -1961,7 +1961,8 @@ describe("receiveSlackMessage — the intake gate (docs/reference/specs/slack-ch
     );
     expect(out).toBeDefined();
     expect(decide).not.toHaveBeenCalled();
-    expect(s.calls).not.toContain("reactions.add");
+    expect(s.calls[0]).toBe("reactions.add");
+    expect(s.add).toHaveBeenCalledExactlyOnceWith({ channel: "CGATE", timestamp: expect.any(String), name: "eyes" });
     expect(s.calls).not.toContain("chat.postMessage");
     expect(s.calls).toContain("download");
   });
@@ -2040,14 +2041,16 @@ describe("receiveSlackMessage — the intake gate (docs/reference/specs/slack-ch
   });
 
   it("silent: no 👀, no download, no note, no message to dispatch — and the span carries the verdict, its source and the receipt", async () => {
-    const s = gateClient();
-    stubDownloads(s.calls);
-    const { attrs, span } = spanStub();
-    const { gate } = gateOf({ decideIntake: decided("silent") as unknown as typeof decideIntake });
-    const out = await receiveSlackMessage(s.client, followUp(), span, POLICY, [], gate);
-    expect(out).toBeUndefined();
-    expect(s.calls).toEqual([]);
-    expect(attrs).toMatchObject({ intake: "silent", intakeSource: "model", intakeReceipt: "inserted" });
+    for (const verbosity of ["quiet", "verbose"] as const) {
+      const s = gateClient();
+      stubDownloads(s.calls);
+      const { attrs, span } = spanStub();
+      const { gate } = gateOf({ decideIntake: decided("silent") as unknown as typeof decideIntake });
+      const out = await receiveSlackMessage(s.client, followUp(), span, { ...POLICY, verbosity }, [], gate);
+      expect(out).toBeUndefined();
+      expect(s.calls).toEqual([]);
+      expect(attrs).toMatchObject({ intake: "silent", intakeSource: "model", intakeReceipt: "inserted" });
+    }
   });
 
   it("an intake provider failure is not silent: the no-lease door posts its ending-safe sentence and dispatches nothing", async () => {
@@ -2230,6 +2233,7 @@ describe("receiveSlackMessage — the intake gate (docs/reference/specs/slack-ch
     expect(second).toBeUndefined();
     expect(decide).toHaveBeenCalledTimes(1);
     expect(attrs).toMatchObject({ dedupe: "duplicate" });
+    expect(s.add).toHaveBeenCalledTimes(1);
   });
 
   it("a thread past the prefetched page (50 messages) pages forward to the tail (replies come oldest-first): cursor followed, duplicates dropped, the newest turns kept; a short thread never fetches", async () => {

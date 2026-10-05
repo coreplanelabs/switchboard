@@ -46,6 +46,50 @@ afterEach(() => {
 });
 
 describe("Slack golden flow", () => {
+  it("acknowledges a quiet reply folded into the active run once, without a folding note", async () => {
+    const world = goldenWorld(Date.now);
+    const reaction = vi.spyOn(world.client.reactions, "add");
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const process = goldenProcess(world, "quiet-fold", [
+      async () => {
+        entered();
+        await waiting;
+        return call("mcp__metrics__signups", SOURCE_QUERY);
+      },
+      (request) => {
+        expect(JSON.stringify(request.messages)).toContain("Include the numbers");
+        return answer("Report with numbers");
+      },
+    ]);
+    const first = world.event("Write the report");
+    const run = process.deliver(first);
+    await started;
+    const reply = world.event("Include the numbers");
+    try {
+      await process.deliver(reply);
+      expect(process.deps.runRegistry!.listActive()).toHaveLength(1);
+      expect(reaction.mock.calls.map(([args]) => args)).toEqual([
+        { channel: world.channel, timestamp: first.ts, name: "eyes" },
+        { channel: world.channel, timestamp: reply.ts, name: "eyes" },
+      ]);
+      expect(await process.deliver(reply)).toEqual({ status: "duplicate" });
+      expect(reaction).toHaveBeenCalledTimes(2);
+      expect(world.posts.some((post) => post.text?.includes("Folded into"))).toBe(false);
+    } finally {
+      release();
+    }
+    expect(await run).toMatchObject({ status: "completed" });
+    expect(world.posts.at(-1)?.text).toBe("Report with numbers");
+    expect(process.remaining()).toBe(0);
+  });
+
   it("carries a sourced answer and ordinary fix into one private durable worker", async () => {
     const world = goldenWorld(Date.now);
     const initial = {
