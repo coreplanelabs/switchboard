@@ -122,9 +122,23 @@ export function publishedHeadEvidence(input: {
     (!run.truncated && run.eventCount !== run.events.length)
   )
     return refuse("child_record_incomplete");
+  const settlement = publicationSettlementForRun(run.publicationSettlement, run);
+  if (
+    run.publicationSettlement !== undefined &&
+    (settlement?.binding.branch !== row.branch ||
+      settlement.checkpoint.kind !== "created" ||
+      settlement.publication.kind !== "accepted")
+  )
+    return refuse("publication_settlement_unverified");
   const events = run.events;
   const pushes = events.filter((event) => event.type === "pushed_head");
-  const push = pushes.length === 1 ? pushes[0] : undefined;
+  // The producer settlement names the accepted final checkpoint. Earlier
+  // native updates and same-head salvage do not create another publication.
+  const push = settlement
+    ? pushes.filter((event) => event.by === "push").at(-1)
+    : pushes.length === 1
+      ? pushes[0]
+      : undefined;
   if (run.truncated) {
     let nextSeq = 1;
     let pastPush = false;
@@ -139,30 +153,30 @@ export function publishedHeadEvidence(input: {
   }
   if (push?.ref !== row.branch || push.by !== "push" || !HEAD.test(push.sha ?? "")) return refuse("push_unverified");
   const head = push.sha!;
+  if (
+    (settlement?.publication.kind === "accepted" && settlement.publication.head !== head) ||
+    pushes.some(
+      (event) =>
+        event.ref !== row.branch ||
+        !HEAD.test(event.sha ?? "") ||
+        (event.by !== "push" && event.by !== "salvage") ||
+        event.receipt !== undefined ||
+        (event.by === "salvage" && event.sha !== head),
+    )
+  )
+    return refuse("push_unverified");
   // The Git Door recorder commits this typed acceptance before the tool
   // result. A newly created branch has no old-head authorization event.
   if (
-    push.receipt !== undefined ||
     run.pushed?.length !== 1 ||
     run.pushed[0]?.ref !== row.branch ||
     run.pushed[0].sha !== head ||
-    run.pushed[0].by !== "push" ||
+    run.pushed[0].by !== pushes.at(-1)?.by ||
     (run.headSha !== undefined && run.headSha !== head) ||
     (row.lastPush !== undefined && row.lastPush !== head) ||
     run.pr !== undefined ||
     events.some((event) => event.type === "pr_opened")
   )
     return refuse("push_unverified");
-  if (run.publicationSettlement !== undefined) {
-    const settlement = publicationSettlementForRun(run.publicationSettlement, run);
-    if (
-      settlement?.binding.branch !== row.branch ||
-      settlement.checkpoint.kind !== "created" ||
-      settlement.checkpoint.head !== head ||
-      settlement.publication.kind !== "accepted" ||
-      settlement.publication.head !== head
-    )
-      return refuse("publication_settlement_unverified");
-  }
   return { ok: true, head, runId: run.id };
 }
