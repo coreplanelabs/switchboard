@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.285.4](https://github.com/coreplanelabs/switchboard/compare/v1.285.3...v1.285.4) (2026-10-05)
+
+
+### Bug fixes
+
+* **core:** reduce recurring agent tool friction ([#2761](https://github.com/coreplanelabs/switchboard/issues/2761)) ([16fd241](https://github.com/coreplanelabs/switchboard/commit/16fd2416030799e77d41091375633259d39b3974))
+* **deploy:** preserve forward bot deploys across native views ([#2766](https://github.com/coreplanelabs/switchboard/issues/2766)) ([a3cfff8](https://github.com/coreplanelabs/switchboard/commit/a3cfff83fb87dffce241afd8274829a3681b0ea1))
+* **deploy:** verify bot targets before upload and live completion ([#2763](https://github.com/coreplanelabs/switchboard/issues/2763)) ([a9ee189](https://github.com/coreplanelabs/switchboard/commit/a9ee189d37421d8389003e8ba7b6eefcb6394e60))
+* **harness:** recover typed model stream failures safely ([#2758](https://github.com/coreplanelabs/switchboard/issues/2758)) ([0c656ac](https://github.com/coreplanelabs/switchboard/commit/0c656acf5f0f526f6de35c8e6a12220192e58327))
+* **resident:** a designed attach refusal no longer traces as an error ([#2765](https://github.com/coreplanelabs/switchboard/issues/2765)) ([5f88a15](https://github.com/coreplanelabs/switchboard/commit/5f88a15f4414fcdcb23399ef11a4c9b66e9db728))
+
 ## [1.285.3](https://github.com/coreplanelabs/switchboard/compare/v1.285.2...v1.285.3) (2026-10-05)
 
 
