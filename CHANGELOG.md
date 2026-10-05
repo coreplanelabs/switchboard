@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.285.6](https://github.com/coreplanelabs/switchboard/compare/v1.285.5...v1.285.6) (2026-10-05)
+
+
+### Bug fixes
+
+* **runs:** resume work under one recovery owner ([#2770](https://github.com/coreplanelabs/switchboard/issues/2770)) ([86d207c](https://github.com/coreplanelabs/switchboard/commit/86d207cdab9bdf4b333fe16f64c415d1ac43cd1b))
+
 ## [1.285.5](https://github.com/coreplanelabs/switchboard/compare/v1.285.4...v1.285.5) (2026-10-05)
 
 
