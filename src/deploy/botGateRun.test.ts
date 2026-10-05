@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { LIVE_GATE_POLL_MS } from "./liveGate.js";
 import { workersFor, type DeployStep, type BotLiveGate } from "./plan.js";
-import { deployStep, type SandboxGateDeps, type StepExec } from "./run.js";
+import { deployStep, readRawBotApplication, type SandboxGateDeps, type StepExec } from "./run.js";
 import type { AppState, HealthRead, Read } from "./sandboxLiveGate.js";
 import { TEST_PROFILE } from "./testing/profile.js";
 
@@ -28,6 +28,7 @@ const botStep: DeployStep = {
   healthUrl: "https://switchboard.example.test/healthz",
   liveGate: gate,
   botImage: PRIOR_IMAGE,
+  botAccount: TEST_PROFILE.account,
   why: "container shim",
 };
 const plan = { waitMaxMs: 10 * 60_000, pollMs: 60_000 };
@@ -149,6 +150,40 @@ describe("deployStep (bot rollback fence)", () => {
     expect(h.calls).not.toContain("exec");
   });
 
+  it("admits a fresh forward image with differing list and effective native versions", async () => {
+    const stale = { value: { version: 73, image: PRIOR_IMAGE } };
+    const effective = { value: { version: 74, image: NEWER_IMAGE } };
+    const selected = "registry.cloudflare.com/account/switchboard:1.262.0";
+    const landed = { value: { version: 75, image: selected } };
+    const h = harness({
+      app: [effective, effective, landed],
+      listed: stale,
+      health: [serving(NEWER_COMMIT), serving(PRIOR_COMMIT)],
+    });
+    expect(
+      await deployStep({ ...botStep, botImage: selected }, plan, PRIOR_COMMIT, h.io, h.deps, h.exec),
+    ).toMatchObject({ ok: true, live: "live" });
+    expect(h.calls).toContain("exec");
+    expect(h.lines.join("\n")).toContain(`still targets ${NEWER_IMAGE}; expected ${selected}`);
+  });
+
+  it("keeps Worker-only and build deployments available across differing native views", async () => {
+    const effective = { value: { version: 74, image: NEWER_IMAGE } };
+    const listed = { value: { version: 73, image: PRIOR_IMAGE } };
+    for (const botImage of [NEWER_IMAGE, undefined]) {
+      const h = harness({
+        app: [effective],
+        listed,
+        health: [serving(NEWER_COMMIT)],
+        output: `no changes ${APP}\nCurrent Version ID: ${WORKER_VERSION}`,
+      });
+      expect(await deployStep({ ...botStep, botImage }, plan, NEWER_COMMIT, h.io, h.deps, h.exec)).toMatchObject({
+        ok: true,
+        live: "live",
+      });
+    }
+  });
+
   it("binds the bot gate to the profile-derived application name", () => {
     expect(gate).toEqual({
       kind: "bot",
@@ -200,5 +235,54 @@ describe("deployStep (bot rollback fence)", () => {
       ),
       reason: expect.stringContaining("deployed but NOT live"),
     });
+  });
+});
+
+describe("raw bot application read", () => {
+  it.each([
+    [{ type: "api_token", token: "fixture-token" }, { authorization: "Bearer fixture-token" }],
+    [{ type: "oauth", token: "fixture-oauth" }, { authorization: "Bearer fixture-oauth" }],
+    [
+      { type: "api_key", key: "fixture-key", email: "fixture@example.test" },
+      { "X-Auth-Key": "fixture-key", "X-Auth-Email": "fixture@example.test" },
+    ],
+  ])("uses deploy's raw endpoint and Wrangler auth mode: %j", async (auth, headers) => {
+    const fetcher: typeof fetch = async (url, init) => {
+      expect(url).toBe(`https://api.cloudflare.com/client/v4/accounts/${TEST_PROFILE.account}/containers/applications`);
+      expect(init?.headers).toEqual(headers);
+      return Response.json({
+        success: true,
+        result: [{ name: APP, version: 16, configuration: { image: PRIOR_IMAGE } }],
+      });
+    };
+    expect(await readRawBotApplication(TEST_PROFILE.account, APP, auth, fetcher)).toEqual({
+      value: { version: 16, image: PRIOR_IMAGE },
+    });
+  });
+
+  it.each([
+    { success: true, result: [{ name: APP, version: 16, image: PRIOR_IMAGE }] },
+    { success: false, result: [{ name: APP, version: 16, configuration: { image: PRIOR_IMAGE } }] },
+    { success: true, result: [] },
+    { success: true, result: [{ name: "other", version: 16, configuration: { image: PRIOR_IMAGE } }] },
+  ])("refuses dashboard shapes or missing native evidence: %j", async (body) => {
+    const result = await readRawBotApplication(
+      TEST_PROFILE.account,
+      APP,
+      { type: "api_token", token: "fixture" },
+      async () => Response.json(body),
+    );
+    // A flattened dashboard image must never substitute for configuration.image.
+    expect(result).toHaveProperty("error");
+  });
+
+  it("never exposes credential-bearing error bodies", async () => {
+    const result = await readRawBotApplication(
+      TEST_PROFILE.account,
+      APP,
+      { type: "api_token", token: "private-fixture" },
+      async () => new Response("private-fixture", { status: 403 }),
+    );
+    expect(result).toEqual({ error: "raw application list HTTP 403" });
   });
 });

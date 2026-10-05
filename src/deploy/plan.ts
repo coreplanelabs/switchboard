@@ -382,6 +382,8 @@ export interface DeployStep {
   residentContainerApp?: string;
   /** Registry bot image selected by this plan, never parsed from deploy output. */
   botImage?: string;
+  /** Account for the raw application list Wrangler deploy uses. */
+  botAccount?: string;
   why: string;
 }
 
@@ -516,6 +518,7 @@ export function planDeploy(
     ...(w.preflight?.healthUrl ? { healthUrl: w.preflight.healthUrl } : {}),
     ...(w.drain ? { drain: { url: w.baseUrl, tokenEnv: w.drain.tokenEnv } } : {}),
     ...(w.liveGate ? { liveGate: w.liveGate } : {}),
+    ...(w.name === "bot" ? { botAccount: profile.account } : {}),
     ...(w.name === "bot" && images.mode === "registry"
       ? {
           botImage: accountRegistryImage(
