@@ -667,7 +667,7 @@ export interface SandboxGateDeps {
   /** `wrangler containers instances <app> --json`, every page, run in `dir`. */
   readInstances(dir: string, containerApp: string): Promise<Read<ContainerInstance[]>>;
   /** The application list Wrangler uses to compute its deploy diff. */
-  readListedAppState?(dir: string, containerApp: string): Promise<Read<AppState>>;
+  readListedAppState?(dir: string, containerApp: string, account: string): Promise<Read<AppState>>;
   /** `POST /exec` `echo ok` on the probe thread; the streamed body parsed. */
   probeExec(execUrl: string, bearer: string, threadKey: string): Promise<ProbeResult>;
   now(): number;
@@ -711,12 +711,12 @@ export const defaultSandboxGateDeps: SandboxGateDeps = {
   env: process.env,
   postJson,
   readHealth: (url, bearer, timeoutMs) => readHealthz(url, bearer, timeoutMs),
-  readListedAppState: async (dir, containerApp) => {
-    const listing = await wranglerJson(dir, ["containers", "list", "--json"]);
-    if ("error" in listing) return listing;
-    const row = Array.isArray(listing.value) ? listing.value.find((app) => app?.name === containerApp) : undefined;
-    const state = parseAppState(row);
-    return state ? { value: state } : { error: `container application ${containerApp}: list has no image/version` };
+  readListedAppState: async (dir, containerApp, account) => {
+    // Capture privately: neither successful credentials nor failed auth output
+    // may enter a deploy log. Use the same auth modes as Wrangler's upload.
+    const auth = await run("npx", ["wrangler", "auth", "token", "--json"], { cwd: workerDir(dir), unset: UNSET_ENV });
+    if (auth.code !== 0) return { error: "Wrangler credentials unavailable for the raw application list" };
+    return readRawBotApplication(account, containerApp, parseWranglerJson(auth.output));
   },
   readAppState: async (dir, containerApp) => {
     const id = await resolveContainerAppId(dir, containerApp);
@@ -765,8 +765,54 @@ export const defaultSandboxGateDeps: SandboxGateDeps = {
   sleep,
 };
 
-/** Wrangler diffs the list endpoint; an inconsistent direct read cannot authorize an upload. */
-export function botUploadProblem(direct: Read<AppState>, listed: Read<AppState>): string | undefined {
+/** The raw list used by Wrangler deploy differs from its dashboard-backed CLI list. */
+export async function readRawBotApplication(
+  account: string,
+  name: string,
+  credentials: unknown,
+  fetcher: typeof fetch = fetch,
+): Promise<Read<AppState>> {
+  if (!/^[a-f0-9]{32}$/.test(account)) return { error: "raw application list requires the selected account" };
+  if (typeof credentials !== "object" || credentials === null) return { error: "Wrangler credentials unavailable" };
+  const auth = credentials as Record<string, unknown>;
+  let headers: Record<string, string>;
+  if ((auth.type === "api_token" || auth.type === "oauth") && typeof auth.token === "string" && auth.token)
+    headers = { authorization: `Bearer ${auth.token}` };
+  else if (
+    auth.type === "api_key" &&
+    typeof auth.key === "string" &&
+    auth.key &&
+    typeof auth.email === "string" &&
+    auth.email
+  )
+    headers = { "X-Auth-Key": auth.key, "X-Auth-Email": auth.email };
+  else return { error: "Wrangler credentials unavailable" };
+  try {
+    const response = await fetcher(`https://api.cloudflare.com/client/v4/accounts/${account}/containers/applications`, {
+      headers,
+      signal: AbortSignal.timeout(MINUTE_MS),
+    });
+    if (!response.ok) return { error: `raw application list HTTP ${response.status}` };
+    const body: unknown = await response.json();
+    if (typeof body !== "object" || body === null) return { error: "raw application list has no result" };
+    const envelope = body as Record<string, unknown>;
+    if (envelope.success !== true || !Array.isArray(envelope.result))
+      return { error: "raw application list has no successful result" };
+    const matches = envelope.result.filter((row) => row && typeof row === "object" && row.name === name);
+    if (matches.length !== 1) return { error: `raw application list does not uniquely name ${name}` };
+    const state = parseAppState(matches[0]);
+    return state?.image ? { value: state } : { error: `raw application list ${name} has no image/version` };
+  } catch {
+    return { error: "raw application list request or JSON failed" };
+  }
+}
+
+/** Refuse a known image no-op in the list endpoint Wrangler deploy uses. */
+export function botUploadProblem(
+  direct: Read<AppState>,
+  listed: Read<AppState>,
+  selectedImage?: string,
+): string | undefined {
   if ("error" in direct) return `direct application read unavailable: ${direct.error}`;
   if ("error" in listed) return `application list unavailable: ${listed.error}`;
   if (
@@ -775,8 +821,11 @@ export function botUploadProblem(direct: Read<AppState>, listed: Read<AppState>)
     ![direct.value.version, listed.value.version].every((version) => Number.isSafeInteger(version) && version >= 0)
   )
     return "application image/version evidence incomplete";
-  if (direct.value.version !== listed.value.version || direct.value.image !== listed.value.image)
-    return `application list/direct mismatch: list version ${listed.value.version} image ${listed.value.image}; direct version ${direct.value.version} image ${direct.value.image}; Wrangler cannot compute a reliable container diff`;
+  // List configuration and effective configuration can differ after a rollout.
+  // Refuse only the known image no-op: Wrangler would diff the selected image
+  // against an equal list image while the effective application targets another.
+  if (selectedImage === listed.value.image && selectedImage !== direct.value.image)
+    return `application list/direct mismatch: list version ${listed.value.version} image ${listed.value.image} already equals selected ${selectedImage}; direct version ${direct.value.version} image ${direct.value.image}; Wrangler would omit the required image change`;
   return undefined;
 }
 
@@ -1278,9 +1327,9 @@ async function deployStepLoop(
       : undefined;
     if (step.liveGate?.kind === "bot") {
       const listed = deps.readListedAppState
-        ? await deps.readListedAppState(step.dir, step.liveGate.containerApp)
+        ? await deps.readListedAppState(step.dir, step.liveGate.containerApp, step.botAccount ?? "")
         : { error: "application list read unavailable" };
-      const problem = botUploadProblem(application!.before, listed);
+      const problem = botUploadProblem(application!.before, listed, step.botImage);
       if (problem) return { ok: false, live: "not deployed", reason: `bot upload refused: ${problem}` };
     }
     if (step.name === "resident") {
