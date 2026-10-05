@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.285.5](https://github.com/coreplanelabs/switchboard/compare/v1.285.4...v1.285.5) (2026-10-05)
+
+
+### Bug fixes
+
+* **deploy:** recognize bot health despite stale instance state ([#2767](https://github.com/coreplanelabs/switchboard/issues/2767)) ([608429b](https://github.com/coreplanelabs/switchboard/commit/608429b4bf26678ad0a06c276b15b9d4ae671e31))
+* **runs:** open a PR after the original coding child pushes ([#2769](https://github.com/coreplanelabs/switchboard/issues/2769)) ([0fc5eaa](https://github.com/coreplanelabs/switchboard/commit/0fc5eaa316126e79a9b280005979a14831dfe14c))
+
 ## [1.285.4](https://github.com/coreplanelabs/switchboard/compare/v1.285.3...v1.285.4) (2026-10-05)
 
 
