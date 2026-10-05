@@ -5771,13 +5771,28 @@ describe("complete canonical pull ownership", () => {
     });
   });
 
-  it("bounds source bytes before parsing or retaining an entire permitted history", async () => {
+  it("ignores historical display bytes while retaining canonical terminal publication", async () => {
     const key = storeKey(),
       stub = env.RUNS.get(env.RUNS.idFromName(key));
     await runInDurableObject(stub, async (owner: RunHistoryDO, state) => {
       const label = "x".repeat(Math.floor(1.4 * 1024 * 1024));
       for (let i = 0; i < 4; i++) {
-        const row = { ...record(`large_${i}`, `slack:C1:large-${i}`), label };
+        const row = {
+          ...record(`large_${i}`, `slack:C1:large-${i}`),
+          repo: "acme/api",
+          label,
+          ...(i === 3
+            ? {
+                branchPublication: {
+                  version: 1,
+                  repo: "acme/api",
+                  branches: [],
+                  complete: false,
+                  pending: { id: "pending-call", pr: 7, headSha: "a".repeat(40) },
+                },
+              }
+            : {}),
+        };
         state.storage.sql.exec(
           `INSERT INTO runs (run_id, channel_id, user_id, thread_key, started_at, finished_at, stored_at, status, event_count, stored_event_count, truncated, bytes, diagnosis_json, summary_json) VALUES (?, 'slack:C1', 'slack:UALICE', ?, 1, 2, 2, 'completed', 0, 0, 0, ?, '{}', ?)`,
           row.id,
@@ -5785,9 +5800,68 @@ describe("complete canonical pull ownership", () => {
           label.length,
           JSON.stringify(row),
         );
-        expect(await owner.findPullOwners({ repo: "acme/api", pr: 7 })).toEqual(
-          i === 3 ? { ok: false, reason: "incomplete" } : { ok: true, owners: [] },
+        expect(await owner.findPullOwners({ repo: "acme/api", pr: 7 })).toEqual({
+          ok: true,
+          owners: i === 3 ? [{ kind: "run", runId: row.id }] : [],
+        });
+      }
+    });
+  });
+  it("bounds canonical producer bytes before parsing", async () => {
+    const key = storeKey(),
+      stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (owner: RunHistoryDO, state) => {
+      for (let i = 0; i < 4; i++) {
+        const row = {
+          ...record(`large_owner_${i}`, `slack:C1:large-owner-${i}`),
+          repo: "acme/api",
+          branchPublication: {
+            version: 1,
+            repo: "acme/api",
+            branches: [],
+            complete: false,
+            pending: { id: "x".repeat(Math.floor(1.4 * 1024 * 1024)), pr: 7, headSha: "a".repeat(40) },
+          },
+        };
+        state.storage.sql.exec(
+          `INSERT INTO runs (run_id, channel_id, user_id, thread_key, started_at, finished_at, stored_at, status, event_count, stored_event_count, truncated, bytes, diagnosis_json, summary_json) VALUES (?, 'slack:C1', 'slack:UALICE', ?, 1, 2, 2, 'completed', 0, 0, 0, ?, '{}', ?)`,
+          row.id,
+          row.threadKey,
+          JSON.stringify(row).length,
+          JSON.stringify(row),
         );
+      }
+      expect(await owner.findPullOwners({ repo: "acme/api", pr: 7 })).toEqual({ ok: false, reason: "incomplete" });
+    });
+  });
+  it("retains unreadable canonical identity and publication after excluding display fields", async () => {
+    const key = storeKey(),
+      id = "projected_owner",
+      terminal = { ...record(id, "slack:C1:projected-owner"), repo: "acme/api" };
+    expect((await post("/runs/put", { storeKey: key, record: terminal })).status).toBe(200);
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+      for (const raw of [
+        "{",
+        "null",
+        "[]",
+        "{}",
+        JSON.stringify({ ...terminal, id: "foreign_owner" }),
+        JSON.stringify({ ...terminal, userId: null }),
+        JSON.stringify({ ...terminal, parentInstanceId: "parent_without_key" }),
+        JSON.stringify({ ...terminal, branchPublication: null }),
+        JSON.stringify({ ...terminal, branchPublication: { version: 2 } }),
+        JSON.stringify({ ...terminal, doorPublicationPending: { id: "unresolved" } }),
+        JSON.stringify({ ...terminal, doorPublicationPending: null }).replace(
+          '"doorPublicationPending":null',
+          '"doorPublicationPending":NaN',
+        ),
+      ]) {
+        state.storage.sql.exec(`UPDATE runs SET summary_json = ? WHERE run_id = ?`, raw, id);
+        expect(await owner.findPullOwners({ repo: "acme/api", pr: 7 })).toEqual({ ok: false, reason: "incomplete" });
+        expect(
+          state.storage.sql.exec<{ summary_json: string }>(`SELECT summary_json FROM runs WHERE run_id = ?`, id).one()
+            .summary_json,
+        ).toBe(raw);
       }
     });
   });
