@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.285.3](https://github.com/coreplanelabs/switchboard/compare/v1.285.2...v1.285.3) (2026-10-05)
+
+
+### Bug fixes
+
+* **deploy:** select a pinned package for bot rollback ([#2759](https://github.com/coreplanelabs/switchboard/issues/2759)) ([670d7f8](https://github.com/coreplanelabs/switchboard/commit/670d7f887d3ae297e0e450ed21ea0fca68479e1f))
+* **runs:** admit work without scanning historical display bytes ([#2762](https://github.com/coreplanelabs/switchboard/issues/2762)) ([302e4d5](https://github.com/coreplanelabs/switchboard/commit/302e4d5dc80cf6c6a8f891c2fdecea1057580037))
+
 ## [1.285.2](https://github.com/coreplanelabs/switchboard/compare/v1.285.1...v1.285.2) (2026-10-05)
 
 
