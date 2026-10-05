@@ -2190,6 +2190,251 @@ describe("run metrics — the point, the guard and the emission rule", () => {
   });
 });
 
+describe("durable branch identity baseline", () => {
+  it("restores private archived baseline before same-ID reservation and promotion and refuses replacement at claim or finish", async () => {
+    const key = storeKey();
+    const rec = record("same-baseline", Date.now(), { repo: "o/r", events: [] });
+    const baseline = {
+      version: 1 as const,
+      binding: {
+        runId: rec.id,
+        requester: rec.userId,
+        threadKey: rec.threadKey,
+        repo: "o/r",
+        branch: "plan/p/u1",
+        base: "main",
+        head: "a".repeat(40),
+      },
+      state: { kind: "known" as const, commits: [] },
+    };
+    await runInDurableObject(stubOf(key), async (inst: RunHistoryDO, state) => {
+      const req = {
+        runId: rec.id,
+        threadKey: rec.threadKey,
+        gen: "g1",
+        leaseMs: LEASE_MS,
+        startedAt: rec.startedAt,
+        meta: { threadKey: rec.threadKey, channelId: rec.channelId, userId: rec.userId, repo: rec.repo },
+        card: null,
+        system: "coding",
+        tools: [],
+      };
+      await inst.claim({ ...req, state: { branchIdentityBaseline: baseline } }, Date.now());
+      await inst.finish(rec.id, "g1", rec);
+      expect(await inst.claim({ ...req, gen: "g2", phase: "attaching", system: "" }, Date.now())).toEqual({ ok: true });
+      expect((await inst.listLive())[0]!.state.branchIdentityBaseline).toEqual(baseline);
+      state.storage.sql.exec("UPDATE live_runs SET state_json = '{}' WHERE run_id = ?", rec.id);
+      expect(await inst.claim({ ...req, gen: "g2", phase: "attaching", system: "" }, Date.now())).toEqual({ ok: true });
+      expect((await inst.listLive())[0]!.state.branchIdentityBaseline).toEqual(baseline);
+      expect(await inst.claim({ ...req, gen: "g2", state: { binding: { backend: "sandbox" } } }, Date.now())).toEqual({
+        ok: true,
+      });
+      expect((await inst.listLive())[0]!.state.branchIdentityBaseline).toEqual(baseline);
+      const changed = { ...baseline, binding: { ...baseline.binding, head: "b".repeat(40) } };
+      expect(await inst.setState(rec.id, "g2", { branchIdentityBaseline: changed })).toEqual({
+        ok: false,
+        reason: "fenced",
+      });
+      state.storage.sql.exec("UPDATE live_runs SET state_json = '{}' WHERE run_id = ?", rec.id);
+      expect(await inst.setState(rec.id, "g2", { checklist: [] })).toEqual({ ok: true });
+      expect((await inst.listLive())[0]!.state.branchIdentityBaseline).toEqual(baseline);
+      state.storage.sql.exec(
+        "UPDATE live_runs SET state_json = ? WHERE run_id = ?",
+        JSON.stringify({ branchIdentityBaseline: changed }),
+        rec.id,
+      );
+      await expect(inst.finish(rec.id, "g2", rec)).rejects.toThrow();
+      expect((await inst.get(rec.id))!.branchIdentityBaseline).toEqual(baseline);
+      state.storage.sql.exec(
+        "UPDATE live_runs SET state_json = ? WHERE run_id = ?",
+        JSON.stringify({ branchIdentityBaseline: baseline }),
+        rec.id,
+      );
+      expect(await inst.finish(rec.id, "g2", rec)).toMatchObject({ ok: true });
+      await expect(
+        inst.claim({ ...req, gen: "g3", state: { branchIdentityBaseline: changed } }, Date.now()),
+      ).rejects.toThrow();
+      expect(await inst.listLive()).toEqual([]);
+      for (const meta of [
+        { ...req.meta, ref: "foreign" },
+        { ...req.meta, baseRef: "foreign" },
+      ])
+        await expect(inst.claim({ ...req, gen: "g3", meta }, Date.now())).rejects.toThrow();
+    });
+  });
+
+  it("fails closed on corrupt or foreign archived baseline before a same-ID claim", async () => {
+    const key = storeKey();
+    const rec = record("foreign-baseline", Date.now(), { repo: "o/r", events: [] });
+    const baseline = {
+      version: 1 as const,
+      binding: {
+        runId: rec.id,
+        requester: rec.userId,
+        threadKey: rec.threadKey,
+        repo: "o/r",
+        branch: "plan/p/u1",
+        base: "main",
+        head: "a".repeat(40),
+      },
+      state: { kind: "unknown" as const },
+    };
+    await runInDurableObject(stubOf(key), async (inst: RunHistoryDO, state) => {
+      const req = {
+        runId: rec.id,
+        threadKey: rec.threadKey,
+        gen: "g1",
+        leaseMs: LEASE_MS,
+        startedAt: rec.startedAt,
+        meta: { threadKey: rec.threadKey, channelId: rec.channelId, userId: rec.userId, repo: rec.repo },
+        card: null,
+        system: "coding",
+        tools: [],
+      };
+      await inst.claim({ ...req, state: { branchIdentityBaseline: baseline } }, Date.now());
+      await inst.finish(rec.id, "g1", rec);
+      await expect(
+        inst.claim({ ...req, gen: "g2", meta: { ...req.meta, userId: "foreign" } }, Date.now()),
+      ).rejects.toThrow();
+      expect(await inst.listLive()).toEqual([]);
+      state.storage.sql.exec(
+        "UPDATE runs SET work_evidence_json = ? WHERE run_id = ?",
+        JSON.stringify({ version: 1, branchIdentityBaseline: { version: 1 } }),
+        rec.id,
+      );
+      await expect(inst.claim({ ...req, gen: "g2" }, Date.now())).rejects.toThrow();
+      expect(await inst.listLive()).toEqual([]);
+    });
+  });
+
+  it("keeps another live run's baseline out of a conflicting new claim", async () => {
+    const key = storeKey();
+    const rec = record("original-baseline", Date.now(), { repo: "o/r", events: [] });
+    const baseline = {
+      version: 1 as const,
+      binding: {
+        runId: rec.id,
+        requester: rec.userId,
+        threadKey: rec.threadKey,
+        repo: "o/r",
+        branch: "plan/p/u1",
+        base: "main",
+        head: "a".repeat(40),
+      },
+      state: { kind: "unknown" as const },
+    };
+    await runInDurableObject(stubOf(key), async (inst: RunHistoryDO) => {
+      const req = {
+        runId: rec.id,
+        threadKey: rec.threadKey,
+        gen: "g1",
+        leaseMs: LEASE_MS,
+        startedAt: rec.startedAt,
+        meta: { threadKey: rec.threadKey, channelId: rec.channelId, userId: rec.userId, repo: rec.repo },
+        card: null,
+        system: "coding",
+        tools: [],
+      };
+      await inst.claim({ ...req, state: { branchIdentityBaseline: baseline } }, Date.now());
+      expect(await inst.claim({ ...req, runId: "other-run" }, Date.now())).toMatchObject({
+        ok: false,
+        reason: "thread-live",
+      });
+      expect((await inst.listLive())[0]!.state.branchIdentityBaseline).toEqual(baseline);
+    });
+  });
+
+  it("keeps the acknowledged baseline through SQLite owner handoff and terminal storage without exposing commit bytes in summaries", async () => {
+    const key = storeKey();
+    const rec = record("baseline-run", Date.now(), { repo: "o/r", events: [] });
+    const baseline = {
+      version: 1 as const,
+      binding: {
+        runId: rec.id,
+        requester: rec.userId,
+        threadKey: rec.threadKey,
+        repo: "o/r",
+        branch: "plan/p/u1",
+        base: "main",
+        head: "a".repeat(40),
+      },
+      state: {
+        kind: "known" as const,
+        commits: [
+          {
+            sha: "b".repeat(40),
+            author: { name: "inherited", email: "prior@example.test" },
+            date: "2026-01-01T00:00:00Z",
+            message: "private inherited commit",
+          },
+        ],
+      },
+    };
+    await runInDurableObject(stubOf(key), async (inst: RunHistoryDO) => {
+      await inst.claim(
+        {
+          runId: rec.id,
+          threadKey: rec.threadKey,
+          gen: "g1",
+          leaseMs: LEASE_MS,
+          startedAt: rec.startedAt,
+          meta: { threadKey: rec.threadKey, channelId: rec.channelId, userId: rec.userId, repo: rec.repo },
+          card: null,
+          system: "coding",
+          tools: [],
+        },
+        Date.now(),
+      );
+      expect(
+        await inst.setState(rec.id, "g1", {
+          branchIdentityBaseline: { ...baseline, binding: { ...baseline.binding, runId: "foreign" } },
+        }),
+      ).toEqual({ ok: false, reason: "fenced" });
+      expect(await inst.setState(rec.id, "g1", { branchIdentityBaseline: baseline })).toEqual({ ok: true });
+      expect(
+        await inst.setState(rec.id, "g1", {
+          branchIdentityBaseline: { ...baseline, state: { kind: "known", commits: [] } },
+        }),
+      ).toEqual({ ok: false, reason: "fenced" });
+      expect(await inst.setState(rec.id, "g1", { pushedBranch: "plan/p/u1" })).toEqual({ ok: true });
+      await inst.handoff("g1", [rec.id]);
+      const taken = await inst.reclaim("g2", Date.now(), LEASE_MS);
+      expect(taken[0]!.row.state.branchIdentityBaseline).toEqual(baseline);
+      expect(await inst.setState(rec.id, "g1", { branchIdentityBaseline: baseline })).toEqual({
+        ok: false,
+        reason: "fenced",
+      });
+      expect(await inst.setState(rec.id, "g2", { pushedBranch: "plan/p/u1" })).toEqual({ ok: true });
+      expect(await inst.finish(rec.id, "g2", rec)).toMatchObject({ ok: true, stored: true });
+      expect((await inst.get(rec.id))!.branchIdentityBaseline).toEqual(baseline);
+    });
+    for (const result of [
+      await post("/runs/summary", { storeKey: key, id: rec.id }),
+      await post("/runs/list", { storeKey: key }),
+    ])
+      expect(JSON.stringify(result.data)).not.toContain("private inherited commit");
+    await runInDurableObject(stubOf(key), async (_inst: RunHistoryDO, state) => {
+      const row = state.storage.sql
+        .exec<{ summary_json: string; work_evidence_json: string }>(
+          "SELECT summary_json, work_evidence_json FROM runs WHERE run_id = ?",
+          rec.id,
+        )
+        .one();
+      expect(row.summary_json).not.toContain("branchIdentityBaseline");
+      expect(JSON.parse(row.work_evidence_json)).toEqual({ version: 1, branchIdentityBaseline: baseline });
+      state.storage.sql.exec(
+        "UPDATE runs SET work_evidence_json = ? WHERE run_id = ?",
+        JSON.stringify({
+          version: 1,
+          branchIdentityBaseline: { ...baseline, binding: { ...baseline.binding, requester: "foreign" } },
+        }),
+        rec.id,
+      );
+    });
+    expect((await post("/runs/get", { storeKey: key, id: rec.id })).data.record).toBeNull();
+  });
+});
+
 describe("retained source archive storage", () => {
   it("keeps exact work-read evidence out of summaries and rejects corrupt private evidence", async () => {
     const key = storeKey(),

@@ -253,6 +253,29 @@ describe("the pure pieces", () => {
     ).toEqual({ repo: "acme/api", ref: "feat/x", pr: 12, headSha: "a".repeat(40), baseRef: "release" });
   });
 
+  it("repoContextOf restores a standalone PR's original non-default base from durable metadata", () => {
+    const original = row();
+    original.meta = { ...original.meta, baseRef: "release/stable" };
+    expect(repoContextOf(original)).toEqual({
+      repo: "acme/api",
+      ref: "feat/x",
+      pr: 12,
+      headSha: "a".repeat(40),
+      baseRef: "release/stable",
+    });
+  });
+
+  it("repoContextOf preserves an explicit durable base conflict instead of overriding it from the baseline", () => {
+    const original = row();
+    original.meta = { ...original.meta, baseRef: "release/stable" };
+    original.state.branchIdentityBaseline = { binding: { base: "main" } };
+    expect(
+      repoContextOf(original, [{ type: "coordinator_tag", parentInstanceId: "ship-review", base: "main" }]),
+    ).toMatchObject({ baseRef: "release/stable" });
+    delete original.meta.baseRef;
+    expect(repoContextOf(original)).not.toHaveProperty("baseRef");
+  });
+
   it("repoContextOf carries repo/ref/pr/headSha and nothing else", () => {
     expect(repoContextOf(row())).toEqual({ repo: "acme/api", ref: "feat/x", pr: 12, headSha: "a".repeat(40) });
     expect(repoContextOf(row({ meta: { channelId: "c", userId: "u", threadKey: "t" } }))).toEqual({});

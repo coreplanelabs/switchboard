@@ -236,6 +236,7 @@ export function toListItem(record: RunRecord, bytes: number): RunListItem {
     reviewPublication: _reviewPublication,
     branchPushReceipts: _branchPushReceipts,
     sourceReads: _sourceReads,
+    branchIdentityBaseline: _branchIdentityBaseline,
     workReads: _workReads,
     unitSeedReceipt: _unitSeedReceipt,
     contextCheckpointReceipt: _contextCheckpointReceipt,

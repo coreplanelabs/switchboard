@@ -4706,7 +4706,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     return this.ctx.blockConcurrencyWhile(async () => {
       await this.recoverPendingCheckpoint(record.id);
       const live = this.liveRow(record.id);
-      for (const field of ["workReads", "unitSeedReceipt"] as const) {
+      for (const field of ["workReads", "unitSeedReceipt", "branchIdentityBaseline"] as const) {
         const canonical = live?.state[field];
         if (canonical === undefined) continue;
         if (record[field] !== undefined && JSON.stringify(record[field]) !== JSON.stringify(canonical))
@@ -5440,6 +5440,50 @@ export class RunHistoryDO extends DurableObject<Env> {
     );
   }
 
+  /** Restore only the original baseline; other segment state keeps its existing lifetime. */
+  private preserveArchivedBaseline(runId: string, incoming: RunState, owner: RunWorkOwner): RunState | undefined {
+    const archived = this.sql
+      .exec<{ summary_json: string; work_evidence_json: string | null }>(
+        `SELECT summary_json, work_evidence_json FROM runs WHERE run_id = ?`,
+        runId,
+      )
+      .toArray()[0];
+    if (!archived) return incoming;
+    const record: unknown = JSON.parse(archived.summary_json);
+    if (!isRunWorkOwner(record) || record.id !== runId) return undefined;
+    const evidence =
+      archived.work_evidence_json === null
+        ? undefined
+        : parseWorkEvidence(JSON.parse(archived.work_evidence_json), record);
+    if (archived.work_evidence_json !== null && !evidence) return undefined;
+    const summary = record as RunWorkOwner & { branchIdentityBaseline?: unknown };
+    const baseline =
+      evidence && Object.hasOwn(evidence, "branchIdentityBaseline")
+        ? evidence.branchIdentityBaseline
+        : summary.branchIdentityBaseline;
+    if (baseline === undefined) return incoming;
+    if (
+      summary.branchIdentityBaseline !== undefined &&
+      JSON.stringify(summary.branchIdentityBaseline) !== JSON.stringify(baseline)
+    )
+      return undefined;
+    const retained = preserveCheckpointState(
+      { branchIdentityBaseline: baseline },
+      {
+        branchIdentityBaseline: incoming.branchIdentityBaseline,
+      },
+    );
+    if (!retained || !workEvidenceBelongsToRun(retained, owner)) return undefined;
+    const binding = (retained.branchIdentityBaseline as { binding: { branch: string; base: string } }).binding;
+    const target = owner as RunWorkOwner & { ref?: unknown; baseRef?: unknown };
+    if (
+      (target.ref !== undefined && target.ref !== binding.branch) ||
+      (target.baseRef !== undefined && target.baseRef !== binding.base)
+    )
+      return undefined;
+    return { ...incoming, ...retained };
+  }
+
   async claim(req: ClaimRequest, now: number): Promise<ClaimResult> {
     return this.withRangePins([{ id: req.runId, handoff: req.meta.childHandoff }], async () => {
       let out: ClaimResult = { ok: true };
@@ -5452,10 +5496,13 @@ export class RunHistoryDO extends DurableObject<Env> {
           this.liveRow(req.runId)?.meta ?? (retained ? (JSON.parse(retained.summary_json) as unknown) : undefined);
         if (!validMaintenanceTransport(req.meta) || (original && !sameMaintenanceTransport(original, req.meta)))
           throw new Error("maintenance transport identity conflicts with retained state");
-        if (!preserveCheckpointState(existing?.state ?? {}, req.state ?? {}))
-          throw new Error("checkpoint state is immutable");
-        if (!workEvidenceBelongsToRun(req.state ?? {}, { id: req.runId, ...req.meta }))
+        const restored = this.preserveArchivedBaseline(req.runId, req.state ?? {}, { id: req.runId, ...req.meta });
+        const state =
+          restored && preserveCheckpointState(existing?.runId === req.runId ? existing.state : {}, restored);
+        if (!state) throw new Error("checkpoint state is immutable");
+        if (!workEvidenceBelongsToRun(state, { id: req.runId, ...req.meta }))
           throw new Error("work evidence does not match its canonical run");
+        req = { ...req, state };
         out = decideClaim(
           existing
             ? {
@@ -5469,6 +5516,18 @@ export class RunHistoryDO extends DurableObject<Env> {
           req,
         );
         if (!out.ok) return;
+        if (
+          existing &&
+          state.branchIdentityBaseline !== undefined &&
+          existing.state.branchIdentityBaseline === undefined
+        ) {
+          existing.state = { ...existing.state, branchIdentityBaseline: structuredClone(state.branchIdentityBaseline) };
+          this.sql.exec(
+            `UPDATE live_runs SET state_json = ? WHERE run_id = ?`,
+            JSON.stringify(existing.state),
+            req.runId,
+          );
+        }
         // The claim promotes the thread's reservation (record 0064, "The queue"):
         // the live row holds the thread from here, so the reservation row retires
         // in the same transaction that writes the claim.
@@ -5490,7 +5549,7 @@ export class RunHistoryDO extends DurableObject<Env> {
               req.card ? JSON.stringify(req.card) : null,
               req.system,
               JSON.stringify(req.tools),
-              JSON.stringify({ ...existing!.state, ...(req.state ?? {}) }),
+              JSON.stringify({ ...existing!.state, ...state }),
               req.runId,
             );
             this.registerSession(req);
@@ -5512,7 +5571,7 @@ export class RunHistoryDO extends DurableObject<Env> {
           req.card ? JSON.stringify(req.card) : null,
           req.system,
           JSON.stringify(req.tools),
-          JSON.stringify(req.state ?? {}),
+          JSON.stringify(state),
         );
       });
       if (out.ok) {
@@ -5733,6 +5792,9 @@ export class RunHistoryDO extends DurableObject<Env> {
       const fence = checkFence(row, gen);
       if (!fence.ok) return fence;
       if (!row) return { ok: false, reason: "unknown-run" };
+      const restored = this.preserveArchivedBaseline(runId, state, { id: runId, ...row.meta });
+      if (!restored) return { ok: false, reason: "fenced" };
+      state = restored;
       const mintSeed = state.unitSeedReceipt !== undefined && row.state.unitSeedReceipt === undefined;
       const preserved = preserveCheckpointState(row.state, state, mintSeed);
       if (!preserved || !workEvidenceBelongsToRun(preserved, { id: row.runId, ...row.meta }))
@@ -6533,21 +6595,29 @@ export class RunHistoryDO extends DurableObject<Env> {
       if (priorRecord?.work_evidence_json != null && priorEvidence === undefined)
         throw new Error("work evidence is unreadable");
       const liveWork = this.liveRow(stored.id)?.state;
-      const canonicalWork = liveWork ?? {
-        ...priorEvidence,
-        ...(priorRecord &&
-        (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).branchPublication !== undefined
-          ? { branchPublication: (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).branchPublication }
-          : {}),
-        ...(priorRecord &&
-        (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).reviewPublication !== undefined
-          ? { reviewPublication: (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).reviewPublication }
-          : {}),
-        ...(priorRecord &&
-        (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).branchPushReceipts !== undefined
-          ? { branchPushReceipts: (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).branchPushReceipts }
-          : {}),
-      };
+      const canonicalWork = this.preserveArchivedBaseline(
+        stored.id,
+        liveWork ?? {
+          ...priorEvidence,
+          ...(priorRecord &&
+          (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).branchPublication !== undefined
+            ? { branchPublication: (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).branchPublication }
+            : {}),
+          ...(priorRecord &&
+          (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).reviewPublication !== undefined
+            ? { reviewPublication: (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).reviewPublication }
+            : {}),
+          ...(priorRecord &&
+          (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).branchPushReceipts !== undefined
+            ? {
+                branchPushReceipts: (JSON.parse(priorRecord.summary_json) as Record<string, unknown>)
+                  .branchPushReceipts,
+              }
+            : {}),
+        },
+        stored,
+      );
+      if (!canonicalWork) throw new Error("original branch identity baseline is immutable");
       // Terminal outcome and cost do not depend on a process-local publication
       // acknowledgment. Only saved producer state can authorize branch release.
       const canonicalDoor = liveWork
@@ -6580,11 +6650,16 @@ export class RunHistoryDO extends DurableObject<Env> {
           ? { reviewPublication: canonicalWork.reviewPublication }
           : {};
       if (
+        stored.branchIdentityBaseline !== undefined &&
+        JSON.stringify(stored.branchIdentityBaseline) !== JSON.stringify(canonicalWork.branchIdentityBaseline)
+      )
+        throw new Error("branch identity baseline is not canonical");
+      if (
         stored.unitSeedReceipt !== undefined &&
         JSON.stringify(stored.unitSeedReceipt) !== JSON.stringify(canonicalWork.unitSeedReceipt)
       )
         throw new Error("unit seed receipt is not canonical");
-      for (const field of ["workReads", "unitSeedReceipt"] as const) {
+      for (const field of ["workReads", "unitSeedReceipt", "branchIdentityBaseline"] as const) {
         if (stored[field] === undefined && canonicalWork[field] !== undefined)
           Object.assign(stored, { [field]: structuredClone(canonicalWork[field]) });
       }
@@ -6592,13 +6667,22 @@ export class RunHistoryDO extends DurableObject<Env> {
         !preserveCheckpointState(canonicalWork, {
           workReads: stored.workReads,
           unitSeedReceipt: stored.unitSeedReceipt,
+          branchIdentityBaseline: stored.branchIdentityBaseline,
         })
       )
         throw new Error("work evidence is not canonical");
       if (!workEvidenceBelongsToRun(stored, stored)) throw new Error("work evidence does not match its canonical run");
       this.pinContext(stored.id, stored.childHandoff, stored.contextDependencies);
-      const { events, sourceReads, workReads, unitSeedReceipt, contextCheckpointReceipt, directAudience, ...summary } =
-        stored;
+      const {
+        events,
+        sourceReads,
+        workReads,
+        unitSeedReceipt,
+        branchIdentityBaseline,
+        contextCheckpointReceipt,
+        directAudience,
+        ...summary
+      } = stored;
       const unreadableDoor =
         doorPublicationPending === undefined && canonicalDoor !== undefined && canonicalDoor !== null
           ? { doorPublicationPending: canonicalDoor }
@@ -6687,6 +6771,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         directAudience === undefined ? null : JSON.stringify(directAudience),
         workReads === undefined &&
           unitSeedReceipt === undefined &&
+          branchIdentityBaseline === undefined &&
           !(branchPublication === undefined && canonicalWork.branchPublication !== undefined) &&
           Object.keys(unreadablePush).length === 0 &&
           Object.keys(unreadableReview).length === 0 &&
@@ -6699,6 +6784,7 @@ export class RunHistoryDO extends DurableObject<Env> {
               ...unreadablePush,
               workReads,
               unitSeedReceipt,
+              branchIdentityBaseline,
               ...(branchPublication === undefined && canonicalWork.branchPublication !== undefined
                 ? { branchPublication: canonicalWork.branchPublication }
                 : {}),
@@ -6967,6 +7053,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     let branchPushReceipts: unknown;
     let workReads: unknown;
     let unitSeedReceipt: unknown;
+    let branchIdentityBaseline: unknown;
     let contextCheckpointReceipt: unknown;
     let directAudience: unknown;
     try {
@@ -6985,6 +7072,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         if (evidence === undefined) return null;
         workReads = (evidence as { workReads?: unknown }).workReads;
         unitSeedReceipt = (evidence as { unitSeedReceipt?: unknown }).unitSeedReceipt;
+        branchIdentityBaseline = evidence.branchIdentityBaseline;
       }
 
       contextCheckpointReceipt =
@@ -7002,6 +7090,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       ...(sourceReads === undefined ? {} : { sourceReads }),
       ...(workReads === undefined ? {} : { workReads }),
       ...(unitSeedReceipt === undefined ? {} : { unitSeedReceipt }),
+      ...(branchIdentityBaseline === undefined ? {} : { branchIdentityBaseline }),
       ...(contextCheckpointReceipt === undefined ? {} : { contextCheckpointReceipt }),
       ...(directAudience === undefined ? {} : { directAudience }),
     };
@@ -7433,6 +7522,7 @@ function parseWorkEvidence(value: unknown, owner: RunWorkOwner): Record<string, 
         field !== "version" &&
         field !== "workReads" &&
         field !== "unitSeedReceipt" &&
+        field !== "branchIdentityBaseline" &&
         field !== "branchPublication" &&
         field !== "reviewPublication" &&
         field !== "branchPushReceipts" &&

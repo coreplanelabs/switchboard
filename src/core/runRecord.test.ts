@@ -123,6 +123,34 @@ it("retained source archives remain bound to the original run owner", () => {
   expect(isRunListItem({ ...item("run-1", 2_000), sourceReads: archive })).toBe(false);
 });
 
+it("binds private branch identity baselines to the exact run, requester, thread, repository and coordinator step", () => {
+  const base = { ...record(), repo: "o/r", parentInstanceId: "pipeline", idempotencyKey: "pipeline:U11/0/coding" };
+  const baseline = {
+    version: 1,
+    binding: {
+      runId: base.id,
+      requester: base.userId,
+      threadKey: base.threadKey,
+      repo: "o/r",
+      branch: "plan/p/u1",
+      base: "main",
+      head: "a".repeat(40),
+      instanceId: "pipeline",
+      step: "pipeline:U11/0/coding",
+    },
+    state: { kind: "known", commits: [] },
+  };
+  expect(isRunRecord({ ...base, branchIdentityBaseline: baseline })).toBe(true);
+  for (const field of ["runId", "requester", "threadKey", "repo", "instanceId", "step"])
+    expect(
+      isRunRecord({
+        ...base,
+        branchIdentityBaseline: { ...baseline, binding: { ...baseline.binding, [field]: "foreign" } },
+      }),
+    ).toBe(false);
+  expect(isRunListItem({ ...item("run-1", 2000), branchIdentityBaseline: baseline })).toBe(false);
+});
+
 it("keeps work-read receipts private and bound to their producing conversation", () => {
   const base = record();
   const receipt = {

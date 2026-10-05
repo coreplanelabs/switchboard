@@ -15779,6 +15779,97 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(warnings).toEqual([]);
   });
 
+  it("a boot restart of an attaching same-ID successor restores the archived baseline and original PR base before model admission", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const target = { repo: "acme/api", ref: "unit/repair", baseRef: "release" };
+    const request = msg("agent:coding in acme/api on branch unit/repair: finish the original task", "slack:UADMIN");
+    const claim: ClaimRequest = {
+      runId: "run-old",
+      threadKey: request.threadKey,
+      gen: "gen-OLD",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      meta: {
+        channelId: request.channelId,
+        userId: request.userId,
+        threadKey: request.threadKey,
+        agent: "coding",
+        model: "anthropic/coding-model",
+        ...target,
+        request: durableInboxMessage(request, request.text, 5_000),
+      },
+      system: "coding",
+      tools: [],
+    };
+    const baseline = {
+      version: 1 as const,
+      binding: {
+        runId: claim.runId,
+        requester: request.userId,
+        threadKey: request.threadKey,
+        repo: target.repo,
+        branch: target.ref,
+        base: target.baseRef,
+        head: "a".repeat(40),
+      },
+      state: { kind: "known" as const, commits: [] },
+    };
+    await ledger.claim({ ...claim, state: { branchIdentityBaseline: baseline } });
+    await ledger.finish(claim.runId, claim.gen, {
+      id: claim.runId,
+      agent: "coding",
+      channelId: request.channelId,
+      userId: request.userId,
+      threadKey: request.threadKey,
+      repo: target.repo,
+      channelVisibility: "unknown",
+      status: "interrupted",
+      restarting: true,
+      startedAt: claim.startedAt,
+      finishedAt: 6_000,
+      events: [],
+      eventCount: 0,
+      storedEventCount: 0,
+      truncated: false,
+      diagnosis: analyzeRunFriction([]),
+    });
+    await ledger.claim({ ...claim, gen: "gen-SEGMENT", phase: "attaching", system: "" });
+    ledger.live.get(claim.runId)!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
+    expect(reclaimed.reclaimedFrom).toBe("attaching");
+    expect(reclaimed.row.state.branchIdentityBaseline).toEqual(baseline);
+    const provider = capturingProvider("original task continued");
+    const { deps, writer } = wired(provider, { ledger });
+    deps.resolveRepoContext = () => ({ repo: target.repo, ref: target.ref, headSha: "b".repeat(40) });
+    const readStartState = vi.fn(async () => ({ kind: "known" as const, commits: [] }));
+    deps.identityRewrite = {
+      readStartState,
+      rewrite: async ({ expectedTip }) => ({ kind: "clean", tip: expectedTip }),
+      pullRequestHead: async () => undefined,
+      isAssignable: async () => false,
+      addAssignee: async () => {},
+      requestedLogin: async () => undefined,
+    };
+    vi.mocked(makeExecutor).mockResolvedValueOnce({
+      executor: {
+        exec: async () => "",
+        readFile: async () => "",
+        writeFile: async () => "",
+        release: async () => ({ released: true }),
+      },
+      resident: true,
+      binding: { ref: target.ref, sha: "b".repeat(40), workspace: "/workspace/original" },
+    });
+    const outcome = await dispatch(deps, request, ioWithCard().io, {
+      restart: { row: reclaimed.row, events: [], inbox: [] },
+    });
+    await writer.settled();
+    expect(readStartState).not.toHaveBeenCalled();
+    expect(outcome.status).toBe("completed");
+    expect(provider.requests).toHaveLength(1);
+    expect(ledger.finished.get(claim.runId)!.branchIdentityBaseline).toEqual(baseline);
+  });
+
   it("a reclaimed coding request keeps its accepted repository and branch instead of a foreign PR citation", async () => {
     const ledger = new InMemoryRunLedger(() => 10_000);
     const target = { repo: "acme/api", ref: "unit/repair" };
@@ -17413,6 +17504,98 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(registry.listActive()).toEqual([]);
     expect(ledger.live.has("run-old")).toBe(false);
     expect(ledger.finished.get("run-old")?.status).toBe("stopped_hard");
+  });
+
+  it("workspace-loss request restart retains canonical owned-branch refusal before advanced-head capture", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const branch = "unit/original";
+    const head = "b".repeat(40);
+    const { calls } = residentFetchStub({
+      attach: (body) =>
+        body.reuse === true
+          ? new Response(JSON.stringify({ error: "reuse-refused: no worktree", needs: "recreate" }), { status: 409 })
+          : new Response(
+              JSON.stringify({ workspace: "/workspace/threads/t/main", ref: branch, sha: head, user: "worker3" }),
+              { status: 200 },
+            ),
+    });
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const request = msg("agent:coding finish the original task", "slack:UADMIN");
+    const target = { repo: "acme/api", ref: branch, baseRef: "release" };
+    await ledger.claim({
+      runId: "run-old",
+      threadKey: request.threadKey,
+      gen: "gen-OLD",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      meta: {
+        channelId: request.channelId,
+        userId: request.userId,
+        threadKey: request.threadKey,
+        agent: "coding",
+        model: "anthropic/coding-model",
+        ...target,
+        operationTarget: target,
+        request: durableInboxMessage(request, request.text, 4_000),
+      },
+      system: "sys",
+      tools: [],
+      state: {
+        binding: { backend: "resident", workspace: "/workspace/threads/t/main", user: "worker2" },
+        preserveOnReattachRefusal: false,
+        branchPushReceipts: [{ ref: branch, sha: head, by: "push" }],
+        pushedBranch: "auxiliary",
+      },
+    });
+    const transcript: ChatMessage[] = [{ role: "user", content: [{ type: "text", text: request.text }] }];
+    await ledger.seed("run-old", "gen-OLD", [{ idx: 0, message: transcript[0] }]);
+    await ledger.step(
+      "run-old",
+      "gen-OLD",
+      { step: 0, seq: 0, turnIndex: 1, inFlight: [], inboxConsumedSeq: 0, remainingMs: 300_000, turn: 0, iteration: 0 },
+      [],
+    );
+    ledger.live.get("run-old")!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
+    const provider = capturingProvider("continued under original ownership");
+    const { deps, writer } = wired(provider, { ledger, yaml: RESIDENT_YAML_FIXTURE });
+    deps.clock = () => 10_000;
+    deps.resolveRepoContext = () => target;
+    const readStartState = vi.fn(async () => ({ kind: "known" as const, commits: [] }));
+    deps.identityRewrite = {
+      readStartState,
+      rewrite: async ({ expectedTip }) => ({ kind: "clean", tip: expectedTip }),
+      pullRequestHead: async () => undefined,
+      isAssignable: async () => false,
+      addAssignee: async () => {},
+      requestedLogin: async () => undefined,
+    };
+    const plan = planResume({
+      transcript: { complete: true, compactions: [], turns: 1, messages: transcript },
+      lastStep: reclaimed.lastStep!,
+      tools: knownToolsFor(getAgent("coding")),
+    });
+    if (plan.kind !== "resume") throw new Error(plan.kind);
+    const outcome = await dispatch(deps, resumeMessage(reclaimed.row, request.text), ioWithCard().io, {
+      resume: {
+        row: reclaimed.row,
+        lastStep: reclaimed.lastStep!,
+        plan,
+        events: [],
+        lastSeq: 0,
+        repoCtx: target,
+        inbox: [],
+      },
+    });
+    await writer.settled();
+    expect(outcome.refusal).toBe("workspace_lost");
+    expect(calls.filter((call) => call.path === "/attach")).toHaveLength(2);
+    expect(provider.requests).toHaveLength(1);
+    expect(ledger.finished.get("run-old")?.status).toBe("completed");
+    expect(ledger.finished.get("run-old")?.branchIdentityBaseline).toBeUndefined();
+    expect(readStartState).not.toHaveBeenCalled();
   });
 
   it("a resume whose recorded resident refuses to reuse the worktree provisions no sandbox: the resumed row closes interrupted with the note that says why, and the request runs again under the SAME run id once the thread is free (item 54) — one row on the index, the record ending completed with the replacement said as one resumed note", async () => {

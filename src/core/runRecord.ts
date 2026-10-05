@@ -1,4 +1,5 @@
 import { RUN_ID_PATTERN } from "./runIdentity.js";
+import { isBranchIdentityBaseline, type BranchIdentityBaseline } from "./branchIdentityBaseline.js";
 import { validMaintenanceTransport, maintenanceEventsMatch } from "./coordinator/maintenanceIdentity.js";
 import {
   branchPublicationOf,
@@ -303,6 +304,8 @@ export interface RunRecord {
   sourceReads?: SourceReadState;
   /** Exact controller status/progress observations; internal full records only. */
   workReads?: readonly MainWorkReadReceipt[];
+  /** First attachment identity proof; internal full records only. */
+  branchIdentityBaseline?: BranchIdentityBaseline;
   /** Exact persisted unit input acknowledgment; internal full records only. */
   unitSeedReceipt?: UnitSeedReceipt;
   /** Flat dependency closure retained independently of source bodies. */
@@ -817,6 +820,7 @@ export type RunListItem = Omit<
   RunRecord,
   | "events"
   | "sourceReads"
+  | "branchIdentityBaseline"
   | "workReads"
   | "unitSeedReceipt"
   | "contextCheckpointReceipt"
@@ -1247,7 +1251,10 @@ export function isRunRecord(v: unknown): v is RunRecord {
   if (r.handoff !== undefined && !isHandoffShape(r.handoff)) return false;
   if (r.childHandoff !== undefined && !isChildHandoff(r.childHandoff)) return false;
   if (
-    !workEvidenceBelongsToRun({ workReads: r.workReads, unitSeedReceipt: r.unitSeedReceipt }, r as unknown as RunRecord)
+    !workEvidenceBelongsToRun(
+      { workReads: r.workReads, unitSeedReceipt: r.unitSeedReceipt, branchIdentityBaseline: r.branchIdentityBaseline },
+      r as unknown as RunRecord,
+    )
   )
     return false;
   if (r.sourceReads !== undefined) {
@@ -1445,6 +1452,7 @@ export function isRunListItem(v: unknown): v is RunListItem {
     r.reviewPublication !== undefined ||
     r.branchPushReceipts !== undefined ||
     r.sourceReads !== undefined ||
+    r.branchIdentityBaseline !== undefined ||
     r.workReads !== undefined ||
     r.unitSeedReceipt !== undefined ||
     r.contextCheckpointReceipt !== undefined ||
@@ -1568,10 +1576,21 @@ export function isRunWorkOwner(value: unknown): value is RunWorkOwner {
 }
 
 export function workEvidenceBelongsToRun(
-  evidence: { workReads?: unknown; unitSeedReceipt?: unknown },
+  evidence: { workReads?: unknown; unitSeedReceipt?: unknown; branchIdentityBaseline?: unknown },
   owner: RunWorkOwner,
 ): boolean {
   if (!isRunWorkEvidence(evidence)) return false;
+  const baseline = evidence.branchIdentityBaseline as BranchIdentityBaseline | undefined;
+  if (
+    baseline &&
+    (baseline.binding.runId !== owner.id ||
+      baseline.binding.requester !== owner.userId ||
+      baseline.binding.threadKey !== owner.threadKey ||
+      baseline.binding.repo !== owner.repo ||
+      baseline.binding.instanceId !== owner.parentInstanceId ||
+      (baseline.binding.instanceId !== undefined && baseline.binding.step !== owner.idempotencyKey))
+  )
+    return false;
   const reads = evidence.workReads as readonly MainWorkReadReceipt[] | undefined;
   if (
     reads?.some(
@@ -1603,7 +1622,11 @@ export function workEvidenceBelongsToRun(
 
 /** The controller checks this before exposing a verified read. Private proof
  * bytes share the existing archive budget and are never silently truncated. */
-export function isRunWorkEvidence(value: { workReads?: unknown; unitSeedReceipt?: unknown }): boolean {
+export function isRunWorkEvidence(value: {
+  workReads?: unknown;
+  unitSeedReceipt?: unknown;
+  branchIdentityBaseline?: unknown;
+}): boolean {
   if (
     value.workReads !== undefined &&
     (!Array.isArray(value.workReads) ||
@@ -1612,9 +1635,16 @@ export function isRunWorkEvidence(value: { workReads?: unknown; unitSeedReceipt?
   )
     return false;
   if (value.unitSeedReceipt !== undefined && !isUnitSeedReceipt(value.unitSeedReceipt)) return false;
+  if (value.branchIdentityBaseline !== undefined && !isBranchIdentityBaseline(value.branchIdentityBaseline))
+    return false;
   return (
-    utf8ByteLength(JSON.stringify({ workReads: value.workReads, unitSeedReceipt: value.unitSeedReceipt })) <=
-    MAX_RECORD_BYTES
+    utf8ByteLength(
+      JSON.stringify({
+        workReads: value.workReads,
+        unitSeedReceipt: value.unitSeedReceipt,
+        branchIdentityBaseline: value.branchIdentityBaseline,
+      }),
+    ) <= MAX_RECORD_BYTES
   );
 }
 /** The JSON size of one event, after which its `text`/`summary` is truncated. */

@@ -812,6 +812,8 @@ export type RunEvent =
       card?: ModelCard;
       repo?: string;
       ref?: string;
+      /** The resolved PR target, distinct from the attached head branch. */
+      baseRef?: string;
       pr?: number;
       headSha?: string;
       /** The plan runner instance whose story this record is (agent-ship item

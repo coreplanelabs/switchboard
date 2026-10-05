@@ -254,15 +254,55 @@ export class InMemoryRunLedger implements RunLedger {
     }
   }
 
+  /** A request restart keeps the first receipt even after its predecessor closed. */
+  private preserveArchivedBaseline(
+    runId: string,
+    incoming: RunState,
+    owner: Parameters<typeof workEvidenceBelongsToRun>[1],
+  ): RunState | undefined {
+    const record = this.finished.get(runId);
+    const evidence = this.finishedWorkEvidence.get(runId);
+    const baseline =
+      evidence && Object.hasOwn(evidence, "branchIdentityBaseline")
+        ? evidence.branchIdentityBaseline
+        : record?.branchIdentityBaseline;
+    if (baseline === undefined) return incoming;
+    if (
+      !record ||
+      record.id !== runId ||
+      !workEvidenceBelongsToRun({ branchIdentityBaseline: baseline }, record) ||
+      (record.branchIdentityBaseline !== undefined &&
+        JSON.stringify(record.branchIdentityBaseline) !== JSON.stringify(baseline))
+    )
+      return undefined;
+    const retained = preserveCheckpointState(
+      { branchIdentityBaseline: baseline },
+      {
+        branchIdentityBaseline: incoming.branchIdentityBaseline,
+      },
+    );
+    if (!retained || !workEvidenceBelongsToRun(retained, owner)) return undefined;
+    const binding = (retained.branchIdentityBaseline as { binding: { branch: string; base: string } }).binding;
+    const target = owner as typeof owner & { ref?: unknown; baseRef?: unknown };
+    if (
+      (target.ref !== undefined && target.ref !== binding.branch) ||
+      (target.baseRef !== undefined && target.baseRef !== binding.base)
+    )
+      return undefined;
+    return { ...incoming, ...retained };
+  }
+
   async claim(req: ClaimRequest): Promise<ClaimResult> {
     const existing = this.byThread(req.threadKey);
     const original = this.live.get(req.runId)?.meta ?? this.finished.get(req.runId);
     if (!validMaintenanceTransport(req.meta) || (original && !sameMaintenanceTransport(original, req.meta)))
       throw new Error("maintenance transport identity conflicts with retained state");
-    if (!preserveCheckpointState(existing?.state ?? {}, req.state ?? {}))
-      throw new Error("checkpoint state is immutable");
-    if (!workEvidenceBelongsToRun(req.state ?? {}, { id: req.runId, ...req.meta }))
+    const restored = this.preserveArchivedBaseline(req.runId, req.state ?? {}, { id: req.runId, ...req.meta });
+    const state = restored && preserveCheckpointState(existing?.runId === req.runId ? existing.state : {}, restored);
+    if (!state) throw new Error("checkpoint state is immutable");
+    if (!workEvidenceBelongsToRun(state, { id: req.runId, ...req.meta }))
       throw new Error("work evidence does not match its canonical run");
+    req = { ...req, state };
     const decision = decideClaim(
       existing
         ? {
@@ -276,6 +316,8 @@ export class InMemoryRunLedger implements RunLedger {
       req,
     );
     if (!decision.ok) return decision;
+    if (existing && state.branchIdentityBaseline !== undefined && existing.state.branchIdentityBaseline === undefined)
+      existing.state = { ...existing.state, branchIdentityBaseline: structuredClone(state.branchIdentityBaseline) };
     switch (decideClaimWrite(existing, req)) {
       case "keep":
         return decision; // idempotent re-claim
@@ -291,7 +333,7 @@ export class InMemoryRunLedger implements RunLedger {
           card: req.card ?? null,
           system: req.system,
           tools: req.tools,
-          state: { ...existing!.state, ...(req.state ?? {}) },
+          state: { ...existing!.state, ...state },
         });
         return decision;
       case "insert":
@@ -310,7 +352,7 @@ export class InMemoryRunLedger implements RunLedger {
       card: req.card ?? null,
       system: req.system,
       tools: req.tools,
-      state: req.state ?? {},
+      state,
     });
     // A new live segment starts without a live-event table. Clear any prior
     // generation's entries, then let the first append create the table so its
@@ -736,6 +778,9 @@ export class InMemoryRunLedger implements RunLedger {
     const row = this.live.get(runId);
     const fence = checkFence(row, gen);
     if (!fence.ok || !row) return fence;
+    const restored = this.preserveArchivedBaseline(runId, state, { id: runId, ...row.meta });
+    if (!restored) return { ok: false, reason: "fenced" };
+    state = restored;
     const mintSeed = state.unitSeedReceipt !== undefined && row.state.unitSeedReceipt === undefined;
     const preserved = preserveCheckpointState(row.state, state, mintSeed);
     if (!preserved) return { ok: false, reason: "fenced" };
@@ -842,7 +887,8 @@ export class InMemoryRunLedger implements RunLedger {
         record.status !== "stopped_hard")
     )
       return { ok: false, reason: "fenced" };
-    const canonicalWork = this.live.get(runId)?.state ?? this.finished.get(runId) ?? {};
+    const canonicalWork = this.preserveArchivedBaseline(runId, row.state, record);
+    if (!canonicalWork) return { ok: false, reason: "fenced" };
     const {
       branchPublication: _speculativePublication,
       doorPublicationPending: _speculativeDoor,
@@ -864,11 +910,16 @@ export class InMemoryRunLedger implements RunLedger {
       ...(branchPushReceipts === undefined ? {} : { branchPushReceipts }),
     };
     if (
+      record.branchIdentityBaseline !== undefined &&
+      JSON.stringify(record.branchIdentityBaseline) !== JSON.stringify(canonicalWork.branchIdentityBaseline)
+    )
+      return { ok: false, reason: "fenced" };
+    if (
       record.unitSeedReceipt !== undefined &&
       JSON.stringify(record.unitSeedReceipt) !== JSON.stringify(canonicalWork.unitSeedReceipt)
     )
       return { ok: false, reason: "fenced" };
-    for (const field of ["workReads", "unitSeedReceipt"] as const) {
+    for (const field of ["workReads", "unitSeedReceipt", "branchIdentityBaseline"] as const) {
       const canonical = canonicalWork[field];
       if (canonical === undefined) continue;
       if (record[field] !== undefined && JSON.stringify(record[field]) !== JSON.stringify(canonical))

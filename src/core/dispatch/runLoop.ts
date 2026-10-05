@@ -87,6 +87,8 @@ import {
 } from "../../execution/factory.js";
 import type { ReadyEnvironmentRequirement } from "../../execution/seedPlan.js";
 import type { BranchStartState } from "../../execution/identityRewrite.js";
+import { branchIdentityBaselineFor, type BranchIdentityBaseline } from "../branchIdentityBaseline.js";
+import { branchIdentityCaptureBlocked } from "../branchIdentityHistory.js";
 import { isContainerGone } from "../harness/container.js";
 import {
   ModelPolicyRefusedError,
@@ -257,7 +259,13 @@ export interface RunInterrupted {
    *  the coordinator tag the run carried, so a coordinator's child restarts as
    *  the same instance's child: its unit branch its own push target, the
    *  plan's base the branch its pull request targets (run-history item 48a). */
-  restart: { request: IncomingMessage; restartOf: string; coordinator?: CoordinatorTag };
+  restart: {
+    request: IncomingMessage;
+    restartOf: string;
+    coordinator?: CoordinatorTag;
+    branchIdentityBaseline?: unknown;
+    identityUncertain?: boolean;
+  };
 }
 
 /** The model's container was replaced and the recorded coding checkout could
@@ -294,6 +302,11 @@ export interface RunLoopContext {
   readyRequirementOverride?: ReadyEnvironmentRequirement;
   resume: ResumeContext | undefined;
   repoCtx: RepoContext;
+  /** Original acknowledged evidence carried through a same-ID request restart. */
+  restartBranchIdentityBaseline?: unknown;
+  /** Refusal-only evidence from the original segment; never write authority. */
+  restartPushedBranch?: unknown;
+  restartIdentityUncertain?: boolean;
   /** A configured repository, independent of citations in this request. */
   configuredRepo?: string;
   githubDoor?: { baseUrl: string; bearer: string; ghConfigDir?: string };
@@ -481,47 +494,72 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     if (existingPrPublicationFence !== undefined) existingPrPublicationFence.authority = existingPrPublication;
     if (ctx.githubDoor) deps.githubBindings?.setPublication(run.id, existingPrPublication);
   };
-  // The start state of the run's branch (record 0062; identityRewrite.ts):
-  // fired HERE, at the attach, so the identity rewrite in the post-step
-  // judges only the run's own commits. The read runs concurrently with the
-  // model loop and is awaited only when the PR target is built — one HTTP
-  // compare ordinarily settles long before the model's first push, but a push
-  // that landed faster would fold into the start state and pass unjudged; the
-  // guarantee is the head start, not a barrier. A RESUMED run whose ledger
-  // row records a pre-restart push of this very branch is that fold made
-  // systematic, not a race: the re-read would list the run's own pre-restart
-  // commits as "start state" and pass them unjudged — so no read is fired and
-  // the start state is `unknown`, on which the rewrite fails closed. The
-  // branch the dispatch knows at attach is the binding's ref (a coordinator's
-  // unit branch, a fix round's PR head); a run that later pushes a branch of
-  // its own cut it in this workspace, so that branch's start state is empty —
-  // the post-step tells the two apart by `startBranch`. Fired once, joined at
-  // the PR target below; a failed read records `unknown`, on which the
-  // rewrite fails closed.
+  // Pin the first attachment's identity evidence before writable tools open.
+  // A restart restores that same receipt; reading the advanced branch would
+  // otherwise exempt the run's own earlier commits from the identity audit.
   const identitySeam = deps.identityRewrite;
-  const startStateRead: Promise<{ branch: string; state: BranchStartState } | undefined> | undefined =
+  const startStateRead:
+    | Promise<{ branch: string; state: BranchStartState; receipt?: BranchIdentityBaseline; invalid?: true } | undefined>
+    | undefined =
     identitySeam !== undefined && isCodingPrRun && repoCtx.repo !== undefined
       ? (async () => {
           const repo = repoCtx.repo;
           if (repo === undefined) return undefined;
-          const branch = binding?.ref ?? repoCtx.ref;
+          const seeded = round.selection.seeded;
+          const seedMatches = seeded?.slug.toLowerCase() === repo.toLowerCase();
+          const attachment = binding ?? (seedMatches ? seeded : undefined) ?? round.selection.cold;
+          const branch = attachment?.ref ?? repoCtx.ref;
           if (branch === undefined) return undefined;
-          const preRestartPush = resume?.row.state.pushedBranch;
-          if (typeof preRestartPush === "string" && preRestartPush === branch)
+          if (!binding && seeded && !seedMatches)
+            return { branch, state: { kind: "unknown" as const }, invalid: true as const };
+          const base = repoCtx.baseRef ?? (await coordinatorBase) ?? branch;
+          const identity = {
+            runId: run.id,
+            requester: msg.userId,
+            threadKey: msg.threadKey,
+            repo,
+            branch,
+            base,
+            ...(coordinator ? { instanceId: coordinator.parentInstanceId, step: coordinator.idempotencyKey } : {}),
+          };
+          const saved =
+            resume?.row.state.branchIdentityBaseline !== undefined
+              ? resume.row.state.branchIdentityBaseline
+              : ctx.restartBranchIdentityBaseline;
+          if (saved !== undefined) {
+            const receipt = branchIdentityBaselineFor(saved, identity);
+            return receipt
+              ? { branch, state: receipt.state, receipt }
+              : { branch, state: { kind: "unknown" as const }, invalid: true as const };
+          }
+          const preRestartPush = resume?.row.state.pushedBranch ?? ctx.restartPushedBranch;
+          const recordedPush = resume?.events.some((event) => event.type === "pushed_head" && event.ref === branch);
+          if (
+            ctx.restartIdentityUncertain ||
+            branchIdentityCaptureBlocked(resume?.row.state ?? {}, repo, branch) ||
+            recordedPush ||
+            (typeof preRestartPush === "string" && preRestartPush === branch)
+          )
             return {
               branch,
               state: {
                 kind: "unknown" as const,
-                reason: `the run pushed ${branch} before a restart, so a start state read now would fold the run's own commits in`,
+                reason: `prior writes or uncertain history for ${branch} from before a restart cannot establish the original identity baseline`,
               },
             };
-          const base = repoCtx.baseRef ?? (await coordinatorBase) ?? branch;
+          const head = attachment?.ref === branch ? attachment.sha : undefined;
+          if (typeof head !== "string" || !/^[a-f0-9]{40}$/.test(head))
+            return { branch, state: { kind: "unknown" as const } };
           const state = await identitySeam
-            .readStartState(repo, base, branch)
+            .readStartState(repo, base, head)
             .catch((): BranchStartState => ({ kind: "unknown" }));
-          return { branch, state };
+          const receipt = branchIdentityBaselineFor({ version: 1, binding: { ...identity, head }, state }, identity);
+          return receipt
+            ? { branch, state, receipt }
+            : { branch, state: { kind: "unknown" as const }, invalid: true as const };
         })()
       : undefined;
+  let branchIdentityBaseline: BranchIdentityBaseline | undefined;
   let reviewHead = ctx.reviewHead;
   let lastActivityAt = ctx.loopStartedAt;
   // The card body is the agent's own checklist (via the update_status tool)
@@ -2141,6 +2179,14 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     });
   }
   try {
+    const identityBaseline = await startStateRead;
+    if (identityBaseline?.invalid)
+      throw new Error("The original branch identity baseline is invalid; publication remains held.");
+    if (identityBaseline?.receipt) {
+      if ((await ledgerRun?.commitState({ branchIdentityBaseline: identityBaseline.receipt })) !== "ok")
+        throw new Error("The original branch identity baseline could not be committed; writable tools remain held.");
+      branchIdentityBaseline = identityBaseline.receipt;
+    }
     if (resumedUnsettledCheckpoint)
       throw new Error(
         `The original coding checkpoint needs reconciliation before another writer can run: ${publicationSettlementSummary(publicationSettlement ?? null)}`,
@@ -3794,7 +3840,17 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       reason: interrupted.reason,
       refusal: interrupted.refusal,
       note: interrupted.message,
-      restart: { request: msg, restartOf: run.id, ...(coordinator !== undefined ? { coordinator } : {}) },
+      restart: {
+        request: msg,
+        restartOf: run.id,
+        ...(coordinator !== undefined ? { coordinator } : {}),
+        ...(branchIdentityBaseline !== undefined ? { branchIdentityBaseline } : {}),
+        // No original acknowledged proof is not a fresh first attachment.
+        // The request may restart after later writes or a lost projection.
+        ...(isCodingPrRun || ctx.restartIdentityUncertain
+          ? { identityUncertain: ctx.restartIdentityUncertain || branchIdentityBaseline === undefined }
+          : {}),
+      },
     };
   } finally {
     clearInterval(heartbeat);
@@ -3957,6 +4013,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         ...(branchReceipts.length > 0 && branchPushReceiptsOf(branchReceipts) !== undefined
           ? { branchPushReceipts: branchPushReceiptsOf(branchReceipts) }
           : {}),
+        ...(branchIdentityBaseline !== undefined ? { branchIdentityBaseline } : {}),
         ...(reviewPost !== undefined ? { reviewPost } : {}),
         ...(route !== undefined ? { route } : {}),
         ...(parentRunId !== undefined ? { parentRunId } : {}),

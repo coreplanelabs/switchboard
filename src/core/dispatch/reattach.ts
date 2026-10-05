@@ -8,7 +8,7 @@ import { isMaintenanceActionId, validMaintenanceTransport } from "../coordinator
 // same run id, carrying the run's identity (`CarriedRunIdentity`) — never
 // migrated silently onto another backend.
 import { workspaceBindingOf, type WorkspaceBinding } from "../../execution/factory.js";
-import { operationTargetOf, type OperationTarget } from "../repoContext.js";
+import { operationTargetOf, type OperationTarget, type RepoContext } from "../repoContext.js";
 import {
   isExistingPrPublicationBinding,
   sendChildSignal,
@@ -17,7 +17,8 @@ import {
 } from "../coordinator/contract.js";
 import type { RunEvent } from "../runEvents.js";
 import { messageFromInbox } from "../runLedger/inboxMessage.js";
-import type { LiveRunRow } from "../runLedger/types.js";
+import type { AppendableEvent, LiveRunRow } from "../runLedger/types.js";
+import { branchIdentityCaptureBlocked } from "../branchIdentityHistory.js";
 import type { LedgerRun } from "../runLedger/writeThrough.js";
 import type { RunHandle, RunRegistry } from "../runRegistry.js";
 import { channelOf, startRequestRoot, type RequestTrace, type RequestTraceDeps } from "../requestTrace.js";
@@ -156,6 +157,12 @@ export function lostWorkspaceNote(why: string, restarts: boolean): string {
 export interface CarriedRunIdentity {
   /** Original admitted profile carried by the owner during same-run recovery. */
   profile?: RunProfile;
+  /** Raw retained evidence must reach the next admission, including malformed bytes. */
+  branchIdentityBaseline?: unknown;
+  pushedBranch?: unknown;
+  identityUncertain?: boolean;
+  /** The original resolved target, independent of the baseline's fingerprint evidence. */
+  repoCtx?: Pick<RepoContext, "repo" | "ref" | "baseRef">;
   /** The predecessor's retained events, replayed under their seqs. */
   events: RunEvent[];
   /** The predecessor's capability token: posted links stay valid. */
@@ -164,6 +171,44 @@ export interface CarriedRunIdentity {
   startedAt: number;
   /** The replacement in user words — the one event line the page shows. */
   note: string;
+}
+
+/** Capture the predecessor's raw facts and refusal hints before any restart closes its row. */
+export function restartEvidenceOf(
+  row: LiveRunRow,
+  events: readonly AppendableEvent[],
+): Pick<CarriedRunIdentity, "branchIdentityBaseline" | "pushedBranch" | "identityUncertain" | "repoCtx"> {
+  const repoCtx = { repo: row.meta.repo, ref: row.meta.ref, baseRef: row.meta.baseRef };
+  const owned = events.find((event) => event.type === "pushed_head" && event.ref === repoCtx.ref);
+  const pushedBranch = owned?.type === "pushed_head" ? owned.ref : row.state.pushedBranch;
+  const historyPresent = [
+    "pushedBranch",
+    "branchPushReceipts",
+    "publicationReceipts",
+    "branchPublication",
+    "doorPublicationPending",
+    "publicationSettlement",
+  ].some((key) => row.state[key] !== undefined);
+  const blocked =
+    repoCtx.repo !== undefined && repoCtx.ref !== undefined
+      ? branchIdentityCaptureBlocked(row.state, repoCtx.repo, repoCtx.ref)
+      : historyPresent ||
+        events.some(
+          (event) =>
+            event.type === "pushed_head" ||
+            event.type === "publication_push_authorized" ||
+            event.type === "publication_settlement",
+        );
+  return {
+    branchIdentityBaseline: row.state.branchIdentityBaseline,
+    pushedBranch,
+    repoCtx,
+    identityUncertain:
+      blocked ||
+      events.some((event, index) => event.seq !== index + 1) ||
+      (row.meta.restartOf === row.runId && row.state.branchIdentityBaseline === undefined) ||
+      (pushedBranch !== undefined && typeof pushedBranch !== "string"),
+  };
 }
 
 /** The predecessor's identity read off the registry — taken BEFORE the
@@ -175,11 +220,49 @@ export function carriedRunIdentity(
   registry: Pick<RunRegistry, "snapshotById" | "getById">,
   runId: string,
   note: string,
+  evidence: Pick<CarriedRunIdentity, "branchIdentityBaseline" | "pushedBranch" | "identityUncertain" | "repoCtx"> = {},
 ): CarriedRunIdentity | undefined {
   const snap = registry.snapshotById(runId);
   const summary = registry.getById(runId);
   if (!snap || !summary) return undefined;
-  return { events: snap.events, token: summary.token, startedAt: snap.startedAt, note };
+  const owned = evidence.repoCtx?.ref;
+  const pushedBranch =
+    snap.events
+      .filter(
+        (event): event is Extract<RunEvent, { type: "pushed_head" }> =>
+          event.type === "pushed_head" && event.ref === owned,
+      )
+      .at(-1)?.ref ?? evidence.pushedBranch;
+  return {
+    events: snap.events,
+    token: summary.token,
+    startedAt: snap.startedAt,
+    note,
+    ...structuredClone(evidence),
+    ...(pushedBranch !== undefined ? { pushedBranch } : {}),
+    identityUncertain:
+      snap.truncated ||
+      evidence.identityUncertain === true ||
+      (pushedBranch !== undefined && typeof pushedBranch !== "string"),
+  };
+}
+
+/** A same-ID segment restores the prior target; fresh resolution cannot redirect it. */
+export function carriedRepoContext(current: RepoContext, prior?: CarriedRunIdentity["repoCtx"]): RepoContext {
+  if (!prior) return current;
+  for (const field of ["repo", "ref", "baseRef"] as const) {
+    const original = prior[field];
+    if (original !== undefined && current[field] !== undefined && original !== current[field])
+      throw new RefusalError(
+        refusalOf("setup_failed", "The original run's repository target changed across its restart."),
+      );
+  }
+  return {
+    ...current,
+    ...(prior.repo !== undefined ? { repo: prior.repo } : {}),
+    ...(prior.ref !== undefined ? { ref: prior.ref } : {}),
+    ...(prior.baseRef !== undefined ? { baseRef: prior.baseRef } : {}),
+  };
 }
 
 /** What `abandonLostWorkspace` reads off the dispatch. */

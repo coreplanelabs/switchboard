@@ -188,6 +188,8 @@ import {
   carriedCoordinatorTag,
   carriedOperationTarget,
   carriedRunIdentity,
+  carriedRepoContext,
+  restartEvidenceOf,
   carriedWorkspaceBinding,
   hasPilotWorkspaceBinding,
   prepareRestartTurn,
@@ -885,6 +887,10 @@ export async function dispatch(
          *  record for real instead of leaving it answering still-running. */
         closed?: RunRecord;
         profile?: CarriedRunIdentity["profile"];
+        branchIdentityBaseline?: unknown;
+        pushedBranch?: unknown;
+        identityUncertain?: boolean;
+        repoCtx?: CarriedRunIdentity["repoCtx"];
       }
     | undefined;
   let pendingStop: StopMode | undefined;
@@ -2162,7 +2168,8 @@ export async function dispatch(
     // gate below runs against it exactly as before.
     // `let`: the attach-head check below may adopt the PR's current head when
     // the branch moved between resolution and attach (item 12).
-    let repoCtx: RepoContext = await repoCtxP;
+    const restartEvidence = restart ? restartEvidenceOf(restart.row, restart.events) : opts.restartCarried;
+    let repoCtx: RepoContext = carriedRepoContext(await repoCtxP, restartEvidence?.repoCtx);
 
     if (
       recovery !== undefined &&
@@ -3485,6 +3492,8 @@ export async function dispatch(
       // saying why, and its request runs again as a new run in the thread,
       // provisioned as a fresh run is, after the outer finally frees the thread.
       if (resume) {
+        const evidence = restartEvidenceOf(resume.row, resume.events);
+        const originalRepoCtx = carriedRepoContext(resume.repoCtx, evidence.repoCtx);
         const abandoned = await abandonLostWorkspace({
           msg,
           io,
@@ -3512,6 +3521,9 @@ export async function dispatch(
             profile,
             restartOf: resume.row.runId,
             note: "workspace lost, resumed from the request",
+            ...evidence,
+            identityUncertain: evidence.identityUncertain || resume.lastSeq !== resume.events.length,
+            repoCtx: originalRepoCtx,
             ...(abandoned.closed !== undefined ? { closed: abandoned.closed } : {}),
             ...(coordinator !== undefined ? { coordinator } : {}),
             ...(operationTarget !== undefined ? { operationTarget } : {}),
@@ -3997,6 +4009,8 @@ export async function dispatch(
       ...(seedNotepad !== undefined ? { seedNotepad } : {}),
       resume,
       ledgerRun,
+      restartBranchIdentityBaseline: restartEvidence?.branchIdentityBaseline,
+      restartPushedBranch: restartEvidence?.pushedBranch,
       card,
       route,
       clock,
@@ -4282,6 +4296,9 @@ export async function dispatch(
         : {}),
       resume,
       repoCtx,
+      restartBranchIdentityBaseline: restartEvidence?.branchIdentityBaseline,
+      restartPushedBranch: restartEvidence?.pushedBranch,
+      restartIdentityUncertain: restartEvidence?.identityUncertain,
       ...(deps.config.scopes(msg.channelId, msg.userId).channel.repo !== undefined
         ? { configuredRepo: deps.config.scopes(msg.channelId, msg.userId).channel.repo }
         : {}),
@@ -4383,6 +4400,11 @@ export async function dispatch(
       restartRequest = {
         ...ran.restart,
         profile,
+        repoCtx: { repo: repoCtx.repo, ref: repoCtx.ref, baseRef: repoCtx.baseRef },
+        pushedBranch: registry
+          .snapshotById(run.id)
+          ?.events.filter((event) => event.type === "pushed_head")
+          .at(-1)?.ref,
         ...(operationTarget !== undefined ? { operationTarget } : {}),
         note:
           ran.refusal === "container_replaced" || ran.refusal === "workspace_lost"
@@ -4692,7 +4714,14 @@ export async function dispatch(
     // the ledger row and the run page stay valid across the replacement.
     const restartIdentity =
       restartRequest?.restartOf !== undefined
-        ? carriedRunIdentity(registry, restartRequest.restartOf, restartRequest.note)
+        ? carriedRunIdentity(registry, restartRequest.restartOf, restartRequest.note, {
+            branchIdentityBaseline: Object.hasOwn(restartRequest, "branchIdentityBaseline")
+              ? restartRequest.branchIdentityBaseline
+              : restartRequest.closed?.branchIdentityBaseline,
+            pushedBranch: restartRequest.pushedBranch,
+            identityUncertain: restartRequest.identityUncertain || restartRequest.closed?.truncated,
+            repoCtx: restartRequest.repoCtx,
+          })
         : undefined;
     // A finalized setup run keeps its frame and record under the original id.
     if (registered && !runLoopStarted && !setupFinished) registry.discard(registered.id);
