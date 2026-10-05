@@ -5416,6 +5416,194 @@ describe("durable maintenance admission", () => {
 });
 
 describe("complete canonical pull ownership", () => {
+  it("admits the original pre-PR child and retains its workspace obligation through PR binding", async () => {
+    const key = storeKey(),
+      id = "initial_coding",
+      thread = "slack:C1:initial-coding",
+      head = "b".repeat(40);
+    const instance: CoordinatorInstance = {
+      id: "initial_ship",
+      branch: "fix/initial",
+      kind: "ship",
+      userId: "slack:UALICE",
+      channelId: "slack:C1",
+      threadKey: thread,
+      repo: "acme/api",
+      base: "main",
+      merge: "person",
+      createdAt: 1,
+    };
+    const unit: CoordinatorUnit = {
+      instanceId: instance.id,
+      unit: "ROOT",
+      slug: "root",
+      branch: "fix/initial",
+      dependsOn: [],
+      rounds: [],
+      currentEffect: {
+        version: 1,
+        id: "ROOT/0/coding",
+        ordinal: 2,
+        execution: { workflowId: instance.id },
+        phase: "settled",
+        target: { repo: instance.repo, ref: "fix/initial", base: "main", headSha: "a".repeat(40) },
+        calls: [{ operation: "spawn", state: "accepted", runId: id }],
+      },
+    };
+    const binding: PublicationBinding = {
+      runId: id,
+      instanceId: instance.id,
+      step: `${instance.id}:ROOT/0/coding`,
+      repo: instance.repo,
+      branch: unit.branch,
+      requester: instance.userId,
+      threadKey: thread,
+      generation: "g1",
+    };
+    const publicationSettlement: PublicationSettlement = {
+      version: 1,
+      binding,
+      checkpoint: { kind: "created", head },
+      publication: { kind: "accepted", head },
+      preservation: { kind: "pending" },
+      release: { kind: "pending" },
+    };
+    const publication = { version: 1, repo: instance.repo, branches: [], complete: false };
+    const native = [{ ref: unit.branch, sha: head, by: "push" }];
+    const meta = {
+      agent: "coding",
+      repo: instance.repo,
+      channelId: instance.channelId,
+      userId: instance.userId,
+      threadKey: thread,
+      parentInstanceId: instance.id,
+      coordinatorUnit: unit.unit,
+      coordinatorAttempt: 0,
+      idempotencyKey: binding.step,
+    };
+    expect((await post("/runs/coordinator/put", { storeKey: key, instance })).status).toBe(200);
+    expect(
+      (await post("/runs/coordinator/units/put", { storeKey: key, units: [{ ...unit, currentEffect: undefined }] }))
+        .status,
+    ).toBe(200);
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        `UPDATE coordinator_units SET json = ? WHERE instance_id = ? AND unit = ?`,
+        JSON.stringify(unit),
+        instance.id,
+        unit.unit,
+      );
+    });
+    expect(
+      (
+        await post(
+          "/runs/claim",
+          claimBody(key, id, thread, "g1", {
+            meta,
+            state: {
+              branchPublication: publication,
+              branchPushReceipts: native,
+              publicationSettlement,
+              binding: {
+                backend: "resident",
+                ref: unit.branch,
+                workspace: "/workspace/threads/initial/fix-initial",
+                user: "worker1",
+                container: "container",
+                ownerGen: "g1",
+                ownerFence: 7,
+              },
+            },
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await post("/runs/finish", {
+          storeKey: key,
+          runId: id,
+          gen: "g1",
+          record: { ...record(id, thread), ...meta, publicationSettlement },
+        })
+      ).status,
+    ).toBe(200);
+    await runInDurableObject(stub, async (owner: RunHistoryDO, state) => {
+      const expected = { ok: true, owners: [{ kind: "unit", instanceId: instance.id, unit: unit.unit }] };
+      const before = state.storage.sql.exec(`SELECT json FROM workspace_settlements`).toArray();
+      expect(before).toHaveLength(1);
+      expect(await owner.findPullOwners({ repo: instance.repo, ref: unit.branch })).toEqual(expected);
+      expect(await owner.findPullOwners({ repo: "other/repo", pr: 7 })).toEqual({ ok: true, owners: [] });
+      const effect = {
+        ...unit.currentEffect!,
+        id: "ROOT/0/coding/pr-check",
+        ordinal: 3,
+        phase: "active" as const,
+        target: { ...unit.currentEffect!.target, headSha: head },
+        calls: [{ operation: "pull_create" as const, state: "unstarted" as const }],
+      };
+      const admitted = await owner.transitionUnitEffect(
+        { kind: "admit", expected: unit, execution: { workflowId: instance.id }, effect },
+        3,
+      );
+      expect(admitted).toMatchObject({ ok: true });
+      if (!admitted.ok) throw new Error("original effect refused");
+      const begun = await owner.transitionUnitEffect(
+        { kind: "begin", expected: admitted.unit, execution: effect.execution, effectId: effect.id, call: 0 },
+        4,
+      );
+      if (!begun.ok) throw new Error("original effect begin refused");
+      const completed = await owner.transitionUnitEffect(
+        {
+          kind: "complete",
+          expected: begun.unit,
+          execution: effect.execution,
+          effectId: effect.id,
+          call: 0,
+          outcome: { state: "accepted", commitSha: head, pr: { number: 7, url: "https://github.com/acme/api/pull/7" } },
+        },
+        5,
+      );
+      if (!completed.ok) throw new Error("original effect completion refused");
+      const settled = await owner.transitionUnitEffect(
+        { kind: "settle", expected: completed.unit, execution: effect.execution, effectId: effect.id },
+        6,
+      );
+      if (!settled.ok) throw new Error("original effect settlement refused");
+      const mapped = {
+        ...settled.unit,
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+        publication: {
+          repo: instance.repo,
+          pr: 7,
+          headRef: unit.branch,
+          publicationRef: unit.branch,
+          baseRef: "main",
+          expectedHeadSha: head,
+          owner: { instanceId: instance.id, unit: unit.unit },
+        },
+      };
+      expect(await owner.compareAndReplaceUnit(settled.unit, mapped, 7)).toEqual({ ok: true });
+      expect(await owner.findPullOwners({ repo: instance.repo, pr: 7 })).toEqual(expected);
+      const ended: CoordinatorUnit = {
+        ...mapped,
+        ending: {
+          kind: "refused",
+          report: "ended",
+          at: 8,
+          outcome: { schemaVersion: 1, kind: "refused", reviewRounds: 0 },
+        },
+      };
+      expect(await owner.compareAndReplaceUnit(mapped, ended, 8)).toEqual({ ok: true });
+      expect(await owner.findPullOwners({ repo: instance.repo, ref: unit.branch })).toEqual({ ok: true, owners: [] });
+      expect(state.storage.sql.exec(`SELECT json FROM workspace_settlements`).toArray()).toEqual(before);
+      const evidence = state.storage.sql
+        .exec<{ summary_json: string }>(`SELECT summary_json FROM runs WHERE run_id = ?`, id)
+        .one();
+      expect(JSON.parse(evidence.summary_json).branchPublication).toEqual(publication);
+    });
+  });
   it("refuses competing PR reservations inside the unit compare-and-replace transaction", async () => {
     const key = storeKey();
     const instance: CoordinatorInstance = {
