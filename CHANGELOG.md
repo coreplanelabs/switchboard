@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.286.2](https://github.com/coreplanelabs/switchboard/compare/v1.286.1...v1.286.2) (2026-10-05)
+
+
+### Bug fixes
+
+* **slack:** render escaped and angle-wrapped links correctly ([#2779](https://github.com/coreplanelabs/switchboard/issues/2779)) ([b1cc4aa](https://github.com/coreplanelabs/switchboard/commit/b1cc4aac886356458cfc69a913e460da5ad31b01))
+
 ## [1.286.1](https://github.com/coreplanelabs/switchboard/compare/v1.286.0...v1.286.1) (2026-10-05)
 
 
