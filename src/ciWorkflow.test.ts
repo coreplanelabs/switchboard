@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
@@ -801,13 +802,14 @@ describe("the production deploy is one reusable workflow", () => {
     // A scoped dispatch skips the blanket image warm-up and lets deploy all
     // copy only its selected Workers' missing images.
     expect(Object.keys(workflow.on.workflow_dispatch.inputs)).toEqual([
+      "smoke",
       "cli",
       "version",
       "targets",
       "force",
       "copy-images",
     ]);
-    for (const k of ["targets", "force", "copy-images"])
+    for (const k of ["targets", "force", "copy-images", "smoke"])
       expect(workflow.on.workflow_dispatch.inputs[k]).toEqual(inputs[k]);
   });
 
@@ -975,14 +977,15 @@ describe("the production deploy is one reusable workflow", () => {
     );
     expect(rendered.filter((l) => /^(npm|git)\b|npm run --silent cli/.test(l))).toEqual([
       "npm ci",
+      'npm run --silent cli -- deploy plan --allow-branch --json > "$RUNNER_TEMP/smoke-fleet.json"',
+      'npm run --silent smoke:ingress -- "$RUNNER_TEMP/smoke-fleet.json" "$RUNNER_TEMP/smoke-receipt.json" --check',
       "npm run load -- route --smoke --profile-model",
       "npm run --silent cli -- deploy images",
       'npm run --silent cli -- deploy plan $ARGS --allow-branch --json > "$RUNNER_TEMP/plan.json"',
       'npm run --silent cli -- deploy plan $ARGS --allow-branch | tee "$RUNNER_TEMP/plan.txt"',
       "git status --porcelain",
       "npm run --silent cli -- deploy all $ARGS --allow-branch",
-      'npm run --silent cli -- deploy plan --allow-branch --json > "$RUNNER_TEMP/smoke-fleet.json"',
-      'npm run --silent smoke:ingress -- "$RUNNER_TEMP/smoke-fleet.json"',
+      'npm run --silent smoke:ingress -- "$RUNNER_TEMP/smoke-fleet.json" "$RUNNER_TEMP/smoke-receipt.json"',
     ]);
     expect(checkoutSteps.filter((s) => s.run).map((s) => s.name)).toEqual([
       "only from main",
@@ -991,6 +994,7 @@ describe("the production deploy is one reusable workflow", () => {
       "the configuration repository needs the App",
       "the credentials this run has",
       "the selection",
+      "validate disposable smoke setup",
       "candidate Door through configured model",
       "copy the release's images into the account registry",
       "plan",
@@ -998,6 +1002,7 @@ describe("the production deploy is one reusable workflow", () => {
       "deploy",
       "what is live",
       "ordinary request through the live Door",
+      "deployment acceptance receipt",
     ]);
   });
 
@@ -1056,12 +1061,34 @@ describe("the production deploy is one reusable workflow", () => {
     expect(credentials.env?.SMOKE).toBe("${{ inputs.smoke }}");
     expect(credentials.run).toContain('if [ "$SMOKE" = "true" ] && [ -z "$SMOKE_INGRESS_TOKEN" ]');
     expect(credentials.run).toContain('if [ "$SMOKE" = "true" ] && [ -z "$SMOKE_INGRESS_ORIGIN" ]');
+    expect(credentials.run).toContain('if [ "$SMOKE" = "true" ] && [ -z "$SMOKE_INGRESS_CONFIG" ]');
+    expect(credentials.run).toContain('if [ "$SMOKE" = "true" ] && [ "$CLI_MODE" = "package" ]');
     expect(steps.indexOf(credentials)).toBeLessThan(steps.findIndex((s) => s.name === "deploy"));
-    expect(smoke.if).toBe("inputs.smoke && inputs.cli != 'package' && steps.deploy.outcome == 'success'");
-    expect(smoke.run).toContain('npm run --silent smoke:ingress -- "$RUNNER_TEMP/smoke-fleet.json"');
+    expect(smoke.if).toBe(
+      "inputs.smoke && inputs.cli != 'package' && steps.deploy.outcome == 'success' && steps.readiness.outcome == 'success'",
+    );
+    expect(smoke.run).toContain(
+      'npm run --silent smoke:ingress -- "$RUNNER_TEMP/smoke-fleet.json" "$RUNNER_TEMP/smoke-receipt.json"',
+    );
     expect(job.env?.SMOKE_INGRESS_TOKEN).toBe("${{ secrets.SMOKE_INGRESS_TOKEN }}");
     expect(job.env?.SMOKE_INGRESS_ORIGIN).toBe("${{ vars.SMOKE_INGRESS_ORIGIN }}");
     expect(steps.indexOf(smoke)).toBeGreaterThan(steps.findIndex((s) => s.name === "what is live"));
+    const setup = steps.find((s) => s.name === "validate disposable smoke setup")!;
+    expect(setup.run).toContain("--check");
+    expect(steps.indexOf(setup)).toBeLessThan(
+      steps.findIndex((s) => s.name === "copy the release's images into the account registry"),
+    );
+    const report = steps.find((s) => s.name === "deployment acceptance receipt")!;
+    expect(report.if).toBe("always()");
+    expect(report.env?.SMOKE_OUTCOME).toBe("${{ steps.smoke.outcome }}");
+    expect(report.run).toContain('"$SMOKE_OUTCOME" != "success"');
+    expect(report.run).toContain("Capability acceptance: skipped");
+    expect(report.run).toContain("not rolled back");
+    expect(
+      steps.some(
+        (s) => s.name === "smoke acceptance artifact" && s.if === "always() && inputs.smoke && inputs.cli != 'package'",
+      ),
+    ).toBe(true);
   });
 
   it("tests the candidate Door with the configured model before touching production", () => {
@@ -1076,6 +1103,43 @@ describe("the production deploy is one reusable workflow", () => {
       steps.findIndex((s) => s.name === "copy the release's images into the account registry"),
     );
     expect(steps.indexOf(smoke)).toBeLessThan(steps.findIndex((s) => s.name === "deploy"));
+  });
+
+  it("cannot report a stale passed receipt when required smoke was skipped or failed", () => {
+    const report = steps.find((s) => s.name === "deployment acceptance receipt")!;
+    const dir = mkdtempSync(path.join(tmpdir(), "smoke-report-"));
+    const summary = path.join(dir, "summary.md");
+    writeFileSync(
+      path.join(dir, "smoke-receipt.json"),
+      JSON.stringify({
+        scope: "deployment-capability-smoke",
+        capabilityOutcome: "passed",
+        productAcceptance: { outcome: "incomplete" },
+        scenarios: ["answer", "workspace", "review"].map((id) => ({
+          id,
+          outcome: "passed",
+          runId: `run-${id}`,
+          build: { commit: "a".repeat(40) },
+        })),
+      }),
+    );
+    for (const outcome of ["skipped", "failure", "success"]) {
+      writeFileSync(summary, "");
+      const result = spawnSync("bash", ["-e", "-c", report.run!], {
+        encoding: "utf8",
+        timeout: 10_000,
+        env: {
+          ...process.env,
+          RUNNER_TEMP: dir,
+          GITHUB_STEP_SUMMARY: summary,
+          SMOKE_REQUIRED: "true",
+          SMOKE_OUTCOME: outcome,
+          DEPLOY_OUTCOME: "success",
+        },
+      });
+      expect(result.status).toBe(outcome === "success" ? 0 : 1);
+      expect(readFileSync(summary, "utf8").includes("Capability acceptance: passed")).toBe(outcome === "success");
+    }
   });
 });
 

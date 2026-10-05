@@ -578,3 +578,11 @@ Terminal PR reads propagate refused durable writes before reporting merged or cl
 | Original frozen maintenance plans survive byte pressure while uncertain calls remain owned; transient tool context can trim without deleting the effect payload or permitting replay. | `[unit]` `src/core/coordinator/sweepEffectJournal.test.ts::durable sweep journal::keeps the original frozen plan under byte pressure while an uncertain call remains owned` |
 
 | An initial coding child with one exact native accepted branch push remains owned by its original canonical unit before a PR exists. Exact terminal identity, checkpoint, native receipt and accepted unit admission must agree; unknown intents and foreign or additional publications still refuse. Delegated ownership keeps the same recovery or adoption action identity as its canonical unit, yielding one owner. Ownership lookup preserves the unit’s existing holding policy and never rewrites publication completeness, workspace retention or release receipts. | `[unit]` `src/core/coordinator/pullOwnership.test.ts::complete canonical pull ownership::keeps an accepted pre-PR coding publication under its original unit`; `deploy/cloudflare-memory/runLedger.test.ts::complete canonical pull ownership::admits the original pre-PR child and retains its workspace obligation through PR binding` |
+
+## Final admitted profile
+
+A finished run retained in the live registry exposes its admitted `profile` from the persisted record, just as the cold stored read does. A missing record or a legacy record without a profile remains unknown; this adds metadata behind the existing authorized run read, not an authority route.
+
+| Criterion | Proof |
+|---|---|
+| Fresh and cold final-run reads carry the same persisted admitted profile | `[unit]` `src/core/runsService.test.ts::RunsService.getRun::finished registry projection exposes the persisted admitted profile` |

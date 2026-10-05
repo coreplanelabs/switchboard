@@ -85,6 +85,8 @@ export type Result<T> =
  */
 export interface RunView {
   answerOutcome?: AnswerOutcome;
+  /** Admitted execution bounds, from the final persisted record. */
+  profile?: RunRecord["profile"];
   id: string;
   label?: string;
   agent?: string;
@@ -913,6 +915,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
     Pick<
       RunView,
       | "answerOutcome"
+      | "profile"
       | "headSha"
       | "verdict"
       | "reviewHead"
@@ -940,6 +943,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
     if (!row) return {};
     return {
       ...(row.answerOutcome !== undefined ? { answerOutcome: row.answerOutcome } : {}),
+      ...(row.profile !== undefined ? { profile: row.profile } : {}),
       ...(row.headSha !== undefined ? { headSha: row.headSha } : {}),
       ...(row.verdict !== undefined ? { verdict: row.verdict } : {}),
       ...(row.reviewHead !== undefined ? { reviewHead: row.reviewHead } : {}),

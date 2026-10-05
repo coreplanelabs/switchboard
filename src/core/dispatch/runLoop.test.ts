@@ -56,7 +56,7 @@ import {
   type HarnessSession,
 } from "../harness/contract.js";
 import type { HarnessRoster } from "../harness/roster.js";
-import { InMemoryRunStore, NullRunStore } from "../runStore.js";
+import { FileRunStore, InMemoryRunStore, NullRunStore } from "../runStore.js";
 import { createCardShell } from "../statusCardFrame.js";
 import { ThreadAdmission } from "../threadAdmission.js";
 import type { ChannelIO, IncomingMessage, StatusUpdate } from "../types.js";
@@ -123,6 +123,7 @@ import type { ResumeContext } from "./admission.js";
 import type { AppendableEvent, LiveRunRow, StepRecord } from "../runLedger/types.js";
 import type { RunRecord } from "../runRecord.js";
 import { publicationReceiptsFromState, restoredPublicationHead } from "../publicationPush.js";
+import { publishedHeadEvidence } from "../coordinator/publishedHeadAdoption.js";
 
 // Feature: docs/reference/specs/harness-pi.md, docs/reference/specs/run-history.md
 // items 20–22, docs/reference/specs/llm-output.md item 5 — the loop's own
@@ -3775,6 +3776,112 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       expect(record.pushed).toEqual([{ ref, sha: last, by: latest === "push" ? "push" : "salvage" }]);
     },
   );
+
+  it("deployment publication smoke carries native updates through durable recording into original-head adoption", async () => {
+    const base = "0".repeat(40),
+      first = "a".repeat(40),
+      final = "b".repeat(40);
+    const branch = "smoke/publication";
+    const instanceId = "smoke-native";
+    const key = `${instanceId}:publication/0/coding`;
+    const bindings = new GitBindings();
+    expect(
+      bindings.register(
+        "run-l",
+        { repo: "o/r", ref: branch },
+        { repo: "o/r", ref: branch, refConfirmed: true },
+        async () => true,
+      ),
+    ).toBe(true);
+    let local = base,
+      remote = base,
+      dirty = false;
+    const nativePush = async () => {
+      const claim = await bindings.beginBranch("run-l", { ref: `refs/heads/${branch}`, old: remote, next: local });
+      expect(claim).toBeDefined();
+      expect(await claim!.finish("accepted")).toBe(true);
+      remote = local;
+    };
+    const s = endingIn(
+      async (_deps, run) => {
+        local = first;
+        await nativePush();
+        dirty = true;
+        run.control?.requestStop("hard");
+        return sessionAnswering("Stopped after the recorded publication.");
+      },
+      {
+        coding: true,
+        repoCtx: { repo: "o/r", ref: branch, baseRef: "main" },
+        binding: { ref: branch, sha: base, workspace: "/srv/wt/smoke" },
+        coordinator: { parentInstanceId: instanceId, idempotencyKey: key, base: "main" },
+        executor: {
+          publishBranch: async () => {
+            await nativePush();
+            return "To https://git.bot.test/git/o/r";
+          },
+          exec: async (command) => {
+            if (/rev-parse --abbrev-ref HEAD|symbolic-ref --quiet --short HEAD/.test(command)) return branch;
+            if (/rev-parse HEAD/.test(command)) return local;
+            if (/rev-parse @\{u\}/.test(command)) return remote;
+            if (/ls-remote/.test(command)) return `${remote}\trefs/heads/${branch}`;
+            if (/remote get-url origin/.test(command)) return "https://github.com/o/r.git";
+            if (/status --porcelain/.test(command)) return dirty ? " M src/work.ts\n" : "";
+            if (/rev-list --count/.test(command)) return local === remote ? "0" : "1";
+            if (/git(?: -C '[^']+')? commit /.test(command)) {
+              local = final;
+              dirty = false;
+            }
+            if (/git(?: -C '[^']+')? push /.test(command)) await nativePush();
+            return "";
+          },
+        },
+      },
+    );
+    s.deps.githubBindings = bindings;
+    const bearers = new RunBearerStore({ clock: () => NOW });
+    s.deps.runBearers = bearers;
+    mintFor(bearers, s);
+    const ctx = await trackedCodingContext(s);
+    const out = answered(await runLoop(s.deps, ctx));
+    await deliverAnswer({ ...ctx, ...out, liveUrl: undefined, stopped: "hard" });
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    const sealed = (await s.store.get(s.run.id))!;
+    const disk = new FileRunStore(mkdtempSync(join(tmpdir(), "smoke-publication-")), {
+      now: () => sealed.finishedAt + 1,
+    });
+    expect(await disk.put(sealed)).toMatchObject({ ok: true, stored: true });
+    const record = (await disk.get(s.run.id))!;
+    expect(record.pr).toBeUndefined();
+    expect(record.branchPushReceipts).toEqual([{ ref: branch, sha: final, by: "push" }]);
+    expect(record.events.filter((event) => event.type === "pushed_head")).toEqual([
+      expect.objectContaining({ ref: branch, sha: first, by: "push" }),
+      expect.objectContaining({ ref: branch, sha: final, by: "push" }),
+      expect.objectContaining({ ref: branch, sha: final, by: "salvage" }),
+    ]);
+    const run = { ...record, finished: true, persisted: true };
+    const instance = {
+      id: instanceId,
+      repo: record.repo!,
+      base: "main",
+      userId: record.userId,
+      threadKey: record.threadKey,
+    };
+    const row = {
+      instanceId,
+      unit: "publication",
+      branch,
+      startedAt: record.startedAt - 1,
+      rounds: [{ index: 0, agent: "coding", outcome: "started", at: record.startedAt }],
+      ending: { kind: "aborted", at: record.finishedAt + 1 },
+    };
+    expect(publishedHeadEvidence({ instance, row, run, runs: [run] })).toEqual({
+      ok: true,
+      head: final,
+      runId: record.id,
+    });
+  });
 
   it("a coding child's final description turn checkpoints dirty work before release", async () => {
     const HEAD = "e1b2c3d4e5f60718293a4b5c6d7e8f9012345678";

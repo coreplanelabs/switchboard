@@ -668,6 +668,16 @@ describe("run receipt in the response", () => {
     });
   });
 
+  it("binds the finished ingress receipt to the serving process build", async () => {
+    const build = { version: "1.0.0", commit: "a".repeat(40) };
+    const dispatch: DispatchFn = async (_deps, _msg, io) => {
+      io.runFinished?.({ id: "run-build", status: "completed" });
+      await io.reply("4");
+    };
+    const res = await handleIngressRequest(request, { ...deps, build }, options(dispatch));
+    expect(res.body).toEqual({ reply: "4", run: { id: "run-build", status: "completed" }, build });
+  });
+
   it("omits `run` entirely when the request produced no run (a config reply)", async () => {
     const { fn } = fakeDispatch("Usage: …");
     const res = await handleIngressRequest(request, deps, options(fn));

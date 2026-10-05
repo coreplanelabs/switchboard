@@ -125,7 +125,7 @@ on:
         type: string
         default: auto
       smoke:
-        description: "After deploy, send a read-only request through the live ingress and require a completed agent answer"
+        description: "After deploy, require three bounded capability checks in the configured disposable smoke scope"
         type: boolean
         default: false
     secrets:
@@ -149,7 +149,7 @@ on:
         description: the sandbox live gate's bearer
       SMOKE_INGRESS_TOKEN:
         required: false
-        description: a dedicated ingress bearer with only dispatch permission for the production smoke request
+        description: "a dedicated disposable-scope bearer: HTTP dispatch/agent grants and MCP runs:read; never all or merge/deploy grants"
       DOOR_SMOKE_OPENAI_API_KEY:
         required: false
         description: the OpenAI key for the candidate Door preflight, used before any production image copy or deploy
@@ -161,6 +161,10 @@ on:
         description: that App's private key
   workflow_dispatch:
     inputs:
+      smoke:
+        description: "After deploy, require three bounded capability checks in the configured disposable smoke scope"
+        type: boolean
+        default: false
       cli:
         description: "`checkout` (default): deploy main; `package`: deploy the pinned published version, including a deliberate rollback"
         type: choice
@@ -219,6 +223,7 @@ jobs:
       SANDBOX_TOKEN: ${{ secrets.SANDBOX_TOKEN }}
       SMOKE_INGRESS_TOKEN: ${{ secrets.SMOKE_INGRESS_TOKEN }}
       SMOKE_INGRESS_ORIGIN: ${{ vars.SMOKE_INGRESS_ORIGIN }}
+      SMOKE_INGRESS_CONFIG: ${{ vars.SMOKE_INGRESS_CONFIG }}
       # The profile (and, through its `configSource`, the bot's config): the
       # `profile` input, else the calling repository's variable. A `github://`
       # profile is read with CONFIG_REPO_TOKEN, the App token minted below.
@@ -329,6 +334,7 @@ jobs:
       - name: the credentials this run has
         env:
           SMOKE: ${{ inputs.smoke }}
+          CLI_MODE: ${{ inputs.cli }}
         run: |
           if [ -z "$SWITCHBOARD_DEPLOY_PROFILE" ]; then echo "::error::no deployment profile — pass the \`profile\` input or set the repository variable SWITCHBOARD_DEPLOY_PROFILE (see the header of this workflow). Nothing was deployed."; exit 1; fi
           if [ -z "$CLOUDFLARE_API_TOKEN" ]; then echo "::error::no Cloudflare token — add CLOUDFLARE_DEPLOY_TOKEN as a repository secret (see the header of this workflow)"; exit 1; fi
@@ -340,6 +346,8 @@ jobs:
           if [ -z "$SANDBOX_TOKEN" ]; then echo "::warning::SANDBOX_TOKEN is not set — a sandbox step would be refused before anything deploys, and --affected judges the sandbox against the last release tag, not what it serves"; fi
           if [ "$SMOKE" = "true" ] && [ -z "$SMOKE_INGRESS_TOKEN" ]; then echo "::error::SMOKE_INGRESS_TOKEN is not set — add the dedicated ingress bearer before deploying a release"; exit 1; fi
           if [ "$SMOKE" = "true" ] && [ -z "$SMOKE_INGRESS_ORIGIN" ]; then echo "::error::SMOKE_INGRESS_ORIGIN is not set — configure the trusted production bot origin before deploying a release"; exit 1; fi
+          if [ "$SMOKE" = "true" ] && [ -z "$SMOKE_INGRESS_CONFIG" ]; then echo "::error::SMOKE_INGRESS_CONFIG is not set — configure a disposable fixture before enabling acceptance"; exit 1; fi
+          if [ "$SMOKE" = "true" ] && [ "$CLI_MODE" = "package" ]; then echo "::error::required capability smoke needs the checked-out runner; package mode cannot silently skip it"; exit 1; fi
       - name: the selection
         id: selection
         env:
@@ -354,6 +362,14 @@ jobs:
           if [ "$FORCE" = "true" ]; then args="$args --force"; fi
           echo "args=$args" >> "$GITHUB_OUTPUT"
           echo "deploy all $args"
+      - name: validate disposable smoke setup
+        if: inputs.smoke && inputs.cli != 'package'
+        env:
+          CLI: ${{ steps.cli.outputs.cli }}
+          CONFIG_REPO_TOKEN: ${{ steps.infra-token.outputs.token }}
+        run: |
+          $CLI deploy plan --allow-branch --json > "$RUNNER_TEMP/smoke-fleet.json"
+          npm run --silent smoke:ingress -- "$RUNNER_TEMP/smoke-fleet.json" "$RUNNER_TEMP/smoke-receipt.json" --check
       # This runs the checked-out candidate against the model named by the
       # deployment profile. It sends only synthetic requests and never starts
       # an agent. Production's trusted main checkout is the only code given
@@ -428,6 +444,7 @@ jobs:
           $CLI deploy all $ARGS --allow-branch
       # What production serves now, whatever happened above — the receipt.
       - name: what is live
+        id: readiness
         if: always()
         env:
           LABEL: ${{ steps.cli.outputs.label }}
@@ -507,12 +524,40 @@ jobs:
           fi
           echo "Selected Workers match the exact source commit; any selected resident fleet is undrained with current image reports. Skipped Workers were not judged against this release." >> "$summary"
       - name: ordinary request through the live Door
-        if: inputs.smoke && inputs.cli != 'package' && steps.deploy.outcome == 'success'
+        id: smoke
+        if: inputs.smoke && inputs.cli != 'package' && steps.deploy.outcome == 'success' && steps.readiness.outcome == 'success'
         env:
-          CLI: ${{ steps.cli.outputs.cli }}
-          CONFIG_REPO_TOKEN: ${{ steps.infra-token.outputs.token }}
+          SMOKE_INGRESS_THREAD: smoke-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
-          # The frozen selection may omit the bot; this unfiltered read proves
-          # that the separately configured request origin matches the profile.
-          $CLI deploy plan --allow-branch --json > "$RUNNER_TEMP/smoke-fleet.json"
-          npm run --silent smoke:ingress -- "$RUNNER_TEMP/smoke-fleet.json"
+          # A scoped release may leave the bot on an older build. Bind smoke to
+          # what that bot serves, and require the release commit only if selected.
+          if jq -e '.steps[] | select(.name == "bot")' "$RUNNER_TEMP/plan.json" > /dev/null; then
+            export SMOKE_EXPECTED_COMMIT="$GITHUB_SHA"
+          fi
+          npm run --silent smoke:ingress -- "$RUNNER_TEMP/smoke-fleet.json" "$RUNNER_TEMP/smoke-receipt.json"
+      - name: deployment acceptance receipt
+        if: always()
+        env:
+          SMOKE_REQUIRED: ${{ inputs.smoke }}
+          SMOKE_OUTCOME: ${{ steps.smoke.outcome }}
+          DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+        run: |
+          echo "Upload step: $DEPLOY_OUTCOME. Readiness is reported separately above." >> "$GITHUB_STEP_SUMMARY"
+          echo "Product acceptance: incomplete — private question → Fix it → draft PR remains unproven." >> "$GITHUB_STEP_SUMMARY"
+          if [ "$SMOKE_REQUIRED" != "true" ]; then
+            echo "Capability acceptance: skipped — smoke disabled; no product acceptance receipt." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$SMOKE_OUTCOME" != "success" ] || ! jq -e '.scope == "deployment-capability-smoke" and .capabilityOutcome == "passed" and .productAcceptance.outcome == "incomplete" and (.scenarios | length == 3) and all(.scenarios[]; .outcome == "passed")' "$RUNNER_TEMP/smoke-receipt.json" > /dev/null; then
+            echo "Capability acceptance: failed or incomplete. Uploaded builds were not rolled back. See smoke receipt for original effects; do not blindly rerun." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "Capability acceptance: passed (three representatives)." >> "$GITHUB_STEP_SUMMARY"
+          jq -r '.scenarios[] | "- \(.id): \(.outcome), run `\(.runId)`, served commit `\(.build.commit)`"' "$RUNNER_TEMP/smoke-receipt.json" >> "$GITHUB_STEP_SUMMARY"
+      - name: smoke acceptance artifact
+        if: always() && inputs.smoke && inputs.cli != 'package'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: smoke-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/smoke-receipt.json
+          if-no-files-found: warn

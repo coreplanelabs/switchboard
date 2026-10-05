@@ -309,7 +309,13 @@ async function handleAuthorized(
   });
   return result.kind === "started"
     ? { status: 202, body: result.receipt }
-    : { status: 200, body: { reply: result.reply, ...(result.run ? { run: result.run } : {}) } };
+    : {
+        status: 200,
+        body: {
+          reply: result.reply,
+          ...(result.run ? { run: result.run, ...(deps.build ? { build: deps.build } : {}) } : {}),
+        },
+      };
 }
 
 export async function handleIngressRequest(
