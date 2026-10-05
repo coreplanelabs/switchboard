@@ -4387,7 +4387,8 @@ export class RunHistoryDO extends DurableObject<Env> {
             FROM json_each(runs.summary_json)
             WHERE key IN ('id', 'repo', 'userId', 'channelId', 'threadKey',
               'parentInstanceId', 'coordinatorUnit', 'coordinatorAttempt',
-              'idempotencyKey', 'session', 'branchPublication', 'doorPublicationPending'))
+              'idempotencyKey', 'session', 'agent', 'status', 'provisional', 'publicationSettlement',
+              'branchPublication', 'branchPushReceipts', 'doorPublicationPending'))
            ELSE 'null' END AS owner_json,
            work_evidence_json FROM runs LIMIT ?`,
         limit,
@@ -4395,7 +4396,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     )) {
       const raw: Record<string, unknown> = JSON.parse(row.owner_json);
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("unreadable terminal producer");
-      const { branchPublication, doorPublicationPending, ...identity } = raw;
+      const { branchPublication, branchPushReceipts, doorPublicationPending, ...identity } = raw;
       if (!isRunWorkOwner(identity) || !isPullOwnerLiveMeta(identity) || identity.id !== row.run_id)
         throw new Error("unreadable terminal producer");
       const evidence =
@@ -4405,6 +4406,9 @@ export class RunHistoryDO extends DurableObject<Env> {
         runId: row.run_id,
         repo: identity.repo,
         live: false,
+        record: identity,
+        pushReceipts:
+          evidence && Object.hasOwn(evidence, "branchPushReceipts") ? evidence.branchPushReceipts : branchPushReceipts,
         publication:
           evidence && Object.hasOwn(evidence, "branchPublication") ? evidence.branchPublication : branchPublication,
         door:

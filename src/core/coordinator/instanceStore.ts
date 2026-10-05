@@ -372,6 +372,10 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
             runId: row.id,
             repo: row.repo,
             live: false,
+            record: row,
+            pushReceipts: Object.hasOwn(this.runOwner!.finishedWorkEvidence.get(row.id) ?? {}, "branchPushReceipts")
+              ? this.runOwner!.finishedWorkEvidence.get(row.id)!.branchPushReceipts
+              : row.branchPushReceipts,
             publication: Object.hasOwn(this.runOwner!.finishedWorkEvidence.get(row.id) ?? {}, "branchPublication")
               ? this.runOwner!.finishedWorkEvidence.get(row.id)!.branchPublication
               : row.branchPublication,

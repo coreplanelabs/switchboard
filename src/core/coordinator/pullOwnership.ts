@@ -1,4 +1,6 @@
 import { doorPublicationOf, branchPublicationOf, isPublicationRepo } from "../branchPublication.js";
+import { branchPushReceiptsOf, isRunWorkOwner } from "../runRecord.js";
+import { publicationSettlementForRun } from "../publicationSettlement.js";
 import { workspaceSettlementOf } from "../workspaceSettlement.js";
 import { isCoordinatorReconcileEffect } from "./workflowReconciliation.js";
 import {
@@ -134,7 +136,15 @@ export const PULL_OWNER_SCAN_MAX_BYTES = 16 * 1024 * 1024;
 export interface PullOwnershipRows {
   complete: boolean;
   units: Array<{ instance: unknown; unit: unknown }>;
-  runs: Array<{ runId: string; repo?: unknown; live: boolean; publication?: unknown; door?: unknown }>;
+  runs: Array<{
+    runId: string;
+    repo?: unknown;
+    live: boolean;
+    publication?: unknown;
+    door?: unknown;
+    record?: unknown;
+    pushReceipts?: unknown;
+  }>;
   effects: unknown[];
   settlements?: unknown[];
 }
@@ -244,6 +254,103 @@ export function findPullOwnersInRows(target: PullTarget, rows: PullOwnershipRows
             : {}),
       });
   }
+  // The first coding child pushes before its coordinator creates the PR.
+  // Its missing branch-to-PR mapping is not an unknown write when native
+  // receipts and the original unit's admission identify the sole owner.
+  const initialCodingOwner = (
+    run: PullOwnershipRows["runs"][number],
+  ): { owner: Extract<PullOwner, { kind: "unit" }>; ref: string; holds: boolean } | undefined => {
+    const record = run.record;
+    if (run.live || !isRunWorkOwner(record) || record.id !== run.runId || record.repo !== run.repo) return;
+    const terminal = record as typeof record & {
+      agent?: unknown;
+      status?: unknown;
+      provisional?: unknown;
+      publicationSettlement?: unknown;
+    };
+    if (
+      terminal.agent !== "coding" ||
+      (terminal.provisional !== undefined && terminal.provisional !== false) ||
+      !["completed", "failed", "interrupted", "stopped_soft", "stopped_hard"].includes(String(terminal.status))
+    )
+      return;
+    const publication = branchPublicationOf(run.publication, record.repo);
+    if (
+      !publication ||
+      publication.complete ||
+      publication.pending ||
+      publication.branches.length ||
+      publication.targets?.length
+    )
+      return;
+    if (run.door !== undefined && run.door !== null) {
+      const door = doorPublicationOf(run.door);
+      if (!door || (door.outcome !== "rejected" && door.outcome !== "not_forwarded")) return;
+    }
+    const proof = publicationSettlementForRun(terminal.publicationSettlement, record);
+    const pushes = branchPushReceiptsOf(run.pushReceipts);
+    if (
+      !proof ||
+      proof.checkpoint.kind !== "created" ||
+      proof.publication.kind !== "accepted" ||
+      pushes?.length !== 1 ||
+      pushes[0]!.ref !== proof.binding.branch ||
+      pushes[0]!.sha !== proof.publication.head
+    )
+      return;
+    const bound = rows.units.filter(
+      (row) =>
+        isCoordinatorInstance(row.instance) &&
+        isCoordinatorUnit(row.unit) &&
+        row.instance.id === record.parentInstanceId &&
+        row.unit.instanceId === record.parentInstanceId &&
+        row.unit.unit === record.coordinatorUnit,
+    );
+    if (bound.length !== 1) return;
+    const { instance, unit } = bound[0] as { instance: CoordinatorInstance; unit: CoordinatorUnit };
+    const effect = unit.currentEffect;
+    if (
+      instance.kind !== "ship" ||
+      record.coordinatorAttempt !== (instance.attempt ?? 0) ||
+      record.idempotencyKey !== `${instance.id}:${unit.unit}/0/coding` ||
+      instance.repo !== record.repo ||
+      instance.userId !== record.userId ||
+      instance.channelId !== record.channelId ||
+      (unit.threadKey ?? instance.threadKey) !== record.threadKey ||
+      unit.branch !== proof.binding.branch ||
+      (effect !== undefined && effect.target.base !== instance.base)
+    )
+      return;
+    const admitted =
+      effect?.id === `${unit.unit}/0/coding` &&
+      effect.phase === "settled" &&
+      effect.calls.length === 1 &&
+      effect.execution.workflowId === instance.id &&
+      effect.execution.recoveryActionId === undefined &&
+      effect.execution.maintenance === undefined &&
+      effect.target.ref === unit.branch &&
+      effect.target.repo === instance.repo &&
+      (proof.binding.baseHeadSha === undefined || effect.target.headSha === proof.binding.baseHeadSha) &&
+      effect.calls.some((call) => call.operation === "spawn" && call.state === "accepted" && call.runId === run.runId);
+    const publishing =
+      effect?.id === `${unit.unit}/0/coding/pr-check` &&
+      effect.target.ref === unit.branch &&
+      effect.target.repo === instance.repo &&
+      effect.target.headSha === proof.publication.head;
+    const mapped = unit.publication?.headRef === unit.branch && unit.publication.repo === instance.repo;
+    if (
+      !admitted &&
+      !publishing &&
+      !mapped &&
+      (unit.recovery?.kind !== "coding" || unit.recovery.codingRunId !== run.runId)
+    )
+      return;
+    return {
+      owner: { kind: "unit", instanceId: instance.id, unit: unit.unit },
+      ref: proof.binding.branch,
+      holds: unitHoldsPulls(unit, instance),
+    };
+  };
   for (const run of rows.runs) {
     if (typeof run.runId !== "string" || !run.runId || typeof run.live !== "boolean")
       return { ok: false, reason: "incomplete" };
@@ -252,7 +359,12 @@ export function findPullOwnersInRows(target: PullTarget, rows: PullOwnershipRows
       if (!publication || (!publication.complete && publication.repo === undefined))
         return { ok: false, reason: "incomplete" };
       if (publication.repo && sameRepo(publication.repo)) {
-        if (!publication.complete && !publication.pending) return { ok: false, reason: "incomplete" };
+        if (!publication.complete && !publication.pending) {
+          const owner = initialCodingOwner(run);
+          if (!owner) return { ok: false, reason: "incomplete" };
+          if (owner.holds && matches(undefined, owner.ref)) add(owner.owner);
+          continue;
+        }
         if (
           (run.live || !publication.complete) &&
           (publication.branches.some((b) => matches(b.pr, b.ref)) ||
@@ -276,7 +388,25 @@ export function findPullOwnersInRows(target: PullTarget, rows: PullOwnershipRows
     if (!settlement) return { ok: false, reason: "incomplete" };
     const publication = settlement.publication;
     if (!publication || publication.complete) continue;
-    if (!publication.repo || !publication.pending) return { ok: false, reason: "incomplete" };
+    if (!publication.repo) return { ok: false, reason: "incomplete" };
+    if (!sameRepo(publication.repo)) continue;
+    if (!publication.pending) {
+      const run = rows.runs.find((run) => run.runId === settlement.owner.runId);
+      const owner = run && initialCodingOwner(run);
+      const proof = publicationSettlementForRun(settlement.record.publicationSettlement, settlement.record);
+      if (
+        !owner ||
+        !proof ||
+        proof.publication.kind !== "accepted" ||
+        !run ||
+        JSON.stringify(settlement.publication) !== JSON.stringify(run.publication) ||
+        JSON.stringify(settlement.record.publicationSettlement) !==
+          JSON.stringify((run.record as { publicationSettlement?: unknown }).publicationSettlement)
+      )
+        return { ok: false, reason: "incomplete" };
+      if (owner.holds && matches(undefined, proof.binding.branch)) add(owner.owner);
+      continue;
+    }
     if (
       sameRepo(publication.repo) &&
       (matches(publication.pending.pr, publication.pending.ref) ||
