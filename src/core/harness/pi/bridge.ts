@@ -26,6 +26,8 @@ import {
 import {
   proxyProviderFailureIsAuthenticated,
   readProxyUnknownTerminal,
+  readProxyTurnBudgetExhausted,
+  proxyTurnBudgetExhaustedIsAuthenticated,
   type ProxyUnknownTerminalEnvelope,
   type ProxyUnknownTerminalReason,
 } from "../../modelProxy/providerFailureAuth.js";
@@ -112,6 +114,7 @@ const LOCAL_STREAM_ENDINGS: ReadonlySet<string> = new Set([
  * typed policy word is a refusal, and only an evidenced provider failure
  * carries a `ProviderFailure`. */
 export type PiTerminalFailure =
+  | { kind: "local_turn_budget"; detail: string; turns: number; maxTurns: number }
   | { kind: "local_abort"; detail: string }
   | { kind: "local_stream"; detail: string }
   | {
@@ -163,6 +166,8 @@ export interface BridgeObservation {
 }
 
 export interface BridgeDeps {
+  /** The run whose proxy evidence this bridge may consume. */
+  runId?: string;
   emit: (event: RunEvent) => void;
   onProgress?: (note: string) => void;
   /** The run's `run.agent` span the tool spans hang under; absent, no spans. */
@@ -401,6 +406,21 @@ export class PiBridge {
       const raw = message.errorMessage;
       const detail = redactAndCap(raw ?? "the model call ended without a classified result", 400);
       out.providerError = detail;
+      const budget = readProxyTurnBudgetExhausted(raw, this.deps.runId);
+      if (budget !== undefined || proxyTurnBudgetExhaustedIsAuthenticated(raw)) {
+        const unknown = readProxyUnknownTerminal(raw);
+        if (budget === undefined || unknown !== undefined) {
+          out.terminalFailure = unknownTerminal(message, detail, unknown);
+          return;
+        }
+        out.terminalFailure = {
+          kind: "local_turn_budget",
+          detail: budget.message,
+          turns: budget.turns,
+          maxTurns: budget.maxTurns,
+        };
+        return;
+      }
       const policyRefusal =
         typeof message.rawStopReason === "string" && POLICY_REFUSAL_STOP_REASONS.has(message.rawStopReason);
       if (policyRefusal) {

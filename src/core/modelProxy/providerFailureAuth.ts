@@ -1,4 +1,4 @@
-// Authentication for typed failures crossing from the model proxy to a run's
+// Authentication for typed terminal facts crossing from the model proxy to a run's
 // pi bridge (docs/reference/specs/model-proxy.md item 12b). Provider stream
 // content shares the same wire shape as a proxy-generated error, so shape is
 // not authority: only an envelope carrying a marker signed by this bot process
@@ -181,4 +181,84 @@ export function readProxyUnknownTerminal(value: unknown): ProxyUnknownTerminalEn
 
 export function proxyUnknownTerminalIsAuthenticated(value: unknown): boolean {
   return readProxyUnknownTerminal(value) !== undefined;
+}
+
+/** The proxy refused this run's next model call locally. This is never a
+ * provider failure or a grant to retry, and another run cannot adopt it. */
+export interface ProxyTurnBudgetExhausted {
+  type: "turn_budget_exhausted";
+  runId: string;
+  turns: number;
+  maxTurns: number;
+  message: string;
+}
+
+const validTurnBudget = (row: Record<string, unknown>): boolean =>
+  typeof row.runId === "string" &&
+  row.runId.length > 0 &&
+  row.runId.length <= 512 &&
+  Number.isSafeInteger(row.turns) &&
+  Number.isSafeInteger(row.maxTurns) &&
+  (row.maxTurns as number) >= 0 &&
+  (row.turns as number) >= (row.maxTurns as number);
+
+const turnBudgetSignature = (row: ProxyTurnBudgetExhausted, nonce: string): Buffer =>
+  createHmac("sha256", AUTH_KEY)
+    .update(JSON.stringify([AUTH_VERSION, nonce, row.type, row.runId, row.turns, row.maxTurns, row.message]))
+    .digest();
+
+export function authenticateProxyTurnBudgetExhausted(
+  counts: Pick<ProxyTurnBudgetExhausted, "runId" | "turns" | "maxTurns">,
+): ProxyTurnBudgetExhausted & { [PROXY_PROVIDER_FAILURE_AUTH_FIELD]: string } {
+  if (!validTurnBudget(counts)) throw new Error("Invalid local turn budget evidence");
+  const row: ProxyTurnBudgetExhausted = {
+    type: "turn_budget_exhausted",
+    ...counts,
+    message: `the run is past its ${counts.maxTurns}-turn guard (${counts.turns} turn${counts.turns === 1 ? "" : "s"} used)`,
+  };
+  const nonce = randomBytes(NONCE_BYTES).toString("base64url");
+  return {
+    ...row,
+    [PROXY_PROVIDER_FAILURE_AUTH_FIELD]: `${AUTH_VERSION}.${nonce}.${turnBudgetSignature(row, nonce).toString("base64url")}`,
+  };
+}
+
+function decodeProxyTurnBudgetExhausted(value: unknown): ProxyTurnBudgetExhausted | undefined {
+  const found = candidates(parseBody(value), [], "turn_budget_exhausted");
+  if (found.length !== 1) return undefined;
+  const row = found[0];
+  if (!validTurnBudget(row) || typeof row.message !== "string") return undefined;
+  const marker = row[PROXY_PROVIDER_FAILURE_AUTH_FIELD];
+  if (typeof marker !== "string") return undefined;
+  const [version, nonce, mac, extra] = marker.split(".");
+  if (
+    version !== AUTH_VERSION ||
+    extra !== undefined ||
+    !/^[A-Za-z0-9_-]{22}$/.test(nonce ?? "") ||
+    !/^[A-Za-z0-9_-]{43}$/.test(mac ?? "")
+  )
+    return undefined;
+  const evidence: ProxyTurnBudgetExhausted = {
+    type: "turn_budget_exhausted",
+    runId: row.runId as string,
+    turns: row.turns as number,
+    maxTurns: row.maxTurns as number,
+    message: row.message,
+  };
+  const offered = Buffer.from(mac, "base64url");
+  const expected = turnBudgetSignature(evidence, nonce);
+  return offered.length === expected.length && timingSafeEqual(offered, expected) ? evidence : undefined;
+}
+
+export function readProxyTurnBudgetExhausted(
+  value: unknown,
+  runId: string | undefined,
+): ProxyTurnBudgetExhausted | undefined {
+  const evidence = decodeProxyTurnBudgetExhausted(value);
+  return runId !== undefined && evidence?.runId === runId ? evidence : undefined;
+}
+
+/** A valid marker from a foreign or unbound run establishes no ending here. */
+export function proxyTurnBudgetExhaustedIsAuthenticated(value: unknown): boolean {
+  return decodeProxyTurnBudgetExhausted(value) !== undefined;
 }

@@ -411,6 +411,17 @@ export class ModelStreamIncompleteError extends Error {
   }
 }
 
+/** The original proxy cap refused another call; no provider was contacted. */
+export class ModelTurnBudgetExhaustedError extends Error {
+  constructor(
+    readonly turns: number,
+    readonly maxTurns: number,
+  ) {
+    super(`The run reached its model call limit (${turns} used; ${maxTurns} allowed).`);
+    this.name = "ModelTurnBudgetExhaustedError";
+  }
+}
+
 export const UNKNOWN_MODEL_TERMINAL_MESSAGE =
   "The model call ended without a classified result; no provider failure was established.";
 export const LOCAL_MODEL_ABORT_MESSAGE = "Pi cancelled the model call locally before it produced an answer.";
@@ -421,6 +432,8 @@ export const PERMANENT_MODEL_FAILURE_MESSAGE =
 
 const terminalFailureText = (terminal: PiTerminalFailure): string => {
   switch (terminal.kind) {
+    case "local_turn_budget":
+      return new ModelTurnBudgetExhaustedError(terminal.turns, terminal.maxTurns).message;
     case "local_abort":
       return LOCAL_MODEL_ABORT_MESSAGE;
     case "local_stream":
@@ -525,6 +538,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     return new ModelPolicyRefusedError(failure);
   };
   const bridge = new PiBridge({
+    runId: run.runId,
     emit,
     onProgress: run.onProgress,
     agentSpan,
@@ -2289,6 +2303,8 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           if (terminalFailure.failure.cause === "permanent") throw new Error(PERMANENT_MODEL_FAILURE_MESSAGE);
           throw terminalFailure.failure;
         }
+        if (terminalFailure.kind === "local_turn_budget")
+          throw new ModelTurnBudgetExhaustedError(terminalFailure.turns, terminalFailure.maxTurns);
         if (terminalFailure.kind === "local_abort") throw new Error(LOCAL_MODEL_ABORT_MESSAGE);
         if (terminalFailure.kind === "local_stream") throw new ModelStreamIncompleteError();
         throw new Error(UNKNOWN_MODEL_TERMINAL_MESSAGE);
@@ -2718,6 +2734,8 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             if (turnFailure.failure.cause === "permanent") throw new Error(PERMANENT_MODEL_FAILURE_MESSAGE);
             throw turnFailure.failure;
           }
+          if (turnFailure.kind === "local_turn_budget")
+            throw new ModelTurnBudgetExhaustedError(turnFailure.turns, turnFailure.maxTurns);
           if (turnFailure.kind === "local_abort") throw new Error(LOCAL_MODEL_ABORT_MESSAGE);
           if (turnFailure.kind === "local_stream") throw new ModelStreamIncompleteError();
           throw new Error(UNKNOWN_MODEL_TERMINAL_MESSAGE);

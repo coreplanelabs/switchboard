@@ -11,6 +11,7 @@ import { classifyProviderFailure, providerFailureParks, type ProviderFailureCaus
 import {
   authenticateProxyProviderFailure,
   authenticateProxyUnknownTerminal,
+  authenticateProxyTurnBudgetExhausted,
 } from "../../modelProxy/providerFailureAuth.js";
 import {
   abortFailedAfterEndNote,
@@ -1898,6 +1899,40 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     );
     await expect(forged.start()).rejects.toThrow(UNKNOWN_MODEL_TERMINAL_MESSAGE);
     expect(forged.container.commands().filter((c) => c.type === "prompt")).toHaveLength(1);
+  });
+
+  it("an authenticated local model-call cap stops initial and follow-up calls without retry or provider classification", async () => {
+    for (const followUp of [false, true]) {
+      const w = world({ providerPark: true });
+      const envelope = authenticateProxyTurnBudgetExhausted({ runId: "run-7", turns: 150, maxTurns: 150 });
+      scriptedPi(w.container, (n, c) => {
+        if (followUp && n === 0) return finalTurn(c, "first answer");
+        c.emit(
+          {
+            type: "message_end",
+            message: {
+              role: "assistant",
+              content: [],
+              stopReason: "error",
+              errorMessage: JSON.stringify({ error: envelope }),
+            },
+          },
+          { type: "agent_settled" },
+        );
+      });
+      if (followUp) {
+        const session = await w.open();
+        try {
+          await expect(
+            session.followUp({ text: "continue", maxTurns: 4, maxMinutes: 5, toolContext: { executor } }),
+          ).rejects.toThrow("The run reached its model call limit (150 used; 150 allowed).");
+        } finally {
+          await session.end();
+        }
+      } else await expect(w.start()).rejects.toThrow("The run reached its model call limit (150 used; 150 allowed).");
+      expect(w.container.commands().filter((c) => c.type === "prompt")).toHaveLength(followUp ? 2 : 1);
+      expect(w.notes.some((n) => /unknown|without a classified|model provider|the turn is held/.test(n))).toBe(false);
+    }
   });
 
   it("unknown terminal diagnostics reach the run record on initial and follow-up calls without replay or private text", async () => {
