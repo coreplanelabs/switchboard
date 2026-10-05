@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.285.1](https://github.com/coreplanelabs/switchboard/compare/v1.285.0...v1.285.1) (2026-10-05)
+
+
+### Bug fixes
+
+* **deploy:** return 503 when no bot container instance is available ([#2753](https://github.com/coreplanelabs/switchboard/issues/2753)) ([8f3f0fc](https://github.com/coreplanelabs/switchboard/commit/8f3f0fc2e516d52dd96873d5fe682cf88238b878))
+* **deploy:** return 503 when startup loses its container ([#2755](https://github.com/coreplanelabs/switchboard/issues/2755)) ([0c2034a](https://github.com/coreplanelabs/switchboard/commit/0c2034ad435919161228fdf6cf16a4eb3a444f9c))
+
+
+### Refactoring
+
+* **ship:** settle work through one durable lifecycle ([#2747](https://github.com/coreplanelabs/switchboard/issues/2747)) ([214c0dc](https://github.com/coreplanelabs/switchboard/commit/214c0dcf1172e02584f57638065345724c2d571c))
+
 ## [1.285.0](https://github.com/coreplanelabs/switchboard/compare/v1.284.8...v1.285.0) (2026-10-04)
 
 
