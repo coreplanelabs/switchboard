@@ -2021,6 +2021,32 @@ describe("Responses stream failure boundary", () => {
       "data: null\n\n",
       frame({ type: "response.created" }),
       frame({ type: "response.created", response: null }),
+      frame({
+        type: "response.output_item.added",
+        output_index: 0,
+        item: { type: "function_call", id: "item", call_id: "call", name: "bash", arguments: 1 },
+      }) +
+        frame({
+          type: "response.output_item.done",
+          output_index: 0,
+          item: { type: "function_call", id: "item", call_id: "call", name: "bash", arguments: "" },
+        }),
+      frame({
+        type: "response.output_item.added",
+        output_index: 0,
+        item: {
+          type: "function_call",
+          id: "item",
+          call_id: "call",
+          name: "bash",
+          arguments: { length: { toString: 0 } },
+        },
+      }) +
+        frame({
+          type: "response.function_call_arguments.done",
+          output_index: 0,
+          arguments: "[object Object]x",
+        }),
     ])
       for (const terminal of [
         {
@@ -2173,6 +2199,33 @@ describe("Responses stream failure boundary", () => {
       expect(h.ends.find((s) => s.name === "model.turn")?.status).toBe(complete ? "ok" : "error");
       expect(h.calls).toHaveLength(1);
     }
+  });
+
+  it("keeps actual tool arguments intact through the real pi adapter", async () => {
+    const args = { command: 'printf "héllo"; ' + "x".repeat(512) };
+    const text = JSON.stringify(args);
+    const item = { type: "function_call", id: "item", call_id: "call", name: "bash", arguments: "" };
+    const events: unknown[] = [
+      { type: "response.created", response: { id: "response" } },
+      { type: "response.output_item.added", output_index: 0, item },
+    ];
+    for (let offset = 0; offset < text.length; offset += 16)
+      events.push({
+        type: "response.function_call_arguments.delta",
+        output_index: 0,
+        delta: text.slice(offset, offset + 16),
+      });
+    events.push(
+      { type: "response.function_call_arguments.done", output_index: 0, arguments: text },
+      { type: "response.output_item.done", output_index: 0, item: { ...item, arguments: text } },
+      { type: "response.completed", response: { status: "completed", output: [{ ...item, arguments: text }] } },
+    );
+    const h = harness({ answer: () => streamingResponse(events.map(frame), h.clock, 1) });
+    const message = await throughPi(h);
+    expect(message.stopReason).toBe("toolUse");
+    expect(message.content).toEqual([expect.objectContaining({ type: "toolCall", name: "bash", arguments: args })]);
+    expect(h.calls).toHaveLength(1);
+    expect(h.ends.find((s) => s.name === "model.turn")?.status).toBe("ok");
   });
 });
 
