@@ -1,3 +1,4 @@
+import { RUN_ID_PATTERN } from "./runIdentity.js";
 import { validMaintenanceTransport, maintenanceEventsMatch } from "./coordinator/maintenanceIdentity.js";
 import {
   branchPublicationOf,
@@ -82,7 +83,7 @@ export const PROVISIONAL_LABEL = "unfinished — no finish recorded";
 const RUN_STATUSES: readonly RunStatus[] = ["completed", "stopped_soft", "stopped_hard", "failed", "interrupted"];
 
 /** Every `runs.*` id: checked before any store call. */
-export const RUN_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+export { RUN_ID_PATTERN } from "./runIdentity.js";
 /** A reviewed head as the record stores it: the normalized sha (`normalizeHead`), 7 to 40 lowercase hex. */
 const REVIEW_HEAD_PATTERN = /^[0-9a-f]{7,40}$/;
 

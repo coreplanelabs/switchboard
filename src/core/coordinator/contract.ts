@@ -12,7 +12,8 @@ import { IDLE_DAYS_MAX, type Grant, type GrantSource } from "../budgets.js";
 import { isVerbosity, type Verbosity } from "../verbosity.js";
 import { isFindingShape } from "../reviewVerdict.js";
 import { isMaintenanceActionId } from "./maintenanceIdentity.js";
-import { RUN_ID_PATTERN } from "../runRecord.js";
+import { RUN_ID_PATTERN, IDEMPOTENCY_KEY_PATTERN, INSTANCE_ID_PATTERN } from "../runIdentity.js";
+export { IDEMPOTENCY_KEY_PATTERN, INSTANCE_ID_PATTERN } from "../runIdentity.js";
 import {
   isAddressSeverity,
   type AddressSeverity,
@@ -47,12 +48,8 @@ export const PLAN_MERGE_ACTION = "plan:merge";
 /** Where the bot answers the steps: `POST <prefix><step>` on the container, forwarded by the shim like every `/admin/*` path. */
 export const COORDINATOR_STEP_PATH_PREFIX = "/admin/coordinator/";
 
-/** A Workflow instance id: the platform's own alphabet, at most 100 characters. */
-export const INSTANCE_ID_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,99}$/;
 /** A step name: `<unit>/<round>/<kind>` and its kin — no colon, which separates it from the instance in the key. */
 export const STEP_NAME_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_./-]{0,255}$/;
-/** `<parentInstanceId>:<step>` — the idempotency key a spawn carries and the child's claim stores. */
-export const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,99}:[A-Za-z0-9_][A-Za-z0-9_./-]{0,255}$/;
 
 export function idempotencyKeyFor(parentInstanceId: string, step: string): string {
   return `${parentInstanceId}:${step}`;
