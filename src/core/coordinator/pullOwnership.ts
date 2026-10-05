@@ -347,7 +347,7 @@ export function findPullOwnersInRows(target: PullTarget, rows: PullOwnershipRows
     )
       return;
     return {
-      owner: { kind: "unit", instanceId: instance.id, unit: unit.unit },
+      owner: unitOwner(unit),
       ref: proof.binding.branch,
       holds: unitHoldsPulls(unit, instance),
     };

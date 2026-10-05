@@ -139,6 +139,37 @@ describe("complete canonical pull ownership", () => {
     expect(
       findPullOwnersInRows({ repo: instance.repo, ref: unit.branch }, { ...rows, units: [{ instance, unit: ended }] }),
     ).toEqual({ ok: true, owners: [] });
+    const actionId = `r_${"d".repeat(64)}`;
+    const recovering: CoordinatorUnit = {
+      ...current,
+      history: { version: 1, receiptId: "rc_claim" },
+      recovery: {
+        kind: "coding",
+        round: 0,
+        actionId,
+        workflowId: `recovery-${actionId}`,
+        expectedHeadSha: head,
+        remainingMs: 1000,
+        claimedAt: 2,
+        deadlineAt: 1002,
+        step: `${unit.unit}/recovery/${actionId}/0/coding`,
+        codingRunId: runId,
+        codingKey: record.idempotencyKey,
+        previousEnding: { kind: "failed", report: "PR creation refused", at: 1 },
+        accounting: {
+          spendUsd: 0,
+          children: [{ runId, key: record.idempotencyKey, usd: 0 }],
+          grant: { renewals: 0 },
+          renewalsSpent: 0,
+        },
+      },
+    };
+    expect(
+      findPullOwnersInRows(
+        { repo: instance.repo, ref: unit.branch },
+        { ...rows, units: [{ instance, unit: recovering }] },
+      ),
+    ).toEqual({ ok: true, owners: [{ kind: "unit", instanceId: instance.id, unit: unit.unit, actionId }] });
     // Lookup does not rewrite private publication or release evidence.
     expect(run.publication).toEqual(publication);
     expect(record.publicationSettlement.release).toEqual({ kind: "pending" });
