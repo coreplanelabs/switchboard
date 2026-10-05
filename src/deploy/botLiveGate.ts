@@ -41,8 +41,16 @@ function judge(input: BotLiveInput): BotLiveDecision {
   )
     return waiting(`container application ${input.containerApp} has an instance with unknown state`);
   const running = input.instances.value.filter((instance) => instance.state.toLowerCase() === "running");
-  const singleton = running.find((instance) => instance.name === "singleton");
-  if (running.length !== 1 || !singleton || singleton.version !== app.version)
+  const singleton = input.instances.value.filter((instance) => instance.name === "singleton");
+  if (singleton.length !== 1)
+    return waiting(`container application ${input.containerApp} has no unique singleton identity`);
+  // Durable Object placement may still say stopped or inactive while the
+  // singleton serves traffic. Its own health proves process uptake; the
+  // inventory can still contradict that proof with a competing live instance.
+  if (
+    running.length > 1 ||
+    running.some((instance) => instance.name !== "singleton" || instance.version !== app.version)
+  )
     return waiting(
       `container application ${input.containerApp} singleton is not the only running instance on version ${app.version}`,
     );
@@ -64,13 +72,13 @@ function judge(input: BotLiveInput): BotLiveDecision {
   const target = app.image;
   return {
     kind: "live",
-    summary: `container application ${input.containerApp} targets ${target} at version ${app.version}; singleton runs on version ${singleton.version}; /healthz serves exact ${commit}`,
+    summary: `container application ${input.containerApp} targets ${target} at version ${app.version}; singleton /healthz serves exact ${commit}`,
   };
 }
 
 /**
  * A bot upload is live only when the independently managed container application
- * targets the selected release image and its singleton runs on that version and `/healthz` reports the full expected commit.
+ * targets the selected release image and singleton health reports the full expected commit.
  * At the ordinary live deadline, the first missing fact becomes the failure.
  */
 export function decideBotLive(input: BotLiveInput, deadlineMs: number = LIVE_GATE_DEADLINE_MS): BotLiveDecision {

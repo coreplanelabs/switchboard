@@ -35,12 +35,49 @@ const input = (world: RollbackWorld, elapsedMs = LIVE_GATE_DEADLINE_MS): BotLive
 });
 
 describe("decideBotLive rollback fence", () => {
+  it.each([
+    { name: "singleton", state: "stopped", version: 18 },
+    { name: "singleton", state: "inactive", version: null },
+  ])("accepts exact healthy singleton when native placement state lags: %j", (singleton) => {
+    const world = newerWorld();
+    world.app = { version: 18, image: PRIOR_IMAGE };
+    world.healthCommit = PRIOR_COMMIT;
+    const evidence = { ...input(world), instances: { value: [singleton] } };
+    expect(decideBotLive(evidence)).toMatchObject({ kind: "live" });
+    expect(
+      decideBotLive({ ...evidence, health: { status: 200, body: { ok: true, build: { commit: NEWER_COMMIT } } } }),
+    ).toMatchObject({ kind: "failed", reason: expect.stringContaining("expected exact") });
+    expect(
+      decideBotLive({
+        ...evidence,
+        health: { status: 200, body: { ok: true, build: { commit: PRIOR_COMMIT }, draining: true } },
+      }),
+    ).toMatchObject({ kind: "failed", reason: expect.stringContaining("draining") });
+  });
+
   it("accepts a reused lower application version only when selected image and runtime agree", () => {
     const world = newerWorld();
     world.app = { version: 16, image: PRIOR_IMAGE };
     world.healthCommit = PRIOR_COMMIT;
     expect(decideBotLive(input(world))).toMatchObject({ kind: "live" });
   });
+
+  it.each([17, 18])(
+    "refuses a competing running instance on version %s despite healthy singleton response",
+    (version) => {
+      const world = newerWorld();
+      world.app = { version: 18, image: PRIOR_IMAGE };
+      world.healthCommit = PRIOR_COMMIT;
+      const evidence = input(world);
+      evidence.instances = {
+        value: [
+          { name: "singleton", state: "stopped", version: 18 },
+          { name: "other", state: "running", version },
+        ],
+      };
+      expect(decideBotLive(evidence)).toMatchObject({ kind: "failed", reason: expect.stringContaining("singleton") });
+    },
+  );
 
   it("refuses an old singleton despite exact selected health and target", () => {
     const world = newerWorld();
@@ -108,7 +145,7 @@ describe("decideBotLive rollback fence", () => {
 
     expect(decideBotLive(input(world, 30_000))).toEqual({
       kind: "live",
-      summary: `container application ${APP} targets ${PRIOR_IMAGE} at version 18; singleton runs on version 18; /healthz serves exact ${PRIOR_COMMIT}`,
+      summary: `container application ${APP} targets ${PRIOR_IMAGE} at version 18; singleton /healthz serves exact ${PRIOR_COMMIT}`,
     });
   });
 

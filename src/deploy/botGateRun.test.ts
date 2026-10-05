@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { LIVE_GATE_POLL_MS } from "./liveGate.js";
 import { workersFor, type DeployStep, type BotLiveGate } from "./plan.js";
 import { deployStep, readRawBotApplication, type SandboxGateDeps, type StepExec } from "./run.js";
-import type { AppState, HealthRead, Read } from "./sandboxLiveGate.js";
+import { parseInstancesPage, type AppState, type HealthRead, type Read } from "./sandboxLiveGate.js";
 import { TEST_PROFILE } from "./testing/profile.js";
 
 const PRIOR_COMMIT = "903ae2855833637fbcc0c0a22d54e7268be75965";
@@ -90,6 +90,17 @@ function harness(script: Scripted) {
 }
 
 describe("deployStep (bot rollback fence)", () => {
+  it("uses fresh singleton health when Wrangler reports an inactive placement without a version", async () => {
+    const h = harness({ app: [before, after], health: [serving(PRIOR_COMMIT)] });
+    const native = parseInstancesPage([{ name: "singleton", state: "inactive", version: null }]);
+    expect(native).toBeDefined();
+    h.deps.readInstances = async () => ({ value: native!.rows });
+    expect(await deployStep(botStep, plan, PRIOR_COMMIT, h.io, h.deps, h.exec)).toMatchObject({
+      ok: true,
+      live: "live",
+    });
+  });
+
   it("refuses the stale list that makes Wrangler skip rollback before any upload even by force", async () => {
     const h = harness({
       app: [before],
@@ -212,13 +223,13 @@ describe("deployStep (bot rollback fence)", () => {
       `[deploy:all] bot: container application at version 17 (image ${NEWER_IMAGE}) before the upload`,
     );
     expect(h.lines).toContain(
-      `[deploy:all] bot: gate requires ${PRIOR_IMAGE}, the running singleton version and exact commit ${PRIOR_COMMIT}`,
+      `[deploy:all] bot: gate requires ${PRIOR_IMAGE}, unique singleton identity and exact healthy commit ${PRIOR_COMMIT}`,
     );
     expect(h.lines).toContain(
       `[deploy:all] bot: deployed, not live yet — container application ${APP} still targets ${NEWER_IMAGE}; expected ${PRIOR_IMAGE} (0m 0s)`,
     );
     expect(h.lines).toContain(
-      `[deploy:all] bot: live (container application ${APP} targets ${PRIOR_IMAGE} at version 18; singleton runs on version 18; /healthz serves exact ${PRIOR_COMMIT}; ${LIVE_GATE_POLL_MS / 1000}s after the upload)`,
+      `[deploy:all] bot: live (container application ${APP} targets ${PRIOR_IMAGE} at version 18; singleton /healthz serves exact ${PRIOR_COMMIT}; ${LIVE_GATE_POLL_MS / 1000}s after the upload)`,
     );
   });
 

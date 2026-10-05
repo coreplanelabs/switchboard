@@ -1360,7 +1360,7 @@ async function deployStepLoop(
           "value" in application.before ? `version ${application.before.value.version}` : "its pre-deploy version";
         if (liveGate.kind === "bot")
           io.log(
-            `[deploy:all] bot: gate requires ${step.botImage ?? "the directly read application image"}, the running singleton version and exact commit ${expectedCommit}`,
+            `[deploy:all] bot: gate requires ${step.botImage ?? "the directly read application image"}, unique singleton identity and exact healthy commit ${expectedCommit}`,
           );
         else
           io.log(
