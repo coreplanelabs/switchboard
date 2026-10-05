@@ -331,7 +331,7 @@ export async function liveFalseSilence(
 ): Promise<LiveIntakeRatio> {
   const windowMs = opts.windowMs ?? INTAKE_RECOVERY_WINDOW_MS;
   const receipts = await ledger.listIntake(opts.since !== undefined ? { since: opts.since } : {});
-  const silentRows = receipts.filter((r) => r.verdict === "silent");
+  const silentRows = receipts.filter((r) => r.verdict === "silent" && !r.threadKey.startsWith("probe:"));
   const skipped = { unparsedThread: 0, readFailed: 0, replyNotFound: 0 };
   const weeks = new Map<string, LiveIntakeWeek>();
   const threadCache = new Map<string, ThreadMessage[] | undefined>();

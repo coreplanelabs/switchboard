@@ -147,3 +147,26 @@ measurements. Remove the experiment block and restart to finish measurement;
 the stored results remain readable. Change `id` for another run rather than
 combining differently configured trials. A short, low-volume run may establish
 speed or cost differences without enough evidence to decide routing quality.
+
+## A single deployed shadow probe
+
+Before enabling a live split, an operator with `deploy:write` may send one
+`POST /admin/reply-probe` request to the bot. Supply `model` and `message` as
+JSON. The request uses the serving bot's key and the same intake code, writes
+a synthetic receipt under `probe:<operator>:<id>`, and returns its experiment
+ID for the existing report command. It never dispatches the verdict or changes
+live configuration. This proves the deployed provider/store path, not Slack
+event delivery or live classification accuracy.
+
+```json
+{ "model": "typesafe/jev-1.13.0", "message": "Please explain this deployment failure." }
+```
+
+The response includes `apiCalls`, `persisted`, `decision` and
+`liveRoutingChanged: false`. Check that the expected verdict came from the
+model, the receipt was inserted and persisted, and only one API call occurred.
+Use the returned experiment ID with `load intake --live --experiment ID` to
+verify reporting. Unknown or failed model outcomes are data, not successful
+functional proof. No key appears in the request or response.
+
+| 20: synthetic `probe:` receipts remain available to the experiment report but are excluded from the live false-silence denominator and weekly recovery buckets | `[unit]` `src/load/intakeReplay.test.ts::liveFalseSilence — the live ratio over the receipts and the threads' later mentions::excludes synthetic probe silences from the live denominator and weekly buckets` |

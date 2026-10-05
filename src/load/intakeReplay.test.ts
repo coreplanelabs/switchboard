@@ -154,6 +154,23 @@ describe("liveFalseSilence — the live ratio over the receipts and the threads'
   });
   const tsOf = (ms: number) => `${Math.floor(ms / 1000)}.000000`;
 
+  it("excludes synthetic probe silences from the live denominator and weekly buckets", async () => {
+    const at = 1_600_000_000_000;
+    const rows = [receipt("slack:C_BACKEND:1000.000100", at, "silent"), receipt("probe:ops:canary", at, "silent")];
+    const ratio = await liveFalseSilence(
+      ledgerOf(rows),
+      async () => [
+        { ts: tsOf(at - 500), user: "U_ALICE", text: "please answer" },
+        { ts: tsOf(at + MINUTE_MS), user: "U_ALICE", text: "<@U_BOT> hello?" },
+      ],
+      { botUserId: "U_BOT" },
+    );
+    expect(ratio.silent).toBe(1);
+    expect(ratio.recovered).toBe(1);
+    expect(ratio.weeks[0]).toMatchObject({ silent: 1, recovered: 1 });
+    expect(ratio.skipped.unparsedThread).toBe(0);
+  });
+
   it("counts a silent receipt recovered when the same person mentions the bot in the thread within the window — one of two prints one half", async () => {
     const t1 = 1_600_000_000_000;
     const t2 = t1 + 3 * MINUTE_MS;
