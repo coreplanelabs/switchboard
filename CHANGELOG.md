@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.287.0](https://github.com/coreplanelabs/switchboard/compare/v1.286.2...v1.287.0) (2026-10-05)
+
+
+### Features
+
+* **core:** probe a reply model without changing live routing ([#2781](https://github.com/coreplanelabs/switchboard/issues/2781)) ([711d3f2](https://github.com/coreplanelabs/switchboard/commit/711d3f25e1339a6f81bd3334947382490c53575c))
+
 ## [1.286.2](https://github.com/coreplanelabs/switchboard/compare/v1.286.1...v1.286.2) (2026-10-05)
 
 
