@@ -6,7 +6,7 @@ import { settingsForAgent } from "./config/agents.js";
 import { intakeModelRef, type AppConfig } from "./config.js";
 import { providerStructuredModel, type RouteModel } from "./core/dispatch/route.js";
 import { turnEffort } from "./core/dispatch/turnEffort.js";
-import type { IntakeDeps } from "./core/intake.js";
+import { decideIntake, type IntakeDeps } from "./core/intake.js";
 import type { IntakeExperimentMeasurement } from "./core/runLedger/types.js";
 import type { CompletionResult, Provider } from "./core/provider.js";
 import { parseModelPrices, priceTurn } from "./core/modelPricing.js";
@@ -16,6 +16,50 @@ import type { ProviderTable } from "./core/harness/piAi.js";
 import { installedModelRegistry } from "./core/installedModelRegistry.js";
 import { resolveModelCard } from "./core/modelCard.js";
 import { parseModelRef } from "./core/provider.js";
+
+export async function probeReply(
+  config: AppConfig,
+  completions: ProviderTable,
+  input: { id: string; subject: string; model: string; message: string; gen: number },
+  deps: { ledger: NonNullable<IntakeDeps["ledger"]>; now: () => number; secrets?: Secrets; fetch?: typeof fetch },
+): Promise<Record<string, unknown>> {
+  const id = `shadow-${input.id}`;
+  const key = `probe:${input.subject}:${input.id}`;
+  // A private per-call configuration never changes the installed classifier.
+  const cfg = { ...config, intake: { ...config.intake, experiment: { id, model: input.model, percent: 100 } } };
+  let apiCalls = 0;
+  const completion = intakeCompletion(cfg, completions, () => {}, {
+    secrets: deps.secrets,
+    fetch: async (url, options) => {
+      if (++apiCalls > 1) throw new Error("reply probe permits one model request");
+      return (deps.fetch ?? fetch)(url, options);
+    },
+  });
+  if (!completion) throw new Error("reply classifier unavailable");
+  const decision = await decideIntake(
+    {
+      key,
+      threadKey: key,
+      mode: "classify",
+      model: completion.modelRef,
+      gen: input.gen,
+      message: input.message,
+      turns: [],
+      facts: { replierIsRequester: true, mentionsOther: false, threadStartedByBot: false },
+    },
+    intakeDecisionDeps(completion, deps),
+  );
+  const stored = await deps.ledger.readIntake(key);
+  return {
+    kind: "synthetic-reply-probe",
+    experiment: id,
+    messageKey: key,
+    apiCalls,
+    persisted: stored?.experiment?.id === id,
+    decision,
+    liveRoutingChanged: false,
+  };
+}
 
 export interface IntakeCompletion {
   selectModel?: IntakeDeps["selectModel"];

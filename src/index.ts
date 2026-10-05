@@ -6,7 +6,9 @@ import { installationPath } from "./deploy/operatorRoot.js";
 import { openConfigStore } from "./config.js";
 import { bindLoadedBaseConfigReceipt, parseConfigLocation } from "./configDocument.js";
 import { configRefusalReason, createConfigRefusalServer } from "./configBoot.js";
-import { intakeCompletion, intakeDecisionDeps } from "./intakeModel.js";
+import { intakeCompletion, intakeDecisionDeps, probeReply } from "./intakeModel.js";
+import { randomUUID } from "node:crypto";
+import { handleAdminReplyProbe, REPLY_PROBE_PATH } from "./channels/adminReplyProbe.js";
 import { providerModelsReader } from "./core/dispatch/providerModels.js";
 import { configuredModelRefs } from "./core/commands/providers.js";
 import { LEASE_MS, type IntakeReceipt } from "./core/runLedger/types.js";
@@ -1759,6 +1761,29 @@ export async function runBot(): Promise<void> {
           tokens: processSecrets.get("SWITCHBOARD_INGRESS_TOKENS"),
           grantsFor: (id) => config.grantsFor(id),
           bearers: runBearers,
+        });
+        return;
+      }
+      if (path === REPLY_PROBE_PATH) {
+        void handleAdminReplyProbe(req, res, {
+          tokens: processSecrets.get("SWITCHBOARD_INGRESS_TOKENS"),
+          grantsFor: (id) => config.grantsFor(id),
+          probe: async (request, subject) => {
+            if (!ledgerClient) throw new Error("durable reply receipts unavailable");
+            return probeReply(
+              config.config,
+              completions,
+              {
+                ...request,
+                subject,
+                id: randomUUID(),
+                gen: PROCESS_STARTED_AT,
+              },
+              { ledger: ledgerClient, now: systemClock },
+            );
+          },
+        }).catch(() => {
+          if (!res.destroyed) res.destroy();
         });
         return;
       }

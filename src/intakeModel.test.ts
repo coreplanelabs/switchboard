@@ -4,7 +4,7 @@ import type { CompletionRequest, Provider } from "./core/provider.js";
 import type { ProviderTable } from "./core/harness/piAi.js";
 import { REASONING_OUTPUT_TOKEN_ALLOWANCE } from "./core/dispatch/route.js";
 import { decideIntake, type IntakeInput } from "./core/intake.js";
-import { intakeCompletion, intakeDecisionDeps } from "./intakeModel.js";
+import { intakeCompletion, intakeDecisionDeps, probeReply } from "./intakeModel.js";
 import { secretsFrom } from "./secrets.js";
 import { isIntakeReceipt, type IntakeReceipt } from "./core/runLedger/types.js";
 
@@ -61,6 +61,52 @@ async function ask(model: NonNullable<ReturnType<typeof intakeCompletion>>["mode
 }
 
 describe("intakeCompletion — the intake composition root", () => {
+  it("an operator probe uses one request, persists a private canary and leaves live settings untouched", async () => {
+    const config = parseAppConfigText(yaml());
+    const captured = completionRequests();
+    let stored: IntakeReceipt | undefined;
+    const ledger = {
+      readIntake: async () => stored,
+      recordIntake: async (_key: string, row: IntakeReceipt) => {
+        stored = row;
+        return { inserted: true, stored: row };
+      },
+    };
+    const proof = await probeReply(
+      config,
+      captured.completions,
+      { id: "one", subject: "ops", model: "typesafe/jev-1.13.0", message: "Please help.", gen: 100 },
+      {
+        ledger,
+        now: () => 100,
+        secrets: secretsFrom({ TYPESAFE_API_KEY: "private" }),
+        fetch: async () =>
+          new Response(
+            JSON.stringify({
+              model: "jev-1.13.0",
+              answers: {
+                intake: {
+                  type: "choice",
+                  choice: "addressed",
+                  probabilities: { addressed: 1, silent: 0, unsure: 0 },
+                  confidence: 1,
+                },
+              },
+              usage: { input_tokens: 100, output_tokens: 0 },
+            }),
+          ),
+      },
+    );
+    expect(proof).toMatchObject({
+      apiCalls: 1,
+      persisted: true,
+      liveRoutingChanged: false,
+      decision: { verdict: "addressed", receipt: "inserted" },
+    });
+    expect(stored).toMatchObject({ threadKey: "probe:ops:one", gen: 100, model: "typesafe/jev-1.13.0" });
+    expect(config.intake?.experiment).toBeUndefined();
+    expect(captured.requests).toHaveLength(0);
+  });
   it("the A/B gate persists the actual arm and usage, and a receipt or pending question spends nothing", async () => {
     const captured = completionRequests();
     const config = parseAppConfigText(
