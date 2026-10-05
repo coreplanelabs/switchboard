@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.287.2](https://github.com/coreplanelabs/switchboard/compare/v1.287.1...v1.287.2) (2026-10-05)
+
+
+### Bug fixes
+
+* **deploy:** prove bounded agent capability smoke ([#2780](https://github.com/coreplanelabs/switchboard/issues/2780)) ([7246f30](https://github.com/coreplanelabs/switchboard/commit/7246f300999a2fe7b1422b049533cccd8cef77f1))
+
 ## [1.287.1](https://github.com/coreplanelabs/switchboard/compare/v1.287.0...v1.287.1) (2026-10-05)
 
 
