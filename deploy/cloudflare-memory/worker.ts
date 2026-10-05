@@ -134,6 +134,8 @@ import {
   isRunRecord,
   branchPushReceiptsOf,
   workEvidenceBelongsToRun,
+  isRunWorkOwner,
+  type RunWorkOwner,
   isRunListItem,
   isRecoveryEvidenceScope,
   isRunSession,
@@ -4369,33 +4371,46 @@ export class RunHistoryDO extends DurableObject<Env> {
       });
     }
     for (const row of bounded(
-      this.sql.exec<{ run_id: string; summary_json: string; work_evidence_json: string | null }>(
-        `SELECT run_id, summary_json, work_evidence_json FROM runs LIMIT ?`,
+      this.sql.exec<{ run_id: string; owner_json: string; work_evidence_json: string | null }>(
+        // Project inside SQLite, before the source-byte bound. Display text and
+        // diagnostics cannot hold a pull request; canonical identity and saved
+        // publication remain in this transaction, including unreadable values.
+        // SQLite accepts JSON5; refuse it before projection can normalize NaN
+        // into the null sentinel used for a cleared Door publication.
+        `SELECT run_id,
+           CASE WHEN json_valid(summary_json) THEN
+           (SELECT json_group_object(key, json(CASE
+              WHEN type IN ('array', 'object') THEN value
+              WHEN type = 'true' THEN 'true'
+              WHEN type = 'false' THEN 'false'
+              ELSE json_quote(value) END))
+            FROM json_each(runs.summary_json)
+            WHERE key IN ('id', 'repo', 'userId', 'channelId', 'threadKey',
+              'parentInstanceId', 'coordinatorUnit', 'coordinatorAttempt',
+              'idempotencyKey', 'session', 'branchPublication', 'doorPublicationPending'))
+           ELSE 'null' END AS owner_json,
+           work_evidence_json FROM runs LIMIT ?`,
         limit,
       ),
     )) {
-      const raw = JSON.parse(row.summary_json);
+      const raw: Record<string, unknown> = JSON.parse(row.owner_json);
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("unreadable terminal producer");
-      const {
-        branchPublication,
-        reviewPublication: _reviewPublication,
-        branchPushReceipts: _branchPushReceipts,
-        ...summary
-      } = raw;
-      if (!isRunListItem(summary) || summary.id !== row.run_id) throw new Error("unreadable terminal producer");
+      const { branchPublication, doorPublicationPending, ...identity } = raw;
+      if (!isRunWorkOwner(identity) || !isPullOwnerLiveMeta(identity) || identity.id !== row.run_id)
+        throw new Error("unreadable terminal producer");
       const evidence =
-        row.work_evidence_json === null ? undefined : parseWorkEvidence(JSON.parse(row.work_evidence_json), summary);
+        row.work_evidence_json === null ? undefined : parseWorkEvidence(JSON.parse(row.work_evidence_json), identity);
       if (row.work_evidence_json !== null && !evidence) throw new Error("unreadable private producer");
       rows.runs.push({
         runId: row.run_id,
-        repo: summary.repo,
+        repo: identity.repo,
         live: false,
         publication:
           evidence && Object.hasOwn(evidence, "branchPublication") ? evidence.branchPublication : branchPublication,
         door:
           evidence && Object.hasOwn(evidence, "doorPublicationPending")
             ? evidence.doorPublicationPending
-            : raw.doorPublicationPending,
+            : doorPublicationPending,
       });
     }
     for (const row of bounded(
@@ -7404,7 +7419,7 @@ function identityOfSummary(raw: string): {
 }
 
 /** Private evidence can carry an unreadable producer projection for preservation only. */
-function parseWorkEvidence(value: unknown, owner: RunListItem | RunRecord): Record<string, unknown> | undefined {
+function parseWorkEvidence(value: unknown, owner: RunWorkOwner): Record<string, unknown> | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const evidence = value as Record<string, unknown>;
   if (

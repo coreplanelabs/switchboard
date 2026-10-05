@@ -1233,16 +1233,9 @@ export function normalizeStored<T extends { diagnosis: FrictionDiagnosis; channe
  *  stay readable by an older reader; the diagnosis likewise is checked for
  *  shape, not for the current category list (see `normalizeDiagnosis`). */
 export function isRunRecord(v: unknown): v is RunRecord {
-  if (typeof v !== "object" || v === null) return false;
-  const r = v as Record<string, unknown>;
-  if (typeof r.id !== "string" || !RUN_ID_PATTERN.test(r.id)) return false;
-  if (
-    !isOptionalString(r.label) ||
-    !isOptionalString(r.agent) ||
-    !isOptionalString(r.model) ||
-    !isOptionalString(r.repo)
-  )
-    return false;
+  if (!isRunWorkOwner(v)) return false;
+  const r = v as RunWorkOwner & Record<string, unknown>;
+  if (!isOptionalString(r.label) || !isOptionalString(r.agent) || !isOptionalString(r.model)) return false;
   if (!isOptionalString(r.activity) || !isOptionalString(r.sourceUrl) || !isOptionalString(r.userName)) return false;
   if (r.record !== undefined && (typeof r.record !== "string" || !/^\d{4}$/.test(r.record))) return false;
   if (r.recordTaskKey !== undefined && (typeof r.recordTaskKey !== "string" || !/^[0-9a-f]{16}$/.test(r.recordTaskKey)))
@@ -1355,14 +1348,6 @@ export function isRunRecord(v: unknown): v is RunRecord {
   // Where the conversation started (item 52): one of the two words, or absent.
   if (r.seed !== undefined && !RUN_SEEDS.includes(r.seed as RunSeed)) return false;
   // The run's place in its session's log (item 53), or absent.
-  if (r.session !== undefined) {
-    if (!isRunSession(r.session)) return false;
-    if (
-      r.session.threadSession !== undefined &&
-      ![`${r.threadKey}:@thread`, `${r.threadKey}:@thread:@context-v1`].includes(r.session.threadSession)
-    )
-      return false;
-  }
   if (r.contextCheckpointReceipt !== undefined) {
     if (
       !isContextCheckpointReceipt(r.contextCheckpointReceipt) ||
@@ -1391,29 +1376,6 @@ export function isRunRecord(v: unknown): v is RunRecord {
   // and the key `<instance>:<step>` — both or neither; one alone is no tag.
   if (!validMaintenanceTransport(r)) return false;
   if (!maintenanceEventsMatch(r, Array.isArray(r.events) ? r.events : [])) return false;
-  if ((r.parentInstanceId === undefined) !== (r.idempotencyKey === undefined)) return false;
-  if (
-    r.parentInstanceId !== undefined &&
-    (typeof r.parentInstanceId !== "string" || !INSTANCE_ID_PATTERN.test(r.parentInstanceId))
-  )
-    return false;
-  if (
-    r.idempotencyKey !== undefined &&
-    (typeof r.idempotencyKey !== "string" || !IDEMPOTENCY_KEY_PATTERN.test(r.idempotencyKey))
-  )
-    return false;
-  if (
-    r.coordinatorUnit !== undefined &&
-    (r.parentInstanceId === undefined || typeof r.coordinatorUnit !== "string" || !UNIT_PATTERN.test(r.coordinatorUnit))
-  )
-    return false;
-  if (
-    r.coordinatorAttempt !== undefined &&
-    (r.coordinatorUnit === undefined ||
-      !Number.isSafeInteger(r.coordinatorAttempt) ||
-      (r.coordinatorAttempt as number) < 0)
-  )
-    return false;
   if (
     r.costCapUsd !== undefined &&
     (r.parentInstanceId === undefined ||
@@ -1436,7 +1398,6 @@ export function isRunRecord(v: unknown): v is RunRecord {
   // without making the whole record unreadable.
   if (r.restarting !== undefined && r.restarting !== true) return false;
   if (r.restartUntil !== undefined && (!isFiniteNumber(r.restartUntil) || r.restarting !== true)) return false;
-  if (typeof r.channelId !== "string" || typeof r.userId !== "string" || typeof r.threadKey !== "string") return false;
   if (r.relayedBy !== undefined && typeof r.relayedBy !== "string") return false;
   if (r.authenticatedAs !== undefined && typeof r.authenticatedAs !== "string") return false;
   if (r.postedBy !== undefined && typeof r.postedBy !== "string") return false;
@@ -1551,20 +1512,63 @@ export function applyRetention<T extends RetentionKey>(
 /** The stored size of one record's JSON, after which events are dropped from the middle. */
 export const MAX_RECORD_BYTES = 1.5 * MIB;
 
+export type RunWorkOwner = Pick<
+  RunRecord,
+  | "id"
+  | "repo"
+  | "userId"
+  | "channelId"
+  | "threadKey"
+  | "parentInstanceId"
+  | "coordinatorUnit"
+  | "coordinatorAttempt"
+  | "idempotencyKey"
+  | "session"
+>;
+
+/** Canonical identity shared by run records and private work evidence. */
+export function isRunWorkOwner(value: unknown): value is RunWorkOwner {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const r = value as Record<string, unknown>;
+  if (typeof r.id !== "string" || !RUN_ID_PATTERN.test(r.id) || !isOptionalString(r.repo)) return false;
+  if (![r.userId, r.channelId, r.threadKey].every((v) => typeof v === "string")) return false;
+  if ((r.parentInstanceId === undefined) !== (r.idempotencyKey === undefined)) return false;
+  if (
+    r.parentInstanceId !== undefined &&
+    (typeof r.parentInstanceId !== "string" || !INSTANCE_ID_PATTERN.test(r.parentInstanceId))
+  )
+    return false;
+  if (
+    r.idempotencyKey !== undefined &&
+    (typeof r.idempotencyKey !== "string" || !IDEMPOTENCY_KEY_PATTERN.test(r.idempotencyKey))
+  )
+    return false;
+  if (
+    r.coordinatorUnit !== undefined &&
+    (r.parentInstanceId === undefined || typeof r.coordinatorUnit !== "string" || !UNIT_PATTERN.test(r.coordinatorUnit))
+  )
+    return false;
+  if (
+    r.coordinatorAttempt !== undefined &&
+    (r.coordinatorUnit === undefined ||
+      !Number.isSafeInteger(r.coordinatorAttempt) ||
+      (r.coordinatorAttempt as number) < 0)
+  )
+    return false;
+  if (r.session !== undefined) {
+    if (!isRunSession(r.session)) return false;
+    if (
+      r.session.threadSession !== undefined &&
+      ![`${r.threadKey}:@thread`, `${r.threadKey}:@thread:@context-v1`].includes(r.session.threadSession)
+    )
+      return false;
+  }
+  return true;
+}
+
 export function workEvidenceBelongsToRun(
   evidence: { workReads?: unknown; unitSeedReceipt?: unknown },
-  owner: Pick<
-    RunRecord,
-    | "id"
-    | "userId"
-    | "channelId"
-    | "threadKey"
-    | "parentInstanceId"
-    | "coordinatorUnit"
-    | "coordinatorAttempt"
-    | "idempotencyKey"
-    | "session"
-  >,
+  owner: RunWorkOwner,
 ): boolean {
   if (!isRunWorkEvidence(evidence)) return false;
   const reads = evidence.workReads as readonly MainWorkReadReceipt[] | undefined;
