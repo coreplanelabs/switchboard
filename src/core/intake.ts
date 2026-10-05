@@ -30,7 +30,7 @@ import {
 import { oneLine, redactAndCap } from "./redact.js";
 import { askStructured, attemptsOfThrow, StructuredAskError, type StructuredAttempt } from "./dispatch/structured.js";
 import { wrapUntrusted } from "./untrusted.js";
-import type { IntakeReceipt } from "./runLedger/types.js";
+import type { IntakeReceipt, IntakeExperimentMeasurement } from "./runLedger/types.js";
 import {
   OutputCapError,
   outputCapWithReasoning,
@@ -131,6 +131,12 @@ export interface IntakeInput {
 
 /** What intake runs on: the model seam, the ledger or null, and a clock. */
 export interface IntakeDeps {
+  selectModel?: (input: IntakeInput) => {
+    model: RouteModel;
+    modelRef: string;
+    capField?: string;
+    measurement: () => Omit<IntakeExperimentMeasurement, "elapsedMs">;
+  };
   model: RouteModel;
   /** The resolved model card's output-cap field. Canonical reasoning wires
    * count hidden reasoning inside this cap, so the visible verdict needs the
@@ -145,6 +151,7 @@ export interface IntakeDeps {
 /** The decision the caller acts on: the stored verdict, why, how it was
  *  reached, and what became of the receipt. */
 export interface IntakeDecision {
+  experiment?: IntakeExperimentMeasurement;
   verdict: IntakeVerdict;
   reason: string;
   source: IntakeSource;
@@ -181,12 +188,16 @@ export async function decideIntake(input: IntakeInput, deps: IntakeDeps): Promis
         source: row.source,
         receipt: "existing",
         ...(row.providerFailure !== undefined ? { providerFailure: row.providerFailure } : {}),
+        ...(row.experiment ? { experiment: row.experiment } : {}),
       };
   }
   // The bot's own pending question decides deterministically, in every mode
   // (issue 2046): the bot asked, so the person's next words in that thread are
   // its answer — no mention needed, no model asked, fail-open on this one fact
   // the code computed itself.
+  const selected =
+    input.facts.pendingQuestion !== true && input.mode === "classify" ? deps.selectModel?.(input) : undefined;
+  const started = selected ? deps.now() : undefined;
   const decided =
     input.facts.pendingQuestion === true
       ? {
@@ -200,29 +211,34 @@ export async function decideIntake(input: IntakeInput, deps: IntakeDeps): Promis
             reason: "mode mention: only a mention is answered here",
             source: "mode" as const,
           }
-        : await askModel(input, deps);
+        : await askModel(input, selected ? { ...deps, model: selected.model, capField: selected.capField } : deps);
+  const experiment = selected
+    ? { ...selected.measurement(), elapsedMs: Math.max(0, deps.now() - started!) }
+    : undefined;
   const row: IntakeReceipt = {
     ...decided,
+    ...(experiment ? { experiment } : {}),
     mode: input.mode,
-    model: input.model,
+    model: selected?.modelRef ?? input.model,
     gen: input.gen,
     threadKey: input.threadKey,
     decidedAt: deps.now(),
   };
-  if (!deps.ledger) return { ...decided, receipt: "absent" };
+  if (!deps.ledger) return { ...decided, ...(experiment ? { experiment } : {}), receipt: "absent" };
   try {
     const { inserted, stored } = await deps.ledger.recordIntake(input.key, row);
-    if (inserted) return { ...decided, receipt: "inserted" };
+    if (inserted) return { ...decided, ...(experiment ? { experiment } : {}), receipt: "inserted" };
     return {
       verdict: stored.verdict,
       reason: stored.reason,
       source: stored.source,
       receipt: "existing",
       ...(stored.providerFailure !== undefined ? { providerFailure: stored.providerFailure } : {}),
+      ...(stored.experiment ? { experiment: stored.experiment } : {}),
     };
   } catch (err) {
     console.warn(`[intake] ${input.key}: receipt write failed — ${messageOf(err)}; acting on the verdict anyway`);
-    return { ...decided, receipt: "failed" };
+    return { ...decided, ...(experiment ? { experiment } : {}), receipt: "failed" };
   }
 }
 

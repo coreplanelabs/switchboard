@@ -590,6 +590,14 @@ workspaceDir: ./workspaces
 # text contract is refused at load when the default mode is `classify`.
 # intake:
 #   threadReplies: classify
+#   experiment:
+#     id: intake-jev
+#     model: typesafe/jev-1.13.0
+#     percent: 50
+# The optional experiment selects Jev for this percentage of threads; the rest
+# use agents.intake. Set percent: 0 and restart the bot to stop Jev calls.
+# TYPESAFE_API_KEY stays on the bot. Add the candidate's input/output/cache
+# rates under costs.prices for dollar estimates; absent rates stay unpriced.
 
 # The orchestration plane (docs/decisions/0064-the-plane-owns-every-runs-state-a-refusal-becomes-a-queue-position-an-ending-is-judged-by-the-ledger-that-saw-it-and-a-release-is-a-quiet-window-a-person-closes.md;
 # docs/reference/specs/routing-and-config.md item 31; orchestration-plane.md).

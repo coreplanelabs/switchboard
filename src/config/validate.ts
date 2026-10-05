@@ -840,7 +840,12 @@ function validateRouting(routing: RoutingConfig, _providers: Record<string, unkn
 }
 
 /** The `intake` block's keys, held equal to `IntakeConfig` the way the top-level keys are. */
-const INTAKE_KEYS: Record<keyof IntakeConfig, true> = { threadReplies: true, model: true, effort: true };
+const INTAKE_KEYS: Record<keyof IntakeConfig, true> = {
+  threadReplies: true,
+  model: true,
+  effort: true,
+  experiment: true,
+};
 
 /** The thread-reply gate's modes (routing-and-config item 27, record 0058). */
 export const INTAKE_MODES = ["mention", "classify", "always"] as const;
@@ -876,6 +881,23 @@ function validateIntake(cfg: AppConfig): void {
       throw new Error("config.yaml: intake must be a mapping");
     for (const key of unknownKeys(intake, INTAKE_KEYS))
       throw new Error(`config.yaml: intake.${key} is not a known key`);
+    if (intake.experiment !== undefined) {
+      const e = intake.experiment;
+      if (
+        typeof e !== "object" ||
+        e === null ||
+        Array.isArray(e) ||
+        Object.keys(e).some((key) => !["id", "model", "percent"].includes(key)) ||
+        typeof e.id !== "string" ||
+        !/^[a-zA-Z0-9_-]{1,64}$/.test(e.id) ||
+        typeof e.model !== "string" ||
+        !/^typesafe\/jev-[a-zA-Z0-9.-]+$/.test(e.model) ||
+        !Number.isInteger(e.percent) ||
+        e.percent < 0 ||
+        e.percent > 100
+      )
+        throw new Error("config.yaml: intake.experiment requires id, typesafe/jev-… model and integer percent 0–100");
+    }
     if (intake.threadReplies !== undefined && !(INTAKE_MODES as readonly unknown[]).includes(intake.threadReplies))
       throw new Error(
         `config.yaml: intake.threadReplies must be ${INTAKE_MODES.join(", ").replace(/, (\w+)$/, " or $1")}`,

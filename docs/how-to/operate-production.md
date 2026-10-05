@@ -1,5 +1,14 @@
 # Operate production
 
+## A/B testing thread replies
+
+Compare the configured fast model with Jev using a stable split of threads.
+Only the selected model runs. The existing durable records hold latency,
+usage, estimated cost, decisions and failures for each arm.
+[Configuration and report commands](../reference/specs/load-harness.md#short-production-ab-run)
+cover a short trial and rollback. Review a few messages from each arm as well
+as the numbers; response rate alone does not measure correctness.
+
 Deploy outside a release, change the config, read the span log, or probe the model proxy without breaking a run in flight.
 
 **You need:**

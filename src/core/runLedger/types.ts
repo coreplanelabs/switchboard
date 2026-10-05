@@ -343,6 +343,7 @@ export type AppendableEvent = RunEvent & { seq: number };
  *  again. The shape is the intake seam's (`src/core/intake.ts` re-exports it);
  *  spelled out here because this file is shared with the state Worker. */
 export interface IntakeReceipt {
+  experiment?: IntakeExperimentMeasurement;
   verdict: "addressed" | "silent";
   reason: string;
   source: "model" | "mode" | "question" | "error" | "timeout";
@@ -360,6 +361,24 @@ export interface IntakeReceipt {
   threadKey: string;
   /** Epoch ms. */
   decidedAt: number;
+}
+
+export interface IntakeExperimentMeasurement {
+  id: string;
+  messageKey: string;
+  arm: "control" | "jev";
+  elapsedMs: number;
+  calls: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  knownCostUsd: number;
+  unpricedCalls: number;
+  missingUsageCalls: number;
+  servedModel?: string;
+  probabilities?: Record<"addressed" | "silent" | "unsure", number>;
+  confidence?: number;
 }
 
 /** What an intake write answers: whether THIS write landed, and the row that
@@ -383,6 +402,7 @@ export function isIntakeReceipt(v: unknown): v is IntakeReceipt {
   return (
     (r.verdict === "addressed" || r.verdict === "silent") &&
     typeof r.reason === "string" &&
+    (r.experiment === undefined || isIntakeExperimentMeasurement(r.experiment)) &&
     (r.source === "model" ||
       r.source === "mode" ||
       r.source === "question" ||
@@ -400,5 +420,39 @@ export function isIntakeReceipt(v: unknown): v is IntakeReceipt {
     r.threadKey.length <= 256 &&
     typeof r.decidedAt === "number" &&
     Number.isFinite(r.decidedAt)
+  );
+}
+
+function isIntakeExperimentMeasurement(value: unknown): value is IntakeExperimentMeasurement {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const m = value as Record<string, unknown>;
+  const nonnegative = (v: unknown) => typeof v === "number" && Number.isFinite(v) && v >= 0;
+  const probability = (v: unknown) => nonnegative(v) && (v as number) <= 1;
+  const p = m.probabilities as Record<string, unknown> | undefined;
+  return (
+    typeof m.id === "string" &&
+    /^[a-zA-Z0-9_-]{1,64}$/.test(m.id) &&
+    typeof m.messageKey === "string" &&
+    m.messageKey.length > 0 &&
+    m.messageKey.length <= 256 &&
+    (m.arm === "control" || m.arm === "jev") &&
+    nonnegative(m.elapsedMs) &&
+    nonnegative(m.knownCostUsd) &&
+    [
+      "calls",
+      "inputTokens",
+      "outputTokens",
+      "cacheReadTokens",
+      "cacheWriteTokens",
+      "unpricedCalls",
+      "missingUsageCalls",
+    ].every((key) => nonnegative(m[key]) && Number.isSafeInteger(m[key])) &&
+    (m.servedModel === undefined || typeof m.servedModel === "string") &&
+    (m.confidence === undefined || probability(m.confidence)) &&
+    (p === undefined ||
+      (p !== null &&
+        typeof p === "object" &&
+        !Array.isArray(p) &&
+        ["addressed", "silent", "unsure"].every((key) => probability(p[key]))))
   );
 }
