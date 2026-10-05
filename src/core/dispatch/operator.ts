@@ -333,6 +333,36 @@ type OperatorRequestSettings = Pick<
   "model" | "effort" | "budget" | "severity" | "renewals" | "verbosity"
 >;
 
+const OPERATOR_SETTING_NAMES = ["effort", "budget", "severity", "renewals", "verbosity"] as const;
+
+/** Meaning is the operator's decision; a matching quote alone cannot say
+ * whether the author requested a run control or merely mentioned its subject. */
+const OPERATOR_SETTINGS_EVIDENCE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  description:
+    "Classify each setting's exact authored quote as requested run control or incidental task content; omit defaults",
+  properties: Object.fromEntries(
+    OPERATOR_SETTING_NAMES.map((name) => [
+      name,
+      {
+        type: "object",
+        additionalProperties: false,
+        required: ["quote", "intent"],
+        properties: {
+          quote: { type: "string", minLength: 1, description: "an exact phrase from the current request" },
+          intent: {
+            type: "string",
+            enum: ["requested", "incidental"],
+            description:
+              "requested only when the phrase asks to set this run control; incidental when it is task content",
+          },
+        },
+      },
+    ]),
+  ),
+};
+
 /** The projection the operator decides over: the presets and commands the
  *  AUTHOR may run — the policy table's answer, filtered here so a capability
  *  the author lacks never reaches the model as a row or a tool. */
@@ -569,7 +599,8 @@ export function buildOperatorPrompt(input: OperatorInput): RoutePrompt {
     "A read command answers only a read intent: an ask to change, set, switch or update something is a write, and a listing or a show never answers it. Every command call declares its `intent`. When a write ask misses a required detail, or names a model provider this deployment does not have, read `provider_models` for the refs this deployment can run, then call `ask` with a suggested command built from them for display — a yes cannot confirm a registry proposal because its typed input is not saved; their next words refine the request.",
     "A question about whether the person has config overrides uses `config show`: it describes their own scope, this channel's scope and the effective settings. `config overrides` lists channels with scopes; use it only when they ask which channels have settings.",
     "When the request names a model in plain words — 'with astra, …', 'use sol for this', 'on gpt-6' — read `provider_models` to resolve the word to exactly ONE ref this deployment can run. Pass that ref as `bind_preset`'s `model` and one exact model-name word from the person's request as `modelWord` (such as 'astra', 'o3', or 'gpt-6'). When the person wrote the full `<provider>/<model>` ref, pass it as `model` and omit `modelWord`; the exact authored ref is its evidence. The run uses either at request precedence. The request still rides verbatim — never strip the model choice from it. A word that matches several refs, or none, is one `ask` naming the catalogue's candidate refs — never a guess and never a silent default; a request naming no model omits both fields.",
-    "`bind_preset` runs the preset on the request as the author asked it — the author's own words ride by reference, so never re-type the request, write a flag form or paraphrase it. Bind effort, budget in whole minutes, and verbosity only when the person requests them. For review or Ship, bind severity only when requested; renewals apply only to Ship. These are typed settings, whether the person used a directive spelling or ordinary words. For each setting you bind, give an exact phrase that expresses the requested run setting in `settingsEvidence` under that setting's name; a word from task content is not a setting request. Omit the setting and its quote when unrequested. If the person requested a setting the selected preset cannot apply, choose a compatible preset that still does the requested action or ask; never silently drop the setting. The call also carries the preset, optional model and modelWord, and the reason. When `ask` proposes a preset line, include `proposalSettings` (an empty object when none were requested); put each requested setting and its exact quote from the original request there, including model and modelWord when requested, so a later yes carries the same settings.",
+    "`bind_preset` runs the preset on the request as the author asked it — the author's own words ride by reference, so never re-type the request, write a flag form or paraphrase it. Bind effort, budget in whole minutes, and verbosity only when the person requests them. For review or Ship, bind severity only when requested; renewals apply only to Ship. These are typed settings, whether the person used a directive spelling or ordinary words. For each setting you bind, supply `settingsEvidence.<setting> = {quote, intent}`: quote an exact authored phrase and classify its meaning as `requested` run control or `incidental` task content. A matching substring alone is not a setting request. Omit defaults and unrequested settings; incidental evidence never applies a control. If the person requested a setting the selected preset cannot apply, choose a compatible preset that still does the requested action or ask; never silently drop the setting. The call also carries the preset, optional model and modelWord, and the reason. When `ask` proposes a preset line, include `proposalSettings` (an empty object when none were requested); put each requested setting and its classified evidence from the original request there, including model and modelWord when requested, so a later yes carries the same settings.",
+    "Setting intent examples: 'What does 'major findings' mean in a review report? Answer in one sentence.' asks general to explain a term: severity is incidental, not a request to review or address findings. 'Review this PR and address major findings' requests severity major. 'What is 2 + 2? Answer in one sentence.' requests no effort: one sentence does not request low effort, a budget or a verbosity level. 'Use high effort and a 25 minute budget; show debug detail' requests those three controls. On repair, reconsider the setting's meaning, not merely whether its quote occurs: omit a default or classify task content as incidental, but preserve actual requested settings. Keep the requested action; do not turn an explanation into a review just to make a topic word fit a preset.",
     "",
     // 2. Projection: the presets and commands THIS author may run.
     "Presets this author may run:",
@@ -727,7 +758,8 @@ export function operatorTools(input: OperatorInput): ToolDef[] {
                 effort: {
                   type: "string",
                   enum: [...EFFORT_LEVELS],
-                  description: "effort the person requested for this run; omit when unrequested",
+                  description:
+                    "effort explicitly requested for this run, with requested-intent evidence; never infer low from a simple task or short answer; omit defaults",
                 },
                 budget: {
                   type: "integer",
@@ -737,7 +769,8 @@ export function operatorTools(input: OperatorInput): ToolDef[] {
                 severity: {
                   type: "string",
                   enum: [...ADDRESS_SEVERITIES],
-                  description: "review severity the person asked to address, for review or Ship; omit when unrequested",
+                  description:
+                    "severity the person asked to address in review or Ship; explaining a severity term is task content, not a requested control",
                 },
                 renewals: {
                   type: "integer",
@@ -750,19 +783,7 @@ export function operatorTools(input: OperatorInput): ToolDef[] {
                   enum: [...VERBOSITY_LEVELS],
                   description: "reply detail the person requested for this run; omit when unrequested",
                 },
-                settingsEvidence: {
-                  type: "object",
-                  additionalProperties: false,
-                  description:
-                    "one exact phrase expressing each requested run setting; do not quote an incidental word from task content; omit unbound settings",
-                  properties: {
-                    effort: { type: "string" },
-                    budget: { type: "string" },
-                    severity: { type: "string" },
-                    renewals: { type: "string" },
-                    verbosity: { type: "string" },
-                  },
-                },
+                settingsEvidence: OPERATOR_SETTINGS_EVIDENCE_SCHEMA,
                 repo: {
                   type: "string",
                   pattern: "^[\\w.-]+/[\\w.-]+$",
@@ -852,17 +873,7 @@ export function operatorTools(input: OperatorInput): ToolDef[] {
             severity: { type: "string", enum: [...ADDRESS_SEVERITIES] },
             renewals: { type: "integer", minimum: 0, maximum: GRANT_RENEWALS_MAX },
             verbosity: { type: "string", enum: [...VERBOSITY_LEVELS] },
-            settingsEvidence: {
-              type: "object",
-              additionalProperties: false,
-              properties: {
-                effort: { type: "string" },
-                budget: { type: "string" },
-                severity: { type: "string" },
-                renewals: { type: "string" },
-                verbosity: { type: "string" },
-              },
-            },
+            settingsEvidence: OPERATOR_SETTINGS_EVIDENCE_SCHEMA,
           },
         },
         reason: { type: "string", description: "one line: why this fork needs the person" },
@@ -1257,22 +1268,38 @@ function requestSettingsOf(
     settingsEvidence !== null && typeof settingsEvidence === "object" && !Array.isArray(settingsEvidence)
       ? (settingsEvidence as Record<string, unknown>)
       : {};
-  const quotesRequest = (setting: "effort" | "budget" | "severity" | "renewals" | "verbosity"): boolean => {
-    const quote = evidence[setting];
-    return typeof quote === "string" && quote.trim() !== "" && requestText.includes(quote);
-  };
-  // Only quoted requester settings have authority. Models sometimes populate
-  // optional tool fields from defaults, including fields for another preset.
-  const requestedSetting = <T>(setting: Parameters<typeof quotesRequest>[0], value: T): T | undefined =>
-    quotesRequest(setting) ? value : undefined;
+  const requested = new Set<(typeof OPERATOR_SETTING_NAMES)[number]>();
+  for (const setting of OPERATOR_SETTING_NAMES) {
+    const raw = evidence[setting];
+    if (input[setting] === undefined || raw === undefined) continue;
+    const entry =
+      raw !== null && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+    if (
+      typeof entry.quote !== "string" ||
+      entry.quote.trim() === "" ||
+      (entry.intent !== "requested" && entry.intent !== "incidental")
+    )
+      return {
+        violation: `settingsEvidence.${setting} needs {quote, intent: requested|incidental}; a matching phrase alone is not a run-setting request. Keep the requested action; omit defaults, classify task content as incidental, and preserve genuine requested controls`,
+      };
+    if (entry.intent === "requested" && requestText.includes(entry.quote)) requested.add(setting);
+  }
+  // The model classifies intent; this boundary holds it to typed evidence
+  // and an authored quote. Neither defaults nor incidental content applies.
+  const requestedSetting = <T>(setting: (typeof OPERATOR_SETTING_NAMES)[number], value: T): T | undefined =>
+    requested.has(setting) ? value : undefined;
   const effort = requestedSetting("effort", suppliedEffort);
   const budget = requestedSetting("budget", suppliedBudget);
-  if (suppliedSeverity !== undefined && preset !== "ship" && preset !== "review" && quotesRequest("severity"))
+  if (suppliedSeverity !== undefined && preset !== "ship" && preset !== "review" && requested.has("severity"))
     return {
-      violation: "bind_preset cannot apply a requested review severity to this preset; choose review or Ship, or ask",
+      violation:
+        "bind_preset cannot apply a requested review severity to this preset. Keep the requested action: if the quote only mentions severity as task content, classify it as incidental or omit it; if it genuinely requests a control, choose compatible review or Ship only if it still does the asked work, or ask; never drop a requested setting",
     };
-  if (suppliedRenewals !== undefined && preset !== "ship" && quotesRequest("renewals"))
-    return { violation: "bind_preset cannot apply requested Ship renewals to this preset; choose Ship or ask" };
+  if (suppliedRenewals !== undefined && preset !== "ship" && requested.has("renewals"))
+    return {
+      violation:
+        "bind_preset cannot apply requested Ship renewals to this preset. Keep the requested action: classify incidental task content or omit defaults; for genuinely requested renewals, choose Ship only if it still does the asked work, or ask; never drop a requested setting",
+    };
   const severity =
     preset === "ship" || preset === "review" ? requestedSetting("severity", suppliedSeverity) : undefined;
   const renewals = preset === "ship" ? requestedSetting("renewals", suppliedRenewals) : undefined;
