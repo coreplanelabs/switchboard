@@ -40,6 +40,8 @@ Optional polish, cosmetic preferences, unsupported suspicions, pre-existing prob
 
 Severity belongs to each finding: `blocking`, `major`, `minor`, or `nit`. A minor means a real, bounded defect worth fixing. The normal review omits polish suggestions. The model judges impact; deterministic code validates the submitted severity and finding structure, applies the configured gate to an approval, and checks the reviewed head before posting.
 
+A posted review requires confirmed delivery to the exact pull request and commit, recorded durably before the run ends. If a response is lost, the review remains unconfirmed; Switchboard preserves that uncertainty and does not post the same review again.
+
 The existing `review.addressSeverity` setting defaults to `minor`. It controls the severity addressed by the review loop; there is no separate reporting threshold. An explicit request for changes still enters the findings loop. See [Configure your defaults](../how-to/configure-your-defaults.md#choose-the-review-action-threshold) for the existing control and [decision 0088](../decisions/0088-review-selects-verified-defects-before-applying-severity.md) for the sources, alternatives, and evaluation plan.
 
 ## When to add an agent
@@ -49,3 +51,14 @@ Add one when a recurring kind of work needs its own instructions **and** a disti
 An agent is [added in the repository](../how-to/add-an-agent.md): declare its definition and budgets, give it a behavioral spec, and decide how it is routed and who may run it. The channel adapters and dispatcher do not need a new branch for its name.
 
 The shipped definitions and default limits are in [`src/agents/defaults.json`](../../src/agents/defaults.json), their builtin prompts in [`src/agents/registry.ts`](../../src/agents/registry.ts), toolsets in [`src/tools/toolsets.ts`](../../src/tools/toolsets.ts), and budget defaults in [`src/core/budgets.ts`](../../src/core/budgets.ts).
+
+
+## One unit keeps its lifecycle
+
+The main conversation composes bounded work. Ship executes one deterministic unit lifetime: coding, review, findings, checks, continuation, idle and terminal settlement. Generated tasks and exact pull requests enter it directly. Seeded plans retain their dependency sequencer and merge authority; they call the same unit lifetime.
+
+The existing unit, run, recovery journal and workspace owners carry authority across restarts. Each external write begins in its original durable publication or effect cell before the request. An unknown result retains that owner; observed remote state cannot grant a repeat. Existing alarms and outbox delivery finish attributable reports and retained workspace obligations after execution ends.
+
+Maintenance uses the same store and effect boundary. An authorized command or authenticated watch reserves its actual intent before preparation; eligible original units keep their requester and report. An unowned PR has a logical maintenance owner without a native Workflow. Native work consumes no model charge, while a funded resolver requires a confirmed start of its original child. Its paid-round allowance is reserved accounting; the actual dispatcher enforces the original time and turn limits. Initial HTTP/MCP job reports may explicitly use durable state, preserving the full report without claiming a message was sent.
+
+[Record 0090](../decisions/0090-one-unit-lifetime-keeps-effects-and-settlement-under-existing-owners.md) records this simplification and its retained obligations. The [Ship](../reference/specs/agent-ship.md), [plane](../reference/specs/orchestration-plane.md) and [run history](../reference/specs/run-history.md) contracts name its source proofs; merge, release, deploy and live acceptance remain separate receipts.

@@ -292,6 +292,10 @@ export interface ChannelIO {
    * receive was not delivered. Absent on every real channel.
    */
   undeliverable?: string;
+  /** A machine job's coordinator report is read from durable state. Only the
+   * first terminal admission may omit its channel copy; existing owed bytes
+   * remain unchanged. This never certifies that a reply was delivered. */
+  reportDelivery?: "state";
   /**
    * Post `lead` as the message and `text` as an attached file beside it — for
    * output too long to read as chat (a 100-tool `mcp show`): the channel's

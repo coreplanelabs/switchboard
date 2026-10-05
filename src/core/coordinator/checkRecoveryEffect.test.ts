@@ -55,6 +55,7 @@ async function setup(over: Partial<CoordinatorInstance> = {}) {
       verifiedHead: { repo: instance.repo, ref: unit.branch, sha: headSha },
     })),
     retryTargets: vi.fn(async () => [{ operation: "actions_rerun" as const, resourceId: 8 }]),
+    canWrite: vi.fn((_call: UnitEffectCall) => true),
     write: vi.fn(async (_call: UnitEffectCall): Promise<GithubWriteResult> => ({ state: "accepted" })),
   };
   const input = {
@@ -70,6 +71,164 @@ async function setup(over: Partial<CoordinatorInstance> = {}) {
   return { store, deps, input };
 }
 describe("durable check recovery", () => {
+  it("checks every adapter before admission without spending an ordinal", async () => {
+    const h = await setup();
+    const canWrite = vi.fn((call: UnitEffectCall) => call.operation !== "pull_reopen");
+    expect(await performCheckRecovery({ ...h.input, retry: undefined, refire: true }, { ...h.deps, canWrite })).toEqual(
+      { ok: false, reason: "unavailable" },
+    );
+    expect((await h.store.listUnits(instance.id))[0]).toEqual(unit);
+    expect(h.deps.write).not.toHaveBeenCalled();
+    expect(canWrite.mock.calls.map(([call]) => call.operation)).toEqual(["pull_close", "pull_reopen"]);
+    const absent = await setup();
+    expect(await performCheckRecovery(absent.input, { ...absent.deps, canWrite: undefined })).toEqual({
+      ok: false,
+      reason: "unavailable",
+    });
+    expect((await absent.store.listUnits(instance.id))[0]).toEqual(unit);
+    expect(absent.deps.write).not.toHaveBeenCalled();
+  });
+  it("replays the recorded result across repository and SHA casing normalization", async () => {
+    const h = await setup();
+    await performCheckRecovery(h.input, h.deps);
+    const saved = (await h.store.listUnits(instance.id))[0]!;
+    expect(
+      await performCheckRecovery(
+        {
+          ...h.input,
+          instance: { ...instance, repo: instance.repo.toUpperCase() },
+          headSha: headSha.toUpperCase(),
+          unit: saved,
+        },
+        h.deps,
+      ),
+    ).toEqual({ ok: true, dispatched: true, effectOrdinal: 1 });
+    expect(h.deps.write).toHaveBeenCalledTimes(1);
+  });
+  it("recovers a lost committed completion ACK from the exact whole row without replaying close", async () => {
+    const h = await setup();
+    h.deps.write.mockImplementation(async () => {
+      if (h.deps.write.mock.calls.length === 1)
+        h.deps.readPull.mockResolvedValue({ ...(await h.deps.readPull()), state: "closed" });
+      return { state: "accepted" };
+    });
+    const transition = vi.fn(async (change: Parameters<typeof h.store.transitionUnitEffect>[0]) => {
+      const result = await h.store.transitionUnitEffect(change);
+      return change.kind === "complete" && change.call === 0
+        ? { ok: false as const, reason: "unavailable" as const }
+        : result;
+    });
+    expect(
+      await performCheckRecovery(
+        { ...h.input, retry: undefined, refire: true },
+        {
+          ...h.deps,
+          instances: {
+            get: (id) => h.store.get(id),
+            listUnits: (id) => h.store.listUnits(id),
+            transitionUnitEffect: transition,
+          },
+        },
+      ),
+    ).toEqual({ ok: true, dispatched: true, effectOrdinal: 1 });
+    expect(h.deps.write.mock.calls.map(([call]) => call.operation)).toEqual(["pull_close", "pull_reopen"]);
+    expect(transition.mock.calls.filter(([change]) => change.kind === "complete" && change.call === 0)).toHaveLength(1);
+  });
+  it("retries only durable completion while its original accepted response remains in memory", async () => {
+    const h = await setup();
+    let completions = 0;
+    const transition = vi.fn(async (change: Parameters<typeof h.store.transitionUnitEffect>[0]) => {
+      if (change.kind === "complete" && ++completions === 1)
+        return { ok: false as const, reason: "unavailable" as const };
+      return h.store.transitionUnitEffect(change);
+    });
+    expect(
+      await performCheckRecovery(h.input, {
+        ...h.deps,
+        instances: {
+          get: (id) => h.store.get(id),
+          listUnits: (id) => h.store.listUnits(id),
+          transitionUnitEffect: transition,
+        },
+      }),
+    ).toEqual({ ok: true, dispatched: true, effectOrdinal: 1 });
+    expect(completions).toBe(2);
+    expect(h.deps.write).toHaveBeenCalledTimes(1);
+  });
+  it("bounds completion retries and never promotes a restarted pending close from observed state", async () => {
+    const h = await setup();
+    const transition = vi.fn(async (change: Parameters<typeof h.store.transitionUnitEffect>[0]) =>
+      change.kind === "complete"
+        ? { ok: false as const, reason: "unavailable" as const }
+        : h.store.transitionUnitEffect(change),
+    );
+    const deps = {
+      ...h.deps,
+      instances: {
+        get: (id: string) => h.store.get(id),
+        listUnits: (id: string) => h.store.listUnits(id),
+        transitionUnitEffect: transition,
+      },
+    };
+    const input = { ...h.input, retry: undefined, refire: true };
+    expect(await performCheckRecovery(input, deps)).toEqual({ ok: false, reason: "unavailable" });
+    const saved = (await h.store.listUnits(instance.id))[0]!;
+    h.deps.readPull.mockResolvedValue({ ...(await h.deps.readPull()), state: "closed" });
+    expect(await performCheckRecovery({ ...input, unit: saved }, deps)).toEqual({ ok: false, reason: "uncertain" });
+    expect(transition.mock.calls.filter(([change]) => change.kind === "complete")).toHaveLength(2);
+    expect(h.deps.write).toHaveBeenCalledTimes(1);
+    expect((await h.store.listUnits(instance.id))[0]!.currentEffect!.calls.map((call) => call.state)).toEqual([
+      "pending",
+      "unstarted",
+    ]);
+  });
+  it("does not accept completion readback when another field of the exact row changed", async () => {
+    const h = await setup();
+    const transition = vi.fn(async (change: Parameters<typeof h.store.transitionUnitEffect>[0]) => {
+      const result = await h.store.transitionUnitEffect(change);
+      if (change.kind === "complete" && result.ok) {
+        await h.store.compareAndReplaceUnit(result.unit, { ...result.unit, title: "changed concurrently" });
+        return { ok: false as const, reason: "unavailable" as const };
+      }
+      return result;
+    });
+    expect(
+      await performCheckRecovery(h.input, {
+        ...h.deps,
+        instances: {
+          get: (id) => h.store.get(id),
+          listUnits: (id) => h.store.listUnits(id),
+          transitionUnitEffect: transition,
+        },
+      }),
+    ).toEqual({ ok: false, reason: "unavailable" });
+    expect(transition.mock.calls.filter(([change]) => change.kind === "complete")).toHaveLength(1);
+    expect(h.deps.write).toHaveBeenCalledTimes(1);
+    expect((await h.store.listUnits(instance.id))[0]!.currentEffect!.phase).toBe("active");
+  });
+  it("does not retry durable completion against a changed owner or an unknown native response", async () => {
+    for (const changedOwner of [true, false]) {
+      const h = await setup();
+      if (!changedOwner) h.deps.write.mockResolvedValue({ state: "uncertain" });
+      const transition = vi.fn(async (change: Parameters<typeof h.store.transitionUnitEffect>[0]) =>
+        change.kind === "complete"
+          ? { ok: false as const, reason: "unavailable" as const }
+          : h.store.transitionUnitEffect(change),
+      );
+      expect(
+        await performCheckRecovery(h.input, {
+          ...h.deps,
+          instances: {
+            get: async (id) => (changedOwner ? { ...instance, userId: "cli:foreign" } : h.store.get(id)),
+            listUnits: (id) => h.store.listUnits(id),
+            transitionUnitEffect: transition,
+          },
+        }),
+      ).toEqual({ ok: false, reason: "unavailable" });
+      expect(transition.mock.calls.filter(([change]) => change.kind === "complete")).toHaveLength(1);
+      expect(h.deps.write).toHaveBeenCalledTimes(1);
+    }
+  });
   it("keeps malformed exact receipts unavailable and reports only positive target drift as conflict", async () => {
     const h = await setup();
     h.deps.readPull.mockResolvedValue({
@@ -101,11 +260,13 @@ describe("durable check recovery", () => {
   });
   it("settles never-begun exact ended execution while preserving a stale owner's cells", async () => {
     const h = await setup();
-    expect(await performCheckRecovery(h.input, { ...h.deps, canWrite: () => false })).toMatchObject({
+    const capability = vi.fn().mockReturnValueOnce(true).mockReturnValue(false);
+    expect(await performCheckRecovery(h.input, { ...h.deps, canWrite: capability })).toMatchObject({
       ok: false,
       reason: "unavailable",
     });
     const admitted = (await h.store.listUnits(instance.id))[0]!;
+    expect(admitted.currentEffect?.calls[0]?.state).toBe("unstarted");
     const ended = { ...admitted, ending: { kind: "aborted", report: "Stopped", at: 2 } };
     expect(await h.store.compareAndReplaceUnit(admitted, ended)).toEqual({ ok: true });
     expect(await performCheckRecovery({ ...h.input, unit: ended }, h.deps)).toEqual({
@@ -116,7 +277,10 @@ describe("durable check recovery", () => {
     expect((await h.store.listUnits(instance.id))[0]?.currentEffect?.phase).toBe("settled");
     expect(h.deps.write).not.toHaveBeenCalled();
     const stale = await setup();
-    await performCheckRecovery(stale.input, { ...stale.deps, canWrite: () => false });
+    await performCheckRecovery(stale.input, {
+      ...stale.deps,
+      canWrite: vi.fn().mockReturnValueOnce(true).mockReturnValue(false),
+    });
     const saved = (await stale.store.listUnits(instance.id))[0]!;
     expect(
       await performCheckRecovery({ ...stale.input, unit: saved, execution: { workflowId: "foreign" } }, stale.deps),

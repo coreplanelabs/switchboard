@@ -328,7 +328,15 @@ describe("durable reconciliation store seam", () => {
     let native: string | undefined = "errored";
     const store = new InMemoryCoordinatorInstanceStore(ledger, async () => native);
     const owner = { ...instance, admission: "created" as const };
-    const row = unitRow("ONE", { ending: { kind: "aborted", report: "Original frozen report", at: 2000 } });
+    const row = unitRow("ONE", {
+      ending: {
+        kind: "aborted",
+        report: "Original frozen report",
+        threadReport: "Original summary",
+        deliveryId: "original/end",
+        at: 2000,
+      },
+    });
     await store.put(owner);
     await store.putUnits([row]);
     native = "unfamiliar";
@@ -408,6 +416,22 @@ describe("durable reconciliation store seam", () => {
       }),
     ).toEqual({ ok: false, reason: "stale" });
     expect(ledger.planeOffers.size).toBe(1);
+  });
+
+  it("never creates a blocking report offer for legacy endings without their original delivery identity and rendering", async () => {
+    for (const ending of [
+      { kind: "aborted", report: "Original private detail", at: 2000 },
+      { kind: "aborted", report: "Original private detail", at: 2000, deliveryId: "original/end" },
+    ]) {
+      const ledger = new InMemoryRunLedger();
+      const store = new InMemoryCoordinatorInstanceStore(ledger, async () => "errored");
+      const row = unitRow("ONE", { ending });
+      await store.put({ ...instance, admission: "created" });
+      await store.putUnits([row]);
+      expect(await store.offerReconciliation(row)).toEqual({ offered: false });
+      expect(ledger.planeOffers.size).toBe(0);
+      expect(await store.listUnits(instance.id)).toEqual([row]);
+    }
   });
 });
 

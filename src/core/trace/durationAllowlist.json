@@ -23,6 +23,7 @@
   "src/core/commands/repo.ts": 2,
   "src/core/coordinator/checksIntake.ts": 1,
   "src/core/coordinator/driver.ts": 3,
+  "src/core/coordinator/maintenanceSweep.ts": 1,
   "src/core/costsSnapshot.ts": 4,
   "src/core/delivery.ts": 2,
   "src/core/deliverySnapshot.ts": 3,

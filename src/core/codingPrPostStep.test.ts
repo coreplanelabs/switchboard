@@ -3115,6 +3115,17 @@ describe("runCodingPrPostStep — the identity rewrite before the open (record 0
     });
   });
 
+  it("forwards the original run ref publication seam into identity rewriting before any PR credit", async () => {
+    const spy = openSpy();
+    const events: RunEvent[] = [];
+    const refPublication = { begin: vi.fn(async () => undefined) };
+    const seam = identityOf({ rewrite: { kind: "unreadable", reason: "original ref publication unavailable" } });
+    await runCodingPrPostStep({ ...common(events, spy), identity: seam.identity, refPublication });
+    expect(seam.rewrite).toHaveBeenCalledWith(expect.objectContaining({ refPublication }));
+    expect(spy.calls).toHaveLength(0);
+    expect(events.some((event) => event.type === "pushed_head" || event.type === "pr_opened")).toBe(false);
+  });
+
   it("on `rewritten` the pull request opens at the rebuilt tip: the body renders there, `head.sha` is pinned, and the note and `pr_opened` carry the count", async () => {
     const spy = openSpy();
     const events: RunEvent[] = [];

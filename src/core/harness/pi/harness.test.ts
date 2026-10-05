@@ -952,6 +952,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
   it("a carried absolute deadline bounds the model lease after attachment downtime", async () => {
     const w = world({ agent: { maxMinutes: 20 } });
     Object.assign(w.run, { deadlineAt: NOW + 8 * MINUTE_MS });
+    w.clock.now += 3 * MINUTE_MS;
     scriptedPi(w.container, (_n, c) => finalTurn(c, "done"));
     expect(await w.start()).toContain("done");
     expect(w.events.find((e) => e.type === "lease")).toMatchObject({ endsAt: NOW + 8 * MINUTE_MS });

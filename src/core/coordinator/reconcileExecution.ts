@@ -48,6 +48,9 @@ export interface CoordinatorReconcileExecutionDeps {
   /** The existing unit-end transaction, with follow-up redispatch disabled. */
   settle(body: CoordinatorReconcileSettlement): Promise<boolean>;
   readReport(owner: CoordinatorReportOwner): Promise<{ text: string; threadText: string } | undefined>;
+  /** Explicit adapter contract for a first machine-job report, never inferred
+   * from a missing destination or used to rewrite an existing ending. */
+  reportDelivery?(instance: CoordinatorInstance, unit: CoordinatorUnit): "state" | undefined;
   finalize(
     input: CoordinatorReportFinalizationInput,
   ): Promise<{ report: { text: string; threadText: string }; receipt: CoordinatorReconcileReceipt } | undefined>;
@@ -125,7 +128,16 @@ async function snapshot(
       return undefined;
   } else if (unit.recovery || unit.recoveryReceipt) return undefined;
   const expected = await coordinatorReconciliationEffect(instance, unit, action);
-  if ((await sourceHash(expected)) !== (await sourceHash(effect))) return undefined;
+  if (
+    expected.id !== effect.id ||
+    expected.kind !== effect.kind ||
+    expected.instanceId !== effect.instanceId ||
+    expected.unit !== effect.unit ||
+    expected.workflowId !== effect.workflowId ||
+    expected.actionId !== effect.actionId ||
+    expected.admissionHash !== effect.admissionHash
+  )
+    return undefined;
   const after = await deps.instances.get(instance.id);
   if ((await sourceHash(after)) !== (await sourceHash(instance))) return undefined;
   return { instance, unit, ...(action ? { action } : {}) };
@@ -157,15 +169,25 @@ export async function reconcileCoordinatorExecution(
         unit: effect.unit,
         deliveryId: DELIVERY_ID,
         ...(effect.actionId ? { recoveryActionId: effect.actionId, recoveryWorkflowId: effect.workflowId } : {}),
-        ending: { kind: "terminated", report: TERMINATED_REPORT, threadReport: TERMINATED_REPORT },
+        ending: {
+          kind: "terminated",
+          report: TERMINATED_REPORT,
+          threadReport:
+            current.unit.reportDelivery === undefined &&
+            deps.reportDelivery?.(current.instance, current.unit) === "state" &&
+            !current.unit.workBrief
+              ? ""
+              : TERMINATED_REPORT,
+        },
       };
       // A lost response may still have committed. One reread can confirm that
       // exact settlement; it never grants a second write or replacement work.
-      await deps.settle(body).catch(() => false);
+      await deps.settle(structuredClone(body)).catch(() => false);
       const settled = await snapshot(effect, deps);
       const ending = settled?.unit.ending;
       if (
         !settled ||
+        settled.unit.currentEffect?.phase === "active" ||
         ending?.kind !== body.ending.kind ||
         ending.report !== body.ending.report ||
         ending.threadReport !== body.ending.threadReport ||
@@ -199,13 +221,15 @@ export async function reconcileCoordinatorExecution(
       if (!observed || (await sourceHash(observed)) !== (await sourceHash(current))) return undefined;
       const { at: _at, deliveryId: _delivery, threadReport: _thread, ...producerEnding } = ending;
       await deps
-        .settle({
-          parentInstanceId: effect.instanceId,
-          unit: effect.unit,
-          deliveryId: ending.deliveryId,
-          ...(current.action ? { recoveryActionId: current.action.id, recoveryWorkflowId: effect.workflowId } : {}),
-          ending: { ...producerEnding, threadReport: original.threadText },
-        })
+        .settle(
+          structuredClone({
+            parentInstanceId: effect.instanceId,
+            unit: effect.unit,
+            deliveryId: ending.deliveryId,
+            ...(current.action ? { recoveryActionId: current.action.id, recoveryWorkflowId: effect.workflowId } : {}),
+            ending: { ...producerEnding, threadReport: original.threadText },
+          }),
+        )
         .catch(() => false);
       const admitted = await snapshot(effect, deps);
       if (
@@ -222,7 +246,8 @@ export async function reconcileCoordinatorExecution(
     }
     const { instance, unit } = current;
     const admission = unit.reportDelivery;
-    if (!unit.ending || !isCoordinatorReportAdmission(admission)) return undefined;
+    if (!unit.ending || unit.currentEffect?.phase === "active" || !isCoordinatorReportAdmission(admission))
+      return undefined;
     const owner = admission.owner;
     if (
       owner.instanceId !== instance.id ||
@@ -253,6 +278,22 @@ export async function reconcileCoordinatorExecution(
       !(await sameCoordinatorReportAdmission(admission, await coordinatorReportAdmission(owner, proposed)))
     )
       return undefined;
+    if (
+      !coordinatorWorkflowCanReconcile(
+        instance,
+        unit,
+        current.action,
+        nativeStatus(await deps.status(effect.workflowId)),
+      )
+    )
+      return undefined;
+    const ready = await snapshot(effect, deps);
+    if (
+      !ready ||
+      ready.unit.currentEffect?.phase === "active" ||
+      (await sourceHash(ready)) !== (await sourceHash(current))
+    )
+      return undefined;
     const finalized = await deps.finalize({ instance, unit, owner, proposed });
     if (
       !finalized ||
@@ -263,17 +304,7 @@ export async function reconcileCoordinatorExecution(
     )
       return undefined;
     const after = await snapshot(effect, deps);
-    if (
-      !after ||
-      (await sourceHash(after)) !== (await sourceHash(current)) ||
-      !coordinatorWorkflowCanReconcile(
-        after.instance,
-        after.unit,
-        after.action,
-        nativeStatus(await deps.status(effect.workflowId)),
-      )
-    )
-      return undefined;
+    if (!after || (await sourceHash(after)) !== (await sourceHash(current))) return undefined;
     return finalized.receipt;
   } catch {
     return undefined;

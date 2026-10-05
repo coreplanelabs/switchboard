@@ -1,6 +1,7 @@
 import { childPresetOfStep } from "./recoveryStep.js";
 import { RUN_ID_PATTERN } from "../runRecord.js";
 import { isPublicationRepo } from "../branchPublication.js";
+import { isMaintenanceExecution, type MaintenanceExecution } from "./maintenanceIdentity.js";
 import {
   INSTANCE_ID_PATTERN,
   isCoordinatorUnit,
@@ -11,8 +12,9 @@ import {
 
 /** One bounded action on the existing unit, retained through unknown call outcomes. */
 export interface UnitEffectExecution {
-  workflowId: string;
+  workflowId?: string;
   recoveryActionId?: string;
+  maintenance?: MaintenanceExecution;
 }
 export interface UnitEffectTarget {
   repo: string;
@@ -27,6 +29,7 @@ export type UnitEffectOperation =
   | "merge"
   | "enqueue"
   | "rebase_push"
+  | "pull_create"
   | "pull_close"
   | "pull_reopen"
   | "actions_rerun"
@@ -34,11 +37,11 @@ export type UnitEffectOperation =
   | "approval_reset"
   | "review_anchor";
 export type UnitEffectCompletionOutcome =
-  | { state: "accepted"; commitSha?: string; runId?: string }
+  | { state: "accepted"; commitSha?: string; runId?: string; pr?: { number: number; url: string } }
   | { state: "refused"; cause: "external_refused" }
   | { state: "uncertain" };
 export type UnitEffectOutcome = UnitEffectCompletionOutcome | { state: "refused"; cause: "not_started" };
-export type UnitEffectCall = { operation: UnitEffectOperation; resourceId?: number } & (
+export type UnitEffectCall = { operation: UnitEffectOperation; resourceId?: number; agent?: "coding" } & (
   { state: "unstarted" | "pending" } | UnitEffectOutcome
 );
 export interface UnitCurrentEffect {
@@ -48,10 +51,14 @@ export interface UnitCurrentEffect {
   execution: UnitEffectExecution;
   target: UnitEffectTarget;
   phase: "active" | "settled";
+  /** A maintenance owner reserves before local preparation; begin cannot cross this marker. */
+  preparation?: "reserved";
   calls: readonly UnitEffectCall[];
 }
 export type UnitEffectTransition = { expected: CoordinatorUnit; execution: UnitEffectExecution } & (
   | { kind: "admit"; effect: UnitCurrentEffect }
+  | { kind: "prepare"; effect: UnitCurrentEffect }
+  | { kind: "publish"; effectId: string }
   | { kind: "begin"; effectId: string; call: number }
   | { kind: "cancel"; effectId: string; call: number }
   | { kind: "complete"; effectId: string; call: number; outcome: UnitEffectCompletionOutcome }
@@ -91,15 +98,37 @@ const object = (v: unknown): v is Record<string, unknown> => typeof v === "objec
 const text = (v: unknown): v is string => typeof v === "string" && v.length > 0 && v.length <= 512;
 const sha = (v: unknown): v is string => typeof v === "string" && /^[a-f0-9]{40}$/i.test(v);
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+const sameExecution = (a: UnitEffectExecution | undefined, b: UnitEffectExecution | undefined): boolean => {
+  const canonical = (value: unknown) =>
+    JSON.stringify(value, (_key, part: unknown) =>
+      object(part)
+        ? Object.fromEntries(Object.entries(part).sort(([left], [right]) => left.localeCompare(right)))
+        : part,
+    );
+  return canonical(a) === canonical(b);
+};
 const keys = (v: Record<string, unknown>, allowed: readonly string[]) =>
   Object.keys(v).every((key) => allowed.includes(key));
 const positive = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) > 0;
+export function isUnitEffectExecution(v: unknown): v is UnitEffectExecution {
+  return (
+    object(v) &&
+    keys(v, ["workflowId", "recoveryActionId", "maintenance"]) &&
+    (v.maintenance !== undefined
+      ? v.workflowId === undefined && v.recoveryActionId === undefined && isMaintenanceExecution(v.maintenance)
+      : typeof v.workflowId === "string" &&
+        INSTANCE_ID_PATTERN.test(v.workflowId) &&
+        (v.recoveryActionId === undefined ||
+          (typeof v.recoveryActionId === "string" && /^r_[a-f0-9]{64}$/.test(v.recoveryActionId))))
+  );
+}
 const operations: readonly UnitEffectOperation[] = [
   "spawn",
   "branch_create",
   "merge",
   "enqueue",
   "rebase_push",
+  "pull_create",
   "pull_close",
   "pull_reopen",
   "actions_rerun",
@@ -114,9 +143,16 @@ export function isUnitEffectOutcome(v: unknown): v is UnitEffectOutcome {
     return keys(v, ["state", "cause"]) && (v.cause === "external_refused" || v.cause === "not_started");
   return (
     v.state === "accepted" &&
-    keys(v, ["state", "commitSha", "runId"]) &&
+    keys(v, ["state", "commitSha", "runId", "pr"]) &&
     (v.commitSha === undefined || sha(v.commitSha)) &&
-    (v.runId === undefined || (typeof v.runId === "string" && RUN_ID_PATTERN.test(v.runId)))
+    (v.runId === undefined || (typeof v.runId === "string" && RUN_ID_PATTERN.test(v.runId))) &&
+    (v.pr === undefined ||
+      (object(v.pr) &&
+        keys(v.pr, ["number", "url"]) &&
+        positive(v.pr.number) &&
+        typeof v.pr.url === "string" &&
+        v.pr.url.length > 0 &&
+        v.pr.url.length <= 2048))
   );
 }
 function isUnitEffectCompletionOutcome(v: unknown): v is UnitEffectCompletionOutcome {
@@ -124,28 +160,27 @@ function isUnitEffectCompletionOutcome(v: unknown): v is UnitEffectCompletionOut
 }
 
 function validOperationOutcome(operation: UnitEffectOperation | undefined, outcome: UnitEffectOutcome): boolean {
-  return (
-    outcome.state !== "accepted" ||
-    (operation === "merge"
-      ? sha(outcome.commitSha) && outcome.runId === undefined
-      : operation === "enqueue"
-        ? outcome.commitSha === undefined && outcome.runId === undefined
-        : true)
-  );
+  if (outcome.state !== "accepted") return true;
+  if (operation === "pull_create")
+    return sha(outcome.commitSha) && outcome.runId === undefined && outcome.pr !== undefined;
+  if (outcome.pr !== undefined) return false;
+  return operation === "merge"
+    ? sha(outcome.commitSha) && outcome.runId === undefined
+    : operation === "enqueue"
+      ? outcome.commitSha === undefined && outcome.runId === undefined
+      : true;
 }
 
 export function isUnitCurrentEffect(v: unknown): v is UnitCurrentEffect {
   if (
     !object(v) ||
-    !keys(v, ["version", "id", "ordinal", "execution", "target", "phase", "calls"]) ||
+    !keys(v, ["version", "id", "ordinal", "execution", "target", "phase", "preparation", "calls"]) ||
     v.version !== 1 ||
     !text(v.id) ||
     !positive(v.ordinal) ||
-    !object(v.execution) ||
-    !keys(v.execution, ["workflowId", "recoveryActionId"]) ||
-    !(typeof v.execution.workflowId === "string" && INSTANCE_ID_PATTERN.test(v.execution.workflowId)) ||
-    (v.execution.recoveryActionId !== undefined &&
-      !(typeof v.execution.recoveryActionId === "string" && /^r_[a-f0-9]{64}$/.test(v.execution.recoveryActionId))) ||
+    !isUnitEffectExecution(v.execution) ||
+    (v.preparation !== undefined &&
+      (v.preparation !== "reserved" || v.phase !== "active" || v.execution.maintenance === undefined)) ||
     !object(v.target) ||
     !keys(v.target, ["repo", "ref", "base", "headSha", "pr"]) ||
     !isPublicationRepo(v.target.repo) ||
@@ -159,20 +194,40 @@ export function isUnitCurrentEffect(v: unknown): v is UnitCurrentEffect {
     v.calls.length > UNIT_EFFECT_MAX_CALLS
   )
     return false;
+  if (
+    v.preparation === "reserved" &&
+    (v.calls.length !== 1 || !same(v.calls[0], { operation: "rebase_push", state: "unstarted" }))
+  )
+    return false;
   for (const call of v.calls) {
     if (
       !object(call) ||
-      !keys(call, ["operation", "resourceId", "state", "commitSha", "runId", "cause"]) ||
+      !keys(call, ["operation", "resourceId", "agent", "state", "commitSha", "runId", "pr", "cause"]) ||
       !operations.includes(call.operation as UnitEffectOperation) ||
       (call.operation === "actions_rerun" || call.operation === "check_rerequest"
         ? !positive(call.resourceId)
         : call.resourceId !== undefined)
     )
       return false;
-    const { operation: _operation, resourceId: _resource, ...outcome } = call;
+    if (
+      call.agent !== undefined &&
+      (call.agent !== "coding" ||
+        call.operation !== "spawn" ||
+        !v.execution.maintenance ||
+        v.calls.length !== 1 ||
+        (v.execution.maintenance.bounds.spendCapUsd ?? 0) <= 0)
+    )
+      return false;
+    const { operation: _operation, resourceId: _resource, agent: _agent, ...outcome } = call;
     if (!(same(outcome, { state: "unstarted" }) || same(outcome, { state: "pending" }) || isUnitEffectOutcome(outcome)))
       return false;
     if (isUnitEffectOutcome(outcome) && !validOperationOutcome(call.operation as UnitEffectOperation, outcome))
+      return false;
+    if (
+      call.agent === "coding" &&
+      outcome.state === "accepted" &&
+      (outcome.runId === undefined || outcome.commitSha !== undefined || outcome.pr !== undefined)
+    )
       return false;
     if (call.operation === "enqueue" && v.calls.length !== 1) return false;
     if (v.phase === "settled" && call.state !== "accepted" && call.state !== "refused") return false;
@@ -184,19 +239,11 @@ export function isUnitCurrentEffect(v: unknown): v is UnitCurrentEffect {
   }
 }
 export function isUnitEffectTransition(v: unknown): v is UnitEffectTransition {
-  if (
-    !object(v) ||
-    !isCoordinatorUnit(v.expected) ||
-    !object(v.execution) ||
-    !keys(v.execution, ["workflowId", "recoveryActionId"]) ||
-    !(typeof v.execution.workflowId === "string" && INSTANCE_ID_PATTERN.test(v.execution.workflowId)) ||
-    (v.execution.recoveryActionId !== undefined &&
-      !(typeof v.execution.recoveryActionId === "string" && /^r_[a-f0-9]{64}$/.test(v.execution.recoveryActionId)))
-  )
-    return false;
-  if (v.kind === "admit") return keys(v, ["expected", "execution", "kind", "effect"]) && isUnitCurrentEffect(v.effect);
+  if (!object(v) || !isCoordinatorUnit(v.expected) || !isUnitEffectExecution(v.execution)) return false;
+  if (v.kind === "admit" || v.kind === "prepare")
+    return keys(v, ["expected", "execution", "kind", "effect"]) && isUnitCurrentEffect(v.effect);
   if (!text(v.effectId)) return false;
-  if (v.kind === "settle") return keys(v, ["expected", "execution", "kind", "effectId"]);
+  if (v.kind === "settle" || v.kind === "publish") return keys(v, ["expected", "execution", "kind", "effectId"]);
   return (
     (v.kind === "begin" || v.kind === "cancel" || v.kind === "complete" || v.kind === "resolve") &&
     Number.isSafeInteger(v.call) &&
@@ -269,10 +316,12 @@ export function reserveUnitEffectOutcomes(effect: UnitCurrentEffect): UnitCurren
     phase: "settled",
     calls: effect.calls.map((call) => ({
       operation: call.operation,
+      ...(call.agent === undefined ? {} : { agent: call.agent }),
       ...(call.resourceId === undefined ? {} : { resourceId: call.resourceId }),
       state: "accepted" as const,
       commitSha: "a".repeat(40),
       runId: "r".repeat(64),
+      ...(call.operation === "pull_create" ? { pr: { number: Number.MAX_SAFE_INTEGER, url: "u".repeat(2048) } } : {}),
     })),
   };
 }
@@ -346,6 +395,7 @@ export function unitEffectTombstoneMatches(meta: unknown, startedAt: number, rec
     "repo",
     "parentInstanceId",
     "coordinatorUnit",
+    "maintenanceActionId",
     "coordinatorAttempt",
     "idempotencyKey",
   ].every((field) => same(meta[field], record[field]));
@@ -371,13 +421,35 @@ function spawnEvidenceRefusal(
   const meta = evidence.meta,
     tag = evidence.tags[0],
     reviewTarget = evidence.reviewTarget;
+  const spawnIndex = effect.calls.findIndex((call) => call.operation === "spawn");
+  const priorPush = effect.calls
+    .slice(0, spawnIndex)
+    .filter((call) => call.operation === "rebase_push")
+    .at(-1);
+  const deltaReview =
+    spawnIndex > 0 &&
+    effect.calls.filter((call) => call.operation === "spawn").length === 1 &&
+    effect.calls.slice(0, spawnIndex).every((call) => call.state === "accepted") &&
+    priorPush?.state === "accepted" &&
+    sha(priorPush.commitSha);
+  const modelRound =
+    effect.execution.maintenance !== undefined &&
+    effect.calls.length === 1 &&
+    effect.calls[0]?.operation === "spawn" &&
+    effect.calls[0].agent === "coding";
+  const expectedAgent = modelRound ? "coding" : deltaReview ? "review" : childPresetOfStep(effect.id);
+  const expectedHead = deltaReview && priorPush?.state === "accepted" ? priorPush.commitSha! : effect.target.headSha;
   const thread = meta.agent === "review" ? (unit.reviewThread?.threadKey ?? unit.threadKey) : unit.threadKey;
   if (
     evidence.runId !== runId ||
     !Number.isFinite(evidence.startedAt) ||
-    evidence.startedAt < instance.createdAt ||
-    childPresetOfStep(effect.id) === undefined ||
-    meta.agent !== childPresetOfStep(effect.id) ||
+    (effect.execution.maintenance === undefined && evidence.startedAt < instance.createdAt) ||
+    expectedAgent === undefined ||
+    meta.agent !== expectedAgent ||
+    (effect.execution.maintenance
+      ? meta.maintenanceActionId !== effect.execution.maintenance.id ||
+        tag.maintenanceActionId !== effect.execution.maintenance.id
+      : meta.maintenanceActionId !== undefined || tag.maintenanceActionId !== undefined) ||
     (meta.agent === "review" &&
       (effect.target.pr === undefined ||
         !object(reviewTarget) ||
@@ -386,7 +458,7 @@ function spawnEvidenceRefusal(
         reviewTarget.repo.toLowerCase() !== effect.target.repo.toLowerCase() ||
         reviewTarget.ref !== effect.target.ref ||
         typeof reviewTarget.headSha !== "string" ||
-        reviewTarget.headSha.toLowerCase() !== effect.target.headSha.toLowerCase())) ||
+        reviewTarget.headSha.toLowerCase() !== expectedHead.toLowerCase())) ||
     meta.hosted !== undefined ||
     meta.channelId !== instance.channelId ||
     meta.userId !== instance.userId ||
@@ -410,10 +482,31 @@ function spawnEvidenceRefusal(
     tag.unit !== unit.unit ||
     tag.branch !== effect.target.ref ||
     tag.base !== effect.target.base ||
-    (tag.transportWorkflowId === undefined ? instance.id : tag.transportWorkflowId) !== effect.execution.workflowId ||
+    (effect.execution.maintenance
+      ? tag.transportWorkflowId !== undefined || (!deltaReview && !modelRound)
+      : (tag.transportWorkflowId === undefined ? instance.id : tag.transportWorkflowId) !==
+        effect.execution.workflowId) ||
     !same(tag.publication, unit.publication)
   )
     return "conflict";
+}
+
+function maintenanceSpawnRounds(
+  unit: CoordinatorUnit,
+  effect: UnitCurrentEffect,
+  runId: string,
+): CoordinatorUnit["rounds"] {
+  const maintenance = effect.execution.maintenance!;
+  return [
+    ...unit.rounds,
+    {
+      index: Math.max(0, ...unit.rounds.map((round) => round.index)) + 1,
+      agent: "coding",
+      outcome: "started",
+      at: maintenance.admittedAt,
+      maintenance: { actionId: maintenance.id, runId, budgetUsd: maintenance.bounds.spendCapUsd! },
+    },
+  ];
 }
 
 /** The owner transaction supplies the current stop and unit; this planner never performs a call. */
@@ -429,24 +522,36 @@ export function planUnitEffectTransition(
   const effect = input.kind === "admit" ? input.effect : current.currentEffect;
   if (!effect || !isUnitCurrentEffect(effect)) return { ok: false, reason: "conflict" };
   if (
-    effect.execution.workflowId !== input.execution.workflowId ||
-    effect.execution.recoveryActionId !== input.execution.recoveryActionId ||
-    effect.execution.workflowId !== (current.recovery?.workflowId ?? instance.id) ||
-    effect.execution.recoveryActionId !== current.recovery?.actionId
+    !sameExecution(effect.execution, input.execution) ||
+    (input.execution.maintenance
+      ? input.kind === "admit" ||
+        !!current.recovery ||
+        !!current.recoveryHold ||
+        !sameExecution(current.currentEffect?.execution, input.execution)
+      : instance.kind !== "ship" ||
+        effect.execution.workflowId !== (current.recovery?.workflowId ?? instance.id) ||
+        effect.execution.recoveryActionId !== current.recovery?.actionId)
   )
     return { ok: false, reason: "execution" };
   const bound = current.publication;
+  const acceptedRebase = effect.calls
+    .filter((part) => part.operation === "rebase_push" && part.state === "accepted")
+    .at(-1);
   if (
     effect.target.repo.toLowerCase() !== instance.repo.toLowerCase() ||
     effect.target.ref !== current.branch ||
-    effect.target.base !== (instance.base ?? "main") ||
+    effect.target.base !== (effect.execution.maintenance ? bound?.baseRef : (instance.base ?? "main")) ||
     effect.target.pr !== current.pr?.number ||
     (current.pr !== undefined && bound === undefined) ||
     (bound === undefined &&
       current.lastPush !== undefined &&
       (!sha(current.lastPush) || effect.target.headSha.toLowerCase() !== current.lastPush.toLowerCase())) ||
     (bound !== undefined &&
-      (effect.target.headSha.toLowerCase() !== bound.expectedHeadSha.toLowerCase() ||
+      ((effect.target.headSha.toLowerCase() !== bound.expectedHeadSha.toLowerCase() &&
+        !(
+          acceptedRebase?.state === "accepted" &&
+          acceptedRebase.commitSha?.toLowerCase() === bound.expectedHeadSha.toLowerCase()
+        )) ||
         bound.repo.toLowerCase() !== instance.repo.toLowerCase() ||
         bound.pr !== effect.target.pr ||
         bound.headRef !== effect.target.ref ||
@@ -456,6 +561,51 @@ export function planUnitEffectTransition(
         bound.owner.unit !== current.unit))
   )
     return { ok: false, reason: "conflict" };
+  if (input.kind === "publish") {
+    if (
+      effect.id !== input.effectId ||
+      !bound ||
+      acceptedRebase?.state !== "accepted" ||
+      !sha(acceptedRebase.commitSha) ||
+      acceptedRebase.runId !== undefined ||
+      acceptedRebase.pr !== undefined
+    )
+      return { ok: false, reason: "conflict" };
+    return {
+      ok: true,
+      unit: {
+        ...current,
+        publication: { ...bound, expectedHeadSha: acceptedRebase.commitSha },
+        lastPush: acceptedRebase.commitSha,
+      },
+    };
+  }
+  if (input.kind === "prepare") {
+    if (instance.stop) return { ok: false, reason: "stopped" };
+    const proposed = input.effect;
+    if (
+      effect.preparation !== "reserved" ||
+      effect.phase !== "active" ||
+      !sameExecution(effect.execution, proposed.execution) ||
+      !same(effect.target, proposed.target) ||
+      proposed.id !== effect.id ||
+      proposed.ordinal !== effect.ordinal ||
+      proposed.phase !== "active" ||
+      proposed.preparation !== undefined ||
+      proposed.calls.some((call) => call.state !== "unstarted") ||
+      !(
+        proposed.calls[0]?.operation === "rebase_push" ||
+        (proposed.calls.length === 1 &&
+          proposed.calls[0]?.operation === "spawn" &&
+          proposed.calls[0].agent === "coding" &&
+          (proposed.execution.maintenance?.bounds.spendCapUsd ?? 0) > 0 &&
+          !current.rounds.some((round) => round.maintenance))
+      ) ||
+      !hasUnitEffectCapacity({ ...current, currentEffect: proposed })
+    )
+      return { ok: false, reason: "conflict" };
+    return { ok: true, unit: { ...current, currentEffect: proposed } };
+  }
   if (input.kind === "admit") {
     if (instance.stop) return { ok: false, reason: "stopped" };
     if (current.ending || current.idle) return { ok: false, reason: "execution" };
@@ -493,10 +643,12 @@ export function planUnitEffectTransition(
         ...current,
         currentEffect: {
           ...effect,
+          ...(effect.preparation === "reserved" ? { preparation: undefined } : {}),
           calls: effect.calls.map((part, index) =>
             index === input.call
               ? {
                   operation: part.operation,
+                  ...(part.agent === undefined ? {} : { agent: part.agent }),
                   ...(part.resourceId === undefined ? {} : { resourceId: part.resourceId }),
                   state: "refused",
                   cause: "not_started",
@@ -508,6 +660,7 @@ export function planUnitEffectTransition(
     };
   }
   if (input.kind === "begin") {
+    if (effect.preparation === "reserved") return { ok: false, reason: "conflict" };
     const restoreAcceptedClose =
       input.call === 1 &&
       effect.calls.length === 2 &&
@@ -515,7 +668,8 @@ export function planUnitEffectTransition(
       effect.calls[0].state === "accepted" &&
       call.operation === "pull_reopen";
     if (instance.stop && !restoreAcceptedClose) return { ok: false, reason: "stopped" };
-    if ((current.ending || current.idle) && !restoreAcceptedClose) return { ok: false, reason: "execution" };
+    if ((current.ending || current.idle) && !restoreAcceptedClose && !effect.execution.maintenance)
+      return { ok: false, reason: "execution" };
     // A pending receipt cannot prove whether its caller crossed the external boundary.
     if (effect.calls.some((part) => part.state === "pending" || part.state === "uncertain"))
       return { ok: false, reason: "uncertain" };
@@ -542,6 +696,9 @@ export function planUnitEffectTransition(
       ok: true,
       unit: {
         ...current,
+        ...(call.agent === "coding" && proof.kind === "spawn_run"
+          ? { rounds: maintenanceSpawnRounds(current, effect, proof.runId) }
+          : {}),
         currentEffect: {
           ...effect,
           ...(call.operation === "enqueue" &&
@@ -553,6 +710,7 @@ export function planUnitEffectTransition(
             index === input.call
               ? {
                   operation: call.operation,
+                  ...(call.agent === undefined ? {} : { agent: call.agent }),
                   ...observationOutcome(
                     proof.kind === "branch_ref" ? { ...proof, headSha: effect.target.headSha } : proof,
                     call,
@@ -566,12 +724,16 @@ export function planUnitEffectTransition(
   }
   if (call.state !== "pending" || !isUnitEffectCompletionOutcome(input.outcome))
     return { ok: false, reason: "conflict" };
-  if (
-    input.outcome.state === "accepted" &&
-    ((call.operation === "merge" && (!sha(input.outcome.commitSha) || input.outcome.runId !== undefined)) ||
-      (call.operation === "enqueue" && (input.outcome.commitSha !== undefined || input.outcome.runId !== undefined)))
-  )
-    return { ok: false, reason: "conflict" };
+  if (!validOperationOutcome(call.operation, input.outcome)) return { ok: false, reason: "conflict" };
+  if (call.operation === "pull_create" && input.outcome.state === "accepted") {
+    const prior = effect.calls
+      .slice(0, input.call)
+      .filter((part) => part.operation === "rebase_push")
+      .at(-1);
+    const head = prior?.state === "accepted" ? prior.commitSha : effect.target.headSha;
+    if (!sha(head) || input.outcome.commitSha?.toLowerCase() !== head.toLowerCase())
+      return { ok: false, reason: "conflict" };
+  }
   if (call.operation === "spawn" && input.outcome.state === "accepted") {
     const reason = spawnEvidenceRefusal(instance, current, effect, input.outcome.runId, runEvidence);
     if (reason) return { ok: false, reason };
@@ -579,10 +741,14 @@ export function planUnitEffectTransition(
   const outcome = {
     ...input.outcome,
     operation: call.operation,
+    ...(call.agent === undefined ? {} : { agent: call.agent }),
     ...(call.resourceId === undefined ? {} : { resourceId: call.resourceId }),
   };
   const next = {
     ...current,
+    ...(call.operation === "spawn" && call.agent === "coding" && input.outcome.state === "accepted"
+      ? { rounds: maintenanceSpawnRounds(current, effect, input.outcome.runId!) }
+      : {}),
     currentEffect: { ...effect, calls: effect.calls.map((part, index) => (index === input.call ? outcome : part)) },
   };
   return isUnitCurrentEffect(next.currentEffect) ? { ok: true, unit: next } : { ok: false, reason: "conflict" };
@@ -591,10 +757,40 @@ export function planUnitEffectTransition(
 /** A successful transport receipt proves only this requested whole-row change. */
 export function unitEffectResultMatches(input: UnitEffectTransition, unit: CoordinatorUnit): boolean {
   if (!isUnitEffectTransition(input) || !isCoordinatorUnit(unit)) return false;
-  const { currentEffect: _before, ...expectedFields } = input.expected;
+  if (input.kind === "publish") {
+    const previous = input.expected.currentEffect;
+    const push = previous?.calls.filter((call) => call.operation === "rebase_push" && call.state === "accepted").at(-1);
+    return (
+      !!previous &&
+      previous.id === input.effectId &&
+      !!input.expected.publication &&
+      push?.state === "accepted" &&
+      sha(push.commitSha) &&
+      push.runId === undefined &&
+      push.pr === undefined &&
+      same(unit, {
+        ...input.expected,
+        publication: { ...input.expected.publication, expectedHeadSha: push.commitSha },
+        lastPush: push.commitSha,
+      })
+    );
+  }
+  const chargedRun =
+    input.kind === "complete" && input.outcome.state === "accepted"
+      ? input.outcome.runId
+      : input.kind === "resolve" && input.observation.kind === "spawn_run"
+        ? input.observation.runId
+        : undefined;
+  const expected =
+    (input.kind === "complete" || input.kind === "resolve") &&
+    chargedRun !== undefined &&
+    input.expected.currentEffect?.calls[input.call]?.agent === "coding"
+      ? { ...input.expected, rounds: maintenanceSpawnRounds(input.expected, input.expected.currentEffect, chargedRun) }
+      : input.expected;
+  const { currentEffect: _before, ...expectedFields } = expected;
   const { currentEffect: effect, ...actualFields } = unit;
   if (!same(expectedFields, actualFields) || !effect) return false;
-  if (input.kind === "admit") return same(effect, input.effect);
+  if (input.kind === "admit" || input.kind === "prepare") return same(effect, input.effect);
   const previous = input.expected.currentEffect;
   if (!previous || previous.id !== input.effectId) return false;
   if (input.kind === "settle")
@@ -606,6 +802,7 @@ export function unitEffectResultMatches(input: UnitEffectTransition, unit: Coord
   if (!call || (input.kind === "resolve" && !observationMatches(previous, call, input.observation))) return false;
   const identity = {
     operation: call.operation,
+    ...(call.agent === undefined ? {} : { agent: call.agent }),
     ...(call.resourceId === undefined ? {} : { resourceId: call.resourceId }),
   };
   const next =
@@ -626,6 +823,7 @@ export function unitEffectResultMatches(input: UnitEffectTransition, unit: Coord
           : { ...input.outcome, ...identity };
   return same(effect, {
     ...previous,
+    ...(input.kind === "cancel" && previous.preparation === "reserved" ? { preparation: undefined } : {}),
     ...(input.kind === "resolve" &&
     call.operation === "enqueue" &&
     ["pull_merged", "pull_dequeued"].includes(input.observation.kind) &&

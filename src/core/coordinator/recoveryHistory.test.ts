@@ -139,6 +139,31 @@ describe("recovery history store", () => {
       expect(await store.getRecoveryAction(row, request())).toEqual(action);
       expect(await store.listUnits(instance.id)).toEqual([admitted.unit]);
     } else {
+      const action = await store.getRecoveryAction(row, request());
+      for (const changed of [
+        { ...execution, workflowId: "recovery-other" },
+        { ...execution, recoveryActionId: "r_" + "f".repeat(64) },
+      ]) {
+        expect(
+          await store.transitionUnitEffect({
+            kind: "begin",
+            expected: admitted.unit,
+            execution: changed,
+            effectId: "recovery/spawn",
+            call: 0,
+          }),
+        ).toEqual({ ok: false, reason: "execution" });
+        expect(await store.listUnits(instance.id)).toEqual([admitted.unit]);
+      }
+      const foreign = {
+        kind: "begin" as const,
+        expected: admitted.unit,
+        execution: { ...execution, authority: "untrusted" },
+        effectId: "recovery/spawn",
+        call: 0,
+      };
+      expect(await store.transitionUnitEffect(foreign)).toEqual({ ok: false, reason: "conflict" });
+      expect(await store.listUnits(instance.id)).toEqual([admitted.unit]);
       const reverseExecution = { recoveryActionId: execution.recoveryActionId, workflowId: execution.workflowId };
       expect(
         await store.transitionUnitEffect({
@@ -149,6 +174,9 @@ describe("recovery history store", () => {
           call: 0,
         }),
       ).toMatchObject({ ok: true });
+      const actual = (await store.listUnits(instance.id))[0]!;
+      expect(JSON.stringify(actual.currentEffect!.execution)).toBe(JSON.stringify(execution));
+      expect(await store.getRecoveryAction(row, request())).toEqual(action);
     }
   });
   it.each([100, 2000, 7000])(

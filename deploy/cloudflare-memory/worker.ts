@@ -1,5 +1,19 @@
+import {
+  validMaintenanceTransport,
+  sameMaintenanceTransport,
+  maintenanceEventsMatch,
+  preserveMaintenanceEvent,
+} from "../../src/core/coordinator/maintenanceIdentity.js";
 import { terminalPublicationRetentionRequired } from "../../src/core/branchPublication.ts";
 import { branchPublicationOf, doorPublicationOf } from "../../src/core/branchPublication.js";
+import { reviewPublicationOf } from "../../src/core/reviewPublication.js";
+import {
+  isMaintenanceAdmissionInput,
+  prepareMaintenanceAdmission,
+  planMaintenanceAdmission,
+  type MaintenanceAdmissionInput,
+  type MaintenanceAdmissionResult,
+} from "../../src/core/coordinator/maintenanceAdmission.js";
 import {
   terminalWorkspaceSettlement,
   terminalThreadKey,
@@ -30,7 +44,12 @@ import {
   sameCoordinatorReportAdmission,
   sameCoordinatorReportOwner,
 } from "../../src/core/coordinator/reportContext.js";
+import {
+  coordinatorPublicDeliveryReference,
+  readCoordinatorPublicDelivery,
+} from "../../src/core/coordinator/reportPublicDelivery.js";
 import { readCoordinatorStatus } from "../../src/core/coordinator/unitStatus.js";
+import { coordinatorReportCanReconcile } from "../../src/core/coordinator/reportReconcileEligibility.js";
 import { isCoordinatorReportAdmission } from "../../src/core/coordinator/reportAdmission.js";
 import { privateWorkerThreadKey } from "../../src/core/privateWorkerLog.js";
 import { isInstanceNotFound } from "../../src/core/coordinator/instancesRoute.js";
@@ -113,6 +132,7 @@ import {
   applyRetention,
   clampRetentionPolicy,
   isRunRecord,
+  branchPushReceiptsOf,
   workEvidenceBelongsToRun,
   isRunListItem,
   isRecoveryEvidenceScope,
@@ -3023,7 +3043,7 @@ export class RunHistoryDO extends DurableObject<Env> {
    * a final ending or replaces a report admitted by the original writer. */
   async offerCoordinatorReconciliation(instanceId: string, unit: string, now: number): Promise<{ offered: boolean }> {
     const before = this.coordinatorSnapshot(instanceId, unit);
-    if (!before) return { offered: false };
+    if (!before || before.instance.kind === "maintenance") return { offered: false };
     const effect = await coordinatorReconciliationEffect(before.instance, before.unit, before.action);
     if (this.sql.exec(`SELECT 1 FROM plane_effects WHERE id = ?`, effect.id).toArray().length)
       return { offered: false };
@@ -3080,6 +3100,18 @@ export class RunHistoryDO extends DurableObject<Env> {
       before.instance = { ...before.instance, admission: "created" };
     }
     if (!coordinatorWorkflowCanReconcile(before.instance, before.unit, before.action, status))
+      return { offered: false };
+    if (
+      !(await coordinatorReportCanReconcile(
+        {
+          readSessionEntry: async (key: string, rowId: string) =>
+            this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(key)).readEntry(rowId),
+        },
+        before.instance,
+        before.unit,
+        before.action,
+      ))
+    )
       return { offered: false };
     let offered = false;
     this.ctx.storage.transactionSync(() => {
@@ -3216,7 +3248,11 @@ export class RunHistoryDO extends DurableObject<Env> {
         (before.unit.workBrief
           ? privateWorkerThreadKey(before.unit)
           : (before.unit.threadKey ?? before.instance.threadKey)) ||
-      (effect.actionId !== undefined && !owner.deliveryId.startsWith(`recovery:${effect.workflowId}:`))
+      owner.deliveryId !==
+        (effect.actionId !== undefined
+          ? `recovery:${effect.workflowId}:${before.unit.ending.deliveryId}`
+          : before.unit.ending.deliveryId) ||
+      receipt.status.destinationThreadKey !== (before.unit.workBrief?.mainThreadKey ?? owner.threadKey)
     )
       return { ok: false };
     const ledger = {
@@ -3238,6 +3274,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     )
       return { ok: false };
     if (before.unit.workBrief) {
+      if (receipt.publicDelivery !== undefined) return { ok: false };
       if (!receipt.privateReplyId || before.unit.ending.deliveryId !== receipt.privateReplyId) return { ok: false };
       const reply = this.sql
         .exec<{ json: string }>(
@@ -3249,7 +3286,22 @@ export class RunHistoryDO extends DurableObject<Env> {
       if (!reply) return { ok: false };
       const event = JSON.parse(reply.json);
       if (event.kind !== "reply" || event.text !== frozen.text) return { ok: false };
-    } else if (receipt.privateReplyId !== undefined) return { ok: false };
+    } else {
+      if (receipt.privateReplyId !== undefined || receipt.publicDelivery === undefined) return { ok: false };
+      const expected = await coordinatorPublicDeliveryReference(receipt.reportDelivery, frozen.threadText);
+      if (
+        receipt.publicDelivery.proposalHash !== expected.proposalHash ||
+        receipt.publicDelivery.threadHash !== expected.threadHash ||
+        receipt.publicDelivery.kind !== expected.kind ||
+        !sameCoordinatorReportOwner(receipt.publicDelivery.owner, expected.owner)
+      )
+        return { ok: false };
+      try {
+        if (!(await readCoordinatorPublicDelivery(ledger, expected))) return { ok: false };
+      } catch {
+        return { ok: false };
+      }
+    }
     if (
       !coordinatorWorkflowCanReconcile(
         before.instance,
@@ -3943,6 +3995,57 @@ export class RunHistoryDO extends DurableObject<Env> {
     return out;
   }
 
+  async admitMaintenance(input: MaintenanceAdmissionInput, now: number): Promise<MaintenanceAdmissionResult> {
+    const prepared = await prepareMaintenanceAdmission({ ...input, createdAt: now });
+    let result: MaintenanceAdmissionResult = { ok: false, reason: "unavailable" };
+    try {
+      this.ctx.storage.transactionSync(() => {
+        const records = this.sql
+          .exec<{ instance_id: string; json: string }>(
+            `SELECT instance_id, json FROM coordinator_instances LIMIT ?`,
+            PULL_OWNER_SCAN_MAX + 1,
+          )
+          .toArray();
+        if (
+          records.length > PULL_OWNER_SCAN_MAX ||
+          records.reduce((n, row) => n + row.json.length * 3, 0) > PULL_OWNER_SCAN_MAX_BYTES
+        ) {
+          result = { ok: false, reason: "incomplete" };
+          return;
+        }
+        const instances = records.map((row) => {
+          const instance = JSON.parse(row.json);
+          if (!isCoordinatorInstance(instance) || instance.id !== row.instance_id)
+            throw new Error("unreadable maintenance owner");
+          return instance;
+        });
+        const planned = planMaintenanceAdmission(prepared, this.pullOwnershipRows(), instances);
+        if (!planned.ok || planned.replayed) {
+          result = planned;
+          return;
+        }
+        this.sql.exec(
+          `INSERT OR IGNORE INTO coordinator_instances (instance_id, json, created_at) VALUES (?, ?, ?)`,
+          planned.instance.id,
+          JSON.stringify(planned.instance),
+          now,
+        );
+        this.sql.exec(
+          `INSERT INTO coordinator_units (instance_id, unit, json, updated_at) VALUES (?, ?, ?, ?)
+          ON CONFLICT(instance_id, unit) DO UPDATE SET json = excluded.json, updated_at = excluded.updated_at`,
+          planned.unit.instanceId,
+          planned.unit.unit,
+          JSON.stringify(planned.unit),
+          now,
+        );
+        result = planned;
+      });
+    } catch {
+      result = { ok: false, reason: "incomplete" };
+    }
+    return result;
+  }
+
   async transitionUnitEffect(input: UnitEffectTransition, now: number): Promise<UnitEffectTransitionResult> {
     if (!isUnitEffectTransition(input)) return { ok: false, reason: "conflict" };
     let result: UnitEffectTransitionResult = { ok: false, reason: "unavailable" };
@@ -4037,6 +4140,14 @@ export class RunHistoryDO extends DurableObject<Env> {
         }
         if (reason) {
           result = { ok: false, reason };
+          return;
+        }
+      }
+      const maintenance = planned.unit.currentEffect?.execution.maintenance;
+      if (input.kind === "begin" && maintenance) {
+        const deadline = maintenance.admittedAt + minutesToMs(maintenance.bounds.leaseMinutes);
+        if (!Number.isFinite(deadline) || now >= deadline) {
+          result = { ok: false, reason: "stopped" };
           return;
         }
       }
@@ -4265,7 +4376,12 @@ export class RunHistoryDO extends DurableObject<Env> {
     )) {
       const raw = JSON.parse(row.summary_json);
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("unreadable terminal producer");
-      const { branchPublication, ...summary } = raw;
+      const {
+        branchPublication,
+        reviewPublication: _reviewPublication,
+        branchPushReceipts: _branchPushReceipts,
+        ...summary
+      } = raw;
       if (!isRunListItem(summary) || summary.id !== row.run_id) throw new Error("unreadable terminal producer");
       const evidence =
         row.work_evidence_json === null ? undefined : parseWorkEvidence(JSON.parse(row.work_evidence_json), summary);
@@ -5188,7 +5304,9 @@ export class RunHistoryDO extends DurableObject<Env> {
       return (
         terminalPublicationRetentionRequired(JSON.parse(row.summary_json)) ||
         evidence?.branchPublication !== undefined ||
-        evidence?.doorPublicationPending !== undefined
+        evidence?.doorPublicationPending !== undefined ||
+        evidence?.reviewPublication !== undefined ||
+        evidence?.branchPushReceipts !== undefined
       );
     } catch {
       return true;
@@ -5308,6 +5426,13 @@ export class RunHistoryDO extends DurableObject<Env> {
       let out: ClaimResult = { ok: true };
       this.ctx.storage.transactionSync(() => {
         const existing = this.liveByThread(req.threadKey);
+        const retained = this.sql
+          .exec<{ summary_json: string }>(`SELECT summary_json FROM runs WHERE run_id = ?`, req.runId)
+          .toArray()[0];
+        const original =
+          this.liveRow(req.runId)?.meta ?? (retained ? (JSON.parse(retained.summary_json) as unknown) : undefined);
+        if (!validMaintenanceTransport(req.meta) || (original && !sameMaintenanceTransport(original, req.meta)))
+          throw new Error("maintenance transport identity conflicts with retained state");
         if (!preserveCheckpointState(existing?.state ?? {}, req.state ?? {}))
           throw new Error("checkpoint state is immutable");
         if (!workEvidenceBelongsToRun(req.state ?? {}, { id: req.runId, ...req.meta }))
@@ -5443,6 +5568,31 @@ export class RunHistoryDO extends DurableObject<Env> {
     this.ctx.storage.transactionSync(() => {
       out = checkFence(this.liveRow(runId), gen);
       if (!out.ok) return;
+      if (
+        !maintenanceEventsMatch(
+          this.liveRow(runId)!.meta,
+          events.map((event) => JSON.parse(event.json)),
+        )
+      ) {
+        out = { ok: false, reason: "fenced" };
+        return;
+      }
+      const originalMeta = this.liveRow(runId)!.meta;
+      if (originalMeta.maintenanceActionId !== undefined) {
+        const previousBySeq = new Map<number, unknown>();
+        for (const event of events) {
+          const saved = this.sql
+            .exec<{ json: string }>(`SELECT json FROM run_events WHERE run_id = ? AND seq = ?`, runId, event.seq)
+            .toArray()[0];
+          const previous = previousBySeq.get(event.seq) ?? (saved ? (JSON.parse(saved.json) as unknown) : undefined);
+          const next: unknown = JSON.parse(event.json);
+          if (!preserveMaintenanceEvent(originalMeta, previous, next)) {
+            out = { ok: false, reason: "fenced" };
+            return;
+          }
+          previousBySeq.set(event.seq, next);
+        }
+      }
       for (let i = 0; i < events.length; i += RUN_EVENT_INSERT_BATCH) {
         const batch = events.slice(i, i + RUN_EVENT_INSERT_BATCH);
         const params: (string | number)[] = [];
@@ -5694,7 +5844,13 @@ export class RunHistoryDO extends DurableObject<Env> {
     const opening = this.liveRow(runId);
     const admitted = checkFence(opening, gen);
     if (!admitted.ok) return admitted;
-    if (!opening || !terminalWorkspaceRecordMatches(opening, record)) return { ok: false, reason: "fenced" };
+    if (
+      !opening ||
+      !terminalWorkspaceRecordMatches(opening, record) ||
+      !sameMaintenanceTransport(opening.meta, record) ||
+      !maintenanceEventsMatch(opening.meta, record.events)
+    )
+      return { ok: false, reason: "fenced" };
     this.checkWorkspaceFinishCapacity(opening, record);
     record = await this.archiveCheckpoint(record);
     let out: FenceResult & { stored?: boolean } = { ok: true };
@@ -5716,7 +5872,12 @@ export class RunHistoryDO extends DurableObject<Env> {
         out = { ok: false, reason: "fenced" };
         return;
       }
-      if (!row || !terminalWorkspaceRecordMatches(row, record)) {
+      if (
+        !row ||
+        !terminalWorkspaceRecordMatches(row, record) ||
+        !sameMaintenanceTransport(row.meta, record) ||
+        !maintenanceEventsMatch(row.meta, record.events)
+      ) {
         out = { ok: false, reason: "fenced" };
         return;
       }
@@ -6359,6 +6520,14 @@ export class RunHistoryDO extends DurableObject<Env> {
         (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).branchPublication !== undefined
           ? { branchPublication: (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).branchPublication }
           : {}),
+        ...(priorRecord &&
+        (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).reviewPublication !== undefined
+          ? { reviewPublication: (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).reviewPublication }
+          : {}),
+        ...(priorRecord &&
+        (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).branchPushReceipts !== undefined
+          ? { branchPushReceipts: (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).branchPushReceipts }
+          : {}),
       };
       // Terminal outcome and cost do not depend on a process-local publication
       // acknowledgment. Only saved producer state can authorize branch release.
@@ -6375,6 +6544,22 @@ export class RunHistoryDO extends DurableObject<Env> {
       delete stored.branchPublication;
       const branchPublication = branchPublicationOf(canonicalWork.branchPublication, stored.repo);
       if (branchPublication !== undefined) stored.branchPublication = branchPublication;
+      delete stored.branchPushReceipts;
+      const branchPushReceipts = branchPushReceiptsOf(canonicalWork.branchPushReceipts);
+      if (branchPushReceipts !== undefined) stored.branchPushReceipts = branchPushReceipts;
+      const unreadablePush =
+        branchPushReceipts === undefined && canonicalWork.branchPushReceipts !== undefined
+          ? { branchPushReceipts: canonicalWork.branchPushReceipts }
+          : {};
+      delete stored.reviewPublication;
+      const decodedReview = reviewPublicationOf(canonicalWork.reviewPublication);
+      const reviewPublication =
+        decodedReview?.runId === stored.id && decodedReview.target.repo === stored.repo ? decodedReview : undefined;
+      if (reviewPublication !== undefined) stored.reviewPublication = reviewPublication;
+      const unreadableReview =
+        reviewPublication === undefined && canonicalWork.reviewPublication !== undefined
+          ? { reviewPublication: canonicalWork.reviewPublication }
+          : {};
       if (
         stored.unitSeedReceipt !== undefined &&
         JSON.stringify(stored.unitSeedReceipt) !== JSON.stringify(canonicalWork.unitSeedReceipt)
@@ -6402,6 +6587,8 @@ export class RunHistoryDO extends DurableObject<Env> {
       const bytes = utf8ByteLength(
         JSON.stringify({
           ...unreadableDoor,
+          ...unreadableReview,
+          ...unreadablePush,
           ...stored,
           ...(branchPublication === undefined && canonicalWork.branchPublication !== undefined
             ? { branchPublication: canonicalWork.branchPublication }
@@ -6482,11 +6669,15 @@ export class RunHistoryDO extends DurableObject<Env> {
         workReads === undefined &&
           unitSeedReceipt === undefined &&
           !(branchPublication === undefined && canonicalWork.branchPublication !== undefined) &&
+          Object.keys(unreadablePush).length === 0 &&
+          Object.keys(unreadableReview).length === 0 &&
           Object.keys(unreadableDoor).length === 0
           ? null
           : JSON.stringify({
               version: 1,
               ...unreadableDoor,
+              ...unreadableReview,
+              ...unreadablePush,
               workReads,
               unitSeedReceipt,
               ...(branchPublication === undefined && canonicalWork.branchPublication !== undefined
@@ -6753,6 +6944,8 @@ export class RunHistoryDO extends DurableObject<Env> {
     const events: RunEvent[] = parseEventRows(this.eventRows(id, 0, Number.MAX_SAFE_INTEGER));
     let sourceReads: unknown;
     let branchPublication: unknown;
+    let reviewPublication: unknown;
+    let branchPushReceipts: unknown;
     let workReads: unknown;
     let unitSeedReceipt: unknown;
     let contextCheckpointReceipt: unknown;
@@ -6760,6 +6953,13 @@ export class RunHistoryDO extends DurableObject<Env> {
     try {
       branchPublication = (JSON.parse(row.summary_json) as Record<string, unknown>).branchPublication;
       if (branchPublication !== undefined && !branchPublicationOf(branchPublication, summary.repo)) return null;
+      reviewPublication = (JSON.parse(row.summary_json) as Record<string, unknown>).reviewPublication;
+      if (reviewPublication !== undefined) {
+        const receipt = reviewPublicationOf(reviewPublication);
+        if (!receipt || receipt.runId !== id || receipt.target.repo !== summary.repo) return null;
+      }
+      branchPushReceipts = (JSON.parse(row.summary_json) as Record<string, unknown>).branchPushReceipts;
+      if (branchPushReceipts !== undefined && !branchPushReceiptsOf(branchPushReceipts)) return null;
       sourceReads = row.source_reads_json == null ? undefined : JSON.parse(row.source_reads_json);
       if (row.work_evidence_json != null) {
         const evidence = parseWorkEvidence(JSON.parse(row.work_evidence_json), summary);
@@ -6778,6 +6978,8 @@ export class RunHistoryDO extends DurableObject<Env> {
       ...summary,
       events,
       ...(branchPublication === undefined ? {} : { branchPublication }),
+      ...(reviewPublication === undefined ? {} : { reviewPublication }),
+      ...(branchPushReceipts === undefined ? {} : { branchPushReceipts }),
       ...(sourceReads === undefined ? {} : { sourceReads }),
       ...(workReads === undefined ? {} : { workReads }),
       ...(unitSeedReceipt === undefined ? {} : { unitSeedReceipt }),
@@ -7213,6 +7415,8 @@ function parseWorkEvidence(value: unknown, owner: RunListItem | RunRecord): Reco
         field !== "workReads" &&
         field !== "unitSeedReceipt" &&
         field !== "branchPublication" &&
+        field !== "reviewPublication" &&
+        field !== "branchPushReceipts" &&
         field !== "doorPublicationPending",
     ) ||
     !workEvidenceBelongsToRun(evidence, owner)
@@ -7225,7 +7429,12 @@ function parseSummary(row: Pick<RunRow, "summary_json">): RunListItem | null {
   try {
     const parsed: unknown = JSON.parse(row.summary_json);
     if (typeof parsed !== "object" || parsed === null) return null;
-    const { branchPublication: _branchPublication, ...summary } = parsed as Record<string, unknown>;
+    const {
+      branchPublication: _branchPublication,
+      reviewPublication: _reviewPublication,
+      branchPushReceipts: _branchPushReceipts,
+      ...summary
+    } = parsed as Record<string, unknown>;
     return isRunListItem(summary) ? normalizeStored(summary as unknown as RunListItem) : null;
   } catch {
     return null;
@@ -8549,6 +8758,7 @@ const LEDGER_ROUTES = new Set([
   "/runs/coordinator/units/claim-legacy-continuation",
   "/runs/coordinator/recovery/transition",
   "/runs/coordinator/units/effect-transition",
+  "/runs/coordinator/maintenance/admit",
   "/runs/coordinator/recovery/action",
   "/runs/coordinator/recovery/history",
   "/runs/coordinator/units/list-active-recoveries",
@@ -8899,6 +9109,8 @@ function parseClaim(b: Record<string, unknown>): Validated<ClaimRequest> {
   // by the finish's send and the refusal a second claim meets: shaped or
   // refused, and both fields or neither — one alone is no tag.
   const meta = r.meta as Record<string, unknown>;
+  if (!validMaintenanceTransport(meta))
+    return invalid("run.meta maintenance transport must name its original logical owner");
   if (meta.childHandoff !== undefined && !isChildHandoff(meta.childHandoff))
     return invalid("run.meta.childHandoff must be a valid bounded handoff");
   if (meta.session !== undefined && !isRunSession(meta.session))
@@ -9471,6 +9683,11 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
   }
   // The units of the plan an instance runs (run-history item 50): rows
   // validated by the shared contract, each replaced whole; a list by instance.
+  if (pathname === "/runs/coordinator/maintenance/admit") {
+    if (!isMaintenanceAdmissionInput(b.input)) return json({ error: "invalid maintenance intent" }, 400);
+    const result = await stub.admitMaintenance(b.input, now);
+    return result.ok ? json(result) : json(result, 409);
+  }
   if (pathname === "/runs/coordinator/units/effect-transition") {
     if (!isUnitEffectTransition(b.input)) return json({ error: "invalid unit effect transition" }, 400);
     const result = await stub.transitionUnitEffect(b.input, now);

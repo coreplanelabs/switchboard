@@ -53,7 +53,16 @@ import type { RepoContext } from "./repoContext.js";
 import type { RunEvent } from "./runEvents.js";
 import type { RunControl } from "./runRegistry/runControl.js";
 import { systemClock } from "./trace/clock.js";
-import type { PullRequestFacts } from "../execution/githubPulls.js";
+import type { PullRequestFacts, GithubWriteResult } from "../execution/githubPulls.js";
+import { sourceHash } from "./references/receipts.js";
+import {
+  acceptedReviewPublication,
+  reviewPublicationOf,
+  REVIEW_PUBLICATION_OWNER_ABSENT,
+  sameReviewPublication,
+  type ReviewPublicationJournal,
+  type ReviewPublicationReceipt,
+} from "./reviewPublication.js";
 
 /** The PR's current head as GitHub reports it; undefined (or a throw) means
  *  unknown. The dispatcher passes `deps.fetchPrHead ?? currentPrHeadSha`. */
@@ -845,7 +854,8 @@ async function classifyMove(
 /** How the post step ended — the `ReviewPost` the run's record carries
  *  (agent-review.md item 18): `posted: true` only when the GitHub post call
  *  succeeded, with the pull request, the pinned head and the verdict kind;
- *  every skip, guard refusal, and failure is `posted: false` with the reason
+ *  every skip or guard refusal is `posted: false` with the reason; unknown
+ *  native outcomes remain explicitly uncertain and cannot authorize reposting
  *  (already said in the thread where the contract wants it said). The run loop
  *  writes it onto the record, and a coordinator's `read-record` answers
  *  `reviewPosted` from it: an approve whose LGTM never landed on the PR must
@@ -865,7 +875,7 @@ export type ReviewPostOutcome = ReviewPost;
  * false alarm). Safe to call at any lifecycle position — it touches only its
  * inputs, so the plain dispatch path keeps calling it AFTER workspace release
  * and registry finish, while a ship round may invoke it inside its loop.
- * Never throws; the returned `ReviewPostOutcome` says whether a post landed.
+ * Never throws; the returned `ReviewPostOutcome` preserves unconfirmed writes.
  */
 export async function runReviewPostStep(
   input: {
@@ -883,7 +893,9 @@ export async function runReviewPostStep(
     carried: { reviewed: string; current: string; commits: number } | undefined;
     hardStopped: boolean;
     /** The GitHub post; the dispatcher passes `deps.postReviewComment ?? postReviewComment`. */
-    post: (target: ReviewCommentTarget, body: string) => Promise<void>;
+    post: (target: ReviewCommentTarget, body: string) => Promise<GithubWriteResult | void>;
+    /** The original run's fenced, trim-independent publication receipt. */
+    publicationJournal?: ReviewPublicationJournal;
     fetchPrHead: FetchPrHead;
     reply: (text: string) => Promise<void>;
     /** An acknowledgement's reply (routing-and-config item 28) — the carried-
@@ -917,7 +929,12 @@ export async function runReviewPostStep(
   // post. A non-review round posts nothing and records nothing; a hard-stopped
   // round records nothing either — the abort is the record's story.
   const record = (outcome: ReviewPostOutcome): ReviewPostOutcome => {
-    if (input.publish && agent.name === "review" && !input.hardStopped) {
+    if (
+      input.publish &&
+      agent.name === "review" &&
+      !input.hardStopped &&
+      !("uncertain" in outcome && outcome.uncertain === true)
+    ) {
       const where = outcome.posted
         ? undefined
         : repoCtx.repo && repoCtx.pr
@@ -1078,13 +1095,63 @@ export async function runReviewPostStep(
     const rendered = buildReviewPostBody(input.answer, verdict, { repo: postTarget.repo, head: pinned });
     const body = carried ? `${rendered}\n\n${carriedFooter(carried)}` : rendered;
     const where = `${postTarget.repo}#${postTarget.number}`;
-    try {
-      await input.post(target, body);
-    } catch (err: unknown) {
-      const reason = err instanceof Error ? err.message : String(err);
-      console.error(`[review-post] ${logKey} failed for ${where}: ${reason}`);
+    const uncertain = async (): Promise<ReviewPostOutcome> => {
+      const reason = "the review publication outcome is unconfirmed";
+      await input.reply(`ℹ️ I could not confirm whether the review posted to ${where}.`).catch(() => {});
+      return record({ posted: false, uncertain: true, reason });
+    };
+    const refused = async (): Promise<ReviewPostOutcome> => {
+      const reason = "the review publication was refused";
       await input.reply(`ℹ️ Review not posted to ${where}: ${reason} — this verdict is Slack-only.`).catch(() => {});
       return record({ posted: false, reason });
+    };
+    const journal = input.publicationJournal;
+    if (!journal) return record({ posted: false, reason: "the review publication owner is unavailable" });
+    const pending = reviewPublicationOf({
+      version: 1,
+      runId: journal.runId,
+      target,
+      bodyHash: await sourceHash(body),
+      ...(verdict ? { verdict: verdict.verdict } : {}),
+      state: "pending",
+    });
+    if (!pending) return record({ posted: false, reason: "the complete review publication target was not confirmed" });
+    try {
+      const previous = await journal.read();
+      if (previous === REVIEW_PUBLICATION_OWNER_ABSENT)
+        return record({ posted: false, reason: "the review publication owner is unavailable" });
+      if (previous !== null) {
+        const receipt = reviewPublicationOf(previous);
+        if (!receipt || !sameReviewPublication(receipt, pending)) return uncertain();
+        const accepted = acceptedReviewPublication(receipt);
+        return accepted ? record(accepted) : receipt.state === "refused" ? refused() : uncertain();
+      }
+      if (!(await journal.canPublish())) return (await journal.read()) === null ? refused() : uncertain();
+      const admission = await journal.commit(pending);
+      if (admission === "refused") return refused();
+      if (admission !== "committed") return uncertain();
+      // An ACK alone never grants another run, target or payload authority.
+      const admitted = reviewPublicationOf(await journal.read());
+      if (!admitted || admitted.state !== "pending" || !sameReviewPublication(admitted, pending)) return uncertain();
+      if (!(await journal.canPublish())) {
+        return (await journal.commit({ ...pending, state: "refused" })) === "committed" ? refused() : uncertain();
+      }
+      let result: GithubWriteResult | void;
+      try {
+        result = await input.post(target, body);
+      } catch {
+        result = { state: "uncertain" };
+      }
+      const state: ReviewPublicationReceipt["state"] =
+        result?.state === "accepted" ? "accepted" : result?.state === "refused" ? "refused" : "uncertain";
+      // Completion records the issued call even if a stop arrived meanwhile.
+      if ((await journal.commit({ ...pending, state })) !== "committed") return uncertain();
+      if (state === "refused") return refused();
+      if (state !== "accepted") return uncertain();
+    } catch {
+      // A journal or native transport failure can hide an admitted write.
+      // Keep the original pending receipt and never emit a not-posted claim.
+      return uncertain();
     }
     console.log(
       `[review-post] ${logKey} → ${where} (${verdict?.verdict ?? "no verdict"})${carried ? ` carried ${carried.reviewed.slice(0, 7)} → ${pinned.slice(0, 7)}` : ""}`,

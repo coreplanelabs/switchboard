@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildReviewPostBody, MAX_REVIEW_POST_CODE_POINTS, parseVerdictInput } from "../core/reviewVerdict.js";
+import { branchPublicationOf } from "../core/branchPublication.js";
 import { postReviewComment } from "./githubComments.js";
 
 // Feature: docs/reference/specs/agent-review.md — the bot-process post is a COMMENT-event
@@ -22,6 +23,73 @@ describe("postReviewComment", () => {
     );
     return calls;
   }
+
+  it("does not follow a redirected native review write or credit its destination", async () => {
+    vi.stubEnv("GH_TOKEN", "ghtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const calls = stubFetch(307);
+    expect(
+      await postReviewComment({ repo: "acme/api", number: 42, commitId: "b".repeat(40) }, "original review"),
+    ).toEqual({ state: "uncertain" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.init.redirect).toBe("manual");
+  });
+  it("refuses dot-segment repositories in both retained producer evidence and the native review target", async () => {
+    vi.stubEnv("GH_TOKEN", "ghtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const calls = stubFetch();
+    for (const repo of ["./api", "../api", "acme/.", "acme/.."]) {
+      expect(branchPublicationOf({ version: 1, repo, branches: [], complete: true })).toBeUndefined();
+      expect(await postReviewComment({ repo, number: 42, commitId: "b".repeat(40) }, "original review")).toEqual({
+        state: "refused",
+      });
+    }
+    expect(calls).toHaveLength(0);
+    expect(branchPublicationOf({ version: 1, repo: "acme/lib.v2", branches: [], complete: true })).toMatchObject({
+      repo: "acme/lib.v2",
+    });
+  });
+
+  it.each(["accepted", "wrong-head", "wrong-pr", "missing-receipt", "unreadable"])(
+    "requires exact positive native review receipt: %s",
+    async (mode) => {
+      vi.stubEnv("GH_TOKEN", "ghtok");
+      vi.stubEnv("GITHUB_APP_ID", "");
+      const head = "b".repeat(40),
+        body = "original review";
+      const response = {
+        id: 71,
+        state: "COMMENTED",
+        body,
+        commit_id: head,
+        pull_request_url: "https://api.github.com/repos/acme/api/pulls/42",
+      };
+      if (mode === "wrong-head") response.commit_id = "c".repeat(40);
+      if (mode === "wrong-pr") response.pull_request_url = "https://api.github.com/repos/acme/api/pulls/43";
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          async () =>
+            new Response(
+              mode === "unreadable" ? "not json" : JSON.stringify(mode === "missing-receipt" ? {} : response),
+              { status: 201 },
+            ),
+        ),
+      );
+      expect(await postReviewComment({ repo: "acme/api", number: 42, commitId: head }, body)).toEqual({
+        state: mode === "accepted" ? "accepted" : "uncertain",
+      });
+    },
+  );
+
+  it.each([422, 408, 500])("distinguishes definitive native refusal from uncertain HTTP %s", async (status) => {
+    vi.stubEnv("GH_TOKEN", "ghtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    stubFetch(status);
+    expect(
+      await postReviewComment({ repo: "acme/api", number: 42, commitId: "b".repeat(40) }, "original review"),
+    ).toEqual(status === 422 ? { state: "refused", status } : { state: "uncertain" });
+  });
 
   it("posts a COMMENT-event review to /pulls/{n}/reviews with commit_id when given", async () => {
     vi.stubEnv("GH_TOKEN", "ghtok");
@@ -68,9 +136,9 @@ describe("postReviewComment", () => {
     const body = buildReviewPostBody("", verdict, { repo: "acme/api", head });
 
     expect([...body].length).toBeGreaterThan(MAX_REVIEW_POST_CODE_POINTS);
-    await expect(postReviewComment({ repo: "acme/api", number: 42, commitId: head }, body)).rejects.toThrow(
-      /refusing to clip the structured verdict/,
-    );
+    await expect(postReviewComment({ repo: "acme/api", number: 42, commitId: head }, body)).resolves.toEqual({
+      state: "refused",
+    });
     expect(calls).toHaveLength(0);
   });
 
@@ -100,31 +168,36 @@ describe("postReviewComment", () => {
     expect([...body].length).toBeGreaterThan(MAX_REVIEW_POST_CODE_POINTS);
     expect(body).toMatch(/^Changes requested:/);
     expect(body).toContain('<!-- switchboard:verdict {"verdict":"request_changes"');
-    await expect(postReviewComment({ repo: "acme/api", number: 42, commitId: head }, body)).rejects.toThrow(
-      /refusing to clip the structured verdict/,
-    );
+    await expect(postReviewComment({ repo: "acme/api", number: 42, commitId: head }, body)).resolves.toEqual({
+      state: "refused",
+    });
     expect(calls).toHaveLength(0);
   });
 
-  it("omits commit_id when no head SHA was resolved", async () => {
+  it("refuses before dispatch when the complete commit target is missing", async () => {
     vi.stubEnv("GH_TOKEN", "ghtok");
     vi.stubEnv("GITHUB_APP_ID", "");
     const calls = stubFetch();
-    await postReviewComment({ repo: "acme/api", number: 1 }, "x");
-    expect(JSON.parse(String(calls[0].init.body))).toEqual({ event: "COMMENT", body: "x" });
+    expect(await postReviewComment({ repo: "acme/api", number: 1 }, "x")).toEqual({ state: "refused" });
+    expect(calls).toHaveLength(0);
   });
 
-  it("throws on a non-2xx so the caller can log the failure", async () => {
+  it("returns a definitive refusal for native rejection", async () => {
     vi.stubEnv("GH_TOKEN", "ghtok");
     vi.stubEnv("GITHUB_APP_ID", "");
     stubFetch(422);
-    await expect(postReviewComment({ repo: "acme/api", number: 1 }, "x")).rejects.toThrow(/HTTP 422/);
+    expect(await postReviewComment({ repo: "acme/api", number: 1, commitId: "b".repeat(40) }, "x")).toEqual({
+      state: "refused",
+      status: 422,
+    });
   });
 
-  it("throws when no credential is available", async () => {
+  it("refuses before dispatch when no credential is available", async () => {
     vi.stubEnv("GH_TOKEN", "");
     vi.stubEnv("GITHUB_APP_ID", "");
     stubFetch();
-    await expect(postReviewComment({ repo: "acme/api", number: 1 }, "x")).rejects.toThrow(/no GitHub credential/);
+    expect(await postReviewComment({ repo: "acme/api", number: 1, commitId: "b".repeat(40) }, "x")).toEqual({
+      state: "refused",
+    });
   });
 });

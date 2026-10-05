@@ -829,3 +829,20 @@ describe("NullRunStore — the store of a process without run history", () => {
     await expect(store.delete("r1")).resolves.toBeUndefined();
   });
 });
+
+describe("terminal review publication store privacy", () => {
+  it("retains typed original publication in the record and excludes it from every summary", async () => {
+    const store = new InMemoryRunStore({ now: () => NOW });
+    const reviewPublication = {
+      version: 1 as const,
+      runId: "review-original",
+      state: "uncertain" as const,
+      target: { repo: "acme/api", number: 7, commitId: "a".repeat(40) },
+      bodyHash: "b".repeat(64),
+    };
+    await store.put(record("review-original", NOW, { repo: "acme/api", reviewPublication }));
+    expect((await store.get("review-original"))?.reviewPublication).toEqual(reviewPublication);
+    for (const summary of [await store.getSummary("review-original"), ...(await store.list({}))])
+      expect(summary).not.toHaveProperty("reviewPublication");
+  });
+});

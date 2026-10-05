@@ -209,6 +209,7 @@ export function readBotAnswer(
  *  child is admitted, and the instance is never failed over a full plane. */
 const TRANSIENT = new Set([
   "github_unavailable",
+  "effect_reconciliation_pending",
   "spawn_unavailable",
   "no_channel",
   "thread_failed",
@@ -519,7 +520,9 @@ function prCheckReturn(step: string, a: BotAnswer): Extract<StepReturn, { type: 
       step,
       pr: {
         state: "none",
-        ...(unrecovered === "no_commits" || unrecovered === "no_base" ? { unrecovered } : {}),
+        ...(unrecovered === "no_commits" || unrecovered === "no_base" || unrecovered === "external_refused"
+          ? { unrecovered }
+          : {}),
         // The branch's commits over the base, when the bot could read them
         // (agent-ship item 12): zero is the `already_landed` ending's fact.
         ...(typeof aheadOfBase === "number" ? { aheadOfBase } : {}),
@@ -833,7 +836,11 @@ async function perform(
   cursor: { ordinal: number },
 ): Promise<StepReturn> {
   const tag = { parentInstanceId: instanceId, unit, effectId: action.step, effectOrdinal: cursor.ordinal + 1 };
-  const receipt = (answer: BotAnswer, route: "branch" | "spawn" | "merge" | "checks", required = true) => {
+  const receipt = (
+    answer: BotAnswer,
+    route: "branch" | "spawn" | "merge" | "checks" | "pr-check" | "rebase",
+    required = true,
+  ) => {
     const ordinal = answer.body.effectOrdinal;
     if (ordinal !== undefined) {
       if (
@@ -903,20 +910,24 @@ async function perform(
       // state instead of `none` over a minutes-old record fact.
       return prCheckReturn(
         action.step,
-        answerOf(
-          "pr-check",
-          await step.do(action.step, STEP_CONFIG, () =>
-            call(bot, "pr-check", {
-              ...tag,
-              // `entry` is the unit-start's pre-check (issue 1689): the bot
-              // reads the branch's tip, the approval and the checks beside the
-              // listing, so a re-issued plan's unit resumes instead of recoding.
-              ...(action.entry === true ? { entry: true } : {}),
-              ...(action.recover !== undefined ? { recover: action.recover } : {}),
-              ...(action.adopt !== undefined ? { adopt: action.adopt } : {}),
-              ...(action.pr !== undefined ? { pr: action.pr } : {}),
-            }),
+        receipt(
+          answerOf(
+            "pr-check",
+            await step.do(action.step, STEP_CONFIG, () =>
+              call(bot, "pr-check", {
+                ...tag,
+                // `entry` is the unit-start's pre-check (issue 1689): the bot
+                // reads the branch's tip, the approval and the checks beside the
+                // listing, so a re-issued plan's unit resumes instead of recoding.
+                ...(action.entry === true ? { entry: true } : {}),
+                ...(action.recover !== undefined ? { recover: action.recover } : {}),
+                ...(action.adopt !== undefined ? { adopt: action.adopt } : {}),
+                ...(action.pr !== undefined ? { pr: action.pr } : {}),
+              }),
+            ),
           ),
+          "pr-check",
+          false,
         ),
       );
     case "sleep":
@@ -983,11 +994,15 @@ async function perform(
     case "rebase":
       return rebaseReturn(
         action.step,
-        answerOf(
-          "rebase",
-          await step.do(action.step, STEP_CONFIG, () =>
-            call(bot, "rebase", { ...tag, prNumber: action.prNumber, headSha: action.headSha }),
+        receipt(
+          answerOf(
+            "rebase",
+            await step.do(action.step, STEP_CONFIG, () =>
+              call(bot, "rebase", { ...tag, prNumber: action.prNumber, headSha: action.headSha }),
+            ),
           ),
+          "rebase",
+          false,
         ),
       );
   }

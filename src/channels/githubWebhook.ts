@@ -9,6 +9,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   GITHUB_EVENT_HEADER,
+  GITHUB_DELIVERY_HEADER,
   GITHUB_SIGNATURE_HEADER,
   handleCheckRunIntake,
   handleIssueCommentIntake,
@@ -40,6 +41,7 @@ export function createGithubWebhookHandler(
     const headers = {
       event: one(req.headers[GITHUB_EVENT_HEADER]),
       signature: one(req.headers[GITHUB_SIGNATURE_HEADER]),
+      delivery: one(req.headers[GITHUB_DELIVERY_HEADER]),
     };
     // Push, issue-comment and check-run each own one pure intake. Every other
     // event stays the check-run intake's ignored case.

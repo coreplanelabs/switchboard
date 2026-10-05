@@ -82,10 +82,12 @@ function fakeGithub(rec: Recorded, body = ""): SweepGithub {
         ...(target.commitId ? { commitId: target.commitId } : {}),
         body: reviewBody,
       });
+      return { state: "accepted" };
     },
     titleBody: async () => ({ title: "feat(core): demo", body }),
     update: async (pr, patch) => {
       rec.updates.push({ number: pr.number, ...patch });
+      return { state: "accepted" };
     },
   };
 }
@@ -93,16 +95,41 @@ function fakeGithub(rec: Recorded, body = ""): SweepGithub {
 const stubGit: SweepGit = {
   rebase: async () => ({ kind: "clean", newHead: NEW_HEAD }),
   patchUnchanged: async () => true,
-  forcePushWithLease: async () => {},
+  canPush: async () => true,
+  forcePushWithLease: async (_pr, head) => ({ state: "accepted", commitSha: head }),
 };
 
 function wiring(rec: Recorded, over: Partial<PullSweepWiringDeps> = {}): PullSweepWiringDeps {
   return {
+    effect: {
+      read: async () => undefined,
+      admit: async () => true,
+      begin: async () => true,
+      complete: async () => true,
+      settle: async () => true,
+    },
+    dispatchEffect: async (request) => {
+      rec.dispatched.push(request);
+      return { state: "accepted", runId: "review-child" };
+    },
     github: fakeGithub(rec),
     git: stubGit,
-    dispatch: async (request) => {
-      rec.dispatched.push(request);
-    },
+    maintenance: (() => {
+      let spent = false;
+      return {
+        modelRoundSpent: async () => spent,
+        startModelRound: async (pr, bounds) => {
+          rec.dispatched.push({
+            channelId: "slack:C1",
+            userId: "slack:UX",
+            threadKey: sweepThreadKey(pr),
+            text: `agent:coding budget:${bounds.leaseMinutes} ${pr.branch}`,
+          });
+          spent = true;
+          return { started: true as const, runId: "coding-child" };
+        },
+      };
+    })(),
     origin: { userId: "slack:UX", channelId: "slack:C1" },
     ...over,
   };
@@ -215,10 +242,42 @@ describe("buildPullSweepDeps — the listing", () => {
 });
 
 describe("buildPullSweepDeps — the effects", () => {
+  it("refuses missing durable maintenance and never credits void native receipts", async () => {
+    const rec = record();
+    const deps = buildPullSweepDeps(
+      wiring(rec, {
+        maintenance: undefined,
+        dispatchEffect: undefined,
+        github: { ...fakeGithub(rec), postReview: async () => undefined, update: async () => undefined },
+      }),
+    );
+    await expect(deps.effects.modelRoundSpent(pr7)).rejects.toThrow("durable sweep maintenance");
+    expect(await deps.effects.startModelRound(pr7, { leaseMinutes: 15, spendCapUsd: 5 })).toEqual({
+      started: false,
+      reason: "durable sweep maintenance adapter unavailable",
+    });
+    expect(rec.dispatched).toEqual([]);
+    await expect(
+      deps.effects.prepareNativeCalls!(pr7, NEW_HEAD, { carryApproval: false, deltaReview: true }),
+    ).rejects.toThrow("child admission receipt");
+    expect(
+      await deps.effects.performNativeCall!(
+        {
+          pr: pr7,
+          newHead: NEW_HEAD,
+          decision: "carry",
+          calls: [{ operation: "approval_reset", state: "unstarted", body: "Frozen LGTM" }],
+        },
+        0,
+      ),
+    ).toEqual({ state: "uncertain" });
+  });
   it("the approval carry is the bot's LGTM review pinned to the new head", async () => {
     const rec = record();
     const deps = buildPullSweepDeps(wiring(rec));
-    await deps.effects.carryApproval(pr7, NEW_HEAD);
+    const calls = await deps.effects.prepareNativeCalls!(pr7, NEW_HEAD, { carryApproval: true, deltaReview: false });
+    for (let index = 0; index < calls.length; index++)
+      await deps.effects.performNativeCall!({ pr: pr7, newHead: NEW_HEAD, decision: "carry", calls }, index);
     expect(rec.posts).toEqual([
       { number: 7, commitId: NEW_HEAD, body: expect.stringMatching(/^LGTM: approval carried/) as string },
     ]);
@@ -228,7 +287,11 @@ describe("buildPullSweepDeps — the effects", () => {
   it("the delta re-review is a review request through dispatch(), as the requester, on the sweep's own thread", async () => {
     const rec = record();
     const deps = buildPullSweepDeps(wiring(rec));
-    await deps.effects.requestDeltaReview(pr7, NEW_HEAD);
+    const calls = await deps.effects.prepareNativeCalls!(pr7, NEW_HEAD, { carryApproval: false, deltaReview: true });
+    for (let index = 0; index < calls.length; index++)
+      expect(
+        await deps.effects.performNativeCall!({ pr: pr7, newHead: NEW_HEAD, decision: "delta-review", calls }, index),
+      ).toEqual({ state: "accepted", runId: "review-child" });
     expect(rec.dispatched).toEqual([
       {
         channelId: "slack:C1",
@@ -244,7 +307,7 @@ describe("buildPullSweepDeps — the effects", () => {
     const deps = buildPullSweepDeps(wiring(rec));
     expect(await deps.effects.modelRoundSpent(pr7)).toBe(false);
     const round = await deps.effects.startModelRound(pr7, { leaseMinutes: 15, spendCapUsd: 5 });
-    expect(round).toEqual({ started: true });
+    expect(round).toEqual({ started: true, runId: "coding-child" });
     expect(rec.dispatched).toHaveLength(1);
     expect(rec.dispatched[0]!.text).toContain("agent:coding budget:15");
     expect(rec.dispatched[0]!.text).toContain("plan/demo/u1");
@@ -254,8 +317,9 @@ describe("buildPullSweepDeps — the effects", () => {
     const failing = record();
     const refused = buildPullSweepDeps(
       wiring(failing, {
-        dispatch: async () => {
-          throw new Error("admission refused");
+        maintenance: {
+          modelRoundSpent: async () => false,
+          startModelRound: async () => ({ started: false, reason: "admission refused" }),
         },
       }),
     );
@@ -269,10 +333,17 @@ describe("buildPullSweepDeps — the effects", () => {
 
   it("the spent-round flag rides the shared state across per-requester instances", async () => {
     const rec = record();
-    const state = { roundSpent: new Set<string>() };
-    const one = buildPullSweepDeps(wiring(rec, { state }));
+    let spent = false;
+    const maintenance = {
+      modelRoundSpent: async () => spent,
+      startModelRound: async () => {
+        spent = true;
+        return { started: true as const, runId: "coding-child" };
+      },
+    };
+    const one = buildPullSweepDeps(wiring(rec, { maintenance }));
     await one.effects.startModelRound(pr7, { leaseMinutes: 15, spendCapUsd: 5 });
-    const two = buildPullSweepDeps(wiring(record(), { state, origin: { userId: "slack:UY" } }));
+    const two = buildPullSweepDeps(wiring(record(), { maintenance, origin: { userId: "slack:UY" } }));
     expect(await two.effects.modelRoundSpent(pr7)).toBe(true);
   });
 
@@ -283,7 +354,9 @@ describe("buildPullSweepDeps — the effects", () => {
       `2. [other repo](https://github.com/acme/other/blob/${SHA_A}/x.ts#L1-L2) untouched`,
     ].join("\n");
     const deps = buildPullSweepDeps(wiring(rec, { github: fakeGithub(rec, body) }));
-    await deps.effects.regenerateAnchors(pr7, NEW_HEAD);
+    const calls = await deps.effects.prepareNativeCalls!(pr7, NEW_HEAD, { carryApproval: false, deltaReview: false });
+    for (let index = 0; index < calls.length; index++)
+      await deps.effects.performNativeCall!({ pr: pr7, newHead: NEW_HEAD, decision: "carry", calls }, index);
     expect(rec.updates).toEqual([
       {
         number: 7,
@@ -297,7 +370,9 @@ describe("buildPullSweepDeps — the effects", () => {
 
     const noLinks = record();
     const untouched = buildPullSweepDeps(wiring(noLinks, { github: fakeGithub(noLinks, "no permalink here") }));
-    await untouched.effects.regenerateAnchors(pr7, NEW_HEAD);
+    expect(
+      await untouched.effects.prepareNativeCalls!(pr7, NEW_HEAD, { carryApproval: false, deltaReview: false }),
+    ).toEqual([]);
     expect(noLinks.updates).toEqual([]);
   });
 });

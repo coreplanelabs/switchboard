@@ -83,25 +83,92 @@ function recordingEffects(): { calls: string[]; effects: SweepEffects } {
   return {
     calls,
     effects: {
-      carryApproval: async (_pr, newHead) => {
-        calls.push(`carry@${newHead}`);
-      },
-      requestDeltaReview: async (_pr, newHead) => {
-        calls.push(`delta@${newHead}`);
-      },
-      regenerateAnchors: async (_pr, newHead) => {
-        calls.push(`anchors@${newHead}`);
+      canPerformNativeCall: () => true,
+      prepareNativeCalls: async (_pr, _head, options) => [
+        { operation: "review_anchor", state: "unstarted", patch: { title: "Title", body: "Frozen" } },
+        ...(options.carryApproval
+          ? [{ operation: "approval_reset" as const, state: "unstarted" as const, body: "LGTM" }]
+          : []),
+      ],
+      performNativeCall: async (plan, index) => {
+        calls.push(`${plan.calls[index]!.operation === "approval_reset" ? "carry" : "anchors"}@${plan.newHead}`);
+        return { state: "accepted" };
       },
       modelRoundSpent: async () => false,
       startModelRound: async () => {
         calls.push("model-round");
-        return { started: true };
+        return { started: true, runId: "coding-child" };
       },
     },
   };
 }
 
 describe("createSweepGit — rung one in a throwaway clone, real git", () => {
+  it("releases a denied sweep's local cache after freezing the reproducible plan without a push", async () => {
+    const { origin, branchHead, tmpRoot } = fixture({ branchLine: 12, baseLine: 1 });
+    const git = createSweepGit({
+      cloneUrl: async () => origin,
+      identity: async () => ({ name: "sweep", email: "sweep@example.test" }),
+      tmpRoot,
+    });
+    const { effects } = recordingEffects();
+    const service = createPullSweepService({
+      listOwnedPullRequests: async () => [pullRequest(branchHead)],
+      git,
+      effects,
+      effect: {
+        read: async () => undefined,
+        admit: async (plan) => {
+          expect(plan.preparedSource?.baseHead).toMatch(/^[a-f0-9]{40}$/);
+          return false;
+        },
+        begin: async () => {
+          throw new Error("must not begin");
+        },
+        complete: async () => false,
+        settle: async () => false,
+      },
+    });
+    expect((await service.sweep({ repo: "acme/api" })).results[0]?.outcome).toBe("error");
+    expect(sh(origin, "rev-parse", "refs/heads/plan/demo/u1").trim()).toBe(branchHead);
+    expect(readdirSync(tmpRoot)).toEqual([]);
+  });
+  it("reconstructs only the frozen prepared commit after restart despite a later base move", async () => {
+    const { origin, branchHead, tmpRoot } = fixture({ branchLine: 12, baseLine: 1 });
+    const opts = {
+      cloneUrl: async () => origin,
+      identity: async () => ({ name: "sweep", email: "sweep@example.test" }),
+      tmpRoot,
+    };
+    const pr = pullRequest(branchHead);
+    const first = createSweepGit(opts);
+    const prepared = await first.rebase(pr);
+    expect(prepared.kind).toBe("clean");
+    if (prepared.kind !== "clean") throw new Error("fixture conflict");
+    expect(prepared.preparedSource?.baseHead).toMatch(/^[a-f0-9]{40}$/);
+    const other = mkdtempSync(join(tmpdir(), "sweep-base-move-"));
+    roots.push(other);
+    execFileSync("git", ["clone", origin, join(other, "work")]);
+    sh(join(other, "work"), "config", "user.name", "other");
+    sh(join(other, "work"), "config", "user.email", "other@example.test");
+    writeFileSync(join(other, "work", "later.txt"), "Later base move\n");
+    sh(join(other, "work"), "add", "later.txt");
+    sh(join(other, "work"), "commit", "-m", "later base move");
+    sh(join(other, "work"), "push", "origin", "main");
+    const restarted = createSweepGit({
+      ...opts,
+      identity: async () => ({ name: "different", email: "different@example.test" }),
+    });
+    expect(await restarted.canPush?.(pr, prepared.newHead, prepared.preparedSource)).toBe(true);
+    expect(await restarted.forcePushWithLease(pr, prepared.newHead)).toEqual({
+      state: "accepted",
+      commitSha: prepared.newHead,
+    });
+    expect(sh(origin, "rev-parse", `refs/heads/${pr.branch}`).trim()).toBe(prepared.newHead);
+    const mismatch = createSweepGit(opts);
+    expect(await mismatch.canPush?.(pr, "0".repeat(40), prepared.preparedSource)).toBe(false);
+    expect(sh(origin, "rev-parse", `refs/heads/${pr.branch}`).trim()).toBe(prepared.newHead);
+  });
   it("a DIRTY pull request walks rung one end to end: clone, rebase, unchanged patch, lease push, approval carried, checkout removed", async () => {
     // Base moved far from the branch's hunk: rebase clean, patch byte-identical.
     const { origin, branchHead, tmpRoot } = fixture({ branchLine: 12, baseLine: 1 });
@@ -112,6 +179,13 @@ describe("createSweepGit — rung one in a throwaway clone, real git", () => {
     });
     const { calls, effects } = recordingEffects();
     const service = createPullSweepService({
+      effect: {
+        read: async () => undefined,
+        admit: async () => true,
+        begin: async () => true,
+        complete: async () => true,
+        settle: async () => true,
+      },
       listOwnedPullRequests: async () => [pullRequest(branchHead)],
       git,
       effects,
@@ -139,6 +213,13 @@ describe("createSweepGit — rung one in a throwaway clone, real git", () => {
     });
     const { calls, effects } = recordingEffects();
     const service = createPullSweepService({
+      effect: {
+        read: async () => undefined,
+        admit: async () => true,
+        begin: async () => true,
+        complete: async () => true,
+        settle: async () => true,
+      },
       listOwnedPullRequests: async () => [pullRequest(branchHead)],
       git,
       effects,
@@ -183,6 +264,13 @@ describe("createSweepGit — rung one in a throwaway clone, real git", () => {
     });
     const { effects } = recordingEffects();
     const service = createPullSweepService({
+      effect: {
+        read: async () => undefined,
+        admit: async () => true,
+        begin: async () => true,
+        complete: async () => true,
+        settle: async () => true,
+      },
       listOwnedPullRequests: async () => [pullRequest(branchHead)],
       git,
       effects,
@@ -217,6 +305,13 @@ describe("createSweepGit — rung one in a throwaway clone, real git", () => {
     const git = createSweepGit({ runner: failing, cloneUrl: async () => "https://github.com/acme/api.git" });
     const { effects } = recordingEffects();
     const service = createPullSweepService({
+      effect: {
+        read: async () => undefined,
+        admit: async () => true,
+        begin: async () => true,
+        complete: async () => true,
+        settle: async () => true,
+      },
       listOwnedPullRequests: async () => [pullRequest("0".repeat(40))],
       git,
       effects,

@@ -3157,3 +3157,61 @@ describe("RunsService — a queued ask on the plane (record 0064)", () => {
     expect(await svc.stopRun("q-run-99", "hard", actor)).toEqual({ ok: false, error: "not_found" });
   });
 });
+
+describe("original coordinator child internal final evidence", () => {
+  it("exposes the original private seed only to the internal final-record reader, never ordinary reads or listings", async () => {
+    const { store, svc } = setup();
+    const run = record("original-proof", NOW, { repo: "acme/api" });
+    const parentInstanceId = "ship_original_proof",
+      idempotencyKey = `${parentInstanceId}:UNIT/0/coding`;
+    const key = `${run.threadKey}:coding`;
+    const proof = {
+      coordinatorUnit: "UNIT",
+      coordinatorAttempt: 3,
+      unitSeedReceipt: {
+        version: 1,
+        binding: { instanceId: parentInstanceId, unit: "UNIT", instanceAttempt: 3, idempotencyKey },
+        child: { runId: run.id, requester: run.userId, channelId: run.channelId, threadKey: run.threadKey },
+        ownerGen: "original-private-seed",
+        workBriefHash: "a".repeat(64),
+        capsuleHash: "a".repeat(64),
+        contractHash: "a".repeat(64),
+        seed: { key, from: 0, through: 0, messagesHash: "a".repeat(64), systemHash: "a".repeat(64) },
+        acknowledgedAt: NOW,
+      },
+    };
+    const branchPushReceipts = [{ ref: "private/native-original", sha: "a".repeat(40), by: "push" as const }];
+    const branchPublication = {
+      version: 1 as const,
+      repo: "acme/api",
+      complete: true,
+      branches: [{ ref: "private/original", pr: 77 }],
+    };
+    await store!.put({
+      ...run,
+      ...proof,
+      branchPublication,
+      branchPushReceipts,
+      parentInstanceId,
+      idempotencyKey,
+      session: { key, seedFrom: 0, request: 0, range: { from: 0, to: 0 } },
+    } as RunRecord);
+    const internal = await svc.getRun(run.id, {
+      requireFinalRecord: true,
+      include: "messages",
+      privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
+    });
+    expect(internal).toMatchObject({ ok: true, value: { ...proof, branchPublication, branchPushReceipts } });
+    for (const read of [
+      await svc.getRun(run.id),
+      await svc.getRun(run.id, { requireFinalRecord: true, include: "messages" }),
+      await svc.getRun(run.id, { include: "messages", privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ }),
+      await svc.listRuns({ status: "all", visibleTo: ALL, privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ }),
+    ]) {
+      expect(JSON.stringify(read)).not.toContain("original-private-seed");
+      expect(JSON.stringify(read)).not.toContain("unitSeedReceipt");
+      expect(JSON.stringify(read)).not.toContain("private/original");
+      expect(JSON.stringify(read)).not.toContain("private/native-original");
+    }
+  });
+});

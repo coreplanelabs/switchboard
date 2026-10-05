@@ -46,7 +46,13 @@ import type { DispatchOutcome } from "../core/dispatch/outcome.js";
 import { REPLAY_EVERYTHING, RunRegistry } from "../core/runRegistry.js";
 import { InMemoryRunStore } from "../core/runStore.js";
 import { InMemoryRunLedger } from "../core/runLedger/inMemory.js";
+import {
+  readCoordinatorPublicDelivery,
+  coordinatorPublicDeliveryReference,
+} from "../core/coordinator/reportPublicDelivery.js";
 import { contextThreadSessionKey } from "../core/runLedger/sessionLog.js";
+import { nullChannelIO } from "../core/nullChannelIo.js";
+import { freezeCoordinatorReport, readCoordinatorReport } from "../core/coordinator/reportContext.js";
 import { createLedgerWriteThrough } from "../core/runLedger/writeThrough.js";
 import { hostKeyOf } from "../core/runLedger/hostKey.js";
 import {
@@ -77,7 +83,6 @@ import type { GithubIdentity } from "../execution/githubApp.js";
 import type { RunHistoryWriter } from "../core/runHistoryWriter.js";
 import { pipelineOfEvents } from "../core/pipelineStanding.js";
 import { verifyExistingPrPublication } from "../core/existingPrPublication.js";
-import { RunnerOwnershipFence } from "../core/runnerOwnership.js";
 import { parseModelPrices, type ModelPriceTable } from "../core/modelPricing.js";
 import {
   COORDINATOR_ADMIN_PREFIX,
@@ -354,7 +359,6 @@ function harness(
   const deps: AdminCoordinatorDeps = {
     tokens: "tokens" in over ? over.tokens : TOKENS,
     childAdmission: createCoordinatorChildAdmission(() => over.draining === true),
-    runnerOwnership: new RunnerOwnershipFence(false),
     grantsFor: (id) => GRANTS[id] ?? NO_GRANTS,
     instances,
     startRecovery: async (id, params) => {
@@ -476,10 +480,14 @@ function harness(
       if (over.mergedPr instanceof Error) throw over.mergedPr;
       return over.mergedPr ?? null;
     },
-    openPullRequest: async (target) => {
+    createRecoveryPullRequest: async (target) => {
       opens.push(target);
       if (over.openPr instanceof Error) throw over.openPr;
-      return over.openPr ?? { number: 77, htmlUrl: "https://github.com/acme/api/pull/77", created: true };
+      return {
+        state: "accepted",
+        headSha: target.headSha,
+        pr: over.openPr ?? { number: 77, htmlUrl: "https://github.com/acme/api/pull/77", created: true },
+      };
     },
     ...(over.headSubject !== undefined
       ? {
@@ -680,9 +688,101 @@ function harness(
   };
 }
 
+async function originalRecovery(h: ReturnType<typeof harness>, runId = "11111111-1111-4111-8111-111111111111") {
+  const rows = await h.instances.listUnits(INSTANCE.id);
+  let row = rows[0];
+  if (!row) {
+    row = {
+      instanceId: INSTANCE.id,
+      unit: "U12",
+      slug: "u12",
+      branch: INSTANCE.branch,
+      dependsOn: [],
+      rounds: [],
+      threadKey: INSTANCE.threadKey,
+    };
+    await h.instances.putUnits([row]);
+  }
+  const saved = await h.store.get(runId);
+  const events: RunEvent[] = [
+    { type: "run_meta", agent: "coding", repo: INSTANCE.repo, ref: row.branch },
+    { type: "coordinator_tag", parentInstanceId: INSTANCE.id, unit: row.unit, base: INSTANCE.base },
+    ...(saved?.events ?? []).filter((event) => event.type !== "run_meta" && event.type !== "coordinator_tag"),
+  ];
+  await h.store.put(
+    record(runId, {
+      ...saved,
+      parentInstanceId: INSTANCE.id,
+      coordinatorUnit: row.unit,
+      coordinatorAttempt: 0,
+      idempotencyKey: `${INSTANCE.id}:${row.unit}/0/coding`,
+      threadKey: row.threadKey ?? INSTANCE.threadKey,
+      repo: INSTANCE.repo,
+      headSha: "a".repeat(40),
+      pushed: [{ ref: row.branch, sha: "a".repeat(40) }],
+      branchPublication: {
+        version: 1,
+        repo: INSTANCE.repo,
+        complete: true,
+        branches: [],
+      },
+      publicationSettlement: {
+        version: 1,
+        binding: {
+          runId,
+          instanceId: INSTANCE.id,
+          step: `${INSTANCE.id}:${row.unit}/0/coding`,
+          repo: INSTANCE.repo,
+          branch: row.branch,
+          requester: INSTANCE.userId,
+          threadKey: row.threadKey ?? INSTANCE.threadKey,
+          generation: "gen-A",
+        },
+        checkpoint: { kind: "created", head: "a".repeat(40) },
+        publication: { kind: "accepted", head: "a".repeat(40) },
+        preservation: { kind: "unavailable", reason: "test artifact not supplied" },
+        release: { kind: "kept", reason: "original work retained" },
+      },
+      events,
+      eventCount: events.length,
+      storedEventCount: events.length,
+      truncated: false,
+    }),
+  );
+  const readFacts = h.deps.fetchPrFacts;
+  h.deps.fetchPrFacts = async (pr) => {
+    const facts = await readFacts(pr);
+    return facts
+      ? {
+          baseRef: INSTANCE.base,
+          verifiedHead: { repo: INSTANCE.repo, ref: row!.branch, sha: facts.headSha ?? "a".repeat(40) },
+          ...facts,
+        }
+      : facts;
+  };
+  h.deps.fetchBranchHeadSha ??= async () => "a".repeat(40);
+  h.deps.rewriteIdentities ??= async () => ({ kind: "clean" });
+}
+
 /** A POST with the coordinator's bearer by default; `null` sends none. */
 const post = (path: string, input: unknown, auth: string | null = "Bearer tok-coord") => {
   let body = input;
+  if (
+    typeof input === "object" &&
+    input !== null &&
+    path.endsWith("/pr-check") &&
+    "recover" in input &&
+    !("effectId" in input)
+  ) {
+    const fields = input as Record<string, unknown>;
+    body = {
+      ...fields,
+      unit: fields.unit ?? "U12",
+      effectId: `${fields.unit ?? "U12"}/0/pr-check`,
+      effectOrdinal: 1,
+      executionWorkflowId: fields.recoveryWorkflowId ?? fields.parentInstanceId,
+    };
+  }
   if (typeof input === "object" && input !== null && path.endsWith("/spawn") && !("effectId" in input)) {
     const fields = input as Record<string, unknown>;
     body = {
@@ -955,15 +1055,9 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
       publication,
       pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
     };
-    const ownership = (owner: { instanceId: string; unit: string } | undefined) => ({
-      claim: () => true,
-      release: () => true,
-      owner: () => owner,
-    });
     const allowed = harness();
     await allowed.instances.put(INSTANCE);
     await allowed.instances.putUnits([row]);
-    allowed.deps.runnerOwnership = ownership(publication.owner);
     const accepted = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}spawn`, { ...spawnBody, unit: "u12" }),
       allowed.deps,
@@ -974,7 +1068,6 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
     const changed = harness();
     await changed.instances.put(INSTANCE);
     await changed.instances.putUnits([row]);
-    changed.deps.runnerOwnership = ownership({ instanceId: "ship_other", unit: "u12" });
     const rival = {
       ...row,
       unit: "OTHER",
@@ -1797,13 +1890,14 @@ describe("POST /admin/coordinator/read-record — the renewal's facts off the re
         htmlUrl: "https://github.com/acme/api/pull/77",
       },
     });
-    h.deps.runnerOwnership = new RunnerOwnershipFence(false);
     const child = h.registry.create("coding · child", {
       agent: "coding",
       channelId: INSTANCE.channelId,
       userId: INSTANCE.userId,
       threadKey: INSTANCE.threadKey,
       ...TAG,
+      repo: INSTANCE.repo,
+      idempotencyKey: `${INSTANCE.id}:U12/0/coding`,
     });
     h.registry.finish(child.id, "completed");
     const runId = child.id;
@@ -1869,6 +1963,7 @@ describe("POST /admin/coordinator/read-record — the renewal's facts off the re
     const recover = nextAction(driver.state);
     expect(recover).toMatchObject({ type: "pr-check", recover: { runId } });
     if (recover.type !== "pr-check") throw new Error("expected the pull-request recovery step");
+    await originalRecovery(h, runId);
     const opened = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
         parentInstanceId: INSTANCE.id,
@@ -1877,6 +1972,7 @@ describe("POST /admin/coordinator/read-record — the renewal's facts off the re
       }),
       h.deps,
     );
+    expect(opened.body).toMatchObject({ ok: true });
     expect(h.opens).toHaveLength(1);
     expect(opened.body).toMatchObject({ ok: true, state: "open", prNumber: 77 });
     await expect(h.instances.listUnits(INSTANCE.id)).resolves.toEqual([
@@ -1949,6 +2045,7 @@ describe("POST /admin/coordinator/read-record — the renewal's facts off the re
         parentInstanceId: INSTANCE.id,
         unit: "U12",
         step: findings.step,
+        effectOrdinal: 2,
         preset: findings.preset,
         budget: findings.budgetMinutes,
         brief: findings.brief,
@@ -2137,6 +2234,7 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
   it("recover after a dead coding child: with nothing heading the branch, the pull request is opened from the pushed branch itself — a minimal body naming the unit when the record holds no description — and a refused create still answers none", async () => {
     const h = harness();
     await h.instances.put(INSTANCE);
+    await originalRecovery(h);
     const res = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
         parentInstanceId: INSTANCE.id,
@@ -2146,6 +2244,7 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
     );
     expect(res.body).toEqual({
       ok: true,
+      effectOrdinal: 1,
       state: "open",
       prNumber: 77,
       url: "https://github.com/acme/api/pull/77",
@@ -2179,6 +2278,7 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
       d.deps.runPageBase = "https://bot.example/runs";
       await d.instances.put(INSTANCE);
       await d.store.put(describe(description));
+      await originalRecovery(d);
       await handleCoordinatorRequest(
         post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, { parentInstanceId: INSTANCE.id, recover: { runId: RUN } }),
         d.deps,
@@ -2197,6 +2297,7 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
     // Nothing pushed: GitHub refuses the create, and the check answers `none` as before.
     const refused = harness({ openPr: new Error("PR create failed: HTTP 422 no commits between main and the head") });
     await refused.instances.put(INSTANCE);
+    await originalRecovery(refused);
     const none = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
         parentInstanceId: INSTANCE.id,
@@ -2204,11 +2305,12 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
       }),
       refused.deps,
     );
-    expect(none.body).toEqual({ ok: true, state: "none", unrecovered: "no_commits", at: NOW });
+    expect(none.body).toEqual({ ok: false, error: "effect_reconciliation_pending", at: NOW });
 
     // Without `recover`, nothing is ever opened from here.
     const plain = harness();
     await plain.instances.put(INSTANCE);
+    await originalRecovery(h);
     await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, { parentInstanceId: INSTANCE.id }),
       plain.deps,
@@ -2220,6 +2322,7 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
     const h = harness();
     h.deps.runPageBase = "https://bot.example/runs";
     await h.instances.put({ ...INSTANCE, userName: undefined });
+    await originalRecovery(h);
     await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
         parentInstanceId: INSTANCE.id,
@@ -2262,6 +2365,7 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
     const h = harness();
     await h.instances.put({ ...INSTANCE, plan: { id: "fix-web-run-cards" } });
     await h.instances.putUnits([row]);
+    await originalRecovery(h);
     await recoverCheck(h.deps);
     const title = h.opens[0]!.title;
     expect(title).toBe("fix(web): issue 1877 — when the plan runner opens a pull request from a");
@@ -2288,6 +2392,7 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
         ],
       }),
     );
+    await originalRecovery(described);
     await recoverCheck(described.deps);
     expect(described.opens[0]!.title).toBe("fix(ship): the runner titles the recovered pull request");
 
@@ -2337,6 +2442,7 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
     const passing = harness({ headSubject: "fix(ship): warm the cache on wake" });
     await passing.instances.put(INSTANCE);
     await passing.instances.putUnits([row]);
+    await originalRecovery(passing);
     await recoverCheck(passing.deps);
     expect(passing.opens[0]!.title).toBe("fix(ship): warm the cache on wake");
 
@@ -2346,6 +2452,7 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
       const h = harness({ headSubject });
       await h.instances.put(INSTANCE);
       await h.instances.putUnits([row]);
+      await originalRecovery(h);
       await recoverCheck(h.deps);
       expect(h.opens[0]!.title).toBe("chore: Warm the cache on wake");
     }
@@ -2369,6 +2476,7 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
         ],
       }),
     );
+    await originalRecovery(described);
     await recoverCheck(described.deps);
     expect(described.opens[0]!.title).toBe("fix(ship): the submitted title wins");
   });
@@ -2412,10 +2520,9 @@ describe("pr-check none — the branch's commits over the base ride the answer (
     });
     await recover.instances.put(INSTANCE);
     expect((await check(recover.deps, { recover: { runId: "11111111-1111-4111-8111-111111111111" } })).body).toEqual({
-      ok: true,
-      state: "none",
-      unrecovered: "no_commits",
-      at: NOW,
+      ok: false,
+      error: "unit_not_found",
+      unit: "U12",
     });
     expect(recover.compares).toEqual([]);
   });
@@ -2433,6 +2540,7 @@ describe("pr-check recover — the answer says why nothing was recovered, and Gi
     const h = harness();
     const { base: _base, ...withoutBase } = INSTANCE;
     await h.instances.put(withoutBase as typeof INSTANCE);
+    await originalRecovery(h);
     const res = await recoverCheck(h.deps);
     expect(res.body).toEqual({ ok: true, state: "none", unrecovered: "no_base", at: NOW });
     expect(h.opens).toHaveLength(0);
@@ -2449,17 +2557,10 @@ describe("pr-check recover — the answer says why nothing was recovered, and Gi
       },
     });
     await deleted.instances.put(INSTANCE);
-    expect(await recoverCheck(deleted.deps)).toEqual({
-      status: 200,
-      body: {
-        ok: true,
-        state: "open",
-        prNumber: 77,
-        url: "https://github.com/acme/api/pull/77",
-        headSha: "b".repeat(40),
-        headBranchExists: false,
-        at: NOW,
-      },
+    await originalRecovery(deleted);
+    expect(await recoverCheck(deleted.deps)).toMatchObject({
+      status: 409,
+      body: { ok: false, error: "publication_facts_mismatch" },
     });
 
     const unknown = harness({
@@ -2472,6 +2573,7 @@ describe("pr-check recover — the answer says why nothing was recovered, and Gi
       },
     });
     await unknown.instances.put(INSTANCE);
+    await originalRecovery(unknown);
     expect(await recoverCheck(unknown.deps)).toEqual({
       status: 502,
       body: {
@@ -2484,6 +2586,7 @@ describe("pr-check recover — the answer says why nothing was recovered, and Gi
 
     const unavailable = harness({ prFacts: new Error("GitHub 502") });
     await unavailable.instances.put(INSTANCE);
+    await originalRecovery(unavailable);
     expect(await recoverCheck(unavailable.deps)).toEqual({
       status: 502,
       body: { ok: false, error: "github_unavailable", message: "GitHub 502", at: NOW },
@@ -2500,13 +2603,16 @@ describe("pr-check recover — the answer says why nothing was recovered, and Gi
     await h.instances.put(INSTANCE);
     const rewrites: Array<Record<string, unknown>> = [];
     const order: string[] = [];
-    const openPullRequest = async (target: Parameters<typeof h.deps.openPullRequest>[0]) => {
+    await originalRecovery(h);
+    const createRecoveryPullRequest = async (
+      target: Parameters<NonNullable<AdminCoordinatorDeps["createRecoveryPullRequest"]>>[0],
+    ) => {
       order.push("open");
-      return h.deps.openPullRequest(target);
+      return h.deps.createRecoveryPullRequest!(target);
     };
     const clean = {
       ...h.deps,
-      openPullRequest,
+      createRecoveryPullRequest,
       rewriteIdentities: async (args: Record<string, unknown>) => {
         rewrites.push(args);
         order.push("rewrite");
@@ -2522,17 +2628,20 @@ describe("pr-check recover — the answer says why nothing was recovered, and Gi
         branch: "plan/orchestration/u12",
         startState: { kind: "known", commits: [] },
         requester: "slack:UALICE",
+        expectedTip: "a".repeat(40),
+        refPublication: expect.objectContaining({ begin: expect.any(Function) }),
       },
     ]);
     expect(order).toEqual(["rewrite", "open"]);
 
     const blocked = harness();
     await blocked.instances.put(INSTANCE);
+    await originalRecovery(blocked);
     const unreadable = await recoverCheck({
       ...blocked.deps,
       rewriteIdentities: async () => ({ kind: "unreadable" as const, reason: "HTTP 422 force pushes blocked" }),
     });
-    expect(unreadable.status).toBe(502);
+    expect(unreadable.status).toBe(503);
     expect(unreadable.body).toMatchObject({ ok: false, error: "github_unavailable" });
     expect(blocked.opens).toHaveLength(0);
   });
@@ -2540,13 +2649,15 @@ describe("pr-check recover — the answer says why nothing was recovered, and Gi
   it("a create GitHub refuses for any reason other than an empty branch is github_unavailable — the step is asked again, and the report never claims nothing was pushed", async () => {
     const down = harness({ openPr: new Error("PR create failed: HTTP 502 bad gateway") });
     await down.instances.put(INSTANCE);
+    await originalRecovery(down);
     expect(await recoverCheck(down.deps)).toEqual({
-      status: 502,
-      body: { ok: false, error: "github_unavailable", message: "PR create failed: HTTP 502 bad gateway", at: NOW },
+      status: 409,
+      body: { ok: false, error: "effect_reconciliation_pending", at: NOW },
     });
     const forbidden = harness({ openPr: new Error("PR create failed: HTTP 403 resource not accessible") });
     await forbidden.instances.put(INSTANCE);
-    expect((await recoverCheck(forbidden.deps)).status).toBe(502);
+    await originalRecovery(forbidden);
+    expect((await recoverCheck(forbidden.deps)).status).toBe(409);
   });
 
   const bindingRow = (over: Partial<CoordinatorUnit> = {}): CoordinatorUnit => ({
@@ -2570,7 +2681,10 @@ describe("pr-check recover — the answer says why nothing was recovered, and Gi
     ...over,
   });
   const bindingHarness = async (facts: PullRequestFacts, row = bindingRow()) => {
-    const h = harness({ prFacts: facts });
+    const h = harness({
+      prFacts: facts,
+      pr: { number: 77, htmlUrl: "https://github.com/acme/api/pull/77", headSha: "a".repeat(40) },
+    });
     await h.instances.put(INSTANCE);
     await h.instances.putUnits([row]);
     return h;
@@ -2585,39 +2699,39 @@ describe("pr-check recover — the answer says why nothing was recovered, and Gi
       deps,
     );
 
-  it("preserves an ordinary publication owner while its binding CAS crosses a durable rebuild", async () => {
+  it("refuses a rival admitted while the original publication awaits its binding CAS", async () => {
     const h = await bindingHarness(bindingFacts());
-    const fence = new RunnerOwnershipFence(false);
-    h.deps.runnerOwnership = fence;
+    const rival = { ...INSTANCE, id: "ship_race", branch: "plan/race/u12" };
+    await h.instances.put(rival);
     const replace = h.instances.compareAndReplaceUnit.bind(h.instances);
     vi.spyOn(h.instances, "compareAndReplaceUnit").mockImplementation(async (expected, replacement) => {
       expect((await h.instances.listUnits(INSTANCE.id))[0]!.pr).toBeUndefined();
-      await fence.recover(
-        {
-          liveListingComplete: true,
-          liveHosted: [{ instanceId: INSTANCE.id, until: NOW + 1 }],
-          resumable: [],
-          liveElsewhere: [],
-        },
-        h.instances,
-      );
+      expect(
+        await h.instances.putUnits([
+          {
+            ...bindingRow(),
+            instanceId: rival.id,
+            branch: rival.branch,
+            pr: { number: 77, url: "https://github.com/acme/api/pull/77" },
+          },
+        ]),
+      ).toEqual({ ok: true });
       return replace(expected, replacement);
     });
 
-    expect(await recoverBinding(h.deps)).toMatchObject({ status: 200 });
-    expect((await h.instances.listUnits(INSTANCE.id))[0]!.pr?.number).toBe(77);
+    expect(await recoverBinding(h.deps)).toMatchObject({
+      status: 409,
+      body: { error: "publication_ownership_changed" },
+    });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([bindingRow()]);
     expect(await h.instances.findPullOwners({ repo: INSTANCE.repo, pr: 77 })).toMatchObject({
       ok: true,
-      owners: [expect.objectContaining({ kind: "unit", instanceId: INSTANCE.id, unit: "U12" })],
+      owners: [expect.objectContaining({ kind: "unit", instanceId: rival.id, unit: "U12" })],
     });
   });
 
   it("binds publication through the canonical owner without reading process-local claims", async () => {
     const h = await bindingHarness(bindingFacts());
-    const obsolete = vi.fn(() => {
-      throw new Error("obsolete local owner");
-    });
-    h.deps.runnerOwnership = { claim: obsolete };
     expect(await recoverBinding(h.deps)).toMatchObject({ status: 200 });
     const [bound] = await h.instances.listUnits(INSTANCE.id);
     expect(bound!.publication).toMatchObject({
@@ -2625,7 +2739,6 @@ describe("pr-check recover — the answer says why nothing was recovered, and Gi
       expectedHeadSha: "a".repeat(40),
       owner: { instanceId: INSTANCE.id, unit: "U12" },
     });
-    expect(obsolete).not.toHaveBeenCalled();
     expect(h.dispatched).toEqual([]);
   });
 
@@ -2759,7 +2872,6 @@ describe("pr-check recover — the answer says why nothing was recovered, and Gi
 
   it("already-bound read-only replay is idempotent without process-local ownership", async () => {
     const replay = await bindingHarness(bindingFacts());
-    delete replay.deps.runnerOwnership;
     expect((await recoverBinding(replay.deps)).status).toBe(200);
     const bound = (await replay.instances.listUnits(INSTANCE.id))[0]!;
     expect((await recoverBinding(replay.deps)).status).toBe(200);
@@ -3503,16 +3615,16 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
         })
       ).status,
     ).toBe(200);
-    expect(reports).toEqual(["original short report", "original short report"]);
+    expect(reports).toEqual(["original short report"]);
     const shared = (await h.ledger.readSessionTail(contextThreadSessionKey(threadKey), 100_000)).transcript;
-    expect(shared.turns).toBe(2);
-    expect(shared.contexts?.map((context) => context?.status)).toEqual(["unknown", "known"]);
+    expect(shared.turns).toBe(3);
+    expect(shared.contexts?.map((context) => context?.status)).toEqual(["unknown", "known", "unknown"]);
     expect(JSON.stringify(shared.messages[1])).toContain("Recorded work status");
     expect(JSON.stringify(shared.messages[1])).not.toContain("original full report");
     h.deps.reportLedger = undefined;
     const publicationCount = published.mock.calls.length;
     expect((await call(h, "unit-end", body)).status).toBe(503);
-    expect(reports).toHaveLength(2);
+    expect(reports).toHaveLength(1);
     expect(published.mock.calls).toHaveLength(publicationCount);
   });
   const PLAN_INSTANCE: CoordinatorInstance = {
@@ -6131,6 +6243,88 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     });
   });
 
+  it("an uncertain stored review uses the native exact-head approval before the unit becomes merge-ready", async () => {
+    const HEAD = "a".repeat(40);
+    const nativeApproval: PullRequestReview = {
+      author: { login: "acme-switchboard[bot]", id: 4242 },
+      state: "COMMENTED",
+      commitId: HEAD,
+      body: "LGTM: native approval",
+    };
+    for (const scenario of ["approved", "other-head", "unreadable"] as const) {
+      const h = await planHarness({
+        reviewsSequence:
+          scenario === "unreadable"
+            ? [undefined]
+            : scenario === "approved"
+              ? [[], [nativeApproval]]
+              : [[{ ...nativeApproval, commitId: "b".repeat(40) }]],
+      });
+      await h.instances.putUnits([unitRow("U10", { threadKey: "slack:C1:2.0", pr: { number: 7, url: "u" } })]);
+      await h.store.put(
+        record("run-r1", {
+          parentInstanceId: PLAN_INSTANCE.id,
+          idempotencyKey: "plan-fixture:U10/1/review",
+          agent: "review",
+          threadKey: "slack:C1:2.0",
+          repo: "acme/api",
+          verdict: { verdict: "approve", summary: "clean", findings: [] },
+          reviewHead: HEAD,
+          reviewPost: { posted: false, uncertain: true, reason: "native response unconfirmed" },
+          reviewPublication: {
+            version: 1,
+            runId: "run-r1",
+            state: "uncertain",
+            bodyHash: "c".repeat(64),
+            target: { repo: "acme/api", number: 7, commitId: HEAD },
+            verdict: "approve",
+          },
+        }),
+      );
+      const read = await call(h, "read-record", { parentInstanceId: PLAN_INSTANCE.id, runId: "run-r1", unit: "U10" });
+      const body = read.body as { run: ChildFacts; at: number };
+      expect(read.status).toBe(200);
+      if (!body.run.finished) throw new Error("expected a terminal review record");
+      expect(h.reviewFetches()).toBe(scenario === "approved" ? 2 : REVIEW_POSTED_CHECKS);
+      expect(body.run.reviewPosted).toBe(
+        scenario === "approved" ? true : scenario === "other-head" ? false : undefined,
+      );
+      expect(body.run.reviewPostReason).toBeUndefined();
+      if (scenario === "unreadable") continue;
+      let state = openUnitPipeline(
+        {
+          unit: { id: "U10", branch: "plan/fixture/u10" },
+          repo: PLAN_INSTANCE.repo,
+          base: "main",
+          caps: { maxRounds: 3, maxMinutes: 240 },
+          merge: "person",
+          generated: false,
+          resume: { pr: 7, headSha: HEAD },
+        },
+        NOW - 60_000,
+      );
+      const feed = (answer: Record<string, unknown>) => {
+        const action = nextAction(state);
+        if (action.type === "end") throw new Error("ended before scripted evidence");
+        state = applyReturn(state, { ...answer, step: action.step } as StepReturn).state;
+      };
+      feed({
+        type: "pr-check",
+        pr: { state: "open", prNumber: 7, url: "u", headSha: HEAD, headBranchExists: true },
+        at: NOW - 50_000,
+      });
+      feed({ type: "spawn", outcome: "spawned", runId: "run-r1", at: NOW - 40_000 });
+      feed({ type: "wait", outcome: "event" });
+      feed({ type: "read-record", run: body.run, at: body.at });
+      if (scenario === "approved") {
+        expect(nextAction(state)).toMatchObject({ type: "checks", headSha: HEAD });
+        feed({ type: "checks", checks: { total: 1, pending: [], failed: [] }, at: NOW });
+        expect(nextAction(state)).toMatchObject({ type: "end", ending: { kind: "merge_ready" } });
+      } else expect(nextAction(state)).toMatchObject({ type: "end", ending: { kind: "aborted" } });
+      expect((await h.store.get("run-r1"))?.reviewPublication?.state).toBe("uncertain");
+    }
+  });
+
   it("read-record answers a recorded skip as reviewPosted: false with the child's reason, GitHub never asked — a skip the child chose is not a post GitHub has yet to surface", async () => {
     const HEAD = "a".repeat(40);
     // GitHub even shows a matching review (an older one): the record wins.
@@ -7816,6 +8010,7 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
   };
   async function mergeHarness(over: Parameters<typeof harness>[0] = {}, unit: Partial<CoordinatorUnit> = {}) {
     const h = harness({ prFacts: facts(), reviews: approving, checks: green, ...over });
+    if (over.runnerRebase) h.deps.runnerRebase = recordNativeRebase(over.runnerRebase);
     await h.instances.put(PLAN_INSTANCE);
     await h.instances.putUnits([row(unit)]);
     return h;
@@ -7940,6 +8135,46 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     }
   });
 
+  const recordNativeRebase =
+    (adapter: NonNullable<AdminCoordinatorDeps["runnerRebase"]>): NonNullable<AdminCoordinatorDeps["runnerRebase"]> =>
+    async (instance, number, journal) => {
+      const report = await adapter(instance, number, journal);
+      const result = report.results.find((r) => r.number === number);
+      if ((result?.outcome !== "carried" && result?.outcome !== "delta-review") || !result.headSha) return report;
+      const plan = {
+        pr: {
+          repo: instance.repo,
+          number,
+          branch: "plan/fixture/u10-warm",
+          base: "main",
+          headSha: HEAD,
+          mergeableState: "dirty",
+          approved: result.approvalCarried === true,
+        },
+        newHead: result.headSha,
+        decision: result.outcome === "carried" ? ("carry" as const) : ("delta-review" as const),
+        calls: [
+          { operation: "rebase_push" as const, state: "unstarted" as const },
+          ...(result.approvalCarried
+            ? [{ operation: "approval_reset" as const, state: "unstarted" as const, body: "LGTM: unchanged patch" }]
+            : []),
+        ],
+      };
+      expect(await journal.admit(plan)).toBe(true);
+      for (let call = 0; call < plan.calls.length; call++) {
+        expect(await journal.begin(plan, call)).toBe(true);
+        expect(
+          await journal.complete(
+            plan,
+            call,
+            call === 0 ? { state: "accepted", commitSha: result.headSha } : { state: "accepted" },
+          ),
+        ).toBe(true);
+      }
+      expect(await journal.settle(plan)).toBe(true);
+      return report;
+    };
+
   it("the runner's rebase route maps the shared resolver's clean carry, changed patch and conflict outcomes", async () => {
     const newHead = "b".repeat(40);
     const result = (outcome: "carried" | "delta-review" | "conflict", line: string, headSha?: string) => ({
@@ -7955,19 +8190,21 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
         },
       ],
     });
-    const carried = await mergeHarness(
-      {
-        runnerRebase: async () => result("carried", "#7 rebased, patch unchanged, approval carried", newHead),
-      },
-      { publication: undefined },
-    );
+    const carried = await mergeHarness({
+      prFacts: facts({
+        headSha: newHead,
+        verifiedHead: { repo: PLAN_INSTANCE.repo, ref: "plan/fixture/u10-warm", sha: newHead },
+      }),
+      runnerRebase: async () => result("carried", "#7 rebased, patch unchanged, approval carried", newHead),
+    });
     expect((await call(carried, "rebase", body)).body).toMatchObject({ outcome: "carried", headSha: newHead });
-    const changed = await mergeHarness(
-      {
-        runnerRebase: async () => result("delta-review", "#7 rebased, patch changed", newHead),
-      },
-      { publication: undefined },
-    );
+    const changed = await mergeHarness({
+      prFacts: facts({
+        headSha: newHead,
+        verifiedHead: { repo: PLAN_INSTANCE.repo, ref: "plan/fixture/u10-warm", sha: newHead },
+      }),
+      runnerRebase: async () => result("delta-review", "#7 rebased, patch changed", newHead),
+    });
     expect((await call(changed, "rebase", body)).body).toMatchObject({ outcome: "changed", headSha: newHead });
     const conflict = await mergeHarness({
       runnerRebase: async () => result("conflict", "#7 conflict in config.ts"),
@@ -8040,10 +8277,10 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
           ],
         }),
       });
-      const replace = h.instances.compareAndReplaceUnit.bind(h.instances);
-      vi.spyOn(h.instances, "compareAndReplaceUnit").mockImplementation(async (before, after) => {
-        const result = await replace(before, after);
-        if (result.ok && after.publication?.expectedHeadSha === newHead) {
+      const replace = h.instances.transitionUnitEffect.bind(h.instances);
+      vi.spyOn(h.instances, "transitionUnitEffect").mockImplementation(async (change) => {
+        const result = await replace(change);
+        if (result.ok && change.kind === "publish") {
           if (lost === "throw") throw new Error("binding response lost");
           return { ok: false, reason: "unavailable" };
         }
@@ -8153,7 +8390,7 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]).toMatchObject({ publication: binding, lastPush: HEAD });
   });
 
-  it("an unrecorded rebase head is adopted only for review without claiming a push", async () => {
+  it("an unrecorded rebase result cannot adopt a mutable head as a push receipt", async () => {
     const newHead = "b".repeat(40);
     const binding = {
       repo: PLAN_INSTANCE.repo,
@@ -8177,46 +8414,24 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
       { publication: binding, lastPush: HEAD },
     );
     expect(await call(h, "rebase", body)).toMatchObject({
-      status: 200,
-      body: { outcome: "changed", headSha: newHead },
+      status: 503,
+      body: { error: "effect_reconciliation_pending" },
     });
     expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]).toMatchObject({
-      publication: { ...binding, expectedHeadSha: newHead },
+      publication: binding,
       lastPush: HEAD,
     });
   });
 
-  it("the runner's rebase returns the named transient while periodic ownership recovery is in flight", async () => {
+  it("the runner's rebase retains canonical ownership uncertainty before native writes", async () => {
     const runnerRebase = vi.fn();
     const h = await mergeHarness({ runnerRebase });
-    const fence = new RunnerOwnershipFence(false);
-    let finishRecovery!: (rows: CoordinatorUnit[]) => void;
-    const activeRecoveries = new Promise<CoordinatorUnit[]>((resolve) => {
-      finishRecovery = resolve;
-    });
-    const recovery = fence.recover(
-      { liveListingComplete: true, liveHosted: [], resumable: [], liveElsewhere: [] },
-      {
-        get: h.instances.get.bind(h.instances),
-        listUnits: h.instances.listUnits.bind(h.instances),
-        listActiveRecoveries: () => activeRecoveries,
-      },
-    );
-    h.deps.runnerOwnership = fence;
-
-    expect(await call(h, "rebase", body)).toEqual({
+    vi.spyOn(h.instances, "findPullOwners").mockResolvedValue({ ok: false, reason: "incomplete" });
+    expect(await call(h, "rebase", body)).toMatchObject({
       status: 503,
-      body: {
-        ok: false,
-        error: "publication_ownership_unknown",
-        message: "runner ownership recovery is still in progress",
-        at: NOW,
-      },
+      body: { error: "publication_ownership_unknown" },
     });
     expect(runnerRebase).not.toHaveBeenCalled();
-
-    finishRecovery([]);
-    await recovery;
   });
 
   it("every guard green: the bot squashes the pull request at exactly the approved head with the title as the commit, and answers merged with the squash's sha", async () => {
@@ -8963,7 +9178,7 @@ describe("the fold — a unit's thread events reach the pipeline's next step (re
     expect(h.dispatched).toHaveLength(1);
   });
 
-  it("leftovers at a final ending with no channel handle stay unconsumed, run no fresh turn, and the log says how many were left where", async () => {
+  it("a final ending without a channel retains pending report delivery and unconsumed leftovers", async () => {
     const h = await foldHarness({ ioFor: () => undefined });
     await h.instances.appendEvent(key, event(1, "also update the readme", "slack:UBOB", "bob"));
     const res = await call(h, "unit-end", {
@@ -8971,12 +9186,12 @@ describe("the fold — a unit's thread events reach the pipeline's next step (re
       unit: "u12",
       ending: { kind: "merge_ready", report: "the unit is merge-ready" },
     });
-    expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ ok: true, told: false });
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({ ok: false, error: "report_context_unavailable" });
     expect(h.dispatched).toHaveLength(0);
     expect((await h.instances.listEvents(key, true)).map((e) => e.seq)).toEqual([1]);
-    expect(h.logs.some((l) => l.includes("1 leftover thread event(s) stay unconsumed") && l.includes("u12"))).toBe(
-      true,
+    expect((await h.instances.listUnits(INSTANCE.id)).find((row) => row.unit === "u12")?.ending?.kind).toBe(
+      "merge_ready",
     );
   });
 
@@ -9175,7 +9390,6 @@ describe("original committed head adoption — create-only draft PR", () => {
     "confirms the exact adoption binding after a lost %s acknowledgement without local ownership",
     async (lost) => {
       const { h, posts } = await setup();
-      h.deps.runnerOwnership = undefined;
       const replace = h.instances.compareAndReplaceUnit.bind(h.instances);
       vi.spyOn(h.instances, "compareAndReplaceUnit").mockImplementation(async (before, after) => {
         const result = await replace(before, after);
@@ -9763,7 +9977,6 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.instances.put(recoveryInstance());
     await h.instances.putUnits([requestChangesRow()]);
     await h.store.put(reviewRecord());
-    delete h.deps.runnerOwnership;
     expect(await callRecovery(h)).toMatchObject({ status: 200 });
     const [claimed] = await h.instances.listUnits(INSTANCE.id);
     expect(await h.instances.findPullOwners({ repo: INSTANCE.repo, pr: PR.number })).toEqual({
@@ -11203,7 +11416,6 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           : { kind: "unanswered" as const, reason: "status response lost" },
       );
       h.deps.recoveryStatus = readStatus;
-      delete h.deps.runnerOwnership;
       const readReviews = vi.fn(async () => {
         if (review === "unavailable") throw new Error("GitHub unavailable");
         return [{ ...laterReview(), id: laterReview().id! + 1 }];
@@ -13377,7 +13589,6 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     const h = await legacyHarness();
     h.deps.startRecovery = async () => ({ kind: "unanswered", reason: "response lost" });
     expect(await callRecovery(h)).toMatchObject({ status: 200, body: { outcome: "indeterminate" } });
-    delete h.deps.runnerOwnership;
     h.deps.recoveryStatus = async () => ({ kind: "absent" });
     h.deps.startRecovery = async (id) => ({ kind: "failed", id, reason: "confirmed absent" });
     expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_workflow_failed" } });
@@ -17471,7 +17682,6 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.instances.putUnits([requestChangesRow()]);
     await h.store.put(reviewRecord());
     expect((await callRecovery(h)).status).toBe(200);
-    delete h.deps.runnerOwnership;
 
     const response = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}recover-unit`, {
@@ -17507,7 +17717,6 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.instances.putUnits([requestChangesRow()]);
     await h.store.put(reviewRecord());
     expect((await callRecovery(h)).status).toBe(200);
-    delete h.deps.runnerOwnership;
 
     const response = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}spawn`, {
@@ -17915,7 +18124,6 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.instances.putUnits([requestChangesRow()]);
     await h.store.put(reviewRecord());
     expect((await callRecovery(h)).status).toBe(200);
-    delete h.deps.runnerOwnership;
 
     const response = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
@@ -18553,7 +18761,6 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.store.put(reviewRecord());
     expect((await callRecovery(h)).status).toBe(200);
     const before = await h.instances.listUnits(INSTANCE.id);
-    delete h.deps.runnerOwnership;
     seedRivalOwner(h, "runner-rival", "U10");
 
     const response = await handleCoordinatorRequest(
@@ -18954,7 +19161,7 @@ describe("spawn durable effect admission", () => {
 });
 
 describe("original Workflow report reconciliation through the admin settlement", () => {
-  const setup = async (privateUnit = false) => {
+  const setup = async (privateUnit = false, machine?: "http" | "mcp") => {
     const log = new InMemoryPrivateWorkerLog();
     const h = harness({
       privateWorkerLog: log,
@@ -18963,6 +19170,9 @@ describe("original Workflow report reconciliation through the admin settlement",
     const instance: CoordinatorInstance = {
       ...INSTANCE,
       admission: "created",
+      ...(machine
+        ? { channelId: `${machine}:ops`, userId: `${machine}:requester`, threadKey: `${machine}:ops:job` }
+        : {}),
       ...(privateUnit
         ? { channelId: "slack:DMAIN", threadKey: "slack:DMAIN:1.0", plan: { id: "private-task" }, merge: "person" }
         : {}),
@@ -18995,10 +19205,162 @@ describe("original Workflow report reconciliation through the admin settlement",
       await h.instances.put(instance);
       expect(await h.instances.putUnits([unit])).toMatchObject({ ok: true });
     }
-    delete h.deps.runnerOwnership;
     const effect = await coordinatorReconciliationEffect(instance, unit);
     return { h, instance, unit, effect, log };
   };
+
+  it("finishes a first machine job report as durable state without claiming a reply", async () => {
+    for (const machine of ["http", "mcp"] as const) {
+      for (const producer of [false, true]) {
+        const { h, instance, effect } = await setup(false, machine);
+        const lines: string[] = [];
+        h.deps.ioFor = (thread) => nullChannelIO(thread.threadKey, (line) => lines.push(line));
+        if (producer) {
+          expect(
+            await handleCoordinatorRequest(
+              post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+                parentInstanceId: instance.id,
+                unit: "U12",
+                deliveryId: "U12/end",
+                ending: { kind: "held", report: "complete original job report", threadReport: "proposed channel copy" },
+              }),
+              h.deps,
+            ),
+          ).toMatchObject({ status: 200 });
+        }
+        const receipt = await reconcileCoordinatorReport(effect, h.deps);
+        expect(receipt?.publicDelivery?.kind).toBe("empty");
+        const [ended] = await h.instances.listUnits(instance.id);
+        expect(ended?.ending?.report).not.toBe("");
+        expect(ended?.ending?.threadReport).toBe("");
+        expect(await readCoordinatorReport(h.ledger, receipt!.reportDelivery.owner)).toEqual({
+          text: ended!.ending!.report,
+          threadText: "",
+        });
+        expect(await reconcileCoordinatorReport(effect, h.deps)).toEqual(receipt);
+        expect(lines).toEqual([]);
+        expect(h.replies).toEqual([]);
+      }
+    }
+  });
+
+  it("preserves an existing nonempty report obligation after its channel becomes state-only", async () => {
+    const { h, instance, unit, effect } = await setup(false, "mcp");
+    const ending = {
+      kind: "held" as const,
+      report: "original full report",
+      threadReport: "original owed copy",
+      deliveryId: "U12/end",
+      at: NOW - 5,
+    };
+    seedCoordinatorUnit(h.instances, { ...unit, ending });
+    h.deps.ioFor = (thread) => nullChannelIO(thread.threadKey, () => {});
+    expect(await reconcileCoordinatorReport(effect, h.deps)).toBeUndefined();
+    const [current] = await h.instances.listUnits(instance.id);
+    expect(current?.ending).toEqual(ending);
+    expect(await readCoordinatorReport(h.ledger, current!.reportDelivery!.owner)).toEqual({
+      text: ending.report,
+      threadText: ending.threadReport,
+    });
+    expect(
+      await readCoordinatorPublicDelivery(
+        h.ledger,
+        await coordinatorPublicDeliveryReference(current!.reportDelivery!, ending.threadReport),
+      ),
+    ).toBeUndefined();
+    expect(h.replies).toEqual([]);
+  });
+
+  it("retries only its own committed empty machine admission after the first freeze fails", async () => {
+    for (const machine of ["http", "mcp"] as const) {
+      const { h, instance } = await setup(false, machine);
+      const lines: string[] = [];
+      h.deps.ioFor = (thread) => nullChannelIO(thread.threadKey, (line) => lines.push(line));
+      const body = {
+        parentInstanceId: instance.id,
+        unit: "U12",
+        deliveryId: "U12/end",
+        ending: { kind: "held", report: "complete original job report", threadReport: "proposed channel copy" },
+      };
+      vi.spyOn(h.ledger, "appendSession").mockRejectedValueOnce(new Error("report storage unavailable"));
+      const end = (input: typeof body) =>
+        handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, input), h.deps);
+      expect(await end(structuredClone(body))).toMatchObject({ status: 503 });
+      const [committed] = await h.instances.listUnits(instance.id);
+      expect(committed!.ending).toMatchObject({
+        report: body.ending.report,
+        threadReport: "",
+        deliveryId: body.deliveryId,
+      });
+      expect(committed!.reportDelivery).toBeDefined();
+      h.deps.ioFor = () => undefined;
+      expect(await end({ ...structuredClone(body), deliveryId: "U12/foreign" })).toMatchObject({ status: 409 });
+      expect(await end(structuredClone(body))).toMatchObject({ status: 200 });
+      const [finished] = await h.instances.listUnits(instance.id);
+      expect(finished!.reportDelivery).toEqual(committed!.reportDelivery);
+      expect(finished!.ending).toEqual(committed!.ending);
+      expect(await readCoordinatorReport(h.ledger, finished!.reportDelivery!.owner)).toEqual({
+        text: body.ending.report,
+        threadText: "",
+      });
+      expect(
+        (
+          await readCoordinatorPublicDelivery(
+            h.ledger,
+            await coordinatorPublicDeliveryReference(finished!.reportDelivery!, ""),
+          )
+        )?.kind,
+      ).toBe("empty");
+      expect(lines).toEqual([]);
+      expect(h.replies).toEqual([]);
+    }
+  });
+
+  it("does not adopt an empty legacy rendering without its exact original admission", async () => {
+    const { h, instance, unit } = await setup(false, "mcp");
+    const ending = {
+      kind: "held" as const,
+      report: "original full report",
+      threadReport: "",
+      deliveryId: "U12/end",
+      at: NOW - 5,
+    };
+    seedCoordinatorUnit(h.instances, { ...unit, ending });
+    h.deps.ioFor = (thread) => nullChannelIO(thread.threadKey, () => {});
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+          parentInstanceId: instance.id,
+          unit: unit.unit,
+          deliveryId: ending.deliveryId,
+          ending: { kind: ending.kind, report: ending.report, threadReport: "unadmitted copy" },
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 409, body: { error: "settlement_conflict" } });
+    expect((await h.instances.listUnits(instance.id))[0]?.ending).toEqual(ending);
+    expect((await h.instances.listUnits(instance.id))[0]?.reportDelivery).toBeUndefined();
+  });
+
+  it("never changes an original frozen proposal when selecting initial machine report delivery", async () => {
+    const { h, instance, unit, effect } = await setup(false, "http");
+    const owner = {
+      instanceId: instance.id,
+      unit: unit.unit,
+      attempt: 0,
+      requester: instance.userId,
+      channelId: instance.channelId,
+      threadKey: instance.threadKey,
+      deliveryId: "lifecycle/reconcile",
+    };
+    const original = { text: "original full report", threadText: "original owed copy" };
+    await freezeCoordinatorReport(h.ledger, owner, original);
+    h.deps.ioFor = (thread) => nullChannelIO(thread.threadKey, () => {});
+    expect(await reconcileCoordinatorReport(effect, h.deps)).toBeUndefined();
+    expect(await readCoordinatorReport(h.ledger, owner)).toEqual(original);
+    expect((await h.instances.listUnits(instance.id))[0]?.ending?.threadReport).toBe(original.threadText);
+    expect(h.replies).toEqual([]);
+  });
 
   it("settles the stopped original unit and delivers one public report without redispatching leftovers", async () => {
     const { h, instance, unit, effect } = await setup();
@@ -19022,6 +19384,115 @@ describe("original Workflow report reconciliation through the admin settlement",
     });
     expect(ended?.ending?.outcome).toBeUndefined();
     expect(await h.instances.listEvents(unit, true)).toHaveLength(1);
+  });
+
+  it("does not repeat a confirmed original public reply during later discovery", async () => {
+    const { h, effect } = await setup();
+    const first = await reconcileCoordinatorReport(effect, h.deps);
+    expect(first).toBeDefined();
+    expect(await reconcileCoordinatorReport(effect, h.deps)).toEqual(first);
+    expect(h.replies).toHaveLength(1);
+  });
+
+  it("does not repeat a held producer's pull request comment while admitting its saved report", async () => {
+    const { h, instance, unit, effect } = await setup();
+    seedCoordinatorUnit(h.instances, {
+      ...unit,
+      pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+      ending: {
+        kind: "held",
+        report: "saved held report",
+        threadReport: "saved held summary",
+        at: NOW - 50,
+        deliveryId: "U12/end",
+      },
+    });
+    const comment = vi.spyOn(h.github, "commentIssue");
+    const receipt = await reconcileCoordinatorReport(effect, h.deps);
+    expect(comment).not.toHaveBeenCalled();
+    expect(receipt).toBeDefined();
+    expect(h.replies).toEqual(["saved held summary"]);
+    expect((await h.instances.listUnits(instance.id))[0]?.ending?.at).toBe(NOW - 50);
+  });
+
+  it("refuses an effect activated between the performer snapshot and settlement handler's own read", async () => {
+    const { h, instance, unit, effect } = await setup();
+    const list = h.instances.listUnits.bind(h.instances);
+    let reads = 0;
+    vi.spyOn(h.instances, "listUnits").mockImplementation(async (id) => {
+      if (++reads === 3)
+        seedCoordinatorUnit(h.instances, {
+          ...unit,
+          currentEffect: {
+            version: 1,
+            id: "U12/merge",
+            ordinal: 1,
+            execution: { workflowId: instance.id },
+            target: { repo: instance.repo, ref: unit.branch, base: "main", headSha: "a".repeat(40) },
+            phase: "active",
+            calls: [{ operation: "merge", state: "pending" }],
+          },
+        });
+      return list(id);
+    });
+    expect(await reconcileCoordinatorReport(effect, h.deps)).toBeUndefined();
+    const [current] = await list(instance.id);
+    expect(current?.currentEffect?.phase).toBe("active");
+    expect(current?.ending).toBeUndefined();
+    expect(current?.reportDelivery).toBeUndefined();
+    expect(h.replies).toEqual([]);
+  });
+  it("never acknowledges an undeliverable public handle in settlement or replay finalization", async () => {
+    const { h, instance, effect } = await setup();
+    const reply = vi.fn(async () => {});
+    h.deps.ioFor = () => ({
+      undeliverable: "no native destination",
+      reply,
+      status: async () => ({ update: () => {}, done: async () => {} }),
+      history: async () => [],
+    });
+    expect(await reconcileCoordinatorReport(effect, h.deps)).toBeUndefined();
+    expect(await reconcileCoordinatorReport(effect, h.deps)).toBeUndefined();
+    expect(reply).not.toHaveBeenCalled();
+    expect((await h.instances.listUnits(instance.id))[0]?.ending?.kind).toBe("terminated");
+    const ended = (await h.instances.listUnits(instance.id))[0]!;
+    expect(
+      await readCoordinatorPublicDelivery(
+        h.ledger,
+        await coordinatorPublicDeliveryReference(ended.reportDelivery!, ended.ending!.threadReport!),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("refuses a changed public raw delivery identity or retained rendering before first report admission", async () => {
+    for (const change of ["identity", "rendering"]) {
+      const { h, instance, unit } = await setup();
+      const ending = {
+        kind: "held" as const,
+        report: "saved original report",
+        threadReport: "saved original summary",
+        deliveryId: "U12/end",
+        at: NOW - 5,
+      };
+      seedCoordinatorUnit(h.instances, { ...unit, ending });
+      const response = await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+          parentInstanceId: instance.id,
+          unit: unit.unit,
+          deliveryId: change === "identity" ? "U12/other" : "U12/end",
+          ending: {
+            kind: "held",
+            report: ending.report,
+            threadReport: change === "rendering" ? "changed summary" : ending.threadReport,
+          },
+        }),
+        h.deps,
+      );
+      expect(response).toMatchObject({ status: 409, body: { error: "settlement_conflict" } });
+      expect((await h.instances.listUnits(instance.id))[0]?.ending).toEqual(ending);
+      expect((await h.instances.listUnits(instance.id))[0]?.reportDelivery).toBeUndefined();
+      expect(h.replies).toEqual([]);
+    }
   });
 
   it.each(["missing", "failed"] as const)(
@@ -19088,5 +19559,205 @@ describe("original Workflow report reconciliation through the admin settlement",
     expect(await h.instances.listUnits(instance.id)).toEqual([committed]);
     expect(h.replies).toEqual([]);
     expect(h.dispatched).toEqual([]);
+  });
+});
+
+describe("dead coding recovery original ownership", () => {
+  it("refuses a rowless or unverifiable original coding child before identity or PR writes", async () => {
+    const h = harness();
+    await h.instances.put(INSTANCE);
+    let rewritten = 0;
+    const response = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+        parentInstanceId: INSTANCE.id,
+        recover: { runId: "11111111-1111-4111-8111-111111111111" },
+        effectId: "U12/0/pr-check",
+        effectOrdinal: 1,
+        executionWorkflowId: INSTANCE.id,
+      }),
+      {
+        ...h.deps,
+        rewriteIdentities: async () => {
+          rewritten++;
+          return { kind: "clean" };
+        },
+      },
+    );
+    expect(response.status).toBe(409);
+    expect(h.opens).toHaveLength(0);
+    expect(rewritten).toBe(0);
+  });
+});
+
+describe("dead coding recovery durable create", () => {
+  it("returns a consumable ordinal for a definite recovery refusal on both original and replay requests", async () => {
+    const h = harness();
+    await h.instances.put(INSTANCE);
+    await originalRecovery(h);
+    let creates = 0;
+    h.deps.createRecoveryPullRequest = async () => {
+      creates++;
+      return { state: "refused", status: 422 };
+    };
+    const request = () =>
+      handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          recover: { runId: "11111111-1111-4111-8111-111111111111" },
+        }),
+        h.deps,
+      );
+    const first = await request();
+    expect(first).toMatchObject({
+      status: 200,
+      body: { ok: true, state: "none", unrecovered: "external_refused", effectOrdinal: 1 },
+    });
+    expect(await request()).toEqual(first);
+    expect(creates).toBe(1);
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.currentEffect?.phase).toBe("settled");
+  });
+
+  it("retains a lost native create response even when discovery later returns an open PR", async () => {
+    const h = harness();
+    await h.instances.put(INSTANCE);
+    await originalRecovery(h);
+    const targetBodies: string[] = [];
+    h.deps.createRecoveryPullRequest = async (target) => {
+      targetBodies.push(target.body);
+      const row = (await h.instances.listUnits(INSTANCE.id))[0]!;
+      expect(row.currentEffect?.calls[0]).toMatchObject({ operation: "pull_create", state: "pending" });
+      throw new Error("response lost");
+    };
+    const request = () =>
+      handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          recover: { runId: "11111111-1111-4111-8111-111111111111" },
+        }),
+        h.deps,
+      );
+    expect(await request()).toMatchObject({ status: 409, body: { error: "effect_reconciliation_pending" } });
+    h.deps.findOpenPrByHead = async () => ({
+      number: 77,
+      htmlUrl: "https://github.com/acme/api/pull/77",
+      headSha: "a".repeat(40),
+    });
+    expect(await request()).toMatchObject({ status: 409, body: { error: "effect_reconciliation_pending" } });
+    expect(targetBodies).toHaveLength(1);
+    const row = (await h.instances.listUnits(INSTANCE.id))[0]!;
+    expect(row.pr).toBeUndefined();
+    expect(row.currentEffect?.calls[0]?.state).toBe("uncertain");
+  });
+  it("rejects foreign original unit metadata and the first run metadata before any write", async () => {
+    for (const mutate of [
+      (run: RunRecord) => ({ ...run, coordinatorUnit: "FOREIGN" }),
+      (run: RunRecord) => ({
+        ...run,
+        events: run.events.map((event) => (event.type === "run_meta" ? { ...event, repo: "foreign/repo" } : event)),
+      }),
+    ]) {
+      const h = harness();
+      await h.instances.put(INSTANCE);
+      await originalRecovery(h);
+      const id = "11111111-1111-4111-8111-111111111111";
+      const run = (await h.store.get(id))!;
+      await h.store.put(mutate(run));
+      const rewritten = vi.fn(async () => ({ kind: "clean" as const }));
+      h.deps.rewriteIdentities = rewritten;
+      expect(
+        await handleCoordinatorRequest(
+          post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+            parentInstanceId: INSTANCE.id,
+            unit: "U12",
+            recover: { runId: id },
+          }),
+          h.deps,
+        ),
+      ).toMatchObject({ status: 409, body: { error: "recovery_original_child_unverified" } });
+      expect(rewritten).not.toHaveBeenCalled();
+      expect(h.opens).toHaveLength(0);
+    }
+  });
+});
+
+describe("dead coding recovery producer publication proof", () => {
+  it("never lets a folded pushed display fact replace the original typed accepted publication", async () => {
+    const h = harness();
+    await h.instances.put(INSTANCE);
+    await originalRecovery(h);
+    const id = "11111111-1111-4111-8111-111111111111";
+    const run = (await h.store.get(id))!;
+    const { branchPublication: _receipt, publicationSettlement: _settlement, ...withoutProof } = run;
+    await h.store.put(withoutProof);
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          recover: { runId: id },
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 409, body: { error: "recovery_original_publication_unverified" } });
+    expect(h.opens).toHaveLength(0);
+  });
+  it("recovers a dead child's exact original native ref receipt even without a salvage checkpoint", async () => {
+    const h = harness();
+    await h.instances.put(INSTANCE);
+    await originalRecovery(h);
+    const id = "11111111-1111-4111-8111-111111111111";
+    const run = (await h.store.get(id))!;
+    const { publicationSettlement: _salvage, ...original } = run;
+    await h.store.put({
+      ...original,
+      branchPublication: { version: 1, repo: INSTANCE.repo, complete: false, branches: [] },
+      branchPushReceipts: [{ ref: INSTANCE.branch, sha: "a".repeat(40), by: "push" }],
+    });
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          recover: { runId: id },
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 200, body: { state: "open", effectOrdinal: 1 } });
+    expect(h.opens).toHaveLength(1);
+  });
+
+  it("refuses malformed original native receipt metadata before dead-child publication", async () => {
+    const h = harness();
+    await h.instances.put(INSTANCE);
+    await originalRecovery(h);
+    const id = "11111111-1111-4111-8111-111111111111";
+    const get = h.deps.runs.getRun;
+    h.deps.runs.getRun = async (...args) => {
+      const answer = await get(...args);
+      if (!answer.ok || args[0] !== id) return answer;
+      const { publicationSettlement: _settlement, ...original } = answer.value;
+      return {
+        ok: true,
+        value: {
+          ...original,
+          branchPushReceipts: [
+            { ref: INSTANCE.branch, sha: "a".repeat(40), by: "push" as const, receipt: "unverified" },
+          ],
+        },
+      };
+    };
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          recover: { runId: id },
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 409, body: { error: "recovery_original_publication_unverified" } });
+    expect(h.opens).toHaveLength(0);
   });
 });

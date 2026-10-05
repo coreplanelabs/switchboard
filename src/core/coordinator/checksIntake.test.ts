@@ -508,30 +508,59 @@ describe("the push-to-base intake — the merge watch's trigger (record 0071, me
     JSON.stringify({ ref: "refs/heads/main", repository: { full_name: "octo/repo" }, ...over });
 
   function watch() {
-    const pushes: Array<{ repo: string; base: string }> = [];
+    const pushes: Array<{ repo: string; base: string; eventId?: string }> = [];
     return {
       pushes,
       watch: {
-        async pushToBase(repo: string, base: string) {
-          pushes.push({ repo, base });
+        async pushToBase(repo: string, base: string, eventId?: string) {
+          pushes.push({ repo, base, eventId });
           return [{ repo, number: 7, outcome: "resolver" as const }];
         },
       },
     };
   }
 
+  it("retains the authenticated native delivery identity and refuses missing source evidence before watch writes", async () => {
+    const raw = pushBody();
+    const sourceIds: unknown[] = [];
+    const deps = {
+      secret: SECRET,
+      watch: {
+        pushToBase: async (_repo: string, _base: string, eventId?: string) => {
+          sourceIds.push(eventId);
+          return [];
+        },
+      },
+    };
+    const signature = await sign(SECRET, raw);
+    expect(
+      (await handlePushIntake({ event: "push", signature, delivery: "native-delivery-1" }, raw, deps)).status,
+    ).toBe(200);
+    expect(sourceIds).toEqual(["github:native-delivery-1"]);
+    expect((await handlePushIntake({ event: "push", signature }, raw, deps)).status).toBe(400);
+    expect(
+      (await handlePushIntake({ event: "push", signature: "sha256=bad", delivery: "native-delivery-2" }, raw, deps))
+        .status,
+    ).toBe(401);
+    expect(sourceIds).toEqual(["github:native-delivery-1"]);
+  });
+
   it("verified: a branch push hands exactly the repo and branch to the watch, and answers what it did", async () => {
     const w = watch();
     const raw = pushBody();
-    const res = await handlePushIntake({ event: "push", signature: await sign(SECRET, raw) }, raw, {
-      secret: SECRET,
-      watch: w.watch,
-    });
+    const res = await handlePushIntake(
+      { event: "push", signature: await sign(SECRET, raw), delivery: "verified-base-push" },
+      raw,
+      {
+        secret: SECRET,
+        watch: w.watch,
+      },
+    );
     expect(res).toEqual({
       status: 200,
       body: { ok: true, watched: 1, results: [{ repo: "octo/repo", number: 7, outcome: "resolver" }] },
     });
-    expect(w.pushes).toEqual([{ repo: "octo/repo", base: "main" }]);
+    expect(w.pushes).toEqual([{ repo: "octo/repo", base: "main", eventId: "github:verified-base-push" }]);
   });
 
   it("no secret is disabled, a bad signature is unauthorized, a non-push event and a tag push are ignored", async () => {

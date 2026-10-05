@@ -17,6 +17,10 @@ import {
   coordinatorReportAdmission,
   freezeAdmittedCoordinatorReport,
 } from "../../src/core/coordinator/reportContext.ts";
+import {
+  appendCoordinatorPublicDelivery,
+  coordinatorPublicDeliveryReference,
+} from "../../src/core/coordinator/reportPublicDelivery.ts";
 import { appendCoordinatorStatus } from "../../src/core/coordinator/unitStatus.ts";
 import type { ContextDependencies } from "../../src/core/references/contextDependencies.ts";
 
@@ -144,7 +148,7 @@ describe("durable coordinator Workflow reconciliation", () => {
     const admission = await coordinatorReportAdmission(reportOwner, proposal);
     const ended: CoordinatorUnit = {
       ...unit,
-      ending: { kind: "aborted", report: proposal.text, at: 2000 },
+      ending: { kind: "aborted", report: proposal.text, deliveryId: reportOwner.deliveryId, at: 2000 },
       reportDelivery: admission,
     };
     let effectId = "";
@@ -176,11 +180,42 @@ describe("durable coordinator Workflow reconciliation", () => {
       { owner: reportOwner, instance, unit: ended },
     );
     expect(status).toBeDefined();
-    const ack = (reportDelivery = admission) =>
-      post("/plane/ack", { storeKey: key, id: effectId, outcome: "done", reconciliation: { reportDelivery, status } });
+    const publicDelivery = await coordinatorPublicDeliveryReference(admission, proposal.threadText);
+    const ack = (reportDelivery = admission, delivery: unknown = publicDelivery) =>
+      post("/plane/ack", {
+        storeKey: key,
+        id: effectId,
+        outcome: "done",
+        reconciliation: { reportDelivery, status, ...(delivery === null ? {} : { publicDelivery: delivery }) },
+      });
     expect((await ack()).status).toBe(409); // Status alone is not canonical report durability.
     expect(await freezeAdmittedCoordinatorReport(ledger, admission, reportOwner, proposal)).toEqual(proposal);
     expect((await ack({ ...admission, proposalHash: "b".repeat(64) })).status).toBe(409);
+    expect((await ack(admission, null)).status).toBe(409); // Frozen prose is not a channel reply ACK.
+    expect((await ack()).status).toBe(409); // A reference alone is not durable proof.
+    expect(await appendCoordinatorPublicDelivery(ledger, publicDelivery)).toEqual(publicDelivery);
+    expect((await ack(admission, { ...publicDelivery, threadHash: "f".repeat(64) })).status).toBe(409);
+    expect(
+      (await ack(admission, { ...publicDelivery, owner: { ...reportOwner, requester: "slack:UOTHER" } })).status,
+    ).toBe(409);
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        `UPDATE coordinator_units SET json = ? WHERE instance_id = ? AND unit = ?`,
+        JSON.stringify({ ...ended, ending: { ...ended.ending, deliveryId: "different/end" } }),
+        instance.id,
+        unit.unit,
+      );
+    });
+    expect((await ack()).status).toBe(409);
+    await runInDurableObject(stub, async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        `UPDATE coordinator_units SET json = ? WHERE instance_id = ? AND unit = ?`,
+        JSON.stringify(ended),
+        instance.id,
+        unit.unit,
+      );
+    });
     expect((await ack()).status).toBe(200);
     expect((await ack()).status).toBe(200); // Lost ACK is idempotent.
     await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO) => {
@@ -1888,6 +1923,67 @@ describe("run ledger — the coordinator's event and the key (items 47–48)", (
     ...record(id, threadKey),
     status,
     ...TAG,
+  });
+
+  it("preserves exact maintenance transport in the native ledger and never calls a Workflow on completion", async () => {
+    const key = storeKey(),
+      runId = "maintenance-child",
+      threadKey = "slack:C1:maintenance";
+    const sent = await coordinatorDouble(key);
+    const identity = { ...TAG, coordinatorUnit: "ONE", maintenanceActionId: "m_" + "a".repeat(64) };
+    const meta = { ...claimBody(key, runId, threadKey).run.meta, ...identity };
+    expect((await post("/runs/claim", claimBody(key, runId, threadKey, "g1", { meta }))).status).toBe(200);
+    expect(
+      (
+        await post(
+          "/runs/claim",
+          claimBody(key, "malformed", "slack:C1:malformed", "g1", { meta: { ...meta, maintenanceActionId: "bad" } }),
+        )
+      ).status,
+    ).toBe(400);
+    const tag = {
+      type: "coordinator_tag",
+      parentInstanceId: identity.parentInstanceId,
+      unit: "ONE",
+      branch: "fix/pr",
+      maintenanceActionId: identity.maintenanceActionId,
+      seq: 1,
+    };
+    const append = (events: unknown[]) => post("/runs/append", { storeKey: key, runId, gen: "g1", events });
+    expect(await append([tag])).toMatchObject({ status: 200, data: { ok: true } });
+    expect(await append([{ ...tag, maintenanceActionId: "m_" + "b".repeat(64) }])).toMatchObject({
+      status: 409,
+      data: { reason: "fenced" },
+    });
+    expect(await append([{ type: "tool_call", tool: "bash", summary: "replacement", seq: 1 }])).toMatchObject({
+      status: 409,
+      data: { reason: "fenced" },
+    });
+    expect(
+      await append([
+        { ...tag, seq: 5 },
+        { type: "tool_call", tool: "bash", summary: "same batch erase", seq: 5 },
+      ]),
+    ).toMatchObject({ status: 409, data: { reason: "fenced" } });
+    expect((await post("/runs/live-events", { storeKey: key, runId })).data.events).toEqual([tag]);
+    const finish = (value: unknown) => post("/runs/finish", { storeKey: key, runId, gen: "g1", record: value });
+    expect(await finish(childRecord(runId, threadKey))).toMatchObject({ status: 409, data: { reason: "fenced" } });
+    const terminal = { ...childRecord(runId, threadKey), ...identity, events: [tag] };
+    expect(await finish(terminal)).toMatchObject({
+      status: 200,
+      data: { ok: true, stored: true, event: "no-binding" },
+    });
+    expect((await post("/runs/get", { storeKey: key, id: runId })).data.record).toEqual(terminal);
+    expect(sent).toEqual([]);
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO) => {
+      await expect(
+        owner.claim(
+          claimBody(key, runId, threadKey, "g1", { meta: { ...meta, maintenanceActionId: undefined } }).run,
+          Date.now(),
+        ),
+      ).rejects.toThrow("maintenance transport identity");
+      expect(await owner.get(runId)).toEqual(terminal);
+    });
   });
 
   it("the test pool leaves the real Workflow engine unbound, so only a test's live-object double can own a workflow promise", () => {
@@ -4844,6 +4940,109 @@ describe("run ledger — durable branch publication", () => {
     },
   );
 
+  it.each(["pending", "malformed", "foreign", "absent"])(
+    "finishes with only canonical review publication and retains unknown evidence: %s",
+    async (mode) => {
+      const key = storeKey();
+      const id = `review-publication-${mode}`;
+      const thread = `slack:C1:${id}`;
+      const receipt = {
+        version: 1 as const,
+        runId: id,
+        target: { repo: "private/repo", number: 7, commitId: "a".repeat(40) },
+        bodyHash: "b".repeat(64),
+        state: "pending" as const,
+      };
+      const canonical =
+        mode === "malformed"
+          ? { ...receipt, version: 2 }
+          : mode === "foreign"
+            ? { ...receipt, runId: "another-run" }
+            : receipt;
+      expect((await post("/runs/claim", claimBody(key, id, thread))).status).toBe(200);
+      if (mode !== "absent")
+        expect(
+          (
+            await post("/runs/state", {
+              storeKey: key,
+              runId: id,
+              gen: "g1",
+              state: { reviewPublication: canonical },
+            })
+          ).status,
+        ).toBe(200);
+      const terminal = record(id, thread);
+      terminal.repo = "private/repo";
+      terminal.reviewPublication = { ...receipt, state: "accepted" };
+      expect((await post("/runs/finish", { storeKey: key, runId: id, gen: "g1", record: terminal })).status).toBe(200);
+      const stored = (await post("/runs/get", { storeKey: key, id })).data.record;
+      expect(stored).toMatchObject({ id, status: "completed" });
+      expect(stored.reviewPublication).toEqual(mode === "pending" ? receipt : undefined);
+      expect((await post("/runs/summary", { storeKey: key, id })).data.summary).not.toHaveProperty("reviewPublication");
+      for (const item of (await post("/runs/list", { storeKey: key })).data.items)
+        expect(item).not.toHaveProperty("reviewPublication");
+      const stub = env.RUNS.get(env.RUNS.idFromName(key));
+      await runInDurableObject(stub, async (instance: RunHistoryDO, state) => {
+        if (mode === "malformed" || mode === "foreign") {
+          const row = state.storage.sql
+            .exec<{ work_evidence_json: string }>(`SELECT work_evidence_json FROM runs WHERE run_id = ?`, id)
+            .one();
+          expect(JSON.parse(row.work_evidence_json).reviewPublication).toEqual(canonical);
+        }
+        state.storage.sql.exec(`UPDATE runs SET finished_at = 1 WHERE run_id = ?`, id);
+        (instance as unknown as { trim(policy: Record<string, number>, now: number, fence: undefined): unknown }).trim(
+          { retentionDays: 1, maxRuns: 1, maxBytes: 16 * 1024 * 1024 },
+          Date.now(),
+          undefined,
+        );
+        expect(state.storage.sql.exec(`SELECT run_id FROM runs WHERE run_id = ?`, id).toArray()).toHaveLength(
+          mode === "absent" ? 0 : 1,
+        );
+      });
+    },
+  );
+
+  it.each(["absent", "valid", "malformed"])("folds only saved native push receipts at finish: %s", async (mode) => {
+    const key = storeKey(),
+      id = `native-push-${mode}`,
+      thread = `slack:C1:${id}`;
+    const receipts = [{ ref: "codex/original", sha: "a".repeat(40), by: "push" as const }];
+    const canonical =
+      mode === "malformed"
+        ? [{ ...receipts[0], sha: "short" }]
+        : [
+            ...receipts.map((r) => ({ ...r, type: "pushed_head", seq: 1 })),
+            { ...receipts[0], sha: "b".repeat(40), type: "pushed_head", seq: 2 },
+          ];
+    await post("/runs/claim", claimBody(key, id, thread));
+    if (mode !== "absent")
+      await post("/runs/state", { storeKey: key, runId: id, gen: "g1", state: { branchPushReceipts: canonical } });
+    const terminal = { ...record(id, thread), repo: "private/repo", branchPushReceipts: receipts };
+    expect((await post("/runs/finish", { storeKey: key, runId: id, gen: "g1", record: terminal })).status).toBe(200);
+    const saved = (await post("/runs/get", { storeKey: key, id })).data.record;
+    expect(saved).not.toBeNull();
+    expect(saved.branchPushReceipts).toEqual(mode === "valid" ? [{ ...receipts[0], sha: "b".repeat(40) }] : undefined);
+    for (const summary of [
+      (await post("/runs/summary", { storeKey: key, id })).data.summary,
+      ...(await post("/runs/list", { storeKey: key })).data.items,
+    ])
+      expect(summary).not.toHaveProperty("branchPushReceipts");
+    if (mode === "malformed")
+      await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+        const row = state.storage.sql
+          .exec<{ work_evidence_json: string }>(`SELECT work_evidence_json FROM runs WHERE run_id = ?`, id)
+          .one();
+        expect(JSON.parse(row.work_evidence_json).branchPushReceipts).toEqual(canonical);
+        state.storage.sql.exec(`UPDATE runs SET finished_at = 1 WHERE run_id = ?`, id);
+        (owner as unknown as { trim(policy: Record<string, number>, now: number, fence: undefined): unknown }).trim(
+          { retentionDays: 1, maxRuns: 1, maxBytes: 16 * 1024 * 1024 },
+          Date.now(),
+          undefined,
+        );
+        expect(state.storage.sql.exec(`SELECT run_id FROM runs WHERE run_id = ?`, id).toArray()).toHaveLength(1);
+      });
+  });
+
   it("retains unresolved direct publication through finish and physical history trimming", async () => {
     const key = storeKey();
     const id = "unresolved-publication";
@@ -4923,6 +5122,296 @@ describe("run ledger — durable branch publication", () => {
       expect(summary).not.toHaveProperty("branchPublication");
       expect(JSON.stringify(summary)).not.toContain("uncertain/branch");
     }
+  });
+});
+
+describe("maintenance server clock", () => {
+  async function prepare() {
+    const key = storeKey();
+    const input = {
+      version: 1,
+      intent: {
+        kind: "command",
+        requestId: "command:clock",
+        actorId: "slack:UALICE",
+        userId: "slack:UALICE",
+        channelId: "slack:C1",
+        threadKey: "slack:C1:clock-child",
+      },
+      target: { repo: "acme/api", pr: 7, ref: "codex/clock", base: "main", headSha: "a".repeat(40) },
+      createdAt: 1000,
+      bounds: { leaseMinutes: 30, spendCapUsd: 1 },
+    };
+    const admitted = await post("/runs/coordinator/maintenance/admit", { storeKey: key, input });
+    expect(admitted.status).toBe(200);
+    const row = admitted.data.unit as CoordinatorUnit;
+    const cell = row.currentEffect!;
+    const planned = await post("/runs/coordinator/units/effect-transition", {
+      storeKey: key,
+      input: {
+        kind: "prepare",
+        expected: row,
+        execution: cell.execution,
+        effect: {
+          ...cell,
+          preparation: undefined,
+          calls: [{ operation: "spawn", agent: "coding", state: "unstarted" }],
+        },
+      },
+    });
+    expect(planned.status).toBe(200);
+    return {
+      key,
+      row: planned.data.unit as CoordinatorUnit,
+      execution: cell.execution,
+      effectId: cell.id,
+      admittedAt: cell.execution.maintenance!.admittedAt,
+    };
+  }
+  it("refuses a new maintenance begin at the original server deadline without changing the prepared cell", async () => {
+    const h = await prepare();
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(h.key)), async (owner: RunHistoryDO) => {
+      expect(
+        await owner.transitionUnitEffect(
+          { kind: "begin", expected: h.row, execution: h.execution, effectId: h.effectId, call: 0 },
+          h.admittedAt + 30 * 60_000,
+        ),
+      ).toEqual({ ok: false, reason: "stopped" });
+      expect(await owner.listUnits(h.row.instanceId)).toEqual([h.row]);
+    });
+  });
+  it("credits an exact durably admitted maintenance child whose bot start precedes the Worker timestamp", async () => {
+    const h = await prepare();
+    const begun = await post("/runs/coordinator/units/effect-transition", {
+      storeKey: h.key,
+      input: { kind: "begin", expected: h.row, execution: h.execution, effectId: h.effectId, call: 0 },
+    });
+    expect(begun.status).toBe(200);
+    const row = begun.data.unit as CoordinatorUnit;
+    const runId = "clock-child",
+      threadKey = "slack:C1:clock-child",
+      actionId = h.execution.maintenance!.id;
+    const meta = {
+      agent: "coding",
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey,
+      repo: "acme/api",
+      ref: row.branch,
+      parentInstanceId: row.instanceId,
+      coordinatorUnit: row.unit,
+      coordinatorAttempt: 0,
+      idempotencyKey: `${row.instanceId}:${h.effectId}`,
+      maintenanceActionId: actionId,
+      operationTarget: { repo: "acme/api", ref: row.branch },
+    };
+    expect(
+      (await post("/runs/claim", claimBody(h.key, runId, threadKey, "g1", { meta, startedAt: h.admittedAt - 5000 })))
+        .status,
+    ).toBe(200);
+    const tag = {
+      type: "coordinator_tag",
+      parentInstanceId: row.instanceId,
+      unit: row.unit,
+      branch: row.branch,
+      base: "main",
+      maintenanceActionId: actionId,
+      publication: row.publication,
+      seq: 1,
+    };
+    expect((await post("/runs/append", { storeKey: h.key, runId, gen: "g1", events: [tag] })).status).toBe(200);
+    const complete = await post("/runs/coordinator/units/effect-transition", {
+      storeKey: h.key,
+      input: {
+        kind: "complete",
+        expected: row,
+        execution: h.execution,
+        effectId: h.effectId,
+        call: 0,
+        outcome: { state: "accepted", runId },
+      },
+    });
+    expect(complete).toMatchObject({
+      status: 200,
+      data: {
+        ok: true,
+        unit: {
+          currentEffect: { calls: [{ operation: "spawn", state: "accepted", runId }] },
+          rounds: [{ maintenance: { actionId, runId, budgetUsd: 1 } }],
+        },
+      },
+    });
+  });
+});
+
+describe("durable maintenance admission", () => {
+  it("atomically rebinds only a settled same-requester intent and retains foreign or live owners", async () => {
+    const key = storeKey();
+    const input = {
+      version: 1 as const,
+      intent: {
+        kind: "command" as const,
+        requestId: "command:original",
+        actorId: "slack:UALICE",
+        userId: "slack:UALICE",
+        channelId: "slack:C1",
+        threadKey: "slack:C1:maintenance",
+      },
+      target: { repo: "acme/api", pr: 7, ref: "codex/maintenance", base: "main", headSha: "a".repeat(40) },
+      createdAt: 1000,
+      bounds: { leaseMinutes: 30, spendCapUsd: 1 },
+    };
+    const first = (await post("/runs/coordinator/maintenance/admit", { storeKey: key, input })).data;
+    expect(first.ok).toBe(true);
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (owner: RunHistoryDO) => {
+      const cancelled = await owner.transitionUnitEffect(
+        { kind: "cancel", expected: first.unit, execution: first.execution, effectId: first.effectId, call: 0 },
+        2000,
+      );
+      expect(cancelled.ok).toBe(true);
+      if (!cancelled.ok) throw new Error("cancel refused");
+      expect(
+        (
+          await owner.transitionUnitEffect(
+            { kind: "settle", expected: cancelled.unit, execution: first.execution, effectId: first.effectId },
+            2001,
+          )
+        ).ok,
+      ).toBe(true);
+    });
+    const moved = {
+      ...input,
+      intent: { ...input.intent, requestId: "command:moved" },
+      target: { ...input.target, headSha: "b".repeat(40), base: "release" },
+    };
+    for (const patch of [
+      { userId: "slack:UBOB", actorId: "slack:UBOB" },
+      { channelId: "slack:C2" },
+      { authenticatedAs: "http:other" },
+      { postedBy: "slack:OTHER" },
+    ])
+      expect(
+        await post("/runs/coordinator/maintenance/admit", {
+          storeKey: key,
+          input: { ...input, intent: { ...moved.intent, ...patch } },
+        }),
+      ).toMatchObject({ status: 409, data: { ok: false, reason: "owned" } });
+    const rebound = await post("/runs/coordinator/maintenance/admit", { storeKey: key, input: moved });
+    expect(rebound).toMatchObject({
+      status: 200,
+      data: {
+        ok: true,
+        instance: first.instance,
+        unit: {
+          publication: { ...first.unit.publication, expectedHeadSha: moved.target.headSha, baseRef: "release" },
+          currentEffect: { target: moved.target, ordinal: 2 },
+        },
+      },
+    });
+    await runInDurableObject(stub, async (owner: RunHistoryDO, state) => {
+      const active = rebound.data.unit as CoordinatorUnit;
+      const prepared = await owner.transitionUnitEffect(
+        {
+          kind: "prepare",
+          expected: active,
+          execution: rebound.data.execution,
+          effect: { ...active.currentEffect!, preparation: undefined },
+        },
+        3000,
+      );
+      expect(prepared.ok).toBe(true);
+      if (!prepared.ok) throw new Error("prepare refused");
+      const begun = await owner.transitionUnitEffect(
+        {
+          kind: "begin",
+          expected: prepared.unit,
+          execution: rebound.data.execution,
+          effectId: rebound.data.effectId,
+          call: 0,
+        },
+        3001,
+      );
+      expect(begun.ok).toBe(true);
+      if (!begun.ok) throw new Error("begin refused");
+      expect(
+        await owner.admitMaintenance({ ...moved, intent: { ...moved.intent, requestId: "command:rival" } }, 3002),
+      ).toEqual({ ok: false, reason: "owned" });
+      expect(
+        (
+          await owner.transitionUnitEffect(
+            {
+              kind: "complete",
+              expected: begun.unit,
+              execution: rebound.data.execution,
+              effectId: rebound.data.effectId,
+              call: 0,
+              outcome: { state: "uncertain" },
+            },
+            3003,
+          )
+        ).ok,
+      ).toBe(true);
+      expect(
+        await owner.admitMaintenance({ ...moved, intent: { ...moved.intent, requestId: "command:uncertain" } }, 3004),
+      ).toEqual({ ok: false, reason: "owned" });
+      expect(await owner.listUnits(first.instance.id)).toHaveLength(1);
+      expect(
+        state.storage.sql.exec(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, first.instance.id).one(),
+      ).toEqual({ json: JSON.stringify(first.instance) });
+    });
+  });
+  it("atomically reserves actual command intent and refuses a rival without a Workflow", async () => {
+    const key = storeKey();
+    const input = {
+      version: 1,
+      intent: {
+        kind: "command",
+        requestId: "command:first",
+        actorId: "slack:UALICE",
+        userId: "slack:UALICE",
+        channelId: "slack:C1",
+        threadKey: "slack:C1:maintenance",
+      },
+      target: { repo: "acme/api", pr: 7, ref: "codex/maintenance", base: "main", headSha: "a".repeat(40) },
+      createdAt: 1000,
+      bounds: { leaseMinutes: 30, spendCapUsd: 1 },
+    };
+    const first = await post("/runs/coordinator/maintenance/admit", { storeKey: key, input });
+    expect(first).toMatchObject({
+      status: 200,
+      data: {
+        ok: true,
+        instance: { kind: "maintenance", userId: "slack:UALICE" },
+        unit: { currentEffect: { preparation: "reserved", phase: "active", calls: [{ state: "unstarted" }] } },
+      },
+    });
+    expect(first.data.execution.workflowId).toBeUndefined();
+    expect((await post("/runs/coordinator/maintenance/admit", { storeKey: key, input })).data).toMatchObject({
+      ok: true,
+      replayed: true,
+      effectId: first.data.effectId,
+    });
+    expect(
+      (
+        await post("/runs/coordinator/maintenance/admit", {
+          storeKey: key,
+          input: { ...input, intent: { ...input.intent, requestId: "command:rival" } },
+        })
+      ).status,
+    ).toBe(409);
+    expect(
+      (await post("/runs/coordinator/pull-owners", { storeKey: key, target: { repo: "acme/api", pr: 7 } })).data,
+    ).toMatchObject({
+      ok: true,
+      owners: [expect.objectContaining({ kind: "unit", instanceId: first.data.instance.id })],
+    });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO) => {
+      expect(await owner.offerCoordinatorReconciliation(first.data.instance.id, "ONE", 2000)).toEqual({
+        offered: false,
+      });
+      expect(owner.openPlaneEffects()).toEqual([]);
+    });
   });
 });
 
@@ -5828,4 +6317,101 @@ describe("spawn effect durable receipt transaction", () => {
       });
     },
   );
+});
+
+// Feature: docs/reference/specs/orchestration-plane.md — unfinishable historical reports never acquire a blocking offer.
+describe("durable original report eligibility", () => {
+  const instance: CoordinatorInstance = {
+    id: "report_eligibility",
+    kind: "ship",
+    userId: "slack:UALICE",
+    channelId: "slack:C1",
+    threadKey: "slack:C1:original",
+    repo: "acme/api",
+    branch: "fix/original",
+    base: "main",
+    createdAt: 1000,
+    admission: "created",
+  };
+  const unit: CoordinatorUnit = {
+    instanceId: instance.id,
+    unit: "ONE",
+    slug: "original",
+    branch: instance.branch,
+    dependsOn: [],
+    rounds: [],
+    ending: { kind: "aborted", report: "Original private detail", at: 2000 },
+  };
+  async function prepare(row: CoordinatorUnit) {
+    const key = storeKey();
+    expect((await post("/runs/coordinator/put", { storeKey: key, instance })).status).toBe(200);
+    expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [row] })).status).toBe(200);
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO) => {
+      const holder = owner as unknown as { env: Record<string, unknown> };
+      holder.env = {
+        ...holder.env,
+        SHIP_COORDINATOR: { get: async () => ({ status: async () => ({ status: "errored" }) }) },
+      };
+    });
+    return key;
+  }
+  it("retains historical ending bytes without a blocking offer when identity or original rendering is missing", async () => {
+    for (const row of [unit, { ...unit, ending: { ...unit.ending!, deliveryId: "original/end" } }]) {
+      const key = await prepare(row);
+      expect(
+        (await post("/runs/coordinator/reconcile/offer", { storeKey: key, instanceId: instance.id, unit: unit.unit }))
+          .data,
+      ).toEqual({ offered: false });
+      await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO) => {
+        expect(owner.openPlaneEffects()).toEqual([]);
+        expect(await owner.listUnits(instance.id)).toEqual([row]);
+      });
+    }
+  });
+  it("still offers an original report with its saved raw delivery and retained rendering", async () => {
+    const row = { ...unit, ending: { ...unit.ending!, deliveryId: "original/end", threadReport: "Original summary" } };
+    const key = await prepare(row);
+    expect(
+      (await post("/runs/coordinator/reconcile/offer", { storeKey: key, instanceId: instance.id, unit: unit.unit }))
+        .data,
+    ).toEqual({ offered: true });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO) => {
+      expect(owner.openPlaneEffects()).toHaveLength(1);
+      expect(await owner.listUnits(instance.id)).toEqual([row]);
+    });
+  });
+  it("offers only the strictly decoded original canonical report when retained rendering is absent", async () => {
+    const row = { ...unit, ending: { ...unit.ending!, deliveryId: "original/end" } };
+    const key = await prepare(row);
+    const reportOwner = {
+      instanceId: instance.id,
+      unit: unit.unit,
+      attempt: 0,
+      requester: instance.userId,
+      channelId: instance.channelId,
+      threadKey: instance.threadKey,
+      deliveryId: row.ending!.deliveryId!,
+    };
+    const proposal = { text: row.ending!.report, threadText: "Original immutable summary" };
+    const admission = await coordinatorReportAdmission(reportOwner, proposal);
+    const ledger = {
+      appendSession: async (
+        sessionKey: string,
+        rowId: string,
+        rows: Array<{ part: number; json: string }>,
+        context?: ContextDependencies,
+      ) => env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(sessionKey)).appendKeyed(rowId, rows, context),
+      readSessionEntry: async (sessionKey: string, rowId: string) =>
+        env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(sessionKey)).readEntry(rowId),
+    };
+    expect(await freezeAdmittedCoordinatorReport(ledger, admission, reportOwner, proposal)).toEqual(proposal);
+    expect(
+      (await post("/runs/coordinator/reconcile/offer", { storeKey: key, instanceId: instance.id, unit: unit.unit }))
+        .data,
+    ).toEqual({ offered: true });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO) => {
+      expect(owner.openPlaneEffects()).toHaveLength(1);
+      expect(await owner.listUnits(instance.id)).toEqual([row]);
+    });
+  });
 });

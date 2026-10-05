@@ -9,6 +9,7 @@ import {
 import {
   isUnitCurrentEffect,
   isUnitEffectTransition,
+  UNIT_EFFECT_MAX_BYTES,
   unitEffectResultMatches,
   type UnitEffectTransition,
   type UnitEffectTransitionResult,
@@ -17,6 +18,7 @@ import {
 import {
   CoordinatorUnitWriteConflict,
   isCoordinatorUnit,
+  RECOVERY_ROW_MAX_BYTES,
   type CoordinatorInstance,
   type CoordinatorUnit,
 } from "./contract.js";
@@ -636,6 +638,52 @@ describe("spawn effect durable receipt", () => {
       });
     }
   });
+  it("credits a delta-review child only from its original target after the same cell accepted its exact rebase push", async () => {
+    for (const mode of ["exact", "wrong_head", "unaccepted_push", "wrong_action"] as const) {
+      const h = await setup();
+      const old = "a".repeat(40),
+        next = "b".repeat(40);
+      const cell = h.pending.currentEffect!;
+      cell.id = "ONE/0/rebase";
+      cell.target = { ...cell.target, pr: 7 };
+      cell.calls = [
+        mode === "unaccepted_push"
+          ? { operation: "rebase_push", state: "uncertain" }
+          : { operation: "rebase_push", state: "accepted", commitSha: next },
+        { operation: "spawn", state: "uncertain" },
+      ];
+      h.pending.pr = { number: 7, url: "https://github.com/acme/api/pull/7" };
+      h.pending.publication = {
+        repo: instance.repo,
+        pr: 7,
+        headRef: unit.branch,
+        baseRef: "main",
+        publicationRef: unit.branch,
+        expectedHeadSha: old,
+        owner: { instanceId: instance.id, unit: unit.unit },
+      };
+      (h.store as unknown as { units: Map<string, string> }).units.set(
+        `${instance.id}\0ONE`,
+        JSON.stringify(h.pending),
+      );
+      Object.assign(h.ledger.live.get("exact-child")!.meta, {
+        agent: "review",
+        idempotencyKey: `${instance.id}:${mode === "wrong_action" ? "OTHER/0/rebase" : cell.id}`,
+        pr: 7,
+        headSha: mode === "wrong_head" ? old : next,
+      });
+      Object.assign(h.ledger.events.get("exact-child")![0], { publication: h.pending.publication });
+      const result = await h.store.transitionUnitEffect({ ...h.input, effectId: cell.id, call: 1 });
+      expect(result.ok).toBe(mode === "exact");
+      if (result.ok)
+        expect(result.unit.currentEffect?.calls[1]).toEqual({
+          operation: "spawn",
+          state: "accepted",
+          runId: "exact-child",
+        });
+      else expect((await h.store.listUnits(instance.id))[0]).toEqual(h.pending);
+    }
+  });
   it("a finished review resolves from its original admission metadata, never its final workspace head", async () => {
     for (const original of ["a".repeat(40), "b".repeat(40), undefined]) {
       const h = await setup();
@@ -705,6 +753,12 @@ describe("spawn effect durable receipt", () => {
   it("a different preset cannot satisfy the exact coding step receipt", async () => {
     const h = await setup();
     h.ledger.live.get("exact-child")!.meta.agent = "review";
+    expect(await h.store.transitionUnitEffect(h.input)).toEqual({ ok: false, reason: "conflict" });
+    expect(await h.store.listUnits(instance.id)).toEqual([h.pending]);
+  });
+  it("ordinary Workflow child evidence cannot predate its original instance", async () => {
+    const h = await setup();
+    h.ledger.live.get("exact-child")!.startedAt = 0;
     expect(await h.store.transitionUnitEffect(h.input)).toEqual({ ok: false, reason: "conflict" });
     expect(await h.store.listUnits(instance.id)).toEqual([h.pending]);
   });
@@ -894,5 +948,136 @@ describe("spawn effect durable receipt", () => {
     h.ledger.events.set("exact-child", [h.tag, { ...h.tag, branch: "foreign" }]);
     expect(await h.store.transitionUnitEffect(h.input)).toEqual({ ok: false, reason: "incomplete" });
     expect(await h.store.listUnits(instance.id)).toEqual([h.pending]);
+  });
+});
+
+describe("native recovered pull creation receipt", () => {
+  it("refuses a create receipt for a different head and accepts only the same cell's acknowledged rewritten tip", async () => {
+    const store = await retained(unit);
+    const plan = {
+      ...admitted,
+      calls: [
+        { operation: "rebase_push" as const, state: "unstarted" as const },
+        { operation: "pull_create" as const, state: "unstarted" as const },
+      ],
+    };
+    let row = accepted(await transition(store, { kind: "admit", expected: unit, execution, effect: plan }));
+    row = accepted(await transition(store, { kind: "begin", expected: row, execution, effectId: plan.id, call: 0 }));
+    const rewritten = "b".repeat(40);
+    row = accepted(
+      await transition(store, {
+        kind: "complete",
+        expected: row,
+        execution,
+        effectId: plan.id,
+        call: 0,
+        outcome: { state: "accepted", commitSha: rewritten },
+      }),
+    );
+    row = accepted(await transition(store, { kind: "begin", expected: row, execution, effectId: plan.id, call: 1 }));
+    const pr = { number: 7, url: "https://github.com/acme/api/pull/7" };
+    expect(
+      await transition(store, {
+        kind: "complete",
+        expected: row,
+        execution,
+        effectId: plan.id,
+        call: 1,
+        outcome: { state: "accepted", commitSha: plan.target.headSha, pr },
+      }),
+    ).toEqual({ ok: false, reason: "conflict" });
+    expect(await store.listUnits(instance.id)).toEqual([row]);
+    const final = accepted(
+      await transition(store, {
+        kind: "complete",
+        expected: row,
+        execution,
+        effectId: plan.id,
+        call: 1,
+        outcome: { state: "accepted", commitSha: rewritten.toUpperCase(), pr },
+      }),
+    );
+    expect(final.currentEffect?.calls[1]).toEqual({
+      operation: "pull_create",
+      state: "accepted",
+      commitSha: rewritten.toUpperCase(),
+      pr,
+    });
+  });
+  it("reserves the complete longest create receipt before admission at both cell and row boundaries", async () => {
+    const bytes = (v: unknown) => new TextEncoder().encode(JSON.stringify(v)).byteLength;
+    const create = { ...admitted, calls: [{ operation: "pull_create" as const, state: "unstarted" as const }] };
+    const longestReceipt = {
+      operation: "pull_create" as const,
+      state: "accepted" as const,
+      commitSha: "a".repeat(40),
+      runId: "r".repeat(64),
+      pr: { number: Number.MAX_SAFE_INTEGER, url: "u".repeat(2048) },
+    };
+    const worst = { ...create, phase: "settled" as const, calls: [longestReceipt] };
+    const longCell = {
+      ...create,
+      calls: Array.from({ length: 4 }, () => ({ operation: "pull_create" as const, state: "unstarted" as const })),
+    };
+    expect(bytes(longCell)).toBeLessThan(UNIT_EFFECT_MAX_BYTES);
+    const store = await retained(unit);
+    expect(await transition(store, { kind: "admit", expected: unit, execution, effect: longCell })).toEqual({
+      ok: false,
+      reason: "conflict",
+    });
+    expect(await store.listUnits(instance.id)).toEqual([unit]);
+    const empty = { ...unit, title: "x", dependsOn: [] as string[], currentEffect: worst };
+    const count = Math.floor((RECOVERY_ROW_MAX_BYTES - bytes(empty)) / 35);
+    const filled = { ...unit, title: "x", dependsOn: Array.from({ length: count }, () => "x".repeat(32)) };
+    filled.title += "x".repeat(RECOVERY_ROW_MAX_BYTES - bytes({ ...filled, currentEffect: worst }));
+    expect(isCoordinatorUnit(filled)).toBe(true);
+    expect(bytes({ ...filled, currentEffect: worst })).toBe(RECOVERY_ROW_MAX_BYTES);
+    const oversized = { ...filled, title: filled.title + "x" };
+    const tooLargeStore = await retained(oversized);
+    expect(await transition(tooLargeStore, { kind: "admit", expected: oversized, execution, effect: create })).toEqual({
+      ok: false,
+      reason: "conflict",
+    });
+    expect(await tooLargeStore.listUnits(instance.id)).toEqual([oversized]);
+    const fitting = await retained(filled);
+    let row = accepted(await transition(fitting, { kind: "admit", expected: filled, execution, effect: create }));
+    row = accepted(
+      await transition(fitting, { kind: "begin", expected: row, execution, effectId: create.id, call: 0 }),
+    );
+    const pr = { number: Number.MAX_SAFE_INTEGER, url: "u".repeat(2048) };
+    row = accepted(
+      await transition(fitting, {
+        kind: "complete",
+        expected: row,
+        execution,
+        effectId: create.id,
+        call: 0,
+        outcome: { state: "accepted", commitSha: create.target.headSha, pr },
+      }),
+    );
+    expect(row.currentEffect?.calls[0]).toEqual({
+      operation: "pull_create",
+      state: "accepted",
+      commitSha: create.target.headSha,
+      pr,
+    });
+    expect(bytes(row)).toBeLessThanOrEqual(RECOVERY_ROW_MAX_BYTES);
+  });
+  it("requires exact native PR identity and head on pull_create and forbids that receipt on other calls", () => {
+    const receipt = {
+      state: "accepted",
+      commitSha: "a".repeat(40),
+      pr: { number: 17, url: "https://github.com/acme/api/pull/17" },
+    };
+    const candidate = { ...effect, calls: [{ operation: "pull_create", ...receipt }] };
+    expect(isUnitCurrentEffect(candidate)).toBe(true);
+    expect(isUnitCurrentEffect({ ...candidate, calls: [{ operation: "pull_create", state: "accepted" }] })).toBe(false);
+    expect(
+      isUnitCurrentEffect({
+        ...candidate,
+        calls: [{ operation: "pull_create", ...receipt, pr: { number: 0, url: "x" } }],
+      }),
+    ).toBe(false);
+    expect(isUnitCurrentEffect({ ...candidate, calls: [{ operation: "rebase_push", ...receipt }] })).toBe(false);
   });
 });

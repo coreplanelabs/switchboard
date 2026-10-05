@@ -3,6 +3,7 @@ import type { CoordinatorInstance, CoordinatorUnit } from "./contract.js";
 import type { CoordinatorInstanceStore } from "./instanceStore.js";
 import {
   UNIT_EFFECT_MAX_CALLS,
+  unitEffectResultMatches,
   type UnitEffectCall,
   type UnitEffectExecution,
   type UnitEffectRefusal,
@@ -61,7 +62,7 @@ export async function performCheckRecovery(
     facts.verifiedHead?.repo.toLowerCase() === instance.repo.toLowerCase() &&
     facts.verifiedHead.ref === row.branch &&
     /^[a-f0-9]{40}$/i.test(facts.verifiedHead.sha) &&
-    facts.verifiedHead.sha === input.headSha &&
+    facts.verifiedHead.sha.toLowerCase() === input.headSha.toLowerCase() &&
     facts.baseRef === base;
   const readMatchingPull = async (state: "open" | "closed"): Promise<UnitEffectRefusal | undefined> => {
     const facts = await deps.readPull();
@@ -80,7 +81,7 @@ export async function performCheckRecovery(
     if (
       head.repo.toLowerCase() !== instance.repo.toLowerCase() ||
       head.ref !== row.branch ||
-      head.sha !== input.headSha
+      head.sha.toLowerCase() !== input.headSha.toLowerCase()
     )
       return "conflict";
     return matchingPull(facts, state) ? undefined : "unavailable";
@@ -92,11 +93,11 @@ export async function performCheckRecovery(
         cell.ordinal !== input.ordinal ||
         cell.execution.workflowId !== execution.workflowId ||
         cell.execution.recoveryActionId !== execution.recoveryActionId ||
-        cell.target.repo !== instance.repo ||
+        cell.target.repo.toLowerCase() !== instance.repo.toLowerCase() ||
         cell.target.ref !== row.branch ||
         cell.target.base !== base ||
         cell.target.pr !== input.pr ||
-        cell.target.headSha !== input.headSha ||
+        cell.target.headSha.toLowerCase() !== input.headSha.toLowerCase() ||
         (input.refire === true
           ? cell.calls.length !== 2 ||
             cell.calls[0]?.operation !== "pull_close" ||
@@ -120,6 +121,7 @@ export async function performCheckRecovery(
             ]
           : targets!.map((target) => ({ ...target, state: "unstarted" }));
       if (calls.length > UNIT_EFFECT_MAX_CALLS) return refusal("conflict");
+      if (calls.some((call) => deps.canWrite?.(call) !== true)) return refusal("unavailable");
       await move({
         kind: "admit",
         expected: row,
@@ -148,7 +150,7 @@ export async function performCheckRecovery(
       }
       const targetRefusal = await readMatchingPull(call.operation === "pull_reopen" ? "closed" : "open");
       if (targetRefusal) return refusal(targetRefusal);
-      if (deps.canWrite?.(call) === false) return refusal("unavailable");
+      if (deps.canWrite?.(call) !== true) return refusal("unavailable");
       const begun = await deps.instances.transitionUnitEffect({
         kind: "begin",
         expected: row,
@@ -190,14 +192,48 @@ export async function performCheckRecovery(
       } catch {
         /* Keep unknown native admission. */
       }
-      await move({
+      const completion: Extract<UnitEffectTransition, { kind: "complete" }> = {
         kind: "complete",
         expected: row,
         execution,
         effectId,
         call: index,
         outcome: result.state === "refused" ? { state: "refused", cause: "external_refused" } : { state: result.state },
-      });
+      };
+      // Only the original native reply can justify this completion. A later
+      // open/closed observation cannot attribute a missing close response.
+      for (let attempt = 0; ; attempt++) {
+        let answer;
+        try {
+          answer = await deps.instances.transitionUnitEffect(completion);
+        } catch {
+          answer = { ok: false as const, reason: "unavailable" as const };
+        }
+        if (answer.ok && unitEffectResultMatches(completion, answer.unit)) {
+          row = answer.unit;
+          break;
+        }
+        const actual = (await deps.instances.listUnits(instance.id)).filter((unit) => unit.unit === row.unit);
+        if (actual.length === 1 && unitEffectResultMatches(completion, actual[0]!)) {
+          row = actual[0]!;
+          break;
+        }
+        const owner = await deps.instances.get(instance.id);
+        if (
+          attempt !== 0 ||
+          result.state === "uncertain" ||
+          (answer.ok ? true : answer.reason !== "unavailable") ||
+          actual.length !== 1 ||
+          JSON.stringify(actual[0]) !== JSON.stringify(completion.expected) ||
+          !owner ||
+          owner.id !== instance.id ||
+          owner.repo.toLowerCase() !== instance.repo.toLowerCase() ||
+          owner.userId !== instance.userId
+        )
+          throw answer.ok ? "unavailable" : answer.reason;
+        // Retry the same durable whole-row completion once, never the native
+        // call. The in-memory accepted/refused reply dies with this invocation.
+      }
       if (result.state === "uncertain") return refusal("uncertain");
       // A definite reopen refusal still leaves the accepted close's obligation
       // owned. Finishing the report cannot release a PR we knowingly left closed.

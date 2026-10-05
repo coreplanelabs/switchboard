@@ -483,6 +483,11 @@ export function activeRunCount(): number {
 }
 
 export interface DispatchOptions {
+  /** Trusted original action clock, without inventing run lineage. */
+  parentRemainingMs?: number;
+  /** The original action's absolute deadline. A sampled remainder cannot
+   * renew this bound while authorization, reservation or setup awaits. */
+  parentDeadlineAt?: number;
   /** The parent's admitted operation target, not a prompt hint. Reviews keep
    * their independently resolved PR target; ordinary authorization still runs. */
   operationTarget?: OperationTarget;
@@ -1860,13 +1865,20 @@ export async function dispatch(
     // boundary caps is refused by name with no card, no row and no executor.
     // Every stage below reads the profile — the factory, the ledger row, the
     // runner — never the preset's own fields.
+    if (opts.parentDeadlineAt !== undefined && !Number.isFinite(opts.parentDeadlineAt)) {
+      await refuseSilently("run_budget_exhausted", async () => {});
+      return ended;
+    }
     const recoveryRemainingMs = recovery === undefined ? undefined : Math.max(0, recovery.deadlineAt - clock());
-    const inheritedRemainingMs =
-      parent?.remainingMs === undefined
-        ? recoveryRemainingMs
-        : recoveryRemainingMs === undefined
-          ? parent.remainingMs
-          : Math.min(parent.remainingMs, recoveryRemainingMs);
+    const actionRemainingMs =
+      opts.parentDeadlineAt === undefined ? undefined : Math.max(0, opts.parentDeadlineAt - clock());
+    const inheritedBounds = [
+      parent?.remainingMs,
+      recoveryRemainingMs,
+      opts.parentRemainingMs,
+      actionRemainingMs,
+    ].filter((value): value is number => value !== undefined);
+    const inheritedRemainingMs = inheritedBounds.length ? Math.min(...inheritedBounds) : undefined;
     const originalEvents = resume?.events ?? restart?.events ?? opts.restartCarried?.events;
     const savedMeta = (resume ?? restart)?.row.meta;
     const hadCoordinator =
@@ -1900,8 +1912,25 @@ export async function dispatch(
       await refuseSilently("run_budget_exhausted", async () => {});
       return ended;
     }
-    const originalDeadline =
-      recoveringCanonical && originalAdmission?.type === "run_state" ? originalAdmission.bound : undefined;
+    const originalDeadlineBounds = [
+      recoveringCanonical && originalAdmission?.type === "run_state" ? originalAdmission.bound : undefined,
+      recovery?.deadlineAt,
+      opts.parentDeadlineAt,
+    ].filter((value): value is number => value !== undefined);
+    const originalDeadline = originalDeadlineBounds.length ? Math.min(...originalDeadlineBounds) : undefined;
+    const minimumActionRemainder =
+      opts.parentDeadlineAt !== undefined || coordinator?.maintenanceActionId !== undefined ? MINUTE_MS : 0;
+    const assertOriginalActionBudget = (at = clock()) => {
+      if (originalDeadline === undefined && coordinator?.maintenanceActionId === undefined) return;
+      if (originalDeadline === undefined)
+        throw new RefusalError(refusalOf("run_budget_exhausted", "The original work's time allowance is unavailable."));
+      const remaining = originalDeadline - at;
+      if (remaining <= 0 || remaining < minimumActionRemainder)
+        throw new RefusalError(
+          refusalOf("run_budget_exhausted", "The original work's time allowance ended before its model started."),
+        );
+    };
+    assertOriginalActionBudget();
 
     const profileGate = await authorizeProfile(deps, {
       msg,
@@ -1920,6 +1949,7 @@ export async function dispatch(
     });
     if (profileGate.kind === "refused") return ended;
     let { profile } = profileGate;
+    assertOriginalActionBudget();
 
     // A review resolves its repository state before admission. A pull request
     // GitHub already closed cannot be reviewed, so it must not claim the
@@ -2723,6 +2753,7 @@ export async function dispatch(
     // `coordinator` was reconstructed before profile resolution so its
     // recovery deadline constrains every resumed/restarted phase.
     const reserveIdentity = async (runId: string, channelVisibility: ChannelVisibility) => {
+      assertOriginalActionBudget();
       const reservation = await reserveRun(deps, {
         msg,
         agent,
@@ -3055,12 +3086,14 @@ export async function dispatch(
       ? admissionAt + resume.plan.remainingMs
       : Math.max(startedAt, admissionAt) + minutesToMs(profile.minutes);
     const admissionBound = originalDeadline === undefined ? segmentBound : Math.min(originalDeadline, segmentBound);
+    assertOriginalActionBudget(admissionAt);
 
     if (typeof registry.commitLiveState === "function") {
       await events.write(async () => {
         const current = registry.getById(runId);
         if (current && current.liveState === undefined) {
           const at = clock();
+          assertOriginalActionBudget(at);
           const eventSeq = current.eventCount + 1;
           const assignment = {
             expectedSeq: 0,
@@ -3115,6 +3148,7 @@ export async function dispatch(
 
     // Admission commits the reserved identity and setup stream, including the coordinator tag, before notifying its owner.
     if (coordinator) {
+      assertOriginalActionBudget();
       if (!(reserved ?? ledgerRun)?.tracked() || typeof registry.commitLiveState !== "function")
         throw new Error("the coordinator child has no durable admission receipt");
       io.runStarted?.({ id: runId });
@@ -3377,6 +3411,7 @@ export async function dispatch(
         throw error;
       }
     }
+    assertOriginalActionBudget();
     if (originalDeadline !== undefined && admissionBound <= clock())
       throw new RefusalError(refusalOf("run_budget_exhausted", "The original child budget ended before attachment."));
     const control = registered?.control;
@@ -3409,9 +3444,12 @@ export async function dispatch(
       ...(control
         ? {
             stopSignal: control.hardSignal,
-            remainingMs: () =>
-              control.remainingMs() ??
-              (resume || coordinator !== undefined ? Math.max(0, admissionBound - clock()) : undefined),
+            remainingMs: () => {
+              const remaining = control.remainingMs();
+              return resume || coordinator !== undefined || originalDeadline !== undefined
+                ? Math.min(remaining ?? Infinity, Math.max(0, admissionBound - clock()))
+                : remaining;
+            },
           }
         : {}),
       onLiveStateObservation: observeResidentLiveState,
@@ -3494,6 +3532,7 @@ export async function dispatch(
     // exists, it may narrow that deadline, never renew it. Recheck each boundary
     // because committing fallback or preparing the prompt can consume the rest.
     const assertAdmissionBudget = (at = clock()): number => {
+      assertOriginalActionBudget(at);
       const remaining = control?.remainingMs();
       const bound = remaining === undefined ? admissionBound : Math.min(admissionBound, at + remaining);
       if (bound <= at) {
@@ -4261,7 +4300,7 @@ export async function dispatch(
       loopStartedAt,
       assertAdmissionBudget,
       admissionRemainingMs: () => Math.max(0, admissionBound - clock()),
-      ...(coordinator ? { admissionDeadlineAt: admissionBound } : {}),
+      ...(coordinator || originalDeadline !== undefined ? { admissionDeadlineAt: admissionBound } : {}),
       channelVisibility,
       slackContext,
       privateAudienceLatch,

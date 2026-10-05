@@ -16,6 +16,7 @@ import { submitVerdictTool } from "../tools/submit.js";
 import type { ReviewHistoryContext } from "./reviewHistory.js";
 import type { RunEvent } from "./runEvents.js";
 import { RunControl } from "./runRegistry/runControl.js";
+import { REVIEW_PUBLICATION_OWNER_ABSENT } from "./reviewPublication.js";
 import {
   attachRoundWorkspace,
   checkPrHeadPreflight,
@@ -530,10 +531,24 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
   function harness() {
     const posts: Array<{ target: ReviewCommentTarget; body: string }> = [];
     const replies: string[] = [];
+    let saved: unknown = null;
+    const publicationJournal = {
+      runId: "review-fixture",
+      read: async () => saved,
+      commit: async (value: unknown): Promise<"committed" | "refused" | "unknown"> => {
+        saved = value;
+        return "committed" as const;
+      },
+      canPublish: async () => true,
+    };
     return {
       posts,
       replies,
-      post: async (target: ReviewCommentTarget, body: string) => void posts.push({ target, body }),
+      publicationJournal,
+      post: async (target: ReviewCommentTarget, body: string) => {
+        posts.push({ target, body });
+        return { state: "accepted" as const };
+      },
       reply: async (text: string) => void replies.push(text),
     };
   }
@@ -561,6 +576,7 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       carried: { reviewed: HEAD, current: OTHER, commits: 1 },
       hardStopped: false,
       post: h.post,
+      publicationJournal: h.publicationJournal,
       fetchPrHead: async () => OTHER,
       reply: h.reply,
       logKey: "t",
@@ -609,6 +625,7 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
         guardTransition: true,
         fetchPrFacts: async () => facts,
         post: h.post,
+        publicationJournal: h.publicationJournal,
         fetchPrHead: async () => HEAD,
         reply: h.reply,
         logKey: "t",
@@ -632,6 +649,7 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       carried: undefined,
       hardStopped: false,
       post: h.post,
+      publicationJournal: h.publicationJournal,
       fetchPrHead: async () => {
         headReads += 1;
         return HEAD;
@@ -660,6 +678,7 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       hardStopped: false,
       guardTransition: true,
       post: h.post,
+      publicationJournal: h.publicationJournal,
       fetchPrHead: async () => undefined,
       fetchPrFacts: async () => ({ state: "closed", sameRepoHead: true }),
       reply: h.reply,
@@ -689,6 +708,7 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
         hardStopped: false,
         guardTransition: true as const,
         post: h.post,
+        publicationJournal: h.publicationJournal,
         fetchPrHead: async () => HEAD,
         fetchPrFacts: async () => facts,
         reply: h.reply,
@@ -713,6 +733,7 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       carried: undefined,
       hardStopped: false,
       post: h.post,
+      publicationJournal: h.publicationJournal,
       fetchPrHead: async () => HEAD,
       reply: h.reply,
       logKey: "t",
@@ -735,6 +756,7 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       carried: undefined,
       hardStopped: false,
       post: h.post,
+      publicationJournal: h.publicationJournal,
       fetchPrHead: async () => HEAD,
       reply: h.reply,
       logKey: "t",
@@ -744,7 +766,7 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
     expect(out).toEqual({ posted: false, reason: expect.stringContaining("is not the PR head") });
   });
 
-  it("a post that throws comes back { posted: false, reason } — ship's merge-ready gate consumes it; the thread is told Slack-only", async () => {
+  it("a lost post response returns uncertainty without claiming a definitive no-write", async () => {
     const h = harness();
     const out = await runReviewPostStep({
       agent: AGENTS.review,
@@ -756,6 +778,7 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       answer,
       carried: undefined,
       hardStopped: false,
+      publicationJournal: h.publicationJournal,
       post: async () => {
         throw new Error("HTTP 502 bad gateway");
       },
@@ -763,8 +786,8 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       reply: h.reply,
       logKey: "t",
     });
-    expect(out).toEqual({ posted: false, reason: "HTTP 502 bad gateway" });
-    expect(h.replies.some((r) => r.includes("Slack-only"))).toBe(true);
+    expect(out).toEqual({ posted: false, uncertain: true, reason: "the review publication outcome is unconfirmed" });
+    expect(h.replies.some((r) => r.includes("could not confirm"))).toBe(true);
   });
 
   it("a hard-stopped round posts nothing and says nothing — and reports posted: false", async () => {
@@ -780,6 +803,7 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       carried: undefined,
       hardStopped: true,
       post: h.post,
+      publicationJournal: h.publicationJournal,
       fetchPrHead: async () => HEAD,
       reply: h.reply,
       logKey: "t",
@@ -805,6 +829,7 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       carried: undefined,
       hardStopped: false,
       post: h.post,
+      publicationJournal: h.publicationJournal,
       fetchPrHead: async () => HEAD,
       reply: h.reply,
       logKey: "t",
@@ -856,7 +881,7 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
         repoCtx: { repo: "acme/api", pr: 42 },
         digest: { complete: true, base: "origin/main", totals: { files: 13, additions: 144, deletions: 53 } },
       });
-      expect(h.posts).toHaveLength(2);
+      expect(h.posts).toHaveLength(1);
       expect(h.replies).toHaveLength(0);
     });
 
@@ -891,6 +916,7 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       carried: undefined,
       hardStopped: false,
       post: h.post,
+      publicationJournal: h.publicationJournal,
       fetchPrHead: async () => HEAD,
       reply: h.reply,
       publish: (e: RunEvent) => void events.push(e),
@@ -957,7 +983,7 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       ]);
     });
 
-    it("a post GitHub refused publishes the same note with GitHub's reason", async () => {
+    it("a lost native response never publishes a definitive not-posted note", async () => {
       const h = harness();
       const events: RunEvent[] = [];
       const out = await runReviewPostStep({
@@ -966,15 +992,8 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
           throw new Error("HTTP 502 bad gateway");
         },
       });
-      expect(out).toEqual({ posted: false, reason: "HTTP 502 bad gateway" });
-      expect(events).toEqual([
-        {
-          type: "run_note",
-          kind: "review_not_posted",
-          summary: "review not posted to acme/api#42: HTTP 502 bad gateway",
-          at: expect.any(Number),
-        },
-      ]);
+      expect(out).toEqual({ posted: false, uncertain: true, reason: "the review publication outcome is unconfirmed" });
+      expect(events).toEqual([]);
     });
 
     it("a review with no pull request to post to records the skip without a target; a non-review round and a hard-stopped round publish nothing", async () => {
@@ -1417,5 +1436,218 @@ describe("makeSystemComposer — the seeded sandbox", () => {
       blocks,
     })({ sha: undefined, verified: false });
     expect(general).toBe(AGENTS.general.system);
+  });
+});
+
+describe("runReviewPostStep durable original publication", () => {
+  const verdict = { verdict: "approve" as const, summary: "approved", head: HEAD };
+  function setup() {
+    let saved: unknown = null;
+    const receipts: unknown[] = [];
+    const posts: Array<{ target: ReviewCommentTarget; body: string }> = [];
+    const events: RunEvent[] = [];
+    const replies: string[] = [];
+    const publicationJournal = {
+      runId: "run-original-review",
+      read: async () => saved,
+      commit: async (receipt: unknown): Promise<"committed" | "refused" | "unknown"> => {
+        saved = structuredClone(receipt);
+        receipts.push(saved);
+        return "committed" as const;
+      },
+      canPublish: async () => true,
+    };
+    const input = {
+      agent: AGENTS.review,
+      requestText: "review acme/api#42",
+      repoCtx: { repo: "acme/api", pr: 42 },
+      heads: { reviewHead: HEAD, observedHead: HEAD },
+      verdict,
+      digest: undefined,
+      answer: "original review bytes",
+      carried: undefined,
+      hardStopped: false,
+      publicationJournal,
+      post: async (target: ReviewCommentTarget, body: string) => {
+        posts.push({ target, body });
+        return { state: "accepted" as const };
+      },
+      fetchPrHead: async () => HEAD,
+      reply: async (text: string) => {
+        replies.push(text);
+      },
+      publish: (event: RunEvent) => {
+        events.push(event);
+      },
+      logKey: "t",
+    };
+    return { input, posts, events, replies, receipts, publicationJournal, read: () => saved };
+  }
+  it("awaits exact original pending admission before a native review POST", async () => {
+    const h = setup();
+    let release!: () => void;
+    let reached!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const ack = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const commit = h.publicationJournal.commit;
+    h.publicationJournal.commit = async (receipt) => {
+      reached();
+      await ack;
+      return commit(receipt);
+    };
+    const running = runReviewPostStep(h.input);
+    await Promise.race([waiting, running]);
+    expect(h.posts).toEqual([]);
+    release();
+    expect(await running).toMatchObject({ posted: true });
+    expect(h.receipts).toMatchObject([
+      { state: "pending", runId: "run-original-review", target: { repo: "acme/api", number: 42, commitId: HEAD } },
+      { state: "accepted" },
+    ]);
+    expect(JSON.stringify(h.receipts)).not.toContain("original review bytes");
+  });
+  it("a void native adapter response stays uncertain and never authorizes repost", async () => {
+    const h = setup();
+    const post = async (target: ReviewCommentTarget, body: string) => {
+      await h.input.post(target, body);
+    };
+    expect(await runReviewPostStep({ ...h.input, post })).toMatchObject({ posted: false, uncertain: true });
+    expect(await runReviewPostStep(h.input)).toMatchObject({ posted: false, uncertain: true });
+    expect(h.posts).toHaveLength(1);
+    expect(
+      h.events.some(
+        (event) => event.type === "review_posted" || (event.type === "run_note" && event.kind === "review_not_posted"),
+      ),
+    ).toBe(false);
+  });
+
+  it.each([undefined, {}, { version: 1, state: "accepted" }, { kind: "owner_absent" }])(
+    "missing or malformed canonical receipt never means confirmed absence: %j",
+    async (saved) => {
+      const h = setup();
+      h.publicationJournal.read = async () => saved;
+      const commit = vi.spyOn(h.publicationJournal, "commit");
+      expect(await runReviewPostStep(h.input)).toMatchObject({ posted: false, uncertain: true });
+      expect(commit).not.toHaveBeenCalled();
+      expect(h.posts).toEqual([]);
+    },
+  );
+
+  it("owner disappearance between absent receipt and prewrite check stays unknown without not-posted evidence", async () => {
+    const h = setup();
+    let reads = 0;
+    h.publicationJournal.read = async () => (reads++ === 0 ? null : undefined);
+    h.publicationJournal.canPublish = async () => false;
+    expect(await runReviewPostStep(h.input)).toMatchObject({ posted: false, uncertain: true });
+    expect(h.posts).toHaveLength(0);
+    expect(h.receipts).toHaveLength(0);
+    expect(h.events.some((event) => event.type === "run_note" && event.kind === "review_not_posted")).toBe(false);
+  });
+
+  it("a failed prewrite check with freshly confirmed receipt absence is a definite no-write refusal", async () => {
+    const h = setup();
+    h.publicationJournal.canPublish = async () => false;
+    expect(await runReviewPostStep(h.input)).toEqual({ posted: false, reason: "the review publication was refused" });
+    expect(h.posts).toHaveLength(0);
+    expect(h.receipts).toHaveLength(0);
+    expect(h.events.some((event) => event.type === "run_note" && event.kind === "review_not_posted")).toBe(true);
+  });
+
+  it("a definite native refusal and its saved replay notify the thread without reposting", async () => {
+    const h = setup();
+    const post = vi.fn(async () => ({ state: "refused" as const, status: 403 }));
+    const input = { ...h.input, post };
+    for (let replay = 0; replay < 2; replay++) {
+      expect(await runReviewPostStep(input)).toEqual({
+        posted: false,
+        reason: "the review publication was refused",
+      });
+    }
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(h.read()).toMatchObject({ state: "refused" });
+    expect(h.replies).toEqual([
+      "ℹ️ Review not posted to acme/api#42: the review publication was refused — this verdict is Slack-only.",
+      "ℹ️ Review not posted to acme/api#42: the review publication was refused — this verdict is Slack-only.",
+    ]);
+    expect(h.events.filter((event) => event.type === "run_note" && event.kind === "review_not_posted")).toHaveLength(2);
+    expect(h.events.some((event) => event.type === "review_posted")).toBe(false);
+  });
+
+  it("a failed refusal-result ACK stays uncertain and cannot claim a Slack-only verdict", async () => {
+    const h = setup();
+    const commit = h.publicationJournal.commit;
+    h.publicationJournal.commit = async (receipt) =>
+      (receipt as { state: string }).state === "pending" ? commit(receipt) : "unknown";
+    const post = vi.fn(async () => ({ state: "refused" as const, status: 403 }));
+    for (let replay = 0; replay < 2; replay++)
+      expect(await runReviewPostStep({ ...h.input, post })).toMatchObject({ posted: false, uncertain: true });
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(h.read()).toMatchObject({ state: "pending" });
+    expect(h.replies.join("\n")).not.toContain("Slack-only");
+    expect(h.events.some((event) => event.type === "run_note" && event.kind === "review_not_posted")).toBe(false);
+  });
+
+  it("a confirmed missing original owner refuses without claiming a native call was uncertain", async () => {
+    const h = setup();
+    h.publicationJournal.read = async () => REVIEW_PUBLICATION_OWNER_ABSENT;
+    expect(await runReviewPostStep(h.input)).toEqual({
+      posted: false,
+      reason: "the review publication owner is unavailable",
+    });
+    expect(h.posts).toEqual([]);
+    expect(h.events.some((event) => event.type === "run_note" && event.kind === "review_not_posted")).toBe(true);
+    expect(h.replies.some((text) => text.includes("could not confirm"))).toBe(false);
+  });
+
+  it("commits native acceptance before an auxiliary head lookup and keeps its credit if that lookup fails", async () => {
+    const h = setup();
+    let reads = 0;
+    const out = await runReviewPostStep({
+      ...h.input,
+      fetchPrHead: async () => {
+        if (++reads === 1) return HEAD;
+        expect(h.read()).toMatchObject({ state: "accepted" });
+        throw new Error("auxiliary read unavailable");
+      },
+    });
+    expect(out).toMatchObject({ posted: true, head: HEAD });
+    expect(h.posts).toHaveLength(1);
+  });
+
+  it("a lost native response remains uncertain and never reposts or declares not-posted", async () => {
+    const h = setup();
+    const post = h.input.post;
+    h.input.post = async (target, body) => {
+      await post(target, body);
+      throw new Error("private native response bytes");
+    };
+    for (let retry = 0; retry < 2; retry++)
+      expect(await runReviewPostStep(h.input)).toMatchObject({ posted: false, uncertain: true });
+    expect(h.posts).toHaveLength(1);
+    expect(h.read()).toMatchObject({ state: "uncertain" });
+    expect(h.events.some((event) => event.type === "run_note" && event.kind === "review_not_posted")).toBe(false);
+    expect(JSON.stringify([...h.events, ...h.replies])).not.toContain("private native response bytes");
+  });
+  it("a stop or changed grant after pending ACK refuses before native dispatch", async () => {
+    const h = setup();
+    h.publicationJournal.canPublish = async () => h.receipts.length === 0;
+    expect(await runReviewPostStep(h.input)).toMatchObject({ posted: false });
+    expect(h.posts).toEqual([]);
+    expect(h.read()).toMatchObject({ state: "refused" });
+  });
+  it("a lost accepted-result ACK keeps pending and prevents another native review", async () => {
+    const h = setup();
+    const commit = h.publicationJournal.commit;
+    h.publicationJournal.commit = async (receipt) =>
+      (receipt as { state: string }).state === "pending" ? commit(receipt) : "unknown";
+    expect(await runReviewPostStep(h.input)).toMatchObject({ posted: false, uncertain: true });
+    expect(await runReviewPostStep(h.input)).toMatchObject({ posted: false, uncertain: true });
+    expect(h.posts).toHaveLength(1);
+    expect(h.read()).toMatchObject({ state: "pending" });
+    expect(h.events.some((event) => event.type === "review_posted")).toBe(false);
   });
 });

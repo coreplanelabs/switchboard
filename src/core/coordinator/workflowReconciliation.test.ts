@@ -41,6 +41,32 @@ const currentEffect = {
 } as const;
 
 describe("coordinator Workflow reconciliation identity", () => {
+  it("decodes only typed public delivery references and refuses extra receipt data", () => {
+    const owner = {
+      instanceId: instance.id,
+      unit: unit.unit,
+      attempt: 0,
+      requester: instance.userId,
+      channelId: instance.channelId,
+      threadKey: instance.threadKey,
+      deliveryId: "original/end",
+    };
+    const reportDelivery = { version: 1, owner, proposalHash: "a".repeat(64) };
+    const status = {
+      ...owner,
+      destinationThreadKey: instance.threadKey,
+      repo: instance.repo,
+      snapshotHash: "b".repeat(64),
+    };
+    const publicDelivery = { ...reportDelivery, threadHash: "c".repeat(64), kind: "reply" };
+    expect(isCoordinatorReconcileReceipt({ reportDelivery, status, publicDelivery })).toBe(true);
+    for (const delivery of [
+      { ...publicDelivery, kind: "sent" },
+      { ...publicDelivery, threadHash: "bad" },
+      { ...publicDelivery, text: "private prose" },
+    ])
+      expect(isCoordinatorReconcileReceipt({ reportDelivery, status, publicDelivery: delivery })).toBe(false);
+  });
   it("does not treat a terminal same-ID Workflow as recovery or legacy admission evidence", () => {
     const action = { id: "r_" + "b".repeat(64), workflowId: "new_recovery", state: "pending" } as RecoveryAction;
     expect(coordinatorWorkflowCanReconcile(instance, unit, action, "errored")).toBe(false);

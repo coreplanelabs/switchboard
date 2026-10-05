@@ -134,7 +134,7 @@ import { routablePresets, type RouteModel, type RoutePrompt } from "./dispatch/r
 import { capabilitiesFrom } from "./capabilities.js";
 import { NO_FLEET } from "./residentFleet.js";
 import { InMemoryCoordinatorInstanceStore } from "./coordinator/instanceStore.js";
-import type { CoordinatorInstance, CoordinatorUnit } from "./coordinator/contract.js";
+import type { CoordinatorInstance, CoordinatorTag, CoordinatorUnit } from "./coordinator/contract.js";
 import {
   COORDINATOR_ADMIN_PREFIX,
   handleCoordinatorRequest,
@@ -322,13 +322,14 @@ function makeDeps(fixtureYaml: string, provider: Provider): TestDeps {
 }
 
 /** Coordinator fixtures must cross the real durable reservation boundary. */
-function wireChildLedger(deps: CoreDeps): void {
-  deps.runLedger = createLedgerWriteThrough({
-    ledger: new InMemoryRunLedger(),
-    gen: "gen-child",
-    fallback: new InMemoryRunStore(),
-    warn: () => {},
-  });
+function wireChildLedger(deps: CoreDeps): InMemoryRunLedger {
+  const ledger = new InMemoryRunLedger();
+  const store = deps.runStore instanceof NullRunStore ? new InMemoryRunStore() : deps.runStore;
+  deps.runLedger = createLedgerWriteThrough({ ledger, gen: "gen-child", fallback: store, warn: () => {} });
+  deps.runStore = ledgerBackedStore(ledger, store);
+  if (deps.runHistoryWriter instanceof NullRunHistoryWriter)
+    deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
+  return ledger;
 }
 
 const YAML_FIXTURE = `
@@ -3771,7 +3772,8 @@ describe("repo/ref resolution + resident prompt selection", () => {
     const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
     const ctx = { repo: "acme/api", ref: "patch-1", pr: 42, headSha: head, baseRef: "main" };
     deps.resolveRepoContext = () => ctx;
-    deps.postReviewComment = vi.fn(async () => {});
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
+    deps.postReviewComment = vi.fn(async () => ({ state: "accepted" as const }));
     const { io } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
     const system = provider.requests[0].system ?? "";
@@ -3813,7 +3815,8 @@ describe("repo/ref resolution + resident prompt selection", () => {
     const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
     const ctx = { repo: "acme/api", ref: "patch-1", pr: 42, headSha: head, baseRef: "main" };
     deps.resolveRepoContext = () => ctx;
-    deps.postReviewComment = vi.fn(async () => {});
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
+    deps.postReviewComment = vi.fn(async () => ({ state: "accepted" as const }));
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
     expect(provider.requests).toHaveLength(2); // the review ran, then its verdict turn (this fake submits no verdict)
@@ -3859,7 +3862,8 @@ describe("repo/ref resolution + resident prompt selection", () => {
     const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: head, baseRef: "main" });
     deps.fetchPrHead = async () => head;
-    deps.postReviewComment = vi.fn(async () => {});
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
+    deps.postReviewComment = vi.fn(async () => ({ state: "accepted" as const }));
     const { io, replies } = fakeIO();
 
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
@@ -3908,7 +3912,8 @@ describe("repo/ref resolution + resident prompt selection", () => {
       baseRef: "main",
     });
     deps.fetchPrHead = async () => head;
-    deps.postReviewComment = vi.fn(async () => {});
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
+    deps.postReviewComment = vi.fn(async () => ({ state: "accepted" as const }));
     const contract = contractFromPlan({
       planMarkdown: "### U10. review the adopted pull request\n\nreview the adopted pull request\n",
       unitId: "U10",
@@ -3979,7 +3984,8 @@ describe("repo/ref resolution + resident prompt selection", () => {
       baseRef: "main",
     });
     deps.fetchPrHead = async () => "6dd3832099140ee5c76022a525bbc5e7629d5adc";
-    deps.postReviewComment = vi.fn(async () => {});
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
+    deps.postReviewComment = vi.fn(async () => ({ state: "accepted" as const }));
     const { io, replies, statuses } = fakeIO();
 
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
@@ -4026,7 +4032,8 @@ describe("repo/ref resolution + resident prompt selection", () => {
     const ctx = { repo: "acme/api", ref: "patch-1", pr: 42, headSha: resolvedHead, baseRef: "main" };
     deps.resolveRepoContext = () => ctx;
     deps.fetchPrHead = async () => attached;
-    const post = vi.fn(async () => {});
+    const post = vi.fn(async () => ({ state: "accepted" as const }));
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
     deps.postReviewComment = post;
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
@@ -4074,7 +4081,8 @@ describe("repo/ref resolution + resident prompt selection", () => {
     const provider = capturingProvider();
     const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
     deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 42 }); // fetch failed: pr named, no headSha
-    const post = vi.fn(async () => {});
+    const post = vi.fn(async () => ({ state: "accepted" as const }));
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
     deps.postReviewComment = post;
     const { io, replies, statuses } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
@@ -4169,7 +4177,8 @@ describe("repo/ref resolution + resident prompt selection", () => {
     const deps = makeDeps(REMOTE_YAML_FIXTURE, provider); // no resident configured
     const ctx = { repo: "acme/api", pr: 42, headSha: "e".repeat(40) };
     deps.resolveRepoContext = () => ctx;
-    deps.postReviewComment = vi.fn(async () => {});
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
+    deps.postReviewComment = vi.fn(async () => ({ state: "accepted" as const }));
     vi.mocked(makeExecutor).mockResolvedValueOnce({
       executor: {
         exec: async (command: string) => (/git rev-parse HEAD/.test(command) ? `${ctx.headSha}\n` : ""),
@@ -4231,6 +4240,7 @@ describe("review post-step", () => {
     const calls: Array<{ target: ReviewCommentTarget; body: string }> = [];
     const fn = vi.fn(async (target: ReviewCommentTarget, body: string) => {
       calls.push({ target, body });
+      return { state: "accepted" as const };
     });
     return { calls, fn };
   }
@@ -4287,6 +4297,7 @@ describe("review post-step", () => {
       closedPr: { number: 42, merged: true, mergedAt: "2026-09-20T03:28:00.000Z" },
     });
     const post = postSpy();
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
     deps.postReviewComment = post.fn;
     const { io, replies, statuses } = fakeIO();
 
@@ -4318,6 +4329,7 @@ describe("review post-step", () => {
       closedPr: { number: 42, merged: false },
     });
     const post = postSpy();
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
     deps.postReviewComment = post.fn;
     const { io, replies, statuses } = fakeIO();
 
@@ -4378,6 +4390,7 @@ describe("review post-step", () => {
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
     headExecutor(PR_HEAD);
     const post = postSpy();
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
     deps.postReviewComment = post.fn;
     const { io, replies } = fakeIO();
 
@@ -4392,7 +4405,7 @@ describe("review post-step", () => {
     expect(JSON.stringify(events)).not.toContain('"id":"F1"');
     expect(provider.requests).toHaveLength(1);
     expect(post.fn).not.toHaveBeenCalled();
-    const record = await store.get("r-early-stop");
+    const record = await deps.runStore.get("r-early-stop");
     expect(record).toMatchObject({ status: "stopped_soft" });
     expect(record).not.toHaveProperty("reviewHead");
     expect(record).not.toHaveProperty("verdict");
@@ -4444,6 +4457,7 @@ describe("review post-step", () => {
     }));
     deps.fetchPrCommits = fetchPrCommits;
     const post = postSpy();
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
     deps.postReviewComment = post.fn;
     const { io, replies, statuses } = fakeIO();
 
@@ -4461,7 +4475,7 @@ describe("review post-step", () => {
     expect(moveTo).not.toHaveBeenCalled();
     expect(provider.requests).toHaveLength(1);
     expect(post.fn).not.toHaveBeenCalled();
-    const record = await store.get("r-settle-stop");
+    const record = await deps.runStore.get("r-settle-stop");
     expect(record).toMatchObject({ status: "stopped_soft" });
     expect(record).not.toHaveProperty("reviewHead");
     expect(record).not.toHaveProperty("verdict");
@@ -4516,15 +4530,19 @@ describe("review post-step", () => {
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
     headExecutor(PR_HEAD);
     const post = postSpy();
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
     deps.postReviewComment = post.fn;
     const { io, replies } = fakeIO();
 
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
 
     expect(replies.some((reply) => reply.includes("one real issue") && reply.includes("Real issue"))).toBe(true);
-    expect(post.calls).toHaveLength(1);
-    expect(post.calls[0].body).toContain("Changes requested: one real issue");
-    expect(post.calls[0].body).toContain("Real issue");
+    expect(post.calls).toHaveLength(0);
+    await deps.runHistoryWriter.settled();
+    const record = await deps.runStore.get("r-late-stop");
+    expect(record?.status).toBe("stopped_soft");
+    expect(record?.verdict?.findings).toContainEqual(expect.objectContaining({ id: "F1", title: "Real issue" }));
+    expect(record?.reviewPost).toEqual({ posted: false, reason: "the review publication was refused" });
   });
 
   it("a review of a resolved PR posts the review back to the PR by default", async () => {
@@ -4533,6 +4551,7 @@ describe("review post-step", () => {
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
     headExecutor(PR_HEAD);
     const spy = postSpy();
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
     deps.postReviewComment = spy.fn;
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
@@ -4584,6 +4603,7 @@ describe("review post-step", () => {
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
     headExecutor(PR_HEAD);
     const spy = postSpy();
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
     deps.postReviewComment = spy.fn;
     const registry = new RunRegistry({ genId: () => "rv1", genToken: () => "tv1" });
     deps.runRegistry = registry;
@@ -4619,6 +4639,7 @@ describe("review post-step", () => {
       deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
       headExecutor(PR_HEAD);
       const spy = postSpy();
+      if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
       deps.postReviewComment = spy.fn;
       deps.fetchPrHead = fetchPrHead;
       return { deps, spy };
@@ -4686,6 +4707,7 @@ describe("review post-step", () => {
       const deps = makeDeps(YAML_FIXTURE, provider);
       deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
       headExecutor(PR_HEAD);
+      if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
       deps.postReviewComment = postSpy().fn;
       deps.fetchPrHead = async () => PR_HEAD;
       deps.runRegistry = new RunRegistry({ genId: () => "r-verdict", genToken: () => "t-verdict" });
@@ -4693,7 +4715,7 @@ describe("review post-step", () => {
       deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), fakeIO().io);
       await deps.runHistoryWriter.settled();
-      const rec = (await store.get("r-verdict"))!;
+      const rec = (await deps.runStore.get("r-verdict"))!;
       expect(rec.verdict).toEqual({
         verdict: "request_changes",
         summary: "one nit",
@@ -4721,7 +4743,17 @@ describe("review post-step", () => {
       const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "ok", "the findings", PR_HEAD));
       deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
       headExecutor(PR_HEAD);
-      deps.postReviewComment = async () => void order.push("post");
+      const ledger = wireChildLedger(deps);
+      const finish = ledger.finish.bind(ledger);
+      ledger.finish = async (...args) => {
+        const receipt = await finish(...args);
+        if (receipt.ok) order.push(`record:${ledger.finished.get(args[0])!.status}`);
+        return receipt;
+      };
+      deps.postReviewComment = async () => {
+        order.push("post");
+        return { state: "accepted" };
+      };
       deps.fetchPrHead = async () => PR_HEAD;
       deps.runRegistry = new RunRegistry({ genId: () => "r-order", genToken: () => "t-order" });
       const inner = new InMemoryRunStore();
@@ -4744,7 +4776,7 @@ describe("review post-step", () => {
       // The start tombstone (run-history item 27) lands at create; the finish
       // record — the one the runner reads — lands after the post.
       expect(order).toEqual(["record:interrupted", "post", "record:completed"]);
-      const rec = (await inner.get("r-order"))!;
+      const rec = (await deps.runStore.get("r-order"))!;
       expect(rec.reviewPost).toMatchObject({ posted: true, head: PR_HEAD, verdict: "approve" });
     });
 
@@ -4752,6 +4784,7 @@ describe("review post-step", () => {
       const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "looks great"));
       deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
       headExecutor([PR_HEAD, OTHER_HEAD]);
+      if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
       deps.postReviewComment = postSpy().fn;
       deps.runRegistry = new RunRegistry({ genId: () => "r-skip", genToken: () => "t-skip" });
       const store = new InMemoryRunStore();
@@ -4759,7 +4792,7 @@ describe("review post-step", () => {
       vi.spyOn(console, "log").mockImplementation(() => {});
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), fakeIO().io);
       await deps.runHistoryWriter.settled();
-      const rec = (await store.get("r-skip"))!;
+      const rec = (await deps.runStore.get("r-skip"))!;
       expect(rec.reviewPost).toEqual({ posted: false, reason: expect.stringContaining("is not the PR head") });
       expect(rec.events.filter((e) => e.type === "run_note" && e.kind === "review_not_posted")).toHaveLength(1);
       vi.restoreAllMocks();
@@ -4939,6 +4972,7 @@ describe("review post-step", () => {
       const deps = makeDeps(YAML_FIXTURE, input.provider);
       deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD, baseRef: "main" });
       const spy = postSpy();
+      if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
       deps.postReviewComment = spy.fn;
       const heads = [...input.heads];
       const headAsks: number[] = [];
@@ -5200,6 +5234,7 @@ describe("review post-step", () => {
     deps.runRegistry = registry;
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: "e".repeat(40) });
     const spy = postSpy();
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
     deps.postReviewComment = spy.fn;
     headExecutor("e".repeat(40));
     const { io, replies } = fakeIO();
@@ -5254,6 +5289,7 @@ describe("review post-step", () => {
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: "c".repeat(40) });
     headExecutor("c".repeat(40));
     const spy = postSpy();
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
     deps.postReviewComment = spy.fn;
     const { io } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
@@ -5274,6 +5310,7 @@ describe("review post-step", () => {
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
     headExecutor(PR_HEAD);
     const spy = postSpy();
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
     deps.postReviewComment = spy.fn;
     const { io } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
@@ -5302,6 +5339,7 @@ describe("review post-step", () => {
       deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
       headExecutor(PR_HEAD);
       const spy = postSpy();
+      if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
       deps.postReviewComment = spy.fn;
       return spy;
     };
@@ -5415,6 +5453,7 @@ describe("review post-step", () => {
     const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "x"));
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42 });
     const spy = postSpy();
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
     deps.postReviewComment = spy.fn;
     const { io } = fakeIO();
     await dispatch(deps, msg("agent:coding https://github.com/acme/api/pull/42 fix it", "slack:UADMIN"), io);
@@ -5426,6 +5465,7 @@ describe("review post-step", () => {
     const deps = makeDeps(YAML_FIXTURE, provider);
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42 });
     const spy = postSpy();
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
     deps.postReviewComment = spy.fn;
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:review acme/api#42 — don't post, slack only"), io);
@@ -5438,6 +5478,7 @@ describe("review post-step", () => {
     const deps = makeDeps(YAML_FIXTURE, provider);
     deps.resolveRepoContext = () => ({ repo: "acme/api" }); // repo but no PR number
     const spy = postSpy();
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
     deps.postReviewComment = spy.fn;
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const { io, replies } = fakeIO();
@@ -5455,6 +5496,7 @@ describe("review post-step", () => {
     const deps = makeDeps(YAML_FIXTURE, capturingProvider());
     deps.resolveRepoContext = () => ({ repo: "acme/api", prUnpostable: { number: 42, reason: "closed" } });
     const spy = postSpy();
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
     deps.postReviewComment = spy.fn;
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:review re-review"), io);
@@ -5467,6 +5509,7 @@ describe("review post-step", () => {
     const deps = makeDeps(YAML_FIXTURE, capturingProvider());
     deps.resolveRepoContext = () => ({ repo: "acme/api", prUnpostable: { number: 42, reason: "closed" } });
     const spy = postSpy();
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
     deps.postReviewComment = spy.fn;
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const { io, replies } = fakeIO();
@@ -5484,6 +5527,7 @@ describe("review post-step", () => {
     const provider = capturingProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);
     deps.resolveRepoContext = () => ({ repo: "acme/api", prUnpostable: { number: 42, reason: "unreachable" } });
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
     deps.postReviewComment = postSpy().fn;
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:review re-review"), io);
@@ -5498,6 +5542,7 @@ describe("review post-step", () => {
     const deps = makeDeps(YAML_FIXTURE, provider);
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42 });
     const spy = postSpy();
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
     deps.postReviewComment = spy.fn;
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:review acme/api#42 — slack only"), io);
@@ -5517,6 +5562,7 @@ describe("review post-step", () => {
       deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
       headExecutor([PR_HEAD, OTHER_HEAD]);
       const spy = postSpy();
+      if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
       deps.postReviewComment = spy.fn;
       const log = vi.spyOn(console, "log").mockImplementation(() => {});
       const { io, replies } = fakeIO();
@@ -5535,6 +5581,7 @@ describe("review post-step", () => {
       const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "ok"));
       deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
       const { order } = headExecutor(PR_HEAD);
+      if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
       deps.postReviewComment = postSpy().fn;
       const { io } = fakeIO();
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
@@ -5550,6 +5597,7 @@ describe("review post-step", () => {
       deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42 }); // no headSha
       vi.mocked(makeExecutor).mockClear();
       const spy = postSpy();
+      if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
       deps.postReviewComment = spy.fn;
       const { io, replies } = fakeIO();
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
@@ -5563,6 +5611,7 @@ describe("review post-step", () => {
       deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
       headExecutor([PR_HEAD, undefined]);
       const spy = postSpy();
+      if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
       deps.postReviewComment = spy.fn;
       const { io } = fakeIO();
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
@@ -5576,6 +5625,7 @@ describe("review post-step", () => {
       deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
       headExecutor([PR_HEAD, undefined]);
       const spy = postSpy();
+      if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
       deps.postReviewComment = spy.fn;
       const { io, replies } = fakeIO();
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
@@ -5588,6 +5638,7 @@ describe("review post-step", () => {
       deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
       headExecutor([PR_HEAD, undefined]);
       const spy = postSpy();
+      if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
       deps.postReviewComment = spy.fn;
       const { io, replies } = fakeIO();
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
@@ -5600,6 +5651,7 @@ describe("review post-step", () => {
       deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
       headExecutor([PR_HEAD, OTHER_HEAD]);
       const spy = postSpy();
+      if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
       deps.postReviewComment = spy.fn;
       const { io } = fakeIO();
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
@@ -5610,6 +5662,7 @@ describe("review post-step", () => {
       const deps = makeDeps(YAML_FIXTURE, capturingProvider());
       deps.resolveRepoContext = () => ({ repo: "acme/api" });
       const { order } = headExecutor(PR_HEAD);
+      if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
       deps.postReviewComment = postSpy().fn;
       const { io } = fakeIO();
       await dispatch(deps, msg("agent:review look at acme/api"), io);
@@ -5622,17 +5675,40 @@ describe("review post-step", () => {
     const deps = makeDeps(YAML_FIXTURE, provider);
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42 });
     const spy = postSpy();
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
     deps.postReviewComment = spy.fn;
     const { io } = fakeIO();
     await dispatch(deps, msg("agent:coding acme/api#42 fix it", "slack:UADMIN"), io);
     expect(spy.fn).not.toHaveBeenCalled();
   });
 
-  it("a post failure is swallowed — the dispatch still completes and Slack gets the review", async () => {
+  it("a definite native post refusal keeps the review and tells the thread that its verdict is Slack-only", async () => {
+    const deps = makeDeps(YAML_FIXTURE, capturingProvider());
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
+    headExecutor(PR_HEAD);
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
+    deps.postReviewComment = vi.fn(async () => ({ state: "refused" as const, status: 403 }));
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:review acme/api#42"), io);
+    expect(replies).toContain("answer");
+    expect(replies).toContain(
+      "ℹ️ Review not posted to acme/api#42: the review publication was refused — this verdict is Slack-only.",
+    );
+    expect(replies.join("\n")).not.toContain("could not confirm");
+    expect(deps.postReviewComment).toHaveBeenCalledTimes(1);
+    await deps.runHistoryWriter.settled();
+    const listed = (await deps.runStore.list({}))[0];
+    const record = listed ? await deps.runStore.get(listed.id) : undefined;
+    expect(record?.reviewPost).toEqual({ posted: false, reason: "the review publication was refused" });
+    expect(record?.events.some((event) => event.type === "run_note" && event.kind === "review_not_posted")).toBe(true);
+  });
+
+  it("a lost native post response stays uncertain while the dispatch completes and the thread keeps the review", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
     headExecutor(PR_HEAD);
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
     deps.postReviewComment = vi.fn(async () => {
       throw new Error("HTTP 403 forbidden");
     });
@@ -5640,8 +5716,15 @@ describe("review post-step", () => {
     await dispatch(deps, msg("agent:review acme/api#42"), io);
     expect(replies).toContain("answer");
     expect(deps.postReviewComment).toHaveBeenCalledTimes(1);
-    // …and the thread is told, so a Slack-only verdict is never mistaken for a posted one.
-    expect(replies.some((r) => /not posted to acme\/api#42/.test(r) && /403/.test(r))).toBe(true);
+    expect(replies.some((reply) => reply.includes("could not confirm whether the review posted to acme/api#42"))).toBe(
+      true,
+    );
+    expect(replies.join("\n")).not.toContain("HTTP 403 forbidden");
+    await deps.runHistoryWriter.settled();
+    const listed = (await deps.runStore.list({}))[0];
+    const record = listed ? await deps.runStore.get(listed.id) : undefined;
+    expect(record?.reviewPost).toMatchObject({ posted: false, uncertain: true });
+    expect(record?.events.some((event) => event.type === "run_note" && event.kind === "review_not_posted")).toBe(false);
   });
 });
 
@@ -7135,7 +7218,8 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     const deps = makeDeps(YAML_FIXTURE, provider);
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: HEAD, baseRef: "main" });
     codingExecutor({ head: HEAD, branch: "patch-1" });
-    deps.postReviewComment = vi.fn(async () => {});
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
+    deps.postReviewComment = vi.fn(async () => ({ state: "accepted" as const }));
     deps.fetchPrHead = async () => HEAD;
     const spy = openSpy();
     deps.openPullRequest = spy.fn;
@@ -7928,7 +8012,8 @@ function reviewRunDeps(provider: Provider) {
   const deps = makeDeps(YAML_FIXTURE, provider);
   deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: REVIEW_PR_HEAD });
   prHeadExecutor();
-  deps.postReviewComment = vi.fn(async () => {});
+  if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
+  deps.postReviewComment = vi.fn(async () => ({ state: "accepted" as const }));
   deps.fetchPrHead = async () => REVIEW_PR_HEAD;
   return deps;
 }
@@ -11013,7 +11098,8 @@ describe("reading-diff artifact on review runs", () => {
       baseRef: "main",
       ...ctxOver,
     });
-    deps.postReviewComment = vi.fn(async () => {});
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
+    deps.postReviewComment = vi.fn(async () => ({ state: "accepted" as const }));
     const fake = {
       // The run's executor serves the artifact productions AND the
       // reviewed-head probe — answer each by command.
@@ -12869,7 +12955,11 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
       },
     } as Awaited<ReturnType<typeof makeExecutor>>);
     const posts: string[] = [];
-    deps.postReviewComment = vi.fn(async (_target: ReviewCommentTarget, body: string) => void posts.push(body));
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
+    deps.postReviewComment = vi.fn(async (_target: ReviewCommentTarget, body: string) => {
+      posts.push(body);
+      return { state: "accepted" as const };
+    });
     const first = fakeIO();
     const run = dispatch(deps, threadMsg("agent:review https://github.com/acme/api/pull/42"), first.io);
     await firstStarted; // the review's first model call is in flight
@@ -14474,60 +14564,75 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(warnings).toEqual([]);
   });
 
-  it("coordinator registration waits for the durable identity and exact setup tag before notifying its owner", async () => {
-    const h = wired(capturingProvider(), { yaml: REMOTE_YAML_FIXTURE });
-    h.deps.admission = new ThreadAdmission<DispatchFollowUp>();
-    const tag = {
-      parentInstanceId: "ship_identity",
-      idempotencyKey: "ship_identity:ONE/0/coding",
-      unit: "ONE",
-      instanceAttempt: 0,
-      branch: "main",
-      base: "main",
-      transportWorkflowId: "original-workflow",
-    };
-    let reached!: () => void, release!: () => void;
-    const pending = new Promise<void>((resolve) => (reached = resolve));
-    const gate = new Promise<void>((resolve) => (release = resolve));
-    const assign = h.ledger.assignLiveState.bind(h.ledger);
-    h.ledger.assignLiveState = async (...args) => {
-      if (args[2].state === "admitted") {
-        reached();
-        await gate;
-      }
-      return assign(...args);
-    };
-    const { io } = ioWithCard();
-    const started = vi.fn(({ id }: { id: string }) => {
-      expect(h.ledger.live.get(id)).toMatchObject({
-        phase: "attaching",
-        meta: {
-          parentInstanceId: tag.parentInstanceId,
-          coordinatorUnit: "ONE",
-          idempotencyKey: tag.idempotencyKey,
-        },
+  it.each(["workflow", "maintenance"] as const)(
+    "coordinator registration waits for the durable identity and exact setup tag before notifying its owner: %s",
+    async (transport) => {
+      const h = wired(capturingProvider(), { yaml: REMOTE_YAML_FIXTURE });
+      const now = Date.now();
+      h.deps.clock = () => now;
+      h.deps.admission = new ThreadAdmission<DispatchFollowUp>();
+      const tag: CoordinatorTag = {
+        parentInstanceId: "ship_identity",
+        idempotencyKey: "ship_identity:ONE/0/coding",
+        unit: "ONE",
+        instanceAttempt: 0,
+        branch: "main",
+        base: "main",
+        ...(transport === "workflow"
+          ? { transportWorkflowId: "original-workflow" }
+          : { maintenanceActionId: "m_" + "a".repeat(64) }),
+      };
+      let reached!: () => void, release!: () => void;
+      const pending = new Promise<void>((resolve) => (reached = resolve));
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const assign = h.ledger.assignLiveState.bind(h.ledger);
+      h.ledger.assignLiveState = async (...args) => {
+        if (args[2].state === "admitted") {
+          reached();
+          await gate;
+        }
+        return assign(...args);
+      };
+      const { io } = ioWithCard();
+      const started = vi.fn(({ id }: { id: string }) => {
+        expect(h.ledger.live.get(id)).toMatchObject({
+          phase: "attaching",
+          meta: {
+            parentInstanceId: tag.parentInstanceId,
+            coordinatorUnit: "ONE",
+            idempotencyKey: tag.idempotencyKey,
+            ...(transport === "maintenance" ? { maintenanceActionId: tag.maintenanceActionId } : {}),
+          },
+        });
+        expect(h.ledger.events.get(id)?.filter((event) => event.type === "coordinator_tag")).toEqual([
+          expect.objectContaining({
+            type: "coordinator_tag",
+            parentInstanceId: tag.parentInstanceId,
+            unit: "ONE",
+            branch: "main",
+            base: "main",
+            ...(transport === "workflow"
+              ? { transportWorkflowId: tag.transportWorkflowId }
+              : { maintenanceActionId: tag.maintenanceActionId }),
+          }),
+        ]);
       });
-      expect(h.ledger.events.get(id)?.filter((event) => event.type === "coordinator_tag")).toEqual([
-        expect.objectContaining({
-          type: "coordinator_tag",
-          parentInstanceId: tag.parentInstanceId,
-          unit: "ONE",
-          branch: "main",
-          base: "main",
-          transportWorkflowId: tag.transportWorkflowId,
-        }),
-      ]);
-    });
-    io.runStarted = started;
-    const running = dispatch(h.deps, msg("agent:coding work on main", "slack:UADMIN"), io, { coordinator: tag });
-    await pending;
-    expect(started).not.toHaveBeenCalled();
-    release();
-    await running;
-    await h.writer.settled();
-    expect(started).toHaveBeenCalledExactlyOnceWith({ id: "run-l" });
-    expect(h.ledger.finished.get("run-l")?.events.filter((event) => event.type === "coordinator_tag")).toHaveLength(1);
-  });
+      io.runStarted = started;
+      const running = dispatch(h.deps, msg("agent:coding work on main", "slack:UADMIN"), io, {
+        coordinator: tag,
+        ...(transport === "maintenance" ? { parentDeadlineAt: now + 14 * MINUTE_MS } : {}),
+      });
+      await pending;
+      expect(started).not.toHaveBeenCalled();
+      release();
+      await running;
+      await h.writer.settled();
+      expect(started).toHaveBeenCalledExactlyOnceWith({ id: "run-l" });
+      expect(h.ledger.finished.get("run-l")?.events.filter((event) => event.type === "coordinator_tag")).toHaveLength(
+        1,
+      );
+    },
+  );
 
   describe("coordinator producer identity", () => {
     async function setup(preset: "coding" | "review" = "coding") {
@@ -23008,7 +23113,8 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       headSha: "a".repeat(40),
       baseRef: "main",
     });
-    t.deps.postReviewComment = vi.fn(async () => {});
+    if (t.deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(t.deps);
+    t.deps.postReviewComment = vi.fn(async () => ({ state: "accepted" as const }));
     vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor("a".repeat(40)) });
     let systemOnPi: string | undefined;
     let agentOnPi: string | undefined;
@@ -23566,7 +23672,8 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       refFromPr: true,
     }));
     s.deps.fetchPrHead = async () => head;
-    s.deps.postReviewComment = vi.fn(async () => {});
+    if (s.deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(s.deps);
+    s.deps.postReviewComment = vi.fn(async () => ({ state: "accepted" as const }));
     const executor = {
       exec: async (command: string) => (/git rev-parse HEAD/.test(command) ? `${head}\n` : ""),
       execResult: async () => ({ exitCode: 0, stdout: `${head}\n`, stderr: "", truncated: false }),
@@ -23667,7 +23774,8 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
         reason: "review the changed PR head",
       },
     }));
-    s.deps.postReviewComment = vi.fn(async () => {});
+    if (s.deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(s.deps);
+    s.deps.postReviewComment = vi.fn(async () => ({ state: "accepted" as const }));
     for (const head of ["2".repeat(40), "3".repeat(40)]) {
       s.deps.resolveRepoContext = vi.fn(() => ({
         repo: "acme/api",
@@ -23801,7 +23909,8 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
       },
     }));
     s.deps.resolveRepoContext = vi.fn(() => ({ repo: "acme/api", ref: s.branch, pr: 7 }));
-    s.deps.postReviewComment = vi.fn(async () => {});
+    if (s.deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(s.deps);
+    s.deps.postReviewComment = vi.fn(async () => ({ state: "accepted" as const }));
     const request = msg("please review https://github.com/acme/api/pull/7", "slack:UADMIN");
     const held = fakeIO();
     await dispatch(s.deps, request, held.io);
@@ -25481,7 +25590,8 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
           ),
       ),
     );
-    deps.postReviewComment = vi.fn(async () => {});
+    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
+    deps.postReviewComment = vi.fn(async () => ({ state: "accepted" as const }));
     vi.mocked(makeExecutor).mockResolvedValueOnce({
       executor: {
         exec: async (command) => (command.includes("git rev-parse HEAD") ? `${"a".repeat(40)}\n` : ""),
@@ -28138,3 +28248,120 @@ describe("durable operator conversation without an agent run", () => {
   });
 });
 import { isContextDependencies, type ContextDependencies } from "./references/contextDependencies.js";
+
+describe("trusted original action remaining clock", () => {
+  it("pre-admission delay cannot renew the original absolute action deadline", async () => {
+    let now = Date.now();
+    const deadline = now + 14 * MINUTE_MS;
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.clock = () => now;
+    const ledger = wireChildLedger(deps);
+    const channel = fakeIO();
+    const status = channel.io.status;
+    channel.io.status = async (initial) => {
+      now += MINUTE_MS;
+      return status(initial);
+    };
+    vi.mocked(runPiHarnessOpen).mockClear();
+    await dispatch(deps, msg("agent:general budget:30 report the result", "slack:UADMIN"), channel.io, {
+      parentRemainingMs: 14 * MINUTE_MS,
+      parentDeadlineAt: deadline,
+    });
+    await deps.runHistoryWriter.settled();
+    const records = [...ledger.finished.values()];
+    expect(records).toHaveLength(1);
+    expect(records[0]?.events.find((event) => event.type === "run_state" && event.state === "admitted")).toMatchObject({
+      bound: deadline,
+    });
+    expect(records[0]?.events.find((event) => event.type === "lease")).toMatchObject({ endsAt: deadline });
+    expect(vi.mocked(runPiHarnessOpen).mock.calls[0]?.[1].deadlineAt).toBe(deadline);
+    expect(provider.requests.length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ["expired", 0],
+    ["subminimum", MINUTE_MS - 1],
+    ["invalid", Number.NaN],
+  ])("an original action with %s remaining starts no model or attachment", async (_label, remaining) => {
+    const now = Date.now();
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.clock = () => now;
+    const channel = fakeIO();
+    vi.mocked(makeExecutor).mockClear();
+    await dispatch(deps, msg("agent:general budget:30 report the result", "slack:UADMIN"), channel.io, {
+      parentRemainingMs: 14 * MINUTE_MS,
+      parentDeadlineAt: now + remaining,
+    });
+    expect(makeExecutor).not.toHaveBeenCalled();
+    expect(provider.requests).toEqual([]);
+  });
+
+  it("expiry during durable admission starts no attachment or model", async () => {
+    let now = Date.now();
+    const deadline = now + 14 * MINUTE_MS;
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.clock = () => now;
+    const ledger = wireChildLedger(deps);
+    const assign = ledger.assignLiveState.bind(ledger);
+    vi.spyOn(ledger, "assignLiveState").mockImplementation(async (...args) => {
+      const result = await assign(...args);
+      now = deadline;
+      return result;
+    });
+    vi.mocked(makeExecutor).mockClear();
+    await dispatch(deps, msg("agent:general budget:30 report the result", "slack:UADMIN"), fakeIO().io, {
+      parentRemainingMs: 14 * MINUTE_MS,
+      parentDeadlineAt: deadline,
+    });
+    expect(makeExecutor).not.toHaveBeenCalled();
+    expect(provider.requests).toEqual([]);
+  });
+
+  it("attachment consuming the original deadline starts no model", async () => {
+    let now = Date.now();
+    const deadline = now + 14 * MINUTE_MS;
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.clock = () => now;
+    wireChildLedger(deps);
+    vi.mocked(makeExecutor).mockImplementationOnce(async () => {
+      now = deadline;
+      return { executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "" } };
+    });
+    await dispatch(deps, msg("agent:general budget:30 report the result", "slack:UADMIN"), fakeIO().io, {
+      parentRemainingMs: 14 * MINUTE_MS,
+      parentDeadlineAt: deadline,
+    });
+    expect(provider.requests).toEqual([]);
+  });
+
+  it("clips the actual dispatcher profile without fabricating a parent run", async () => {
+    const deps = makeDeps(YAML_FIXTURE, {
+      name: "fake",
+      complete: async () => ({ content: [{ type: "text" as const, text: "done" }], stopReason: "end_turn" as const }),
+    });
+    const ledger = new InMemoryRunLedger();
+    deps.runLedger = createLedgerWriteThrough({
+      ledger,
+      gen: "original-clock",
+      fallback: deps.runStore,
+      warn: () => {},
+    });
+    const channel = fakeIO();
+    let actualStarted = false;
+    channel.io.runStarted = (started) => {
+      actualStarted = true;
+      const row = ledger.live.get(started.id)!;
+      expect(row.meta.profile?.minutes).toBe(5);
+      expect(row.meta.parentRunId).toBeUndefined();
+      expect(ledger.events.get(started.id)?.filter((event) => event.type === "coordinator_tag")).toHaveLength(0);
+    };
+    await dispatch(deps, msg("agent:general budget:30 report the result", "slack:UADMIN"), channel.io, {
+      parentRemainingMs: 359_999,
+    });
+    expect(actualStarted).toBe(true);
+  });
+});

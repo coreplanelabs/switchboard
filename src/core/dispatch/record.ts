@@ -19,6 +19,7 @@ import { SPAN_SCHEMA } from "../normalizeSpans.js";
 import { isSpanRecord, type RunEvent } from "../runEvents.js";
 import { usageOfEvents } from "../runUsage.js";
 import {
+  branchPushReceiptsOf,
   fitRecordToBudget,
   decisionRecordOfEvents,
   instanceIdOfEvents,
@@ -178,6 +179,11 @@ export function interruptedRunRecord(summary: RunSummary, snap: RunSnapshot, fin
             coordinator: {
               parentInstanceId: summary.parentInstanceId,
               idempotencyKey: summary.idempotencyKey,
+              ...(summary.coordinatorUnit !== undefined ? { unit: summary.coordinatorUnit } : {}),
+              ...(summary.coordinatorAttempt !== undefined ? { instanceAttempt: summary.coordinatorAttempt } : {}),
+              ...(summary.maintenanceActionId !== undefined
+                ? { maintenanceActionId: summary.maintenanceActionId }
+                : {}),
               ...(summary.costCapUsd !== undefined ? { costCapUsd: summary.costCapUsd } : {}),
             },
           }
@@ -256,6 +262,15 @@ export function reclaimedRunRecord(input: {
       ? { contextCheckpointReceipt: row.state.contextCheckpointReceipt as RunRecord["contextCheckpointReceipt"] }
       : {}),
     ...(row.state.sourceReads !== undefined ? { sourceReads: row.state.sourceReads as RunRecord["sourceReads"] } : {}),
+    ...(row.state.branchPushReceipts !== undefined
+      ? {
+          branchPushReceipts: (branchPushReceiptsOf(row.state.branchPushReceipts) ??
+            row.state.branchPushReceipts) as RunRecord["branchPushReceipts"],
+        }
+      : {}),
+    ...(row.state.reviewPublication !== undefined
+      ? { reviewPublication: row.state.reviewPublication as RunRecord["reviewPublication"] }
+      : {}),
     ...(row.state.workReads !== undefined ? { workReads: row.state.workReads as RunRecord["workReads"] } : {}),
     ...(row.state.unitSeedReceipt !== undefined
       ? { unitSeedReceipt: row.state.unitSeedReceipt as RunRecord["unitSeedReceipt"] }
@@ -275,6 +290,11 @@ export function reclaimedRunRecord(input: {
           coordinator: {
             parentInstanceId: row.meta.parentInstanceId,
             idempotencyKey: row.meta.idempotencyKey,
+            ...(row.meta.coordinatorUnit !== undefined ? { unit: row.meta.coordinatorUnit } : {}),
+            ...(row.meta.coordinatorAttempt !== undefined ? { instanceAttempt: row.meta.coordinatorAttempt } : {}),
+            ...(row.meta.maintenanceActionId !== undefined
+              ? { maintenanceActionId: row.meta.maintenanceActionId }
+              : {}),
             ...(row.meta.costCapUsd !== undefined ? { costCapUsd: row.meta.costCapUsd } : {}),
           },
         }
@@ -374,6 +394,8 @@ export function assembleRunRecord(input: {
   publicationSettlement?: RunRecord["publicationSettlement"];
   /** A Git-door write still uncertain when the live ledger row closes. */
   doorPublicationPending?: RunRecord["doorPublicationPending"];
+  reviewPublication?: RunRecord["reviewPublication"];
+  branchPushReceipts?: RunRecord["branchPushReceipts"];
   /** The typed handoff the run submitted (docs/reference/specs/agent-ship.md item 14),
    *  as the tool accepted it; redacted HERE, the one assembly, so no caller
    *  can forget. Omitted (not set undefined) when the run submitted none. */
@@ -507,6 +529,13 @@ export function assembleRunRecord(input: {
     ...(input.verdict !== undefined ? { verdict: redactVerdict(input.verdict) } : {}),
     ...(input.reviewHead !== undefined ? { reviewHead: input.reviewHead } : {}),
     ...(input.dispositions !== undefined ? { dispositions: redactDispositions(input.dispositions) } : {}),
+    ...(input.reviewPublication !== undefined ? { reviewPublication: structuredClone(input.reviewPublication) } : {}),
+    ...(input.branchPushReceipts !== undefined
+      ? {
+          branchPushReceipts:
+            branchPushReceiptsOf(input.branchPushReceipts) ?? structuredClone(input.branchPushReceipts),
+        }
+      : {}),
     ...(input.reviewPost !== undefined ? { reviewPost: redactReviewPost(input.reviewPost) } : {}),
     ...(route !== undefined ? { route } : {}),
     ...(operator !== undefined ? { operator } : {}),
@@ -733,6 +762,8 @@ export interface FinishRecordContext {
   headSha?: string;
   publicationSettlement?: RunRecord["publicationSettlement"];
   doorPublicationPending?: RunRecord["doorPublicationPending"];
+  reviewPublication?: RunRecord["reviewPublication"];
+  branchPushReceipts?: RunRecord["branchPushReceipts"];
   /** The handoff the run loop captured from `submit_handoff`, when one was submitted. */
   handoff?: Handoff;
   /** The verdict a review run submitted and the head it reviewed; the dispositions a fix round submitted. */
@@ -780,6 +811,8 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
     ledgerRun,
     headSha,
     doorPublicationPending,
+    reviewPublication,
+    branchPushReceipts,
     publicationSettlement,
     handoff,
     verdict,
@@ -823,6 +856,8 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
           ...(verdict !== undefined ? { verdict } : {}),
           ...(reviewHead !== undefined ? { reviewHead } : {}),
           ...(dispositions !== undefined ? { dispositions } : {}),
+          ...(reviewPublication !== undefined ? { reviewPublication } : {}),
+          ...(branchPushReceipts !== undefined ? { branchPushReceipts } : {}),
           ...(reviewPost !== undefined ? { reviewPost } : {}),
           ...(route !== undefined && !privateMain ? { route } : {}),
           ...(parentRunId !== undefined ? { parentRunId } : {}),

@@ -1,3 +1,9 @@
+import {
+  validMaintenanceTransport,
+  sameMaintenanceTransport,
+  maintenanceEventsMatch,
+  preserveMaintenanceEvent,
+} from "../coordinator/maintenanceIdentity.js";
 import { preserveCheckpointState } from "./checkpointState.js";
 import { branchPublicationOf, doorPublicationOf } from "../branchPublication.js";
 import {
@@ -49,8 +55,9 @@ import {
 // against, applying the same pure decisions the Durable Object applies. It
 // also documents the storage shape in the plainest form.
 
+import { reviewPublicationOf } from "../reviewPublication.js";
 import { INTAKE_DELIVERY_CLAIM_MS } from "../budgets.js";
-import { utf8ByteLength, workEvidenceBelongsToRun, type RunRecord } from "../runRecord.js";
+import { branchPushReceiptsOf, utf8ByteLength, workEvidenceBelongsToRun, type RunRecord } from "../runRecord.js";
 import type { UnitSeedReceipt } from "../coordinator/unitSeedReceipt.js";
 import {
   assignLedgerLiveState,
@@ -249,6 +256,9 @@ export class InMemoryRunLedger implements RunLedger {
 
   async claim(req: ClaimRequest): Promise<ClaimResult> {
     const existing = this.byThread(req.threadKey);
+    const original = this.live.get(req.runId)?.meta ?? this.finished.get(req.runId);
+    if (!validMaintenanceTransport(req.meta) || (original && !sameMaintenanceTransport(original, req.meta)))
+      throw new Error("maintenance transport identity conflicts with retained state");
     if (!preserveCheckpointState(existing?.state ?? {}, req.state ?? {}))
       throw new Error("checkpoint state is immutable");
     if (!workEvidenceBelongsToRun(req.state ?? {}, { id: req.runId, ...req.meta }))
@@ -656,7 +666,17 @@ export class InMemoryRunLedger implements RunLedger {
   async append(runId: string, gen: string, events: AppendableEvent[]): Promise<FenceResult> {
     const fence = this.fence(runId, gen);
     if (!fence.ok) return fence;
+    if (!maintenanceEventsMatch(this.live.get(runId)!.meta, events)) return { ok: false, reason: "fenced" };
     const list = this.events.get(runId) ?? [];
+    const originalMeta = this.live.get(runId)!.meta;
+    if (originalMeta.maintenanceActionId !== undefined) {
+      const previousBySeq = new Map(list.map((event) => [event.seq, event]));
+      for (const event of events) {
+        if (!preserveMaintenanceEvent(originalMeta, previousBySeq.get(event.seq), event))
+          return { ok: false, reason: "fenced" };
+        previousBySeq.set(event.seq, event);
+      }
+    }
     list.push(...events);
     this.events.set(runId, list);
     return { ok: true };
@@ -808,7 +828,12 @@ export class InMemoryRunLedger implements RunLedger {
     const fence = this.fence(runId, gen);
     if (!fence.ok) return fence;
     const row = this.live.get(runId)!;
-    if (!terminalWorkspaceRecordMatches(row, record)) return { ok: false, reason: "fenced" };
+    if (
+      !terminalWorkspaceRecordMatches(row, record) ||
+      !sameMaintenanceTransport(row.meta, record) ||
+      !maintenanceEventsMatch(row.meta, record.events)
+    )
+      return { ok: false, reason: "fenced" };
     if (
       opts?.requireStoppedPause &&
       (row.phase !== "handoff" ||
@@ -821,14 +846,22 @@ export class InMemoryRunLedger implements RunLedger {
     const {
       branchPublication: _speculativePublication,
       doorPublicationPending: _speculativeDoor,
+      reviewPublication: _speculativeReview,
+      branchPushReceipts: _speculativePushes,
       ...terminal
     } = record;
     const branchPublication = branchPublicationOf(canonicalWork.branchPublication, record.repo);
     const doorPublicationPending = doorPublicationOf(canonicalWork.doorPublicationPending);
+    const branchPushReceipts = branchPushReceiptsOf(canonicalWork.branchPushReceipts);
+    const savedReview = reviewPublicationOf(canonicalWork.reviewPublication);
+    const reviewPublication =
+      savedReview?.runId === runId && savedReview.target.repo === record.repo ? savedReview : undefined;
     record = {
       ...terminal,
       ...(branchPublication === undefined ? {} : { branchPublication }),
       ...(doorPublicationPending === undefined ? {} : { doorPublicationPending }),
+      ...(reviewPublication === undefined ? {} : { reviewPublication }),
+      ...(branchPushReceipts === undefined ? {} : { branchPushReceipts }),
     };
     if (
       record.unitSeedReceipt !== undefined &&
@@ -862,6 +895,12 @@ export class InMemoryRunLedger implements RunLedger {
       this.workspaceObligations.set(key, { revision: obligation.revision, pending });
     }
     const unreadable = {
+      ...(canonicalWork.branchPushReceipts !== undefined && branchPushReceipts === undefined
+        ? { branchPushReceipts: structuredClone(canonicalWork.branchPushReceipts) }
+        : {}),
+      ...(canonicalWork.reviewPublication !== undefined && reviewPublication === undefined
+        ? { reviewPublication: structuredClone(canonicalWork.reviewPublication) }
+        : {}),
       ...(canonicalWork.branchPublication !== undefined && branchPublication === undefined
         ? { branchPublication: structuredClone(canonicalWork.branchPublication) }
         : {}),

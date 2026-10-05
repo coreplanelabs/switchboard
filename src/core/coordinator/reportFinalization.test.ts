@@ -8,6 +8,8 @@ import type { CoordinatorInstance, CoordinatorUnit } from "./contract.js";
 import { coordinatorReportAdmission, freezeCoordinatorReport, readCoordinatorReport } from "./reportContext.js";
 import { readCoordinatorStatus } from "./unitStatus.js";
 import { isCoordinatorReconcileReceipt } from "./workflowReconciliation.js";
+import { coordinatorPublicDeliveryReference, readCoordinatorPublicDelivery } from "./reportPublicDelivery.js";
+import { sourceHash } from "../references/receipts.js";
 import { finalizeCoordinatorReport } from "./reportFinalization.js";
 
 // Feature: docs/reference/specs/orchestration-plane.md — original report
@@ -19,7 +21,7 @@ async function fixture(privateWorker = false) {
   const instance: CoordinatorInstance = {
     id: "report-original",
     kind: "ship",
-    userId: "slack:U1",
+    userId: "slack:UALPHA",
     channelId: "slack:C1",
     threadKey: "slack:C1:1.0",
     repo: "acme/api",
@@ -89,7 +91,7 @@ async function fixture(privateWorker = false) {
     await instances.put(instance);
   }
   seedCoordinatorUnit(instances, unit);
-  return { ledger, instances, instance, unit, owner, proposed };
+  return { ledger, instances, instance, unit, owner, proposed, deliverPublic: vi.fn(async () => true) };
 }
 
 describe("original coordinator report finalization", () => {
@@ -106,12 +108,115 @@ describe("original coordinator report finalization", () => {
     });
   });
 
+  it("records positive public delivery and suppresses a restarted finalizer's duplicate reply", async () => {
+    const f = await fixture();
+    const first = await finalizeCoordinatorReport(f, f);
+    expect(first).toBeDefined();
+    expect(f.deliverPublic).toHaveBeenCalledTimes(1);
+    const restarted = vi.fn(async () => true);
+    expect(await finalizeCoordinatorReport({ ...f, deliverPublic: restarted }, f)).toEqual(first);
+    expect(restarted).not.toHaveBeenCalled();
+  });
+
+  it("retains the delivery ACK identity when decoded JSON properties change order", async () => {
+    const f = await fixture();
+    const result = await finalizeCoordinatorReport(f, f);
+    const original = result!.receipt.publicDelivery!;
+    const reordered = Object.fromEntries(Object.entries(original).reverse());
+    reordered.owner = Object.fromEntries(Object.entries(original.owner).reverse());
+    expect(await readCoordinatorPublicDelivery(f.ledger, reordered as typeof original)).toEqual(original);
+  });
+
+  it("does not certify public delivery without a positive channel reply", async () => {
+    const f = await fixture();
+    expect(await finalizeCoordinatorReport({ ...f, deliverPublic: async () => false }, f)).toBeUndefined();
+    expect(await finalizeCoordinatorReport({ ...f, deliverPublic: undefined }, f)).toBeUndefined();
+  });
+
+  it("retries only frozen public bytes when a positive reply has no durable ACK", async () => {
+    const f = await fixture();
+    const append = f.ledger.appendSession.bind(f.ledger);
+    vi.spyOn(f.ledger, "appendSession").mockImplementation(async (key, id, rows, context) =>
+      id.startsWith("coordinator-public-delivery:") ? { ok: false, appended: false } : append(key, id, rows, context),
+    );
+    expect(await finalizeCoordinatorReport(f, f)).toBeUndefined();
+    expect(f.deliverPublic).toHaveBeenCalledTimes(1);
+    vi.mocked(f.ledger.appendSession).mockImplementation(append);
+    const retry = vi.fn(async () => true);
+    const result = await finalizeCoordinatorReport(
+      { ...f, deliverPublic: retry },
+      {
+        ...f,
+        proposed: { text: "new full report", threadText: "new thread report" },
+      },
+    );
+    expect(retry).toHaveBeenCalledWith(expect.objectContaining({ report: f.proposed }));
+    expect(result?.receipt.publicDelivery).toEqual(
+      await coordinatorPublicDeliveryReference(f.unit.reportDelivery!, f.proposed.threadText),
+    );
+    expect(await readCoordinatorPublicDelivery(f.ledger, result!.receipt.publicDelivery!)).toEqual(
+      result?.receipt.publicDelivery,
+    );
+  });
+
+  it("does not repeat a positive reply when its durable delivery ACK committed but the response was lost", async () => {
+    const f = await fixture();
+    const append = f.ledger.appendSession.bind(f.ledger);
+    let lost = false;
+    vi.spyOn(f.ledger, "appendSession").mockImplementation(async (key, id, rows, context) => {
+      const result = await append(key, id, rows, context);
+      if (id.startsWith("coordinator-public-delivery:") && !lost) {
+        lost = true;
+        throw new Error("ACK response lost after commit");
+      }
+      return result;
+    });
+    expect(await finalizeCoordinatorReport(f, f)).toBeUndefined();
+    expect(f.deliverPublic).toHaveBeenCalledTimes(1);
+    const result = await finalizeCoordinatorReport({ ...f, deliverPublic: undefined }, f);
+    expect(result?.receipt.publicDelivery?.kind).toBe("reply");
+    expect(f.deliverPublic).toHaveBeenCalledTimes(1);
+  });
+
+  it("recovers a producer crash after ending admission before public delivery", async () => {
+    const f = await fixture();
+    await freezeCoordinatorReport(f.ledger, f.owner, f.proposed);
+    const result = await finalizeCoordinatorReport(f, f);
+    expect(result?.report).toEqual(f.proposed);
+    expect(f.deliverPublic).toHaveBeenCalledTimes(1);
+    expect(await finalizeCoordinatorReport({ ...f, deliverPublic: undefined }, f)).toEqual(result);
+  });
+
+  it("records an empty admitted thread copy without requiring a channel", async () => {
+    const f = await fixture();
+    f.proposed.threadText = "";
+    f.unit.reportDelivery = await coordinatorReportAdmission(f.owner, f.proposed);
+    seedCoordinatorUnit(f.instances, f.unit);
+    const result = await finalizeCoordinatorReport({ ...f, deliverPublic: undefined }, f);
+    expect(result?.receipt.publicDelivery?.kind).toBe("empty");
+    expect(result?.receipt.publicDelivery?.threadHash).toBe(await sourceHash(""));
+    expect(f.deliverPublic).not.toHaveBeenCalled();
+  });
+
+  it("retains malformed public ACK bytes without replying or overwriting them", async () => {
+    const f = await fixture();
+    await f.ledger.appendSession(
+      contextThreadSessionKey(f.owner.threadKey),
+      `coordinator-public-delivery:${await sourceHash(f.owner)}`,
+      [{ part: 0, json: '{"part":{"type":"text","text":""},"coordinatorPublicDelivery":{}}' }],
+    );
+    const append = vi.spyOn(f.ledger, "appendSession");
+    expect(await finalizeCoordinatorReport(f, f)).toBeUndefined();
+    expect(f.deliverPublic).not.toHaveBeenCalled();
+    expect(append.mock.calls.every(([, id]) => !id.startsWith("coordinator-public-delivery:"))).toBe(true);
+  });
+
   it("refuses uncommitted rows, mismatched owners or proposals before any report bytes are appended", async () => {
     const f = await fixture();
     const append = vi.spyOn(f.ledger, "appendSession");
     for (const input of [
       { ...f, unit: { ...f.unit, ending: { ...f.unit.ending!, at: 3 } } },
-      { ...f, instance: { ...f.instance, userId: "slack:U2" } },
+      { ...f, instance: { ...f.instance, userId: "slack:UBETA" } },
       { ...f, owner: { ...f.owner, deliveryId: "replacement" } },
       { ...f, proposed: { ...f.proposed, text: "regenerated" } },
     ])
@@ -129,7 +234,7 @@ describe("original coordinator report finalization", () => {
     expect(result?.report).toEqual(f.proposed);
     expect(result?.receipt.reportDelivery).toEqual(f.unit.reportDelivery);
     expect((await f.ledger.readSessionTail(contextThreadSessionKey(f.owner.threadKey), 100_000)).transcript.turns).toBe(
-      2,
+      3,
     );
   });
 

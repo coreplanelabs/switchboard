@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { forcePushWithLease, localGitRunner, patchUnchanged, rebaseOntoBase, type GitRunner } from "./gitRebase.js";
 import { resolveGithubIdentity, resolveGithubToken } from "./githubApp.js";
-import type { SweepGit, SweepPullRequest } from "../core/pullSweep.js";
+import type { SweepGit, SweepPullRequest, SweepPreparedSource } from "../core/pullSweep.js";
 
 // The checkout rung one of the pull sweep runs in (record 0071, mechanism two;
 // docs/reference/specs/agent-ship.md item 20): `SweepGit` over a throwaway
@@ -65,6 +65,8 @@ export async function sweepIdentity(): Promise<{ name: string; email: string }> 
 interface CheckoutState {
   dir: string;
   preRebaseHead: string;
+  preparedSource: SweepPreparedSource;
+  newHead: string;
 }
 
 const keyOf = (pr: SweepPullRequest): string => `${pr.repo}#${pr.number}`;
@@ -86,41 +88,85 @@ export function createSweepGit(opts: SweepCheckoutOpts): SweepGit {
     if (!state) throw new Error(`no checkout is open for ${keyOf(pr)} — rebase() opens it`);
     return state;
   };
-  return {
-    async rebase(pr) {
-      const key = keyOf(pr);
-      await cleanup(key); // a retried walk never reuses a stale checkout
-      const dir = await mkdtemp(join(tmpRoot, "pull-sweep-"));
-      try {
-        const url = await opts.cloneUrl(pr.repo);
-        // `--config` lands in the new clone's config before the fetch, so the
-        // credential authenticates the clone AND the later fetch and lease push
-        // without ever appearing in the remote URL git quotes on failure.
-        const auth = opts.authHeader ? ["--config", `http.extraHeader=${await opts.authHeader(pr.repo)}`] : [];
-        const clone = await runner.run(["clone", ...auth, "--branch", pr.branch, url, dir], tmpRoot);
-        if (clone.code !== 0) throw new Error(`git clone failed: ${clone.stderr.trim() || clone.stdout.trim()}`);
-        const who = await (opts.identity ?? sweepIdentity)();
-        for (const [k, v] of [
-          ["user.name", who.name],
-          ["user.email", who.email],
-        ] as const) {
-          const set = await runner.run(["config", k, v], dir);
-          if (set.code !== 0) throw new Error(`git config ${k} failed: ${set.stderr.trim()}`);
-        }
-        const head = await runner.run(["rev-parse", "HEAD"], dir);
-        if (head.code !== 0) throw new Error(`git rev-parse failed: ${head.stderr.trim()}`);
-        const preRebaseHead = head.stdout.trim();
-        const outcome = await rebaseOntoBase(runner, { dir, base: pr.base });
-        if (outcome.kind === "conflict") {
-          // Rung one is over for this pull request; rung two runs elsewhere.
-          await rm(dir, { recursive: true, force: true }).catch(() => {});
-          return outcome;
-        }
-        states.set(key, { dir, preRebaseHead });
-        return outcome;
-      } catch (err) {
+  const prepare = async (pr: SweepPullRequest, saved?: SweepPreparedSource) => {
+    const key = keyOf(pr);
+    await cleanup(key); // a retried walk never reuses a stale checkout
+    const dir = await mkdtemp(join(tmpRoot, "pull-sweep-"));
+    try {
+      const url = await opts.cloneUrl(pr.repo);
+      // `--config` lands in the new clone's config before the fetch, so the
+      // credential authenticates the clone AND the later fetch and lease push
+      // without ever appearing in the remote URL git quotes on failure.
+      const auth = opts.authHeader ? ["--config", `http.extraHeader=${await opts.authHeader(pr.repo)}`] : [];
+      const clone = await runner.run(["clone", ...auth, "--branch", pr.branch, url, dir], tmpRoot);
+      if (clone.code !== 0) throw new Error(`git clone failed: ${clone.stderr.trim() || clone.stdout.trim()}`);
+      const who = saved?.committer ?? (await (opts.identity ?? sweepIdentity)());
+      for (const [k, v] of [
+        ["user.name", who.name],
+        ["user.email", who.email],
+      ] as const) {
+        const set = await runner.run(["config", k, v], dir);
+        if (set.code !== 0) throw new Error(`git config ${k} failed: ${set.stderr.trim()}`);
+      }
+      const head = await runner.run(["rev-parse", "HEAD"], dir);
+      if (head.code !== 0) throw new Error(`git rev-parse failed: ${head.stderr.trim()}`);
+      let preRebaseHead = head.stdout.trim();
+      if (saved) {
+        const fetchOld = await runner.run(["fetch", "origin", pr.headSha], dir);
+        if (fetchOld.code !== 0) throw new Error("original rebase source unavailable");
+        const checkout = await runner.run(["checkout", "--detach", pr.headSha], dir);
+        if (checkout.code !== 0) throw new Error("original rebase source unavailable");
+        preRebaseHead = pr.headSha;
+      }
+      if (!/^[a-f0-9]{40}$/i.test(preRebaseHead) || preRebaseHead.toLowerCase() !== pr.headSha.toLowerCase())
+        throw new Error("pull request source moved before rebase");
+      let baseHead = saved?.baseHead;
+      if (!baseHead) {
+        const fetched = await runner.run(["fetch", "origin", pr.base], dir);
+        if (fetched.code !== 0) throw new Error("rebase base unavailable");
+        const base = await runner.run(["rev-parse", "FETCH_HEAD"], dir);
+        if (base.code !== 0) throw new Error("rebase base unavailable");
+        baseHead = base.stdout.trim();
+      }
+      if (!/^[a-f0-9]{40}$/i.test(baseHead)) throw new Error("exact rebase base unavailable");
+      const preparedSource = { baseHead, committer: who };
+      const outcome = await rebaseOntoBase(runner, { dir, base: pr.base, baseHead });
+      if (outcome.kind === "conflict") {
+        // Rung one is over for this pull request; rung two runs elsewhere.
         await rm(dir, { recursive: true, force: true }).catch(() => {});
-        throw err;
+        return outcome;
+      }
+      states.set(key, { dir, preRebaseHead, preparedSource, newHead: outcome.newHead });
+      return { ...outcome, preparedSource };
+    } catch (err) {
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
+      throw err;
+    }
+  };
+  return {
+    rebase: (pr) => prepare(pr),
+    release: (pr) => cleanup(keyOf(pr)),
+    async canPush(pr, newHead, source) {
+      try {
+        if (!/^[a-f0-9]{40}$/i.test(newHead) || !/^[a-f0-9]{40}$/i.test(pr.headSha)) return false;
+        if (!states.has(keyOf(pr))) {
+          if (!source || !/^[a-f0-9]{40}$/i.test(source.baseHead)) return false;
+          const rebuilt = await prepare(pr, source);
+          if (rebuilt.kind !== "clean" || rebuilt.newHead.toLowerCase() !== newHead.toLowerCase()) {
+            await cleanup(keyOf(pr));
+            return false;
+          }
+        }
+        const state = stateOf(pr);
+        if (
+          state.preRebaseHead.toLowerCase() !== pr.headSha.toLowerCase() ||
+          state.newHead.toLowerCase() !== newHead.toLowerCase()
+        )
+          return false;
+        const actual = await runner.run(["rev-parse", "HEAD"], state.dir);
+        return actual.code === 0 && actual.stdout.trim().toLowerCase() === newHead.toLowerCase();
+      } catch {
+        return false;
       }
     },
     async patchUnchanged(pr, newHead) {
@@ -137,10 +183,18 @@ export function createSweepGit(opts: SweepCheckoutOpts): SweepGit {
         throw err;
       }
     },
-    async forcePushWithLease(pr, _newHead) {
+    async forcePushWithLease(pr, newHead) {
       const state = stateOf(pr);
       try {
-        await forcePushWithLease(runner, { dir: state.dir, branch: pr.branch, preRebaseHead: state.preRebaseHead });
+        const actual = await runner.run(["rev-parse", "HEAD"], state.dir);
+        if (
+          actual.code !== 0 ||
+          actual.stdout.trim().toLowerCase() !== newHead.toLowerCase() ||
+          state.preRebaseHead.toLowerCase() !== pr.headSha.toLowerCase()
+        )
+          return { state: "refused", cause: "external_refused" };
+        await forcePushWithLease(runner, { dir: state.dir, branch: pr.branch, preRebaseHead: pr.headSha, newHead });
+        return { state: "accepted", commitSha: newHead };
       } finally {
         await cleanup(keyOf(pr));
       }

@@ -46,8 +46,9 @@ async function fixture() {
   const settlements: CoordinatorReconcileSettlement[] = [];
   let native: InstanceStatusAnswer = { kind: "status", status: "complete" };
   const status = vi.fn(async (_id: string) => native);
+  const deliverPublic = vi.fn(async () => true);
   const finalize = vi.fn(async (input: CoordinatorReportFinalizationInput) =>
-    finalizeCoordinatorReport({ ledger, instances }, input),
+    finalizeCoordinatorReport({ ledger, instances, deliverPublic }, input),
   );
   const settle = vi.fn(async (body: CoordinatorReconcileSettlement) => {
     settlements.push(body);
@@ -80,6 +81,7 @@ async function fixture() {
   return {
     ledger,
     instances,
+    deliverPublic,
     instance,
     get unit() {
       return unit;
@@ -98,6 +100,35 @@ async function fixture() {
 }
 
 describe("original execution reconciliation performer", () => {
+  it("selects no thread copy for the first explicit state report without losing its full report", async () => {
+    const f = await fixture();
+    const receipt = await reconcileCoordinatorExecution(f.effect, { ...f.deps, reportDelivery: () => "state" });
+    expect(receipt?.publicDelivery?.kind).toBe("empty");
+    expect(f.settlements[0]?.ending.threadReport).toBe("");
+    expect(f.settlements[0]?.ending.report).not.toBe("");
+    expect(f.unit.ending?.report).toBe(f.settlements[0]?.ending.report);
+    expect(f.deliverPublic).not.toHaveBeenCalled();
+  });
+  it("preserves a thread copy when a prior segment already admitted its report", async () => {
+    const f = await fixture();
+    const reportDelivery = await coordinatorReportAdmission(
+      {
+        instanceId: f.instance.id,
+        unit: f.unit.unit,
+        attempt: 0,
+        requester: f.instance.userId,
+        channelId: f.instance.channelId,
+        threadKey: f.unit.threadKey!,
+        deliveryId: "ONE/segment",
+      },
+      { text: "original segment detail", threadText: "original segment copy" },
+    );
+    f.setUnit({ ...f.unit, reportDelivery });
+    await reconcileCoordinatorExecution(f.effect, { ...f.deps, reportDelivery: () => "state" });
+    expect(f.settlements).toHaveLength(1);
+    expect(f.settlements[0].ending.threadReport).toBe(f.settlements[0].ending.report);
+    expect(f.settlements[0].ending.threadReport).not.toBe("");
+  });
   it.each(["complete", "errored", "terminated"])(
     "records a conservative ending for native %s and returns original report receipts",
     async (status) => {
@@ -116,6 +147,34 @@ describe("original execution reconciliation performer", () => {
       expect(f.deps.status.mock.calls.every(([id]) => id === f.instance.id)).toBe(true);
     },
   );
+
+  it("accepts a complete reordered wire identity while rejecting changed or omitted identity facts", async () => {
+    const f = await fixture();
+    const reordered = Object.fromEntries(Object.entries(f.effect).reverse());
+    expect(await reconcileCoordinatorExecution(reordered, f.deps)).toBeDefined();
+    const changed = await fixture();
+    for (const effect of [
+      { ...changed.effect, admissionHash: "c".repeat(64) },
+      { ...changed.effect, unit: "TWO" },
+      { ...changed.effect, workflowId: "other_workflow" },
+      { ...changed.effect, admissionHash: undefined },
+      { ...changed.effect, instanceId: undefined },
+    ])
+      expect(await reconcileCoordinatorExecution(effect, changed.deps)).toBeUndefined();
+    expect(changed.deps.settle).not.toHaveBeenCalled();
+  });
+  it("a settlement callback cannot rewrite the performer's original proposal or grant finalization of changed bytes", async () => {
+    const f = await fixture();
+    const settle = f.deps.settle.getMockImplementation()!;
+    f.deps.settle.mockImplementationOnce(async (body) => {
+      body.ending.report = "changed callback report";
+      body.ending.threadReport = "changed callback summary";
+      return settle(body);
+    });
+    expect(await reconcileCoordinatorExecution(f.effect, f.deps)).toBeUndefined();
+    expect(f.unit.ending?.report).toBe("changed callback report");
+    expect(f.deps.finalize).not.toHaveBeenCalled();
+  });
 
   it("does not settle malformed or changed admission identity, unavailable native status, or an unconfirmed absent execution", async () => {
     const f = await fixture();
@@ -200,7 +259,8 @@ describe("original execution reconciliation performer", () => {
     });
     const result = await reconcileCoordinatorExecution(f.effect, {
       ...f.deps,
-      finalize: (input) => finalizeCoordinatorReport({ ledger: f.ledger, instances: f.instances }, input),
+      finalize: (input) =>
+        finalizeCoordinatorReport({ ledger: f.ledger, instances: f.instances, deliverPublic: f.deliverPublic }, input),
     });
     expect(result?.reportDelivery).toEqual(f.unit.reportDelivery);
     expect(await readCoordinatorReport(f.ledger, owner)).toEqual(proposed);
@@ -445,5 +505,61 @@ describe("original execution reconciliation performer", () => {
     });
     expect(await reconcileCoordinatorExecution(f.effect, f.deps)).toBeUndefined();
     expect(f.deps.settle).not.toHaveBeenCalled();
+  });
+
+  it("does not finalize when settlement races a newly active original effect", async () => {
+    const f = await fixture();
+    const settle = f.deps.settle.getMockImplementation()!;
+    f.deps.settle.mockImplementationOnce(async (body) => {
+      await settle(body);
+      f.setUnit({
+        ...f.unit,
+        currentEffect: {
+          version: 1,
+          id: "ONE/branch",
+          ordinal: 1,
+          execution: { workflowId: f.instance.id },
+          target: { repo: f.instance.repo, ref: f.unit.branch, base: "main", headSha: "a".repeat(40) },
+          phase: "active",
+          calls: [{ operation: "branch_create", state: "pending" }],
+        },
+      });
+      return true;
+    });
+    expect(await reconcileCoordinatorExecution(f.effect, f.deps)).toBeUndefined();
+    expect(f.deps.finalize).not.toHaveBeenCalled();
+    expect(f.unit.currentEffect?.phase).toBe("active");
+  });
+
+  it("defers an unanswered final native read before report delivery and keeps the committed original ending", async () => {
+    const f = await fixture();
+    f.deps.status
+      .mockResolvedValueOnce({ kind: "status", status: "complete" })
+      .mockResolvedValueOnce({ kind: "unanswered", reason: "transient read failure" });
+    expect(await reconcileCoordinatorExecution(f.effect, f.deps)).toBeUndefined();
+    expect(f.deps.finalize).not.toHaveBeenCalled();
+    expect(f.deps.settle).toHaveBeenCalledTimes(1);
+    expect(f.unit.ending?.deliveryId).toBe("lifecycle/reconcile");
+  });
+
+  it("rechecks the exact original row before delivery after the final native read and after delivery before returning a receipt", async () => {
+    const before = await fixture();
+    before.deps.status
+      .mockResolvedValueOnce({ kind: "status", status: "complete" })
+      .mockImplementationOnce(async () => {
+        before.setUnit({ ...before.unit, title: "raced before delivery" });
+        return { kind: "status", status: "complete" };
+      });
+    expect(await reconcileCoordinatorExecution(before.effect, before.deps)).toBeUndefined();
+    expect(before.deps.finalize).not.toHaveBeenCalled();
+    const after = await fixture();
+    const finalize = after.deps.finalize.getMockImplementation()!;
+    after.deps.finalize.mockImplementationOnce(async (input) => {
+      const result = await finalize(input);
+      after.setUnit({ ...after.unit, title: "raced after delivery" });
+      return result;
+    });
+    expect(await reconcileCoordinatorExecution(after.effect, after.deps)).toBeUndefined();
+    expect(after.deps.finalize).toHaveBeenCalledTimes(1);
   });
 });

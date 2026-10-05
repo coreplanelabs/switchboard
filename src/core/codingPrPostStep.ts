@@ -94,7 +94,12 @@ import {
   type PrDescription,
   type RequestedBy,
 } from "./prDescription.js";
-import { EMPTY_START_STATE, type BranchStartState, type RewriteResult } from "../execution/identityRewrite.js";
+import {
+  EMPTY_START_STATE,
+  type BranchStartState,
+  type RewriteResult,
+  type IdentityRefPublication,
+} from "../execution/identityRewrite.js";
 import { submittedPrDescriptionArtifact } from "./reviewDescription.js";
 import { normalizeHead, parseRevParseOutput, sameCommit } from "./reviewedHead.js";
 import { parseExitPrefix, type RunEvent } from "./runEvents.js";
@@ -1047,6 +1052,8 @@ export async function runCodingPrPostStep(input: {
   target: CodingPrTarget;
   /** The owning ledger must acknowledge intent and accepted mapping. */
   publication: (fact: PrPublicationFact) => Promise<void>;
+  /** Original run-owned pending and acceptance for an identity ref transition. */
+  refPublication?: IdentityRefPublication;
   openPullRequest: (
     target: PullRequestTarget,
     beforeMutation?: (pr: number | undefined) => Promise<void>,
@@ -1099,6 +1106,7 @@ export async function runCodingPrPostStep(input: {
       branch: string;
       expectedTip?: string;
       startState: BranchStartState;
+      refPublication?: IdentityRefPublication;
     }) => Promise<RewriteResult>;
     /** The pull request's `head.sha` after the open (githubPulls.pullRequestHead). */
     pullRequestHead: (repo: string, number: number) => Promise<string | undefined>;
@@ -1394,6 +1402,7 @@ export async function runCodingPrPostStep(input: {
           branch: headBranch,
           expectedTip: pushed ? (headSha ?? prHead) : prHead,
           startState: startStateFor(headBranch),
+          ...(input.refPublication ? { refPublication: input.refPublication } : {}),
         })
         .catch((err: unknown): RewriteResult => ({
           kind: "unreadable",
@@ -1492,7 +1501,14 @@ export async function runCodingPrPostStep(input: {
     const rewriteOnce = async (): Promise<RewriteResult | undefined> => {
       if (!input.identity) return undefined;
       const result = await input.identity
-        .rewrite({ repo, base, branch, expectedTip: renderHead, startState })
+        .rewrite({
+          repo,
+          base,
+          branch,
+          expectedTip: renderHead,
+          startState,
+          ...(input.refPublication ? { refPublication: input.refPublication } : {}),
+        })
         .catch((err: unknown): RewriteResult => ({
           kind: "unreadable",
           reason: err instanceof Error ? err.message : String(err),

@@ -81,7 +81,7 @@ export function unitPullBindingRefusal(
     permitsRecoveryMetadataWrite(current, next, true);
   if (instance.stop !== undefined && !adoptionTransition) return "stale";
   if (next.adoption && next.adoption.requester !== instance.userId) return "incomplete";
-  if (!unitHoldsPulls(next) && !(current?.adoption?.state === "posting" && next.adoption?.state === "bound"))
+  if (!unitHoldsPulls(next, instance) && !(current?.adoption?.state === "posting" && next.adoption?.state === "bound"))
     return "stale";
   if (
     next.publication &&
@@ -161,7 +161,18 @@ export function isPullOwnerLiveMeta(value: unknown): value is { repo?: string } 
   );
 }
 
-export function unitHoldsPulls(unit: CoordinatorUnit): boolean {
+export function unitHoldsPulls(unit: CoordinatorUnit, instance?: CoordinatorInstance): boolean {
+  if (
+    instance?.kind === "maintenance" &&
+    unit.currentEffect?.phase === "settled" &&
+    unit.currentEffect.execution.maintenance &&
+    unit.startedAt === undefined &&
+    unit.ending === undefined &&
+    !unit.recovery &&
+    !unit.recoveryHold &&
+    unit.currentEffect.execution.workflowId === undefined
+  )
+    return false;
   return (
     unit.currentEffect?.phase === "active" ||
     !unit.ending ||
@@ -204,7 +215,14 @@ export function findPullOwnersInRows(target: PullTarget, rows: PullOwnershipRows
     )
       return { ok: false, reason: "incomplete" };
     if (!sameRepo(row.instance.repo)) continue;
-    const held = unitHoldsPulls(unit);
+    const held =
+      unitHoldsPulls(unit, row.instance) ||
+      unit.currentEffect?.calls.some(
+        (call) =>
+          call.operation === "spawn" &&
+          call.state === "accepted" &&
+          rows.runs.some((run) => run.live === true && run.runId === call.runId),
+      );
     if (
       held &&
       (matches(unit.pr?.number, unit.branch) ||
@@ -227,7 +245,8 @@ export function findPullOwnersInRows(target: PullTarget, rows: PullOwnershipRows
       });
   }
   for (const run of rows.runs) {
-    if (typeof run.runId !== "string" || !run.runId) return { ok: false, reason: "incomplete" };
+    if (typeof run.runId !== "string" || !run.runId || typeof run.live !== "boolean")
+      return { ok: false, reason: "incomplete" };
     if (run.publication !== undefined) {
       const publication = branchPublicationOf(run.publication, typeof run.repo === "string" ? run.repo : undefined);
       if (!publication || (!publication.complete && publication.repo === undefined))

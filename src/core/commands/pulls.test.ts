@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CommandRegistry, renderText } from "../commandRegistry.js";
 import type { PullSweepService, SweepReport } from "../pullSweep.js";
 import { callerWith } from "../testing/callers.js";
@@ -112,5 +112,73 @@ describe("pulls rebase — the sweep command", () => {
     const res = await registry.invoke("pulls.rebase", { options: { repo: "acme/api" } }, CALLER, deps);
     expect(res).toMatchObject({ ok: false, error: "unavailable" });
     expect((res as { message?: string }).message).toMatch(/HTTP 502/);
+  });
+});
+
+describe("trusted maintenance command source", () => {
+  it.each([{ authenticatedAs: "http:credential" }, { postedBy: "slack:APP" }])(
+    "retains the authorized actor and exact requester native conversation and provenance: %s",
+    async (provenance) => {
+      const { registry, deps } = setup();
+      const service = vi.spyOn(deps.pulls!, "service");
+      const actorId = provenance.authenticatedAs ?? provenance.postedBy!;
+      const caller = {
+        ...callerWith("chat", "slack:UPERSON", "all"),
+        actor: { ...CALLER.actor, id: actorId, kind: provenance.postedBy ? ("agent" as const) : ("service" as const) },
+        origin: { channelId: "slack:C1", threadKey: "slack:C1:original", messageId: "123.456", ...provenance },
+      };
+      expect((await registry.invoke("pulls.rebase", { options: { repo: "acme/api" } }, caller, deps)).ok).toBe(true);
+      expect(service.mock.calls[0]![0]).toMatchObject({
+        userId: caller.id,
+        actor: caller.actor,
+        channelId: "slack:C1",
+        threadKey: "slack:C1:original",
+        ...provenance,
+        intent: {
+          kind: "command",
+          requestId: "slack:C1:123.456",
+          actorId,
+          userId: caller.id,
+          channelId: "slack:C1",
+          threadKey: "slack:C1:original",
+          ...provenance,
+        },
+      });
+    },
+  );
+  it("missing chat conversation facts cannot be replaced by a machine-shaped context", async () => {
+    const { registry, deps } = setup();
+    const service = vi.spyOn(deps.pulls!, "service");
+    const result = await registry.invoke(
+      "pulls.rebase",
+      { options: { repo: "acme/api" } },
+      callerWith("chat", "slack:UPERSON", "all"),
+      deps,
+    );
+    expect(result).toMatchObject({ ok: false, error: "invalid_input" });
+    expect(service).not.toHaveBeenCalled();
+  });
+  it("gives separate machine invocations distinct trusted namespaced request contexts and never lends grants from an intent", async () => {
+    const { registry, deps } = setup();
+    const service = vi.spyOn(deps.pulls!, "service");
+    for (let i = 0; i < 2; i++)
+      expect((await registry.invoke("pulls.rebase", { options: { repo: "acme/api" } }, CALLER, deps)).ok).toBe(true);
+    const [one, two] = service.mock.calls.map(([origin]) => origin);
+    if (one?.intent?.kind !== "command" || two?.intent?.kind !== "command") throw new Error("command intent missing");
+    expect(one.intent).toMatchObject({
+      kind: "command",
+      actorId: CALLER.actor.id,
+      userId: CALLER.id,
+      channelId: "cli:pulls",
+    });
+    expect(one.intent.requestId).toMatch(/^command:/);
+    expect(two.intent.requestId).not.toBe(one.intent.requestId);
+    expect(one.threadKey).toContain(one.intent.requestId);
+    expect(one.actor).toBe(CALLER.actor);
+    expect(
+      (await registry.invoke("pulls.rebase", { options: { repo: "acme/api" } }, callerWith("cli", "cli:denied"), deps))
+        .ok,
+    ).toBe(false);
+    expect(service).toHaveBeenCalledTimes(2);
   });
 });

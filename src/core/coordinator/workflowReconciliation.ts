@@ -2,6 +2,10 @@ import { INSTANCE_ID_PATTERN, UNIT_PATTERN, type CoordinatorInstance, type Coord
 import { sourceHash } from "../references/receipts.js";
 import { isUnitStatusReference, type UnitStatusReference } from "../references/unitStatusReference.js";
 import { isCoordinatorReportAdmission, type CoordinatorReportAdmission } from "./reportAdmission.js";
+import {
+  isCoordinatorPublicDeliveryReference,
+  type CoordinatorPublicDeliveryReference,
+} from "./reportPublicDelivery.js";
 import type { RecoveryAction } from "./recoveryHistory.js";
 
 /** An offer to finish the original execution's report. It carries no private prose
@@ -21,6 +25,7 @@ export interface CoordinatorReconcileReceipt {
   reportDelivery: CoordinatorReportAdmission;
   status: UnitStatusReference;
   privateReplyId?: string;
+  publicDelivery?: CoordinatorPublicDeliveryReference;
 }
 /** Absence can retire only an attributable saved execution, never an
  * unanswered create. Unknown begun calls remain settlement obligations. */
@@ -84,9 +89,10 @@ export function isCoordinatorReconcileEffect(v: unknown): v is CoordinatorReconc
 export function isCoordinatorReconcileReceipt(v: unknown): v is CoordinatorReconcileReceipt {
   return (
     object(v) &&
-    Object.keys(v).every((k) => ["reportDelivery", "status", "privateReplyId"].includes(k)) &&
+    Object.keys(v).every((k) => ["reportDelivery", "status", "privateReplyId", "publicDelivery"].includes(k)) &&
     isCoordinatorReportAdmission(v.reportDelivery) &&
     isUnitStatusReference(v.status) &&
+    (v.publicDelivery === undefined || isCoordinatorPublicDeliveryReference(v.publicDelivery)) &&
     (v.privateReplyId === undefined ||
       (typeof v.privateReplyId === "string" && v.privateReplyId.length > 0 && v.privateReplyId.length <= 512))
   );

@@ -56,6 +56,38 @@ async function fixture(bindings?: GitBindings, token?: GithubDoorDeps["token"]) 
 }
 
 describe("GitHub run-bearer door", () => {
+  it.each([false, true])(
+    "closed model transport refuses discovery and push without borrowing authorization: PR=%s",
+    async (existingPr) => {
+      const bindings = new GitBindings();
+      bindings.register(grant.runId, { repo: "o/r", ref: "fix" }, undefined, undefined, existingPr);
+      if (existingPr) bindings.setPublication(grant.runId, { ref: "fix", expectedHeadSha: "1".repeat(40) });
+      bindings.closeModelTurn(grant.runId);
+      const token = vi.fn(async () => "fixture-token");
+      const f = await fixture(bindings, token);
+      const auth = `Basic ${Buffer.from(`x-access-token:${f.bearer}`).toString("base64")}`;
+      try {
+        const discovery = await fetch(`${f.url}/git/o/r.git/info/refs?service=git-receive-pack`, {
+          headers: { authorization: auth },
+        });
+        expect(discovery.status).toBe(403);
+        const push = await fetch(`${f.url}/git/o/r.git/git-receive-pack`, {
+          method: "POST",
+          headers: { authorization: auth },
+          body: "0000",
+        });
+        expect(push.status).toBe(403);
+        expect(token).not.toHaveBeenCalled();
+        expect(f.upstream).not.toHaveBeenCalled();
+        expect(bindings.publicationOf(grant.runId)).toEqual(
+          existingPr ? { ref: "fix", expectedHeadSha: "1".repeat(40) } : undefined,
+        );
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
   const allowBranchReceipt = (bindings: GitBindings, runId: string) =>
     bindings.setBranchRecorder(runId, { begin: async () => true, finish: async () => true });
   it("rejects oversized credentials and refuses upstream redirects without forwarding the bearer", async () => {

@@ -35,6 +35,8 @@ import {
   listAnyPrByHead,
   createDraftPullRequest,
   updatePullRequest,
+  updatePullRequestEffect,
+  createRecoveryPullRequest,
 } from "./githubPulls.js";
 
 // Feature: docs/reference/specs/pr-description.md — the bot process opens and edits PRs
@@ -320,6 +322,106 @@ describe("githubPulls", () => {
     expect(payload.body).toBe(hostile); // passed through verbatim — inert data, not directives
   });
 
+  describe("durable pull mutation receipts", () => {
+    const headSha = "a".repeat(40);
+    const input = { ...target, headSha };
+    const native = () => ({
+      number: 31,
+      html_url: "https://github.com/acme/api/pull/31",
+      state: "open",
+      merged: false,
+      draft: false,
+      title: input.title,
+      body: input.body,
+      head: { sha: headSha, ref: input.headBranch, repo: { full_name: input.repo } },
+      base: { ref: input.base, repo: { full_name: input.repo } },
+    });
+    it("creates only once and accepts only the exact frozen original pull receipt", async () => {
+      stubToken();
+      const calls = stubFetch(() => Response.json(native(), { status: 201 }));
+      expect(await createRecoveryPullRequest(input)).toMatchObject({ state: "accepted", pr: { number: 31 }, headSha });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.init.method).toBe("POST");
+      expect(JSON.parse(String(calls[0]!.init.body))).toEqual({
+        title: input.title,
+        head: input.headBranch,
+        base: input.base,
+        body: input.body,
+        draft: false,
+      });
+      for (const row of [
+        { ...native(), head: { ...native().head, sha: "b".repeat(40) } },
+        { ...native(), head: { ...native().head, repo: { full_name: "foreign/api" } } },
+        { ...native(), base: { ...native().base, ref: "foreign" } },
+        { ...native(), title: "changed" },
+        { ...native(), body: "changed" },
+        { ...native(), number: 0 },
+        {},
+      ]) {
+        stubFetch(() => Response.json(row, { status: 201 }));
+        expect(await createRecoveryPullRequest(input)).toEqual({ state: "uncertain" });
+      }
+    });
+    it("distinguishes definite refusal from lost or unavailable create acknowledgement", async () => {
+      stubToken();
+      for (const status of [403, 422]) {
+        stubFetch(() => new Response("refused", { status }));
+        expect(await createRecoveryPullRequest(input)).toEqual({ state: "refused", status });
+      }
+      for (const status of [408, 500]) {
+        stubFetch(() => new Response("unavailable", { status }));
+        expect(await createRecoveryPullRequest(input)).toEqual({ state: "uncertain" });
+      }
+      stubFetch(() => {
+        throw new Error("ACK lost");
+      });
+      expect(await createRecoveryPullRequest(input)).toEqual({ state: "uncertain" });
+    });
+    it("certifies a description edit only from its exact frozen native response", async () => {
+      stubToken();
+      const exact = { headSha, headRef: input.headBranch, baseRef: input.base };
+      const patch = { title: input.title, body: input.body };
+      const calls = stubFetch(() => Response.json(native()));
+      expect(await updatePullRequestEffect({ repo: input.repo, number: 31 }, exact, patch)).toEqual({
+        state: "accepted",
+      });
+      expect(calls).toHaveLength(1);
+      for (const row of [
+        { ...native(), body: "changed" },
+        { ...native(), head: { ...native().head, sha: "b".repeat(40) } },
+        {},
+      ]) {
+        stubFetch(() => Response.json(row));
+        expect(await updatePullRequestEffect({ repo: input.repo, number: 31 }, exact, patch)).toEqual({
+          state: "uncertain",
+        });
+      }
+      const refused = stubFetch(() => new Response("refused", { status: 422 }));
+      expect(await updatePullRequestEffect({ repo: input.repo, number: 31 }, exact, patch)).toEqual({
+        state: "refused",
+        status: 422,
+      });
+      expect(refused).toHaveLength(1);
+    });
+    it("refuses malformed heads and oversized frozen bytes before any native request", async () => {
+      stubToken();
+      const calls = stubFetch(() => Response.json(native(), { status: 201 }));
+      for (const changed of [
+        { ...input, headSha: "short" },
+        { ...input, body: "x".repeat(65001) },
+      ])
+        expect(await createRecoveryPullRequest(changed)).toEqual({ state: "refused" });
+      expect(
+        await updatePullRequestEffect(
+          { repo: input.repo, number: 31 },
+          { headSha, headRef: input.headBranch, baseRef: input.base },
+          { title: input.title, body: "x".repeat(65001) },
+        ),
+      ).toEqual({ state: "refused" });
+      expect(calls).toHaveLength(0);
+    });
+  });
+
   it("updatePullRequest PATCHes the known PR number directly and throws on non-2xx", async () => {
     stubToken();
     const calls = stubFetch(() => new Response("{}", { status: 200 }));
@@ -416,6 +518,25 @@ describe("githubPulls", () => {
       expect(calls.filter((call) => call.url.endsWith("/actions/runs/99"))).toHaveLength(1);
     });
 
+    it("distinguishes named checks already pending or green from unavailable retry evidence", async () => {
+      stubToken();
+      for (const row of [
+        { ...check(42), status: "in_progress", conclusion: null },
+        { ...check(42), conclusion: "success" },
+      ]) {
+        const calls = stubFetch(() => Response.json(listing([row])));
+        expect(await fetchCheckRetryTargets("acme/api", sha, ["ci / depot"])).toEqual([]);
+        expect(calls).toHaveLength(1);
+        expect(calls[0]!.init.method ?? "GET").toBe("GET");
+      }
+      stubFetch(() => Response.json(listing([check(42), { ...check(43, "other"), conclusion: "success" }])));
+      expect(await fetchCheckRetryTargets("acme/api", sha, ["ci / depot", "other"])).toEqual([
+        { operation: "check_rerequest", resourceId: 42 },
+      ]);
+      stubFetch(() => Response.json(listing([check(42, "other")])));
+      expect(await fetchCheckRetryTargets("acme/api", sha, ["ci / depot"])).toBeUndefined();
+    });
+
     it("reads the final check page before freezing a target and refuses unstable, duplicate, foreign or incomplete native evidence", async () => {
       stubToken();
       const page = Array.from({ length: 100 }, (_, i) => check(i + 1, `other-${i}`));
@@ -427,8 +548,6 @@ describe("githubPulls", () => {
       for (const row of [
         { ...check(42), id: 0 },
         { ...check(42), head_sha: "d".repeat(40) },
-        { ...check(42), status: "in_progress" },
-        { ...check(42), conclusion: "success" },
       ]) {
         stubFetch(() => Response.json(listing([row])));
         expect(await fetchCheckRetryTargets("acme/api", sha, ["ci / depot"])).toBeUndefined();

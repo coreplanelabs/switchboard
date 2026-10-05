@@ -18,6 +18,12 @@ import {
 import { isCoordinatorReportAdmission } from "./reportAdmission.js";
 import { appendCoordinatorStatus, readCoordinatorStatus } from "./unitStatus.js";
 import type { CoordinatorReconcileReceipt } from "./workflowReconciliation.js";
+import {
+  appendCoordinatorPublicDelivery,
+  coordinatorPublicDeliveryReference,
+  readCoordinatorPublicDelivery,
+  type CoordinatorPublicDeliveryReference,
+} from "./reportPublicDelivery.js";
 
 export interface CoordinatorReportFinalizationInput {
   instance: CoordinatorInstance;
@@ -37,6 +43,10 @@ export interface CoordinatorReportFinalizationDeps {
     deliveryId: string;
     report: { text: string; threadText: string };
   }): Promise<string | undefined>;
+  /** Return true only after the original public channel reply completes. */
+  deliverPublic?(
+    input: CoordinatorReportFinalizationInput & { report: { text: string; threadText: string } },
+  ): Promise<boolean>;
 }
 
 /** Finish only the committed original report using existing immutable session
@@ -96,14 +106,32 @@ export async function finalizeCoordinatorReport(
     const status = await appendCoordinatorStatus(deps, { instance, unit, owner });
     if (!status) return undefined;
     let privateReplyId: string | undefined;
+    let publicDelivery: CoordinatorPublicDeliveryReference | undefined;
     if (unit.workBrief) {
       privateReplyId = await deps.deliverPrivate!({ instance, unit, owner, deliveryId: deliveryId!, report });
       if (privateReplyId !== deliveryId) return undefined;
+    } else {
+      const reference = await coordinatorPublicDeliveryReference(admission, report.threadText);
+      publicDelivery = await readCoordinatorPublicDelivery(deps.ledger, reference);
+      if (!publicDelivery) {
+        if (!(await committed())) return undefined;
+        if (reference.kind === "reply" && !(await deps.deliverPublic?.({ ...input, report }))) return undefined;
+        publicDelivery = await appendCoordinatorPublicDelivery(deps.ledger, reference);
+        if (!publicDelivery) return undefined;
+      }
     }
     if (!(await committed()) || !(await readCoordinatorStatus(deps.ledger, status))) return undefined;
     const confirmed = await readCoordinatorReport(deps.ledger, owner);
     if (!confirmed || (await sourceHash(confirmed)) !== (await sourceHash(report))) return undefined;
-    return { report, receipt: { reportDelivery: admission, status, ...(privateReplyId ? { privateReplyId } : {}) } };
+    return {
+      report,
+      receipt: {
+        reportDelivery: admission,
+        status,
+        ...(privateReplyId ? { privateReplyId } : {}),
+        ...(publicDelivery ? { publicDelivery } : {}),
+      },
+    };
   } catch {
     return undefined;
   }

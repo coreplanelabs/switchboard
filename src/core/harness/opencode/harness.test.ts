@@ -1032,7 +1032,9 @@ describe("the post-turn on the run's session — refused, answered by silence, o
   });
 
   it("an absolute admitted deadline bounds the OpenCode lease after attachment downtime", async () => {
-    const o = openRun({}, oneTurn, undefined, NOW + 4 * MINUTE_MS);
+    const o = openRun({}, oneTurn, undefined, NOW + 4 * MINUTE_MS, (_run, clock) => {
+      clock.now += 2 * MINUTE_MS;
+    });
     const session = await o.opened;
     expect(o.events.find((event) => event.type === "lease")).toMatchObject({ endsAt: NOW + 4 * MINUTE_MS });
     await session.end();

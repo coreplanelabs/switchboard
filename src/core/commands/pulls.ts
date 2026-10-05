@@ -1,3 +1,6 @@
+import { randomUUID } from "node:crypto";
+import type { Actor } from "../authz/types.js";
+import { isMaintenanceIntent, type MaintenanceIntent } from "../coordinator/maintenanceIdentity.js";
 import { z } from "zod";
 import {
   CommandError,
@@ -28,6 +31,12 @@ export interface SweepOrigin {
   userId: string;
   /** The chat caller's channel, when there is one — context for the run's record. */
   channelId?: string;
+  threadKey?: string;
+  authenticatedAs?: string;
+  postedBy?: string;
+  /** Present at trusted command/watch entry points; existing runner journals already own their admission. */
+  intent?: MaintenanceIntent;
+  actor?: Actor;
 }
 
 export interface PullsCommandDeps {
@@ -102,9 +111,35 @@ export const pullsRebase = defineCommand({
       );
     if (deps.pulls === undefined)
       throw new CommandError("unavailable", "no sweep service is wired in this process — ask the bot to run it");
+    if (caller.kind === "chat" && caller.origin === undefined)
+      throw new CommandError("invalid_input", "the command conversation identity is incomplete");
+    const requestId = caller.origin?.messageId
+      ? `${caller.origin.channelId}:${caller.origin.messageId}`
+      : `command:${randomUUID()}`;
+    const channelId = caller.origin?.channelId ?? `${caller.kind}:pulls`;
+    const threadKey = caller.origin?.threadKey ?? `${channelId}:${requestId}`;
+    const provenance = {
+      ...(caller.origin?.authenticatedAs !== undefined ? { authenticatedAs: caller.origin.authenticatedAs } : {}),
+      ...(caller.origin?.postedBy !== undefined ? { postedBy: caller.origin.postedBy } : {}),
+    };
+    const intent: MaintenanceIntent = {
+      kind: "command",
+      requestId,
+      actorId: caller.actor.id,
+      userId: caller.id,
+      channelId,
+      threadKey,
+      ...provenance,
+    };
+    if (!isMaintenanceIntent(intent))
+      throw new CommandError("invalid_input", "the command source identity is incomplete");
     const service = await deps.pulls.service({
       userId: caller.id,
-      ...(caller.origin ? { channelId: caller.origin.channelId } : {}),
+      channelId,
+      threadKey,
+      ...provenance,
+      intent,
+      actor: caller.actor,
     });
     try {
       const report = await service.sweep({ repo, ...(ref ? { number: ref.number } : {}) });

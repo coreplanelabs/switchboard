@@ -659,8 +659,9 @@ export type PrCheck =
       /** After a recover pr-check (a dead coding child): why nothing was
        *  recovered — `no_commits` (GitHub refused the create: nothing between
        *  the base and the head) or `no_base` (the instance names no base to
-       *  open against, so no create was tried). Absent on a plain check. */
-      unrecovered?: "no_commits" | "no_base";
+       *  open against, so no create was tried), or `external_refused` (a
+       *  definite native refusal). Absent on a plain check. */
+      unrecovered?: "no_commits" | "no_base" | "external_refused";
       /** On a plain check: the branch's commits over the base as GitHub
        *  compares them, when the bot could read them. Zero beside a handoff
        *  naming where the scope landed is the `already_landed` ending
@@ -3118,6 +3119,17 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
     );
   }
   if (pr.state === "none") {
+    if (pr.unrecovered === "external_refused")
+      return end(
+        s,
+        {
+          kind: "aborted",
+          reason: `GitHub definitively refused the recovery publication; the pushed work stays on \`${s.input.unit.branch}\`.`,
+          round,
+          reviewRounds: s.reviewRounds,
+        },
+        [roundNote(round, "aborted")],
+      );
     // A dead child left nothing on the branch to recover: the unit ends with
     // the child's own reason — never the budget clip.
     if (phase.dead === "interrupted")
@@ -3163,7 +3175,9 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
           ? `the remote branch \`${s.input.unit.branch}\` contains no changes against its base; ${publicationSettlementSummary(phase.publicationSettlement)}`
           : pr.unrecovered === "no_base"
             ? `\`${s.input.unit.branch}\` could not be given a pull request: the pipeline names no base branch to open it against, so whatever was pushed stays on the branch`
-            : `the pr-check found no pull request heading \`${s.input.unit.branch}\`, so nothing was recovered`;
+            : pr.unrecovered === "external_refused"
+              ? `GitHub definitively refused the recovery publication; the pushed work stays on \`${s.input.unit.branch}\``
+              : `the pr-check found no pull request heading \`${s.input.unit.branch}\`, so nothing was recovered`;
       return end(
         s,
         {

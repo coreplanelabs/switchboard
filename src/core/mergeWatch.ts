@@ -1,3 +1,4 @@
+import { isMaintenanceIntent, type MaintenanceIntent } from "./coordinator/maintenanceIdentity.js";
 import { PULL_SWEEP } from "./budgets.js";
 import type { SweepReport } from "./pullSweep.js";
 
@@ -133,7 +134,7 @@ export interface MergeWatchDeps {
   /** The pull request's facts once GitHub has recomputed `mergeable_state`. */
   facts(entry: MergeReadyEntry): Promise<WatchedPullFacts>;
   /** One resolver pass for the one pull request: the sweep's two rungs. */
-  resolve(entry: MergeReadyEntry): Promise<SweepReport>;
+  resolve(entry: MergeReadyEntry, intent: Extract<MaintenanceIntent, { kind: "watch" }>): Promise<SweepReport>;
   /** What the pull request's watch has spent on model rounds so far, USD. */
   spendOf(entry: MergeReadyEntry): Promise<number>;
   /** One line on the unit's card (the spend cap names the sweep). */
@@ -145,7 +146,7 @@ export interface MergeWatchDeps {
 export interface MergeWatch {
   /** One push-to-base webhook: every registered pull request of the repo on
    *  that base is read and answered. */
-  pushToBase(repo: string, base: string): Promise<WatchResult[]>;
+  pushToBase(repo: string, base: string, eventId?: string): Promise<WatchResult[]>;
 }
 
 /** The watch's reaction to base pushes, under the caps. One rebase in flight
@@ -155,14 +156,15 @@ export interface MergeWatch {
  *  book keeps the entry — a person's sweep or merge still ends it. */
 export function createMergeWatch(deps: MergeWatchDeps): MergeWatch {
   const inFlight = new Map<string, number>();
-  const queues = new Map<string, MergeReadyEntry[]>();
+  type Job = { entry: MergeReadyEntry; intent: Extract<MaintenanceIntent, { kind: "watch" }> };
+  const queues = new Map<string, Job[]>();
 
-  const runResolver = async (entry: MergeReadyEntry): Promise<void> => {
+  const runResolver = async ({ entry, intent }: Job): Promise<void> => {
     inFlight.set(entry.repo, (inFlight.get(entry.repo) ?? 0) + 1);
     try {
       // The card carries the model round's own words in its thread; a rung-one
       // git failure or a conflict would otherwise vanish, so it is logged here.
-      const report = await deps.resolve(entry);
+      const report = await deps.resolve(entry, intent);
       for (const r of report.results)
         if (r.outcome === "conflict" || r.outcome === "error")
           console.error(`[merge-watch] ${r.repo}#${r.number} ${r.outcome}: ${r.line}`);
@@ -183,8 +185,18 @@ export function createMergeWatch(deps: MergeWatchDeps): MergeWatch {
     }
   };
 
-  const one = async (entry: MergeReadyEntry): Promise<WatchResult> => {
+  const one = async (entry: MergeReadyEntry, eventId?: string): Promise<WatchResult> => {
     const at = (outcome: WatchOutcome): WatchResult => ({ repo: entry.repo, number: entry.number, outcome });
+    const intent = {
+      kind: "watch" as const,
+      eventId,
+      instanceId: entry.instanceId,
+      unit: entry.unit,
+      requester: entry.requester,
+    };
+    if (typeof eventId !== "string" || !/^github:[A-Za-z0-9._-]{1,128}$/.test(eventId) || !isMaintenanceIntent(intent))
+      return at("stood");
+    const job: Job = { entry: structuredClone(entry), intent };
     const settings = deps.settings(entry.repo);
     // The setting turned off while a unit waited: the entry stands (the unit
     // still owns its wait) but no round is bought — a person's sweep or merge
@@ -211,18 +223,18 @@ export function createMergeWatch(deps: MergeWatchDeps): MergeWatch {
     }
     if ((inFlight.get(entry.repo) ?? 0) >= settings.rebaseInFlight) {
       const queue = queues.get(entry.repo) ?? [];
-      queue.push(entry);
+      queue.push(job);
       queues.set(entry.repo, queue);
       return at("queued");
     }
-    void runResolver(entry); // never throws: each entry's failure is logged in its own frame
+    void runResolver(job); // never throws: each entry's failure is logged in its own frame
     return at("resolver");
   };
 
   return {
-    async pushToBase(repo, base) {
+    async pushToBase(repo, base, eventId) {
       const results: WatchResult[] = [];
-      for (const entry of deps.book.onBase(repo, base)) results.push(await one(entry));
+      for (const entry of deps.book.onBase(repo, base)) results.push(await one(entry, eventId));
       return results;
     },
   };

@@ -1,4 +1,5 @@
 import { resolveGithubToken } from "./githubApp.js";
+import { isPublicationRepo as githubRepo } from "../core/branchPublication.js";
 import type { CheckRunDetail } from "../core/ship/checkFindings.js";
 import { redactAndCap } from "../core/redact.js";
 
@@ -290,11 +291,115 @@ export type CheckRetryTarget = { operation: "actions_rerun" | "check_rerequest";
 const DEFINITIVE_WRITE_REFUSALS = new Set([400, 401, 403, 404, 405, 409, 422, 429]);
 const positiveNativeId = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) > 0;
 const fullHead = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{40}$/i.test(value);
-const githubRepo = (value: string): boolean =>
-  /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value) && value.split("/").every((part) => part !== "." && part !== "..");
 
-function writeRefusal(status: number): GithubWriteResult {
+function writeRefusal(status: number): Exclude<GithubWriteResult, { state: "accepted" }> {
   return DEFINITIVE_WRITE_REFUSALS.has(status) ? { state: "refused", status } : { state: "uncertain" };
+}
+
+export type RecoveryPullWriteResult =
+  { state: "accepted"; pr: OpenedPullRequest; headSha: string } | Exclude<GithubWriteResult, { state: "accepted" }>;
+
+/** One native write under the caller's already-begun original effect. The
+ * native response, not a later listing, binds the frozen bytes and head. */
+async function writeFrozenPull(
+  target: PullRequestTarget & { headSha: string },
+  number?: number,
+): Promise<RecoveryPullWriteResult> {
+  if (
+    !githubRepo(target.repo) ||
+    !fullHead(target.headSha) ||
+    !target.headBranch ||
+    !target.base ||
+    typeof target.title !== "string" ||
+    !target.title ||
+    typeof target.body !== "string" ||
+    target.body.length > MAX_BODY_CHARS ||
+    (number !== undefined && !positiveNativeId(number))
+  )
+    return { state: "refused" };
+  const token = await requireToken().catch(() => undefined);
+  if (!token) return { state: "refused" };
+  try {
+    const creating = number === undefined;
+    const res = await fetch(`https://api.github.com/repos/${target.repo}/pulls${creating ? "" : `/${number}`}`, {
+      method: creating ? "POST" : "PATCH",
+      redirect: "error",
+      headers: apiHeaders(token, true),
+      body: JSON.stringify(
+        creating
+          ? { title: target.title, head: target.headBranch, base: target.base, body: target.body, draft: false }
+          : { title: target.title, body: target.body },
+      ),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (res.status !== (creating ? 201 : 200)) return writeRefusal(res.status);
+    const row = (await res.json()) as {
+      number?: unknown;
+      html_url?: unknown;
+      state?: unknown;
+      merged?: unknown;
+      draft?: unknown;
+      title?: unknown;
+      body?: unknown;
+      head?: { sha?: unknown; ref?: unknown; repo?: { full_name?: unknown } };
+      base?: { ref?: unknown; repo?: { full_name?: unknown } };
+    } | null;
+    if (
+      !row ||
+      !positiveNativeId(row.number) ||
+      (number !== undefined && row.number !== number) ||
+      row.state !== "open" ||
+      row.merged !== false ||
+      (creating && row.draft !== false) ||
+      row.title !== target.title ||
+      row.body !== target.body ||
+      typeof row.head?.sha !== "string" ||
+      row.head.sha.toLowerCase() !== target.headSha.toLowerCase() ||
+      row.head.ref !== target.headBranch ||
+      typeof row.head.repo?.full_name !== "string" ||
+      row.head.repo.full_name.toLowerCase() !== target.repo.toLowerCase() ||
+      row.base?.ref !== target.base ||
+      typeof row.base.repo?.full_name !== "string" ||
+      row.base.repo.full_name.toLowerCase() !== target.repo.toLowerCase() ||
+      typeof row.html_url !== "string" ||
+      row.html_url.length > 2048
+    )
+      return { state: "uncertain" };
+    const url = new URL(row.html_url);
+    if (url.protocol !== "https:" || url.hostname !== "github.com" || url.username || url.password)
+      return { state: "uncertain" };
+    return {
+      state: "accepted",
+      headSha: target.headSha,
+      pr: { number: row.number as number, htmlUrl: row.html_url, created: creating },
+    };
+  } catch {
+    return { state: "uncertain" };
+  }
+}
+
+export async function createRecoveryPullRequest(
+  target: PullRequestTarget & { headSha: string },
+): Promise<RecoveryPullWriteResult> {
+  return writeFrozenPull(target);
+}
+
+export async function updatePullRequestEffect(
+  pr: { repo: string; number: number },
+  target: { headSha: string; headRef: string; baseRef: string },
+  patch: { title: string; body: string },
+): Promise<GithubWriteResult> {
+  const result = await writeFrozenPull(
+    {
+      repo: pr.repo,
+      headBranch: target.headRef,
+      base: target.baseRef,
+      headSha: target.headSha,
+      ...patch,
+    },
+    pr.number,
+  );
+  return result.state === "accepted" ? { state: "accepted" } : result;
 }
 
 /** GitHub does not provide a head precondition for this PATCH. The caller
@@ -1218,8 +1323,8 @@ export async function fetchCheckRetryTargets(
   try {
     for (const row of rows) {
       if (!wanted.has(row.name)) continue;
-      if (row.status !== "completed" || GREEN_CONCLUSIONS.has(row.conclusion as string)) return undefined;
       found.add(row.name);
+      if (row.status !== "completed" || GREEN_CONCLUSIONS.has(row.conclusion as string)) continue;
       const url = typeof row.details_url === "string" ? new URL(row.details_url) : undefined;
       if (url?.pathname.includes("/actions/runs/") || row.app?.slug === "github-actions") {
         const prefix = `/${repo}/actions/runs/`;
@@ -1847,7 +1952,7 @@ export async function createCommit(
     tree: string;
     parents: string[];
     author: { name: string; email: string; date: string };
-    committer: { name: string; email: string };
+    committer: { name: string; email: string; date?: string };
   },
 ): Promise<string> {
   const token = await requireToken();

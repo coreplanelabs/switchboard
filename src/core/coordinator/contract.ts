@@ -11,6 +11,8 @@
 import { IDLE_DAYS_MAX, type Grant, type GrantSource } from "../budgets.js";
 import { isVerbosity, type Verbosity } from "../verbosity.js";
 import { isFindingShape } from "../reviewVerdict.js";
+import { isMaintenanceActionId } from "./maintenanceIdentity.js";
+import { RUN_ID_PATTERN } from "../runRecord.js";
 import {
   isAddressSeverity,
   type AddressSeverity,
@@ -683,6 +685,7 @@ export interface CoordinatorTag {
   /** Workflow transport for a recovered child. Identity and idempotency remain
    * on `parentInstanceId`; only lifecycle wake-ups use this checkpoint id. */
   transportWorkflowId?: string;
+  maintenanceActionId?: string;
   /** The immutable target and absolute lease of an original-unit recovery.
    * Stored on the coordinator event so a resume or request-restart cannot turn
    * the remaining lease into a fresh relative budget or adopt another head. */
@@ -723,6 +726,7 @@ export function coordinatorFields(tag: CoordinatorTag | undefined): {
   coordinatorAttempt?: number;
   idempotencyKey?: string;
   costCapUsd?: number;
+  maintenanceActionId?: string;
 } {
   return tag
     ? {
@@ -734,6 +738,7 @@ export function coordinatorFields(tag: CoordinatorTag | undefined): {
             }
           : {}),
         idempotencyKey: tag.idempotencyKey,
+        ...(tag.maintenanceActionId !== undefined ? { maintenanceActionId: tag.maintenanceActionId } : {}),
         ...(tag.costCapUsd !== undefined ? { costCapUsd: tag.costCapUsd } : {}),
       }
     : {};
@@ -747,7 +752,7 @@ export function coordinatorFields(tag: CoordinatorTag | undefined): {
  *  its two surfaces: the card the bot redraws and the final run record. */
 export interface CoordinatorInstance {
   id: string;
-  kind: "ship";
+  kind: "ship" | "maintenance";
   /** The requesting person (platform-namespaced); every child is dispatched as them. */
   userId: string;
   userName?: string;
@@ -1091,6 +1096,8 @@ export interface CoordinatorUnit {
     at: number;
     gate?: RoundGate;
     patternContinuation?: true;
+    /** The actual accepted maintenance child retains its one bounded admission. */
+    maintenance?: { actionId: string; runId: string; budgetUsd: number };
   }>;
   /** An explicit recovery claim for this same durable unit. It is mutually
    * exclusive with both `idle` and `ending`; legacy readers otherwise keep
@@ -1208,14 +1215,35 @@ export function hasRecoverySettlementCapacity(unit: CoordinatorUnit): boolean {
 
 /** Account for receipts not yet written; the projection is never stored. */
 function reserveActiveEffect(unit: CoordinatorUnit): CoordinatorUnit {
-  return unit.currentEffect?.phase === "active"
-    ? { ...unit, currentEffect: reserveUnitEffectOutcomes(unit.currentEffect) }
-    : unit;
+  const cell = unit.currentEffect;
+  if (cell?.phase !== "active") return unit;
+  const maintenance = cell.execution.maintenance;
+  const rounds =
+    maintenance &&
+    cell.calls.some((call) => call.operation === "spawn" && call.agent === "coding") &&
+    !unit.rounds.some((round) => round.maintenance?.actionId === maintenance.id)
+      ? [
+          ...unit.rounds,
+          {
+            index: Math.max(0, ...unit.rounds.map((round) => round.index)) + 1,
+            agent: "coding",
+            outcome: "started",
+            at: maintenance.admittedAt,
+            maintenance: {
+              actionId: maintenance.id,
+              runId: "r".repeat(64),
+              budgetUsd: maintenance.bounds.spendCapUsd!,
+            },
+          },
+        ]
+      : unit.rounds;
+  return { ...unit, rounds, currentEffect: reserveUnitEffectOutcomes(cell) };
 }
 export function hasUnitEffectCapacity(unit: CoordinatorUnit): boolean {
   const maximum = reserveActiveEffect(unit);
   const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
   return (
+    maximum.rounds.length <= MAX_ROUNDS &&
     bytes(maximum.currentEffect) <= UNIT_EFFECT_MAX_BYTES &&
     bytes(maximum) <= RECOVERY_ROW_MAX_BYTES &&
     (unit.recovery === undefined || hasRecoverySettlementCapacity(unit))
@@ -1227,6 +1255,11 @@ export function permitsRecoveryMetadataWrite(
   replacement: CoordinatorUnit,
   checked = false,
 ): boolean {
+  if (
+    JSON.stringify(current?.rounds.filter((round) => round.maintenance) ?? []) !==
+    JSON.stringify(replacement.rounds.filter((round) => round.maintenance))
+  )
+    return false;
   if (JSON.stringify(current?.currentEffect) !== JSON.stringify(replacement.currentEffect)) return false;
   if (replacement.currentEffect?.phase === "active" && !hasUnitEffectCapacity(replacement)) return false;
   if (
@@ -1391,7 +1424,12 @@ export function isCoordinatorInstance(v: unknown): v is CoordinatorInstance {
   if (!isObject(v)) return false;
   const r = v;
   if (typeof r.id !== "string" || !INSTANCE_ID_PATTERN.test(r.id)) return false;
-  if (r.kind !== "ship") return false;
+  if (r.kind !== "ship" && r.kind !== "maintenance") return false;
+  if (
+    r.kind === "maintenance" &&
+    (r.admission !== undefined || r.runId !== undefined || r.plan !== undefined || r.generatedTask !== undefined)
+  )
+    return false;
   if (!isText(r.userId) || !isText(r.channelId) || !isText(r.threadKey)) return false;
   if (!isOptionalText(r.userName) || !isOptionalText(r.channelName) || !isOptionalText(r.sourceUrl)) return false;
   if (r.generatedTask !== undefined && !isGeneratedTask(r.generatedTask)) return false;
@@ -1674,7 +1712,16 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
         isText(x.outcome) &&
         isFinite(x.at) &&
         (x.gate === undefined || isRoundGate(x.gate)) &&
-        (x.patternContinuation === undefined || x.patternContinuation === true),
+        (x.patternContinuation === undefined || x.patternContinuation === true) &&
+        (x.maintenance === undefined ||
+          (isObject(x.maintenance) &&
+            Object.keys(x.maintenance).every((key) => ["actionId", "runId", "budgetUsd"].includes(key)) &&
+            typeof x.maintenance.actionId === "string" &&
+            /^m_[a-f0-9]{64}$/.test(x.maintenance.actionId) &&
+            typeof x.maintenance.runId === "string" &&
+            RUN_ID_PATTERN.test(x.maintenance.runId) &&
+            isFinite(x.maintenance.budgetUsd) &&
+            x.maintenance.budgetUsd > 0)),
     )
   )
     return false;
@@ -1854,13 +1901,21 @@ export async function sendChildSignal(
     runId: string;
     parentInstanceId: string;
     transportWorkflowId?: string;
+    maintenanceActionId?: string;
     kind: "interrupted" | "resumed";
     reason: string;
     at: number;
   },
 ): Promise<RunFinishedSend> {
   const { runId, parentInstanceId: instance, kind, reason, at } = signal;
-  if (!workflow) return { kind: "no-binding", instance };
+  if (signal.maintenanceActionId !== undefined && !isMaintenanceActionId(signal.maintenanceActionId))
+    return {
+      kind: "failed",
+      instance,
+      type: kind === "interrupted" ? childInterruptedEventType(runId) : childResumedEventType(runId),
+      reason: "invalid maintenance transport identity",
+    };
+  if (isMaintenanceActionId(signal.maintenanceActionId) || !workflow) return { kind: "no-binding", instance };
   const type = kind === "interrupted" ? childInterruptedEventType(runId) : childResumedEventType(runId);
   try {
     const handle = await workflow.get(signal.transportWorkflowId ?? instance);
@@ -1880,11 +1935,19 @@ export async function sendRunFinished(
     finishedAt: number;
     parentInstanceId?: string;
     transportWorkflowId?: string;
+    maintenanceActionId?: string;
   },
 ): Promise<RunFinishedSend> {
   const instance = record.parentInstanceId;
   if (instance === undefined) return { kind: "none" };
-  if (!workflow) return { kind: "no-binding", instance };
+  if (record.maintenanceActionId !== undefined && !isMaintenanceActionId(record.maintenanceActionId))
+    return {
+      kind: "failed",
+      instance,
+      type: runFinishedEventType(record.id),
+      reason: "invalid maintenance transport identity",
+    };
+  if (isMaintenanceActionId(record.maintenanceActionId) || !workflow) return { kind: "no-binding", instance };
   const type = runFinishedEventType(record.id);
   const payload: RunFinishedPayload = {
     runId: record.id,

@@ -27,6 +27,7 @@ import type { ArtifactStore } from "../../artifacts/store.js";
 import type {
   OpenedPullRequest,
   OpenPrRef,
+  GithubWriteResult,
   PullRequestFacts,
   PullRequestTarget,
   RepoShipInfo,
@@ -258,7 +259,7 @@ export interface RunDeps
    * shell-out — AGENTS.md invariant 5). Injectable so tests assert the
    * decision without a network call.
    */
-  postReviewComment?: (target: ReviewCommentTarget, body: string) => Promise<void>;
+  postReviewComment?: (target: ReviewCommentTarget, body: string) => Promise<GithubWriteResult | void>;
 }
 
 /** What `claimRun` reads off the dispatch. */

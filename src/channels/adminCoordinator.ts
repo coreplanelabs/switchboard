@@ -43,8 +43,14 @@
 // The handler here is pure over a parsed request (`handleCoordinatorRequest`),
 // like the ingress; `createAdminCoordinatorHandler` is the node:http adapter.
 
-import type { RunnerPullOwner } from "../core/runnerOwnership.js";
+import { findRunnerPullOwner } from "../core/runnerOwnership.js";
+import { createSweepEffectJournal } from "../core/coordinator/sweepEffectJournal.js";
 import { isPullOwnersResult } from "../core/coordinator/pullOwnership.js";
+import { branchPublicationOf } from "../core/branchPublication.js";
+import { sourceHash } from "../core/references/receipts.js";
+import { performRecoverPublication } from "../core/coordinator/recoverPublicationEffect.js";
+import type { IdentityRefPublication } from "../execution/identityRewrite.js";
+import { isUnitSeedReceipt } from "../core/coordinator/unitSeedReceipt.js";
 import { performCheckRecovery } from "../core/coordinator/checkRecoveryEffect.js";
 import { finalizeCoordinatorReport } from "../core/coordinator/reportFinalization.js";
 import { reconcileCoordinatorExecution } from "../core/coordinator/reconcileExecution.js";
@@ -101,10 +107,11 @@ import { isShipOutcome, sameShipOutcome } from "../core/coordinator/shipOutcome.
 import { foldThreadAttachments } from "../core/dispatch/admission.js";
 import { attributedText, foldThreadEvents } from "../core/threadEvents.js";
 import { assembleRunRecord } from "../core/dispatch/record.js";
-import type {
-  UnitEffectTransition,
-  UnitEffectRefusal,
-  UnitEffectCompletionOutcome,
+import {
+  unitEffectResultMatches,
+  type UnitEffectTransition,
+  type UnitEffectRefusal,
+  type UnitEffectCompletionOutcome,
 } from "../core/coordinator/unitEffect.js";
 import type { CoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import {
@@ -155,13 +162,13 @@ import {
 import { analyzeRunFriction } from "../core/runFriction.js";
 import { COMMAND_CAP, type RunEvent, type ShipRoundOutcome } from "../core/runEvents.js";
 import type { RunHistoryWriter } from "../core/runHistoryWriter.js";
-import { RUN_ID_PATTERN, RUN_LIST_MAX_LIMIT } from "../core/runRecord.js";
+import { branchPushReceiptsOf, RUN_ID_PATTERN, RUN_LIST_MAX_LIMIT } from "../core/runRecord.js";
 import type { RunRegistry } from "../core/runRegistry.js";
 import type { LedgerRun } from "../core/runLedger/writeThrough.js";
 import { directAudienceStampOf } from "../core/runLedger/inboxMessage.js";
 import type { HostingState } from "../core/runLedger/types.js";
 import type { RunsService, RunView } from "../core/runsService.js";
-import type { SweepReport } from "../core/pullSweep.js";
+import type { SweepReport, SweepEffectJournal } from "../core/pullSweep.js";
 import {
   interruptionCauseOfWords,
   parsePlanBranch,
@@ -209,6 +216,7 @@ import {
   type MergeQueueState,
   type MergeResult,
   type OpenedPullRequest,
+  type RecoveryPullWriteResult,
   type OpenPrRef,
   type AnyHeadPullRequest,
   type PullRequestComment,
@@ -292,12 +300,7 @@ export interface AdminCoordinatorDeps {
   /** Rung one for a pull request this live runner owns. The sweep's git and
    *  approval-carry rules are reused, but a conflict returns to this runner
    *  instead of starting a detached fix round. */
-  runnerRebase?: (instance: CoordinatorInstance, prNumber: number) => Promise<SweepReport>;
-  /** Temporary rebase admission until its external writes use the durable
-   * effect journal. Recovery and settlement use canonical store transactions. */
-  runnerOwnership?: {
-    claim(repo: string, prNumber: number, owner?: RunnerPullOwner): boolean;
-  };
+  runnerRebase?: (instance: CoordinatorInstance, prNumber: number, effects: SweepEffectJournal) => Promise<SweepReport>;
   /** The ship grant as the requester's channel and user scopes say now. Idle
    * waits can outlive a config change, so a wake never relies on the grant
    * captured when the instance was created. */
@@ -352,11 +355,8 @@ export interface AdminCoordinatorDeps {
     startState: BranchStartState;
     requester: string;
   }) => Promise<RewriteResult>;
-  /** The recover path's one write (githubPulls.openPullRequest, open-or-edit by
-   *  head branch): a coding child that pushed and then died leaves its work on
-   *  the branch — the pr-check opens the pull request from the branch itself
-   *  instead of answering `none` over stranded work (agent-ship item 15). */
-  openPullRequest: (target: PullRequestTarget) => Promise<OpenedPullRequest>;
+  /** One create request over this admitted original head; uncertain admission remains owned. */
+  createRecoveryPullRequest?: (target: PullRequestTarget & { headSha: string }) => Promise<RecoveryPullWriteResult>;
   /** The branch head commit's subject (githubPulls.branchHeadSubject): the
    *  recover open's preferred title when the record holds no submitted
    *  description and the subject passes the title rule (record 0064's
@@ -370,12 +370,14 @@ export interface AdminCoordinatorDeps {
    *  agent-ship items 10 and 15): the same rewrite the coding post-step runs,
    *  over an EMPTY start state — every earlier round's commits were rewritten
    *  before their own pull request opened, so they pass. Unreadable throws,
-   *  which the pr-check reports as `github_unavailable`, never an open over
-   *  unverified identities. Absent (a test of the other paths): no rewrite. */
+   *  which leaves the original publication unverified. Missing capability
+   *  never permits an open over unchecked identities. */
   rewriteIdentities?: (args: {
     repo: string;
     base: string;
     branch: string;
+    expectedTip: string;
+    refPublication: IdentityRefPublication;
     startState: BranchStartState;
     requester: string;
   }) => Promise<RewriteResult>;
@@ -1892,14 +1894,14 @@ async function reviewPostedAtPatiently(
  *  reviewed head to that pull request, `false` with the reason when it recorded
  *  a skip or a failure, and nothing when the record is silent (a child from
  *  before the fact existed) or names another head, verdict or pull request —
- *  then GitHub decides. */
+ *  then GitHub decides. An uncertain post is not a confirmed skip. */
 function reviewPostedByRecord(
   record: Pick<RunView, "reviewPost" | "reviewHead" | "verdict">,
   pr: { repo: string; number: number },
 ): { reviewPosted: boolean; reviewPostReason?: string } | undefined {
   const post = record.reviewPost;
   if (post === undefined || record.reviewHead === undefined || record.verdict === undefined) return undefined;
-  if (!post.posted) return { reviewPosted: false, reviewPostReason: post.reason };
+  if (!post.posted) return post.uncertain ? undefined : { reviewPosted: false, reviewPostReason: post.reason };
   const same =
     post.target.repo === pr.repo &&
     post.target.number === pr.number &&
@@ -2110,7 +2112,7 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
   }
   // Whether the verdict stands on the unit's pull request: the child's own
   // record of its post first (item 18) — it posted, or it recorded why not —
-  // and GitHub only when the record is silent, looked at patiently: the
+  // and GitHub when the record is silent or uncertain, looked at patiently: the
   // finish event wakes the runner within a second of the post, and GitHub's
   // review list can lag it. The merge step re-verifies the approval at the
   // head regardless, so the pre-check may be patient while the guard stays strict.
@@ -2216,21 +2218,14 @@ async function restartedChildOf(
   return successor?.id;
 }
 
-/** Why a recover pr-check opened nothing: GitHub refused the create because
- *  nothing sits between the base and the head (`no_commits`), or the instance
- *  names no base to open against and no create was tried (`no_base`). Any
- *  other GitHub failure is not a reason but an outage: it propagates, the
- *  check answers `github_unavailable`, and the step is asked again. */
-type Unrecovered = "no_commits" | "no_base";
+/** A recovery that opened nothing carries only its proved reason: no base,
+ * no commits, or a definite native refusal. Unknown write admission stays owned. */
+type Unrecovered = "no_commits" | "no_base" | "external_refused";
 type Recovered = { kind: "opened"; pr: OpenedPullRequest } | { kind: "none"; why: Unrecovered };
 
 /** GitHub's refusal of a pull request over an empty branch: HTTP 422 with
  *  "No commits between <base> and <head>". Everything else that fails the
  *  create is treated as GitHub being unavailable. */
-function isEmptyBranchRefusal(err: unknown): boolean {
-  const message = err instanceof Error ? err.message : String(err);
-  return /HTTP 422\b/.test(message) && /no commits between/i.test(message);
-}
 
 /** The last line with the cap: over `max`, cut at the last word boundary that
  *  fits, never mid-word, and drop what a cut leaves dangling (a period the
@@ -2271,100 +2266,222 @@ export function recoveredFallbackTitle(
   return cutAtWordBoundary(`${prefix}${rest === "" ? branch : rest}`, TITLE_MAX_LENGTH, prefix.length);
 }
 
-/** The recover path's pull request (agent-ship items 10 and 15): a coding
- *  child pushed its branch and then died — the pull request is opened from the
- *  branch itself through the same open-or-edit as any run's, the title from
- *  the child's submitted description when the record holds one (used as is —
- *  the submit tool's gate already judged it), else the head commit's subject
- *  when it passes the title rule (record 0064's `unit_title` move), else the
- *  unit's title as the conventional fallback above (issue 1877); the body from
- *  the description,
- *  else a minimal body naming the unit. `none` names why when nothing could be
- *  opened; a GitHub failure that is neither reason is thrown for the caller's
- *  `github_unavailable`. */
+/** A dead coding child publishes only through its current durable unit execution.
+ * Frozen payload and per-call native acknowledgments survive coordinator retries. */
+class RecoverPublicationRefusal extends Error {
+  constructor(readonly reason: string) {
+    super(reason);
+  }
+}
 async function recoverPushedBranch(
   deps: AdminCoordinatorDeps,
   instance: CoordinatorInstance,
   row: CoordinatorUnit | undefined,
   branch: string,
   runId: string,
-): Promise<Recovered> {
+  body: Record<string, unknown>,
+): Promise<Recovered & { effectOrdinal?: number }> {
   if (instance.base === undefined) return { kind: "none", why: "no_base" };
-  const unitName = row?.unit ?? "the unit";
-  let title: string | undefined;
-  let prBody = `Opened by the plan runner from the pushed branch \`${branch}\`: the coding run ${runId} of ${unitName} ended before it could open the pull request or submit its description. The review round asks for the description.`;
-  try {
-    const full = await deps.runs.getRun(runId, {
-      include: "messages",
-      privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
-    });
-    if (full.ok && full.value.parentInstanceId === instance.id) {
-      const events = full.value.events ?? [];
-      const descEvent = [...events].reverse().find((e) => e.type === "pr_description");
-      const desc = descEvent?.type === "pr_description" ? descEvent.description : undefined;
-      if (desc !== undefined) {
-        title = desc.title;
-        // A record written under the previous contract carries the why as
-        // `whatWhy`; a body with neither gets no second paragraph, never "undefined".
-        const why = desc.why ?? (desc as { whatWhy?: string }).whatWhy;
-        prBody = [
-          desc.tldr,
-          why,
-          "_Rendered by the plan runner from the coding run's submitted description; the run ended before it could open the pull request itself._",
-        ]
-          .filter((part) => part !== undefined && part !== "")
-          .join("\n\n");
-      }
-    }
-  } catch {
-    // the minimal body stands
-  }
-  // No submitted description: the head commit's subject when it passes the
-  // title rule (record 0064's `unit_title` move — the open passes the required
-  // check first time), else the conventional fallback from the unit's title
-  // (issue 1877). An unreadable subject claims nothing and the fallback stands.
-  if (title === undefined && deps.branchHeadSubject !== undefined) {
-    const subject = await deps.branchHeadSubject(instance.repo, branch).catch(() => undefined);
-    if (subject !== undefined && checkPrTitle(subject, PR_TITLE_VOCABULARY).ok) title = subject;
-  }
-  title ??= recoveredFallbackTitle(row, branch, instance.plan?.id ?? parsePlanBranch(branch)?.planId);
-  // Recovery has no normal coding post-step, but the durable instance still
-  // owns the requester and the original thread even when its child is gone.
-  const header = requestedByLine({
-    name: instance.userName?.trim() || instance.userId,
-    threadUrl: threadPageLink(instance.threadKey, deps.runPageBase?.replace(/\/runs\/?$/, "") ?? ""),
+  if (!row || row.branch !== branch || row.ending !== undefined || row.idle !== undefined)
+    throw new RecoverPublicationRefusal("effect_unit_required");
+  const execution = {
+    workflowId: body.executionWorkflowId as string,
+    ...(typeof body.recoveryActionId === "string" ? { recoveryActionId: body.recoveryActionId } : {}),
+  };
+  if (
+    execution.workflowId !== (row.recovery?.workflowId ?? instance.id) ||
+    execution.recoveryActionId !== row.recovery?.actionId ||
+    typeof body.effectId !== "string" ||
+    !STEP_NAME_PATTERN.test(body.effectId) ||
+    !body.effectId.startsWith(`${row.unit}/`) ||
+    !Number.isSafeInteger(body.effectOrdinal)
+  )
+    throw new RecoverPublicationRefusal("effect_execution_mismatch");
+  if (!deps.reportLedger || !deps.createRecoveryPullRequest || !deps.rewriteIdentities || !deps.fetchBranchHeadSha)
+    throw new RecoverPublicationRefusal("recovery_publication_unavailable");
+  const original = await deps.runs.getRun(runId, {
+    include: "messages",
+    requireFinalRecord: true,
+    privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
   });
-  prBody = `${header}\n\n${prBody}`;
-  // The identity rewrite before the open (record 0062): the recover path
-  // opens over the same guarantee the coding post-step gives — the commits
-  // carry only the allowed identities. Unreadable is thrown for the caller's
-  // `github_unavailable`, never an open over unverified identities.
-  if (deps.rewriteIdentities !== undefined) {
-    const rewritten = await deps.rewriteIdentities({
-      repo: instance.repo,
-      base: instance.base,
-      branch,
-      startState: EMPTY_START_STATE,
-      requester: instance.userId,
-    });
-    if (rewritten.kind === "unreadable")
-      throw new Error(`the identity rewrite could not verify ${branch}: ${rewritten.reason}`);
+  const child = original.ok ? original.value : undefined;
+  const tags = child?.events?.filter((event) => event.type === "coordinator_tag") ?? [];
+  const originalMeta = child?.events?.find((event) => event.type === "run_meta");
+  const prefix =
+    row.recovery?.actionId === undefined
+      ? publicationStepPrefix(row)
+      : recoveryStepPrefix(row.unit, row.recovery.actionId);
+  if (
+    !child ||
+    originalMeta?.type !== "run_meta" ||
+    originalMeta.agent !== "coding" ||
+    originalMeta.repo?.toLowerCase() !== instance.repo.toLowerCase() ||
+    originalMeta.ref !== branch ||
+    child.id !== runId ||
+    child.finished !== true ||
+    child.persisted !== true ||
+    child.truncated !== false ||
+    child.events === undefined ||
+    child.eventCount !== child.storedEventCount ||
+    child.events.length !== child.storedEventCount ||
+    child.parentInstanceId !== instance.id ||
+    child.coordinatorUnit !== row.unit ||
+    child.coordinatorAttempt !== (instance.attempt ?? 0) ||
+    child.agent !== "coding" ||
+    child.userId !== instance.userId ||
+    child.channelId !== instance.channelId ||
+    child.threadKey !== (row.threadKey ?? instance.threadKey) ||
+    child.repo?.toLowerCase() !== instance.repo.toLowerCase() ||
+    !isStepAttempt(child.idempotencyKey, `${instance.id}:${prefix}/0/coding`) ||
+    !fullHead(child.headSha) ||
+    child.pushed?.length !== 1 ||
+    child.pushed[0]?.ref !== branch ||
+    child.pushed[0]?.sha !== child.headSha ||
+    child.doorPublicationPending !== undefined ||
+    tags.length !== 1 ||
+    tags[0]?.unit !== row.unit ||
+    tags[0].parentInstanceId !== instance.id ||
+    tags[0].base !== instance.base ||
+    !Number.isFinite(child.finishedAt) ||
+    child.finishedAt! < child.startedAt
+  )
+    throw new RecoverPublicationRefusal("recovery_original_child_unverified");
+  const acceptedBranch = branchPublicationOf(child.branchPublication);
+  const settlement = publicationSettlementForRun(child.publicationSettlement, child);
+  const nativePushes = branchPushReceiptsOf(child.branchPushReceipts);
+  const originalPush = nativePushes?.filter(
+    (receipt) => receipt.ref === branch && receipt.sha === child.headSha && receipt.by === "push",
+  );
+  if (
+    child.pr !== undefined ||
+    (child.branchPublication !== undefined &&
+      (!acceptedBranch ||
+        acceptedBranch.pending !== undefined ||
+        acceptedBranch.branches.length !== 0 ||
+        (acceptedBranch.targets?.length ?? 0) !== 0)) ||
+    !(
+      (child.branchPushReceipts?.length === 1 && nativePushes?.length === 1 && originalPush?.length === 1) ||
+      (settlement?.checkpoint.kind === "created" &&
+        settlement.checkpoint.head === child.headSha &&
+        settlement.publication.kind === "accepted" &&
+        settlement.publication.head === child.headSha &&
+        settlement.binding.branch === branch)
+    )
+  )
+    throw new RecoverPublicationRefusal("recovery_original_publication_unverified");
+  if (row.workBrief !== undefined) {
+    const seed = child.unitSeedReceipt;
+    if (
+      row.threadKey !== privateWorkerThreadKey({ instanceId: instance.id, unit: row.unit }) ||
+      !isUnitSeedReceipt(seed) ||
+      seed.binding.instanceId !== instance.id ||
+      seed.binding.unit !== row.unit ||
+      seed.binding.instanceAttempt !== (instance.attempt ?? 0) ||
+      seed.binding.idempotencyKey !== child.idempotencyKey ||
+      seed.child.runId !== runId ||
+      seed.child.requester !== instance.userId ||
+      seed.child.channelId !== instance.channelId ||
+      seed.child.threadKey !== row.threadKey ||
+      seed.workBriefHash !== (await sourceHash(row.workBrief))
+    )
+      throw new RecoverPublicationRefusal("recovery_original_child_unverified");
   }
-  try {
-    const pr = await deps.openPullRequest({
-      repo: instance.repo,
-      headBranch: branch,
-      base: instance.base,
-      title,
-      body: prBody,
-    });
-    return { kind: "opened", pr };
-  } catch (err) {
-    // Nothing to recover only when GitHub says the branch is empty; any other
-    // failure is an outage the caller reports, never a claim that nothing was pushed.
-    if (isEmptyBranchRefusal(err)) return { kind: "none", why: "no_commits" };
-    throw err;
-  }
+  const listing = await deps.runs.listRuns({
+    privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
+    status: "all",
+    visibleTo: EVERY_RUN,
+    limit: RUN_LIST_MAX_LIMIT,
+    recoveryEvidence: { instanceId: instance.id, unit: row.unit, threadKeys: [row.threadKey ?? instance.threadKey] },
+  });
+  if (
+    listing.storeUnavailable ||
+    listing.ledgerUnavailable ||
+    listing.nextBefore !== undefined ||
+    listing.runs.length >= RUN_LIST_MAX_LIMIT ||
+    listing.runs.filter((run) => run.id === runId).length !== 1 ||
+    listing.runs.some(
+      (run) =>
+        run.id !== runId &&
+        ((!run.finished &&
+          (run.parentInstanceId === instance.id || run.idempotencyKey?.startsWith(`${instance.id}:${row.unit}/`))) ||
+          (run.pushed?.some((push) => push.ref === branch) &&
+            (run.finishedAt === undefined || run.finishedAt >= child.startedAt))),
+    )
+  )
+    throw new RecoverPublicationRefusal("recovery_evidence_incomplete");
+  const answer = await performRecoverPublication(
+    {
+      instance,
+      unit: row,
+      execution,
+      effectId: body.effectId,
+      ordinal: body.effectOrdinal as number,
+      runId,
+      headSha: child.headSha!,
+    },
+    {
+      instances: deps.instances,
+      ledger: deps.reportLedger,
+      head: () => deps.fetchBranchHeadSha!(instance.repo, branch),
+      render: async () => {
+        const unitName = row?.unit ?? "the unit";
+        let title: string | undefined;
+        let prBody = `Opened by the plan runner from the pushed branch \`${branch}\`: the coding run ${runId} of ${unitName} ended before it could open the pull request or submit its description. The review round asks for the description.`;
+        const descEvent = [...child.events!].reverse().find((event) => event.type === "pr_description");
+        const desc = descEvent?.type === "pr_description" ? descEvent.description : undefined;
+        if (desc !== undefined) {
+          title = desc.title;
+          const why = desc.why ?? (desc as { whatWhy?: string }).whatWhy;
+          prBody = [
+            desc.tldr,
+            why,
+            "_Rendered by the plan runner from the original coding run's submitted description._",
+          ]
+            .filter((part) => part !== undefined && part !== "")
+            .join("\n\n");
+        }
+        // No submitted description: the head commit's subject when it passes the
+        // title rule (record 0064's `unit_title` move — the open passes the required
+        // check first time), else the conventional fallback from the unit's title
+        // (issue 1877). An unreadable subject claims nothing and the fallback stands.
+        if (title === undefined && deps.branchHeadSubject !== undefined) {
+          const subject = await deps.branchHeadSubject(instance.repo, branch).catch(() => undefined);
+          if (subject !== undefined && checkPrTitle(subject, PR_TITLE_VOCABULARY).ok) title = subject;
+        }
+        title ??= recoveredFallbackTitle(row, branch, instance.plan?.id ?? parsePlanBranch(branch)?.planId);
+        // Recovery has no normal coding post-step, but the durable instance still
+        // owns the requester and the original thread even when its child is gone.
+        const header = requestedByLine({
+          name: instance.userName?.trim() || instance.userId,
+          threadUrl: threadPageLink(instance.threadKey, deps.runPageBase?.replace(/\/runs\/?$/, "") ?? ""),
+        });
+        prBody = `${header}\n\n${prBody}`;
+
+        return { title, body: prBody };
+      },
+      rewrite: (refPublication, expectedTip) =>
+        deps.rewriteIdentities!({
+          repo: instance.repo,
+          base: instance.base!,
+          branch,
+          startState: EMPTY_START_STATE,
+          requester: instance.userId,
+          expectedTip,
+          refPublication,
+        }),
+      create: deps.createRecoveryPullRequest,
+    },
+  );
+  if (!answer.ok)
+    throw new RecoverPublicationRefusal(
+      answer.reason === "uncertain"
+        ? "effect_reconciliation_pending"
+        : answer.reason === "unavailable"
+          ? "github_unavailable"
+          : answer.reason,
+    );
+  if ("refused" in answer) return { kind: "none", why: "external_refused", effectOrdinal: answer.effectOrdinal };
+  return { kind: "opened", pr: answer.pr, effectOrdinal: answer.effectOrdinal };
 }
 
 const CHILD_SUPERSESSION_REASONS = new Set(["merged", "closed", "head_moved", "branch_deleted"]);
@@ -6176,6 +6293,11 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       });
   };
   try {
+    if (
+      unit.row?.currentEffect?.calls.some((call) => call.operation === "pull_create") &&
+      unit.row.currentEffect.calls.some((call) => call.state === "pending" || call.state === "uncertain")
+    )
+      throw new RecoverPublicationRefusal("effect_reconciliation_pending");
     // Once the machine has adopted a pull request, its number is the authority:
     // read and enrich it before any branch discovery. The unit branch may have
     // another pull request, but entry, transition and ending reads all stay on
@@ -6243,7 +6365,12 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
         at,
       });
     }
-    const open = await deps.findOpenPrByHead(instance.repo, branch);
+    const recoveringCell =
+      recover !== undefined &&
+      unit.row?.currentEffect !== undefined &&
+      unit.row.currentEffect.id === body.effectId &&
+      unit.row.currentEffect.calls.some((call) => call.operation === "pull_create");
+    const open = recoveringCell ? null : await deps.findOpenPrByHead(instance.repo, branch);
     if (open) {
       // The branch listing is discovery only. Re-read the pull request whole
       // before this transition acts: the listing can lag a merge/close, and
@@ -6330,7 +6457,7 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     // or by an earlier attempt that died after its merge — makes the unit done
     // rather than aborted (record 0031's `merged` ending, reached without the
     // runner's merge). Asked only now: an open pull request is the round's.
-    const merged = await deps.findMergedPrByHead(instance.repo, branch);
+    const merged = recoveringCell ? null : await deps.findMergedPrByHead(instance.repo, branch);
     if (!merged) {
       // A dead coding child's pushed work is recovered here: the pull request
       // is opened from the branch itself rather than the round ending aborted
@@ -6351,7 +6478,12 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
               });
         return json(200, { ok: true, state: "none", ...(ahead !== undefined ? { aheadOfBase: ahead } : {}), at });
       }
-      const recovered = await recoverPushedBranch(deps, instance, unit.row, branch, recover.runId);
+      const recovered = await recoverPushedBranch(deps, instance, unit.row, branch, recover.runId, body);
+      if (unit.row !== undefined) {
+        const refreshed = (await deps.instances.listUnits(instance.id)).filter((row) => row.unit === unit.row!.unit);
+        if (refreshed.length !== 1) throw new RecoverPublicationRefusal("stale");
+        unit.row = refreshed[0];
+      }
       if (recovered.kind === "opened") {
         // Open-or-edit is not a transition fact: the request can merge, close
         // or lose its head ref before this route returns. Re-read the pull
@@ -6368,9 +6500,20 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
           const refused = await rememberTerminal(recoveredPr);
           if (refused !== undefined) return refused;
         }
-        return json(200, { ok: true, ...recoveredState, at });
+        return json(200, {
+          ok: true,
+          ...recoveredState,
+          ...(recovered.effectOrdinal === undefined ? {} : { effectOrdinal: recovered.effectOrdinal }),
+          at,
+        });
       }
-      return json(200, { ok: true, state: "none", unrecovered: recovered.why, at });
+      return json(200, {
+        ok: true,
+        state: "none",
+        unrecovered: recovered.why,
+        ...(recovered.effectOrdinal === undefined ? {} : { effectOrdinal: recovered.effectOrdinal }),
+        at,
+      });
     }
     const mergedFacts = await deps.fetchPrFacts({ repo: instance.repo, number: merged.number });
     if (mergedFacts === undefined) throw new Error(`could not read ${instance.repo}#${merged.number}`);
@@ -6380,6 +6523,8 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     if (refused !== undefined) return refused;
     return json(200, { ok: true, ...state, at });
   } catch (err) {
+    if (err instanceof RecoverPublicationRefusal)
+      return json(err.reason.endsWith("unavailable") ? 503 : 409, { ok: false, error: err.reason, at });
     if (err instanceof PublicationBindingRefusal)
       return json(409, { ok: false, error: err.reason, message: "the open pull request was not durably bound", at });
     if (err instanceof CoordinatorUnitWriteConflict) throw err;
@@ -7334,13 +7479,21 @@ export async function reconcileCoordinatorReport(
   return reconcileCoordinatorExecution(effect, {
     instances: deps.instances,
     status: deps.recoveryStatus,
-    settle: async (body) => (await unitEnd({ ...body }, deps, { reconciliation: true })).status === 200,
+    reportDelivery: (instance, unit) => unitIO(deps, instance, unit)?.reportDelivery,
+    settle: async (body) =>
+      (await unitEnd({ ...structuredClone(body) }, deps, { reconciliation: true })).status === 200,
     readReport: (owner) => readCoordinatorReport(ledger, owner),
     finalize: async (input) => {
       const finalized = await finalizeCoordinatorReport(
         {
           ledger,
           instances: deps.instances,
+          deliverPublic: async (delivery) => {
+            const io = unitIO(deps, delivery.instance, delivery.unit);
+            if (!io || io.undeliverable !== undefined) return false;
+            await io.reply(delivery.report.threadText);
+            return true;
+          },
           deliverPrivate: async (delivery) => {
             if (!deps.privateWorkerLog) return undefined;
             await appendPrivateWorkerReply(
@@ -7354,11 +7507,6 @@ export async function reconcileCoordinatorReport(
         input,
       );
       if (!finalized) return undefined;
-      if (!input.unit.workBrief && finalized.report.threadText.length > 0) {
-        const io = unitIO(deps, input.instance, input.unit);
-        if (!io) return undefined;
-        await io.reply(finalized.report.threadText);
-      }
       return finalized;
     },
   });
@@ -7408,6 +7556,8 @@ async function unitEnd(
   const units = await deps.instances.listUnits(instance.id);
   const row = units.find((u) => u.unit === body.unit);
   if (!row) return json(404, { ok: false, error: "unit_not_found", unit: body.unit });
+  if (options.reconciliation && row.currentEffect?.phase === "active")
+    return json(409, { ok: false, error: "effect_active", at });
   // A committed recovery clears its live claim. Its exact terminal receipt is
   // still the authority for retrying that report, never for starting more work.
   if (row.recovery?.actionId !== undefined || body.recoveryActionId !== undefined) {
@@ -7464,6 +7614,30 @@ async function unitEnd(
       fullReport = frozen.text;
       threadReport = frozen.threadText;
       ending.report = fullReport;
+    } else if (
+      row.workBrief === undefined &&
+      row.ending?.threadReport === "" &&
+      row.ending.report === fullReport &&
+      row.ending.deliveryId === body.deliveryId &&
+      (await sameCoordinatorReportAdmission(
+        row.reportDelivery,
+        await coordinatorReportAdmission(reportOwner, { text: fullReport, threadText: "" }),
+      ))
+    ) {
+      // A retry keeps the original admitted rendering when the ending committed
+      // before freeze. Current channel availability cannot change that promise.
+      threadReport = "";
+    } else if (
+      row.ending === undefined &&
+      row.reportDelivery === undefined &&
+      row.workBrief === undefined &&
+      ending.kind !== "continued" &&
+      ending.kind !== "idle" &&
+      deps.ioFor({ threadKey: reportThread, userId: instance.userId })?.reportDelivery === "state"
+    ) {
+      // The machine job's deliverable is its durable report. Select no channel
+      // copy before its first admission; never discard an original owed copy.
+      threadReport = "";
     }
   } catch {
     return json(503, { ok: false, error: "report_context_unavailable", at });
@@ -7502,13 +7676,14 @@ async function unitEnd(
     row.ending !== undefined &&
     (row.ending.kind !== ending.kind ||
       row.ending.report !== ending.report ||
+      (row.ending.threadReport !== undefined && row.ending.threadReport !== threadReport) ||
       !sameShipOutcome(row.ending.outcome, outcome))
   )
     return json(409, { ok: false, error: "settlement_conflict", at });
   if (
-    row.workBrief !== undefined &&
     row.ending !== undefined &&
-    (row.ending.outcome !== undefined || row.history !== undefined) &&
+    (row.ending.deliveryId !== undefined ||
+      (row.workBrief !== undefined && (row.ending.outcome !== undefined || row.history !== undefined))) &&
     row.ending.deliveryId !== body.deliveryId
   )
     return json(409, { ok: false, error: "settlement_conflict", at });
@@ -7556,6 +7731,12 @@ async function unitEnd(
       {
         ledger: deps.reportLedger!,
         instances: deps.instances,
+        deliverPublic: async (input) => {
+          const io = unitIO(deps, input.instance, input.unit);
+          if (!io || io.undeliverable !== undefined) return false;
+          await io.reply(input.report.threadText);
+          return true;
+        },
         deliverPrivate: async (input) => {
           try {
             if (!deps.privateWorkerLog) throw new Error("private worker log unavailable");
@@ -7890,9 +8071,9 @@ async function unitEnd(
     if (updated.ending === undefined && !(await deliverPrivateReport()))
       return json(503, { ok: false, error: "private_worker_log_unavailable", at });
     told = true;
-  } else if (options.reconciliation) {
-    // The reconciliation finalizer confirms the original public delivery.
-    told = threadReport.length === 0;
+  } else if (updated.ending !== undefined) {
+    // The shared finalizer confirmed delivery or an explicitly empty thread copy.
+    told = true;
   } else if (io && threadReport.length === 0)
     told = true; // nothing owed to the thread at this level
   else if (io) {
@@ -7930,7 +8111,12 @@ async function unitEnd(
   // An ordinary human-gated unit leaves its report on the pull request beside
   // the review. A private worker reports only to the main agent's durable log.
   const parkedHumanGate = ending.kind === "idle" && idle?.humanGate !== undefined;
-  if (row.workBrief === undefined && (ending.kind === "held" || parkedHumanGate) && updated.pr !== undefined) {
+  if (
+    !options.reconciliation &&
+    row.workBrief === undefined &&
+    (ending.kind === "held" || parkedHumanGate) &&
+    updated.pr !== undefined
+  ) {
     const state = parkedHumanGate ? "waiting for a person" : "held";
     await deps.github
       .commentIssue(instance.repo, updated.pr.number, `**Plan runner — ${row.unit} ${state}**\n\n${ending.report}`)
@@ -7997,7 +8183,7 @@ async function advanceRunnerRebasePublication(
   instance: CoordinatorInstance,
   row: CoordinatorUnit,
   from: string,
-  reportedHead?: string,
+  reportedHead: string,
 ): Promise<string | undefined> {
   const binding = row.publication;
   if (binding === undefined) return undefined;
@@ -8012,8 +8198,8 @@ async function advanceRunnerRebasePublication(
     binding.publicationRef !== row.branch ||
     binding.baseRef !== instance.base ||
     !fullHead(from) ||
-    (reportedHead !== undefined && !fullHead(reportedHead)) ||
-    binding.expectedHeadSha !== from
+    !fullHead(reportedHead) ||
+    (binding.expectedHeadSha !== from && binding.expectedHeadSha !== reportedHead)
   )
     throw new PublicationBindingRefusal("publication_facts_mismatch");
   const facts = await deps.fetchPrFacts({ repo: instance.repo, number: binding.pr });
@@ -8024,20 +8210,34 @@ async function advanceRunnerRebasePublication(
     facts.headRef !== binding.headRef ||
     facts.baseRef !== binding.baseRef ||
     !fullHead(facts.headSha) ||
-    (reportedHead !== undefined && facts.headSha !== reportedHead) ||
+    facts.headSha !== reportedHead ||
     facts.verifiedHead?.repo.toLowerCase() !== instance.repo.toLowerCase() ||
     facts.verifiedHead.ref !== binding.publicationRef ||
     facts.verifiedHead.sha !== facts.headSha
   )
     throw new PublicationBindingRefusal("publication_facts_mismatch");
   const to = facts.headSha;
-  if (to === from) return undefined;
-  const updated: CoordinatorUnit = {
-    ...row,
-    ...(reportedHead !== undefined ? { lastPush: to } : {}),
-    publication: { ...binding, expectedHeadSha: to },
-  };
-  await replacePublicationUnit(deps, row, updated);
+  if (to === binding.expectedHeadSha) return to;
+  const cell = row.currentEffect;
+  if (
+    !cell ||
+    cell.calls[0]?.operation !== "rebase_push" ||
+    cell.calls[0].state !== "accepted" ||
+    cell.calls[0].commitSha !== to
+  )
+    throw new PublicationBindingRefusal("publication_facts_mismatch");
+  const change: UnitEffectTransition = { kind: "publish", expected: row, execution: cell.execution, effectId: cell.id };
+  let answer;
+  try {
+    answer = await deps.instances.transitionUnitEffect(change);
+  } catch {
+    /* Exact readback resolves a lost durable ACK. */
+  }
+  if (!answer?.ok || !unitEffectResultMatches(change, answer.unit)) {
+    const current = (await deps.instances.listUnits(instance.id)).filter((u) => u.unit === row.unit);
+    if (current.length !== 1 || !unitEffectResultMatches(change, current[0]!))
+      throw new PublicationBindingRefusal("publication_store_unavailable");
+  }
   return to;
 }
 
@@ -8048,7 +8248,7 @@ async function rebaseStep(body: Record<string, unknown>, deps: AdminCoordinatorD
     return json(400, { ok: false, error: "unit must be a unit id" });
   if (typeof body.prNumber !== "number" || !Number.isInteger(body.prNumber) || body.prNumber <= 0)
     return json(400, { ok: false, error: "prNumber must be a pull request number" });
-  if (typeof body.headSha !== "string" || !/^[0-9a-f]{7,40}$/i.test(body.headSha))
+  if (typeof body.headSha !== "string" || !fullHead(body.headSha))
     return json(400, { ok: false, error: "headSha must be a commit sha" });
   const at = (deps.clock ?? systemClock)();
   const instance = await deps.instances.get(id.value);
@@ -8057,50 +8257,99 @@ async function rebaseStep(body: Record<string, unknown>, deps: AdminCoordinatorD
   if (!row) return json(404, { ok: false, error: "unknown_unit", at });
   if (row.pr?.number !== undefined && row.pr.number !== body.prNumber)
     return json(409, { ok: false, error: "pull_request_moved", at });
-  try {
-    if (
-      deps.runnerOwnership?.claim(instance.repo, body.prNumber, {
-        instanceId: instance.id,
-        unit: row.unit,
-      }) !== true
-    )
-      return json(409, { ok: false, error: "publication_ownership_changed", at });
-  } catch (err) {
-    return json(503, { ok: false, error: "publication_ownership_unknown", message: describe(err), at });
-  }
-  if (deps.runnerRebase === undefined)
+  const execution = {
+    workflowId: body.executionWorkflowId as string,
+    ...(body.recoveryActionId === undefined ? {} : { recoveryActionId: body.recoveryActionId as string }),
+  };
+  if (
+    execution.workflowId !== (row.recovery?.workflowId ?? instance.id) ||
+    execution.recoveryActionId !== row.recovery?.actionId ||
+    typeof body.effectId !== "string" ||
+    !STEP_NAME_PATTERN.test(body.effectId) ||
+    !Number.isSafeInteger(body.effectOrdinal) ||
+    body.effectOrdinal !==
+      (row.currentEffect?.id === body.effectId ? row.currentEffect.ordinal : (row.currentEffect?.ordinal ?? 0) + 1)
+  )
+    return json(409, { ok: false, error: "effect_execution_mismatch", at });
+  const owner = await findRunnerPullOwner(deps.instances, instance.repo, body.prNumber);
+  if (!owner.ok) return json(503, { ok: false, error: "publication_ownership_unknown", at });
+  if (
+    owner.owner?.instanceId !== instance.id ||
+    owner.owner.unit !== row.unit ||
+    owner.owner.recoveryActionId !== row.recovery?.actionId
+  )
+    return json(409, { ok: false, error: "publication_ownership_changed", at });
+  if (deps.runnerRebase === undefined || deps.reportLedger === undefined)
     return json(200, { ok: true, outcome: "refused", reason: "the runner's rebase resolver is unavailable", at });
+  const nativeJournal = createSweepEffectJournal(
+    { instance, unit: row, execution, effectId: body.effectId, ordinal: body.effectOrdinal as number },
+    { instances: deps.instances, ledger: deps.reportLedger },
+  );
+  const journal: SweepEffectJournal = {
+    ...nativeJournal,
+    begin: async (plan, call) => {
+      if (call > 0) {
+        const current = (await deps.instances.listUnits(instance.id)).find((u) => u.unit === row.unit);
+        if (
+          !current ||
+          !current.currentEffect ||
+          current.currentEffect.id !== body.effectId ||
+          current.currentEffect.ordinal !== body.effectOrdinal ||
+          current.currentEffect.calls[0]?.operation !== "rebase_push" ||
+          current.currentEffect.calls[0].state !== "accepted" ||
+          current.currentEffect.calls[0].commitSha !== plan.newHead
+        )
+          return false;
+        await advanceRunnerRebasePublication(deps, instance, current, plan.pr.headSha, plan.newHead);
+      }
+      return nativeJournal.begin(plan, call);
+    },
+  };
   let report: SweepReport;
   try {
-    report = await deps.runnerRebase(instance, body.prNumber);
-  } catch (err) {
-    try {
-      const observed = await advanceRunnerRebasePublication(deps, instance, row, body.headSha);
-      if (observed !== undefined) return json(200, { ok: true, outcome: "changed", headSha: observed, at });
-    } catch {
-      /* An unverifiable head cannot be adopted after an unrecorded rebase. */
-    }
-    return json(200, { ok: true, outcome: "refused", reason: describe(err), at });
+    report = await deps.runnerRebase(instance, body.prNumber, journal);
+  } catch {
+    return json(503, { ok: false, error: "effect_reconciliation_pending", at });
   }
+
   try {
     const result = report.results.find((r) => r.number === body.prNumber);
-    if (result?.outcome === "carried" && result.headSha !== undefined) {
-      await advanceRunnerRebasePublication(deps, instance, row, body.headSha, result.headSha);
+    if ((result?.outcome === "carried" || result?.outcome === "delta-review") && result.headSha !== undefined) {
+      const current = (await deps.instances.listUnits(instance.id)).find((u) => u.unit === row.unit);
+      const effect = current?.currentEffect;
+      if (
+        !current ||
+        effect?.id !== body.effectId ||
+        effect.ordinal !== body.effectOrdinal ||
+        effect.phase !== "settled" ||
+        effect.execution.workflowId !== execution.workflowId ||
+        effect.execution.recoveryActionId !== execution.recoveryActionId ||
+        effect.target.headSha.toLowerCase() !== body.headSha.toLowerCase() ||
+        effect.calls[0]?.operation !== "rebase_push" ||
+        effect.calls[0].state !== "accepted" ||
+        effect.calls[0].commitSha !== result.headSha.toLowerCase()
+      )
+        return json(503, { ok: false, error: "effect_reconciliation_pending", at });
+      await advanceRunnerRebasePublication(deps, instance, current, body.headSha, result.headSha);
       return json(200, {
         ok: true,
-        outcome: result.approvalCarried === true ? "carried" : "changed",
+        outcome:
+          result.outcome === "carried" &&
+          result.approvalCarried === true &&
+          effect.calls.some((call) => call.operation === "approval_reset" && call.state === "accepted")
+            ? "carried"
+            : "changed",
         headSha: result.headSha,
+        effectOrdinal: effect.ordinal,
         at,
       });
     }
-    if (result?.outcome === "delta-review" && result.headSha !== undefined) {
-      await advanceRunnerRebasePublication(deps, instance, row, body.headSha, result.headSha);
-      return json(200, { ok: true, outcome: "changed", headSha: result.headSha, at });
-    }
-    // Only a lost rebase outcome (the throw above) permits an unattributed
-    // head reconciliation. An explicit result cannot credit another writer.
+    // An explicit local conflict or no-op cannot credit a native push.
     if (result?.outcome === "conflict") return json(200, { ok: true, outcome: "conflict", reason: result.line, at });
     if (result?.outcome === "skipped") return json(200, { ok: true, outcome: "carried", headSha: body.headSha, at });
+    const current = (await deps.instances.listUnits(instance.id)).find((u) => u.unit === row.unit);
+    if (current?.currentEffect?.id === body.effectId && current.currentEffect.phase === "active")
+      return json(503, { ok: false, error: "effect_reconciliation_pending", at });
     return json(200, {
       ok: true,
       outcome: "refused",

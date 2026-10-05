@@ -19,6 +19,8 @@ import type { MergeWatch, WatchResult } from "../mergeWatch.js";
 export const GITHUB_SIGNATURE_HEADER = "x-hub-signature-256";
 /** The event header naming the payload kind; only `check_run` is read. */
 export const GITHUB_EVENT_HEADER = "x-github-event";
+/** Native delivery identity, retained only after the payload signature passes. */
+export const GITHUB_DELIVERY_HEADER = "x-github-delivery";
 
 const encoder = new TextEncoder();
 
@@ -267,7 +269,7 @@ export interface PushIntakeDeps {
  *  `mergeable_state`, and a DIRTY one buys a resolver round under the caps.
  *  Never on a clock: the push is the only trigger. */
 export async function handlePushIntake(
-  headers: { event?: string; signature?: string },
+  headers: { event?: string; signature?: string; delivery?: string },
   rawBody: string,
   deps: PushIntakeDeps,
 ): Promise<CheckRunIntakeResult> {
@@ -290,6 +292,8 @@ export async function handlePushIntake(
   const branch = p.ref.startsWith("refs/heads/") ? p.ref.slice("refs/heads/".length) : undefined;
   if (branch === undefined || branch === "") return { status: 200, body: { ok: true, ignored: "ref" } };
   if (deps.watch === undefined) return { status: 200, body: { ok: true, watched: 0 } };
-  const results: WatchResult[] = await deps.watch.pushToBase(repo, branch);
+  if (typeof headers.delivery !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(headers.delivery))
+    return { status: 400, body: { error: "invalid_delivery" } };
+  const results: WatchResult[] = await deps.watch.pushToBase(repo, branch, `github:${headers.delivery}`);
   return { status: 200, body: { ok: true, watched: results.length, results } };
 }

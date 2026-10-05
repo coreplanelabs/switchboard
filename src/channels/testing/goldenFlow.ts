@@ -531,7 +531,7 @@ workspaceDir: ${join(world.dir, "workspaces")}
       github: { readFile: unexpected, listIssues: unexpected, commentIssue: unexpected },
       findOpenPrByHead: unexpected,
       findMergedPrByHead: unexpected,
-      openPullRequest: unexpected,
+      createRecoveryPullRequest: unexpected,
       commitsOverBase: unexpected,
       createBranchRef: unexpected,
       fetchBranchRef: async (_repo, ref) => ({ kind: "verified", ref: `refs/heads/${ref}`, sha: "a".repeat(40) }),

@@ -1,4 +1,11 @@
 import { PUSHED_MAX } from "../../execution/residentRebind.js";
+import {
+  reviewPublicationOf,
+  acceptedReviewPublication,
+  sameReviewPublication,
+  REVIEW_PUBLICATION_OWNER_ABSENT,
+  type ReviewPublicationReceipt,
+} from "../reviewPublication.js";
 import { doorPublicationOf, branchPublicationOf, type BranchPublication } from "../branchPublication.js";
 import { createWorkFreshness } from "./workFreshness.js";
 import { appendRunReport } from "../runLedger/threadSession.js";
@@ -154,7 +161,7 @@ import { RunEventLane } from "../runEventLane.js";
 import { oneLine } from "../redact.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "../runFriction.js";
 import { markdownOutput } from "../llmOutput/index.js";
-import { callsInFlight, type RunFailure, type RunSeed, type RunStatus } from "../runRecord.js";
+import { branchPushReceiptsOf, callsInFlight, type RunFailure, type RunSeed, type RunStatus } from "../runRecord.js";
 import type { RunHandle, RunRegistry } from "../runRegistry.js";
 import type { LedgerRun } from "../runLedger/writeThrough.js";
 import { assignRunLiveState } from "../runLiveState.js";
@@ -418,6 +425,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     coordinator,
     seed,
   } = ctx;
+  const ledgerTrackedAtEntry = ledgerRun?.tracked() === true;
   // A private tool's result can reach model-authored progress before the final
   // answer. Keep every card frame free of model text for the whole DM run.
   const privateRun = privateAudienceRequired(msg) || slackContext !== undefined;
@@ -524,8 +532,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // the checklist the card shows, the verdict/description already submitted,
   // the branch already pushed.
   const restored = resume?.row.state ?? {};
+  let reviewPublication = restored.reviewPublication as ReviewPublicationReceipt | undefined;
   let branchPublication: BranchPublication | undefined = branchPublicationOf(restored.branchPublication, repoCtx.repo);
-  if (resume === undefined && isCodingPrRun && ledgerRun?.tracked())
+  if (resume === undefined && (isCodingPrRun || agent.name === "review") && ledgerRun?.tracked())
     branchPublication = {
       version: 1,
       ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
@@ -534,8 +543,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     };
   if (branchPublication) ledgerRun?.setState({ branchPublication });
   let publicationAction: BranchPublication["pending"];
-  const recordBranchPublication = async ({ kind, target, ownsBranch }: PrPublicationFact): Promise<void> => {
-    if (kind !== "accepted" && tailSkipped()) throw new Error("publication stopped");
+  const recordBranchPublication = async (
+    { kind, target, ownsBranch }: PrPublicationFact | (Omit<PrPublicationFact, "kind"> & { kind: "refused" }),
+    statePatch: Record<string, unknown> = {},
+  ): Promise<void> => {
+    if ((kind === "pending" || kind === "observed") && tailSkipped()) throw new Error("publication stopped");
     if (
       (ownsBranch && !target.ref) ||
       (target.pr !== undefined && (!Number.isSafeInteger(target.pr) || target.pr < 1)) ||
@@ -589,7 +601,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         throw new Error("publication target unavailable");
       }
       if (
-        kind === "accepted" &&
+        (kind === "accepted" || kind === "refused") &&
         (!publicationAction ||
           publicationAction.ref !== target.ref ||
           publicationAction.headSha !== target.headSha ||
@@ -619,13 +631,13 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       // Until the accepted projection is acknowledged, local release stays closed.
       branchPublication = { ...current, complete: false };
     }
-    const gate = await ledgerRun?.commitState({ branchPublication: proposed });
+    const gate = await ledgerRun?.commitState({ ...statePatch, branchPublication: proposed });
     if (gate !== "ok") throw new Error(`publication state ${gate ?? "unavailable"}`);
     branchPublication = proposed;
     if (kind !== "pending") publicationAction = undefined;
     // A stop can arrive while the intent is being saved. Acceptance must still
     // be recorded for an already-issued mutation; no new call follows a stop.
-    if (kind !== "accepted" && tailSkipped()) throw new Error("publication stopped");
+    if ((kind === "pending" || kind === "observed") && tailSkipped()) throw new Error("publication stopped");
   };
   // An intent without a completed outcome is a possible remote write. A
   // restart never guesses that it was harmless from an absent local event.
@@ -661,21 +673,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     restoredPublicationHead(restoredReceipts, coordinator.publication) !== undefined
       ? restoredReceipts
       : [];
+  const restoredBranchReceipts = branchPushReceiptsOf(restored.branchPushReceipts);
+  // Unreadable canonical history remains evidence, never an empty baseline
+  // that a later accepted native write can replace.
+  const malformedBranchReceipts = restored.branchPushReceipts !== undefined && restoredBranchReceipts === undefined;
   const branchReceipts: Array<Extract<RunEvent, { type: "pushed_head" }>> =
-    Array.isArray(restored.branchPushReceipts) &&
-    restored.branchPushReceipts.every(
-      (value: unknown) =>
-        typeof value === "object" &&
-        value !== null &&
-        (value as { type?: unknown }).type === "pushed_head" &&
-        (value as { by?: unknown }).by === "push" &&
-        typeof (value as { ref?: unknown }).ref === "string" &&
-        typeof (value as { sha?: unknown }).sha === "string" &&
-        /^[0-9a-f]{40}$/.test((value as { sha: string }).sha) &&
-        (value as { receipt?: unknown }).receipt === undefined,
-    )
-      ? (restored.branchPushReceipts as Array<Extract<RunEvent, { type: "pushed_head" }>>)
-      : [];
+    restoredBranchReceipts?.map((receipt) => ({ type: "pushed_head", ...receipt })) ?? [];
   if (
     branchPublication &&
     [...branchReceipts, ...publicationReceipts].some(
@@ -1552,6 +1555,39 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
    *  soft pre-review stop can land while the preceding tail step awaits. */
   const tailSkipped = (): boolean =>
     run.control.requested === "hard" || relaunchEndedRun || latchReviewStoppedBeforeStart();
+  const originalPublicationOwner = async () => {
+    if (!ledgerRun?.tracked() || !deps.runLedger) return undefined;
+    const rows = (await deps.runLedger.readLiveRuns()).filter((row) => row.runId === run.id);
+    if (rows.length !== 1) return undefined;
+    const row = rows[0]!;
+    if (
+      row.ownerGen !== deps.runLedger.gen ||
+      row.meta.threadKey !== msg.threadKey ||
+      row.meta.userId !== msg.userId ||
+      row.meta.channelId !== msg.channelId ||
+      row.meta.authenticatedAs !== msg.authenticatedAs ||
+      row.meta.postedBy !== msg.postedBy ||
+      row.meta.repo !== repoCtx.repo ||
+      (agent.name === "review" && row.meta.pr !== repoCtx.pr)
+    )
+      return undefined;
+    return row;
+  };
+  const publicationWriteAllowed = async (): Promise<boolean> => {
+    const row = await originalPublicationOwner();
+    const actor = chatActorOf(deps.config, msg);
+    return (
+      !!row &&
+      !malformedBranchReceipts &&
+      row.stop === null &&
+      run.control.requested === undefined &&
+      !tailSkipped() &&
+      deps.config.canRunAgent(actor, agent.name) &&
+      !!repoCtx.repo &&
+      deps.config.canUseRepo(actor, repoCtx.repo) &&
+      (ctx.publicationContextCheck === undefined || (await ctx.publicationContextCheck()).ok)
+    );
+  };
   // Give the workspace back now rather than at the inactivity sweep: a
   // resident's pool user is a scarce slot (docs/reference/specs/resident-repos.md item
   // 16a). The release mode is paired to the round's agent by the attach
@@ -1622,6 +1658,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       if (
         isCodingPrRun &&
         (!ledgerRun?.tracked() ||
+          malformedBranchReceipts ||
           branchPublication?.complete !== true ||
           [...branchReceipts, ...publicationReceipts].some(
             (receipt) => !branchPublication?.branches.some((branch) => branch.ref === receipt.ref),
@@ -2022,17 +2059,26 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   const reentry = resume?.plan.kind === "resume" ? resume.plan : undefined;
   const loopEnding: LoopEnding = finish && resume ? loopEndingOf(resume.events) : { kind: "answered" };
   if (loopEnding.kind === "soft_stop") run.control.requestStop("soft");
-  // A verdict a previous generation already posted (agent-review item 18): the
-  // replayed `review_posted` event is the post-step's outcome, so neither the
-  // settle nor the post runs again, and the reviewed head is the event's.
-  const postedBefore = resume ? reviewPostedBefore(resume.events) : undefined;
-  const replayedPostMismatch =
-    postedBefore !== undefined &&
-    coordinator?.publication !== undefined &&
-    (postedBefore.target.repo !== coordinator.publication.repo ||
-      postedBefore.target.number !== coordinator.publication.pr ||
-      postedBefore.head.toLowerCase() !== coordinator.publication.expectedHeadSha.toLowerCase());
-  if (postedBefore && !replayedPostMismatch) reviewHead = postedBefore.head;
+  // Only canonical native acceptance grants replay credit. A display event
+  // without that receipt retains uncertainty and cannot authorize another POST.
+  const replayedPost = resume ? reviewPostedBefore(resume.events) : undefined;
+  const replayedReceipt =
+    resume && agent.name === "review"
+      ? reviewPublicationOf((await originalPublicationOwner().catch(() => undefined))?.state.reviewPublication)
+      : undefined;
+  const postedBefore =
+    replayedReceipt?.state === "accepted" &&
+    replayedReceipt.runId === run.id &&
+    replayedReceipt.target.repo === repoCtx.repo &&
+    replayedReceipt.target.number === repoCtx.pr &&
+    (coordinator?.publication === undefined ||
+      (replayedReceipt.target.repo === coordinator.publication.repo &&
+        replayedReceipt.target.number === coordinator.publication.pr &&
+        replayedReceipt.target.commitId === coordinator.publication.expectedHeadSha))
+      ? acceptedReviewPublication(replayedReceipt)
+      : undefined;
+  const unconfirmedReplayedPost = replayedPost !== undefined && postedBefore === undefined;
+  if (postedBefore) reviewHead = postedBefore.head;
   // The row's harness facts (harness.md item 7; harness-pi item 8), read by
   // whichever harness wrote them: for the harness's re-attach or, on a finish,
   // for ending the process the previous generation left behind. The row's
@@ -2095,10 +2141,6 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     });
   }
   try {
-    if (replayedPostMismatch)
-      throw new RefusalError(
-        refusalOf("workspace_head_mismatch", "The replayed post does not match the saved review target."),
-      );
     if (resumedUnsettledCheckpoint)
       throw new Error(
         `The original coding checkpoint needs reconciliation before another writer can run: ${publicationSettlementSummary(publicationSettlement ?? null)}`,
@@ -2149,6 +2191,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               const authority = existingPrPublicationFence?.authority;
               if (
                 !ledgerRun?.tracked() ||
+                malformedBranchReceipts ||
                 unresolvedDoorPublication ||
                 activeDoorPublication ||
                 !authority ||
@@ -2285,7 +2328,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           begin: async (update) => {
             let committed = false;
             await events.write(async () => {
-              if (!ledgerRun?.tracked() || activeDoorPublication) return;
+              if (!ledgerRun?.tracked() || malformedBranchReceipts || activeDoorPublication) return;
               const pending = newDoorIntent(update);
               if (!pending) return;
               const ref = update.ref.slice("refs/heads/".length);
@@ -3169,9 +3212,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // outcome to this run before the PR observes the remote branch.
     let doorPostStepBlocked = refusalOnObservedBranch();
     if (ctx.githubDoor && deps.githubBindings) {
-      if (existingPrPublication !== undefined)
-        deps.githubBindings.setPublication(run.id, { blocked: "the model turn has ended" });
-      else deps.githubBindings.blockBranch(run.id, "the model turn has ended");
+      deps.githubBindings.closeModelTurn(run.id);
       await deps.githubBindings.waitForPublication(run.id, GIT_PUBLICATION_SETTLE_TIMEOUT_MS);
       await events.drain();
       retainPublicationReceipts();
@@ -3320,6 +3361,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // An existing-PR publication denial also blocks the whole post-step.
     if (
       isCodingPrRun &&
+      !malformedBranchReceipts &&
       !tailSkipped() &&
       !endingSalvageAttempted &&
       !doorPostStepBlocked &&
@@ -3358,6 +3400,20 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           },
           target: prTarget,
           publication: recordBranchPublication,
+          refPublication: {
+            begin: async ({ repo, update }) => {
+              if (repo !== repoCtx.repo || !(await publicationWriteAllowed())) return undefined;
+              const bindings = deps.githubBindings;
+              if (!bindings || bindings.get(run.id)?.repo?.toLowerCase() !== repo.toLowerCase()) return undefined;
+              const claim = await bindings.beginPostStepPublication(run.id, update);
+              if (!claim) return undefined;
+              if (!(await publicationWriteAllowed())) {
+                await claim.finish("not_forwarded");
+                return undefined;
+              }
+              return claim;
+            },
+          },
           openPullRequest: deps.openPullRequest ?? openPullRequest,
           findOpenPr: deps.findOpenPrByHead ?? findOpenPrByHead,
           updatePullRequest: deps.updatePullRequest ?? updatePullRequest,
@@ -3603,6 +3659,50 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                 fetchPrFacts: deps.fetchPrFacts ?? fetchPullRequestFacts,
               }
             : { guardTransition: false as const }),
+          publicationJournal: {
+            runId: run.id,
+            read: async () => {
+              if (!ledgerRun?.tracked())
+                return resume || ledgerTrackedAtEntry ? undefined : REVIEW_PUBLICATION_OWNER_ABSENT;
+              const row = await originalPublicationOwner();
+              return row
+                ? row.state.reviewPublication === undefined
+                  ? unconfirmedReplayedPost
+                    ? undefined
+                    : null
+                  : row.state.reviewPublication === null
+                    ? undefined
+                    : row.state.reviewPublication
+                : undefined;
+            },
+            canPublish: async () => (await publicationWriteAllowed()) && (await publicationAllowed()),
+            commit: async (receipt: ReviewPublicationReceipt) => {
+              const admission: { state: "committed" | "refused" | "unknown" } = { state: "unknown" };
+              await events.write(async () => {
+                const row = await originalPublicationOwner();
+                if (
+                  !row ||
+                  receipt.runId !== run.id ||
+                  receipt.target.repo !== repoCtx.repo ||
+                  receipt.target.number !== repoCtx.pr
+                )
+                  return;
+                const prior = reviewPublicationOf(row.state.reviewPublication);
+                if (receipt.state === "pending") {
+                  if (row.state.reviewPublication !== undefined) return;
+                  if (!(await publicationWriteAllowed()) || !(await publicationAllowed())) {
+                    const current = await originalPublicationOwner();
+                    if (current && current.state.reviewPublication === undefined) admission.state = "refused";
+                    return;
+                  }
+                } else if (!prior || prior.state !== "pending" || !sameReviewPublication(prior, receipt)) return;
+                if ((await ledgerRun!.commitState({ reviewPublication: receipt })) === "ok")
+                  admission.state = "committed";
+              });
+              if (admission.state === "committed") reviewPublication = structuredClone(receipt);
+              return admission.state;
+            },
+          },
           post: deps.postReviewComment ?? postReviewComment,
           fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
           reply: (text) => io.reply(text),
@@ -3853,6 +3953,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         ...(verdict !== undefined ? { verdict } : {}),
         ...(reviewHead !== undefined ? { reviewHead } : {}),
         ...(dispositions !== undefined ? { dispositions } : {}),
+        ...(reviewPublication !== undefined ? { reviewPublication } : {}),
+        ...(branchReceipts.length > 0 && branchPushReceiptsOf(branchReceipts) !== undefined
+          ? { branchPushReceipts: branchPushReceiptsOf(branchReceipts) }
+          : {}),
         ...(reviewPost !== undefined ? { reviewPost } : {}),
         ...(route !== undefined ? { route } : {}),
         ...(parentRunId !== undefined ? { parentRunId } : {}),

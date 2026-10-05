@@ -1592,3 +1592,29 @@ describe("durable branch publication contract", () => {
     expect(isRunListItem(summary)).toBe(false);
   });
 });
+
+describe("strict terminal review publication", () => {
+  const receipt = {
+    version: 1 as const,
+    runId: "run-1",
+    state: "uncertain" as const,
+    target: { repo: "acme/api", number: 7, commitId: "a".repeat(40) },
+    bodyHash: "b".repeat(64),
+  };
+  it("validates only the original run and exact bounded target without prose", () => {
+    const base = record({ repo: "acme/api", reviewPublication: receipt });
+    expect(isRunRecord(base)).toBe(true);
+    for (const invalid of [
+      { ...receipt, runId: "different" },
+      { ...receipt, bodyHash: "short" },
+      { ...receipt, target: { ...receipt.target, repo: "other/repo" } },
+      { ...receipt, state: "unknown" },
+      { ...receipt, body: "private review bytes" },
+    ])
+      expect(isRunRecord({ ...base, reviewPublication: invalid })).toBe(false);
+  });
+  it("refuses publication receipts on generic listing rows", () => {
+    const { events: _events, ...summary } = record({ repo: "acme/api", reviewPublication: receipt });
+    expect(isRunListItem(summary)).toBe(false);
+  });
+});

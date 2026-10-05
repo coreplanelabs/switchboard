@@ -1,9 +1,22 @@
-import type { PullSweepDeps, SweepGit, SweepPullRequest } from "./pullSweep.js";
+import type {
+  PullSweepDeps,
+  SweepGit,
+  SweepPullRequest,
+  SweepEffectJournal,
+  SweepNativeCall,
+  SweepEffects,
+} from "./pullSweep.js";
+import { isUnitEffectOutcome, type UnitEffectCompletionOutcome } from "./coordinator/unitEffect.js";
 import type { SweepOrigin } from "./commands/pulls.js";
 import { parsePlanBranch } from "./ship/coordinator.js";
 import { LGTM_TOKEN } from "./reviewVerdict.js";
 import { sameCommit } from "./reviewedHead.js";
-import type { OpenPullRequestRow, PullRequestFacts, PullRequestReview } from "../execution/githubPulls.js";
+import type {
+  GithubWriteResult,
+  OpenPullRequestRow,
+  PullRequestFacts,
+  PullRequestReview,
+} from "../execution/githubPulls.js";
 
 // The pull sweep's production wiring (record 0071, mechanism two; issue 2067;
 // docs/reference/specs/agent-ship.md item 20): fills `PullSweepDeps` for
@@ -34,11 +47,18 @@ export interface SweepGithub {
    *  with the LGTM token, so the approval read must know who "the bot" is. */
   selfIdentity(): Promise<{ login: string; id?: number } | undefined>;
   /** Post a review pinned to a commit (`postReviewComment`) — the carry. */
-  postReview(target: { repo: string; number: number; commitId?: string }, body: string): Promise<void>;
+  postReview(
+    target: { repo: string; number: number; commitId?: string },
+    body: string,
+  ): Promise<GithubWriteResult | void>;
   /** The description as GitHub has it (`fetchPullRequestTitleBody`). */
   titleBody(pr: { repo: string; number: number }): Promise<{ title: string; body: string } | undefined>;
   /** Replace the description (`updatePullRequest`) — the anchor regeneration. */
-  update(pr: { repo: string; number: number }, patch: { title: string; body: string }): Promise<void>;
+  update(
+    pr: { repo: string; number: number },
+    patch: { title: string; body: string },
+    target: { headSha: string; headRef: string; baseRef: string },
+  ): Promise<GithubWriteResult | void>;
 }
 
 /** One request handed to `dispatch()` — the model rung's and the delta
@@ -53,9 +73,11 @@ export interface SweepDispatchRequest {
 export interface PullSweepWiringDeps {
   github: SweepGithub;
   git: SweepGit;
-  /** `dispatch()` bound by src/index.ts (invariant 3): starts the run and
-   *  returns; the sweep never waits on the round's outcome. */
-  dispatch(request: SweepDispatchRequest): Promise<void>;
+  /** Original child admission receipt, never a void send acknowledgment. */
+  dispatchEffect?(request: SweepDispatchRequest): Promise<UnitEffectCompletionOutcome>;
+  effect?: SweepEffectJournal;
+  /** The existing durable maintenance owner supplies spend and child admission. */
+  maintenance?: Pick<SweepEffects, "modelRoundSpent" | "startModelRound">;
   /** Who asked for the sweep — the model round runs as this requester, on the
    *  sweep's own thread key so it never folds into an unrelated conversation. */
   origin: SweepOrigin;
@@ -64,15 +86,6 @@ export interface PullSweepWiringDeps {
   /** Whether a live ship runner currently owns this pull request. A command
    *  sweep defers; the runner invokes the same resolver in runner mode. */
   runnerOwns?: (pr: SweepPullRequest) => Promise<boolean>;
-  /** Shared across the process's per-requester services, so an unowned pull
-   *  request buys its one sweep model round once no matter who sweeps. Runner
-   *  mode returns conflicts to the lease-bounded pipeline instead. */
-  state?: SweepSharedState;
-}
-
-/** What outlives one requester's service: the spent-round flags. */
-export interface SweepSharedState {
-  roundSpent: Set<string>;
 }
 
 const prUrl = (pr: SweepPullRequest): string => `https://github.com/${pr.repo}/pull/${pr.number}`;
@@ -91,16 +104,6 @@ const blobLink = (repo: string): RegExp =>
 /** `PullSweepDeps` over the seams — what `createPullSweepService` runs on. */
 export function buildPullSweepDeps(deps: PullSweepWiringDeps): PullSweepDeps {
   const owns = deps.owns ?? ((branch: string) => parsePlanBranch(branch) !== undefined);
-  const roundSpent = deps.state?.roundSpent ?? new Set<string>();
-  const key = (pr: SweepPullRequest): string => `${pr.repo}#${pr.number}`;
-  const send = async (pr: SweepPullRequest, text: string): Promise<void> => {
-    await deps.dispatch({
-      channelId: deps.origin.channelId ?? "http:pulls",
-      userId: deps.origin.userId,
-      threadKey: sweepThreadKey(pr),
-      text,
-    });
-  };
   // The bot's identity, looked up once per process and shared across sweeps —
   // the underlying resolver caches too, this just avoids a call per pull request.
   let self: Promise<{ login: string; id?: number } | undefined> | undefined;
@@ -149,46 +152,83 @@ export function buildPullSweepDeps(deps: PullSweepWiringDeps): PullSweepDeps {
     },
     ...(deps.runnerOwns ? { runnerOwns: deps.runnerOwns } : {}),
     git: deps.git,
+    ...(deps.effect ? { effect: deps.effect } : {}),
     effects: {
-      async carryApproval(pr, newHead) {
-        // The merge door and the auto-approve workflow both read a review by
-        // the bot pinned to the head whose body starts with the LGTM token —
-        // this post is the carry, nothing else is.
-        await deps.github.postReview(
-          { repo: pr.repo, number: pr.number, commitId: newHead },
-          `${LGTM_TOKEN} approval carried across a rebase onto \`${pr.base}\` — \`git range-diff\` read the patch byte-identical (every commit pair \`=\`); only the base moved. Carried by \`pulls rebase\` (the sweep of record 0071).`,
-        );
-      },
-      async requestDeltaReview(pr, newHead) {
-        await send(
-          pr,
-          `agent:review ${prUrl(pr)} — delta re-review after \`pulls rebase\`: the rebase onto \`${pr.base}\` changed the patch, so the prior approval does not carry. Review the pull request at head ${newHead}.`,
-        );
-      },
-      async regenerateAnchors(pr, newHead) {
+      async prepareNativeCalls(pr, newHead, options) {
         const current = await deps.github.titleBody({ repo: pr.repo, number: pr.number });
-        if (!current) return;
+        if (!current) throw new Error("pull request description unavailable");
+        const calls: SweepNativeCall[] = [];
         const body = current.body.replace(blobLink(pr.repo), `$1${newHead}$2`);
-        if (body === current.body) return;
-        await deps.github.update({ repo: pr.repo, number: pr.number }, { title: current.title, body });
+        if (body !== current.body)
+          calls.push({ operation: "review_anchor", state: "unstarted", patch: { title: current.title, body } });
+        if (options.carryApproval)
+          calls.push({
+            operation: "approval_reset",
+            state: "unstarted",
+            body: `${LGTM_TOKEN} approval carried across a rebase onto \`${pr.base}\` — \`git range-diff\` read the patch byte-identical (every commit pair \`=\`); only the base moved. Carried by \`pulls rebase\` (the sweep of record 0071).`,
+          });
+        if (options.deltaReview) {
+          if (!deps.dispatchEffect) throw new Error("sweep child admission receipt unavailable");
+          calls.push({
+            operation: "spawn",
+            state: "unstarted",
+            request: {
+              channelId: deps.origin.channelId ?? "http:pulls",
+              userId: deps.origin.userId,
+              threadKey: sweepThreadKey(pr),
+              text: `agent:review ${prUrl(pr)} — delta re-review after \`pulls rebase\`: the rebase onto \`${pr.base}\` changed the patch, so the prior approval does not carry. Review the pull request at head ${newHead}.`,
+            },
+          });
+        }
+        return calls;
       },
-      // In-memory, like the sweep's own per-repository bound: the sweep runs
-      // where the command registry runs, and every round is bounded by its own
-      // lease regardless — a bot restart forgets the flag, never the bound.
+      canPerformNativeCall(plan, index) {
+        const op = plan.calls[index]?.operation;
+        return op === "review_anchor"
+          ? typeof deps.github.update === "function"
+          : op === "approval_reset"
+            ? typeof deps.github.postReview === "function"
+            : op === "spawn"
+              ? typeof deps.dispatchEffect === "function"
+              : false;
+      },
+      async performNativeCall(plan, index) {
+        const call = plan.calls[index];
+        if (!call) return { state: "uncertain" };
+        let native: GithubWriteResult | void;
+        if (call.operation === "review_anchor")
+          native = await deps.github.update({ repo: plan.pr.repo, number: plan.pr.number }, call.patch, {
+            headSha: plan.newHead,
+            headRef: plan.pr.branch,
+            baseRef: plan.pr.base,
+          });
+        else if (call.operation === "approval_reset")
+          native = await deps.github.postReview(
+            { repo: plan.pr.repo, number: plan.pr.number, commitId: plan.newHead },
+            call.body,
+          );
+        else if (call.operation === "spawn") {
+          const result = await deps.dispatchEffect?.(call.request);
+          return isUnitEffectOutcome(result) &&
+            (result.state === "refused"
+              ? result.cause === "external_refused"
+              : result.state !== "accepted" || (result.runId !== undefined && result.commitSha === undefined))
+            ? (result as UnitEffectCompletionOutcome)
+            : { state: "uncertain" };
+        } else return { state: "uncertain" };
+        return native?.state === "accepted"
+          ? { state: "accepted" }
+          : native?.state === "refused"
+            ? { state: "refused", cause: "external_refused" }
+            : { state: "uncertain" };
+      },
       async modelRoundSpent(pr) {
-        return roundSpent.has(key(pr));
+        if (!deps.maintenance) throw new Error("durable sweep maintenance adapter unavailable");
+        return deps.maintenance.modelRoundSpent(pr);
       },
       async startModelRound(pr, bounds) {
-        try {
-          await send(
-            pr,
-            `agent:coding budget:${bounds.leaseMinutes} — \`pulls rebase\` fix round for ${prUrl(pr)}: rebase branch \`${pr.branch}\` of ${pr.repo} onto \`${pr.base}\` and resolve the conflicts git could not take. Work on the pull request's own branch, follow the repository's AGENTS.md (regenerate only what it names as generated), run the fast gates, and force-push with lease. Never merge and never approve.`,
-          );
-        } catch (err) {
-          return { started: false, reason: err instanceof Error ? err.message : String(err) };
-        }
-        roundSpent.add(key(pr));
-        return { started: true };
+        if (!deps.maintenance) return { started: false, reason: "durable sweep maintenance adapter unavailable" };
+        return deps.maintenance.startModelRound(pr, bounds);
       },
     },
   };

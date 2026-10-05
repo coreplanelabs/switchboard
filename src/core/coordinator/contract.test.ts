@@ -663,6 +663,36 @@ describe("isCoordinatorUnit — one unit's row", () => {
 });
 
 describe("sendRunFinished — the event a terminal record sends", () => {
+  it("never addresses a native Workflow for an explicitly typed maintenance child", async () => {
+    let calls = 0;
+    const sender: WorkflowSender = {
+      get: async () => {
+        calls++;
+        throw new Error("must not get");
+      },
+    };
+    const maintenanceActionId = "m_" + "a".repeat(64);
+    expect(
+      await sendRunFinished(sender, {
+        id: "real-child",
+        status: "completed",
+        finishedAt: 2,
+        parentInstanceId: "logical_owner",
+        maintenanceActionId,
+      }),
+    ).toEqual({ kind: "no-binding", instance: "logical_owner" });
+    expect(
+      await sendChildSignal(sender, {
+        runId: "real-child",
+        parentInstanceId: "logical_owner",
+        maintenanceActionId,
+        kind: "resumed",
+        reason: "reclaimed",
+        at: 2,
+      }),
+    ).toEqual({ kind: "no-binding", instance: "logical_owner" });
+    expect(calls).toBe(0);
+  });
   function workflow(behaviour: "ok" | "not-running" = "ok") {
     const sent: Array<{ instance: string; type: string; payload: unknown }> = [];
     const sender: WorkflowSender = {

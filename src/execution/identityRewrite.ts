@@ -25,6 +25,13 @@ import {
 } from "./githubPulls.js";
 import { resolveGithubIdentity } from "./githubApp.js";
 import { bindingOf, type BindingSource, type GithubBinding } from "./authorBinding.js";
+import type { GitPublicationClaim, GitPublicationUpdate } from "../core/modelProxy/gitBindings.js";
+
+/** The original run's existing publication recorder owns the exact remote
+ * transition; commit creation alone grants no authority to move a ref. */
+export interface IdentityRefPublication {
+  begin(target: { repo: string; update: GitPublicationUpdate }): Promise<GitPublicationClaim | undefined>;
+}
 
 /** One exact `(name, email)` pair — the whole identity the rewrite judges. */
 export interface IdentityPair {
@@ -94,7 +101,7 @@ export interface RewriteApi {
       tree: string;
       parents: string[];
       author: { name: string; email: string; date: string };
-      committer: { name: string; email: string };
+      committer: { name: string; email: string; date?: string };
     },
   ): Promise<string>;
   forceMoveRef(repo: string, branch: string, sha: string, expectedSha: string): Promise<void>;
@@ -123,6 +130,7 @@ export interface RewriteInput {
    *  author env is enabled and the requester has a binding. */
   requester?: IdentityPair;
   api: RewriteApi;
+  refPublication?: IdentityRefPublication;
   /** Judge an already published exact head without creating commits or moving its ref. */
   readOnly?: true;
 }
@@ -202,8 +210,8 @@ function scrubMessage(message: string, allowed: { bot: IdentityPair; requester?:
     .join("\n");
 }
 
-/** A ruleset's refusal of the rebuild or the ref move (force pushes blocked,
- *  signed commits required): HTTP 422 or 409 — unreadable with the rule named. */
+/** A commit rebuild's refusal is displayed as an unreadable preparation.
+ * This text never classifies the later remote ref mutation's outcome. */
 function rulesetRefusal(err: unknown): string | undefined {
   const message = err instanceof Error ? err.message : String(err);
   return /HTTP (?:422|409)\b/.test(message) ? message : undefined;
@@ -215,7 +223,7 @@ function rulesetRefusal(err: unknown): string | undefined {
  * state, judge each against the allowed identities, and — from the first
  * commit that fails through the tip — rebuild the chain over the Git Data API
  * with the same trees and the committer as the bot pair, conditionally move
- * the ref, then re-read and require every run commit to pass. A tip that
+ * the ref under the original durable publication claim, then re-read and require every run commit to pass. A tip that
  * moved since the caller observed it, or after our ref move, is unreadable.
  */
 export async function rewriteRunCommits(input: RewriteInput): Promise<RewriteResult> {
@@ -315,7 +323,7 @@ export async function rewriteRunCommits(input: RewriteInput): Promise<RewriteRes
           author: keepAuthor
             ? { ...commit.author }
             : { name: correctedAuthor.name, email: correctedAuthor.email, date: commit.author.date },
-          committer: { name: allowed.bot.name, email: allowed.bot.email },
+          committer: { name: allowed.bot.name, email: allowed.bot.email, date: commit.author.date },
         });
       } catch (err) {
         const rule = rulesetRefusal(err);
@@ -328,16 +336,22 @@ export async function rewriteRunCommits(input: RewriteInput): Promise<RewriteRes
     }
     const newTip = rebuilt.get(runCommits[runCommits.length - 1].sha);
     if (newTip === undefined) return { kind: "unreadable", reason: "the rebuild produced no tip" };
+    if (tip === undefined) return { kind: "unreadable", reason: "the branch compare named no current tip" };
+    const claim = await input.refPublication
+      ?.begin({
+        repo: input.repo,
+        update: { ref: `refs/heads/${input.branch}`, old: tip, next: newTip },
+      })
+      .catch(() => undefined);
+    if (!claim) return { kind: "unreadable", reason: "the original ref publication could not be admitted durably" };
     try {
-      if (tip === undefined) return { kind: "unreadable", reason: "the branch compare named no current tip" };
       await input.api.forceMoveRef(input.repo, input.branch, newTip, tip);
-    } catch (err) {
-      const rule = rulesetRefusal(err);
-      return {
-        kind: "unreadable",
-        reason: rule ?? `the ref move failed: ${err instanceof Error ? err.message : String(err)}`,
-      };
+    } catch {
+      await claim.finish("unknown").catch(() => false);
+      return { kind: "unreadable", reason: "the original ref publication outcome remains unverified" };
     }
+    if (!(await claim.finish("accepted").catch(() => false)))
+      return { kind: "unreadable", reason: "the original ref publication acceptance could not be committed durably" };
     rebuilds += 1;
     expectedTip = newTip;
     // The re-read requires the ref to stay at the tip we just wrote and every
@@ -359,6 +373,7 @@ export interface DispatchIdentityRewrite {
     expectedTip?: string;
     startState: BranchStartState;
     requester: string;
+    refPublication?: IdentityRefPublication;
   }): Promise<RewriteResult>;
   verify?(args: {
     repo: string;
@@ -383,7 +398,7 @@ export interface DispatchIdentityRewrite {
 export function dispatchIdentityRewrite(store: BindingSource): DispatchIdentityRewrite {
   return {
     readStartState: (repo, base, branch) => readBranchStartState(repo, base, branch, compareRange),
-    rewrite: async ({ repo, base, branch, expectedTip, startState, requester }) => {
+    rewrite: async ({ repo, base, branch, expectedTip, startState, requester, refPublication }) => {
       const bot = await resolveGithubIdentity();
       // The authoritative read: `fresh` bypasses the binding's TTL cache, so a
       // rename inside the exec path's window is still refused before the PR
@@ -399,6 +414,7 @@ export function dispatchIdentityRewrite(store: BindingSource): DispatchIdentityR
         bot: bot !== undefined ? pairOfBinding(bot) : undefined,
         ...(requesterPair !== undefined ? { requester: requesterPair } : {}),
         api: { compareRange, createCommit, forceMoveRef },
+        ...(refPublication ? { refPublication } : {}),
       });
     },
     verify: async ({ repo, base, branch, expectedTip, startState, requester }) => {

@@ -2332,6 +2332,32 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     ]);
   });
 
+  it("a consumed recovery refusal ends the unit with its native reason without renewal or another child", async () => {
+    for (const status of ["failed", "completed"] as const) {
+      const s = steps({ "U10/0/coding/wait/1": "event" });
+      const b = bot({
+        plan: [planAnswer([row("U10")])],
+        "unit-start": [started("U10")],
+        branch: [branched("U10")],
+        spawn: [spawned("run-c0")],
+        "read-record": [record({ id: "run-c0", finished: true, status }, T0 + 5 * MIN)],
+        "pr-check": [
+          prNone(),
+          ok({ ok: true, state: "none", unrecovered: "external_refused", effectOrdinal: 3 }, T0 + 6 * MIN),
+        ],
+        round: [acked(), acked()],
+        "unit-end": [acked()],
+        finish: [acked()],
+      });
+      const summary = await runPlan(s.runner, b.client, INSTANCE);
+      expect(summary.units).toEqual({ U10: "aborted" });
+      const [end] = b.of("unit-end") as Array<{ ending: { report: string } }>;
+      expect(end.ending.report).toContain("GitHub definitively refused the recovery publication");
+      expect(b.wireOf("spawn")).toHaveLength(1);
+      expect(b.wireOf("pr-check")[1]?.effectOrdinal).toBe(3);
+    }
+  });
+
   it("a failed coding child whose recover pr-check answers none with a reason carries that reason into the abort — the parse keeps `unrecovered`", async () => {
     const s = steps({ "U10/0/coding/wait/1": "event" });
     const b = bot({
@@ -3493,7 +3519,7 @@ describe("the plan runner's driver — the entry checks resume a re-issued plan'
     expect(b.of("spawn")).toEqual([]);
   });
 
-  it("an empty required-check launch carries the one pull_request refire through the Workflow step and records checks restarted on the round before the re-read", async () => {
+  it("an empty required-check launch reasks pending effect reconciliation before recording the refire", async () => {
     const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
     const empty = {
       total: 1,
@@ -3512,6 +3538,7 @@ describe("the plan runner's driver — the entry checks resume a re-issued plan'
       checks: [
         ok({ ok: true, checks: empty }, T0 + 20 * MIN),
         ok({ ok: true, checks: empty }, T0 + 25 * MIN),
+        ok({ ok: false, error: "effect_reconciliation_pending" }, T0 + 25 * MIN, 503),
         ok({ ok: true, refired: true }, T0 + 25 * MIN),
         ok({ ok: true, checks: { total: 3, pending: [], failed: [], required: empty.required } }, T0 + 26 * MIN),
       ],
@@ -3526,12 +3553,14 @@ describe("the plan runner's driver — the entry checks resume a re-issued plan'
       { parentInstanceId: INSTANCE, unit: "U10", prNumber: 7, headSha: HEAD },
       { parentInstanceId: INSTANCE, unit: "U10", prNumber: 7, headSha: HEAD },
       { parentInstanceId: INSTANCE, unit: "U10", prNumber: 7, headSha: HEAD, refire: true },
+      { parentInstanceId: INSTANCE, unit: "U10", prNumber: 7, headSha: HEAD, refire: true },
       { parentInstanceId: INSTANCE, unit: "U10", prNumber: 7, headSha: HEAD },
     ]);
     expect(b.of("round")).toContainEqual(
       expect.objectContaining({ unit: "U10", index: 1, agent: "review", outcome: "checks_restarted" }),
     );
-    expect(b.wireOf("checks")[3].effectOrdinal).toBe((b.wireOf("checks")[2].effectOrdinal as number) + 1);
+    expect(b.wireOf("checks")[3].effectOrdinal).toBe(b.wireOf("checks")[2].effectOrdinal);
+    expect(b.wireOf("checks")[4].effectOrdinal).toBe((b.wireOf("checks")[3].effectOrdinal as number) + 1);
   });
 
   it("refuses a positive check recovery wire reply without its next exact effect ordinal", async () => {
@@ -4454,6 +4483,28 @@ describe("the plan runner's driver — the hosted parent's hard stop stops the r
 });
 
 describe("Workflow effect receipt ordinals", () => {
+  it("consumes a recovered pull creation ordinal before the next review child", async () => {
+    const recovered = prOpen(T0 + 10 * MIN);
+    const b = bot({
+      plan: [planAnswer([row("U10")], T0, "runner")],
+      "unit-start": [started("U10")],
+      branch: [ok({ ok: true, effectOrdinal: 0 })],
+      spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN)],
+      "read-record": [codingDone("run-c0", T0 + 10 * MIN), reviewApproved("run-r1", T0 + 20 * MIN)],
+      "pr-check": [
+        prNone(),
+        { ...recovered, text: JSON.stringify({ ...JSON.parse(recovered.text), effectOrdinal: 2 }) },
+      ],
+      round: [acked(), acked(), acked(), acked()],
+      merge: [ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + 21 * MIN)],
+      "unit-end": [acked()],
+      finish: [acked()],
+    });
+    const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
+    await runPlan(s.runner, b.client, INSTANCE);
+    expect(b.wireOf("spawn")[1]?.effectOrdinal).toBe(3);
+  });
+
   function flow(branch: BotReply, spawn: BotReply) {
     const b = bot({
       plan: [planAnswer([row("U10")], T0, "person", { generated: true })],

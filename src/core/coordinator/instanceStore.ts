@@ -10,7 +10,17 @@
 // null store, which knows no instance and refuses every write by name.
 
 import { isRunRecord } from "../runRecord.js";
+import {
+  isMaintenanceAdmissionInput,
+  isMaintenanceAdmissionResult,
+  prepareMaintenanceAdmission,
+  planMaintenanceAdmission,
+  maintenanceAdmissionMatches,
+  type MaintenanceAdmissionInput,
+  type MaintenanceAdmissionResult,
+} from "./maintenanceAdmission.js";
 import { isCoordinatorReportAdmission } from "./reportAdmission.js";
+import { coordinatorReportCanReconcile } from "./reportReconcileEligibility.js";
 import type { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { PLANE_EFFECTS_TOTAL_CAP } from "../plane/decide.js";
 import {
@@ -140,6 +150,8 @@ function mainTaskUnitSnapshot(rows: unknown, key: UnitEventKey): MainTaskUnitSna
 }
 
 export interface CoordinatorInstanceStore {
+  /** Reserve the same unit cell from an already authorized command or native watch intent. */
+  admitMaintenance(input: MaintenanceAdmissionInput): Promise<MaintenanceAdmissionResult>;
   /** Complete canonical owner snapshot; reservation must share this owner transaction. */
   findPullOwners(target: PullTarget): Promise<PullOwnersResult>;
   /** Native ended execution discovery persists an exact existing outbox offer. */
@@ -235,10 +247,39 @@ export interface CoordinatorInstanceStore {
 const unitKey = (u: Pick<CoordinatorUnit, "instanceId" | "unit">) => `${u.instanceId}\0${u.unit}`;
 
 export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStore {
+  async admitMaintenance(input: MaintenanceAdmissionInput): Promise<MaintenanceAdmissionResult> {
+    if (!isMaintenanceAdmissionInput(input)) return { ok: false, reason: "conflict" };
+    try {
+      const prepared = await prepareMaintenanceAdmission(input);
+      if (!this.runOwner) return { ok: false, reason: "unavailable" };
+      const rows = this.pullOwnershipRows();
+      const result = planMaintenanceAdmission(
+        prepared,
+        rows,
+        [...this.rows.values()].map((row) => JSON.parse(row)),
+      );
+      if (!result.ok || result.replayed) return result;
+      const existing = this.rows.get(result.instance.id);
+      if (existing !== undefined && JSON.stringify(JSON.parse(existing)) !== JSON.stringify(result.instance))
+        return { ok: false, reason: "stale" };
+      // The complete scan and both owner rows share this synchronous mutation.
+      this.rows.set(result.instance.id, JSON.stringify(result.instance));
+      this.units.set(unitKey(result.unit), JSON.stringify(result.unit));
+      return result;
+    } catch {
+      return { ok: false, reason: "incomplete" };
+    }
+  }
   constructor(
     private readonly runOwner?: Pick<
       InMemoryRunLedger,
-      "live" | "finished" | "events" | "finishedWorkEvidence" | "workspacePublicationRows" | "planeOffers"
+      | "live"
+      | "finished"
+      | "events"
+      | "finishedWorkEvidence"
+      | "workspacePublicationRows"
+      | "planeOffers"
+      | "readSessionEntry"
     >,
     private readonly workflowStatus?: (workflowId: string) => Promise<string | undefined>,
   ) {}
@@ -259,7 +300,9 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     const effect = await coordinatorReconciliationEffect(instance, unit, action ?? undefined);
     if (this.runOwner.planeOffers.has(effect.id)) return { offered: false };
     const status = await this.workflowStatus(effect.workflowId);
+    const eligible = await coordinatorReportCanReconcile(this.runOwner, instance, unit, action ?? undefined);
     if (
+      !eligible ||
       !coordinatorWorkflowCanReconcile(instance, unit, action ?? undefined, status) ||
       this.rows.get(instance.id) !== JSON.stringify(instance) ||
       this.units.get(unitKey(unit)) !== JSON.stringify(unit)
@@ -761,6 +804,9 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
 /** Without a durable state Worker, writes refuse and unit-owner reads are
  *  unavailable rather than evidence that the instance has no units. */
 export class NullCoordinatorInstanceStore implements CoordinatorInstanceStore {
+  async admitMaintenance(): Promise<MaintenanceAdmissionResult> {
+    return { ok: false, reason: "unavailable" };
+  }
   async offerReconciliation(): Promise<{ offered: boolean }> {
     return { offered: false };
   }
@@ -877,6 +923,21 @@ export interface WorkerCoordinatorInstanceStoreOptions {
  *  the run store's client. An answer this client cannot read is thrown, never
  *  read as "no instance": a spawn on a guess would be a spawn nobody asked for. */
 export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore {
+  async admitMaintenance(input: MaintenanceAdmissionInput): Promise<MaintenanceAdmissionResult> {
+    if (!isMaintenanceAdmissionInput(input)) return { ok: false, reason: "conflict" };
+    try {
+      const response = await this.post("/runs/coordinator/maintenance/admit", { input });
+      if (!isMaintenanceAdmissionResult(response.data)) return { ok: false, reason: "unavailable" };
+      const result = response.data;
+      if (!result.ok) return response.status === 409 ? result : { ok: false, reason: "unavailable" };
+      const prepared = await prepareMaintenanceAdmission(input);
+      if (response.status !== 200 || !maintenanceAdmissionMatches(prepared, result))
+        return { ok: false, reason: "unavailable" };
+      return result;
+    } catch {
+      return { ok: false, reason: "unavailable" };
+    }
+  }
   async offerReconciliation(key: UnitEventKey): Promise<{ offered: boolean }> {
     const response = await this.post("/runs/coordinator/reconcile/offer", { ...key });
     const result = response.data as { offered?: unknown };

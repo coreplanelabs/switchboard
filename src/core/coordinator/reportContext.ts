@@ -14,7 +14,7 @@ export {
   type CoordinatorReportOwner,
   type CoordinatorReportAdmission,
 } from "./reportAdmission.js";
-const canonicalOwner = (o: CoordinatorReportOwner): CoordinatorReportOwner => ({
+export const coordinatorReportOwnerIdentity = (o: CoordinatorReportOwner): CoordinatorReportOwner => ({
   instanceId: o.instanceId,
   unit: o.unit,
   attempt: o.attempt,
@@ -27,7 +27,7 @@ export async function coordinatorReportAdmission(
   owner: CoordinatorReportOwner,
   proposed: { text: string; threadText: string },
 ): Promise<CoordinatorReportAdmission> {
-  const identity = canonicalOwner(owner);
+  const identity = coordinatorReportOwnerIdentity(owner);
   return {
     version: 1,
     owner: identity,
@@ -41,11 +41,12 @@ export async function sameCoordinatorReportAdmission(
   return (
     isCoordinatorReportAdmission(a) &&
     a.proposalHash === b.proposalHash &&
-    (await sourceHash(canonicalOwner(a.owner))) === (await sourceHash(canonicalOwner(b.owner)))
+    (await sourceHash(coordinatorReportOwnerIdentity(a.owner))) ===
+      (await sourceHash(coordinatorReportOwnerIdentity(b.owner)))
   );
 }
 export function sameCoordinatorReportOwner(a: CoordinatorReportOwner, b: CoordinatorReportOwner): boolean {
-  return JSON.stringify(canonicalOwner(a)) === JSON.stringify(canonicalOwner(b));
+  return JSON.stringify(coordinatorReportOwnerIdentity(a)) === JSON.stringify(coordinatorReportOwnerIdentity(b));
 }
 export async function freezeAdmittedCoordinatorReport(
   ledger: CoordinatorReportLedger,
@@ -66,7 +67,7 @@ export async function readCoordinatorReport(
   owner: CoordinatorReportOwner,
 ): Promise<{ text: string; threadText: string } | undefined> {
   const key = contextThreadSessionKey(owner.threadKey);
-  const identity = canonicalOwner(owner);
+  const identity = coordinatorReportOwnerIdentity(owner);
   const rowId = `coordinator-report:${await sourceHash(identity)}`;
   let rows = await ledger.readSessionEntry(key, rowId);
   // An original caller can still name its exact historical row. Validate its
@@ -83,7 +84,7 @@ export async function readCoordinatorReport(
     row.coordinatorReport?.version !== 1 ||
     typeof row.coordinatorReport.threadText !== "string" ||
     !isCoordinatorReportAdmission({ version: 1, owner: row.coordinatorReport.owner, proposalHash: "0".repeat(64) }) ||
-    (await sourceHash(canonicalOwner(row.coordinatorReport.owner))) !== (await sourceHash(identity)) ||
+    (await sourceHash(coordinatorReportOwnerIdentity(row.coordinatorReport.owner))) !== (await sourceHash(identity)) ||
     (await sourceHash(row.context)) !== (await sourceHash(UNKNOWN_CONTEXT_DEPENDENCIES))
   )
     throw new Error("coordinator report snapshot does not match its original delivery");
@@ -98,14 +99,14 @@ export async function freezeCoordinatorReport(
   proposed: { text: string; threadText: string },
 ): Promise<{ text: string; threadText: string }> {
   const key = contextThreadSessionKey(owner.threadKey);
-  const rowId = `coordinator-report:${await sourceHash(canonicalOwner(owner))}`;
+  const rowId = `coordinator-report:${await sourceHash(coordinatorReportOwnerIdentity(owner))}`;
   const previous = await readCoordinatorReport(ledger, owner);
   if (previous) return previous;
   const json = JSON.stringify({
     ...JSON.parse(
       storedTurnRow({ role: "assistant", text: proposed.text, folded: true, context: UNKNOWN_CONTEXT_DEPENDENCIES }),
     ),
-    coordinatorReport: { version: 1, owner: canonicalOwner(owner), threadText: proposed.threadText },
+    coordinatorReport: { version: 1, owner: coordinatorReportOwnerIdentity(owner), threadText: proposed.threadText },
   });
   const appended = await ledger.appendSession(key, rowId, [{ part: 0, json }], UNKNOWN_CONTEXT_DEPENDENCIES);
   if (!appended.ok) throw new Error("coordinator report persistence was not acknowledged");

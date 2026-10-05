@@ -77,6 +77,29 @@ const lastStep: StepRecord = {
 };
 
 describe("carriedWorkspaceBinding: where the row says the run's workspace is", () => {
+  it("retains a maintenance action from original metadata and refuses conflicting or erased event transport", () => {
+    const maintenanceActionId = "m_" + "a".repeat(64);
+    const r = row(
+      {},
+      {
+        parentInstanceId: "logical_owner",
+        idempotencyKey: `logical_owner:ONE/maintenance/${maintenanceActionId}`,
+        coordinatorUnit: "ONE",
+        maintenanceActionId,
+      },
+    );
+    expect(carriedCoordinatorTag(r, [])?.maintenanceActionId).toBe(maintenanceActionId);
+    const tag = {
+      type: "coordinator_tag" as const,
+      parentInstanceId: "logical_owner",
+      unit: "ONE",
+      maintenanceActionId,
+    };
+    expect(carriedCoordinatorTag(r, [tag])?.maintenanceActionId).toBe(maintenanceActionId);
+    expect(() => carriedCoordinatorTag(r, [{ ...tag, maintenanceActionId: "m_" + "b".repeat(64) }])).toThrow();
+    expect(() => carriedCoordinatorTag(r, [{ ...tag, transportWorkflowId: "fake_workflow" }])).toThrow();
+    expect(() => carriedCoordinatorTag({ ...r, meta: { ...r.meta, maintenanceActionId: undefined } }, [tag])).toThrow();
+  });
   it("reads the binding the claim recorded on the row's state", () => {
     const r = row({
       state: {

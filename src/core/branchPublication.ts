@@ -1,7 +1,12 @@
+import { reviewPublicationOf } from "./reviewPublication.js";
 import { parsePushed, PUSHED_MAX, type PushedBranch } from "../execution/residentRebind.js";
 
 export function isPublicationRepo(value: unknown): value is string {
-  return typeof value === "string" && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value);
+  return (
+    typeof value === "string" &&
+    /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value) &&
+    value.split("/").every((part) => part !== "." && part !== "..")
+  );
 }
 
 /** Producer facts retained independently of the bounded display event stream. */
@@ -124,9 +129,12 @@ export function doorPublicationRetentionRequired(value: unknown): boolean {
 export function terminalPublicationRetentionRequired(record: {
   branchPublication?: unknown;
   doorPublicationPending?: unknown;
+  reviewPublication?: unknown;
 }): boolean {
+  const review = reviewPublicationOf(record.reviewPublication);
   return (
     publicationRetentionRequired(record.branchPublication) ||
-    doorPublicationRetentionRequired(record.doorPublicationPending)
+    doorPublicationRetentionRequired(record.doorPublicationPending) ||
+    (record.reviewPublication !== undefined && (!review || review.state === "pending" || review.state === "uncertain"))
   );
 }

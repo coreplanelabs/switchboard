@@ -1,9 +1,11 @@
+import { validMaintenanceTransport, maintenanceEventsMatch } from "./coordinator/maintenanceIdentity.js";
 import {
   branchPublicationOf,
   doorPublicationOf,
   type BranchPublication,
   type DoorPublication,
 } from "./branchPublication.js";
+import { reviewPublicationOf, type ReviewPublicationReceipt } from "./reviewPublication.js";
 import { answerOutcomeOf, type AnswerOutcome } from "./answerOutcome.js";
 import {
   isMainContextRefusalCode,
@@ -96,7 +98,41 @@ export interface RunReference {
   messages: number;
 }
 
+export interface BranchPushReceipt {
+  ref: string;
+  sha: string;
+  by: "push";
+}
+/** Canonical producer history may contain successive writes to one ref. Preserve
+ * its latest exact native acknowledgment; malformed history grants no credit. */
+export function branchPushReceiptsOf(value: unknown): BranchPushReceipt[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const latest = new Map<string, BranchPushReceipt>();
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+    const receipt = raw as Record<string, unknown>;
+    if (
+      Object.keys(receipt).some((key) => !["type", "ref", "sha", "by", "at", "seq"].includes(key)) ||
+      (receipt.type !== undefined && receipt.type !== "pushed_head") ||
+      receipt.by !== "push" ||
+      typeof receipt.ref !== "string" ||
+      receipt.ref.length < 1 ||
+      receipt.ref.length > 512 ||
+      typeof receipt.sha !== "string" ||
+      !/^[a-f0-9]{40}$/.test(receipt.sha) ||
+      (receipt.at !== undefined && (typeof receipt.at !== "number" || !Number.isFinite(receipt.at))) ||
+      (receipt.seq !== undefined && (!Number.isSafeInteger(receipt.seq) || (receipt.seq as number) < 0))
+    )
+      return undefined;
+    latest.set(receipt.ref, { ref: receipt.ref, sha: receipt.sha, by: "push" });
+    if (latest.size > 20) return undefined;
+  }
+  return [...latest.values()];
+}
+
 export interface RunRecord {
+  /** Native ref acknowledgments retained independently of display events; internal readers only. */
+  branchPushReceipts?: BranchPushReceipt[];
   /** Authored-output facts; absent on legacy records means unknown. */
   answerOutcome?: AnswerOutcome;
   /** null preserves a present but invalid canonical receipt; absent is legacy unknown. */
@@ -277,6 +313,7 @@ export interface RunRecord {
    *  carrying it, and `read-record` answers only for a matching instance.
    *  Absent on every run no coordinator spawned. */
   parentInstanceId?: string;
+  maintenanceActionId?: string;
   /** Canonical unit/attempt copied from admitted coordinator state. Zero names
    * the original instance; reissues carry their durable attempt number. */
   coordinatorUnit?: string;
@@ -344,6 +381,8 @@ export interface RunRecord {
    * ref transition until head reconciliation. A PR number exists only for a
    * verified existing-PR publication. */
   branchPublication?: BranchPublication;
+  /** Exact original review publication survives event trimming and terminal recovery. */
+  reviewPublication?: ReviewPublicationReceipt;
   doorPublicationPending?: DoorPublication;
   /** What the run cost in tokens, per model, summed from its `model.turn`
    *  spans at finish (`usageOfEvents`; docs/reference/specs/costs.md, cost by user).
@@ -782,6 +821,8 @@ export type RunListItem = Omit<
   | "contextCheckpointReceipt"
   | "directAudience"
   | "branchPublication"
+  | "reviewPublication"
+  | "branchPushReceipts"
 > & {
   bytes?: number;
 };
@@ -1285,6 +1326,29 @@ export function isRunRecord(v: unknown): v is RunRecord {
   if (r.branchPublication !== undefined && !branchPublicationOf(r.branchPublication, r.repo as string | undefined))
     return false;
   if (r.doorPublicationPending !== undefined && !doorPublicationOf(r.doorPublicationPending)) return false;
+  if (r.branchPushReceipts !== undefined) {
+    const receipts = branchPushReceiptsOf(r.branchPushReceipts);
+    if (
+      !receipts ||
+      typeof r.repo !== "string" ||
+      !Array.isArray(r.branchPushReceipts) ||
+      receipts.length !== r.branchPushReceipts.length ||
+      r.branchPushReceipts.some((raw, index) => {
+        const receipt = raw as Record<string, unknown>;
+        return (
+          Object.keys(receipt).some((key) => !["ref", "sha", "by"].includes(key)) ||
+          receipt.ref !== receipts[index]?.ref ||
+          receipt.sha !== receipts[index]?.sha ||
+          receipt.by !== receipts[index]?.by
+        );
+      })
+    )
+      return false;
+  }
+  if (r.reviewPublication !== undefined) {
+    const receipt = reviewPublicationOf(r.reviewPublication);
+    if (!receipt || receipt.runId !== r.id || receipt.target.repo !== r.repo) return false;
+  }
   // A parent is named by a run id (item 46): the same shape as the record's own.
   if (r.parentRunId !== undefined && (typeof r.parentRunId !== "string" || !RUN_ID_PATTERN.test(r.parentRunId)))
     return false;
@@ -1325,6 +1389,8 @@ export function isRunRecord(v: unknown): v is RunRecord {
   if (r.usage !== undefined && !isRunUsage(r.usage)) return false;
   // A coordinator's child (item 48): the instance id in the platform's alphabet
   // and the key `<instance>:<step>` — both or neither; one alone is no tag.
+  if (!validMaintenanceTransport(r)) return false;
+  if (!maintenanceEventsMatch(r, Array.isArray(r.events) ? r.events : [])) return false;
   if ((r.parentInstanceId === undefined) !== (r.idempotencyKey === undefined)) return false;
   if (
     r.parentInstanceId !== undefined &&
@@ -1414,6 +1480,8 @@ export function isRunListItem(v: unknown): v is RunListItem {
   const r = v as Record<string, unknown>;
   if (
     r.branchPublication !== undefined ||
+    r.reviewPublication !== undefined ||
+    r.branchPushReceipts !== undefined ||
     r.sourceReads !== undefined ||
     r.workReads !== undefined ||
     r.unitSeedReceipt !== undefined ||

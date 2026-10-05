@@ -654,6 +654,9 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
   const publishMeta = (repoCtx: RepoContext) =>
     events.publish({
       type: "run_meta",
+      ...(coordinator?.maintenanceActionId !== undefined
+        ? { maintenanceActionId: coordinator.maintenanceActionId }
+        : {}),
       agent: agent.name,
       agentSource,
       model: resolved.modelRef,
@@ -728,6 +731,9 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
     registry.publish(run.id, {
       type: "coordinator_tag",
       parentInstanceId: coordinator.parentInstanceId,
+      ...(coordinator.maintenanceActionId !== undefined
+        ? { maintenanceActionId: coordinator.maintenanceActionId }
+        : {}),
       ...(coordinator.costCapUsd !== undefined ? { costCapUsd: coordinator.costCapUsd } : {}),
       ...(unit !== undefined ? { unit } : {}),
       ...(coordinator.branch !== undefined ? { branch: coordinator.branch } : {}),
