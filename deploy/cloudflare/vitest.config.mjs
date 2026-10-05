@@ -5,9 +5,10 @@ import { defineConfig } from "vitest/config";
 // over its injected bucket/fetch/pipe (artifactsCopy.test.ts), the scan over
 // the sources for the module boundary the Workflows binding depends on
 // (coordinator.test.ts), and the scan that holds the shim to forwarding the
-// model proxy's paths blind (modelProxyForwarding.test.ts). worker.ts itself is
-// covered by typecheck + the live receipts in the feature files. Also a
-// project of the root vitest.config.ts (`--project worker-bot`).
+// model proxy's paths blind (modelProxyForwarding.test.ts). The container start
+// contract loads worker.ts with the SDK boundary mocked to call its actual
+// fetch override. Live receipts cover the runtime. Also a project of the root
+// vitest.config.ts (`--project worker-bot`).
 export default defineConfig({
   test: {
     name: "worker-bot",
@@ -18,6 +19,8 @@ export default defineConfig({
       "prImages.test.ts",
       "depotCi.test.ts",
       "knownLength.test.ts",
+      "containerStart.test.ts",
+      "containerStartContract.test.ts",
       "coordinator.test.ts",
       "modelProxyForwarding.test.ts",
       "githubDoorForwarding.test.ts",

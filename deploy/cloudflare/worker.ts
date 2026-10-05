@@ -13,6 +13,7 @@ import { githubDoorEdgeRoute } from "../../src/channels/githubDoorPaths.ts";
 // NOT special: a `run` schedule is POSTed to the bot's generic /ingress as the
 // `cron` identity, so it becomes an ordinary run.
 import { Container, getContainer } from "@cloudflare/containers";
+import { isNoContainerInstanceError, noContainerInstanceResponse } from "./containerStart.ts";
 import { parseHealthz } from "../../src/deploy/liveGate.ts";
 import {
   COORDINATOR_AUTHORIZE_PATH,
@@ -197,7 +198,14 @@ export class SwitchboardServer extends Container<Env> {
   }
 
   override async fetch(request: Request): Promise<Response> {
-    await this.startBot();
+    try {
+      await this.startBot();
+    } catch (error) {
+      // Match the SDK's unavailable response before its fetch handler runs.
+      // Retry-After is a hint; GitHub still requires explicit redelivery.
+      if (isNoContainerInstanceError(error)) return noContainerInstanceResponse();
+      throw error;
+    }
     return super.fetch(request);
   }
 
