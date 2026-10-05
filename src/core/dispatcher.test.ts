@@ -5426,7 +5426,7 @@ describe("review post-step", () => {
           severity: "major",
           repo: "acme/api",
           prTarget: { number: 42, source: "request", quote: "https://github.com/acme/api/pull/42" },
-          settingsEvidence: { severity: "major findings" },
+          settingsEvidence: { severity: { quote: "major findings", intent: "requested" } },
           reason: "requested review bar",
         },
       }));
@@ -12262,7 +12262,10 @@ workspaceDir: __WORKDIR__
         shipEntry: "work",
         severity: "major",
         renewals: 2,
-        settingsEvidence: { severity: "major findings", renewals: "two renewals" },
+        settingsEvidence: {
+          severity: { quote: "major findings", intent: "requested" },
+          renewals: { quote: "two renewals", intent: "requested" },
+        },
         reason: "requested review bar",
       },
     }));
@@ -25305,7 +25308,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       proposal?: string;
       proposalSettings?: {
         effort?: "low" | "medium" | "high" | "xhigh" | "max";
-        settingsEvidence?: { effort?: string };
+        settingsEvidence?: { effort?: { quote: string; intent: "requested" | "incidental" } };
       };
     };
   }) =>
@@ -25383,7 +25386,11 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
         effort: "high",
         budget: 25,
         verbosity: "debug",
-        settingsEvidence: { effort: "high effort", budget: "25 minute budget", verbosity: "debug detail" },
+        settingsEvidence: {
+          effort: { quote: "high effort", intent: "requested" },
+          budget: { quote: "25 minute budget", intent: "requested" },
+          verbosity: { quote: "debug detail", intent: "requested" },
+        },
         reason: "requested controls",
       },
     }));

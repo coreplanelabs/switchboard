@@ -1101,7 +1101,11 @@ channels:
           effort: "high",
           budget: 25,
           verbosity: "debug",
-          settingsEvidence: { effort: "high effort", budget: "25 minute budget", verbosity: "debug detail" },
+          settingsEvidence: {
+            effort: { quote: "high effort", intent: "requested" },
+            budget: { quote: "25 minute budget", intent: "requested" },
+            verbosity: { quote: "debug detail", intent: "requested" },
+          },
           reason: "requested controls",
         },
       },
@@ -1129,7 +1133,10 @@ channels:
           severity: "major",
           renewals: 2,
           repo: "acme/api",
-          settingsEvidence: { severity: "major findings", renewals: "two renewals" },
+          settingsEvidence: {
+            severity: { quote: "major findings", intent: "requested" },
+            renewals: { quote: "two renewals", intent: "requested" },
+          },
           reason: "requested review bar",
         },
       },
@@ -1148,7 +1155,7 @@ channels:
           severity: "major",
           repo: "acme/api",
           prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
-          settingsEvidence: { severity: "major findings" },
+          settingsEvidence: { severity: { quote: "major findings", intent: "requested" } },
           reason: "requested review bar",
         },
       },
@@ -1211,7 +1218,7 @@ channels:
           effort: "medium",
           budget: 25,
           verbosity: "verbose",
-          settingsEvidence: { effort: "not in the request" },
+          settingsEvidence: { effort: { quote: "not in the request", intent: "requested" } },
           reason: "answer the question",
         },
       },
@@ -1222,6 +1229,177 @@ channels:
       line: "agent:general What happened with the export?",
       reason: "answer the question",
     });
+  });
+
+  it("incidental severity evidence keeps the exact severity-topic question on general", () => {
+    const requestText = "What does 'major findings' mean in a review report? Answer in one sentence.";
+    const turn = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "general",
+          severity: "major",
+          settingsEvidence: { severity: { quote: "major findings", intent: "incidental" } },
+          reason: "explain the term",
+        },
+      },
+      ctxOf({ requestText, presets: ["general", "review", "ship"] }),
+    );
+    expect(turn).toEqual({
+      kind: "decision",
+      decision: {
+        kind: "binds",
+        binds: [{ line: `agent:general ${requestText}`, reason: "explain the term" }],
+        reason: "explain the term",
+      },
+    });
+  });
+
+  it("incidental effort evidence cannot turn answer length into low effort", () => {
+    const requestText = "What is 2 + 2? Answer in one sentence.";
+    for (const settingsEvidence of [undefined, { effort: { quote: "Answer in one sentence", intent: "incidental" } }]) {
+      const turn = parseOperatorTurn(
+        { tool: OPERATOR_BIND_TOOL, input: { preset: "general", effort: "low", settingsEvidence, reason: "answer" } },
+        ctxOf({ requestText }),
+      );
+      if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("read did not bind");
+      expect(turn.decision.binds[0]).toEqual({ line: `agent:general ${requestText}`, reason: "answer" });
+    }
+  });
+
+  it("quote-only effort evidence requires semantic repair instead of accepting a default", () => {
+    const turn = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: { preset: "general", effort: "low", settingsEvidence: { effort: "Answer" }, reason: "answer" },
+      },
+      ctxOf({ requestText: "What is 2 + 2? Answer in one sentence." }),
+    );
+    expect(turn).toMatchObject({ kind: "violation", violation: expect.stringContaining("settingsEvidence.effort") });
+  });
+
+  it("repairs quote-only settings evidence while preserving the exact requester action", async () => {
+    for (const [text, setting, value, quote, intent] of [
+      [
+        "What does 'major findings' mean in a review report? Answer in one sentence.",
+        "severity",
+        "major",
+        "major findings",
+        "incidental",
+      ],
+      ["What is 2 + 2? Answer in one sentence.", "effort", "low", "Answer", "incidental"],
+      ["Use high effort. What is 2 + 2? Answer in one sentence.", "effort", "high", "high effort", "requested"],
+    ] as const) {
+      const model = vi.fn<RouteModel>(async (prompt) => {
+        if (!prompt.retries?.length)
+          return {
+            tool: OPERATOR_BIND_TOOL,
+            input: { preset: "general", [setting]: value, settingsEvidence: { [setting]: quote }, reason: "answer" },
+          };
+        expect(prompt.retries.at(-1)?.violation).toContain(`settingsEvidence.${setting}`);
+        expect(prompt.retries.at(-1)?.violation).toContain("incidental");
+        expect(prompt.retries.at(-1)?.violation).toContain("Keep the requested action");
+        return {
+          tool: OPERATOR_BIND_TOOL,
+          input: {
+            preset: "general",
+            [setting]: value,
+            settingsEvidence: { [setting]: { quote, intent } },
+            reason: "answer",
+          },
+        };
+      });
+      const answer = await runOperator(input({ text, projection: projectionOf(["general", "review", "ship"]) }), model);
+      expect(model).toHaveBeenCalledTimes(2);
+      expect(answer.attempts).toMatchObject([{ outcome: "violation" }, { outcome: "accepted" }]);
+      expect(answer.decision).toEqual({
+        kind: "binds",
+        binds: [
+          { line: `agent:general ${text}`, reason: "answer", ...(intent === "requested" ? { effort: "high" } : {}) },
+        ],
+        reason: "answer",
+      });
+    }
+  });
+
+  it("directive settings with requested intent retain all five controls", () => {
+    const settings = { effort: "high", budget: 25, severity: "major", renewals: 2, verbosity: "debug" };
+    const requestText = "Ship this with effort:high budget:25 severity:major renewals:2 verbosity:debug";
+    const settingsEvidence = Object.fromEntries(
+      Object.entries(settings).map(([name, value]) => [name, { quote: `${name}:${value}`, intent: "requested" }]),
+    );
+    const turn = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: { preset: "ship", shipEntry: "work", ...settings, settingsEvidence, reason: "work" },
+      },
+      ctxOf({ requestText, presets: ["ship"] }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("work did not bind");
+    expect(turn.decision.binds[0]).toEqual({
+      line: `agent:ship ${requestText}`,
+      shipEntry: "work",
+      ...settings,
+      reason: "work",
+    });
+  });
+
+  it("settings evidence requires an exact quote and a supported intent", () => {
+    const requestText = "Use high effort to answer this.";
+    for (const evidence of [
+      { quote: "high effort" },
+      { quote: "high effort", intent: "default" },
+      { quote: 1, intent: "requested" },
+    ]) {
+      expect(
+        parseOperatorTurn(
+          {
+            tool: OPERATOR_BIND_TOOL,
+            input: { preset: "general", effort: "high", settingsEvidence: { effort: evidence } },
+          },
+          ctxOf({ requestText }),
+        ),
+      ).toMatchObject({ kind: "violation" });
+    }
+    const turn = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "general",
+          effort: "high",
+          settingsEvidence: { effort: { quote: "low effort", intent: "requested" } },
+          reason: "answer",
+        },
+      },
+      ctxOf({ requestText }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("read did not bind");
+    expect(turn.decision.binds[0]).not.toHaveProperty("effort");
+  });
+
+  it("the bind and proposal schemas require semantic settings evidence", () => {
+    const tools = operatorTools(input());
+    const bind = tools.find((tool) => tool.name === OPERATOR_BIND_TOOL)!;
+    const ask = tools.find((tool) => tool.name === OPERATOR_ASK_TOOL)!;
+    const evidence = {
+      properties: Object.fromEntries(
+        ["effort", "budget", "severity", "renewals", "verbosity"].map((name) => [
+          name,
+          {
+            type: "object",
+            required: ["quote", "intent"],
+            properties: { intent: { enum: ["requested", "incidental"] } },
+          },
+        ]),
+      ),
+    };
+    expect(bind.inputSchema).toMatchObject({ properties: { settingsEvidence: evidence } });
+    expect(ask.inputSchema).toMatchObject({
+      properties: { proposalSettings: { properties: { settingsEvidence: evidence } } },
+    });
+    const prompt = buildOperatorPrompt(input());
+    expect(prompt.system).toContain("'major findings' mean");
+    expect(prompt.system).toContain("one sentence does not request low effort");
   });
 
   it("an ordinary read retains a model-resolved repository without accepting unused PR authority", () => {
@@ -1291,11 +1469,11 @@ channels:
         input: {
           preset: "general",
           severity: "major",
-          settingsEvidence: { severity: "major findings" },
+          settingsEvidence: { severity: { quote: "major findings", intent: "requested" } },
           reason: "answer",
         },
       },
-      ctxOf({ requestText: "What happened with the major findings?", presets: ["general", "review"] }),
+      ctxOf({ requestText: "Answer this with major findings addressed.", presets: ["general", "review"] }),
     );
     const review = parseOperatorTurn(
       {
@@ -1305,7 +1483,7 @@ channels:
           renewals: 2,
           repo: "acme/api",
           prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
-          settingsEvidence: { renewals: "two renewals" },
+          settingsEvidence: { renewals: { quote: "two renewals", intent: "requested" } },
           reason: "review",
         },
       },
@@ -1329,7 +1507,10 @@ channels:
       },
       ctxOf({ requestText: "What is 2 + 2? Answer in one sentence.", presets: ["general", "review"] }),
     );
-    expect(coincidental).toMatchObject({ kind: "violation", violation: expect.stringContaining("review severity") });
+    expect(coincidental).toMatchObject({
+      kind: "violation",
+      violation: expect.stringContaining("settingsEvidence.severity"),
+    });
   });
 
   it("repairs an incidental setting quote without stranding an ordinary read", async () => {
@@ -1339,7 +1520,7 @@ channels:
         input: {
           preset: "general",
           severity: "major",
-          settingsEvidence: { severity: "Answer" },
+          settingsEvidence: { severity: { quote: "Answer", intent: "requested" } },
           reason: "answer the question",
         },
       },
@@ -1347,7 +1528,14 @@ channels:
     ];
     const answer = await runOperator(
       input({ text: "What is 2 + 2? Answer in one sentence.", projection: projectionOf(["general", "review"]) }),
-      async () => answers.shift()!,
+      async (prompt) => {
+        if (prompt.retries?.length) {
+          expect(prompt.retries.at(-1)?.violation).toContain("Keep the requested action");
+          expect(prompt.retries.at(-1)?.violation).toContain("classify it as incidental or omit it");
+          expect(prompt.retries.at(-1)?.violation).toContain("never drop a requested setting");
+        }
+        return answers.shift()!;
+      },
     );
     expect(answer.attempts).toMatchObject([{ outcome: "violation" }, { outcome: "accepted" }]);
     expect(answer.decision).toMatchObject({
@@ -1366,7 +1554,7 @@ channels:
           repo: "acme/api",
           prTarget,
           renewals: 2,
-          settingsEvidence: { renewals: "two renewals" },
+          settingsEvidence: { renewals: { quote: "two renewals", intent: "requested" } },
           reason: "review the PR",
         },
       },
@@ -1378,7 +1566,7 @@ channels:
           repo: "acme/api",
           prTarget,
           renewals: 2,
-          settingsEvidence: { renewals: "two renewals" },
+          settingsEvidence: { renewals: { quote: "two renewals", intent: "requested" } },
           reason: "review the PR with renewals",
         },
       },
@@ -1452,7 +1640,7 @@ channels:
           shipEntry: "work",
           reason: "r",
           ...setting,
-          settingsEvidence: { [name]: requestText },
+          settingsEvidence: { [name]: { quote: requestText, intent: "requested" } },
         },
       },
       ctxOf({ requestText, presets: ["ship"] }),
@@ -3551,6 +3739,46 @@ describe("the question and its answer-as-a-bind", () => {
     expect(bindFromAnswer("yes", { proposal: "agent:general summarize the flaky test" })).toBeUndefined();
   });
 
+  it("a preset proposal cannot save incidental effort or bypass requested severity compatibility", () => {
+    const turn = parseOperatorTurn(
+      {
+        tool: OPERATOR_ASK_TOOL,
+        input: {
+          text: "Answer this?",
+          proposal: "agent:general Answer this.",
+          reason: "confirm",
+          proposalSettings: {
+            effort: "low",
+            settingsEvidence: { effort: { quote: "one sentence", intent: "incidental" } },
+          },
+        },
+      },
+      ctxOf({ requestText: "Answer this in one sentence." }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "question") throw new Error("not a question");
+    expect(turn.decision.proposalSettings).toEqual({});
+    const bind = bindFromAnswer("yes", { ...turn.decision, proposal: turn.decision.proposal! });
+    expect(bind).toMatchObject({ line: "agent:general Answer this.", confirmed: true });
+    expect(bind).not.toHaveProperty("effort");
+    expect(
+      parseOperatorTurn(
+        {
+          tool: OPERATOR_ASK_TOOL,
+          input: {
+            text: "Answer this?",
+            proposal: "agent:general Answer this.",
+            reason: "confirm",
+            proposalSettings: {
+              severity: "major",
+              settingsEvidence: { severity: { quote: "severity:major", intent: "requested" } },
+            },
+          },
+        },
+        ctxOf({ requestText: "Answer this with severity:major." }),
+      ),
+    ).toMatchObject({ kind: "violation", violation: expect.stringContaining("review severity") });
+  });
+
   it("a confirmed preset proposal keeps typed settings from the original request", () => {
     const turn = parseOperatorTurn(
       {
@@ -3558,7 +3786,10 @@ describe("the question and its answer-as-a-bind", () => {
         input: {
           text: "Summarize this run?",
           proposal: "agent:general Summarize the run with effort:high",
-          proposalSettings: { effort: "high", settingsEvidence: { effort: "effort:high" } },
+          proposalSettings: {
+            effort: "high",
+            settingsEvidence: { effort: { quote: "effort:high", intent: "requested" } },
+          },
           reason: "confirm summary",
         },
       },
