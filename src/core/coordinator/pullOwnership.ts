@@ -206,6 +206,16 @@ export function findPullOwnersInRows(target: PullTarget, rows: PullOwnershipRows
     (target.pr !== undefined && pr === target.pr) ||
     (target.ref !== undefined && ref !== undefined && pullRef(ref) === pullRef(target.ref));
   const add = (owner: PullOwner) => owners.set(JSON.stringify(owner), owner);
+  const unitOwner = (unit: CoordinatorUnit): Extract<PullOwner, { kind: "unit" }> => ({
+    kind: "unit",
+    instanceId: unit.instanceId,
+    unit: unit.unit,
+    ...(unit.recovery
+      ? { actionId: unit.recovery.actionId }
+      : unit.adoption && unit.adoption.state !== "bound"
+        ? { actionId: unit.adoption.actionId }
+        : {}),
+  });
   for (const row of rows.units) {
     if (!isCoordinatorInstance(row.instance) || !isCoordinatorUnit(row.unit) || row.unit.instanceId !== row.instance.id)
       return { ok: false, reason: "incomplete" };
@@ -243,16 +253,7 @@ export function findPullOwnersInRows(target: PullTarget, rows: PullOwnershipRows
         (unit.currentEffect?.phase === "active" &&
           matches(unit.currentEffect.target.pr, unit.currentEffect.target.ref)))
     )
-      add({
-        kind: "unit",
-        instanceId: unit.instanceId,
-        unit: unit.unit,
-        ...(unit.recovery
-          ? { actionId: unit.recovery.actionId }
-          : unit.adoption && unit.adoption.state !== "bound"
-            ? { actionId: unit.adoption.actionId }
-            : {}),
-      });
+      add(unitOwner(unit));
   }
   // The first coding child pushes before its coordinator creates the PR.
   // Its missing branch-to-PR mapping is not an unknown write when native
