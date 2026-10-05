@@ -9367,6 +9367,52 @@ describe("original committed head adoption — create-only draft PR", () => {
   const adopt = (h: ReturnType<typeof harness>) =>
     adoptOriginalPublishedHead({ parentInstanceId: INSTANCE.id, unit: "U12" }, h.deps, caller);
 
+  it("binds the accepted final native update after same-head salvage without changing original custody", async () => {
+    const child = coding();
+    child.events = [
+      { type: "pushed_head", ref: INSTANCE.branch!, sha: prior, by: "push", seq: 1 },
+      { type: "pushed_head", ref: INSTANCE.branch!, sha: head, by: "push", seq: 2 },
+      { type: "pushed_head", ref: INSTANCE.branch!, sha: head, by: "salvage", seq: 3 },
+    ];
+    child.eventCount = child.storedEventCount = 3;
+    child.pushed = [{ ref: INSTANCE.branch!, sha: head, by: "salvage" }];
+    child.publicationSettlement = {
+      version: 1,
+      binding: {
+        runId: child.id,
+        instanceId: INSTANCE.id,
+        step: child.idempotencyKey!,
+        repo: INSTANCE.repo,
+        branch: INSTANCE.branch!,
+        requester: INSTANCE.userId,
+        threadKey: INSTANCE.threadKey,
+        generation: "original-generation",
+        baseHeadSha: prior,
+      },
+      checkpoint: { kind: "created", head },
+      publication: { kind: "accepted", head },
+      preservation: {
+        kind: "saved",
+        key: `runs/${child.id}/out/0-checkpoint-${prior}-${head}.bundle`,
+        size: 100,
+        sha256: "a".repeat(64),
+      },
+      release: { kind: "pending" },
+    };
+    const before = structuredClone(child);
+    const { h, posts } = await setup(original(), unit(), child);
+    expect(await adopt(h)).toMatchObject({ status: 200, body: { outcome: "bound", pr: 99, head } });
+    expect(posts).toHaveLength(1);
+    expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
+      pr: { number: 99 },
+      lastPush: head,
+      adoption: { state: "bound", headSha: head },
+    });
+    expect(await h.store.get(child.id)).toEqual(before);
+    expect(await adopt(h)).toMatchObject({ status: 200, body: { outcome: "already_bound", pr: 99 } });
+    expect(posts).toHaveLength(1);
+  });
+
   it("claims the original unit and binds one draft PR at its accepted head", async () => {
     const { h, posts } = await setup();
     expect(await adopt(h)).toMatchObject({ status: 200, body: { outcome: "bound", pr: 99, head } });
