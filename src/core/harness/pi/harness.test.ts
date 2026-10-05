@@ -8,7 +8,10 @@ import { ExecInfraError, ExecSandboxRestartedError, type Executor } from "../../
 import { ResidentExecutor } from "../../../execution/resident.js";
 import type { ChatMessage } from "../../chatMessage.js";
 import { classifyProviderFailure, providerFailureParks, type ProviderFailureCause } from "../../provider.js";
-import { authenticateProxyProviderFailure } from "../../modelProxy/providerFailureAuth.js";
+import {
+  authenticateProxyProviderFailure,
+  authenticateProxyUnknownTerminal,
+} from "../../modelProxy/providerFailureAuth.js";
 import {
   abortFailedAfterEndNote,
   abortReaskedNote,
@@ -1873,7 +1876,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
         type: "run_note",
         kind: "harness_error",
         summary:
-          'the model call ended without a classified result; no provider failure was established — pi stop: "other"; provider stop: "failed"',
+          'the model call ended without a classified result; no provider failure was established — pi stop: "other"; provider stop: "failed"; terminal evidence: {"source":"unverified","errorMessage":"missing","contentParts":0}',
       }),
     );
     expect(w.container.commands().filter((c) => c.type === "prompt")).toHaveLength(1);
@@ -1895,6 +1898,46 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     );
     await expect(forged.start()).rejects.toThrow(UNKNOWN_MODEL_TERMINAL_MESSAGE);
     expect(forged.container.commands().filter((c) => c.type === "prompt")).toHaveLength(1);
+  });
+
+  it("unknown terminal diagnostics reach the run record on initial and follow-up calls without replay or private text", async () => {
+    for (const followUp of [false, true]) {
+      const w = world({ providerPark: true });
+      const envelope = authenticateProxyUnknownTerminal("consumer_rejected");
+      scriptedPi(w.container, (n, c) => {
+        if (followUp && n === 0) return finalTurn(c, "first answer");
+        c.emit(
+          {
+            type: "message_end",
+            message: {
+              role: "assistant",
+              content: [{ type: "text", text: "private partial answer" }],
+              stopReason: "error",
+              errorMessage: `private SDK prefix ${JSON.stringify(envelope)}`,
+            },
+          },
+          { type: "agent_settled" },
+        );
+      });
+      if (followUp) {
+        const session = await w.open();
+        try {
+          await expect(
+            session.followUp({ text: "continue", maxTurns: 4, maxMinutes: 5, toolContext: { executor } }),
+          ).rejects.toThrow(UNKNOWN_MODEL_TERMINAL_MESSAGE);
+        } finally {
+          await session.end();
+        }
+      } else await expect(w.start()).rejects.toThrow(UNKNOWN_MODEL_TERMINAL_MESSAGE);
+      const notes = w.events.filter((e) => e.type === "run_note" && e.kind === "harness_error");
+      expect(notes).toHaveLength(1);
+      expect(notes[0]).toMatchObject({
+        summary: `the ${followUp ? "follow-up " : ""}model call ended without a classified result; no provider failure was established — pi stop: "error"; provider stop: "missing"; terminal evidence: {"source":"proxy","reason":"consumer_rejected","errorMessage":"present","contentParts":1}`,
+      });
+      expect(JSON.stringify(notes)).not.toContain("private");
+      expect(JSON.stringify(notes)).not.toContain(envelope._switchboard_proxy_auth);
+      expect(w.container.commands().filter((c) => c.type === "prompt")).toHaveLength(followUp ? 2 : 1);
+    }
   });
 
   it("transport failures stay held on backoff inside the lease; exhausting that retry budget ends by type without exposing a gateway page, while a non-transient error is never retried", async () => {

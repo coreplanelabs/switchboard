@@ -25,7 +25,9 @@ import {
 } from "../../runEvents.js";
 import {
   proxyProviderFailureIsAuthenticated,
-  proxyUnknownTerminalIsAuthenticated,
+  readProxyUnknownTerminal,
+  type ProxyUnknownTerminalEnvelope,
+  type ProxyUnknownTerminalReason,
 } from "../../modelProxy/providerFailureAuth.js";
 import type { CompactionEntry } from "../../runLedger/types.js";
 import { classifyProviderFailure, type ProviderFailure } from "../../provider.js";
@@ -112,7 +114,17 @@ const LOCAL_STREAM_ENDINGS: ReadonlySet<string> = new Set([
 export type PiTerminalFailure =
   | { kind: "local_abort"; detail: string }
   | { kind: "local_stream"; detail: string }
-  | { kind: "unknown"; detail: string; stops: { pi: string; provider: string } }
+  | {
+      kind: "unknown";
+      detail: string;
+      stops: { pi: string; provider: string };
+      diagnostic: {
+        source: "proxy" | "unverified";
+        reason?: ProxyUnknownTerminalReason;
+        errorMessage: "missing" | "empty" | "present";
+        contentParts: number | "invalid";
+      };
+    }
   | { kind: "provider_refusal"; detail: string; failure: ProviderFailure }
   | { kind: "provider_failure"; detail: string; failure: ProviderFailure };
 
@@ -164,12 +176,22 @@ export interface BridgeDeps {
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 const str = (v: unknown): string => (typeof v === "string" ? v : String(v ?? ""));
-const unknownTerminal = (message: PiAssistantMessage, detail: string): PiTerminalFailure => ({
+const unknownTerminal = (
+  message: PiAssistantMessage,
+  detail: string,
+  proxy?: ProxyUnknownTerminalEnvelope,
+): PiTerminalFailure => ({
   kind: "unknown",
   detail,
   stops: {
     pi: redactAndCap(typeof message.stopReason === "string" ? message.stopReason : "missing", 80),
     provider: redactAndCap(typeof message.rawStopReason === "string" ? message.rawStopReason : "missing", 80),
+  },
+  diagnostic: {
+    source: proxy === undefined ? "unverified" : "proxy",
+    ...(proxy?.reason === undefined ? {} : { reason: proxy.reason }),
+    errorMessage: message.errorMessage === undefined ? "missing" : message.errorMessage === "" ? "empty" : "present",
+    contentParts: Array.isArray(message.content) ? message.content.length : "invalid",
   },
 });
 
@@ -390,8 +412,9 @@ export class PiBridge {
       }
       // pi can observe the terminal failure and then race a local abort in
       // its catch. Authenticated terminal evidence owns that ending.
-      if (proxyUnknownTerminalIsAuthenticated(raw)) {
-        out.terminalFailure = unknownTerminal(message, detail);
+      const unknown = readProxyUnknownTerminal(raw);
+      if (unknown !== undefined) {
+        out.terminalFailure = unknownTerminal(message, detail, unknown);
         return;
       }
       if (raw !== undefined && proxyProviderFailureIsAuthenticated(raw)) {

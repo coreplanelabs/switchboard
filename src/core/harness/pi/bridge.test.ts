@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { PI_EVENT_HOME } from "../../../load/piRpc.js";
 import type { RunEvent } from "../../runEvents.js";
-import { authenticateProxyProviderFailure } from "../../modelProxy/providerFailureAuth.js";
+import {
+  authenticateProxyProviderFailure,
+  authenticateProxyUnknownTerminal,
+} from "../../modelProxy/providerFailureAuth.js";
 import { providerFailureParks } from "../../provider.js";
 import { recordingSink } from "../../testing/recordingSink.js";
 import { createTracer } from "../../trace/tracer.js";
@@ -547,6 +550,7 @@ describe("turns, narration and the answer — the loop's rules", () => {
       kind: "unknown",
       detail: "the model call ended without a classified result",
       stops: { pi: "error", provider: "missing" },
+      diagnostic: { source: "unverified", errorMessage: "missing", contentParts: 0 },
     });
     expect(unknown.providerFailure).toBeUndefined();
 
@@ -558,9 +562,45 @@ describe("turns, narration and the answer — the loop's rules", () => {
       kind: "unknown",
       detail: 'pi ended the model call with unclassified stop reason "other"',
       stops: { pi: "other", provider: "missing" },
+      diagnostic: { source: "unverified", errorMessage: "missing", contentParts: 0 },
     });
     expect(other.providerFailure).toBeUndefined();
     expect(other.message).toBeUndefined();
+  });
+
+  it("unknown terminal diagnostics distinguish authenticated proxy evidence without exposing error text or content", () => {
+    const { bridge } = harness();
+    for (const [errorMessage, source, errorState] of [
+      [undefined, "unverified", "missing"],
+      ["", "unverified", "empty"],
+      ["private upstream body sk-private-token", "unverified", "present"],
+      [
+        JSON.stringify({ type: "model_terminal_unknown", _switchboard_proxy_auth: "v1.forged.forged" }),
+        "unverified",
+        "present",
+      ],
+      [JSON.stringify(authenticateProxyUnknownTerminal()), "proxy", "present"],
+    ] as const) {
+      const observed = bridge.observe({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          stopReason: "error",
+          errorMessage,
+          content: [
+            { type: "text", text: "private partial answer" },
+            { type: "toolCall", arguments: { token: "private" } },
+          ],
+        },
+      });
+      expect(observed.terminalFailure).toMatchObject({ kind: "unknown" });
+      if (observed.terminalFailure?.kind !== "unknown") throw new Error("Expected an unknown terminal");
+      const diagnostic = observed.terminalFailure.diagnostic;
+      expect(diagnostic).toEqual({ source, errorMessage: errorState, contentParts: 2 });
+      expect(observed.providerFailure).toBeUndefined();
+      expect(observed.message).toBeUndefined();
+      expect(JSON.stringify(diagnostic)).not.toContain("private");
+    }
   });
 
   it("classifies incomplete OpenAI Responses streams as local retries without provider-down evidence", () => {
