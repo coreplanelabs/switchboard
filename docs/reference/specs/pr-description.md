@@ -29,7 +29,8 @@ Complete literal rendered bodies prove title exclusion and inline permalink plac
 
 | Criterion | Proof |
 |---|---|
-| Schema: complete object accepted, lines trimmed; no pointers, missing fields and blank strings rejected naming the field; decisions may be empty, criteria may not | `[unit]` `src/core/prDescription.test.ts::parsePrDescription (the schema)` (7) |
+| Schema: an omitted, empty or whitespace-only optional pointer risk is absent through submission and rendering; nonstrings, nonblank over-cap or multiline risks still fail, and top-level risk remains required | `[unit]` `src/core/prDescription.test.ts::parsePrDescription (the schema)::treats blank optional pointer risks as absent through render and parse, but keeps risk validation`, `src/tools/submit.test.ts::submit_pr_description tool::accepts schema-valid blank optional pointer risks and records them as absent` |
+| Schema: complete object accepted, lines trimmed; no pointers, missing fields and blank required strings rejected naming the field; decisions may be empty, criteria may not | `[unit]` `src/core/prDescription.test.ts::parsePrDescription (the schema)` (7) |
 | Anchors: absolute or traversing path, non-positive line, `to < from` rejected | `[unit]` `::rejects a bad anchor…` |
 | The map renders in contract order — tldr first with no heading, the bold labels, the numbered pointers — then the folds, then the footer; no heading anywhere | `[unit]` `::renders the map in the contract order…` |
 | A pointer is `N. [label](permalink) text ⚠ risk`, numbered from 1, ⚠ only with a risk, a `]` in a label escaped; no bare permalink line anywhere in a rendered body | `[unit]` `::a pointer is …`, `src/core/prDescription.test.ts::golden: a full PR description rendered through the pipeline::fixture → markdown equals the checked-in body byte for byte` |

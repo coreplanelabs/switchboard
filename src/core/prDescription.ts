@@ -194,7 +194,12 @@ export const PointerSchema = z.object({
     (s) => !s.includes(RISK_SEPARATOR),
     `must not contain "${RISK_SEPARATOR}" (the risk separator)`,
   ),
-  risk: capped(line, PR_DESCRIPTION_CAPS.pointerRisk).optional(),
+  // Structured outputs often fill optional strings with "". Only this
+  // optional risk treats a blank as omission; required risks stay nonempty.
+  risk: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    capped(line, PR_DESCRIPTION_CAPS.pointerRisk).optional(),
+  ),
   anchor: PrAnchorSchema,
 });
 
