@@ -692,6 +692,44 @@ describe("submit_pr_description tool", () => {
     expect(String(out)).toMatch(/PR description recorded/);
   });
 
+  it("accepts schema-valid blank optional pointer risks and records them as absent", async () => {
+    const got: PrDescription[] = [];
+    const tool: Tool = {
+      name: submitPrDescriptionTool.name,
+      description: submitPrDescriptionTool.description,
+      parameters: submitPrDescriptionTool.inputSchema as Tool["parameters"],
+    };
+    for (const risk of ["", " \t\n "]) {
+      const input = validInput();
+      input.pointers = [
+        { label: "The thing", text: "What it does.", risk, anchor: { path: "src/a.ts", from: 3, to: 9 } },
+      ];
+      expect(() =>
+        validateToolArguments(tool, {
+          type: "toolCall",
+          id: "probe",
+          name: tool.name,
+          arguments: input as ToolCall["arguments"],
+        }),
+      ).not.toThrow();
+      expect(
+        await submitPrDescriptionTool.run(
+          input,
+          ctxWith((d) => got.push(d)),
+        ),
+      ).toMatch(/PR description recorded/);
+      expect(got.at(-1)?.pointers[0].risk).toBeUndefined();
+    }
+    const count = got.length;
+    expect(
+      await submitPrDescriptionTool.run(
+        { ...validInput(), risk: " " },
+        ctxWith((d) => got.push(d)),
+      ),
+    ).toMatch(/^error:/);
+    expect(got).toHaveLength(count);
+  });
+
   it("a missing section is a string error naming the zod path — no throw, context untouched", async () => {
     const got: PrDescription[] = [];
     const { risk: _r, ...noRisk } = validInput();

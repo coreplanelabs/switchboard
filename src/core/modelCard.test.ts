@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { decideControls, resolveModelCard, UNKNOWN_WINDOW, type CardRegistry } from "./modelCard.js";
 import { vendorOf, type ProviderConfig } from "./provider.js";
+import { installedModelRegistry } from "./installedModelRegistry.js";
 import type { RegistryCard } from "./modelRegistry.js";
 
 // Feature: docs/reference/specs/model-proxy.md item 11 — the card and the
@@ -124,6 +125,66 @@ describe("vendorOf — the one vendor parse", () => {
 });
 
 describe("resolveModelCard — operator over registry over wire", () => {
+  it("uses only an explicit exact catalog identity for a wire alias, preserving unknown vendor and unvouched cap and cache", () => {
+    const ref = "openrouter/GPT-5.3-Codex";
+    const unknown = resolveModelCard(ref, blocks, installedModelRegistry);
+    expect(unknown.window).toBe(UNKNOWN_WINDOW);
+    expect(unknown.levels).toBe("unknown");
+    const mappedBlocks = {
+      ...blocks,
+      openrouter: { ...blocks.openrouter, models: { "GPT-5.3-Codex": { catalogModel: "openai/gpt-5.3-codex" } } },
+    };
+    const mapped = resolveModelCard(ref, mappedBlocks, installedModelRegistry);
+    expect(mapped).toMatchObject({
+      ref,
+      model: "GPT-5.3-Codex",
+      vendor: "openrouter",
+      window: 400_000,
+      inputs: { image: true },
+      cache: "unknown",
+      capField: "max_completion_tokens",
+    });
+    expect(mapped.provenance).toMatchObject({
+      window: "registry",
+      levels: "registry",
+      capField: "wire",
+      cache: "wire",
+    });
+    expect(mapped.levels).not.toBe("unknown");
+    expect(decideControls(mapped, { effort: "max" }).find((control) => control.control === "effort")?.outcome).toBe(
+      "refused",
+    );
+    expect(mapped.price?.cacheRead).toBe(0.175);
+    const pinned = resolveModelCard(
+      ref,
+      {
+        ...mappedBlocks,
+        openrouter: {
+          ...mappedBlocks.openrouter,
+          models: {
+            "GPT-5.3-Codex": {
+              catalogModel: "openai/gpt-5.3-codex",
+              capField: "max_completion_tokens",
+              cache: "automatic",
+            },
+          },
+        },
+      },
+      installedModelRegistry,
+    );
+    expect(pinned.provenance).toMatchObject({ capField: "operator", cache: "operator" });
+    expect(pinned.model).toBe("GPT-5.3-Codex");
+    const missing = resolveModelCard(
+      ref,
+      {
+        ...blocks,
+        openrouter: { ...blocks.openrouter, models: { "GPT-5.3-Codex": { catalogModel: "absent/not-in-catalog" } } },
+      },
+      installedModelRegistry,
+    );
+    expect(missing.window).toBe(UNKNOWN_WINDOW);
+    expect(missing.levels).toBe("unknown");
+  });
   it("a model the registry does not know falls to the wire layer on every field, provenance wire", () => {
     const card = resolveModelCard("openrouter/deepseek/deepseek-v4.1-flash", blocks, REGISTRY);
     expect(card).toMatchObject({

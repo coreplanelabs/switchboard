@@ -400,6 +400,31 @@ function tickingWorld(opts: Parameters<typeof world>[0] = {}) {
 }
 
 describe("runPiHarness — a run on pi from the first file to the answer", () => {
+  it.each([false, true])("restores output reads only for a recorded scratch-capable pi: %s", async (outputScratch) => {
+    const w = world();
+    const paths = piRunPathsAt("/tmp/recorded-pi-root");
+    await w.container.start({ paths, command: "pi", args: [], env: {} });
+    w.run.resume = {
+      messages: w.run.messages,
+      settlements: [],
+      remainingMs: 20 * 60_000,
+      turn: 1,
+      inboxConsumedSeq: 0,
+      facts: piFacts({
+        pid: 4242,
+        logOffset: 0,
+        root: paths.dir,
+        bearerHash: bearerHashOf(w.bearer),
+        ...(outputScratch ? { outputScratch: true } : {}),
+      }),
+    };
+    scriptedPi(w.container, (_n, c) => {
+      expect(w.registry.get("run-7")?.rules.outputDir).toBe(outputScratch ? paths.outputDir : undefined);
+      finalTurn(c, "done");
+    });
+    expect(await w.start()).toBe("done");
+    expect(w.container.starts).toHaveLength(1);
+  });
   // The run's files live in one directory of the run's own directly under
   // /tmp, whatever OS user the executor runs the commands as, and the
   // directory goes when the run does (harness-pi item 4).
@@ -421,6 +446,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       pid: 4242,
       logOffset: 0,
       root: paths.dir,
+      outputScratch: true,
       bearerHash: bearerHashOf(w.bearer),
       wire: "anthropic-messages",
       container: "vm-fake",
@@ -499,6 +525,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       pid: 4242,
       logOffset: 0,
       root: paths.dir,
+      outputScratch: true,
       bearerHash: bearerHashOf(w.bearer),
       wire: "anthropic-messages",
       container: "vm-fake",
@@ -6355,6 +6382,7 @@ describe("runPiHarness — a read-identity preset", () => {
     expect(rules).toEqual({
       identity: "read",
       checkout: "/workspace/threads/t/main",
+      outputDir: paths.outputDir,
       protectedBranches: ["main"],
       loopEndsIn: expect.any(Function),
     });
@@ -6380,6 +6408,7 @@ describe("runPiHarness — a read-identity preset", () => {
     expect(rules).toEqual({
       identity: "write",
       checkout: "/workspace/threads/t/main",
+      outputDir: paths.outputDir,
       protectedBranches: ["main"],
       loopEndsIn: expect.any(Function),
     });
@@ -6852,6 +6881,7 @@ describe("runPiHarness — the relaunch in the replacement container", () => {
       pid: 5151,
       logOffset: 0,
       root: paths.dir,
+      outputScratch: true,
       bearerHash: bearerHashOf(w.bearer),
       wire: "anthropic-messages",
       container: "vm-fake",

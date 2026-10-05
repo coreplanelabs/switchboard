@@ -102,8 +102,11 @@ export interface ToolRuleContext {
   /** The run's identity — the preset's (`AgentDef.identity`): it decides the
    *  reach, and under `read` the shell never pushes or writes to GitHub. */
   identity: Identity;
-  /** The checkout pi runs in: the files bundles are this tree and nothing outside it. */
+  /** The checkout pi runs in: the files bundles are this tree. */
   checkout: string;
+  /** Trusted run output-only scratch parent. Only read reaches it; the pi
+   * extension checks the open file against its active process's scratch. */
+  outputDir?: string;
   /** The run's branch, when the run was given one (a plan unit's, the spike's):
    *  then the one push target it may use. Absent, the run names its own
    *  branch and may push any but the protected ones. */
@@ -226,7 +229,7 @@ export function judgeToolCall(tool: string, input: unknown, ctx: ToolRuleContext
   }
   const args = isRecord(input) ? input : {};
   if (tool === "bash") return judgeBash(args.command, args.timeout, ctx);
-  if (bundle === "files" || bundle === "write-files") return judgePath(args.path, ctx);
+  if (bundle === "files" || bundle === "write-files") return judgePath(args.path, ctx, tool === "read");
   return allowed;
 }
 
@@ -236,6 +239,8 @@ function judgeBash(command: unknown, timeout: unknown, ctx: ToolRuleContext): To
   if (verdict.verdict !== "allowed") return verdict;
   return judgeBashTimeout(timeout, ctx);
 }
+
+const LITERAL_DATA_COMMANDS = new Set(["echo", "printf", "grep", "rg"]);
 
 function judgeBashCommand(command: string, ctx: ToolRuleContext): ToolVerdict {
   if (CREDENTIAL_FILE.test(command)) return refused("credential — reads the executor's credential store");
@@ -261,6 +266,18 @@ function judgeBashCommand(command: string, ctx: ToolRuleContext): ToolVerdict {
     return allowed;
   }
   const shell = pushShellWords(command.trim());
+  const dataOnly = shell !== undefined && !shell.compound && LITERAL_DATA_COMMANDS.has(shell.words[0] ?? "");
+  // Native publication uses a distinct runner-only Door credential, never
+  // the model shell's bearer. The legacy literal-source parser is not a
+  // shell policy: ordinary globbing and interpreters need no publication.
+  if (ctx.noShellPush) {
+    if (dataOnly) return allowed;
+    return ANY_PUSH.test(pushCommand)
+      ? refused(
+          "repo:use — publish through the runner-owned publish_branch tool; shell publication has no Git Door credential",
+        )
+      : allowed;
+  }
   // A write-capable shell can assemble an executable or a Git subcommand
   // without spelling either word in its input. Until publication is a typed
   // runner effect, no expansion, escaped word or nested shell may run here.
@@ -286,7 +303,6 @@ function judgeBashCommand(command: string, ctx: ToolRuleContext): ToolVerdict {
     (word, i) => (word === "git" || word.endsWith("/git")) && words.slice(i + 1, i + 5).includes("push"),
   );
   if (first !== "git" || words[1] === undefined) {
-    const dataOnly = !compound && ["echo", "printf", "grep", "rg"].includes(first ?? "");
     if (dataOnly) return allowed;
     const nestedPush = words.some((word) => word.includes("git") && word.includes("push"));
     // A script can pass the executable name in its code and the subcommand
@@ -306,7 +322,6 @@ function judgeBashCommand(command: string, ctx: ToolRuleContext): ToolVerdict {
     index += 2;
   }
   if (words[index] !== "push") return ANY_PUSH.test(pushCommand) || hasPushWords ? refused(COMPOUND_PUSH) : allowed;
-  if (ctx.noShellPush) return refused("repo:use — this harness cannot bind shell publication to a Git door receipt");
   if (compound) return refused(COMPOUND_PUSH);
   const tail = words.slice(index + 1);
   if (
@@ -510,11 +525,16 @@ function judgePush(tail: readonly string[], ctx: ToolRuleContext): ToolVerdict {
   return allowed;
 }
 
-function judgePath(path: unknown, ctx: ToolRuleContext): ToolVerdict {
+function judgePath(path: unknown, ctx: ToolRuleContext, readOutput: boolean): ToolVerdict {
   if (path === undefined) return allowed; // the search tools default to the checkout
   if (typeof path !== "string") return refused("malformed — a path tool without a string path");
   if (CREDENTIAL_FILE.test(path)) return refused("credential — reads the executor's credential store");
-  const rel = relative(ctx.checkout, resolve(ctx.checkout, path));
+  const absolute = resolve(ctx.checkout, path);
+  if (readOutput && ctx.outputDir !== undefined) {
+    const output = relative(ctx.outputDir, absolute);
+    if (output !== "" && output !== ".." && !output.startsWith("../") && !isAbsolute(output)) return allowed;
+  }
+  const rel = relative(ctx.checkout, absolute);
   if (rel.startsWith("..") || isAbsolute(rel)) return refused(`path — \`${path}\` resolves outside the checkout`);
   return allowed;
 }

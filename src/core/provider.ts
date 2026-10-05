@@ -495,6 +495,9 @@ export const WIRE_ALIASES: Readonly<Record<string, Wire>> = {
  *  the operator layer of the card). Every field is optional and wins over the
  *  registry card and the wire defaults where it is set. */
 export interface ProviderModelOverride {
+  /** Exact catalog identity for metadata only. Never rewrites the wire id
+   * or declares a vendor; the operator verifies this association. */
+  catalogModel?: string;
   /** Our effort tiers → the wire's word, or null to refuse the tier. */
   levels?: Record<string, string | null>;
   /** The body field the output cap is spelled with on this model. */

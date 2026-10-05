@@ -68,6 +68,10 @@ export interface PiHarnessFacts {
    *  row written before the root was recorded: that pi cannot be found, so it
    *  is ended and a fresh one started. */
   root?: string;
+  /** Launch capability, not a path grant: this pi has the guarded read
+   * override; hosts without Linux descriptor paths retain checkout-only reads. Absent on older processes,
+   * which must never gain an outside-checkout read on reattach. */
+  outputScratch?: true;
   /** The SHA-256 (hex) of the secret in the bearer pi was started with
    *  (`bearerHashOf`; model-proxy item 2) — never the bearer. The generation
    *  that re-attaches adopts it onto its own proxy, so the calls pi keeps

@@ -112,8 +112,8 @@ export function compareCardToEndpoints(card: ModelCard, answer: ModelEndpoints):
       pin: "levels: {low: null, medium: null, high: null, xhigh: null, max: null}",
     });
 
-  if (params.length > 0 && !params.includes(card.capField)) {
-    const alternative = CAP_FIELDS.find((f) => params.includes(f));
+  if (params.length > 0 && (!params.includes(card.capField) || card.provenance.capField === "wire")) {
+    const alternative = params.includes(card.capField) ? card.capField : CAP_FIELDS.find((f) => params.includes(f));
     drift.push({
       field: "capField",
       card: `${card.capField}${vouch(card, "capField")}`,
@@ -196,7 +196,8 @@ export const providersCheck = defineCommand({
         models.push({ ...base, error: `providers.${vendor.block} names no baseUrl to read endpoints from` });
         continue;
       }
-      const url = `${block.baseUrl.replace(/\/+$/, "")}/models/${vendor.vendor}/${vendor.vendorId}/endpoints`;
+      const metadataId = block.models?.[vendor.model]?.catalogModel ?? `${vendor.vendor}/${vendor.vendorId}`;
+      const url = `${block.baseUrl.replace(/\/+$/, "")}/models/${metadataId.split("/").map(encodeURIComponent).join("/")}/endpoints`;
       try {
         const res = await deps.providers.fetch(url);
         if (!res.ok) {

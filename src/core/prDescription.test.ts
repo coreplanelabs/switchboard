@@ -59,6 +59,26 @@ describe("parsePrDescription (the schema)", () => {
     expect(d.tldr).toBe("Two sentences.");
   });
 
+  it("treats blank optional pointer risks as absent through render and parse, but keeps risk validation", () => {
+    for (const risk of [undefined, "", " \t\r\n "]) {
+      const input = desc();
+      input.pointers[0].risk = risk;
+      const normalized = parsePrDescription(input);
+      expect(normalized.pointers[0].risk).toBeUndefined();
+      const body = renderPrDescriptionMarkdown(normalized, CTX);
+      expect(body).not.toContain(" ⚠ ");
+      expect(parsePrDescriptionMarkdown(body).description.pointers[0].risk).toBeUndefined();
+    }
+    const input = desc();
+    input.pointers[0].risk = "  guard  ";
+    expect(parsePrDescription(input).pointers[0].risk).toBe("guard");
+    for (const risk of [null, 0, false, {}, "x".repeat(101), "one\ntwo"]) {
+      expect(() => parsePrDescription({ ...desc(), pointers: [{ ...input.pointers[0], risk }] })).toThrow();
+    }
+    for (const risk of [undefined, "", " \n ", null])
+      expect(() => parsePrDescription({ ...desc(), risk })).toThrow(/risk/);
+  });
+
   it("requires a title — the PR title's single source; missing or blank is rejected naming the field", () => {
     const { title: _t, ...noTitle } = desc();
     expect(() => parsePrDescription(noTitle)).toThrow(/title/);

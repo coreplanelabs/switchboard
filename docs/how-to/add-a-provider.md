@@ -39,10 +39,27 @@ A block carries what a run needs to know about its models (record 0052):
 | `wire` | the shape the block speaks — `anthropic-messages`, `openai-chat` or `openai-responses` |
 | `vendor` | the vendor whose models the block serves: a name, or `model` when the block is an aggregator and each model id names its vendor first (`openrouter/anthropic/claude-sonnet-4`) |
 | `catalog` | the pi registry file this block's cards are read from — default, the block's own name when the library ships such a file; `none` for a local server with no catalog |
-| `models.<id>` | the operator's per-model override: `levels` (our effort words → the wire's word, or `null` to refuse one), `capField`, `window`, `inputs`, `cache`, `price` |
+| `models.<id>` | the operator's per-model override: `catalogModel` (exact catalog id for metadata only), `levels` (our effort words → the wire's word, or `null` to refuse one), `capField`, `window`, `inputs`, `cache`, `price` |
 | `passthrough` | extra body fields merged into every request (a vendor-only feature), never a control |
 
 Nothing is required beyond `wire` (or its `type` alias) and, for a keyed provider, `apiKeyEnv`; the registry card and the wire's own defaults fill the rest, and a field no layer names goes out unvouched with a note on the run's record saying so. Set `models.<id>` where you know better than the registry.
+
+## Keep wire aliases separate from catalog identities
+
+A display name or gateway alias may differ from the catalog's exact id. No alias is inferred: without an exact match the card's unknown fields remain unvouched. After independently verifying which catalog model an alias actually serves, an operator may bind that metadata without changing the outbound model id:
+
+```yaml
+providers:
+  gateway:
+    wire: openai-chat
+    vendor: model
+    catalog: openrouter
+    models:
+      display-alias:
+        catalogModel: vendor/catalog-model
+```
+
+The model ref remains `gateway/display-alias` on the wire. `catalogModel` selects the pinned registry's window, inputs, levels and prices and the exact endpoint id for `providers check`; it does **not** declare the alias's vendor, a cache rule or a cap field absent from that catalog card. A missing mapped card still falls back honestly. Pin `capField` or `cache` separately under the **wire alias**, only from verified endpoint/operator facts. A supported cap spelling still needs an explicit pin when it was merely a wire default. Cache-read pricing alone does not prove a cache-control rule; do not turn an unknown rule into `automatic` just to remove a notice. The check reports facts, never mutates configuration; enabling a mapping is a separate operator change.
 
 ## Set the key and restart
 

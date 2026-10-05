@@ -177,7 +177,13 @@ export function resolveModelCard(
   const block = blocks[vendor.block];
   const wire = block ? wireOf(block) : "openai-chat";
   const override = block?.models?.[vendor.model];
-  const card: RegistryCard | undefined = registry.card(block?.catalog ?? vendor.block, wire, vendor.model);
+  // A wire alias is not a catalog identity. Only an explicit operator
+  // association selects another card; neither the wire id nor vendor moves.
+  const card: RegistryCard | undefined = registry.card(
+    block?.catalog ?? vendor.block,
+    wire,
+    override?.catalogModel ?? vendor.model,
+  );
 
   const levels: LevelMap =
     override?.levels !== undefined

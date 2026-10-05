@@ -931,6 +931,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         if (recorded.root !== undefined && wireMismatch === undefined && honoured(recorded.bearerHash)) {
           reattached = true;
           paths = piRunPathsAt(recorded.root);
+          rules.outputDir = recorded.outputScratch === true ? paths.outputDir : undefined;
         } else {
           ended =
             recorded.root === undefined
@@ -974,6 +975,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       // under whatever root comes back. A dead pi's recorded root, when it is
       // another, goes with it.
       paths = piRunPathsAt(await container.makeRoot(piRunPaths(run.runId).dir));
+      rules.outputDir = paths.outputDir;
       // A dead pi's root elsewhere on THIS container goes; a pi in another
       // container, or one gone with the replaced container, left nothing here
       // to remove.
@@ -1132,6 +1134,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         ...(started.processBirth === undefined ? {} : { processBirth: started.processBirth }),
         logOffset: 0,
         root: paths.dir,
+        ...(run.agent.identity !== "none" ? { outputScratch: true as const } : {}),
         ...(bearerHash !== undefined ? { bearerHash } : {}),
         wire: runWire,
         ...(here !== undefined ? { container: here } : {}),

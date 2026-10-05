@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import { bearerHashOf, RunBearerStore } from "../core/modelProxy/runBearers.js";
 import { GitBindings } from "../core/modelProxy/gitBindings.js";
 import { createGithubDoorHandler } from "./githubDoor.js";
+import { judgeToolCall } from "../core/harness/pi/toolRules.js";
 
 const execFileAsync = promisify(execFile);
 async function git(...args: string[]): Promise<string> {
@@ -303,6 +304,40 @@ describe("GitHub door against a real Git smart HTTP peer", () => {
         const url = `http://127.0.0.1:${addr.port}/git/o/r.git`;
         const helper = `!f() { printf '%s\\n' 'username=x-access-token' 'password=${bearer}'; }; f`;
         await git("-C", source, "remote", "set-url", "origin", url);
+        // Opaque native shell programs may execute ordinary work, but cannot
+        // borrow the distinct credential of this pending runner effect.
+        const modelBearer = bearers.issue(runId)!.token;
+        const modelHelper = `!f() { printf '%s\\n' 'username=x-access-token' 'password=${modelBearer}'; }; f`;
+        for (const destination of ["fix:fix", "HEAD:fix", "fix:main"]) {
+          const args = ["-c", `credential.helper=${modelHelper}`, "-C", source, "pu" + "sh", "origin", destination];
+          const program = `require("child_process").execFileSync(String.fromCharCode(103,105,116),${JSON.stringify(args)})`;
+          expect(
+            judgeToolCall(
+              "bash",
+              { command: `node -e '${program}'` },
+              { identity: "write", checkout: source, noShellPush: true },
+            ).verdict,
+          ).toBe("allowed");
+          await expect(
+            execFileAsync(process.execPath, ["-e", program], {
+              timeout: 15_000,
+              env: {
+                ...process.env,
+                GIT_CONFIG_NOSYSTEM: "1",
+                GIT_CONFIG_GLOBAL: "/dev/null",
+                GIT_CONFIG_COUNT: "0",
+                GIT_CONFIG_PARAMETERS: undefined,
+                GIT_TERMINAL_PROMPT: "0",
+              },
+            }),
+          ).rejects.toThrow(/403/);
+          expect(bindings.hasToolPush(runId, bearerHashOf(bearer))).toBe(true);
+          expect(bindings.hasToolPush(runId, bearerHashOf(modelBearer))).toBe(false);
+          expect(receipt).toEqual([]);
+          expect(forwarded).toBe(0);
+        }
+        expect(seen.every((request) => request.writeTokens === 0 && request.claims === 0)).toBe(true);
+        const effectStart = seen.length;
         await git(
           "-c",
           `credential.helper=${helper}`,
@@ -314,7 +349,7 @@ describe("GitHub door against a real Git smart HTTP peer", () => {
           "origin",
           "fix",
         );
-        expectLargePushEffects();
+        expectLargePushEffects(effectStart);
         expect(await git("-C", repo, "rev-parse", "refs/heads/fix")).toBe(next);
         expect(bindings.hasToolPush(runId, bearerHashOf(bearer))).toBe(false);
         expect(bindings.get(runId)?.refConfirmed).toBe(mode === "precreated Ship" ? undefined : true);

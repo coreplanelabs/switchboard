@@ -116,7 +116,9 @@ describe("the container scripts", () => {
     const script = startScript(piStart(["--mode", "rpc", "-e", paths.extension], { X: "1" }));
     // The directories at 700 in a subshell: the run's root is the caller's alone, and the process's own umask is untouched.
     expect(
-      script.startsWith(`(umask 077 && mkdir -p '${paths.dir}' '${paths.sessionDir}' '${paths.commandDir}') && `),
+      script.startsWith(
+        `(umask 077 && mkdir -p '${paths.dir}' '${paths.sessionDir}' '${paths.commandDir}' '${paths.outputDir}') && `,
+      ),
     ).toBe(true);
     expect(script).toContain(`mkfifo -m 600 '${paths.fifo}'`);
     expect(script).toContain("setsid -f sh -c ");

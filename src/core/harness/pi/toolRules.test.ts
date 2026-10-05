@@ -164,6 +164,57 @@ describe("judgeToolCall — a read-identity run", () => {
   });
 });
 
+describe("judgeToolCall — output scratch", () => {
+  it("allows only read within the bound output root for both workspace identities", () => {
+    for (const identity of ["read", "write"] as const) {
+      const rules = { ...ctx, identity, outputDir: "/var/tmp/run-one/output" };
+      expect(judgeToolCall("read", { path: "/var/tmp/run-one/output/process/log" }, rules).verdict).toBe("allowed");
+      for (const path of [
+        "/tmp/pi-bash-output.log",
+        "/var/tmp/run-two/output/log",
+        "/var/tmp/run-one/agent/models.json",
+        "/var/tmp/run-one/output/../agent/models.json",
+        "/var/tmp/run-one/output-other/log",
+      ])
+        expect(judgeToolCall("read", { path }, rules).verdict).toBe("refused");
+      for (const tool of ["write", "edit", "ls", "grep", "find"])
+        expect(judgeToolCall(tool, { path: "/var/tmp/run-one/output/process/log" }, rules).verdict).not.toBe("allowed");
+    }
+    expect(judgeToolCall("read", { path: "/var/tmp/run-one/output/process/log" }, ctx).verdict).toBe("refused");
+  });
+});
+
+describe("judgeToolCall — typed publication", () => {
+  const native = { ...ctx, noShellPush: true };
+  it("allows harmless wildcards, interpreters and shell composition without minting publication", () => {
+    for (const command of [
+      "cat src/core/models* | head -10; ls src/core/harness/pi",
+      "node -e 'console.log(1)'",
+      "python3 -c 'print(1)'",
+      "cat README.md 2>/dev/null; git status --short",
+      "echo $HOME && ls src",
+      "rg -n 'git push' README.md",
+      "echo 'git push is an example'",
+    ])
+      expect(judgeToolCall("bash", { command }, native), command).toEqual({ verdict: "allowed" });
+  });
+
+  it("refuses literal shell publication with typed-tool recovery guidance and preserves credential and merge guards", () => {
+    for (const command of [
+      "git push origin load-pi/test-gap-1",
+      "git push origin main && ls",
+      "git -C /work/repo push origin other",
+    ])
+      expect(judgeToolCall("bash", { command }, native)).toEqual({
+        verdict: "refused",
+        reason:
+          "repo:use — publish through the runner-owned publish_branch tool; shell publication has no Git Door credential",
+      });
+    for (const command of ["env", "cat .git/github-credentials", "echo $GITHUB_TOKEN", "gh pr merge 12"])
+      expect(judgeToolCall("bash", { command }, native).verdict).toBe("refused");
+  });
+});
+
 describe("judgeToolCall — bash", () => {
   it("allows ordinary commands and a push of the run's own branch to origin", () => {
     expect(bash("npx vitest run src/load/reasons.test.ts")).toEqual({ verdict: "allowed" });

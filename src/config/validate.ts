@@ -648,6 +648,7 @@ const PROVIDER_KEYS: Record<keyof ProviderConfig, true> = {
 
 /** A `models.<id>` override's keys, and the shapes they are held to. */
 const MODEL_OVERRIDE_KEYS: Record<string, true> = {
+  catalogModel: true,
   levels: true,
   capField: true,
   window: true,
@@ -667,6 +668,16 @@ export function validateModelOverride(path: string, raw: unknown): void {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new Error(`${path} must be a mapping`);
   const m = raw as Record<string, unknown>;
   for (const key of unknownKeys(m, MODEL_OVERRIDE_KEYS)) throw new Error(`${path}.${key} is not a known key`);
+  if (m.catalogModel !== undefined) {
+    const id = m.catalogModel;
+    if (
+      typeof id !== "string" ||
+      !id ||
+      /[\s\\?#:]/.test(id) ||
+      id.split("/").some((segment) => !segment || segment === "." || segment === "..")
+    )
+      throw new Error(`${path}.catalogModel must be an exact catalog model id, not a URL or path`);
+  }
   if (m.levels !== undefined) {
     if (typeof m.levels !== "object" || m.levels === null || Array.isArray(m.levels))
       throw new Error(`${path}.levels must be a mapping of effort → wire word or null`);
@@ -795,9 +806,9 @@ export function validateProviders(cfg: AppConfig, source: string): void {
       if (typeof b.models !== "object" || b.models === null || Array.isArray(b.models))
         throw new Error(`${path}.models must be a mapping of model id → overrides`);
       for (const [id, raw] of Object.entries(b.models as Record<string, unknown>)) {
-        if (b.vendor === "model" && !id.includes("/"))
-          throw new Error(`${path}.models.${id}: a vendor: model block names its models <vendor>/<id>`);
         validateModelOverride(`${path}.models.${id}`, raw);
+        if (b.vendor === "model" && !id.includes("/") && (raw as Record<string, unknown>).catalogModel === undefined)
+          throw new Error(`${path}.models.${id}: a vendor: model block names its models <vendor>/<id>`);
       }
     }
     // Derive the legacy word for every consumer that still reads `type` (the

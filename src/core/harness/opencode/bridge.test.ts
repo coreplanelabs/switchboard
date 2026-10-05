@@ -323,11 +323,11 @@ describe("the gate's honest cannot, the compaction row, the budget stop, the unk
     };
     expect(judgeOpenCodeAsk("shell", ["git push origin feat/x:feat/x"], rules, new Set())).toMatchObject({
       reply: "reject",
-      message: expect.stringContaining("cannot bind shell publication"),
+      message: expect.stringContaining("publish through the runner-owned publish_branch tool"),
     });
     expect(judgeOpenCodeAsk("shell", ["git status --short"], rules, new Set()).reply).toBe("once");
-    // An opaque program cannot prove it will not spawn a Git write.
-    expect(judgeOpenCodeAsk("shell", ["node -e '0'"], rules, new Set()).reply).toBe("reject");
+    // Ordinary scripts hold no native publication credential.
+    expect(judgeOpenCodeAsk("shell", ["node -e '0'"], rules, new Set()).reply).toBe("once");
   });
 
   it("refuses subsequent tools during push attribution without denying the push's secondary permission", () => {
