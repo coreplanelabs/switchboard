@@ -12,8 +12,8 @@ import { githubDoorEdgeRoute } from "../../src/channels/githubDoorPaths.ts";
 // Mode websocket, so nothing user-facing flows through here. Scheduled jobs are
 // NOT special: a `run` schedule is POSTed to the bot's generic /ingress as the
 // `cron` identity, so it becomes an ordinary run.
-import { Container, getContainer } from "@cloudflare/containers";
-import { isNoContainerInstanceError, noContainerInstanceResponse } from "./containerStart.ts";
+import { Container, getContainer, type WaitOptions } from "@cloudflare/containers";
+import { ContainerPortLostError, containerRollResponse, isContainerRollStartError } from "./containerStart.ts";
 import { parseHealthz } from "../../src/deploy/liveGate.ts";
 import {
   COORDINATOR_AUTHORIZE_PATH,
@@ -197,13 +197,27 @@ export class SwitchboardServer extends Container<Env> {
     );
   }
 
+  override async waitForPort(options: WaitOptions): Promise<number> {
+    // startAndWaitForPorts reaches this phase only after acquiring the instance.
+    // The SDK rethrows the TCP error, not its onError crash diagnostic. Translate
+    // here, where a stopped container means port loss, rather than broadening
+    // the start catch to ambiguous network/not-listening errors. No shared latch:
+    // concurrent requests each carry their own failure, with its original cause.
+    try {
+      return await super.waitForPort(options);
+    } catch (error) {
+      if (this.ctx.container?.running === false) throw new ContainerPortLostError(error);
+      throw error;
+    }
+  }
+
   override async fetch(request: Request): Promise<Response> {
     try {
       await this.startBot();
     } catch (error) {
-      // Match the SDK's unavailable response before its fetch handler runs.
-      // Retry-After is a hint; GitHub still requires explicit redelivery.
-      if (isNoContainerInstanceError(error)) return noContainerInstanceResponse();
+      // No instance, a runtime rollout, or a port wait losing its container is
+      // unavailable, so answer 503. Other startup faults still surface.
+      if (isContainerRollStartError(error)) return containerRollResponse();
       throw error;
     }
     return super.fetch(request);
