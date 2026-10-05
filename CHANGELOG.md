@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.285.2](https://github.com/coreplanelabs/switchboard/compare/v1.285.1...v1.285.2) (2026-10-05)
+
+
+### Bug fixes
+
+* **dispatcher:** distinguish setting requests from task content ([#2756](https://github.com/coreplanelabs/switchboard/issues/2756)) ([efdabac](https://github.com/coreplanelabs/switchboard/commit/efdabac043a6b4b2dd2938768393fa8e16848ed4))
+
 ## [1.285.1](https://github.com/coreplanelabs/switchboard/compare/v1.285.0...v1.285.1) (2026-10-05)
 
 
