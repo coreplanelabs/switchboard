@@ -92,3 +92,11 @@ The composed request thread key must fit the ledger's 256-character claim key af
 | Criterion | Proof |
 | --- | --- |
 | A failed Workflow nudge retains the committed requester comment and offers the same original unit for reconciliation; it cannot dispatch replacement work. | `[unit]` `src/core/coordinator/checksIntake.test.ts::*::retains a committed comment and offers the original owner for reconciliation after a failed nudge` |
+
+## Serving build receipt
+
+A synchronous response with a finished run includes the serving process's existing `build` metadata when configured. A missing stamp remains absent. It names the responding process and never claims task success; deployment smoke compares its exact commit with the observed build and separately reads original run facts.
+
+| Criterion | Proof |
+|---|---|
+| The finished ingress receipt carries the serving process build without a view token or invented stamp | `[unit]` `src/channels/http.test.ts::run receipt in the response::binds the finished ingress receipt to the serving process build` |

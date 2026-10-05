@@ -168,6 +168,34 @@ The project's own production, not Switchboard:
 - The profile and config live in a private repository named by the variable `SWITCHBOARD_DEPLOY_PROFILE`, read with an App token minted as `CONFIG_REPO_TOKEN`.
 - CI holds `CLOUDFLARE_DEPLOY_TOKEN`, `RESIDENT_READ_TOKEN`, `RESIDENT_DRAIN_TOKEN` (drain, deploy fence, and undrain; a normal resident upload requires it) and `SANDBOX_TOKEN`; the docs deploy uses `CLOUDFLARE_API_TOKEN`.
 
+## Configure bounded deployment smoke
+
+Enable `SMOKE_INGRESS_ENABLED=true` only after explicitly authorizing a disposable smoke scope. The reusable workflow and manual dispatch both accept `smoke=true`. Required smoke refuses missing setup and package mode before upload. Disabled smoke says acceptance was skipped. Upload success and Worker readiness remain separate receipts.
+
+Provision a dedicated bearer in `SWITCHBOARD_INGRESS_TOKENS` pinned to channel `smoke`, subject `smoke`, without an email binding. Its `http:smoke` grants need `dispatch`, `agent:run:general`, `agent:run:explore`, `agent:run:review`, and repository write access limited to the disposable smoke repository. Its `mcp:smoke` grants need `runs:read` for `http:smoke` only. Do not grant `all`, merge, deployment, retained customer repositories or real-user threads. Set that channel's `boundary.maxMinutes: 7`; select its normal configured models and provider limits. The runner never creates credentials or grants.
+
+Create a small fixture repository and a dedicated open PR there outside the runner. Give `SMOKE.md` the single line `smoke fixture`. Configure repository secret `SMOKE_INGRESS_TOKEN`, variable `SMOKE_INGRESS_ORIGIN` (bare HTTPS bot origin) and variable `SMOKE_INGRESS_CONFIG`:
+
+```json
+{
+  "disposable": true,
+  "channel": "smoke",
+  "subject": "smoke",
+  "repo": "your-org/disposable-smoke",
+  "workspace": { "path": "SMOKE.md", "answer": "smoke fixture" },
+  "review": { "number": 1, "head": "0123456789abcdef0123456789abcdef01234567" },
+  "maxObservedUsd": 1
+}
+```
+
+Replace the example PR/head with the fixture's exact current head. Reviews publish to that PR, so this is write-capable setup. Keep the fixture small enough for a short review; maintain it explicitly, without automatic reset/cleanup.
+
+`npm run smoke:ingress -- <full-deploy-plan.json> <receipt.json> --check` validates configuration without network or model calls. Execution requires a fresh `SMOKE_INGRESS_THREAD` prefix; CI supplies its run/retry prefix. Keep receipts outside the checkout. `SMOKE_EXPECTED_COMMIT` requires a selected bot's exact release commit; a scoped deployment that leaves the bot unchanged records the bot's actual served commit instead. The adapter's finished response supplies its own serving build, independently of the run's output.
+
+Three runs cover the shared capability families: ordinary answer; workspace read; exact-head review publication. Each request uses the existing minimum run budget: currently four minutes for General/Explore and seven for Review. HTTP deadlines are one minute longer; MCP reads are bounded to thirty seconds. `maxObservedUsd` stops subsequent runs after priced run cost is observed; it is not a hard spending cap on the current call and excludes infrastructure and Door cost. Unknown cost or effects stop acceptance. Retain the receipt and inspect the original run before any authorized retry; the runner never cancels, cleans up or rolls back.
+
+The JSON artifact records `capabilityOutcome`, passed/failed/incomplete/skipped scenarios, original run/actor/thread, served commit and exact review artifact. Its separate `productAcceptance` stays `incomplete` while the private route is unproven. The workflow reports upload/readiness separately. The private question → Fix it → draft-PR path remains a live gap because its attested Slack DM boundary is unavailable through HTTP/MCP. It needs a separately authorized disposable DM procedure and original unit/draft artifact receipts. Scripted CI, route probes and these three capability checks cannot prove it.
+
 ## Findings work after a pull request merges
 
 A findings run can finish after its pull request merges or closes. Switchboard

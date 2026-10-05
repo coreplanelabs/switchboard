@@ -90,7 +90,7 @@ The repo's whole interface: deterministic, non-interactive, no credential unless
 | `npm run screenshots:gen` | Renders changed dashboard captures in both themes and records input hashes. | After a `web/` or fixture change; needs Chromium. |
 | `npm run screenshots:check` | Each surface's inputs still hash to what its screenshots were rendered from — no browser. | Part of `check:consistency`. |
 | `npm run load` | Load harness for infrastructure and route checks. | Capacity receipts. |
-| `npm run smoke:ingress` | Probes a live read through ingress. | Release gate. |
+| `npm run smoke:ingress` | Checks three deployment capability families and writes an acceptance receipt; --check validates setup without network. | Explicitly configured disposable smoke scope; release acceptance. |
 
 <!-- /generated:commands -->
 

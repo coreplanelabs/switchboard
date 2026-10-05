@@ -252,8 +252,8 @@
       "when": "Capacity receipts."
     },
     "smoke:ingress": {
-      "does": "Probes a live read through ingress.",
-      "when": "Release gate."
+      "does": "Checks three deployment capability families and writes an acceptance receipt; --check validates setup without network.",
+      "when": "Explicitly configured disposable smoke scope; release acceptance."
     }
   }
 }

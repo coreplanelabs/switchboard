@@ -92,6 +92,23 @@ function expectNoToken(value: unknown): void {
 }
 
 describe("RunsService.getRun", () => {
+  it("finished registry projection exposes the persisted admitted profile", async () => {
+    const { reg, store, svc } = setup();
+    const profile = { preset: "review", machine: "repo-resident", identity: "read", minutes: 7 } as const;
+    reg.create(
+      "review",
+      { agent: "review", channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:profile" },
+      { id: "profile-run" },
+    );
+    reg.finish("profile-run", "completed");
+    await store!.put(record("profile-run", NOW, { profile, agent: "review" }));
+    reg.markPersisted("profile-run");
+    const fresh = await svc.getRun("profile-run", { include: "messages" });
+    expect(fresh.ok && fresh.value.profile).toEqual(profile);
+    reg.discard("profile-run");
+    const cold = await svc.getRun("profile-run", { include: "messages" });
+    expect(cold.ok && cold.value.profile).toEqual(profile);
+  });
   it("never exposes internal source archives or handoff context through any persisted projection", async () => {
     const { store, svc } = setup();
     const base = record("archive", NOW);
