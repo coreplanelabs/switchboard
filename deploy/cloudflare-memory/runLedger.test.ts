@@ -5535,6 +5535,47 @@ describe("complete canonical pull ownership", () => {
       expect(before).toHaveLength(1);
       expect(await owner.findPullOwners({ repo: instance.repo, ref: unit.branch })).toEqual(expected);
       expect(await owner.findPullOwners({ repo: "other/repo", pr: 7 })).toEqual({ ok: true, owners: [] });
+      const actionId = `r_${"d".repeat(64)}`;
+      const recovering: CoordinatorUnit = {
+        ...unit,
+        history: { version: 1, receiptId: "rc_claim" },
+        recovery: {
+          kind: "coding",
+          round: 0,
+          actionId,
+          workflowId: `recovery-${actionId}`,
+          expectedHeadSha: head,
+          remainingMs: 1000,
+          claimedAt: 2,
+          deadlineAt: 1002,
+          step: `${unit.unit}/recovery/${actionId}/0/coding`,
+          codingRunId: id,
+          codingKey: binding.step,
+          previousEnding: { kind: "failed", report: "PR creation refused", at: 1 },
+          accounting: {
+            spendUsd: 0,
+            children: [{ runId: id, key: binding.step, usd: 0 }],
+            grant: { renewals: 0 },
+            renewalsSpent: 0,
+          },
+        },
+      };
+      state.storage.sql.exec(
+        `UPDATE coordinator_units SET json = ? WHERE instance_id = ? AND unit = ?`,
+        JSON.stringify(recovering),
+        instance.id,
+        unit.unit,
+      );
+      expect(await owner.findPullOwners({ repo: instance.repo, ref: unit.branch })).toEqual({
+        ok: true,
+        owners: [{ kind: "unit", instanceId: instance.id, unit: unit.unit, actionId }],
+      });
+      state.storage.sql.exec(
+        `UPDATE coordinator_units SET json = ? WHERE instance_id = ? AND unit = ?`,
+        JSON.stringify(unit),
+        instance.id,
+        unit.unit,
+      );
       const effect = {
         ...unit.currentEffect!,
         id: "ROOT/0/coding/pr-check",
