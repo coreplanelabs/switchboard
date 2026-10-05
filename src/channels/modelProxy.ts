@@ -456,7 +456,7 @@ export class SseMeter {
       } catch {
         continue;
       }
-      this.apply(json);
+      this.observe(json);
     }
   }
 
@@ -478,7 +478,8 @@ export class SseMeter {
     };
   }
 
-  private apply(json: unknown): void {
+  /** A decoded event from a caller that already owns SSE dispatch semantics. */
+  observe(json: unknown): void {
     const event = record(json);
     if (!event) return;
     if (this.shape === "openai-responses") {
