@@ -1,6 +1,17 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { createBashToolDefinition, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { judgeToolCall } from "./toolRules.js";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PI_EXTENSION_SOURCE } from "./extensionSource.js";
@@ -20,7 +31,13 @@ interface RegisteredTool {
   label: string;
   description: string;
   parameters: unknown;
-  execute(toolCallId: string, params: unknown, signal?: AbortSignal): Promise<{ content: unknown[]; details: unknown }>;
+  execute(
+    toolCallId: string,
+    params: unknown,
+    signal?: AbortSignal,
+    update?: unknown,
+    ctx?: { cwd: string },
+  ): Promise<{ content: unknown[]; details: unknown }>;
 }
 
 function fakePi() {
@@ -64,13 +81,19 @@ function fakeBot(answers: Record<string, unknown | ((body: unknown) => unknown)>
 /** The bot's answer for a relayed call still running: 202 and the call id, as the route answers. */
 const pending = (toolCallId: string) => new Response(JSON.stringify({ pending: true, toolCallId }), { status: 202 });
 
+const originalTmpdir = process.env.TMPDIR;
+const originalOutputRoot = process.env.SWITCHBOARD_PI_OUTPUT_ROOT;
 let dir: string;
 let load: () => Promise<(pi: unknown) => Promise<void>>;
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), "swb-pi-ext-"));
+  delete process.env.SWITCHBOARD_PI_OUTPUT_ROOT;
+  dir = realpathSync(mkdtempSync(join(tmpdir(), "swb-pi-ext-")));
   const file = join(dir, "extension.mjs");
   writeFileSync(file, PI_EXTENSION_SOURCE);
+  // pi's pinned loader aliases its SDK even outside node_modules. Native
+  // imports in this fixture use the same installed SDK through a temp link.
+  symlinkSync(resolve("node_modules"), join(dir, "node_modules"), "dir");
   load = async () => ((await import(pathToFileURL(file).href)) as { default: (pi: unknown) => Promise<void> }).default;
   process.env[HARNESS_URL_ENV] = "https://bot.example.com/";
   process.env[RUN_BEARER_ENV] = "sbr_run-7.s3cret";
@@ -81,6 +104,10 @@ afterEach(() => {
   vi.useRealTimers();
   delete process.env[HARNESS_URL_ENV];
   delete process.env[RUN_BEARER_ENV];
+  if (originalOutputRoot === undefined) delete process.env.SWITCHBOARD_PI_OUTPUT_ROOT;
+  else process.env.SWITCHBOARD_PI_OUTPUT_ROOT = originalOutputRoot;
+  if (originalTmpdir === undefined) delete process.env.TMPDIR;
+  else process.env.TMPDIR = originalTmpdir;
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -96,15 +123,226 @@ const TOOLS = {
 };
 
 describe("the harness extension", () => {
-  it("imports nothing and reads its settings from the environment", async () => {
-    expect(PI_EXTENSION_SOURCE).not.toMatch(/^\s*import\s/m);
+  it("keeps the authorization gate and checkout reader on unsupported hosts without scratch access", async () => {
+    const host = process;
+    vi.stubGlobal(
+      "process",
+      new Proxy(host, { get: (target, key) => (key === "platform" ? "darwin" : Reflect.get(target, key)) }),
+    );
+    const checkout = join(dir, "checkout");
+    mkdirSync(checkout);
+    writeFileSync(join(checkout, "normal.txt"), "normal");
+    const output = join(dir, "output");
+    mkdirSync(output);
+    const alias = join(dir, "output-alias");
+    symlinkSync(output, alias, "dir");
+    process.env.SWITCHBOARD_PI_OUTPUT_ROOT = alias;
+    fakeBot({ "/harness/tools": TOOLS, "/harness/authorize": { allow: false, reason: "blocked by bot" } });
+    const pi = fakePi();
+    await expect((await load())(pi.api)).resolves.toBeUndefined();
+    expect(pi.handlers.has("tool_call")).toBe(true);
+    expect(
+      await pi.handlers.get("tool_call")!({ toolCallId: "b", toolName: "bash", input: { command: "git push" } }, {}),
+    ).toEqual({ block: true, reason: "blocked by bot" });
+    const read = pi.tools.find((t) => t.name === "read")!;
+    expect(await read.execute("r", { path: "normal.txt" }, undefined, undefined, { cwd: checkout })).toMatchObject({
+      content: [{ type: "text", text: "normal" }],
+    });
+    const outside = join(output, "outside.log");
+    writeFileSync(outside, "outside");
+    await expect(read.execute("r", { path: outside }, undefined, undefined, { cwd: checkout })).rejects.toThrow();
+  });
+
+  it("retains a blocking gate when extension initialization fails", async () => {
+    fakeBot({
+      "/harness/tools": () => {
+        throw new Error("initialization failed");
+      },
+    });
+    const pi = fakePi();
+    await expect((await load())(pi.api)).resolves.toBeUndefined();
+    expect(
+      await pi.handlers.get("tool_call")!({ toolCallId: "b", toolName: "bash", input: { command: "touch file" } }, {}),
+    ).toMatchObject({ block: true });
+  });
+
+  it("uses the pinned reader's path normalization before checking and reading the target", async () => {
+    const checkout = join(dir, "checkout");
+    mkdirSync(checkout);
+    writeFileSync(join(checkout, "normal.txt"), "normal");
+    process.env.SWITCHBOARD_PI_OUTPUT_ROOT = join(dir, "output");
+    fakeBot({ "/harness/tools": TOOLS });
+    const pi = fakePi();
+    await (
+      await load()
+    )(pi.api);
+    const read = pi.tools.find((t) => t.name === "read")!;
+    for (const path of ["@normal.txt", "@" + join(checkout, "normal.txt")])
+      expect(await read.execute("r", { path }, undefined, undefined, { cwd: checkout })).toMatchObject({
+        content: [{ type: "text", text: "normal" }],
+      });
+    const outside = join(dir, "outside.txt");
+    writeFileSync(outside, "outside");
+    await expect(read.execute("r", { path: "@" + outside }, undefined, undefined, { cwd: checkout })).rejects.toThrow();
+  });
+  it("loads the output read override through the pinned pi loader outside node_modules", async () => {
+    rmSync(join(dir, "node_modules"));
+    process.env.SWITCHBOARD_PI_OUTPUT_ROOT = join(dir, "output");
+    fakeBot({ "/harness/tools": TOOLS });
+    const loader = (await import(
+      new URL("./core/extensions/loader.js", import.meta.resolve("@earendil-works/pi-coding-agent")).href
+    )) as {
+      loadExtensions(
+        paths: string[],
+        cwd: string,
+      ): Promise<{ extensions: { tools: Map<string, unknown> }[]; errors: unknown[] }>;
+    };
+    const loaded = await loader.loadExtensions([join(dir, "extension.mjs")], dir);
+    expect(loaded.errors).toEqual([]);
+    expect([...loaded.extensions[0].tools.keys()]).toEqual(["read", "update_status", "submit_pr_description"]);
+    if (process.platform === "linux") expect(process.env.TMPDIR?.startsWith(`${dir}/output/process-`)).toBe(true);
+    else expect(process.env.TMPDIR).toBe(originalTmpdir);
+  });
+
+  // Workspace pi runs on Linux; the kernel resolves held descriptors through /proc.
+  it.runIf(process.platform === "linux").each(["read", "write"] as const)(
+    "reads pinned pi bash spills only from this process's output scratch for %s identity",
+    async (identity) => {
+      const checkout = join(dir, "checkout");
+      const root = join(dir, "run", "output");
+      mkdirSync(checkout);
+      mkdirSync(root, { recursive: true });
+      const credential = join(dir, "run", "agent", "models.json");
+      mkdirSync(join(dir, "run", "agent"));
+      writeFileSync(credential, "not output");
+      writeFileSync(join(checkout, "normal.txt"), "ordinary checkout read");
+      process.env.SWITCHBOARD_PI_OUTPUT_ROOT = root;
+      const bot = fakeBot({
+        "/harness/tools": TOOLS,
+        "/harness/authorize": (body: unknown) => {
+          const ask = body as { tool: string; input: unknown };
+          const verdict = judgeToolCall(ask.tool, ask.input, {
+            identity,
+            checkout,
+            outputDir: root,
+            noShellPush: true,
+          });
+          return verdict.verdict === "allowed" ? { allow: true } : { allow: false, reason: verdict.reason };
+        },
+      });
+      const pi = fakePi();
+      await (
+        await load()
+      )(pi.api);
+      const scratch = process.env.TMPDIR!;
+      expect(scratch.startsWith(`${root}/`)).toBe(true);
+      expect(scratch.startsWith(`${checkout}/`)).toBe(false);
+      let exitCode = 0;
+      const context = { cwd: checkout } as ExtensionContext;
+      const bash = createBashToolDefinition(checkout, {
+        exposeSessionEnvironment: false,
+        operations: {
+          exec: async (_command, _cwd, { onData }) => {
+            onData(Buffer.from(Array.from({ length: 2200 }, (_, i) => `row ${i + 1}`).join("\n")));
+            return { exitCode };
+          },
+        },
+      });
+      const output = await bash.execute("bash-1", { command: "fixture" }, undefined, undefined, context);
+      const path = (output.details as { fullOutputPath: string }).fullOutputPath;
+      expect(path.startsWith(`${scratch}/`)).toBe(true);
+      const hook = pi.handlers.get("tool_call")!;
+      expect(
+        await hook({ toolCallId: "read-1", toolName: "read", input: { path } }, { cwd: checkout }),
+      ).toBeUndefined();
+      const read = pi.tools.find((tool) => tool.name === "read")!;
+      expect(read).toBeDefined();
+      const readAt = (file: string, offset = 1, limit = 2) =>
+        read.execute("read-1", { path: file, offset, limit }, undefined, undefined, { cwd: checkout });
+      expect(await readAt(path)).toMatchObject({
+        content: [{ type: "text", text: expect.stringContaining("row 1\nrow 2") }],
+      });
+      expect(await readAt(path, 2199)).toMatchObject({
+        content: [{ type: "text", text: expect.stringContaining("row 2199\nrow 2200") }],
+      });
+      expect(await readAt(join(checkout, "normal.txt"))).toMatchObject({
+        content: [{ type: "text", text: "ordinary checkout read" }],
+      });
+      const checkoutAlias = join(dir, "checkout-alias");
+      symlinkSync(checkout, checkoutAlias, "dir");
+      expect(
+        await read.execute(
+          "absolute-checkout-alias",
+          { path: join(checkoutAlias, "normal.txt") },
+          undefined,
+          undefined,
+          { cwd: checkoutAlias },
+        ),
+      ).toMatchObject({
+        content: [{ type: "text", text: "ordinary checkout read" }],
+      });
+      exitCode = 1;
+      const failure = await bash
+        .execute("bash-failed", { command: "fixture failure" }, undefined, undefined, context)
+        .catch((error: Error) => error);
+      expect(failure).toBeInstanceOf(Error);
+      const failedPath = (failure as Error).message.match(/Full output: ([^\]]+)/)![1];
+      expect(failedPath.startsWith(`${scratch}/`)).toBe(true);
+      expect(await readAt(failedPath)).toMatchObject({
+        content: [{ type: "text", text: expect.stringContaining("row 1\nrow 2") }],
+      });
+      for (const file of [credential, join(dir, "pi-bash-other.log"), join(root, "other-process", "pi-bash-file.log")])
+        await expect(readAt(file)).rejects.toThrow();
+      expect(
+        await hook({ toolCallId: "read-outside", toolName: "read", input: { path: credential } }, {}),
+      ).toMatchObject({ block: true });
+      for (const tool of ["write", "edit", "ls", "grep", "find"])
+        expect(await hook({ toolCallId: `outside-${tool}`, toolName: tool, input: { path } }, {})).toMatchObject({
+          block: true,
+        });
+      const symlink = join(scratch, "link.log");
+      symlinkSync(credential, symlink);
+      await expect(readAt(symlink)).rejects.toThrow();
+      const hardlink = join(scratch, "hardlink.log");
+      linkSync(credential, hardlink);
+      await expect(readAt(hardlink)).rejects.toThrow();
+      symlinkSync(join(dir, "run", "agent"), join(scratch, "escape"));
+      await expect(readAt(join(scratch, "escape", "models.json"))).rejects.toThrow();
+      symlinkSync(path, join(checkout, "output-link"));
+      await expect(readAt(join(checkout, "output-link"))).rejects.toThrow();
+      // A bot reattach uses the same loaded extension; a fresh pi does not
+      // inherit a previous process's scratch, even with the same run root.
+      expect(await readAt(path)).toBeDefined();
+      const fresh = fakePi();
+      await (
+        await load()
+      )(fresh.api);
+      expect(process.env.TMPDIR).not.toBe(scratch);
+      const freshRead = fresh.tools.find((tool) => tool.name === "read")!;
+      await expect(freshRead.execute("old", { path }, undefined, undefined, { cwd: checkout })).rejects.toThrow();
+      // Replacing the directory with an alias cannot extend the old grant.
+      renameSync(scratch, `${scratch}-moved`);
+      symlinkSync(join(dir, "run", "agent"), scratch);
+      await expect(readAt(join(scratch, "models.json"))).rejects.toThrow();
+      expect(bot.calls.some((call) => call.path === "/harness/authorize")).toBe(true);
+    },
+  );
+  it("imports only the pinned pi SDK and Node builtins and reads its settings from the environment", async () => {
+    expect(PI_EXTENSION_SOURCE.match(/^import .* from "([^"]+)"/gm)).toEqual([
+      'import { constants } from "node:fs"',
+      'import { mkdir, mkdtemp, open, realpath } from "node:fs/promises"',
+      'import { isAbsolute, relative, resolve } from "node:path"',
+      'import { pathToFileURL } from "node:url"',
+      'import { createReadToolDefinition, getPackageDir } from "@earendil-works/pi-coding-agent"',
+    ]);
     expect(PI_EXTENSION_SOURCE).not.toContain("require(");
     delete process.env[RUN_BEARER_ENV];
     const bot = fakeBot({ "/harness/tools": TOOLS });
     const pi = fakePi();
-    await expect((await load())(pi.api)).rejects.toThrow(
-      /SWITCHBOARD_HARNESS_URL and SWITCHBOARD_RUN_BEARER must be set/,
-    );
+    await expect((await load())(pi.api)).resolves.toBeUndefined();
+    expect(
+      await pi.handlers.get("tool_call")!({ toolCallId: "b", toolName: "bash", input: { command: "touch file" } }, {}),
+    ).toMatchObject({ block: true });
     expect(bot.calls).toHaveLength(0);
   });
 

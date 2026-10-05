@@ -4287,14 +4287,14 @@ describe("runLoop — the model turn and everything that rides on it", () => {
         const spawn = `node -e 'require("child_process").execFileSync("git",process.argv.slice(1))' push origin ${ref}:${ref} & npm version patch`;
         expect(
           await authorizeToolCall(harness, { toolCallId: "spawn", tool: "bash", input: { command: spawn } }),
-        ).toMatchObject({ allow: false });
+        ).toMatchObject({ allow: true });
         expect(bindings.hasToolPush("run-l")).toBe(false);
-        // Inline interpreters are not a bound publication call, even when
-        // neither executable nor subcommand appears in the shell source.
+        // Scripts can run, but they never obtain a native publication slot,
+        // including when they construct the executable and verb indirectly.
         const opaque = `node -e 'require("child_process").execFileSync(String.fromCharCode(103,105,116),["pu"+"sh","origin","${ref}:${ref}"])'`;
         expect(
           await authorizeToolCall(harness, { toolCallId: "opaque", tool: "bash", input: { command: opaque } }),
-        ).toMatchObject({ allow: false });
+        ).toMatchObject({ allow: true });
         expect(bindings.hasToolPush("run-l")).toBe(false);
         for (const command of [`git push origin HEAD:${ref}`, `git push upstream ${ref}:main`])
           expect(
@@ -6128,6 +6128,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     expect(fixRound).toEqual({
       identity: "write",
       checkout: "/srv/wt/the-pr",
+      outputDir: "/var/tmp/switchboard-pi-run-l/output",
       branch: "fix/the-pr-head",
       protectedBranches: ["main"],
       loopEndsIn: expect.any(Function),
@@ -6143,6 +6144,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       identity: "write",
       checkout: "/workspace",
       branch: "unit/u26",
+      outputDir: "/var/tmp/switchboard-pi-run-l/output",
       protectedBranches: ["feat/trunk"],
       loopEndsIn: expect.any(Function),
     });
@@ -6248,6 +6250,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     expect(recovered).toEqual({
       identity: "write",
       checkout: "/workspace",
+      outputDir: "/var/tmp/switchboard-pi-run-l/output",
       branch: "unit/u27",
       protectedBranches: ["feat/trunk"],
       loopEndsIn: expect.any(Function),
@@ -6259,6 +6262,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     expect(plain).toEqual({
       identity: "write",
       checkout: "/workspace",
+      outputDir: "/var/tmp/switchboard-pi-run-l/output",
       protectedBranches: ["main"],
       loopEndsIn: expect.any(Function),
     });

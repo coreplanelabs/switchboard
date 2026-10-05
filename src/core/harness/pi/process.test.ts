@@ -171,12 +171,22 @@ describe("piLaunchArgs", () => {
 });
 
 describe("piLaunchEnv", () => {
+  it("binds an output-only scratch root for workspace identities, never the agent config or checkout", () => {
+    for (const identity of ["read", "write"] as const) {
+      const env = piLaunchEnv({ ...spec, identity }, "bearer");
+      expect(env.SWITCHBOARD_PI_OUTPUT_ROOT).toBe(`${spec.paths.dir}/output`);
+      expect(spec.paths.dirs).toContain(env.SWITCHBOARD_PI_OUTPUT_ROOT);
+      expect(env.SWITCHBOARD_PI_OUTPUT_ROOT).not.toBe(spec.paths.agentDir);
+    }
+    expect(piLaunchEnv(generalSpec, "bearer")).not.toHaveProperty("SWITCHBOARD_PI_OUTPUT_ROOT");
+  });
   it("carries the bearer under the name models.json reads, the bot's URL, the run id, pi's config directory and the offline switches — and nothing else", () => {
     expect(piLaunchEnv(spec, "sbr_run-7.s3cret")).toEqual({
       [RUN_BEARER_ENV]: "sbr_run-7.s3cret",
       [HARNESS_URL_ENV]: "https://bot.example.com/",
       SWITCHBOARD_RUN_ID: "run-7",
       PI_CODING_AGENT_DIR: "/var/tmp/switchboard-pi-run-7/agent",
+      SWITCHBOARD_PI_OUTPUT_ROOT: "/var/tmp/switchboard-pi-run-7/output",
       PI_SKIP_VERSION_CHECK: "1",
       PI_OFFLINE: "1",
       PI_TELEMETRY: "0",

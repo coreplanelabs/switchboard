@@ -1,8 +1,9 @@
 // The pi extension a run's container loads (docs/reference/specs/harness-pi.md
 // item 7), as the text the harness writes there before pi starts. Plain
-// JavaScript that imports nothing: pi's own loader (jiti) runs it as written
-// in a directory with no node_modules. It does two things. It registers the
-// run's relayed tools — the definitions it fetches from the bot, one JSON
+// JavaScript using Node builtins and pi's pinned SDK (its loader resolves
+// the SDK even in a directory with no node_modules). It also binds bash's
+// spill files to isolated output-only scratch and safely reads them. It
+// registers the run's relayed tools — the definitions it fetches from the bot, one JSON
 // Schema each — so `update_status`, `submit_pr_description` and the rest run
 // in the bot with the run's own context and answer here, a call the bot says
 // is still running asked again with the same call id until it answers (the
@@ -14,8 +15,8 @@
 // pointer summary after one that failed for good — and hands pi the bot's
 // compaction under pi's own kept entry and size; a bot that cannot be reached
 // leaves the compaction to pi. The bearer and the bot's URL come from the
-// process environment the harness started pi with; nothing here holds a rule,
-// a key or a decision.
+// process environment the harness started pi with; the bot decides authority.
+// The read wrapper only narrows the trusted scratch binding to an open file.
 //
 // Shipped as a string on purpose: the file the container runs is exactly this
 // text, the tests import it from a file they write, and `tsc` carries it to
@@ -30,7 +31,12 @@ export const BLOCKED_AT_DOOR_PREFIX = "authorization refused at the door: ";
 export const BLOCKED_UNAVAILABLE_PREFIX = "authorization unavailable: ";
 
 export const PI_EXTENSION_SOURCE = `// Switchboard's pi harness extension. Written into the run's directory by the
-// bot before pi starts; loaded with \`-e\`. Imports nothing.
+// bot before pi starts; loaded with \`-e\`.
+import { constants } from "node:fs";
+import { mkdir, mkdtemp, open, realpath } from "node:fs/promises";
+import { isAbsolute, relative, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { createReadToolDefinition, getPackageDir } from "@earendil-works/pi-coding-agent";
 
 const BEARER_ENV = "SWITCHBOARD_RUN_BEARER";
 const URL_ENV = "SWITCHBOARD_HARNESS_URL";
@@ -226,14 +232,79 @@ async function compaction(event) {
   };
 }
 
+/** Output scratch never includes the harness's agent configs. Each loaded
+ * pi gets a fresh child: a live reattach keeps it, a new process cannot read
+ * the previous one's outputs. TMPDIR is the pinned accumulator's producer
+ * seam, including failed commands which advertise no structured details. */
+async function outputReadTool() {
+  const root = process.env.SWITCHBOARD_PI_OUTPUT_ROOT;
+  if (!root) return undefined;
+  const { resolveReadPathAsync } = await import(pathToFileURL(resolve(getPackageDir(), "dist/core/tools/path-utils.js")).href);
+  let scratch;
+  if (process.platform === "linux") {
+    await mkdir(root, { recursive: true, mode: 0o700 });
+    if (await realpath(root) !== resolve(root)) throw new Error("output scratch root is not canonical");
+    scratch = await mkdtemp(resolve(root, "process-"));
+    process.env.TMPDIR = scratch;
+  }
+  const inside = (dir, file) => {
+    const path = relative(dir, file);
+    return path !== "" && path !== ".." && !path.startsWith("../") && !isAbsolute(path);
+  };
+  const normal = createReadToolDefinition(process.cwd());
+  const output = createReadToolDefinition(process.cwd(), {
+    operations: {
+      access: async () => {},
+      async readFile(path) {
+        if (scratch === undefined || !inside(scratch, path)) throw new Error("read refused: path is outside this process's output scratch");
+        // O_NOFOLLOW excludes a final symlink. The descriptor's canonical
+        // path excludes ancestor swaps; nlink excludes aliases to other files.
+        // Read the SAME open file, not a path checked before an async gate.
+        const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        try {
+          const stat = await file.stat();
+          const actual = await realpath("/proc/self/fd/" + file.fd);
+          if (!stat.isFile() || stat.nlink !== 1 || !inside(scratch, actual))
+            throw new Error("read refused: output file identity is outside this process's scratch");
+          return await file.readFile();
+        } finally {
+          await file.close();
+        }
+      },
+    },
+  });
+  return {
+    ...normal,
+    async execute(id, args, signal, update, ctx) {
+      const checkout = resolve(ctx && ctx.cwd || process.cwd());
+      const canonicalCheckout = await realpath(checkout);
+      const path = await resolveReadPathAsync(args.path, checkout);
+      if (inside(checkout, path)) {
+        if (!inside(canonicalCheckout, await realpath(path))) throw new Error("read refused: path resolves outside the checkout");
+        return normal.execute(id, { ...args, path }, signal, update, ctx);
+      }
+      return output.execute(id, { ...args, path }, signal, update, ctx);
+    },
+  };
+}
+
 export default async function switchboardHarness(pi) {
-  const { tools } = await call("GET", "/harness/tools");
-  for (const def of tools) pi.registerTool(relayTool(def));
+  let initialized = false;
   pi.on("tool_call", async (event) => {
+    if (!initialized) return { block: true, reason: "authorization unavailable: harness initialization failed; tool execution blocked" };
     const verdict = await authorize(event);
     if (!verdict.allow) return { block: true, reason: verdict.reason };
     return undefined;
   });
-  pi.on("session_before_compact", compaction);
+  try {
+    const { tools } = await call("GET", "/harness/tools");
+    const read = await outputReadTool();
+    if (read) pi.registerTool(read);
+    for (const def of tools) pi.registerTool(relayTool(def));
+    pi.on("session_before_compact", compaction);
+    initialized = true;
+  } catch {
+    // Return the extension with its gate intact; pi discards extensions that throw.
+  }
 }
 `;

@@ -65,6 +65,8 @@ export interface PiRunPaths extends HarnessPaths {
   agentDir: string;
   sessionDir: string;
   extension: string;
+  /** Output-only scratch parent; never the agent config directory. */
+  outputDir: string;
 }
 
 /** Every path is derived from the run id, so two runs never share a file and
@@ -108,7 +110,8 @@ export function piRunPathsAt(dir: string): PiRunPaths {
   return {
     dir,
     // The directories the start makes at 700, the root first (harness-pi item 4).
-    dirs: [dir, sessionDir, commandDir],
+    dirs: [dir, sessionDir, commandDir, `${dir}/output`],
+    outputDir: `${dir}/output`,
     agentDir: `${dir}/agent`,
     sessionDir,
     extension: `${dir}/extension.js`,
@@ -198,6 +201,7 @@ export function piLaunchEnv(spec: PiLaunchSpec, bearer: string): Record<string, 
     [HARNESS_URL_ENV]: spec.harnessUrl,
     SWITCHBOARD_RUN_ID: spec.runId,
     PI_CODING_AGENT_DIR: spec.paths.agentDir,
+    ...(spec.identity !== "none" ? { SWITCHBOARD_PI_OUTPUT_ROOT: spec.paths.outputDir } : {}),
     PI_SKIP_VERSION_CHECK: "1",
     PI_OFFLINE: "1",
     PI_TELEMETRY: "0",
