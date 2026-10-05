@@ -12,6 +12,13 @@ export function escapeMrkdwn(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+/** Decode the three named entities once. Callers must still escape text or
+ *  encode URLs afterward; this alone never authorizes mrkdwn structure. Code
+ *  content deliberately skips decoding so its literal entity text survives. */
+export function decodeMrkdwnEntities(s: string): string {
+  return s.replace(/&(amp|lt|gt);/g, (_match, entity: string) => ({ amp: "&", lt: "<", gt: ">" })[entity]!);
+}
+
 /** A URL lives inside `<url|label>`; HTML-escaping it would corrupt the address,
  *  so instead percent-encode only the characters that would break out of or
  *  forge that structure — `<`, `>`, `|`. Slack decodes `%3C`/`%3E`/`%7C` back to

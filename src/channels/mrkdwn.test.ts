@@ -128,6 +128,36 @@ describe("mdToMrkdwn", () => {
     expect(mdToMrkdwn("<https://x.test?q=slack:U123|slack:U123>")).toBe("<https://x.test?q=slack:U123|slack:U123>");
   });
 
+  it("decodes link entities once and accepts angle-wrapped Markdown destinations", () => {
+    const raw = "https://x.test/path?a=1&b=2#L14-L54";
+    const encoded = "https://x.test/path?a=1&amp;b=2#L14-L54";
+    expect(mdToMrkdwn(`<${encoded}|Native A &amp; B>`)).toBe(`<${raw}|Native A &amp; B>`);
+    expect(mdToMrkdwn(`[Markdown A &amp; B](<${encoded}>)`)).toBe(`<${raw}|Markdown A &amp; B>`);
+    expect(mdToMrkdwn(`[ordinary](${encoded})`)).toBe(`<${raw}|ordinary>`);
+    expect(mdToMrkdwn(`[path](<https://x.test/a%20b>)`)).toBe("<https://x.test/a%20b|path>");
+    expect(mdToMrkdwn("![alt](<https://x.test/a.png?a=1&amp;b=2>)")).toBe("https://x.test/a.png?a=1&b=2");
+  });
+
+  it("accepts angle-wrapped HTTP(S) Markdown destinations", () => {
+    expect(mdToMrkdwn("[link](<https://x.test/a?one=1&two=2#part>)")).toBe("<https://x.test/a?one=1&two=2#part|link>");
+  });
+
+  it("decodes prose entities once without promoting encoded control syntax", () => {
+    expect(mdToMrkdwn("A &amp; B &lt; C &gt; D")).toBe("A &amp; B &lt; C &gt; D");
+    expect(mdToMrkdwn("&lt;!here&gt; &lt;@U123&gt; &lt;@slack:U123&gt;")).toBe(
+      "&lt;!here&gt; &lt;@U123&gt; &lt;@slack:U123&gt;",
+    );
+    expect(mdToMrkdwn("<https://x.test|&lt;!here&gt; &amp; safe>")).toBe("<https://x.test|&lt;!here&gt; &amp; safe>");
+    expect(mdToMrkdwn("&amp;lt;!here&amp;gt;")).toBe("&amp;lt;!here&amp;gt;");
+    expect(mdToMrkdwn("[safe](<https://x.test/&lt;!here&gt;>)")).toBe("<https://x.test/%3C!here%3E|safe>");
+    expect(mdToMrkdwn("[safe](<!here>)")).toBe("<%3C!here%3E|safe>");
+  });
+
+  it("keeps literal entities in code spans and fences", () => {
+    expect(mdToMrkdwn("`A &amp; B &lt;x&gt;`")).toBe("`A &amp;amp; B &amp;lt;x&amp;gt;`");
+    expect(mdToMrkdwn("```\nA &amp; B &lt;x&gt;\n```")).toBe("```\nA &amp;amp; B &amp;lt;x&amp;gt;\n```");
+  });
+
   it("keeps native links literal in inline code and fences", () => {
     const link = "<https://x.test?a=1&b=2|label>";
     const escaped = "&lt;https://x.test?a=1&amp;b=2|label&gt;";

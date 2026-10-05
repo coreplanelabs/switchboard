@@ -1,4 +1,4 @@
-import { encodeMrkdwnUrl, escapeMrkdwn } from "./slackEscape.js";
+import { decodeMrkdwnEntities, encodeMrkdwnUrl, escapeMrkdwn } from "./slackEscape.js";
 
 // Standard Markdown -> Slack mrkdwn. Agents write normal Markdown (the
 // contract for every channel); each adapter converts to its native dialect.
@@ -78,7 +78,7 @@ function convert(text: string): string {
   // `<`/`>`/`|` (mirroring the link path) so an image url of `<!channel>`/`<@U…>`
   // can't reach Slack as a live broadcast/mention, then stash it so its literal
   // `&` (query params) survives the prose escape untouched.
-  out = out.replace(/!\[[^\]]*\]\(([^)\s]+)\)/g, (_, url: string) => stash(encodeMrkdwnUrl(url)));
+  out = out.replace(/!\[[^\]]*\]\(([^)\s]+)\)/g, (_, url: string) => stash(encodeMrkdwnUrl(markdownUrl(url))));
 
   // links [text](url) -> <url|label>. Escape the label and percent-encode only
   // the url's structural chars (<>|) so a link can't forge or break out of the
@@ -87,7 +87,7 @@ function convert(text: string): string {
   // would corrupt the address. Stash the whole produced link so the prose escape
   // below leaves its real `<`/`>`/`|` and already-escaped label alone.
   out = out.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label: string, url: string) =>
-    stash(`<${encodeMrkdwnUrl(url)}|${escapeMrkdwn(label)}>`),
+    stash(`<${encodeMrkdwnUrl(markdownUrl(url))}|${escapeMrkdwn(decodeMrkdwnEntities(label))}>`),
   );
 
   // Native Slack links can arrive in quoted history or model prose. Accept
@@ -95,12 +95,11 @@ function convert(text: string): string {
   // through the same escaping helpers as Markdown links. Reject nested angle
   // syntax so a forged label cannot smuggle a mention or broadcast through.
   out = out.replace(/<(https?:\/\/[^\s<>|]+)(?:\|([^<>\n]*))?>/gi, (raw, url: string, label?: string) => {
-    try {
-      if (!new URL(url).hostname) return raw;
-    } catch {
-      return raw;
-    }
-    return stash(`<${encodeMrkdwnUrl(url)}${label === undefined ? "" : `|${escapeMrkdwn(label)}`}>`);
+    const decodedUrl = decodeMrkdwnEntities(url);
+    if (!isHttpUrl(decodedUrl)) return raw;
+    return stash(
+      `<${encodeMrkdwnUrl(decodedUrl)}${label === undefined ? "" : `|${escapeMrkdwn(decodeMrkdwnEntities(label))}`}>`,
+    );
   });
 
   // A person's actor id in bot-authored text — bare `slack:U…` (AGENTS.md
@@ -130,7 +129,10 @@ function convert(text: string): string {
   // <!channel>/<@U…> and invalid native links become inert visible text. This runs
   // BEFORE the marker conversions below, whose markers (*, _, ~, •) never
   // introduce `&`/`<`/`>`, so escaping first can't break or double-escape them.
-  out = escapeMrkdwn(out);
+  // Decode entity prose only after structural/actor recognition. An encoded
+  // mention, broadcast or quote marker stays prose and is escaped again;
+  // decoding earlier could promote it into live structure. Code is stashed.
+  out = escapeMrkdwn(decodeMrkdwnEntities(out));
 
   // Asterisk emphasis is normalized to BOLD, whichever dialect the model wrote:
   // `**x**` collapses to `*x*` and a single `*x*` is already mrkdwn bold, so both
@@ -150,4 +152,21 @@ function convert(text: string): string {
 
   // Restore stashed structural syntax verbatim.
   return out.replace(new RegExp(`${STRUCT_OPEN}(\\d+)${STRUCT_CLOSE}`, "g"), (_, i) => structural[Number(i)]);
+}
+
+/** CommonMark permits `<https://…>` as a Markdown destination. Unwrap only a
+ *  valid HTTP(S) target; `<@…>`/`<!…>` still pass through structural encoding. */
+function markdownUrl(raw: string): string {
+  const url = decodeMrkdwnEntities(raw);
+  const wrapped = url.startsWith("<") && url.endsWith(">") ? url.slice(1, -1) : undefined;
+  return wrapped !== undefined && isHttpUrl(wrapped) ? wrapped : url;
+}
+
+function isHttpUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.hostname !== "";
+  } catch {
+    return false;
+  }
 }

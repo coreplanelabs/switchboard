@@ -51,6 +51,32 @@ const dispatchClickMock = vi.mocked(dispatchClick);
 
 const BOT = "U0BOT";
 
+describe("SlackIO.reply — model link normalization", () => {
+  async function payload(text: string): Promise<string> {
+    const postMessage = vi.fn(async (_options: Record<string, unknown>) => ({ ok: true, ts: "reply.1" }));
+    const client = guardOutbound({ chat: { postMessage } } as unknown as ConstructorParameters<typeof SlackIO>[0]);
+    const io = new SlackIO(client, { channel: "CLINKS", ts: "1.1", threadTs: "1.0", text: "" });
+    await io.reply(text);
+    expect(postMessage).toHaveBeenCalledTimes(1);
+    expect(postMessage.mock.calls[0]![0]).toMatchObject({ channel: "CLINKS", thread_ts: "1.0" });
+    return postMessage.mock.calls[0]![0].text as string;
+  }
+
+  it("replays the native model answer as one escaped label and an intact URL", async () => {
+    const url = `https://github.com/acme/api/blob/${"a".repeat(40)}/src/channels/mrkdwn.ts?probe=1&mode=native#L93-L104`;
+    const posted = await payload(`<${url.replaceAll("&", "&amp;")}|Native A &amp; B>`);
+    expect(posted).toBe(`<${url}|Native A &amp; B>`);
+    expect(posted).not.toContain("&amp;amp;");
+  });
+
+  it("replays the angle-wrapped Markdown model answer as one valid Slack link", async () => {
+    const url = `https://github.com/acme/api/blob/${"a".repeat(40)}/src/channels/mrkdwn.ts?probe=1&mode=markdown#L93-L104`;
+    const encoded = url.replaceAll("&", "&amp;");
+    expect(await payload(`[Markdown link](<${encoded}>)`)).toBe(`<${url}|Markdown link>`);
+    expect(await payload(`[Markdown link](&lt;${encoded}&gt;)`)).toBe(`<${url}|Markdown link>`);
+  });
+});
+
 describe("SlackIO direct audience", () => {
   it("names only the requester's direct-message destination", () => {
     const client = guardOutbound({} as ConstructorParameters<typeof SlackIO>[0]);
