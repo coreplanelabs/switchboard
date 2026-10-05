@@ -237,6 +237,8 @@ function judgeBash(command: unknown, timeout: unknown, ctx: ToolRuleContext): To
   return judgeBashTimeout(timeout, ctx);
 }
 
+const LITERAL_DATA_COMMANDS = new Set(["echo", "printf", "grep", "rg"]);
+
 function judgeBashCommand(command: string, ctx: ToolRuleContext): ToolVerdict {
   if (CREDENTIAL_FILE.test(command)) return refused("credential — reads the executor's credential store");
   if (ENV_DUMP.test(command)) return refused("credential — dumps the process environment");
@@ -261,6 +263,7 @@ function judgeBashCommand(command: string, ctx: ToolRuleContext): ToolVerdict {
     return allowed;
   }
   const shell = pushShellWords(command.trim());
+  const dataOnly = shell !== undefined && !shell.compound && LITERAL_DATA_COMMANDS.has(shell.words[0] ?? "");
   // A write-capable shell can assemble an executable or a Git subcommand
   // without spelling either word in its input. Until publication is a typed
   // runner effect, no expansion, escaped word or nested shell may run here.
@@ -286,7 +289,6 @@ function judgeBashCommand(command: string, ctx: ToolRuleContext): ToolVerdict {
     (word, i) => (word === "git" || word.endsWith("/git")) && words.slice(i + 1, i + 5).includes("push"),
   );
   if (first !== "git" || words[1] === undefined) {
-    const dataOnly = !compound && ["echo", "printf", "grep", "rg"].includes(first ?? "");
     if (dataOnly) return allowed;
     const nestedPush = words.some((word) => word.includes("git") && word.includes("push"));
     // A script can pass the executable name in its code and the subcommand
