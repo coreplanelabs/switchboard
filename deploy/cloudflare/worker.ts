@@ -201,12 +201,8 @@ export class SwitchboardServer extends Container<Env> {
     try {
       await this.startBot();
     } catch (error) {
-      // A deploy or a container-application roll replaces the single instance,
-      // and a request that lands in that moment has no instance to start. That
-      // condition is retryable — the roll settles and the same request succeeds —
-      // so it answers 503 rather than escaping as an uncaught 500, which a
-      // caller reads as a broken endpoint and GitHub records as a failed
-      // delivery. Anything else is a real fault and still surfaces.
+      // Match the SDK's unavailable response before its fetch handler runs.
+      // Retry-After is a hint; GitHub still requires explicit redelivery.
       if (isNoContainerInstanceError(error)) return noContainerInstanceResponse();
       throw error;
     }

@@ -20,7 +20,7 @@ describe("container start — a roll with no instance is retryable, not a 500", 
     expect(isNoContainerInstanceError(null)).toBe(false);
   });
 
-  it("answers 503 with Retry-After, the status a webhook sender redelivers on", () => {
+  it("answers temporary unavailability with a retry hint", () => {
     const res = noContainerInstanceResponse();
     expect(res.status).toBe(503);
     expect(res.headers.get("retry-after")).toBe("1");
