@@ -19,7 +19,10 @@
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { once } from "node:events";
 import { MODEL_STREAM_HEARTBEAT_MS } from "../core/budgets.js";
-import { authenticateProxyProviderFailure } from "../core/modelProxy/providerFailureAuth.js";
+import {
+  authenticateProxyProviderFailure,
+  authenticateProxyTurnBudgetExhausted,
+} from "../core/modelProxy/providerFailureAuth.js";
 import type { RunBearerGrant, RunBearerStore, RunMarks } from "../core/modelProxy/runBearers.js";
 import type { SpanAttrs } from "../core/trace/attrs.js";
 import type { Clock } from "../core/trace/types.js";
@@ -879,12 +882,16 @@ export async function handleAdmitted(
       at: deps.clock(),
     });
     log(`[model-proxy] 403 turn_budget_exhausted run=${grant.runId} turns=${turn.turns}/${turn.maxTurns}`);
-    return refusalResponse(
-      shape,
-      403,
-      "turn_budget_exhausted",
-      `the run is past its ${turn.maxTurns}-turn guard (${used})`,
-    );
+    const error = authenticateProxyTurnBudgetExhausted({
+      runId: grant.runId,
+      turns: turn.turns,
+      maxTurns: turn.maxTurns,
+    });
+    return {
+      status: 403,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(shape === "anthropic-messages" ? { type: "error", error } : { error }),
+    };
   }
   // What the run offered rides the span; what went upstream is shaped by the
   // harness's marks (the checkpoint turn's none, a post-step's trimmed list)

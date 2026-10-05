@@ -4,6 +4,7 @@ import type { RunEvent } from "../../runEvents.js";
 import {
   authenticateProxyProviderFailure,
   authenticateProxyUnknownTerminal,
+  authenticateProxyTurnBudgetExhausted,
 } from "../../modelProxy/providerFailureAuth.js";
 import { providerFailureParks } from "../../provider.js";
 import { recordingSink } from "../../testing/recordingSink.js";
@@ -566,6 +567,69 @@ describe("turns, narration and the answer — the loop's rules", () => {
     });
     expect(other.providerFailure).toBeUndefined();
     expect(other.message).toBeUndefined();
+  });
+
+  it("local budget evidence requires an authenticated matching run and exact counts", () => {
+    const bridge = new PiBridge({ runId: "run-1", emit: () => {}, clock: () => NOW });
+    const signed = authenticateProxyTurnBudgetExhausted({ runId: "run-1", turns: 150, maxTurns: 150 });
+    for (const envelope of [
+      signed,
+      { ...signed, turns: 149 },
+      { ...signed, runId: "another-run" },
+      { type: "turn_budget_exhausted", runId: "run-1", turns: 150, maxTurns: 150 },
+    ]) {
+      const result = bridge.observe({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [],
+          stopReason: "error",
+          errorMessage: `403 ${JSON.stringify({ error: envelope })}`,
+        },
+      });
+      expect(result.terminalFailure).toMatchObject(
+        envelope === signed ? { kind: "local_turn_budget", turns: 150, maxTurns: 150 } : { kind: "unknown" },
+      );
+      expect(result.providerFailure).toBeUndefined();
+      expect(result.message).toBeUndefined();
+    }
+    const other = new PiBridge({ runId: "another-run", emit: () => {}, clock: () => NOW });
+    expect(
+      other.observe({
+        type: "message_end",
+        message: { role: "assistant", content: [], stopReason: "error", errorMessage: JSON.stringify(signed) },
+      }).terminalFailure,
+    ).toMatchObject({ kind: "unknown" });
+    const mixed = bridge.observe({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [],
+        stopReason: "error",
+        errorMessage: JSON.stringify({ budget: signed, unknown: authenticateProxyUnknownTerminal() }),
+      },
+    });
+    expect(mixed.terminalFailure).toMatchObject({ kind: "unknown" });
+    for (const stopReason of ["error", "aborted"]) {
+      expect(
+        other.observe({
+          type: "message_end",
+          message: { role: "assistant", content: [], stopReason, errorMessage: JSON.stringify(signed) },
+        }).terminalFailure,
+      ).toMatchObject({ kind: "unknown" });
+      const unbound = new PiBridge({ emit: () => {}, clock: () => NOW });
+      expect(
+        unbound.observe({
+          type: "message_end",
+          message: { role: "assistant", content: [], stopReason, errorMessage: JSON.stringify(signed) },
+        }).terminalFailure,
+      ).toMatchObject({ kind: "unknown" });
+    }
+    const raced = bridge.observe({
+      type: "message_end",
+      message: { role: "assistant", content: [], stopReason: "aborted", errorMessage: JSON.stringify(signed) },
+    });
+    expect(raced.terminalFailure).toMatchObject({ kind: "local_turn_budget" });
   });
 
   it("unknown terminal diagnostics distinguish authenticated proxy evidence without exposing error text or content", () => {
