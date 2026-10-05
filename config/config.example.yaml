@@ -109,6 +109,8 @@ providers:
     # provider's own endpoint to fill these in.
     # models:
     #   deepseek/deepseek-v4.1-flash:
+    #     # catalogModel: vendor/exact-id   # metadata only, for a VERIFIED wire alias;
+    #     #                                # never rewrites the outbound id or vendor
     #     window: 1048576
     #     capField: max_tokens
     #     levels:

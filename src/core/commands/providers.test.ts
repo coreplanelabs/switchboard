@@ -163,6 +163,29 @@ function bound(overrides: Partial<ProvidersCommandDeps["providers"]> = {}) {
 }
 
 describe("providers.check — the command over the registry with an injectable fetch", () => {
+  it("reads an explicitly mapped metadata id without rewriting the wire alias and reports supported but unvouched caps", async () => {
+    const ref = "openrouter/display-alias";
+    const { commands, fetched } = bound({
+      configured: async () => ({
+        blocks: {
+          ...BLOCKS,
+          openrouter: { ...BLOCKS.openrouter, models: { "display-alias": { catalogModel: "vendor/catalog-model" } } },
+        },
+        refs: [ref],
+      }),
+    });
+    const result = await commands.invoke("providers.check", {}, reader);
+    if (!result.ok) throw new Error(result.message);
+    expect(fetched).toEqual(["https://openrouter.example/api/v1/models/vendor/catalog-model/endpoints"]);
+    expect((result.value as { models: { model: string }[] }).models[0].model).toBe("display-alias");
+    const card = resolveModelCard(ref, BLOCKS, EMPTY_REGISTRY);
+    expect(
+      compareCardToEndpoints(card, {
+        inputModalities: [],
+        endpoints: [{ supportedParameters: ["max_completion_tokens"] }],
+      }).find((row) => row.field === "capField"),
+    ).toMatchObject({ pin: "capField: max_completion_tokens", card: expect.stringContaining("unvouched") });
+  });
   it("reads the endpoints of each aggregator model the configuration names — never a direct block's — and reports the drift with its pins", async () => {
     const { commands, fetched } = bound();
     const res = await commands.invoke("providers.check", {}, reader);
