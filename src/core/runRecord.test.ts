@@ -20,7 +20,6 @@ import {
   normalizeStored,
   operatorOfEvents,
   prOfEvents,
-  pushedBranchesOf,
   pushedHeadsOf,
   routeOfEvents,
   storedEventSeqs,
@@ -499,6 +498,19 @@ describe("fitRecordToBudget", () => {
 describe("applyRetention", () => {
   const now = 100 * DAY;
   const policy = { ...DEFAULT_RETENTION_POLICY };
+
+  it("protects unresolved evidence and existing context beyond byte limits without resurrecting absent records", () => {
+    const source = { ...item("source", 1), bytes: 100 };
+    const owner = { ...item("owner", 2), bytes: 100 };
+    const fresh = { ...item("fresh", now), bytes: 100 };
+    const context = {
+      protectedIds: ["owner", "absent"],
+      references: [{ holderRunId: "owner", sourceRunId: "source" }],
+    };
+    expect(
+      applyRetention([source, owner, fresh], { ...policy, maxRuns: 1, maxBytes: 1 }, now, context).map((row) => row.id),
+    ).toEqual(["owner", "source"]);
+  });
 
   it("hides a record finished 31 days ago under retentionDays 30 and keeps a 29-day-old one", () => {
     const kept = applyRetention([item("old", now - 31 * DAY), item("fresh", now - 29 * DAY)], policy, now);
@@ -1396,7 +1408,7 @@ describe("the pull request on the record (docs/reference/specs/run-history.md it
 
   // resident-repos item 16: the branch the PR is opened from is the fact the
   // run's release hands the resident, so it rides the event and the record.
-  it("the pull request carries the head branch the run pushed when the event names it, and pushedBranchesOf lists every pushed branch with its PR, the last push to a branch winning", () => {
+  it("the pull request carries the head branch the run pushed when the event names it", () => {
     const events: RunEvent[] = [
       { type: "pr_opened", url: "https://github.com/acme/api/pull/1", number: 1, created: true, head: "fix/a" },
       { type: "pr_opened", url: "https://github.com/acme/api/pull/2", number: 2, created: false },
@@ -1405,12 +1417,6 @@ describe("the pull request on the record (docs/reference/specs/run-history.md it
     ];
     expect(prOfEvents(events)).toEqual({ number: 4, url: "https://github.com/acme/api/pull/4", head: "fix/a" });
     expect(prOfEvents(events.slice(0, 2))).toEqual({ number: 2, url: "https://github.com/acme/api/pull/2" });
-    expect(pushedBranchesOf(events)).toEqual([
-      { ref: "fix/c", pr: 3 },
-      { ref: "fix/a", pr: 4 },
-    ]);
-    expect(pushedBranchesOf(events.slice(1, 2))).toEqual([]);
-    expect(pushedBranchesOf([])).toEqual([]);
   });
 });
 
@@ -1529,5 +1535,86 @@ describe("isRunRecord — the route field", () => {
     expect(isRunRecord(record({ route: { preset: "review", reason: "r" } as never }))).toBe(false);
     expect(isRunRecord(record({ route: { ...route, parts: [{ preset: "general" }] } as never }))).toBe(false);
     expect(isRunRecord(record({ route: { ...route, collapsed: { presets: [1] } } as never }))).toBe(false);
+  });
+});
+
+describe("durable branch publication contract", () => {
+  it("validates complete and pending producer projections while rejecting unknown or over-cap facts", () => {
+    const complete = { version: 1 as const, repo: "acme/api", complete: true, branches: [{ ref: "fix/a", pr: 7 }] };
+    expect(isRunRecord(record({ repo: "acme/api", branchPublication: complete }))).toBe(true);
+    const pending = {
+      ...complete,
+      complete: false,
+      pending: { id: "publication-a", ref: "fix/b", headSha: "a".repeat(40) },
+    };
+    expect(isRunRecord(record({ repo: "acme/api", branchPublication: pending }))).toBe(true);
+    expect(
+      isRunRecord(
+        record({
+          repo: "acme/api",
+          branchPublication: {
+            ...pending,
+            pending: { id: "metadata-a", pr: 7, headSha: "a".repeat(40) },
+          },
+        }),
+      ),
+    ).toBe(true);
+    for (const value of [
+      { ...complete, repo: "foreign/repo" },
+      { ...complete, complete: "true" },
+      { ...pending, complete: true },
+      { ...pending, pending: { ...pending.pending, headSha: "short" } },
+      { ...pending, pending: { id: "unknown-a", headSha: "a".repeat(40) } },
+      {
+        ...complete,
+        branches: [
+          { ref: "fix/a", pr: 7 },
+          { ref: "fix/a", pr: 8 },
+        ],
+      },
+      { ...complete, branches: Array.from({ length: 21 }, (_, i) => ({ ref: `branch/${i}`, pr: i + 1 })) },
+    ])
+      expect(isRunRecord({ ...record({ repo: "acme/api" }), branchPublication: value })).toBe(false);
+    const targets = [{ pr: 7, headSha: "a".repeat(40) }];
+    expect(isRunRecord(record({ repo: "acme/api", branchPublication: { ...complete, branches: [], targets } }))).toBe(
+      true,
+    );
+    for (const invalidTargets of [
+      [{ pr: 0, headSha: "a".repeat(40) }],
+      [{ pr: 7, headSha: "bad" }],
+      [...targets, ...targets],
+      Array.from({ length: 21 }, (_, i) => ({ pr: i + 1, headSha: "a".repeat(40) })),
+    ])
+      expect(
+        isRunRecord({ ...record({ repo: "acme/api" }), branchPublication: { ...complete, targets: invalidTargets } }),
+      ).toBe(false);
+    const { events: _events, ...summary } = record({ branchPublication: complete });
+    expect(isRunListItem(summary)).toBe(false);
+  });
+});
+
+describe("strict terminal review publication", () => {
+  const receipt = {
+    version: 1 as const,
+    runId: "run-1",
+    state: "uncertain" as const,
+    target: { repo: "acme/api", number: 7, commitId: "a".repeat(40) },
+    bodyHash: "b".repeat(64),
+  };
+  it("validates only the original run and exact bounded target without prose", () => {
+    const base = record({ repo: "acme/api", reviewPublication: receipt });
+    expect(isRunRecord(base)).toBe(true);
+    for (const invalid of [
+      { ...receipt, runId: "different" },
+      { ...receipt, bodyHash: "short" },
+      { ...receipt, target: { ...receipt.target, repo: "other/repo" } },
+      { ...receipt, state: "unknown" },
+      { ...receipt, body: "private review bytes" },
+    ])
+      expect(isRunRecord({ ...base, reviewPublication: invalid })).toBe(false);
+  });
+  it("refuses publication receipts on generic listing rows", () => {
+    const { events: _events, ...summary } = record({ repo: "acme/api", reviewPublication: receipt });
+    expect(isRunListItem(summary)).toBe(false);
   });
 });

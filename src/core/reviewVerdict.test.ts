@@ -816,6 +816,14 @@ describe("the stored review post — isReviewPostShape and its redaction", () =>
     expect(isReviewPostShape({ posted: false, reason: 7 })).toBe(false);
   });
 
+  it("preserves uncertainty through stored decoding and redaction instead of claiming a definitive skip", () => {
+    const uncertain = { posted: false as const, uncertain: true as const, reason: "unconfirmed ghp_" + "a".repeat(24) };
+    expect(isReviewPostShape(uncertain)).toBe(true);
+    expect(isReviewPostShape({ ...uncertain, uncertain: false })).toBe(false);
+    expect(isReviewPostShape({ ...posted, uncertain: true })).toBe(false);
+    expect(redactReviewPost(uncertain)).toEqual({ ...uncertain, reason: "unconfirmed «redacted-github-token»" });
+  });
+
   it("redaction walks the skip's reason and leaves a posted outcome as it is", () => {
     const token = `ghp_${"a".repeat(24)}`;
     expect(redactReviewPost({ posted: false, reason: `HTTP 401 for ${token}` })).toEqual({

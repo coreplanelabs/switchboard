@@ -253,20 +253,32 @@ async function continuationPreface(
   return lines.join("\n\n");
 }
 
-/** The findings step's message (agent-ship item 7): the review's findings as
- *  the requester would paste them into the unit thread, with the review's own
- *  words and the ask: every finding gets a disposition, the description is
- *  resubmitted, the branch is pushed. The `address-review-findings` skill
- *  carries the craft. */
-function findingsRequest(input: { where: string; findings: Finding[]; review: string; answers?: string[] }): string {
+/** The findings step's message (agent-ship item 7): source arrays decide what
+ *  needs repair, never review prose or an ID's spelling. Every issued finding
+ *  gets a disposition, the description is resubmitted, the branch is pushed.
+ *  The `address-review-findings` skill carries the craft. */
+function findingsRequest(input: {
+  where: string;
+  reviewFindings: Finding[];
+  checks: Finding[];
+  review: string;
+  answers?: string[];
+}): string {
+  const checkOnly = input.reviewFindings.length === 0 && input.checks.length > 0;
+  const reason = checkOnly
+    ? `Required CI checks for ${input.where} failed. Repair only the listed checks; do not reopen resolved review findings.`
+    : input.reviewFindings.length > 0
+      ? `The review of ${input.where} requested changes.${input.checks.length > 0 ? " Required CI checks also failed." : ""}`
+      : `Address the review feedback for ${input.where}.`;
   const findings =
-    input.findings.map(formatFinding).join("\n") || "(the review listed no structured findings, address its prose)";
+    [...input.reviewFindings, ...input.checks].map(formatFinding).join("\n") ||
+    "(the review listed no structured findings, address its prose)";
   const answers =
     input.answers !== undefined && input.answers.length > 0
       ? `\n\nA person answered the human-gated finding. Treat the finding and this answer together as the fix brief:\n${input.answers.join("\n\n")}`
       : "";
   return (
-    `The review of ${input.where} requested changes. Load the \`address-review-findings\` skill and address every finding below, nits included: ` +
+    `${reason} Load the \`address-review-findings\` skill and address every finding below, nits included: ` +
     `check every applicable invariant case (scenario → expected result) and record one disposition per finding with submit_dispositions (fixed or declined, with a note). Copy each finding ID exactly, including any \`check:…\` ID; never substitute an \`F1\` ID for a check. Squash to coherent commits, ` +
     `resubmit the pull request description with submit_pr_description, and push the branch. Never merge and never approve.\n\n` +
     `Findings:\n${findings}${answers}\n\nReview:\n${input.review}`
@@ -362,14 +374,17 @@ export async function composeChild(
           : ({} as ChildRunFacts);
       // Check findings sit on no review run's record. Bind both sources as
       // typed IDs on the child, not just as text in its model-facing prompt.
-      const findings = [...(brief.findings ?? review.findings ?? []), ...(brief.checks ?? [])];
+      const reviewFindings = brief.findings ?? review.findings ?? [];
+      const checks = brief.checks ?? [];
+      const findings = [...reviewFindings, ...checks];
       return {
         preset: "coding",
         issuedFindingIds: findings.map((finding) => finding.id),
         prompt:
           findingsRequest({
             where,
-            findings,
+            reviewFindings,
+            checks,
             review: review.finalReply ?? "",
             ...(brief.answers !== undefined ? { answers: brief.answers } : {}),
           }) +

@@ -48,6 +48,12 @@ import { PermanentStoreError, RouteMissingError, TransientStoreError } from "../
 import { createAppendFlusher } from "./flusher.js";
 import type { HeartbeatFacts, RequesterTarget, RunLedger } from "./ledger.js";
 import type { PlaneAckOutcome, PlaneAskAnswer, PlaneEffect, PlaneOutcomePost } from "../plane/decide.js";
+import {
+  isCoordinatorReconcileEffect,
+  isCoordinatorReconcileReceipt,
+  type CoordinatorReconcileEffect,
+  type CoordinatorReconcileReceipt,
+} from "../coordinator/workflowReconciliation.js";
 import type { PlaneAdmitPost, PlaneLevelPost, PlaneObservePost } from "./ledger.js";
 import { requestIndex, sessionKey, contextThreadSessionKey } from "./sessionLog.js";
 import {
@@ -112,6 +118,8 @@ export interface LedgerWriteThroughOptions {
   planeEffects?: {
     draining(): boolean;
     admit(effect: Extract<PlaneEffect, { kind: "admit" }>): Promise<PlaneAckOutcome>;
+    /** Finish the original coordinator report; no receipt defers its offer. */
+    reconcile?(effect: CoordinatorReconcileEffect): Promise<CoordinatorReconcileReceipt | undefined>;
     /** Deliver an already-durable provider-recovery row to the live inbox.
      *  Absent on an older wiring: the effect remains offered. */
     steer?(effect: Extract<PlaneEffect, { kind: "steer" }>): Promise<PlaneAckOutcome>;
@@ -1711,24 +1719,38 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
             // rebase_round, reissue) has no executor seam in this generation
             // yet: it defers and stays offered, bounded and harmless, for a
             // bot that can execute it — never a claim it was done.
-            const outcome: PlaneAckOutcome =
-              effect.kind === "probe"
-                ? executor?.probe === undefined
-                  ? "skipped"
-                  : await executor.probe(effect)
-                : effect.kind === "steer"
-                  ? executor?.steer === undefined || executor.draining()
-                    ? "deferred"
-                    : await executor.steer(effect)
-                  : effect.kind !== "admit"
-                    ? "deferred"
-                    : executor === undefined || executor.draining()
+            let reconciliation: CoordinatorReconcileReceipt | undefined;
+            let outcome: PlaneAckOutcome;
+            if (effect.kind === "coordinator_reconcile") {
+              const receipt =
+                isCoordinatorReconcileEffect(effect) && executor?.reconcile !== undefined && !executor.draining()
+                  ? await executor.reconcile(effect)
+                  : undefined;
+              if (isCoordinatorReconcileReceipt(receipt)) {
+                reconciliation = receipt;
+                outcome = "done";
+              } else outcome = "deferred";
+            } else {
+              outcome =
+                effect.kind === "probe"
+                  ? executor?.probe === undefined
+                    ? "skipped"
+                    : await executor.probe(effect)
+                  : effect.kind === "steer"
+                    ? executor?.steer === undefined || executor.draining()
                       ? "deferred"
-                      : await executor.admit(effect);
+                      : await executor.steer(effect)
+                    : effect.kind !== "admit"
+                      ? "deferred"
+                      : executor === undefined || executor.draining()
+                        ? "deferred"
+                        : await executor.admit(effect);
+            }
             await ledger.planeAck(
               effect.id,
               outcome,
               effect.kind === "steer" ? { runId: effect.runId, gen } : undefined,
+              reconciliation,
             );
           } catch (err) {
             warn(`[ledger] plane ack failed for effect ${effect.id}: ${describe(err)} — it stays offered`);

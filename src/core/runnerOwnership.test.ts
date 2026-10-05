@@ -1,7 +1,8 @@
+import { InMemoryRunLedger } from "./runLedger/inMemory.js";
 import { describe, expect, it } from "vitest";
 import { InMemoryCoordinatorInstanceStore } from "./coordinator/instanceStore.js";
 import type { CoordinatorInstance, CoordinatorUnit } from "./coordinator/contract.js";
-import { recoverRunnerOwnedPulls, RunnerOwnershipFence } from "./runnerOwnership.js";
+import { findRunnerPullOwner, runnerPullOwnerOf } from "./runnerOwnership.js";
 
 const instance = (id: string, repo: string): CoordinatorInstance => ({
   id,
@@ -25,321 +26,115 @@ const unit = (instanceId: string, unitId: string, pr: number, ending?: Coordinat
   ...(ending !== undefined ? { ending } : {}),
 });
 
-describe("recoverRunnerOwnedPulls", () => {
-  it("rebuilds an unfinished resumed runner's pull ownership from durable unit rows after process-local state was lost", async () => {
-    const instances = new InMemoryCoordinatorInstanceStore();
+describe("canonical runner pull owner", () => {
+  it("reads an unhosted durable unit after restart without a boot rebuild or local claim", async () => {
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await instances.put(instance("runner_live", "acme/api"));
     await instances.putUnits([unit("runner_live", "unit", 77)]);
-
-    const owned = await recoverRunnerOwnedPulls(["runner_live"], instances);
-
-    expect(owned).toEqual(new Set(["acme/api#77"]));
+    expect(await findRunnerPullOwner(instances, "acme/api", 77)).toEqual({
+      ok: true,
+      owner: { instanceId: "runner_live", unit: "unit" },
+    });
+    expect(await findRunnerPullOwner(instances, "acme/api", 78)).toEqual({ ok: true });
   });
 
-  it("does not restore ownership for a unit that already ended", async () => {
-    const instances = new InMemoryCoordinatorInstanceStore();
-    await instances.put(instance("runner_ended", "acme/api"));
-    await instances.putUnits([unit("runner_ended", "unit", 78, { kind: "merge_ready", report: "ready", at: 2 })]);
-
-    expect(await recoverRunnerOwnedPulls(["runner_ended"], instances)).toEqual(new Set());
+  it("never caches a prior owner across a later complete owner read", async () => {
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
+    await instances.put(instance("runner_live", "acme/api"));
+    const row = unit("runner_live", "unit", 77);
+    await instances.putUnits([row]);
+    expect((await findRunnerPullOwner(instances, "acme/api", 77)).ok).toBe(true);
+    await instances.putUnits([
+      {
+        ...row,
+        ending: {
+          kind: "refused",
+          report: "ready",
+          at: 2,
+          outcome: { schemaVersion: 1, kind: "refused", reviewRounds: 0 },
+        },
+      },
+    ]);
+    expect(await findRunnerPullOwner(instances, "acme/api", 77)).toEqual({ ok: true });
   });
 
-  it("rebuilds an active recovery claim even though its original parent Workflow is terminal", async () => {
-    const instances = new InMemoryCoordinatorInstanceStore();
+  it("reads an active original recovery independently of parent hosting or process state", async () => {
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await instances.put(instance("runner_recovery", "acme/api"));
-    await instances.putUnits([
-      {
-        ...unit("runner_recovery", "unit", 81),
-        recovery: {
-          kind: "review",
-          round: 2,
-          expectedHeadSha: "a".repeat(40),
-          remainingMs: 60_000,
-          claimedAt: 2,
-          step: "unit/recovery/2/review",
-          reviewRunId: "review-1",
-          previousEnding: { kind: "aborted", report: "recoverable", at: 1 },
-          workflowId: "recovery-review-1",
-          deadlineAt: 60_002,
-          reviewKey: "runner_recovery:unit/1/review",
-        },
-      },
-    ]);
-
-    expect(await recoverRunnerOwnedPulls([], instances)).toEqual(new Set(["acme/api#81"]));
-  });
-});
-
-describe("RunnerOwnershipFence", () => {
-  it("clears an orphaned local recovery only after a complete durable rebuild", async () => {
-    const fence = new RunnerOwnershipFence(false);
-    const original = { instanceId: "runner_recovery", unit: "unit", recoveryActionId: "first" };
-    const instances = new InMemoryCoordinatorInstanceStore();
-    await instances.put(instance(original.instanceId, "acme/api"));
-    await instances.putUnits([
-      unit(original.instanceId, original.unit, 77, { kind: "aborted", report: "ended", at: 2 }),
-    ]);
-    expect(fence.claim("acme/api", 77, original)).toBe(true);
-    const outcome = { liveListingComplete: false, liveHosted: [], resumable: [], liveElsewhere: [] };
-    await fence.recover(outcome, instances);
-    expect(fence.owner("acme/api", 77)).toEqual(original);
-
-    await fence.recover({ ...outcome, liveListingComplete: true }, instances);
-
-    expect(fence.owner("acme/api", 77)).toBeUndefined();
-    expect(fence.owns("acme/api", 77)).toBe(false);
-    expect(fence.reserve("acme/api", 77, { ...original, recoveryActionId: "second" })).toBeTypeOf("symbol");
-  });
-
-  it("preserves an uncommitted reservation through a complete durable rebuild", async () => {
-    const fence = new RunnerOwnershipFence(false);
-    const pending = { instanceId: "runner_recovery", unit: "unit", recoveryActionId: "pending" };
-    const token = fence.reserve("acme/api", 77, pending)!;
-    await fence.recover(
-      { liveListingComplete: true, liveHosted: [], resumable: [], liveElsewhere: [] },
-      new InMemoryCoordinatorInstanceStore(),
-    );
-    expect(fence.owner("acme/api", 77)).toEqual(pending);
-    expect(fence.owns("acme/api", 77)).toBe(true);
-    expect(fence.releaseReservation("acme/api", 77, token)).toBe(true);
-  });
-
-  it("preserves a transfer absent from the durable snapshot", async () => {
-    const fence = new RunnerOwnershipFence(false);
-    const pending = { instanceId: "runner_recovery", unit: "unit", recoveryActionId: "pending" };
-    const token = fence.reserve("acme/api", 77, pending)!;
-    await fence.recover(
-      { liveListingComplete: true, liveHosted: [], resumable: [], liveElsewhere: [] },
-      {
-        get: async () => null,
-        listUnits: async () => [],
-        listActiveRecoveries: async () => {
-          expect(fence.transferReservation("acme/api", 77, token, pending, pending)).toBe(true);
-          return [];
-        },
-      },
-    );
-    expect(fence.owner("acme/api", 77)).toEqual(pending);
-    expect(fence.owns("acme/api", 77)).toBe(true);
-    expect(fence.releaseReservation("acme/api", 77, token)).toBe(false);
-    expect(fence.release("acme/api", 77, pending)).toBe(true);
-  });
-
-  it("keeps a durable successor when rebuilding over a stale local recovery", async () => {
-    const fence = new RunnerOwnershipFence(false);
-    const original = { instanceId: "runner_recovery", unit: "unit", recoveryActionId: "r_" + "a".repeat(64) };
-    const successor = { ...original, recoveryActionId: "r_" + "b".repeat(64) };
-    expect(fence.claim("acme/api", 77, original)).toBe(true);
-    const recovered: CoordinatorUnit = {
-      ...unit(original.instanceId, original.unit, 77),
-      history: { version: 1, receiptId: original.recoveryActionId },
-      recovery: {
-        kind: "review",
-        round: 2,
-        expectedHeadSha: "a".repeat(40),
-        remainingMs: 60_000,
-        claimedAt: 2,
-        step: "unit/recovery/2/review",
-        reviewRunId: "review-2",
-        reviewKey: "review-key-2",
-        previousEnding: { kind: "aborted", report: "previous result", at: 1 },
-        workflowId: "recovery-review-2",
-        deadlineAt: 60_002,
-        actionId: successor.recoveryActionId,
-      },
-    };
-    await fence.recover(
-      { liveListingComplete: true, liveHosted: [], resumable: [], liveElsewhere: [] },
-      {
-        get: async () => instance(original.instanceId, "acme/api"),
-        listUnits: async () => [],
-        listActiveRecoveries: async () => [recovered],
-      },
-    );
-    expect(fence.owner("acme/api", 77)).toEqual(successor);
-    expect(fence.release("acme/api", 77, original)).toBe(false);
-    expect(fence.owner("acme/api", 77)).toEqual(successor);
-    expect(fence.owns("acme/api", 77)).toBe(true);
-    expect(fence.claim("acme/api", 77, successor)).toBe(true);
-  });
-
-  it("binds same-unit recovery ownership and cleanup to the action", () => {
-    const fence = new RunnerOwnershipFence(false);
-    const original = { instanceId: "runner_recovery", unit: "unit", recoveryActionId: "first" };
-    const successor = { ...original, recoveryActionId: "second" };
-    expect(fence.claim("acme/api", 77, original)).toBe(true);
-    expect(fence.claim("acme/api", 77, successor)).toBe(false);
-    expect(fence.claim("acme/api", 77, { instanceId: original.instanceId, unit: original.unit })).toBe(true);
     expect(
-      fence.claim("acme/api", 77, {
-        instanceId: original.instanceId,
-        unit: original.unit,
-        recoveryActionId: undefined,
-      }),
-    ).toBe(true);
-    expect(fence.owner("acme/api", 77)).toEqual(original);
-    expect(fence.release("acme/api", 77, { instanceId: original.instanceId, unit: original.unit })).toBe(false);
-    expect(fence.release("acme/api", 77, successor)).toBe(false);
-    expect(fence.release("acme/api", 77, original)).toBe(true);
-    const token = fence.reserve("acme/api", 77, successor)!;
-    expect(fence.release("acme/api", 77, original)).toBe(false);
-    expect(fence.transferReservation("acme/api", 77, token, successor, successor)).toBe(true);
-    expect(fence.release("acme/api", 77, original)).toBe(false);
-    expect(fence.owner("acme/api", 77)).toEqual(successor);
-  });
-
-  it("preserves a reservation transferred while durable ownership is being read", async () => {
-    const fence = new RunnerOwnershipFence(false);
-    const pending = { instanceId: "runner_recovery", unit: "unit", recoveryActionId: "r_" + "b".repeat(64) };
-    const token = fence.reserve("acme/api", 77, pending)!;
-    await fence.recover(
-      {
-        liveListingComplete: true,
-        liveHosted: [{ instanceId: pending.instanceId, until: 10 }],
-        resumable: [],
-        liveElsewhere: [],
-      },
-      {
-        get: async () => instance(pending.instanceId, "acme/api"),
-        listUnits: async () => {
-          expect(fence.transferReservation("acme/api", 77, token, pending, pending)).toBe(true);
-          return [unit(pending.instanceId, pending.unit, 77)];
+      await instances.putUnits([
+        {
+          ...unit("runner_recovery", "unit", 81),
+          recovery: {
+            kind: "review",
+            round: 2,
+            expectedHeadSha: "a".repeat(40),
+            remainingMs: 60_000,
+            claimedAt: 2,
+            step: "unit/recovery/2/review",
+            reviewRunId: "review-1",
+            previousEnding: { kind: "aborted", report: "recoverable", at: 1 },
+            workflowId: "recovery-review-1",
+            deadlineAt: 60_002,
+            reviewKey: "runner_recovery:unit/1/review",
+          },
         },
-        listActiveRecoveries: async () => [],
-      },
-    );
-    expect(fence.owner("acme/api", 77)).toEqual(pending);
-    expect(fence.release("acme/api", 77, { instanceId: pending.instanceId, unit: pending.unit })).toBe(false);
-    expect(fence.owns("acme/api", 77)).toBe(true);
+      ]),
+    ).toEqual({ ok: true });
+    expect(await findRunnerPullOwner(instances, "acme/api", 81)).toEqual({
+      ok: true,
+      owner: { instanceId: "runner_recovery", unit: "unit" },
+    });
   });
 
-  it("refuses sweep ownership reads until a complete live-run listing rebuilds durable ownership", async () => {
-    const instances = new InMemoryCoordinatorInstanceStore();
-    await instances.put(instance("runner_live", "acme/api"));
-    await instances.putUnits([unit("runner_live", "unit", 77)]);
-    const fence = new RunnerOwnershipFence(true);
-
-    await fence.recover(
-      {
-        liveListingComplete: false,
-        liveHosted: [],
-        resumable: [{ kind: "rehost", hosting: { instanceId: "runner_live", until: 10 } }],
-        liveElsewhere: [],
-      },
-      instances,
-    );
-    expect(() => fence.owns("acme/api", 77)).toThrow("runner ownership recovery is still in progress");
-
-    await fence.recover({ liveListingComplete: true, liveHosted: [], resumable: [], liveElsewhere: [] }, instances);
-    expect(fence.owns("acme/api", 77)).toBe(true);
-    expect(fence.owner("acme/api", 77)).toEqual({ instanceId: "runner_live", unit: "unit" });
+  it.each([
+    { ok: false, reason: "unavailable" },
+    { ok: false, reason: "incomplete" },
+    { ok: false, reason: "invalid" },
+  ] as const)("retains canonical refusal %j", async (result) => {
+    expect(await findRunnerPullOwner({ findPullOwners: async () => result }, "acme/api", 77)).toEqual(result);
   });
 
-  it("refuses claims and reservations while boot ownership reconstruction is incomplete", () => {
-    const fence = new RunnerOwnershipFence(true);
-    expect(() => fence.claim("acme/api", 77, { instanceId: "runner_live", unit: "unit" })).toThrow(
-      "runner ownership recovery is still in progress",
-    );
-    expect(() => fence.reserve("acme/api", 77, { instanceId: "runner_live", unit: "unit" })).toThrow(
-      "runner ownership recovery is still in progress",
-    );
+  it("retains transport uncertainty instead of treating it as no owner", async () => {
+    expect(
+      await findRunnerPullOwner(
+        {
+          findPullOwners: async () => {
+            throw new Error("state unavailable");
+          },
+        },
+        "acme/api",
+        77,
+      ),
+    ).toEqual({ ok: false, reason: "unavailable" });
   });
 
-  it("recovers a current-generation hosted runner even when classification omitted it from resumable", async () => {
-    const instances = new InMemoryCoordinatorInstanceStore();
-    await instances.put(instance("runner_failed", "acme/api"));
-    await instances.putUnits([unit("runner_failed", "unit", 79)]);
-    const fence = new RunnerOwnershipFence(true);
-
-    await fence.recover(
-      {
-        liveListingComplete: true,
-        liveHosted: [{ instanceId: "runner_failed", until: 10 }],
-        resumable: [],
-        liveElsewhere: [],
-      },
-      instances,
-    );
-
-    expect(fence.owns("acme/api", 79)).toBe(true);
+  it.each([
+    {
+      owners: [
+        { kind: "unit", instanceId: "first", unit: "U11" },
+        { kind: "unit", instanceId: "second", unit: "U12" },
+      ],
+    },
+    { owners: [{ kind: "run", runId: "run" }] },
+    { owners: [{ kind: "effect", id: "effect" }] },
+    {
+      owners: [
+        { kind: "unit", instanceId: "first", unit: "U11" },
+        { kind: "run", runId: "run" },
+      ],
+    },
+  ])("refuses ambiguous and nonunit owners: %j", ({ owners }) => {
+    expect(runnerPullOwnerOf({ ok: true, owners })).toEqual({ ok: false, reason: "incomplete" });
   });
 
-  it("recovers a foreign-generation hosted runner while its lease remains live", async () => {
-    const instances = new InMemoryCoordinatorInstanceStore();
-    await instances.put(instance("runner_foreign", "acme/api"));
-    await instances.putUnits([unit("runner_foreign", "unit", 80)]);
-    const fence = new RunnerOwnershipFence(true);
-
-    await fence.recover(
-      {
-        liveListingComplete: true,
-        liveHosted: [],
-        resumable: [],
-        liveElsewhere: [{ hosting: { instanceId: "runner_foreign", until: 10 } }],
-      },
-      instances,
-    );
-
-    expect(fence.owns("acme/api", 80)).toBe(true);
-  });
-
-  it("starts recovered when no run ledger exists and keeps process-local claims separate from recovered claims", () => {
-    const fence = new RunnerOwnershipFence(false);
-    expect(fence.owns("acme/api", 77)).toBe(false);
-
-    expect(fence.claim("acme/api", 77, { instanceId: "runner_live", unit: "unit" })).toBe(true);
-    expect(fence.owns("acme/api", 77)).toBe(true);
-    expect(fence.owner("acme/api", 77)).toEqual({ instanceId: "runner_live", unit: "unit" });
-    expect(fence.release("acme/api", 77)).toBe(true);
-    expect(fence.owns("acme/api", 77)).toBe(false);
-  });
-
-  it("an exclusive reservation transfers only from its exact token and current owner to the new runner", () => {
-    const fence = new RunnerOwnershipFence(false);
-    const continuation = { instanceId: "runner_continuation", unit: "unit" };
-    const reissued = { instanceId: "runner_reissued", unit: "unit" };
-    const intervening = { instanceId: "runner_intervening", unit: "other" };
-
-    const token = fence.reserve("acme/api", 77, continuation);
-    expect(token).toBeTypeOf("symbol");
-    expect(fence.reserve("acme/api", 77, continuation)).toBeUndefined();
-    expect(fence.claim("acme/api", 77, intervening)).toBe(false);
-    expect(fence.owner("acme/api", 77)).toEqual(continuation);
-    expect(fence.transferReservation("acme/api", 77, Symbol("stale"), continuation, reissued)).toBe(false);
-    expect(fence.transferReservation("acme/api", 77, token!, intervening, reissued)).toBe(false);
-    expect(fence.owner("acme/api", 77)).toEqual(continuation);
-    expect(fence.transferReservation("acme/api", 77, token!, continuation, reissued)).toBe(true);
-    expect(fence.owner("acme/api", 77)).toEqual(reissued);
-    expect(fence.claim("acme/api", 77, intervening)).toBe(false);
-    expect(fence.releaseReservation("acme/api", 77, token!)).toBe(false);
-  });
-
-  it("a failed reissued start releases only the transferred owner and never a successor", () => {
-    const fence = new RunnerOwnershipFence(false);
-    const continuation = { instanceId: "runner_continuation", unit: "unit" };
-    const reissued = { instanceId: "runner_reissued", unit: "unit" };
-    const successor = { instanceId: "runner_successor", unit: "unit" };
-    const token = fence.reserve("acme/api", 77, continuation)!;
-
-    expect(fence.transferReservation("acme/api", 77, token, continuation, reissued)).toBe(true);
-    expect(fence.release("acme/api", 77, continuation)).toBe(false);
-    expect(fence.release("acme/api", 77, reissued)).toBe(true);
-    expect(fence.claim("acme/api", 77, successor)).toBe(true);
-    expect(fence.release("acme/api", 77, reissued)).toBe(false);
-    expect(fence.owner("acme/api", 77)).toEqual(successor);
-  });
-
-  it("an intervening runner cannot displace an existing owner, and a stale release cannot erase it", () => {
-    const fence = new RunnerOwnershipFence(false);
-    const continuation = { instanceId: "runner_continuation", unit: "unit" };
-    const intervening = { instanceId: "runner_intervening", unit: "other" };
-
-    expect(fence.claim("acme/api", 77, continuation)).toBe(true);
-    expect(fence.claim("acme/api", 77, intervening)).toBe(false);
-    expect(fence.owner("acme/api", 77)).toEqual(continuation);
-    expect(fence.release("acme/api", 77, intervening)).toBe(false);
-    expect(fence.owner("acme/api", 77)).toEqual(continuation);
-    expect(fence.release("acme/api", 77, continuation)).toBe(true);
-    expect(fence.owns("acme/api", 77)).toBe(false);
+  it("keeps the exact canonical action when routing a single recovery owner", () => {
+    expect(
+      runnerPullOwnerOf({
+        ok: true,
+        owners: [{ kind: "unit", instanceId: "first", unit: "U11", actionId: "original" }],
+      }),
+    ).toEqual({ ok: true, owner: { instanceId: "first", unit: "U11", recoveryActionId: "original" } });
+    expect(runnerPullOwnerOf({ ok: true, owners: [{ kind: "unit" }] })).toEqual({ ok: false, reason: "unavailable" });
   });
 });

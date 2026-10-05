@@ -1,3 +1,4 @@
+import { terminalPublicationRetentionRequired } from "./branchPublication.js";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { RunEvent } from "./runEvents.js";
@@ -231,6 +232,9 @@ export function pageEvents(events: readonly RunEvent[], opts: RunEventsOptions):
 export function toListItem(record: RunRecord, bytes: number): RunListItem {
   const {
     events: _events,
+    branchPublication: _branchPublication,
+    reviewPublication: _reviewPublication,
+    branchPushReceipts: _branchPushReceipts,
     sourceReads: _sourceReads,
     workReads: _workReads,
     unitSeedReceipt: _unitSeedReceipt,
@@ -268,7 +272,11 @@ export class InMemoryRunStore implements RunStore {
   }
 
   private retained(): RunListItem[] {
-    return applyRetention(this.items(), this.policy, this.now());
+    return applyRetention(this.items(), this.policy, this.now(), {
+      protectedIds: [...this.records.values()]
+        .filter(({ record }) => terminalPublicationRetentionRequired(record))
+        .map(({ record }) => record.id),
+    });
   }
 
   abandoned(): void {
@@ -311,6 +319,9 @@ export class InMemoryRunStore implements RunStore {
 
   async delete(id: string): Promise<void> {
     if (!isValidRunId(id)) return;
+    const record = this.records.get(id)?.record;
+    if (record && terminalPublicationRetentionRequired(record))
+      throw new Error("unresolved publication prevents history deletion");
     this.records.delete(id);
   }
 
@@ -336,13 +347,13 @@ const DIR_MODE = 0o700;
 /**
  * A directory store: `<dir>/<id>.json` per run (written temp-then-rename, mode
  * 0600, in a 0700 directory) plus `<dir>/index.jsonl` of `RunListItem`s (with
- * `bytes`), so `list` never opens a record file and `get` opens exactly one.
+ * `bytes`). Retention reads private producer facts from record files; the index
+ * cannot decide whether publication has settled.
  * Retention runs on every read (hidden) and on every write (files unlinked, the
  * index compacted); `sweep()` does the write-side work with no new record, and
  * `buildRunStore` runs it on start and every 6 h. A torn record file is
  * absent from `list` (size ≠ the indexed `bytes`) and not-found from `get`
- * (unparsable or missing — `get` opens the one file instead of stat'ing them
- * all); an index line whose file is gone is hidden and dropped at the next
+ * (unparsable or missing); an index line whose file is gone is hidden and dropped at the next
  * compaction. The same durability as `data/overrides.json` — a volume on
  * Fly/compose, ephemeral on Cloudflare Containers — hence an explicit opt-in.
  */
@@ -407,15 +418,37 @@ export class FileRunStore implements RunStore {
     }
   }
 
-  /** The index rows the policy keeps, newest first, only those whose file is intact. */
-  private retainedIntact(): RunListItem[] {
-    return applyRetention(this.readIndex(), this.policy, this.now()).filter((r) => this.fileIntact(r));
+  /** Publication intent is private canonical data, so it is never copied into the listing index.
+   * An unreadable existing file remains protected until its evidence can be inspected. */
+  private retained(index: RunListItem[]): RunListItem[] {
+    const ordinary = new Set(applyRetention(index, this.policy, this.now(), { references: [] }).map((item) => item.id));
+    const protectedIds = index
+      .filter((item) => {
+        if (ordinary.has(item.id)) return false;
+        try {
+          const record: unknown = JSON.parse(readFileSync(this.recordPath(item.id), "utf8"));
+          return (
+            !this.fileIntact(item) ||
+            !isRunRecord(record) ||
+            record.id !== item.id ||
+            terminalPublicationRetentionRequired(record)
+          );
+        } catch {
+          return existsSync(this.recordPath(item.id));
+        }
+      })
+      .map((item) => item.id);
+    return applyRetention(index, this.policy, this.now(), { protectedIds });
   }
 
-  /** Write-side retention: unlink every record file outside policy or without a
-   *  healthy file, and rewrite the index to exactly the kept rows. Returns the kept rows. */
+  /** The retained index rows, newest first, only those whose file is intact. */
+  private retainedIntact(): RunListItem[] {
+    return this.retained(this.readIndex()).filter((r) => this.fileIntact(r));
+  }
+
+  /** Unlink unprotected files outside policy and rewrite the retained index. */
   private compact(index: RunListItem[]): RunListItem[] {
-    const kept = applyRetention(index, this.policy, this.now()).filter((r) => this.fileIntact(r));
+    const kept = this.retained(index).filter((item) => existsSync(this.recordPath(item.id)));
     const keptIds = new Set(kept.map((r) => r.id));
     for (const item of index) if (!keptIds.has(item.id)) rmSync(this.recordPath(item.id), { force: true });
     this.writeAtomic(
@@ -442,27 +475,33 @@ export class FileRunStore implements RunStore {
     return { ok: true, retained: kept.length, stored: kept.some((r) => r.id === record.id), rewritten };
   }
 
-  /** Retention is decided from the index alone (no per-file stat); the one
-   *  file that matters is then read directly — a torn or missing file lands
-   *  in the catch below, so nothing is stat'd that will not be opened. */
+  /** Read the full record only when ordinary policy or protected evidence retains it. */
   async get(id: string): Promise<RunRecord | null> {
     if (!isValidRunId(id)) return null;
-    if (!applyRetention(this.readIndex(), this.policy, this.now()).some((r) => r.id === id)) return null;
+    const index = this.readIndex();
+    const ordinary = applyRetention(index, this.policy, this.now());
+    if (!ordinary.some((item) => item.id === id) && !this.retained(index).some((item) => item.id === id)) return null;
+    return this.readRecord(id);
+  }
+
+  private readRecord(id: string): RunRecord | null {
     try {
       const parsed: unknown = JSON.parse(readFileSync(this.recordPath(id), "utf8"));
       return isRunRecord(parsed) && parsed.id === id ? normalizeStored(parsed) : null;
     } catch {
-      return null; // torn or unreadable: not-found, healed at the next write
+      return null;
     }
   }
 
-  /** The index row IS the summary: no record file is opened. Hidden like `list`
-   *  hides it — outside policy, or a file whose size differs from the indexed
+  /** Return the public index row when ordinary policy or private intent retains it.
+   *  Hidden like `list` for a file whose size differs from the indexed
    *  `bytes` (torn) — so `getSummary` and `list` always agree row for row. */
   async getSummary(id: string): Promise<RunListItem | null> {
     if (!isValidRunId(id)) return null;
-    const row = this.retainedIntact().find((r) => r.id === id);
-    return row ? normalizeStored(row) : null;
+    const index = this.readIndex();
+    const ordinary = applyRetention(index, this.policy, this.now()).find((item) => item.id === id);
+    const row = ordinary ?? this.retained(index).find((item) => item.id === id);
+    return row && this.fileIntact(row) ? normalizeStored(row) : null;
   }
 
   async list(opts: RunListOptions): Promise<RunListItem[]> {
@@ -481,7 +520,7 @@ export class FileRunStore implements RunStore {
     const records: RunRecord[] = [];
     for (const item of items) {
       if (item.finishedAt < query.sinceMs || item.finishedAt >= query.untilMs) continue;
-      const record = await this.get(item.id);
+      const record = this.readRecord(item.id);
       if (record) records.push(record);
     }
     const parent = (id: string) => {
@@ -500,6 +539,23 @@ export class FileRunStore implements RunStore {
     if (!isValidRunId(id)) return;
     const index = this.readIndex();
     if (!index.some((r) => r.id === id) && !existsSync(this.recordPath(id))) return;
+    if (!existsSync(this.recordPath(id))) throw new Error("unreadable publication evidence prevents history deletion");
+    if (existsSync(this.recordPath(id))) {
+      let record: unknown;
+      try {
+        record = JSON.parse(readFileSync(this.recordPath(id), "utf8"));
+      } catch {
+        throw new Error("unreadable publication evidence prevents history deletion");
+      }
+      const item = index.find((r) => r.id === id);
+      if (
+        !isRunRecord(record) ||
+        record.id !== id ||
+        (item && !this.fileIntact(item)) ||
+        terminalPublicationRetentionRequired(record)
+      )
+        throw new Error("unresolved publication prevents history deletion");
+    }
     this.ensureDir();
     rmSync(this.recordPath(id), { force: true });
     this.compact(index.filter((r) => r.id !== id));

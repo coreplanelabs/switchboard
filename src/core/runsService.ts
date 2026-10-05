@@ -251,6 +251,13 @@ export interface UnitLineage {
 
 /** `getRun` adds events or structural audience evidence only on an explicit include. */
 export interface RunRecordView extends RunView {
+  /** Exact final-record ownership, available only to the trusted internal coordinator reader. */
+  coordinatorUnit?: RunRecord["coordinatorUnit"];
+  coordinatorAttempt?: RunRecord["coordinatorAttempt"];
+  unitSeedReceipt?: RunRecord["unitSeedReceipt"];
+  reviewPublication?: RunRecord["reviewPublication"];
+  branchPublication?: RunRecord["branchPublication"];
+  branchPushReceipts?: RunRecord["branchPushReceipts"];
   audience?: { status: "recorded"; refusal: AudienceRefusalReceipt } | { status: "unavailable" };
   events?: RunEvent[];
 }
@@ -637,7 +644,17 @@ function liveView(s: RunSummary): RunView {
 /** A stored row as a view: finished, persisted, and priced when it carries usage. */
 function persistedView(
   item: RunListItem &
-    Pick<RunRecord, "sourceReads" | "workReads" | "unitSeedReceipt" | "contextCheckpointReceipt" | "directAudience">,
+    Pick<
+      RunRecord,
+      | "sourceReads"
+      | "workReads"
+      | "unitSeedReceipt"
+      | "contextCheckpointReceipt"
+      | "directAudience"
+      | "branchPublication"
+      | "reviewPublication"
+      | "branchPushReceipts"
+    >,
   prices: ModelPriceTable,
 ): RunView {
   const {
@@ -647,6 +664,9 @@ function persistedView(
     unitSeedReceipt: _unitSeedReceipt,
     contextCheckpointReceipt: _contextCheckpointReceipt,
     directAudience: _directAudience,
+    branchPublication: _branchPublication,
+    reviewPublication: _reviewPublication,
+    branchPushReceipts: _branchPushReceipts,
     childHandoff: _childHandoff,
     contextDependencies: _contextDependencies,
     ...visible
@@ -1269,6 +1289,14 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
         if (!record || record.provisional === true || !ordinaryRun(record, opts.privateWorkerAccess)) return notFound;
         const { events, ...rest } = record;
         const view: RunRecordView = persistedView(rest, prices);
+        if (opts.privateWorkerAccess === PRIVATE_WORKER_INTERNAL_READ) {
+          if (record.coordinatorUnit !== undefined) view.coordinatorUnit = record.coordinatorUnit;
+          if (record.coordinatorAttempt !== undefined) view.coordinatorAttempt = record.coordinatorAttempt;
+          if (record.unitSeedReceipt !== undefined) view.unitSeedReceipt = record.unitSeedReceipt;
+          if (record.reviewPublication !== undefined) view.reviewPublication = record.reviewPublication;
+          if (record.branchPublication !== undefined) view.branchPublication = record.branchPublication;
+          if (record.branchPushReceipts !== undefined) view.branchPushReceipts = record.branchPushReceipts;
+        }
         if (opts.include === "messages") view.events = events;
         return { ok: true, value: await diagnostic(view) };
       }

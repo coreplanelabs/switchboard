@@ -55,6 +55,9 @@ export interface RunMeta {
    *  coordinator spawned, so the live summary names them and a retried spawn
    *  finds its run without the record. */
   parentInstanceId?: string;
+  maintenanceActionId?: string;
+  coordinatorUnit?: string;
+  coordinatorAttempt?: number;
   idempotencyKey?: string;
   /** Original dollar cap of this coordinator unit, when one was granted. */
   costCapUsd?: number;

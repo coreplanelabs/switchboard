@@ -92,7 +92,9 @@ const splitLines = (text: string) =>
     .map((l) => l.trim())
     .filter(Boolean);
 
-const git = (...argv: string[]) => execFileSync("git", argv, { cwd: root, stdio: "pipe" }).toString();
+// Read complete committed snapshots, including large contract test files.
+const git = (...argv: string[]) =>
+  execFileSync("git", argv, { cwd: root, stdio: "pipe", maxBuffer: 32 * 1024 * 1024 }).toString();
 
 function changedPaths(args: Args, entries: ChangedEntry[]): string[] {
   if (args.changed !== undefined) return entries.map((entry) => entry.newPath);

@@ -14,6 +14,8 @@ import type { SessionSources } from "../references/receipts.js";
 // means the transcript is complete up to it.
 
 import type { RunRecord } from "../runRecord.js";
+import type { CoordinatorReconcileReceipt } from "../coordinator/workflowReconciliation.js";
+import type { WorkspaceOwner, WorkspaceSettlement, WorkspaceAck } from "../workspaceSettlement.js";
 import type { ProviderFailureCause } from "../provider.js";
 import type {
   HeartbeatFacts,
@@ -125,6 +127,10 @@ export function mergeRequesterTarget(prior: RequesterTarget | null, next: Reques
 }
 
 export interface RunLedger {
+  /** Retained terminal facts for one acknowledged physical attachment. */
+  workspaceSettlement(owner: WorkspaceOwner): Promise<WorkspaceSettlement | undefined>;
+  /** Drop only the exact retained revision after the resident saves it. */
+  ackWorkspaceSettlement(owner: WorkspaceOwner, revision: number): Promise<WorkspaceAck>;
   /** Replace equivalent ordinary origins only through a verified durable checkpoint. */
   normalizeContextOrigins(request: ContextCheckpointRequest): Promise<ContextCheckpointResult>;
   readContextCheckpoint(runId: string): Promise<CanonicalCheckpointSource | undefined>;
@@ -260,7 +266,12 @@ export interface RunLedger {
   /** One effect's acknowledgement by id (orchestration-plane item 7): `done` and `skipped` close it,
    *  `deferred` leaves it offered. A steer closes only while `owner` still
    *  matches its live row; an unknown id is the object's no-op. */
-  planeAck(id: string, outcome: PlaneAckOutcome, owner?: { runId: string; gen: string }): Promise<void>;
+  planeAck(
+    id: string,
+    outcome: PlaneAckOutcome,
+    owner?: { runId: string; gen: string },
+    reconciliation?: CoordinatorReconcileReceipt,
+  ): Promise<void>;
   /** The admission-stage ask (record 0064, "The queue"): `admitted` with a
    *  reservation on the thread, or `queued` with the stored request's minted
    *  id, its position and the conditions it waits on. */

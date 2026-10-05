@@ -39,13 +39,13 @@ export interface PrivateTreeObservation {
 
 /** A separate strict probe for deletion authority. Reporting counts below
  * intentionally retain their older meaning and cannot authorize removal. */
-export function privateTreeObservationScript(worktreePath: string, user: string): string {
+export function privateTreeObservationScript(worktreePath: string, user: string, sessionCommand = false): string {
   const wt = shellQuote(worktreePath);
   const inner = [
     `cd ${wt} || exit 1`,
     `branch=$(git symbolic-ref --quiet --short HEAD) || exit 1`,
     `head=$(git rev-parse --verify HEAD) || exit 1`,
-    `status=$(git -c core.quotepath=true status --porcelain --untracked-files=all) || exit 1`,
+    `status=$(GIT_OPTIONAL_LOCKS=0 git -c core.quotepath=true status --porcelain --untracked-files=all) || exit 1`,
     `unpushed=$(git rev-list --count HEAD --not --remotes) || exit 1`,
     `printf 'branch=%s\\nhead=%s\\n' "$branch" "$head"`,
     `printf 'tracked=%s\\n' "$(printf '%s\\n' "$status" | sed '/^$/d' | grep -c -v '^?? ')"`,
@@ -55,8 +55,77 @@ export function privateTreeObservationScript(worktreePath: string, user: string)
   return [
     `if ! test -e ${shellQuote(`${worktreePath}/.git`)}; then echo present=no; exit 0; fi`,
     `echo present=yes`,
-    `su -s /bin/bash ${shellQuote(user)} -c ${shellQuote(inner)}`,
+    `su -s /bin/bash ${shellQuote(user)} ${sessionCommand ? "--session-command" : "-c"} ${shellQuote(inner)}`,
   ].join("\n");
+}
+
+/** Bound and drain both native streams before interpreting counts. No raw
+ * process output or errors cross the diagnostic boundary. */
+export async function collectPrivateTreeObservation(
+  process: {
+    stdout: ReadableStream<Uint8Array> | null | undefined;
+    stderr: ReadableStream<Uint8Array> | null | undefined;
+    exitCode: Promise<number>;
+  },
+  expectedContainer: string,
+): Promise<PrivateTreeObservation | null> {
+  const read = async (stream: ReadableStream<Uint8Array> | null | undefined) => {
+    if (!stream) return null;
+    const reader = stream.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0,
+      invalid = false;
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (!(value instanceof Uint8Array) || value.byteLength > 2048 - size) {
+          invalid = true;
+          chunks.length = 0;
+        } else if (!invalid) {
+          size += value.byteLength;
+          chunks.push(value);
+        }
+      }
+    } catch {
+      invalid = true;
+    } finally {
+      reader.releaseLock();
+    }
+    if (invalid) return null;
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return new TextDecoder().decode(bytes);
+  };
+  const [out, err, exit] = await Promise.allSettled([read(process.stdout), read(process.stderr), process.exitCode]);
+  if (
+    out.status !== "fulfilled" ||
+    out.value === null ||
+    err.status !== "fulfilled" ||
+    err.value !== "" ||
+    exit.status !== "fulfilled"
+  )
+    return null;
+  // Only the probe's exact tags are admissible, even when exit status is zero.
+  const lines = out.value.split("\n");
+  const containers = lines.filter((line) => line.startsWith("container="));
+  if (
+    !/^[A-Za-z0-9-]{1,64}$/.test(expectedContainer) ||
+    containers.length !== 1 ||
+    containers[0] !== `container=${expectedContainer}`
+  )
+    return null;
+  if (lines.some((line) => line !== "" && !/^(container|present|branch|head|tracked|untracked|unpushed)=/.test(line)))
+    return null;
+  return parsePrivateTreeObservation({
+    stdout: lines.filter((line) => !line.startsWith("container=")).join("\n"),
+    exitCode: exit.value,
+    timedOut: false,
+  });
 }
 
 export function parsePrivateTreeObservation(result: {

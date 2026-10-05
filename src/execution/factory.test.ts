@@ -738,6 +738,22 @@ describe("makeExecutor resident selection", () => {
     expect(calls).toEqual(["/status", "/attach"]);
   });
 
+  it("a mismatched acknowledged attachment fence never becomes a cold fallback", async () => {
+    stubEnvs();
+    const { calls } = stubFetch(
+      { body: { state: "warm", reason: "" } },
+      { body: { ref: "master", sha: "a".repeat(40), ownerFence: 8 } },
+    );
+    const refused = await makeExecutor(residentOpts(), {
+      ...repoCtx(),
+      runId: "run-1",
+      ownerGen: "gen-1",
+      residentClaim: async () => 7,
+    }).catch((err: unknown) => err);
+    expect(refused).toBeInstanceOf(ResidentRegistrationMismatchError);
+    expect(calls).toEqual(["/status", "/attach"]);
+  });
+
   it("needs-ref WITH the resident's defaultRef → re-attach once on that ref; the note says it was the repo default", async () => {
     stubEnvs();
     const { calls, bodies } = stubFetch(
@@ -1104,6 +1120,34 @@ describe("makeExecutor resident selection", () => {
         user: "worker2",
       },
     };
+
+    it("the first resident probe cannot outlast the original run remainder or provision a fallback afterward", async () => {
+      vi.useFakeTimers();
+      try {
+        stubEnvs();
+        const start = Date.now();
+        const { calls } = stubFetchLate({ body: { state: "warm" }, afterMs: 36_000 });
+        const opts = residentOpts();
+        opts.execution!.resident!.probeTimeoutMs = 120_000;
+        let settled = false;
+        const outcome = makeExecutor(opts, { ...repoCtx(), remainingMs: () => 95_000 - (Date.now() - start) }).then(
+          (value) => {
+            settled = true;
+            return value;
+          },
+          (error) => {
+            settled = true;
+            return error;
+          },
+        );
+        await vi.advanceTimersByTimeAsync(35_000);
+        expect(settled).toBe(true);
+        expect(calls).toEqual(["/status"]);
+        expect(await outcome).toMatchObject({ name: "ResidentLeaseSpentError" });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
 
     it("restoring probe → /await-restore held; a warm answer attaches, the card names the wait", async () => {
       stubEnvs();
@@ -1655,7 +1699,7 @@ describe("makeExecutor resident selection", () => {
         status: 502,
         raw: "<html><head><title>502 Bad Gateway</title></head><body>cloudflare</body></html>",
       };
-      // The probe, its at-once re-probe, then one every 5 s to the budget's edge: 14 in all.
+      // The probe, its at-once re-probe, then one every 5 s before the budget's edge: 13 in all.
       const { fn } = stubFetch(...Array.from({ length: 14 }, () => edge));
       let settled: { note?: string } | undefined;
       const p = makeExecutor(residentOpts(), repoCtx()).then((s) => (settled = s));
@@ -1664,14 +1708,14 @@ describe("makeExecutor resident selection", () => {
       expect(settled?.note).toBe(
         "resident unreachable (probe HTTP 502: no Worker document in the answer) after waiting 60s — using fresh sandbox",
       );
-      expect(fn).toHaveBeenCalledTimes(14);
+      expect(fn).toHaveBeenCalledTimes(13);
       // Inside the window the next dispatch skips the fetch, the wait named.
       const second = await makeExecutor(residentOpts(), repoCtx());
       expect(second.executor).toBeInstanceOf(CloudflareSandboxExecutor);
       expect(second.note).toMatch(
-        /the edge's own page \(no Worker document\) for 14 of 14 probes over 60s; probe skipped during outage window/,
+        /the edge's own page \(no Worker document\) for 13 of 13 probes over 60s; probe skipped during outage window/,
       );
-      expect(fn).toHaveBeenCalledTimes(14);
+      expect(fn).toHaveBeenCalledTimes(13);
     } finally {
       vi.useRealTimers();
     }
@@ -1686,8 +1730,8 @@ describe("makeExecutor resident selection", () => {
         raw: "<html><head><title>502 Bad Gateway</title></head><body>cloudflare</body></html>",
       };
       const typed = { status: 500, body: { error: "internal error", status: 500, transient: true } };
-      // (a) 13 edge pages, then the last view Worker-typed: the platform did not answer for the wait — armed.
-      const a = stubFetch(...Array.from({ length: 13 }, () => edge), typed);
+      // (a) 12 edge pages, then the last view Worker-typed: the platform did not answer for the wait — armed.
+      const a = stubFetch(...Array.from({ length: 12 }, () => edge), typed);
       let first: { note?: string } | undefined;
       const p1 = makeExecutor(residentOpts(), repoCtx()).then((s) => (first = s));
       await vi.advanceTimersByTimeAsync(60_000);
@@ -1697,11 +1741,11 @@ describe("makeExecutor resident selection", () => {
       );
       const afterA = await makeExecutor(residentOpts(), repoCtx());
       expect(afterA.note).toMatch(/probe skipped during outage window/);
-      expect(a.fn).toHaveBeenCalledTimes(14);
-      // (b) 13 Worker-typed blips, then one edge page at the end: the Durable Object's blip, not an outage — nothing armed.
+      expect(a.fn).toHaveBeenCalledTimes(13);
+      // (b) 12 Worker-typed blips, then one edge page at the end: the Durable Object's blip, not an outage — nothing armed.
       resetResidentProbeCache();
       const b = stubFetch(
-        ...Array.from({ length: 13 }, () => typed),
+        ...Array.from({ length: 12 }, () => typed),
         edge,
         { body: { state: "warm", reason: "" } },
         { body: { workspace: "/workspace/threads/x/master", ref: "master", sha: "abc", user: "worker2" } },
@@ -1715,7 +1759,7 @@ describe("makeExecutor resident selection", () => {
       );
       const afterB = await makeExecutor(residentOpts(), repoCtx());
       expect(afterB.executor).toBeInstanceOf(ResidentExecutor);
-      expect(b.fn).toHaveBeenCalledTimes(16);
+      expect(b.fn).toHaveBeenCalledTimes(15);
     } finally {
       vi.useRealTimers();
     }
@@ -1874,7 +1918,7 @@ describe("makeExecutor resident selection", () => {
     try {
       stubEnvs();
       const transient = { status: 500, body: { error: "internal error", status: 500, transient: true } };
-      // The probe, its at-once re-probe, then one every 5 s to the budget's edge: 14 in all.
+      // The probe, its at-once re-probe, then one every 5 s before the budget's edge: 13 in all.
       const { fn } = stubFetch(
         ...Array.from({ length: 14 }, () => transient),
         { body: { state: "warm", reason: "" } },
@@ -1889,7 +1933,7 @@ describe("makeExecutor resident selection", () => {
       expect(settled?.note).toBe(
         "resident unreachable (probe HTTP 500: internal error) after waiting 60s — using fresh sandbox",
       );
-      expect(fn).toHaveBeenCalledTimes(14);
+      expect(fn).toHaveBeenCalledTimes(13);
       const second = await makeExecutor(residentOpts(), repoCtx());
       expect(second.executor).toBeInstanceOf(ResidentExecutor);
     } finally {
@@ -2038,7 +2082,7 @@ describe("makeExecutor resident selection", () => {
         expect((settled as WorkspaceReattachRefusedError).why).toContain("waited 60s for the resident to come back");
         // The selection probe and the attach, then a wake probe every 5 s from t=0 to the budget's edge.
         expect(calls.slice(0, 2)).toEqual(["/status", "/attach"]);
-        expect(calls).toHaveLength(15);
+        expect(calls).toHaveLength(14);
       } finally {
         vi.useRealTimers();
       }
@@ -2085,7 +2129,7 @@ describe("makeExecutor resident selection", () => {
         expect((settled as WorkspaceReattachRefusedError).why).toBe(
           "resident unreachable (probe HTTP 500: internal error) after waiting 60s",
         );
-        expect(calls).toHaveLength(14);
+        expect(calls).toHaveLength(13);
       } finally {
         vi.useRealTimers();
       }
@@ -2112,7 +2156,7 @@ describe("makeExecutor resident selection", () => {
         expect((settledA as WorkspaceReattachLeaseSpentError).note).toBe(
           "the run has 60s of wall clock left, inside the 60s write-up reserve, so no attach was opened",
         );
-        expect(a.calls).toHaveLength(14);
+        expect(a.calls).toHaveLength(13);
         expect(a.calls.every((c) => c === "/status")).toBe(true);
         // (b) 100 s left: the blip clears at t = 15 s with 85 s left — 25 s past the
         // reserve, under what an attach needs — so the attach is not opened, and the
@@ -2166,7 +2210,7 @@ describe("makeExecutor resident selection", () => {
         );
         // The probe, the attach, then the wake's probes every 5 s to the clipped budget's edge: 9 of them.
         expect(calls.slice(0, 2)).toEqual(["/status", "/attach"]);
-        expect(calls.slice(2)).toEqual(Array.from({ length: 9 }, () => "/status"));
+        expect(calls.slice(2)).toEqual(Array.from({ length: 8 }, () => "/status"));
       } finally {
         vi.useRealTimers();
       }
@@ -2777,6 +2821,72 @@ describe("residentSlugsLister", () => {
 // Feature: docs/reference/specs/run-history.md item 54: the binding the row
 // records at the claim (`state.binding`) and how the next generation reads it.
 describe("the workspace binding on the row", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  it("uses the latest physical attachment while preserving the opening publication base through promotion", async () => {
+    const answers = [
+      {
+        ref: "main",
+        sha: "a".repeat(40),
+        workspace: "/workspace/threads/t/main",
+        user: "worker2",
+        container: "vm-1",
+        ownerFence: 7,
+      },
+      { ref: "main", sha: "b".repeat(40), workspace: "/workspace/threads/t/main", user: "worker3", container: "vm-2" },
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify(answers.shift()), { status: 200 })),
+    );
+    const executor = await ResidentExecutor.open({
+      baseUrl: "https://resident.example",
+      token: "test-token",
+      resource: "repo:acme/api",
+      threadKey: "mcp:physical",
+      refHint: "main",
+      runId: "run-1",
+      ownerGen: "gen-1",
+      ownerFence: 7,
+    });
+    const selection = { executor, backend: "resident" as const, binding: executor.binding };
+    await executor.moveTo("b".repeat(40));
+    const promoted = workspaceBindingFor(selection);
+    expect(promoted).toMatchObject({ user: "worker3", container: "vm-2", publicationBaseSha: "a".repeat(40) });
+    expect(promoted).not.toHaveProperty("ownerFence");
+  });
+
+  it("carries the actual attachment fence through save and resume without borrowing a later claim", () => {
+    const first = workspaceBindingFor({
+      executor: new LocalExecutor("/tmp/x"),
+      backend: "resident",
+      resident: true,
+      binding: {
+        ref: "main",
+        sha: "a".repeat(40),
+        workspace: "/workspace/threads/t/main",
+        user: "worker3",
+        container: "vm-9",
+        ownerFence: 7,
+      },
+    });
+    const restored = workspaceBindingOf(JSON.parse(JSON.stringify(first)));
+    expect(restored).toMatchObject({ ownerFence: 7, container: "vm-9", user: "worker3" });
+    const next = workspaceBindingFor(
+      {
+        executor: new LocalExecutor("/tmp/x"),
+        backend: "resident",
+        resident: true,
+        binding: { ref: "main", sha: "a".repeat(40), ownerFence: 8, container: "vm-9", user: "worker3" },
+      },
+      "repo-resident",
+      restored,
+    );
+    expect(next).toMatchObject({ ownerFence: 8 });
+    for (const ownerFence of [0, -1, 1.5, "7", Number.MAX_SAFE_INTEGER + 1])
+      expect(workspaceBindingOf({ ...restored, ownerFence })).not.toHaveProperty("ownerFence");
+    expect(workspaceBindingOf({ backend: "resident" })).not.toHaveProperty("ownerFence");
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();

@@ -1,3 +1,4 @@
+import { advanceWorkspace } from "./workspaceAdvance.js";
 import {
   emptyCredentialInspection,
   type CredentialInspection,
@@ -13,6 +14,7 @@ import {
   requestFailedMessage,
   infraReasonOfStatus,
   truncate,
+  type MoveOptions,
   type ExecOptions,
   type ExecResult,
   type Executor,
@@ -496,6 +498,10 @@ export class CloudflareSandboxExecutor implements Executor {
     )
       throw new ExecInfraError("sandbox /exec: invalid command result", "worker-unavailable");
     return { stdout: r.stdout, stderr: r.stderr, exitCode: r.exitCode as number, truncated: r.truncated };
+  }
+
+  moveTo(sha: string, opts?: MoveOptions): Promise<{ sha: string }> {
+    return advanceWorkspace((command, options) => this.execResult(command, options), sha, opts);
   }
 
   /** The effect bearer goes to the Worker once, never through `call` (which

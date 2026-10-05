@@ -9,6 +9,53 @@
 // process without a Worker-backed run history get the in-memory double or the
 // null store, which knows no instance and refuses every write by name.
 
+import { isRunRecord } from "../runRecord.js";
+import {
+  isMaintenanceAdmissionInput,
+  isMaintenanceAdmissionResult,
+  prepareMaintenanceAdmission,
+  planMaintenanceAdmission,
+  maintenanceAdmissionMatches,
+  type MaintenanceAdmissionInput,
+  type MaintenanceAdmissionResult,
+} from "./maintenanceAdmission.js";
+import { isCoordinatorReportAdmission } from "./reportAdmission.js";
+import { coordinatorReportCanReconcile } from "./reportReconcileEligibility.js";
+import type { InMemoryRunLedger } from "../runLedger/inMemory.js";
+import { PLANE_EFFECTS_TOTAL_CAP } from "../plane/decide.js";
+import {
+  coordinatorReconciliationEffect,
+  coordinatorWorkflowCanReconcile,
+  isCoordinatorReconcileEffect,
+} from "./workflowReconciliation.js";
+import {
+  findPullOwnersInRows,
+  pullBindingChanges,
+  needsPullBindingAdmission,
+  isPullBindingRefusal,
+  type PullBindingRefusal,
+  unitPullBindingRefusal,
+  unitPullTargetsRefusal,
+  type PullOwnershipRows,
+  isPullTarget,
+  isPullOwnerLiveMeta,
+  PULL_OWNER_SCAN_MAX,
+  PULL_OWNER_SCAN_MAX_BYTES,
+  isPullOwnersResult,
+  type PullTarget,
+  type PullOwnersResult,
+} from "./pullOwnership.js";
+import {
+  isUnitEffectTransition,
+  isUnitEffectTransitionResult,
+  unitEffectResultMatches,
+  planUnitEffectTransition,
+  unitEffectRunId,
+  unitEffectTombstoneMatches,
+  type UnitEffectRunEvidence,
+  type UnitEffectTransition,
+  type UnitEffectTransitionResult,
+} from "./unitEffect.js";
 import type { MainTaskLink } from "./mainTaskLink.js";
 export type { MainTaskLink } from "./mainTaskLink.js";
 import type { Secrets } from "../../secrets.js";
@@ -25,6 +72,7 @@ import {
   prepareUnfencedUnitWrite,
   permitsRecoveryMetadataWrite,
   CoordinatorUnitWriteConflict,
+  coordinatorUnitCanBeDiscarded,
   isThreadEvent,
   type CoordinatorInstance,
   type CoordinatorUnit,
@@ -62,16 +110,17 @@ import {
  *  idempotent); `unavailable`: no durable store in this process. */
 export type PutInstanceResult = { ok: true } | { ok: false; reason: "exists" | "unavailable" };
 export type ConfirmCreatedResult = { ok: true } | { ok: false; reason: "stale" | "unavailable" };
-export type PutUnitsResult = { ok: true } | { ok: false; reason: "unavailable" };
-export type CompareAndReplaceUnitResult = { ok: true } | { ok: false; reason: "stale" | "unavailable" };
+export type PutUnitsResult = { ok: true } | { ok: false; reason: PullBindingRefusal };
+export type CompareAndReplaceUnitResult =
+  { ok: true } | { ok: false; reason: "stale" | "unavailable" | "owned" | "incomplete" };
 export type AppendEventResult =
   { ok: true; seq: number; event?: ThreadEvent } | { ok: false; reason: "ended" | "stale" | "unavailable" };
 export type MarkConsumedResult = { ok: true } | { ok: false; reason: "unavailable" };
-export type AnswerWakeResult = { ok: true } | { ok: false; reason: "unavailable" };
+export type AnswerWakeResult = { ok: true } | { ok: false; reason: PullBindingRefusal };
 export type MarkStoppedResult = { ok: true } | { ok: false; reason: "unknown_instance" | "stale" | "unavailable" };
 export type ReserveDecisionRecordResult = { ok: true; number: string } | { ok: false; reason: "unavailable" };
 export type ClaimMainTaskResult =
-  { ok: true; created: boolean; link: MainTaskLink } | { ok: false; reason: "conflict" | "unavailable" };
+  { ok: true; created: boolean; link: MainTaskLink } | { ok: false; reason: "conflict" | PullBindingRefusal };
 
 /** The (instance, unit) a thread event belongs to. */
 export interface UnitEventKey {
@@ -101,8 +150,16 @@ function mainTaskUnitSnapshot(rows: unknown, key: UnitEventKey): MainTaskUnitSna
 }
 
 export interface CoordinatorInstanceStore {
+  /** Reserve the same unit cell from an already authorized command or native watch intent. */
+  admitMaintenance(input: MaintenanceAdmissionInput): Promise<MaintenanceAdmissionResult>;
+  /** Complete canonical owner snapshot; reservation must share this owner transaction. */
+  findPullOwners(target: PullTarget): Promise<PullOwnersResult>;
+  /** Native ended execution discovery persists an exact existing outbox offer. */
+  offerReconciliation(key: UnitEventKey): Promise<{ offered: boolean }>;
   transitionRecovery(input: RecoveryTransition): Promise<RecoveryTransitionResult>;
-  getRecoveryAction(key: UnitEventKey, request: RecoveryRequest): Promise<RecoveryAction | null>;
+  /** Reads stop, execution, complete owner facts and the whole unit in one transaction. */
+  transitionUnitEffect(input: UnitEffectTransition): Promise<UnitEffectTransitionResult>;
+  getRecoveryAction(key: UnitEventKey, request: RecoveryRequest | string): Promise<RecoveryAction | null>;
   listRecoveryHistory(key: UnitEventKey, after?: number): Promise<RecoveryHistoryPage>;
   /** The authenticated requester turn, outside model and session content. */
   recordRequesterTurn(input: RequesterTurnInput): Promise<RecordRequesterTurnResult>;
@@ -123,7 +180,7 @@ export interface CoordinatorInstanceStore {
   /** The record written over whatever the id holds and the id's unit rows
    *  dropped — an attempt starting over: the leftover of one whose Workflow
    *  instance was never created, once the shim has said so. A private-task
-   *  claim or typed settlement refuses replacement as `exists`. */
+   *  claim, publication or execution evidence refuses replacement as `exists`. */
   replace(instance: CoordinatorInstance): Promise<PutInstanceResult>;
   /** Mark only the exact saved pre-create record as created. Unit rows remain
    * untouched; a duplicate or a replaced owner cannot cross this fence. */
@@ -170,6 +227,7 @@ export interface CoordinatorInstanceStore {
     event: ThreadEventInput,
     requireActive?: boolean,
     binding?: MainTaskBinding,
+    expectedRecovery?: { actionId: string; workflowId: string },
   ): Promise<AppendEventResult>;
   /** The unit's events in sequence order; `unconsumedOnly` filters to the rows no spawn or run has consumed. */
   listEvents(key: UnitEventKey, unconsumedOnly?: boolean): Promise<ThreadEvent[]>;
@@ -189,6 +247,228 @@ export interface CoordinatorInstanceStore {
 const unitKey = (u: Pick<CoordinatorUnit, "instanceId" | "unit">) => `${u.instanceId}\0${u.unit}`;
 
 export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStore {
+  async admitMaintenance(input: MaintenanceAdmissionInput): Promise<MaintenanceAdmissionResult> {
+    if (!isMaintenanceAdmissionInput(input)) return { ok: false, reason: "conflict" };
+    try {
+      const prepared = await prepareMaintenanceAdmission(input);
+      if (!this.runOwner) return { ok: false, reason: "unavailable" };
+      const rows = this.pullOwnershipRows();
+      const result = planMaintenanceAdmission(
+        prepared,
+        rows,
+        [...this.rows.values()].map((row) => JSON.parse(row)),
+      );
+      if (!result.ok || result.replayed) return result;
+      const existing = this.rows.get(result.instance.id);
+      if (existing !== undefined && JSON.stringify(JSON.parse(existing)) !== JSON.stringify(result.instance))
+        return { ok: false, reason: "stale" };
+      // The complete scan and both owner rows share this synchronous mutation.
+      this.rows.set(result.instance.id, JSON.stringify(result.instance));
+      this.units.set(unitKey(result.unit), JSON.stringify(result.unit));
+      return result;
+    } catch {
+      return { ok: false, reason: "incomplete" };
+    }
+  }
+  constructor(
+    private readonly runOwner?: Pick<
+      InMemoryRunLedger,
+      | "live"
+      | "finished"
+      | "events"
+      | "finishedWorkEvidence"
+      | "workspacePublicationRows"
+      | "planeOffers"
+      | "readSessionEntry"
+    >,
+    private readonly workflowStatus?: (workflowId: string) => Promise<string | undefined>,
+  ) {}
+  async offerReconciliation(key: UnitEventKey): Promise<{ offered: boolean }> {
+    if (!this.runOwner || !this.workflowStatus) return { offered: false };
+    const instance = await this.get(key.instanceId);
+    const unit = (await this.listUnits(key.instanceId)).find((row) => row.unit === key.unit);
+    if (!instance || !unit || !isCoordinatorInstance(instance) || !isCoordinatorUnit(unit)) return { offered: false };
+    const actionId = unit.recovery?.actionId ?? (unit.recoveryReceipt ? unit.history?.receiptId : undefined);
+    const action = actionId ? await this.getRecoveryAction(key, actionId) : undefined;
+    if (
+      (unit.recovery || unit.recoveryReceipt) &&
+      (!action ||
+        action.workflowId !== (unit.recovery?.workflowId ?? unit.recoveryReceipt?.workflowId) ||
+        action.state !== (unit.recovery ? "pending" : "settled"))
+    )
+      return { offered: false };
+    const effect = await coordinatorReconciliationEffect(instance, unit, action ?? undefined);
+    if (this.runOwner.planeOffers.has(effect.id)) return { offered: false };
+    const status = await this.workflowStatus(effect.workflowId);
+    const eligible = await coordinatorReportCanReconcile(this.runOwner, instance, unit, action ?? undefined);
+    if (
+      !eligible ||
+      !coordinatorWorkflowCanReconcile(instance, unit, action ?? undefined, status) ||
+      this.rows.get(instance.id) !== JSON.stringify(instance) ||
+      this.units.get(unitKey(unit)) !== JSON.stringify(unit)
+    )
+      return { offered: false };
+    if (this.runOwner.planeOffers.size >= PLANE_EFFECTS_TOTAL_CAP) throw new Error("plane_effects total cap");
+    this.runOwner.planeOffers.set(effect.id, effect);
+    return { offered: true };
+  }
+  async findPullOwners(target: PullTarget): Promise<PullOwnersResult> {
+    if (!isPullTarget(target)) return { ok: false, reason: "invalid" };
+    if (!this.runOwner) return { ok: false, reason: "unavailable" };
+    try {
+      return findPullOwnersInRows(target, this.pullOwnershipRows());
+    } catch {
+      return { ok: false, reason: "incomplete" };
+    }
+  }
+  private pullOwnershipRows(): PullOwnershipRows {
+    if (!this.runOwner) throw new Error("pull owner unavailable");
+    let count = 0,
+      bytes = 0;
+    const visit = (...text: string[]) => {
+      count++;
+      bytes += text.reduce((sum, item) => sum + 3 * item.length, 0);
+      if (count > PULL_OWNER_SCAN_MAX || bytes > PULL_OWNER_SCAN_MAX_BYTES)
+        throw new Error("pull owner scan incomplete");
+    };
+    for (const text of this.units.values()) {
+      const unit = JSON.parse(text);
+      visit(text, this.rows.get(unit.instanceId) ?? "");
+    }
+    for (const row of this.runOwner.live.values()) visit(JSON.stringify(row.meta), JSON.stringify(row.state));
+    for (const record of this.runOwner.finished.values()) {
+      const { events: _events, ...summary } = record;
+      visit(JSON.stringify(summary), JSON.stringify(this.runOwner.finishedWorkEvidence.get(record.id) ?? {}));
+    }
+    const settlements = this.runOwner.workspacePublicationRows();
+    for (const row of settlements) visit(JSON.stringify(row));
+    if (
+      [...this.runOwner.live.values()].some(
+        (row) =>
+          !isPullOwnerLiveMeta(row.meta) || !row.state || typeof row.state !== "object" || Array.isArray(row.state),
+      )
+    )
+      throw new Error("unreadable pull owner");
+    if ([...this.runOwner.finishedWorkEvidence.keys()].some((id) => !this.runOwner!.finished.has(id)))
+      throw new Error("unreadable pull owner");
+    return {
+      complete: true,
+      units: [...this.units.values()].map((text) => {
+        const unit = JSON.parse(text);
+        const owner = this.rows.get(unit.instanceId);
+        return { unit, instance: owner === undefined ? undefined : JSON.parse(owner) };
+      }),
+      runs: [
+        ...[...this.runOwner.live.values()].map((row) => ({
+          runId: row.runId,
+          repo: row.meta.repo,
+          live: true,
+          publication: row.state.branchPublication,
+          door: row.state.doorPublicationPending,
+        })),
+        ...[...this.runOwner.finished.values()].map((row) => {
+          if (!isRunRecord(row)) throw new Error("unreadable terminal producer");
+          return {
+            runId: row.id,
+            repo: row.repo,
+            live: false,
+            publication: Object.hasOwn(this.runOwner!.finishedWorkEvidence.get(row.id) ?? {}, "branchPublication")
+              ? this.runOwner!.finishedWorkEvidence.get(row.id)!.branchPublication
+              : row.branchPublication,
+            door: Object.hasOwn(this.runOwner!.finishedWorkEvidence.get(row.id) ?? {}, "doorPublicationPending")
+              ? this.runOwner!.finishedWorkEvidence.get(row.id)!.doorPublicationPending
+              : row.doorPublicationPending,
+          };
+        }),
+      ],
+      effects: [...this.runOwner.planeOffers.values()],
+      settlements,
+    };
+  }
+  private bindingRefusal(
+    current: CoordinatorUnit | undefined,
+    next: CoordinatorUnit,
+    force = false,
+    staged: readonly CoordinatorUnit[] = [],
+    owner?: CoordinatorInstance,
+  ): PullBindingRefusal | undefined {
+    if (
+      current?.ending &&
+      !(
+        current.reportDelivery === undefined &&
+        isCoordinatorReportAdmission(next.reportDelivery) &&
+        JSON.stringify(current) === JSON.stringify({ ...next, reportDelivery: undefined })
+      ) &&
+      (JSON.stringify(current.ending) !== JSON.stringify(next.ending) ||
+        JSON.stringify(current.reportDelivery) !== JSON.stringify(next.reportDelivery)) &&
+      [...(this.runOwner?.planeOffers.values() ?? [])].some(
+        (effect) =>
+          isCoordinatorReconcileEffect(effect) &&
+          effect.instanceId === current.instanceId &&
+          effect.unit === current.unit,
+      )
+    )
+      return "stale";
+    force ||= current?.startedAt === undefined && next.startedAt !== undefined;
+    if (!force && !needsPullBindingAdmission(current, next)) return;
+    try {
+      const instance = owner ?? JSON.parse(this.rows.get(next.instanceId) ?? "null");
+      if (!isCoordinatorInstance(instance)) return "incomplete";
+      if (!force && !pullBindingChanges(instance, current, next)) return;
+      if (!this.runOwner) return "unavailable";
+      const rows = this.pullOwnershipRows();
+      for (const unit of staged)
+        rows.units.push({ unit, instance: JSON.parse(this.rows.get(unit.instanceId) ?? "null") });
+      return unitPullBindingRefusal(rows, instance, current, next);
+    } catch {
+      return "incomplete";
+    }
+  }
+  async transitionUnitEffect(input: UnitEffectTransition): Promise<UnitEffectTransitionResult> {
+    if (!isUnitEffectTransition(input)) return { ok: false, reason: "conflict" };
+    try {
+      const instance = JSON.parse(this.rows.get(input.expected.instanceId) ?? "null");
+      const current = JSON.parse(this.units.get(unitKey(input.expected)) ?? "null");
+      if ((instance !== null && !isCoordinatorInstance(instance)) || (current !== null && !isCoordinatorUnit(current)))
+        return { ok: false, reason: "incomplete" };
+      const runId = unitEffectRunId(input);
+      let evidence: UnitEffectRunEvidence | undefined;
+      if (runId !== undefined && this.runOwner) {
+        const live = this.runOwner.live.get(runId),
+          finished = this.runOwner.finished.get(runId);
+        if (live && (live.runId !== runId || live.threadKey !== live.meta.threadKey))
+          return { ok: false, reason: "incomplete" };
+        if (finished && (!isRunRecord(finished) || finished.id !== runId)) return { ok: false, reason: "incomplete" };
+        if (live && finished && !unitEffectTombstoneMatches(live.meta, live.startedAt, finished))
+          return { ok: false, reason: "incomplete" };
+        if (!live && finished?.provisional === true) return { ok: false, reason: "unavailable" };
+        const meta = live?.meta ?? finished;
+        if (meta)
+          evidence = {
+            runId,
+            meta,
+            reviewTarget: live?.meta ?? finished!.events.find((e) => e.type === "run_meta"),
+            startedAt: live?.startedAt ?? finished!.startedAt,
+            tags: (live ? (this.runOwner.events.get(runId) ?? []) : finished!.events).filter(
+              (e) => e.type === "coordinator_tag",
+            ),
+          };
+      }
+      const result = planUnitEffectTransition(input, instance, current ?? undefined, evidence);
+      if (!result.ok) return result;
+      if (input.kind === "admit") {
+        if (!this.runOwner) return { ok: false, reason: "unavailable" };
+        const reason = unitPullTargetsRefusal(this.pullOwnershipRows(), instance, result.unit);
+        if (reason) return { ok: false, reason };
+      }
+      // No awaits separate these owner reads from their single mutation.
+      const serialized = JSON.stringify(result.unit);
+      this.units.set(unitKey(input.expected), serialized);
+      return result;
+    } catch {
+      return { ok: false, reason: "incomplete" };
+    }
+  }
   private readonly recoveryActions = new Map<string, string>();
   private readonly recoveryReceipts = new Map<string, string>();
   async transitionRecovery(input: RecoveryTransition): Promise<RecoveryTransitionResult> {
@@ -211,13 +491,19 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
       },
     );
     if (!result.ok) return result;
+    if (input.kind === "claim" && !result.replayed) {
+      const reason = this.bindingRefusal(input.expected, result.unit, true);
+      if (reason) return { ok: false, reason };
+    }
     if (result.receipt) this.recoveryReceipts.set(`${key}\0${result.receipt.id}`, JSON.stringify(result.receipt));
     if (result.action) this.recoveryActions.set(`${key}\0${result.action.id}`, JSON.stringify(result.action));
     this.units.set(key, JSON.stringify(result.unit));
     return { ok: true, unit: result.unit, ...(result.replayed ? { replayed: true } : {}) };
   }
-  async getRecoveryAction(key: UnitEventKey, request: RecoveryRequest): Promise<RecoveryAction | null> {
-    const value = this.recoveryActions.get(`${unitKey(key)}\0${await recoveryActionId(key, request)}`);
+  async getRecoveryAction(key: UnitEventKey, request: RecoveryRequest | string): Promise<RecoveryAction | null> {
+    const actionId = typeof request === "string" ? request : await recoveryActionId(key, request);
+    if (!/^r_[a-f0-9]{64}$/.test(actionId)) throw new Error("invalid recovery action identity");
+    const value = this.recoveryActions.get(`${unitKey(key)}\0${actionId}`);
     return value ? (JSON.parse(value) as RecoveryAction) : null;
   }
   async listRecoveryHistory(key: UnitEventKey, after = 0): Promise<RecoveryHistoryPage> {
@@ -276,6 +562,7 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
       !isMainTaskKey(key) ||
       !isCoordinatorInstance(instance) ||
       !isCoordinatorUnit(unit) ||
+      unit.currentEffect !== undefined ||
       !mainTaskClaimMatches(key, instance, unit) ||
       authority.requesterId !== instance.userId ||
       authority.repo.toLowerCase() !== instance.repo.toLowerCase()
@@ -292,9 +579,13 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     if (current?.messageId !== authority.sourceMessageId || current.revision !== authority.revision)
       return { ok: false, reason: "conflict" };
     if (this.rows.has(instance.id) || this.units.has(unitKey(unit))) return { ok: false, reason: "conflict" };
+    const reason = this.bindingRefusal(undefined, unit, true, [], instance);
+    if (reason) return { ok: false, reason };
     const link = { instanceId: instance.id, unit: unit.unit, authority };
-    this.rows.set(instance.id, JSON.stringify(instance));
-    this.units.set(unitKey(unit), JSON.stringify(unit));
+    const instanceText = JSON.stringify(instance);
+    const unitText = JSON.stringify(unit);
+    this.rows.set(instance.id, instanceText);
+    this.units.set(unitKey(unit), unitText);
     this.mainTasks.set(this.mainTaskKey(key), link);
     return { ok: true, created: true, link };
   }
@@ -306,15 +597,15 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     return { ok: true };
   }
   async replace(instance: CoordinatorInstance): Promise<PutInstanceResult> {
-    if ([...this.mainTasks.values()].some((link) => link.instanceId === instance.id))
+    if (
+      [...this.mainTasks.values()].some((link) => link.instanceId === instance.id) ||
+      [...this.recoveryActions.keys(), ...this.recoveryReceipts.keys()].some((key) =>
+        key.startsWith(`${instance.id}\0`),
+      )
+    )
       return { ok: false, reason: "exists" };
     if (
-      [...this.units].some(
-        ([key, text]) =>
-          key.startsWith(`${instance.id}\0`) &&
-          ((JSON.parse(text) as CoordinatorUnit).ending?.outcome !== undefined ||
-            (JSON.parse(text) as CoordinatorUnit).history !== undefined),
-      )
+      [...this.units].some(([key, text]) => key.startsWith(`${instance.id}\0`) && !coordinatorUnitCanBeDiscarded(text))
     )
       return { ok: false, reason: "exists" };
     this.rows.set(instance.id, JSON.stringify(instance));
@@ -335,13 +626,18 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     return text === undefined ? null : (JSON.parse(text) as CoordinatorInstance);
   }
   async putUnits(units: readonly CoordinatorUnit[]): Promise<PutUnitsResult> {
-    const pending = new Map<string, string>();
+    const pending = new Map<string, CoordinatorUnit>();
     for (const u of units) {
-      const key = unitKey(u);
-      const current = pending.get(key) ?? this.units.get(key);
-      pending.set(key, JSON.stringify(prepareUnfencedUnitWrite(current ? JSON.parse(current) : undefined, u)));
+      const current = pending.get(unitKey(u)) ?? this.units.get(unitKey(u));
+      pending.set(unitKey(u), prepareUnfencedUnitWrite(typeof current === "string" ? JSON.parse(current) : current, u));
     }
-    for (const [key, text] of pending) this.units.set(key, text);
+    for (const [key, next] of pending) {
+      const current = this.units.get(key);
+      const reason = this.bindingRefusal(current ? JSON.parse(current) : undefined, next, false, [...pending.values()]);
+      if (reason) return { ok: false, reason };
+    }
+    const serialized = [...pending].map(([key, next]) => [key, JSON.stringify(next)] as const);
+    for (const [key, text] of serialized) this.units.set(key, text);
     return { ok: true };
   }
   async compareAndReplaceUnit(
@@ -355,6 +651,8 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
       !permitsRecoveryMetadataWrite(expected, replacement, true)
     )
       return { ok: false, reason: "stale" };
+    const reason = this.bindingRefusal(expected, replacement);
+    if (reason) return { ok: false, reason };
     this.units.set(key, JSON.stringify(preserveWorkBrief(expected, replacement)));
     return { ok: true };
   }
@@ -417,8 +715,9 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     event: ThreadEventInput,
     requireActive = false,
     binding?: MainTaskBinding,
+    expectedRecovery?: { actionId: string; workflowId: string },
   ): Promise<AppendEventResult> {
-    if (requireActive || binding !== undefined) {
+    if (requireActive || binding !== undefined || expectedRecovery !== undefined) {
       const instanceText = this.rows.get(key.instanceId);
       const unitText = this.units.get(unitKey(key));
       const instance = instanceText ? (JSON.parse(instanceText) as CoordinatorInstance) : undefined;
@@ -430,7 +729,34 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
           !mainTaskBindingMatches(binding, this.mainTasks.get(this.mainTaskKey(binding.key)) ?? null, instance, unit))
       )
         return { ok: false, reason: "stale" };
-      if (!instance || !unit || instance.stop || unit.ending || unit.recovery || unit.recoveryHold)
+      if (expectedRecovery !== undefined) {
+        const actionText = this.recoveryActions.get(`${unitKey(key)}\0${expectedRecovery.actionId}`);
+        const action = actionText ? JSON.parse(actionText) : undefined;
+        if (
+          !requireActive ||
+          !instance ||
+          !unit ||
+          !isCoordinatorInstance(instance) ||
+          !isCoordinatorUnit(unit) ||
+          !isRecoveryAction(action) ||
+          action.state !== "pending" ||
+          action.id !== expectedRecovery.actionId ||
+          action.instanceId !== key.instanceId ||
+          action.unit !== key.unit ||
+          action.workflowId !== expectedRecovery.workflowId ||
+          unit.recovery?.actionId !== expectedRecovery.actionId ||
+          unit.recovery.workflowId !== expectedRecovery.workflowId
+        )
+          return { ok: false, reason: "stale" };
+      }
+      if (
+        !instance ||
+        !unit ||
+        instance.stop ||
+        unit.ending ||
+        (unit.recovery && !expectedRecovery) ||
+        unit.recoveryHold
+      )
         return { ok: false, reason: "ended" };
     }
     const list = this.events.get(unitKey(key)) ?? [];
@@ -464,10 +790,11 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
   ): Promise<AnswerWakeResult> {
     const updated = { ...unit, wakes: { ...(unit.wakes ?? {}), [waitId]: answer } };
     const current = this.units.get(unitKey(updated));
-    this.units.set(
-      unitKey(updated),
-      JSON.stringify(prepareUnfencedUnitWrite(current ? JSON.parse(current) : undefined, updated)),
-    );
+    const existing = current ? JSON.parse(current) : undefined;
+    const prepared = prepareUnfencedUnitWrite(existing, updated);
+    const reason = this.bindingRefusal(existing, prepared);
+    if (reason) return { ok: false, reason };
+    this.units.set(unitKey(prepared), JSON.stringify(prepared));
     const list = this.events.get(unitKey(unit)) ?? [];
     for (const e of list) if (seqs.includes(e.seq) && e.consumedBy === undefined) e.consumedBy = by;
     return { ok: true };
@@ -477,6 +804,18 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
 /** Without a durable state Worker, writes refuse and unit-owner reads are
  *  unavailable rather than evidence that the instance has no units. */
 export class NullCoordinatorInstanceStore implements CoordinatorInstanceStore {
+  async admitMaintenance(): Promise<MaintenanceAdmissionResult> {
+    return { ok: false, reason: "unavailable" };
+  }
+  async offerReconciliation(): Promise<{ offered: boolean }> {
+    return { offered: false };
+  }
+  async findPullOwners(_target: PullTarget): Promise<PullOwnersResult> {
+    return { ok: false, reason: "unavailable" };
+  }
+  async transitionUnitEffect(_input: UnitEffectTransition): Promise<UnitEffectTransitionResult> {
+    return { ok: false, reason: "unavailable" };
+  }
   async transitionRecovery(): Promise<RecoveryTransitionResult> {
     return { ok: false, reason: "unavailable" };
   }
@@ -549,6 +888,7 @@ export class NullCoordinatorInstanceStore implements CoordinatorInstanceStore {
     _event: ThreadEventInput,
     _requireActive = false,
     _binding?: MainTaskBinding,
+    _expectedRecovery?: { actionId: string; workflowId: string },
   ): Promise<AppendEventResult> {
     return { ok: false, reason: "unavailable" };
   }
@@ -583,6 +923,55 @@ export interface WorkerCoordinatorInstanceStoreOptions {
  *  the run store's client. An answer this client cannot read is thrown, never
  *  read as "no instance": a spawn on a guess would be a spawn nobody asked for. */
 export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore {
+  async admitMaintenance(input: MaintenanceAdmissionInput): Promise<MaintenanceAdmissionResult> {
+    if (!isMaintenanceAdmissionInput(input)) return { ok: false, reason: "conflict" };
+    try {
+      const response = await this.post("/runs/coordinator/maintenance/admit", { input });
+      if (!isMaintenanceAdmissionResult(response.data)) return { ok: false, reason: "unavailable" };
+      const result = response.data;
+      if (!result.ok) return response.status === 409 ? result : { ok: false, reason: "unavailable" };
+      const prepared = await prepareMaintenanceAdmission(input);
+      if (response.status !== 200 || !maintenanceAdmissionMatches(prepared, result))
+        return { ok: false, reason: "unavailable" };
+      return result;
+    } catch {
+      return { ok: false, reason: "unavailable" };
+    }
+  }
+  async offerReconciliation(key: UnitEventKey): Promise<{ offered: boolean }> {
+    const response = await this.post("/runs/coordinator/reconcile/offer", { ...key });
+    const result = response.data as { offered?: unknown };
+    if (response.status === 200 && typeof result.offered === "boolean") return { offered: result.offered };
+    throw new Error(`coordinator reconciliation unavailable (HTTP ${response.status})`);
+  }
+  async findPullOwners(target: PullTarget): Promise<PullOwnersResult> {
+    try {
+      const response = await this.post("/runs/coordinator/pull-owners", { target });
+      if (response.status !== 200 || !isPullOwnersResult(response.data)) return { ok: false, reason: "unavailable" };
+      return response.data;
+    } catch {
+      return { ok: false, reason: "unavailable" };
+    }
+  }
+  async transitionUnitEffect(input: UnitEffectTransition): Promise<UnitEffectTransitionResult> {
+    if (!isUnitEffectTransition(input)) return { ok: false, reason: "conflict" };
+    try {
+      const response = await this.post("/runs/coordinator/units/effect-transition", { input });
+      if (!isUnitEffectTransitionResult(response.data)) return { ok: false, reason: "unavailable" };
+      const result = response.data;
+      if (!result.ok) return response.status === 409 ? result : { ok: false, reason: "unavailable" };
+      if (
+        response.status !== 200 ||
+        result.unit.instanceId !== input.expected.instanceId ||
+        result.unit.unit !== input.expected.unit ||
+        !unitEffectResultMatches(input, result.unit)
+      )
+        return { ok: false, reason: "unavailable" };
+      return result;
+    } catch {
+      return { ok: false, reason: "unavailable" };
+    }
+  }
   async transitionRecovery(input: RecoveryTransition): Promise<RecoveryTransitionResult> {
     const response = await this.post("/runs/coordinator/recovery/transition", { input });
     const data = response.data as { ok?: unknown; reason?: unknown; unit?: unknown; replayed?: unknown };
@@ -598,20 +987,27 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
       (data.reason === "stale" ||
         data.reason === "conflict" ||
         data.reason === "capacity" ||
-        data.reason === "unavailable")
+        data.reason === "unavailable" ||
+        data.reason === "owned" ||
+        data.reason === "incomplete")
     )
       return { ok: false, reason: data.reason };
     throw new Error(`recovery transition unavailable (HTTP ${response.status})`);
   }
-  async getRecoveryAction(key: UnitEventKey, request: RecoveryRequest): Promise<RecoveryAction | null> {
-    const response = await this.post("/runs/coordinator/recovery/action", { key, request });
+  async getRecoveryAction(key: UnitEventKey, request: RecoveryRequest | string): Promise<RecoveryAction | null> {
+    const actionId = typeof request === "string" ? request : await recoveryActionId(key, request);
+    if (!/^r_[a-f0-9]{64}$/.test(actionId)) throw new Error("invalid recovery action identity");
+    const response = await this.post("/runs/coordinator/recovery/action", {
+      key,
+      ...(typeof request === "string" ? { actionId } : { request }),
+    });
     const action = (response.data as { action?: unknown }).action;
     if (action === null) return null;
     if (
       !isRecoveryAction(action) ||
       action.instanceId !== key.instanceId ||
       action.unit !== key.unit ||
-      action.id !== (await recoveryActionId(key, request))
+      action.id !== actionId
     )
       throw new Error("invalid recovery action response");
     return action;
@@ -749,6 +1145,7 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     const r = await this.post("/runs/coordinator/units/put", { units });
     const d = r.data as { ok?: unknown; reason?: unknown };
     if (r.status === 409 && d.reason === "settled") throw new CoordinatorUnitWriteConflict();
+    if (r.status === 409 && isPullBindingRefusal(d.reason)) return { ok: false, reason: d.reason };
     if (d.ok === true) return { ok: true };
     throw new Error(`coordinator store /runs/coordinator/units/put: unexpected answer (HTTP ${r.status})`);
   }
@@ -764,7 +1161,11 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
       recovered: replacement,
     });
     const d = r.data as { ok?: unknown; reason?: unknown };
-    if (r.status === 409 && d.reason === "stale") return { ok: false, reason: "stale" };
+    if (
+      r.status === 409 &&
+      (d.reason === "stale" || d.reason === "owned" || d.reason === "incomplete" || d.reason === "unavailable")
+    )
+      return { ok: false, reason: d.reason };
     if (d.ok === true) return { ok: true };
     throw new Error(
       `coordinator store /runs/coordinator/units/claim-legacy-continuation: unexpected answer (HTTP ${r.status})`,
@@ -829,13 +1230,20 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     event: ThreadEventInput,
     requireActive = false,
     binding?: MainTaskBinding,
+    expectedRecovery?: { actionId: string; workflowId: string },
   ): Promise<AppendEventResult> {
     // The state Worker caps again after assigning the sequence, but its HTTP
     // request-body fence runs first. Cap here too so an accepted 5–10 MB file
     // reaches that boundary as the small dropped-count row the store contract
     // promises, never as a transport-level 413.
     const capped = capThreadEvent(event);
-    const r = await this.post("/runs/coordinator/events/append", { ...key, event: capped, requireActive, binding });
+    const r = await this.post("/runs/coordinator/events/append", {
+      ...key,
+      event: capped,
+      requireActive,
+      binding,
+      expectedRecovery,
+    });
     const d = r.data as { ok?: unknown; seq?: unknown; event?: unknown; reason?: unknown };
     if (d.ok === true && typeof d.seq === "number" && (d.event === undefined || isThreadEvent(d.event)))
       return { ok: true, seq: d.seq, ...(d.event === undefined ? {} : { event: d.event }) };
@@ -868,6 +1276,7 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     const r = await this.post("/runs/coordinator/wake", { unit, waitId, answer, seqs: [...seqs], by });
     const d = r.data as { ok?: unknown; reason?: unknown };
     if (r.status === 409 && d.reason === "settled") throw new CoordinatorUnitWriteConflict();
+    if (r.status === 409 && isPullBindingRefusal(d.reason)) return { ok: false, reason: d.reason };
     if (d.ok === true) return { ok: true };
     throw new Error(`coordinator store /runs/coordinator/wake: unexpected answer (HTTP ${r.status})`);
   }

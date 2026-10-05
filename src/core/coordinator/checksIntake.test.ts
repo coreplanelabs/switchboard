@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   GITHUB_EVENT_HEADER,
   GITHUB_SIGNATURE_HEADER,
@@ -11,6 +11,9 @@ import {
 } from "./checksIntake.js";
 import { checksSettledEventType, unitNudgeEventType, type WorkflowSender } from "./contract.js";
 import { InMemoryCoordinatorInstanceStore } from "./instanceStore.js";
+import { InMemoryRunLedger } from "../runLedger/inMemory.js";
+import { findRunnerPullOwner, runnerPullOwnerOf } from "../runnerOwnership.js";
+import { isCoordinatorUnit, type CoordinatorUnit } from "./contract.js";
 
 const SECRET = "hush";
 const HEAD = "a".repeat(40);
@@ -156,8 +159,8 @@ describe("the pull-request comment intake — a person's answer wakes the owning
       repository: { full_name: "octo/repo" },
     });
 
-  async function liveInstances() {
-    const instances = new InMemoryCoordinatorInstanceStore();
+  async function liveInstances(recoveryRequested = false) {
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     const owner = { instanceId: "runner-fixture", unit: "U10" };
     await instances.put({
       id: owner.instanceId,
@@ -167,21 +170,249 @@ describe("the pull-request comment intake — a person's answer wakes the owning
       threadKey: "slack:C1:1",
       repo: "octo/repo",
       branch: "plan/fixture/u1",
+      base: "main",
       createdAt: 1,
     });
-    await instances.putUnits([
-      {
-        instanceId: owner.instanceId,
-        unit: owner.unit,
-        slug: "u1",
-        branch: "fixture/x/u1",
-        dependsOn: [],
-        rounds: [],
-        idle: { why: "held", at: 1, renewalsLeft: 0, spendUsd: 1, wakes: 0 },
-      },
-    ]);
-    return { instances, owner };
+    const row: CoordinatorUnit = {
+      instanceId: owner.instanceId,
+      unit: owner.unit,
+      slug: "u1",
+      branch: "fixture/x/u1",
+      dependsOn: [],
+      rounds: [],
+      pr: { number: 7, url: "https://github.com/octo/repo/pull/7" },
+      idle: { why: "held", at: 1, renewalsLeft: 0, spendUsd: 1, wakes: 0 },
+    };
+    if (recoveryRequested) {
+      delete row.idle;
+      row.recovery = {
+        kind: "review",
+        round: 2,
+        expectedHeadSha: "a".repeat(40),
+        remainingMs: 60_000,
+        claimedAt: 2,
+        step: "unit/recovery/2/review",
+        reviewRunId: "review-original",
+        reviewKey: "runner-fixture:U10/2/review",
+        previousEnding: { kind: "aborted", report: "recoverable", at: 1 },
+        workflowId: "recovery-original",
+        deadlineAt: 60_002,
+      };
+    }
+    let actionId: string | undefined;
+    if (!recoveryRequested) expect(await instances.putUnits([row])).toEqual({ ok: true });
+    else {
+      expect(isCoordinatorUnit(row)).toBe(true);
+      const { recovery, ...original } = row;
+      const ended = { ...original, ending: recovery!.previousEnding };
+      expect(await instances.putUnits([ended])).toEqual({ ok: true });
+      const claim = await instances.transitionRecovery({
+        kind: "claim",
+        expected: ended,
+        replacement: row,
+        request: { userId: "slack:UALICE", threadKey: "slack:C1:1", messageId: "recovery-request" },
+      });
+      expect(claim).toMatchObject({ ok: true });
+      if (!claim.ok) throw new Error(claim.reason);
+      actionId = claim.unit.recovery!.actionId;
+    }
+    return { instances, owner, actionId };
   }
+
+  it("awaits canonical durable ownership without a process-local recovery map", async () => {
+    const { instances, owner } = await liveInstances();
+    const w = workflow();
+    const raw = commentBody();
+    const result = await handleIssueCommentIntake({ event: "issue_comment", signature: await sign(SECRET, raw) }, raw, {
+      secret: SECRET,
+      ownerOf: (repo, pr) => findRunnerPullOwner(instances, repo, pr),
+      instances,
+      commenterAuthorized: async () => true,
+      workflow: w.sender,
+      now: () => 1,
+    });
+    expect(result.body).toMatchObject({ appended: true, nudge: "sent" });
+    expect(await instances.listEvents(owner)).toHaveLength(1);
+  });
+
+  it("revalidates the canonical resumed PR target without requiring a duplicate display PR field", async () => {
+    const { instances, owner } = await liveInstances();
+    const [row] = await instances.listUnits(owner.instanceId);
+    expect(await instances.putUnits([{ ...row!, pr: undefined, resume: { pr: 7, headSha: HEAD } }])).toEqual({
+      ok: true,
+    });
+    const raw = commentBody();
+    const w = workflow();
+    const result = await handleIssueCommentIntake({ event: "issue_comment", signature: await sign(SECRET, raw) }, raw, {
+      secret: SECRET,
+      ownerOf: (repo, pr) => findRunnerPullOwner(instances, repo, pr),
+      instances,
+      commenterAuthorized: async () => true,
+      workflow: w.sender,
+      now: () => 1,
+    });
+    expect(result.body).toMatchObject({ appended: true, nudge: "sent" });
+    expect(await instances.listEvents(owner)).toHaveLength(1);
+  });
+
+  it("retains a committed comment and offers the original owner for reconciliation after a failed nudge", async () => {
+    const { instances, owner } = await liveInstances();
+    const offer = vi.spyOn(instances, "offerReconciliation");
+    const raw = commentBody();
+    const result = await handleIssueCommentIntake({ event: "issue_comment", signature: await sign(SECRET, raw) }, raw, {
+      secret: SECRET,
+      ownerOf: (repo, pr) => findRunnerPullOwner(instances, repo, pr),
+      instances,
+      commenterAuthorized: async () => true,
+      workflow: {
+        get: async () => {
+          throw new Error("native Workflow unavailable");
+        },
+      },
+      now: () => 1,
+    });
+    expect(result.body).toMatchObject({ appended: true, nudge: "failed" });
+    expect(await instances.listEvents(owner)).toHaveLength(1);
+    expect(offer).toHaveBeenCalledExactlyOnceWith({ instanceId: owner.instanceId, unit: owner.unit });
+  });
+
+  it("does not append or nudge on an incomplete canonical owner inventory", async () => {
+    const { instances, owner } = await liveInstances();
+    const w = workflow();
+    const raw = commentBody();
+    const result = await handleIssueCommentIntake({ event: "issue_comment", signature: await sign(SECRET, raw) }, raw, {
+      secret: SECRET,
+      ownerOf: async () => ({ ok: false, reason: "incomplete" }),
+      instances,
+      commenterAuthorized: async () => true,
+      workflow: w.sender,
+      now: () => 1,
+    });
+    expect(result).toEqual({ status: 503, body: { error: "ownership_unavailable" } });
+    expect(await instances.listEvents(owner)).toEqual([]);
+    expect(w.sent).toEqual([]);
+  });
+
+  it.each([
+    {
+      owners: [
+        { kind: "unit", instanceId: "runner-fixture", unit: "U10" },
+        { kind: "unit", instanceId: "rival", unit: "U11" },
+      ],
+    },
+    {
+      owners: [
+        { kind: "unit", instanceId: "runner-fixture", unit: "U10" },
+        { kind: "run", runId: "rival" },
+      ],
+    },
+    { owners: [{ kind: "effect", id: "held" }] },
+  ])("does not choose a webhook destination from conflicting ownership: %j", async ({ owners }) => {
+    const { instances, owner } = await liveInstances();
+    const w = workflow();
+    const raw = commentBody();
+    const result = await handleIssueCommentIntake({ event: "issue_comment", signature: await sign(SECRET, raw) }, raw, {
+      secret: SECRET,
+      ownerOf: async () => runnerPullOwnerOf({ ok: true, owners }),
+      instances,
+      commenterAuthorized: async () => true,
+      workflow: w.sender,
+      now: () => 1,
+    });
+    expect(result).toEqual({ status: 503, body: { error: "ownership_unavailable" } });
+    expect(await instances.listEvents(owner)).toEqual([]);
+    expect(w.sent).toEqual([]);
+  });
+
+  it("atomically refuses an ordinary comment when the unit ends after its owner read", async () => {
+    const { instances, owner } = await liveInstances();
+    const w = workflow();
+    const raw = commentBody();
+    const result = await handleIssueCommentIntake({ event: "issue_comment", signature: await sign(SECRET, raw) }, raw, {
+      secret: SECRET,
+      ownerOf: (repo, pr) => findRunnerPullOwner(instances, repo, pr),
+      instances: {
+        get: instances.get.bind(instances),
+        listUnits: instances.listUnits.bind(instances),
+        appendEvent: async (...args) => {
+          const [row] = await instances.listUnits(owner.instanceId);
+          await instances.putUnits([
+            {
+              ...row!,
+              idle: undefined,
+              ending: {
+                kind: "refused",
+                report: "ended",
+                at: 2,
+                outcome: { schemaVersion: 1, kind: "refused", reviewRounds: 0 },
+              },
+            },
+          ]);
+          return instances.appendEvent(...args);
+        },
+      },
+      commenterAuthorized: async () => true,
+      workflow: w.sender,
+      now: () => 1,
+    });
+    expect(result).toEqual({ status: 200, body: { ok: true, ignored: "ended" } });
+    expect(await instances.listEvents(owner)).toEqual([]);
+    expect(w.sent).toEqual([]);
+  });
+
+  it("keeps a recovery comment on its exact original unit and nudges its recovery Workflow", async () => {
+    const { instances, owner, actionId: savedActionId } = await liveInstances(true);
+    const actionId = savedActionId!;
+    const w = workflow();
+    const raw = commentBody();
+    const deps = {
+      secret: SECRET,
+      ownerOf: (repo: string, pr: number) => findRunnerPullOwner(instances, repo, pr),
+      instances,
+      commenterAuthorized: async () => true,
+      workflow: w.sender,
+      now: () => 1,
+    };
+    expect(
+      (await handleIssueCommentIntake({ event: "issue_comment", signature: await sign(SECRET, raw) }, raw, deps)).body,
+    ).toMatchObject({ appended: true });
+    expect(await instances.listEvents(owner)).toHaveLength(1);
+    expect(w.sent).toEqual([{ instance: "recovery-original", type: unitNudgeEventType(owner), payload: {} }]);
+    const event = (await instances.listEvents(owner))[0]!;
+    for (const expected of [
+      { actionId: "r_" + "b".repeat(64), workflowId: "recovery-original" },
+      { actionId, workflowId: "recovery-successor" },
+    ]) {
+      expect(await instances.appendEvent(owner, event, true, undefined, expected)).toEqual({
+        ok: false,
+        reason: "stale",
+      });
+    }
+    expect(
+      await instances.appendEvent(owner, event, true, undefined, { actionId, workflowId: "recovery-original" }),
+    ).toEqual({ ok: true, seq: 1 });
+    expect(await instances.listEvents(owner)).toHaveLength(1);
+  });
+
+  it("a stopped recovery cannot use an old duplicate event to append or wake", async () => {
+    const { instances, owner, actionId: savedActionId } = await liveInstances(true);
+    const actionId = savedActionId!;
+    const event = {
+      id: "github:issue-comment:99",
+      sender: "github:42",
+      text: "Receipt",
+      mode: "steer" as const,
+      at: 1,
+    };
+    expect(
+      await instances.appendEvent(owner, event, true, undefined, { actionId, workflowId: "recovery-original" }),
+    ).toEqual({ ok: true, seq: 1 });
+    await instances.markStopped(owner.instanceId, 3);
+    expect(
+      await instances.appendEvent(owner, event, true, undefined, { actionId, workflowId: "recovery-original" }),
+    ).toEqual({ ok: false, reason: "ended" });
+    expect(await instances.listEvents(owner)).toHaveLength(1);
+  });
 
   it("a verified comment from the requester's bound GitHub account appends one attributed wake event and nudges the live idle unit", async () => {
     const { instances, owner } = await liveInstances();
@@ -189,7 +420,7 @@ describe("the pull-request comment intake — a person's answer wakes the owning
     const raw = commentBody();
     const result = await handleIssueCommentIntake({ event: "issue_comment", signature: await sign(SECRET, raw) }, raw, {
       secret: SECRET,
-      ownerOf: () => owner,
+      ownerOf: (repo, pr) => findRunnerPullOwner(instances, repo, pr),
       instances,
       commenterAuthorized: async (requester, author) =>
         requester === "slack:UALICE" && author.login === "alice" && author.id === 42,
@@ -215,7 +446,7 @@ describe("the pull-request comment intake — a person's answer wakes the owning
     const raw = commentBody();
     const result = await handleIssueCommentIntake({ event: "issue_comment", signature: await sign(SECRET, raw) }, raw, {
       secret: SECRET,
-      ownerOf: () => owner,
+      ownerOf: (repo, pr) => findRunnerPullOwner(instances, repo, pr),
       instances,
       commenterAuthorized: async () => false,
       workflow: w.sender,
@@ -233,7 +464,7 @@ describe("the pull-request comment intake — a person's answer wakes the owning
       (
         await handleIssueCommentIntake({ event: "issue_comment", signature: await sign(SECRET, bot) }, bot, {
           secret: SECRET,
-          ownerOf: () => undefined,
+          ownerOf: async () => ({ ok: true }),
           instances,
           commenterAuthorized: async () => false,
           workflow: undefined,
@@ -246,7 +477,7 @@ describe("the pull-request comment intake — a person's answer wakes the owning
       (
         await handleIssueCommentIntake({ event: "issue_comment", signature: await sign(SECRET, human) }, human, {
           secret: SECRET,
-          ownerOf: () => undefined,
+          ownerOf: async () => ({ ok: true }),
           instances,
           commenterAuthorized: async () => false,
           workflow: undefined,
@@ -277,30 +508,59 @@ describe("the push-to-base intake — the merge watch's trigger (record 0071, me
     JSON.stringify({ ref: "refs/heads/main", repository: { full_name: "octo/repo" }, ...over });
 
   function watch() {
-    const pushes: Array<{ repo: string; base: string }> = [];
+    const pushes: Array<{ repo: string; base: string; eventId?: string }> = [];
     return {
       pushes,
       watch: {
-        async pushToBase(repo: string, base: string) {
-          pushes.push({ repo, base });
+        async pushToBase(repo: string, base: string, eventId?: string) {
+          pushes.push({ repo, base, eventId });
           return [{ repo, number: 7, outcome: "resolver" as const }];
         },
       },
     };
   }
 
+  it("retains the authenticated native delivery identity and refuses missing source evidence before watch writes", async () => {
+    const raw = pushBody();
+    const sourceIds: unknown[] = [];
+    const deps = {
+      secret: SECRET,
+      watch: {
+        pushToBase: async (_repo: string, _base: string, eventId?: string) => {
+          sourceIds.push(eventId);
+          return [];
+        },
+      },
+    };
+    const signature = await sign(SECRET, raw);
+    expect(
+      (await handlePushIntake({ event: "push", signature, delivery: "native-delivery-1" }, raw, deps)).status,
+    ).toBe(200);
+    expect(sourceIds).toEqual(["github:native-delivery-1"]);
+    expect((await handlePushIntake({ event: "push", signature }, raw, deps)).status).toBe(400);
+    expect(
+      (await handlePushIntake({ event: "push", signature: "sha256=bad", delivery: "native-delivery-2" }, raw, deps))
+        .status,
+    ).toBe(401);
+    expect(sourceIds).toEqual(["github:native-delivery-1"]);
+  });
+
   it("verified: a branch push hands exactly the repo and branch to the watch, and answers what it did", async () => {
     const w = watch();
     const raw = pushBody();
-    const res = await handlePushIntake({ event: "push", signature: await sign(SECRET, raw) }, raw, {
-      secret: SECRET,
-      watch: w.watch,
-    });
+    const res = await handlePushIntake(
+      { event: "push", signature: await sign(SECRET, raw), delivery: "verified-base-push" },
+      raw,
+      {
+        secret: SECRET,
+        watch: w.watch,
+      },
+    );
     expect(res).toEqual({
       status: 200,
       body: { ok: true, watched: 1, results: [{ repo: "octo/repo", number: 7, outcome: "resolver" }] },
     });
-    expect(w.pushes).toEqual([{ repo: "octo/repo", base: "main" }]);
+    expect(w.pushes).toEqual([{ repo: "octo/repo", base: "main", eventId: "github:verified-base-push" }]);
   });
 
   it("no secret is disabled, a bad signature is unauthorized, a non-push event and a tag push are ignored", async () => {

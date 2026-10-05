@@ -15,6 +15,12 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Secret } from "../secrets.js";
 import type { PlaneAckOutcome, PlaneEffect } from "../core/plane/decide.js";
+import {
+  isCoordinatorReconcileEffect,
+  isCoordinatorReconcileReceipt,
+  type CoordinatorReconcileEffect,
+  type CoordinatorReconcileReceipt,
+} from "../core/coordinator/workflowReconciliation.js";
 import { constantTimeEqual } from "../deploy/restart.js";
 import { readBody } from "./http.js";
 
@@ -33,6 +39,8 @@ export interface PlaneEffectsDeps {
         draining(): boolean;
         admit(effect: Extract<PlaneEffect, { kind: "admit" }>): Promise<PlaneAckOutcome>;
         steer(effect: Extract<PlaneEffect, { kind: "steer" }>): Promise<PlaneAckOutcome>;
+        /** Finish original settlement only; no receipt leaves the offer standing. */
+        reconcile?(effect: CoordinatorReconcileEffect): Promise<CoordinatorReconcileReceipt | undefined>;
       }
     | undefined;
   /** Atomically verify the open steer and this generation's ownership, then
@@ -40,7 +48,7 @@ export interface PlaneEffectsDeps {
   fenceSteer: (effect: Extract<PlaneEffect, { kind: "steer" }>) => Promise<boolean>;
   /** `RunLedger.planeAck` — closes or re-offers the effect on the object. The
    *  whole effect lets steer acknowledgements carry their owner fence. */
-  ack: (effect: PushedEffect, outcome: PlaneAckOutcome) => Promise<void>;
+  ack: (effect: PushedEffect, outcome: PlaneAckOutcome, reconciliation?: CoordinatorReconcileReceipt) => Promise<void>;
   warn?: (line: string) => void;
   log?: (line: string) => void;
 }
@@ -48,8 +56,8 @@ export interface PlaneEffectsDeps {
 /** One pushed effect, shape-checked before anything runs: the push crosses a
  *  process boundary, so a malformed body is a 400, never a throw. `probe`
  *  still rides the heartbeat answer because its executor lives beside the
- *  ledger client; admits and already-durable live steers use this fast path. */
-export type PushedEffect = Extract<PlaneEffect, { kind: "admit" | "steer" }>;
+ *  ledger client; admits, live steers and original coordinator settlement use this fast path. */
+export type PushedEffect = Extract<PlaneEffect, { kind: "admit" | "steer" | "coordinator_reconcile" }>;
 
 type ObjectValue = Record<string, unknown>;
 const objectValue = (v: unknown): ObjectValue | undefined =>
@@ -58,6 +66,7 @@ const objectValue = (v: unknown): ObjectValue | undefined =>
 function parseEffect(v: unknown): PushedEffect | undefined {
   const e = objectValue(v);
   if (!e || typeof e.id !== "string" || e.id.length === 0) return undefined;
+  if (e.kind === "coordinator_reconcile") return isCoordinatorReconcileEffect(e) ? e : undefined;
   if (typeof e.runId !== "string" || e.runId.length === 0) return undefined;
   if (e.kind === "admit") {
     if (typeof e.threadKey !== "string" || e.threadKey.length === 0) return undefined;
@@ -141,7 +150,7 @@ export function handlePlaneEffects(req: IncomingMessage, res: ServerResponse, de
     // admits or live steers beside it.
     const pushed = raw.filter((v) => {
       const kind = objectValue(v)?.kind;
-      return kind === "admit" || kind === "steer";
+      return kind === "admit" || kind === "steer" || kind === "coordinator_reconcile";
     });
     const effects = pushed.map(parseEffect);
     if (effects.some((e) => e === undefined)) {
@@ -156,8 +165,15 @@ export function handlePlaneEffects(req: IncomingMessage, res: ServerResponse, de
       try {
         const executor = deps.execute;
         let outcome: PlaneAckOutcome;
+        let reconciliation: CoordinatorReconcileReceipt | undefined;
         if (executor === undefined || executor.draining()) outcome = "deferred";
-        else if (effect.kind === "admit") outcome = await executor.admit(effect);
+        else if (effect.kind === "coordinator_reconcile") {
+          const receipt = await executor.reconcile?.(effect);
+          if (isCoordinatorReconcileReceipt(receipt)) {
+            reconciliation = receipt;
+            outcome = "done";
+          } else outcome = "deferred";
+        } else if (effect.kind === "admit") outcome = await executor.admit(effect);
         else {
           const fenced = await deps.fenceSteer(effect);
           // Drain can begin while the durable fence call is in flight. Check it
@@ -165,7 +181,7 @@ export function handlePlaneEffects(req: IncomingMessage, res: ServerResponse, de
           // leaves the offer for its successor instead of waking stale state.
           outcome = fenced && !executor.draining() ? await executor.steer(effect) : "deferred";
         }
-        await deps.ack(effect, outcome);
+        await deps.ack(effect, outcome, reconciliation);
         acks.push({ id: effect.id, outcome });
       } catch (err) {
         warn(

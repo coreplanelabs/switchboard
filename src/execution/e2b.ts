@@ -1,3 +1,4 @@
+import { advanceWorkspace } from "./workspaceAdvance.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, posix } from "node:path";
 import { Sandbox } from "e2b";
@@ -5,6 +6,9 @@ import { bashTimeoutNote, clampBashTimeout } from "./bashTimeout.js";
 import {
   ExecInfraError,
   truncate,
+  MAX_OUTPUT,
+  type MoveOptions,
+  type ExecResult,
   type ExecOptions,
   type Executor,
   type ReleaseMode,
@@ -219,9 +223,10 @@ export class E2BExecutor implements Executor {
     return truncate(out);
   }
 
-  private async run(command: string, opts?: ExecOptions): Promise<string> {
+  private async runResult(command: string, opts?: ExecOptions): Promise<ExecResult> {
     const timeoutMs = clampBashTimeout(opts?.timeoutMs);
     const envs = (await this.resolveEnvs()) ?? {};
+    if (opts?.signal?.aborted) throw new Error("workspace command stopped");
     const result = await this.sbx.commands.run(command, { cwd: WORKDIR, timeoutMs, envs }).catch((err: unknown) => {
       const e = err as { name?: string; exitCode?: number; stdout?: string; stderr?: string; message?: string };
       // The SDK's deadline kill throws TimeoutError with no exit code —
@@ -239,6 +244,21 @@ export class E2BExecutor implements Executor {
         stderr: e.stderr ?? e.message ?? String(err),
       };
     });
+    return { ...result, truncated: result.stdout.length > MAX_OUTPUT || result.stderr.length > MAX_OUTPUT };
+  }
+
+  async execResult(command: string, opts?: ExecOptions): Promise<ExecResult> {
+    if (opts?.signal?.aborted) throw new Error("workspace command stopped");
+    await this.refreshCredential();
+    return this.runResult(command, opts);
+  }
+
+  moveTo(sha: string, opts?: MoveOptions): Promise<{ sha: string }> {
+    return advanceWorkspace((command, options) => this.execResult(command, options), sha, opts);
+  }
+
+  private async run(command: string, opts?: ExecOptions): Promise<string> {
+    const result = await this.runResult(command, opts);
     const parts = [result.stdout, result.stderr].filter(Boolean).join("\n--- stderr ---\n");
     if (result.exitCode !== 0) {
       return `exit ${result.exitCode}:\n${parts}`;

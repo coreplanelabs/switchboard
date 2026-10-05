@@ -165,7 +165,6 @@ describe("rereviewFollowUp (the second model turn's instruction)", () => {
       move,
       before,
       after,
-      worktreeMoved: true,
     });
     expect(text).toContain("moved from e8e43f4 to d75b5a5 while you were reviewing");
     expect(text).toContain("Switchboard has already moved your worktree to d75b5a5");
@@ -177,19 +176,5 @@ describe("rereviewFollowUp (the second model turn's instruction)", () => {
     expect(text).toContain("submit_verdict");
     expect(text).toContain(`head` + "` = " + `\`${B}\``);
     expect(text).not.toContain("body"); // commit bodies are not pasted — subjects only
-  });
-
-  it("worktree not moved (sandbox clone): tells the model to fetch and check out the new head itself", () => {
-    const text = rereviewFollowUp({
-      where: "acme/api#42",
-      reviewed: A,
-      current: B,
-      move,
-      before,
-      after,
-      worktreeMoved: false,
-    });
-    expect(text).toContain(`git fetch origin ${B} && git checkout ${B}`);
-    expect(text).not.toContain("already moved your worktree");
   });
 });

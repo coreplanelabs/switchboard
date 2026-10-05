@@ -33,6 +33,7 @@ import type { LiveRunRow } from "../runLedger/types.js";
 import {
   NullLedgerRun,
   NullLedgerWriteThrough,
+  createLedgerWriteThrough,
   type ReserveOutcome,
   type ReserveRunRequest,
 } from "../runLedger/writeThrough.js";
@@ -570,6 +571,63 @@ describe("registerRun — the run's row on every surface before the attach", () 
     expect(registry.getById("run-public")?.label).toContain("acme/api");
   });
 
+  it("publishes the coordinator admission tag before attachment and never duplicates it on restart", async () => {
+    const coordinator = {
+      parentInstanceId: "plan-p-2",
+      idempotencyKey: "plan-p-2:U16/1/coding",
+      branch: "plan/p/u16",
+      base: "feat/trunk",
+      costCapUsd: 50,
+      issuedFindingIds: ["F1", "check:ci / bot"],
+    };
+    const d = deps();
+    const r = request(d, "agent:coding fix the login bug", "coding");
+    const registry = new RunRegistry({ genId: () => "run-p", genToken: () => "tok" });
+    const { io, started } = fakeIO([]);
+    const input = {
+      agentSource: "directive" as const,
+      msg: r.message,
+      io,
+      agent: r.agent,
+      resolved: r.resolved,
+      directives: r.directives,
+      history: [],
+      repoCtx,
+      carriedRow: undefined,
+      resume: undefined,
+      startedAt: NOW,
+      receivedAt: NOW,
+      clock: () => NOW,
+      root: r.root,
+      trace: r.trace,
+      registry,
+      shell: r.shell,
+      admitted: r.admitted,
+      coordinator,
+    };
+    await registerRun(d, input);
+    const tags = registry.snapshotById("run-p")!.events.filter((event) => event.type === "coordinator_tag");
+    expect(tags).toEqual([
+      expect.objectContaining({
+        type: "coordinator_tag",
+        parentInstanceId: "plan-p-2",
+        unit: "U16",
+        branch: "plan/p/u16",
+        base: "feat/trunk",
+        costCapUsd: 50,
+        issuedFindingIds: ["F1", "check:ci / bot"],
+      }),
+    ]);
+    expect(started).toEqual([]);
+    const restarted = new RunRegistry({ genId: () => "run-p", genToken: () => "tok" });
+    await registerRun(d, {
+      ...input,
+      registry: restarted,
+      restart: { row: {} as LiveRunRow, inbox: [], events: tags.map((event) => ({ ...event, seq: event.seq! })) },
+    });
+    expect(restarted.snapshotById("run-p")!.events.filter((event) => event.type === "coordinator_tag")).toHaveLength(1);
+  });
+
   it("creates the registry row under the minted id with its label and meta, links the run page, and publishes the request, the run meta and the thread context", async () => {
     vi.stubEnv("PUBLIC_BASE_URL", "https://sb.example");
     const d = deps();
@@ -997,7 +1055,7 @@ describe("reserveRun — the ledger reservation before the attach", () => {
     };
     expect(await reserveRun(d, { ...base, resume, restart: undefined })).toBeUndefined();
     expect(
-      await reserveRun(d, { ...base, resume: undefined, restart: { row: resume.row, inbox: [] } }),
+      await reserveRun(d, { ...base, resume: undefined, restart: { row: resume.row, events: [], inbox: [] } }),
     ).toBeUndefined();
     expect(d.ledger.reserved).toEqual([]);
     expect(r.admitted.runId).toBeUndefined();
@@ -1520,6 +1578,74 @@ describe("reattachWorkspace — the run's recorded workspace re-attached without
     release: async () => {},
   });
 
+  it("persists each acknowledged resident attachment before continuation and removes an absent physical fence", async () => {
+    const d = deps();
+    const inner = new InMemoryRunLedger(() => NOW);
+    const through = createLedgerWriteThrough({
+      ledger: inner,
+      gen: "gen-A",
+      fallback: { put: async () => {}, abandoned: () => {} },
+      warn: () => {},
+    });
+    d.runLedger = through;
+    const run = await through.reserve({
+      runId: "physical-owner",
+      threadKey: THREAD,
+      startedAt: NOW,
+      meta: { channelId: "slack:CX", userId: "slack:UX", threadKey: THREAD },
+    });
+    if (run.kind !== "tracked") throw new Error("reservation missing");
+    const r = request(d, "agent:coding fix it", "coding");
+    attachState.reattached = round();
+    try {
+      await reattachWorkspace(d, {
+        runId: "physical-owner",
+        ownerGen: "gen-A",
+        threadKey: THREAD,
+        agent: r.agent,
+        profile: r.profile,
+        repoCtx: { repo: "acme/api", ref: "main" },
+        root: r.root,
+        clock: () => NOW,
+        reattach: { ...binding, publicationBaseSha: "a".repeat(40) },
+      });
+      const observe = attachState.rounds[0].onResidentBinding!;
+      await observe({
+        ref: "main",
+        sha: "b".repeat(40),
+        workspace: binding.workspace,
+        user: "worker2",
+        container: "vm-1",
+        ownerFence: 7,
+      });
+      expect(inner.live.get("physical-owner")?.state.binding).toMatchObject({
+        ownerFence: 7,
+        publicationBaseSha: "a".repeat(40),
+        container: "vm-1",
+      });
+      await observe({
+        ref: "main",
+        sha: "c".repeat(40),
+        workspace: binding.workspace,
+        user: "worker3",
+        container: "vm-2",
+      });
+      expect(inner.live.get("physical-owner")?.state.binding).toMatchObject({
+        user: "worker3",
+        publicationBaseSha: "a".repeat(40),
+        container: "vm-2",
+      });
+      expect(inner.live.get("physical-owner")?.state.binding).not.toHaveProperty("ownerFence");
+      inner.setState = async () => ({ ok: false, reason: "fenced" });
+      await expect(observe({ ref: "main", sha: "c".repeat(40), ownerFence: 8 })).rejects.toThrow(
+        "attachment binding not durable",
+      );
+      expect(inner.live.get("physical-owner")?.state.binding).not.toHaveProperty("ownerFence");
+    } finally {
+      await run.run.abandon();
+    }
+  });
+
   it("re-attaches a recorded binding mid-run with no gate context — no message, no card, no refusal wrap — and hands back the round the dispatch-time attach hands back for the same binding: the factory sees the same round input with the binding, under a dispatch.workspace.attach span each time", async () => {
     const d = deps();
     const r = request(d, "agent:coding fix it", "coding");
@@ -1560,9 +1686,16 @@ describe("reattachWorkspace — the run's recorded workspace re-attached without
     // The gate path alone carries the awaited resident observation sink: the
     // mid-run re-attach has no card to paint, so the factory sees the same
     // round input less that one sink.
-    const { onLiveStateObservation, ...gateRound } = attachState.rounds[1] as Record<string, unknown>;
+    const {
+      onLiveStateObservation,
+      onResidentBinding: gatedBinding,
+      ...gateRound
+    } = attachState.rounds[1] as Record<string, unknown>;
     expect(typeof onLiveStateObservation).toBe("function");
-    expect(attachState.rounds[0]).toEqual(gateRound);
+    const { onResidentBinding: midBinding, ...midRound } = attachState.rounds[0];
+    expect(typeof gatedBinding).toBe("function");
+    expect(typeof midBinding).toBe("function");
+    expect(midRound).toEqual(gateRound);
     expect(attachState.rounds[0]).toMatchObject({
       threadKey: THREAD,
       repo: "acme/api",

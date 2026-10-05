@@ -1,3 +1,4 @@
+import { recoveryStepPrefix } from "../coordinator/recoveryStep.js";
 import {
   publicationHasNoWork,
   publicationSettlementSummary,
@@ -658,8 +659,9 @@ export type PrCheck =
       /** After a recover pr-check (a dead coding child): why nothing was
        *  recovered — `no_commits` (GitHub refused the create: nothing between
        *  the base and the head) or `no_base` (the instance names no base to
-       *  open against, so no create was tried). Absent on a plain check. */
-      unrecovered?: "no_commits" | "no_base";
+       *  open against, so no create was tried), or `external_refused` (a
+       *  definite native refusal). Absent on a plain check. */
+      unrecovered?: "no_commits" | "no_base" | "external_refused";
       /** On a plain check: the branch's commits over the base as GitHub
        *  compares them, when the bot could read them. Zero beside a handoff
        *  naming where the scope landed is the `already_landed` ending
@@ -985,6 +987,8 @@ export type UnitEnding =
       /** A round-0 end without a pull request that was judged for renewal and
        *  refused: the decision and the card's sentence (decision 0046). */
       renewal?: { decision: Extract<RenewalDecision, { renew: false }>; line: string };
+      /** Original recovery may spend its admitted lease, never another segment. */
+      recoveryStop?: "continuation_not_admitted";
     }
   /** The coding round ended at its lease with the unit unfinished, the row
    *  showed progress and the grant renewed: this segment is over and the next
@@ -1199,6 +1203,7 @@ export interface UnitPipelineInput {
    * exact remaining lease is carried in milliseconds; the step prefix keeps
    * every new durable step under `<original instance>:<unit>/recovery/...`. */
   recovery?: {
+    actionId: string;
     remainingMs: number;
     unitKey: string;
     renewalsSpent?: number;
@@ -1604,7 +1609,9 @@ export const stepPrefixOf = (unit: string, session: LeaseSegmentProgress | undef
   return session?.resume !== undefined ? `${segment}/r${session.resume.attempt}` : segment;
 };
 const stepPrefix = (s: UnitPipelineState) =>
-  s.input.recovery !== undefined ? `${s.input.unit.id}/recovery` : stepPrefixOf(s.input.unit.id, s.input.session);
+  s.input.recovery !== undefined
+    ? recoveryStepPrefix(s.input.unit.id, s.input.recovery.actionId)
+    : stepPrefixOf(s.input.unit.id, s.input.session);
 const roundStep = (s: UnitPipelineState, round: RoundRef) =>
   `${stepPrefix(s)}/${round.index}/${round.kind}${round.attempt !== undefined ? `/a${round.attempt}` : ""}`;
 
@@ -1880,6 +1887,7 @@ function end(s: UnitPipelineState, ending: UnitEnding, notes: CoordinatorNote[] 
 function idleEnding(s: UnitPipelineState, ending: UnitEnding): Extract<UnitEnding, { kind: "idle" }> | undefined {
   if ((s.input.idleDays ?? 0) <= 0) return undefined;
   if (NEVER_IDLES.has(ending.kind)) return undefined;
+  if (ending.kind === "aborted" && ending.recoveryStop !== undefined) return undefined;
   if (ending.kind === "aborted" && ending.terminalPr !== undefined) return undefined;
   // A draft hold is not continued by a reply. A blocked hold (issue 2086)
   // waits for the person's word. Human-gated questions bypass this mapping:
@@ -3111,6 +3119,17 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
     );
   }
   if (pr.state === "none") {
+    if (pr.unrecovered === "external_refused")
+      return end(
+        s,
+        {
+          kind: "aborted",
+          reason: `GitHub definitively refused the recovery publication; the pushed work stays on \`${s.input.unit.branch}\`.`,
+          round,
+          reviewRounds: s.reviewRounds,
+        },
+        [roundNote(round, "aborted")],
+      );
     // A dead child left nothing on the branch to recover: the unit ends with
     // the child's own reason — never the budget clip.
     if (phase.dead === "interrupted")
@@ -3156,7 +3175,9 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
           ? `the remote branch \`${s.input.unit.branch}\` contains no changes against its base; ${publicationSettlementSummary(phase.publicationSettlement)}`
           : pr.unrecovered === "no_base"
             ? `\`${s.input.unit.branch}\` could not be given a pull request: the pipeline names no base branch to open it against, so whatever was pushed stays on the branch`
-            : `the pr-check found no pull request heading \`${s.input.unit.branch}\`, so nothing was recovered`;
+            : pr.unrecovered === "external_refused"
+              ? `GitHub definitively refused the recovery publication; the pushed work stays on \`${s.input.unit.branch}\``
+              : `the pr-check found no pull request heading \`${s.input.unit.branch}\`, so nothing was recovered`;
       return end(
         s,
         {
@@ -3233,6 +3254,25 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
       // shape when nothing was pushed under a grant of zero: a clarifying
       // question is not a stop to explain.
       const grant = s.input.grant ?? DEFAULT_GRANT;
+      if (s.input.recovery !== undefined) {
+        const spent = s.input.recovery.renewalsSpent;
+        const accounting =
+          spent === undefined
+            ? "The original renewal count is unknown."
+            : `${spent} of ${grant.renewals} original renewals were spent.`;
+        return end(
+          s,
+          {
+            kind: "aborted",
+            recoveryStop: "continuation_not_admitted",
+            reason: `The recovered coding round ended without opening a pull request. Recovery uses only its remaining time; no further work was authorized. ${accounting}`,
+            round,
+            reviewRounds: s.reviewRounds,
+            ...(phase.finalReply !== undefined ? { finalReply: phase.finalReply } : {}),
+          },
+          [roundNote(round, "aborted")],
+        );
+      }
       const session = s.input.session;
       const progress = progressOf({
         branch: s.input.unit.branch,
@@ -4295,10 +4335,17 @@ function renderUnitReportWithWake(
   const level = s.input.addressSeverity ?? DEFAULT_ADDRESS_SEVERITY;
   const levelLine = `Severity addressed: ${level} and above (set by ${s.input.addressSeveritySource ?? "org"}).`;
   // The grant as the instance carries it (decision 0046): spent of granted,
-  // the cap when one is set, and who granted it. A capped recovery carries
-  // proven spent renewals; an uncapped legacy checkpoint has zero capacity.
+  // the cap when one is set, and who granted it. Missing recovery accounting
+  // stays unknown rather than inventing an unspent original allowance.
   const grant = s.input.grant ?? DEFAULT_GRANT;
-  const grantLine = `Renewals: ${s.input.recovery?.renewalsSpent ?? 0} of ${grant.renewals} spent${grant.costCapUsd !== undefined ? `, cost cap $${grant.costCapUsd}` : ""} (granted by ${s.input.grantSource ?? "org"}).`;
+  const renewalsSpent =
+    s.input.recovery !== undefined
+      ? (s.input.recovery.renewalsSpent ?? "unknown")
+      : (s.input.session?.renewalsSpent ?? 0);
+  const grantLine =
+    s.input.recovery !== undefined && s.input.recovery.renewalsSpent === undefined
+      ? "Original renewal accounting is unverified."
+      : `Renewals: ${renewalsSpent} of ${grant.renewals} spent${grant.costCapUsd !== undefined ? `, cost cap $${grant.costCapUsd}` : ""} (${s.input.recovery !== undefined && s.input.grantSource === undefined ? "grant source unverified" : `granted by ${s.input.grantSource ?? "org"}`}).`;
   const lastFindings = s.findingsByRound[e.reviewRounds] ?? [];
   const skipped = lastFindings.filter((f) => !findingsAtOrAbove([f], level).length);
   const skippedLine =
@@ -4397,6 +4444,11 @@ function renderUnitReportWithWake(
       // this unit live; either answer surface wakes a fix round carrying both
       // the typed finding and the attributed answer.
       const rows = e.findings.map((f) => `${f.id} (${f.severity}) — ${f.title}`).join("; ");
+      if (s.input.recovery !== undefined)
+        return join([
+          `⏸️ Held after ${rounds}${e.pr !== undefined ? `: ${e.pr.url}` : ""} — findings require a person's receipt: ${rows}. This recovery is held and has ended.`,
+          shows(verbosity, "verbose") ? levelLine : undefined,
+        ]);
       if (!shows(verbosity, "verbose"))
         return `⏸️ Waiting for you: ${rows}${e.pr !== undefined ? ` — ${e.pr.url}` : ""}`;
       return join([

@@ -98,7 +98,7 @@ describe("a named ref replaces the sticky fallback before the worktree is provis
     expect(create).toMatch(/let refChanged = input\.refChanged;/);
     expect(create).toMatch(/refChanged = true;/);
     expect(create).toMatch(
-      /\{\s*detached: target\.kind === "sha",\s*reuse,\s*refChanged,\s*priorBinding: input\.preservationSource,?\s*\}/,
+      /\{\s*detached: target\.kind === "sha",\s*reuse,\s*refChanged,\s*priorBinding: input\.preservationSource,\s*\.\.\.\(sha === wantSha && input\.advanceOwner \? \{ advanceOwner: input\.advanceOwner \} : \{\}\),?\s*\}/,
     );
     expect(method("ensureThreadWorktree")).toMatch(
       /decideWorktree\(\{[\s\S]*?reuse: opts\.reuse,[\s\S]*?modeSwitch,[\s\S]*?refChanged: opts\.refChanged,[\s\S]*?sha,[\s\S]*?worktreePath: wt,[\s\S]*?facts,[\s\S]*?\}\)/,
@@ -161,7 +161,7 @@ describe("the `ownPr` and `refByDefault` body fields reach the binding decision"
   it("attachThread carries the reason through the traced body, decides named authority before the legacy own-PR plan, and records boundBy on a new binding", () => {
     expect(method("attachThread")).toMatch(/reason: RefHintReason = NO_REF_HINT_REASON,/);
     expect(method("attachThreadTraced")).toMatch(
-      /attachThreadBody\(\s*threadKey,\s*refHint,\s*readonly,\s*wantSha,\s*reuse,\s*resourceId,\s*t0,\s*record,\s*reason,\s*githubDoor,?\s*\)/,
+      /attachThreadBody\(\s*threadKey,\s*refHint,\s*readonly,\s*wantSha,\s*reuse,\s*resourceId,\s*t0,\s*record,\s*reason,\s*githubDoor,\s*registered && readonly && wantSha !== null && !reuse\s*\? \{ runId: runId!, ownerGen: ownerGen!, ownerFence: ownerFence! \}\s*: undefined,?\s*\)/,
     );
     const body = method("attachThreadBody");
     const named = body.indexOf("const namedRef = refHint !== null && !reason.refByDefault && reason.ownPr === null;");
@@ -304,18 +304,18 @@ describe("the attach after a rebind provisions the tree at the moved ref as it p
     expect(source).toMatch(/\| \{ kind: "rebound"; moved: ThreadBinding; rebound: Rebound \};/);
     for (const m of [body, create, ensure]) expect(m).not.toMatch(/keepTree/);
     expect(create).toMatch(
-      /this\.ensureThreadWorktree\(binding, sha, originUrl, mode\.modeSwitch, \{\s*detached: target\.kind === "sha",\s*reuse,\s*refChanged,\s*priorBinding: input\.preservationSource,?\s*\}\)/,
+      /this\.ensureThreadWorktree\(binding, sha, originUrl, mode\.modeSwitch, \{\s*detached: target\.kind === "sha",\s*reuse,\s*refChanged,\s*priorBinding: input\.preservationSource,\s*\.\.\.\(sha === wantSha && input\.advanceOwner \? \{ advanceOwner: input\.advanceOwner \} : \{\}\),?\s*\}\)/,
     );
     expect(ensure).toMatch(
-      /opts: \{ detached: boolean; reuse: boolean; refChanged: boolean; priorBinding\?: ThreadBinding \}/,
+      /opts: \{\s*detached: boolean;\s*reuse: boolean;\s*refChanged: boolean;\s*priorBinding\?: ThreadBinding;\s*advanceOwner\?: WorkspaceOwner;\s*\}/,
     );
     expect(ensure).toMatch(
-      /const decision = decideWorktree\(\{[\s\S]*?reuse: opts\.reuse,[\s\S]*?modeSwitch,[\s\S]*?refChanged: opts\.refChanged,[\s\S]*?sha,[\s\S]*?worktreePath: wt,[\s\S]*?facts,[\s\S]*?\}\);/,
+      /const decision = advancing\s*\? \{ kind: "recreate" as const, why: "stale" as const \}\s*: decideWorktree\(\{[\s\S]*?reuse: opts\.reuse,[\s\S]*?modeSwitch,[\s\S]*?refChanged: opts\.refChanged,[\s\S]*?sha,[\s\S]*?worktreePath: wt,[\s\S]*?facts,[\s\S]*?\}\);/,
     );
   });
 
   it("the worktree step's one rm -rf and its clone sit behind the pure decision, which recreates a dirty or stale tree — the tree the run left on the old branch included — and no other path in the attach removes or clones a tree", () => {
-    const decision = ensure.indexOf("const decision = decideWorktree(");
+    const decision = ensure.indexOf("const decision = advancing");
     const reuse = ensure.indexOf('if (decision.kind === "reuse") return false;');
     const wipe = ensure.indexOf('await this.runOk(["rm", "-rf", wt], "worktree-clean");');
     const clone = ensure.indexOf('"worktree-clone"');
@@ -483,7 +483,9 @@ describe("the owning run's pushed branches survive release", () => {
       evicted,
     );
     const keep = method("rememberOwnBranches");
-    expect(keep).toMatch(/ownBranches: rememberOwnBranches\(binding\.ownBranches, pushed, /);
+    expect(keep).toMatch(/ownBranches: remembered\.ownBranches/);
+    expect(keep.indexOf('if ("error" in remembered)')).toBeLessThan(keep.indexOf("await this.putThreadBinding("));
+    expect(detach.match(/if \(refused !== undefined\) return refused;/g)).toHaveLength(2);
     expect(keep).toMatch(/await this\.putThreadBinding\(/);
   });
 

@@ -1,5 +1,6 @@
 import type { PublicationSettlement } from "../publicationSettlement.js";
 import { describe, expect, it } from "vitest";
+import { workflowSteps } from "./steps.js";
 import { SHIP_RECORD_VISIBILITY } from "../budgets.js";
 import { MERGE_WAIT_CHUNK_MS, PR_TRANSITION_GUARD_MS, WAIT_CHUNK_MS } from "../ship/coordinator.js";
 import {
@@ -66,7 +67,14 @@ const row = (unit: string, over: Partial<CoordinatorUnit> = {}): CoordinatorUnit
 });
 
 /** The bot's reply as the wire carries it: the fixture object, stamped with the bot's clock, as text. */
-const ok = (body: object, at = T0, status = 200): BotReply => ({ status, text: JSON.stringify({ ...body, at }) });
+const ok = (body: object, at = T0, status = 200): BotReply => {
+  const reply = { status, text: JSON.stringify({ ...body, at }) };
+  const value = body as Record<string, unknown>;
+  if (["merged", "enqueued"].includes(value.outcome as string) && value.by === undefined && !("effectOrdinal" in value))
+    effectFixtures.add(reply);
+  if ((value.retried === true || value.refired === true) && !("effectOrdinal" in value)) effectFixtures.add(reply);
+  return reply;
+};
 /** The same, read — what the mappers see. */
 const answer = (body: object, at = T0, status = 200): BotAnswer => ({
   status,
@@ -96,9 +104,15 @@ const planAnswer = (
 
 const started = (unit: string, at = T0): BotReply =>
   ok({ ok: true, threadKey: `slack:C1:${unit}`, branch: `plan/fixture/${unit.toLowerCase()}`, base: "main" }, at);
+const effectFixtures = new WeakSet<BotReply>();
+const effectReply = (body: object, at: number): BotReply => {
+  const reply = ok(body, at);
+  effectFixtures.add(reply);
+  return reply;
+};
 const branched = (unit: string, at = T0): BotReply =>
-  ok({ ok: true, branch: `plan/fixture/${unit.toLowerCase()}`, base: "main" }, at);
-const spawned = (runId: string, at = T0): BotReply => ok({ ok: true, runId, threadKey: "slack:C1:x" }, at);
+  effectReply({ ok: true, branch: `plan/fixture/${unit.toLowerCase()}`, base: "main" }, at);
+const spawned = (runId: string, at = T0): BotReply => effectReply({ ok: true, runId, threadKey: "slack:C1:x" }, at);
 const record = (run: object, at = T0): BotReply => ok({ ok: true, run }, at);
 const codingDone = (runId: string, at: number) =>
   record(
@@ -132,18 +146,21 @@ const prMerged = (at = T0, mergedAt = "2026-09-13T23:55:59Z"): BotReply =>
 const acked = (at = T0): BotReply => ok({ ok: true }, at);
 
 describe("runOriginalUnitRecovery", () => {
-  const WORKFLOW = "recovery-run-original-review";
+  const ACTION = `r_${"a".repeat(64)}`;
+  const WORKFLOW = `recovery-${ACTION}`;
   const recoveryRow = (kind: "findings" | "review", over: Partial<OriginalReviewRecovery> = {}): CoordinatorUnit =>
     row("U10", {
       pr: { number: 7, url: PR_URL },
       lastPush: HEAD,
+      history: { version: 1, receiptId: "observed" },
       recovery: {
+        actionId: ACTION,
         kind,
         round: 1,
         expectedHeadSha: HEAD,
         remainingMs: 60 * MIN,
         claimedAt: T0,
-        step: `U10/recovery/1/${kind}`,
+        step: `U10/recovery/${ACTION}/1/${kind}`,
         reviewRunId: "run-original-review",
         previousEnding: { kind: "aborted", report: "original terminal state", at: T0 - MIN },
         workflowId: WORKFLOW,
@@ -153,10 +170,156 @@ describe("runOriginalUnitRecovery", () => {
       },
     });
 
+  it("refuses a Workflow carrying another action before reading cached steps", async () => {
+    const s = steps();
+    const b = bot({});
+    await expect(
+      runOriginalUnitRecovery(s.runner, b.client, WORKFLOW, {
+        kind: "recover-original-unit",
+        parentInstanceId: INSTANCE,
+        unit: "U10",
+        recoveryActionId: `r_${"b".repeat(64)}`,
+      }),
+    ).rejects.toThrow("recovery Workflow does not name its action");
+    expect(b.calls).toHaveLength(0);
+  });
+
+  it("a pre-start stop settles the exact recovered unit without dispatching a child", async () => {
+    const s = steps();
+    const b = bot({
+      "recover-unit": [acked()],
+      plan: [planAnswer([recoveryRow("review")], T0, "person", { stopped: true })],
+      "unit-end": [
+        (body) =>
+          body.recoveryWorkflowId === WORKFLOW ? acked() : ok({ ok: false, error: "recovery_claim_mismatch" }, T0, 409),
+      ],
+    });
+    const result = await runOriginalUnitRecovery(s.runner, b.client, WORKFLOW, {
+      kind: "recover-original-unit",
+      recoveryActionId: ACTION,
+      parentInstanceId: INSTANCE,
+      unit: "U10",
+    });
+    expect(result.units).toEqual({ U10: "stopped" });
+    expect(b.calls.every((call) => call.body.executionWorkflowId === WORKFLOW)).toBe(true);
+    expect(b.of("spawn")).toEqual([]);
+    expect(b.of("unit-start")).toEqual([]);
+    expect(b.of("round")).toEqual([]);
+    expect(b.of("unit-end")).toEqual([
+      {
+        parentInstanceId: INSTANCE,
+        unit: "U10",
+        recoveryActionId: ACTION,
+        recoveryWorkflowId: WORKFLOW,
+        deliveryId: `U10/recovery/${ACTION}/end`,
+        ending: { kind: "stopped", report: expect.stringContaining("ended without running") },
+      },
+    ]);
+  });
+
+  it("a refused stopped recovery keeps its exact claim on the thrown-step settlement", async () => {
+    const s = steps();
+    const b = bot({
+      "recover-unit": [acked()],
+      plan: [planAnswer([recoveryRow("review")], T0, "person", { stopped: true })],
+      "unit-end": Array.from({ length: STEP_RETRIES.limit + 2 }, () => (body: Record<string, unknown>) => {
+        const ending = body.ending as { kind: string };
+        return body.recoveryWorkflowId === WORKFLOW && ending.kind === "failed"
+          ? acked()
+          : ok({ ok: false, error: "settlement_conflict" }, T0, 409);
+      }),
+    });
+    await expect(
+      runOriginalUnitRecovery(s.runner, b.client, WORKFLOW, {
+        kind: "recover-original-unit",
+        recoveryActionId: ACTION,
+        parentInstanceId: INSTANCE,
+        unit: "U10",
+      }),
+    ).rejects.toThrow(/successful settlement/);
+    expect(b.of("spawn")).toEqual([]);
+    expect(b.of("unit-end")).toHaveLength(2);
+    expect(b.of("unit-end").every((body) => body.recoveryWorkflowId === WORKFLOW)).toBe(true);
+    expect(b.of("unit-end").at(-1)).toMatchObject({
+      deliveryId: `U10/recovery/${ACTION}/end/threw`,
+      ending: { kind: "failed", cause: "step_threw", step: `U10/recovery/${ACTION}/end` },
+    });
+  });
+
+  it("settles a completed no-PR coding recovery without asking for another segment", async () => {
+    const recovered = row("U10", {
+      history: { version: 1, receiptId: "observed" },
+      recovery: {
+        actionId: ACTION,
+        kind: "coding",
+        round: 0,
+        codingRunId: "run-original-coding",
+        codingKey: `${INSTANCE}:U10/0/coding`,
+        expectedHeadSha: HEAD,
+        accounting: {
+          spendUsd: 3,
+          children: [{ runId: "run-original-coding", key: `${INSTANCE}:U10/0/coding`, usd: 3 }],
+          grant: { renewals: 2, costCapUsd: 50 },
+          renewalsSpent: 1,
+        },
+        remainingMs: 180 * MIN,
+        claimedAt: T0,
+        step: `U10/recovery/${ACTION}/0/coding`,
+        previousEnding: { kind: "aborted", report: "original ended", at: T0 - MIN },
+        workflowId: WORKFLOW,
+        deadlineAt: T0 + 180 * MIN,
+      },
+    });
+    const s = steps({ [`U10/recovery/${ACTION}/0/coding/wait/1`]: "event" });
+    const settle = (body: Record<string, unknown>) => {
+      const ending = body.ending as { kind: string };
+      return ending.kind === "continued" || ending.kind === "idle"
+        ? ok({ ok: false, error: "recovery_continuation_unsupported" }, T0 + 45 * MIN, 409)
+        : acked(T0 + 45 * MIN);
+    };
+    const b = bot({
+      "recover-unit": [acked()],
+      plan: [planAnswer([recovered], T0, "person")],
+      spawn: [spawned("run-recovered-coding")],
+      "read-record": [
+        record(
+          {
+            id: "run-recovered-coding",
+            finished: true,
+            status: "completed",
+            costUsd: 2,
+            pushed: [{ ref: recovered.branch, sha: "b".repeat(40), at: T0 + 30 * MIN }],
+            leaseStartedAt: T0,
+          },
+          T0 + 45 * MIN,
+        ),
+      ],
+      "pr-check": [prNone(T0 + 45 * MIN)],
+      round: [acked(), acked()],
+      "unit-end": Array.from({ length: STEP_RETRIES.limit + 2 }, () => settle),
+    });
+    const result = await runOriginalUnitRecovery(s.runner, b.client, WORKFLOW, {
+      kind: "recover-original-unit",
+      recoveryActionId: ACTION,
+      parentInstanceId: INSTANCE,
+      unit: "U10",
+    });
+    expect(result.units).toEqual({ U10: "aborted" });
+    expect(b.of("spawn")).toHaveLength(1);
+    expect(b.of("unit-end")).toHaveLength(1);
+    expect(b.of("unit-end")[0]).toMatchObject({
+      recoveryWorkflowId: WORKFLOW,
+      ending: { kind: "aborted", outcome: { recoveryStop: "continuation_not_admitted" } },
+    });
+    expect(b.of("unit-start")).toEqual([]);
+  });
+
   it("starts a recovered round-zero coding child on the original unit", async () => {
     const restored = row("U10", {
       lastPush: HEAD,
+      history: { version: 1, receiptId: "observed" },
       recovery: {
+        actionId: ACTION,
         kind: "coding",
         round: 0,
         codingRunId: "run-original-coding",
@@ -170,13 +333,16 @@ describe("runOriginalUnitRecovery", () => {
         },
         remainingMs: 180 * MIN,
         claimedAt: T0,
-        step: "U10/recovery/0/coding",
+        step: `U10/recovery/${ACTION}/0/coding`,
         previousEnding: { kind: "aborted", report: "original stopped", at: T0 - MIN },
         workflowId: WORKFLOW,
         deadlineAt: T0 + 180 * MIN,
       },
     });
-    const s = steps({ "U10/recovery/0/coding/wait/1": "event", "U10/recovery/1/review/wait/1": "event" });
+    const s = steps({
+      [`U10/recovery/${ACTION}/0/coding/wait/1`]: "event",
+      [`U10/recovery/${ACTION}/1/review/wait/1`]: "event",
+    });
     const b = bot({
       "recover-unit": [acked()],
       plan: [planAnswer([restored], T0, "person")],
@@ -191,6 +357,7 @@ describe("runOriginalUnitRecovery", () => {
     });
     const summary = await runOriginalUnitRecovery(s.runner, b.client, WORKFLOW, {
       kind: "recover-original-unit",
+      recoveryActionId: ACTION,
       parentInstanceId: INSTANCE,
       unit: "U10",
     });
@@ -198,18 +365,18 @@ describe("runOriginalUnitRecovery", () => {
     expect(b.of("unit-start")).toEqual([]);
     expect(b.of("branch")).toEqual([]);
     expect(b.of("spawn")[0]).toMatchObject({
-      step: "U10/recovery/0/coding",
+      step: `U10/recovery/${ACTION}/0/coding`,
       preset: "coding",
       brief: { kind: "contract", continue: { from: HEAD, previousRunId: "run-original-coding", recovery: true } },
     });
-    expect(b.of("spawn")[1]).toMatchObject({ step: "U10/recovery/1/review", preset: "review" });
+    expect(b.of("spawn")[1]).toMatchObject({ step: `U10/recovery/${ACTION}/1/review`, preset: "review" });
   });
 
   it("continues request_changes through the original findings namespace and re-review without a start, branch, or generated unit", async () => {
     const HEAD_2 = "b".repeat(40);
     const s = steps({
-      "U10/recovery/1/findings/wait/1": "event",
-      "U10/recovery/2/review/wait/1": "event",
+      [`U10/recovery/${ACTION}/1/findings/wait/1`]: "event",
+      [`U10/recovery/${ACTION}/2/review/wait/1`]: "event",
     });
     const b = bot({
       "recover-unit": [acked()],
@@ -261,26 +428,52 @@ describe("runOriginalUnitRecovery", () => {
 
     const summary = await runOriginalUnitRecovery(s.runner, b.client, WORKFLOW, {
       kind: "recover-original-unit",
+      recoveryActionId: ACTION,
       parentInstanceId: INSTANCE,
       unit: "U10",
     });
 
     expect(summary).toMatchObject({ instance: INSTANCE, units: { U10: "merge_ready" }, outcome: "completed" });
-    expect(b.of("recover-unit")).toEqual([{ parentInstanceId: INSTANCE, unit: "U10", workflowId: WORKFLOW }]);
+    expect(b.of("recover-unit")).toEqual([
+      {
+        parentInstanceId: INSTANCE,
+        unit: "U10",
+        recoveryActionId: ACTION,
+        recoveryWorkflowId: WORKFLOW,
+        workflowId: WORKFLOW,
+      },
+    ]);
     expect(b.of("unit-start")).toEqual([]);
     expect(b.of("branch")).toEqual([]);
     expect(b.of("round").every((body) => body.recoveryWorkflowId === WORKFLOW)).toBe(true);
     expect(b.of("unit-end")).toEqual([
-      expect.objectContaining({ parentInstanceId: INSTANCE, unit: "U10", recoveryWorkflowId: WORKFLOW }),
+      expect.objectContaining({
+        parentInstanceId: INSTANCE,
+        unit: "U10",
+        recoveryActionId: ACTION,
+        recoveryWorkflowId: WORKFLOW,
+      }),
     ]);
     expect(b.of("pr-check").filter((body) => "recover" in body)).toEqual([
-      { parentInstanceId: INSTANCE, unit: "U10", pr: 7, recover: { runId: "run-f1" } },
+      {
+        parentInstanceId: INSTANCE,
+        unit: "U10",
+        recoveryActionId: ACTION,
+        recoveryWorkflowId: WORKFLOW,
+        pr: 7,
+        recover: { runId: "run-f1" },
+      },
     ]);
+    expect(
+      b.wireOf("spawn").every((body) => body.executionWorkflowId === WORKFLOW && body.effectId === body.step),
+    ).toBe(true);
     expect(b.of("spawn")).toEqual([
       {
         parentInstanceId: INSTANCE,
         unit: "U10",
-        step: "U10/recovery/1/findings",
+        recoveryActionId: ACTION,
+        recoveryWorkflowId: WORKFLOW,
+        step: `U10/recovery/${ACTION}/1/findings`,
         preset: "coding",
         budget: 40,
         brief: { kind: "findings", unit: "U10", pr: 7, headSha: HEAD, reviewRunId: "run-original-review" },
@@ -288,7 +481,9 @@ describe("runOriginalUnitRecovery", () => {
       {
         parentInstanceId: INSTANCE,
         unit: "U10",
-        step: "U10/recovery/2/review",
+        recoveryActionId: ACTION,
+        recoveryWorkflowId: WORKFLOW,
+        step: `U10/recovery/${ACTION}/2/review`,
         preset: "review",
         budget: 25,
         brief: {
@@ -306,7 +501,7 @@ describe("runOriginalUnitRecovery", () => {
   it("verifies an incomplete findings push through the publication recovery route before the cost cap ends the original unit", async () => {
     const pushed = "b".repeat(40);
     const branch = "plan/fixture/u10";
-    const s = steps({ "U10/recovery/1/findings/wait/1": "event" });
+    const s = steps({ [`U10/recovery/${ACTION}/1/findings/wait/1`]: "event" });
     const b = bot({
       "recover-unit": [acked()],
       plan: [
@@ -352,13 +547,21 @@ describe("runOriginalUnitRecovery", () => {
 
     const summary = await runOriginalUnitRecovery(s.runner, b.client, WORKFLOW, {
       kind: "recover-original-unit",
+      recoveryActionId: ACTION,
       parentInstanceId: INSTANCE,
       unit: "U10",
     });
 
     expect(summary.units).toEqual({ U10: "aborted" });
     expect(b.of("pr-check")).toEqual([
-      { parentInstanceId: INSTANCE, unit: "U10", pr: 7, recover: { runId: "run-f1" } },
+      {
+        parentInstanceId: INSTANCE,
+        unit: "U10",
+        recoveryActionId: ACTION,
+        recoveryWorkflowId: WORKFLOW,
+        pr: 7,
+        recover: { runId: "run-f1" },
+      },
     ]);
     expect(b.of("spawn")).toHaveLength(1);
     expect(b.of("unit-end")[0]?.ending).toMatchObject({ kind: "aborted", report: expect.stringContaining("cost cap") });
@@ -382,15 +585,15 @@ describe("runOriginalUnitRecovery", () => {
       };
       const HEAD_2 = "b".repeat(40);
       const s = steps({
-        "U10/recovery/2/review/wait/1": "event",
-        "U10/recovery/2/findings/wait/1": "event",
-        "U10/recovery/3/review/wait/1": "event",
+        [`U10/recovery/${ACTION}/2/review/wait/1`]: "event",
+        [`U10/recovery/${ACTION}/2/findings/wait/1`]: "event",
+        [`U10/recovery/${ACTION}/3/review/wait/1`]: "event",
       });
       const b = bot({
         "recover-unit": [acked()],
         plan: [
           planAnswer(
-            [recoveryRow("review", { round: 2, step: "U10/recovery/2/review", externalReview, accounting })],
+            [recoveryRow("review", { round: 2, step: `U10/recovery/${ACTION}/2/review`, externalReview, accounting })],
             T0,
             "person",
             { caps: { maxRounds: 3, maxMinutes: 120 }, grant: accounting.grant },
@@ -450,6 +653,7 @@ describe("runOriginalUnitRecovery", () => {
       });
       const result = await runOriginalUnitRecovery(s.runner, b.client, WORKFLOW, {
         kind: "recover-original-unit",
+        recoveryActionId: ACTION,
         parentInstanceId: INSTANCE,
         unit: "U10",
       });
@@ -462,7 +666,10 @@ describe("runOriginalUnitRecovery", () => {
       expect(result.units).toEqual({ U10: "merge_ready" });
       const spawns = b.of("spawn");
       expect(spawns.map((spawn) => spawn.preset)).toEqual(["review", "coding", "review"]);
-      expect(spawns[0]).toMatchObject({ step: "U10/recovery/2/review", brief: { kind: "review", headSha: HEAD } });
+      expect(spawns[0]).toMatchObject({
+        step: `U10/recovery/${ACTION}/2/review`,
+        brief: { kind: "review", headSha: HEAD },
+      });
       expect(spawns[0]!.brief).not.toHaveProperty("prior");
       expect(spawns[1]).toMatchObject({ brief: { reviewRunId: "run-full-review" } });
       expect(spawns[2]).toMatchObject({
@@ -487,7 +694,7 @@ describe("runOriginalUnitRecovery", () => {
         { scenario: "endpoint", expected: "checked" },
       ],
     };
-    const s = steps({ "U10/recovery/3/review/wait/1": "event" });
+    const s = steps({ [`U10/recovery/${ACTION}/3/review/wait/1`]: "event" });
     const b = bot({
       "recover-unit": [acked()],
       plan: [
@@ -495,7 +702,7 @@ describe("runOriginalUnitRecovery", () => {
           [
             recoveryRow("review", {
               round: 3,
-              step: "U10/recovery/3/review",
+              step: `U10/recovery/${ACTION}/3/review`,
               patternContinuations: 1,
               priorFindings: [prior],
             }),
@@ -511,17 +718,95 @@ describe("runOriginalUnitRecovery", () => {
     });
     await runOriginalUnitRecovery(s.runner, b.client, WORKFLOW, {
       kind: "recover-original-unit",
+      recoveryActionId: ACTION,
       parentInstanceId: INSTANCE,
       unit: "U10",
     });
     expect(b.of("spawn")[0]).toMatchObject({
-      step: "U10/recovery/3/review",
+      step: `U10/recovery/${ACTION}/3/review`,
       brief: { kind: "review", prior: { findings: [prior] } },
     });
   });
 
+  it("reports legacy review recovery accounting as unverified without inventing an original grant", async () => {
+    const s = steps({ [`U10/recovery/${ACTION}/1/review/wait/1`]: "event" });
+    const b = bot({
+      "recover-unit": [acked()],
+      plan: [planAnswer([recoveryRow("review")], T0, "person", { grant: { renewals: 6 }, grantSource: "channel" })],
+      spawn: [spawned("run-r1")],
+      "read-record": [reviewApproved("run-r1", T0 + 10 * MIN)],
+      round: [acked(), acked()],
+      "unit-end": [acked(T0 + 10 * MIN)],
+    });
+    const summary = await runOriginalUnitRecovery(s.runner, b.client, WORKFLOW, {
+      kind: "recover-original-unit",
+      recoveryActionId: ACTION,
+      parentInstanceId: INSTANCE,
+      unit: "U10",
+    });
+    expect(summary.units).toEqual({ U10: "merge_ready" });
+    const end = b.of("unit-end")[0]! as { ending: { report: string }; deliveryId: string };
+    expect(end.ending.report).toContain("Original renewal accounting is unverified.");
+    expect(end.ending.report).not.toMatch(/of 0 spent|granted by channel/);
+    expect(end.deliveryId).toBe(`U10/recovery/${ACTION}/end`);
+  });
+
+  it.each(["channel", undefined] as const)("reports only admitted grant provenance (%s)", async (grantSource) => {
+    const accounting = {
+      spendUsd: 1,
+      children: [{ runId: "run-original-review", key: `${INSTANCE}:U10/1/review`, usd: 1 }],
+      grant: { renewals: 2 },
+      renewalsSpent: 1,
+      grantSource,
+    };
+    const s = steps({ [`U10/recovery/${ACTION}/1/review/wait/1`]: "event" });
+    const b = bot({
+      "recover-unit": [acked()],
+      plan: [planAnswer([recoveryRow("review", { accounting })], T0, "person", { grantSource: "org" })],
+      spawn: [spawned("run-r1")],
+      "read-record": [reviewApproved("run-r1", T0 + MIN)],
+      round: [acked(), acked()],
+      "unit-end": [acked(T0 + MIN)],
+    });
+    await runOriginalUnitRecovery(s.runner, b.client, WORKFLOW, {
+      kind: "recover-original-unit",
+      recoveryActionId: ACTION,
+      parentInstanceId: INSTANCE,
+      unit: "U10",
+    });
+    const report = (b.of("unit-end")[0]!.ending as { report: string }).report;
+    expect(report).toContain("1 of 2 spent");
+    expect(report).toContain(grantSource === undefined ? "grant source unverified" : "granted by channel");
+    expect(report).not.toContain("granted by org");
+  });
+
+  it("an early recovered deadline ending preserves an ambiguous private report failure", async () => {
+    const s = steps();
+    const unavailable = ok({ ok: false, error: "private_worker_log_unavailable" }, T0, 503);
+    const b = bot({
+      "recover-unit": [acked()],
+      plan: [planAnswer([recoveryRow("review", { remainingMs: 1, deadlineAt: T0 + 1 })], T0, "person")],
+      "unit-end": Array.from({ length: 2 * (STEP_RETRIES.limit + 1) }, () => unavailable),
+    });
+    await expect(
+      runOriginalUnitRecovery(s.runner, b.client, WORKFLOW, {
+        kind: "recover-original-unit",
+        recoveryActionId: ACTION,
+        parentInstanceId: INSTANCE,
+        unit: "U10",
+      }),
+    ).rejects.toThrow("private_worker_log_unavailable");
+    expect(b.of("spawn")).toEqual([]);
+    expect(b.of("unit-end")).toHaveLength(STEP_RETRIES.limit + 1);
+    expect(b.of("unit-end").every((body) => (body.ending as { kind: string }).kind === "review_pending")).toBe(true);
+    expect(b.of("unit-end")[0]).toMatchObject({
+      headSha: HEAD,
+      ending: { outcome: { schemaVersion: 1, kind: "review_pending", reviewRounds: 1 } },
+    });
+  });
+
   it("continues no_verdict with one read-only review in the original namespace", async () => {
-    const s = steps({ "U10/recovery/1/review/wait/1": "event" });
+    const s = steps({ [`U10/recovery/${ACTION}/1/review/wait/1`]: "event" });
     const b = bot({
       "recover-unit": [acked()],
       plan: [planAnswer([recoveryRow("review")], T0, "person")],
@@ -533,6 +818,7 @@ describe("runOriginalUnitRecovery", () => {
 
     const summary = await runOriginalUnitRecovery(s.runner, b.client, WORKFLOW, {
       kind: "recover-original-unit",
+      recoveryActionId: ACTION,
       parentInstanceId: INSTANCE,
       unit: "U10",
     });
@@ -542,7 +828,9 @@ describe("runOriginalUnitRecovery", () => {
       {
         parentInstanceId: INSTANCE,
         unit: "U10",
-        step: "U10/recovery/1/review",
+        recoveryActionId: ACTION,
+        recoveryWorkflowId: WORKFLOW,
+        step: `U10/recovery/${ACTION}/1/review`,
         preset: "review",
         budget: 22,
         brief: { kind: "review", unit: "U10", pr: 7, headSha: HEAD, round: 1 },
@@ -553,7 +841,7 @@ describe("runOriginalUnitRecovery", () => {
   });
 
   it("passes the original cost cap and cumulative spend into the recovered review", async () => {
-    const s = steps({ "U10/recovery/1/review/wait/1": "event" });
+    const s = steps({ [`U10/recovery/${ACTION}/1/review/wait/1`]: "event" });
     const grant = { renewals: 2, costCapUsd: 50 };
     const accounting = {
       spendUsd: 49,
@@ -585,6 +873,7 @@ describe("runOriginalUnitRecovery", () => {
 
     const summary = await runOriginalUnitRecovery(s.runner, b.client, WORKFLOW, {
       kind: "recover-original-unit",
+      recoveryActionId: ACTION,
       parentInstanceId: INSTANCE,
       unit: "U10",
     });
@@ -595,7 +884,7 @@ describe("runOriginalUnitRecovery", () => {
   });
 
   it("keeps spent original renewals out of a recovered human-gate balance", async () => {
-    const s = steps({ "U10/recovery/2/review/wait/1": "event" });
+    const s = steps({ [`U10/recovery/${ACTION}/2/review/wait/1`]: "event" });
     const grant = { renewals: 2, costCapUsd: 50 };
     const accounting = {
       spendUsd: 15,
@@ -606,9 +895,14 @@ describe("runOriginalUnitRecovery", () => {
     const b = bot({
       "recover-unit": [acked()],
       plan: [
-        planAnswer([recoveryRow("review", { round: 2, step: "U10/recovery/2/review", accounting })], T0, "person", {
-          grant,
-        }),
+        planAnswer(
+          [recoveryRow("review", { round: 2, step: `U10/recovery/${ACTION}/2/review`, accounting })],
+          T0,
+          "person",
+          {
+            grant,
+          },
+        ),
       ],
       spawn: [spawned("run-r2")],
       "read-record": [
@@ -635,16 +929,22 @@ describe("runOriginalUnitRecovery", () => {
 
     const summary = await runOriginalUnitRecovery(s.runner, b.client, WORKFLOW, {
       kind: "recover-original-unit",
+      recoveryActionId: ACTION,
       parentInstanceId: INSTANCE,
       unit: "U10",
     });
 
-    expect(summary.units).toEqual({ U10: "idle" });
+    expect(summary.units).toEqual({ U10: "held" });
     expect(b.of("unit-end")).toMatchObject([{ ending: { kind: "held", why: "held", renewalsLeft: 1 } }]);
+    const report = (b.of("unit-end")[0]!.ending as { report: string }).report;
+    expect(report).toContain("This recovery is held and has ended");
+    expect(report).not.toMatch(/stays live|next reply|review then runs again/);
+    expect(b.of("unit-wake")).toEqual([]);
+    expect(s.taken.filter((entry) => entry.kind === "wait").some((entry) => entry.name.includes("/idle/"))).toBe(false);
   });
 
   it("keeps an uncapped recovered checkpoint at zero renewal capacity", async () => {
-    const s = steps({ "U10/recovery/1/review/wait/1": "event" });
+    const s = steps({ [`U10/recovery/${ACTION}/1/review/wait/1`]: "event" });
     const b = bot({
       "recover-unit": [acked()],
       plan: [planAnswer([recoveryRow("review")], T0, "person", { grant: { renewals: 2 } })],
@@ -672,12 +972,14 @@ describe("runOriginalUnitRecovery", () => {
 
     const summary = await runOriginalUnitRecovery(s.runner, b.client, WORKFLOW, {
       kind: "recover-original-unit",
+      recoveryActionId: ACTION,
       parentInstanceId: INSTANCE,
       unit: "U10",
     });
 
-    expect(summary.units).toEqual({ U10: "idle" });
+    expect(summary.units).toEqual({ U10: "held" });
     expect(b.of("unit-end")).toMatchObject([{ ending: { kind: "held", why: "held", renewalsLeft: 0 } }]);
+    expect(b.of("unit-wake")).toEqual([]);
   });
 
   it("does not dispatch a capped recovery when the plan row lacks spend carry", async () => {
@@ -689,6 +991,7 @@ describe("runOriginalUnitRecovery", () => {
 
     const summary = await runOriginalUnitRecovery(steps().runner, b.client, WORKFLOW, {
       kind: "recover-original-unit",
+      recoveryActionId: ACTION,
       parentInstanceId: INSTANCE,
       unit: "U10",
     });
@@ -700,7 +1003,7 @@ describe("runOriginalUnitRecovery", () => {
 
   it("continues a completed original findings checkpoint directly with its read-only re-review", async () => {
     const HEAD_2 = "b".repeat(40);
-    const s = steps({ "U10/recovery/2/review/wait/1": "event" });
+    const s = steps({ [`U10/recovery/${ACTION}/2/review/wait/1`]: "event" });
     const b = bot({
       "recover-unit": [acked()],
       plan: [
@@ -709,7 +1012,7 @@ describe("runOriginalUnitRecovery", () => {
             recoveryRow("review", {
               round: 2,
               expectedHeadSha: HEAD_2,
-              step: "U10/recovery/2/review",
+              step: `U10/recovery/${ACTION}/2/review`,
               findingsRunId: "run-original-findings",
               findingsKey: `${INSTANCE}:U10/1/findings`,
             }),
@@ -726,6 +1029,7 @@ describe("runOriginalUnitRecovery", () => {
 
     await runOriginalUnitRecovery(s.runner, b.client, WORKFLOW, {
       kind: "recover-original-unit",
+      recoveryActionId: ACTION,
       parentInstanceId: INSTANCE,
       unit: "U10",
     });
@@ -734,7 +1038,9 @@ describe("runOriginalUnitRecovery", () => {
       {
         parentInstanceId: INSTANCE,
         unit: "U10",
-        step: "U10/recovery/2/review",
+        recoveryActionId: ACTION,
+        recoveryWorkflowId: WORKFLOW,
+        step: `U10/recovery/${ACTION}/2/review`,
         preset: "review",
         budget: 25,
         brief: {
@@ -750,7 +1056,7 @@ describe("runOriginalUnitRecovery", () => {
   });
 
   it("does not report completion when durable recovery settlement is refused", async () => {
-    const s = steps({ "U10/recovery/1/review/wait/1": "event" });
+    const s = steps({ [`U10/recovery/${ACTION}/1/review/wait/1`]: "event" });
     const refused = ok({ ok: false, error: "recovery_claim_stale" }, T0 + 10 * MIN, 409);
     const b = bot({
       "recover-unit": [acked()],
@@ -764,11 +1070,12 @@ describe("runOriginalUnitRecovery", () => {
     await expect(
       runOriginalUnitRecovery(s.runner, b.client, WORKFLOW, {
         kind: "recover-original-unit",
+        recoveryActionId: ACTION,
         parentInstanceId: INSTANCE,
         unit: "U10",
       }),
     ).rejects.toThrow("successful settlement");
-    expect(s.attempts["U10/recovery/end"]).toBe(STEP_RETRIES.limit + 1);
+    expect(s.attempts[`U10/recovery/${ACTION}/end`]).toBe(1);
   });
 });
 
@@ -781,6 +1088,8 @@ type Taken =
  *  a `do` retries a throwing callback under its own policy (no delay), a wait
  *  answers from the script by step name — `event` resolves, anything else
  *  rejects the way the platform's timeout does. */
+class PermanentStepError extends Error {}
+
 function steps(waits: Record<string, "event" | "timeout"> = {}) {
   const taken: Taken[] = [];
   const attempts: Record<string, number> = {};
@@ -792,7 +1101,7 @@ function steps(waits: Record<string, "event" | "timeout"> = {}) {
         try {
           return await callback();
         } catch (err) {
-          if (attempt >= config.retries.limit) throw err;
+          if (err instanceof PermanentStepError || attempt >= config.retries.limit) throw err;
         }
       }
     },
@@ -812,7 +1121,7 @@ function steps(waits: Record<string, "event" | "timeout"> = {}) {
   // step order stays legible.
   const names = () =>
     taken.filter((t) => !/\/(wait|busy)\/\d+\/(interrupted|resumed)(\/\d+)?$/.test(t.name)).map((t) => t.name);
-  return { runner, taken, attempts, names };
+  return { runner: workflowSteps(runner, (message) => new PermanentStepError(message)), taken, attempts, names };
 }
 
 type Scripted = BotReply | Error | ((body: Record<string, unknown>) => BotReply | Error);
@@ -842,11 +1151,29 @@ function bot(script: Partial<Record<CoordinatorStepRoute, Scripted[]>>) {
       const answer = typeof next === "function" ? next(body) : next;
       if (answer instanceof Error) throw answer;
       if (route === "plan" && !(answer instanceof Error)) lastPlan = answer;
+      // Only the explicit effect fixtures model a persisted receipt. Raw replies remain available for malformed-wire proofs.
+      if (
+        (route === "branch" ||
+          route === "spawn" ||
+          (route === "checks" &&
+            (JSON.parse(answer.text).retried === true || JSON.parse(answer.text).refired === true)) ||
+          (route === "merge" &&
+            body.queued !== true &&
+            ["merged", "enqueued"].includes(JSON.parse(answer.text).outcome) &&
+            JSON.parse(answer.text).by !== "other")) &&
+        effectFixtures.has(answer)
+      )
+        return { ...answer, text: JSON.stringify({ ...JSON.parse(answer.text), effectOrdinal: body.effectOrdinal }) };
       return answer;
     },
   };
-  const of = (route: CoordinatorStepRoute) => calls.filter((c) => c.route === route).map((c) => c.body);
-  return { client, calls, of };
+  const wireOf = (route: CoordinatorStepRoute) => calls.filter((c) => c.route === route).map((c) => c.body);
+  // Pipeline assertions read their fields; transport identity has its own wire proof.
+  const of = (route: CoordinatorStepRoute) =>
+    wireOf(route).map(
+      ({ executionWorkflowId: _execution, effectId: _effect, effectOrdinal: _ordinal, ...body }) => body,
+    );
+  return { client, calls, of, wireOf };
 }
 
 const wakeReply = (answer: object, at = T0 + 46 * MIN): BotReply => ok({ ok: true, answer }, at);
@@ -901,6 +1228,95 @@ function idleWakeRun(input: {
 }
 
 describe("the plan runner's driver — the Workflow body over the step runner (item 9)", () => {
+  it("carries the actual Workflow and action step on branch requests", async () => {
+    const s = steps();
+    const b = bot({
+      plan: [planAnswer([row("U10")], T0, "person", { generated: true })],
+      "unit-start": [started("U10")],
+      "pr-check": [prNone()],
+      branch: [ok({ ok: false, reason: "refused" })],
+      "unit-end": [acked()],
+      finish: [acked()],
+    });
+    await runPlan(s.runner, b.client, INSTANCE);
+    expect(b.wireOf("branch")[0]).toMatchObject({ executionWorkflowId: INSTANCE, effectId: "U10/branch" });
+    expect(b.calls.every((call) => call.body.executionWorkflowId === INSTANCE)).toBe(true);
+  });
+  it.each(["new task", "exact PR", "stopped task"] as const)(
+    "drives a generated %s without rereading graph selection",
+    async (request) => {
+      const s = steps();
+      const unit = row("task", {
+        branch: "ship/task",
+        ...(request === "exact PR" ? { resume: { pr: 7, headSha: HEAD, url: PR_URL } } : {}),
+      });
+      const b = bot({
+        plan: [planAnswer([unit], T0, "person", { generated: true, stopped: request === "stopped task" })],
+        "unit-start": [started("task")],
+        "pr-check": [prMerged(T0, "2026-09-13T23:55:59Z")],
+        "unit-end": [acked()],
+        finish: [acked()],
+      });
+      expect(await runPlan(s.runner, b.client, INSTANCE)).toMatchObject({
+        units: { task: request === "stopped task" ? "stopped" : "merged" },
+        outcome: request === "stopped task" ? "failed" : "completed",
+      });
+      expect(b.of("plan")).toHaveLength(1);
+      expect(s.names()).not.toContain("plan/2");
+      expect(b.of("spawn")).toEqual([]);
+      expect(b.of("branch")).toEqual([]);
+      if (request === "stopped task") expect(b.of("unit-start")).toEqual([]);
+    },
+  );
+
+  it("keeps the complete indexed idle lifetime on direct generated execution", async () => {
+    const { s, b } = idleWakeRun({ waits: {} });
+    const direct: CoordinatorBot = {
+      async step(route, body) {
+        const reply = await b.client.step(route, body);
+        return route === "plan"
+          ? { ...reply, text: JSON.stringify({ ...JSON.parse(reply.text), generated: true }) }
+          : reply;
+      },
+    };
+    expect(await runPlan(s.runner, direct, INSTANCE)).toMatchObject({
+      units: { U10: "idle_expired" },
+      outcome: "failed",
+    });
+    expect(b.of("unit-end").map((body) => (body.ending as { kind: string }).kind)).toEqual(["idle", "idle_expired"]);
+    expect(b.of("plan")).toHaveLength(1);
+    expect(s.names()).not.toContain("plan/2");
+  });
+
+  it.each(["multiple units", "dependencies"] as const)("refuses generated %s before starting work", async (shape) => {
+    const s = steps();
+    const units = shape === "multiple units" ? [row("U10"), row("U11")] : [row("U10", { dependsOn: ["external"] })];
+    const b = bot({ plan: [planAnswer(units, T0, "person", { generated: true })], finish: [acked()] });
+    await expect(runPlan(s.runner, b.client, INSTANCE)).rejects.toThrow(
+      "generated execution requires one independent unit",
+    );
+    expect(b.of("unit-start")).toEqual([]);
+    expect(b.of("spawn")).toEqual([]);
+    expect(b.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "failed" }]);
+  });
+
+  it("an indexed idle expiry cannot finish on a refused terminal write", async () => {
+    const { s, b } = idleWakeRun({ waits: {} });
+    const writes: Record<string, unknown>[] = [];
+    const client: CoordinatorBot = {
+      async step(route, body) {
+        if (route === "unit-end" && (body.ending as { kind: string }).kind === "idle_expired") {
+          writes.push(body);
+          return ok({ ok: false, error: "settlement_conflict" }, T0, 409);
+        }
+        return b.client.step(route, body);
+      },
+    };
+    await expect(runPlan(s.runner, client, INSTANCE)).rejects.toThrow(/successful settlement/);
+    expect(writes).toHaveLength(1);
+    expect(writes.every((body) => body.deliveryId === "U10/idle/1/end")).toBe(true);
+  });
+
   it.each(["event", "timeout"] as const)(
     "the %s confirmation retries an addressed finished child's pending record under the short bound and continues",
     async (confirmation) => {
@@ -1022,6 +1438,9 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(b.of("plan")).toEqual([{ parentInstanceId: INSTANCE }, { parentInstanceId: INSTANCE }]);
     expect(b.of("unit-start")).toEqual([{ parentInstanceId: INSTANCE, unit: "U10" }]);
     expect(b.of("branch")).toEqual([{ parentInstanceId: INSTANCE, unit: "U10" }]);
+    expect(
+      b.wireOf("spawn").every((body) => body.executionWorkflowId === INSTANCE && body.effectId === body.step),
+    ).toBe(true);
     expect(b.of("spawn")).toEqual([
       {
         parentInstanceId: INSTANCE,
@@ -1282,7 +1701,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(ends[0].ending.report).toContain(`budget renewed, 1 of 6, continues ${HEAD.slice(0, 7)}`);
     expect(ends[1].ending.kind).toBe("merge_ready");
     expect(ends[1].segment).toBeUndefined();
-    expect(ends[1].ending.report).toContain("Renewals: 0 of 6 spent, cost cap $50 (granted by channel).");
+    expect(ends[1].ending.report).toContain("Renewals: 1 of 6 spent, cost cap $50 (granted by channel).");
   });
 
   it("an idle ending waits under the first indexed identity for its remaining days; a timeout writes idle_expired under that wait's end and opens no segment", async () => {
@@ -1913,6 +2332,32 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     ]);
   });
 
+  it("a consumed recovery refusal ends the unit with its native reason without renewal or another child", async () => {
+    for (const status of ["failed", "completed"] as const) {
+      const s = steps({ "U10/0/coding/wait/1": "event" });
+      const b = bot({
+        plan: [planAnswer([row("U10")])],
+        "unit-start": [started("U10")],
+        branch: [branched("U10")],
+        spawn: [spawned("run-c0")],
+        "read-record": [record({ id: "run-c0", finished: true, status }, T0 + 5 * MIN)],
+        "pr-check": [
+          prNone(),
+          ok({ ok: true, state: "none", unrecovered: "external_refused", effectOrdinal: 3 }, T0 + 6 * MIN),
+        ],
+        round: [acked(), acked()],
+        "unit-end": [acked()],
+        finish: [acked()],
+      });
+      const summary = await runPlan(s.runner, b.client, INSTANCE);
+      expect(summary.units).toEqual({ U10: "aborted" });
+      const [end] = b.of("unit-end") as Array<{ ending: { report: string } }>;
+      expect(end.ending.report).toContain("GitHub definitively refused the recovery publication");
+      expect(b.wireOf("spawn")).toHaveLength(1);
+      expect(b.wireOf("pr-check")[1]?.effectOrdinal).toBe(3);
+    }
+  });
+
   it("a failed coding child whose recover pr-check answers none with a reason carries that reason into the abort — the parse keeps `unrecovered`", async () => {
     const s = steps({ "U10/0/coding/wait/1": "event" });
     const b = bot({
@@ -2063,7 +2508,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     const tb = bot({
       plan: [planAnswer([row("task", { slug: "task", branch: "ship/warm-the-cache-abc123" })], T0, "person")],
       "unit-start": [started("task")],
-      branch: [ok({ ok: true, branch: "ship/warm-the-cache-abc123", base: "main" })],
+      branch: [ok({ ok: true, branch: "ship/warm-the-cache-abc123", base: "main", effectOrdinal: 0 })],
       spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN)],
       "read-record": [codingDone("run-c0", T0 + 10 * MIN), reviewApproved("run-r1", T0 + 20 * MIN)],
       "pr-check": [prNone(), prOpen(T0 + 10 * MIN)],
@@ -2093,7 +2538,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       return bot({
         plan: [ok(generated === undefined ? base : { ...base, generated })],
         "unit-start": [started("U10")],
-        branch: [ok({ ok: true, branch: "plan/warm-the-cache-abc123/u10", base: "main" })],
+        branch: [ok({ ok: true, branch: "plan/warm-the-cache-abc123/u10", base: "main", effectOrdinal: 0 })],
         spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN)],
         "read-record": [
           codingDone("run-c0", T0 + 10 * MIN),
@@ -2868,7 +3313,7 @@ describe("the plan runner's driver — a shipped pull request at the wall-clock 
         }),
       ],
       "unit-start": [ok({ ok: true, threadKey: "slack:C1:1.0" })],
-      branch: [ok({ ok: true })],
+      branch: [ok({ ok: true, effectOrdinal: 0 })],
       spawn: [spawned("run-c0")],
       "read-record": [codingDone("run-c0", T0 + 205 * MIN)],
       // The pre-check, then the round's check: the pull request is open at the child's head with 35 minutes
@@ -2913,7 +3358,7 @@ describe("the plan runner's driver — a shipped pull request at the wall-clock 
         }),
       ],
       "unit-start": [ok({ ok: true, threadKey: "slack:C1:1.0" })],
-      branch: [ok({ ok: true })],
+      branch: [ok({ ok: true, effectOrdinal: 0 })],
       spawn: [spawned("run-c0")],
       "read-record": [codingDone("run-c0", T0 + 205 * MIN)],
       "pr-check": [prNone(), prOpen(T0 + 205 * MIN)],
@@ -3074,7 +3519,7 @@ describe("the plan runner's driver — the entry checks resume a re-issued plan'
     expect(b.of("spawn")).toEqual([]);
   });
 
-  it("an empty required-check launch carries the one pull_request refire through the Workflow step and records checks restarted on the round before the re-read", async () => {
+  it("an empty required-check launch reasks pending effect reconciliation before recording the refire", async () => {
     const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
     const empty = {
       total: 1,
@@ -3093,6 +3538,7 @@ describe("the plan runner's driver — the entry checks resume a re-issued plan'
       checks: [
         ok({ ok: true, checks: empty }, T0 + 20 * MIN),
         ok({ ok: true, checks: empty }, T0 + 25 * MIN),
+        ok({ ok: false, error: "effect_reconciliation_pending" }, T0 + 25 * MIN, 503),
         ok({ ok: true, refired: true }, T0 + 25 * MIN),
         ok({ ok: true, checks: { total: 3, pending: [], failed: [], required: empty.required } }, T0 + 26 * MIN),
       ],
@@ -3107,11 +3553,38 @@ describe("the plan runner's driver — the entry checks resume a re-issued plan'
       { parentInstanceId: INSTANCE, unit: "U10", prNumber: 7, headSha: HEAD },
       { parentInstanceId: INSTANCE, unit: "U10", prNumber: 7, headSha: HEAD },
       { parentInstanceId: INSTANCE, unit: "U10", prNumber: 7, headSha: HEAD, refire: true },
+      { parentInstanceId: INSTANCE, unit: "U10", prNumber: 7, headSha: HEAD, refire: true },
       { parentInstanceId: INSTANCE, unit: "U10", prNumber: 7, headSha: HEAD },
     ]);
     expect(b.of("round")).toContainEqual(
       expect.objectContaining({ unit: "U10", index: 1, agent: "review", outcome: "checks_restarted" }),
     );
+    expect(b.wireOf("checks")[3].effectOrdinal).toBe(b.wireOf("checks")[2].effectOrdinal);
+    expect(b.wireOf("checks")[4].effectOrdinal).toBe((b.wireOf("checks")[3].effectOrdinal as number) + 1);
+  });
+
+  it("refuses a positive check recovery wire reply without its next exact effect ordinal", async () => {
+    for (const receipt of [{}, { effectOrdinal: 0 }, { effectOrdinal: "unreadable" }]) {
+      const empty = { total: 1, pending: [], failed: [], required: ["ci / bot"], expected: ["ci / bot"] };
+      const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
+      const b = bot({
+        plan: [planAnswer([row("U10")], T0, "person")],
+        "unit-start": [started("U10")],
+        branch: [branched("U10")],
+        spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN)],
+        "read-record": [codingDone("run-c0", T0 + 10 * MIN), reviewApproved("run-r1", T0 + 20 * MIN)],
+        "pr-check": [prNone(), prOpen(T0 + 10 * MIN)],
+        checks: [
+          ok({ ok: true, checks: empty }, T0 + 20 * MIN),
+          ok({ ok: true, checks: empty }, T0 + 25 * MIN),
+          { status: 200, text: JSON.stringify({ ok: true, refired: true, at: T0 + 25 * MIN, ...receipt }) },
+        ],
+        round: Array.from({ length: 8 }, () => acked()),
+        "unit-end": [acked()],
+        finish: [acked()],
+      });
+      await expect(runPlan(s.runner, b.client, INSTANCE)).rejects.toThrow("effect ordinal");
+    }
   });
 
   it("the seal's remedy holds (issue 2100): a re-issue in a thread whose pull request is approved and clean resumes at the checks step — under merge: runner the merge door is asked at exactly the approved head with no branch step and no coding child, never a fresh coding round", async () => {
@@ -3848,6 +4321,56 @@ describe("the plan runner's driver — a unit whose pull request already merged 
 // read-record answer flags it — the walk honours the mark by ending every unit
 // not yet ended `stopped` and running nothing more.
 describe("the plan runner's driver — the hosted parent's hard stop stops the runner (record 0060, issue 1924)", () => {
+  it.each([400, 404])("an unstamped terminal refusal stops retries (%s)", async (status) => {
+    const s = steps();
+    const refusal = { status, text: JSON.stringify({ ok: false, error: "unit_not_found" }) };
+    const b = bot({
+      plan: [planAnswer([row("U10")], T0, "runner", { stopped: true })],
+      "unit-end": Array.from({ length: 2 * (STEP_RETRIES.limit + 1) }, () => refusal),
+      finish: [acked()],
+    });
+    await expect(runPlan(s.runner, b.client, INSTANCE)).rejects.toThrow();
+    expect(s.attempts["U10/end"]).toBe(1);
+    expect(s.attempts["U10/end/threw"]).toBe(1);
+  });
+
+  it.each([
+    { status: 409, ok: false },
+    { status: 200, ok: false },
+    { status: 409, ok: true },
+  ])(
+    "an unrun ending rejects an unsuccessful acknowledgement $status/$ok, including its failure report",
+    async ({ status, ok: accepted }) => {
+      const s = steps();
+      const b = bot({
+        plan: [planAnswer([row("U10")], T0, "runner", { stopped: true })],
+        "unit-end": Array.from({ length: 2 * (STEP_RETRIES.limit + 1) }, () =>
+          ok({ ok: accepted, error: "settlement_conflict" }, T0, status),
+        ),
+        finish: [acked()],
+      });
+      await expect(runPlan(s.runner, b.client, INSTANCE)).rejects.toThrow(/successful settlement/);
+      expect(s.attempts["U10/end"]).toBe(1);
+      expect(s.attempts["U10/end/threw"]).toBe(1);
+      expect(b.of("unit-start")).toEqual([]);
+    },
+  );
+
+  it("an unrun private report outage keeps the original delivery unconfirmed", async () => {
+    const s = steps();
+    const b = bot({
+      plan: [planAnswer([row("U10")], T0, "runner", { stopped: true })],
+      "unit-end": Array.from({ length: STEP_RETRIES.limit + 1 }, () =>
+        ok({ ok: false, error: "private_worker_log_unavailable" }, T0, 503),
+      ),
+      finish: [acked()],
+    });
+    await expect(runPlan(s.runner, b.client, INSTANCE)).rejects.toThrow("private_worker_log_unavailable");
+    expect(s.names()).not.toContain("U10/end/threw");
+    expect(b.of("unit-end")).toHaveLength(STEP_RETRIES.limit + 1);
+    expect(b.of("unit-end").every((body) => (body.ending as { kind: string }).kind === "stopped")).toBe(true);
+  });
+
   it("a stop between units spawns nothing more and ends the remaining units stopped: the boundary re-read carries the mark, the next unit never starts, its row is told a stopped ending, and the finish is failed", async () => {
     const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
     const b = bot({
@@ -3956,5 +4479,96 @@ describe("the plan runner's driver — the hosted parent's hard stop stops the r
     expect(summary).toEqual({ instance: INSTANCE, planId: "fixture", units: { U10: "merged" }, outcome: "completed" });
     expect(b.of("unit-end")).toHaveLength(1);
     expect(b.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "completed" }]);
+  });
+});
+
+describe("Workflow effect receipt ordinals", () => {
+  it("consumes a recovered pull creation ordinal before the next review child", async () => {
+    const recovered = prOpen(T0 + 10 * MIN);
+    const b = bot({
+      plan: [planAnswer([row("U10")], T0, "runner")],
+      "unit-start": [started("U10")],
+      branch: [ok({ ok: true, effectOrdinal: 0 })],
+      spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN)],
+      "read-record": [codingDone("run-c0", T0 + 10 * MIN), reviewApproved("run-r1", T0 + 20 * MIN)],
+      "pr-check": [
+        prNone(),
+        { ...recovered, text: JSON.stringify({ ...JSON.parse(recovered.text), effectOrdinal: 2 }) },
+      ],
+      round: [acked(), acked(), acked(), acked()],
+      merge: [ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + 21 * MIN)],
+      "unit-end": [acked()],
+      finish: [acked()],
+    });
+    const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
+    await runPlan(s.runner, b.client, INSTANCE);
+    expect(b.wireOf("spawn")[1]?.effectOrdinal).toBe(3);
+  });
+
+  function flow(branch: BotReply, spawn: BotReply) {
+    const b = bot({
+      plan: [planAnswer([row("U10")], T0, "person", { generated: true })],
+      "unit-start": [started("U10")],
+      branch: [branch],
+      spawn: [spawn],
+      "pr-check": [prNone(), prOpen(T0 + 205 * MIN)],
+      "read-record": [codingDone("run-c0", T0 + 205 * MIN)],
+      round: [acked(), acked()],
+      "unit-end": [acked(T0 + 205 * MIN)],
+      finish: [acked()],
+    });
+    const s = steps({ "U10/0/coding/wait/1": "event" });
+    return { b, s };
+  }
+  it("a merge success without its committed ordinal or full native SHA cannot complete the unit", async () => {
+    for (const reply of [
+      { ok: true, outcome: "merged", sha: MERGED },
+      { ok: true, outcome: "enqueued", reason: "queued" },
+      { ok: true, outcome: "merged", sha: "short", effectOrdinal: 4 },
+    ]) {
+      const b = bot({
+        plan: [planAnswer([row("U10")], T0, "runner")],
+        "unit-start": [started("U10")],
+        branch: [branched("U10")],
+        spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN)],
+        "read-record": [codingDone("run-c0", T0 + 10 * MIN), reviewApproved("run-r1", T0 + 20 * MIN)],
+        "pr-check": [prNone(), prOpen(T0 + 10 * MIN)],
+        round: [acked(), acked(), acked(), acked()],
+        merge: [{ status: 200, text: JSON.stringify({ ...reply, at: T0 + 21 * MIN }) }],
+        "unit-end": [acked()],
+        finish: [acked()],
+      });
+      const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
+      await expect(runPlan(s.runner, b.client, INSTANCE)).rejects.toThrow();
+      expect(b.of("unit-end")[0]).toMatchObject({ ending: { kind: "failed" } });
+    }
+  });
+
+  it("advances from a branch creation receipt to the next exact child ordinal", async () => {
+    const { b, s } = flow(
+      ok({ ok: true, effectOrdinal: 1 }),
+      ok({ ok: true, runId: "run-c0", threadKey: "slack:C1:x", effectOrdinal: 2 }),
+    );
+    await runPlan(s.runner, b.client, INSTANCE);
+    expect(b.wireOf("branch")[0].effectOrdinal).toBe(1);
+    expect(b.wireOf("spawn")[0].effectOrdinal).toBe(2);
+  });
+  it("a verified existing branch spends no ordinal before child admission", async () => {
+    const { b, s } = flow(
+      ok({ ok: true, effectOrdinal: 0 }),
+      ok({ ok: true, runId: "run-c0", threadKey: "slack:C1:x", effectOrdinal: 1 }),
+    );
+    await runPlan(s.runner, b.client, INSTANCE);
+    expect(b.wireOf("spawn")[0].effectOrdinal).toBe(1);
+  });
+  it("missing and non-consuming child receipts cannot be cached as successful admission", async () => {
+    for (const receipt of [{}, { effectOrdinal: 0 }, { effectOrdinal: 2 }]) {
+      const { b, s } = flow(
+        ok({ ok: true, effectOrdinal: 0 }),
+        ok({ ok: true, runId: "run-c0", threadKey: "slack:C1:x", ...receipt }),
+      );
+      await expect(runPlan(s.runner, b.client, INSTANCE)).rejects.toThrow("effect ordinal");
+      expect(b.wireOf("read-record")).toEqual([]);
+    }
   });
 });

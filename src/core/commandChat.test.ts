@@ -332,6 +332,25 @@ describe("parseChatCommand", () => {
 });
 
 describe("chatCallerFor", () => {
+  it("retains native message and authenticated relay facts after resolving the actor", async () => {
+    const { chatCallerFor } = await import("./commandChat.js");
+    const config = configStore(ADMIN_YAML);
+    const source = {
+      ...msg("x", "slack:UADMIN"),
+      messageId: "100.200",
+      authenticatedAs: "http:bound",
+      postedBy: "slack:APP",
+    };
+    const caller = chatCallerFor(source, config);
+    expect(caller.origin).toMatchObject({
+      messageId: source.messageId,
+      authenticatedAs: source.authenticatedAs,
+      postedBy: source.postedBy,
+    });
+    expect(caller.actor.id).toBe(source.postedBy);
+    expect(caller.id).toBe(source.userId);
+  });
+
   it("carries the message's channel + thread and optional display name as `origin` (context, never authority), plus the lazy repo resolver", async () => {
     const { chatCallerFor } = await import("./commandChat.js");
     const config = configStore(ADMIN_YAML);

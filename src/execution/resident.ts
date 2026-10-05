@@ -522,6 +522,9 @@ export async function waitOnStatus<T>(input: {
     if (spentMs >= input.budgetMs) return input.spent(view, spentMs);
     if (verdict === "wait")
       await wakePause(Math.min(WAKE_POLL_MS, input.budgetMs - spentMs), input.signal, input.route);
+    // A pause can consume the last allowance. Retain the last observed state
+    // and use the caller's spent outcome without starting another probe.
+    if (spent() >= input.budgetMs) return input.spent(view, spent());
     view = await input.probe(input.signal);
     // The run's stop rides into the probe as into every send: a stop during one
     // is the stop's own typed error, as the pause throws it — never a verdict on
@@ -537,6 +540,8 @@ export interface ResidentExecutorOptions {
   ownerGen?: string;
   /** Monotonic claim from the run ledger, shared by attach, lease update, and release. */
   ownerFence?: number;
+  /** Persist the current successful physical binding before commands resume. */
+  onBinding?: (binding: ResidentBinding) => Promise<void>;
   /** Base URL of the resident Worker. */
   baseUrl: string;
   /** Operator bearer (RESIDENT_OPERATOR_TOKEN secret). */
@@ -611,6 +616,9 @@ export interface ResidentExecutorOptions {
 export interface ResidentBinding {
   ref: string;
   sha: string;
+  /** Fence acknowledged by this successful attach, not a later ledger claim. */
+  ownerFence?: number;
+  ownerGen?: string;
   /** The successful attach's dependency materialization, and the exact
    * lockfile key when an install-backed view was attached. */
   deps?: ThreadDepsMechanism;
@@ -969,7 +977,14 @@ export class ResidentExecutor implements Executor {
   private runtimeReplacedStreak = 0;
 
   private lastBinding?: ResidentBinding;
+  private attachmentFailure?: ResidentRegistrationMismatchError;
+  private attachmentPending?: Promise<unknown>;
   private attachAttempt = 0;
+
+  private refuseAttachment(reason: string): never {
+    this.attachmentFailure = new ResidentRegistrationMismatchError(this.opts.resource, reason);
+    throw this.attachmentFailure;
+  }
 
   /** The thread's binding as the resident answered it on the most recent
    *  successful attach — including a mid-run re-attach after an eviction, which
@@ -1120,6 +1135,10 @@ export class ResidentExecutor implements Executor {
     signal?: AbortSignal,
     span?: Span,
   ): Promise<{ status: number; data: Record<string, unknown> }> {
+    if (route !== "/attach" && route !== "/detach") {
+      while (this.attachmentPending) await this.attachmentPending;
+      if (this.attachmentFailure) throw this.attachmentFailure;
+    }
     let res: Response;
     try {
       // One `http.client` span under the caller's (docs/reference/specs/tracing.md item 21);
@@ -1193,7 +1212,39 @@ export class ResidentExecutor implements Executor {
    *  the command. */
   async attach(
     span?: Span,
-    opts: { signal?: AbortSignal; budgetMs?: number; drainBoundMs?: number } = {},
+    opts: { signal?: AbortSignal; budgetMs?: number; drainBoundMs?: number; targetSha?: string } = {},
+  ): Promise<ResidentBinding> {
+    return this.serializeAttachment(async () => {
+      const reuse = this.opts.reuse;
+      if (opts.targetSha !== undefined) {
+        this.opts = { ...this.opts, sha: opts.targetSha, reuse: false };
+        this.shaPending = true;
+      }
+      try {
+        return await this.performAttach(span, opts);
+      } finally {
+        if (opts.targetSha !== undefined) this.opts = { ...this.opts, reuse };
+      }
+    });
+  }
+
+  private async serializeAttachment<T>(operation: () => Promise<T>): Promise<T> {
+    const prior = this.attachmentPending;
+    const pending = (async () => {
+      await prior?.catch(() => undefined);
+      return operation();
+    })();
+    this.attachmentPending = pending;
+    try {
+      return await pending;
+    } finally {
+      if (this.attachmentPending === pending) this.attachmentPending = undefined;
+    }
+  }
+
+  private async performAttach(
+    span: Span | undefined,
+    opts: { signal?: AbortSignal; budgetMs?: number; drainBoundMs?: number },
   ): Promise<ResidentBinding> {
     this.attachAttempt++;
     const answer = await this.attachOnce(span, this.attachBoundMs("/attach"), opts.signal);
@@ -1353,8 +1404,17 @@ export class ResidentExecutor implements Executor {
     const status = answeredStatus(answered.status, data);
     if (status !== 200) return { ok: false, status, data };
     if (typeof data.ref !== "string" || typeof data.sha !== "string") {
-      throw new Error(`resident attach: malformed answer for ${this.opts.resource} (missing ref/sha)`);
+      this.refuseAttachment("malformed answer (missing ref/sha)");
     }
+    if (
+      data.ownerFence !== undefined &&
+      (!Number.isSafeInteger(data.ownerFence) ||
+        Number(data.ownerFence) <= 0 ||
+        data.ownerFence !== this.opts.ownerFence ||
+        !this.opts.runId ||
+        !this.opts.ownerGen)
+    )
+      this.refuseAttachment("attachment fence mismatch");
     const returned = returnedOf(data.returned);
     // A named ref is the spawn's branch, not a hint an older sticky binding may
     // override. Fail closed against a Worker predating that invariant rather
@@ -1368,7 +1428,7 @@ export class ResidentExecutor implements Executor {
       this.opts.ownPr === undefined &&
       data.ref !== this.opts.refHint
     ) {
-      throw new Error(
+      this.refuseAttachment(
         `resident attach: named ref mismatch for ${this.opts.resource} (asked for ${JSON.stringify(this.opts.refHint)}, got ${JSON.stringify(data.ref)})`,
       );
     }
@@ -1378,6 +1438,7 @@ export class ResidentExecutor implements Executor {
     this.lastBinding = {
       ref: data.ref,
       sha: data.sha,
+      ...(data.ownerFence !== undefined ? { ownerFence: data.ownerFence as number, ownerGen: this.opts.ownerGen } : {}),
       ...(["hardlink", "copy", "reconcile", "none"].includes(String(data.deps))
         ? { deps: data.deps as ThreadDepsMechanism }
         : {}),
@@ -1391,6 +1452,12 @@ export class ResidentExecutor implements Executor {
       ...(rebindRefused !== undefined ? { rebindRefused } : {}),
       ...(returned !== undefined ? { returned } : {}),
     };
+    try {
+      await this.opts.onBinding?.(this.lastBinding);
+    } catch {
+      this.refuseAttachment("attachment binding could not be saved");
+    }
+    this.attachmentFailure = undefined;
     this.shaPending = false; // bound at the commit asked for; recovery re-attaches name none
     return { ok: true, binding: this.lastBinding };
   }
@@ -1427,8 +1494,10 @@ export class ResidentExecutor implements Executor {
       const defaultRef = typeof data.defaultRef === "string" && data.defaultRef ? data.defaultRef : undefined;
       return traced(new ResidentNeedsRefError(this.opts.resource, defaultRef));
     }
-    if (status === 409 && err.startsWith("run-registration-mismatch:"))
-      return traced(new ResidentRegistrationMismatchError(this.opts.resource, err));
+    if (status === 409 && err.startsWith("run-registration-mismatch:")) {
+      this.attachmentFailure = new ResidentRegistrationMismatchError(this.opts.resource, err);
+      return traced(this.attachmentFailure);
+    }
     if (status === 409 && data.needs === "recreate")
       return traced(new ResidentReuseRefusedError(this.opts.resource, err));
     if (status === 404)
@@ -1466,9 +1535,7 @@ export class ResidentExecutor implements Executor {
    *  rides into the attach and the wake wait a transient refusal begins, so a
    *  stopped round never sits out the wake ceiling. */
   async moveTo(sha: string, opts?: MoveOptions): Promise<{ sha: string }> {
-    this.opts = { ...this.opts, sha };
-    this.shaPending = true;
-    const binding = await this.attach(opts?.span, { signal: opts?.signal });
+    const binding = await this.attach(opts?.span, { signal: opts?.signal, targetSha: sha });
     return { sha: binding.sha };
   }
 
@@ -1548,6 +1615,7 @@ export class ResidentExecutor implements Executor {
     body: Record<string, unknown>,
     opts: { signal?: AbortSignal; callTimeoutMs?: number; waitBudgetMs?: number; span?: Span } = {},
   ): Promise<{ status: number; data: Record<string, unknown> }> {
+    if (this.attachmentFailure) throw this.attachmentFailure;
     const { signal, span } = opts;
     const callTimeoutMs = opts.callTimeoutMs ?? BASH_TIMEOUT_MS;
     // Worktree still gone after a re-attach — the resident is unhealthy
@@ -1759,6 +1827,18 @@ export class ResidentExecutor implements Executor {
    *  Worker unreachable throughout ends in `worker-unavailable`, never
    *  `refused`. */
   private async awaitWake(
+    route: string,
+    refusal: string,
+    opts: Parameters<ResidentExecutor["performWake"]>[2],
+  ): Promise<{ waitedMs: number; binding: ResidentBinding }> {
+    // Attach-owned waits already hold admission; operation-owned waits must
+    // acquire it before any wake or drain reattachment can change the binding.
+    return route === "/attach"
+      ? this.performWake(route, refusal, opts)
+      : this.serializeAttachment(() => this.performWake(route, refusal, opts));
+  }
+
+  private async performWake(
     route: string,
     refusal: string,
     opts: {

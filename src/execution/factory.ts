@@ -184,6 +184,8 @@ export interface ExecutorContext {
   requester?: string;
   /** Awaited observations from the resident's two wait states. */
   onLiveStateObservation?: ResidentLiveStateObserver;
+  /** Awaited for every successful resident attachment, including automatic recovery. */
+  onResidentBinding?: (binding: ResidentBinding) => Promise<void>;
 }
 
 /** Where a run's workspace is (docs/reference/specs/run-history.md item 54):
@@ -203,6 +205,9 @@ export interface WorkspaceBinding {
   /** The identity of the container the workspace is in (docs/reference/specs/harness-pi.md
    *  item 8), when the attach answered one: the resident's is its VM's boot id. */
   container?: string;
+  /** Exact successful resident attach fence; absent means unverified. */
+  ownerFence?: number;
+  ownerGen?: string;
   /** The physical Cloudflare sandbox identity, distinct from the logical thread for new read-profile reviews. */
   sandboxKey?: string;
   /** Trusted fetched branch tip before this run can change its checkout. */
@@ -267,6 +272,12 @@ export function workspaceBindingOf(value: unknown): WorkspaceBinding | undefined
       ? { sandboxKey: typeof v.sandboxKey === "string" ? v.sandboxKey : "" }
       : {}),
     ...(typeof v.container === "string" && v.container ? { container: v.container } : {}),
+    ...(v.backend === "resident" && Number.isSafeInteger(v.ownerFence) && Number(v.ownerFence) > 0
+      ? { ownerFence: v.ownerFence as number }
+      : {}),
+    ...(v.backend === "resident" && typeof v.ownerGen === "string" && /^[A-Za-z0-9_.:-]{1,128}$/.test(v.ownerGen)
+      ? { ownerGen: v.ownerGen }
+      : {}),
     ...(typeof v.publicationBaseSha === "string" && /^[0-9a-f]{40}$/.test(v.publicationBaseSha)
       ? { publicationBaseSha: v.publicationBaseSha }
       : {}),
@@ -276,7 +287,8 @@ export function workspaceBindingOf(value: unknown): WorkspaceBinding | undefined
 
 /** The checkout supplied by attach, seed or the verified pre-model cold clone. */
 export function checkoutOfSelection(selection: ExecutorSelection): string | undefined {
-  return selection.binding?.workspace ?? selection.seeded?.workspace ?? selection.cold?.workspace;
+  const binding = selection.executor instanceof ResidentExecutor ? selection.executor.binding : selection.binding;
+  return binding?.workspace ?? selection.seeded?.workspace ?? selection.cold?.workspace;
 }
 
 const COLD_CHECKOUT_PATH = /^\/(?:[A-Za-z0-9._-]+\/)*checkout$/;
@@ -349,16 +361,16 @@ export async function prepareColdPublicationCheckout(
  *  and a resident's pool user and container. Nothing for a class without a
  *  workspace (`none`): there is nothing to re-attach. */
 export function workspaceBindingFor(
-  selection: ExecutorSelection,
+  selection: Omit<ExecutorSelection, "executor"> & Partial<Pick<ExecutorSelection, "executor">>,
   machine: MachineClass = "repo-resident",
   recorded?: WorkspaceBinding | null,
 ): WorkspaceBinding | undefined {
   if (machine === "none" || selection.backend === undefined) return undefined;
-  const b = selection.binding;
-  const checkout = checkoutOfSelection(selection);
+  const b = selection.executor instanceof ResidentExecutor ? selection.executor.binding : selection.binding;
+  const checkout = b?.workspace ?? selection.seeded?.workspace ?? selection.cold?.workspace;
   const publicationBaseSha =
     recorded === undefined
-      ? (b?.sha ?? selection.seeded?.sha ?? selection.cold?.sha)
+      ? (selection.binding?.sha ?? b?.sha ?? selection.seeded?.sha ?? selection.cold?.sha)
       : recorded?.backend === selection.backend
         ? recorded.publicationBaseSha
         : undefined;
@@ -367,6 +379,8 @@ export function workspaceBindingFor(
     ...(b?.ref !== undefined || selection.cold?.ref !== undefined ? { ref: b?.ref ?? selection.cold?.ref } : {}),
     ...(checkout !== undefined ? { workspace: checkout } : {}),
     ...(b?.user !== undefined ? { user: b.user } : {}),
+    ...(selection.backend === "resident" && b?.ownerFence !== undefined ? { ownerFence: b.ownerFence } : {}),
+    ...(selection.backend === "resident" && b?.ownerGen !== undefined ? { ownerGen: b.ownerGen } : {}),
     ...(b?.container !== undefined || selection.seeded?.preservationContainer !== undefined
       ? { container: b?.container ?? selection.seeded?.preservationContainer }
       : {}),
@@ -646,9 +660,17 @@ export async function makeExecutor(
    *  probe and the attach become its `http.client` children (tracing.md item 21). */
   span?: Span,
 ): Promise<ExecutorSelection> {
+  if (ctx.reattach === undefined) assertRemainingAllowance(ctx);
   const sandboxKey = physicalSandboxKey(opts, ctx);
   const selection = await selectExecutor(opts, ctx, sandboxKey, span);
   return selection.backend === "sandbox" && sandboxKey !== undefined ? { ...selection, sandboxKey } : selection;
+}
+
+function assertRemainingAllowance(ctx: ExecutorContext): void {
+  const remaining = ctx.remainingMs?.();
+  if (remaining === undefined) return;
+  const bound = attachBoundWithinRun(remaining);
+  if (bound.kind === "exhausted") throw new ResidentLeaseSpentError("/attach", bound.note, remaining);
 }
 
 /** A recorded key wins on recovery. An older binding used the thread key; it must not
@@ -891,8 +913,10 @@ async function selectExecutor(
   // The same ledger owner must authorize both resident attach and every cold
   // fallback. A stale generation cannot bypass the fence when the probe fails.
   if (ctx.residentClaim !== undefined) await ctx.residentClaim();
-  const recheckOwner = async (): Promise<number | undefined> =>
-    ctx.residentClaim === undefined ? undefined : ctx.residentClaim();
+  const recheckOwner = async (): Promise<number | undefined> => {
+    assertRemainingAllowance(ctx);
+    return ctx.residentClaim === undefined ? undefined : ctx.residentClaim();
+  };
 
   // `repo-resident`. Resident selection: only when a target repo was resolved
   // AND the resident backend is configured. A SERVICEABLE state → ResidentExecutor;
@@ -915,12 +939,20 @@ async function selectExecutor(
     const token = processSecrets.named(tokenEnv);
     if (!token) throw new Error(`execution.resident is configured but ${tokenEnv} is not set`);
     const resource = repoResourceId(ctx.repo);
-    const through = await probeThroughBlip(resident, token, resource, span, ctx.stopSignal);
+    const through = await probeThroughBlip(
+      resident,
+      token,
+      resource,
+      span,
+      ctx.stopSignal,
+      leaseClippedBudget(ctx.remainingMs?.()),
+    );
     let probe: ResidentStatusProbe = through.probe;
     /** How long the selection probe waited through a blip the Worker typed
      *  transient (execution.md item 9): drawn from the first attach's budget
      *  and named on the card with the attach's own wait. */
     const probeWaitMs = through.waitedMs;
+    assertRemainingAllowance(ctx);
     /** Set when the run held the one /await-restore request (item 27) — the
      *  card names the wait whichever way the answer went. */
     let waitedForRestore = false;
@@ -933,13 +965,14 @@ async function selectExecutor(
         resident.baseUrl,
         token.reveal(),
         resource,
-        AWAIT_RESTORE_TIMEOUT_MS,
+        restoreHoldBudget(ctx.remainingMs?.()),
         span,
         ctx.stopSignal,
       );
       // The run's own stop ended the hold: the stop's typed shape, read by the
       // dispatch as the stop it is — a stopped run is never provisioned cold.
       if (wait.kind === "stopped") throw wakeStopped("/await-restore");
+      assertRemainingAllowance(ctx);
       if (wait.kind === "status") {
         waitedForRestore = true;
         // The state the restore landed on; the probe's seed handle (item 25)
@@ -1003,6 +1036,7 @@ async function selectExecutor(
             ...(ctx.ownPr !== undefined ? { ownPr: ctx.ownPr } : {}),
             ...(ctx.remainingMs !== undefined ? { remainingMs: ctx.remainingMs } : {}),
             ...(ctx.onLiveStateObservation !== undefined ? { onLiveStateObservation: ctx.onLiveStateObservation } : {}),
+            ...(ctx.onResidentBinding !== undefined ? { onBinding: ctx.onResidentBinding } : {}),
           },
           nonWarm,
           span,
@@ -1477,6 +1511,7 @@ async function reattachWorkspace(
     runBudgetMs: minutesToMs(ctx.profile.minutes),
     ...(ctx.setupRemainingMs !== undefined ? { setupRemainingMs: ctx.setupRemainingMs } : {}),
     ...(ctx.onLiveStateObservation !== undefined ? { onLiveStateObservation: ctx.onLiveStateObservation } : {}),
+    ...(ctx.onResidentBinding !== undefined ? { onBinding: ctx.onResidentBinding } : {}),
   });
   let binding: ResidentBinding;
   try {
@@ -1727,6 +1762,7 @@ async function probeResident(
    *  operator who set it to keep a cold fallback fast gets that pace through
    *  the wait too. */
   stop?: AbortSignal,
+  remainingMs?: number,
 ): Promise<ResidentStatusProbe> {
   if (probeOutage && systemClock() < probeOutage.until) {
     return { kind: "unreachable", error: `${probeOutage.error}; probe skipped during outage window`, transport: true };
@@ -1735,7 +1771,7 @@ async function probeResident(
     cfg.baseUrl,
     token.reveal(),
     resource,
-    cfg.probeTimeoutMs ?? PROBE_TIMEOUT_MS,
+    Math.max(1, Math.min(cfg.probeTimeoutMs ?? PROBE_TIMEOUT_MS, remainingMs ?? Infinity)),
     span,
     stop,
   );
@@ -1786,7 +1822,12 @@ async function probeThroughBlip(
   budgetMs: number = FIRST_ATTACH_WAIT_MS,
 ): Promise<{ probe: ResidentStatusProbe; waitedMs: number }> {
   const since = systemClock();
-  const first = await probeResident(cfg, token, resource, span, stopSignal);
+  const left = () => Math.max(0, budgetMs - (systemClock() - since));
+  const probeWithinAllowance = (signal?: AbortSignal) => {
+    const remaining = left();
+    return probeResident(cfg, token, resource, span, signal, remaining);
+  };
+  const first = await probeWithinAllowance(stopSignal);
   // The stop aborted the probe: the stop's own typed error, as the loop throws
   // it after each of its probes — never a cold fallback on the view the stop
   // itself produced. A stop pending beside an answer is read where the
@@ -1814,7 +1855,7 @@ async function probeThroughBlip(
   return waitOnStatus<{ probe: ResidentStatusProbe; waitedMs: number }>({
     first,
     since,
-    probe: (signal) => probeResident(cfg, token, resource, span, signal),
+    probe: probeWithinAllowance,
     budgetMs,
     signal: stopSignal,
     route: "/status",

@@ -49,12 +49,35 @@ const trimmed = async (git: GitRunner, args: readonly string[], cwd: string): Pr
  *  `--skip`) — is thrown with git's own words, never reported as a conflict. */
 export async function rebaseOntoBase(
   git: GitRunner,
-  opts: { dir: string; base: string; remote?: string },
+  opts: { dir: string; base: string; remote?: string; baseHead?: string },
 ): Promise<GitRebaseOutcome> {
   const remote = opts.remote ?? "origin";
-  const fetch = await git.run(["fetch", remote, opts.base], opts.dir);
+  const fetch = await git.run(["fetch", remote, opts.baseHead ?? opts.base], opts.dir);
   if (fetch.code !== 0) throw new Error(`git fetch failed: ${fetch.stderr.trim()}`);
-  let step = await git.run([...RERERE, "rebase", `${remote}/${opts.base}`], opts.dir);
+  const deterministic = opts.baseHead
+    ? [
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        "rebase.backend=merge",
+        "-c",
+        "rebase.autoSquash=false",
+        "-c",
+        "rebase.updateRefs=false",
+      ]
+    : [];
+  let step = await git.run(
+    [
+      ...deterministic,
+      ...RERERE,
+      "rebase",
+      ...(opts.baseHead ? ["--committer-date-is-author-date", "--no-autosquash", "--no-update-refs"] : []),
+      opts.baseHead ?? `${remote}/${opts.base}`,
+    ],
+    opts.dir,
+  );
   let lastStop: string | undefined;
   while (step.code !== 0) {
     const gitSaid = step.stderr.trim() || step.stdout.trim();
@@ -85,7 +108,7 @@ export async function rebaseOntoBase(
       throw new Error(`git rebase --continue made no progress at ${stopAt}: ${gitSaid}`);
     }
     lastStop = stopAt;
-    step = await git.run([...RERERE, "rebase", "--continue"], opts.dir);
+    step = await git.run([...deterministic, ...RERERE, "rebase", "--continue"], opts.dir);
   }
   return { kind: "clean", newHead: await trimmed(git, ["rev-parse", "HEAD"], opts.dir) };
 }
@@ -118,15 +141,16 @@ export async function patchUnchanged(
  *  that moved under the sweep refuses the push instead of losing the move. */
 export async function forcePushWithLease(
   git: GitRunner,
-  opts: { dir: string; branch: string; preRebaseHead: string; remote?: string },
+  opts: { dir: string; branch: string; preRebaseHead: string; remote?: string; newHead?: string },
 ): Promise<void> {
   const remote = opts.remote ?? "origin";
   const out = await git.run(
     [
+      ...(opts.newHead ? ["-c", "core.hooksPath=/dev/null"] : []),
       "push",
       "--force-with-lease=" + `refs/heads/${opts.branch}:${opts.preRebaseHead}`,
       remote,
-      `HEAD:refs/heads/${opts.branch}`,
+      `${opts.newHead ?? "HEAD"}:refs/heads/${opts.branch}`,
     ],
     opts.dir,
   );

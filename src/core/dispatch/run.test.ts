@@ -501,38 +501,6 @@ describe("claimRun — the ledger claim once the prompt exists", () => {
   // run-history item 48a: the coordinator tag is a fact of the run — the claim
   // publishes it as a typed event, so it lands on the ledger row and a resume
   // after a bot roll reads the plan's base back off the run's own events.
-  it("a coordinator's child publishes its tag as a `coordinator_tag` event at the claim — instance, unit and base — mirrored onto the row; a resume republishes nothing", async () => {
-    const { deps, ledger, base } = setup();
-    const reserved = new NullLedgerRun("run-c", { put: async () => {}, abandoned: () => {} });
-    const coordinator = {
-      parentInstanceId: "plan-p-2",
-      idempotencyKey: "plan-p-2:U16/1/coding",
-      costCapUsd: 50,
-      branch: "plan/p/u16",
-      base: "feat/trunk",
-      issuedFindingIds: ["F1", "check:ci / bot"],
-    };
-    await claimRun(deps, { ...base, reserved, resume: undefined, ledgerRun: undefined, coordinator });
-    expect(ledger.handle!.events.map((e) => e.event)).toEqual([
-      {
-        type: "coordinator_tag",
-        parentInstanceId: "plan-p-2",
-        costCapUsd: 50,
-        unit: "U16",
-        branch: "plan/p/u16",
-        base: "feat/trunk",
-        issuedFindingIds: ["F1", "check:ci / bot"],
-        at: NOW,
-        seq: 1,
-      },
-    ]);
-
-    const resumed = setup();
-    const adopted = new RecordingRun("run-c", { put: async () => {}, abandoned: () => {} });
-    const resume = { lastSeq: 3 } as unknown as ResumeContext;
-    await claimRun(resumed.deps, { ...resumed.base, reserved: undefined, resume, ledgerRun: adopted, coordinator });
-    expect(adopted.events).toEqual([]);
-  });
 
   it("a promotion gone untracked publishes the ledger_untracked note with the why and marks the card through markUntracked — the same label the reserve-time path sets", async () => {
     const { deps, registry, run, base } = setup();

@@ -198,7 +198,7 @@ export async function classifyLoopFailure(
  *  later, and is neither `pendingSend` nor queued until it settles. */
 export function reattachTransport(
   old: PiRpcTransport,
-  deps: Pick<PiRpcTransportDeps, "container" | "paths" | "pid" | "pollMs" | "sleep">,
+  deps: Pick<PiRpcTransportDeps, "container" | "paths" | "pid" | "pollMs" | "sleep" | "admitWrite">,
 ): { transport: PiRpcTransport; unsent: Record<string, unknown>[] } {
   const offset = old.consumedOffset;
   const unsent = old.takeUnsent("reattach");

@@ -1,3 +1,5 @@
+import { seedCoordinatorUnit } from "../testing/coordinatorInstance.js";
+import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { describe, expect, it, vi } from "vitest";
 import type { Actor } from "../authz/types.js";
 import { createPlaneService, type PlaneService } from "../planeService.js";
@@ -69,7 +71,7 @@ function actor(over: Partial<Actor> = {}): Actor {
 }
 
 async function fixture(over: Partial<CoordinatorUnit> = {}) {
-  const instances = new InMemoryCoordinatorInstanceStore();
+  const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
   await instances.recordRequesterTurn({ threadKey: THREAD, requesterId: INSTANCE.userId, messageId: "1" });
   expect(
     await instances.claimMainTask({ mainThreadKey: THREAD, actId: ACT }, INSTANCE, UNIT, {
@@ -255,7 +257,7 @@ describe("main task actions", () => {
       liveAuthority: {
         active: () => true,
         verify: async () => {
-          await instances.putUnits([{ ...UNIT, startedAt: 1_100 + ++checks }]);
+          seedCoordinatorUnit(instances, { ...UNIT, startedAt: 1_100 + ++checks });
           return true;
         },
       },
@@ -506,8 +508,9 @@ describe("main task actions", () => {
     expect(events.some((event) => event.sender === INSTANCE.userId)).toBe(true);
   });
 
-  it("a failed nudge leaves the event queued", async () => {
+  it("a failed nudge leaves the event queued and offers reconciliation to its original owner", async () => {
     const { instances } = await fixture();
+    const offer = vi.spyOn(instances, "offerReconciliation");
     const actions = createMainTaskActions({
       instances,
       workflow: {
@@ -524,6 +527,7 @@ describe("main task actions", () => {
       nudge: "pending",
     });
     expect(await instances.listEvents({ instanceId: INSTANCE.id, unit: "task" })).toHaveLength(1);
+    expect(offer).toHaveBeenCalledExactlyOnceWith({ instanceId: INSTANCE.id, unit: "task" });
   });
 
   it("a persisted steer is nudged without reading the unit's full event history", async () => {

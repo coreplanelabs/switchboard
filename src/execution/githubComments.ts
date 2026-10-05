@@ -1,5 +1,6 @@
 import { resolveGithubToken } from "./githubApp.js";
-import { redactAndCap } from "../core/redact.js";
+import type { GithubWriteResult } from "./githubPulls.js";
+import { isPublicationRepo } from "../core/branchPublication.js";
 import { MAX_REVIEW_POST_CODE_POINTS } from "../core/reviewVerdict.js";
 
 // Posting a review back to a PR. The bot process posts the comment
@@ -34,36 +35,54 @@ export interface ReviewCommentTarget {
 }
 
 /**
- * Post a plain comment to a PR. Throws on missing credential or a non-2xx
- * response so the caller can log a receipt/failure; callers treat it as
- * best-effort (the Slack reply is the primary delivery).
+ * Post only a pinned review. A positive exact native receipt credits acceptance;
+ * ambiguous transport or response bytes retain an uncertain original write.
  */
-export async function postReviewComment(target: ReviewCommentTarget, body: string): Promise<void> {
-  const codePoints = [...body].length;
-  if (codePoints > MAX_REVIEW_POST_CODE_POINTS) {
-    throw new Error(
-      `PR review body is ${codePoints} Unicode code points, over the ${MAX_REVIEW_POST_CODE_POINTS} limit; refusing to clip the structured verdict`,
-    );
-  }
+export async function postReviewComment(target: ReviewCommentTarget, body: string): Promise<GithubWriteResult> {
+  if (
+    !isPublicationRepo(target.repo) ||
+    !Number.isSafeInteger(target.number) ||
+    target.number < 1 ||
+    typeof target.commitId !== "string" ||
+    !/^[a-f0-9]{40}$/.test(target.commitId) ||
+    [...body].length > MAX_REVIEW_POST_CODE_POINTS
+  )
+    return { state: "refused" };
   const token = await resolveGithubToken();
-  if (!token) {
-    throw new Error("no GitHub credential available to post the PR review comment");
-  }
+  if (!token) return { state: "refused" };
   const payload: Record<string, string> = { event: "COMMENT", body };
   if (target.commitId) payload.commit_id = target.commitId;
-  const res = await fetch(`https://api.github.com/repos/${target.repo}/pulls/${target.number}/reviews`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${token}`,
-      accept: "application/vnd.github+json",
-      "content-type": "application/json",
-      "user-agent": "switchboard",
-    },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(15000),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`PR comment post failed: HTTP ${res.status} ${redactAndCap(text, 300)}`);
+  try {
+    const res = await fetch(`https://api.github.com/repos/${target.repo}/pulls/${target.number}/reviews`, {
+      method: "POST",
+      redirect: "manual",
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: "application/vnd.github+json",
+        "content-type": "application/json",
+        "user-agent": "switchboard",
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok)
+      return res.status >= 400 && res.status < 500 && res.status !== 408
+        ? { state: "refused", status: res.status }
+        : { state: "uncertain" };
+    const receipt: unknown = await res.json();
+    if (!receipt || typeof receipt !== "object") return { state: "uncertain" };
+    const r = receipt as Record<string, unknown>;
+    return Number.isSafeInteger(r.id) &&
+      (r.id as number) > 0 &&
+      r.state === "COMMENTED" &&
+      r.body === body &&
+      r.commit_id === target.commitId &&
+      typeof r.pull_request_url === "string" &&
+      r.pull_request_url.toLowerCase() ===
+        `https://api.github.com/repos/${target.repo.toLowerCase()}/pulls/${target.number}`
+      ? { state: "accepted" }
+      : { state: "uncertain" };
+  } catch {
+    return { state: "uncertain" };
   }
 }

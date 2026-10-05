@@ -75,7 +75,7 @@ describe("resident pool UID binding index", () => {
     expect(put).toContain("this.ctx.storage.transaction");
     expect(put).toContain("releasePoolBinding(");
     expect(put).toContain("claimPoolBinding(");
-    expect(put).toContain("await txn.put(key, next)");
+    expect(put).toMatch(/await txn\.put\(\s*key,/);
     expect(method("deleteThreadBinding")).toContain("await txn.delete(key)");
     expect(source).not.toMatch(/this\.ctx\.storage\.(?:put|delete)\(threadBindingKey\(/);
     expect(method("allocateThreadUser")).toContain("this.putThreadBinding(binding)");

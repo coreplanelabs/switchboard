@@ -105,7 +105,7 @@ describe("a DIRTY push-to-base wakes the resolver under the caps (record 0071, m
     });
     book.note(entry({ number: 7 }));
     book.note(entry({ number: 8 }));
-    const results = await watch.pushToBase("acme/api", "main");
+    const results = await watch.pushToBase("acme/api", "main", "github:fixture-base-push");
     expect(results).toEqual([
       { repo: "acme/api", number: 7, outcome: "resolver" },
       { repo: "acme/api", number: 8, outcome: "queued" },
@@ -134,7 +134,7 @@ describe("a DIRTY push-to-base wakes the resolver under the caps (record 0071, m
       });
       book.note(entry({ number: 7 }));
       book.note(entry({ number: 8 }));
-      await watch.pushToBase("acme/api", "main");
+      await watch.pushToBase("acme/api", "main", "github:fixture-base-push");
       first.resolve();
       await tick();
       await tick();
@@ -151,29 +151,31 @@ describe("a DIRTY push-to-base wakes the resolver under the caps (record 0071, m
       facts: async () => ({ state: "open", mergeableState: "behind" }),
     });
     book.note(entry());
-    expect(await watch.pushToBase("acme/api", "main")).toEqual([{ repo: "acme/api", number: 7, outcome: "stood" }]);
+    expect(await watch.pushToBase("acme/api", "main", "github:fixture-base-push")).toEqual([
+      { repo: "acme/api", number: 7, outcome: "stood" },
+    ]);
     expect(resolved).toEqual([]);
   });
 
   it("a still-recomputing mergeable_state stands too — nothing retries on a clock", async () => {
     const { watch, book, resolved } = harness({ facts: async () => ({ state: "open", mergeableState: "unknown" }) });
     book.note(entry());
-    expect((await watch.pushToBase("acme/api", "main"))[0]!.outcome).toBe("stood");
+    expect((await watch.pushToBase("acme/api", "main", "github:fixture-base-push"))[0]!.outcome).toBe("stood");
     expect(resolved).toEqual([]);
   });
 
   it("with the watch off for the repository, no round is bought", async () => {
     const { watch, book, resolved } = harness({}, { watch: false });
     book.note(entry());
-    expect((await watch.pushToBase("acme/api", "main"))[0]!.outcome).toBe("off");
+    expect((await watch.pushToBase("acme/api", "main", "github:fixture-base-push"))[0]!.outcome).toBe("off");
     expect(resolved).toEqual([]);
   });
 
   it("a push to another base, or another repository, wakes nothing", async () => {
     const { watch, book, resolved } = harness();
     book.note(entry({ base: "main" }));
-    expect(await watch.pushToBase("acme/api", "release")).toEqual([]);
-    expect(await watch.pushToBase("acme/web", "main")).toEqual([]);
+    expect(await watch.pushToBase("acme/api", "release", "github:fixture-base-push")).toEqual([]);
+    expect(await watch.pushToBase("acme/web", "main", "github:fixture-base-push")).toEqual([]);
     expect(resolved).toEqual([]);
   });
 });
@@ -182,7 +184,7 @@ describe("the spend cap: the DIRTY stands and the card names the sweep (record 0
   it("a pull request at its spend limit buys no round; its card names `pulls rebase`", async () => {
     const { watch, book, resolved, cards } = harness({ spendOf: async () => 5 }, { spendLimitUsd: 5 });
     book.note(entry());
-    expect((await watch.pushToBase("acme/api", "main"))[0]!.outcome).toBe("spend-capped");
+    expect((await watch.pushToBase("acme/api", "main", "github:fixture-base-push"))[0]!.outcome).toBe("spend-capped");
     expect(resolved).toEqual([]);
     expect(cards).toEqual([spendCapLine({ repo: "acme/api", number: 7 }, 5)]);
     expect(cards[0]).toContain("pulls rebase acme/api#7");
@@ -195,21 +197,21 @@ describe("a merged fact, whoever merged, ends the unit `merged` by other (record
       facts: async () => ({ state: "merged", sha: "b".repeat(40), mergedAt: "2026-09-20T00:00:00Z" }),
     });
     book.note(entry());
-    expect((await watch.pushToBase("acme/api", "main"))[0]!.outcome).toBe("merged");
+    expect((await watch.pushToBase("acme/api", "main", "github:fixture-base-push"))[0]!.outcome).toBe("merged");
     expect(merged).toHaveLength(1);
     expect(merged[0]).toMatchObject({ sha: "b".repeat(40), mergedAt: "2026-09-20T00:00:00Z" });
     expect(merged[0]!.entry.instanceId).toBe("inst-1");
     expect(resolved).toEqual([]);
     // Dropped: the next push finds nothing to read.
-    expect(await watch.pushToBase("acme/api", "main")).toEqual([]);
+    expect(await watch.pushToBase("acme/api", "main", "github:fixture-base-push")).toEqual([]);
   });
 
   it("a closed-unmerged pull request is dropped without a word", async () => {
     const { watch, book, merged } = harness({ facts: async () => ({ state: "closed" }) });
     book.note(entry());
-    expect((await watch.pushToBase("acme/api", "main"))[0]!.outcome).toBe("dropped");
+    expect((await watch.pushToBase("acme/api", "main", "github:fixture-base-push"))[0]!.outcome).toBe("dropped");
     expect(merged).toEqual([]);
-    expect(await watch.pushToBase("acme/api", "main")).toEqual([]);
+    expect(await watch.pushToBase("acme/api", "main", "github:fixture-base-push")).toEqual([]);
   });
 });
 
@@ -224,5 +226,37 @@ describe("the merge-ready book", () => {
     expect(onMain.find((e) => e.number === 7)?.headSha).toBe("c".repeat(40));
     book.drop("acme/api", 7);
     expect(book.onBase("acme/api", "main").map((e) => e.number)).toEqual([8]);
+  });
+});
+
+describe("trusted maintenance watch source", () => {
+  it("missing or non-GitHub delivery evidence cannot start a resolver write", async () => {
+    const resolve = vi.fn(async (e: MergeReadyEntry) => report(e.repo, e.number));
+    const { watch, book } = harness({ resolve });
+    book.note(entry());
+    for (const eventId of [undefined, "", "command:unproven"])
+      expect((await watch.pushToBase("acme/api", "main", eventId))[0]?.outcome).toBe("stood");
+    expect(resolve).not.toHaveBeenCalled();
+  });
+  it("a queued resolver retains its exact triggering delivery and original owner requester", async () => {
+    const first = deferred();
+    const sources: unknown[] = [];
+    const { watch, book } = harness({
+      resolve: async (e, intent) => {
+        sources.push(intent);
+        if (sources.length === 1) await first.promise;
+        return report(e.repo, e.number);
+      },
+    });
+    book.note(entry());
+    await watch.pushToBase("acme/api", "main", "github:first-delivery");
+    await watch.pushToBase("acme/api", "main", "github:second-delivery");
+    first.resolve();
+    await tick();
+    await tick();
+    expect(sources).toEqual([
+      { kind: "watch", eventId: "github:first-delivery", instanceId: "inst-1", unit: "U12", requester: "slack:U12" },
+      { kind: "watch", eventId: "github:second-delivery", instanceId: "inst-1", unit: "U12", requester: "slack:U12" },
+    ]);
   });
 });

@@ -1,3 +1,4 @@
+import { seedCoordinatorInstance, seedCoordinatorUnit } from "../core/testing/coordinatorInstance.js";
 import { booleanAudienceVerifier } from "../core/testing/audienceVerifier.js";
 import { describe, expect, it, vi } from "vitest";
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
@@ -10,6 +11,8 @@ import { ALL_GRANTS } from "../core/authz/grants.js";
 import { InMemoryCoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import { createMainTaskStarter } from "../core/coordinator/mainStart.js";
 import { generatedTaskOf } from "../core/coordinator/generatedTask.js";
+import { coordinatorReconciliationEffect } from "../core/coordinator/workflowReconciliation.js";
+import { workflowSteps } from "../core/coordinator/steps.js";
 import {
   InMemoryPrivateWorkerLog,
   UnavailablePrivateWorkerLog,
@@ -43,7 +46,13 @@ import type { DispatchOutcome } from "../core/dispatch/outcome.js";
 import { REPLAY_EVERYTHING, RunRegistry } from "../core/runRegistry.js";
 import { InMemoryRunStore } from "../core/runStore.js";
 import { InMemoryRunLedger } from "../core/runLedger/inMemory.js";
+import {
+  readCoordinatorPublicDelivery,
+  coordinatorPublicDeliveryReference,
+} from "../core/coordinator/reportPublicDelivery.js";
 import { contextThreadSessionKey } from "../core/runLedger/sessionLog.js";
+import { nullChannelIO } from "../core/nullChannelIo.js";
+import { freezeCoordinatorReport, readCoordinatorReport } from "../core/coordinator/reportContext.js";
 import { createLedgerWriteThrough } from "../core/runLedger/writeThrough.js";
 import { hostKeyOf } from "../core/runLedger/hostKey.js";
 import {
@@ -74,7 +83,6 @@ import type { GithubIdentity } from "../execution/githubApp.js";
 import type { RunHistoryWriter } from "../core/runHistoryWriter.js";
 import { pipelineOfEvents } from "../core/pipelineStanding.js";
 import { verifyExistingPrPublication } from "../core/existingPrPublication.js";
-import { RunnerOwnershipFence } from "../core/runnerOwnership.js";
 import { parseModelPrices, type ModelPriceTable } from "../core/modelPricing.js";
 import {
   COORDINATOR_ADMIN_PREFIX,
@@ -86,6 +94,7 @@ import {
   isCoordinatorAdminPath,
   planSummary,
   recoverOriginalUnit,
+  reconcileCoordinatorReport,
   adoptOriginalPublishedHead,
   recoveredFallbackTitle,
   type AdminCoordinatorDeps,
@@ -215,6 +224,21 @@ const registers =
     return { status: "completed" };
   };
 
+// Retained competing evidence is not a claim that a new conflicting admission succeeds.
+function seedPublicationRival(h: ReturnType<typeof harness>, pr: number): void {
+  const rival = { ...INSTANCE, id: "ship_rival", branch: "plan/rival/u99" };
+  seedCoordinatorInstance(h.instances, rival);
+  seedCoordinatorUnit(h.instances, {
+    instanceId: rival.id,
+    unit: "U99",
+    slug: "u99",
+    branch: rival.branch,
+    dependsOn: [],
+    rounds: [],
+    pr: { number: pr, url: `https://github.com/acme/api/pull/${pr}` },
+  });
+}
+
 function harness(
   over: {
     script?: Script;
@@ -303,7 +327,7 @@ function harness(
     fallback: { put: (r) => store.put(r), abandoned: () => {} },
     warn: () => {},
   });
-  const instances = new InMemoryCoordinatorInstanceStore();
+  const instances = new InMemoryCoordinatorInstanceStore(ledger);
   const dispatched: Array<{ msg: IncomingMessage; opts?: { coordinator: CoordinatorTag } }> = [];
   const replies: string[] = [];
   const io: ChannelIO = {
@@ -331,10 +355,10 @@ function harness(
   const recoveries: Array<{ id: string; params: OriginalUnitRecoveryParams }> = [];
   let reviewFetches = 0;
   const github = new InMemoryGithubApi({ "acme/api": { files: over.files ?? {}, issues: over.issues ?? [] } });
+  let dispatchScript = over.script ?? registers("run-child");
   const deps: AdminCoordinatorDeps = {
     tokens: "tokens" in over ? over.tokens : TOKENS,
     childAdmission: createCoordinatorChildAdmission(() => over.draining === true),
-    runnerOwnership: new RunnerOwnershipFence(false),
     grantsFor: (id) => GRANTS[id] ?? NO_GRANTS,
     instances,
     startRecovery: async (id, params) => {
@@ -351,7 +375,95 @@ function harness(
     reportLedger: ledger,
     dispatch: async (msg, dispatchIo, opts) => {
       dispatched.push({ msg, opts });
-      return (over.script ?? registers("run-child"))(msg, dispatchIo, opts);
+      const tag = opts!.coordinator;
+      let registration: Promise<void> = Promise.resolve();
+      let registeredId: string | undefined;
+      const fixtureIO: ChannelIO = {
+        ...dispatchIo,
+        runStarted: ({ id }) => {
+          registration = (async () => {
+            const agent = msg.text.startsWith("agent:review") ? "review" : "coding";
+            const claimed = await ledger.claim({
+              runId: id,
+              threadKey: msg.threadKey,
+              gen: "gen-A",
+              leaseMs: 30_000,
+              startedAt: NOW,
+              meta: {
+                agent,
+                channelId: msg.channelId,
+                userId: msg.userId,
+                threadKey: msg.threadKey,
+                authenticatedAs: msg.authenticatedAs,
+                postedBy: msg.postedBy,
+                repo: opts!.operationTarget!.repo,
+                ref: tag.branch,
+                parentInstanceId: tag.parentInstanceId,
+                coordinatorUnit: tag.unit,
+                coordinatorAttempt: tag.instanceAttempt,
+                idempotencyKey: tag.idempotencyKey,
+                ...(agent === "review" ? { pr: tag.publication?.pr, headSha: tag.publication?.expectedHeadSha } : {}),
+              },
+              card: null,
+              system: "",
+              tools: [],
+              state: {},
+            });
+            expect(claimed).toMatchObject({ ok: true });
+            expect(
+              await ledger.append(id, "gen-A", [
+                {
+                  type: "run_meta",
+                  agent,
+                  seq: 1,
+                  repo: opts!.operationTarget!.repo,
+                  ref: tag.branch,
+                  ...(agent === "review" ? { pr: tag.publication?.pr, headSha: tag.publication?.expectedHeadSha } : {}),
+                },
+                {
+                  type: "coordinator_tag",
+                  seq: 2,
+                  parentInstanceId: tag.parentInstanceId,
+                  unit: tag.unit,
+                  branch: tag.branch,
+                  base: tag.base,
+                  publication: tag.publication,
+                  transportWorkflowId: tag.transportWorkflowId,
+                },
+              ]),
+            ).toMatchObject({ ok: true });
+            registeredId = id;
+            dispatchIo.runStarted?.({ id });
+          })();
+        },
+      };
+      const result = await dispatchScript(msg, fixtureIO, opts);
+      await registration;
+      if (registeredId) {
+        const live = ledger.live.get(registeredId)!;
+        const stored = await store.get(registeredId);
+        const events = [
+          ...(ledger.events.get(registeredId) ?? []),
+          ...(stored?.events ?? []).filter((e) => e.type !== "coordinator_tag" && e.type !== "run_meta"),
+        ].map((event, index) => ({ ...event, seq: index + 1 }));
+        const { profile: _profile, pr: _targetPr, ...meta } = live.meta;
+        expect(
+          await ledger.finish(
+            registeredId,
+            "gen-A",
+            record(registeredId, {
+              ...stored,
+              ...meta,
+              startedAt: NOW,
+              finishedAt: NOW,
+              events,
+              eventCount: events.length,
+              storedEventCount: events.length,
+            }),
+          ),
+        ).toMatchObject({ ok: true });
+      }
+      return result;
     },
     ioFor: (thread) => {
       threadsAsked.push(thread);
@@ -368,10 +480,14 @@ function harness(
       if (over.mergedPr instanceof Error) throw over.mergedPr;
       return over.mergedPr ?? null;
     },
-    openPullRequest: async (target) => {
+    createRecoveryPullRequest: async (target) => {
       opens.push(target);
       if (over.openPr instanceof Error) throw over.openPr;
-      return over.openPr ?? { number: 77, htmlUrl: "https://github.com/acme/api/pull/77", created: true };
+      return {
+        state: "accepted",
+        headSha: target.headSha,
+        pr: over.openPr ?? { number: 77, htmlUrl: "https://github.com/acme/api/pull/77", created: true },
+      };
     },
     ...(over.headSubject !== undefined
       ? {
@@ -395,9 +511,21 @@ function harness(
       return over.ahead;
     },
     github,
-    createBranchRef: async (repo, branch, fromRef) => {
-      branches.push([repo, branch, fromRef]);
-      if (over.branchError) throw over.branchError;
+    fetchBranchRef: async (_repo, ref) => {
+      const facts = ref === "main" ? undefined : await deps.fetchPrFacts?.({ repo: _repo, number: 77 });
+      const sha =
+        ref !== "main" && deps.fetchBranchHeadSha
+          ? await deps.fetchBranchHeadSha(_repo, ref)
+          : facts?.headRef === ref
+            ? facts.headSha
+            : typeof over.branchHead === "string"
+              ? over.branchHead
+              : "a".repeat(40);
+      return typeof sha === "string" ? { kind: "verified", ref: `refs/heads/${ref}`, sha } : { kind: "unverified" };
+    },
+    createBranchRef: async (repo, branch, sha) => {
+      branches.push([repo, branch, sha]);
+      return over.branchError ? { state: "refused", status: 403 } : { state: "accepted", commitSha: sha };
     },
     fetchPrReviews: async () => {
       const i = reviewFetches++;
@@ -461,17 +589,24 @@ function harness(
       : {}),
     ...(over.rerunOk !== undefined
       ? {
-          rerunFailedChecks: async (_repo: string, sha: string, names: string[]) => {
+          fetchCheckRetryTargets: async (_repo: string, sha: string, names: string[]) => {
             reruns.push({ sha, names });
-            return over.rerunOk === true;
+            return [{ operation: "actions_rerun" as const, resourceId: 8 }];
           },
+          rerunActionsFailedJobs: async () => ({
+            state: over.rerunOk === true ? ("accepted" as const) : ("refused" as const),
+          }),
         }
       : {}),
     ...(over.refireOk !== undefined
       ? {
-          refirePullRequest: async (repo: string, prNumber: number) => {
-            refires.push({ repo, prNumber });
-            return over.refireOk === true;
+          setPullRequestState: async (
+            pr: { repo: string; number: number },
+            _target: unknown,
+            state: "closed" | "open",
+          ) => {
+            if (state === "closed") refires.push({ repo: pr.repo, prNumber: pr.number });
+            return { state: over.refireOk === true ? ("accepted" as const) : ("refused" as const) };
           },
         }
       : {}),
@@ -520,6 +655,9 @@ function harness(
   };
   return {
     deps,
+    setScript: (script: Script) => {
+      dispatchScript = script;
+    },
     sleeps,
     compares,
     reviewFetches: () => reviewFetches,
@@ -550,15 +688,169 @@ function harness(
   };
 }
 
-/** A POST with the coordinator's bearer by default; `null` sends none. */
-const post = (path: string, body: unknown, auth: string | null = "Bearer tok-coord") => ({
-  method: "POST",
-  path,
-  headers: auth !== null ? { authorization: auth } : {},
-  body: typeof body === "string" ? body : JSON.stringify(body),
-});
+async function originalRecovery(h: ReturnType<typeof harness>, runId = "11111111-1111-4111-8111-111111111111") {
+  const rows = await h.instances.listUnits(INSTANCE.id);
+  let row = rows[0];
+  if (!row) {
+    row = {
+      instanceId: INSTANCE.id,
+      unit: "U12",
+      slug: "u12",
+      branch: INSTANCE.branch,
+      dependsOn: [],
+      rounds: [],
+      threadKey: INSTANCE.threadKey,
+    };
+    await h.instances.putUnits([row]);
+  }
+  const saved = await h.store.get(runId);
+  const events: RunEvent[] = [
+    { type: "run_meta", agent: "coding", repo: INSTANCE.repo, ref: row.branch },
+    { type: "coordinator_tag", parentInstanceId: INSTANCE.id, unit: row.unit, base: INSTANCE.base },
+    ...(saved?.events ?? []).filter((event) => event.type !== "run_meta" && event.type !== "coordinator_tag"),
+  ];
+  await h.store.put(
+    record(runId, {
+      ...saved,
+      parentInstanceId: INSTANCE.id,
+      coordinatorUnit: row.unit,
+      coordinatorAttempt: 0,
+      idempotencyKey: `${INSTANCE.id}:${row.unit}/0/coding`,
+      threadKey: row.threadKey ?? INSTANCE.threadKey,
+      repo: INSTANCE.repo,
+      headSha: "a".repeat(40),
+      pushed: [{ ref: row.branch, sha: "a".repeat(40) }],
+      branchPublication: {
+        version: 1,
+        repo: INSTANCE.repo,
+        complete: true,
+        branches: [],
+      },
+      publicationSettlement: {
+        version: 1,
+        binding: {
+          runId,
+          instanceId: INSTANCE.id,
+          step: `${INSTANCE.id}:${row.unit}/0/coding`,
+          repo: INSTANCE.repo,
+          branch: row.branch,
+          requester: INSTANCE.userId,
+          threadKey: row.threadKey ?? INSTANCE.threadKey,
+          generation: "gen-A",
+        },
+        checkpoint: { kind: "created", head: "a".repeat(40) },
+        publication: { kind: "accepted", head: "a".repeat(40) },
+        preservation: { kind: "unavailable", reason: "test artifact not supplied" },
+        release: { kind: "kept", reason: "original work retained" },
+      },
+      events,
+      eventCount: events.length,
+      storedEventCount: events.length,
+      truncated: false,
+    }),
+  );
+  const readFacts = h.deps.fetchPrFacts;
+  h.deps.fetchPrFacts = async (pr) => {
+    const facts = await readFacts(pr);
+    return facts
+      ? {
+          baseRef: INSTANCE.base,
+          verifiedHead: { repo: INSTANCE.repo, ref: row!.branch, sha: facts.headSha ?? "a".repeat(40) },
+          ...facts,
+        }
+      : facts;
+  };
+  h.deps.fetchBranchHeadSha ??= async () => "a".repeat(40);
+  h.deps.rewriteIdentities ??= async () => ({ kind: "clean" });
+}
 
-const spawnBody = { parentInstanceId: INSTANCE.id, step: "u12/0/coding", preset: "coding", prompt: "do the unit" };
+/** A POST with the coordinator's bearer by default; `null` sends none. */
+const post = (path: string, input: unknown, auth: string | null = "Bearer tok-coord") => {
+  let body = input;
+  if (
+    typeof input === "object" &&
+    input !== null &&
+    path.endsWith("/pr-check") &&
+    "recover" in input &&
+    !("effectId" in input)
+  ) {
+    const fields = input as Record<string, unknown>;
+    body = {
+      ...fields,
+      unit: fields.unit ?? "U12",
+      effectId: `${fields.unit ?? "U12"}/0/pr-check`,
+      effectOrdinal: 1,
+      executionWorkflowId: fields.recoveryWorkflowId ?? fields.parentInstanceId,
+    };
+  }
+  if (typeof input === "object" && input !== null && path.endsWith("/spawn") && !("effectId" in input)) {
+    const fields = input as Record<string, unknown>;
+    body = {
+      ...fields,
+      effectId: fields.step,
+      effectOrdinal: fields.effectOrdinal ?? 1,
+      executionWorkflowId: fields.recoveryWorkflowId ?? fields.parentInstanceId,
+    };
+  }
+  return {
+    method: "POST",
+    path,
+    headers: auth !== null ? { authorization: auth } : {},
+    body: typeof body === "string" ? body : JSON.stringify(body),
+  };
+};
+
+const spawnBody = {
+  parentInstanceId: INSTANCE.id,
+  unit: "u12",
+  step: "u12/0/coding",
+  effectId: "u12/0/coding",
+  effectOrdinal: 1,
+  executionWorkflowId: INSTANCE.id,
+  preset: "coding",
+  prompt: "do the unit",
+};
+async function seedSpawnUnit(h: ReturnType<typeof harness>, instance: CoordinatorInstance = INSTANCE) {
+  await h.instances.put(instance);
+  expect(
+    await h.instances.putUnits([
+      {
+        instanceId: instance.id,
+        unit: "u12",
+        slug: "u12",
+        branch: instance.branch!,
+        threadKey: instance.threadKey,
+        dependsOn: [],
+        rounds: [],
+      },
+    ]),
+  ).toEqual({ ok: true });
+  h.deps.fetchBranchRef = async (_repo, ref) => ({ kind: "verified", ref: `refs/heads/${ref}`, sha: "a".repeat(40) });
+}
+async function fixtureStep(h: ReturnType<typeof harness>, route: string, input: Record<string, unknown>) {
+  const body = { ...input };
+  if ((route === "spawn" || route === "branch") && !Object.hasOwn(body, "effectOrdinal")) {
+    const brief = body.brief as { unit?: string } | undefined;
+    const unit = body.unit ?? brief?.unit;
+    const row = (await h.instances.listUnits(body.parentInstanceId as string)).find((row) => row.unit === unit);
+    const effectId = route === "spawn" ? body.step : body.effectId;
+    Object.assign(body, {
+      effectId,
+      effectOrdinal:
+        row?.currentEffect && row.currentEffect.id === effectId
+          ? row.currentEffect.ordinal
+          : (row?.currentEffect?.ordinal ?? 0) + 1,
+      executionWorkflowId: body.recoveryWorkflowId ?? body.parentInstanceId,
+    });
+    if (route === "spawn")
+      h.deps.fetchBranchRef = async (_repo, ref) => ({
+        kind: "verified",
+        ref: `refs/heads/${ref}`,
+        sha: row?.publication?.expectedHeadSha ?? row?.lastPush ?? "a".repeat(40),
+      });
+  }
+  return handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}${route}`, body), h.deps);
+}
 
 describe("the coordinator routes — the bearer (item 9)", () => {
   it("names its paths", () => {
@@ -641,7 +933,7 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
           return { status: "completed" };
         },
       });
-      await h.instances.put({ ...instance, ...(testCase.postedBy ? { postedBy: testCase.postedBy } : {}) });
+      await seedSpawnUnit(h, { ...instance, ...(testCase.postedBy ? { postedBy: testCase.postedBy } : {}) });
       const response = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps);
       expect(response.status).toBe(200);
       expect(h.dispatched[0].msg.directAudience).toEqual(testCase.stamped ? audience : undefined);
@@ -653,7 +945,7 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
 
   it("dispatches the child as the instance's user, channel and thread — a body naming another user is ignored — with the preset directive, the repository and the prompt as its text and the coordinator tag as its option; answers the run id and thread at registration", async () => {
     const h = harness();
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
     const res = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}spawn`, {
         ...spawnBody,
@@ -665,7 +957,7 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
     );
     expect(res).toEqual({
       status: 200,
-      body: { ok: true, runId: "run-child", threadKey: INSTANCE.threadKey, at: NOW },
+      body: { ok: true, runId: "run-child", threadKey: INSTANCE.threadKey, effectOrdinal: 1, at: NOW },
     });
     expect(h.dispatched).toHaveLength(1);
     expect(h.dispatched[0].msg).toEqual({
@@ -679,14 +971,14 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
       receivedAt: NOW,
     });
     expect(h.dispatched[0].opts).toEqual({
-      coordinator: { ...TAG, branch: INSTANCE.branch },
+      coordinator: { ...TAG, branch: INSTANCE.branch, unit: "u12", instanceAttempt: 0 },
       operationTarget: { repo: INSTANCE.repo, ref: INSTANCE.branch },
     });
   });
 
   it("the decision's tier rides the child's request: `model` and `effort` on the body become the child's own directives, ahead of every scope (the one-door plan's tiers rule)", async () => {
     const h = harness();
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
     const res = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}spawn`, { ...spawnBody, model: "anthropic/strong-model", effort: "high" }),
       h.deps,
@@ -699,7 +991,7 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
 
   it("every configured child model is strong after the classifier tier retires, and a malformed model or effort is refused by name", async () => {
     const h = harness();
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
     const res = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}spawn`, { ...spawnBody, model: "anthropic/fast-model" }),
       h.deps,
@@ -723,19 +1015,22 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
 
   it("the tag carries the instance's base — the branch the child's pull request targets — and no base field at all for an instance that knows none, so the post-step's own resolution runs", async () => {
     const h = harness();
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
     await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps);
     expect(h.dispatched[0].opts!.coordinator.base).toBe("main");
     const { base: _base, ...baseless } = INSTANCE;
     const noBase = harness();
-    await noBase.instances.put(baseless);
+    await seedSpawnUnit(noBase, baseless);
     await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), noBase.deps);
     expect(noBase.dispatched[0].opts!.coordinator).toEqual({
       parentInstanceId: INSTANCE.id,
       idempotencyKey: KEY,
       branch: INSTANCE.branch,
+      base: "main",
+      unit: "u12",
+      instanceAttempt: 0,
     });
-    expect("base" in noBase.dispatched[0].opts!.coordinator).toBe(false);
+    expect(noBase.dispatched[0].opts!.coordinator.base).toBe("main");
   });
 
   it("an existing-PR coding spawn carries the durable publication binding only for its sole owner and fails closed after ownership changes", async () => {
@@ -758,16 +1053,11 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
       threadKey: INSTANCE.threadKey,
       rounds: [],
       publication,
+      pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
     };
-    const ownership = (owner: { instanceId: string; unit: string } | undefined) => ({
-      claim: () => true,
-      release: () => true,
-      owner: () => owner,
-    });
     const allowed = harness();
     await allowed.instances.put(INSTANCE);
     await allowed.instances.putUnits([row]);
-    allowed.deps.runnerOwnership = ownership(publication.owner);
     const accepted = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}spawn`, { ...spawnBody, unit: "u12" }),
       allowed.deps,
@@ -778,14 +1068,22 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
     const changed = harness();
     await changed.instances.put(INSTANCE);
     await changed.instances.putUnits([row]);
-    changed.deps.runnerOwnership = ownership({ instanceId: "ship_other", unit: "u12" });
+    const rival = {
+      ...row,
+      unit: "OTHER",
+      publication: { ...publication, owner: { instanceId: INSTANCE.id, unit: "OTHER" } },
+    };
+    (changed.instances as unknown as { units: Map<string, string> }).units.set(
+      `${INSTANCE.id}\0OTHER`,
+      JSON.stringify(rival),
+    );
     const blocked = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}spawn`, { ...spawnBody, unit: "u12" }),
       changed.deps,
     );
     expect(blocked).toMatchObject({
-      status: 409,
-      body: { ok: false, error: "publication_ownership_changed" },
+      status: 503,
+      body: { ok: false, error: "spawn_unavailable" },
     });
     expect(changed.dispatched).toEqual([]);
 
@@ -806,7 +1104,7 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
 
   it("SIGTERM closes child admission immediately: a spawn is held for the next generation and dispatch is never entered", async () => {
     const h = harness({ draining: true });
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
     const res = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps);
     expect(res).toEqual({
       status: 409,
@@ -818,7 +1116,7 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
   it("SIGTERM fences a spawn that was already reading its parent before the drain boundary", async () => {
     const state = { draining: false };
     const h = harness(state);
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
     const get = h.deps.instances.get.bind(h.deps.instances);
     let reading!: () => void;
     const readStarted = new Promise<void>((resolve) => {
@@ -863,7 +1161,7 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
         return { status: "completed" };
       },
     });
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
 
     const response = handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps);
     await dispatchStarted;
@@ -881,10 +1179,10 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
     expect(h.dispatched).toEqual([]);
   });
 
-  it("a live run on the instance's thread carrying the same key answers its id with alreadySpawned and starts nothing", async () => {
+  it("a registry-only child carrying the same key cannot authorize adoption and starts nothing", async () => {
     const h = harness();
-    await h.instances.put(INSTANCE);
-    const live = h.registry.create("coding · child", {
+    await seedSpawnUnit(h);
+    const _live = h.registry.create("coding · child", {
       agent: "coding",
       channelId: INSTANCE.channelId,
       userId: INSTANCE.userId,
@@ -892,16 +1190,13 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
       ...TAG,
     });
     const res = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps);
-    expect(res).toEqual({
-      status: 200,
-      body: { ok: true, runId: live.id, threadKey: INSTANCE.threadKey, alreadySpawned: true, at: NOW },
-    });
+    expect(res).toEqual({ status: 503, body: { ok: false, error: "spawn_unavailable", at: NOW } });
     expect(h.dispatched).toEqual([]);
   });
 
   it("a live run on the thread without the key — another step's child, or a person's run — answers busy (409) naming it and starts nothing; a run live on another generation's ledger row counts the same", async () => {
     const h = harness();
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
     const other = h.registry.create("review · previous", {
       agent: "review",
       channelId: INSTANCE.channelId,
@@ -918,7 +1213,7 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
     expect(h.dispatched).toEqual([]);
 
     const far = harness();
-    await far.instances.put(INSTANCE);
+    await seedSpawnUnit(far);
     await far.ledger.claim({
       runId: "run-far",
       threadKey: INSTANCE.threadKey,
@@ -942,7 +1237,7 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
   // thread — a one-unit task's child spawns into the requesting thread beside it.
   it("a hosted parent live in the requesting thread — unfinished on the registry and on the ledger under the host key — does not make the spawn busy: the one-unit task's coding child is dispatched, and the child's own ledger claim on the thread is accepted", async () => {
     const h = harness();
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
     h.registry.create("ship · acme/api", {
       agent: "ship",
       hosted: true,
@@ -970,7 +1265,7 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
     const res = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps);
     expect(res).toEqual({
       status: 200,
-      body: { ok: true, runId: "run-child", threadKey: INSTANCE.threadKey, at: NOW },
+      body: { ok: true, runId: "run-child", threadKey: INSTANCE.threadKey, effectOrdinal: 1, at: NOW },
     });
     expect(h.dispatched).toHaveLength(1);
     // The child's ledger claim on the thread key itself is accepted (tracked):
@@ -991,14 +1286,11 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
 
   it("a finished run in the instance's thread carrying the key answers its id with alreadySpawned and starts nothing — a retry that lands after the child ended never spawns a second one", async () => {
     const h = harness();
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
     await h.store.put(record("run-done", { ...TAG }));
     await h.store.put(record("run-other-thread", { threadKey: "slack:C1:2.0", ...TAG }));
     const res = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps);
-    expect(res).toEqual({
-      status: 200,
-      body: { ok: true, runId: "run-done", threadKey: INSTANCE.threadKey, alreadySpawned: true, at: NOW },
-    });
+    expect(res).toEqual({ status: 503, body: { ok: false, error: "spawn_unavailable", at: NOW } });
     expect(h.dispatched).toEqual([]);
   });
 
@@ -1009,13 +1301,14 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
         return { status: "refused", refusal: "agent_allowlist" };
       },
     });
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
     const res = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps);
     expect(res).toEqual({
       status: 403,
       body: {
         ok: false,
         error: "agent_allowlist",
+        effectOrdinal: 1,
         message: "🚫 You're not on the allowlist for the `coding` agent.",
         at: NOW,
       },
@@ -1036,9 +1329,9 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
         return { status: "refused", refusal: "coordinator_thread_live" };
       },
     });
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
     const res = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps);
-    expect(res).toMatchObject({ status: 200, body: { ok: true, runId: "run-1", alreadySpawned: true } });
+    expect(res).toMatchObject({ status: 409, body: { ok: false, error: "busy", effectOrdinal: 1 } });
   });
 
   it("a dispatch that ended with no run and no gate's name is a failed spawn (502) naming what the thread saw; an instance whose channel cannot be rebuilt is 503", async () => {
@@ -1048,13 +1341,13 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
         return { status: "failed" };
       },
     });
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
     expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps)).toEqual({
-      status: 502,
-      body: { ok: false, error: "spawn_failed", message: "⚠️ the resident could not be attached", at: NOW },
+      status: 503,
+      body: { ok: false, error: "spawn_unavailable", at: NOW },
     });
     const noChannel = harness();
-    await noChannel.instances.put(INSTANCE);
+    await seedSpawnUnit(noChannel);
     noChannel.deps.ioFor = () => undefined;
     expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), noChannel.deps)).toEqual(
       {
@@ -1067,7 +1360,7 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
 
   it("validates the body before anything is read: a bad instance id, a step with a colon, an unknown preset, the ship preset, an empty prompt, a budget under two minutes and non-JSON are 400", async () => {
     const h = harness();
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
     const bad = [
       { ...spawnBody, parentInstanceId: "has:colon" },
       { ...spawnBody, step: "a:b" },
@@ -1597,13 +1890,14 @@ describe("POST /admin/coordinator/read-record — the renewal's facts off the re
         htmlUrl: "https://github.com/acme/api/pull/77",
       },
     });
-    h.deps.runnerOwnership = new RunnerOwnershipFence(false);
     const child = h.registry.create("coding · child", {
       agent: "coding",
       channelId: INSTANCE.channelId,
       userId: INSTANCE.userId,
       threadKey: INSTANCE.threadKey,
       ...TAG,
+      repo: INSTANCE.repo,
+      idempotencyKey: `${INSTANCE.id}:U12/0/coding`,
     });
     h.registry.finish(child.id, "completed");
     const runId = child.id;
@@ -1669,6 +1963,7 @@ describe("POST /admin/coordinator/read-record — the renewal's facts off the re
     const recover = nextAction(driver.state);
     expect(recover).toMatchObject({ type: "pr-check", recover: { runId } });
     if (recover.type !== "pr-check") throw new Error("expected the pull-request recovery step");
+    await originalRecovery(h, runId);
     const opened = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
         parentInstanceId: INSTANCE.id,
@@ -1677,6 +1972,7 @@ describe("POST /admin/coordinator/read-record — the renewal's facts off the re
       }),
       h.deps,
     );
+    expect(opened.body).toMatchObject({ ok: true });
     expect(h.opens).toHaveLength(1);
     expect(opened.body).toMatchObject({ ok: true, state: "open", prNumber: 77 });
     await expect(h.instances.listUnits(INSTANCE.id)).resolves.toEqual([
@@ -1749,6 +2045,7 @@ describe("POST /admin/coordinator/read-record — the renewal's facts off the re
         parentInstanceId: INSTANCE.id,
         unit: "U12",
         step: findings.step,
+        effectOrdinal: 2,
         preset: findings.preset,
         budget: findings.budgetMinutes,
         brief: findings.brief,
@@ -1937,6 +2234,7 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
   it("recover after a dead coding child: with nothing heading the branch, the pull request is opened from the pushed branch itself — a minimal body naming the unit when the record holds no description — and a refused create still answers none", async () => {
     const h = harness();
     await h.instances.put(INSTANCE);
+    await originalRecovery(h);
     const res = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
         parentInstanceId: INSTANCE.id,
@@ -1946,6 +2244,7 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
     );
     expect(res.body).toEqual({
       ok: true,
+      effectOrdinal: 1,
       state: "open",
       prNumber: 77,
       url: "https://github.com/acme/api/pull/77",
@@ -1979,6 +2278,7 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
       d.deps.runPageBase = "https://bot.example/runs";
       await d.instances.put(INSTANCE);
       await d.store.put(describe(description));
+      await originalRecovery(d);
       await handleCoordinatorRequest(
         post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, { parentInstanceId: INSTANCE.id, recover: { runId: RUN } }),
         d.deps,
@@ -1997,6 +2297,7 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
     // Nothing pushed: GitHub refuses the create, and the check answers `none` as before.
     const refused = harness({ openPr: new Error("PR create failed: HTTP 422 no commits between main and the head") });
     await refused.instances.put(INSTANCE);
+    await originalRecovery(refused);
     const none = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
         parentInstanceId: INSTANCE.id,
@@ -2004,11 +2305,12 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
       }),
       refused.deps,
     );
-    expect(none.body).toEqual({ ok: true, state: "none", unrecovered: "no_commits", at: NOW });
+    expect(none.body).toEqual({ ok: false, error: "effect_reconciliation_pending", at: NOW });
 
     // Without `recover`, nothing is ever opened from here.
     const plain = harness();
     await plain.instances.put(INSTANCE);
+    await originalRecovery(h);
     await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, { parentInstanceId: INSTANCE.id }),
       plain.deps,
@@ -2020,6 +2322,7 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
     const h = harness();
     h.deps.runPageBase = "https://bot.example/runs";
     await h.instances.put({ ...INSTANCE, userName: undefined });
+    await originalRecovery(h);
     await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
         parentInstanceId: INSTANCE.id,
@@ -2062,6 +2365,7 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
     const h = harness();
     await h.instances.put({ ...INSTANCE, plan: { id: "fix-web-run-cards" } });
     await h.instances.putUnits([row]);
+    await originalRecovery(h);
     await recoverCheck(h.deps);
     const title = h.opens[0]!.title;
     expect(title).toBe("fix(web): issue 1877 — when the plan runner opens a pull request from a");
@@ -2088,6 +2392,7 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
         ],
       }),
     );
+    await originalRecovery(described);
     await recoverCheck(described.deps);
     expect(described.opens[0]!.title).toBe("fix(ship): the runner titles the recovered pull request");
 
@@ -2137,6 +2442,7 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
     const passing = harness({ headSubject: "fix(ship): warm the cache on wake" });
     await passing.instances.put(INSTANCE);
     await passing.instances.putUnits([row]);
+    await originalRecovery(passing);
     await recoverCheck(passing.deps);
     expect(passing.opens[0]!.title).toBe("fix(ship): warm the cache on wake");
 
@@ -2146,6 +2452,7 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
       const h = harness({ headSubject });
       await h.instances.put(INSTANCE);
       await h.instances.putUnits([row]);
+      await originalRecovery(h);
       await recoverCheck(h.deps);
       expect(h.opens[0]!.title).toBe("chore: Warm the cache on wake");
     }
@@ -2169,6 +2476,7 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
         ],
       }),
     );
+    await originalRecovery(described);
     await recoverCheck(described.deps);
     expect(described.opens[0]!.title).toBe("fix(ship): the submitted title wins");
   });
@@ -2212,10 +2520,9 @@ describe("pr-check none — the branch's commits over the base ride the answer (
     });
     await recover.instances.put(INSTANCE);
     expect((await check(recover.deps, { recover: { runId: "11111111-1111-4111-8111-111111111111" } })).body).toEqual({
-      ok: true,
-      state: "none",
-      unrecovered: "no_commits",
-      at: NOW,
+      ok: false,
+      error: "unit_not_found",
+      unit: "U12",
     });
     expect(recover.compares).toEqual([]);
   });
@@ -2233,6 +2540,7 @@ describe("pr-check recover — the answer says why nothing was recovered, and Gi
     const h = harness();
     const { base: _base, ...withoutBase } = INSTANCE;
     await h.instances.put(withoutBase as typeof INSTANCE);
+    await originalRecovery(h);
     const res = await recoverCheck(h.deps);
     expect(res.body).toEqual({ ok: true, state: "none", unrecovered: "no_base", at: NOW });
     expect(h.opens).toHaveLength(0);
@@ -2249,17 +2557,10 @@ describe("pr-check recover — the answer says why nothing was recovered, and Gi
       },
     });
     await deleted.instances.put(INSTANCE);
-    expect(await recoverCheck(deleted.deps)).toEqual({
-      status: 200,
-      body: {
-        ok: true,
-        state: "open",
-        prNumber: 77,
-        url: "https://github.com/acme/api/pull/77",
-        headSha: "b".repeat(40),
-        headBranchExists: false,
-        at: NOW,
-      },
+    await originalRecovery(deleted);
+    expect(await recoverCheck(deleted.deps)).toMatchObject({
+      status: 409,
+      body: { ok: false, error: "publication_facts_mismatch" },
     });
 
     const unknown = harness({
@@ -2272,6 +2573,7 @@ describe("pr-check recover — the answer says why nothing was recovered, and Gi
       },
     });
     await unknown.instances.put(INSTANCE);
+    await originalRecovery(unknown);
     expect(await recoverCheck(unknown.deps)).toEqual({
       status: 502,
       body: {
@@ -2284,6 +2586,7 @@ describe("pr-check recover — the answer says why nothing was recovered, and Gi
 
     const unavailable = harness({ prFacts: new Error("GitHub 502") });
     await unavailable.instances.put(INSTANCE);
+    await originalRecovery(unavailable);
     expect(await recoverCheck(unavailable.deps)).toEqual({
       status: 502,
       body: { ok: false, error: "github_unavailable", message: "GitHub 502", at: NOW },
@@ -2300,13 +2603,16 @@ describe("pr-check recover — the answer says why nothing was recovered, and Gi
     await h.instances.put(INSTANCE);
     const rewrites: Array<Record<string, unknown>> = [];
     const order: string[] = [];
-    const openPullRequest = async (target: Parameters<typeof h.deps.openPullRequest>[0]) => {
+    await originalRecovery(h);
+    const createRecoveryPullRequest = async (
+      target: Parameters<NonNullable<AdminCoordinatorDeps["createRecoveryPullRequest"]>>[0],
+    ) => {
       order.push("open");
-      return h.deps.openPullRequest(target);
+      return h.deps.createRecoveryPullRequest!(target);
     };
     const clean = {
       ...h.deps,
-      openPullRequest,
+      createRecoveryPullRequest,
       rewriteIdentities: async (args: Record<string, unknown>) => {
         rewrites.push(args);
         order.push("rewrite");
@@ -2322,17 +2628,20 @@ describe("pr-check recover — the answer says why nothing was recovered, and Gi
         branch: "plan/orchestration/u12",
         startState: { kind: "known", commits: [] },
         requester: "slack:UALICE",
+        expectedTip: "a".repeat(40),
+        refPublication: expect.objectContaining({ begin: expect.any(Function) }),
       },
     ]);
     expect(order).toEqual(["rewrite", "open"]);
 
     const blocked = harness();
     await blocked.instances.put(INSTANCE);
+    await originalRecovery(blocked);
     const unreadable = await recoverCheck({
       ...blocked.deps,
       rewriteIdentities: async () => ({ kind: "unreadable" as const, reason: "HTTP 422 force pushes blocked" }),
     });
-    expect(unreadable.status).toBe(502);
+    expect(unreadable.status).toBe(503);
     expect(unreadable.body).toMatchObject({ ok: false, error: "github_unavailable" });
     expect(blocked.opens).toHaveLength(0);
   });
@@ -2340,13 +2649,15 @@ describe("pr-check recover — the answer says why nothing was recovered, and Gi
   it("a create GitHub refuses for any reason other than an empty branch is github_unavailable — the step is asked again, and the report never claims nothing was pushed", async () => {
     const down = harness({ openPr: new Error("PR create failed: HTTP 502 bad gateway") });
     await down.instances.put(INSTANCE);
+    await originalRecovery(down);
     expect(await recoverCheck(down.deps)).toEqual({
-      status: 502,
-      body: { ok: false, error: "github_unavailable", message: "PR create failed: HTTP 502 bad gateway", at: NOW },
+      status: 409,
+      body: { ok: false, error: "effect_reconciliation_pending", at: NOW },
     });
     const forbidden = harness({ openPr: new Error("PR create failed: HTTP 403 resource not accessible") });
     await forbidden.instances.put(INSTANCE);
-    expect((await recoverCheck(forbidden.deps)).status).toBe(502);
+    await originalRecovery(forbidden);
+    expect((await recoverCheck(forbidden.deps)).status).toBe(409);
   });
 
   const bindingRow = (over: Partial<CoordinatorUnit> = {}): CoordinatorUnit => ({
@@ -2370,7 +2681,10 @@ describe("pr-check recover — the answer says why nothing was recovered, and Gi
     ...over,
   });
   const bindingHarness = async (facts: PullRequestFacts, row = bindingRow()) => {
-    const h = harness({ prFacts: facts });
+    const h = harness({
+      prFacts: facts,
+      pr: { number: 77, htmlUrl: "https://github.com/acme/api/pull/77", headSha: "a".repeat(40) },
+    });
     await h.instances.put(INSTANCE);
     await h.instances.putUnits([row]);
     return h;
@@ -2385,29 +2699,118 @@ describe("pr-check recover — the answer says why nothing was recovered, and Gi
       deps,
     );
 
-  it("preserves an ordinary publication owner while its binding CAS crosses a durable rebuild", async () => {
+  it("refuses a rival admitted while the original publication awaits its binding CAS", async () => {
     const h = await bindingHarness(bindingFacts());
-    const fence = new RunnerOwnershipFence(false);
-    h.deps.runnerOwnership = fence;
+    const rival = { ...INSTANCE, id: "ship_race", branch: "plan/race/u12" };
+    await h.instances.put(rival);
     const replace = h.instances.compareAndReplaceUnit.bind(h.instances);
     vi.spyOn(h.instances, "compareAndReplaceUnit").mockImplementation(async (expected, replacement) => {
       expect((await h.instances.listUnits(INSTANCE.id))[0]!.pr).toBeUndefined();
-      await fence.recover(
-        {
-          liveListingComplete: true,
-          liveHosted: [{ instanceId: INSTANCE.id, until: NOW + 1 }],
-          resumable: [],
-          liveElsewhere: [],
-        },
-        h.instances,
-      );
+      expect(
+        await h.instances.putUnits([
+          {
+            ...bindingRow(),
+            instanceId: rival.id,
+            branch: rival.branch,
+            pr: { number: 77, url: "https://github.com/acme/api/pull/77" },
+          },
+        ]),
+      ).toEqual({ ok: true });
       return replace(expected, replacement);
     });
 
+    expect(await recoverBinding(h.deps)).toMatchObject({
+      status: 409,
+      body: { error: "publication_ownership_changed" },
+    });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([bindingRow()]);
+    expect(await h.instances.findPullOwners({ repo: INSTANCE.repo, pr: 77 })).toMatchObject({
+      ok: true,
+      owners: [expect.objectContaining({ kind: "unit", instanceId: rival.id, unit: "U12" })],
+    });
+  });
+
+  it("binds publication through the canonical owner without reading process-local claims", async () => {
+    const h = await bindingHarness(bindingFacts());
     expect(await recoverBinding(h.deps)).toMatchObject({ status: 200 });
-    expect((await h.instances.listUnits(INSTANCE.id))[0]!.pr?.number).toBe(77);
-    expect(fence.owner(INSTANCE.repo, 77)).toEqual({ instanceId: INSTANCE.id, unit: "U12" });
-    expect(fence.owns(INSTANCE.repo, 77)).toBe(true);
+    const [bound] = await h.instances.listUnits(INSTANCE.id);
+    expect(bound!.publication).toMatchObject({
+      pr: 77,
+      expectedHeadSha: "a".repeat(40),
+      owner: { instanceId: INSTANCE.id, unit: "U12" },
+    });
+    expect(h.dispatched).toEqual([]);
+  });
+
+  it.each(["throw", "unavailable"] as const)(
+    "confirms only an exact publication binding after a committed CAS with %s response loss",
+    async (failure) => {
+      const h = await bindingHarness(bindingFacts());
+      const replace = h.instances.compareAndReplaceUnit.bind(h.instances);
+      const cas = vi.spyOn(h.instances, "compareAndReplaceUnit").mockImplementation(async (before, after) => {
+        expect(await replace(before, after)).toEqual({ ok: true });
+        if (failure === "throw") throw new Error("reply lost");
+        return { ok: false, reason: "unavailable" };
+      });
+      expect(await recoverBinding(h.deps)).toMatchObject({ status: 200 });
+      expect(cas).toHaveBeenCalledOnce();
+      expect((await h.instances.listUnits(INSTANCE.id))[0]!.publication?.expectedHeadSha).toBe("a".repeat(40));
+      expect(h.dispatched).toEqual([]);
+    },
+  );
+
+  it.each(["missing", "foreign", "duplicate", "unreadable"] as const)(
+    "retains publication uncertainty after a %s CAS readback",
+    async (scenario) => {
+      const h = await bindingHarness(bindingFacts());
+      const read = h.instances.listUnits.bind(h.instances);
+      let proposal: CoordinatorUnit | undefined;
+      const cas = vi.spyOn(h.instances, "compareAndReplaceUnit").mockImplementation(async (_before, after) => {
+        proposal = after;
+        return { ok: false, reason: "unavailable" };
+      });
+      vi.spyOn(h.instances, "listUnits").mockImplementation(async (id) => {
+        if (!proposal) return read(id);
+        if (scenario === "unreadable") throw new Error("read unavailable");
+        return scenario === "missing"
+          ? []
+          : scenario === "duplicate"
+            ? [proposal, proposal]
+            : [{ ...proposal, instanceId: "foreign" }];
+      });
+      expect(await recoverBinding(h.deps)).toMatchObject({
+        status: 409,
+        body: { error: "publication_store_unavailable" },
+      });
+      expect(cas).toHaveBeenCalledOnce();
+      expect(await read(INSTANCE.id)).toEqual([bindingRow()]);
+      expect(h.dispatched).toEqual([]);
+    },
+  );
+
+  it("a canonical rival refuses the publication binding without rollback or displacement", async () => {
+    const h = await bindingHarness(bindingFacts());
+    const rival = { ...INSTANCE, id: "ship_rival", branch: "plan/other/u12" };
+    await h.instances.put(rival);
+    expect(
+      await h.instances.putUnits([
+        {
+          ...bindingRow(),
+          instanceId: rival.id,
+          branch: rival.branch,
+          pr: { number: 77, url: "https://github.com/acme/api/pull/77" },
+        },
+      ]),
+    ).toEqual({ ok: true });
+    const cas = vi.spyOn(h.instances, "compareAndReplaceUnit");
+    expect(await recoverBinding(h.deps)).toMatchObject({
+      status: 409,
+      body: { error: "publication_ownership_changed" },
+    });
+    expect(cas).toHaveBeenCalledOnce();
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([bindingRow()]);
+    expect((await h.instances.listUnits(rival.id))[0]!.pr?.number).toBe(77);
+    expect(h.dispatched).toEqual([]);
   });
 
   it.each([
@@ -2451,61 +2854,29 @@ describe("pr-check recover — the answer says why nothing was recovered, and Gi
     expect(h.dispatched).toEqual([]);
   });
 
-  it("a refused ownership claim, an unknown fence, a stale row and an unavailable store all release only this attempt's owner and store no PR-only row", async () => {
-    const refused = await bindingHarness(bindingFacts());
-    refused.deps.runnerOwnership = { claim: () => false, release: () => true, owner: () => undefined };
-    expect(await recoverBinding(refused.deps)).toMatchObject({
-      status: 409,
-      body: { error: "publication_ownership_changed" },
-    });
-    expect(await refused.instances.listUnits(INSTANCE.id)).toEqual([bindingRow()]);
-
-    const unknown = await bindingHarness(bindingFacts());
-    delete unknown.deps.runnerOwnership;
-    expect(await recoverBinding(unknown.deps)).toMatchObject({
-      status: 409,
-      body: { error: "publication_ownership_unknown" },
-    });
-    expect(await unknown.instances.listUnits(INSTANCE.id)).toEqual([bindingRow()]);
-
-    const stale = await bindingHarness(bindingFacts());
-    const staleFence = stale.deps.runnerOwnership!;
-    stale.instances.compareAndReplaceUnit = async () => ({ ok: false, reason: "stale" });
-    expect(await recoverBinding(stale.deps)).toMatchObject({
-      status: 409,
-      body: { error: "publication_binding_stale" },
-    });
-    expect(staleFence.owner(INSTANCE.repo, 77)).toBeUndefined();
-    expect(await stale.instances.listUnits(INSTANCE.id)).toEqual([bindingRow()]);
-
-    const unavailable = await bindingHarness(bindingFacts());
-    const unavailableFence = unavailable.deps.runnerOwnership!;
-    unavailable.instances.compareAndReplaceUnit = async () => ({ ok: false, reason: "unavailable" });
-    expect(await recoverBinding(unavailable.deps)).toMatchObject({
-      status: 409,
-      body: { error: "publication_store_unavailable" },
-    });
-    expect(unavailableFence.owner(INSTANCE.repo, 77)).toBeUndefined();
-    expect(await unavailable.instances.listUnits(INSTANCE.id)).toEqual([bindingRow()]);
+  it("canonical owned, incomplete, stale and unavailable refusals store no PR-only row", async () => {
+    for (const [reason, error] of [
+      ["owned", "publication_ownership_changed"],
+      ["incomplete", "publication_store_unavailable"],
+      ["stale", "publication_binding_stale"],
+      ["unavailable", "publication_store_unavailable"],
+    ] as const) {
+      const h = await bindingHarness(bindingFacts());
+      const cas = vi.spyOn(h.instances, "compareAndReplaceUnit").mockResolvedValue({ ok: false, reason });
+      expect(await recoverBinding(h.deps)).toMatchObject({ status: 409, body: { error } });
+      expect(cas).toHaveBeenCalledOnce();
+      expect(await h.instances.listUnits(INSTANCE.id)).toEqual([bindingRow()]);
+      expect(h.dispatched).toEqual([]);
+    }
   });
 
-  it("a rival owner cannot be displaced, while exact already-bound replay is idempotent", async () => {
-    const rival = await bindingHarness(bindingFacts());
-    const rivalFence = rival.deps.runnerOwnership!;
-    expect(rivalFence.claim(INSTANCE.repo, 77, { instanceId: "ship_other", unit: "other" })).toBe(true);
-    expect(await recoverBinding(rival.deps)).toMatchObject({
-      status: 409,
-      body: { error: "publication_ownership_changed" },
-    });
-    expect(rivalFence.owner(INSTANCE.repo, 77)).toEqual({ instanceId: "ship_other", unit: "other" });
-    expect(await rival.instances.listUnits(INSTANCE.id)).toEqual([bindingRow()]);
-
+  it("already-bound read-only replay is idempotent without process-local ownership", async () => {
     const replay = await bindingHarness(bindingFacts());
     expect((await recoverBinding(replay.deps)).status).toBe(200);
     const bound = (await replay.instances.listUnits(INSTANCE.id))[0]!;
     expect((await recoverBinding(replay.deps)).status).toBe(200);
     expect(await replay.instances.listUnits(INSTANCE.id)).toEqual([bound]);
-    expect(replay.deps.runnerOwnership!.owner(INSTANCE.repo, 77)).toEqual({ instanceId: INSTANCE.id, unit: "U12" });
+    expect(replay.dispatched).toEqual([]);
   });
 });
 
@@ -2578,6 +2949,44 @@ describe("pr-check keeps the machine's adopted pull request authoritative before
         },
       },
     ]);
+  });
+
+  it("refuses terminal PR success when its durable ownership write is rejected", async () => {
+    for (const path of ["follow", "discovered", "merged"] as const) {
+      for (const reason of ["owned", "unavailable"] as const) {
+        const pr = { number: 7, htmlUrl: "https://github.com/acme/api/pull/7", headSha: SHA };
+        const h = harness({
+          ...(path === "discovered" ? { pr } : {}),
+          ...(path === "merged" ? { mergedPr: { ...pr, sha: SHA, mergedAt: new Date(NOW).toISOString() } } : {}),
+          prFacts: { state: "closed", sameRepoHead: true, mergedAt: new Date(NOW).toISOString(), mergeCommitSha: SHA },
+        });
+        await h.instances.put(INSTANCE);
+        const row: CoordinatorUnit = {
+          instanceId: INSTANCE.id,
+          unit: "u12",
+          slug: "u12",
+          branch: INSTANCE.branch,
+          dependsOn: [],
+          rounds: [],
+          threadKey: INSTANCE.threadKey,
+        };
+        await h.instances.putUnits([row]);
+        vi.spyOn(h.instances, "putUnits").mockResolvedValueOnce({ ok: false, reason });
+        const response = await handleCoordinatorRequest(
+          post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+            parentInstanceId: INSTANCE.id,
+            unit: row.unit,
+            ...(path === "follow" ? { pr: 7 } : {}),
+          }),
+          h.deps,
+        );
+        expect(response, `${path}/${reason}`).toMatchObject({
+          status: reason === "unavailable" ? 503 : 409,
+          body: { ok: false, error: "unit_write_refused", reason },
+        });
+        expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+      }
+    }
   });
 
   it("a followed pull request that merged answers merged with the merge receipt; one closed unmerged answers the terminal closed state with its closer", async () => {
@@ -3107,7 +3516,7 @@ describe("createAdminCoordinatorHandler — the node adapter decides the door fr
 
   it("an admitted POST reads the body once the door is open and answers the step; the bearer is looked at exactly once per request", async () => {
     const h = harness();
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
     // The secret is frozen, so the count is a proxy in front of it: one `reveal` per request.
     let reveals = 0;
     const counted = new Proxy(TOKENS, {
@@ -3124,7 +3533,13 @@ describe("createAdminCoordinatorHandler — the node adapter decides the door fr
     handler(r.req, r.res);
     const out = await r.answered;
     expect(out.status).toBe(200);
-    expect(JSON.parse(out.body!)).toEqual({ ok: true, runId: "run-child", threadKey: INSTANCE.threadKey, at: NOW });
+    expect(JSON.parse(out.body!)).toEqual({
+      ok: true,
+      runId: "run-child",
+      threadKey: INSTANCE.threadKey,
+      effectOrdinal: 1,
+      at: NOW,
+    });
     expect(r.bodyRead()).toBe(true);
     expect(reveals).toBe(1);
   });
@@ -3200,16 +3615,16 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
         })
       ).status,
     ).toBe(200);
-    expect(reports).toEqual(["original short report", "original short report"]);
+    expect(reports).toEqual(["original short report"]);
     const shared = (await h.ledger.readSessionTail(contextThreadSessionKey(threadKey), 100_000)).transcript;
-    expect(shared.turns).toBe(2);
-    expect(shared.contexts?.map((context) => context?.status)).toEqual(["unknown", "known"]);
+    expect(shared.turns).toBe(3);
+    expect(shared.contexts?.map((context) => context?.status)).toEqual(["unknown", "known", "unknown"]);
     expect(JSON.stringify(shared.messages[1])).toContain("Recorded work status");
     expect(JSON.stringify(shared.messages[1])).not.toContain("original full report");
     h.deps.reportLedger = undefined;
     const publicationCount = published.mock.calls.length;
     expect((await call(h, "unit-end", body)).status).toBe(503);
-    expect(reports).toHaveLength(2);
+    expect(reports).toHaveLength(1);
     expect(published.mock.calls).toHaveLength(publicationCount);
   });
   const PLAN_INSTANCE: CoordinatorInstance = {
@@ -3246,6 +3661,19 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     dependsOn: unit === "U11" ? ["U10"] : [],
     rounds: [],
     ...over,
+    ...(over.pr !== undefined && over.publication === undefined
+      ? {
+          publication: {
+            repo: PLAN_INSTANCE.repo,
+            pr: over.pr.number,
+            headRef: `plan/fixture/${unit.toLowerCase()}`,
+            baseRef: "main",
+            expectedHeadSha: over.lastPush ?? "a".repeat(40),
+            publicationRef: `plan/fixture/${unit.toLowerCase()}`,
+            owner: { instanceId: PLAN_INSTANCE.id, unit },
+          },
+        }
+      : {}),
   });
   const issue = (number: number, title: string): IssueSummary => ({
     number,
@@ -3258,12 +3686,50 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     createdAt: "2000-01-01T00:00:00.000Z",
     updatedAt: "2000-01-01T00:00:00.000Z",
   });
-  const call = (h: ReturnType<typeof harness>, step: string, body: Record<string, unknown>) =>
-    handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}${step}`, body), h.deps);
+  const call = fixtureStep;
   async function planHarness(over: Parameters<typeof harness>[0] = {}) {
     const h = harness({ files: { "docs/plans/fixture.md": PLAN_TEXT, "AGENTS.md": "# Rules" }, ...over });
     await h.instances.put(PLAN_INSTANCE);
     await h.instances.putUnits([unitRow("U10"), unitRow("U11")]);
+    h.deps.fetchBranchRef = async (_repo, ref) =>
+      ref === "main" ? { kind: "verified", ref: "refs/heads/main", sha: "a".repeat(40) } : { kind: "missing" };
+    return h;
+  }
+  async function privatePlanHarness(over: Parameters<typeof harness>[0] = {}) {
+    const h = harness(over);
+    const instance: CoordinatorInstance = {
+      ...PLAN_INSTANCE,
+      plan: { id: "fixture" },
+      merge: "person",
+      branch: unitRow("U10").branch,
+      base: "main",
+    };
+    const unit = unitRow("U10", {
+      threadKey: `worker:${instance.id}:U10`,
+      workBrief: {
+        requesterId: instance.userId,
+        mainThreadKey: instance.threadKey,
+        actId: "act-1",
+        repo: instance.repo,
+        base: "main",
+        question: "Why?",
+        findings: [],
+        requestedChange: "Fix it",
+      },
+    });
+    await h.instances.recordRequesterTurn({
+      threadKey: instance.threadKey,
+      requesterId: instance.userId,
+      messageId: "1",
+    });
+    expect(
+      await h.instances.claimMainTask({ mainThreadKey: instance.threadKey, actId: "act-1" }, instance, unit, {
+        requesterId: instance.userId,
+        sourceMessageId: "1",
+        revision: 1,
+        repo: instance.repo,
+      }),
+    ).toMatchObject({ ok: true });
     return h;
   }
   async function idleHarness(
@@ -3271,7 +3737,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     idle: Partial<NonNullable<CoordinatorUnit["idle"]>> = {},
   ) {
     const h = await planHarness(over);
-    await h.instances.replace({ ...PLAN_INSTANCE, caps: { maxRounds: 2, maxMinutes: 240 } });
+    seedCoordinatorInstance(h.instances, { ...PLAN_INSTANCE, caps: { maxRounds: 2, maxMinutes: 240 } });
     await h.instances.putUnits([
       unitRow("U10", {
         threadKey: "slack:C1:2.0",
@@ -3369,12 +3835,182 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       tools: [],
     });
 
+  it.each([
+    "original owner",
+    "changed requester",
+    "changed run",
+    "changed attempt",
+    "unreconciled admission",
+    "mixed snapshot",
+    "foreign report owner",
+  ] as const)("reconciles a concurrent terminal ending only under the %s", async (scenario) => {
+    const h = await planHarness();
+    await hostParent(h);
+    const canonical = { kind: "terminated", report: "The original execution ended", at: NOW };
+    const committed = unitRow("U10", {
+      ending: canonical,
+      ...(scenario === "foreign report owner"
+        ? {
+            reportDelivery: {
+              version: 1 as const,
+              proposalHash: "c".repeat(64),
+              owner: {
+                instanceId: PLAN_INSTANCE.id,
+                unit: "U10",
+                attempt: 0,
+                requester: "slack:UOTHER",
+                channelId: PLAN_INSTANCE.channelId,
+                threadKey: PLAN_INSTANCE.threadKey,
+                deliveryId: "U10/end",
+              },
+            },
+          }
+        : {}),
+    });
+    expect(isCoordinatorUnit(committed)).toBe(true);
+    let installed = false;
+    let mixed = false;
+    let mixedResponseStatus: number | undefined;
+    const calls: string[] = [];
+    const bot: CoordinatorBot = {
+      async step(route, body) {
+        calls.push(route);
+        const mixing = scenario === "mixed snapshot" && installed && route === "plan" && !mixed;
+        if (mixing) {
+          mixed = true;
+          const readUnits = h.instances.listUnits.bind(h.instances);
+          vi.spyOn(h.instances, "listUnits").mockImplementationOnce(async (id) => {
+            seedCoordinatorInstance(h.instances, { ...PLAN_INSTANCE, userId: "slack:UOTHER" });
+            await h.instances.putUnits([committed, unitRow("U11")]);
+            return readUnits(id);
+          });
+        }
+        if (route === "pr-check") return { status: 200, text: JSON.stringify({ ok: true, state: "none", at: NOW }) };
+        if (route === "unit-start")
+          return { status: 200, text: JSON.stringify({ ok: true, threadKey: PLAN_INSTANCE.threadKey, at: NOW }) };
+        if (route === "branch")
+          return { status: 200, text: JSON.stringify({ ok: false, reason: "branch creation refused", at: NOW }) };
+        if (route === "unit-end" && body.unit === "U10" && !installed) {
+          installed = true;
+          if (scenario !== "original owner" && scenario !== "mixed snapshot" && scenario !== "foreign report owner") {
+            seedCoordinatorInstance(h.instances, {
+              ...PLAN_INSTANCE,
+              ...(scenario === "changed requester"
+                ? { userId: "slack:UOTHER" }
+                : scenario === "changed run"
+                  ? { runId: "another-host" }
+                  : scenario === "changed attempt"
+                    ? { attempt: 2 }
+                    : { admission: "unreconciled" as const }),
+            });
+            await h.instances.putUnits([unitRow("U10"), unitRow("U11")]);
+          }
+          expect(await h.instances.compareAndReplaceUnit(unitRow("U10"), committed)).toEqual({ ok: true });
+        }
+        const response = await call(h, route, body);
+        if (mixing) mixedResponseStatus = response.status;
+        return { status: response.status, text: JSON.stringify(response.body) };
+      },
+    };
+    class PermanentError extends Error {}
+    const steps = workflowSteps(
+      {
+        async do(_name, config, callback) {
+          for (let attempt = 0; ; attempt++) {
+            try {
+              return await callback();
+            } catch (error) {
+              if (error instanceof PermanentError || attempt >= config.retries.limit) throw error;
+            }
+          }
+        },
+        sleep: async () => {},
+        waitForEvent: async () => {
+          throw new Error("no child should start");
+        },
+      },
+      (message) => new PermanentError(message),
+    );
+
+    const result = runPlan(steps, bot, PLAN_INSTANCE.id);
+    if (scenario === "original owner") {
+      expect(await result).toMatchObject({ units: { U10: "terminated", U11: "blocked" }, outcome: "failed" });
+      expect((await h.instances.listUnits(PLAN_INSTANCE.id)).find((row) => row.unit === "U11")?.ending?.kind).toBe(
+        "blocked",
+      );
+    } else {
+      await expect(result).rejects.toThrow();
+      expect((await h.instances.listUnits(PLAN_INSTANCE.id)).find((row) => row.unit === "U11")?.ending).toBeUndefined();
+    }
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id)).find((row) => row.unit === "U10")).toEqual(committed);
+    expect(calls).not.toContain("spawn");
+    if (scenario === "mixed snapshot") expect(mixedResponseStatus).toBe(503);
+  });
+
+  it.each(["stopped selection", "blocked dependent", "recorded step failure"] as const)(
+    "keeps recorded terminal endings while settling a %s",
+    async (scenario) => {
+      const h = await planHarness();
+      await hostParent(h);
+      const canonical =
+        scenario === "recorded step failure"
+          ? {
+              kind: "failed",
+              cause: "step_threw" as const,
+              step: "U10/start",
+              report: "The original execution failed",
+              at: NOW,
+            }
+          : { kind: "terminated", report: "The original execution ended", at: NOW };
+      await h.instances.putUnits([
+        unitRow("U10", { ending: canonical }),
+        unitRow("U11", scenario === "blocked dependent" ? { ending: canonical } : {}),
+      ]);
+      if (scenario === "stopped selection")
+        expect(await h.instances.markStopped(PLAN_INSTANCE.id, NOW)).toEqual({ ok: true });
+      const calls: string[] = [];
+      const bot: CoordinatorBot = {
+        async step(route, body) {
+          calls.push(route);
+          const response = await call(h, route, body);
+          return { status: response.status, text: JSON.stringify(response.body) };
+        },
+      };
+      const steps: StepRunner = {
+        do: async (_name, _config, callback) => callback(),
+        sleep: async () => {},
+        waitForEvent: async () => {
+          throw new Error("no child should start");
+        },
+      };
+      expect(
+        await runPlan(
+          workflowSteps(steps, (message) => new Error(message)),
+          bot,
+          PLAN_INSTANCE.id,
+        ),
+      ).toMatchObject({
+        units: {
+          U10: canonical.kind,
+          U11:
+            scenario === "stopped selection" ? "stopped" : scenario === "blocked dependent" ? "terminated" : "blocked",
+        },
+        outcome: "failed",
+      });
+      expect((await h.instances.listUnits(PLAN_INSTANCE.id)).find((row) => row.unit === "U10")).toEqual(
+        unitRow("U10", { ending: canonical }),
+      );
+      expect(calls).not.toContain("spawn");
+    },
+  );
+
   it("plan answers the instance's units with where each stands, who merges from the instance's field, the caps as clipped and the base; an instance without the field is a person's merge; an unknown instance is 404", async () => {
     const h = await planHarness();
     expect(await call(h, "plan", { parentInstanceId: PLAN_INSTANCE.id })).toEqual({
       status: 200,
       body: {
         ok: true,
+        instance: PLAN_INSTANCE,
         planId: "fixture",
         merge: "runner",
         // Absent on the record: the machine reads the default, named as the org's.
@@ -3939,6 +4575,47 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(offline.threadsAsked).toEqual([]);
   });
 
+  it("keeps a legacy terminal row immutable before report admission exists", async () => {
+    const h = await planHarness();
+    const ended = unitRow("U10", { ending: { kind: "terminated", report: "Workflow is gone", at: NOW } });
+    await h.instances.putUnits([ended]);
+    await hostParent(h);
+    expect(
+      await call(h, "unit-end", {
+        parentInstanceId: PLAN_INSTANCE.id,
+        unit: "U10",
+        deliveryId: "U10/end/threw",
+        ending: { kind: "failed", report: "A late producer tried to replace termination" },
+      }),
+    ).toMatchObject({ status: 409, body: { error: "settlement_conflict" } });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]).toEqual(ended);
+  });
+
+  it("keeps an unprojected terminal report immutable across a different delivery id", async () => {
+    const h = await planHarness();
+    await h.instances.putUnits([unitRow("U10")]);
+    await hostParent(h);
+    const body = {
+      parentInstanceId: PLAN_INSTANCE.id,
+      unit: "U10",
+      deliveryId: "U10/end",
+      ending: { kind: "stopped", report: "Stopped before dispatch" },
+    };
+    expect(await call(h, "unit-end", body)).toMatchObject({ status: 200 });
+    const settled = (await h.instances.listUnits(PLAN_INSTANCE.id))[0];
+    expect(
+      await call(h, "unit-end", {
+        ...body,
+        deliveryId: "U10/end/threw",
+        ending: { kind: "failed", report: "A late producer tried to replace the result" },
+      }),
+    ).toMatchObject({
+      status: 409,
+      body: { error: "settlement_conflict" },
+    });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]).toEqual(settled);
+  });
+
   it("persists typed settlement facts and refuses a mismatched ending before publication", async () => {
     const h = await planHarness();
     const pr = { number: 7, url: "https://github.com/acme/api/pull/7" };
@@ -4163,8 +4840,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     const pr = { number: 7, url: "https://github.com/acme/api/pull/7" };
     await h.instances.putUnits([unitRow("U10", { pr })]);
     await hostParent(h);
-    const fence = h.deps.runnerOwnership!;
-    expect(fence.claim(PLAN_INSTANCE.repo, pr.number, { instanceId: PLAN_INSTANCE.id, unit: "U10" })).toBe(true);
+
     const body = {
       parentInstanceId: PLAN_INSTANCE.id,
       unit: "U10",
@@ -4172,10 +4848,18 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       ending: { kind: "aborted", report: "Stopped", outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 1 } },
     };
     expect(await call(h, "unit-end", body)).toMatchObject({ status: 200 });
-    const successor = { instanceId: "runner-successor", unit: "task" };
-    expect(fence.claim(PLAN_INSTANCE.repo, pr.number, successor)).toBe(true);
+    const successor = { instanceId: "runner-successor", unit: "U11" };
+    seedCoordinatorInstance(h.instances, { ...PLAN_INSTANCE, id: successor.instanceId });
+    const successorRow = unitRow(successor.unit, { instanceId: successor.instanceId, pr });
+    seedCoordinatorUnit(h.instances, {
+      ...successorRow,
+      publication: { ...successorRow.publication!, owner: successor },
+    });
     expect(await call(h, "unit-end", body)).toMatchObject({ status: 200 });
-    expect(fence.owner(PLAN_INSTANCE.repo, pr.number)).toEqual(successor);
+    expect(await h.instances.findPullOwners({ repo: PLAN_INSTANCE.repo, pr: pr.number })).toEqual({
+      ok: true,
+      owners: [{ kind: "unit", ...successor }],
+    });
   });
 
   it("binds a typed private report to its original delivery id across retries", async () => {
@@ -4194,7 +4878,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
           return saved;
         },
       };
-      const h = await planHarness({ privateWorkerLog: log });
+      const h = await privatePlanHarness({ privateWorkerLog: log });
       await h.instances.putUnits([
         unitRow("U10", {
           workBrief: {
@@ -4233,6 +4917,35 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       ).toMatchObject([{ kind: "reply", id: "U10/end", text: "Stopped" }]);
       expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]?.ending).toMatchObject({ deliveryId: "U10/end" });
     }
+  });
+
+  it.each(["missing", "foreign"] as const)("refuses private report replay when its Main claim is %s", async (claim) => {
+    const log = new InMemoryPrivateWorkerLog();
+    const h = await privatePlanHarness({ privateWorkerLog: log });
+    await hostParent(h);
+    const body = {
+      parentInstanceId: PLAN_INSTANCE.id,
+      unit: "U10",
+      deliveryId: "U10/end",
+      ending: {
+        kind: "aborted",
+        report: "Private report",
+        outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 1 },
+      },
+    };
+    expect((await call(h, "unit-end", body)).status).toBe(200);
+    const key = `worker:${PLAN_INSTANCE.id}:U10`;
+    const before = await log.list(key);
+    const link = await h.instances.getMainTask({ mainThreadKey: PLAN_INSTANCE.threadKey, actId: "act-1" });
+    expect(link).not.toBeNull();
+    vi.spyOn(h.instances, "getMainTask").mockResolvedValue(
+      claim === "missing" ? null : { ...link!, unit: "another-unit" },
+    );
+    expect(await call(h, "unit-end", body)).toMatchObject({
+      status: 503,
+      body: { error: "report_context_unavailable" },
+    });
+    expect(await log.list(key)).toEqual(before);
   });
 
   it.each(["round", "pr-check", "unit-start"] as const)(
@@ -4298,7 +5011,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
         return backing.append(threadKey, event);
       },
     };
-    const h = await planHarness({ privateWorkerLog: log });
+    const h = await privatePlanHarness({ privateWorkerLog: log });
     const key = `worker:${PLAN_INSTANCE.id}:U10`;
     await h.instances.putUnits([
       unitRow("U10", {
@@ -4339,7 +5052,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     "keeps a private worker's %s report out of hosted events and pull request comments",
     async (kind) => {
       const log = new InMemoryPrivateWorkerLog();
-      const h = await planHarness({ privateWorkerLog: log });
+      const h = await privatePlanHarness({ privateWorkerLog: log });
       const key = `worker:${PLAN_INSTANCE.id}:U10`;
       const pr = { number: 12, url: "https://github.com/acme/api/pull/12" };
       await h.instances.putUnits([
@@ -4496,7 +5209,10 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     ]);
     // One thread per unit (record 0055): the review child runs in the unit's thread.
     const res = await call(h, "spawn", review("U10/1/review"));
-    expect(res).toEqual({ status: 200, body: { ok: true, runId: "run-child", threadKey: "slack:C1:2.0", at: NOW } });
+    expect(res).toEqual({
+      status: 200,
+      body: { ok: true, runId: "run-child", threadKey: "slack:C1:2.0", effectOrdinal: 1, at: NOW },
+    });
     expect(h.dispatched).toHaveLength(1);
     const { msg, opts } = h.dispatched[0];
     expect(msg.threadKey).toBe("slack:C1:2.0");
@@ -4510,6 +5226,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       idempotencyKey: "plan-fixture:U10/1/review",
       unit: "U10",
       instanceAttempt: 0,
+      publication: (await h.instances.listUnits(PLAN_INSTANCE.id))[0].publication,
       branch: "plan/fixture/u10",
       base: "main",
     });
@@ -4519,7 +5236,9 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     // A run live in the unit's thread (a person's, since the runner awaited its
     // own child) is what makes a review spawn busy.
     const busy = await planHarness();
-    await busy.instances.putUnits([unitRow("U10", { threadKey: "slack:C1:2.0" })]);
+    await busy.instances.putUnits([
+      unitRow("U10", { threadKey: "slack:C1:2.0", pr: { number: 7, url: "https://github.com/acme/api/pull/7" } }),
+    ]);
     const other = busy.registry.create("coding · person", {
       agent: "coding",
       channelId: PLAN_INSTANCE.channelId,
@@ -4540,10 +5259,14 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       unitRow("U10", {
         threadKey: "slack:C1:9.0",
         reviewThread: { threadKey: "slack:C1:3.0", sourceUrl: "https://acme.slack.com/archives/C1/p3" },
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
       }),
     ]);
     const late = await call(older, "spawn", review("U10/1/review"));
-    expect(late).toEqual({ status: 200, body: { ok: true, runId: "run-child", threadKey: "slack:C1:3.0", at: NOW } });
+    expect(late).toEqual({
+      status: 200,
+      body: { ok: true, runId: "run-child", threadKey: "slack:C1:3.0", effectOrdinal: 1, at: NOW },
+    });
     expect(opened).toHaveLength(0);
     expect(older.dispatched[0].msg.threadKey).toBe("slack:C1:3.0");
     expect(older.dispatched[0].msg.sourceUrl).toBe("https://acme.slack.com/archives/C1/p3");
@@ -4569,7 +5292,13 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       reviewHead: "a".repeat(40),
       events: [{ type: "answer", text: "Changes requested: one nit.", seq: 1 }],
     });
-    const rows = () => [unitRow("U10", { threadKey: "slack:C1:2.0", reviewThread: { threadKey: "slack:C1:3.0" } })];
+    const rows = () => [
+      unitRow("U10", {
+        threadKey: "slack:C1:2.0",
+        reviewThread: { threadKey: "slack:C1:3.0" },
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+      }),
+    ];
     const live = await planHarness();
     await live.instances.putUnits(rows());
     await live.store.put(reviewRecord);
@@ -4597,7 +5326,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     });
     expect(await call(free, "spawn", findings)).toEqual({
       status: 200,
-      body: { ok: true, runId: "run-child", threadKey: "slack:C1:2.0", at: NOW },
+      body: { ok: true, runId: "run-child", threadKey: "slack:C1:2.0", effectOrdinal: 1, at: NOW },
     });
     expect(free.dispatched).toHaveLength(1);
     expect(free.dispatched[0].msg.threadKey).toBe("slack:C1:2.0");
@@ -4622,17 +5351,149 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     });
   });
 
+  it("branch freezes its base, persists pending before the POST and never replays an unknown outcome", async () => {
+    const h = await planHarness();
+    const head = "a".repeat(40);
+    let observed = "missing";
+    let posts = 0;
+    h.deps.fetchBranchRef = async (_repo, ref) =>
+      ref === "main"
+        ? { kind: "verified", ref: "refs/heads/main", sha: head }
+        : observed === "missing"
+          ? { kind: "missing" }
+          : { kind: "verified", ref: `refs/heads/${ref}`, sha: observed };
+    h.deps.createBranchRef = async (_repo, _ref, sha) => {
+      posts++;
+      expect(sha).toBe(head);
+      const row = (await h.instances.listUnits(PLAN_INSTANCE.id)).find((row) => row.unit === "U10")!;
+      expect(row.currentEffect?.calls[0].state).toBe("pending");
+      expect(row.currentEffect?.target.headSha).toBe(head);
+      return { state: "uncertain" };
+    };
+    const input = {
+      parentInstanceId: PLAN_INSTANCE.id,
+      unit: "U10",
+      executionWorkflowId: PLAN_INSTANCE.id,
+      effectId: "U10/branch",
+      effectOrdinal: 1,
+    };
+    expect((await call(h, "branch", input)).status).toBe(503);
+    observed = "b".repeat(40);
+    expect((await call(h, "branch", input)).status).toBe(503);
+    expect(posts).toBe(1);
+    observed = head;
+    await h.instances.markStopped(PLAN_INSTANCE.id, NOW);
+    expect(await call(h, "branch", input)).toMatchObject({ body: { ok: true } });
+    expect(await call(h, "branch", input)).toMatchObject({ body: { ok: true } });
+    expect(posts).toBe(1);
+    const cell = (await h.instances.listUnits(PLAN_INSTANCE.id)).find((row) => row.unit === "U10")!.currentEffect!;
+    expect(cell.phase).toBe("settled");
+    expect(cell.calls).toEqual([{ operation: "branch_create", state: "accepted", commitSha: head }]);
+  });
+  it("a verified existing branch is reused without a creation POST", async () => {
+    const h = await planHarness();
+    h.deps.fetchBranchRef = async (_repo, ref) => ({ kind: "verified", ref: `refs/heads/${ref}`, sha: "c".repeat(40) });
+    expect(
+      await call(h, "branch", {
+        parentInstanceId: PLAN_INSTANCE.id,
+        unit: "U10",
+        executionWorkflowId: PLAN_INSTANCE.id,
+        effectId: "U10/branch",
+        effectOrdinal: 1,
+      }),
+    ).toMatchObject({ status: 200, body: { ok: true } });
+    expect(h.branches).toEqual([]);
+    expect(
+      (await h.instances.listUnits(PLAN_INSTANCE.id)).find((row) => row.unit === "U10")!.currentEffect,
+    ).toBeUndefined();
+  });
+  it("a known 422 remains refused and does not become unknown or permit another POST", async () => {
+    const h = await planHarness();
+    let posts = 0;
+    h.deps.createBranchRef = async () => {
+      posts++;
+      return { state: "refused", status: 422 };
+    };
+    const input = {
+      parentInstanceId: PLAN_INSTANCE.id,
+      unit: "U10",
+      executionWorkflowId: PLAN_INSTANCE.id,
+      effectId: "U10/branch",
+      effectOrdinal: 1,
+    };
+    expect(await call(h, "branch", input)).toMatchObject({ status: 200, body: { ok: false } });
+    expect(await call(h, "branch", input)).toMatchObject({ status: 200, body: { ok: false } });
+    expect(posts).toBe(1);
+    const cell = (await h.instances.listUnits(PLAN_INSTANCE.id)).find((row) => row.unit === "U10")!.currentEffect!;
+    expect(cell.phase).toBe("settled");
+    expect(cell.calls).toEqual([{ operation: "branch_create", state: "refused", cause: "external_refused" }]);
+  });
+  it("stop between admission and begin cancels only the provably unstarted creation", async () => {
+    const h = await planHarness();
+    const transition = h.instances.transitionUnitEffect.bind(h.instances);
+    h.instances.transitionUnitEffect = async (input) => {
+      const result = await transition(input);
+      if (input.kind === "admit" && result.ok) await h.instances.markStopped(PLAN_INSTANCE.id, NOW);
+      return result;
+    };
+    expect(
+      await call(h, "branch", {
+        parentInstanceId: PLAN_INSTANCE.id,
+        unit: "U10",
+        executionWorkflowId: PLAN_INSTANCE.id,
+        effectId: "U10/branch",
+        effectOrdinal: 1,
+      }),
+    ).toMatchObject({ status: 409, body: { error: "stopped" } });
+    expect(h.branches).toEqual([]);
+    const cell = (await h.instances.listUnits(PLAN_INSTANCE.id)).find((row) => row.unit === "U10")!.currentEffect!;
+    expect(cell.phase).toBe("settled");
+    expect(cell.calls).toEqual([{ operation: "branch_create", state: "refused", cause: "not_started" }]);
+  });
+  it("branch rejects missing or stale execution identity before a GitHub mutation", async () => {
+    const h = await planHarness();
+    for (const executionWorkflowId of [undefined, "retired-workflow"]) {
+      expect(
+        (
+          await call(h, "branch", {
+            parentInstanceId: PLAN_INSTANCE.id,
+            unit: "U10",
+            executionWorkflowId,
+            effectId: "U10/branch",
+            effectOrdinal: 1,
+          })
+        ).status,
+      ).toBe(409);
+    }
+    expect(h.branches).toEqual([]);
+  });
   it("branch creates the unit's branch from the base on origin and answers ok; a create that fails answers ok: false with the reason, never a throw; an instance without a base says so", async () => {
     const h = await planHarness();
-    expect(await call(h, "branch", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" })).toEqual({
+    expect(
+      await call(h, "branch", {
+        parentInstanceId: PLAN_INSTANCE.id,
+        unit: "U10",
+        executionWorkflowId: PLAN_INSTANCE.id,
+        effectId: "U10/branch",
+        effectOrdinal: 1,
+      }),
+    ).toEqual({
       status: 200,
-      body: { ok: true, branch: "plan/fixture/u10", base: "main", at: NOW },
+      body: { ok: true, branch: "plan/fixture/u10", base: "main", effectOrdinal: 1, at: NOW },
     });
-    expect(h.branches).toEqual([["acme/api", "plan/fixture/u10", "main"]]);
+    expect(h.branches).toEqual([["acme/api", "plan/fixture/u10", "a".repeat(40)]]);
     const failing = await planHarness({ branchError: new Error("HTTP 403 forbidden") });
-    expect(await call(failing, "branch", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" })).toEqual({
+    expect(
+      await call(failing, "branch", {
+        parentInstanceId: PLAN_INSTANCE.id,
+        unit: "U10",
+        executionWorkflowId: PLAN_INSTANCE.id,
+        effectId: "U10/branch",
+        effectOrdinal: 1,
+      }),
+    ).toEqual({
       status: 200,
-      body: { ok: false, reason: "HTTP 403 forbidden", at: NOW },
+      body: { ok: false, reason: "branch creation was refused", at: NOW },
     });
     const noBase = harness();
     await noBase.instances.put({ ...INSTANCE, base: undefined });
@@ -4651,7 +5512,10 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       preset: "coding",
       brief: { kind: "contract", unit: "U10", rebase: { branch: "plan/fixture/u10", onto: "main" } },
     });
-    expect(res).toEqual({ status: 200, body: { ok: true, runId: "run-child", threadKey: "slack:C1:2.0", at: NOW } });
+    expect(res).toEqual({
+      status: 200,
+      body: { ok: true, runId: "run-child", threadKey: "slack:C1:2.0", effectOrdinal: 1, at: NOW },
+    });
     expect(h.dispatched).toHaveLength(1);
     const { msg, opts } = h.dispatched[0];
     expect(msg.threadKey).toBe("slack:C1:2.0");
@@ -4690,6 +5554,11 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
         events: [{ type: "answer", text: "Changes requested: one nit.", seq: 1 }],
       }),
     );
+    const codingRow = (await h.instances.listUnits(PLAN_INSTANCE.id)).find((row) => row.unit === "U10")!;
+    await h.instances.putUnits([
+      unitRow("U10", { ...codingRow, pr: { number: 7, url: "https://github.com/acme/api/pull/7" } }),
+    ]);
+    h.setScript(registers("run-findings"));
     const findings = await call(h, "spawn", {
       parentInstanceId: PLAN_INSTANCE.id,
       step: "U10/1/findings",
@@ -4698,7 +5567,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     });
     expect(findings).toEqual({
       status: 200,
-      body: { ok: true, runId: "run-child", threadKey: "slack:C1:2.0", at: NOW },
+      body: { ok: true, runId: "run-findings", threadKey: "slack:C1:2.0", effectOrdinal: 2, at: NOW },
     });
     const findingsDispatch = h.dispatched[1];
     expect(findingsDispatch.msg.threadKey).toBe("slack:C1:2.0");
@@ -4717,6 +5586,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
         idempotencyKey: "plan-fixture:U10/1/findings",
         unit: "U10",
         instanceAttempt: 0,
+        publication: (await h.instances.listUnits(PLAN_INSTANCE.id)).find((row) => row.unit === "U10")!.publication,
         branch: "plan/fixture/u10",
         base: "main",
         issuedFindingIds: ["F1"],
@@ -5173,9 +6043,14 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
           case "unit-start":
             return wire({ ok: true, threadKey: "slack:C1:2.0", branch: "plan/fixture/u10", base: "main" });
           case "branch":
-            return wire({ ok: true, branch: "plan/fixture/u10", base: "main" });
+            return wire({ ok: true, branch: "plan/fixture/u10", base: "main", effectOrdinal: 0 });
           case "spawn":
-            return wire({ ok: true, runId: n === 1 ? "run-c0" : "run-r1", threadKey: "slack:C1:2.0" });
+            return wire({
+              ok: true,
+              runId: n === 1 ? "run-c0" : "run-r1",
+              threadKey: "slack:C1:2.0",
+              effectOrdinal: n,
+            });
           case "pr-check":
             if (n === 1) return wire({ ok: true, state: "none" });
             return wire({
@@ -5366,6 +6241,88 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
         },
       });
     });
+  });
+
+  it("an uncertain stored review uses the native exact-head approval before the unit becomes merge-ready", async () => {
+    const HEAD = "a".repeat(40);
+    const nativeApproval: PullRequestReview = {
+      author: { login: "acme-switchboard[bot]", id: 4242 },
+      state: "COMMENTED",
+      commitId: HEAD,
+      body: "LGTM: native approval",
+    };
+    for (const scenario of ["approved", "other-head", "unreadable"] as const) {
+      const h = await planHarness({
+        reviewsSequence:
+          scenario === "unreadable"
+            ? [undefined]
+            : scenario === "approved"
+              ? [[], [nativeApproval]]
+              : [[{ ...nativeApproval, commitId: "b".repeat(40) }]],
+      });
+      await h.instances.putUnits([unitRow("U10", { threadKey: "slack:C1:2.0", pr: { number: 7, url: "u" } })]);
+      await h.store.put(
+        record("run-r1", {
+          parentInstanceId: PLAN_INSTANCE.id,
+          idempotencyKey: "plan-fixture:U10/1/review",
+          agent: "review",
+          threadKey: "slack:C1:2.0",
+          repo: "acme/api",
+          verdict: { verdict: "approve", summary: "clean", findings: [] },
+          reviewHead: HEAD,
+          reviewPost: { posted: false, uncertain: true, reason: "native response unconfirmed" },
+          reviewPublication: {
+            version: 1,
+            runId: "run-r1",
+            state: "uncertain",
+            bodyHash: "c".repeat(64),
+            target: { repo: "acme/api", number: 7, commitId: HEAD },
+            verdict: "approve",
+          },
+        }),
+      );
+      const read = await call(h, "read-record", { parentInstanceId: PLAN_INSTANCE.id, runId: "run-r1", unit: "U10" });
+      const body = read.body as { run: ChildFacts; at: number };
+      expect(read.status).toBe(200);
+      if (!body.run.finished) throw new Error("expected a terminal review record");
+      expect(h.reviewFetches()).toBe(scenario === "approved" ? 2 : REVIEW_POSTED_CHECKS);
+      expect(body.run.reviewPosted).toBe(
+        scenario === "approved" ? true : scenario === "other-head" ? false : undefined,
+      );
+      expect(body.run.reviewPostReason).toBeUndefined();
+      if (scenario === "unreadable") continue;
+      let state = openUnitPipeline(
+        {
+          unit: { id: "U10", branch: "plan/fixture/u10" },
+          repo: PLAN_INSTANCE.repo,
+          base: "main",
+          caps: { maxRounds: 3, maxMinutes: 240 },
+          merge: "person",
+          generated: false,
+          resume: { pr: 7, headSha: HEAD },
+        },
+        NOW - 60_000,
+      );
+      const feed = (answer: Record<string, unknown>) => {
+        const action = nextAction(state);
+        if (action.type === "end") throw new Error("ended before scripted evidence");
+        state = applyReturn(state, { ...answer, step: action.step } as StepReturn).state;
+      };
+      feed({
+        type: "pr-check",
+        pr: { state: "open", prNumber: 7, url: "u", headSha: HEAD, headBranchExists: true },
+        at: NOW - 50_000,
+      });
+      feed({ type: "spawn", outcome: "spawned", runId: "run-r1", at: NOW - 40_000 });
+      feed({ type: "wait", outcome: "event" });
+      feed({ type: "read-record", run: body.run, at: body.at });
+      if (scenario === "approved") {
+        expect(nextAction(state)).toMatchObject({ type: "checks", headSha: HEAD });
+        feed({ type: "checks", checks: { total: 1, pending: [], failed: [] }, at: NOW });
+        expect(nextAction(state)).toMatchObject({ type: "end", ending: { kind: "merge_ready" } });
+      } else expect(nextAction(state)).toMatchObject({ type: "end", ending: { kind: "aborted" } });
+      expect((await h.store.get("run-r1"))?.reviewPublication?.state).toBe("uncertain");
+    }
   });
 
   it("read-record answers a recorded skip as reviewPosted: false with the child's reason, GitHub never asked — a skip the child chose is not a post GitHub has yet to surface", async () => {
@@ -5754,7 +6711,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     // A verbose instance's round header names the severity in force and its
     // source (agent-ship item 6): this instance carries none, so the org
     // default shows.
-    await h.instances.replace({ ...PLAN_INSTANCE, verbosity: "verbose" });
+    seedCoordinatorInstance(h.instances, { ...PLAN_INSTANCE, verbosity: "verbose" });
     await h.instances.putUnits([unitRow("U10", { threadKey: "slack:C1:2.0" })]);
     frames.length = 0;
     expect(
@@ -6253,7 +7210,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
 
     const short = await idleHarness({ grantFact: { grant: { renewals: 2 }, source: "org" } }, { why: "stopped" });
     const [row] = await short.instances.listUnits(PLAN_INSTANCE.id);
-    await short.instances.putUnits([{ ...row!, startedAt: NOW - minutesToMs(239) }]);
+    seedCoordinatorUnit(short.instances, { ...row!, startedAt: NOW - minutesToMs(239) });
     await short.instances.appendEvent(key, {
       sender: PLAN_INSTANCE.userId,
       text: "use a renewal instead",
@@ -6283,7 +7240,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
 
     const unfit = await idleHarness({ grantFact: { grant: { renewals: 2 }, source: "org" } });
     const unfitRows = await unfit.instances.listUnits(PLAN_INSTANCE.id);
-    await unfit.instances.replace({ ...PLAN_INSTANCE, caps: { maxRounds: 3, maxMinutes: 40 } });
+    seedCoordinatorInstance(unfit.instances, { ...PLAN_INSTANCE, caps: { maxRounds: 3, maxMinutes: 40 } });
     await unfit.instances.putUnits(unfitRows);
     await unfit.instances.appendEvent(key, {
       sender: PLAN_INSTANCE.userId,
@@ -6336,6 +7293,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       step: "U10/2/review/read/1",
       round: 2,
       report,
+      threadReport: report,
       at: NOW,
     });
     expect(replies).toEqual([{ threadKey: "slack:C1:2.0", text: report }]);
@@ -6402,6 +7360,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(rows[0].ending).toEqual({
       kind: "merge_ready",
       report: "✅ Merge-ready after 1 review round: https://github.com/acme/api/pull/7",
+      threadReport: "✅ Merge-ready after 1 review round: https://github.com/acme/api/pull/7",
       at: NOW,
     });
     expect(rows[0].pr).toEqual({ number: 7, url: "https://github.com/acme/api/pull/7" });
@@ -6466,9 +7425,12 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     // A review_pending ending's headSha — the coding child's own last push —
     // is persisted on the row as lastPush, so the next attempt's pre-check can
     // start at the review round; a value that is not a sha leaves the row alone.
+    const capped = await planHarness();
+    await hostParent(capped);
+    await capped.instances.putUnits([unitRow("U10")]);
     expect(
       (
-        await call(h, "unit-end", {
+        await call(capped, "unit-end", {
           parentInstanceId: PLAN_INSTANCE.id,
           unit: "U10",
           ending: { kind: "review_pending", report: "⏸ capped" },
@@ -6476,22 +7438,25 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
         })
       ).status,
     ).toBe(200);
-    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0].lastPush).toBe(
+    expect((await capped.instances.listUnits(PLAN_INSTANCE.id))[0].lastPush).toBe(
       "abcdef1234abcdef1234abcdef1234abcdef1234",
     );
-    await call(h, "unit-end", {
+    await call(capped, "unit-end", {
       parentInstanceId: PLAN_INSTANCE.id,
       unit: "U10",
       ending: { kind: "review_pending", report: "⏸ capped" },
       headSha: "not-a-sha",
     });
-    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0].lastPush).toBe(
+    expect((await capped.instances.listUnits(PLAN_INSTANCE.id))[0].lastPush).toBe(
       "abcdef1234abcdef1234abcdef1234abcdef1234",
     );
     // A merge_ready ending persists the exact final reviewed head too: this is
     // the durable expected head an ended generated pipeline continues from.
+    const ready = await planHarness();
+    await hostParent(ready);
+    await ready.instances.putUnits([unitRow("U10")]);
     const reviewedHead = "FEDCBA9876fedcba9876fedcba9876fedcba9876";
-    await call(h, "unit-end", {
+    await call(ready, "unit-end", {
       parentInstanceId: PLAN_INSTANCE.id,
       unit: "U10",
       ending: {
@@ -6501,7 +7466,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
       headSha: reviewedHead,
     });
-    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0].lastPush).toBe(reviewedHead.toLowerCase());
+    expect((await ready.instances.listUnits(PLAN_INSTANCE.id))[0].lastPush).toBe(reviewedHead.toLowerCase());
 
     // The hosted parent (record 0060): finish publishes the answer,
     // finishes the registry row and seals the ONE record — the run's own
@@ -6535,14 +7500,11 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       "run_state",
       "run_state",
       "ship_unit",
-      "ship_unit",
-      "ship_unit",
-      "ship_unit",
       "run_state",
       "answer",
       "run_state",
     ]);
-    expect(rec.events.map((e) => e.seq)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    expect(rec.events.map((e) => e.seq)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
     // The record names the instance whose story it is (agent-ship item 17) in
     // its LAST run_meta carrying one, so its page can list the units.
     expect(rec.events[1]).toMatchObject({ type: "run_meta", agent: "ship", instanceId: PLAN_INSTANCE.id });
@@ -6704,6 +7666,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     await h.instances.putUnits([
       {
         ...unitRow("U10"),
+        startedAt: NOW,
         instanceId: solo.id,
         threadKey: INSTANCE.threadKey,
         ending: { kind: "merge_ready", report: "ready", at: NOW },
@@ -6765,7 +7728,15 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
 // and every check is green; refused by reason otherwise, so a person decides.
 describe("POST /admin/coordinator/checks — the round's checks read at the reviewed head (record 0055, item 9)", () => {
   const HEAD = "a".repeat(40);
-  const body = { parentInstanceId: INSTANCE.id, unit: "U10", prNumber: 7, headSha: HEAD };
+  const body = {
+    parentInstanceId: INSTANCE.id,
+    unit: "U10",
+    prNumber: 7,
+    headSha: HEAD,
+    effectId: "U10/checks/0",
+    effectOrdinal: 1,
+    executionWorkflowId: INSTANCE.id,
+  };
   const rowU10: Partial<CoordinatorUnit> = {};
   async function checksHarness(over: Parameters<typeof harness>[0] = {}) {
     const h = harness(over);
@@ -6779,9 +7750,34 @@ describe("POST /admin/coordinator/checks — the round's checks read at the revi
         dependsOn: [],
         rounds: [],
         threadKey: "slack:C1:2.0",
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+        publication: {
+          repo: INSTANCE.repo,
+          pr: 7,
+          headRef: "ship/warm-abc123",
+          baseRef: "main",
+          publicationRef: "ship/warm-abc123",
+          expectedHeadSha: HEAD,
+          owner: { instanceId: INSTANCE.id, unit: "U10" },
+        },
         ...rowU10,
       },
     ]);
+    if (over.prFacts === undefined) {
+      const read = h.deps.fetchPrFacts;
+      h.deps.fetchPrFacts = async (pr) => {
+        const facts = await read(pr);
+        return (
+          facts && {
+            ...facts,
+            baseRef: "main",
+            headRef: "ship/warm-abc123",
+            verifiedHead: { repo: INSTANCE.repo, ref: "ship/warm-abc123", sha: HEAD },
+            ...(over.refireOk === true && h.refires.length > 0 ? { state: "closed" as const } : {}),
+          }
+        );
+      };
+    }
     return h;
   }
   const checks = (h: ReturnType<typeof harness>, b: Record<string, unknown> = body) =>
@@ -6892,15 +7888,11 @@ describe("POST /admin/coordinator/checks — the round's checks read at the revi
     const h = await checksHarness({ rerunOk: true });
     expect(await checks(h, { ...body, retry: ["test 2 of 4"] })).toEqual({
       status: 200,
-      body: { ok: true, retried: true, at: NOW },
+      body: { ok: true, retried: true, effectOrdinal: 1, at: NOW },
     });
     expect(h.reruns).toEqual([{ sha: HEAD, names: ["test 2 of 4"] }]);
     const bare = await checksHarness();
-    expect((await checks(bare, { ...body, retry: ["test 2 of 4"] })).body).toEqual({
-      ok: true,
-      retried: false,
-      at: NOW,
-    });
+    expect((await checks(bare, { ...body, retry: ["test 2 of 4"] })).status).toBe(503);
     // A malformed retry is a 400, never a silent read.
     expect((await checks(bare, { ...body, retry: [] })).status).toBe(400);
     expect((await checks(bare, { ...body, retry: [7] })).status).toBe(400);
@@ -6910,15 +7902,46 @@ describe("POST /admin/coordinator/checks — the round's checks read at the revi
     const h = await checksHarness({ refireOk: true });
     expect(await checks(h, { ...body, refire: true })).toEqual({
       status: 200,
-      body: { ok: true, refired: true, at: NOW },
+      body: { ok: true, refired: true, effectOrdinal: 1, at: NOW },
     });
     expect(h.refires).toEqual([{ repo: "acme/api", prNumber: 7 }]);
 
     const bare = await checksHarness();
-    expect((await checks(bare, { ...body, refire: true })).body).toEqual({ ok: true, refired: false, at: NOW });
+    expect((await checks(bare, { ...body, refire: true })).status).toBe(503);
     expect((await checks(bare, { ...body, refire: false })).status).toBe(400);
     expect((await checks(bare, { ...body, refire: true, retry: ["ci / bot"] })).status).toBe(400);
   });
+
+  it.each(["moved head", "foreign ref", "unknown head"] as const)(
+    "check recovery refuses the native %s before admitting a write",
+    async (mismatch) => {
+      const h = await checksHarness({
+        rerunOk: true,
+        prFacts: {
+          state: "open",
+          sameRepoHead: true,
+          headBranchExists: true,
+          headRef: "ship/warm-abc123",
+          baseRef: "main",
+          ...(mismatch === "unknown head"
+            ? {}
+            : {
+                verifiedHead: {
+                  repo: INSTANCE.repo,
+                  ref: mismatch === "foreign ref" ? "other" : "ship/warm-abc123",
+                  sha: mismatch === "moved head" ? "b".repeat(40) : HEAD,
+                },
+              }),
+        },
+      });
+      expect(await checks(h, { ...body, retry: ["ci / tests"] })).toMatchObject({
+        status: mismatch === "unknown head" ? 503 : 409,
+        body: { error: mismatch === "unknown head" ? "effect_reconciliation_pending" : "effect_target_mismatch" },
+      });
+      expect(h.reruns).toEqual([]);
+      expect((await h.instances.listUnits(INSTANCE.id))[0]?.currentEffect).toBeUndefined();
+    },
+  );
 
   it("holds its body to shape: a bad instance, unit, prNumber or head is a 400/404 by name", async () => {
     const h = await checksHarness({ roundChecks: { total: 1, pending: [], failed: [] } });
@@ -6950,6 +7973,15 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     rounds: [],
     threadKey: "slack:C1:2.0",
     pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+    publication: {
+      repo: PLAN_INSTANCE.repo,
+      pr: 7,
+      headRef: "plan/fixture/u10-warm",
+      baseRef: "main",
+      publicationRef: "plan/fixture/u10-warm",
+      expectedHeadSha: HEAD,
+      owner: { instanceId: PLAN_INSTANCE.id, unit: "U10" },
+    },
     ...over,
   });
   const facts = (over: Partial<PullRequestFacts> = {}): PullRequestFacts => ({
@@ -6967,9 +7999,18 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     { author: { login: "acme-switchboard[bot]", id: 4242 }, state: "COMMENTED", commitId: HEAD, body: "LGTM: clean" },
   ];
   const green: CommitChecks = { total: 3, pending: [], failed: [] };
-  const body = { parentInstanceId: PLAN_INSTANCE.id, unit: "U10", prNumber: 7, headSha: HEAD };
+  const body = {
+    parentInstanceId: PLAN_INSTANCE.id,
+    unit: "U10",
+    prNumber: 7,
+    headSha: HEAD,
+    effectId: "U10/merge/0",
+    effectOrdinal: 1,
+    executionWorkflowId: PLAN_INSTANCE.id,
+  };
   async function mergeHarness(over: Parameters<typeof harness>[0] = {}, unit: Partial<CoordinatorUnit> = {}) {
     const h = harness({ prFacts: facts(), reviews: approving, checks: green, ...over });
+    if (over.runnerRebase) h.deps.runnerRebase = recordNativeRebase(over.runnerRebase);
     await h.instances.put(PLAN_INSTANCE);
     await h.instances.putUnits([row(unit)]);
     return h;
@@ -6978,6 +8019,161 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}${step}`, b), h.deps);
   const merge = (h: ReturnType<typeof harness>, b: Record<string, unknown> = body, auth?: string) =>
     handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}merge`, b, auth), h.deps);
+
+  it("merge persists permission and acceptance under the durable owner, then replays without another write", async () => {
+    const h = await mergeHarness();
+    const original = h.deps.mergePullRequest;
+    h.deps.mergePullRequest = async (pr, opts) => {
+      expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]?.currentEffect).toMatchObject({
+        phase: "active",
+        calls: [{ operation: "merge", state: "pending" }],
+      });
+      return original(pr, opts);
+    };
+    const request = { ...body, effectId: "U10/merge/0", effectOrdinal: 1, executionWorkflowId: PLAN_INSTANCE.id };
+    expect((await merge(h, request)).body).toMatchObject({ outcome: "merged", effectOrdinal: 1 });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]?.currentEffect).toMatchObject({
+      phase: "settled",
+      calls: [{ state: "accepted", commitSha: MERGED }],
+    });
+    expect((await merge(h, request)).body).toMatchObject({ outcome: "merged", effectOrdinal: 1 });
+    expect(h.merges).toHaveLength(1);
+  });
+
+  it("a lost merge response stays owned and cannot replay when fresh facts are still open", async () => {
+    const h = await mergeHarness({ merge: new Error("lost response") });
+    const request = { ...body, effectId: "U10/merge/0", effectOrdinal: 1, executionWorkflowId: PLAN_INSTANCE.id };
+    expect((await merge(h, request)).status).toBe(502);
+    expect((await merge(h, request)).status).toBe(502);
+    expect(h.merges).toHaveLength(1);
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]?.currentEffect).toMatchObject({
+      phase: "active",
+      calls: [{ state: "uncertain" }],
+    });
+  });
+
+  it("an exact terminal merge resolves a lost reply after stop without another mutation", async () => {
+    const h = await mergeHarness({ merge: new Error("lost response") });
+    expect((await merge(h)).status).toBe(502);
+    await h.instances.markStopped(PLAN_INSTANCE.id, NOW);
+    h.deps.fetchPrFacts = async () =>
+      facts({ state: "closed", mergedAt: "2026-09-20T00:01:00Z", mergeCommitSha: MERGED });
+    expect((await merge(h)).body).toMatchObject({ outcome: "merged", by: "other", effectOrdinal: 1 });
+    expect(h.merges).toHaveLength(1);
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]?.currentEffect?.phase).toBe("settled");
+  });
+
+  it("enqueue acceptance stays active through stop until a native queued poll proves terminal removal", async () => {
+    const h = await mergeHarness({ queueRule: true, enqueue: { ok: true }, queueState: { queued: false } });
+    expect((await merge(h)).body).toMatchObject({ outcome: "enqueued", effectOrdinal: 1 });
+    await h.instances.markStopped(PLAN_INSTANCE.id, NOW);
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]?.currentEffect?.phase).toBe("active");
+    expect((await merge(h, { ...body, queued: true, effectId: "U10/merge/1", effectOrdinal: 2 })).body).toMatchObject({
+      outcome: "removed",
+    });
+    expect(h.enqueues).toHaveLength(1);
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]?.currentEffect?.phase).toBe("settled");
+  });
+
+  it("a stop racing merge admission cancels only unstarted work and issues no GitHub mutation", async () => {
+    const h = await mergeHarness();
+    const move = h.instances.transitionUnitEffect.bind(h.instances);
+    h.instances.transitionUnitEffect = async (input) => {
+      const result = await move(input);
+      if (input.kind === "admit" && result.ok) await h.instances.markStopped(PLAN_INSTANCE.id, NOW);
+      return result;
+    };
+    expect((await merge(h)).body).toMatchObject({ error: "stopped", effectOrdinal: 1 });
+    expect(h.merges).toEqual([]);
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]?.currentEffect).toMatchObject({
+      phase: "settled",
+      calls: [{ state: "refused", cause: "not_started" }],
+    });
+  });
+
+  it("a moved head releases only a known accepted queue with native absence before projecting the replacement", async () => {
+    const h = await mergeHarness({ queueRule: true, enqueue: { ok: true }, queueState: { queued: false } });
+    await merge(h);
+    h.deps.fetchPrFacts = async () => facts({ headSha: "b".repeat(40) });
+    expect((await merge(h, { ...body, queued: true, effectId: "U10/merge/1", effectOrdinal: 2 })).body).toMatchObject({
+      outcome: "recheck",
+      pullRequest: { headSha: "b".repeat(40) },
+    });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]?.currentEffect?.phase).toBe("settled");
+    expect(h.enqueues).toHaveLength(1);
+  });
+
+  it("a terminal replacement head is projected as a recheck rather than a merge of the frozen head", async () => {
+    const h = await mergeHarness({
+      prFacts: facts({
+        state: "closed",
+        headSha: "b".repeat(40),
+        mergedAt: "2026-09-20T00:01:00Z",
+        mergeCommitSha: MERGED,
+      }),
+    });
+    expect((await merge(h)).body).toMatchObject({ outcome: "recheck", pullRequest: { headSha: "b".repeat(40) } });
+    expect(h.merges).toEqual([]);
+  });
+
+  it("an already merged PR cannot complete a different durable PR or publication head", async () => {
+    for (const foreign of ["pull", "head"] as const) {
+      const h = await mergeHarness({
+        prFacts: facts({ state: "closed", mergedAt: "2026-09-20T00:01:00Z", mergeCommitSha: MERGED }),
+      });
+      const current = (await h.instances.listUnits(PLAN_INSTANCE.id))[0]!;
+      seedCoordinatorUnit(h.instances, {
+        ...current,
+        ...(foreign === "pull" ? { pr: { number: 8, url: "https://github.com/acme/api/pull/8" } } : {}),
+        publication: {
+          ...current.publication!,
+          ...(foreign === "pull" ? { pr: 8 } : { expectedHeadSha: "b".repeat(40) }),
+        },
+      });
+      expect((await merge(h)).status).toBe(409);
+      expect(h.merges).toEqual([]);
+    }
+  });
+
+  const recordNativeRebase =
+    (adapter: NonNullable<AdminCoordinatorDeps["runnerRebase"]>): NonNullable<AdminCoordinatorDeps["runnerRebase"]> =>
+    async (instance, number, journal) => {
+      const report = await adapter(instance, number, journal);
+      const result = report.results.find((r) => r.number === number);
+      if ((result?.outcome !== "carried" && result?.outcome !== "delta-review") || !result.headSha) return report;
+      const plan = {
+        pr: {
+          repo: instance.repo,
+          number,
+          branch: "plan/fixture/u10-warm",
+          base: "main",
+          headSha: HEAD,
+          mergeableState: "dirty",
+          approved: result.approvalCarried === true,
+        },
+        newHead: result.headSha,
+        decision: result.outcome === "carried" ? ("carry" as const) : ("delta-review" as const),
+        calls: [
+          { operation: "rebase_push" as const, state: "unstarted" as const },
+          ...(result.approvalCarried
+            ? [{ operation: "approval_reset" as const, state: "unstarted" as const, body: "LGTM: unchanged patch" }]
+            : []),
+        ],
+      };
+      expect(await journal.admit(plan)).toBe(true);
+      for (let call = 0; call < plan.calls.length; call++) {
+        expect(await journal.begin(plan, call)).toBe(true);
+        expect(
+          await journal.complete(
+            plan,
+            call,
+            call === 0 ? { state: "accepted", commitSha: result.headSha } : { state: "accepted" },
+          ),
+        ).toBe(true);
+      }
+      expect(await journal.settle(plan)).toBe(true);
+      return report;
+    };
 
   it("the runner's rebase route maps the shared resolver's clean carry, changed patch and conflict outcomes", async () => {
     const newHead = "b".repeat(40);
@@ -6995,10 +8191,18 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
       ],
     });
     const carried = await mergeHarness({
+      prFacts: facts({
+        headSha: newHead,
+        verifiedHead: { repo: PLAN_INSTANCE.repo, ref: "plan/fixture/u10-warm", sha: newHead },
+      }),
       runnerRebase: async () => result("carried", "#7 rebased, patch unchanged, approval carried", newHead),
     });
     expect((await call(carried, "rebase", body)).body).toMatchObject({ outcome: "carried", headSha: newHead });
     const changed = await mergeHarness({
+      prFacts: facts({
+        headSha: newHead,
+        verifiedHead: { repo: PLAN_INSTANCE.repo, ref: "plan/fixture/u10-warm", sha: newHead },
+      }),
       runnerRebase: async () => result("delta-review", "#7 rebased, patch changed", newHead),
     });
     expect((await call(changed, "rebase", body)).body).toMatchObject({ outcome: "changed", headSha: newHead });
@@ -7056,6 +8260,42 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
       ),
     ).toMatchObject({ status: 200, body: { headSha: newHead } });
   });
+
+  it.each(["throw", "unavailable"] as const)(
+    "confirms the exact rebase binding after a lost %s acknowledgement",
+    async (lost) => {
+      const newHead = "b".repeat(40);
+      const h = await mergeHarness({
+        prFacts: {
+          ...facts({ headSha: newHead }),
+          verifiedHead: { repo: PLAN_INSTANCE.repo, ref: "plan/fixture/u10-warm", sha: newHead },
+        },
+        runnerRebase: async () => ({
+          repo: PLAN_INSTANCE.repo,
+          results: [
+            { repo: PLAN_INSTANCE.repo, number: 7, outcome: "delta-review", line: "changed", headSha: newHead },
+          ],
+        }),
+      });
+      const replace = h.instances.transitionUnitEffect.bind(h.instances);
+      vi.spyOn(h.instances, "transitionUnitEffect").mockImplementation(async (change) => {
+        const result = await replace(change);
+        if (result.ok && change.kind === "publish") {
+          if (lost === "throw") throw new Error("binding response lost");
+          return { ok: false, reason: "unavailable" };
+        }
+        return result;
+      });
+      expect(await call(h, "rebase", body)).toMatchObject({
+        status: 200,
+        body: { outcome: "changed", headSha: newHead },
+      });
+      expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]).toMatchObject({
+        publication: { expectedHeadSha: newHead },
+        lastPush: newHead,
+      });
+    },
+  );
 
   it("the runner's rebase refuses a reported push when the PR ref points elsewhere", async () => {
     const newHead = "b".repeat(40);
@@ -7150,7 +8390,7 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]).toMatchObject({ publication: binding, lastPush: HEAD });
   });
 
-  it("an unrecorded rebase head is adopted only for review without claiming a push", async () => {
+  it("an unrecorded rebase result cannot adopt a mutable head as a push receipt", async () => {
     const newHead = "b".repeat(40);
     const binding = {
       repo: PLAN_INSTANCE.repo,
@@ -7174,57 +8414,39 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
       { publication: binding, lastPush: HEAD },
     );
     expect(await call(h, "rebase", body)).toMatchObject({
-      status: 200,
-      body: { outcome: "changed", headSha: newHead },
+      status: 503,
+      body: { error: "effect_reconciliation_pending" },
     });
     expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]).toMatchObject({
-      publication: { ...binding, expectedHeadSha: newHead },
+      publication: binding,
       lastPush: HEAD,
     });
   });
 
-  it("the runner's rebase returns the named transient while periodic ownership recovery is in flight", async () => {
+  it("the runner's rebase retains canonical ownership uncertainty before native writes", async () => {
     const runnerRebase = vi.fn();
     const h = await mergeHarness({ runnerRebase });
-    const fence = new RunnerOwnershipFence(false);
-    let finishRecovery!: (rows: CoordinatorUnit[]) => void;
-    const activeRecoveries = new Promise<CoordinatorUnit[]>((resolve) => {
-      finishRecovery = resolve;
-    });
-    const recovery = fence.recover(
-      { liveListingComplete: true, liveHosted: [], resumable: [], liveElsewhere: [] },
-      {
-        get: h.instances.get.bind(h.instances),
-        listUnits: h.instances.listUnits.bind(h.instances),
-        listActiveRecoveries: () => activeRecoveries,
-      },
-    );
-    h.deps.runnerOwnership = fence;
-
-    expect(await call(h, "rebase", body)).toEqual({
+    vi.spyOn(h.instances, "findPullOwners").mockResolvedValue({ ok: false, reason: "incomplete" });
+    expect(await call(h, "rebase", body)).toMatchObject({
       status: 503,
-      body: {
-        ok: false,
-        error: "publication_ownership_unknown",
-        message: "runner ownership recovery is still in progress",
-        at: NOW,
-      },
+      body: { error: "publication_ownership_unknown" },
     });
     expect(runnerRebase).not.toHaveBeenCalled();
-
-    finishRecovery([]);
-    await recovery;
   });
 
   it("every guard green: the bot squashes the pull request at exactly the approved head with the title as the commit, and answers merged with the squash's sha", async () => {
     const h = await mergeHarness();
-    expect(await merge(h)).toEqual({ status: 200, body: { ok: true, outcome: "merged", sha: MERGED, at: NOW } });
+    expect(await merge(h)).toEqual({
+      status: 200,
+      body: { ok: true, outcome: "merged", sha: MERGED, effectOrdinal: 1, at: NOW },
+    });
     expect(h.merges).toEqual([
       { pr: { repo: "acme/api", number: 7 }, opts: { sha: HEAD, title: "feat(cache): warm on wake" } },
     ]);
-    // A seven-hex approved head still pins the squash to what GitHub has.
+    // A mutation requires the complete approved target, not an abbreviated head.
     const short = await mergeHarness();
-    expect((await merge(short, { ...body, headSha: HEAD.slice(0, 7) })).body).toMatchObject({ outcome: "merged" });
+    expect((await merge(short, { ...body, headSha: HEAD.slice(0, 7) })).status).toBe(400);
+    expect(short.merges).toEqual([]);
   });
 
   it("agent-ship item 10: an unknown head-branch state dispatches no merge and returns a retryable GitHub error", async () => {
@@ -7491,26 +8713,29 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     // from its record, a run of this instance and no other — a run outside the
     // instance, one the history lacks, or a record without a handoff leaves the
     // comment as the report alone.
+    const handoffs = await mergeHarness({ issues: [] });
+    await handoffs.github.createIssue("acme/api", { title: "U10: Warm the cache (unit)", body: "" });
+    await handoffs.instances.putUnits([row({ issue: issue.number })]);
     const handoff = {
       deviations: [{ from: "one table", to: "two tables", why: "the row outgrew the record" }],
       followUps: [],
       unproven: [{ criterion: "the live receipt", why: "needs staging" }],
     };
-    await h.store.put(
+    await handoffs.store.put(
       record("run-c0", {
         parentInstanceId: PLAN_INSTANCE.id,
         idempotencyKey: `${PLAN_INSTANCE.id}:U10/1/fix`,
         handoff,
       }),
     );
-    await h.store.put(
+    await handoffs.store.put(
       record("run-else", { parentInstanceId: "ship_other_1", idempotencyKey: "ship_other_1:x", handoff }),
     );
-    await h.store.put(
+    await handoffs.store.put(
       record("run-bare", { parentInstanceId: PLAN_INSTANCE.id, idempotencyKey: `${PLAN_INSTANCE.id}:y` }),
     );
     const ended = (codingRunId: unknown) =>
-      call(h, "unit-end", {
+      call(handoffs, "unit-end", {
         parentInstanceId: PLAN_INSTANCE.id,
         unit: "U10",
         ending: { kind: "merged", report: "✅ Merged after 1 review round" },
@@ -7518,7 +8743,7 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
         codingRunId,
       });
     for (const id of ["run-c0", "run-else", "run-bare", "run-missing", 42]) expect((await ended(id)).status).toBe(200);
-    const bodies = (await h.github.getIssue("acme/api", issue.number)).comments.slice(1).map((c) => c.body);
+    const bodies = (await handoffs.github.getIssue("acme/api", issue.number)).comments.map((c) => c.body);
     expect(bodies[0]).toBe(
       "**Plan runner — U10 ended `merged`** · https://github.com/acme/api/pull/7\n\n✅ Merged after 1 review round\n\n" +
         "**Handoff — U10** · pull request [#7](https://github.com/acme/api/pull/7)\n\n" +
@@ -7555,7 +8780,13 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     const [board, prIssue] = (await held.github.listIssues("acme/api", { state: "open", limit: 10 })).sort(
       (a, b) => a.number - b.number,
     );
-    await held.instances.putUnits([row({ issue: board!.number })]);
+    seedCoordinatorUnit(
+      held.instances,
+      row({
+        issue: board!.number,
+        pr: { number: prIssue!.number, url: `https://github.com/acme/api/pull/${prIssue!.number}` },
+      }),
+    );
     const heldReport =
       "⏸️ Approved but held after 1 review round — F1 (minor) — the entry replay receipt is human-gated";
     expect(
@@ -7574,7 +8805,7 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     expect((await held.github.getIssue("acme/api", board!.number)).comments.map((c) => c.body)).toEqual([
       `**Plan runner — U10 ended \`held\`** · https://github.com/acme/api/pull/${prIssue!.number}\n\n${heldReport}`,
     ]);
-    const heldGone = await mergeHarness();
+    const heldGone = await mergeHarness({}, { pr: { number: 4242, url: "https://github.com/acme/api/pull/4242" } });
     expect(
       (
         await call(heldGone, "unit-end", {
@@ -7606,47 +8837,36 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     const h = await mergeHarness({ queueRule: true, enqueue: { ok: true } });
     expect(await merge(h)).toEqual({
       status: 200,
-      body: { ok: true, outcome: "enqueued", reason: `enqueued at \`${HEAD.slice(0, 7)}\``, at: NOW },
+      body: { ok: true, outcome: "enqueued", effectOrdinal: 1, reason: `enqueued at \`${HEAD.slice(0, 7)}\``, at: NOW },
     });
     expect(h.enqueues).toEqual([{ pr: { repo: "acme/api", number: 7 }, opts: { sha: HEAD } }]);
     expect(h.merges).toEqual([]);
     expect(h.logs.some((l) => l.includes("enqueued acme/api#7"))).toBe(true);
   });
 
-  it("a 405 with the queue's wording on a repository whose rules could not be read enqueues too; any other refusal keeps GitHub's words; a queue ruled but with no enqueue wired is refused naming the hand enqueue", async () => {
-    const h = await mergeHarness({
-      queueRule: new Error("rules unreadable"),
-      merge: {
-        ok: false,
-        status: 405,
-        reason: "Repository rule violations found — Changes must be made through the merge queue",
-      },
+  it("unreadable queue rules authorize no write, and queue error prose cannot choose an enqueue", async () => {
+    for (const queueRule of [undefined, new Error("rules unreadable")]) {
+      const h = await mergeHarness({
+        queueRule,
+        merge: { ok: false, status: 405, reason: "must use merge queue" },
+        enqueue: { ok: true },
+      });
+      expect((await merge(h)).status).toBe(502);
+      expect(h.merges).toEqual([]);
+      expect(h.enqueues).toEqual([]);
+    }
+    const falseRule = await mergeHarness({
+      queueRule: false,
+      merge: { ok: false, status: 405, reason: "must use merge queue" },
       enqueue: { ok: true },
     });
-    expect((await merge(h)).body).toMatchObject({ outcome: "enqueued" });
-    // The squash was attempted (the rules read decided nothing) and the 405's
-    // own wording routed it to the queue.
-    expect(h.merges).toHaveLength(1);
-    expect(h.enqueues).toEqual([{ pr: { repo: "acme/api", number: 7 }, opts: { sha: HEAD } }]);
-    // A 405 without the queue's wording keeps today's refusal in GitHub's words.
-    const plain = await mergeHarness({
-      queueRule: undefined,
-      merge: { ok: false, status: 405, reason: "Pull Request is not mergeable" },
-      enqueue: { ok: true },
-    });
-    expect((await merge(plain)).body).toMatchObject({
+    expect((await merge(falseRule)).body).toMatchObject({
       outcome: "refused",
-      reason: "GitHub refused the merge of acme/api#7 (HTTP 405): Pull Request is not mergeable",
+      reason: "GitHub refused the merge of acme/api#7 (HTTP 405): must use merge queue",
     });
-    expect(plain.enqueues).toEqual([]);
-    // The queue is ruled but the door cannot enqueue: refused naming the hand act.
+    expect(falseRule.enqueues).toEqual([]);
     const bare = await mergeHarness({ queueRule: true });
-    expect((await merge(bare)).body).toMatchObject({
-      outcome: "refused",
-      reason:
-        "`main` takes changes only through a merge queue and the door cannot enqueue — this is a bug: automatic merge-queue enqueue is unavailable; the approved work stands",
-    });
-    // GitHub refusing the enqueue itself is a refusal in GitHub's words.
+    expect((await merge(bare)).status).toBe(502);
     const refused = await mergeHarness({ queueRule: true, enqueue: { ok: false, reason: "queue is locked" } });
     expect((await merge(refused)).body).toMatchObject({
       outcome: "refused",
@@ -7707,8 +8927,7 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
 // arrival order, and marks them consumed by the spawn's step; a review spawn
 // leaves them; leftovers at a final ending run once as one fresh turn.
 describe("the fold — a unit's thread events reach the pipeline's next step (record 0051's fold rule)", () => {
-  const call = (h: ReturnType<typeof harness>, step: string, body: Record<string, unknown>) =>
-    handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}${step}`, body), h.deps);
+  const call = fixtureStep;
   const key = { instanceId: INSTANCE.id, unit: "u12" };
   const row: CoordinatorUnit = {
     instanceId: INSTANCE.id,
@@ -7748,7 +8967,7 @@ describe("the fold — a unit's thread events reach the pipeline's next step (re
     });
     const res = await call(h, "spawn", {
       parentInstanceId: INSTANCE.id,
-      step: "u12/1/fix",
+      step: "u12/1/findings",
       preset: "coding",
       prompt: "Address the findings.",
       unit: "u12",
@@ -7762,12 +8981,13 @@ describe("the fold — a unit's thread events reach the pipeline's next step (re
     // The stored attachments ride the child's message as its own images and documents.
     expect(h.dispatched[0]!.msg.images).toEqual([shot]);
     expect(h.dispatched[0]!.msg.documents).toEqual([note]);
-    expect((await h.instances.listEvents(key)).map((e) => e.consumedBy)).toEqual(["u12/1/fix", "u12/1/fix"]);
+    expect((await h.instances.listEvents(key)).map((e) => e.consumedBy)).toEqual(["u12/1/findings", "u12/1/findings"]);
     expect(await h.instances.listEvents(key, true)).toEqual([]);
 
+    h.setScript(registers("run-child-2"));
     const roundTwo = await call(h, "spawn", {
       parentInstanceId: INSTANCE.id,
-      step: "u12/2/fix",
+      step: "u12/2/findings",
       preset: "coding",
       prompt: "Address the next findings.",
       unit: "u12",
@@ -7871,7 +9091,7 @@ describe("the fold — a unit's thread events reach the pipeline's next step (re
     expect(artifacts).toHaveLength(1);
   });
 
-  it("a coding spawn that fails before registration leaves its attachment event unconsumed, so the retry carries and consumes it", async () => {
+  it("an uncertain coding dispatch leaves its attachment unconsumed and never replays on retry", async () => {
     const h = await foldHarness({ script: async () => ({ status: "failed" }) });
     await h.instances.appendEvent(key, {
       ...event(1, "Attachments from the ship request.", "slack:UALICE", "alice"),
@@ -7886,27 +9106,41 @@ describe("the fold — a unit's thread events reach the pipeline's next step (re
       unit: "u12",
     };
 
-    expect((await call(h, "spawn", body)).status).toBe(502);
+    expect((await call(h, "spawn", body)).status).toBe(503);
     expect(h.dispatched[0]!.msg.images).toEqual([shot]);
     expect(await h.instances.listEvents(key, true)).toHaveLength(1);
 
-    h.deps.dispatch = async (msg, io, opts) => {
-      h.dispatched.push({ msg, opts });
+    h.setScript(async (msg, io, opts) => {
       return registers("run-retry")(msg, io, opts);
-    };
-    expect((await call(h, "spawn", body)).status).toBe(200);
-    expect(h.dispatched[1]!.msg.images).toEqual([shot]);
-    expect((await h.instances.listEvents(key))[0]!.consumedBy).toBe("u12/0/coding");
+    });
+    expect((await call(h, "spawn", body)).status).toBe(503);
+    expect(h.dispatched).toHaveLength(1);
+    expect(await h.instances.listEvents(key, true)).toHaveLength(1);
   });
 
   it("a review spawn leaves the events unconsumed and folds nothing", async () => {
     const h = await foldHarness();
     await h.instances.appendEvent(key, event(1, "also update the readme"));
+    await h.instances.putUnits([
+      {
+        ...row,
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+        publication: {
+          repo: INSTANCE.repo,
+          pr: 7,
+          headRef: row.branch,
+          baseRef: "main",
+          publicationRef: row.branch,
+          expectedHeadSha: "a".repeat(40),
+          owner: { instanceId: INSTANCE.id, unit: row.unit },
+        },
+      },
+    ]);
     const res = await call(h, "spawn", {
       parentInstanceId: INSTANCE.id,
       step: "u12/1/review",
       preset: "review",
-      prompt: "Review the pull request.",
+      brief: { kind: "review", unit: "u12", pr: 7, headSha: "a".repeat(40), round: 1 },
       unit: "u12",
     });
     expect(res.status).toBe(200);
@@ -7944,7 +9178,7 @@ describe("the fold — a unit's thread events reach the pipeline's next step (re
     expect(h.dispatched).toHaveLength(1);
   });
 
-  it("leftovers at a final ending with no channel handle stay unconsumed, run no fresh turn, and the log says how many were left where", async () => {
+  it("a final ending without a channel retains pending report delivery and unconsumed leftovers", async () => {
     const h = await foldHarness({ ioFor: () => undefined });
     await h.instances.appendEvent(key, event(1, "also update the readme", "slack:UBOB", "bob"));
     const res = await call(h, "unit-end", {
@@ -7952,16 +9186,16 @@ describe("the fold — a unit's thread events reach the pipeline's next step (re
       unit: "u12",
       ending: { kind: "merge_ready", report: "the unit is merge-ready" },
     });
-    expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ ok: true, told: false });
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({ ok: false, error: "report_context_unavailable" });
     expect(h.dispatched).toHaveLength(0);
     expect((await h.instances.listEvents(key, true)).map((e) => e.seq)).toEqual([1]);
-    expect(h.logs.some((l) => l.includes("1 leftover thread event(s) stay unconsumed") && l.includes("u12"))).toBe(
-      true,
+    expect((await h.instances.listUnits(INSTANCE.id)).find((row) => row.unit === "u12")?.ending?.kind).toBe(
+      "merge_ready",
     );
   });
 
-  it("a spawn replayed after a reclaim answers alreadySpawned before the events are read and folds nothing twice", async () => {
+  it("a registry-only spawn candidate cannot authorize adoption or consume queued thread events", async () => {
     const h = await foldHarness();
     h.registry.create("coding · child", {
       agent: "coding",
@@ -7969,18 +9203,18 @@ describe("the fold — a unit's thread events reach the pipeline's next step (re
       userId: INSTANCE.userId,
       threadKey: INSTANCE.threadKey,
       parentInstanceId: INSTANCE.id,
-      idempotencyKey: `${INSTANCE.id}:u12/1/fix`,
+      idempotencyKey: `${INSTANCE.id}:u12/1/findings`,
     });
     await h.instances.appendEvent(key, event(1, "also update the readme"));
     const res = await call(h, "spawn", {
       parentInstanceId: INSTANCE.id,
-      step: "u12/1/fix",
+      step: "u12/1/findings",
       preset: "coding",
       prompt: "Address the findings.",
       unit: "u12",
     });
-    expect(res.status).toBe(200);
-    expect((res.body as { alreadySpawned?: boolean }).alreadySpawned).toBe(true);
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({ error: "spawn_unavailable" });
     expect(h.dispatched).toHaveLength(0);
     expect(await h.instances.listEvents(key, true)).toHaveLength(1);
   });
@@ -8011,7 +9245,7 @@ describe("the runner's routes read the hard stop's mark (record 0060; issue 1924
 
   it("spawn refuses `stopped` over a marked row before any child is dispatched — a terminal refusal, never a retry", async () => {
     const h = harness();
-    await h.instances.put(INSTANCE);
+    await seedSpawnUnit(h);
     await h.instances.markStopped(INSTANCE.id, NOW - 1_000);
     const res = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps);
     expect(res).toEqual({ status: 409, body: { ok: false, error: "stopped", at: NOW } });
@@ -8096,7 +9330,7 @@ describe("original committed head adoption — create-only draft PR", () => {
   ) {
     const h = harness({ branchHead: head, ahead: 1, runPageBase: "https://bot.example/runs" });
     await h.instances.put(instance);
-    await h.instances.putUnits([row]);
+    seedCoordinatorUnit(h.instances, row);
     await h.store.put(child);
     h.deps.verifyIdentitiesReadOnly = async () => ({ kind: "clean", tip: head });
     const prs: NonNullable<AdminCoordinatorDeps["listAnyPrByHead"]> extends (...args: never[]) => Promise<infer T>
@@ -8151,6 +9385,31 @@ describe("original committed head adoption — create-only draft PR", () => {
     expect(await adopt(h)).toMatchObject({ status: 200, body: { outcome: "already_bound", pr: 99 } });
     expect(posts).toHaveLength(1);
   });
+
+  it.each(["throw", "unavailable"] as const)(
+    "confirms the exact adoption binding after a lost %s acknowledgement without local ownership",
+    async (lost) => {
+      const { h, posts } = await setup();
+      const replace = h.instances.compareAndReplaceUnit.bind(h.instances);
+      vi.spyOn(h.instances, "compareAndReplaceUnit").mockImplementation(async (before, after) => {
+        const result = await replace(before, after);
+        if (result.ok && after.adoption?.state === "bound") {
+          if (lost === "throw") throw new Error("binding response lost");
+          return { ok: false, reason: "unavailable" };
+        }
+        return result;
+      });
+      expect(await adopt(h)).toMatchObject({ status: 200, body: { outcome: "bound", pr: 99, head } });
+      expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
+        adoption: { state: "bound" },
+        publication: { expectedHeadSha: head, pr: 99 },
+        lastPush: head,
+      });
+      expect(posts).toHaveLength(1);
+      expect(await adopt(h)).toMatchObject({ status: 200, body: { outcome: "already_bound", pr: 99 } });
+      expect(posts).toHaveLength(1);
+    },
+  );
 
   it("a stopped original instance can adopt only its terminal child's accepted head", async () => {
     const child = coding();
@@ -8226,6 +9485,7 @@ describe("POST /admin/coordinator/recover-unit — pre-PR same-unit coding", () 
     plan: { id: "orchestration" },
     caps: { maxRounds: 3, maxMinutes: 240 },
     grant: { renewals: 0, costCapUsd: 2 },
+    grantSource: "channel",
   });
   const unit = (): CoordinatorUnit => ({
     instanceId: INSTANCE.id,
@@ -8302,13 +9562,22 @@ describe("POST /admin/coordinator/recover-unit — pre-PR same-unit coding", () 
     expect(row).toMatchObject({ branch: INSTANCE.branch, recovery: { kind: "coding", expectedHeadSha: HEAD } });
     expect(row?.generatedTask?.text).toBe(task);
     expect(row?.recovery?.accounting?.spendUsd).toBe(0.25);
+    expect(row?.recovery?.accounting?.grantSource).toBe("channel");
     expect(h.recoveries).toHaveLength(1);
     expect(await recover(h)).toMatchObject({ status: 200, body: { outcome: "already_started" } });
     expect(h.recoveries).toHaveLength(1);
     const workflowId = (h.recoveries[0] as { id: string }).id;
-    expect(await recoverOriginalUnit({ parentInstanceId: INSTANCE.id, unit: "U12", workflowId }, h.deps)).toMatchObject(
-      { status: 200, body: { workflowId } },
-    );
+    expect(
+      await recoverOriginalUnit(
+        {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          recoveryActionId: h.recoveries[0]!.params.recoveryActionId,
+          workflowId,
+        },
+        h.deps,
+      ),
+    ).toMatchObject({ status: 200, body: { workflowId } });
   });
 
   it("spawns only the original coding step and refuses a ref move before dispatch", async () => {
@@ -8320,7 +9589,9 @@ describe("POST /admin/coordinator/recover-unit — pre-PR same-unit coding", () 
     const body = {
       parentInstanceId: INSTANCE.id,
       unit: "U12",
-      step: "U12/recovery/0/coding",
+      recoveryActionId: h.recoveries[0]!.params.recoveryActionId,
+      recoveryWorkflowId: h.recoveries[0]!.id,
+      step: `U12/recovery/${h.recoveries[0]!.params.recoveryActionId}/0/coding`,
       preset: "coding",
       brief: {
         kind: "contract",
@@ -8337,10 +9608,10 @@ describe("POST /admin/coordinator/recover-unit — pre-PR same-unit coding", () 
       opts: { coordinator: { parentInstanceId: INSTANCE.id, unit: "U12", branch: INSTANCE.branch } },
     });
     const second = await handleCoordinatorRequest(
-      post(`${COORDINATOR_ADMIN_PREFIX}spawn`, { ...body, step: "U12/recovery/0/coding/a1" }),
+      post(`${COORDINATOR_ADMIN_PREFIX}spawn`, { ...body, step: `${body.step}/a1` }),
       h.deps,
     );
-    expect(second).toMatchObject({ status: 409, body: { error: "recovery_claim_mismatch" } });
+    expect(second).toMatchObject({ status: 409, body: { error: "effect_execution_mismatch" } });
     expect(h.dispatched).toHaveLength(1);
 
     const moved = harness({ branchHead: HEAD });
@@ -8356,7 +9627,7 @@ describe("POST /admin/coordinator/recover-unit — pre-PR same-unit coding", () 
     expect(moved.dispatched).toHaveLength(0);
   });
 
-  it("settles the coding recovery without inventing a review receipt", async () => {
+  it("settles and replays the coding recovery refusal only under its exact claim", async () => {
     const h = harness({ branchHead: HEAD });
     await h.instances.put(original());
     await h.instances.putUnits([unit()]);
@@ -8364,30 +9635,102 @@ describe("POST /admin/coordinator/recover-unit — pre-PR same-unit coding", () 
     const response = await recover(h);
     expect(response).toMatchObject({ status: 200 });
     const workflowId = (response.body as { workflowId: string }).workflowId;
-    expect(
-      await handleCoordinatorRequest(
-        post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
-          parentInstanceId: INSTANCE.id,
-          unit: "U12",
-          recoveryWorkflowId: workflowId,
-          ending: {
-            kind: "aborted",
-            report: "the second coding attempt ended",
-            outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 0 },
-          },
-        }),
-        h.deps,
-      ),
-    ).toMatchObject({ status: 200 });
+    const body = {
+      parentInstanceId: INSTANCE.id,
+      unit: "U12",
+      recoveryActionId: h.recoveries[0]!.params.recoveryActionId,
+      recoveryWorkflowId: workflowId,
+      ending: {
+        kind: "aborted",
+        report: "the second coding attempt ended",
+        outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 0, recoveryStop: "continuation_not_admitted" },
+      },
+    };
+    const settlement = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps);
+    expect(settlement, JSON.stringify(settlement)).toMatchObject({
+      status: 200,
+      body: { ok: true },
+    });
     const [settled] = await h.instances.listUnits(INSTANCE.id);
     expect(settled?.recovery).toBeUndefined();
     expect(settled?.recoveryReceipt).toMatchObject({ codingRunId: "run-original-coding", workflowId });
     expect(settled?.recoveryReceipt?.reviewRunId).toBeUndefined();
+    expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps)).toMatchObject({
+      status: 200,
+      body: { alreadySettled: true },
+    });
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, { ...body, recoveryWorkflowId: "foreign-recovery" }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 409, body: { error: "recovery_claim_mismatch" } });
+    expect((await h.instances.listUnits(INSTANCE.id))[0]).toEqual(settled);
     expect((await h.instances.listRecoveryHistory(unit())).receipts).toHaveLength(2);
     expect(await recover(h, INSTANCE.userId, "recovery-2")).toMatchObject({
       status: 409,
       body: { error: "recovery_already_completed" },
     });
+  });
+
+  it("refuses a recovery-only outcome on an ordinary unit", async () => {
+    const h = harness();
+    await h.instances.put(original());
+    await h.instances.putUnits([{ ...unit(), ending: undefined }]);
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          ending: {
+            kind: "aborted",
+            report: "No continuation admitted",
+            outcome: {
+              schemaVersion: 1,
+              kind: "aborted",
+              reviewRounds: 0,
+              recoveryStop: "continuation_not_admitted",
+            },
+          },
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 409, body: { error: "recovery_outcome_mismatch" } });
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.ending).toBeUndefined();
+  });
+
+  it("persists a recovered coding deviation as a blocked hold without inventing a human gate", async () => {
+    const h = harness({ branchHead: HEAD });
+    await h.instances.put(original());
+    await h.instances.putUnits([unit()]);
+    await h.store.put(coding());
+    const response = await recover(h);
+    expect(response.status).toBe(200);
+    const workflowId = (response.body as { workflowId: string }).workflowId;
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          recoveryActionId: h.recoveries[0]!.params.recoveryActionId,
+          recoveryWorkflowId: workflowId,
+          ending: {
+            kind: "held",
+            holdCause: "blocked",
+            report: "The recorded precondition does not hold",
+            outcome: { schemaVersion: 1, kind: "held", reviewRounds: 0 },
+          },
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 200 });
+    const settled = (await h.instances.listUnits(INSTANCE.id))[0]!;
+    expect(settled).toMatchObject({ ending: { kind: "held" }, recoveryHold: { cause: "blocked" } });
+    expect(isCoordinatorUnit(JSON.parse(JSON.stringify(settled)))).toBe(true);
+    expect(isCoordinatorUnit({ ...settled, recoveryHold: { cause: "blocked", gate: {} } })).toBe(false);
+    expect(settled.pr).toBeUndefined();
+    expect(settled.recovery).toBeUndefined();
+    expect(await recover(h, INSTANCE.userId, "recovery-2")).toMatchObject({ status: 409 });
   });
 
   it("refuses unverified work and moved heads before claiming", async () => {
@@ -8461,6 +9804,9 @@ describe("POST /admin/coordinator/recover-unit — pre-PR same-unit coding", () 
 // Feature: docs/reference/specs/agent-ship.md item 10 — an explicit original-unit
 // recovery reads only durable instance, unit and child evidence. It claims the
 // exact row and pull-request owner before admitting one durable checkpoint.
+const REVIEW_ACTION = "r_bfd48a0cfcfb547bf85c9ef3037a3369bcb4aace9f52cd0e979862e881f139c7";
+const REVIEW_WORKFLOW = `recovery-${REVIEW_ACTION}`;
+
 describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit recovery", () => {
   const HEAD = "7".repeat(40);
   const PR = { number: 77, url: "https://github.com/acme/api/pull/77" };
@@ -8609,6 +9955,85 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     return key;
   }
 
+  const pullOwners = async (h: ReturnType<typeof harness>) => {
+    const result = await h.instances.findPullOwners({ repo: INSTANCE.repo, pr: PR.number });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("canonical ownership unavailable");
+    return result.owners;
+  };
+  const seedRivalOwner = (h: ReturnType<typeof harness>, id = "rival", unit = "U10") => {
+    seedCoordinatorInstance(h.instances, { ...recoveryInstance(), id });
+    seedCoordinatorUnit(h.instances, {
+      ...requestChangesRow(),
+      instanceId: id,
+      unit,
+      ending: undefined,
+      publication: { ...publication, owner: { instanceId: id, unit } },
+    });
+  };
+
+  it("admits and settles the original recovery without process-local ownership state", async () => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    expect(await callRecovery(h)).toMatchObject({ status: 200 });
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    expect(await h.instances.findPullOwners({ repo: INSTANCE.repo, pr: PR.number })).toEqual({
+      ok: true,
+      owners: [{ kind: "unit", instanceId: INSTANCE.id, unit: "U12", actionId: claimed!.recovery!.actionId }],
+    });
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          recoveryActionId: claimed!.recovery!.actionId,
+          recoveryWorkflowId: claimed!.recovery!.workflowId,
+          ending: {
+            kind: "aborted",
+            report: "original recovery stopped",
+            outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 1 },
+          },
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 200 });
+    expect((await h.instances.getRecoveryAction(claimed!, claimed!.recovery!.actionId!))?.state).toBe("settled");
+    expect(await h.instances.findPullOwners({ repo: INSTANCE.repo, pr: PR.number })).toEqual({ ok: true, owners: [] });
+  });
+
+  it.each(["unavailable", "incomplete"] as const)("defers recovery on a %s canonical owner read", async (reason) => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    const before = await h.instances.listUnits(INSTANCE.id);
+    vi.spyOn(h.instances, "findPullOwners").mockResolvedValueOnce({ ok: false, reason });
+    const claim = vi.spyOn(h.instances, "transitionRecovery");
+    expect(await callRecovery(h)).toMatchObject({ status: 503, body: { error: "publication_ownership_unknown" } });
+    expect(claim).not.toHaveBeenCalled();
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+    expect(h.recoveries).toEqual([]);
+  });
+
+  it("a canonical rival arriving after the owner read refuses atomic recovery admission", async () => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    const before = await h.instances.listUnits(INSTANCE.id);
+    const transition = h.instances.transitionRecovery.bind(h.instances);
+    vi.spyOn(h.instances, "transitionRecovery").mockImplementationOnce(async (input) => {
+      seedRivalOwner(h);
+      return transition(input);
+    });
+    expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "publication_ownership_changed" } });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+    expect(h.recoveries).toEqual([]);
+    expect(await pullOwners(h)).toEqual(expect.arrayContaining([{ kind: "unit", instanceId: "rival", unit: "U10" }]));
+  });
+
   it("preserves the predecessor and final receipt at the recovery owner", async () => {
     const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
     await h.instances.put(recoveryInstance());
@@ -8627,6 +10052,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
           parentInstanceId: INSTANCE.id,
           unit: "U12",
+          recoveryActionId: h.recoveries[0]!.params.recoveryActionId,
           recoveryWorkflowId: (result.body as Record<string, unknown>).workflowId,
           ending: {
             kind: "aborted",
@@ -8667,6 +10093,42 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(creates).toBe(2);
   });
 
+  it("a retired delayed create cannot bind to a later action using the same source review", async () => {
+    const h = harness({
+      prFacts: exactRecoveryFacts(HEAD),
+      startRecovery: async (id) => ({ kind: "failed", id, reason: "confirmed absent" }),
+    });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    const firstRequest = { userId: INSTANCE.userId, threadKey: INSTANCE.threadKey, messageId: "slack:C1:10.0" };
+    const laterRequest = { ...firstRequest, messageId: "slack:C1:11.0" };
+    const target = { parentInstanceId: INSTANCE.id, unit: "U12" };
+    await recoverOriginalUnit(target, h.deps, firstRequest);
+    const retired = await h.instances.getRecoveryAction({ instanceId: INSTANCE.id, unit: "U12" }, firstRequest);
+    h.deps.startRecovery = async (id) => ({ kind: "created", id });
+    expect(await recoverOriginalUnit(target, h.deps, laterRequest)).toMatchObject({ status: 200 });
+    const current = (await h.instances.listUnits(INSTANCE.id))[0]!;
+    expect(current.recovery!.workflowId).not.toBe(retired!.workflowId);
+    expect(current.recovery!.step).toContain(current.recovery!.actionId);
+    expect(
+      await recoverOriginalUnit({ ...target, workflowId: retired!.workflowId, recoveryActionId: retired!.id }, h.deps),
+    ).toMatchObject({ status: 409, body: { error: "recovery_claim_mismatch" } });
+    expect(
+      await recoverOriginalUnit(
+        { ...target, workflowId: current.recovery!.workflowId, recoveryActionId: retired!.id },
+        h.deps,
+      ),
+    ).toMatchObject({ status: 409, body: { error: "recovery_claim_mismatch" } });
+    expect(
+      await recoverOriginalUnit(
+        { ...target, workflowId: current.recovery!.workflowId, recoveryActionId: current.recovery!.actionId },
+        h.deps,
+      ),
+    ).toMatchObject({ status: 200 });
+    expect(h.dispatched).toEqual([]);
+  });
+
   it("reconciles a committed refusal after a lost acknowledgment and releases the original owner", async () => {
     const h = harness({
       prFacts: exactRecoveryFacts(HEAD),
@@ -8686,12 +10148,12 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       return result;
     });
     expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_workflow_failed" } });
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
     expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_workflow_failed" } });
     expect(h.recoveries).toHaveLength(1);
   });
 
-  it("refuses unsupported history storage before reserving or creating recovery", async () => {
+  it("refuses unsupported history storage before admitting or creating recovery", async () => {
     const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
     await h.instances.put(recoveryInstance());
     await h.instances.putUnits([requestChangesRow()]);
@@ -8699,7 +10161,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     vi.spyOn(h.instances, "getRecoveryAction").mockRejectedValue(new Error("old Worker"));
     expect(await callRecovery(h)).toMatchObject({ status: 503, body: { error: "recovery_history_unavailable" } });
     expect(h.recoveries).toEqual([]);
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
   });
 
   it("refuses recovery while original admission remains unreconciled", async () => {
@@ -8709,7 +10171,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.store.put(reviewRecord());
     expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_admission_unreconciled" } });
     expect(h.recoveries).toEqual([]);
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
     expect((await h.instances.listRecoveryHistory(requestChangesRow())).receipts).toEqual([]);
   });
 
@@ -8731,26 +10193,111 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       return result;
     });
     expect(await callRecovery(h)).toMatchObject({ status: 500, body: { error: "recovery_rollback_failed" } });
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeDefined();
+    expect(
+      (
+        await h.instances.getRecoveryAction(
+          { instanceId: INSTANCE.id, unit: "U12" },
+          {
+            userId: INSTANCE.userId,
+            threadKey: INSTANCE.threadKey,
+            messageId: "slack:C1:recovery-request",
+          },
+        )
+      )?.state,
+    ).toBe("refused");
     expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_workflow_failed" } });
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
     expect(await callRecovery(h, "later-request")).toMatchObject({ status: 200 });
-    const owner = h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number);
+    const owner = await pullOwners(h);
     expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_workflow_failed" } });
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(owner);
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeDefined();
+    expect(await pullOwners(h)).toEqual(owner);
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery?.actionId).toBeDefined();
     expect(creates).toBe(2);
+  });
+
+  it("requires the current action before rerunning recovery checks", async () => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD), rerunOk: true });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    expect((await callRecovery(h)).status).toBe(200);
+    const rerun = vi.spyOn(h.deps, "rerunActionsFailedJobs");
+    const base = { parentInstanceId: INSTANCE.id, unit: "U12", pr: PR.number, headSha: HEAD, retry: ["tests"] };
+    for (const identity of [
+      {},
+      { recoveryWorkflowId: REVIEW_WORKFLOW },
+      { recoveryActionId: `r_${"c".repeat(64)}`, recoveryWorkflowId: REVIEW_WORKFLOW },
+    ]) {
+      expect(
+        await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}checks`, { ...base, ...identity }), h.deps),
+      ).toMatchObject({ status: 409, body: { error: "recovery_claim_mismatch" } });
+    }
+    expect(rerun).not.toHaveBeenCalled();
+  });
+
+  it("refuses a recovery child retired while its brief and events are read", async () => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    expect((await callRecovery(h)).status).toBe(200);
+    let entered!: () => void;
+    let release!: () => void;
+    const reading = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const resume = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const list = h.instances.listEvents.bind(h.instances);
+    vi.spyOn(h.instances, "listEvents").mockImplementationOnce(async (...args) => {
+      entered();
+      await resume;
+      return list(...args);
+    });
+    const spawning = handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}spawn`, {
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
+        step: `U12/recovery/${REVIEW_ACTION}/1/findings`,
+        preset: "coding",
+        budget: 20,
+        brief: { kind: "findings", unit: "U12", pr: PR.number, headSha: HEAD, reviewRunId: "run-original-review" },
+      }),
+      h.deps,
+    );
+    await reading;
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          recoveryActionId: REVIEW_ACTION,
+          recoveryWorkflowId: REVIEW_WORKFLOW,
+          ending: { kind: "aborted", report: "retired before dispatch" },
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 200 });
+    release();
+    expect(await spawning).toMatchObject({ status: 409, body: { error: "recovery_claim_mismatch" } });
+    expect(h.dispatched).toHaveLength(0);
   });
 
   it("refuses an older private settlement while a successor recovery owns the same unit", async () => {
     const log = new InMemoryPrivateWorkerLog();
     const h = harness({ prFacts: exactRecoveryFacts(HEAD), privateWorkerLog: log });
     const key = await privateRecovery(h);
+    const REVIEW_ACTION = h.recoveries[0]!.params.recoveryActionId;
+    const REVIEW_WORKFLOW = h.recoveries[0]!.id;
     const body = {
       parentInstanceId: INSTANCE.id,
       unit: "U12",
-      recoveryWorkflowId: "recovery-run-original-review",
-      deliveryId: "U12/recovery/end",
+      recoveryActionId: REVIEW_ACTION,
+      recoveryWorkflowId: REVIEW_WORKFLOW,
+      deliveryId: `U12/recovery/${REVIEW_ACTION}/end`,
       ending: { kind: "aborted", report: "first result" },
       pr: PR,
     };
@@ -8775,7 +10322,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           expectedHeadSha: HEAD,
           remainingMs: 60000,
           claimedAt: NOW,
-          step: "U12/recovery/2/review",
+          step: `U12/recovery/${REVIEW_ACTION}/2/review`,
           reviewRunId: "later-review",
           reviewKey: "later-key",
           previousEnding: ending!,
@@ -8787,18 +10334,22 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     });
     expect(claimed.ok).toBe(true);
     if (!claimed.ok) throw new Error(claimed.reason);
-    const owner = { instanceId: INSTANCE.id, unit: "U12", recoveryActionId: claimed.unit.recovery!.actionId };
+    const successorOwner = {
+      kind: "unit",
+      instanceId: INSTANCE.id,
+      unit: "U12",
+      actionId: claimed.unit.recovery!.actionId,
+    };
     expect(first?.state).toBe("settled");
-    expect(h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, owner)).toBe(true);
     for (const replay of [
       body,
-      { ...body, deliveryId: "U12/recovery/changed", ending: { ...body.ending, report: "changed" } },
+      { ...body, deliveryId: `U12/recovery/${REVIEW_ACTION}/changed`, ending: { ...body.ending, report: "changed" } },
     ])
       expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, replay), h.deps)).toMatchObject(
         { status: 409, body: { error: "recovery_claim_mismatch" } },
       );
     expect((await log.list(key)).filter((event) => event.kind === "reply")).toHaveLength(1);
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(owner);
+    expect(await pullOwners(h)).toEqual([successorOwner]);
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual([claimed.unit]);
   });
 
@@ -8825,7 +10376,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       }),
     );
 
-    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: "recovery-run-original-review" } });
+    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: REVIEW_WORKFLOW } });
     const [claimed] = await h.instances.listUnits(INSTANCE.id);
     expect(claimed).toMatchObject({
       lastPush: HEAD,
@@ -9114,13 +10665,12 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     if (scenario === "wrong PR head") h.deps.fetchPrFacts = async () => exactRecoveryFacts("e".repeat(40));
     if (scenario === "unpriced child") await h.store.put({ ...child, usage: undefined });
     if (scenario === "round cap")
-      await h.instances.replace({ ...recoveryInstance(), caps: { maxRounds: 1, maxMinutes: 120 } });
+      seedCoordinatorInstance(h.instances, { ...recoveryInstance(), caps: { maxRounds: 1, maxMinutes: 120 } });
     if (scenario === "competing owner") {
-      h.deps.runnerOwnership!.release(INSTANCE.repo, PR.number, owner);
-      h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
+      seedRivalOwner(h);
     }
     if (scenario === "spent cap")
-      await h.instances.replace({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 0.5 } });
+      seedCoordinatorInstance(h.instances, { ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 0.5 } });
     if (scenario === "expired lease") h.deps.clock = () => NOW + minutesToMs(121);
     if (
       [
@@ -9143,7 +10693,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
 
   it("a saved unpushed findings child restarts required findings at the requester-moved head without push credit", async () => {
     const { h, patch } = await unpushedHarness();
-    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: "recovery-run-original-review" } });
+    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: REVIEW_WORKFLOW } });
     const [claimed] = await h.instances.listUnits(INSTANCE.id);
     expect(claimed).toMatchObject({
       lastPush: HEAD,
@@ -9237,7 +10787,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     const [before] = await h.instances.listUnits(INSTANCE.id);
     const outcomes = await Promise.all([callRecovery(h), callRecovery(h)]);
     expect(outcomes.some((result) => result.status === 200)).toBe(true);
-    expect(new Set(h.recoveries.map((entry) => entry.id))).toEqual(new Set(["recovery-run-original-review"]));
+    expect(new Set(h.recoveries.map((entry) => entry.id))).toEqual(new Set([REVIEW_WORKFLOW]));
     const [claimed] = await h.instances.listUnits(INSTANCE.id);
     expect(claimed).toMatchObject({
       branch: INSTANCE.branch,
@@ -9257,10 +10807,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       },
     });
     expect(claimed!.recovery).not.toHaveProperty("findingsRunId");
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual({
-      ...owner,
-      recoveryActionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId,
-    });
+    expect(await pullOwners(h)).toEqual([
+      { kind: "unit", ...owner, actionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId },
+    ]);
     expect((await h.instances.get(INSTANCE.id))!.caps).toEqual(recoveryInstance().caps);
     expect(await callRecovery(h)).toMatchObject({ status: 200, body: { outcome: "already_started" } });
     expect((await h.instances.listUnits(INSTANCE.id))[0]).toEqual(claimed);
@@ -9273,7 +10822,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     const failed = (await h.store.get("run-original-findings"))!;
     await h.store.put({ ...failed, status: "failed", dispositions: undefined, events: failed.events.slice(0, 1) });
     const original = (await h.instances.listUnits(INSTANCE.id))[0]!;
-    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: "recovery-run-original-review" } });
+    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: REVIEW_WORKFLOW } });
     const [claimed] = await h.instances.listUnits(INSTANCE.id);
     expect(claimed).toMatchObject({
       unit: original.unit,
@@ -9310,8 +10859,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           }),
         );
       if (scenario === "moving ref") h.deps.fetchPrFacts = async () => exactRecoveryFacts("c".repeat(40));
-      if (scenario === "rival owner")
-        h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
+      if (scenario === "rival owner") seedRivalOwner(h);
       const before = await h.instances.listUnits(INSTANCE.id);
       expect((await callRecovery(h)).status).toBe(409);
       expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
@@ -9356,7 +10904,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
   it("keeps prior review evidence within its renewed segment when pricing findings", async () => {
     const h = await salvageHarness();
     const row = (await h.instances.listUnits(INSTANCE.id))[0]!;
-    await h.instances.replace({ ...recoveryInstance(), grant: { renewals: 1, costCapUsd: 5 } });
+    seedCoordinatorInstance(h.instances, { ...recoveryInstance(), grant: { renewals: 1, costCapUsd: 5 } });
     row.startedAt = NOW - minutesToMs(120);
     row.segments = [{ index: 2, at: NOW - minutesToMs(60) }];
     row.rounds = [
@@ -9366,7 +10914,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       { index: 1, agent: "coding", outcome: "completed", at: NOW - minutesToMs(85) },
       ...row.rounds,
     ];
-    await h.instances.putUnits([row]);
+    seedCoordinatorUnit(h.instances, row);
     const currentReview = (await h.store.get("run-original-review"))!;
     const currentFindings = (await h.store.get("run-original-findings"))!;
     await h.store.put({ ...currentReview, idempotencyKey: `${INSTANCE.id}:U12/s2/1/review` });
@@ -9542,8 +11090,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       h.deps.fetchPrFacts = async () => ({ ...exactRecoveryFacts(SALVAGED), headRef: "other" });
     if (scenario === "closed PR")
       h.deps.fetchPrFacts = async () => ({ ...exactRecoveryFacts(SALVAGED), state: "closed" });
-    if (scenario === "rival owner")
-      h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
+    if (scenario === "rival owner") seedRivalOwner(h);
     if (scenario === "stale CAS")
       vi.spyOn(h.instances, "transitionRecovery").mockResolvedValueOnce({ ok: false, reason: "stale" });
     if (scenario === "partial listing") {
@@ -9554,15 +11101,15 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       }));
     }
     if (scenario === "round cap")
-      await h.instances.replace({ ...recoveryInstance(), caps: { maxRounds: 1, maxMinutes: 120 } });
+      seedCoordinatorInstance(h.instances, { ...recoveryInstance(), caps: { maxRounds: 1, maxMinutes: 120 } });
     if (scenario === "wall-clock cap") row = { ...row!, startedAt: NOW - minutesToMs(120) };
     if (scenario === "unknown spend")
-      await h.instances.replace({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
-    await h.instances.putUnits([row!]);
-    const priorOwner = h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number);
+      seedCoordinatorInstance(h.instances, { ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
+    seedCoordinatorUnit(h.instances, row!);
+    const priorOwner = await pullOwners(h);
     expect((await callRecovery(h)).status).toBe(409);
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(priorOwner);
+    expect(await pullOwners(h)).toEqual(priorOwner);
     expect(h.recoveries).toEqual([]);
     expect(h.dispatched).toEqual([]);
     expect(h.branches).toEqual([]);
@@ -9590,7 +11137,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual(
       before.map((row) => ({ ...row, history: { version: 1, receiptId: "observed" } })),
     );
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
     h.deps.startRecovery = async (id) => ({ kind: "created", id });
     expect((await callRecovery(h, "slack:C1:later-request")).status).toBe(200);
     expect((await h.instances.listUnits(INSTANCE.id))[0]!.recovery?.kind).toBe("findings");
@@ -9601,6 +11148,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     async (scenario) => {
       const h = await salvageHarness(124);
       expect((await callRecovery(h, "slack:C1:later-request")).status).toBe(200);
+      const REVIEW_ACTION = h.recoveries[0]!.params.recoveryActionId;
+      const REVIEW_WORKFLOW = h.recoveries[0]!.id;
       let head = SALVAGED;
       const fixed = "c".repeat(40);
       h.deps.fetchPrFacts = async () => exactRecoveryFacts(head);
@@ -9612,14 +11161,14 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       });
       h.deps.fixupCommitSubjects = async () => [];
       const children: CoordinatorTag[] = [];
-      h.deps.dispatch = async (msg, io, opts) => {
+      h.setScript(async (msg, io, opts) => {
         const tag = opts!.coordinator;
         children.push(tag);
         expect(msg.userId).toBe(INSTANCE.userId);
         expect(msg.threadKey).toBe(INSTANCE.threadKey);
-        expect(tag.transportWorkflowId).toBe("recovery-run-original-review");
+        expect(tag.transportWorkflowId).toBe(REVIEW_WORKFLOW);
         if (children.length === 1) {
-          expect(tag.idempotencyKey).toBe(`${INSTANCE.id}:U12/recovery/1/findings`);
+          expect(tag.idempotencyKey).toBe(`${INSTANCE.id}:U12/recovery/${REVIEW_ACTION}/1/findings`);
           expect(tag.publication).toMatchObject({ ...publication, expectedHeadSha: SALVAGED });
           expect(msg.text).toContain("F1");
           expect(msg.text).toContain("F2");
@@ -9654,7 +11203,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           );
           io.runStarted?.({ id: "run-recovered-fix" });
         } else if (children.length === 2) {
-          expect(tag.idempotencyKey).toBe(`${INSTANCE.id}:U12/recovery/2/review`);
+          expect(tag.idempotencyKey).toBe(`${INSTANCE.id}:U12/recovery/${REVIEW_ACTION}/2/review`);
           expect(tag.recovery?.expectedHeadSha).toBe(fixed);
           expect(msg.text).toContain(fixed);
           const verdict = scenario === "human consent" ? "request_changes" : "approve";
@@ -9677,7 +11226,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         } else {
           expect(scenario).toBe("red CI");
           expect(children).toHaveLength(3);
-          expect(tag.idempotencyKey).toBe(`${INSTANCE.id}:U12/recovery/2/findings`);
+          expect(tag.idempotencyKey).toBe(`${INSTANCE.id}:U12/recovery/${REVIEW_ACTION}/2/findings`);
           expect(msg.text).toContain("test");
           // The red check requires a repair contract, not a merge-ready ending.
           await h.store.put(
@@ -9694,7 +11243,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           io.runStarted?.({ id: "run-ci-repair" });
         }
         return { status: "completed" };
-      };
+      });
       const routes: string[] = [];
       const bot: CoordinatorBot = {
         step: async (route, body) => {
@@ -9711,12 +11260,13 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         },
         waitForEvent: async () => ({ ok: true }),
       };
-      const result = await runOriginalUnitRecovery(steps, bot, "recovery-run-original-review", {
+      const result = await runOriginalUnitRecovery(steps, bot, REVIEW_WORKFLOW, {
         kind: "recover-original-unit",
+        recoveryActionId: h.recoveries.at(-1)!.params.recoveryActionId,
         parentInstanceId: INSTANCE.id,
         unit: "U12",
       });
-      const ending = scenario === "complete" ? "merge_ready" : scenario === "human consent" ? "idle" : "aborted";
+      const ending = scenario === "complete" ? "merge_ready" : scenario === "human consent" ? "held" : "aborted";
       expect(h.logs.filter((line) => line.includes("dispatch threw"))).toEqual([]);
       expect(result, JSON.stringify(h.logs)).toMatchObject({ instance: INSTANCE.id, units: { U12: ending } });
       expect(children).toHaveLength(scenario.startsWith("missing") ? 1 : scenario === "red CI" ? 3 : 2);
@@ -9813,7 +11363,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     row.rounds.unshift({ index: 0, agent: "coding", outcome: "started", at: NOW - minutesToMs(58) });
     await h.instances.putUnits([row]);
     const before = (await h.instances.listUnits(INSTANCE.id))[0]!;
-    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: "recovery-review-5324414426" } });
+    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: REVIEW_WORKFLOW } });
     const claimed = (await h.instances.listUnits(INSTANCE.id))[0]!;
     expect(claimed).toMatchObject({
       branch: before.branch,
@@ -9855,7 +11405,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       const h = await approvedHarness();
       const start = vi.fn(async () => ({ kind: "unanswered" as const, reason: "create response lost" }));
       h.deps.startRecovery = start;
-      const workflowId = "recovery-review-5324414426";
+      const workflowId = REVIEW_WORKFLOW;
       expect(await callRecovery(h)).toMatchObject({ status: 200, body: { outcome: "indeterminate", workflowId } });
       const claimed = await h.instances.listUnits(INSTANCE.id);
       const savedInstance = await h.instances.get(INSTANCE.id);
@@ -9866,7 +11416,6 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           : { kind: "unanswered" as const, reason: "status response lost" },
       );
       h.deps.recoveryStatus = readStatus;
-      h.deps.runnerOwnership = new RunnerOwnershipFence(false);
       const readReviews = vi.fn(async () => {
         if (review === "unavailable") throw new Error("GitHub unavailable");
         return [{ ...laterReview(), id: laterReview().id! + 1 }];
@@ -9883,10 +11432,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       expect(await h.instances.listUnits(INSTANCE.id)).toEqual(claimed);
       expect(await h.instances.get(INSTANCE.id)).toEqual(savedInstance);
       expect(await h.instances.listRecoveryHistory({ instanceId: INSTANCE.id, unit: "U12" })).toEqual(history);
-      expect(h.deps.runnerOwnership.owner(INSTANCE.repo, PR.number)).toEqual({
-        ...owner,
-        recoveryActionId: claimed[0]!.recovery!.actionId,
-      });
+      expect(await pullOwners(h)).toEqual([{ kind: "unit", ...owner, actionId: claimed[0]!.recovery!.actionId }]);
       expect(h.dispatched).toEqual([]);
     },
   );
@@ -9895,7 +11441,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     "revalidates an absent external-review Workflow before retrying its original create (%s)",
     async (review) => {
       const h = await approvedHarness();
-      const workflowId = "recovery-review-5324414426";
+      const workflowId = REVIEW_WORKFLOW;
       const start = vi
         .fn<NonNullable<AdminCoordinatorDeps["startRecovery"]>>()
         .mockResolvedValueOnce({ kind: "unanswered", reason: "create response lost" })
@@ -9935,10 +11481,10 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     ).toMatchObject({ status: 409, body: { error: "recovery_claim_mismatch" } });
     expect(
       await recoverOriginalUnit(
-        { parentInstanceId: INSTANCE.id, unit: "U12", workflowId: "recovery-review-5324414426" },
+        { parentInstanceId: INSTANCE.id, unit: "U12", recoveryActionId: REVIEW_ACTION, workflowId: REVIEW_WORKFLOW },
         h.deps,
       ),
-    ).toMatchObject({ status: 200, body: { workflowId: "recovery-review-5324414426" } });
+    ).toMatchObject({ status: 200, body: { workflowId: REVIEW_WORKFLOW } });
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual(claimed);
     expect(h.recoveries).toHaveLength(1);
     expect(h.dispatched).toEqual([]);
@@ -9946,7 +11492,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
 
   it("does not revoke a concurrent external-review retry after observing its Workflow absent", async () => {
     const h = await approvedHarness();
-    const workflowId = "recovery-review-5324414426";
+    const workflowId = REVIEW_WORKFLOW;
     const start = vi
       .fn<NonNullable<AdminCoordinatorDeps["startRecovery"]>>()
       .mockResolvedValueOnce({ kind: "unanswered", reason: "create response lost" })
@@ -9980,10 +11526,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(start.mock.calls.map(([id]) => id)).toEqual([workflowId, workflowId]);
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual(claimed);
     expect(await h.instances.listRecoveryHistory({ instanceId: INSTANCE.id, unit: "U12" })).toEqual(history);
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual({
-      ...owner,
-      recoveryActionId: claimed[0]!.recovery!.actionId,
-    });
+    expect(await pullOwners(h)).toEqual([{ kind: "unit", ...owner, actionId: claimed[0]!.recovery!.actionId }]);
   });
 
   it("persists cost accounting that remains valid after children are sorted", async () => {
@@ -10036,7 +11579,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       { index: 0, agent: "coding", outcome: "started", at: NOW - minutesToMs(175) },
       { index: 0, agent: "coding", outcome: "aborted", at: NOW - minutesToMs(165) },
     );
-    await h.instances.putUnits([row]);
+    seedCoordinatorUnit(h.instances, row);
     const coding = (await h.store.get("run-original-coding"))!;
     const review = (await h.store.get("run-original-review"))!;
     await h.store.put({ ...coding, idempotencyKey: `${INSTANCE.id}:U12/s2/0/coding` });
@@ -10078,8 +11621,13 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       callRecovery(h, "slack:C1:later-request"),
       callRecovery(h, "slack:C1:later-request"),
     ]);
-    expect(responses.map((r) => r.status).sort()).toEqual([200, 409]);
-    expect(admitted).toEqual(["recovery-review-5324414426"]);
+    expect(responses.map((r) => r.status)).toEqual([200, 200]);
+    expect([...new Set(admitted)]).toEqual([
+      "recovery-r_2a7b4146107649167ee86be55a3153f9a6a6441cf82602934e7507102be544e1",
+    ]);
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    expect((await h.instances.getRecoveryAction(claimed!, claimed!.recovery!.actionId!))?.state).toBe("pending");
+    expect(await pullOwners(h)).toEqual([{ kind: "unit", ...owner, actionId: claimed!.recovery!.actionId }]);
   });
 
   it.each([
@@ -10217,12 +11765,11 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         stopped: { kind: "segment", index: 1, spendUsd: 15, texts: [], senders: [], leaseMs: minutesToMs(20) },
       };
     if (scenario === "invalid renewal") row.segments = [{ index: 5, at: NOW - minutesToMs(1) }];
-    if (scenario === "rival owner")
-      h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
+    if (scenario === "rival owner") seedRivalOwner(h);
     if (scenario === "CAS loss")
       vi.spyOn(h.instances, "transitionRecovery").mockResolvedValueOnce({ ok: false, reason: "stale" });
-    await h.instances.replace(instance);
-    await h.instances.putUnits([row]);
+    seedCoordinatorInstance(h.instances, instance);
+    seedCoordinatorUnit(h.instances, row);
     expect((await callRecovery(h)).status).toBe(409);
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
     expect(h.recoveries).toEqual([]);
@@ -10267,17 +11814,17 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       });
       h.deps.fixupCommitSubjects = async () => [];
       const children: CoordinatorTag[] = [];
-      h.deps.dispatch = async (msg, io, opts) => {
+      h.setScript(async (msg, io, opts) => {
         const tag = opts!.coordinator;
         children.push(tag);
         expect(msg.userId).toBe(INSTANCE.userId);
         expect(msg.threadKey).toBe(INSTANCE.threadKey);
-        expect(tag.transportWorkflowId).toBe("recovery-review-5324414426");
+        expect(tag.transportWorkflowId).toBe(REVIEW_WORKFLOW);
         expect(tag.recovery?.deadlineAt).toBe(NOW + minutesToMs(60));
         const n = children.length;
         const id = `run-recovered-${n}`;
         if (n === 1 || n === 3) {
-          expect(tag.idempotencyKey).toBe(`${INSTANCE.id}:U12/recovery/${n === 1 ? 2 : 3}/review`);
+          expect(tag.idempotencyKey).toBe(`${INSTANCE.id}:U12/recovery/${REVIEW_ACTION}/${n === 1 ? 2 : 3}/review`);
           expect(msg.text).toContain(head);
           if (n === 1) {
             expect(msg.text).toContain("full read-only review");
@@ -10303,7 +11850,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           );
         } else {
           expect(n).toBe(2);
-          expect(tag.idempotencyKey).toBe(`${INSTANCE.id}:U12/recovery/2/findings`);
+          expect(tag.idempotencyKey).toBe(`${INSTANCE.id}:U12/recovery/${REVIEW_ACTION}/2/findings`);
           expect(tag.publication?.expectedHeadSha).toBe(POST_HEAD);
           expect(msg.text).toContain("F1");
           head = fixed;
@@ -10326,7 +11873,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         }
         io.runStarted?.({ id });
         return { status: "completed" };
-      };
+      });
       const routes: string[] = [];
       const bot: CoordinatorBot = {
         step: async (route, body) => {
@@ -10343,8 +11890,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         },
         waitForEvent: async () => ({ ok: true }),
       };
-      const result = await runOriginalUnitRecovery(steps, bot, "recovery-review-5324414426", {
+      const result = await runOriginalUnitRecovery(steps, bot, REVIEW_WORKFLOW, {
         kind: "recover-original-unit",
+        recoveryActionId: h.recoveries.at(-1)!.params.recoveryActionId,
         parentInstanceId: INSTANCE.id,
         unit: "U12",
       });
@@ -10365,6 +11913,16 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         accounting: { spendUsd: 15 },
       });
       expect(await callRecovery(h)).toMatchObject({ status: 200, body: { outcome: "already_completed" } });
+      const actionsBeforeReplay = h.recoveries.length;
+      expect(
+        await recoverOriginalUnit({ parentInstanceId: INSTANCE.id, unit: "U12", renew: true }, h.deps, {
+          userId: INSTANCE.userId,
+          threadKey: INSTANCE.threadKey,
+          messageId: "slack:C1:recovery-request",
+        }),
+      ).toMatchObject({ status: 409, body: { error: "recovery_claim_mismatch" } });
+      expect(h.recoveries).toHaveLength(actionsBeforeReplay);
+      expect((await h.instances.listUnits(INSTANCE.id))[0]).toEqual(settled);
     },
   );
 
@@ -10381,7 +11939,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         {
           parentInstanceId: INSTANCE.id,
           unit: "U12",
-          workflowId: scenario === "wrong workflow" ? "other-workflow" : "recovery-review-5324414426",
+          workflowId: scenario === "wrong workflow" ? "other-workflow" : REVIEW_WORKFLOW,
         },
         h.deps,
       );
@@ -10398,7 +11956,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       expect((await callRecovery(h)).status).toBe(200);
       const recoveredReview = reviewRecord({
         id: "run-recovered-review",
-        idempotencyKey: `${INSTANCE.id}:U12/recovery/2/review`,
+        idempotencyKey: `${INSTANCE.id}:U12/recovery/${REVIEW_ACTION}/2/review`,
         startedAt: NOW,
         finishedAt: NOW,
         reviewHead: POST_HEAD,
@@ -10409,17 +11967,19 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           verdict: "request_changes",
         },
       });
-      h.deps.dispatch = async (_msg, io) => {
+      h.setScript(async (_msg, io) => {
         await h.store.put(recoveredReview);
         io.runStarted?.({ id: recoveredReview.id });
         return { status: "completed" };
-      };
+      });
       expect(
         await handleCoordinatorRequest(
           post(`${COORDINATOR_ADMIN_PREFIX}spawn`, {
             parentInstanceId: INSTANCE.id,
             unit: "U12",
-            step: "U12/recovery/2/review",
+            recoveryActionId: REVIEW_ACTION,
+            recoveryWorkflowId: REVIEW_WORKFLOW,
+            step: `U12/recovery/${REVIEW_ACTION}/2/review`,
             preset: "review",
             budget: 10,
             brief: { kind: "review", unit: "U12", pr: PR.number, headSha: POST_HEAD, round: 2 },
@@ -10439,8 +11999,11 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         handleCoordinatorRequest(
           post(`${COORDINATOR_ADMIN_PREFIX}spawn`, {
             parentInstanceId: INSTANCE.id,
+            effectOrdinal: 2,
             unit: "U12",
-            step: `U12/recovery/${child === "findings" ? "2/findings" : "3/review"}`,
+            recoveryActionId: REVIEW_ACTION,
+            recoveryWorkflowId: REVIEW_WORKFLOW,
+            step: `U12/recovery/${REVIEW_ACTION}/${child === "findings" ? "2/findings" : "3/review"}`,
             preset: child === "findings" ? "coding" : "review",
             budget: 10,
             brief:
@@ -10458,7 +12021,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           h.deps,
         );
       const laterDispatch = vi.fn(registers("run-next-child"));
-      h.deps.dispatch = laterDispatch;
+      h.setScript(laterDispatch);
       const before = await h.instances.listUnits(INSTANCE.id);
       for (const scenario of [
         "dismissed",
@@ -10515,7 +12078,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       }
       h.deps.fetchPrReviews = async () => [laterReview(), independentReview];
       h.deps.commenterAuthorized = async () => true;
-      h.deps.dispatch = registers("run-next-child");
+      h.setScript(registers("run-next-child"));
       expect(await admit()).toMatchObject({ status: 200, body: { runId: "run-next-child" } });
     },
   );
@@ -10527,7 +12090,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       post(`${COORDINATOR_ADMIN_PREFIX}spawn`, {
         parentInstanceId: INSTANCE.id,
         unit: "U12",
-        step: "U12/recovery/2/findings",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
+        step: `U12/recovery/${REVIEW_ACTION}/2/findings`,
         preset: "coding",
         budget: 10,
         brief: { kind: "findings", unit: "U12", pr: PR.number, headSha: POST_HEAD, reviewRunId: "run-original-review" },
@@ -10622,7 +12187,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
 
     it("carries complete priced history into a cost-capped original unit", async () => {
       const h = await legacyHarness();
-      await h.instances.replace({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
+      seedCoordinatorInstance(h.instances, { ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
       await h.instances.putUnits([legacyRow()]);
       expect(await callRecovery(h)).toMatchObject({ status: 200 });
       expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
@@ -11262,7 +12827,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         ...historicalUsage,
         byModel: { "test/historical": { ...historicalUsage.byModel["test/historical"], usd } },
       });
-      await h.instances.replace({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
+      seedCoordinatorInstance(h.instances, { ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
       const row = legacyRow();
       row.rounds.push({ index: 1, agent: "coding", outcome: "started", at: NOW - minutesToMs(14) });
       await h.instances.putUnits([row]);
@@ -11317,10 +12882,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           ...(scenario === "unpriced child" ? { usage: undefined } : {}),
         }),
       );
-      const reserve = vi.spyOn(h.deps.runnerOwnership!, "reserve");
       const cas = vi.spyOn(h.instances, "transitionRecovery");
       expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_budget_unknown", reason } });
-      expect(reserve).not.toHaveBeenCalled();
       expect(cas).not.toHaveBeenCalled();
       expect(await h.instances.listUnits(INSTANCE.id)).toEqual([legacyRow()]);
       expect(h.recoveries).toEqual([]);
@@ -11339,13 +12902,11 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
             threadKey: "slack:COTHER:hidden",
           }),
         );
-        const reserve = vi.spyOn(h.deps.runnerOwnership!, "reserve");
         const cas = vi.spyOn(h.instances, "transitionRecovery");
         expect(await callRecovery(h)).toMatchObject({
           status: 409,
           body: { error: "recovery_budget_unknown", reason: "child_identity_mismatch" },
         });
-        expect(reserve).not.toHaveBeenCalled();
         expect(cas).not.toHaveBeenCalled();
         expect(await h.instances.listUnits(INSTANCE.id)).toEqual([legacyRow()]);
         expect(h.recoveries).toEqual([]);
@@ -11359,7 +12920,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         await fillUnrelatedHistory(h);
         let error = "recovery_budget_unknown";
         if (scenario === "cost cap") {
-          await h.instances.replace({
+          seedCoordinatorInstance(h.instances, {
             ...recoveryInstance(),
             grant: { renewals: 0, costCapUsd: 0.5 },
           });
@@ -11379,7 +12940,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           error = "recovery_facts_mismatch";
         }
         if (scenario === "lost ownership") {
-          h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
+          seedRivalOwner(h);
           error = "publication_ownership_changed";
         }
         if (scenario === "missing review") {
@@ -11428,16 +12989,14 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         system: "sys",
         tools: [],
       });
-      const reserve = vi.spyOn(h.deps.runnerOwnership!, "reserve");
       const cas = vi.spyOn(h.instances, "transitionRecovery");
       expect(await callRecovery(h)).toMatchObject({ status: 409, body: { reason: "child_active" } });
-      expect(reserve).not.toHaveBeenCalled();
       expect(cas).not.toHaveBeenCalled();
       expect(h.recoveries).toEqual([]);
     });
 
     it.each(["store unavailable", "ambiguous duplicate", "full relevant set"])(
-      "refuses %s at the evidence boundary before reservation or row CAS",
+      "refuses %s at the evidence boundary before native recovery admission",
       async (scenario) => {
         const h = await legacyHarness();
         await fillUnrelatedHistory(h);
@@ -11449,7 +13008,6 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
             ? Array.from({ length: 200 }, () => rows[0]!)
             : [...rows, { ...rows[0]!, userId: "slack:UOTHER" }];
         });
-        const reserve = vi.spyOn(h.deps.runnerOwnership!, "reserve");
         const cas = vi.spyOn(h.instances, "transitionRecovery");
         expect(await callRecovery(h)).toMatchObject({
           status: 409,
@@ -11458,7 +13016,6 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
               ? { error: "recovery_budget_unknown", reason: "child_history_ambiguous" }
               : { error: "recovery_evidence_incomplete" },
         });
-        expect(reserve).not.toHaveBeenCalled();
         expect(cas).not.toHaveBeenCalled();
         expect(h.recoveries).toEqual([]);
       },
@@ -11568,7 +13125,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           },
         });
         expect(await h.instances.listUnits(INSTANCE.id)).toEqual([legacyRow()]);
-        expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+        expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
         expect(h.recoveries).toEqual([]);
       },
     );
@@ -11599,14 +13156,12 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           });
         }
         const listLive = vi.spyOn(h.ledger, "listLive").mockRejectedValueOnce(new Error("HTTP 503"));
-        const claim = vi.spyOn(h.deps.runnerOwnership!, "claim");
         const cas = vi.spyOn(h.instances, "transitionRecovery");
         expect(await callRecovery(h)).toMatchObject({
           status: 409,
           body: { error: "recovery_evidence_incomplete" },
         });
         expect(await h.instances.listUnits(INSTANCE.id)).toEqual([legacyRow()]);
-        expect(claim).not.toHaveBeenCalled();
         expect(cas).not.toHaveBeenCalled();
         expect(h.recoveries).toEqual([]);
         expect(h.dispatched).toEqual([]);
@@ -11638,7 +13193,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           body: { error: "recovery_evidence_incomplete" },
         });
         expect(await h.instances.listUnits(INSTANCE.id)).toEqual([legacyRow()]);
-        expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+        expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
         expect(h.recoveries).toEqual([]);
       },
     );
@@ -11690,13 +13245,13 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       };
       expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_wall_clock_exhausted" } });
       expect(await h.instances.listUnits(INSTANCE.id)).toEqual([legacyRow()]);
-      expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+      expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
       expect(h.recoveries).toEqual([]);
     });
 
     it("refuses a claimed cost-capped recovery when its original grant changes", async () => {
       const h = await legacyHarness();
-      await h.instances.replace({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
+      seedCoordinatorInstance(h.instances, { ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 5 } });
       await h.instances.putUnits([legacyRow()]);
       expect((await callRecovery(h)).status).toBe(200);
       const claimed = (await h.instances.listUnits(INSTANCE.id))[0]!;
@@ -11711,7 +13266,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
 
     it("refuses a proven spent cost cap without resetting the cumulative total", async () => {
       const h = await legacyHarness();
-      await h.instances.replace({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 0.5 } });
+      seedCoordinatorInstance(h.instances, { ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 0.5 } });
       await h.instances.putUnits([legacyRow()]);
       expect(await callRecovery(h)).toMatchObject({
         status: 409,
@@ -11834,8 +13389,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       "refuses %s without borrowing present configuration or changing the original row",
       async (reason, instanceOver, rowOver) => {
         const h = await legacyHarness();
-        await h.instances.replace({ ...recoveryInstance(), ...instanceOver });
-        await h.instances.putUnits([{ ...legacyRow(), ...rowOver }]);
+        seedCoordinatorInstance(h.instances, { ...recoveryInstance(), ...instanceOver });
+        seedCoordinatorUnit(h.instances, { ...legacyRow(), ...rowOver });
         h.deps.shipGrantFor = () => {
           throw new Error("current configuration is not historical authority");
         };
@@ -11846,13 +13401,13 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         });
         expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
         expect(h.recoveries).toEqual([]);
-        expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+        expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
       },
     );
 
     it("accepts a retained grant at the renewal maximum without consulting current configuration", async () => {
       const h = await legacyHarness();
-      await h.instances.replace({ ...recoveryInstance(), grant: { renewals: 12 } });
+      seedCoordinatorInstance(h.instances, { ...recoveryInstance(), grant: { renewals: 12 } });
       await h.instances.putUnits([legacyRow()]);
       h.deps.shipGrantFor = () => {
         throw new Error("current configuration is not historical authority");
@@ -11900,16 +13455,15 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       h.deps,
       { userId: INSTANCE.userId, threadKey: INSTANCE.threadKey, messageId: "slack:C1:recovery-request" },
     );
-    expect(result).toMatchObject({ status: 200, body: { workflowId: "recovery-run-original-review" } });
+    expect(result).toMatchObject({ status: 200, body: { workflowId: REVIEW_WORKFLOW } });
     expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
       publication,
       lastPush: HEAD,
       recovery: { kind: "findings", round: 1 },
     });
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual({
-      ...owner,
-      recoveryActionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId,
-    });
+    expect(await pullOwners(h)).toEqual([
+      { kind: "unit", ...owner, actionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId },
+    ]);
   });
 
   it("legacy binding repair admits a retained initial coding checkpoint and no-verdict review without requiring a PR-created event", async () => {
@@ -11987,9 +13541,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       h.deps.fetchPrFacts = async () => ({ ...exactRecoveryFacts(HEAD), baseRef: "other" });
     if (scenario === "foreign remote")
       h.deps.fetchPrFacts = async () => ({ ...exactRecoveryFacts(HEAD), sameRepoHead: false });
-    if (scenario === "rival owner")
-      h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
-    if (scenario === "active owner") h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, owner);
+    if (scenario === "rival owner") seedRivalOwner(h);
+    if (scenario === "active owner") seedRivalOwner(h, "active-owner");
     if (scenario === "CAS loss")
       vi.spyOn(h.instances, "transitionRecovery").mockResolvedValueOnce({ ok: false, reason: "stale" });
     if (scenario === "contradictory hint") await h.instances.putUnits([{ ...legacyRow(), lastPush: "b".repeat(40) }]);
@@ -12029,21 +13582,20 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual([
       { ...legacyRow(), history: { version: 1, receiptId: "observed" } },
     ]);
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
   });
 
   it("legacy binding repair restores absent authority after an indeterminate start and process restart", async () => {
     const h = await legacyHarness();
     h.deps.startRecovery = async () => ({ kind: "unanswered", reason: "response lost" });
     expect(await callRecovery(h)).toMatchObject({ status: 200, body: { outcome: "indeterminate" } });
-    h.deps.runnerOwnership = new RunnerOwnershipFence(false);
     h.deps.recoveryStatus = async () => ({ kind: "absent" });
     h.deps.startRecovery = async (id) => ({ kind: "failed", id, reason: "confirmed absent" });
     expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_workflow_failed" } });
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual([
       { ...legacyRow(), history: { version: 1, receiptId: "observed" } },
     ]);
-    expect(h.deps.runnerOwnership.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
   });
 
   it("legacy binding repair keeps proven authority once the recovery transport has recorded progress", async () => {
@@ -12054,7 +13606,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         post(`${COORDINATOR_ADMIN_PREFIX}round`, {
           parentInstanceId: INSTANCE.id,
           unit: "U12",
-          recoveryWorkflowId: "recovery-run-original-review",
+          recoveryActionId: REVIEW_ACTION,
+          recoveryWorkflowId: REVIEW_WORKFLOW,
           index: 1,
           agent: "coding",
           outcome: "started",
@@ -12079,13 +13632,13 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     h.deps.fetchPrFacts = async () => exactRecoveryFacts(head);
     h.deps.fetchCommitChecks = async () => ({ total: 1, pending: [], failed: [] });
     h.deps.fixupCommitSubjects = async () => [];
-    h.deps.dispatch = async (msg, io, opts) => {
+    h.setScript(async (msg, io, opts) => {
       const tag = opts!.coordinator;
       children.push(tag);
       expect(msg.userId).toBe(INSTANCE.userId);
       expect(msg.threadKey).toBe(INSTANCE.threadKey);
       expect(tag.parentInstanceId).toBe(INSTANCE.id);
-      expect(tag.transportWorkflowId).toBe("recovery-run-original-review");
+      expect(tag.transportWorkflowId).toBe(REVIEW_WORKFLOW);
       if (tag.idempotencyKey.endsWith("/findings")) {
         const [row] = await h.instances.listUnits(INSTANCE.id);
         expect(
@@ -12099,7 +13652,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
               requestHeadSha: HEAD,
               workspaceRef: INSTANCE.branch,
               workspaceHeadSha: HEAD,
-              owner: h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number),
+              owner,
             },
             exactRecoveryFacts(HEAD),
           ),
@@ -12123,7 +13676,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         );
         io.runStarted?.({ id: "run-recovered-fix" });
       } else {
-        expect(tag.idempotencyKey).toBe(`${INSTANCE.id}:U12/recovery/2/review`);
+        expect(tag.idempotencyKey).toBe(`${INSTANCE.id}:U12/recovery/${REVIEW_ACTION}/2/review`);
         expect(tag.recovery?.expectedHeadSha).toBe(fixed);
         expect(msg.text).toContain(fixed);
         await h.store.put(
@@ -12145,7 +13698,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         io.runStarted?.({ id: "run-recovered-review" });
       }
       return { status: "completed" };
-    };
+    });
     expect((await callRecovery(h)).status).toBe(200);
     const routes: string[] = [];
     const bot: CoordinatorBot = {
@@ -12164,8 +13717,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       waitForEvent: async () => ({ ok: true }),
     };
     expect(
-      await runOriginalUnitRecovery(steps, bot, "recovery-run-original-review", {
+      await runOriginalUnitRecovery(steps, bot, REVIEW_WORKFLOW, {
         kind: "recover-original-unit",
+        recoveryActionId: h.recoveries.at(-1)!.params.recoveryActionId,
         parentInstanceId: INSTANCE.id,
         unit: "U12",
       }),
@@ -12179,7 +13733,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       ending: { kind: "merge_ready" },
       recoveryReceipt: { reviewRunId: "run-original-review" },
     });
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
   });
 
   const ordinaryFindingsHarness = async () => {
@@ -12188,7 +13742,6 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.instances.put(recoveryInstance());
     const { ending: _ending, ...row } = requestChangesRow();
     await h.instances.putUnits([row]);
-    h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, owner);
     await h.store.put(
       completedOriginalFindings(fixed, {
         events: [{ type: "coordinator_tag", parentInstanceId: INSTANCE.id, unit: "U12", base: "main", publication }],
@@ -12304,7 +13857,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.store.put(missingReceiptRecord());
     expect(await callRecovery(h)).toMatchObject({
       status: 200,
-      body: { workflowId: "recovery-run-original-findings" },
+      body: { workflowId: REVIEW_WORKFLOW },
     });
     expect(await h.instances.get(INSTANCE.id)).toEqual(instance);
     expect((await h.instances.listUnits(INSTANCE.id))[0]).toMatchObject({
@@ -12391,8 +13944,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     if (scenario === "foreign head") run.headSha = "c".repeat(40);
     if (scenario === "unpriced") run.usage = undefined;
     if (scenario === "rival owner") {
-      h.deps.runnerOwnership!.release(INSTANCE.repo, PR.number, owner);
-      h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
+      seedPublicationRival(h, PR.number);
     }
     if (scenario === "competing push")
       await h.store.put({
@@ -12432,7 +13984,6 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     };
     delete row.ending;
     await h.instances.putUnits([row]);
-    h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, owner);
     await h.store.put(
       originalCoding({
         id: "run-original-coding",
@@ -12509,8 +14060,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         .mockResolvedValueOnce(exactRecoveryFacts("b".repeat(40)))
         .mockResolvedValue(exactRecoveryFacts("c".repeat(40)));
     if (scenario === "rival owner") {
-      h.deps.runnerOwnership!.release(INSTANCE.repo, PR.number, owner);
-      h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
+      seedPublicationRival(h, PR.number);
     }
     expect((await check()).status).toBe(409);
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
@@ -12528,7 +14078,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     });
     expect(row).not.toHaveProperty("recovery");
     expect(await ordinaryPrCheck(h)).toMatchObject({ status: 200 });
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(owner);
+    expect(await pullOwners(h)).toEqual([{ kind: "unit", ...owner }]);
   });
 
   it.each([false, true])(
@@ -13034,8 +14584,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         await h.store.put({ ...child, userId: "slack:UOTHER" });
       }
       if (scenario === "changed owner") {
-        h.deps.runnerOwnership!.release(INSTANCE.repo, PR.number, owner);
-        h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U99" });
+        seedPublicationRival(h, PR.number);
       }
       const before = (await h.instances.listUnits(INSTANCE.id))[0]!;
       const checked = await handleCoordinatorRequest(
@@ -13324,8 +14873,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     if (scenario === "unrecorded push") await h.store.put({ ...run, pushed: undefined });
     if (scenario === "moved head") h.deps.fetchPrFacts = async () => exactRecoveryFacts("c".repeat(40));
     if (scenario === "rival owner") {
-      h.deps.runnerOwnership!.release(INSTANCE.repo, PR.number, owner);
-      h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
+      seedPublicationRival(h, PR.number);
     }
     if (scenario === "CAS loss")
       vi.spyOn(h.instances, "compareAndReplaceUnit").mockResolvedValueOnce({ ok: false, reason: "stale" });
@@ -13367,19 +14915,18 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(h.recoveries).toEqual([]);
   });
 
-  it("ordinary findings publication restores its prior binding when ownership changes during the CAS", async () => {
+  it("ordinary findings publication refuses a canonical competitor observed before its CAS", async () => {
     const h = await ordinaryFindingsHarness();
     const before = await h.instances.listUnits(INSTANCE.id);
     const replace = h.instances.compareAndReplaceUnit.bind(h.instances);
-    h.instances.compareAndReplaceUnit = async (expected, replacement) => {
-      const result = await replace(expected, replacement);
-      h.deps.runnerOwnership!.release(INSTANCE.repo, PR.number, owner);
-      h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
-      return result;
-    };
+    const cas = vi.spyOn(h.instances, "compareAndReplaceUnit").mockImplementation(async (expected, replacement) => {
+      seedPublicationRival(h, PR.number);
+      return replace(expected, replacement);
+    });
     expect(await ordinaryPrCheck(h)).toMatchObject({ status: 409, body: { error: "publication_ownership_changed" } });
+    expect(cas).toHaveBeenCalledOnce();
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)?.instanceId).toBe("rival");
+    expect((await h.instances.listUnits("ship_rival"))[0]!.pr?.number).toBe(PR.number);
   });
 
   it.each([
@@ -13417,7 +14964,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
   ])("attributes an unknown recovery budget to %s without guessing", async (reason, instanceOver, rowOver) => {
     const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
     await h.instances.put({ ...recoveryInstance(), ...instanceOver });
-    await h.instances.putUnits([{ ...requestChangesRow(), ...rowOver }]);
+    seedCoordinatorUnit(h.instances, { ...requestChangesRow(), ...rowOver });
     expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_budget_unknown", reason } });
     expect(h.recoveries).toEqual([]);
   });
@@ -13443,13 +14990,18 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
 
     expect(response).toMatchObject({
       status: 200,
-      body: { ok: true, outcome: "started", workflowId: "recovery-run-original-review" },
+      body: { ok: true, outcome: "started", workflowId: REVIEW_WORKFLOW },
     });
     expect(h.dispatched).toHaveLength(0);
     expect(h.recoveries).toEqual([
       {
-        id: "recovery-run-original-review",
-        params: { kind: "recover-original-unit", parentInstanceId: INSTANCE.id, unit: "U12" },
+        id: REVIEW_WORKFLOW,
+        params: {
+          kind: "recover-original-unit",
+          recoveryActionId: REVIEW_ACTION,
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+        },
       },
     ]);
     const [claimed] = await h.instances.listUnits(INSTANCE.id);
@@ -13458,14 +15010,13 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       publication,
     });
     expect(claimed).not.toHaveProperty("ending");
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual({
-      ...owner,
-      recoveryActionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId,
-    });
+    expect(await pullOwners(h)).toEqual([
+      { kind: "unit", ...owner, actionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId },
+    ]);
   });
 
   it.each([
-    ["earned", true, true, true, "recovery-run-original-review-2"],
+    ["earned", true, true, true, REVIEW_WORKFLOW],
     ["unposted", false, true, true, undefined],
     ["not a strict widening", true, false, true, undefined],
     ["no durable credit", true, true, false, undefined],
@@ -13589,7 +15140,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     );
     expect(await callRecovery(h)).toMatchObject({
       status: 200,
-      body: { workflowId: "recovery-run-original-findings-2" },
+      body: { workflowId: REVIEW_WORKFLOW },
     });
     const [claimed] = await h.instances.listUnits(INSTANCE.id);
     expect(claimed?.recovery).toMatchObject({
@@ -13662,7 +15213,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       }),
     );
     await h.store.put(review(3, ["source", "endpoint", "composition"], 15, 10));
-    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: "recovery-run-review-3" } });
+    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: REVIEW_WORKFLOW } });
     expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toMatchObject({
       round: 3,
       patternContinuations: 2,
@@ -13716,7 +15267,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
 
     expect(response).toMatchObject({
       status: 200,
-      body: { workflowId: "recovery-run-original-findings" },
+      body: { workflowId: REVIEW_WORKFLOW },
     });
     const [claimed] = await h.instances.listUnits(INSTANCE.id);
     expect(claimed).toMatchObject({
@@ -13846,7 +15397,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           parentInstanceId: INSTANCE.id,
           idempotencyKey: `${INSTANCE.id}:U12/1/findings/a3`,
         });
-      const priorOwner = h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number);
+      const priorOwner = await pullOwners(h);
       if (scenario === "stale head") h.deps.fetchPrFacts = async () => exactRecoveryFacts("c".repeat(40));
       if (scenario === "ambiguous push")
         await h.store.put({ ...findings, id: "run-other-push", idempotencyKey: `${INSTANCE.id}:U12/1/findings/a3` });
@@ -13893,19 +15444,19 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         expect(h.dispatched).toEqual([]);
         expect(h.branches).toEqual([]);
         expect(h.opens).toEqual([]);
-        expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(priorOwner);
+        expect(await pullOwners(h)).toEqual(priorOwner);
         return;
       }
-      expect(admission).toMatchObject({ status: 200, body: { workflowId: "recovery-run-original-findings" } });
+      expect(admission).toMatchObject({ status: 200, body: { workflowId: REVIEW_WORKFLOW } });
       h.deps.fetchCommitChecks = async () => ({ total: 1, pending: [], failed: [] });
       h.deps.fixupCommitSubjects = async () => [];
       const children: CoordinatorTag[] = [];
-      h.deps.dispatch = async (msg, io, opts) => {
+      h.setScript(async (msg, io, opts) => {
         const tag = opts!.coordinator;
         children.push(tag);
         expect(tag).toMatchObject({
           parentInstanceId: INSTANCE.id,
-          idempotencyKey: `${INSTANCE.id}:U12/recovery/2/review`,
+          idempotencyKey: `${INSTANCE.id}:U12/recovery/${REVIEW_ACTION}/2/review`,
           recovery: { expectedHeadSha: fixed },
         });
         expect(msg.text).toContain(fixed);
@@ -13929,7 +15480,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         );
         io.runStarted?.({ id: "run-recovered-review" });
         return { status: "completed" };
-      };
+      });
       const routes: string[] = [];
       const bot: CoordinatorBot = {
         step: async (route, body) => {
@@ -13946,8 +15497,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         },
         waitForEvent: async () => ({ ok: true }),
       };
-      const result = await runOriginalUnitRecovery(steps, bot, "recovery-run-original-findings", {
+      const result = await runOriginalUnitRecovery(steps, bot, REVIEW_WORKFLOW, {
         kind: "recover-original-unit",
+        recoveryActionId: h.recoveries.at(-1)!.params.recoveryActionId,
         parentInstanceId: INSTANCE.id,
         unit: "U12",
       });
@@ -14145,8 +15697,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         parentInstanceId: INSTANCE.id,
         idempotencyKey: `${INSTANCE.id}:U12/1/findings/a2`,
       });
-    if (scenario === "rival owner")
-      h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, { instanceId: "rival", unit: "U12" });
+    if (scenario === "rival owner") seedRivalOwner(h);
     const before = await h.instances.listUnits(INSTANCE.id);
     const result = await recoverOriginalUnit({ parentInstanceId: INSTANCE.id, unit: "U12", renew: true }, h.deps, {
       userId: INSTANCE.userId,
@@ -14248,7 +15799,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.store.put(reviewRecord());
     await h.store.put(failedDuringDrainWait());
 
-    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: "recovery-run-original-review" } });
+    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: REVIEW_WORKFLOW } });
     const [claimed] = await h.instances.listUnits(INSTANCE.id);
     expect(claimed?.recovery).toMatchObject({ kind: "findings", round: 1, expectedHeadSha: HEAD });
     expect(claimed?.lastPush).toBeUndefined();
@@ -14301,6 +15852,270 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(h.recoveries).toEqual([]);
   });
 
+  const admittedCodingSetupRefusal = (stage: "coding" | "findings"): RunRecord => {
+    const source: RunEvent[] = [
+      { type: "input", messageId: "m1", text: "continue the original task" },
+      { type: "run_meta", agent: "coding", repo: INSTANCE.repo, ref: INSTANCE.branch, pr: PR.number, headSha: HEAD },
+      ...Array.from({ length: 4 }, (_, index): RunEvent[] => [
+        { type: "span_start", spanId: `gate-${index}`, name: "dispatch.admission" },
+        {
+          type: "span_end",
+          spanId: `gate-${index}`,
+          name: "dispatch.admission",
+          startedAt: NOW,
+          durationMs: 1,
+          status: "ok",
+        },
+      ]).flat(),
+      { type: "span_start", spanId: "memory", name: "dispatch.memory_read" },
+      { type: "context", text: "user: prior request" },
+      { type: "run_state", state: "admitted", since: NOW - minutesToMs(20), bound: NOW },
+      { type: "span_end", spanId: "memory", name: "dispatch.memory_read", startedAt: NOW, durationMs: 1, status: "ok" },
+      { type: "span_start", spanId: "attach", name: "dispatch.workspace.attach" },
+      {
+        type: "span_end",
+        spanId: "attach",
+        name: "dispatch.workspace.attach",
+        startedAt: NOW,
+        durationMs: 1,
+        status: "error",
+      },
+      { type: "refusal", code: "setup_failed", cause: "system", text: "dependencies_invalid" },
+      { type: "span_start", spanId: "refuse", name: "dispatch.refuse" },
+      { type: "span_end", spanId: "refuse", name: "dispatch.refuse", startedAt: NOW, durationMs: 1, status: "ok" },
+      { type: "span_start", spanId: "reply", name: "post.reply" },
+      { type: "span_end", spanId: "reply", name: "post.reply", startedAt: NOW, durationMs: 1, status: "ok" },
+    ];
+    const events = source.map((event, index) => ({ ...event, seq: index + 1 }));
+    return failedBeforeWork({
+      id: stage === "coding" ? "run-original-coding" : "run-setup-refused-findings",
+      idempotencyKey: `${INSTANCE.id}:U12/${stage === "coding" ? "0/coding" : "1/findings"}`,
+      startedAt: NOW - minutesToMs(stage === "coding" ? 55 : 20),
+      finishedAt: NOW - minutesToMs(stage === "coding" ? 50 : 15),
+      liveState: { state: "admitted", since: NOW - minutesToMs(stage === "coding" ? 55 : 20), bound: NOW },
+      headSha: HEAD,
+      pr: { ...PR, head: INSTANCE.branch },
+      events,
+      eventCount: events.length,
+      storedEventCount: events.length,
+    });
+  };
+
+  const admittedCodingBudgetHarness = async (stage: "coding" | "findings", mutate?: (child: RunRecord) => void) => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD), branchHead: HEAD });
+    await h.instances.put({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 0.5 } });
+    const row =
+      stage === "findings"
+        ? setupRefusalRow()
+        : ({
+            ...requestChangesRow(),
+            rounds: [
+              { index: 0, agent: "coding", outcome: "started", at: NOW - minutesToMs(54) },
+              { index: 0, agent: "coding", outcome: "pr_opened", at: NOW - minutesToMs(49) },
+              ...requestChangesRow().rounds,
+            ],
+          } as CoordinatorUnit);
+    await h.instances.putUnits([row]);
+    await h.store.put(reviewRecord());
+    const child = admittedCodingSetupRefusal(stage);
+    mutate?.(child);
+    await h.store.put(child);
+    return { h, row, child };
+  };
+
+  it.each(["coding", "findings"] as const)(
+    "prices the complete admitted %s attach refusal at zero while preserving prior spend and input target",
+    async (stage) => {
+      const { h, child } = await admittedCodingBudgetHarness(stage);
+      expect(child.events).toHaveLength(21);
+      expect(child.events.slice(12, 17).map((event) => event.type)).toEqual([
+        "run_state",
+        "span_end",
+        "span_start",
+        "span_end",
+        "refusal",
+      ]);
+      expect(await callRecovery(h)).toMatchObject({ status: 200 });
+      const [claimed] = await h.instances.listUnits(INSTANCE.id);
+      expect(claimed?.recovery).toMatchObject({
+        kind: "findings",
+        expectedHeadSha: HEAD,
+        remainingMs: minutesToMs(60),
+        accounting: {
+          spendUsd: 0.25,
+          renewalsSpent: 0,
+          grant: { renewals: 0, costCapUsd: 0.5 },
+          children: expect.arrayContaining([
+            { runId: child.id, key: child.idempotencyKey, usd: 0 },
+            { runId: "run-original-review", key: `${INSTANCE.id}:U12/1/review`, usd: 0.25 },
+          ]),
+        },
+      });
+      expect(h.dispatched).toEqual([]);
+    },
+  );
+
+  it.each([
+    "model activity",
+    "tool activity",
+    "missing metadata",
+    "foreign input head",
+    "wrong attach span",
+    "successful attach",
+    "missing refusal",
+    "truncated record",
+    "unmatched setup span",
+    "foreign metadata without summary",
+    "preparing without attach proof",
+  ] as const)(
+    "refuses admitted coding setup evidence with %s without changing allowance or owner",
+    async (scenario) => {
+      const { h, row } = await admittedCodingBudgetHarness("findings", (child) => {
+        if (scenario === "model activity")
+          child.events[19] = { type: "span_start", name: "model.turn", spanId: "model", seq: 20 };
+        if (scenario === "tool activity")
+          child.events[19] = { type: "tool_call", tool: "bash", summary: "git status", seq: 20 };
+        if (scenario === "missing metadata")
+          child.events[1] = { type: "context", text: "metadata unavailable", seq: 2 };
+        if (scenario === "foreign input head")
+          child.events[1] = {
+            type: "run_meta",
+            agent: "coding",
+            repo: INSTANCE.repo,
+            ref: INSTANCE.branch,
+            pr: PR.number,
+            headSha: "9".repeat(40),
+            seq: 2,
+          };
+        if (scenario === "wrong attach span") child.events[15] = { ...child.events[15], spanId: "other" } as RunEvent;
+        if (scenario === "successful attach") child.events[15] = { ...child.events[15], status: "ok" } as RunEvent;
+        if (scenario === "missing refusal") child.events[16] = { type: "context", text: "failed", seq: 17 };
+        if (scenario === "truncated record") child.truncated = true;
+        if (scenario === "unmatched setup span")
+          child.events[3] = { ...child.events[3], spanId: "unknown" } as RunEvent;
+        if (scenario === "foreign metadata without summary") {
+          child.headSha = undefined;
+          child.pr = undefined;
+          child.events[1] = {
+            type: "run_meta",
+            agent: "coding",
+            repo: "foreign/repo",
+            ref: "foreign-ref",
+            pr: 999,
+            headSha: "9".repeat(40),
+            seq: 2,
+          };
+        }
+        if (scenario === "preparing without attach proof") {
+          child.headSha = undefined;
+          child.pr = undefined;
+          child.liveState = { state: "preparing", since: NOW, bound: NOW };
+          child.events = [
+            { type: "run_meta", agent: "coding", seq: 1 },
+            { type: "run_state", state: "preparing", since: NOW, bound: NOW, seq: 2 },
+            { type: "refusal", code: "setup_failed", cause: "workspace", text: "setup failed", seq: 3 },
+          ];
+          child.eventCount = child.events.length;
+          child.storedEventCount = child.events.length;
+        }
+      });
+      expect((await callRecovery(h)).status).toBe(409);
+      expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+      expect(h.recoveries).toEqual([]);
+      expect(h.dispatched).toEqual([]);
+    },
+  );
+
+  it.each(["preparing", "drain"] as const)(
+    "prices a complete %s setup refusal carrying only its resolved input target at zero",
+    async (phase) => {
+      const h = harness({ prFacts: exactRecoveryFacts(HEAD), branchHead: HEAD });
+      await h.instances.put({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 0.5 } });
+      await h.instances.putUnits([setupRefusalRow()]);
+      await h.store.put(reviewRecord());
+      const child = phase === "preparing" ? failedBeforeWork() : failedDuringDrainWait();
+      child.headSha = HEAD;
+      child.pr = { ...PR, head: INSTANCE.branch };
+      child.events[1] = {
+        type: "run_meta",
+        agent: "coding",
+        repo: INSTANCE.repo,
+        ref: INSTANCE.branch,
+        pr: PR.number,
+        headSha: HEAD,
+        seq: 2,
+      };
+      await h.store.put(child);
+      expect(await callRecovery(h)).toMatchObject({ status: 200 });
+      const [claimed] = await h.instances.listUnits(INSTANCE.id);
+      expect(claimed?.recovery?.accounting).toMatchObject({
+        spendUsd: 0.25,
+        renewalsSpent: 0,
+        grant: { renewals: 0, costCapUsd: 0.5 },
+      });
+      expect(claimed?.recovery?.accounting?.children).toContainEqual({
+        runId: child.id,
+        key: child.idempotencyKey,
+        usd: 0,
+      });
+      expect(claimed?.publication).toEqual(publication);
+      expect(h.dispatched).toEqual([]);
+    },
+  );
+
+  it.each([
+    "missing status",
+    "invalid status",
+    "negative duration",
+    "nonfinite duration",
+    "missing start time",
+    "empty span identity",
+  ] as const)("refuses zero-spend setup evidence with %s", async (scenario) => {
+    const { h, row } = await admittedCodingBudgetHarness("findings", (child) => {
+      const event = { ...child.events[3] } as unknown as Record<string, unknown>;
+      if (scenario === "missing status") delete event.status;
+      if (scenario === "invalid status") event.status = "unknown";
+      if (scenario === "negative duration") event.durationMs = -1;
+      if (scenario === "nonfinite duration") event.durationMs = Infinity;
+      if (scenario === "missing start time") delete event.startedAt;
+      if (scenario === "empty span identity") {
+        event.spanId = "";
+        child.events[2] = { ...child.events[2], spanId: "" } as RunEvent;
+      }
+      child.events[3] = event as unknown as RunEvent;
+    });
+    expect((await callRecovery(h)).status).toBe(409);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+    expect(h.recoveries).toEqual([]);
+  });
+
+  it.each(["preparing", "drain"] as const)("refuses new attach work after a %s setup refusal", async (phase) => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD), branchHead: HEAD });
+    await h.instances.put(recoveryInstance());
+    const row = setupRefusalRow();
+    await h.instances.putUnits([row]);
+    await h.store.put(reviewRecord());
+    const child = phase === "preparing" ? failedBeforeWork() : failedDuringDrainWait();
+    child.events.push(
+      { type: "span_start", spanId: "second-attach", name: "dispatch.workspace.attach" },
+      {
+        type: "span_end",
+        spanId: "second-attach",
+        name: "dispatch.workspace.attach",
+        startedAt: NOW,
+        durationMs: 1,
+        status: "ok",
+      },
+    );
+    child.events = child.events.map((event, index) => ({ ...event, seq: index + 1 }));
+    child.eventCount = child.events.length;
+    child.storedEventCount = child.events.length;
+    await h.store.put(child);
+    expect((await callRecovery(h)).status).toBe(409);
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
+    expect(h.recoveries).toEqual([]);
+  });
+
   it("accounts a complete server setup refusal as $0 and resumes the original same-head findings without work credit", async () => {
     const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
     await h.instances.put({ ...recoveryInstance(), grant: { renewals: 0, costCapUsd: 0.5 } });
@@ -14311,7 +16126,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(failed.events.slice(12, 17).map((event) => event.type)).toEqual(Array(5).fill("context"));
     await h.store.put(failed);
 
-    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: "recovery-run-original-review" } });
+    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: REVIEW_WORKFLOW } });
     const [claimed] = await h.instances.listUnits(INSTANCE.id);
     expect(claimed?.recovery).toMatchObject({
       kind: "findings",
@@ -14343,7 +16158,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.store.put(reviewRecord());
     await h.store.put(failedBeforeWork());
 
-    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: "recovery-run-original-review" } });
+    expect(await callRecovery(h)).toMatchObject({ status: 200, body: { workflowId: REVIEW_WORKFLOW } });
     const [claimed] = await h.instances.listUnits(INSTANCE.id);
     expect(claimed?.recovery).toMatchObject({
       kind: "findings",
@@ -14380,7 +16195,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     if (scenario === "foreign binding owner") row.publication = { ...publication, owner: { ...owner, unit: "U13" } };
     if (scenario === "missing publication") row.publication = undefined;
     if (scenario === "exhausted original lease") row.startedAt = NOW - minutesToMs(121);
-    await h.instances.putUnits([row]);
+    seedCoordinatorUnit(h.instances, row);
     await h.store.put(reviewRecord());
     await h.store.put(failedBeforeWork());
     if (scenario === "rival findings child")
@@ -14570,7 +16385,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
 
     const response = await callRecovery(h);
 
-    expect(response).toMatchObject({ status: 200, body: { workflowId: "recovery-run-original-findings" } });
+    expect(response).toMatchObject({ status: 200, body: { workflowId: REVIEW_WORKFLOW } });
     const [claimed] = await h.instances.listUnits(INSTANCE.id);
     expect(claimed!.recovery).toMatchObject({ kind: "review", round: 2, findingsRunId: "run-original-findings" });
   });
@@ -14726,6 +16541,69 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       await change?.(failed, h);
     });
 
+  it("prices an admitted review input target without crediting work or resetting earlier spend", async () => {
+    const { h, row, fixed } = await admittedReviewWithRefusalReply((child) => {
+      child.headSha = "8".repeat(40);
+      child.pr = { ...PR, head: INSTANCE.branch };
+      child.events[1] = {
+        type: "run_meta",
+        agent: "review",
+        repo: INSTANCE.repo,
+        ref: INSTANCE.branch,
+        pr: PR.number,
+        headSha: "8".repeat(40),
+        seq: 2,
+      };
+    });
+    expect(await callRecovery(h)).toMatchObject({ status: 200 });
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    expect(claimed?.recovery).toMatchObject({
+      kind: "review",
+      expectedHeadSha: fixed,
+      accounting: { spendUsd: 0.5, renewalsSpent: 0 },
+    });
+    expect(claimed?.recovery?.accounting?.children).toContainEqual({
+      runId: "run-h2-attach",
+      key: `${INSTANCE.id}:U12/2/review`,
+      usd: 0,
+    });
+    expect(claimed?.publication).toEqual(row.publication);
+    expect(claimed?.lastPush).toBe(row.lastPush);
+    expect(h.dispatched).toEqual([]);
+  });
+
+  it("prices ordered review refusal cleanup followed by closure of its original outer scopes at zero", async () => {
+    const { h, row, fixed } = await admittedReviewWithRefusalReply((child) => {
+      child.events.push(
+        ...[
+          ["card", "post.card_close"],
+          ["track", "dispatch.track"],
+          ["receive", "slack.receive"],
+          ["request", "request"],
+        ].map(([spanId, name]): RunEvent => ({
+          type: "span_end",
+          spanId: spanId!,
+          name: name!,
+          startedAt: NOW,
+          durationMs: 1,
+          status: "ok",
+        })),
+      );
+      child.events = child.events.map((event, index) => ({ ...event, seq: index + 1 }));
+      child.eventCount = child.events.length;
+      child.storedEventCount = child.events.length;
+    });
+    expect(await callRecovery(h)).toMatchObject({ status: 200 });
+    const [claimed] = await h.instances.listUnits(INSTANCE.id);
+    expect(claimed?.recovery).toMatchObject({
+      kind: "review",
+      expectedHeadSha: fixed,
+      accounting: { spendUsd: 0.5, renewalsSpent: 0 },
+    });
+    expect(claimed?.publication).toEqual(row.publication);
+    expect(h.dispatched).toEqual([]);
+  });
+
   it("recovers admitted review attach refusal followed by ordered refusal and reply cleanup", async () => {
     const { h, row, fixed } = await admittedReviewWithRefusalReply();
     const events = (await h.store.get("run-h2-attach"))!.events;
@@ -14839,7 +16717,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     }
     expect((await callRecovery(h)).status, scenario).toBe(409);
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
     expect(h.recoveries).toEqual([]);
     expect(h.dispatched).toEqual([]);
   });
@@ -14977,7 +16855,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     }
     expect((await callRecovery(h)).status, scenario).toBe(409);
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
     expect(h.recoveries).toEqual([]);
     expect(h.dispatched).toEqual([]);
   });
@@ -15173,7 +17051,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     });
     expect(reads).toBe(2);
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
     expect(h.recoveries).toEqual([]);
   });
 
@@ -15194,7 +17072,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     });
     expect(reads).toBe(1);
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
     expect(h.recoveries).toEqual([]);
   });
 
@@ -15258,7 +17136,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(reads).toBe(2);
     expect(remoteReads).toBe(1);
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual([row]);
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
     expect(h.recoveries).toEqual([]);
   });
 
@@ -15586,15 +17464,15 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
 
     expect(first).toMatchObject({
       status: 200,
-      body: { outcome: "started", workflowId: "recovery-run-original-review" },
+      body: { outcome: "started", workflowId: REVIEW_WORKFLOW },
     });
     expect(replay).toMatchObject({
       status: 200,
-      body: { outcome: "already_started", workflowId: "recovery-run-original-review" },
+      body: { outcome: "already_started", workflowId: REVIEW_WORKFLOW },
     });
     expect(h.dispatched).toHaveLength(0);
     expect(h.recoveries).toHaveLength(1);
-    expect(new Set(h.recoveries.map((entry) => entry.id))).toEqual(new Set(["recovery-run-original-review"]));
+    expect(new Set(h.recoveries.map((entry) => entry.id))).toEqual(new Set([REVIEW_WORKFLOW]));
   });
 
   it("refuses a requester replay after the original absolute lease expires without minting another Workflow", async () => {
@@ -15638,7 +17516,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     const [restored] = await h.instances.listUnits(INSTANCE.id);
     expect(restored!.recovery).toBeUndefined();
     expect(restored!.ending).toBeDefined();
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
   });
 
   it("refuses a different requester or thread before reading evidence or claiming ownership", async () => {
@@ -15804,25 +17682,25 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.instances.putUnits([requestChangesRow()]);
     await h.store.put(reviewRecord());
     expect((await callRecovery(h)).status).toBe(200);
-    h.deps.runnerOwnership = new RunnerOwnershipFence(false);
 
     const response = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}recover-unit`, {
         parentInstanceId: INSTANCE.id,
         unit: "U12",
-        workflowId: "recovery-run-original-review",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
+        workflowId: REVIEW_WORKFLOW,
       }),
       h.deps,
     );
 
     expect(response.status).toBe(200);
-    expect(h.deps.runnerOwnership.owner(INSTANCE.repo, PR.number)).toEqual({
-      ...owner,
-      recoveryActionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId,
-    });
+    expect(await pullOwners(h)).toEqual([
+      { kind: "unit", ...owner, actionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId },
+    ]);
   });
 
-  it("reconstructs the durable recovery owner at a later findings spawn after the bot process restarts", async () => {
+  it("reads the durable recovery owner at a later findings spawn after the bot process restarts", async () => {
     const h = harness({
       prFacts: {
         state: "open",
@@ -15839,13 +17717,14 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.instances.putUnits([requestChangesRow()]);
     await h.store.put(reviewRecord());
     expect((await callRecovery(h)).status).toBe(200);
-    h.deps.runnerOwnership = new RunnerOwnershipFence(false);
 
     const response = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}spawn`, {
         parentInstanceId: INSTANCE.id,
         unit: "U12",
-        step: "U12/recovery/1/findings",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
+        step: `U12/recovery/${REVIEW_ACTION}/1/findings`,
         preset: "coding",
         budget: 20,
         brief: { kind: "findings", unit: "U12", pr: PR.number, headSha: HEAD, reviewRunId: "run-original-review" },
@@ -15858,7 +17737,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(h.dispatched[0]!.opts).toMatchObject({
       coordinator: {
         parentInstanceId: INSTANCE.id,
-        transportWorkflowId: "recovery-run-original-review",
+        transportWorkflowId: REVIEW_WORKFLOW,
       },
       recovery: {
         repo: INSTANCE.repo,
@@ -15869,7 +17748,11 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         deadlineAt: NOW + minutesToMs(60),
       },
     });
-    expect(h.deps.runnerOwnership.owner(INSTANCE.repo, PR.number)).toEqual(owner);
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery?.actionId).toBe(REVIEW_ACTION);
+    expect(await h.instances.findPullOwners({ repo: INSTANCE.repo, pr: PR.number })).toMatchObject({
+      ok: true,
+      owners: [{ instanceId: INSTANCE.id, unit: "U12" }],
+    });
   });
 
   it("revalidates the fixed head and absolute deadline at actual recovery child admission", async () => {
@@ -15895,7 +17778,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       post(`${COORDINATOR_ADMIN_PREFIX}spawn`, {
         parentInstanceId: INSTANCE.id,
         unit: "U12",
-        step: "U12/recovery/1/findings",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
+        step: `U12/recovery/${REVIEW_ACTION}/1/findings`,
         preset: "coding",
         budget: 20,
         brief: { kind: "findings", unit: "U12", pr: PR.number, headSha: HEAD, reviewRunId: "run-original-review" },
@@ -15940,7 +17825,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       post(`${COORDINATOR_ADMIN_PREFIX}spawn`, {
         parentInstanceId: INSTANCE.id,
         unit: "U12",
-        step: "U12/recovery/1/findings",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
+        step: `U12/recovery/${REVIEW_ACTION}/1/findings`,
         preset: "coding",
         budget: 20,
         brief: { kind: "findings", unit: "U12", pr: PR.number, headSha: HEAD, reviewRunId: "run-original-review" },
@@ -15974,7 +17861,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       reviewRecord({
         id: "run-recovery-fix",
         agent: "coding",
-        idempotencyKey: `${INSTANCE.id}:U12/recovery/1/findings`,
+        idempotencyKey: `${INSTANCE.id}:U12/recovery/${REVIEW_ACTION}/1/findings`,
         verdict: undefined,
         reviewPost: undefined,
         reviewHead: undefined,
@@ -15997,6 +17884,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
         parentInstanceId: INSTANCE.id,
         unit: "U12",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
         pr: PR.number,
         recover: { runId: "run-recovery-fix" },
       }),
@@ -16034,7 +17923,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(response).toMatchObject({ status: 409, body: { error: "recovery_claim_stale" } });
     expect(replace).toHaveBeenCalledTimes(1);
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
   });
 
   it("reconciles a claim CAS whose committed response was lost and keeps ownership through Workflow admission", async () => {
@@ -16067,11 +17956,10 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     const response = await callRecovery(h);
 
     expect(response).toMatchObject({ status: 200, body: { outcome: "started" } });
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual({
-      ...owner,
-      recoveryActionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId,
-    });
-    expect((await h.instances.listUnits(INSTANCE.id))[0]!.recovery?.workflowId).toBe("recovery-run-original-review");
+    expect(await pullOwners(h)).toEqual([
+      { kind: "unit", ...owner, actionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId },
+    ]);
+    expect((await h.instances.listUnits(INSTANCE.id))[0]!.recovery?.workflowId).toBe(REVIEW_WORKFLOW);
   });
 
   it("rolls the exact row and owner back when Workflow admission fails definitively", async () => {
@@ -16099,10 +17987,10 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual(
       before.map((row) => ({ ...row, history: { version: 1, receiptId: "observed" } })),
     );
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
   });
 
-  it("surfaces rollback CAS loss and leaves the durable claim fenced", async () => {
+  it("surfaces rollback CAS loss and retains the durable claim", async () => {
     const h = harness({
       prFacts: {
         state: "open",
@@ -16133,10 +18021,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       body: { error: "recovery_rollback_failed", cause: "recovery_workflow_failed", reason: "stale" },
     });
     expect((await h.instances.listUnits(INSTANCE.id))[0]!.recovery).toBeDefined();
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual({
-      ...owner,
-      recoveryActionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId,
-    });
+    expect(await pullOwners(h)).toEqual([
+      { kind: "unit", ...owner, actionId: (await h.instances.listUnits(INSTANCE.id))[0]!.recovery!.actionId },
+    ]);
   });
 
   it("keeps an ambiguous Workflow admission claimed so retry can meet the same Workflow id without a second budget charge", async () => {
@@ -16165,10 +18052,10 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
 
     expect(first).toMatchObject({
       status: 200,
-      body: { outcome: "indeterminate", workflowId: "recovery-run-original-review" },
+      body: { outcome: "indeterminate", workflowId: REVIEW_WORKFLOW },
     });
     expect(replay).toMatchObject({ status: 200, body: { outcome: "already_started" } });
-    expect(h.recoveries.map((entry) => entry.id)).toEqual(["recovery-run-original-review"]);
+    expect(h.recoveries.map((entry) => entry.id)).toEqual([REVIEW_WORKFLOW]);
     expect((await h.instances.listUnits(INSTANCE.id))[0]!.recovery).toEqual(claimed!.recovery);
   });
 
@@ -16206,7 +18093,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       post(`${COORDINATOR_ADMIN_PREFIX}recover-unit`, {
         parentInstanceId: INSTANCE.id,
         unit: "U12",
-        workflowId: "recovery-run-original-review",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
+        workflowId: REVIEW_WORKFLOW,
       }),
       h.deps,
     );
@@ -16215,10 +18104,10 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual(
       before.map((row) => ({ ...row, history: { version: 1, receiptId: "observed" } })),
     );
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
   });
 
-  it("terminal settlement clears the durable claim by CAS and releases the original publication owner", async () => {
+  it("terminal settlement clears the durable recovery action by CAS", async () => {
     const h = harness({
       prFacts: {
         state: "open",
@@ -16235,13 +18124,13 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.instances.putUnits([requestChangesRow()]);
     await h.store.put(reviewRecord());
     expect((await callRecovery(h)).status).toBe(200);
-    h.deps.runnerOwnership = new RunnerOwnershipFence(false);
 
     const response = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
         parentInstanceId: INSTANCE.id,
         unit: "U12",
-        recoveryWorkflowId: "recovery-run-original-review",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
         ending: { kind: "merge_ready", report: "ready at the recovered head" },
         pr: PR,
         headSha: HEAD,
@@ -16254,12 +18143,151 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(settled!.recovery).toBeUndefined();
     expect(settled!.recoveryReceipt).toMatchObject({
       reviewRunId: "run-original-review",
-      workflowId: "recovery-run-original-review",
+      workflowId: REVIEW_WORKFLOW,
       accounting: { spendUsd: 0.25, grant: { renewals: 0, costCapUsd: 5 } },
     });
     expect(settled!.ending?.kind).toBe("merge_ready");
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
   });
+
+  it.each([
+    ["unavailable", 503, "recovery_store_unavailable"],
+    ["stale", 409, "recovery_claim_stale"],
+    ["conflict", 409, "settlement_conflict"],
+    ["capacity", 409, "recovery_history_capacity"],
+    ["unreadable", 503, "recovery_store_unavailable"],
+  ] as const)("preserves recovery ownership when settlement returns %s", async (reason, status, error) => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    expect((await callRecovery(h)).status).toBe(200);
+    const before = await h.instances.listUnits(INSTANCE.id);
+    const publicationOwner = await pullOwners(h);
+    expect(publicationOwner).toHaveLength(1);
+    if (reason === "unreadable")
+      vi.spyOn(h.instances, "transitionRecovery").mockImplementationOnce(async () => {
+        vi.spyOn(h.instances, "listUnits").mockRejectedValueOnce(new Error("store unreachable"));
+        throw new Error("settlement response lost");
+      });
+    else vi.spyOn(h.instances, "transitionRecovery").mockResolvedValueOnce({ ok: false, reason });
+
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          recoveryActionId: REVIEW_ACTION,
+          recoveryWorkflowId: REVIEW_WORKFLOW,
+          ending: { kind: "merge_ready", report: "ready at the recovered head" },
+          pr: PR,
+          headSha: HEAD,
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status, body: { error } });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+    expect(await pullOwners(h)).toEqual(publicationOwner);
+  });
+
+  it.each(["changed", "missing", "changed on replay", "missing on replay"] as const)(
+    "refuses a committed recovery report when its owner becomes %s",
+    async (owner) => {
+      const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+      const instance = recoveryInstance();
+      await h.instances.put(instance);
+      await h.instances.putUnits([requestChangesRow()]);
+      await h.store.put(reviewRecord());
+      expect((await callRecovery(h)).status).toBe(200);
+      const changed = owner.startsWith("missing")
+        ? null
+        : {
+            ...instance,
+            userId: "slack:another-requester",
+            runId: "another-run",
+            attempt: 1,
+          };
+      const body = {
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
+        ending: { kind: "merge_ready", report: "ready at the recovered head" },
+        pr: PR,
+        headSha: HEAD,
+      };
+      if (owner.endsWith("on replay")) {
+        expect((await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps)).status).toBe(
+          200,
+        );
+        vi.spyOn(h.instances, "get").mockResolvedValueOnce(instance).mockResolvedValueOnce(changed);
+      } else {
+        const settle = h.instances.transitionRecovery.bind(h.instances);
+        vi.spyOn(h.instances, "transitionRecovery").mockImplementationOnce(async (transition) => {
+          const result = await settle(transition);
+          expect(result.ok).toBe(true);
+          vi.spyOn(h.instances, "get").mockResolvedValueOnce(changed);
+          throw new Error("settlement response lost");
+        });
+      }
+      expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps)).toMatchObject({
+        status: 503,
+        body: { error: "report_context_unavailable" },
+      });
+      expect(await pullOwners(h)).toEqual([{ kind: "unit", instanceId: INSTANCE.id, unit: "U12" }]);
+      expect(
+        (await h.instances.getRecoveryAction({ instanceId: INSTANCE.id, unit: "U12" }, REVIEW_ACTION))?.state,
+      ).toBe("settled");
+    },
+  );
+
+  it.each(["unavailable", "stale", "conflicting reread", "unreadable reread", "unchanged reread"] as const)(
+    "keeps legacy recovery replay retryable only when storage is %s",
+    async (reason) => {
+      const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+      await h.instances.put(recoveryInstance());
+      const committed: CoordinatorUnit = {
+        ...requestChangesRow(),
+        ending: { kind: "merge_ready", report: "canonical legacy report", at: NOW },
+        recoveryReceipt: { reviewRunId: "run-original-review", workflowId: "recovery-run-original-review", at: NOW },
+      };
+      expect(isCoordinatorUnit(committed)).toBe(true);
+      await h.instances.putUnits([committed]);
+      const next = { ...committed, threadKey: "slack:C1:another-owner" };
+      if (reason === "unavailable" || reason === "stale")
+        vi.spyOn(h.instances, "compareAndReplaceUnit").mockResolvedValueOnce({ ok: false, reason });
+      else {
+        const cas = h.instances.compareAndReplaceUnit.bind(h.instances);
+        vi.spyOn(h.instances, "compareAndReplaceUnit").mockImplementationOnce(async () => {
+          if (reason === "conflicting reread") expect(await cas(committed, next)).toEqual({ ok: true });
+          if (reason === "unreadable reread")
+            vi.spyOn(h.instances, "listUnits").mockRejectedValueOnce(new Error("store unreachable"));
+          throw new Error("CAS response lost");
+        });
+      }
+      const body = {
+        parentInstanceId: INSTANCE.id,
+        unit: "U12",
+        recoveryWorkflowId: "recovery-run-original-review",
+        ending: { kind: "merge_ready", report: committed.ending!.report },
+        pr: PR,
+        headSha: HEAD,
+      };
+      const unavailable = reason !== "stale" && reason !== "conflicting reread";
+      expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps)).toMatchObject({
+        status: unavailable ? 503 : 409,
+        body: { error: unavailable ? "settlement_store_unavailable" : "settlement_conflict" },
+      });
+      expect(await h.instances.listUnits(INSTANCE.id)).toEqual([reason === "conflicting reread" ? next : committed]);
+      if (reason === "unavailable")
+        expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps)).toMatchObject(
+          {
+            status: 200,
+            body: { ok: true, alreadySettled: true },
+          },
+        );
+    },
+  );
 
   it("replays a recovered private unit report after its settlement committed but the log failed", async () => {
     for (const outcome of [undefined, { schemaVersion: 1, kind: "aborted", reviewRounds: 2 }]) {
@@ -16279,11 +18307,14 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       };
       const h = harness({ prFacts: exactRecoveryFacts(HEAD), privateWorkerLog: log });
       const key = await privateRecovery(h);
+      const REVIEW_ACTION = h.recoveries[0]!.params.recoveryActionId;
+      const REVIEW_WORKFLOW = h.recoveries[0]!.id;
       const body = {
         parentInstanceId: INSTANCE.id,
         unit: "U12",
-        recoveryWorkflowId: "recovery-run-original-review",
-        deliveryId: "U12/recovery/end",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
+        deliveryId: `U12/recovery/${REVIEW_ACTION}/end`,
         ending: {
           kind: outcome?.kind ?? "merge_ready",
           report: "ready at the recovered head",
@@ -16297,14 +18328,14 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         body: { error: "private_worker_log_unavailable" },
       });
       expect((await h.instances.listUnits(INSTANCE.id))[0]?.recoveryReceipt).toMatchObject({
-        workflowId: "recovery-run-original-review",
+        workflowId: REVIEW_WORKFLOW,
       });
       if (outcome) {
         expect(
           await handleCoordinatorRequest(
             post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
               ...body,
-              deliveryId: "U12/recovery/changed-id",
+              deliveryId: `U12/recovery/${REVIEW_ACTION}/changed-id`,
             }),
             h.deps,
           ),
@@ -16322,7 +18353,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           await handleCoordinatorRequest(
             post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
               ...body,
-              deliveryId: "U12/recovery/conflicting",
+              deliveryId: `U12/recovery/${REVIEW_ACTION}/conflicting`,
               ending: {
                 ...body.ending,
                 outcome: { ...outcome, reviewRounds: 3 },
@@ -16332,7 +18363,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
           ),
         ).toMatchObject({ status: 409, body: { error: "settlement_conflict" } });
         expect((await backing.list(key)).filter((event) => event.kind === "reply")).toMatchObject([
-          { kind: "reply", id: "U12/recovery/end", text: "ready at the recovered head" },
+          { kind: "reply", id: `U12/recovery/${REVIEW_ACTION}/end`, text: "ready at the recovered head" },
         ]);
       }
       expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps)).toMatchObject({
@@ -16344,7 +18375,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         body: { ok: true, alreadySettled: true, told: true },
       });
       expect((await backing.list(key)).filter((event) => event.kind === "reply")).toMatchObject([
-        { kind: "reply", id: "U12/recovery/end", text: "ready at the recovered head" },
+        { kind: "reply", id: `U12/recovery/${REVIEW_ACTION}/end`, text: "ready at the recovered head" },
       ]);
     }
   });
@@ -16352,6 +18383,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
   it("keeps the recovered delivery admission when immutable report storage fails after settlement", async () => {
     const h = harness({ prFacts: exactRecoveryFacts(HEAD), privateWorkerLog: new InMemoryPrivateWorkerLog() });
     await privateRecovery(h);
+    const REVIEW_ACTION = h.recoveries[0]!.params.recoveryActionId;
+    const REVIEW_WORKFLOW = h.recoveries[0]!.id;
     const append = h.deps.reportLedger!.appendSession.bind(h.deps.reportLedger);
     vi.spyOn(h.deps.reportLedger!, "appendSession").mockImplementationOnce(async () => ({
       ok: false,
@@ -16360,8 +18393,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     const body = {
       parentInstanceId: INSTANCE.id,
       unit: "U12",
-      recoveryWorkflowId: "recovery-run-original-review",
-      deliveryId: "U12/recovery/end",
+      recoveryActionId: REVIEW_ACTION,
+      recoveryWorkflowId: REVIEW_WORKFLOW,
+      deliveryId: `U12/recovery/${REVIEW_ACTION}/end`,
       ending: {
         kind: "aborted",
         report: "recovered detail",
@@ -16399,11 +18433,14 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     const log = new InMemoryPrivateWorkerLog();
     const h = harness({ prFacts: exactRecoveryFacts(HEAD), privateWorkerLog: log });
     const key = await privateRecovery(h);
+    const REVIEW_ACTION = h.recoveries[0]!.params.recoveryActionId;
+    const REVIEW_WORKFLOW = h.recoveries[0]!.id;
     const body = {
       parentInstanceId: INSTANCE.id,
       unit: "U12",
-      recoveryWorkflowId: "recovery-run-original-review",
-      deliveryId: "U12/recovery/legacy",
+      recoveryActionId: REVIEW_ACTION,
+      recoveryWorkflowId: REVIEW_WORKFLOW,
+      deliveryId: `U12/recovery/${REVIEW_ACTION}/legacy`,
       ending: { kind: "merge_ready", report: "Legacy report" },
       pr: PR,
       headSha: HEAD,
@@ -16413,7 +18450,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         await handleCoordinatorRequest(
           post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
             ...body,
-            deliveryId: "U12/recovery/typed",
+            deliveryId: `U12/recovery/${REVIEW_ACTION}/typed`,
             ending: {
               kind: "aborted",
               report: "Typed report",
@@ -16430,11 +18467,11 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       body: { error: "recovery_claim_stale" },
     });
     expect((await log.list(key)).filter((event) => event.kind === "reply")).toMatchObject([
-      { id: "U12/recovery/typed", text: "Typed report" },
+      { id: `U12/recovery/${REVIEW_ACTION}/typed`, text: "Typed report" },
     ]);
     expect((await h.instances.listUnits(INSTANCE.id))[0]?.ending).toMatchObject({
       kind: "aborted",
-      deliveryId: "U12/recovery/typed",
+      deliveryId: `U12/recovery/${REVIEW_ACTION}/typed`,
       report: "Typed report",
     });
   });
@@ -16461,6 +18498,52 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
   });
 
+  it("rejects a different legacy terminal result after a lost settlement response", async () => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+    await h.instances.put(recoveryInstance());
+    const row: CoordinatorUnit = {
+      ...requestChangesRow(),
+      ending: undefined,
+      recovery: {
+        kind: "review",
+        workflowId: "recovery-run-original-review",
+        reviewRunId: "run-original-review",
+        reviewKey: `${INSTANCE.id}:U12/2/review`,
+        round: 2,
+        expectedHeadSha: HEAD,
+        remainingMs: minutesToMs(30),
+        claimedAt: NOW,
+        deadlineAt: NOW + minutesToMs(30),
+        step: "U12/recovery/2/review",
+        previousEnding: requestChangesRow().ending!,
+      },
+    };
+    expect(isCoordinatorUnit(row)).toBe(true);
+    await h.instances.putUnits([row]);
+    const cas = h.instances.compareAndReplaceUnit.bind(h.instances);
+    let canonical: CoordinatorUnit | undefined;
+    vi.spyOn(h.instances, "compareAndReplaceUnit").mockImplementationOnce(async (expected, proposed) => {
+      canonical = { ...proposed, ending: { ...proposed.ending!, kind: "aborted" } };
+      expect(isCoordinatorUnit(canonical)).toBe(true);
+      expect(await cas(expected, canonical)).toEqual({ ok: true });
+      throw new Error("settlement response lost");
+    });
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          recoveryWorkflowId: "recovery-run-original-review",
+          ending: { kind: "merge_ready", report: "same legacy report" },
+          pr: PR,
+          headSha: HEAD,
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 409, body: { error: "recovery_claim_stale" } });
+    expect(await h.instances.listUnits(INSTANCE.id)).toEqual([canonical]);
+  });
+
   it("reconciles a committed terminal CAS with a lost response and releases only the original owner", async () => {
     const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
     await h.instances.put(recoveryInstance());
@@ -16477,7 +18560,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
         parentInstanceId: INSTANCE.id,
         unit: "U12",
-        recoveryWorkflowId: "recovery-run-original-review",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
         ending: { kind: "merge_ready", report: "settled" },
         pr: PR,
       }),
@@ -16485,7 +18569,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     );
 
     expect(response).toMatchObject({ status: 200, body: { ok: true } });
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
   });
 
   it("acknowledges a lost settlement response without rewriting the row or releasing a successor owner", async () => {
@@ -16508,7 +18592,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     const body = {
       parentInstanceId: INSTANCE.id,
       unit: "U12",
-      recoveryWorkflowId: "recovery-run-original-review",
+      recoveryActionId: REVIEW_ACTION,
+      recoveryWorkflowId: REVIEW_WORKFLOW,
       ending: { kind: "merge_ready", report: "ready at the recovered head" },
       pr: PR,
       headSha: HEAD,
@@ -16517,12 +18602,12 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       200,
     );
     const successor = { instanceId: "runner-successor", unit: "U10" };
-    expect(h.deps.runnerOwnership!.claim(INSTANCE.repo, PR.number, successor)).toBe(true);
+    seedRivalOwner(h, successor.instanceId, successor.unit);
 
     const replay = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, body), h.deps);
 
     expect(replay).toMatchObject({ status: 200, body: { alreadySettled: true } });
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toEqual(successor);
+    expect(await pullOwners(h)).toEqual(expect.arrayContaining([{ kind: "unit", ...successor }]));
   });
 
   it("settles a recovered human-only verdict as a typed hold without opening idle or renewal", async () => {
@@ -16556,7 +18641,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
         parentInstanceId: INSTANCE.id,
         unit: "U12",
-        recoveryWorkflowId: "recovery-run-original-review",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
         ending: { kind: "held", report: "a person must choose", humanGate },
         pr: PR,
       }),
@@ -16581,7 +18667,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
         parentInstanceId: INSTANCE.id,
         unit: "U12",
-        recoveryWorkflowId: "recovery-run-original-review",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
         ending: { kind: "held", holdCause: "draft", report: "mark ready" },
         pr: PR,
       }),
@@ -16618,7 +18705,7 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     const [settled] = await h.instances.listUnits(INSTANCE.id);
     expect(settled!.recovery).toBeUndefined();
     expect(settled!.recoveryReceipt?.reviewRunId).toBe("run-original-review");
-    expect(h.deps.runnerOwnership!.owner(INSTANCE.repo, PR.number)).toBeUndefined();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
   });
 
   it("refuses recovered idle or renewal settlement and keeps the claim valid", async () => {
@@ -16644,7 +18731,8 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
         parentInstanceId: INSTANCE.id,
         unit: "U12",
-        recoveryWorkflowId: "recovery-run-original-review",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
         ending: { kind: "continued", report: "renew", segment: 2 },
         segment: { index: 2 },
       }),
@@ -16673,15 +18761,14 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     await h.store.put(reviewRecord());
     expect((await callRecovery(h)).status).toBe(200);
     const before = await h.instances.listUnits(INSTANCE.id);
-    const restarted = new RunnerOwnershipFence(false);
-    restarted.claim(INSTANCE.repo, PR.number, { instanceId: "runner-rival", unit: "U10" });
-    h.deps.runnerOwnership = restarted;
+    seedRivalOwner(h, "runner-rival", "U10");
 
     const response = await handleCoordinatorRequest(
       post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
         parentInstanceId: INSTANCE.id,
         unit: "U12",
-        recoveryWorkflowId: "recovery-run-original-review",
+        recoveryActionId: REVIEW_ACTION,
+        recoveryWorkflowId: REVIEW_WORKFLOW,
         ending: { kind: "merge_ready", report: "must not settle" },
         pr: PR,
         headSha: HEAD,
@@ -16691,7 +18778,9 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
 
     expect(response).toMatchObject({ status: 409, body: { error: "publication_ownership_changed" } });
     expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
-    expect(restarted.owner(INSTANCE.repo, PR.number)).toEqual({ instanceId: "runner-rival", unit: "U10" });
+    expect(await pullOwners(h)).toEqual(
+      expect.arrayContaining([{ kind: "unit", instanceId: "runner-rival", unit: "U10" }]),
+    );
   });
 
   it.each([
@@ -16783,4 +18872,892 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
     },
   );
+});
+
+describe("spawn durable effect admission", () => {
+  const body = {
+    ...spawnBody,
+    unit: "u12",
+    effectId: "u12/0/coding",
+    effectOrdinal: 1,
+    executionWorkflowId: INSTANCE.id,
+  };
+  async function setup() {
+    const h = harness();
+    await h.instances.put(INSTANCE);
+    const row: CoordinatorUnit = {
+      instanceId: INSTANCE.id,
+      unit: "u12",
+      slug: "unit",
+      branch: INSTANCE.branch!,
+      threadKey: INSTANCE.threadKey,
+      dependsOn: [],
+      rounds: [],
+    };
+    expect(await h.instances.putUnits([row])).toEqual({ ok: true });
+    h.deps.fetchBranchRef = async (_repo, ref) => ({ kind: "verified", ref: `refs/heads/${ref}`, sha: "a".repeat(40) });
+    return h;
+  }
+  async function register(
+    h: ReturnType<typeof harness>,
+    msg: IncomingMessage,
+    io: ChannelIO,
+    tag: CoordinatorTag,
+    agent = "coding",
+  ) {
+    expect((await h.instances.listUnits(INSTANCE.id))[0].currentEffect?.calls[0].state).toBe("pending");
+    expect(
+      await h.ledger.claim({
+        runId: "durable-child",
+        gen: "gen-A",
+        leaseMs: 30_000,
+        startedAt: NOW,
+        threadKey: msg.threadKey,
+        meta: {
+          agent,
+          channelId: msg.channelId,
+          userId: msg.userId,
+          authenticatedAs: msg.authenticatedAs,
+          postedBy: msg.postedBy,
+          threadKey: msg.threadKey,
+          repo: INSTANCE.repo,
+          ref: tag.branch,
+          parentInstanceId: tag.parentInstanceId,
+          coordinatorUnit: tag.unit,
+          coordinatorAttempt: tag.instanceAttempt,
+          idempotencyKey: tag.idempotencyKey,
+          ...(agent === "review" ? { pr: tag.publication?.pr, headSha: tag.publication?.expectedHeadSha } : {}),
+        },
+        card: null,
+        system: "",
+        tools: [],
+        state: {},
+      }),
+    ).toMatchObject({ ok: true });
+    await h.ledger.append("durable-child", "gen-A", [
+      {
+        type: "run_meta",
+        agent,
+        seq: 1,
+        repo: INSTANCE.repo,
+        ref: tag.branch,
+        ...(agent === "review" ? { pr: tag.publication?.pr, headSha: tag.publication?.expectedHeadSha } : {}),
+      },
+      {
+        type: "coordinator_tag",
+        seq: 2,
+        parentInstanceId: tag.parentInstanceId,
+        unit: tag.unit,
+        branch: tag.branch,
+        base: tag.base,
+        publication: tag.publication,
+        transportWorkflowId: tag.transportWorkflowId,
+      },
+    ]);
+    io.runStarted?.({ id: "durable-child" });
+    return { status: "completed" as const };
+  }
+  it("persists begun permission before dispatch and records the exact child before acknowledging registration", async () => {
+    const h = await setup();
+    let calls = 0;
+    h.deps.dispatch = async (msg, io, opts) => {
+      calls++;
+      return register(h, msg, io, opts!.coordinator);
+    };
+    const response = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, body), h.deps);
+    expect(response).toEqual({
+      status: 200,
+      body: { ok: true, runId: "durable-child", threadKey: INSTANCE.threadKey, effectOrdinal: 1, at: NOW },
+    });
+    expect((await h.instances.listUnits(INSTANCE.id))[0].currentEffect).toMatchObject({
+      phase: "settled",
+      calls: [{ operation: "spawn", state: "accepted", runId: "durable-child" }],
+    });
+    expect((await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, body), h.deps)).body).toMatchObject(
+      { alreadySpawned: true },
+    );
+    expect(calls).toBe(1);
+  });
+  it("lost dispatch response retains uncertainty and never dispatches again without an exact child receipt", async () => {
+    const h = await setup();
+    let calls = 0;
+    h.deps.dispatch = async () => {
+      calls++;
+      throw new Error("response lost");
+    };
+    expect((await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, body), h.deps)).status).toBe(503);
+    expect((await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, body), h.deps)).status).toBe(503);
+    expect(calls).toBe(1);
+    expect((await h.instances.listUnits(INSTANCE.id))[0].currentEffect?.calls[0].state).toBe("uncertain");
+  });
+  it("missing execution, foreign Workflow and stale ordinal cannot adopt a same-key listing or dispatch", async () => {
+    const h = await setup();
+    h.registry.create("foreign child", {
+      agent: "coding",
+      channelId: INSTANCE.channelId,
+      userId: "slack:UOTHER",
+      threadKey: INSTANCE.threadKey,
+      ...TAG,
+    });
+    for (const changed of [
+      { executionWorkflowId: undefined },
+      { executionWorkflowId: "retired" },
+      { effectOrdinal: 0 },
+    ]) {
+      expect(
+        (await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, { ...body, ...changed }), h.deps))
+          .status,
+      ).toBe(409);
+    }
+    expect(h.dispatched).toEqual([]);
+    expect((await h.instances.listUnits(INSTANCE.id))[0].currentEffect).toBeUndefined();
+  });
+  it("stop between admission and begin cancels only the unstarted call and dispatches nothing", async () => {
+    const h = await setup();
+    const transition = h.instances.transitionUnitEffect.bind(h.instances);
+    h.instances.transitionUnitEffect = async (input) => {
+      const result = await transition(input);
+      if (input.kind === "admit" && result.ok) await h.instances.markStopped(INSTANCE.id, NOW);
+      return result;
+    };
+    expect((await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, body), h.deps)).status).toBe(409);
+    expect(h.dispatched).toEqual([]);
+    expect((await h.instances.listUnits(INSTANCE.id))[0].currentEffect).toMatchObject({
+      phase: "settled",
+      calls: [{ operation: "spawn", state: "refused", cause: "not_started" }],
+    });
+  });
+  async function published() {
+    const h = await setup();
+    const previous = (await h.instances.listUnits(INSTANCE.id))[0];
+    const publication = {
+      repo: INSTANCE.repo,
+      pr: 77,
+      headRef: previous.branch,
+      baseRef: "main",
+      expectedHeadSha: "a".repeat(40),
+      publicationRef: previous.branch,
+      owner: { instanceId: INSTANCE.id, unit: previous.unit },
+    };
+    expect(
+      await h.instances.compareAndReplaceUnit(previous, {
+        ...previous,
+        pr: { number: 77, url: "https://github.com/acme/api/pull/77" },
+        publication,
+      }),
+    ).toEqual({ ok: true });
+    return h;
+  }
+  const reviewBody = {
+    ...body,
+    prompt: undefined,
+    step: "u12/1/review",
+    effectId: "u12/1/review",
+    preset: "review",
+    brief: { kind: "review", unit: "u12", pr: 77, headSha: "a".repeat(40), round: 1 },
+  };
+  it("a published review carries the canonical publication receipt and settles its exact child", async () => {
+    const h = await published();
+    h.deps.dispatch = (msg, io, opts) => register(h, msg, io, opts!.coordinator!, "review");
+    expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, reviewBody), h.deps)).toMatchObject({
+      status: 200,
+      body: { runId: "durable-child" },
+    });
+    expect((await h.instances.listUnits(INSTANCE.id))[0].currentEffect?.phase).toBe("settled");
+  });
+  it("a lost dispatch reply resolves from the exact finished review without dispatching it again", async () => {
+    const h = await published();
+    let calls = 0;
+    h.deps.dispatch = async (msg, io, opts) => {
+      calls++;
+      await register(h, msg, { ...io, runStarted: undefined }, opts!.coordinator!, "review");
+      const live = h.ledger.live.get("durable-child")!;
+      const { profile: _profile, pr: _pr, ...meta } = live.meta;
+      const events = await h.ledger.readEvents("durable-child");
+      const finished = record("durable-child", {
+        ...meta,
+        startedAt: NOW,
+        finishedAt: NOW + 1,
+        events,
+        eventCount: events.length,
+        storedEventCount: events.length,
+      });
+      expect(await h.ledger.finish("durable-child", "gen-A", finished)).toMatchObject({ ok: true });
+      await h.store.put(finished);
+      throw new Error("dispatch reply lost after finishing");
+    };
+    expect((await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, reviewBody), h.deps)).status).toBe(
+      503,
+    );
+    expect((await h.instances.listUnits(INSTANCE.id))[0].currentEffect?.calls[0].state).toBe("uncertain");
+    expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, reviewBody), h.deps)).toMatchObject({
+      status: 200,
+      body: { runId: "durable-child", alreadySpawned: true },
+    });
+    expect(calls).toBe(1);
+    expect((await h.instances.listUnits(INSTANCE.id))[0].currentEffect?.phase).toBe("settled");
+  });
+
+  it("a review cannot dispatch for another pull or head under the original unit permission", async () => {
+    for (const change of [{ pr: 88 }, { headSha: "b".repeat(40) }]) {
+      const h = await published();
+      expect(
+        await handleCoordinatorRequest(
+          post(`${COORDINATOR_ADMIN_PREFIX}spawn`, {
+            ...reviewBody,
+            brief: { ...reviewBody.brief, ...change },
+          }),
+          h.deps,
+        ),
+      ).toMatchObject({ status: 409, body: { error: "effect_target_mismatch" } });
+      expect(h.dispatched).toEqual([]);
+      expect((await h.instances.listUnits(INSTANCE.id))[0].currentEffect).toBeUndefined();
+    }
+  });
+  it("a stopped retry cancels and settles an admitted call that never began", async () => {
+    const h = await setup();
+    const previous = (await h.instances.listUnits(INSTANCE.id))[0];
+    expect(
+      await h.instances.transitionUnitEffect({
+        kind: "admit",
+        expected: previous,
+        execution: { workflowId: INSTANCE.id },
+        effect: {
+          version: 1,
+          id: body.effectId,
+          ordinal: 1,
+          execution: { workflowId: INSTANCE.id },
+          target: { repo: INSTANCE.repo, ref: previous.branch, base: "main", headSha: "a".repeat(40) },
+          phase: "active",
+          calls: [{ operation: "spawn", state: "unstarted" }],
+        },
+      }),
+    ).toMatchObject({ ok: true });
+    await h.instances.markStopped(INSTANCE.id, NOW);
+    expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, body), h.deps)).toMatchObject({
+      status: 409,
+      body: { error: "stopped" },
+    });
+    expect(h.dispatched).toEqual([]);
+    expect((await h.instances.listUnits(INSTANCE.id))[0].currentEffect).toMatchObject({
+      phase: "settled",
+      calls: [{ state: "refused", cause: "not_started" }],
+    });
+  });
+
+  it("a review prompt cannot bypass the canonical typed pull target and coding cannot use a review step", async () => {
+    const h = await published();
+    for (const changed of [
+      { ...reviewBody, brief: undefined, prompt: "Review https://github.com/acme/api/pull/88" },
+      { ...body, step: "u12/1/review", effectId: "u12/1/review" },
+    ]) {
+      expect((await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, changed), h.deps)).status).toBe(
+        409,
+      );
+      expect(h.dispatched).toEqual([]);
+      expect((await h.instances.listUnits(INSTANCE.id))[0].currentEffect).toBeUndefined();
+    }
+  });
+});
+
+describe("original Workflow report reconciliation through the admin settlement", () => {
+  const setup = async (privateUnit = false, machine?: "http" | "mcp") => {
+    const log = new InMemoryPrivateWorkerLog();
+    const h = harness({
+      privateWorkerLog: log,
+      recoveryStatus: async () => ({ kind: "status", status: "terminated" }),
+    });
+    const instance: CoordinatorInstance = {
+      ...INSTANCE,
+      admission: "created",
+      ...(machine
+        ? { channelId: `${machine}:ops`, userId: `${machine}:requester`, threadKey: `${machine}:ops:job` }
+        : {}),
+      ...(privateUnit
+        ? { channelId: "slack:DMAIN", threadKey: "slack:DMAIN:1.0", plan: { id: "private-task" }, merge: "person" }
+        : {}),
+    };
+    const unit: CoordinatorUnit = {
+      instanceId: instance.id,
+      unit: "U12",
+      slug: "u12",
+      branch: instance.branch,
+      dependsOn: [],
+      rounds: [],
+      startedAt: NOW - 10,
+      ...(privateUnit
+        ? {
+            workBrief: {
+              requesterId: instance.userId,
+              mainThreadKey: instance.threadKey,
+              actId: "act-1",
+              repo: instance.repo,
+              base: "main",
+              question: "Why?",
+              findings: [],
+              requestedChange: "Fix it",
+            },
+          }
+        : {}),
+    };
+    if (privateUnit) await claimPrivateUnit(h.instances, instance, unit);
+    else {
+      await h.instances.put(instance);
+      expect(await h.instances.putUnits([unit])).toMatchObject({ ok: true });
+    }
+    const effect = await coordinatorReconciliationEffect(instance, unit);
+    return { h, instance, unit, effect, log };
+  };
+
+  it("finishes a first machine job report as durable state without claiming a reply", async () => {
+    for (const machine of ["http", "mcp"] as const) {
+      for (const producer of [false, true]) {
+        const { h, instance, effect } = await setup(false, machine);
+        const lines: string[] = [];
+        h.deps.ioFor = (thread) => nullChannelIO(thread.threadKey, (line) => lines.push(line));
+        if (producer) {
+          expect(
+            await handleCoordinatorRequest(
+              post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+                parentInstanceId: instance.id,
+                unit: "U12",
+                deliveryId: "U12/end",
+                ending: { kind: "held", report: "complete original job report", threadReport: "proposed channel copy" },
+              }),
+              h.deps,
+            ),
+          ).toMatchObject({ status: 200 });
+        }
+        const receipt = await reconcileCoordinatorReport(effect, h.deps);
+        expect(receipt?.publicDelivery?.kind).toBe("empty");
+        const [ended] = await h.instances.listUnits(instance.id);
+        expect(ended?.ending?.report).not.toBe("");
+        expect(ended?.ending?.threadReport).toBe("");
+        expect(await readCoordinatorReport(h.ledger, receipt!.reportDelivery.owner)).toEqual({
+          text: ended!.ending!.report,
+          threadText: "",
+        });
+        expect(await reconcileCoordinatorReport(effect, h.deps)).toEqual(receipt);
+        expect(lines).toEqual([]);
+        expect(h.replies).toEqual([]);
+      }
+    }
+  });
+
+  it("preserves an existing nonempty report obligation after its channel becomes state-only", async () => {
+    const { h, instance, unit, effect } = await setup(false, "mcp");
+    const ending = {
+      kind: "held" as const,
+      report: "original full report",
+      threadReport: "original owed copy",
+      deliveryId: "U12/end",
+      at: NOW - 5,
+    };
+    seedCoordinatorUnit(h.instances, { ...unit, ending });
+    h.deps.ioFor = (thread) => nullChannelIO(thread.threadKey, () => {});
+    expect(await reconcileCoordinatorReport(effect, h.deps)).toBeUndefined();
+    const [current] = await h.instances.listUnits(instance.id);
+    expect(current?.ending).toEqual(ending);
+    expect(await readCoordinatorReport(h.ledger, current!.reportDelivery!.owner)).toEqual({
+      text: ending.report,
+      threadText: ending.threadReport,
+    });
+    expect(
+      await readCoordinatorPublicDelivery(
+        h.ledger,
+        await coordinatorPublicDeliveryReference(current!.reportDelivery!, ending.threadReport),
+      ),
+    ).toBeUndefined();
+    expect(h.replies).toEqual([]);
+  });
+
+  it("retries only its own committed empty machine admission after the first freeze fails", async () => {
+    for (const machine of ["http", "mcp"] as const) {
+      const { h, instance } = await setup(false, machine);
+      const lines: string[] = [];
+      h.deps.ioFor = (thread) => nullChannelIO(thread.threadKey, (line) => lines.push(line));
+      const body = {
+        parentInstanceId: instance.id,
+        unit: "U12",
+        deliveryId: "U12/end",
+        ending: { kind: "held", report: "complete original job report", threadReport: "proposed channel copy" },
+      };
+      vi.spyOn(h.ledger, "appendSession").mockRejectedValueOnce(new Error("report storage unavailable"));
+      const end = (input: typeof body) =>
+        handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, input), h.deps);
+      expect(await end(structuredClone(body))).toMatchObject({ status: 503 });
+      const [committed] = await h.instances.listUnits(instance.id);
+      expect(committed!.ending).toMatchObject({
+        report: body.ending.report,
+        threadReport: "",
+        deliveryId: body.deliveryId,
+      });
+      expect(committed!.reportDelivery).toBeDefined();
+      h.deps.ioFor = () => undefined;
+      expect(await end({ ...structuredClone(body), deliveryId: "U12/foreign" })).toMatchObject({ status: 409 });
+      expect(await end(structuredClone(body))).toMatchObject({ status: 200 });
+      const [finished] = await h.instances.listUnits(instance.id);
+      expect(finished!.reportDelivery).toEqual(committed!.reportDelivery);
+      expect(finished!.ending).toEqual(committed!.ending);
+      expect(await readCoordinatorReport(h.ledger, finished!.reportDelivery!.owner)).toEqual({
+        text: body.ending.report,
+        threadText: "",
+      });
+      expect(
+        (
+          await readCoordinatorPublicDelivery(
+            h.ledger,
+            await coordinatorPublicDeliveryReference(finished!.reportDelivery!, ""),
+          )
+        )?.kind,
+      ).toBe("empty");
+      expect(lines).toEqual([]);
+      expect(h.replies).toEqual([]);
+    }
+  });
+
+  it("does not adopt an empty legacy rendering without its exact original admission", async () => {
+    const { h, instance, unit } = await setup(false, "mcp");
+    const ending = {
+      kind: "held" as const,
+      report: "original full report",
+      threadReport: "",
+      deliveryId: "U12/end",
+      at: NOW - 5,
+    };
+    seedCoordinatorUnit(h.instances, { ...unit, ending });
+    h.deps.ioFor = (thread) => nullChannelIO(thread.threadKey, () => {});
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+          parentInstanceId: instance.id,
+          unit: unit.unit,
+          deliveryId: ending.deliveryId,
+          ending: { kind: ending.kind, report: ending.report, threadReport: "unadmitted copy" },
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 409, body: { error: "settlement_conflict" } });
+    expect((await h.instances.listUnits(instance.id))[0]?.ending).toEqual(ending);
+    expect((await h.instances.listUnits(instance.id))[0]?.reportDelivery).toBeUndefined();
+  });
+
+  it("never changes an original frozen proposal when selecting initial machine report delivery", async () => {
+    const { h, instance, unit, effect } = await setup(false, "http");
+    const owner = {
+      instanceId: instance.id,
+      unit: unit.unit,
+      attempt: 0,
+      requester: instance.userId,
+      channelId: instance.channelId,
+      threadKey: instance.threadKey,
+      deliveryId: "lifecycle/reconcile",
+    };
+    const original = { text: "original full report", threadText: "original owed copy" };
+    await freezeCoordinatorReport(h.ledger, owner, original);
+    h.deps.ioFor = (thread) => nullChannelIO(thread.threadKey, () => {});
+    expect(await reconcileCoordinatorReport(effect, h.deps)).toBeUndefined();
+    expect(await readCoordinatorReport(h.ledger, owner)).toEqual(original);
+    expect((await h.instances.listUnits(instance.id))[0]?.ending?.threadReport).toBe(original.threadText);
+    expect(h.replies).toEqual([]);
+  });
+
+  it("settles the stopped original unit and delivers one public report without redispatching leftovers", async () => {
+    const { h, instance, unit, effect } = await setup();
+    expect(
+      await h.instances.appendEvent(unit, {
+        mode: "steer",
+        sender: instance.userId,
+        text: "one more detail",
+        at: NOW,
+      }),
+    ).toMatchObject({ ok: true });
+    const receipt = await reconcileCoordinatorReport(effect, h.deps);
+    expect(receipt?.reportDelivery.owner.deliveryId).toBe("lifecycle/reconcile");
+    expect(h.replies).toHaveLength(1);
+    expect(h.dispatched).toEqual([]);
+    const [ended] = await h.instances.listUnits(instance.id);
+    expect(ended?.ending).toMatchObject({
+      kind: "terminated",
+      deliveryId: "lifecycle/reconcile",
+      threadReport: h.replies[0],
+    });
+    expect(ended?.ending?.outcome).toBeUndefined();
+    expect(await h.instances.listEvents(unit, true)).toHaveLength(1);
+  });
+
+  it("does not repeat a confirmed original public reply during later discovery", async () => {
+    const { h, effect } = await setup();
+    const first = await reconcileCoordinatorReport(effect, h.deps);
+    expect(first).toBeDefined();
+    expect(await reconcileCoordinatorReport(effect, h.deps)).toEqual(first);
+    expect(h.replies).toHaveLength(1);
+  });
+
+  it("does not repeat a held producer's pull request comment while admitting its saved report", async () => {
+    const { h, instance, unit, effect } = await setup();
+    seedCoordinatorUnit(h.instances, {
+      ...unit,
+      pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+      ending: {
+        kind: "held",
+        report: "saved held report",
+        threadReport: "saved held summary",
+        at: NOW - 50,
+        deliveryId: "U12/end",
+      },
+    });
+    const comment = vi.spyOn(h.github, "commentIssue");
+    const receipt = await reconcileCoordinatorReport(effect, h.deps);
+    expect(comment).not.toHaveBeenCalled();
+    expect(receipt).toBeDefined();
+    expect(h.replies).toEqual(["saved held summary"]);
+    expect((await h.instances.listUnits(instance.id))[0]?.ending?.at).toBe(NOW - 50);
+  });
+
+  it("refuses an effect activated between the performer snapshot and settlement handler's own read", async () => {
+    const { h, instance, unit, effect } = await setup();
+    const list = h.instances.listUnits.bind(h.instances);
+    let reads = 0;
+    vi.spyOn(h.instances, "listUnits").mockImplementation(async (id) => {
+      if (++reads === 3)
+        seedCoordinatorUnit(h.instances, {
+          ...unit,
+          currentEffect: {
+            version: 1,
+            id: "U12/merge",
+            ordinal: 1,
+            execution: { workflowId: instance.id },
+            target: { repo: instance.repo, ref: unit.branch, base: "main", headSha: "a".repeat(40) },
+            phase: "active",
+            calls: [{ operation: "merge", state: "pending" }],
+          },
+        });
+      return list(id);
+    });
+    expect(await reconcileCoordinatorReport(effect, h.deps)).toBeUndefined();
+    const [current] = await list(instance.id);
+    expect(current?.currentEffect?.phase).toBe("active");
+    expect(current?.ending).toBeUndefined();
+    expect(current?.reportDelivery).toBeUndefined();
+    expect(h.replies).toEqual([]);
+  });
+  it("never acknowledges an undeliverable public handle in settlement or replay finalization", async () => {
+    const { h, instance, effect } = await setup();
+    const reply = vi.fn(async () => {});
+    h.deps.ioFor = () => ({
+      undeliverable: "no native destination",
+      reply,
+      status: async () => ({ update: () => {}, done: async () => {} }),
+      history: async () => [],
+    });
+    expect(await reconcileCoordinatorReport(effect, h.deps)).toBeUndefined();
+    expect(await reconcileCoordinatorReport(effect, h.deps)).toBeUndefined();
+    expect(reply).not.toHaveBeenCalled();
+    expect((await h.instances.listUnits(instance.id))[0]?.ending?.kind).toBe("terminated");
+    const ended = (await h.instances.listUnits(instance.id))[0]!;
+    expect(
+      await readCoordinatorPublicDelivery(
+        h.ledger,
+        await coordinatorPublicDeliveryReference(ended.reportDelivery!, ended.ending!.threadReport!),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("refuses a changed public raw delivery identity or retained rendering before first report admission", async () => {
+    for (const change of ["identity", "rendering"]) {
+      const { h, instance, unit } = await setup();
+      const ending = {
+        kind: "held" as const,
+        report: "saved original report",
+        threadReport: "saved original summary",
+        deliveryId: "U12/end",
+        at: NOW - 5,
+      };
+      seedCoordinatorUnit(h.instances, { ...unit, ending });
+      const response = await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}unit-end`, {
+          parentInstanceId: instance.id,
+          unit: unit.unit,
+          deliveryId: change === "identity" ? "U12/other" : "U12/end",
+          ending: {
+            kind: "held",
+            report: ending.report,
+            threadReport: change === "rendering" ? "changed summary" : ending.threadReport,
+          },
+        }),
+        h.deps,
+      );
+      expect(response).toMatchObject({ status: 409, body: { error: "settlement_conflict" } });
+      expect((await h.instances.listUnits(instance.id))[0]?.ending).toEqual(ending);
+      expect((await h.instances.listUnits(instance.id))[0]?.reportDelivery).toBeUndefined();
+      expect(h.replies).toEqual([]);
+    }
+  });
+
+  it.each(["missing", "failed"] as const)(
+    "defers the receipt when required original public delivery is %s",
+    async (failure) => {
+      const { h, instance, effect } = await setup();
+      h.deps.ioFor =
+        failure === "missing"
+          ? () => undefined
+          : () => ({
+              reply: async () => {
+                throw new Error("unanswered");
+              },
+              status: async () => ({ update: () => {}, done: async () => {} }),
+              history: async () => [],
+            });
+      expect(await reconcileCoordinatorReport(effect, h.deps)).toBeUndefined();
+      expect((await h.instances.listUnits(instance.id))[0]?.ending?.kind).toBe("terminated");
+      expect(h.dispatched).toEqual([]);
+    },
+  );
+
+  it("admits the saved original private ending without replacing its time or report bytes", async () => {
+    const { h, instance, unit, effect, log } = await setup(true);
+    const ending = {
+      kind: "terminated" as const,
+      report: "saved original private report",
+      threadReport: "saved original short copy",
+      deliveryId: "U12/end",
+      at: NOW - 50,
+      cause: "provider_failed",
+      step: "U12/0/coding",
+      round: 0,
+    };
+    expect(await h.instances.compareAndReplaceUnit(unit, { ...unit, ending })).toEqual({ ok: true });
+    const receipt = await reconcileCoordinatorReport(effect, h.deps);
+    expect(receipt?.privateReplyId).toBe("U12/end");
+    const [confirmed] = await h.instances.listUnits(instance.id);
+    expect(confirmed?.ending).toEqual(ending);
+    expect(confirmed?.reportDelivery?.owner.deliveryId).toBe("U12/end");
+    expect((await log.list(`worker:${instance.id}:U12`)).filter((event) => event.kind === "reply")).toMatchObject([
+      { id: "U12/end", text: ending.report },
+    ]);
+    expect(h.replies).toEqual([]);
+    expect(h.dispatched).toEqual([]);
+  });
+
+  it("restarts an exact private settlement after its first report freeze was unavailable", async () => {
+    const { h, instance, effect, log } = await setup(true);
+    const append = h.ledger.appendSession.bind(h.ledger);
+    vi.spyOn(h.ledger, "appendSession").mockRejectedValue(new Error("report storage unavailable"));
+    expect(await reconcileCoordinatorReport(effect, h.deps)).toBeUndefined();
+    const [committed] = await h.instances.listUnits(instance.id);
+    expect(committed?.ending).toMatchObject({ kind: "terminated", deliveryId: "lifecycle/reconcile" });
+    expect(committed?.ending?.threadReport).toBe(committed?.ending?.report);
+    expect(committed?.ending?.outcome).toBeUndefined();
+    expect(await log.list(`worker:${instance.id}:U12`)).toEqual([]);
+    vi.mocked(h.ledger.appendSession).mockImplementation(append);
+    const receipt = await reconcileCoordinatorReport(effect, h.deps);
+    expect(receipt?.privateReplyId).toBe("lifecycle/reconcile");
+    const replies = (await log.list(`worker:${instance.id}:U12`)).filter((event) => event.kind === "reply");
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatchObject({ id: "lifecycle/reconcile", text: committed?.ending?.report });
+    expect(await h.instances.listUnits(instance.id)).toEqual([committed]);
+    expect(h.replies).toEqual([]);
+    expect(h.dispatched).toEqual([]);
+  });
+});
+
+describe("dead coding recovery original ownership", () => {
+  it("refuses a rowless or unverifiable original coding child before identity or PR writes", async () => {
+    const h = harness();
+    await h.instances.put(INSTANCE);
+    let rewritten = 0;
+    const response = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+        parentInstanceId: INSTANCE.id,
+        recover: { runId: "11111111-1111-4111-8111-111111111111" },
+        effectId: "U12/0/pr-check",
+        effectOrdinal: 1,
+        executionWorkflowId: INSTANCE.id,
+      }),
+      {
+        ...h.deps,
+        rewriteIdentities: async () => {
+          rewritten++;
+          return { kind: "clean" };
+        },
+      },
+    );
+    expect(response.status).toBe(409);
+    expect(h.opens).toHaveLength(0);
+    expect(rewritten).toBe(0);
+  });
+});
+
+describe("dead coding recovery durable create", () => {
+  it("returns a consumable ordinal for a definite recovery refusal on both original and replay requests", async () => {
+    const h = harness();
+    await h.instances.put(INSTANCE);
+    await originalRecovery(h);
+    let creates = 0;
+    h.deps.createRecoveryPullRequest = async () => {
+      creates++;
+      return { state: "refused", status: 422 };
+    };
+    const request = () =>
+      handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          recover: { runId: "11111111-1111-4111-8111-111111111111" },
+        }),
+        h.deps,
+      );
+    const first = await request();
+    expect(first).toMatchObject({
+      status: 200,
+      body: { ok: true, state: "none", unrecovered: "external_refused", effectOrdinal: 1 },
+    });
+    expect(await request()).toEqual(first);
+    expect(creates).toBe(1);
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.currentEffect?.phase).toBe("settled");
+  });
+
+  it("retains a lost native create response even when discovery later returns an open PR", async () => {
+    const h = harness();
+    await h.instances.put(INSTANCE);
+    await originalRecovery(h);
+    const targetBodies: string[] = [];
+    h.deps.createRecoveryPullRequest = async (target) => {
+      targetBodies.push(target.body);
+      const row = (await h.instances.listUnits(INSTANCE.id))[0]!;
+      expect(row.currentEffect?.calls[0]).toMatchObject({ operation: "pull_create", state: "pending" });
+      throw new Error("response lost");
+    };
+    const request = () =>
+      handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          recover: { runId: "11111111-1111-4111-8111-111111111111" },
+        }),
+        h.deps,
+      );
+    expect(await request()).toMatchObject({ status: 409, body: { error: "effect_reconciliation_pending" } });
+    h.deps.findOpenPrByHead = async () => ({
+      number: 77,
+      htmlUrl: "https://github.com/acme/api/pull/77",
+      headSha: "a".repeat(40),
+    });
+    expect(await request()).toMatchObject({ status: 409, body: { error: "effect_reconciliation_pending" } });
+    expect(targetBodies).toHaveLength(1);
+    const row = (await h.instances.listUnits(INSTANCE.id))[0]!;
+    expect(row.pr).toBeUndefined();
+    expect(row.currentEffect?.calls[0]?.state).toBe("uncertain");
+  });
+  it("rejects foreign original unit metadata and the first run metadata before any write", async () => {
+    for (const mutate of [
+      (run: RunRecord) => ({ ...run, coordinatorUnit: "FOREIGN" }),
+      (run: RunRecord) => ({
+        ...run,
+        events: run.events.map((event) => (event.type === "run_meta" ? { ...event, repo: "foreign/repo" } : event)),
+      }),
+    ]) {
+      const h = harness();
+      await h.instances.put(INSTANCE);
+      await originalRecovery(h);
+      const id = "11111111-1111-4111-8111-111111111111";
+      const run = (await h.store.get(id))!;
+      await h.store.put(mutate(run));
+      const rewritten = vi.fn(async () => ({ kind: "clean" as const }));
+      h.deps.rewriteIdentities = rewritten;
+      expect(
+        await handleCoordinatorRequest(
+          post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+            parentInstanceId: INSTANCE.id,
+            unit: "U12",
+            recover: { runId: id },
+          }),
+          h.deps,
+        ),
+      ).toMatchObject({ status: 409, body: { error: "recovery_original_child_unverified" } });
+      expect(rewritten).not.toHaveBeenCalled();
+      expect(h.opens).toHaveLength(0);
+    }
+  });
+});
+
+describe("dead coding recovery producer publication proof", () => {
+  it("never lets a folded pushed display fact replace the original typed accepted publication", async () => {
+    const h = harness();
+    await h.instances.put(INSTANCE);
+    await originalRecovery(h);
+    const id = "11111111-1111-4111-8111-111111111111";
+    const run = (await h.store.get(id))!;
+    const { branchPublication: _receipt, publicationSettlement: _settlement, ...withoutProof } = run;
+    await h.store.put(withoutProof);
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          recover: { runId: id },
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 409, body: { error: "recovery_original_publication_unverified" } });
+    expect(h.opens).toHaveLength(0);
+  });
+  it("recovers a dead child's exact original native ref receipt even without a salvage checkpoint", async () => {
+    const h = harness();
+    await h.instances.put(INSTANCE);
+    await originalRecovery(h);
+    const id = "11111111-1111-4111-8111-111111111111";
+    const run = (await h.store.get(id))!;
+    const { publicationSettlement: _salvage, ...original } = run;
+    await h.store.put({
+      ...original,
+      branchPublication: { version: 1, repo: INSTANCE.repo, complete: false, branches: [] },
+      branchPushReceipts: [{ ref: INSTANCE.branch, sha: "a".repeat(40), by: "push" }],
+    });
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          recover: { runId: id },
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 200, body: { state: "open", effectOrdinal: 1 } });
+    expect(h.opens).toHaveLength(1);
+  });
+
+  it("refuses malformed original native receipt metadata before dead-child publication", async () => {
+    const h = harness();
+    await h.instances.put(INSTANCE);
+    await originalRecovery(h);
+    const id = "11111111-1111-4111-8111-111111111111";
+    const get = h.deps.runs.getRun;
+    h.deps.runs.getRun = async (...args) => {
+      const answer = await get(...args);
+      if (!answer.ok || args[0] !== id) return answer;
+      const { publicationSettlement: _settlement, ...original } = answer.value;
+      return {
+        ok: true,
+        value: {
+          ...original,
+          branchPushReceipts: [
+            { ref: INSTANCE.branch, sha: "a".repeat(40), by: "push" as const, receipt: "unverified" },
+          ],
+        },
+      };
+    };
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          recover: { runId: id },
+        }),
+        h.deps,
+      ),
+    ).toMatchObject({ status: 409, body: { error: "recovery_original_publication_unverified" } });
+    expect(h.opens).toHaveLength(0);
+  });
 });

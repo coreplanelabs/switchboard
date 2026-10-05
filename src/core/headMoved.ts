@@ -141,16 +141,11 @@ export function rereviewFollowUp(input: {
   move: Extract<HeadMove, { kind: "substantive" }>;
   before: PrCommitList;
   after: PrCommitList;
-  /** true when Switchboard moved the workspace to `current` (resident
-   *  re-attach); false when the model must fetch and check it out itself. */
-  worktreeMoved: boolean;
 }): string {
   const r = short(input.reviewed);
   const c = short(input.current);
   const list = (l: PrCommitList) => l.commits.map((x) => `- ${short(x.sha)} ${subject(x.message)}`).join("\n");
-  const where = input.worktreeMoved
-    ? `Switchboard has already moved your worktree to ${c}. Confirm with \`git rev-parse HEAD\` (from the current directory, no \`cd\`) — it must equal \`${input.current}\`; do NOT run \`git fetch\` and never check out anything else.`
-    : `Bring your checkout to the new head: \`git fetch origin ${input.current} && git checkout ${input.current}\`, then confirm with \`git rev-parse HEAD\` — it must equal \`${input.current}\`. Never check out another branch or PR.`;
+  const where = `Switchboard has already moved your worktree to ${c}. Confirm with \`git rev-parse HEAD\` (from the current directory, no \`cd\`) — it must equal \`${input.current}\`; do NOT run \`git fetch\` and never check out anything else.`;
   return [
     `The head of ${input.where} moved from ${r} to ${c} while you were reviewing — ${describeMove(input.move)}. Your review above was of ${r} and has NOT been posted.`,
     "",

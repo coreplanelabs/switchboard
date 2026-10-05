@@ -403,6 +403,7 @@ export type PlaneEvent =
  *  id is derived from the run, so a duplicate offer after a roll is the same
  *  effect, acknowledged once. The transport unit adds execution; this one only shapes and stores. */
 export type PlaneEffect =
+  | import("../coordinator/workflowReconciliation.js").CoordinatorReconcileEffect
   | {
       id: string;
       kind: "admit";

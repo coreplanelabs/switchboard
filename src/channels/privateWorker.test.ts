@@ -1,3 +1,4 @@
+import { InMemoryRunLedger } from "../core/runLedger/inMemory.js";
 import { describe, expect, it } from "vitest";
 import {
   InMemoryPrivateWorkerLog,
@@ -94,7 +95,7 @@ describe("private worker IO — a task thread with no Slack delivery", () => {
   });
 
   it("rehosts a saved private child from its original unit and requester DM", async () => {
-    const instances = new InMemoryCoordinatorInstanceStore();
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     const instance: CoordinatorInstance = {
       id: task.instanceId,
       kind: "ship",

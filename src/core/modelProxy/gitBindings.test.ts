@@ -257,3 +257,79 @@ describe("GitBindings", () => {
     expect(bindings.get("legacy")).toMatchObject({ ref, refConfirmed: false });
   });
 });
+
+describe("model publication closure and original post-step claims", () => {
+  it.each([false, true])(
+    "seals model writes while retaining the exact original recorder for a trusted post-step: PR=%s",
+    async (existingPr) => {
+      const bindings = new GitBindings(),
+        old = "a".repeat(40),
+        next = "b".repeat(40);
+      bindings.register("run", { repo: "o/r", ref: "owned" }, undefined, undefined, existingPr);
+      if (existingPr) bindings.setPublication("run", { ref: "owned", expectedHeadSha: old });
+      const begin = vi.fn(async () => true),
+        finish = vi.fn(async () => true);
+      if (existingPr) bindings.setPublicationRecorder("run", { begin, finish });
+      else bindings.setBranchRecorder("run", { begin, finish });
+      const update = { ref: "refs/heads/owned", old, next };
+      const generation = bindings.generationOf("run");
+      expect(bindings.closeModelTurn("run")).toBe(true);
+      expect(bindings.generationOf("run")).not.toBe(generation);
+      expect(bindings.isModelClosed("run")).toBe(true);
+      expect(bindings.publicationOf("run")).toEqual(existingPr ? { ref: "owned", expectedHeadSha: old } : undefined);
+      expect(bindings.takeToolPush("run", update)).toBe(false);
+      expect(await bindings.beginBranch("run", update)).toBeUndefined();
+      expect(await bindings.beginPublication("run", update)).toBeUndefined();
+      expect(await bindings.beginPostStepPublication("run", { ...update, ref: "refs/heads/other" })).toBeUndefined();
+      const claim = await bindings.beginPostStepPublication("run", update);
+      expect(claim).toBeDefined();
+      expect(await claim!.finish("accepted")).toBe(true);
+      expect(begin).toHaveBeenCalledWith(update);
+      expect(finish).toHaveBeenCalledWith(update, "accepted");
+      expect(bindings.takeToolPush("run", update)).toBe(false);
+      expect(await bindings.beginPublication("run", { ...update, old: next })).toBeUndefined();
+    },
+  );
+
+  it("refuses a model write whose durable begin ACK arrives after model closure", async () => {
+    const bindings = new GitBindings();
+    bindings.register("run", { repo: "o/r", ref: "owned" }, undefined);
+    let resolve!: () => void;
+    const delayed = new Promise<boolean>((done) => {
+      resolve = () => done(true);
+    });
+    const finish = vi.fn(async () => true);
+    bindings.setBranchRecorder("run", { begin: async () => delayed, finish });
+    const update = { ref: "refs/heads/owned", old: "a".repeat(40), next: "b".repeat(40) };
+    const starting = bindings.beginBranch("run", update);
+    bindings.closeModelTurn("run");
+    resolve();
+    expect(await starting).toBeUndefined();
+    expect(finish).toHaveBeenCalledWith(update, "not_forwarded");
+    expect(bindings.takeToolPush("run", update)).toBe(false);
+  });
+
+  it("never turns an authorization block or missing recorder into post-step permission", async () => {
+    const bindings = new GitBindings();
+    bindings.register("run", { repo: "o/r", ref: "owned" }, undefined);
+    bindings.setBranchRecorder("run", { begin: async () => true, finish: async () => true });
+    bindings.blockBranch("run", "revoked grant");
+    bindings.closeModelTurn("run");
+    expect(
+      await bindings.beginPostStepPublication("run", {
+        ref: "refs/heads/owned",
+        old: "a".repeat(40),
+        next: "b".repeat(40),
+      }),
+    ).toBeUndefined();
+    bindings.register("missing", { repo: "o/r", ref: "owned" }, undefined);
+    bindings.closeModelTurn("missing");
+    expect(
+      await bindings.beginPostStepPublication("missing", {
+        ref: "refs/heads/owned",
+        old: "a".repeat(40),
+        next: "b".repeat(40),
+      }),
+    ).toBeUndefined();
+  });
+});

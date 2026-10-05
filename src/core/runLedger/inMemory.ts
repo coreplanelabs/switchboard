@@ -1,4 +1,22 @@
+import {
+  validMaintenanceTransport,
+  sameMaintenanceTransport,
+  maintenanceEventsMatch,
+  preserveMaintenanceEvent,
+} from "../coordinator/maintenanceIdentity.js";
 import { preserveCheckpointState } from "./checkpointState.js";
+import { branchPublicationOf, doorPublicationOf } from "../branchPublication.js";
+import {
+  terminalWorkspaceSettlement,
+  terminalWorkspaceRecordMatches,
+  nextWorkspaceRevision,
+  WORKSPACE_SETTLEMENTS_MAX,
+  workspaceOwnerKey,
+  workspaceAcknowledgment,
+  type WorkspaceOwner,
+  type WorkspaceSettlement,
+  type WorkspaceAck,
+} from "../workspaceSettlement.js";
 import {
   checkpointMembersOf,
   checkpointMemberHashesOf,
@@ -11,6 +29,7 @@ import {
   type ContextCheckpointResult,
 } from "../references/contextCheckpoint.js";
 import { contextDependenciesContain } from "../references/contextDependencies.js";
+import type { CoordinatorReconcileReceipt } from "../coordinator/workflowReconciliation.js";
 import {
   handoffRangePins,
   sessionRangesAvailable,
@@ -36,8 +55,9 @@ import {
 // against, applying the same pure decisions the Durable Object applies. It
 // also documents the storage shape in the plainest form.
 
+import { reviewPublicationOf } from "../reviewPublication.js";
 import { INTAKE_DELIVERY_CLAIM_MS } from "../budgets.js";
-import { utf8ByteLength, workEvidenceBelongsToRun, type RunRecord } from "../runRecord.js";
+import { branchPushReceiptsOf, utf8ByteLength, workEvidenceBelongsToRun, type RunRecord } from "../runRecord.js";
 import type { UnitSeedReceipt } from "../coordinator/unitSeedReceipt.js";
 import {
   assignLedgerLiveState,
@@ -62,6 +82,7 @@ import {
   causeOfClose,
   causeOfReclaim,
   type PlaneAckOutcome,
+  type PlaneEffect,
   type PlaneAskAnswer,
   type PlaneEnding,
   type PlaneEndingCause,
@@ -143,6 +164,33 @@ export interface SessionLog {
 const TRIM_MARKER_BYTES_ESTIMATE = 260;
 
 export class InMemoryRunLedger implements RunLedger {
+  private readonly workspaceObligations = new Map<
+    string,
+    { revision: number; pending: Map<number, WorkspaceSettlement> }
+  >();
+
+  /** Canonical private obligations, read synchronously by this ledger's paired store. */
+  workspacePublicationRows(): WorkspaceSettlement[] {
+    return [...this.workspaceObligations.values()].flatMap((row) => [...row.pending.values()]);
+  }
+  async workspaceSettlement(owner: WorkspaceOwner): Promise<WorkspaceSettlement | undefined> {
+    if (this.live.has(owner.runId)) return;
+    const value = this.workspaceObligations.get(workspaceOwnerKey(owner))?.pending.values().next().value;
+    return value && structuredClone(value);
+  }
+
+  async ackWorkspaceSettlement(owner: WorkspaceOwner, revision: number): Promise<WorkspaceAck> {
+    const key = workspaceOwnerKey(owner);
+    const standing = this.workspaceObligations.get(key);
+    const result = workspaceAcknowledgment(
+      standing?.pending.get(revision),
+      revision,
+      this.live.has(owner.runId),
+      standing?.revision,
+    );
+    if (result.ok) standing?.pending.delete(revision);
+    return result;
+  }
   private residentClaimFence = 0;
   async residentClaim(
     runId: string,
@@ -164,6 +212,8 @@ export class InMemoryRunLedger implements RunLedger {
   readonly transcripts = new Map<string, Transcript>();
   readonly sessions = new Map<string, SessionLog>();
   readonly finished = new Map<string, RunRecord>();
+  /** Mirrors private terminal producer evidence that cannot enter a typed record. */
+  readonly finishedWorkEvidence = new Map<string, RunState>();
   readonly intake = new Map<string, IntakeReceipt>();
   readonly intakeDeliveries = new Map<string, { poster: string; claimUntil: number; delivered: boolean }>();
   /** The failure toggle (run-history item 59): tests flip a flag to make the
@@ -206,6 +256,9 @@ export class InMemoryRunLedger implements RunLedger {
 
   async claim(req: ClaimRequest): Promise<ClaimResult> {
     const existing = this.byThread(req.threadKey);
+    const original = this.live.get(req.runId)?.meta ?? this.finished.get(req.runId);
+    if (!validMaintenanceTransport(req.meta) || (original && !sameMaintenanceTransport(original, req.meta)))
+      throw new Error("maintenance transport identity conflicts with retained state");
     if (!preserveCheckpointState(existing?.state ?? {}, req.state ?? {}))
       throw new Error("checkpoint state is immutable");
     if (!workEvidenceBelongsToRun(req.state ?? {}, { id: req.runId, ...req.meta }))
@@ -510,7 +563,11 @@ export class InMemoryRunLedger implements RunLedger {
 
   /** The shadow posts and the acks, kept for assertions (orchestration-plane items 7 and 8). */
   readonly planeOutcomes: PlaneOutcomePost[] = [];
-  readonly planeAcks: Array<{ id: string; outcome: PlaneAckOutcome }> = [];
+  readonly planeAcks: Array<{ id: string; outcome: PlaneAckOutcome; reconciliation?: CoordinatorReconcileReceipt }> =
+    [];
+  /** The same outbox seam as the Worker; reconciliation remains open until
+   * durable report obligations can be verified, which this double cannot infer. */
+  readonly planeOffers = new Map<string, PlaneEffect>();
 
   async planeOutcome(post: PlaneOutcomePost): Promise<{ ok: boolean; decider?: string; agreed?: boolean | null }> {
     this.planeOutcomes.push(post);
@@ -525,8 +582,17 @@ export class InMemoryRunLedger implements RunLedger {
     return true;
   }
 
-  async planeAck(id: string, outcome: PlaneAckOutcome): Promise<void> {
-    this.planeAcks.push({ id, outcome });
+  async planeAck(
+    id: string,
+    outcome: PlaneAckOutcome,
+    _owner?: { runId: string; gen: string },
+    reconciliation?: CoordinatorReconcileReceipt,
+  ): Promise<void> {
+    this.planeAcks.push({
+      id,
+      outcome,
+      ...(reconciliation ? { reconciliation: structuredClone(reconciliation) } : {}),
+    });
   }
 
   /** The admission asks, kept for assertions; the answer is settable per test
@@ -600,7 +666,17 @@ export class InMemoryRunLedger implements RunLedger {
   async append(runId: string, gen: string, events: AppendableEvent[]): Promise<FenceResult> {
     const fence = this.fence(runId, gen);
     if (!fence.ok) return fence;
+    if (!maintenanceEventsMatch(this.live.get(runId)!.meta, events)) return { ok: false, reason: "fenced" };
     const list = this.events.get(runId) ?? [];
+    const originalMeta = this.live.get(runId)!.meta;
+    if (originalMeta.maintenanceActionId !== undefined) {
+      const previousBySeq = new Map(list.map((event) => [event.seq, event]));
+      for (const event of events) {
+        if (!preserveMaintenanceEvent(originalMeta, previousBySeq.get(event.seq), event))
+          return { ok: false, reason: "fenced" };
+        previousBySeq.set(event.seq, event);
+      }
+    }
     list.push(...events);
     this.events.set(runId, list);
     return { ok: true };
@@ -753,6 +829,12 @@ export class InMemoryRunLedger implements RunLedger {
     if (!fence.ok) return fence;
     const row = this.live.get(runId)!;
     if (
+      !terminalWorkspaceRecordMatches(row, record) ||
+      !sameMaintenanceTransport(row.meta, record) ||
+      !maintenanceEventsMatch(row.meta, record.events)
+    )
+      return { ok: false, reason: "fenced" };
+    if (
       opts?.requireStoppedPause &&
       (row.phase !== "handoff" ||
         row.state.pausedForRetry !== true ||
@@ -761,6 +843,26 @@ export class InMemoryRunLedger implements RunLedger {
     )
       return { ok: false, reason: "fenced" };
     const canonicalWork = this.live.get(runId)?.state ?? this.finished.get(runId) ?? {};
+    const {
+      branchPublication: _speculativePublication,
+      doorPublicationPending: _speculativeDoor,
+      reviewPublication: _speculativeReview,
+      branchPushReceipts: _speculativePushes,
+      ...terminal
+    } = record;
+    const branchPublication = branchPublicationOf(canonicalWork.branchPublication, record.repo);
+    const doorPublicationPending = doorPublicationOf(canonicalWork.doorPublicationPending);
+    const branchPushReceipts = branchPushReceiptsOf(canonicalWork.branchPushReceipts);
+    const savedReview = reviewPublicationOf(canonicalWork.reviewPublication);
+    const reviewPublication =
+      savedReview?.runId === runId && savedReview.target.repo === record.repo ? savedReview : undefined;
+    record = {
+      ...terminal,
+      ...(branchPublication === undefined ? {} : { branchPublication }),
+      ...(doorPublicationPending === undefined ? {} : { doorPublicationPending }),
+      ...(reviewPublication === undefined ? {} : { reviewPublication }),
+      ...(branchPushReceipts === undefined ? {} : { branchPushReceipts }),
+    };
     if (
       record.unitSeedReceipt !== undefined &&
       JSON.stringify(record.unitSeedReceipt) !== JSON.stringify(canonicalWork.unitSeedReceipt)
@@ -781,6 +883,35 @@ export class InMemoryRunLedger implements RunLedger {
       JSON.stringify(record.contextCheckpointReceipt) !== JSON.stringify(priorReceipt)
     )
       return { ok: false, reason: "fenced" };
+    const obligation = terminalWorkspaceSettlement(row, record);
+    if (obligation) {
+      const key = workspaceOwnerKey(obligation.owner);
+      const prior = this.workspaceObligations.get(key);
+      if ((prior?.pending.size ?? 0) >= WORKSPACE_SETTLEMENTS_MAX)
+        throw new Error("workspace obligation capacity exhausted");
+      obligation.revision = nextWorkspaceRevision(prior?.revision);
+      const pending = prior?.pending ?? new Map<number, WorkspaceSettlement>();
+      pending.set(obligation.revision, obligation);
+      this.workspaceObligations.set(key, { revision: obligation.revision, pending });
+    }
+    const unreadable = {
+      ...(canonicalWork.branchPushReceipts !== undefined && branchPushReceipts === undefined
+        ? { branchPushReceipts: structuredClone(canonicalWork.branchPushReceipts) }
+        : {}),
+      ...(canonicalWork.reviewPublication !== undefined && reviewPublication === undefined
+        ? { reviewPublication: structuredClone(canonicalWork.reviewPublication) }
+        : {}),
+      ...(canonicalWork.branchPublication !== undefined && branchPublication === undefined
+        ? { branchPublication: structuredClone(canonicalWork.branchPublication) }
+        : {}),
+      ...(canonicalWork.doorPublicationPending !== undefined &&
+      canonicalWork.doorPublicationPending !== null &&
+      doorPublicationPending === undefined
+        ? { doorPublicationPending: structuredClone(canonicalWork.doorPublicationPending) }
+        : {}),
+    };
+    if (Object.keys(unreadable).length) this.finishedWorkEvidence.set(runId, unreadable);
+    else this.finishedWorkEvidence.delete(runId);
     this.finished.set(runId, record);
     // The ending's cause (record 0064): recorded when the row closes, first
     // cause standing — exactly the object's rule, its one keyed exception

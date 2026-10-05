@@ -1,4 +1,16 @@
 import { isContextCheckpointReceipt, type CanonicalCheckpointSource } from "./references/contextCheckpoint.js";
+import {
+  isCoordinatorReconcileReceipt,
+  type CoordinatorReconcileReceipt,
+} from "./coordinator/workflowReconciliation.js";
+import {
+  workspaceSettlementOf,
+  workspaceOwnerKey,
+  isWorkspaceOwner,
+  type WorkspaceOwner,
+  type WorkspaceSettlement,
+  type WorkspaceAck,
+} from "./workspaceSettlement.js";
 import type { ContextCheckpointRequest, ContextCheckpointResult } from "./runLedger/ledger.js";
 import {
   isContextDependencies,
@@ -207,6 +219,45 @@ export class WorkerRunLedger implements RunLedger {
     if (!Number.isSafeInteger(r.data.fence) || (r.data.fence as number) <= 0)
       throw new PermanentStoreError("run ledger resident claim: invalid fence");
     return { ok: true, fence: r.data.fence as number };
+  }
+
+  async workspaceSettlement(owner: WorkspaceOwner): Promise<WorkspaceSettlement | undefined> {
+    if (!isWorkspaceOwner(owner)) throw new PermanentStoreError("run ledger: invalid workspace owner");
+    const r = await this.post("/runs/preservation-owner", { storeKey: this.opts.storeKey, ...owner });
+    if (r.data.kind === "live" || r.data.kind === "unknown") return;
+    if (
+      r.data.kind === "absent" &&
+      isWorkspaceOwner(r.data.owner) &&
+      workspaceOwnerKey(r.data.owner) === workspaceOwnerKey(owner)
+    )
+      return;
+    if (
+      r.data.kind === "acknowledged" &&
+      isWorkspaceOwner(r.data.owner) &&
+      workspaceOwnerKey(r.data.owner) === workspaceOwnerKey(owner) &&
+      Number.isSafeInteger(r.data.revision) &&
+      Number(r.data.revision) > 0
+    )
+      return;
+    const value = workspaceSettlementOf(r.data.settlement);
+    if (r.data.kind !== "terminal" || !value || workspaceOwnerKey(value.owner) !== workspaceOwnerKey(owner))
+      throw new PermanentStoreError("run ledger: invalid workspace settlement");
+    return value;
+  }
+
+  async ackWorkspaceSettlement(owner: WorkspaceOwner, revision: number): Promise<WorkspaceAck> {
+    if (!isWorkspaceOwner(owner) || !Number.isSafeInteger(revision) || revision <= 0)
+      throw new PermanentStoreError("run ledger: invalid workspace acknowledgment");
+    const r = await this.post("/runs/workspace-ack", { storeKey: this.opts.storeKey, ...owner, revision });
+    if (r.status === 200 && r.data.ok === true) return { ok: true };
+    const reason = r.data.reason;
+    if (
+      r.status === 409 &&
+      r.data.ok === false &&
+      (reason === "owner-live" || reason === "stale" || reason === "unverified")
+    )
+      return { ok: false, reason };
+    throw new PermanentStoreError("run ledger: invalid workspace acknowledgment response");
   }
 
   async claim(req: ClaimRequest): Promise<ClaimResult> {
@@ -506,9 +557,24 @@ export class WorkerRunLedger implements RunLedger {
     return r.data.accepted === true;
   }
 
-  async planeAck(id: string, outcome: PlaneAckOutcome, owner?: { runId: string; gen: string }): Promise<void> {
+  async planeAck(
+    id: string,
+    outcome: PlaneAckOutcome,
+    owner?: { runId: string; gen: string },
+    reconciliation?: CoordinatorReconcileReceipt,
+  ): Promise<void> {
     if (owner) this.checkIds(owner.runId, owner.gen);
-    await this.post("/plane/ack", { storeKey: this.opts.storeKey, id, outcome, ...(owner ? { owner } : {}) });
+    if (reconciliation !== undefined && (!isCoordinatorReconcileReceipt(reconciliation) || outcome !== "done"))
+      throw new PermanentStoreError("run ledger: invalid reconciliation acknowledgement");
+    const response = await this.post("/plane/ack", {
+      storeKey: this.opts.storeKey,
+      id,
+      outcome,
+      ...(owner ? { owner } : {}),
+      ...(reconciliation ? { reconciliation } : {}),
+    });
+    if (reconciliation !== undefined && (response.status !== 200 || response.data.ok !== true))
+      throw new TransientStoreError("run ledger: reconciliation acknowledgement unconfirmed");
   }
 
   async planeAdmit(post: PlaneAdmitPost): Promise<PlaneAskAnswer> {

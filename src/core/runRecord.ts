@@ -1,3 +1,11 @@
+import { validMaintenanceTransport, maintenanceEventsMatch } from "./coordinator/maintenanceIdentity.js";
+import {
+  branchPublicationOf,
+  doorPublicationOf,
+  type BranchPublication,
+  type DoorPublication,
+} from "./branchPublication.js";
+import { reviewPublicationOf, type ReviewPublicationReceipt } from "./reviewPublication.js";
 import { answerOutcomeOf, type AnswerOutcome } from "./answerOutcome.js";
 import {
   isMainContextRefusalCode,
@@ -7,7 +15,7 @@ import {
 import { publicationSettlementForRun, type PublicationSettlement } from "./publicationSettlement.js";
 import { audienceRefusalOf, type AudienceRefusalReceipt } from "./audienceDecision.js";
 import type { ChannelVisibility, Predicate } from "./authz/types.js";
-import type { BoundaryScope, Identity, MachineClass, RunProfile } from "../config/profile.js";
+import { isRunProfile, type RunProfile } from "../config/profile.js";
 import type { RunEvent } from "./runEvents.js";
 import type { ProviderFailureCause } from "./provider.js";
 import type { Effort } from "../effort.js";
@@ -15,7 +23,6 @@ import type { AddressSeverity } from "./reviewVerdict.js";
 import type { Verbosity } from "./verbosity.js";
 import { isHeadMaterial, isSpanRecord } from "./runEvents.js";
 import { isRunUsage, type RunUsage } from "./runUsage.js";
-import type { PushedBranch } from "../execution/residentRebind.js";
 import type { RunLiveState } from "./runLiveState.js";
 import { isHandoffShape, type Handoff } from "./ship/handoff.js";
 import { isChildHandoff, type ChildHandoff } from "./dispatch/handoff.js";
@@ -91,7 +98,41 @@ export interface RunReference {
   messages: number;
 }
 
+export interface BranchPushReceipt {
+  ref: string;
+  sha: string;
+  by: "push";
+}
+/** Canonical producer history may contain successive writes to one ref. Preserve
+ * its latest exact native acknowledgment; malformed history grants no credit. */
+export function branchPushReceiptsOf(value: unknown): BranchPushReceipt[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const latest = new Map<string, BranchPushReceipt>();
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+    const receipt = raw as Record<string, unknown>;
+    if (
+      Object.keys(receipt).some((key) => !["type", "ref", "sha", "by", "at", "seq"].includes(key)) ||
+      (receipt.type !== undefined && receipt.type !== "pushed_head") ||
+      receipt.by !== "push" ||
+      typeof receipt.ref !== "string" ||
+      receipt.ref.length < 1 ||
+      receipt.ref.length > 512 ||
+      typeof receipt.sha !== "string" ||
+      !/^[a-f0-9]{40}$/.test(receipt.sha) ||
+      (receipt.at !== undefined && (typeof receipt.at !== "number" || !Number.isFinite(receipt.at))) ||
+      (receipt.seq !== undefined && (!Number.isSafeInteger(receipt.seq) || (receipt.seq as number) < 0))
+    )
+      return undefined;
+    latest.set(receipt.ref, { ref: receipt.ref, sha: receipt.sha, by: "push" });
+    if (latest.size > 20) return undefined;
+  }
+  return [...latest.values()];
+}
+
 export interface RunRecord {
+  /** Native ref acknowledgments retained independently of display events; internal readers only. */
+  branchPushReceipts?: BranchPushReceipt[];
   /** Authored-output facts; absent on legacy records means unknown. */
   answerOutcome?: AnswerOutcome;
   /** null preserves a present but invalid canonical receipt; absent is legacy unknown. */
@@ -272,6 +313,7 @@ export interface RunRecord {
    *  carrying it, and `read-record` answers only for a matching instance.
    *  Absent on every run no coordinator spawned. */
   parentInstanceId?: string;
+  maintenanceActionId?: string;
   /** Canonical unit/attempt copied from admitted coordinator state. Zero names
    * the original instance; reissues carry their durable attempt number. */
   coordinatorUnit?: string;
@@ -338,13 +380,10 @@ export interface RunRecord {
    * live ledger row is deleted at finish, so recovery retains this exact
    * ref transition until head reconciliation. A PR number exists only for a
    * verified existing-PR publication. */
-  doorPublicationPending?: {
-    id: string;
-    repo: string;
-    pr?: number;
-    owner?: { instanceId: string; unit: string };
-    update: { ref: string; old: string; next: string };
-  };
+  branchPublication?: BranchPublication;
+  /** Exact original review publication survives event trimming and terminal recovery. */
+  reviewPublication?: ReviewPublicationReceipt;
+  doorPublicationPending?: DoorPublication;
   /** What the run cost in tokens, per model, summed from its `model.turn`
    *  spans at finish (`usageOfEvents`; docs/reference/specs/costs.md, cost by user).
    *  Every record written since carries it (zero turns included); one written
@@ -431,20 +470,6 @@ export function prOfEvents(events: readonly RunEvent[]): RunPullRequest | undefi
       pr = { number: e.number, url: e.url, ...(e.head !== undefined ? { head: e.head } : {}) };
   }
   return pr;
-}
-
-/** Every branch a run's events say it pushed, with the pull request each
- *  heads — what the run's release hands the resident so the thread remembers
- *  its own branches past the tree (resident-repos item 16). One entry per
- *  branch, the last push to it winning; an event without a head names none. */
-export function pushedBranchesOf(events: readonly RunEvent[]): PushedBranch[] {
-  const byRef = new Map<string, number>();
-  for (const e of events) {
-    if (e.type !== "pr_opened" || e.head === undefined) continue;
-    byRef.delete(e.head);
-    byRef.set(e.head, e.number);
-  }
-  return [...byRef].map(([ref, pr]) => ({ ref, pr }));
 }
 
 /** A call a run's ending may have left running in its workspace (harness.md
@@ -778,38 +803,9 @@ export function isRunSession(v: unknown): v is RunSession {
 /** The profile as the record stores it: the run's effective profile plus the preset it came from. */
 export type RunProfileRecord = RunProfile & { preset: string };
 
-// The vocabularies the profile is checked against, typed against the unions
-// (a class or identity added without a row here fails to compile) — the record
-// contract stays node-free and imports the registry's types only.
-const MACHINE_CLASSES_IN_RECORD: Record<MachineClass, true> = {
-  none: true,
-  blank: true,
-  "repo-cold": true,
-  "repo-resident": true,
-};
-const IDENTITIES_IN_RECORD: Record<Identity, true> = { none: true, read: true, write: true };
-const BOUNDARY_SCOPES_IN_RECORD: Record<BoundaryScope, true> = {
-  defaults: true,
-  channel: true,
-  user: true,
-  directive: true,
-  parent: true,
-};
-
 /** Structural check on a stored profile (item 3's rule for the field). */
 function isRunProfileRecord(v: unknown): v is RunProfileRecord {
-  if (typeof v !== "object" || v === null) return false;
-  const p = v as Record<string, unknown>;
-  if (typeof p.preset !== "string") return false;
-  if (typeof p.machine !== "string" || !Object.hasOwn(MACHINE_CLASSES_IN_RECORD, p.machine)) return false;
-  if (typeof p.identity !== "string" || !Object.hasOwn(IDENTITIES_IN_RECORD, p.identity)) return false;
-  if (!isFiniteNumber(p.minutes) || p.minutes <= 0) return false;
-  if (
-    p.boundedBy !== undefined &&
-    (typeof p.boundedBy !== "string" || !Object.hasOwn(BOUNDARY_SCOPES_IN_RECORD, p.boundedBy))
-  )
-    return false;
-  return true;
+  return isRunProfile(v) && typeof (v as unknown as Record<string, unknown>).preset === "string";
 }
 
 /** A run as a listing shows it: the record minus its events. `diagnosis` stays —
@@ -818,7 +814,15 @@ function isRunProfileRecord(v: unknown): v is RunProfileRecord {
  *  missing value as 0. */
 export type RunListItem = Omit<
   RunRecord,
-  "events" | "sourceReads" | "workReads" | "unitSeedReceipt" | "contextCheckpointReceipt" | "directAudience"
+  | "events"
+  | "sourceReads"
+  | "workReads"
+  | "unitSeedReceipt"
+  | "contextCheckpointReceipt"
+  | "directAudience"
+  | "branchPublication"
+  | "reviewPublication"
+  | "branchPushReceipts"
 > & {
   bytes?: number;
 };
@@ -1319,26 +1323,31 @@ export function isRunRecord(v: unknown): v is RunRecord {
     publicationSettlementForRun(r.publicationSettlement, r) === undefined
   )
     return false;
-  if (r.doorPublicationPending !== undefined) {
-    const pending = r.doorPublicationPending;
-    if (typeof pending !== "object" || pending === null) return false;
-    const { id, repo, pr, owner, update } = pending as Record<string, unknown>;
+  if (r.branchPublication !== undefined && !branchPublicationOf(r.branchPublication, r.repo as string | undefined))
+    return false;
+  if (r.doorPublicationPending !== undefined && !doorPublicationOf(r.doorPublicationPending)) return false;
+  if (r.branchPushReceipts !== undefined) {
+    const receipts = branchPushReceiptsOf(r.branchPushReceipts);
     if (
-      typeof id !== "string" ||
-      !id ||
-      typeof repo !== "string" ||
-      !repo ||
-      (pr !== undefined && (!Number.isInteger(pr) || (pr as number) < 1))
+      !receipts ||
+      typeof r.repo !== "string" ||
+      !Array.isArray(r.branchPushReceipts) ||
+      receipts.length !== r.branchPushReceipts.length ||
+      r.branchPushReceipts.some((raw, index) => {
+        const receipt = raw as Record<string, unknown>;
+        return (
+          Object.keys(receipt).some((key) => !["ref", "sha", "by"].includes(key)) ||
+          receipt.ref !== receipts[index]?.ref ||
+          receipt.sha !== receipts[index]?.sha ||
+          receipt.by !== receipts[index]?.by
+        );
+      })
     )
       return false;
-    if (owner !== undefined && (typeof owner !== "object" || owner === null)) return false;
-    if (typeof update !== "object" || update === null) return false;
-    const o = owner as Record<string, unknown> | undefined;
-    const u = update as Record<string, unknown>;
-    if (o !== undefined && (typeof o.instanceId !== "string" || typeof o.unit !== "string")) return false;
-    if (typeof u.ref !== "string" || !u.ref.startsWith("refs/heads/")) return false;
-    if (typeof u.old !== "string" || !/^[0-9a-f]{40}$/.test(u.old)) return false;
-    if (typeof u.next !== "string" || !/^[0-9a-f]{40}$/.test(u.next)) return false;
+  }
+  if (r.reviewPublication !== undefined) {
+    const receipt = reviewPublicationOf(r.reviewPublication);
+    if (!receipt || receipt.runId !== r.id || receipt.target.repo !== r.repo) return false;
   }
   // A parent is named by a run id (item 46): the same shape as the record's own.
   if (r.parentRunId !== undefined && (typeof r.parentRunId !== "string" || !RUN_ID_PATTERN.test(r.parentRunId)))
@@ -1380,6 +1389,8 @@ export function isRunRecord(v: unknown): v is RunRecord {
   if (r.usage !== undefined && !isRunUsage(r.usage)) return false;
   // A coordinator's child (item 48): the instance id in the platform's alphabet
   // and the key `<instance>:<step>` — both or neither; one alone is no tag.
+  if (!validMaintenanceTransport(r)) return false;
+  if (!maintenanceEventsMatch(r, Array.isArray(r.events) ? r.events : [])) return false;
   if ((r.parentInstanceId === undefined) !== (r.idempotencyKey === undefined)) return false;
   if (
     r.parentInstanceId !== undefined &&
@@ -1468,6 +1479,9 @@ export function isRunListItem(v: unknown): v is RunListItem {
   if (typeof v !== "object" || v === null) return false;
   const r = v as Record<string, unknown>;
   if (
+    r.branchPublication !== undefined ||
+    r.reviewPublication !== undefined ||
+    r.branchPushReceipts !== undefined ||
     r.sourceReads !== undefined ||
     r.workReads !== undefined ||
     r.unitSeedReceipt !== undefined ||
@@ -1496,7 +1510,7 @@ export type RetentionKey = Pick<RunListItem, "id" | "finishedAt" | "bytes" | "ch
  * The one retention function both the bot and the Worker run, in this order:
  * (1) drop everything finished before `nowMs - retentionDays`; (2) keep the
  * newest `maxRuns`; (3) drop the oldest while the cumulative `bytes` of what is
- * kept exceeds `maxBytes` (missing `bytes` counts as 0); (4) retain existing
+ * kept exceeds `maxBytes` (missing `bytes` counts as 0); (4) keep existing protected records and retain existing
  * sources referenced by those roots or live holders, without recursively
  * promoting a pinned source. Returns newest-first; never mutates `items`.
  */
@@ -1504,7 +1518,11 @@ export function applyRetention<T extends RetentionKey>(
   items: readonly T[],
   policy: RetentionPolicy,
   nowMs: number,
-  context: { references?: readonly ContextReference[]; liveHolderIds?: readonly string[] } = {},
+  context: {
+    references?: readonly ContextReference[];
+    liveHolderIds?: readonly string[];
+    protectedIds?: readonly string[];
+  } = {},
 ): T[] {
   const cutoff = nowMs - policy.retentionDays * 86_400_000;
   const kept = items
@@ -1523,7 +1541,9 @@ export function applyRetention<T extends RetentionKey>(
   const references =
     context.references ??
     items.flatMap((item) => contextReferencesOf(item.id, item.childHandoff, item.contextDependencies));
-  return retainContextSources(items, kept.slice(0, end), references, context.liveHolderIds).sort(newestFirst);
+  const protectedIds = new Set(context.protectedIds);
+  const roots = [...kept.slice(0, end), ...items.filter((item) => protectedIds.has(item.id))];
+  return retainContextSources(items, roots, references, context.liveHolderIds).sort(newestFirst);
 }
 
 // ---- byte budget ------------------------------------------------------------

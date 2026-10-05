@@ -889,6 +889,76 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     ).toEqual([expect.stringContaining("the notepad could not be read for the compaction steer (ledger 503)")]);
   });
 
+  it("a canonical post-loop turn has only the absolute deadline remainder, even below the lease floor", async () => {
+    const w = world({ agent: { name: "general", maxMinutes: 20 } });
+    Object.assign(w.run, { deadlineAt: NOW + 90_000 });
+    const context = { executor };
+    let seen: number | undefined;
+    scriptedPi(w.container, (n, c) => {
+      if (n > 0) seen = (context as { remainingMs?: () => number }).remainingMs?.();
+      finalTurn(c, "done");
+    });
+    const session = await w.open();
+    w.clock.now = NOW + 60_000;
+    await session.followUp({ text: "write the verdict", maxTurns: 4, maxMinutes: 5, toolContext: context });
+    expect(seen).toBe(30_000);
+    w.clock.now = NOW + 90_000;
+    const prompts = w.container.commands().filter((command) => command.type === "prompt").length;
+    await expect(
+      session.followUp({ text: "another verdict", maxTurns: 4, maxMinutes: 5, toolContext: context }),
+    ).rejects.toThrow("deadline");
+    expect(w.container.commands().filter((command) => command.type === "prompt")).toHaveLength(prompts);
+    await session.end();
+  });
+
+  it("an absolute deadline ends a hung post-loop turn without admitting a finale prompt", async () => {
+    const w = world({ agent: { name: "general", maxMinutes: 20 } });
+    Object.assign(w.run, { deadlineAt: NOW + 90_000 });
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0) finalTurn(c, "done");
+      else w.clock.now = NOW + 90_001;
+    });
+    const session = await w.open();
+    const commandsBefore = w.container.commands().length;
+    w.clock.now = NOW + 60_000;
+    await session.followUp({ text: "write the verdict", maxTurns: 4, maxMinutes: 5, toolContext: { executor } });
+    expect(w.container.commands().filter((command) => command.type === "prompt")).toHaveLength(2);
+    expect(
+      w.container
+        .commands()
+        .slice(commandsBefore)
+        .filter((command) => command.type === "steer" && String(command.message).includes("time budget")),
+    ).toEqual([]);
+    expect(w.container.commands().some((command) => command.type === "abort")).toBe(true);
+    await session.end();
+  });
+
+  it("startup consuming the absolute deadline sends no model instruction", async () => {
+    const w = world({ agent: { maxMinutes: 20 } });
+    Object.assign(w.run, { deadlineAt: NOW + MINUTE_MS });
+    const start = w.container.start.bind(w.container);
+    vi.spyOn(w.container, "start").mockImplementation(async (input) => {
+      const result = await start(input);
+      w.clock.now = NOW + MINUTE_MS;
+      return result;
+    });
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "late work"));
+    await expect(w.open()).rejects.toThrow("deadline");
+    expect(w.container.commands().filter((command) => command.type === "prompt" || command.type === "steer")).toEqual(
+      [],
+    );
+  });
+
+  it("a carried absolute deadline bounds the model lease after attachment downtime", async () => {
+    const w = world({ agent: { maxMinutes: 20 } });
+    Object.assign(w.run, { deadlineAt: NOW + 8 * MINUTE_MS });
+    w.clock.now += 3 * MINUTE_MS;
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "done"));
+    expect(await w.start()).toContain("done");
+    expect(w.events.find((e) => e.type === "lease")).toMatchObject({ endsAt: NOW + 8 * MINUTE_MS });
+    expect(w.bearers.grantOf("run-7")?.expiresAt).toBe(bearerExpiresAt(NOW + 8 * MINUTE_MS));
+  });
+
   it("the wrap-up warning is steered once as the loop's end nears — the lease's end less the write-up and the post-step it holds back", async () => {
     const clock = { now: NOW };
     const w = world({ clock, agent: { maxMinutes: 20 } });

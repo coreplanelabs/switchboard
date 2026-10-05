@@ -182,6 +182,7 @@ export function chatCallerFor(
     | "postedBy"
     | "authenticatedAs"
     | "relayedBy"
+    | "messageId"
   >,
   config: Pick<ConfigStore, "grantsFor">,
   resolveRepo?: () => Promise<string | undefined>,
@@ -194,6 +195,9 @@ export function chatCallerFor(
     origin: {
       channelId: msg.channelId,
       threadKey: msg.threadKey,
+      ...(msg.messageId !== undefined ? { messageId: msg.messageId } : {}),
+      ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
+      ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
       ...(directAudience !== undefined ? { directAudience } : {}),
       ...(msg.channelName !== undefined ? { channelName: msg.channelName } : {}),
       ...(resolveRepo ? { repo: resolveRepo } : {}),

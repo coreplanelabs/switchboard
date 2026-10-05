@@ -782,6 +782,7 @@ export type RunEvent =
   | {
       type: "run_meta";
       agent: string;
+      maintenanceActionId?: string;
       /** How `agent` was chosen (`AgentSource`); absent on a command run and on records written before it existed. */
       agentSource?: AgentSource;
       /** Absent on a command run, which resolves no model. */
@@ -1012,6 +1013,7 @@ export type RunEvent =
       costCapUsd?: number;
       branch?: string;
       transportWorkflowId?: string;
+      maintenanceActionId?: string;
       recovery?: import("./coordinator/contract.js").CoordinatorTag["recovery"];
       base?: string;
       publication?: import("./coordinator/contract.js").ExistingPrPublicationBinding;

@@ -60,6 +60,8 @@ export default defineConfig({
       "releaseAtRunEnd.test.ts",
       "pausedWorkspace.test.ts",
       "runRegistration.test.ts",
+      "workspaceSettlement.test.ts",
+      "workspaceAdvance.test.ts",
       "dirtNeverKeeps.test.ts",
       "autoRebuild.test.ts",
       "awaitRestore.test.ts",

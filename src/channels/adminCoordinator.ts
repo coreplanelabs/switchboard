@@ -43,7 +43,18 @@
 // The handler here is pure over a parsed request (`handleCoordinatorRequest`),
 // like the ingress; `createAdminCoordinatorHandler` is the node:http adapter.
 
-import type { RunnerPullOwner } from "../core/runnerOwnership.js";
+import { findRunnerPullOwner } from "../core/runnerOwnership.js";
+import { createSweepEffectJournal } from "../core/coordinator/sweepEffectJournal.js";
+import { isPullOwnersResult } from "../core/coordinator/pullOwnership.js";
+import { branchPublicationOf } from "../core/branchPublication.js";
+import { sourceHash } from "../core/references/receipts.js";
+import { performRecoverPublication } from "../core/coordinator/recoverPublicationEffect.js";
+import type { IdentityRefPublication } from "../execution/identityRewrite.js";
+import { isUnitSeedReceipt } from "../core/coordinator/unitSeedReceipt.js";
+import { performCheckRecovery } from "../core/coordinator/checkRecoveryEffect.js";
+import { finalizeCoordinatorReport } from "../core/coordinator/reportFinalization.js";
+import { reconcileCoordinatorExecution } from "../core/coordinator/reconcileExecution.js";
+import type { CoordinatorReconcileReceipt } from "../core/coordinator/workflowReconciliation.js";
 import {
   DEFAULT_GRANT,
   carve,
@@ -77,6 +88,7 @@ import {
   isHumanGatePending,
   isSavedFindingsPatch,
   INSTANCE_ID_PATTERN,
+  isCoordinatorUnit,
   STEP_NAME_PATTERN,
   unitOfIdempotencyKey,
   type CoordinatorInstance,
@@ -95,6 +107,12 @@ import { isShipOutcome, sameShipOutcome } from "../core/coordinator/shipOutcome.
 import { foldThreadAttachments } from "../core/dispatch/admission.js";
 import { attributedText, foldThreadEvents } from "../core/threadEvents.js";
 import { assembleRunRecord } from "../core/dispatch/record.js";
+import {
+  unitEffectResultMatches,
+  type UnitEffectTransition,
+  type UnitEffectRefusal,
+  type UnitEffectCompletionOutcome,
+} from "../core/coordinator/unitEffect.js";
 import type { CoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import {
   freezeCoordinatorReport,
@@ -119,6 +137,13 @@ import {
 } from "./privateWorker.js";
 import type { CreateInstanceAnswer, InstanceStatusAnswer } from "../core/coordinator/instancesRoute.js";
 import type { OriginalUnitRecoveryParams } from "../core/coordinator/driver.js";
+import {
+  parseRecoveryStep,
+  childPresetOfStep,
+  recoveryStepName,
+  recoveryStepPrefix,
+  recoveryWorkflowId,
+} from "../core/coordinator/recoveryStep.js";
 import type { DispatchOptions } from "../core/dispatcher.js";
 import type { DispatchOutcome } from "../core/dispatch/outcome.js";
 import { childRequestText, spawnTierRefusal } from "../core/dispatch/spawn.js";
@@ -137,13 +162,13 @@ import {
 import { analyzeRunFriction } from "../core/runFriction.js";
 import { COMMAND_CAP, type RunEvent, type ShipRoundOutcome } from "../core/runEvents.js";
 import type { RunHistoryWriter } from "../core/runHistoryWriter.js";
-import { RUN_ID_PATTERN, RUN_LIST_MAX_LIMIT } from "../core/runRecord.js";
+import { branchPushReceiptsOf, RUN_ID_PATTERN, RUN_LIST_MAX_LIMIT } from "../core/runRecord.js";
 import type { RunRegistry } from "../core/runRegistry.js";
 import type { LedgerRun } from "../core/runLedger/writeThrough.js";
 import { directAudienceStampOf } from "../core/runLedger/inboxMessage.js";
 import type { HostingState } from "../core/runLedger/types.js";
 import type { RunsService, RunView } from "../core/runsService.js";
-import type { SweepReport } from "../core/pullSweep.js";
+import type { SweepReport, SweepEffectJournal } from "../core/pullSweep.js";
 import {
   interruptionCauseOfWords,
   parsePlanBranch,
@@ -173,6 +198,7 @@ import { systemClock } from "../core/trace/clock.js";
 import {
   isRecoveryRequest,
   recoveryActionId,
+  recoveryActionRenewed,
   type RecoveryRequest,
   type RecoveryAction,
 } from "../core/coordinator/recoveryHistory.js";
@@ -184,19 +210,23 @@ import type { GithubApi } from "../execution/githubApi.js";
 import { isReleasePullRequest } from "../core/commands/merge.js";
 import type { GithubIdentity } from "../execution/githubApp.js";
 import {
-  MERGE_QUEUE_405,
   type CommitChecks,
   type EnqueueResult,
   type MergedPrRef,
   type MergeQueueState,
   type MergeResult,
   type OpenedPullRequest,
+  type RecoveryPullWriteResult,
   type OpenPrRef,
   type AnyHeadPullRequest,
   type PullRequestComment,
   type PullRequestFacts,
   type PullRequestReview,
   type PullRequestTarget,
+  type BranchRefRead,
+  type BranchRefCreateResult,
+  type CheckRetryTarget,
+  type GithubWriteResult,
 } from "../execution/githubPulls.js";
 import { EMPTY_START_STATE, type BranchStartState, type RewriteResult } from "../execution/identityRewrite.js";
 import type { Secret } from "../secrets.js";
@@ -270,23 +300,7 @@ export interface AdminCoordinatorDeps {
   /** Rung one for a pull request this live runner owns. The sweep's git and
    *  approval-carry rules are reused, but a conflict returns to this runner
    *  instead of starting a detached fix round. */
-  runnerRebase?: (instance: CoordinatorInstance, prNumber: number) => Promise<SweepReport>;
-  /** Process-local ownership fence shared with the sweep. The durable runner
-   *  remains authoritative; this fence only makes a simultaneous command defer. */
-  runnerOwnership?: {
-    claim(repo: string, prNumber: number, owner?: RunnerPullOwner): boolean;
-    reserve?(repo: string, prNumber: number, owner: RunnerPullOwner): symbol | undefined;
-    transferReservation?(
-      repo: string,
-      prNumber: number,
-      token: symbol,
-      currentOwner: RunnerPullOwner,
-      nextOwner: RunnerPullOwner,
-    ): boolean;
-    releaseReservation?(repo: string, prNumber: number, token: symbol): boolean;
-    release(repo: string, prNumber: number, owner?: RunnerPullOwner): boolean;
-    owner(repo: string, prNumber: number): RunnerPullOwner | undefined;
-  };
+  runnerRebase?: (instance: CoordinatorInstance, prNumber: number, effects: SweepEffectJournal) => Promise<SweepReport>;
   /** The ship grant as the requester's channel and user scopes say now. Idle
    * waits can outlive a config change, so a wake never relies on the grant
    * captured when the instance was created. */
@@ -341,11 +355,8 @@ export interface AdminCoordinatorDeps {
     startState: BranchStartState;
     requester: string;
   }) => Promise<RewriteResult>;
-  /** The recover path's one write (githubPulls.openPullRequest, open-or-edit by
-   *  head branch): a coding child that pushed and then died leaves its work on
-   *  the branch — the pr-check opens the pull request from the branch itself
-   *  instead of answering `none` over stranded work (agent-ship item 15). */
-  openPullRequest: (target: PullRequestTarget) => Promise<OpenedPullRequest>;
+  /** One create request over this admitted original head; uncertain admission remains owned. */
+  createRecoveryPullRequest?: (target: PullRequestTarget & { headSha: string }) => Promise<RecoveryPullWriteResult>;
   /** The branch head commit's subject (githubPulls.branchHeadSubject): the
    *  recover open's preferred title when the record holds no submitted
    *  description and the subject passes the title rule (record 0064's
@@ -359,12 +370,14 @@ export interface AdminCoordinatorDeps {
    *  agent-ship items 10 and 15): the same rewrite the coding post-step runs,
    *  over an EMPTY start state — every earlier round's commits were rewritten
    *  before their own pull request opened, so they pass. Unreadable throws,
-   *  which the pr-check reports as `github_unavailable`, never an open over
-   *  unverified identities. Absent (a test of the other paths): no rewrite. */
+   *  which leaves the original publication unverified. Missing capability
+   *  never permits an open over unchecked identities. */
   rewriteIdentities?: (args: {
     repo: string;
     base: string;
     branch: string;
+    expectedTip: string;
+    refPublication: IdentityRefPublication;
     startState: BranchStartState;
     requester: string;
   }) => Promise<RewriteResult>;
@@ -377,8 +390,9 @@ export interface AdminCoordinatorDeps {
    *  issues (a unit's board issue) and the comment a unit's ending leaves there
    *  — the App's GitHub reads and the one write beside the merge. */
   github: Pick<GithubApi, "readFile" | "listIssues" | "commentIssue">;
-  /** Round 0's branch create (githubPulls.createBranchRef): 422 already-exists is success inside. */
-  createBranchRef: (repo: string, branch: string, fromRef: string) => Promise<void>;
+  /** Exact reads freeze a base before admission; the write consumes only that SHA. */
+  fetchBranchRef: (repo: string, branch: string) => Promise<BranchRefRead>;
+  createBranchRef: (repo: string, branch: string, sha: string) => Promise<BranchRefCreateResult>;
   /** The reviews on a pull request (githubPulls.fetchPullRequestReviews) and the
    *  identity this bot posts as: whether the bot's verdict stands at a head. */
   fetchPrReviews: (pr: { repo: string; number: number }) => Promise<PullRequestReview[] | undefined>;
@@ -438,14 +452,14 @@ export interface AdminCoordinatorDeps {
     prNumber: number,
     baseRef?: string,
   ) => Promise<RoundChecks | undefined>;
-  /** The flake rule's one re-run (record 0055): re-run the failed jobs behind
-   *  the named check runs at the head (githubPulls.rerunFailedJobs — the same
-   *  `rerun-failed-jobs` retry the deploy pipeline documents). Optional:
-   *  without it a retry ask answers false and the second read makes the finding. */
-  rerunFailedChecks?: (repo: string, sha: string, names: string[]) => Promise<boolean>;
-  /** Empty required-check recovery: close and reopen the pull request once so
-   *  GitHub emits `pull_request` again without moving the reviewed head. */
-  refirePullRequest?: (repo: string, prNumber: number) => Promise<boolean>;
+  fetchCheckRetryTargets?: (repo: string, sha: string, names: string[]) => Promise<CheckRetryTarget[] | undefined>;
+  rerunActionsFailedJobs?: (repo: string, id: number) => Promise<GithubWriteResult>;
+  rerequestCheckRun?: (repo: string, id: number) => Promise<GithubWriteResult>;
+  setPullRequestState?: (
+    pr: { repo: string; number: number },
+    target: { headSha: string; headRef: string; baseRef: string },
+    state: "closed" | "open",
+  ) => Promise<GithubWriteResult>;
   /** Where the parent's record goes when the instance ends. */
   runHistoryWriter: RunHistoryWriter;
   /** The channel's visibility stamp for that record (dispatch/record.ts `channelVisibilityOf`). */
@@ -986,7 +1000,6 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   // The hard stop's mark (record 0060; issue 1924): a sealed parent's runner
   // spawns nothing more — the refusal is terminal, and the machine ends the
   // unit stopped on it.
-  if (instance.stop !== undefined) return json(409, { ok: false, error: "stopped", at });
   const unit = await unitRowOf(deps, instance, req.unit);
   if (!unit.ok) return unit.response;
   if (unit.rows.some((candidate) => candidate.workBrief !== undefined) && unit.row?.workBrief === undefined)
@@ -1010,9 +1023,58 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   // there. A row a bot wrote before record 0055 names a review thread; its
   // review rounds stay there, so a unit in flight across the release keeps
   // its review session where it began.
-  const row = unit.row;
+  const initialRow = unit.row;
+  if (!initialRow || !isCoordinatorUnit(initialRow)) return json(409, { ok: false, error: "effect_unit_required", at });
+  let row: CoordinatorUnit = initialRow;
+  const execution = {
+    workflowId: body.executionWorkflowId as string,
+    ...(body.recoveryActionId === undefined ? {} : { recoveryActionId: body.recoveryActionId as string }),
+  };
+  if (
+    execution.workflowId !== (row.recovery?.workflowId ?? instance.id) ||
+    execution.recoveryActionId !== row.recovery?.actionId ||
+    body.effectId !== req.step ||
+    !req.step.startsWith(`${row.unit}/`) ||
+    childPresetOfStep(req.step) !== req.preset ||
+    !Number.isSafeInteger(body.effectOrdinal) ||
+    (body.effectOrdinal as number) < 1
+  )
+    return json(409, { ok: false, error: "effect_execution_mismatch", at });
+  const effectId = req.step,
+    effectOrdinal = body.effectOrdinal as number;
+  const unavailable = () => json(503, { ok: false, error: "spawn_unavailable", at });
+  const move = async (input: UnitEffectTransition) => {
+    const result = await deps.instances.transitionUnitEffect(input);
+    if (result.ok) row = result.unit;
+    return result;
+  };
+  const cell = row.currentEffect;
+  if (cell?.id === effectId) {
+    if (
+      cell.ordinal !== effectOrdinal ||
+      cell.execution.workflowId !== execution.workflowId ||
+      cell.execution.recoveryActionId !== execution.recoveryActionId ||
+      cell.calls.length !== 1 ||
+      cell.calls[0].operation !== "spawn"
+    )
+      return json(409, { ok: false, error: "effect_execution_mismatch", at });
+  } else if (effectOrdinal !== (cell?.ordinal ?? 0) + 1 || cell?.phase === "active") {
+    return json(409, { ok: false, error: "effect_execution_mismatch", at });
+  }
   if (row?.workBrief !== undefined && req.brief === undefined)
     return json(409, { ok: false, error: "private_worker_brief_required", at });
+  if (
+    req.preset === "review" &&
+    (req.brief?.kind !== "review" || req.brief.headSha !== row.publication?.expectedHeadSha)
+  )
+    return json(409, { ok: false, error: "effect_target_mismatch", at });
+  if (
+    req.brief !== undefined &&
+    "pr" in req.brief &&
+    (req.brief.pr !== row.pr?.number ||
+      ("headSha" in req.brief && req.brief.headSha !== row.publication?.expectedHeadSha))
+  )
+    return json(409, { ok: false, error: "effect_target_mismatch", at });
   const legacy = req.preset === "review" ? row?.reviewThread : undefined;
   const thread: OpenedThreadRef = legacy ?? {
     threadKey: own.threadKey,
@@ -1020,12 +1082,72 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   };
   const threadKey = thread.threadKey;
   const key = idempotencyKeyFor(instance.id, req.step);
-  // Retry-safe before anything starts: the step's child, live or finished, or
-  // another run holding the unit's thread.
+  const recoveryStep = parseRecoveryStep(req.step);
+  if (row?.recovery !== undefined || req.step.includes("/recovery/")) {
+    if (
+      row?.recovery?.actionId === undefined ||
+      recoveryStep?.unit !== row.unit ||
+      recoveryStep.actionId !== row.recovery.actionId ||
+      body.recoveryActionId !== row.recovery.actionId ||
+      body.recoveryWorkflowId !== row.recovery.workflowId
+    )
+      return json(409, { ok: false, error: "recovery_claim_mismatch", at });
+  }
+  const known = (alreadySpawned: boolean) => {
+    const call = row!.currentEffect!.calls[0];
+    return call.state === "accepted" && call.runId !== undefined
+      ? json(200, {
+          ok: true,
+          runId: call.runId,
+          threadKey,
+          effectOrdinal,
+          ...(alreadySpawned ? { alreadySpawned: true } : {}),
+          at,
+        })
+      : json(403, { ok: false, error: "spawn_refused", effectOrdinal, at });
+  };
+  if (cell?.id === effectId && cell.phase === "settled") return known(true);
+  if (cell?.id === effectId && cell.calls[0].state !== "unstarted") {
+    if (cell.calls[0].state === "pending" || cell.calls[0].state === "uncertain") {
+      const live = await liveOnThread(deps.runs, instance, threadKey).catch(() => undefined);
+      const candidate =
+        live?.idempotencyKey === key
+          ? live
+          : await finishedWithKey(deps.runs, instance, threadKey, key).catch(() => undefined);
+      if (!candidate) return unavailable();
+      const resolved = await move({
+        kind: "resolve",
+        expected: row,
+        execution,
+        effectId,
+        call: 0,
+        observation: { kind: "spawn_run", runId: candidate.id },
+      });
+      if (!resolved.ok) return unavailable();
+    }
+    if (!(await move({ kind: "settle", expected: row, execution, effectId })).ok) return unavailable();
+    return known(true);
+  }
+  const cancelUnstarted = async () => {
+    if (row!.currentEffect?.id !== effectId) return true;
+    if (!(await move({ kind: "cancel", expected: row!, execution, effectId, call: 0 })).ok) return false;
+    return (await move({ kind: "settle", expected: row!, execution, effectId })).ok;
+  };
+  if (instance.stop !== undefined)
+    return (await cancelUnstarted())
+      ? json(409, { ok: false, error: "stopped", effectOrdinal: row.currentEffect?.ordinal, at })
+      : unavailable();
+  // Listings locate occupied threads; they cannot admit a same-key child without its effect receipt.
   const live = await liveOnThread(deps.runs, instance, threadKey);
-  if (live) return answerForLive(live, key, threadKey, at);
-  const done = await finishedWithKey(deps.runs, instance, threadKey, key);
-  if (done) return json(200, { ok: true, runId: done.id, threadKey, alreadySpawned: true, at });
+  if (live) {
+    if (live.idempotencyKey === key || !(await cancelUnstarted())) return unavailable();
+    const answer = answerForLive(live, key, threadKey, at);
+    return {
+      ...answer,
+      body: { ...(answer.body as object), ...(row.currentEffect?.id === effectId ? { effectOrdinal } : {}) },
+    };
+  }
+  if (await finishedWithKey(deps.runs, instance, threadKey, key)) return unavailable();
   if (row?.recovery?.kind === "coding") {
     if (
       req.preset !== "coding" ||
@@ -1053,7 +1175,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
     if (open !== null || merged !== null) return json(409, { ok: false, error: "recovery_stage_changed", at });
   } else if (row?.recovery !== undefined) {
     const expectedKind = req.preset === "coding" ? "findings" : "review";
-    const stepMatch = new RegExp(`^${row.unit}/recovery/[1-9][0-9]*/${expectedKind}(?:/a[1-9][0-9]*)?$`).test(req.step);
+    const stepMatch = recoveryStep?.kind === expectedKind;
     const briefHead =
       req.brief !== undefined && "headSha" in req.brief && typeof req.brief.headSha === "string"
         ? req.brief.headSha
@@ -1100,7 +1222,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
             ? undefined
             : await deps.runs.getRun(reviewId, { privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ });
         const run = review?.ok ? review.value : undefined;
-        const round = Number(req.step.split("/")[2]);
+        const round = recoveryStep!.round;
         const priorRound = req.preset === "review" ? round - 1 : round;
         if (
           run === undefined ||
@@ -1114,7 +1236,10 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
           run.threadKey !== (row.reviewThread?.threadKey ?? row.threadKey ?? instance.threadKey) ||
           priorRound < row.recovery.round ||
           round > (instance.caps?.maxRounds ?? 0) + (row.recovery.patternContinuations ?? 0) ||
-          !isStepAttempt(run.idempotencyKey, `${instance.id}:${row.unit}/recovery/${priorRound}/review`) ||
+          !isStepAttempt(
+            run.idempotencyKey,
+            `${instance.id}:${recoveryStepName({ unit: row.unit, actionId: row.recovery.actionId!, round: priorRound, kind: "review" })}`,
+          ) ||
           run.verdict === undefined ||
           run.reviewPost?.posted !== true ||
           run.reviewPost.target.repo.toLowerCase() !== instance.repo.toLowerCase() ||
@@ -1151,12 +1276,6 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
             : "recovery_facts_mismatch",
         at,
       });
-    try {
-      if (deps.runnerOwnership?.claim(instance.repo, row.publication.pr, row.publication.owner) !== true)
-        return json(409, { ok: false, error: "publication_ownership_changed", at });
-    } catch (err) {
-      return json(409, { ok: false, error: "publication_ownership_unknown", message: describe(err), at });
-    }
   }
   const io =
     row?.workBrief !== undefined
@@ -1215,40 +1334,6 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
         message: "the existing pull request has no durable publication binding",
         at,
       });
-    try {
-      // A recovery Workflow can outlive the bot process that admitted it. Its
-      // durable claim is sufficient to rebuild only this exact owner before
-      // every write-child admission; a rival process-local owner still wins.
-      if (
-        row.recovery !== undefined &&
-        deps.runnerOwnership?.claim(instance.repo, row.publication.pr, row.publication.owner) !== true
-      )
-        return json(409, {
-          ok: false,
-          error: "publication_ownership_changed",
-          message: "the durable recovery claim no longer owns the pull request",
-          at,
-        });
-      const owner = deps.runnerOwnership?.owner(instance.repo, row.publication.pr);
-      if (
-        owner === undefined ||
-        owner.instanceId !== row.publication.owner.instanceId ||
-        owner.unit !== row.publication.owner.unit
-      )
-        return json(409, {
-          ok: false,
-          error: "publication_ownership_changed",
-          message: "the durable existing-PR publication owner is no longer the runner's sole owner",
-          at,
-        });
-    } catch (err) {
-      return json(409, {
-        ok: false,
-        error: "publication_ownership_unknown",
-        message: describe(err),
-        at,
-      });
-    }
   }
   // The child's message is the one the requester would have typed, in the
   // child's thread, as the requester the parent record names. The directive is
@@ -1338,13 +1423,82 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
     )
       return json(409, { ok: false, error: "recovery_claim_mismatch", at });
   }
-  // The definitive drain fence sits beside dispatch, after every asynchronous
-  // read. Its synchronous permit acquisition and dispatch call cannot have a
-  // signal callback interleave; once dispatch yields, the drain counts this
-  // permit until a registry row exists (or dispatch ends without one).
+  if (row?.recovery !== undefined) {
+    const [currentInstance, currentRows] = await Promise.all([
+      deps.instances.get(instance.id),
+      deps.instances.listUnits(instance.id),
+    ]);
+    const matches = currentRows.filter((candidate) => candidate.unit === row.unit);
+    if (
+      currentInstance === null ||
+      currentInstance.stop !== undefined ||
+      matches.length !== 1 ||
+      JSON.stringify(matches[0]!.recovery) !== JSON.stringify(row.recovery) ||
+      JSON.stringify(matches[0]!.publication) !== JSON.stringify(row.publication)
+    )
+      return json(409, { ok: false, error: "recovery_claim_mismatch", at });
+  }
+  // Hold the drain permit through durable admission and dispatch setup until registration or a closed dispatch outcome.
+  const head = await deps.fetchBranchRef(instance.repo, row.branch).catch(() => ({ kind: "unverified" as const }));
+  if (head.kind !== "verified" || head.ref !== `refs/heads/${row.branch}` || !fullHead(head.sha)) return unavailable();
   const leaveAdmission = deps.childAdmission?.enter();
   if (deps.childAdmission !== undefined && leaveAdmission === undefined) return queued();
   const releaseAdmission = leaveAdmission ?? (() => {});
+  try {
+    if (!row.currentEffect || row.currentEffect.id !== effectId) {
+      const admitted = await move({
+        kind: "admit",
+        expected: row,
+        execution,
+        effect: {
+          version: 1,
+          id: effectId,
+          ordinal: effectOrdinal,
+          execution,
+          phase: "active",
+          target: {
+            repo: instance.repo,
+            ref: row.branch,
+            base: instance.base ?? "main",
+            headSha: head.sha,
+            ...(row.pr ? { pr: row.pr.number } : {}),
+          },
+          calls: [{ operation: "spawn", state: "unstarted" }],
+        },
+      });
+      if (!admitted.ok) {
+        releaseAdmission();
+        return admitted.reason === "stopped" ? json(409, { ok: false, error: "stopped", at }) : unavailable();
+      }
+    }
+    const begun = await move({ kind: "begin", expected: row, execution, effectId, call: 0 });
+    if (!begun.ok) {
+      if (begun.reason === "stopped") {
+        if (!(await cancelUnstarted())) {
+          releaseAdmission();
+          return unavailable();
+        }
+      }
+      releaseAdmission();
+      return begun.reason === "stopped" ? json(409, { ok: false, error: "stopped", at }) : unavailable();
+    }
+  } catch {
+    releaseAdmission();
+    return unavailable();
+  }
+  const finishEffect = async (
+    outcome:
+      { state: "accepted"; runId: string } | { state: "refused"; cause: "external_refused" } | { state: "uncertain" },
+  ) => {
+    // Child setup may acknowledge context on this row. Refresh metadata only when the exact pending cell survives.
+    const current = (await deps.instances.listUnits(instance.id)).filter((u) => u.unit === row!.unit);
+    if (current.length !== 1 || JSON.stringify(current[0].currentEffect) !== JSON.stringify(row!.currentEffect))
+      return false;
+    row = current[0];
+    const completed = await move({ kind: "complete", expected: row, execution, effectId, call: 0, outcome });
+    if (!completed.ok) return false;
+    return outcome.state === "uncertain" || (await move({ kind: "settle", expected: row, execution, effectId })).ok;
+  };
   let startedId: string | undefined;
   let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
   let lastReply: string | undefined;
@@ -1380,7 +1534,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
         ? req.brief.continue?.from
         : undefined;
   const publication =
-    req.preset === "coding" && row?.publication !== undefined
+    row?.publication !== undefined
       ? {
           ...row.publication,
           ...(roundExpectedHead !== undefined ? { expectedHeadSha: roundExpectedHead } : {}),
@@ -1406,7 +1560,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
           },
         }
       : {}),
-    ...(instance.base !== undefined ? { base: instance.base } : {}),
+    base: instance.base ?? "main",
     ...(publication !== undefined ? { publication } : {}),
     ...(req.brief?.kind === "findings" && turn.issuedFindingIds !== undefined
       ? { issuedFindingIds: turn.issuedFindingIds }
@@ -1445,9 +1599,10 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
         : {}),
       ...(turn.contract !== undefined ? { contract: turn.contract } : {}),
     });
-  } catch (err) {
+  } catch {
     releaseAdmission();
-    return json(502, { ok: false, error: "spawn_failed", message: describe(err), at });
+    await finishEffect({ state: "uncertain" }).catch(() => false);
+    return unavailable();
   }
   const settled = dispatching.then(
     (outcome) => ({ kind: "ended" as const, outcome }),
@@ -1466,6 +1621,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   const first = await Promise.race([started.then((id) => ({ kind: "started" as const, id })), settled]);
   if (first.kind === "started" || startedId !== undefined) {
     const runId = first.kind === "started" ? first.id : startedId!;
+    if (!(await finishEffect({ state: "accepted", runId }).catch(() => false))) return unavailable();
     if (folded.length > 0) {
       // Consumed by the spawn's step (record 0051's fold rule): the same identity a
       // replay carries, so the marks and the retry answer agree. A failed mark
@@ -1483,23 +1639,35 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
       );
     }
     log(`[coordinator] ${instance.id} ${req.step}: spawned ${req.preset} run ${runId} in ${threadKey}`);
-    return json(200, { ok: true, runId, threadKey, at });
+    return json(200, { ok: true, runId, threadKey, effectOrdinal, at });
   }
-  if (first.kind === "threw") return json(502, { ok: false, error: "spawn_failed", message: describe(first.err), at });
+  if (first.kind === "threw") {
+    await finishEffect({ state: "uncertain" }).catch(() => false);
+    return unavailable();
+  }
   const refusal = first.outcome.refusal;
+  if (
+    !(await finishEffect(
+      refusal === undefined ? { state: "uncertain" } : { state: "refused", cause: "external_refused" },
+    ).catch(() => false))
+  )
+    return unavailable();
+  if (refusal === undefined) return unavailable();
   if (refusal === "coordinator_thread_live") {
     // A run took the thread between the read above and the claim: answer from it.
     const now = await liveOnThread(deps.runs, instance, threadKey);
-    if (now) return answerForLive(now, key, threadKey, at);
-    return json(409, { ok: false, error: "busy", at });
+    if (now && now.idempotencyKey !== key) {
+      const answer = answerForLive(now, key, threadKey, at);
+      return { ...answer, body: { ...(answer.body as object), effectOrdinal } };
+    }
+    return json(409, { ok: false, error: "busy", effectOrdinal, at });
   }
   log(`[coordinator] ${instance.id} ${req.step}: ${req.preset} child not started (${refusal ?? first.outcome.status})`);
-  if (refusal !== undefined)
-    return json(403, { ok: false, error: refusal, ...(lastReply !== undefined ? { message: lastReply } : {}), at });
-  return json(502, {
+  return json(403, {
     ok: false,
-    error: "spawn_failed",
-    message: lastReply ?? `the child ended (${first.outcome.status}) before it started`,
+    error: refusal,
+    effectOrdinal,
+    ...(lastReply !== undefined ? { message: lastReply } : {}),
     at,
   });
 }
@@ -1726,14 +1894,14 @@ async function reviewPostedAtPatiently(
  *  reviewed head to that pull request, `false` with the reason when it recorded
  *  a skip or a failure, and nothing when the record is silent (a child from
  *  before the fact existed) or names another head, verdict or pull request —
- *  then GitHub decides. */
+ *  then GitHub decides. An uncertain post is not a confirmed skip. */
 function reviewPostedByRecord(
   record: Pick<RunView, "reviewPost" | "reviewHead" | "verdict">,
   pr: { repo: string; number: number },
 ): { reviewPosted: boolean; reviewPostReason?: string } | undefined {
   const post = record.reviewPost;
   if (post === undefined || record.reviewHead === undefined || record.verdict === undefined) return undefined;
-  if (!post.posted) return { reviewPosted: false, reviewPostReason: post.reason };
+  if (!post.posted) return post.uncertain ? undefined : { reviewPosted: false, reviewPostReason: post.reason };
   const same =
     post.target.repo === pr.repo &&
     post.target.number === pr.number &&
@@ -1901,7 +2069,14 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
         : undefined;
     if (coordinatorUnit !== undefined && pushedPrRef !== undefined && coordinatorUnit.branch !== pushedPrRef) {
       coordinatorUnit = { ...coordinatorUnit, branch: pushedPrRef };
-      await deps.instances.putUnits([coordinatorUnit]);
+      const written = await deps.instances.putUnits([coordinatorUnit]);
+      if (!written.ok)
+        return json(written.reason === "unavailable" ? 503 : 409, {
+          ok: false,
+          error: "unit_write_refused",
+          reason: written.reason,
+          at,
+        });
     }
   }
   // An interrupted child that restarted from its request (issue 1903: a
@@ -1937,7 +2112,7 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
   }
   // Whether the verdict stands on the unit's pull request: the child's own
   // record of its post first (item 18) — it posted, or it recorded why not —
-  // and GitHub only when the record is silent, looked at patiently: the
+  // and GitHub when the record is silent or uncertain, looked at patiently: the
   // finish event wakes the runner within a second of the post, and GitHub's
   // review list can lag it. The merge step re-verifies the approval at the
   // head regardless, so the pre-check may be patient while the guard stays strict.
@@ -2043,21 +2218,14 @@ async function restartedChildOf(
   return successor?.id;
 }
 
-/** Why a recover pr-check opened nothing: GitHub refused the create because
- *  nothing sits between the base and the head (`no_commits`), or the instance
- *  names no base to open against and no create was tried (`no_base`). Any
- *  other GitHub failure is not a reason but an outage: it propagates, the
- *  check answers `github_unavailable`, and the step is asked again. */
-type Unrecovered = "no_commits" | "no_base";
+/** A recovery that opened nothing carries only its proved reason: no base,
+ * no commits, or a definite native refusal. Unknown write admission stays owned. */
+type Unrecovered = "no_commits" | "no_base" | "external_refused";
 type Recovered = { kind: "opened"; pr: OpenedPullRequest } | { kind: "none"; why: Unrecovered };
 
 /** GitHub's refusal of a pull request over an empty branch: HTTP 422 with
  *  "No commits between <base> and <head>". Everything else that fails the
  *  create is treated as GitHub being unavailable. */
-function isEmptyBranchRefusal(err: unknown): boolean {
-  const message = err instanceof Error ? err.message : String(err);
-  return /HTTP 422\b/.test(message) && /no commits between/i.test(message);
-}
 
 /** The last line with the cap: over `max`, cut at the last word boundary that
  *  fits, never mid-word, and drop what a cut leaves dangling (a period the
@@ -2098,100 +2266,222 @@ export function recoveredFallbackTitle(
   return cutAtWordBoundary(`${prefix}${rest === "" ? branch : rest}`, TITLE_MAX_LENGTH, prefix.length);
 }
 
-/** The recover path's pull request (agent-ship items 10 and 15): a coding
- *  child pushed its branch and then died — the pull request is opened from the
- *  branch itself through the same open-or-edit as any run's, the title from
- *  the child's submitted description when the record holds one (used as is —
- *  the submit tool's gate already judged it), else the head commit's subject
- *  when it passes the title rule (record 0064's `unit_title` move), else the
- *  unit's title as the conventional fallback above (issue 1877); the body from
- *  the description,
- *  else a minimal body naming the unit. `none` names why when nothing could be
- *  opened; a GitHub failure that is neither reason is thrown for the caller's
- *  `github_unavailable`. */
+/** A dead coding child publishes only through its current durable unit execution.
+ * Frozen payload and per-call native acknowledgments survive coordinator retries. */
+class RecoverPublicationRefusal extends Error {
+  constructor(readonly reason: string) {
+    super(reason);
+  }
+}
 async function recoverPushedBranch(
   deps: AdminCoordinatorDeps,
   instance: CoordinatorInstance,
   row: CoordinatorUnit | undefined,
   branch: string,
   runId: string,
-): Promise<Recovered> {
+  body: Record<string, unknown>,
+): Promise<Recovered & { effectOrdinal?: number }> {
   if (instance.base === undefined) return { kind: "none", why: "no_base" };
-  const unitName = row?.unit ?? "the unit";
-  let title: string | undefined;
-  let prBody = `Opened by the plan runner from the pushed branch \`${branch}\`: the coding run ${runId} of ${unitName} ended before it could open the pull request or submit its description. The review round asks for the description.`;
-  try {
-    const full = await deps.runs.getRun(runId, {
-      include: "messages",
-      privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
-    });
-    if (full.ok && full.value.parentInstanceId === instance.id) {
-      const events = full.value.events ?? [];
-      const descEvent = [...events].reverse().find((e) => e.type === "pr_description");
-      const desc = descEvent?.type === "pr_description" ? descEvent.description : undefined;
-      if (desc !== undefined) {
-        title = desc.title;
-        // A record written under the previous contract carries the why as
-        // `whatWhy`; a body with neither gets no second paragraph, never "undefined".
-        const why = desc.why ?? (desc as { whatWhy?: string }).whatWhy;
-        prBody = [
-          desc.tldr,
-          why,
-          "_Rendered by the plan runner from the coding run's submitted description; the run ended before it could open the pull request itself._",
-        ]
-          .filter((part) => part !== undefined && part !== "")
-          .join("\n\n");
-      }
-    }
-  } catch {
-    // the minimal body stands
-  }
-  // No submitted description: the head commit's subject when it passes the
-  // title rule (record 0064's `unit_title` move — the open passes the required
-  // check first time), else the conventional fallback from the unit's title
-  // (issue 1877). An unreadable subject claims nothing and the fallback stands.
-  if (title === undefined && deps.branchHeadSubject !== undefined) {
-    const subject = await deps.branchHeadSubject(instance.repo, branch).catch(() => undefined);
-    if (subject !== undefined && checkPrTitle(subject, PR_TITLE_VOCABULARY).ok) title = subject;
-  }
-  title ??= recoveredFallbackTitle(row, branch, instance.plan?.id ?? parsePlanBranch(branch)?.planId);
-  // Recovery has no normal coding post-step, but the durable instance still
-  // owns the requester and the original thread even when its child is gone.
-  const header = requestedByLine({
-    name: instance.userName?.trim() || instance.userId,
-    threadUrl: threadPageLink(instance.threadKey, deps.runPageBase?.replace(/\/runs\/?$/, "") ?? ""),
+  if (!row || row.branch !== branch || row.ending !== undefined || row.idle !== undefined)
+    throw new RecoverPublicationRefusal("effect_unit_required");
+  const execution = {
+    workflowId: body.executionWorkflowId as string,
+    ...(typeof body.recoveryActionId === "string" ? { recoveryActionId: body.recoveryActionId } : {}),
+  };
+  if (
+    execution.workflowId !== (row.recovery?.workflowId ?? instance.id) ||
+    execution.recoveryActionId !== row.recovery?.actionId ||
+    typeof body.effectId !== "string" ||
+    !STEP_NAME_PATTERN.test(body.effectId) ||
+    !body.effectId.startsWith(`${row.unit}/`) ||
+    !Number.isSafeInteger(body.effectOrdinal)
+  )
+    throw new RecoverPublicationRefusal("effect_execution_mismatch");
+  if (!deps.reportLedger || !deps.createRecoveryPullRequest || !deps.rewriteIdentities || !deps.fetchBranchHeadSha)
+    throw new RecoverPublicationRefusal("recovery_publication_unavailable");
+  const original = await deps.runs.getRun(runId, {
+    include: "messages",
+    requireFinalRecord: true,
+    privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
   });
-  prBody = `${header}\n\n${prBody}`;
-  // The identity rewrite before the open (record 0062): the recover path
-  // opens over the same guarantee the coding post-step gives — the commits
-  // carry only the allowed identities. Unreadable is thrown for the caller's
-  // `github_unavailable`, never an open over unverified identities.
-  if (deps.rewriteIdentities !== undefined) {
-    const rewritten = await deps.rewriteIdentities({
-      repo: instance.repo,
-      base: instance.base,
-      branch,
-      startState: EMPTY_START_STATE,
-      requester: instance.userId,
-    });
-    if (rewritten.kind === "unreadable")
-      throw new Error(`the identity rewrite could not verify ${branch}: ${rewritten.reason}`);
+  const child = original.ok ? original.value : undefined;
+  const tags = child?.events?.filter((event) => event.type === "coordinator_tag") ?? [];
+  const originalMeta = child?.events?.find((event) => event.type === "run_meta");
+  const prefix =
+    row.recovery?.actionId === undefined
+      ? publicationStepPrefix(row)
+      : recoveryStepPrefix(row.unit, row.recovery.actionId);
+  if (
+    !child ||
+    originalMeta?.type !== "run_meta" ||
+    originalMeta.agent !== "coding" ||
+    originalMeta.repo?.toLowerCase() !== instance.repo.toLowerCase() ||
+    originalMeta.ref !== branch ||
+    child.id !== runId ||
+    child.finished !== true ||
+    child.persisted !== true ||
+    child.truncated !== false ||
+    child.events === undefined ||
+    child.eventCount !== child.storedEventCount ||
+    child.events.length !== child.storedEventCount ||
+    child.parentInstanceId !== instance.id ||
+    child.coordinatorUnit !== row.unit ||
+    child.coordinatorAttempt !== (instance.attempt ?? 0) ||
+    child.agent !== "coding" ||
+    child.userId !== instance.userId ||
+    child.channelId !== instance.channelId ||
+    child.threadKey !== (row.threadKey ?? instance.threadKey) ||
+    child.repo?.toLowerCase() !== instance.repo.toLowerCase() ||
+    !isStepAttempt(child.idempotencyKey, `${instance.id}:${prefix}/0/coding`) ||
+    !fullHead(child.headSha) ||
+    child.pushed?.length !== 1 ||
+    child.pushed[0]?.ref !== branch ||
+    child.pushed[0]?.sha !== child.headSha ||
+    child.doorPublicationPending !== undefined ||
+    tags.length !== 1 ||
+    tags[0]?.unit !== row.unit ||
+    tags[0].parentInstanceId !== instance.id ||
+    tags[0].base !== instance.base ||
+    !Number.isFinite(child.finishedAt) ||
+    child.finishedAt! < child.startedAt
+  )
+    throw new RecoverPublicationRefusal("recovery_original_child_unverified");
+  const acceptedBranch = branchPublicationOf(child.branchPublication);
+  const settlement = publicationSettlementForRun(child.publicationSettlement, child);
+  const nativePushes = branchPushReceiptsOf(child.branchPushReceipts);
+  const originalPush = nativePushes?.filter(
+    (receipt) => receipt.ref === branch && receipt.sha === child.headSha && receipt.by === "push",
+  );
+  if (
+    child.pr !== undefined ||
+    (child.branchPublication !== undefined &&
+      (!acceptedBranch ||
+        acceptedBranch.pending !== undefined ||
+        acceptedBranch.branches.length !== 0 ||
+        (acceptedBranch.targets?.length ?? 0) !== 0)) ||
+    !(
+      (child.branchPushReceipts?.length === 1 && nativePushes?.length === 1 && originalPush?.length === 1) ||
+      (settlement?.checkpoint.kind === "created" &&
+        settlement.checkpoint.head === child.headSha &&
+        settlement.publication.kind === "accepted" &&
+        settlement.publication.head === child.headSha &&
+        settlement.binding.branch === branch)
+    )
+  )
+    throw new RecoverPublicationRefusal("recovery_original_publication_unverified");
+  if (row.workBrief !== undefined) {
+    const seed = child.unitSeedReceipt;
+    if (
+      row.threadKey !== privateWorkerThreadKey({ instanceId: instance.id, unit: row.unit }) ||
+      !isUnitSeedReceipt(seed) ||
+      seed.binding.instanceId !== instance.id ||
+      seed.binding.unit !== row.unit ||
+      seed.binding.instanceAttempt !== (instance.attempt ?? 0) ||
+      seed.binding.idempotencyKey !== child.idempotencyKey ||
+      seed.child.runId !== runId ||
+      seed.child.requester !== instance.userId ||
+      seed.child.channelId !== instance.channelId ||
+      seed.child.threadKey !== row.threadKey ||
+      seed.workBriefHash !== (await sourceHash(row.workBrief))
+    )
+      throw new RecoverPublicationRefusal("recovery_original_child_unverified");
   }
-  try {
-    const pr = await deps.openPullRequest({
-      repo: instance.repo,
-      headBranch: branch,
-      base: instance.base,
-      title,
-      body: prBody,
-    });
-    return { kind: "opened", pr };
-  } catch (err) {
-    // Nothing to recover only when GitHub says the branch is empty; any other
-    // failure is an outage the caller reports, never a claim that nothing was pushed.
-    if (isEmptyBranchRefusal(err)) return { kind: "none", why: "no_commits" };
-    throw err;
-  }
+  const listing = await deps.runs.listRuns({
+    privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
+    status: "all",
+    visibleTo: EVERY_RUN,
+    limit: RUN_LIST_MAX_LIMIT,
+    recoveryEvidence: { instanceId: instance.id, unit: row.unit, threadKeys: [row.threadKey ?? instance.threadKey] },
+  });
+  if (
+    listing.storeUnavailable ||
+    listing.ledgerUnavailable ||
+    listing.nextBefore !== undefined ||
+    listing.runs.length >= RUN_LIST_MAX_LIMIT ||
+    listing.runs.filter((run) => run.id === runId).length !== 1 ||
+    listing.runs.some(
+      (run) =>
+        run.id !== runId &&
+        ((!run.finished &&
+          (run.parentInstanceId === instance.id || run.idempotencyKey?.startsWith(`${instance.id}:${row.unit}/`))) ||
+          (run.pushed?.some((push) => push.ref === branch) &&
+            (run.finishedAt === undefined || run.finishedAt >= child.startedAt))),
+    )
+  )
+    throw new RecoverPublicationRefusal("recovery_evidence_incomplete");
+  const answer = await performRecoverPublication(
+    {
+      instance,
+      unit: row,
+      execution,
+      effectId: body.effectId,
+      ordinal: body.effectOrdinal as number,
+      runId,
+      headSha: child.headSha!,
+    },
+    {
+      instances: deps.instances,
+      ledger: deps.reportLedger,
+      head: () => deps.fetchBranchHeadSha!(instance.repo, branch),
+      render: async () => {
+        const unitName = row?.unit ?? "the unit";
+        let title: string | undefined;
+        let prBody = `Opened by the plan runner from the pushed branch \`${branch}\`: the coding run ${runId} of ${unitName} ended before it could open the pull request or submit its description. The review round asks for the description.`;
+        const descEvent = [...child.events!].reverse().find((event) => event.type === "pr_description");
+        const desc = descEvent?.type === "pr_description" ? descEvent.description : undefined;
+        if (desc !== undefined) {
+          title = desc.title;
+          const why = desc.why ?? (desc as { whatWhy?: string }).whatWhy;
+          prBody = [
+            desc.tldr,
+            why,
+            "_Rendered by the plan runner from the original coding run's submitted description._",
+          ]
+            .filter((part) => part !== undefined && part !== "")
+            .join("\n\n");
+        }
+        // No submitted description: the head commit's subject when it passes the
+        // title rule (record 0064's `unit_title` move — the open passes the required
+        // check first time), else the conventional fallback from the unit's title
+        // (issue 1877). An unreadable subject claims nothing and the fallback stands.
+        if (title === undefined && deps.branchHeadSubject !== undefined) {
+          const subject = await deps.branchHeadSubject(instance.repo, branch).catch(() => undefined);
+          if (subject !== undefined && checkPrTitle(subject, PR_TITLE_VOCABULARY).ok) title = subject;
+        }
+        title ??= recoveredFallbackTitle(row, branch, instance.plan?.id ?? parsePlanBranch(branch)?.planId);
+        // Recovery has no normal coding post-step, but the durable instance still
+        // owns the requester and the original thread even when its child is gone.
+        const header = requestedByLine({
+          name: instance.userName?.trim() || instance.userId,
+          threadUrl: threadPageLink(instance.threadKey, deps.runPageBase?.replace(/\/runs\/?$/, "") ?? ""),
+        });
+        prBody = `${header}\n\n${prBody}`;
+
+        return { title, body: prBody };
+      },
+      rewrite: (refPublication, expectedTip) =>
+        deps.rewriteIdentities!({
+          repo: instance.repo,
+          base: instance.base!,
+          branch,
+          startState: EMPTY_START_STATE,
+          requester: instance.userId,
+          expectedTip,
+          refPublication,
+        }),
+      create: deps.createRecoveryPullRequest,
+    },
+  );
+  if (!answer.ok)
+    throw new RecoverPublicationRefusal(
+      answer.reason === "uncertain"
+        ? "effect_reconciliation_pending"
+        : answer.reason === "unavailable"
+          ? "github_unavailable"
+          : answer.reason,
+    );
+  if ("refused" in answer) return { kind: "none", why: "external_refused", effectOrdinal: answer.effectOrdinal };
+  return { kind: "opened", pr: answer.pr, effectOrdinal: answer.effectOrdinal };
 }
 
 const CHILD_SUPERSESSION_REASONS = new Set(["merged", "closed", "head_moved", "branch_deleted"]);
@@ -2378,7 +2668,7 @@ async function reconcileMissingFindingsPush(
       return false;
   }
   // Evidence reads may take time. Recheck the ref after them, immediately
-  // before the caller reserves ownership and compares the original row.
+  // before the caller atomically admits the original recovery action.
   const fresh = await deps.fetchPrFacts({ repo: instance.repo, number: binding.pr }).catch(() => undefined);
   return (
     fresh?.state === "open" &&
@@ -2430,6 +2720,60 @@ function findingsRoundAuthorized(
   );
 }
 
+/** A routing observation can refuse unsafe work; only the following native
+ * action transition may admit it. Missing or contradictory owners never clear
+ * a retained original recovery action. */
+async function recoveryPullOwnership(
+  deps: AdminCoordinatorDeps,
+  instance: CoordinatorInstance,
+  row: CoordinatorUnit,
+  at: number,
+): Promise<IngressResponse | undefined> {
+  if (!row.pr) return undefined;
+  const owners = await deps.instances.findPullOwners({ repo: instance.repo, pr: row.pr.number }).catch(() => undefined);
+  if (!isPullOwnersResult(owners) || !owners.ok)
+    return json(503, { ok: false, error: "publication_ownership_unknown", at });
+  if (
+    (row.recovery && owners.owners.length !== 1) ||
+    owners.owners.some(
+      (owner) =>
+        owner.kind !== "unit" ||
+        owner.instanceId !== instance.id ||
+        owner.unit !== row.unit ||
+        owner.actionId !== row.recovery?.actionId,
+    )
+  )
+    return json(409, { ok: false, error: "publication_ownership_changed", at });
+  return undefined;
+}
+
+/** Confirm a whole-row transition, including a committed CAS with a lost reply. */
+async function replacePublicationUnit(
+  deps: AdminCoordinatorDeps,
+  row: CoordinatorUnit,
+  updated: CoordinatorUnit,
+): Promise<void> {
+  let replaced: Awaited<ReturnType<CoordinatorInstanceStore["compareAndReplaceUnit"]>> | undefined;
+  try {
+    replaced = await deps.instances.compareAndReplaceUnit(row, updated);
+  } catch {
+    // The owner may have committed before its transport failed.
+  }
+  if (replaced === undefined || (!replaced.ok && replaced.reason === "unavailable")) {
+    const reread = await deps.instances.listUnits(row.instanceId).catch(() => undefined);
+    const current = reread?.filter((candidate) => candidate.unit === row.unit);
+    if (current?.length === 1 && JSON.stringify(current[0]) === JSON.stringify(updated)) replaced = { ok: true };
+  }
+  if (replaced?.ok !== true)
+    throw new PublicationBindingRefusal(
+      replaced?.reason === "stale"
+        ? "publication_binding_stale"
+        : replaced?.reason === "owned"
+          ? "publication_ownership_changed"
+          : "publication_store_unavailable",
+    );
+}
+
 /** Advance a publication binding only to the exact head recorded by its completed
  * authorized findings child. An unrelated force-push can never rewrite the durable
  * publication binding merely because the branch currently points there. */
@@ -2447,7 +2791,8 @@ async function advanceFindingsPublication(
   });
   const owner = { instanceId: instance.id, unit: row.unit };
   const latestReview = [...row.rounds].reverse().find((round) => round.agent === "review");
-  const prefix = row.recovery !== undefined ? `${row.unit}/recovery` : publicationStepPrefix(row);
+  const prefix =
+    row.recovery !== undefined ? recoveryStepPrefix(row.unit, row.recovery.actionId!) : publicationStepPrefix(row);
   const findingsPrefix = `${instance.id}:${prefix}/${latestReview?.index}/findings`;
   let reconciledPush = false;
   // Ordinary findings must carry the exact authority used at dispatch, not
@@ -2524,10 +2869,7 @@ async function advanceFindingsPublication(
     child.value.userId !== instance.userId ||
     child.value.repo?.toLowerCase() !== instance.repo.toLowerCase() ||
     child.value.threadKey !== (row.threadKey ?? instance.threadKey) ||
-    (row.recovery !== undefined
-      ? child.value.idempotencyKey?.startsWith(`${instance.id}:${row.unit}/recovery/`) !== true ||
-        !/\/findings(?:\/a[1-9][0-9]*)?$/.test(child.value.idempotencyKey ?? "")
-      : !isStepAttempt(child.value.idempotencyKey, findingsPrefix)) ||
+    !isStepAttempt(child.value.idempotencyKey, findingsPrefix) ||
     !fullHead(facts.headSha) ||
     child.value.headSha !== facts.headSha ||
     (!reconciledPush &&
@@ -2563,15 +2905,6 @@ async function advanceFindingsPublication(
     fresh.verifiedHead.sha !== facts.headSha
   )
     throw new PublicationBindingRefusal("publication_facts_mismatch");
-  try {
-    if (row.recovery !== undefined && deps.runnerOwnership?.claim(instance.repo, row.publication.pr, owner) !== true)
-      throw new PublicationBindingRefusal("publication_ownership_changed");
-    if (!samePublicationOwner(deps.runnerOwnership?.owner(instance.repo, row.publication.pr), owner))
-      throw new PublicationBindingRefusal("publication_ownership_changed");
-  } catch (err) {
-    if (err instanceof PublicationBindingRefusal) throw err;
-    throw new PublicationBindingRefusal("publication_ownership_unknown");
-  }
   const updated: CoordinatorUnit = {
     ...row,
     lastPush: facts.headSha,
@@ -2580,29 +2913,7 @@ async function advanceFindingsPublication(
       ? { recovery: { ...row.recovery, previousBinding: undefined, expectedHeadSha: facts.headSha } }
       : {}),
   };
-  let replaced: Awaited<ReturnType<CoordinatorInstanceStore["compareAndReplaceUnit"]>> | undefined;
-  try {
-    replaced = await deps.instances.compareAndReplaceUnit(row, updated);
-  } catch {
-    const reread = await deps.instances.listUnits(instance.id).catch(() => undefined);
-    const current = reread?.filter((candidate) => candidate.unit === row.unit);
-    if (current?.length === 1 && JSON.stringify(current[0]) === JSON.stringify(updated)) replaced = { ok: true };
-  }
-  if (replaced?.ok !== true)
-    throw new PublicationBindingRefusal(
-      replaced?.reason === "stale" ? "publication_binding_stale" : "publication_store_unavailable",
-    );
-  let stillOwned = false;
-  try {
-    stillOwned = samePublicationOwner(deps.runnerOwnership?.owner(instance.repo, row.publication.pr), owner);
-  } catch {
-    /* Unknown ownership also requires rollback. */
-  }
-  if (!stillOwned) {
-    const restored = await deps.instances.compareAndReplaceUnit(updated, row).catch(() => undefined);
-    if (restored?.ok !== true) throw new PublicationBindingRefusal("publication_rollback_failed");
-    throw new PublicationBindingRefusal("publication_ownership_changed");
-  }
+  await replacePublicationUnit(deps, row, updated);
   return updated;
 }
 
@@ -2721,37 +3032,8 @@ async function advanceCodingPublication(
     fresh.verifiedHead.sha !== facts.headSha
   )
     throw new PublicationBindingRefusal("publication_facts_mismatch");
-  try {
-    if (!samePublicationOwner(deps.runnerOwnership?.owner(instance.repo, binding.pr), owner))
-      throw new PublicationBindingRefusal("publication_ownership_changed");
-  } catch (err) {
-    if (err instanceof PublicationBindingRefusal) throw err;
-    throw new PublicationBindingRefusal("publication_ownership_unknown");
-  }
   const updated = { ...row, lastPush: facts.headSha, publication: { ...binding, expectedHeadSha: facts.headSha } };
-  let replaced: Awaited<ReturnType<CoordinatorInstanceStore["compareAndReplaceUnit"]>> | undefined;
-  try {
-    replaced = await deps.instances.compareAndReplaceUnit(row, updated);
-  } catch {
-    const reread = await deps.instances.listUnits(instance.id).catch(() => undefined);
-    const current = reread?.filter((candidate) => candidate.unit === row.unit);
-    if (current?.length === 1 && JSON.stringify(current[0]) === JSON.stringify(updated)) replaced = { ok: true };
-  }
-  if (replaced?.ok !== true)
-    throw new PublicationBindingRefusal(
-      replaced?.reason === "stale" ? "publication_binding_stale" : "publication_store_unavailable",
-    );
-  let stillOwned = false;
-  try {
-    stillOwned = samePublicationOwner(deps.runnerOwnership?.owner(instance.repo, binding.pr), owner);
-  } catch {
-    /* An unknown owner cannot credit the child either. */
-  }
-  if (!stillOwned) {
-    const restored = await deps.instances.compareAndReplaceUnit(updated, row).catch(() => undefined);
-    if (restored?.ok !== true) throw new PublicationBindingRefusal("publication_rollback_failed");
-    throw new PublicationBindingRefusal("publication_ownership_changed");
-  }
+  await replacePublicationUnit(deps, row, updated);
   return updated;
 }
 
@@ -2836,63 +3118,20 @@ async function adoptSupersededHead(
   // receives lastPush credit; incomplete evidence must not become adoption.
   if (findings && child.status === "completed" && child.headSha === facts.headSha)
     return advanceFindingsPublication(deps, instance, row, facts, source.runId);
-  const fence = deps.runnerOwnership;
-  if (fence === undefined) throw new PublicationBindingRefusal("publication_ownership_unknown");
-  let priorOwner: { instanceId: string; unit: string } | undefined;
-  try {
-    priorOwner = fence.owner(instance.repo, binding.pr);
-    if (priorOwner !== undefined && !samePublicationOwner(priorOwner, owner))
-      throw new PublicationBindingRefusal("publication_ownership_changed");
-    if (!fence.claim(instance.repo, binding.pr, owner))
-      throw new PublicationBindingRefusal("publication_ownership_changed");
-  } catch (err) {
-    if (err instanceof PublicationBindingRefusal) throw err;
-    throw new PublicationBindingRefusal("publication_ownership_unknown");
-  }
-  const releaseClaim = () => {
-    if (priorOwner === undefined) fence.release(instance.repo, binding.pr, owner);
-  };
   const fresh = await deps.fetchPrFacts({ repo: instance.repo, number: binding.pr }).catch(() => undefined);
   if (fresh === undefined || !validFacts(fresh) || fresh.headSha !== facts.headSha) {
-    releaseClaim();
     throw new PublicationBindingRefusal("publication_facts_mismatch");
   }
   const updated: CoordinatorUnit = {
     ...row,
     publication: { ...binding, expectedHeadSha: fresh.headSha! },
   };
-  let replaced: Awaited<ReturnType<CoordinatorInstanceStore["compareAndReplaceUnit"]>>;
-  try {
-    replaced = await deps.instances.compareAndReplaceUnit(row, updated);
-  } catch {
-    releaseClaim();
-    throw new PublicationBindingRefusal("publication_store_unavailable");
-  }
-  if (!replaced.ok) {
-    releaseClaim();
-    throw new PublicationBindingRefusal(
-      replaced.reason === "stale" ? "publication_binding_stale" : "publication_store_unavailable",
-    );
-  }
-  let stillOwned = false;
-  try {
-    stillOwned = samePublicationOwner(fence.owner(instance.repo, binding.pr), owner);
-  } catch {
-    /* Unknown ownership also requires rollback. */
-  }
-  if (!stillOwned) {
-    const restored = await deps.instances.compareAndReplaceUnit(updated, row).catch(() => undefined);
-    if (restored?.ok !== true) throw new PublicationBindingRefusal("publication_rollback_failed");
-    releaseClaim();
-    throw new PublicationBindingRefusal("publication_ownership_changed");
-  }
+  await replacePublicationUnit(deps, row, updated);
   return updated;
 }
 
-/** One fail-closed transition from a freshly read open pull request to the
- * exact durable authority later coding rounds require. The ownership claim is
- * synchronous and precedes the full-row CAS; only a claim acquired by this
- * call is conditionally released after a failed durable transition. */
+/** Bind fresh GitHub facts through the existing exclusive durable owner transaction.
+ * An identical binding is a read-only replay, never permission for an effect. */
 async function bindOpenPullRequest(
   deps: AdminCoordinatorDeps,
   instance: CoordinatorInstance,
@@ -2941,55 +3180,9 @@ async function bindOpenPullRequest(
   )
     throw new PublicationBindingRefusal("publication_facts_mismatch");
 
-  const fence = deps.runnerOwnership;
-  if (fence === undefined) throw new PublicationBindingRefusal("publication_ownership_unknown");
-  let priorOwner: { instanceId: string; unit: string } | undefined;
-  try {
-    priorOwner = fence.owner(instance.repo, pr.number);
-  } catch {
-    throw new PublicationBindingRefusal("publication_ownership_unknown");
-  }
-  if (priorOwner !== undefined && !samePublicationOwner(priorOwner, owner))
-    throw new PublicationBindingRefusal("publication_ownership_changed");
-  try {
-    if (!fence.claim(instance.repo, pr.number, owner))
-      throw new PublicationBindingRefusal("publication_ownership_changed");
-  } catch (err) {
-    if (err instanceof PublicationBindingRefusal) throw err;
-    throw new PublicationBindingRefusal("publication_ownership_unknown");
-  }
-  let claimedHere = priorOwner === undefined;
-  const releaseClaim = () => {
-    if (!claimedHere) return;
-    fence.release(instance.repo, pr.number, owner);
-    claimedHere = false;
-  };
-  try {
-    if (!samePublicationOwner(fence.owner(instance.repo, pr.number), owner)) {
-      releaseClaim();
-      throw new PublicationBindingRefusal("publication_ownership_unknown");
-    }
-  } catch (err) {
-    releaseClaim();
-    if (err instanceof PublicationBindingRefusal) throw err;
-    throw new PublicationBindingRefusal("publication_ownership_unknown");
-  }
-
   const replacement = { ...row, pr, publication };
   if (JSON.stringify(replacement) === JSON.stringify(row)) return;
-  let replaced: Awaited<ReturnType<CoordinatorInstanceStore["compareAndReplaceUnit"]>>;
-  try {
-    replaced = await deps.instances.compareAndReplaceUnit(row, replacement);
-  } catch {
-    releaseClaim();
-    throw new PublicationBindingRefusal("publication_store_unavailable");
-  }
-  if (!replaced.ok) {
-    releaseClaim();
-    throw new PublicationBindingRefusal(
-      replaced.reason === "stale" ? "publication_binding_stale" : "publication_store_unavailable",
-    );
-  }
+  await replacePublicationUnit(deps, row, replacement);
 }
 
 const fullHead = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f]{40}$/i.test(value);
@@ -3007,29 +3200,29 @@ const unavailableReviewStart = (reason: string): RecoveryReviewStartDiagnostic =
   reason,
 });
 
-/** Zero-turn review starts are evidence only with the complete final attach
- * refusal, not merely a zero-usage summary or an absent review post. */
-async function verifiedReviewAttachRefusal(
+/** A complete final setup refusal proves zero model spend, not completed work. */
+async function verifiedSetupAttachRefusal(
   run: RunView,
   service: RunsService,
+  target: { repo: string; ref: string; pr?: number },
 ): Promise<"verified" | "invalid" | "unavailable"> {
   if (
-    run.agent !== "review" ||
     !run.finished ||
     run.status !== "failed" ||
-    (run.liveState?.state !== "preparing" && run.liveState?.state !== "admitted") ||
+    !["preparing", "admitted", "waiting_deploy"].includes(run.liveState?.state ?? "") ||
     run.usage?.turns !== 0 ||
     run.usage.byModel === undefined ||
     Object.keys(run.usage.byModel).length !== 0 ||
-    run.reviewHead !== undefined ||
+    run.pushed !== undefined ||
     run.verdict !== undefined ||
     run.reviewPost !== undefined ||
-    run.headSha !== undefined ||
-    run.pushed !== undefined ||
-    run.pr !== undefined ||
+    run.reviewHead !== undefined ||
+    run.dispositions !== undefined ||
     run.doorPublicationPending !== undefined
   )
     return "invalid";
+  // Zero tokens are not a price receipt. Only a complete final server
+  // record that stopped in setup before any model/tool/work is $0 evidence.
   let final: Awaited<ReturnType<RunsService["getRun"]>>;
   try {
     final = await service.getRun(run.id, {
@@ -3040,36 +3233,74 @@ async function verifiedReviewAttachRefusal(
   } catch {
     return "unavailable";
   }
-  const child = final.ok === true ? final.value : undefined;
+  if (final.ok !== true) return "invalid";
+  const child = final.value;
   const events = child?.events;
-  const preparing = events?.findIndex((event) => event.type === "run_state" && event.state === "preparing") ?? -1;
-  const attachStart =
+  const preparingIndex = events?.findIndex((event) => event.type === "run_state" && event.state === "preparing") ?? -1;
+  const waitingDeployIndex =
+    events?.findIndex((event) => event.type === "run_state" && event.state === "waiting_deploy") ?? -1;
+  const drainStartIndex =
+    events?.findIndex(
+      (event) => event.type === "span_start" && event.name === "dispatch.workspace.attach.drain-wait",
+    ) ?? -1;
+  const drainEndIndex =
+    events?.findIndex(
+      (event) =>
+        event.type === "span_end" && event.name === "dispatch.workspace.attach.drain-wait" && event.status === "error",
+    ) ?? -1;
+  const attachStartIndex =
     events?.findIndex((event) => event.type === "span_start" && event.name === "dispatch.workspace.attach") ?? -1;
-  const attachEnd =
+  const attachEndIndex =
     events?.findIndex(
       (event) => event.type === "span_end" && event.name === "dispatch.workspace.attach" && event.status === "error",
     ) ?? -1;
-  const refusal =
-    events?.findIndex(
-      (event) => event.type === "refusal" && event.code === "setup_failed" && event.cause === "workspace",
-    ) ?? -1;
-  const start = events?.[attachStart];
-  const end = events?.[attachEnd];
-  const admitted = events?.findIndex((event) => event.type === "run_state" && event.state === "admitted") ?? -1;
-  const memoryStart =
-    events?.findIndex((event) => event.type === "span_start" && event.name === "dispatch.memory_read") ?? -1;
-  const memoryEnd =
+  const refusalIndex = events?.findIndex((event) => event.type === "refusal" && event.code === "setup_failed") ?? -1;
+  const attachStart = events?.[attachStartIndex];
+  const attachEnd = events?.[attachEndIndex];
+  const drainStart = events?.[drainStartIndex];
+  const drainEnd = events?.[drainEndIndex];
+  const drainWaitSetupRefusal =
+    run.liveState?.state === "waiting_deploy" &&
+    child?.liveState?.state === "waiting_deploy" &&
+    preparingIndex < 0 &&
+    attachStartIndex >= 0 &&
+    attachStartIndex < waitingDeployIndex &&
+    waitingDeployIndex < drainStartIndex &&
+    drainStartIndex < drainEndIndex &&
+    drainEndIndex < attachEndIndex &&
+    attachEndIndex < refusalIndex &&
+    attachStart?.type === "span_start" &&
+    attachEnd?.type === "span_end" &&
+    attachStart.spanId === attachEnd.spanId &&
+    drainStart?.type === "span_start" &&
+    drainEnd?.type === "span_end" &&
+    drainStart.spanId === drainEnd.spanId &&
+    events?.slice(waitingDeployIndex + 1).every((event) => event.type !== "run_state") === true &&
+    events?.[refusalIndex]?.type === "refusal" &&
+    events[refusalIndex].cause === "system";
+  const admittedIndex = events?.findIndex((event) => event.type === "run_state" && event.state === "admitted") ?? -1;
+  const memoryEndIndex =
     events?.findIndex((event) => event.type === "span_end" && event.name === "dispatch.memory_read") ?? -1;
-  const systemRefusal =
-    events?.findIndex(
-      (event) => event.type === "refusal" && event.code === "setup_failed" && event.cause === "system",
-    ) ?? -1;
-  const memoryOpened = events?.[memoryStart];
-  const memoryClosed = events?.[memoryEnd];
-  const postRefusal = events?.slice(systemRefusal + 1) ?? [];
-  const matchingCleanupPair = (offset: number, name: string): boolean => {
-    const opened = postRefusal[offset];
-    const closed = postRefusal[offset + 1];
+  const memoryEnd = events?.[memoryEndIndex];
+  const memoryStartIndex =
+    events?.findIndex((event) => event.type === "span_start" && event.name === "dispatch.memory_read") ?? -1;
+  const memoryStart = events?.[memoryStartIndex];
+  const concurrentMemoryEnd =
+    memoryEndIndex > admittedIndex &&
+    memoryStartIndex >= 0 &&
+    memoryStartIndex < admittedIndex &&
+    memoryStart?.type === "span_start" &&
+    memoryEnd?.type === "span_end" &&
+    memoryStart.spanId === memoryEnd.spanId;
+  const adjacentAttachSetup = concurrentMemoryEnd
+    ? ((attachStartIndex === admittedIndex + 1 && memoryEndIndex === admittedIndex + 2) ||
+        (memoryEndIndex === admittedIndex + 1 && attachStartIndex === admittedIndex + 2)) &&
+      attachEndIndex === admittedIndex + 3
+    : attachStartIndex === admittedIndex + 1 && attachEndIndex === admittedIndex + 2;
+  const cleanup = events?.slice(refusalIndex + 1) ?? [];
+  const cleanupPair = (offset: number, name: string) => {
+    const opened = cleanup[offset];
+    const closed = cleanup[offset + 1];
     return (
       opened?.type === "span_start" &&
       opened.name === name &&
@@ -3082,34 +3313,41 @@ async function verifiedReviewAttachRefusal(
       ).length === 2
     );
   };
-  // The memory read may finish while attach is in flight. Previously opened
-  // setup spans may close after refusal; the only newly opened spans are the
-  // ordered refusal and reply cleanup pairs, never another dispatch action.
-  const pairedRefusalReply =
-    postRefusal.length === 4 && matchingCleanupPair(0, "dispatch.refuse") && matchingCleanupPair(2, "post.reply");
-  // The already-started memory read may end just before attach starts or
-  // while attach runs. Both orders are setup-only when the three events are
-  // adjacent after admission and attach itself ends in an error.
-  const adjacentAttachSetup =
-    (attachStart === admitted + 1 && memoryEnd === admitted + 2) ||
-    (memoryEnd === admitted + 1 && attachStart === admitted + 2);
+  const outerScopes = new Set(["request", "slack.receive", "post.card_close", "dispatch.track"]);
+  const cleanupOffset =
+    cleanup[0]?.type === "span_start"
+      ? cleanupPair(0, "dispatch.refuse") && cleanupPair(2, "post.reply")
+        ? 4
+        : -1
+      : 0;
+  const cleanupBoundary = admittedIndex >= 0 ? admittedIndex : preparingIndex;
+  const permittedCleanup =
+    cleanupOffset >= 0 &&
+    cleanup.slice(cleanupOffset).every((event) => {
+      if (event.type !== "span_end" || !outerScopes.has(event.name)) return false;
+      const opened =
+        events?.findIndex(
+          (prior) => prior.type === "span_start" && prior.name === event.name && prior.spanId === event.spanId,
+        ) ?? -1;
+      return opened >= 0 && opened < cleanupBoundary;
+    });
   const admittedAttachRefusal =
     run.liveState?.state === "admitted" &&
     child?.liveState?.state === "admitted" &&
-    preparing < 0 &&
-    admitted >= 0 &&
+    preparingIndex < 0 &&
+    waitingDeployIndex < 0 &&
+    admittedIndex >= 0 &&
     events?.filter((event) => event.type === "run_state").length === 1 &&
-    memoryStart >= 0 &&
-    memoryStart < admitted &&
     adjacentAttachSetup &&
-    attachEnd === admitted + 3 &&
-    systemRefusal === attachEnd + 1 &&
-    memoryOpened?.type === "span_start" &&
-    memoryClosed?.type === "span_end" &&
-    memoryOpened.spanId === memoryClosed.spanId &&
-    events?.every((event, index) => {
-      if (event.seq !== index + 1) return false;
-      if (index < admitted)
+    refusalIndex === attachEndIndex + 1 &&
+    attachStart?.type === "span_start" &&
+    attachEnd?.type === "span_end" &&
+    attachStart.spanId === attachEnd.spanId &&
+    events?.[refusalIndex]?.type === "refusal" &&
+    events[refusalIndex].cause === "system" &&
+    permittedCleanup &&
+    events.every((event, index) => {
+      if (index < admittedIndex)
         return (
           event.type === "input" ||
           event.type === "run_meta" ||
@@ -3122,92 +3360,165 @@ async function verifiedReviewAttachRefusal(
               event.name === "post.reply" ||
               (event.name.startsWith("dispatch.") && event.name !== "dispatch.workspace.attach")))
         );
-      if (index === admitted) return event.type === "run_state" && event.state === "admitted";
-      if (index === attachStart || index === memoryEnd || index === attachEnd) return true;
-      if (index === systemRefusal) return event.type === "refusal";
-      if (pairedRefusalReply && index > systemRefusal) return true;
-      if (event.type !== "span_end" || index < systemRefusal) return false;
-      if (
-        event.name !== "request" &&
-        event.name !== "slack.receive" &&
-        event.name !== "post.card_close" &&
-        event.name !== "post.reply" &&
-        (!event.name.startsWith("dispatch.") ||
-          event.name === "dispatch.workspace.attach" ||
-          event.name === "dispatch.memory_read")
-      )
-        return false;
-      const opened = events.findIndex(
-        (prior) => prior.type === "span_start" && prior.spanId === event.spanId && prior.name === event.name,
-      );
       return (
-        opened >= 0 &&
-        opened < admitted &&
-        events.filter((prior) => prior.type === "span_end" && prior.spanId === event.spanId).length === 1
+        index === admittedIndex ||
+        (concurrentMemoryEnd && index === memoryEndIndex) ||
+        index === attachStartIndex ||
+        index === attachEndIndex ||
+        index === refusalIndex ||
+        index > refusalIndex
       );
-    }) === true;
-  return child !== undefined &&
-    child.id === run.id &&
-    child.idempotencyKey === run.idempotencyKey &&
-    child.parentInstanceId === run.parentInstanceId &&
-    child.userId === run.userId &&
-    child.repo === run.repo &&
-    child.threadKey === run.threadKey &&
-    child.agent === "review" &&
-    child.startedAt === run.startedAt &&
-    child.finishedAt === run.finishedAt &&
-    child.status === "failed" &&
-    (child.liveState?.state === "preparing" || child.liveState?.state === "admitted") &&
-    child.truncated === false &&
-    child.eventCount === run.eventCount &&
-    child.storedEventCount === run.eventCount &&
-    events !== undefined &&
-    events.length === run.eventCount &&
-    child.usage?.turns === 0 &&
-    child.usage.byModel !== undefined &&
-    Object.keys(child.usage.byModel).length === 0 &&
-    child.reviewHead === undefined &&
-    child.verdict === undefined &&
-    child.reviewPost === undefined &&
-    child.headSha === undefined &&
-    child.pushed === undefined &&
-    child.pr === undefined &&
-    child.dispositions === undefined &&
-    child.doorPublicationPending === undefined &&
-    child.lease === undefined &&
-    (admittedAttachRefusal ||
-      (run.liveState?.state === "preparing" &&
-        preparing >= 0 &&
-        attachStart > preparing &&
-        attachEnd > attachStart &&
-        refusal > attachEnd)) &&
-    start?.type === "span_start" &&
-    end?.type === "span_end" &&
-    start.spanId === end.spanId &&
-    events.filter((event) => event.type === "refusal").length === 1 &&
-    events.filter((event) => event.type === "run_meta" && event.agent === "review").length === 1 &&
-    (admittedAttachRefusal ||
-      events.every(
-        (event, index) =>
-          event.seq === index + 1 &&
-          (event.type === "input" ||
-            event.type === "run_meta" ||
-            (event.type === "coordinator_tag" && index < preparing) ||
-            (event.type === "context" && index < preparing) ||
-            (event.type === "refusal" && index === refusal) ||
-            (event.type === "run_state" && ["admitted", "waiting_repository", "preparing"].includes(event.state)) ||
-            ((event.type === "span_start" || event.type === "span_end") &&
-              (index === attachStart ||
-                index === attachEnd ||
-                (index < preparing &&
-                  (event.name === "request" ||
-                    event.name === "slack.receive" ||
-                    event.name === "post.card_close" ||
-                    event.name === "post.reply" ||
-                    event.name.startsWith("dispatch.")))))),
-      ))
-    ? "verified"
-    : "invalid";
+    });
+  const preparingAttachRefusal =
+    run.liveState?.state === "preparing" &&
+    child?.liveState?.state === "preparing" &&
+    preparingIndex >= 0 &&
+    attachStartIndex > preparingIndex &&
+    attachEndIndex > attachStartIndex &&
+    refusalIndex > attachEndIndex &&
+    attachStart?.type === "span_start" &&
+    attachEnd?.type === "span_end" &&
+    attachStart.spanId === attachEnd.spanId &&
+    events?.[refusalIndex]?.type === "refusal" &&
+    ["workspace", "system"].includes(events[refusalIndex].cause);
+  // Resolved input PR/head fields survive an attach failure. Only the first
+  // retained metadata can identify them; output or later metadata cannot.
+  const metadata = events?.filter((event) => event.type === "run_meta") ?? [];
+  const input = metadata[0];
+  const setupBoundary = admittedAttachRefusal
+    ? admittedIndex
+    : drainWaitSetupRefusal
+      ? waitingDeployIndex
+      : preparingIndex;
+  const validInputMetadata =
+    metadata.length === 1 &&
+    input?.type === "run_meta" &&
+    events!.indexOf(input) < setupBoundary &&
+    input.agent === run.agent &&
+    (input.repo === undefined || input.repo.toLowerCase() === target.repo.toLowerCase()) &&
+    (input.ref === undefined || input.ref === target.ref) &&
+    ((run.headSha === undefined && run.pr === undefined) ||
+      (input.repo?.toLowerCase() === target.repo.toLowerCase() && input.ref === target.ref)) &&
+    input.headSha === run.headSha &&
+    child?.headSha === run.headSha &&
+    (input.headSha === undefined || fullHead(input.headSha)) &&
+    input.pr === run.pr?.number &&
+    child?.pr?.number === run.pr?.number &&
+    child?.pr?.url === run.pr?.url &&
+    child?.pr?.head === run.pr?.head &&
+    (run.pr === undefined ||
+      (run.pr.number === target.pr && (run.pr.head === undefined || run.pr.head === target.ref)));
+  const resolvedInputTarget =
+    (admittedAttachRefusal || preparingAttachRefusal || drainWaitSetupRefusal) && validInputMetadata;
+  const spans = new Map<string, { name: string; index: number }>();
+  const closedSpans = new Set<string>();
+  // The final snapshot precedes closure of outer dispatcher scopes. Setup
+  // spans must pair; only known parents opened before setup may remain open.
+  const completeSetupSpans =
+    events?.every((event, index) => {
+      if (event.type === "span_start") {
+        if (
+          typeof event.spanId !== "string" ||
+          !event.spanId.trim() ||
+          typeof event.name !== "string" ||
+          !event.name.trim() ||
+          spans.has(event.spanId)
+        )
+          return false;
+        spans.set(event.spanId, { name: event.name, index });
+      } else if (event.type === "span_end") {
+        if (
+          typeof event.spanId !== "string" ||
+          !event.spanId.trim() ||
+          typeof event.name !== "string" ||
+          !event.name.trim() ||
+          (event.status !== "ok" && event.status !== "error") ||
+          !Number.isFinite(event.startedAt) ||
+          !Number.isFinite(event.durationMs) ||
+          event.durationMs < 0
+        )
+          return false;
+        const opened = spans.get(event.spanId);
+        if (!opened || opened.name !== event.name || opened.index >= index || closedSpans.has(event.spanId))
+          return false;
+        closedSpans.add(event.spanId);
+      }
+      return true;
+    }) === true &&
+    [...spans].every(
+      ([id, opened]) =>
+        closedSpans.has(id) ||
+        (opened.index < setupBoundary &&
+          outerScopes.has(opened.name) &&
+          [...spans.values()].filter((span) => span.name === opened.name).length === 1),
+    );
+  const setupBoundaryIndex = admittedAttachRefusal
+    ? admittedIndex
+    : drainWaitSetupRefusal
+      ? waitingDeployIndex
+      : preparingIndex;
+  if (
+    !permittedCleanup ||
+    !validInputMetadata ||
+    !completeSetupSpans ||
+    child === undefined ||
+    child.id !== run.id ||
+    child.idempotencyKey !== run.idempotencyKey ||
+    child.parentInstanceId !== run.parentInstanceId ||
+    child.userId !== run.userId ||
+    child.repo !== run.repo ||
+    child.agent !== run.agent ||
+    child.threadKey !== run.threadKey ||
+    child.startedAt !== run.startedAt ||
+    child.finishedAt !== run.finishedAt ||
+    run.status !== "failed" ||
+    (!preparingAttachRefusal && !drainWaitSetupRefusal && !admittedAttachRefusal) ||
+    child.status !== "failed" ||
+    (!preparingAttachRefusal && !drainWaitSetupRefusal && !admittedAttachRefusal) ||
+    child.truncated !== false ||
+    child.eventCount !== run.eventCount ||
+    child.storedEventCount !== run.eventCount ||
+    events === undefined ||
+    events.length !== run.eventCount ||
+    child.usage?.turns !== 0 ||
+    child.usage.byModel === undefined ||
+    Object.keys(child.usage.byModel).length !== 0 ||
+    ((run.headSha !== undefined || run.pr !== undefined || child.headSha !== undefined || child.pr !== undefined) &&
+      !resolvedInputTarget) ||
+    run.pushed !== undefined ||
+    child.pushed !== undefined ||
+    child.verdict !== undefined ||
+    child.reviewPost !== undefined ||
+    child.reviewHead !== undefined ||
+    child.dispositions !== undefined ||
+    child.doorPublicationPending !== undefined ||
+    child.lease !== undefined ||
+    events.filter((event) => event.type === "refusal" && event.code === "setup_failed").length !== 1 ||
+    setupBoundaryIndex < 0 ||
+    events.some(
+      (event, index) =>
+        event.seq !== index + 1 ||
+        !(
+          event.type === "input" ||
+          event.type === "run_meta" ||
+          event.type === "coordinator_tag" ||
+          // The dispatcher records prior-thread context before setup; later
+          // narrative events cannot attest to a pre-model refusal.
+          (event.type === "context" && typeof event.text === "string" && index < setupBoundaryIndex) ||
+          (event.type === "refusal" && event.code === "setup_failed") ||
+          (event.type === "run_state" &&
+            ["admitted", "waiting_deploy", "waiting_repository", "falling_back", "preparing"].includes(event.state)) ||
+          ((event.type === "span_start" || event.type === "span_end") &&
+            (event.name === "request" ||
+              event.name === "slack.receive" ||
+              event.name === "post.card_close" ||
+              event.name === "post.reply" ||
+              event.name.startsWith("dispatch.")))
+        ),
+    )
+  )
+    return "invalid";
+  return "verified";
 }
 
 /** Audit the retained original children, not today's cost projection. A known
@@ -3331,138 +3642,24 @@ async function historicalRecoverySpend(
     if (run.startedAt < segmentStart || run.finishedAt > segmentEnd) return { reason: "child_round_mismatch" };
     const models = Object.values(run.usage?.byModel ?? {});
     let childUsd: number;
-    if (run.usage?.turns === 0 && models.length === 0 && action === "review") {
-      const refusal = await verifiedReviewAttachRefusal(run, service);
+    if (run.usage?.turns === 0 && models.length === 0) {
+      const refusal = await verifiedSetupAttachRefusal(run, service, {
+        repo: instance.repo,
+        ref: row.branch,
+        ...(row.pr !== undefined ? { pr: row.pr.number } : {}),
+      });
       if (refusal !== "verified")
         return {
-          reason: refusal === "unavailable" ? "review_start_store_unavailable" : "review_start_evidence_unavailable",
+          reason:
+            action === "review"
+              ? refusal === "unavailable"
+                ? "review_start_store_unavailable"
+                : "review_start_evidence_unavailable"
+              : "child_price_unknown",
         };
       childUsd = 0;
-      noWorkReviews.push(run.id);
-    } else if (run.usage?.turns === 0 && models.length === 0 && action === "findings") {
-      // Zero tokens are not a price receipt. Only a complete final server
-      // record that stopped in setup before any model/tool/work is $0 evidence.
-      const final = await service
-        .getRun(run.id, {
-          include: "messages",
-          requireFinalRecord: true,
-          privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
-        })
-        .catch(() => undefined);
-      const child = final?.ok === true ? final.value : undefined;
-      const events = child?.events;
-      const preparingIndex =
-        events?.findIndex((event) => event.type === "run_state" && event.state === "preparing") ?? -1;
-      const waitingDeployIndex =
-        events?.findIndex((event) => event.type === "run_state" && event.state === "waiting_deploy") ?? -1;
-      const drainStartIndex =
-        events?.findIndex(
-          (event) => event.type === "span_start" && event.name === "dispatch.workspace.attach.drain-wait",
-        ) ?? -1;
-      const drainEndIndex =
-        events?.findIndex(
-          (event) =>
-            event.type === "span_end" &&
-            event.name === "dispatch.workspace.attach.drain-wait" &&
-            event.status === "error",
-        ) ?? -1;
-      const attachStartIndex =
-        events?.findIndex((event) => event.type === "span_start" && event.name === "dispatch.workspace.attach") ?? -1;
-      const attachEndIndex =
-        events?.findIndex(
-          (event) =>
-            event.type === "span_end" && event.name === "dispatch.workspace.attach" && event.status === "error",
-        ) ?? -1;
-      const refusalIndex =
-        events?.findIndex((event) => event.type === "refusal" && event.code === "setup_failed") ?? -1;
-      const attachStart = events?.[attachStartIndex];
-      const attachEnd = events?.[attachEndIndex];
-      const drainStart = events?.[drainStartIndex];
-      const drainEnd = events?.[drainEndIndex];
-      const drainWaitSetupRefusal =
-        run.liveState?.state === "waiting_deploy" &&
-        child?.liveState?.state === "waiting_deploy" &&
-        preparingIndex < 0 &&
-        attachStartIndex >= 0 &&
-        attachStartIndex < waitingDeployIndex &&
-        waitingDeployIndex < drainStartIndex &&
-        drainStartIndex < drainEndIndex &&
-        drainEndIndex < attachEndIndex &&
-        attachEndIndex < refusalIndex &&
-        attachStart?.type === "span_start" &&
-        attachEnd?.type === "span_end" &&
-        attachStart.spanId === attachEnd.spanId &&
-        drainStart?.type === "span_start" &&
-        drainEnd?.type === "span_end" &&
-        drainStart.spanId === drainEnd.spanId &&
-        events?.slice(waitingDeployIndex + 1).every((event) => event.type !== "run_state") === true &&
-        events?.[refusalIndex]?.type === "refusal" &&
-        events[refusalIndex].cause === "system";
-      const setupBoundaryIndex = drainWaitSetupRefusal ? waitingDeployIndex : preparingIndex;
-      if (
-        child === undefined ||
-        child.id !== run.id ||
-        child.idempotencyKey !== run.idempotencyKey ||
-        child.parentInstanceId !== run.parentInstanceId ||
-        child.userId !== run.userId ||
-        child.repo !== run.repo ||
-        child.agent !== run.agent ||
-        child.threadKey !== run.threadKey ||
-        child.startedAt !== run.startedAt ||
-        child.finishedAt !== run.finishedAt ||
-        run.status !== "failed" ||
-        (run.liveState?.state !== "preparing" && !drainWaitSetupRefusal) ||
-        child.status !== "failed" ||
-        (child.liveState?.state !== "preparing" && !drainWaitSetupRefusal) ||
-        child.truncated !== false ||
-        child.eventCount !== run.eventCount ||
-        child.storedEventCount !== run.eventCount ||
-        events === undefined ||
-        events.length !== run.eventCount ||
-        child.usage?.turns !== 0 ||
-        child.usage.byModel === undefined ||
-        Object.keys(child.usage.byModel).length !== 0 ||
-        run.headSha !== undefined ||
-        run.pushed !== undefined ||
-        run.pr !== undefined ||
-        child.headSha !== undefined ||
-        child.pushed !== undefined ||
-        child.pr !== undefined ||
-        child.verdict !== undefined ||
-        child.reviewPost !== undefined ||
-        child.reviewHead !== undefined ||
-        child.dispositions !== undefined ||
-        child.doorPublicationPending !== undefined ||
-        child.lease !== undefined ||
-        events.filter((event) => event.type === "refusal" && event.code === "setup_failed").length !== 1 ||
-        setupBoundaryIndex < 0 ||
-        events.some(
-          (event, index) =>
-            event.seq !== index + 1 ||
-            !(
-              event.type === "input" ||
-              event.type === "run_meta" ||
-              event.type === "coordinator_tag" ||
-              // The dispatcher records prior-thread context before setup; later
-              // narrative events cannot attest to a pre-model refusal.
-              (event.type === "context" && typeof event.text === "string" && index < setupBoundaryIndex) ||
-              (event.type === "refusal" && event.code === "setup_failed") ||
-              (event.type === "run_state" &&
-                ["admitted", "waiting_deploy", "waiting_repository", "falling_back", "preparing"].includes(
-                  event.state,
-                )) ||
-              ((event.type === "span_start" || event.type === "span_end") &&
-                (event.name === "request" ||
-                  event.name === "slack.receive" ||
-                  event.name === "post.card_close" ||
-                  event.name === "post.reply" ||
-                  event.name.startsWith("dispatch.")))
-            ),
-        )
-      )
-        return { reason: "child_price_unknown" };
-      childUsd = 0;
-      noWork.push(run.id);
+      if (action === "review") noWorkReviews.push(run.id);
+      else if (action === "findings") noWork.push(run.id);
     } else if (
       models.length === 0 ||
       !Number.isSafeInteger(run.usage?.turns) ||
@@ -4144,12 +4341,6 @@ export async function adoptOriginalPublishedHead(
   if (row.adoption?.state === "bound")
     return json(200, { ok: true, outcome: "already_bound", pr: found.number, head, at });
   const owner = { instanceId: instance.id, unit: row.unit };
-  try {
-    if (deps.runnerOwnership?.claim(instance.repo, found.number, owner) !== true)
-      return json(409, { ok: false, error: "publication_ownership_changed", at });
-  } catch {
-    return json(503, { ok: false, error: "publication_ownership_unknown", at });
-  }
   const pr = { number: found.number, url: found.htmlUrl };
   const replacement: CoordinatorUnit = {
     ...row,
@@ -4166,14 +4357,12 @@ export async function adoptOriginalPublishedHead(
     },
     adoption: { ...row.adoption!, state: "bound", pr },
   };
-  const saved = await deps.instances.compareAndReplaceUnit(row, replacement).catch(() => undefined);
-  deps.runnerOwnership?.release(instance.repo, found.number, owner);
-  if (saved?.ok !== true)
-    return json(saved?.reason === "stale" ? 409 : 503, {
-      ok: false,
-      error: saved?.reason === "stale" ? "adoption_claim_stale" : "adoption_store_unavailable",
-      at,
-    });
+  try {
+    await replacePublicationUnit(deps, row, replacement);
+  } catch (error) {
+    const cause = error instanceof PublicationBindingRefusal ? error.reason : "publication_store_unavailable";
+    return json(cause === "publication_store_unavailable" ? 503 : 409, { ok: false, error: cause, at });
+  }
   return json(200, { ok: true, outcome: "bound", pr: found.number, url: found.htmlUrl, head, at });
 }
 
@@ -4308,19 +4497,27 @@ async function recoverOriginalCodingUnit(
         costCapUsd: grant.costCapUsd,
         at,
       });
+    if (request === undefined) return json(409, { ok: false, error: "recovery_request_identity_required", at });
+    const actionId = await recoveryActionId(row, request);
     claim = {
       kind: "coding",
       round: 0,
       codingRunId: coding.id,
       codingKey: key,
       expectedHeadSha: coding.headSha,
-      accounting: { spendUsd: spend.usd, children: spend.children, grant: { ...grant }, renewalsSpent: 0 },
+      accounting: {
+        spendUsd: spend.usd,
+        children: spend.children,
+        grant: { ...grant },
+        ...(instance.grantSource !== undefined ? { grantSource: instance.grantSource } : {}),
+        renewalsSpent: 0,
+      },
       remainingMs: deadlineAt - at,
       claimedAt: at,
-      step: `${row.unit}/recovery/0/coding`,
+      step: recoveryStepName({ unit: row.unit, actionId, round: 0, kind: "coding" }),
       previousEnding: row.ending!,
       ...(row.lastPush !== undefined ? {} : { previousBinding: {} }),
-      workflowId: `recovery-coding-${coding.id}`,
+      workflowId: recoveryWorkflowId(actionId),
       deadlineAt,
     };
   }
@@ -4420,6 +4617,7 @@ async function recoverOriginalCodingUnit(
       kind: "recover-original-unit",
       parentInstanceId: instance.id,
       unit: row.unit,
+      recoveryActionId: codingClaim.actionId!,
     })
     .catch(() => ({ kind: "unanswered" as const }));
   if (started === undefined) return rollback("recovery_workflow_unavailable");
@@ -4468,6 +4666,14 @@ export async function recoverOriginalUnit(
   if (matches.length !== 1) return json(409, { ok: false, error: "unit_evidence_ambiguous", at });
   const row = matches[0]!;
   if (row.instanceId !== instance.id) return json(409, { ok: false, error: "recovery_identity_mismatch", at });
+  if (
+    requestedWorkflowId !== undefined &&
+    (row.recovery?.workflowId !== requestedWorkflowId ||
+      row.recovery.actionId === undefined ||
+      body.recoveryActionId !== row.recovery.actionId ||
+      recoveryWorkflowId(row.recovery.actionId) !== requestedWorkflowId)
+  )
+    return json(409, { ok: false, error: "recovery_claim_mismatch", at });
   if (caller !== undefined && caller.threadKey !== (row.threadKey ?? instance.threadKey))
     return json(403, { ok: false, error: "recovery_requester_mismatch", at });
   const request: RecoveryRequest | undefined = caller !== undefined && isRecoveryRequest(caller) ? caller : undefined;
@@ -4489,15 +4695,12 @@ export async function recoverOriginalUnit(
       savedAction.actId !== row.workBrief?.actId
     )
       return json(409, { ok: false, error: "recovery_identity_mismatch", at });
+    if (requestedWorkflowId === undefined) {
+      const renewed = await recoveryActionRenewed(savedAction);
+      if (renewed === null) return json(409, { ok: false, error: "recovery_history_invalid", at });
+      if (renew !== renewed) return json(409, { ok: false, error: "recovery_claim_mismatch", at });
+    }
     if (savedAction.state === "refused") {
-      // A refusal can commit while every response is lost. Only its action
-      // may release the old fence; the same unit can already have a successor.
-      if (row.pr !== undefined)
-        deps.runnerOwnership?.release(instance.repo, row.pr.number, {
-          instanceId: instance.id,
-          unit: row.unit,
-          recoveryActionId: savedAction.id,
-        });
       return json(409, { ok: false, error: savedAction.error, workflowId: savedAction.workflowId, at });
     }
     if (savedAction.state === "settled")
@@ -4884,6 +5087,7 @@ export async function recoverOriginalUnit(
         spendUsd: spend.usd,
         children: spend.children,
         grant: { ...grant },
+        ...(instance.grantSource !== undefined ? { grantSource: instance.grantSource } : {}),
         renewalsSpent: latestSegmentIndex - 1,
       };
     if (postApproval) {
@@ -5558,17 +5762,16 @@ export async function recoverOriginalUnit(
         spendUsd: spend.usd,
         children: spend.children,
         grant: { ...grant },
+        ...(instance.grantSource !== undefined ? { grantSource: instance.grantSource } : {}),
         renewalsSpent: segments.length + 1,
       };
     }
     if (!Number.isFinite(remainingMs) || remainingMs < floor)
       return json(409, { ok: false, error: "recovery_wall_clock_exhausted", at });
-    stepName = `${row.unit}/recovery/${round}/${kind}`;
-    workflowId = renew
-      ? `recovery-renewal-${reviewRunId}`
-      : externalReview !== undefined
-        ? `recovery-review-${externalReview.id}`
-        : `recovery-${findingsRunId ?? reviewRunId}`;
+    if (request === undefined) return json(409, { ok: false, error: "recovery_request_identity_required", at });
+    const admittedActionId = await recoveryActionId(row, request);
+    stepName = recoveryStepName({ unit: row.unit, actionId: admittedActionId, round, kind });
+    workflowId = recoveryWorkflowId(admittedActionId);
     deadlineAt = at + remainingMs;
     findings = kind === "findings" ? candidates[0]!.verdict?.findings : undefined;
     if (kind === "review" && round >= 2) {
@@ -5607,35 +5810,11 @@ export async function recoverOriginalUnit(
 
   const actionId =
     existingClaim?.actionId ?? (request === undefined ? undefined : await recoveryActionId(row, request));
-  const fenceOwner: RunnerPullOwner = {
-    ...originalOwner,
-    ...(actionId !== undefined ? { recoveryActionId: actionId } : {}),
-  };
-  const fence = deps.runnerOwnership;
-  if (
-    fence === undefined ||
-    fence.reserve === undefined ||
-    fence.transferReservation === undefined ||
-    fence.releaseReservation === undefined
-  )
-    return json(503, { ok: false, error: "publication_ownership_unknown", at });
-  const releaseReservation = fence.releaseReservation.bind(fence);
-  if (existingClaim !== undefined) {
-    try {
-      // The claim is durable while the ownership fence is process-local. A
-      // Workflow can outlive a bot process, so reconstruct this exact owner's
-      // fence from the claim before revalidating it; a rival claim still wins.
-      if (!fence.claim(instance.repo, pr.number, fenceOwner))
-        return json(409, { ok: false, error: "publication_ownership_changed", at });
-    } catch (err) {
-      return json(503, { ok: false, error: "publication_ownership_unknown", message: describe(err), at });
-    }
-  }
+  const ownershipRefusal = await recoveryPullOwnership(deps, instance, row, at);
+  if (ownershipRefusal) return ownershipRefusal;
 
   let claimedRow = row;
   let claimReplayed = false;
-  let token: symbol | undefined;
-  let transferred = existingClaim !== undefined;
   const rollback = async (error: string, consumed = false): Promise<IngressResponse> => {
     // A committed renewal is spent even if Workflow admission fails: a later
     // request must not mint another lease from the same original grant.
@@ -5668,12 +5847,6 @@ export async function recoverOriginalUnit(
           at,
         });
     }
-    const released = transferred
-      ? fence.release(instance.repo, pr.number, fenceOwner)
-      : token !== undefined
-        ? releaseReservation(instance.repo, pr.number, token)
-        : true;
-    if (!released) return json(500, { ok: false, error: "recovery_cleanup_failed", cause: error, at });
     return json(409, { ok: false, error, at });
   };
 
@@ -5937,12 +6110,6 @@ export async function recoverOriginalUnit(
           at,
         });
     }
-    try {
-      token = fence.reserve(instance.repo, pr.number, fenceOwner);
-    } catch (err) {
-      return json(503, { ok: false, error: "publication_ownership_unknown", message: describe(err), at });
-    }
-    if (token === undefined) return json(409, { ok: false, error: "publication_ownership_changed", at });
     const { ending: _ending, ...withoutEnding } = claimRow;
     claimedRow = {
       ...withoutEnding,
@@ -5991,36 +6158,29 @@ export async function recoverOriginalUnit(
       replaced = result.ok ? { ok: true } : { ok: false, reason: result.reason === "stale" ? "stale" : "unavailable" };
       if (!result.ok && (result.reason === "capacity" || result.reason === "conflict"))
         historyError = `recovery_history_${result.reason}`;
+      if (!result.ok && result.reason === "owned") historyError = "publication_ownership_changed";
+      if (!result.ok && result.reason === "incomplete") historyError = "publication_ownership_unknown";
       if (result.ok) {
         claimedRow = result.unit;
         claimReplayed = result.replayed === true;
       }
     } catch (err) {
       // A lost CAS response is not a definite failure. Re-read the exact row:
-      // committed means continue under the still-held reservation; unchanged
-      // means release; unreadable or another value stays fenced for restart
-      // reconciliation rather than exposing a claimed row as unowned.
+      // committed means continue under its canonical action; unchanged means
+      // defer; unreadable or another value retains the durable claim for
+      // restart reconciliation rather than exposing it as unowned.
       const reread = await deps.instances.listUnits(instance.id).catch(() => undefined);
       const current = reread?.filter((candidate) => candidate.unit === row.unit);
       if (current?.length === 1 && JSON.stringify(current[0]) === JSON.stringify(claimedRow)) replaced = { ok: true };
       else if (current?.length === 1 && JSON.stringify(current[0]) === JSON.stringify(row)) {
-        const released = releaseReservation(instance.repo, pr.number, token);
-        if (!released)
-          return json(500, { ok: false, error: "recovery_cleanup_failed", cause: "recovery_store_unavailable", at });
         return json(503, { ok: false, error: "recovery_store_unavailable", message: describe(err), at });
       } else return json(503, { ok: false, error: "recovery_claim_unanswered", message: describe(err), at });
     }
     if (replaced.ok !== true) {
       const error =
         historyError ?? (replaced.reason === "stale" ? "recovery_claim_stale" : "recovery_store_unavailable");
-      const released = releaseReservation(instance.repo, pr.number, token);
-      if (!released) return json(500, { ok: false, error: "recovery_cleanup_failed", cause: error, at });
-      return json(409, { ok: false, error, at });
+      return json(error === "publication_ownership_unknown" ? 503 : 409, { ok: false, error, at });
     }
-    if (!fence.transferReservation(instance.repo, pr.number, token, fenceOwner, fenceOwner))
-      return rollback("publication_ownership_changed");
-    token = undefined;
-    transferred = true;
   }
   if (requestedWorkflowId !== undefined)
     return json(200, { ok: true, parentInstanceId: instance.id, unit: row.unit, workflowId, at });
@@ -6036,6 +6196,7 @@ export async function recoverOriginalUnit(
     kind: "recover-original-unit",
     parentInstanceId: instance.id,
     unit: row.unit,
+    recoveryActionId: claimedRow.recovery!.actionId!,
   }).catch((err) => ({ kind: "unanswered" as const, reason: describe(err) }));
   if (started.kind !== "created" && started.kind !== "duplicate") {
     if (started.kind === "failed") return rollback("recovery_workflow_failed");
@@ -6122,9 +6283,21 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   // their one atomic {pr, publication} transition.
   const rememberTerminal = async (pr: { number: number; url: string }) => {
     if (!unit.row || (unit.row.pr?.number === pr.number && unit.row.pr.url === pr.url)) return;
-    await deps.instances.putUnits([{ ...unit.row, pr }]);
+    const written = await deps.instances.putUnits([{ ...unit.row, pr }]);
+    if (!written.ok)
+      return json(written.reason === "unavailable" ? 503 : 409, {
+        ok: false,
+        error: "unit_write_refused",
+        reason: written.reason,
+        at,
+      });
   };
   try {
+    if (
+      unit.row?.currentEffect?.calls.some((call) => call.operation === "pull_create") &&
+      unit.row.currentEffect.calls.some((call) => call.state === "pending" || call.state === "uncertain")
+    )
+      throw new RecoverPublicationRefusal("effect_reconciliation_pending");
     // Once the machine has adopted a pull request, its number is the authority:
     // read and enrich it before any branch discovery. The unit branch may have
     // another pull request, but entry, transition and ending reads all stay on
@@ -6139,7 +6312,8 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       if (state === undefined) throw new Error(headBranchStateError(instance.repo, follow));
       const followedPr = { number: follow, url: String(state.url) };
       if (state.state !== "open") {
-        await rememberTerminal(followedPr);
+        const refused = await rememberTerminal(followedPr);
+        if (refused !== undefined) return refused;
         return json(200, { ok: true, ...state, at });
       }
       const bindingRow =
@@ -6191,7 +6365,12 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
         at,
       });
     }
-    const open = await deps.findOpenPrByHead(instance.repo, branch);
+    const recoveringCell =
+      recover !== undefined &&
+      unit.row?.currentEffect !== undefined &&
+      unit.row.currentEffect.id === body.effectId &&
+      unit.row.currentEffect.calls.some((call) => call.operation === "pull_create");
+    const open = recoveringCell ? null : await deps.findOpenPrByHead(instance.repo, branch);
     if (open) {
       // The branch listing is discovery only. Re-read the pull request whole
       // before this transition acts: the listing can lag a merge/close, and
@@ -6202,7 +6381,8 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       if (current === undefined) throw new Error(headBranchStateError(instance.repo, open.number));
       const discoveredPr = { number: open.number, url: open.htmlUrl };
       if (current.state !== "open") {
-        await rememberTerminal(discoveredPr);
+        const refused = await rememberTerminal(discoveredPr);
+        if (refused !== undefined) return refused;
         return json(200, { ok: true, ...current, at });
       }
       await bindOpenPullRequest(deps, instance, unit.row, discoveredPr, liveFacts);
@@ -6277,7 +6457,7 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     // or by an earlier attempt that died after its merge — makes the unit done
     // rather than aborted (record 0031's `merged` ending, reached without the
     // runner's merge). Asked only now: an open pull request is the round's.
-    const merged = await deps.findMergedPrByHead(instance.repo, branch);
+    const merged = recoveringCell ? null : await deps.findMergedPrByHead(instance.repo, branch);
     if (!merged) {
       // A dead coding child's pushed work is recovered here: the pull request
       // is opened from the branch itself rather than the round ending aborted
@@ -6298,7 +6478,12 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
               });
         return json(200, { ok: true, state: "none", ...(ahead !== undefined ? { aheadOfBase: ahead } : {}), at });
       }
-      const recovered = await recoverPushedBranch(deps, instance, unit.row, branch, recover.runId);
+      const recovered = await recoverPushedBranch(deps, instance, unit.row, branch, recover.runId, body);
+      if (unit.row !== undefined) {
+        const refreshed = (await deps.instances.listUnits(instance.id)).filter((row) => row.unit === unit.row!.unit);
+        if (refreshed.length !== 1) throw new RecoverPublicationRefusal("stale");
+        unit.row = refreshed[0];
+      }
       if (recovered.kind === "opened") {
         // Open-or-edit is not a transition fact: the request can merge, close
         // or lose its head ref before this route returns. Re-read the pull
@@ -6311,18 +6496,35 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
         const recoveredPr = { number: recovered.pr.number, url: recovered.pr.htmlUrl };
         if (recoveredState.state === "open")
           await bindOpenPullRequest(deps, instance, unit.row, recoveredPr, recoveredFacts);
-        else await rememberTerminal(recoveredPr);
-        return json(200, { ok: true, ...recoveredState, at });
+        else {
+          const refused = await rememberTerminal(recoveredPr);
+          if (refused !== undefined) return refused;
+        }
+        return json(200, {
+          ok: true,
+          ...recoveredState,
+          ...(recovered.effectOrdinal === undefined ? {} : { effectOrdinal: recovered.effectOrdinal }),
+          at,
+        });
       }
-      return json(200, { ok: true, state: "none", unrecovered: recovered.why, at });
+      return json(200, {
+        ok: true,
+        state: "none",
+        unrecovered: recovered.why,
+        ...(recovered.effectOrdinal === undefined ? {} : { effectOrdinal: recovered.effectOrdinal }),
+        at,
+      });
     }
     const mergedFacts = await deps.fetchPrFacts({ repo: instance.repo, number: merged.number });
     if (mergedFacts === undefined) throw new Error(`could not read ${instance.repo}#${merged.number}`);
     const state = pullRequestState(merged.number, merged.htmlUrl, mergedFacts);
     if (state?.state !== "merged") throw new Error(`${instance.repo}#${merged.number} no longer reads merged`);
-    await rememberTerminal({ number: merged.number, url: merged.htmlUrl });
+    const refused = await rememberTerminal({ number: merged.number, url: merged.htmlUrl });
+    if (refused !== undefined) return refused;
     return json(200, { ok: true, ...state, at });
   } catch (err) {
+    if (err instanceof RecoverPublicationRefusal)
+      return json(err.reason.endsWith("unavailable") ? 503 : 409, { ok: false, error: err.reason, at });
     if (err instanceof PublicationBindingRefusal)
       return json(409, { ok: false, error: err.reason, message: "the open pull request was not durably bound", at });
     if (err instanceof CoordinatorUnitWriteConflict) throw err;
@@ -6458,8 +6660,12 @@ async function plan(body: Record<string, unknown>, deps: AdminCoordinatorDeps): 
   const instance = await deps.instances.get(id.value);
   if (!instance) return json(404, { ok: false, error: "unknown_instance" });
   const units = await deps.instances.listUnits(instance.id);
+  const confirmed = await deps.instances.get(instance.id);
+  if (JSON.stringify(confirmed) !== JSON.stringify(instance))
+    return json(503, { ok: false, error: "coordinator_snapshot_unavailable", at });
   return json(200, {
     ok: true,
+    instance,
     ...(instance.plan !== undefined ? { planId: instance.plan.id } : {}),
     // Who merges: the instance's field; a record written before it existed is a person's merge.
     merge: instance.merge ?? "person",
@@ -6519,6 +6725,7 @@ async function unitStart(body: Record<string, unknown>, deps: AdminCoordinatorDe
   const unit = await unitRowOf(deps, instance, body.unit);
   if (!unit.ok) return unit.response;
   let row = unit.row!;
+  if (instance.stop !== undefined) return json(409, { ok: false, error: "instance_stopped", at });
   if (row.workBrief !== undefined) {
     const threadKey = privateWorkerThreadKey({ instanceId: instance.id, unit: row.unit });
     if (deps.privateWorkerLog === undefined)
@@ -6553,7 +6760,14 @@ async function unitStart(body: Record<string, unknown>, deps: AdminCoordinatorDe
     if (issue !== undefined) row = { ...row, issue };
   }
   row = { ...row, startedAt: row.startedAt ?? at };
-  await deps.instances.putUnits([row]);
+  const written = await deps.instances.putUnits([row]);
+  if (!written.ok)
+    return json(written.reason === "unavailable" ? 503 : 409, {
+      ok: false,
+      error: "unit_write_refused",
+      reason: written.reason,
+      at,
+    });
   if (host.kind === "host")
     await hostPublish(
       deps,
@@ -6590,26 +6804,150 @@ function unitLead(instance: CoordinatorInstance, row: CoordinatorUnit): string {
   return `↳ *ship* unit ${row.unit}${row.title ? ` — ${row.title}` : ""} for ${who}, from ${from}: \`${row.branch}\` in ${instance.repo}`;
 }
 
-/** Round 0's pipeline branch: `refs/heads/<branch>` at the base's tip, on
- *  origin before any attach; a branch already there is success inside. */
+/** Branch creation uses the existing owner transaction; a retry only observes unknown work. */
 async function branch(body: Record<string, unknown>, deps: AdminCoordinatorDeps): Promise<IngressResponse> {
   const id = parseInstanceId(body.parentInstanceId);
   if (!id.ok) return json(400, { ok: false, error: id.error });
-  if (body.unit !== undefined && (typeof body.unit !== "string" || !UNIT_ID.test(body.unit)))
-    return json(400, { ok: false, error: "unit must be a unit id" });
   const at = (deps.clock ?? systemClock)();
   const instance = await deps.instances.get(id.value);
   if (!instance) return json(404, { ok: false, error: "unknown_instance" });
-  const unit = await unitRowOf(deps, instance, body.unit as string | undefined);
-  if (!unit.ok) return unit.response;
-  const name = unit.row?.branch ?? instance.branch;
   const base = instance.base;
   if (base === undefined) return json(200, { ok: false, reason: `no base branch is known for ${instance.repo}`, at });
+  if (typeof body.unit !== "string" || !UNIT_ID.test(body.unit))
+    return json(400, { ok: false, error: "unit must be a unit id" });
+  const found = await unitRowOf(deps, instance, body.unit);
+  if (!found.ok) return found.response;
+  let row = found.row!;
+  if (!isCoordinatorUnit(row)) return json(503, { ok: false, error: "github_unavailable", at });
+  const execution = {
+    workflowId: body.executionWorkflowId as string,
+    ...(body.recoveryActionId === undefined ? {} : { recoveryActionId: body.recoveryActionId as string }),
+  };
+  if (
+    execution.workflowId !== (row.recovery?.workflowId ?? instance.id) ||
+    execution.recoveryActionId !== row.recovery?.actionId ||
+    typeof body.effectId !== "string" ||
+    !STEP_NAME_PATTERN.test(body.effectId)
+  )
+    return json(409, { ok: false, error: "effect_execution_mismatch", at });
+  const effectId = body.effectId;
+  if (
+    !Number.isSafeInteger(body.effectOrdinal) ||
+    (body.effectOrdinal as number) < 1 ||
+    (row.currentEffect?.id === effectId
+      ? body.effectOrdinal !== row.currentEffect.ordinal
+      : body.effectOrdinal !== (row.currentEffect?.ordinal ?? 0) + 1)
+  )
+    return json(409, { ok: false, error: "effect_execution_mismatch", at });
+  const ok = () =>
+    json(200, { ok: true, branch: row.branch, base, effectOrdinal: row.currentEffect?.ordinal ?? 0, at });
+  const unavailable = () =>
+    json(503, { ok: false, error: "github_unavailable", message: "branch creation outcome remains unverified", at });
+  const refused = (reason: UnitEffectRefusal) =>
+    reason === "stopped"
+      ? json(409, { ok: false, error: "stopped", at })
+      : ["stale", "busy", "uncertain", "unavailable", "incomplete"].includes(reason)
+        ? unavailable()
+        : json(409, { ok: false, error: "effect_admission_refused", reason, at });
+  const move = async (input: UnitEffectTransition) => {
+    const result = await deps.instances.transitionUnitEffect(input);
+    if (result.ok) row = result.unit;
+    return result;
+  };
+  const read = async (ref: string): Promise<BranchRefRead> => {
+    const fact = await deps.fetchBranchRef(instance.repo, ref).catch(() => ({ kind: "unverified" as const }));
+    return fact.kind === "verified" && (fact.ref !== `refs/heads/${ref}` || !fullHead(fact.sha))
+      ? { kind: "unverified" }
+      : fact;
+  };
   try {
-    await deps.createBranchRef(instance.repo, name, base);
-    return json(200, { ok: true, branch: name, base, at });
-  } catch (err) {
-    return json(200, { ok: false, reason: describe(err), at });
+    let cell = row.currentEffect;
+    if (cell && cell.id !== effectId && cell.phase === "active") return unavailable();
+    if (!cell || cell.id !== effectId) {
+      if (instance.stop) return refused("stopped");
+      const existing = await read(row.branch);
+      if (existing.kind === "verified") return ok();
+      if (existing.kind !== "missing") return unavailable();
+      const source = await read(base);
+      if (source.kind !== "verified") return unavailable();
+      const admitted = await move({
+        kind: "admit",
+        expected: row,
+        execution,
+        effect: {
+          version: 1,
+          id: effectId,
+          ordinal: body.effectOrdinal as number,
+          phase: "active",
+          execution,
+          target: {
+            repo: instance.repo,
+            ref: row.branch,
+            base,
+            headSha: source.sha,
+            ...(row.pr ? { pr: row.pr.number } : {}),
+          },
+          calls: [{ operation: "branch_create", state: "unstarted" }],
+        },
+      });
+      if (!admitted.ok) return refused(admitted.reason);
+      cell = row.currentEffect!;
+    }
+    if (
+      cell.execution.workflowId !== execution.workflowId ||
+      cell.execution.recoveryActionId !== execution.recoveryActionId ||
+      cell.calls.length !== 1 ||
+      cell.calls[0].operation !== "branch_create"
+    )
+      return refused("conflict");
+    if (cell.phase === "settled")
+      return cell.calls[0].state === "accepted"
+        ? ok()
+        : json(200, { ok: false, reason: "branch creation was refused", at });
+    let call = cell.calls[0];
+    if (call.state === "unstarted") {
+      const begun = await move({ kind: "begin", expected: row, execution, effectId, call: 0 });
+      if (!begun.ok) {
+        if (begun.reason === "stopped") {
+          const cancelled = await move({ kind: "cancel", expected: row, execution, effectId, call: 0 });
+          if (!cancelled.ok) return refused(cancelled.reason);
+          const settled = await move({ kind: "settle", expected: row, execution, effectId });
+          if (!settled.ok) return refused(settled.reason);
+        }
+        return refused(begun.reason);
+      }
+      const result = await deps
+        .createBranchRef(instance.repo, cell.target.ref, cell.target.headSha)
+        .catch(() => ({ state: "uncertain" as const }));
+      const outcome =
+        result.state === "accepted" && sameCommit(result.commitSha, cell.target.headSha)
+          ? { state: "accepted" as const, commitSha: cell.target.headSha }
+          : result.state === "refused"
+            ? { state: "refused" as const, cause: "external_refused" as const }
+            : { state: "uncertain" as const };
+      const completed = await move({ kind: "complete", expected: row, execution, effectId, call: 0, outcome });
+      if (!completed.ok) return refused(completed.reason);
+      call = row.currentEffect!.calls[0];
+    }
+    if (call.state === "pending" || call.state === "uncertain") {
+      const fact = await read(cell.target.ref);
+      if (fact.kind !== "verified" || !sameCommit(fact.sha, cell.target.headSha)) return unavailable();
+      const resolved = await move({
+        kind: "resolve",
+        expected: row,
+        execution,
+        effectId,
+        call: 0,
+        observation: { kind: "branch_ref", repo: instance.repo, ref: cell.target.ref, headSha: fact.sha },
+      });
+      if (!resolved.ok) return refused(resolved.reason);
+      call = row.currentEffect!.calls[0];
+    }
+    const settled = await move({ kind: "settle", expected: row, execution, effectId });
+    if (!settled.ok) return refused(settled.reason);
+    return call.state === "accepted" ? ok() : json(200, { ok: false, reason: "branch creation was refused", at });
+  } catch {
+    return unavailable();
   }
 }
 
@@ -6824,7 +7162,16 @@ async function round(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
         error: replaced?.reason === "stale" ? "recovery_claim_stale" : "recovery_store_unavailable",
         at,
       });
-  } else await deps.instances.putUnits([updated]);
+  } else {
+    const written = await deps.instances.putUnits([updated]);
+    if (!written.ok)
+      return json(written.reason === "unavailable" ? 503 : 409, {
+        ok: false,
+        error: "unit_write_refused",
+        reason: written.reason,
+        at,
+      });
+  }
   if (host.kind === "host") {
     const thread = unitThread(instance, updated, units.length);
     await hostPublish(
@@ -6955,7 +7302,14 @@ async function unitWake(body: Record<string, unknown>, deps: AdminCoordinatorDep
   }
   if (!row.idle) {
     const answer: UnitWakeAnswer = row.ending?.kind === "stopped" ? { kind: "stopped" } : { kind: "expired" };
-    await deps.instances.answerWake(row, body.waitId, answer, [], body.waitId);
+    const written = await deps.instances.answerWake(row, body.waitId, answer, [], body.waitId);
+    if (!written.ok)
+      return json(written.reason === "unavailable" ? 503 : 409, {
+        ok: false,
+        error: "unit_write_refused",
+        reason: written.reason,
+        at,
+      });
     return json(200, { ok: true, answer, at });
   }
 
@@ -7079,13 +7433,20 @@ async function unitWake(body: Record<string, unknown>, deps: AdminCoordinatorDep
       : {}),
   };
   const by = answer.kind === "segment" ? `segment:${answer.index}` : body.waitId;
-  await deps.instances.answerWake(
+  const written = await deps.instances.answerWake(
     updated,
     body.waitId,
     answer,
     events.map((e) => e.seq),
     by,
   );
+  if (!written.ok)
+    return json(written.reason === "unavailable" ? 503 : 409, {
+      ok: false,
+      error: "unit_write_refused",
+      reason: written.reason,
+      at,
+    });
   const visible = { ...updated, wakes: { ...(updated.wakes ?? {}), [body.waitId]: answer } };
   if (answer.kind === "answered") {
     if (row.workBrief !== undefined) {
@@ -7107,7 +7468,55 @@ async function unitWake(body: Record<string, unknown>, deps: AdminCoordinatorDep
 }
 
 /** A unit ended: the row says how, the unit's thread gets the report, the card is redrawn. */
-async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps): Promise<IngressResponse> {
+/** Finish the offered original Workflow through the existing settlement and
+ * report paths. The core validates its native status and canonical identity. */
+export async function reconcileCoordinatorReport(
+  effect: unknown,
+  deps: AdminCoordinatorDeps,
+): Promise<CoordinatorReconcileReceipt | undefined> {
+  if (!deps.recoveryStatus || !deps.reportLedger) return undefined;
+  const ledger = deps.reportLedger;
+  return reconcileCoordinatorExecution(effect, {
+    instances: deps.instances,
+    status: deps.recoveryStatus,
+    reportDelivery: (instance, unit) => unitIO(deps, instance, unit)?.reportDelivery,
+    settle: async (body) =>
+      (await unitEnd({ ...structuredClone(body) }, deps, { reconciliation: true })).status === 200,
+    readReport: (owner) => readCoordinatorReport(ledger, owner),
+    finalize: async (input) => {
+      const finalized = await finalizeCoordinatorReport(
+        {
+          ledger,
+          instances: deps.instances,
+          deliverPublic: async (delivery) => {
+            const io = unitIO(deps, delivery.instance, delivery.unit);
+            if (!io || io.undeliverable !== undefined) return false;
+            await io.reply(delivery.report.threadText);
+            return true;
+          },
+          deliverPrivate: async (delivery) => {
+            if (!deps.privateWorkerLog) return undefined;
+            await appendPrivateWorkerReply(
+              deps.privateWorkerLog,
+              { instanceId: delivery.instance.id, unit: delivery.unit.unit },
+              { id: delivery.deliveryId, text: delivery.report.text, at: delivery.unit.ending!.at },
+            );
+            return delivery.deliveryId;
+          },
+        },
+        input,
+      );
+      if (!finalized) return undefined;
+      return finalized;
+    },
+  });
+}
+
+async function unitEnd(
+  body: Record<string, unknown>,
+  deps: AdminCoordinatorDeps,
+  options: { reconciliation?: boolean } = {},
+): Promise<IngressResponse> {
   const id = parseInstanceId(body.parentInstanceId);
   if (!id.ok) return json(400, { ok: false, error: id.error });
   if (typeof body.unit !== "string" || !UNIT_ID.test(body.unit))
@@ -7147,6 +7556,21 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   const units = await deps.instances.listUnits(instance.id);
   const row = units.find((u) => u.unit === body.unit);
   if (!row) return json(404, { ok: false, error: "unit_not_found", unit: body.unit });
+  if (options.reconciliation && row.currentEffect?.phase === "active")
+    return json(409, { ok: false, error: "effect_active", at });
+  // A committed recovery clears its live claim. Its exact terminal receipt is
+  // still the authority for retrying that report, never for starting more work.
+  if (row.recovery?.actionId !== undefined || body.recoveryActionId !== undefined) {
+    const actionId = row.recovery?.actionId ?? row.history?.receiptId;
+    const workflowId = row.recovery?.workflowId ?? row.recoveryReceipt?.workflowId;
+    if (
+      actionId !== body.recoveryActionId ||
+      workflowId !== body.recoveryWorkflowId ||
+      (row.recovery === undefined && row.ending === undefined)
+    )
+      return json(409, { ok: false, error: "recovery_claim_mismatch", at });
+  }
+
   if (
     body.deliveryId !== undefined &&
     (typeof body.deliveryId !== "string" || !STEP_NAME_PATTERN.test(body.deliveryId))
@@ -7190,6 +7614,30 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       fullReport = frozen.text;
       threadReport = frozen.threadText;
       ending.report = fullReport;
+    } else if (
+      row.workBrief === undefined &&
+      row.ending?.threadReport === "" &&
+      row.ending.report === fullReport &&
+      row.ending.deliveryId === body.deliveryId &&
+      (await sameCoordinatorReportAdmission(
+        row.reportDelivery,
+        await coordinatorReportAdmission(reportOwner, { text: fullReport, threadText: "" }),
+      ))
+    ) {
+      // A retry keeps the original admitted rendering when the ending committed
+      // before freeze. Current channel availability cannot change that promise.
+      threadReport = "";
+    } else if (
+      row.ending === undefined &&
+      row.reportDelivery === undefined &&
+      row.workBrief === undefined &&
+      ending.kind !== "continued" &&
+      ending.kind !== "idle" &&
+      deps.ioFor({ threadKey: reportThread, userId: instance.userId })?.reportDelivery === "state"
+    ) {
+      // The machine job's deliverable is its durable report. Select no channel
+      // copy before its first admission; never discard an original owed copy.
+      threadReport = "";
     }
   } catch {
     return json(503, { ok: false, error: "report_context_unavailable", at });
@@ -7226,16 +7674,16 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   // Recovery first claims and removes the old ending under its own fenced path.
   if (
     row.ending !== undefined &&
-    (outcome !== undefined || row.ending.outcome !== undefined || row.history !== undefined) &&
     (row.ending.kind !== ending.kind ||
       row.ending.report !== ending.report ||
+      (row.ending.threadReport !== undefined && row.ending.threadReport !== threadReport) ||
       !sameShipOutcome(row.ending.outcome, outcome))
   )
     return json(409, { ok: false, error: "settlement_conflict", at });
   if (
-    row.workBrief !== undefined &&
     row.ending !== undefined &&
-    (row.ending.outcome !== undefined || row.history !== undefined) &&
+    (row.ending.deliveryId !== undefined ||
+      (row.workBrief !== undefined && (row.ending.outcome !== undefined || row.history !== undefined))) &&
     row.ending.deliveryId !== body.deliveryId
   )
     return json(409, { ok: false, error: "settlement_conflict", at });
@@ -7264,14 +7712,57 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   };
   const recordStatus = async (committed: CoordinatorUnit): Promise<boolean> => {
     try {
-      await appendCoordinatorStatus(
+      const status = await appendCoordinatorStatus(
         { ledger: deps.reportLedger!, instances: deps.instances },
         { owner: reportOwner, instance, unit: committed },
       );
-      return true;
+      return status !== undefined;
     } catch {
       return false;
     }
+  };
+  let finalizationError = "report_context_unavailable";
+  const finalizeReport = async (committed: CoordinatorUnit): Promise<boolean> => {
+    if (committed.ending === undefined) {
+      await freezeReport(committed);
+      return recordStatus(committed);
+    }
+    const finalized = await finalizeCoordinatorReport(
+      {
+        ledger: deps.reportLedger!,
+        instances: deps.instances,
+        deliverPublic: async (input) => {
+          const io = unitIO(deps, input.instance, input.unit);
+          if (!io || io.undeliverable !== undefined) return false;
+          await io.reply(input.report.threadText);
+          return true;
+        },
+        deliverPrivate: async (input) => {
+          try {
+            if (!deps.privateWorkerLog) throw new Error("private worker log unavailable");
+            await appendPrivateWorkerReply(
+              deps.privateWorkerLog,
+              { instanceId: input.instance.id, unit: input.unit.unit },
+              { id: input.deliveryId, text: input.report.text, at: input.unit.ending!.at },
+            );
+            return input.deliveryId;
+          } catch {
+            finalizationError = "private_worker_log_unavailable";
+            return undefined;
+          }
+        },
+      },
+      {
+        instance,
+        unit: committed,
+        owner: reportOwner,
+        proposed: { text: fullReport, threadText: threadReport as string },
+      },
+    );
+    if (!finalized) return false;
+    fullReport = finalized.report.text;
+    threadReport = finalized.report.threadText;
+    return true;
   };
   const recoveryWorkflowId =
     typeof body.recoveryWorkflowId === "string" && INSTANCE_ID_PATTERN.test(body.recoveryWorkflowId)
@@ -7281,13 +7772,23 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     return json(400, { ok: false, error: "recoveryWorkflowId must be a Workflow instance id", at });
   if (row.recovery !== undefined && recoveryWorkflowId !== row.recovery.workflowId)
     return json(409, { ok: false, error: "recovery_claim_mismatch", at });
-  const settlementActionId =
-    row.recovery?.actionId ?? (row.history?.receiptId !== "observed" ? row.history?.receiptId : undefined);
-  const settlementOwner: RunnerPullOwner = {
-    instanceId: instance.id,
-    unit: row.unit,
-    ...(settlementActionId !== undefined ? { recoveryActionId: settlementActionId } : {}),
-  };
+  if (
+    recoveryWorkflowId !== undefined &&
+    row.recoveryReceipt?.workflowId === recoveryWorkflowId &&
+    row.ending === undefined
+  )
+    return json(409, { ok: false, error: "settlement_conflict", at });
+  if (
+    outcome?.recoveryStop !== undefined &&
+    !(
+      (row.recovery?.kind === "coding" && row.recovery.round === 0 && row.recovery.workflowId === recoveryWorkflowId) ||
+      (row.recovery === undefined &&
+        row.recoveryReceipt?.codingRunId !== undefined &&
+        row.recoveryReceipt.workflowId === recoveryWorkflowId &&
+        sameShipOutcome(row.ending?.outcome, outcome))
+    )
+  )
+    return json(409, { ok: false, error: "recovery_outcome_mismatch", at });
   const reportAdmission = await coordinatorReportAdmission(reportOwner, {
     text: fullReport,
     threadText: threadReport as string,
@@ -7296,8 +7797,7 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   if (
     row.reportDelivery !== undefined &&
     !sameReport &&
-    (sameCoordinatorReportOwner(row.reportDelivery.owner, reportOwner) ||
-      (row.ending !== undefined && (row.ending.outcome !== undefined || row.history !== undefined)))
+    (sameCoordinatorReportOwner(row.reportDelivery.owner, reportOwner) || row.ending !== undefined)
   )
     return json(409, { ok: false, error: "settlement_conflict", at });
   if (recoveryWorkflowId !== undefined && row.recoveryReceipt?.workflowId === recoveryWorkflowId) {
@@ -7305,26 +7805,25 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     if (!sameReport) {
       try {
         const accepted = await deps.instances.compareAndReplaceUnit(row, committed);
-        if (!accepted.ok) return json(409, { ok: false, error: "settlement_conflict", at });
+        if (!accepted.ok)
+          return json(accepted.reason === "unavailable" ? 503 : 409, {
+            ok: false,
+            error: accepted.reason === "unavailable" ? "settlement_store_unavailable" : "settlement_conflict",
+            at,
+          });
       } catch {
         const current = await deps.instances.listUnits(instance.id).catch(() => undefined);
-        if (
-          current?.filter((candidate) => candidate.unit === row.unit).length !== 1 ||
-          JSON.stringify(current.find((candidate) => candidate.unit === row.unit)) !== JSON.stringify(committed)
-        )
+        const matches = current?.filter((candidate) => candidate.unit === row.unit);
+        if (matches === undefined || (matches.length === 1 && JSON.stringify(matches[0]) === JSON.stringify(row)))
           return json(503, { ok: false, error: "settlement_store_unavailable", at });
+        if (matches.length !== 1 || JSON.stringify(matches[0]) !== JSON.stringify(committed))
+          return json(409, { ok: false, error: "settlement_conflict", at });
       }
     }
     try {
-      await freezeReport(committed);
+      if (!(await finalizeReport(committed))) return json(503, { ok: false, error: finalizationError, at });
     } catch {
       return json(503, { ok: false, error: "report_context_unavailable", at });
-    }
-    if (!(await recordStatus(committed))) return json(503, { ok: false, error: "report_context_unavailable", at });
-    if (row.workBrief !== undefined && !(await deliverPrivateReport()))
-      return json(503, { ok: false, error: "private_worker_log_unavailable", at });
-    if (row.pr !== undefined) {
-      deps.runnerOwnership?.release(instance.repo, row.pr.number, settlementOwner);
     }
     return json(200, {
       ok: true,
@@ -7334,8 +7833,12 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     });
   }
 
-  const host = row.recovery !== undefined ? ({ kind: "not_host" } as const) : await hostRunOf(deps, instance);
-  if (host.kind === "not_host" && row.recovery === undefined) return json(409, { ok: false, error: "not_host", at });
+  const host =
+    row.recovery !== undefined || options.reconciliation
+      ? ({ kind: "not_host" } as const)
+      : await hostRunOf(deps, instance);
+  if (host.kind === "not_host" && row.recovery === undefined && !options.reconciliation)
+    return json(409, { ok: false, error: "not_host", at });
   // The driver's `headSha` is the exact continuation boundary: the coding
   // child's last push for review_pending, or the final approved head for
   // merge_ready. Persist it as `lastPush` for the next attempt's pre-check.
@@ -7364,24 +7867,22 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
           typeof pr.number === "number" &&
           typeof pr.url === "string"
         ? ({ cause: "draft", pr: { number: pr.number, url: pr.url } } as const)
-        : undefined;
+        : row.recovery !== undefined && ending.kind === "held" && ending.holdCause === "blocked"
+          ? ({ cause: "blocked" } as const)
+          : undefined;
   if (row.recovery !== undefined && ending.kind === "held" && recoveryHold === undefined)
     return json(400, { ok: false, error: "a recovered held ending must carry a typed hold cause", at });
   if (row.recovery !== undefined && (idle !== undefined || segment !== undefined))
     return json(409, { ok: false, error: "recovery_continuation_unsupported", at });
-  if (row.recovery !== undefined && row.pr !== undefined) {
-    try {
-      if (deps.runnerOwnership?.claim(instance.repo, row.pr.number, settlementOwner) !== true)
-        return json(409, { ok: false, error: "publication_ownership_changed", at });
-    } catch (err) {
-      return json(409, { ok: false, error: "publication_ownership_unknown", message: describe(err), at });
-    }
+  if (row.recovery) {
+    const ownershipRefusal = await recoveryPullOwnership(deps, instance, row, at);
+    if (ownershipRefusal) return ownershipRefusal;
   }
   // A real ending is the unit's end: an idle the row carried from an earlier
   // stop is dropped with it, so the row says one thing about how the unit stands.
   const { idle: _idle, recovery: _recovery, ...rowWithoutLifecycle } = row;
   let updated: CoordinatorUnit =
-    sameReport || (row.ending !== undefined && (row.ending.outcome !== undefined || row.history !== undefined))
+    sameReport || row.ending !== undefined
       ? row
       : {
           ...(idle !== undefined || segment !== undefined ? row : rowWithoutLifecycle),
@@ -7415,10 +7916,9 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
                   ending: {
                     kind: ending.kind,
                     report: fullReport,
+                    threadReport: threadReport as string,
                     ...(outcome !== undefined ? { outcome } : {}),
-                    ...((outcome !== undefined || row.history !== undefined) && row.workBrief !== undefined
-                      ? { deliveryId: body.deliveryId as string }
-                      : {}),
+                    ...(typeof body.deliveryId === "string" ? { deliveryId: body.deliveryId as string } : {}),
                     // Machine-readable failure context (issue 2100): readers do not
                     // need to parse the person's report to locate a thrown step.
                     ...(cause !== undefined ? { cause } : {}),
@@ -7433,31 +7933,23 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   // a stale legacy or idle write must not erase a newer typed settlement.
   const storeError = row.recovery !== undefined ? "recovery_store_unavailable" : "settlement_store_unavailable";
   const staleError = row.recovery !== undefined ? "recovery_claim_stale" : "settlement_conflict";
-  let replaced: Awaited<ReturnType<CoordinatorInstanceStore["compareAndReplaceUnit"]>> | undefined;
+  let replaced:
+    | Awaited<ReturnType<CoordinatorInstanceStore["compareAndReplaceUnit"]>>
+    | Awaited<ReturnType<CoordinatorInstanceStore["transitionRecovery"]>>
+    | undefined;
   try {
     if (row.recovery?.actionId !== undefined) {
       const replacement = updated;
       updated = { ...updated, history: { version: 1, receiptId: row.recovery.actionId } };
       const result = await deps.instances.transitionRecovery({ kind: "settle", expected: row, replacement });
-      replaced = result.ok ? { ok: true } : { ok: false, reason: result.reason === "stale" ? "stale" : "unavailable" };
+      replaced = result;
       if (result.ok) updated = result.unit;
     } else replaced = await deps.instances.compareAndReplaceUnit(row, updated);
   } catch {
     const reread = await deps.instances.listUnits(instance.id).catch(() => undefined);
     const current = reread?.filter((candidate) => candidate.unit === row.unit);
-    if (
-      current?.length === 1 &&
-      (JSON.stringify(current[0]) === JSON.stringify(updated) ||
-        (outcome === undefined &&
-          row.history === undefined &&
-          current[0]!.ending?.outcome === undefined &&
-          row.recovery !== undefined &&
-          current[0]!.recovery === undefined &&
-          current[0]!.recoveryReceipt?.workflowId === row.recovery.workflowId &&
-          (row.recovery.kind === "coding"
-            ? current[0]!.recoveryReceipt?.codingRunId === row.recovery.codingRunId
-            : current[0]!.recoveryReceipt?.reviewRunId === row.recovery.reviewRunId)))
-    ) {
+    if (current === undefined) return json(503, { ok: false, error: storeError, at });
+    if (current?.length === 1 && JSON.stringify(current[0]) === JSON.stringify(updated)) {
       replaced = { ok: true };
       updated = current[0]!;
     } else if (current?.length === 1 && JSON.stringify(current[0]) === JSON.stringify(row))
@@ -7465,19 +7957,23 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     else return json(409, { ok: false, error: staleError, at });
   }
   if (replaced?.ok !== true)
-    return json(409, {
+    return json(replaced?.reason === "unavailable" || replaced === undefined ? 503 : 409, {
       ok: false,
-      error: replaced?.reason === "stale" ? staleError : storeError,
+      error:
+        replaced?.reason === "stale"
+          ? staleError
+          : replaced?.reason === "conflict"
+            ? "settlement_conflict"
+            : replaced?.reason === "capacity"
+              ? "recovery_history_capacity"
+              : storeError,
       at,
     });
   try {
-    await freezeReport(updated);
+    if (!(await finalizeReport(updated))) return json(503, { ok: false, error: finalizationError, at });
   } catch {
     return json(503, { ok: false, error: "report_context_unavailable", at });
   }
-  if (!(await recordStatus(updated))) return json(503, { ok: false, error: "report_context_unavailable", at });
-  if (segment === undefined && idle === undefined && updated.pr !== undefined)
-    deps.runnerOwnership?.release(instance.repo, updated.pr.number, settlementOwner);
   const thread = unitThread(instance, updated, units.length);
   if (host.kind === "host")
     await hostPublish(
@@ -7509,7 +8005,13 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   // the log says so by count — a loss the operator can read, never a silent one.
   // An idle unit has not ended: its events wait for the fold or the wake
   // (record 0051; the wait lands with this plan's fifth unit).
-  if (segment === undefined && idle === undefined && row.recovery === undefined && row.workBrief === undefined) {
+  if (
+    !options.reconciliation &&
+    segment === undefined &&
+    idle === undefined &&
+    row.recovery === undefined &&
+    row.workBrief === undefined
+  ) {
     const leftovers = await deps.instances
       .listEvents({ instanceId: instance.id, unit: row.unit }, true)
       .catch(() => [] as ThreadEvent[]);
@@ -7566,7 +8068,11 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   }
   let told = false;
   if (row.workBrief !== undefined) {
-    if (!(await deliverPrivateReport())) return json(503, { ok: false, error: "private_worker_log_unavailable", at });
+    if (updated.ending === undefined && !(await deliverPrivateReport()))
+      return json(503, { ok: false, error: "private_worker_log_unavailable", at });
+    told = true;
+  } else if (updated.ending !== undefined) {
+    // The shared finalizer confirmed delivery or an explicitly empty thread copy.
     told = true;
   } else if (io && threadReport.length === 0)
     told = true; // nothing owed to the thread at this level
@@ -7585,7 +8091,7 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   // refused, a cap, a stop — and under it the last coding child's typed handoff
   // as the parent renders it, so a deviation the child recorded reaches the
   // board without a person copying it over. Best effort, like the thread's.
-  if (row.issue !== undefined && row.workBrief === undefined) {
+  if (!options.reconciliation && row.issue !== undefined && row.workBrief === undefined) {
     const handoff = await codingHandoffOf(deps, instance, body.codingRunId);
     const rendered =
       handoff !== undefined
@@ -7605,7 +8111,12 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   // An ordinary human-gated unit leaves its report on the pull request beside
   // the review. A private worker reports only to the main agent's durable log.
   const parkedHumanGate = ending.kind === "idle" && idle?.humanGate !== undefined;
-  if (row.workBrief === undefined && (ending.kind === "held" || parkedHumanGate) && updated.pr !== undefined) {
+  if (
+    !options.reconciliation &&
+    row.workBrief === undefined &&
+    (ending.kind === "held" || parkedHumanGate) &&
+    updated.pr !== undefined
+  ) {
     const state = parkedHumanGate ? "waiting for a person" : "held";
     await deps.github
       .commentIssue(instance.repo, updated.pr.number, `**Plan runner — ${row.unit} ${state}**\n\n${ending.report}`)
@@ -7658,8 +8169,8 @@ async function codingHandoffOf(
  *
  * A base that takes changes only through a merge queue is enqueued, never
  * squashed and never refused (issue 2011): the base branch's ruleset says so
- * ahead of the attempt, or — when the rules could not be read — GitHub's own
- * 405 wording does; either way the door enqueues (the GraphQL
+ * ahead of the attempt; an unreadable rule is a retryable read, never permission
+ * inferred from error prose. The door enqueues (the GraphQL
  * `enqueuePullRequest` mutation, the same act `gh pr merge --auto` performs)
  * and answers `enqueued`. A `queued: true` re-ask reads the queue's outcome
  * instead: merged from the facts, still `enqueued`, or `removed` with the
@@ -7672,7 +8183,7 @@ async function advanceRunnerRebasePublication(
   instance: CoordinatorInstance,
   row: CoordinatorUnit,
   from: string,
-  reportedHead?: string,
+  reportedHead: string,
 ): Promise<string | undefined> {
   const binding = row.publication;
   if (binding === undefined) return undefined;
@@ -7687,8 +8198,8 @@ async function advanceRunnerRebasePublication(
     binding.publicationRef !== row.branch ||
     binding.baseRef !== instance.base ||
     !fullHead(from) ||
-    (reportedHead !== undefined && !fullHead(reportedHead)) ||
-    binding.expectedHeadSha !== from
+    !fullHead(reportedHead) ||
+    (binding.expectedHeadSha !== from && binding.expectedHeadSha !== reportedHead)
   )
     throw new PublicationBindingRefusal("publication_facts_mismatch");
   const facts = await deps.fetchPrFacts({ repo: instance.repo, number: binding.pr });
@@ -7699,34 +8210,33 @@ async function advanceRunnerRebasePublication(
     facts.headRef !== binding.headRef ||
     facts.baseRef !== binding.baseRef ||
     !fullHead(facts.headSha) ||
-    (reportedHead !== undefined && facts.headSha !== reportedHead) ||
+    facts.headSha !== reportedHead ||
     facts.verifiedHead?.repo.toLowerCase() !== instance.repo.toLowerCase() ||
     facts.verifiedHead.ref !== binding.publicationRef ||
     facts.verifiedHead.sha !== facts.headSha
   )
     throw new PublicationBindingRefusal("publication_facts_mismatch");
   const to = facts.headSha;
-  if (to === from) return undefined;
-  const updated: CoordinatorUnit = {
-    ...row,
-    ...(reportedHead !== undefined ? { lastPush: to } : {}),
-    publication: { ...binding, expectedHeadSha: to },
-  };
-  const replaced = await deps.instances.compareAndReplaceUnit(row, updated).catch(() => undefined);
-  if (replaced?.ok !== true)
-    throw new PublicationBindingRefusal(
-      replaced?.reason === "stale" ? "publication_binding_stale" : "publication_store_unavailable",
-    );
-  let stillOwned = false;
+  if (to === binding.expectedHeadSha) return to;
+  const cell = row.currentEffect;
+  if (
+    !cell ||
+    cell.calls[0]?.operation !== "rebase_push" ||
+    cell.calls[0].state !== "accepted" ||
+    cell.calls[0].commitSha !== to
+  )
+    throw new PublicationBindingRefusal("publication_facts_mismatch");
+  const change: UnitEffectTransition = { kind: "publish", expected: row, execution: cell.execution, effectId: cell.id };
+  let answer;
   try {
-    stillOwned = samePublicationOwner(deps.runnerOwnership?.owner(instance.repo, binding.pr), owner);
+    answer = await deps.instances.transitionUnitEffect(change);
   } catch {
-    /* Unknown ownership also requires rollback. */
+    /* Exact readback resolves a lost durable ACK. */
   }
-  if (!stillOwned) {
-    const restored = await deps.instances.compareAndReplaceUnit(updated, row).catch(() => undefined);
-    if (restored?.ok !== true) throw new PublicationBindingRefusal("publication_rollback_failed");
-    throw new PublicationBindingRefusal("publication_ownership_changed");
+  if (!answer?.ok || !unitEffectResultMatches(change, answer.unit)) {
+    const current = (await deps.instances.listUnits(instance.id)).filter((u) => u.unit === row.unit);
+    if (current.length !== 1 || !unitEffectResultMatches(change, current[0]!))
+      throw new PublicationBindingRefusal("publication_store_unavailable");
   }
   return to;
 }
@@ -7738,7 +8248,7 @@ async function rebaseStep(body: Record<string, unknown>, deps: AdminCoordinatorD
     return json(400, { ok: false, error: "unit must be a unit id" });
   if (typeof body.prNumber !== "number" || !Number.isInteger(body.prNumber) || body.prNumber <= 0)
     return json(400, { ok: false, error: "prNumber must be a pull request number" });
-  if (typeof body.headSha !== "string" || !/^[0-9a-f]{7,40}$/i.test(body.headSha))
+  if (typeof body.headSha !== "string" || !fullHead(body.headSha))
     return json(400, { ok: false, error: "headSha must be a commit sha" });
   const at = (deps.clock ?? systemClock)();
   const instance = await deps.instances.get(id.value);
@@ -7747,50 +8257,99 @@ async function rebaseStep(body: Record<string, unknown>, deps: AdminCoordinatorD
   if (!row) return json(404, { ok: false, error: "unknown_unit", at });
   if (row.pr?.number !== undefined && row.pr.number !== body.prNumber)
     return json(409, { ok: false, error: "pull_request_moved", at });
-  try {
-    if (
-      deps.runnerOwnership?.claim(instance.repo, body.prNumber, {
-        instanceId: instance.id,
-        unit: row.unit,
-      }) !== true
-    )
-      return json(409, { ok: false, error: "publication_ownership_changed", at });
-  } catch (err) {
-    return json(503, { ok: false, error: "publication_ownership_unknown", message: describe(err), at });
-  }
-  if (deps.runnerRebase === undefined)
+  const execution = {
+    workflowId: body.executionWorkflowId as string,
+    ...(body.recoveryActionId === undefined ? {} : { recoveryActionId: body.recoveryActionId as string }),
+  };
+  if (
+    execution.workflowId !== (row.recovery?.workflowId ?? instance.id) ||
+    execution.recoveryActionId !== row.recovery?.actionId ||
+    typeof body.effectId !== "string" ||
+    !STEP_NAME_PATTERN.test(body.effectId) ||
+    !Number.isSafeInteger(body.effectOrdinal) ||
+    body.effectOrdinal !==
+      (row.currentEffect?.id === body.effectId ? row.currentEffect.ordinal : (row.currentEffect?.ordinal ?? 0) + 1)
+  )
+    return json(409, { ok: false, error: "effect_execution_mismatch", at });
+  const owner = await findRunnerPullOwner(deps.instances, instance.repo, body.prNumber);
+  if (!owner.ok) return json(503, { ok: false, error: "publication_ownership_unknown", at });
+  if (
+    owner.owner?.instanceId !== instance.id ||
+    owner.owner.unit !== row.unit ||
+    owner.owner.recoveryActionId !== row.recovery?.actionId
+  )
+    return json(409, { ok: false, error: "publication_ownership_changed", at });
+  if (deps.runnerRebase === undefined || deps.reportLedger === undefined)
     return json(200, { ok: true, outcome: "refused", reason: "the runner's rebase resolver is unavailable", at });
+  const nativeJournal = createSweepEffectJournal(
+    { instance, unit: row, execution, effectId: body.effectId, ordinal: body.effectOrdinal as number },
+    { instances: deps.instances, ledger: deps.reportLedger },
+  );
+  const journal: SweepEffectJournal = {
+    ...nativeJournal,
+    begin: async (plan, call) => {
+      if (call > 0) {
+        const current = (await deps.instances.listUnits(instance.id)).find((u) => u.unit === row.unit);
+        if (
+          !current ||
+          !current.currentEffect ||
+          current.currentEffect.id !== body.effectId ||
+          current.currentEffect.ordinal !== body.effectOrdinal ||
+          current.currentEffect.calls[0]?.operation !== "rebase_push" ||
+          current.currentEffect.calls[0].state !== "accepted" ||
+          current.currentEffect.calls[0].commitSha !== plan.newHead
+        )
+          return false;
+        await advanceRunnerRebasePublication(deps, instance, current, plan.pr.headSha, plan.newHead);
+      }
+      return nativeJournal.begin(plan, call);
+    },
+  };
   let report: SweepReport;
   try {
-    report = await deps.runnerRebase(instance, body.prNumber);
-  } catch (err) {
-    try {
-      const observed = await advanceRunnerRebasePublication(deps, instance, row, body.headSha);
-      if (observed !== undefined) return json(200, { ok: true, outcome: "changed", headSha: observed, at });
-    } catch {
-      /* An unverifiable head cannot be adopted after an unrecorded rebase. */
-    }
-    return json(200, { ok: true, outcome: "refused", reason: describe(err), at });
+    report = await deps.runnerRebase(instance, body.prNumber, journal);
+  } catch {
+    return json(503, { ok: false, error: "effect_reconciliation_pending", at });
   }
+
   try {
     const result = report.results.find((r) => r.number === body.prNumber);
-    if (result?.outcome === "carried" && result.headSha !== undefined) {
-      await advanceRunnerRebasePublication(deps, instance, row, body.headSha, result.headSha);
+    if ((result?.outcome === "carried" || result?.outcome === "delta-review") && result.headSha !== undefined) {
+      const current = (await deps.instances.listUnits(instance.id)).find((u) => u.unit === row.unit);
+      const effect = current?.currentEffect;
+      if (
+        !current ||
+        effect?.id !== body.effectId ||
+        effect.ordinal !== body.effectOrdinal ||
+        effect.phase !== "settled" ||
+        effect.execution.workflowId !== execution.workflowId ||
+        effect.execution.recoveryActionId !== execution.recoveryActionId ||
+        effect.target.headSha.toLowerCase() !== body.headSha.toLowerCase() ||
+        effect.calls[0]?.operation !== "rebase_push" ||
+        effect.calls[0].state !== "accepted" ||
+        effect.calls[0].commitSha !== result.headSha.toLowerCase()
+      )
+        return json(503, { ok: false, error: "effect_reconciliation_pending", at });
+      await advanceRunnerRebasePublication(deps, instance, current, body.headSha, result.headSha);
       return json(200, {
         ok: true,
-        outcome: result.approvalCarried === true ? "carried" : "changed",
+        outcome:
+          result.outcome === "carried" &&
+          result.approvalCarried === true &&
+          effect.calls.some((call) => call.operation === "approval_reset" && call.state === "accepted")
+            ? "carried"
+            : "changed",
         headSha: result.headSha,
+        effectOrdinal: effect.ordinal,
         at,
       });
     }
-    if (result?.outcome === "delta-review" && result.headSha !== undefined) {
-      await advanceRunnerRebasePublication(deps, instance, row, body.headSha, result.headSha);
-      return json(200, { ok: true, outcome: "changed", headSha: result.headSha, at });
-    }
-    // Only a lost rebase outcome (the throw above) permits an unattributed
-    // head reconciliation. An explicit result cannot credit another writer.
+    // An explicit local conflict or no-op cannot credit a native push.
     if (result?.outcome === "conflict") return json(200, { ok: true, outcome: "conflict", reason: result.line, at });
     if (result?.outcome === "skipped") return json(200, { ok: true, outcome: "carried", headSha: body.headSha, at });
+    const current = (await deps.instances.listUnits(instance.id)).find((u) => u.unit === row.unit);
+    if (current?.currentEffect?.id === body.effectId && current.currentEffect.phase === "active")
+      return json(503, { ok: false, error: "effect_reconciliation_pending", at });
     return json(200, {
       ok: true,
       outcome: "refused",
@@ -7799,6 +8358,287 @@ async function rebaseStep(body: Record<string, unknown>, deps: AdminCoordinatorD
     });
   } catch (err) {
     return json(200, { ok: true, outcome: "refused", reason: describe(err), at });
+  }
+}
+
+/** The existing unit owns one merge or enqueue call, including an unknown reply. */
+async function mergeEffect(
+  body: Record<string, unknown>,
+  deps: AdminCoordinatorDeps,
+  instance: CoordinatorInstance,
+  input: CoordinatorUnit,
+  facts?: PullRequestFacts,
+): Promise<IngressResponse | undefined> {
+  let row = input;
+  const at = (deps.clock ?? systemClock)();
+  const execution = {
+    workflowId: body.executionWorkflowId as string,
+    ...(body.recoveryActionId === undefined ? {} : { recoveryActionId: body.recoveryActionId as string }),
+  };
+  const effectId = body.effectId as string;
+  if (
+    execution.workflowId !== (row.recovery?.workflowId ?? instance.id) ||
+    execution.recoveryActionId !== row.recovery?.actionId ||
+    typeof effectId !== "string" ||
+    !STEP_NAME_PATTERN.test(effectId) ||
+    !Number.isSafeInteger(body.effectOrdinal) ||
+    (row.currentEffect?.id === effectId
+      ? body.effectOrdinal !== row.currentEffect.ordinal
+      : body.effectOrdinal !== (row.currentEffect?.ordinal ?? 0) + 1)
+  )
+    return json(409, { ok: false, error: "effect_execution_mismatch", at });
+  const unavailable = () =>
+    json(502, {
+      ok: false,
+      error: "github_unavailable",
+      message: "the merge or enqueue outcome remains unverified",
+      at,
+    });
+  const move = async (change: UnitEffectTransition) => {
+    const answer = await deps.instances.transitionUnitEffect(change);
+    if (!answer.ok) throw new Error(answer.reason);
+    row = answer.unit;
+  };
+  const answer = (by?: "other", reason?: string): IngressResponse => {
+    const call = row.currentEffect!.calls[0]!;
+    return call.state === "accepted"
+      ? json(200, {
+          ok: true,
+          effectOrdinal: row.currentEffect!.ordinal,
+          ...(call.operation === "merge"
+            ? { outcome: "merged", sha: call.commitSha, ...(by ? { by } : {}) }
+            : { outcome: "enqueued", reason: `enqueued at \`${row.currentEffect!.target.headSha.slice(0, 7)}\`` }),
+          at,
+        })
+      : json(200, {
+          ok: true,
+          outcome: "refused",
+          effectOrdinal: row.currentEffect!.ordinal,
+          reason: reason ?? "GitHub refused the recorded merge or enqueue",
+          at,
+        });
+  };
+  try {
+    let cell = row.currentEffect;
+    if (cell?.id === effectId) {
+      if (
+        cell.execution.workflowId !== execution.workflowId ||
+        cell.execution.recoveryActionId !== execution.recoveryActionId ||
+        cell.target.repo.toLowerCase() !== instance.repo.toLowerCase() ||
+        cell.target.ref !== row.branch ||
+        cell.target.base !== instance.base ||
+        cell.target.pr !== body.prNumber ||
+        cell.target.headSha !== body.headSha ||
+        cell.calls.length !== 1 ||
+        !["merge", "enqueue"].includes(cell.calls[0]!.operation)
+      )
+        return unavailable();
+      if (cell.phase === "settled") return answer();
+      const call = cell.calls[0]!;
+      if (
+        call.state === "pending" ||
+        call.state === "uncertain" ||
+        (call.operation === "enqueue" && call.state === "accepted")
+      ) {
+        const observed = await deps.fetchPrFacts({ repo: cell.target.repo, number: cell.target.pr! });
+        if (
+          !observed ||
+          observed.sameRepoHead !== true ||
+          observed.headRef !== cell.target.ref ||
+          observed.baseRef !== cell.target.base ||
+          !fullHead(observed.headSha) ||
+          (observed.headSha !== cell.target.headSha && !(call.operation === "enqueue" && call.state === "accepted"))
+        )
+          return unavailable();
+        const target = {
+          repo: cell.target.repo,
+          ref: cell.target.ref,
+          base: cell.target.base,
+          pr: cell.target.pr!,
+          headSha: cell.target.headSha,
+        };
+        if (
+          observed.state === "closed" &&
+          observed.headSha === cell.target.headSha &&
+          observed.mergedAt !== undefined &&
+          fullHead(observed.mergeCommitSha)
+        ) {
+          await move({
+            kind: "resolve",
+            expected: row,
+            execution,
+            effectId,
+            call: 0,
+            observation: { kind: "pull_merged", ...target, commitSha: observed.mergeCommitSha },
+          });
+          if (row.currentEffect!.phase !== "settled")
+            await move({ kind: "settle", expected: row, execution, effectId });
+          return json(200, {
+            ok: true,
+            outcome: "merged",
+            by: "other",
+            sha: observed.mergeCommitSha,
+            mergedAt: observed.mergedAt,
+            effectOrdinal: cell.ordinal,
+            at,
+          });
+        }
+        if (call.operation !== "enqueue") return unavailable();
+        const queued = await deps.fetchMergeQueueState?.({ repo: cell.target.repo, number: cell.target.pr! });
+        if (queued === undefined) return unavailable();
+        if (
+          call.state === "accepted" &&
+          (!queued.queued ||
+            (queued.headSha !== undefined &&
+              queued.headSha !== cell.target.headSha &&
+              queued.headSha === observed.headSha))
+        ) {
+          await move({
+            kind: "resolve",
+            expected: row,
+            execution,
+            effectId,
+            call: 0,
+            observation: { kind: "pull_dequeued", ...target },
+          });
+          if (observed.headSha !== cell.target.headSha || observed.state !== "open") {
+            const pullRequest = pullRequestState(cell.target.pr!, row.pr!.url, observed);
+            return pullRequest
+              ? json(200, { ok: true, outcome: "recheck", pullRequest, effectOrdinal: cell.ordinal, at })
+              : unavailable();
+          }
+          return json(200, {
+            ok: true,
+            outcome: "removed",
+            reason: queued.queued
+              ? "the queue now names a replacement head"
+              : (queued.reason ?? "removed from the merge queue with no reason given"),
+            effectOrdinal: cell.ordinal,
+            at,
+          });
+        }
+        if (observed.state !== "open" || observed.headSha !== cell.target.headSha || !queued.queued)
+          return unavailable();
+        if (call.state !== "accepted") {
+          if (queued.headSha !== cell.target.headSha) return unavailable();
+          await move({
+            kind: "resolve",
+            expected: row,
+            execution,
+            effectId,
+            call: 0,
+            observation: { kind: "pull_enqueued", ...target },
+          });
+        }
+        return json(200, {
+          ok: true,
+          outcome: "enqueued",
+          reason:
+            queued.position !== undefined ? `position ${queued.position} in the merge queue` : "in the merge queue",
+          effectOrdinal: cell.ordinal,
+          at,
+        });
+      }
+      if (call.state === "accepted" || call.state === "refused") {
+        if (call.operation !== "enqueue" || call.state !== "accepted")
+          await move({ kind: "settle", expected: row, execution, effectId });
+        return answer();
+      }
+      if (instance.stop) {
+        await move({ kind: "cancel", expected: row, execution, effectId, call: 0 });
+        await move({ kind: "settle", expected: row, execution, effectId });
+        return json(409, { ok: false, error: "stopped", effectOrdinal: cell.ordinal, at });
+      }
+    } else if (cell?.phase === "active") return unavailable();
+    if (facts === undefined) return undefined;
+    if (
+      !isCoordinatorUnit(row) ||
+      instance.base === undefined ||
+      facts.sameRepoHead !== true ||
+      facts.baseRef !== instance.base ||
+      facts.headRef !== row.branch ||
+      facts.headSha !== body.headSha
+    )
+      return unavailable();
+    if (!cell || cell.id !== effectId) {
+      const queue = await deps.branchHasMergeQueue?.(instance.repo, instance.base);
+      if (queue === undefined) return unavailable();
+      if (queue && deps.enqueuePullRequest === undefined)
+        return json(502, { ok: false, error: "github_unavailable", message: "merge queue enqueue is unavailable", at });
+      await move({
+        kind: "admit",
+        expected: row,
+        execution,
+        effect: {
+          version: 1,
+          id: effectId,
+          ordinal: body.effectOrdinal as number,
+          execution,
+          phase: "active",
+          target: {
+            repo: instance.repo,
+            ref: row.branch,
+            base: instance.base,
+            pr: body.prNumber as number,
+            headSha: body.headSha as string,
+          },
+          calls: [{ operation: queue ? "enqueue" : "merge", state: "unstarted" }],
+        },
+      });
+      cell = row.currentEffect!;
+    }
+    const begun = await deps.instances.transitionUnitEffect({
+      kind: "begin",
+      expected: row,
+      execution,
+      effectId,
+      call: 0,
+    });
+    if (!begun.ok) {
+      if (begun.reason === "stopped") {
+        await move({ kind: "cancel", expected: row, execution, effectId, call: 0 });
+        await move({ kind: "settle", expected: row, execution, effectId });
+        return json(409, { ok: false, error: "stopped", effectOrdinal: cell.ordinal, at });
+      }
+      return unavailable();
+    }
+    row = begun.unit;
+    let outcome: UnitEffectCompletionOutcome = { state: "uncertain" };
+    let reason: string | undefined;
+    try {
+      const target = { repo: cell.target.repo, number: cell.target.pr! };
+      if (cell.calls[0]!.operation === "enqueue") {
+        const queued = await deps.enqueuePullRequest!(target, { sha: cell.target.headSha });
+        outcome = queued.ok ? { state: "accepted" } : { state: "refused", cause: "external_refused" };
+        if (!queued.ok) reason = `GitHub refused to enqueue ${instance.repo}#${target.number}: ${queued.reason}`;
+      } else {
+        const merged = await deps.mergePullRequest(target, {
+          sha: cell.target.headSha,
+          title: facts.title ?? `Merge pull request #${target.number}`,
+        });
+        outcome =
+          merged.ok && fullHead(merged.sha)
+            ? { state: "accepted", commitSha: merged.sha }
+            : !merged.ok
+              ? { state: "refused", cause: "external_refused" }
+              : { state: "uncertain" };
+        if (!merged.ok)
+          reason = `GitHub refused the merge of ${instance.repo}#${target.number} (HTTP ${merged.status}): ${merged.reason}`;
+      }
+    } catch {
+      /* A begun call without a native response retains the owner. */
+    }
+    await move({ kind: "complete", expected: row, execution, effectId, call: 0, outcome });
+    if (outcome.state === "uncertain") return unavailable();
+    if (cell.calls[0]!.operation !== "enqueue" || outcome.state !== "accepted")
+      await move({ kind: "settle", expected: row, execution, effectId });
+    const response = answer(undefined, reason);
+    (deps.log ?? console.log)(
+      `[coordinator] ${instance.id} ${row.unit}: ${cell.calls[0]!.operation === "enqueue" ? "enqueued" : "merged"} ${instance.repo}#${cell.target.pr} — ${outcome.state}`,
+    );
+    return response;
+  } catch {
+    return unavailable();
   }
 }
 
@@ -7814,7 +8654,7 @@ async function merge(
   if (typeof body.prNumber !== "number" || !Number.isInteger(body.prNumber) || body.prNumber < 1)
     return json(400, { ok: false, error: "prNumber must be a pull request number" });
   const headSha = normalizeHead(body.headSha);
-  if (headSha === undefined) return json(400, { ok: false, error: "headSha must be the approved head (7 to 40 hex)" });
+  if (!fullHead(headSha)) return json(400, { ok: false, error: "headSha must be the exact approved head (40 hex)" });
   const at = (deps.clock ?? systemClock)();
   const refused = (reason: string) => json(200, { ok: true, outcome: "refused", reason, at });
   const instance = await deps.instances.get(id.value);
@@ -7822,7 +8662,38 @@ async function merge(
   const unit = await unitRowOf(deps, instance, body.unit);
   if (!unit.ok) return unit.response;
   const row = unit.row!;
-  const log = deps.log ?? console.log;
+  const bindingMatches =
+    isCoordinatorUnit(row) &&
+    row.pr?.number === body.prNumber &&
+    row.publication?.pr === body.prNumber &&
+    row.publication.repo.toLowerCase() === instance.repo.toLowerCase() &&
+    row.publication.headRef === row.branch &&
+    row.publication.publicationRef === row.branch &&
+    row.publication.baseRef === instance.base &&
+    row.publication.expectedHeadSha === headSha &&
+    row.publication.owner.instanceId === instance.id &&
+    row.publication.owner.unit === row.unit;
+  const staleBinding = () => json(409, { ok: false, error: "publication_binding_stale", at });
+  const retained = row.currentEffect;
+  if (
+    retained?.phase === "active" &&
+    retained.calls.length === 1 &&
+    ["merge", "enqueue"].includes(retained.calls[0]!.operation) &&
+    retained.calls[0]!.state !== "unstarted"
+  ) {
+    if (!bindingMatches) return staleBinding();
+    const observed = await mergeEffect(
+      body.queued === true ? { ...body, effectId: retained.id, effectOrdinal: retained.ordinal } : body,
+      deps,
+      instance,
+      row,
+    );
+    if (observed !== undefined) {
+      if (body.queued !== true) return observed;
+      const { effectOrdinal: _ordinal, ...answer } = observed.body as Record<string, unknown>;
+      return { ...observed, body: answer };
+    }
+  }
   // The grant: the bearer's actor on `plan:merge`, decided here beside the
   // door's `coordinator:step`. Withdrawn, every merge is a person's.
   const actor = resolveActor({ surface: "http", subjectId: subject }, deps.grantsFor);
@@ -7841,6 +8712,11 @@ async function merge(
     return refused(
       `the instance's \`merge\` field says runner but \`${row.branch}\` is not a branch of plan \`${instance.plan?.id ?? "(none)"}\` — waits for a person's merge`,
     );
+  if (!bindingMatches) return staleBinding();
+  if (body.queued !== true) {
+    const replay = await mergeEffect(body, deps, instance, row);
+    if (replay !== undefined) return replay;
+  }
   const pr = { repo: instance.repo, number: body.prNumber };
   const where = `${instance.repo}#${pr.number}`;
   let facts: PullRequestFacts | undefined;
@@ -7860,12 +8736,28 @@ async function merge(
     });
   if (isReleasePullRequest(facts))
     return refused(`${where} is the release pull request — always a person's merge, never the runner's`);
+  if (
+    facts.state !== "open" &&
+    (facts.sameRepoHead !== true ||
+      facts.headRef !== row.branch ||
+      facts.baseRef !== instance.base ||
+      facts.headSha !== headSha)
+  ) {
+    const current = pullRequestState(
+      pr.number,
+      row.pr?.url ?? `https://github.com/${instance.repo}/pull/${pr.number}`,
+      facts,
+    );
+    return current === undefined
+      ? json(502, { ok: false, error: "github_unavailable", at })
+      : json(200, { ok: true, outcome: "recheck", pullRequest: current, at });
+  }
   if (facts.state !== "open") {
     // Already merged — auto-merge fired, a person merged after the approval,
     // or the merge queue merged what the door enqueued: the unit is done, not
     // refused. The door merged nothing, so the outcome says `by: other` with
     // the merge commit and the time (spec item 9).
-    if (facts.mergedAt !== undefined && facts.mergeCommitSha !== undefined)
+    if (facts.mergedAt !== undefined && facts.mergeCommitSha !== undefined) {
       return json(200, {
         ok: true,
         outcome: "merged",
@@ -7875,6 +8767,7 @@ async function merge(
         ...(facts.mergedBy !== undefined ? { mergedBy: facts.mergedBy } : {}),
         at,
       });
+    }
     const pullRequest = pullRequestState(
       body.prNumber,
       row.pr?.url ?? `https://github.com/${instance.repo}/pull/${body.prNumber}`,
@@ -7891,6 +8784,22 @@ async function merge(
       facts,
     );
     if (pullRequest !== undefined) return json(200, { ok: true, outcome: "recheck", pullRequest, at });
+  }
+  if (
+    body.queued === true &&
+    (facts.headRef !== row.branch ||
+      facts.headSha !== headSha ||
+      facts.sameRepoHead !== true ||
+      facts.baseRef !== instance.base)
+  ) {
+    const current = pullRequestState(
+      pr.number,
+      row.pr?.url ?? `https://github.com/${instance.repo}/pull/${pr.number}`,
+      facts,
+    );
+    return current === undefined
+      ? json(502, { ok: false, error: "github_unavailable", at })
+      : json(200, { ok: true, outcome: "recheck", pullRequest: current, at });
   }
   if (body.queued === true) {
     // The pull request is in the base's merge queue (issue 2011): the door
@@ -7986,54 +8895,9 @@ async function merge(
       at,
     });
   }
-  // The merge queue (issue 2011): a base whose ruleset routes every change
-  // through the queue is enqueued — the same act `gh pr merge --auto` performs
-  // — and never squashed; an unreadable ruleset decides nothing, and the 405's
-  // own wording below catches what the read missed.
-  const enqueue = async (): Promise<IngressResponse> => {
-    if (deps.enqueuePullRequest === undefined)
-      return refused(
-        `\`${facts.baseRef ?? "the base"}\` takes changes only through a merge queue and the door cannot enqueue — this is a bug: automatic merge-queue enqueue is unavailable; the approved work stands`,
-      );
-    let queued: EnqueueResult;
-    try {
-      queued = await deps.enqueuePullRequest(pr, { sha: headSha });
-    } catch (err) {
-      return json(502, { ok: false, error: "github_unavailable", message: describe(err), at });
-    }
-    if (!queued.ok) return refused(`GitHub refused to enqueue ${where}: ${queued.reason}`);
-    log(
-      `[coordinator] ${instance.id} ${row.unit}: enqueued ${where} at ${headSha.slice(0, 7)} — the base takes changes through a merge queue`,
-    );
-    return json(200, { ok: true, outcome: "enqueued", reason: `enqueued at \`${headSha.slice(0, 7)}\``, at });
-  };
-  const queueRuled =
-    deps.branchHasMergeQueue !== undefined && facts.baseRef !== undefined
-      ? await deps.branchHasMergeQueue(instance.repo, facts.baseRef).catch(() => undefined)
-      : undefined;
-  if (queueRuled === true) return enqueue();
-  let merged: MergeResult;
-  try {
-    merged = await deps.mergePullRequest(pr, {
-      sha: headSha,
-      title: facts.title ?? `Merge pull request #${pr.number}`,
-    });
-  } catch (err) {
-    return json(502, { ok: false, error: "github_unavailable", message: describe(err), at });
-  }
-  if (!merged.ok) {
-    // The rules read missed the queue (or could not run): GitHub's own 405
-    // wording says the base merges through the queue, so enqueue (issue 2011).
-    if (merged.status === 405 && MERGE_QUEUE_405.test(merged.reason)) return enqueue();
-    log(
-      `[coordinator] ${instance.id} ${row.unit}: GitHub refused the merge of ${where} (HTTP ${merged.status}): ${merged.reason}`,
-    );
-    return refused(`GitHub refused the merge of ${where} (HTTP ${merged.status}): ${merged.reason}`);
-  }
-  log(
-    `[coordinator] ${instance.id} ${row.unit}: merged ${where} at ${headSha.slice(0, 7)} → ${merged.sha.slice(0, 7)}`,
+  return (
+    (await mergeEffect(body, deps, instance, row, facts)) ?? json(502, { ok: false, error: "github_unavailable", at })
   );
-  return json(200, { ok: true, outcome: "merged", sha: merged.sha, at });
 }
 
 /** The round's checks step (record 0055, agent-ship item 9): the check runs
@@ -8060,6 +8924,91 @@ async function checksStep(body: Record<string, unknown>, deps: AdminCoordinatorD
   const unit = await unitRowOf(deps, instance, body.unit);
   if (!unit.ok) return unit.response;
   const log = deps.log ?? console.log;
+  if (body.retry !== undefined || body.refire !== undefined) {
+    if (body.retry !== undefined && body.refire !== undefined)
+      return json(400, { ok: false, error: "checks recovery must be retry or refire, not both" });
+    if (
+      body.retry !== undefined &&
+      (!Array.isArray(body.retry) ||
+        body.retry.length === 0 ||
+        !body.retry.every((name) => typeof name === "string" && name.length > 0))
+    )
+      return json(400, { ok: false, error: "retry must name the failed checks" });
+    if (body.refire !== undefined && body.refire !== true)
+      return json(400, { ok: false, error: "refire must be true" });
+    const row = unit.row!;
+    if (
+      !fullHead(headSha) ||
+      typeof body.effectId !== "string" ||
+      !STEP_NAME_PATTERN.test(body.effectId) ||
+      !Number.isSafeInteger(body.effectOrdinal) ||
+      typeof body.executionWorkflowId !== "string"
+    )
+      return json(409, { ok: false, error: "effect_execution_mismatch", at });
+    if (row.pr?.number !== body.prNumber || row.publication?.expectedHeadSha !== headSha)
+      return json(409, { ok: false, error: "publication_binding_stale", at });
+    if (body.refire === true && deps.setPullRequestState === undefined)
+      return json(503, { ok: false, error: "github_unavailable", at });
+    const result = await performCheckRecovery(
+      {
+        instance,
+        unit: row,
+        execution: {
+          workflowId: body.executionWorkflowId,
+          ...(typeof body.recoveryActionId === "string" ? { recoveryActionId: body.recoveryActionId } : {}),
+        },
+        effectId: body.effectId,
+        ordinal: body.effectOrdinal as number,
+        pr: body.prNumber,
+        headSha,
+        ...(Array.isArray(body.retry) ? { retry: body.retry as string[] } : { refire: true }),
+      },
+      {
+        instances: deps.instances,
+        readPull: () => deps.fetchPrFacts({ repo: instance.repo, number: body.prNumber as number }),
+        retryTargets: () =>
+          deps.fetchCheckRetryTargets?.(instance.repo, headSha, body.retry as string[]) ?? Promise.resolve(undefined),
+        canWrite: (call) =>
+          call.operation === "pull_close" || call.operation === "pull_reopen"
+            ? deps.setPullRequestState !== undefined
+            : call.operation === "actions_rerun"
+              ? deps.rerunActionsFailedJobs !== undefined
+              : deps.rerequestCheckRun !== undefined,
+        write: (call) => {
+          if (call.operation === "pull_close" || call.operation === "pull_reopen")
+            return (
+              deps.setPullRequestState?.(
+                { repo: instance.repo, number: body.prNumber as number },
+                { headSha, headRef: row.branch, baseRef: instance.base ?? "main" },
+                call.operation === "pull_close" ? "closed" : "open",
+              ) ?? Promise.resolve({ state: "uncertain" })
+            );
+          return (
+            (call.operation === "actions_rerun"
+              ? deps.rerunActionsFailedJobs?.(instance.repo, call.resourceId!)
+              : deps.rerequestCheckRun?.(instance.repo, call.resourceId!)) ?? Promise.resolve({ state: "uncertain" })
+          );
+        },
+      },
+    );
+    if (!result.ok)
+      return json(["stopped", "execution", "conflict"].includes(result.reason) ? 409 : 503, {
+        ok: false,
+        error:
+          result.reason === "execution"
+            ? "effect_execution_mismatch"
+            : result.reason === "conflict"
+              ? "effect_target_mismatch"
+              : "effect_reconciliation_pending",
+        at,
+      });
+    return json(200, {
+      ok: true,
+      ...(body.refire === true ? { refired: result.dispatched } : { retried: result.dispatched }),
+      ...(result.effectOrdinal === undefined ? {} : { effectOrdinal: result.effectOrdinal }),
+      at,
+    });
+  }
   // State, head and branch existence are read before even a recovery effect:
   // checks on a terminal, moved or deleted head are no longer this unit's act.
   const facts = await deps.fetchPrFacts({ repo: instance.repo, number: body.prNumber }).catch(() => undefined);
@@ -8083,25 +9032,6 @@ async function checksStep(body: Record<string, unknown>, deps: AdminCoordinatorD
       (typeof pullRequest.headSha === "string" && !sameCommit(pullRequest.headSha, headSha)))
   )
     return json(200, { ok: true, pullRequest, at });
-  if (body.retry !== undefined && body.refire !== undefined)
-    return json(400, { ok: false, error: "checks recovery must be retry or refire, not both" });
-  if (body.retry !== undefined) {
-    if (!Array.isArray(body.retry) || body.retry.length === 0 || !body.retry.every((n) => typeof n === "string"))
-      return json(400, { ok: false, error: "retry must name the failed checks" });
-    const retried = (await deps.rerunFailedChecks?.(instance.repo, headSha, body.retry as string[])) ?? false;
-    log(
-      `[coordinator] ${instance.id} ${body.unit}: flake re-run ${retried ? "dispatched" : "not dispatched"} for ${(body.retry as string[]).join(", ")} at ${headSha.slice(0, 7)}`,
-    );
-    return json(200, { ok: true, retried, at });
-  }
-  if (body.refire !== undefined) {
-    if (body.refire !== true) return json(400, { ok: false, error: "refire must be true" });
-    const refired = (await deps.refirePullRequest?.(instance.repo, body.prNumber)) ?? false;
-    log(
-      `[coordinator] ${instance.id} ${body.unit}: pull_request event ${refired ? "re-fired" : "not re-fired"} for ${instance.repo}#${body.prNumber} at ${headSha.slice(0, 7)}`,
-    );
-    return json(200, { ok: true, refired, at });
-  }
   // The pull request's own facts beside the runs (issue 2063): a draft head
   // is the machine's to hold — never to merge — and the base names the branch
   // whose required checks say what the head must still gain.
@@ -8432,6 +9362,27 @@ export async function answerCoordinatorStep(
   const parsed = parseObject(body);
   if (!parsed.ok) return json(400, { ok: false, error: parsed.error });
   const answer = async (): Promise<IngressResponse> => {
+    const request = parsed.value;
+    if (door.step !== "unit-end" && typeof request.parentInstanceId === "string" && typeof request.unit === "string") {
+      const id = parseInstanceId(request.parentInstanceId);
+      if (!id.ok) return json(400, { ok: false, error: "recovery_identity_invalid" });
+      const rows = await deps.instances.listUnits(id.value);
+      const matches = rows.filter((row) => row.unit === request.unit);
+      const claim = matches.length === 1 ? matches[0]!.recovery : undefined;
+      if (claim !== undefined || request.recoveryActionId !== undefined || request.recoveryWorkflowId !== undefined) {
+        if (
+          claim?.actionId === undefined ||
+          claim.actionId !== request.recoveryActionId ||
+          claim.workflowId !== request.recoveryWorkflowId
+        )
+          return json(409, { ok: false, error: "recovery_claim_mismatch", at: (deps.clock ?? systemClock)() });
+      }
+    } else if (
+      door.step !== "unit-end" &&
+      (request.recoveryActionId !== undefined || request.recoveryWorkflowId !== undefined)
+    ) {
+      return json(400, { ok: false, error: "recovery_identity_invalid" });
+    }
     switch (door.step) {
       case "plan":
         return plan(parsed.value, deps);

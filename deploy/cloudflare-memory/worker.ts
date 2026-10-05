@@ -1,4 +1,58 @@
+import {
+  validMaintenanceTransport,
+  sameMaintenanceTransport,
+  maintenanceEventsMatch,
+  preserveMaintenanceEvent,
+} from "../../src/core/coordinator/maintenanceIdentity.js";
+import { terminalPublicationRetentionRequired } from "../../src/core/branchPublication.ts";
+import { branchPublicationOf, doorPublicationOf } from "../../src/core/branchPublication.js";
+import { reviewPublicationOf } from "../../src/core/reviewPublication.js";
+import {
+  isMaintenanceAdmissionInput,
+  prepareMaintenanceAdmission,
+  planMaintenanceAdmission,
+  type MaintenanceAdmissionInput,
+  type MaintenanceAdmissionResult,
+} from "../../src/core/coordinator/maintenanceAdmission.js";
+import {
+  terminalWorkspaceSettlement,
+  terminalThreadKey,
+  terminalWorkspaceRecordMatches,
+  nextWorkspaceRevision,
+  WORKSPACE_SETTLEMENTS_MAX,
+  workspaceSettlementOf,
+  workspaceOwnerKey,
+  workspaceAcknowledgment,
+  isWorkspaceOwner,
+  type WorkspaceOwner,
+  type WorkspaceSettlement,
+  type WorkspaceAck,
+} from "../../src/core/workspaceSettlement.js";
 import type { UnitSeedReceipt } from "../../src/core/coordinator/unitSeedReceipt.js";
+import {
+  coordinatorReconciliationEffect,
+  coordinatorWorkflowCanReconcile,
+  coordinatorExecutionWasStarted,
+  isCoordinatorReconcileEffect,
+  isCoordinatorReconcileReceipt,
+  type CoordinatorReconcileReceipt,
+  type CoordinatorReconcileEffect,
+} from "../../src/core/coordinator/workflowReconciliation.js";
+import {
+  readCoordinatorReport,
+  coordinatorReportAdmission,
+  sameCoordinatorReportAdmission,
+  sameCoordinatorReportOwner,
+} from "../../src/core/coordinator/reportContext.js";
+import {
+  coordinatorPublicDeliveryReference,
+  readCoordinatorPublicDelivery,
+} from "../../src/core/coordinator/reportPublicDelivery.js";
+import { readCoordinatorStatus } from "../../src/core/coordinator/unitStatus.js";
+import { coordinatorReportCanReconcile } from "../../src/core/coordinator/reportReconcileEligibility.js";
+import { isCoordinatorReportAdmission } from "../../src/core/coordinator/reportAdmission.js";
+import { privateWorkerThreadKey } from "../../src/core/privateWorkerLog.js";
+import { isInstanceNotFound } from "../../src/core/coordinator/instancesRoute.js";
 import { isPersonalToken } from "../../src/core/personalToken.js";
 import { preserveCheckpointState } from "../../src/core/runLedger/checkpointState.js";
 import {
@@ -78,6 +132,7 @@ import {
   applyRetention,
   clampRetentionPolicy,
   isRunRecord,
+  branchPushReceiptsOf,
   workEvidenceBelongsToRun,
   isRunListItem,
   isRecoveryEvidenceScope,
@@ -173,6 +228,30 @@ import {
   type PlaneState,
   type PlaneWrite,
 } from "../../src/core/plane/decide.ts";
+import {
+  findPullOwnersInRows,
+  pullBindingChanges,
+  needsPullBindingAdmission,
+  unitPullBindingRefusal,
+  unitPullTargetsRefusal,
+  type PullBindingRefusal,
+  isPullTarget,
+  isPullOwnerLiveMeta,
+  PULL_OWNER_SCAN_MAX,
+  PULL_OWNER_SCAN_MAX_BYTES,
+  type PullTarget,
+  type PullOwnersResult,
+  type PullOwnershipRows,
+} from "../../src/core/coordinator/pullOwnership.ts";
+import {
+  isUnitEffectTransition,
+  planUnitEffectTransition,
+  unitEffectRunId,
+  unitEffectTombstoneMatches,
+  type UnitEffectRunEvidence,
+  type UnitEffectTransition,
+  type UnitEffectTransitionResult,
+} from "../../src/core/coordinator/unitEffect.ts";
 import { mergePlaneFindings, planeFindingKey, type PlaneFinding } from "../../src/core/plane/findings.ts";
 import {
   IDEMPOTENCY_KEY_PATTERN,
@@ -188,6 +267,7 @@ import {
   CoordinatorUnitWriteConflict,
   isCoordinatorInstance,
   isCoordinatorUnit,
+  coordinatorUnitCanBeDiscarded,
   isThreadEvent,
   isUnitWakeAnswer,
   sendChildSignal,
@@ -250,6 +330,7 @@ import {
   recoveryHistoryPage,
   isRecoveryTransition,
   isRecoveryRequest,
+  isRecoveryAction,
   RECOVERY_HISTORY_LIMITS,
   recoveryBytes,
   type RecoveryTransition,
@@ -1792,6 +1873,7 @@ function planeAgreementOf(outcome: string, decider: "proceed" | "queued"): boole
 
 /** The most effects one answer carries (record 0064; orchestration-plane item 7): the rest ride the next heartbeat. */
 const PLANE_EFFECTS_PER_ANSWER = 32;
+const COORDINATOR_SCAN_LIMIT = 16;
 
 export class RunHistoryDO extends DurableObject<Env> {
   private readonly sql: SqlStorage;
@@ -1929,6 +2011,12 @@ export class RunHistoryDO extends DurableObject<Env> {
         value INTEGER NOT NULL
       );
       INSERT OR IGNORE INTO resident_claim_clock (id, value) VALUES (1, 0);
+      CREATE TABLE IF NOT EXISTS workspace_settlements (
+        owner_key TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 1,
+        json TEXT,
+        PRIMARY KEY (owner_key, revision)
+      );
       CREATE TABLE IF NOT EXISTS run_steps (
         run_id TEXT NOT NULL,
         step INTEGER NOT NULL,
@@ -2126,6 +2214,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         .map((column) => column.name),
     );
     if (!planeLevelColumns.has("cause")) this.sql.exec(`ALTER TABLE plane_levels ADD COLUMN cause TEXT`);
+    this.ctx.blockConcurrencyWhile(() => this.armCoordinatorReconciliation(systemClock()));
   }
 
   // ---- the orchestration plane (record 0064; orchestration-plane.md) ----------
@@ -2575,6 +2664,11 @@ export class RunHistoryDO extends DurableObject<Env> {
       }
     }
     if (this.planeWaitsOnResident()) dues.push(reoffer);
+    const coordinatorDue = this.sql
+      .exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'coordinator_reconcile_due'`)
+      .toArray()[0];
+    if (coordinatorDue && Number.isFinite(Number(coordinatorDue.value)))
+      dues.push(Number(coordinatorDue.value) > now ? Number(coordinatorDue.value) : reoffer);
     return dues.length === 0 ? undefined : Math.min(...dues);
   }
 
@@ -2865,6 +2959,9 @@ export class RunHistoryDO extends DurableObject<Env> {
       .toArray()[0];
     if (!offered) return { ok: true };
     const effect = JSON.parse(offered.body_json) as PlaneEffect;
+    // A terminal execution's offer is not closed by a transport word. Its
+    // canonical report obligations are independently checked below.
+    if (effect.kind === "coordinator_reconcile") return { ok: true };
     if (effect.kind === "steer") {
       if (!owner || owner.runId !== effect.runId) return { ok: true };
       const live = this.sql
@@ -2877,6 +2974,357 @@ export class RunHistoryDO extends DurableObject<Env> {
   }
 
   // ---- the coordinator's parent records (run-history item 49) -----------------
+
+  private coordinatorSnapshot(
+    instanceId: string,
+    unit: string,
+  ): { instance: CoordinatorInstance; unit: CoordinatorUnit; action?: RecoveryAction } | undefined {
+    const savedInstance = this.sql
+      .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, instanceId)
+      .toArray()[0];
+    const savedUnit = this.sql
+      .exec<{ json: string }>(`SELECT json FROM coordinator_units WHERE instance_id = ? AND unit = ?`, instanceId, unit)
+      .toArray()[0];
+    if (!savedInstance || !savedUnit) return;
+    try {
+      const instance = JSON.parse(savedInstance.json),
+        row = JSON.parse(savedUnit.json);
+      if (!isCoordinatorInstance(instance) || !isCoordinatorUnit(row) || row.instanceId !== instance.id) return;
+      const actionId = row.recovery?.actionId ?? (row.recoveryReceipt ? row.history?.receiptId : undefined);
+      let action: RecoveryAction | undefined;
+      if (row.recovery || row.recoveryReceipt) {
+        if (!actionId) return;
+        const record = this.sql
+          .exec<{ json: string }>(
+            `SELECT json FROM coordinator_recovery_journal WHERE instance_id = ? AND unit = ? AND kind = 'action' AND id = ?`,
+            instanceId,
+            unit,
+            actionId,
+          )
+          .toArray()[0];
+        if (!record) return;
+        const parsed = JSON.parse(record.json);
+        if (
+          !isRecoveryAction(parsed) ||
+          parsed.instanceId !== instance.id ||
+          parsed.unit !== row.unit ||
+          parsed.workflowId !== (row.recovery?.workflowId ?? row.recoveryReceipt?.workflowId) ||
+          (row.recovery ? parsed.state !== "pending" : parsed.state !== "settled")
+        )
+          return;
+        action = parsed;
+      }
+      return { instance, unit: row, ...(action ? { action } : {}) };
+    } catch {
+      return;
+    }
+  }
+
+  private async coordinatorNativeStatus(id: string): Promise<string | "absent" | undefined> {
+    if (!this.env.SHIP_COORDINATOR) return;
+    try {
+      const result = await (await this.env.SHIP_COORDINATOR.get(id)).status();
+      return typeof result.status === "string" ? result.status : undefined;
+    } catch (error) {
+      return isInstanceNotFound(error instanceof Error ? error.message : String(error)) ? "absent" : undefined;
+    }
+  }
+
+  private async armCoordinatorReconciliation(now: number): Promise<void> {
+    if (!this.sql.exec(`SELECT 1 FROM coordinator_units LIMIT 1`).toArray().length) return;
+    this.sql.exec(
+      `INSERT OR IGNORE INTO meta (key, value) VALUES ('coordinator_reconcile_due', ?)`,
+      String(now + this.planeReaskMs()),
+    );
+    await this.ensurePlaneAlarm(now);
+  }
+
+  /** Discovery only: native ended status offers settlement; it never fabricates
+   * a final ending or replaces a report admitted by the original writer. */
+  async offerCoordinatorReconciliation(instanceId: string, unit: string, now: number): Promise<{ offered: boolean }> {
+    const before = this.coordinatorSnapshot(instanceId, unit);
+    if (!before || before.instance.kind === "maintenance") return { offered: false };
+    const effect = await coordinatorReconciliationEffect(before.instance, before.unit, before.action);
+    if (this.sql.exec(`SELECT 1 FROM plane_effects WHERE id = ?`, effect.id).toArray().length)
+      return { offered: false };
+    const status = await this.coordinatorNativeStatus(effect.workflowId);
+    const after = this.coordinatorSnapshot(instanceId, unit);
+    if (!after || JSON.stringify(after) !== JSON.stringify(before)) return { offered: false };
+    if (
+      status === "absent" &&
+      before.unit.recovery &&
+      before.action?.state === "pending" &&
+      !coordinatorWorkflowCanReconcile(before.instance, before.unit, before.action, status)
+    ) {
+      if (
+        before.unit.currentEffect?.execution.workflowId === effect.workflowId ||
+        this.sql
+          .exec(
+            `SELECT 1 FROM run_events WHERE json_extract(json, '$.type') = 'coordinator_tag' AND json_extract(json, '$.transportWorkflowId') = ? LIMIT 1`,
+            effect.workflowId,
+          )
+          .toArray().length
+      )
+        return { offered: false };
+      const { recovery: claim, ...retained } = before.unit;
+      let restored: CoordinatorUnit = { ...retained, ending: claim.previousEnding };
+      if (claim.previousBinding !== undefined) {
+        const { publication: _publication, lastPush: _lastPush, ...original } = restored;
+        restored = { ...original, ...claim.previousBinding };
+      }
+      // Absence consumes no execution/source evidence, refunds no allowance,
+      // and retires only this journal action's delayed-create authority.
+      await this.transitionRecovery(
+        {
+          kind: "refuse",
+          expected: before.unit,
+          replacement: restored,
+          error: "workflow_absent",
+          consumed: false,
+        },
+        now,
+      );
+      return { offered: false };
+    }
+    // The same native ID is not attribution of an unanswered create. An exact
+    // durable effect execution is affirmative saved evidence; status alone is not.
+    if (before.instance.admission === "unreconciled") {
+      if (
+        !coordinatorExecutionWasStarted(before.unit, effect.workflowId, effect.actionId) ||
+        !["queued", "running", "paused", "waiting", "waitingForPause", "complete", "errored", "terminated"].includes(
+          status ?? "",
+        )
+      )
+        return { offered: false };
+      if (!(await this.confirmInstanceCreated(before.instance)).ok) return { offered: false };
+      before.instance = { ...before.instance, admission: "created" };
+    }
+    if (!coordinatorWorkflowCanReconcile(before.instance, before.unit, before.action, status))
+      return { offered: false };
+    if (
+      !(await coordinatorReportCanReconcile(
+        {
+          readSessionEntry: async (key: string, rowId: string) =>
+            this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(key)).readEntry(rowId),
+        },
+        before.instance,
+        before.unit,
+        before.action,
+      ))
+    )
+      return { offered: false };
+    let offered = false;
+    this.ctx.storage.transactionSync(() => {
+      const current = this.coordinatorSnapshot(instanceId, unit);
+      if (!current || JSON.stringify(current) !== JSON.stringify(before)) return;
+      // An acknowledged request is a retained finalization receipt, not a new
+      // offer. Reopening it on every scan would loop forever on ended rows.
+      if (this.sql.exec(`SELECT 1 FROM plane_effects WHERE id = ?`, effect.id).toArray().length) return;
+      this.applyPlaneWrites([{ table: "plane_effects", op: "offer", effect, at: now }]);
+      offered = true;
+    });
+    await this.armCoordinatorReconciliation(now);
+    if (offered) this.pushPlaneEffects([effect]);
+    return { offered };
+  }
+
+  /** A bounded worklist survives bot outages independently of physical history
+   * maintenance and user nudges. Cursor and due live in the existing meta. */
+  private async discoverCoordinatorWorkflows(now: number): Promise<void> {
+    const cursor = this.sql
+      .exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'coordinator_reconcile_cursor'`)
+      .toArray()[0];
+    let after: [string, string] = ["", ""];
+    try {
+      if (cursor) {
+        const value = JSON.parse(cursor.value);
+        if (Array.isArray(value) && value.length === 2 && value.every((v) => typeof v === "string"))
+          after = value as [string, string];
+      }
+    } catch {
+      /* Restart a malformed cursor without guessing owner state. */
+    }
+    const rows = this.sql
+      .exec<{ instance_id: string; unit: string }>(
+        `SELECT instance_id, unit FROM coordinator_units WHERE instance_id > ? OR (instance_id = ? AND unit > ?) ORDER BY instance_id, unit LIMIT ?`,
+        after[0],
+        after[0],
+        after[1],
+        COORDINATOR_SCAN_LIMIT,
+      )
+      .toArray();
+    for (const row of rows) {
+      try {
+        await this.offerCoordinatorReconciliation(row.instance_id, row.unit, now);
+      } catch (error) {
+        console.warn(
+          "[coordinator/reconcile] discovery retained an unavailable owner",
+          error instanceof Error ? error.name : "unavailable",
+        );
+      }
+    }
+    this.sql.exec(
+      `INSERT OR REPLACE INTO meta (key, value) VALUES ('coordinator_reconcile_cursor', ?)`,
+      JSON.stringify(rows.length === COORDINATOR_SCAN_LIMIT ? [rows.at(-1)!.instance_id, rows.at(-1)!.unit] : ["", ""]),
+    );
+    if (this.sql.exec(`SELECT 1 FROM coordinator_units LIMIT 1`).toArray().length)
+      this.sql.exec(
+        `INSERT OR REPLACE INTO meta (key, value) VALUES ('coordinator_reconcile_due', ?)`,
+        String(now + this.planeReaskMs()),
+      );
+    else this.sql.exec(`DELETE FROM meta WHERE key IN ('coordinator_reconcile_due', 'coordinator_reconcile_cursor')`);
+    // Unsupported move effects must not hide report obligations behind the
+    // general answer's oldest entries when the bot returns after an outage.
+    const deliveryCursor =
+      this.sql
+        .exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'coordinator_reconcile_delivery_cursor'`)
+        .toArray()[0]?.value ?? "";
+    const pending = this.sql
+      .exec<{ body_json: string }>(
+        `SELECT body_json FROM plane_effects WHERE acked_at IS NULL AND json_extract(body_json, '$.kind') = 'coordinator_reconcile' AND id > ? ORDER BY id LIMIT ?`,
+        deliveryCursor,
+        PLANE_EFFECTS_PER_ANSWER,
+      )
+      .toArray()
+      .map((row) => JSON.parse(row.body_json) as CoordinatorReconcileEffect);
+    this.sql.exec(
+      `INSERT OR REPLACE INTO meta (key, value) VALUES ('coordinator_reconcile_delivery_cursor', ?)`,
+      pending.length === PLANE_EFFECTS_PER_ANSWER ? pending.at(-1)!.id : "",
+    );
+    this.pushPlaneEffects(pending);
+  }
+
+  private pendingCoordinatorReport(current: CoordinatorUnit | undefined, next: CoordinatorUnit): boolean {
+    if (
+      !current?.ending ||
+      (current.reportDelivery === undefined &&
+        isCoordinatorReportAdmission(next.reportDelivery) &&
+        JSON.stringify(current) === JSON.stringify({ ...next, reportDelivery: undefined })) ||
+      (JSON.stringify(current.ending) === JSON.stringify(next.ending) &&
+        JSON.stringify(current.reportDelivery) === JSON.stringify(next.reportDelivery))
+    )
+      return false;
+    return (
+      this.sql
+        .exec(
+          `SELECT 1 FROM plane_effects WHERE acked_at IS NULL AND json_extract(body_json, '$.kind') = 'coordinator_reconcile' AND json_extract(body_json, '$.instanceId') = ? AND json_extract(body_json, '$.unit') = ? LIMIT 1`,
+          next.instanceId,
+          next.unit,
+        )
+        .toArray().length > 0
+    );
+  }
+
+  async ackCoordinatorReconciliation(
+    id: string,
+    receipt: CoordinatorReconcileReceipt,
+    now: number,
+  ): Promise<{ ok: boolean }> {
+    const offered = this.sql
+      .exec<{ body_json: string }>(`SELECT body_json FROM plane_effects WHERE id = ? AND acked_at IS NULL`, id)
+      .toArray()[0];
+    if (!offered) return { ok: true };
+    const effect: unknown = JSON.parse(offered.body_json);
+    if (!isCoordinatorReconcileEffect(effect) || !isCoordinatorReconcileReceipt(receipt)) return { ok: false };
+    const before = this.coordinatorSnapshot(effect.instanceId, effect.unit);
+    if (
+      !before ||
+      !before.unit.ending ||
+      before.unit.recovery ||
+      before.unit.idle ||
+      (before.unit.currentEffect && before.unit.currentEffect.phase !== "settled") ||
+      JSON.stringify(await coordinatorReconciliationEffect(before.instance, before.unit, before.action)) !==
+        JSON.stringify(effect) ||
+      !(await sameCoordinatorReportAdmission(before.unit.reportDelivery, receipt.reportDelivery)) ||
+      !sameCoordinatorReportOwner(receipt.reportDelivery.owner, receipt.status)
+    )
+      return { ok: false };
+    const owner = receipt.reportDelivery.owner;
+    if (
+      owner.requester !== before.instance.userId ||
+      owner.channelId !== before.instance.channelId ||
+      owner.attempt !== (before.instance.attempt ?? 0) ||
+      owner.threadKey !==
+        (before.unit.workBrief
+          ? privateWorkerThreadKey(before.unit)
+          : (before.unit.threadKey ?? before.instance.threadKey)) ||
+      owner.deliveryId !==
+        (effect.actionId !== undefined
+          ? `recovery:${effect.workflowId}:${before.unit.ending.deliveryId}`
+          : before.unit.ending.deliveryId) ||
+      receipt.status.destinationThreadKey !== (before.unit.workBrief?.mainThreadKey ?? owner.threadKey)
+    )
+      return { ok: false };
+    const ledger = {
+      readSessionEntry: async (key: string, rowId: string) =>
+        this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(key)).readEntry(rowId),
+    };
+    const frozen = await readCoordinatorReport(ledger, owner),
+      status = await readCoordinatorStatus(ledger, receipt.status);
+    if (
+      !frozen ||
+      !status ||
+      before.unit.ending.report !== frozen.text ||
+      !(await sameCoordinatorReportAdmission(
+        receipt.reportDelivery,
+        await coordinatorReportAdmission(owner, frozen),
+      )) ||
+      status.observedAt !== before.unit.ending.at ||
+      status.repo !== before.instance.repo.toLowerCase()
+    )
+      return { ok: false };
+    if (before.unit.workBrief) {
+      if (receipt.publicDelivery !== undefined) return { ok: false };
+      if (!receipt.privateReplyId || before.unit.ending.deliveryId !== receipt.privateReplyId) return { ok: false };
+      const reply = this.sql
+        .exec<{ json: string }>(
+          `SELECT json FROM coordinator_private_worker_events WHERE thread_key = ? AND event_id = ?`,
+          owner.threadKey,
+          receipt.privateReplyId,
+        )
+        .toArray()[0];
+      if (!reply) return { ok: false };
+      const event = JSON.parse(reply.json);
+      if (event.kind !== "reply" || event.text !== frozen.text) return { ok: false };
+    } else {
+      if (receipt.privateReplyId !== undefined || receipt.publicDelivery === undefined) return { ok: false };
+      const expected = await coordinatorPublicDeliveryReference(receipt.reportDelivery, frozen.threadText);
+      if (
+        receipt.publicDelivery.proposalHash !== expected.proposalHash ||
+        receipt.publicDelivery.threadHash !== expected.threadHash ||
+        receipt.publicDelivery.kind !== expected.kind ||
+        !sameCoordinatorReportOwner(receipt.publicDelivery.owner, expected.owner)
+      )
+        return { ok: false };
+      try {
+        if (!(await readCoordinatorPublicDelivery(ledger, expected))) return { ok: false };
+      } catch {
+        return { ok: false };
+      }
+    }
+    if (
+      !coordinatorWorkflowCanReconcile(
+        before.instance,
+        before.unit,
+        before.action,
+        await this.coordinatorNativeStatus(effect.workflowId),
+      )
+    )
+      return { ok: false };
+    let ok = false;
+    this.ctx.storage.transactionSync(() => {
+      if (JSON.stringify(this.coordinatorSnapshot(effect.instanceId, effect.unit)) !== JSON.stringify(before)) return;
+      if (
+        this.sql
+          .exec<{ body_json: string }>(`SELECT body_json FROM plane_effects WHERE id = ? AND acked_at IS NULL`, id)
+          .toArray()[0]?.body_json !== offered.body_json
+      )
+        return;
+      this.sql.exec(`UPDATE plane_effects SET acked_at = ? WHERE id = ? AND acked_at IS NULL`, now, id);
+      ok = true;
+    });
+    return { ok };
+  }
 
   async recordRequesterTurn(
     input: RequesterTurnInput,
@@ -3086,17 +3534,17 @@ export class RunHistoryDO extends DurableObject<Env> {
     | { ok: true; created: boolean; link: { instanceId: string; unit: string; authority: MainTaskAuthority } }
     | {
         ok: false;
-        reason: "conflict";
+        reason: "conflict" | PullBindingRefusal;
       }
   > {
-    return this.withRangePins(
+    const result = await this.withRangePins(
       [{ id: `@unit:${unit.instanceId}:${unit.unit}`, handoff: unit.context?.handoff }],
       async () => {
         let out:
           | { ok: true; created: boolean; link: { instanceId: string; unit: string; authority: MainTaskAuthority } }
           | {
               ok: false;
-              reason: "conflict";
+              reason: "conflict" | PullBindingRefusal;
             } = {
           ok: false,
           reason: "conflict",
@@ -3152,9 +3600,15 @@ export class RunHistoryDO extends DurableObject<Env> {
             authority.requesterId !== instance.userId ||
             authority.repo.toLowerCase() !== instance.repo.toLowerCase() ||
             unit.instanceId !== instance.id ||
+            unit.currentEffect !== undefined ||
             this.sql.exec(`SELECT 1 FROM coordinator_instances WHERE instance_id = ?`, instance.id).toArray().length > 0
           )
             return;
+          const reason = this.bindingRefusal(undefined, unit, true, [], instance);
+          if (reason) {
+            out = { ok: false, reason };
+            return;
+          }
           this.pinUnitContext(unit, undefined, now);
           this.sql.exec(
             `INSERT INTO coordinator_instances (instance_id, json, created_at) VALUES (?, ?, ?)`,
@@ -3191,6 +3645,8 @@ export class RunHistoryDO extends DurableObject<Env> {
         return out;
       },
     );
+    if (result.ok) await this.armCoordinatorReconciliation(now);
+    return result;
   }
 
   /** Idempotent for the same record; a different record under a taken id is refused. */
@@ -3228,11 +3684,7 @@ export class RunHistoryDO extends DurableObject<Env> {
           this.sql
             .exec<{ json: string }>(`SELECT json FROM coordinator_units WHERE instance_id = ?`, instance.id)
             .toArray()
-            .some(
-              (row) =>
-                (JSON.parse(row.json) as CoordinatorUnit).ending?.outcome !== undefined ||
-                (JSON.parse(row.json) as CoordinatorUnit).history !== undefined,
-            ) ||
+            .some((row) => !coordinatorUnitCanBeDiscarded(row.json)) ||
           this.sql
             .exec(`SELECT 1 FROM coordinator_recovery_journal WHERE instance_id = ? LIMIT 1`, instance.id)
             .toArray().length > 0
@@ -3253,7 +3705,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         );
         this.sql.exec(`DELETE FROM coordinator_units WHERE instance_id = ?`, instance.id);
       });
-      await this.syncRangePins();
+      if (out.ok) await this.syncRangePins();
       return out;
     });
   }
@@ -3414,10 +3866,45 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   // ---- the units of the plan an instance runs (run-history item 50) -----------
 
-  private writeUnfencedUnit(write: () => void): { ok: true } | { ok: false; reason: "settled" } {
+  private bindingRefusal(
+    current: CoordinatorUnit | undefined,
+    next: CoordinatorUnit,
+    force = false,
+    staged: readonly CoordinatorUnit[] = [],
+    owner?: CoordinatorInstance,
+  ): PullBindingRefusal | undefined {
+    if (this.pendingCoordinatorReport(current, next)) return "stale";
+    force ||= current?.startedAt === undefined && next.startedAt !== undefined;
+    if (!force && !needsPullBindingAdmission(current, next)) return;
     try {
-      this.ctx.storage.transactionSync(write);
-      return { ok: true };
+      const saved =
+        owner === undefined
+          ? this.sql
+              .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, next.instanceId)
+              .toArray()[0]
+          : undefined;
+      const instance = owner ?? (saved ? JSON.parse(saved.json) : null);
+      if (!isCoordinatorInstance(instance)) return "incomplete";
+      if (!force && !pullBindingChanges(instance, current, next)) return;
+      const rows = this.pullOwnershipRows();
+      for (const unit of staged) {
+        const saved = this.sql
+          .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, unit.instanceId)
+          .toArray()[0];
+        rows.units.push({ unit, instance: saved ? JSON.parse(saved.json) : null });
+      }
+      return unitPullBindingRefusal(rows, instance, current, next);
+    } catch {
+      return "incomplete";
+    }
+  }
+
+  private writeUnfencedUnit(
+    write: () => PullBindingRefusal | undefined,
+  ): { ok: true } | { ok: false; reason: "settled" | PullBindingRefusal } {
+    try {
+      const reason = this.ctx.storage.transactionSync(write);
+      return reason ? { ok: false, reason } : { ok: true };
     } catch (error) {
       if (error instanceof CoordinatorUnitWriteConflict) return { ok: false, reason: "settled" };
       throw error;
@@ -3425,34 +3912,48 @@ export class RunHistoryDO extends DurableObject<Env> {
   }
 
   /** Each row replaced whole under its (instance, unit); a replace keeps the row's place. */
-  async putUnits(units: CoordinatorUnit[], now: number): Promise<{ ok: true } | { ok: false; reason: "settled" }> {
-    return this.withRangePins(
+  async putUnits(
+    units: CoordinatorUnit[],
+    now: number,
+  ): Promise<{ ok: true } | { ok: false; reason: "settled" | PullBindingRefusal }> {
+    const result = await this.withRangePins(
       units.map((unit) => ({ id: `@unit:${unit.instanceId}:${unit.unit}`, handoff: unit.context?.handoff })),
-      async () => {
-        return this.writeUnfencedUnit(() => {
-          for (const u of units) {
+      async () =>
+        this.writeUnfencedUnit(() => {
+          const pending = new Map<string, { current: CoordinatorUnit | undefined; next: CoordinatorUnit }>();
+          for (const unit of units) {
+            const key = `${unit.instanceId}\0${unit.unit}`;
             const row = this.sql
               .exec<{ json: string }>(
                 `SELECT json FROM coordinator_units WHERE instance_id = ? AND unit = ?`,
-                u.instanceId,
-                u.unit,
+                unit.instanceId,
+                unit.unit,
               )
               .toArray()[0];
             const current = row ? (JSON.parse(row.json) as CoordinatorUnit) : undefined;
-            const updated = prepareUnfencedUnitWrite(current, u);
-            this.pinUnitContext(updated, current, now);
+            const prior = pending.get(key);
+            pending.set(key, { current, next: prepareUnfencedUnitWrite(prior?.next ?? current, unit) });
+          }
+          const staged = [...pending.values()].map((row) => row.next);
+          for (const { current, next } of pending.values()) {
+            const reason = this.bindingRefusal(current, next, false, staged);
+            if (reason) return reason;
+          }
+          for (const { current, next } of pending.values()) {
+            this.pinUnitContext(next, current, now);
             this.sql.exec(
               `INSERT INTO coordinator_units (instance_id, unit, json, updated_at) VALUES (?, ?, ?, ?)
-           ON CONFLICT(instance_id, unit) DO UPDATE SET json = excluded.json, updated_at = excluded.updated_at`,
-              u.instanceId,
-              u.unit,
-              JSON.stringify(updated),
+             ON CONFLICT(instance_id, unit) DO UPDATE SET json = excluded.json, updated_at = excluded.updated_at`,
+              next.instanceId,
+              next.unit,
+              JSON.stringify(next),
               now,
             );
           }
-        });
-      },
+        }),
     );
+    if (result.ok) await this.armCoordinatorReconciliation(now);
+    return result;
   }
 
   /** One compare-and-replace transaction updates a unit for exactly one
@@ -3462,8 +3963,8 @@ export class RunHistoryDO extends DurableObject<Env> {
     expected: CoordinatorUnit,
     replacement: CoordinatorUnit,
     now: number,
-  ): Promise<{ ok: true } | { ok: false; reason: "stale" }> {
-    let out: { ok: true } | { ok: false; reason: "stale" } = { ok: true };
+  ): Promise<{ ok: true } | { ok: false; reason: PullBindingRefusal }> {
+    let out: { ok: true } | { ok: false; reason: PullBindingRefusal } = { ok: true };
     this.ctx.storage.transactionSync(() => {
       const row = this.sql
         .exec<{ json: string }>(
@@ -3477,6 +3978,11 @@ export class RunHistoryDO extends DurableObject<Env> {
         return;
       }
       const preserved = preserveWorkBrief(expected, replacement);
+      const reason = this.bindingRefusal(expected, preserved);
+      if (reason) {
+        out = { ok: false, reason };
+        return;
+      }
       this.pinUnitContext(preserved, expected, now);
       this.sql.exec(
         `UPDATE coordinator_units SET json = ?, updated_at = ? WHERE instance_id = ? AND unit = ?`,
@@ -3487,6 +3993,175 @@ export class RunHistoryDO extends DurableObject<Env> {
       );
     });
     return out;
+  }
+
+  async admitMaintenance(input: MaintenanceAdmissionInput, now: number): Promise<MaintenanceAdmissionResult> {
+    const prepared = await prepareMaintenanceAdmission({ ...input, createdAt: now });
+    let result: MaintenanceAdmissionResult = { ok: false, reason: "unavailable" };
+    try {
+      this.ctx.storage.transactionSync(() => {
+        const records = this.sql
+          .exec<{ instance_id: string; json: string }>(
+            `SELECT instance_id, json FROM coordinator_instances LIMIT ?`,
+            PULL_OWNER_SCAN_MAX + 1,
+          )
+          .toArray();
+        if (
+          records.length > PULL_OWNER_SCAN_MAX ||
+          records.reduce((n, row) => n + row.json.length * 3, 0) > PULL_OWNER_SCAN_MAX_BYTES
+        ) {
+          result = { ok: false, reason: "incomplete" };
+          return;
+        }
+        const instances = records.map((row) => {
+          const instance = JSON.parse(row.json);
+          if (!isCoordinatorInstance(instance) || instance.id !== row.instance_id)
+            throw new Error("unreadable maintenance owner");
+          return instance;
+        });
+        const planned = planMaintenanceAdmission(prepared, this.pullOwnershipRows(), instances);
+        if (!planned.ok || planned.replayed) {
+          result = planned;
+          return;
+        }
+        this.sql.exec(
+          `INSERT OR IGNORE INTO coordinator_instances (instance_id, json, created_at) VALUES (?, ?, ?)`,
+          planned.instance.id,
+          JSON.stringify(planned.instance),
+          now,
+        );
+        this.sql.exec(
+          `INSERT INTO coordinator_units (instance_id, unit, json, updated_at) VALUES (?, ?, ?, ?)
+          ON CONFLICT(instance_id, unit) DO UPDATE SET json = excluded.json, updated_at = excluded.updated_at`,
+          planned.unit.instanceId,
+          planned.unit.unit,
+          JSON.stringify(planned.unit),
+          now,
+        );
+        result = planned;
+      });
+    } catch {
+      result = { ok: false, reason: "incomplete" };
+    }
+    return result;
+  }
+
+  async transitionUnitEffect(input: UnitEffectTransition, now: number): Promise<UnitEffectTransitionResult> {
+    if (!isUnitEffectTransition(input)) return { ok: false, reason: "conflict" };
+    let result: UnitEffectTransitionResult = { ok: false, reason: "unavailable" };
+    this.ctx.storage.transactionSync(() => {
+      const { instanceId, unit } = input.expected;
+      const saved = this.sql
+        .exec<{ json: string }>(
+          `SELECT json FROM coordinator_units WHERE instance_id = ? AND unit = ?`,
+          instanceId,
+          unit,
+        )
+        .toArray()[0];
+      const savedInstance = this.sql
+        .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, instanceId)
+        .toArray()[0];
+      let current: unknown, instance: unknown;
+      try {
+        current = saved ? JSON.parse(saved.json) : undefined;
+        instance = savedInstance ? JSON.parse(savedInstance.json) : null;
+      } catch {
+        result = { ok: false, reason: "incomplete" };
+        return;
+      }
+      if (
+        (instance !== null && !isCoordinatorInstance(instance)) ||
+        (current !== undefined && !isCoordinatorUnit(current))
+      ) {
+        result = { ok: false, reason: "incomplete" };
+        return;
+      }
+      const runId = unitEffectRunId(input);
+      let evidence: UnitEffectRunEvidence | undefined;
+      if (runId !== undefined) {
+        try {
+          const live = this.sql
+            .exec<{ meta_json: string; started_at: number; thread_key: string }>(
+              `SELECT meta_json, started_at, thread_key FROM live_runs WHERE run_id = ?`,
+              runId,
+            )
+            .toArray()[0];
+          const finished = this.sql
+            .exec<{ summary_json: string }>(`SELECT summary_json FROM runs WHERE run_id = ?`, runId)
+            .toArray()[0];
+          const liveMeta = live ? JSON.parse(live.meta_json) : undefined;
+          const record = finished ? JSON.parse(finished.summary_json) : undefined;
+          if (live && live.thread_key !== liveMeta?.threadKey) throw new Error("unreadable child claim");
+          if (finished && (!isRunRecord({ ...record, events: [] }) || record.id !== runId))
+            throw new Error("unreadable child receipt");
+          if (live && finished && !unitEffectTombstoneMatches(liveMeta, live.started_at, record))
+            throw new Error("ambiguous child receipt");
+          const meta = liveMeta ?? (record?.provisional === true ? undefined : record);
+          if (meta)
+            evidence = {
+              runId,
+              meta,
+              reviewTarget:
+                liveMeta ??
+                (() => {
+                  const original = this.sql
+                    .exec<{ json: string }>(
+                      `SELECT json FROM run_events WHERE run_id = ? AND json_extract(json, '$.type') = 'run_meta' ORDER BY seq ASC LIMIT 1`,
+                      runId,
+                    )
+                    .toArray()[0];
+                  return original ? JSON.parse(original.json) : undefined;
+                })(),
+              startedAt: live?.started_at ?? meta.startedAt,
+              tags: this.sql
+                .exec<{ json: string }>(
+                  `SELECT json FROM run_events WHERE run_id = ? AND json_extract(json, '$.type') = 'coordinator_tag' LIMIT 2`,
+                  runId,
+                )
+                .toArray()
+                .map((row) => JSON.parse(row.json)),
+            };
+        } catch {
+          result = { ok: false, reason: "incomplete" };
+          return;
+        }
+      }
+      const planned = planUnitEffectTransition(input, instance, current, evidence);
+      if (!planned.ok) {
+        result = planned;
+        return;
+      }
+      if (input.kind === "admit") {
+        let reason: PullBindingRefusal | undefined;
+        try {
+          reason = unitPullTargetsRefusal(this.pullOwnershipRows(), instance!, planned.unit);
+        } catch {
+          reason = "incomplete";
+        }
+        if (reason) {
+          result = { ok: false, reason };
+          return;
+        }
+      }
+      const maintenance = planned.unit.currentEffect?.execution.maintenance;
+      if (input.kind === "begin" && maintenance) {
+        const deadline = maintenance.admittedAt + minutesToMs(maintenance.bounds.leaseMinutes);
+        if (!Number.isFinite(deadline) || now >= deadline) {
+          result = { ok: false, reason: "stopped" };
+          return;
+        }
+      }
+      const serialized = JSON.stringify(planned.unit);
+      this.sql.exec(
+        `UPDATE coordinator_units SET json = ?, updated_at = ? WHERE instance_id = ? AND unit = ?`,
+        serialized,
+        now,
+        instanceId,
+        unit,
+      );
+      result = planned;
+    });
+    return result;
   }
 
   async transitionRecovery(input: RecoveryTransition, now: number): Promise<RecoveryTransitionResult> {
@@ -3537,6 +4212,13 @@ export class RunHistoryDO extends DurableObject<Env> {
         result = planned;
         return;
       }
+      if (input.kind === "claim" && !planned.replayed) {
+        const reason = this.bindingRefusal(input.expected, planned.unit, true);
+        if (reason) {
+          result = { ok: false, reason };
+          return;
+        }
+      }
       this.pinUnitContext(planned.unit, saved ? (JSON.parse(saved.json) as CoordinatorUnit) : undefined, now);
       if (planned.receipt)
         this.sql.exec(
@@ -3568,9 +4250,9 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   async getRecoveryAction(
     key: { instanceId: string; unit: string },
-    request: RecoveryRequest,
+    request: RecoveryRequest | string,
   ): Promise<RecoveryAction | null> {
-    const id = await recoveryActionId(key, request);
+    const id = typeof request === "string" ? request : await recoveryActionId(key, request);
     const row = this.sql
       .exec<{ json: string }>(
         `SELECT json FROM coordinator_recovery_journal WHERE instance_id = ? AND unit = ? AND kind = 'action' AND id = ?`,
@@ -3579,7 +4261,14 @@ export class RunHistoryDO extends DurableObject<Env> {
         id,
       )
       .toArray()[0];
-    return row ? (JSON.parse(row.json) as RecoveryAction) : null;
+    if (!row) return null;
+    const action = JSON.parse(row.json) as RecoveryAction;
+    return isRecoveryAction(action) &&
+      action.id === id &&
+      action.instanceId === key.instanceId &&
+      action.unit === key.unit
+      ? action
+      : null;
   }
 
   async listRecoveryHistory(key: { instanceId: string; unit: string }, after = 0): Promise<RecoveryHistoryPage> {
@@ -3601,6 +4290,139 @@ export class RunHistoryDO extends DurableObject<Env> {
       .exec<{ json: string }>(`SELECT json FROM coordinator_units WHERE instance_id = ? ORDER BY rowid`, instanceId)
       .toArray()
       .map((r) => JSON.parse(r.json) as CoordinatorUnit);
+  }
+
+  /** Reads are also consumed by admission inside this existing owner transaction. */
+  private pullOwnershipRows(): PullOwnershipRows {
+    let count = 0,
+      bytes = 0;
+    const bounded = function* <T extends Record<string, unknown>>(cursor: Iterable<T>) {
+      for (const row of cursor) {
+        count++;
+        // UTF-8 needs at most three bytes per UTF-16 code unit. Refuse before parsing.
+        bytes += Object.values(row).reduce<number>(
+          (sum, value) => sum + (typeof value === "string" ? 3 * value.length : 0),
+          0,
+        );
+        if (count > PULL_OWNER_SCAN_MAX || bytes > PULL_OWNER_SCAN_MAX_BYTES)
+          throw new Error("pull owner scan incomplete");
+        yield row;
+      }
+    };
+    const limit = PULL_OWNER_SCAN_MAX + 1;
+    const effects = [
+      ...bounded(
+        this.sql.exec<{ body_json: string }>(
+          `SELECT body_json FROM plane_effects WHERE acked_at IS NULL LIMIT ?`,
+          limit,
+        ),
+      ),
+    ].map((row) => JSON.parse(row.body_json));
+    const rows: PullOwnershipRows = { complete: true, units: [], runs: [], effects, settlements: [] };
+    for (const row of bounded(
+      this.sql.exec<{ unit_json: string; instance_json: string | null }>(
+        `SELECT u.json AS unit_json, i.json AS instance_json FROM coordinator_units u LEFT JOIN coordinator_instances i ON i.instance_id = u.instance_id LIMIT ?`,
+        limit,
+      ),
+    ))
+      rows.units.push({
+        unit: JSON.parse(row.unit_json),
+        instance: row.instance_json === null ? undefined : JSON.parse(row.instance_json),
+      });
+    for (const row of bounded(
+      this.sql.exec<{
+        run_id: string;
+        thread_key: string;
+        owner_gen: string;
+        phase: string;
+        meta_json: string;
+        state_json: string;
+      }>(`SELECT run_id, thread_key, owner_gen, phase, meta_json, state_json FROM live_runs LIMIT ?`, limit),
+    )) {
+      const meta = JSON.parse(row.meta_json),
+        state = JSON.parse(row.state_json);
+      const admitted =
+        row.owner_gen === "plane" &&
+        row.phase === "attaching" &&
+        meta &&
+        typeof meta === "object" &&
+        !Array.isArray(meta) &&
+        Object.keys(meta).length === 1 &&
+        meta.request &&
+        typeof meta.request === "object" &&
+        !Array.isArray(meta.request) &&
+        effects.some(
+          (effect) =>
+            effect?.kind === "admit" &&
+            effect.runId === row.run_id &&
+            effect.threadKey === row.thread_key &&
+            JSON.stringify(effect.request) === JSON.stringify(meta.request),
+        );
+      if ((!isPullOwnerLiveMeta(meta) && !admitted) || !state || typeof state !== "object" || Array.isArray(state))
+        throw new Error("unreadable live producer");
+      rows.runs.push({
+        runId: row.run_id,
+        repo: meta.repo,
+        live: true,
+        publication: state.branchPublication,
+        door: state.doorPublicationPending,
+      });
+    }
+    for (const row of bounded(
+      this.sql.exec<{ run_id: string; summary_json: string; work_evidence_json: string | null }>(
+        `SELECT run_id, summary_json, work_evidence_json FROM runs LIMIT ?`,
+        limit,
+      ),
+    )) {
+      const raw = JSON.parse(row.summary_json);
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("unreadable terminal producer");
+      const {
+        branchPublication,
+        reviewPublication: _reviewPublication,
+        branchPushReceipts: _branchPushReceipts,
+        ...summary
+      } = raw;
+      if (!isRunListItem(summary) || summary.id !== row.run_id) throw new Error("unreadable terminal producer");
+      const evidence =
+        row.work_evidence_json === null ? undefined : parseWorkEvidence(JSON.parse(row.work_evidence_json), summary);
+      if (row.work_evidence_json !== null && !evidence) throw new Error("unreadable private producer");
+      rows.runs.push({
+        runId: row.run_id,
+        repo: summary.repo,
+        live: false,
+        publication:
+          evidence && Object.hasOwn(evidence, "branchPublication") ? evidence.branchPublication : branchPublication,
+        door:
+          evidence && Object.hasOwn(evidence, "doorPublicationPending")
+            ? evidence.doorPublicationPending
+            : raw.doorPublicationPending,
+      });
+    }
+    for (const row of bounded(
+      this.sql.exec<{ owner_key: string; revision: number; json: string }>(
+        `SELECT owner_key, revision, json FROM workspace_settlements WHERE json IS NOT NULL LIMIT ?`,
+        limit,
+      ),
+    )) {
+      const value = workspaceSettlementOf(JSON.parse(row.json));
+      if (!value || workspaceOwnerKey(value.owner) !== row.owner_key || value.revision !== row.revision)
+        throw new Error("unreadable workspace owner");
+      rows.settlements!.push(value);
+    }
+    return rows;
+  }
+
+  async findPullOwners(target: PullTarget): Promise<PullOwnersResult> {
+    if (!isPullTarget(target)) return { ok: false, reason: "invalid" };
+    let result: PullOwnersResult = { ok: false, reason: "incomplete" };
+    try {
+      this.ctx.storage.transactionSync(() => {
+        result = findPullOwnersInRows(target, this.pullOwnershipRows());
+      });
+    } catch {
+      return { ok: false, reason: "incomplete" };
+    }
+    return result;
   }
 
   async listActiveRecoveries(): Promise<CoordinatorUnit[]> {
@@ -3645,12 +4467,13 @@ export class RunHistoryDO extends DurableObject<Env> {
     event: Omit<ThreadEvent, "seq">,
     requireActive = false,
     binding?: MainTaskBinding,
+    expectedRecovery?: { actionId: string; workflowId: string },
   ): Promise<{ ok: true; seq: number; event?: ThreadEvent } | { ok: false; reason: "ended" | "stale" }> {
     let seq = 1;
     let refusal: "ended" | "stale" | undefined;
     let storedEvent: ThreadEvent | undefined;
     this.ctx.storage.transactionSync(() => {
-      if (requireActive || binding !== undefined) {
+      if (requireActive || binding !== undefined || expectedRecovery !== undefined) {
         const instanceText = this.sql
           .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, instanceId)
           .toArray()[0]?.json;
@@ -3673,7 +4496,23 @@ export class RunHistoryDO extends DurableObject<Env> {
           refusal = "stale";
           return;
         }
-        if (!instance || !row || instance.stop || row.ending || row.recovery || row.recoveryHold) {
+        if (expectedRecovery !== undefined) {
+          const snapshot = this.coordinatorSnapshot(instanceId, unit);
+          if (
+            !requireActive ||
+            !snapshot ||
+            snapshot.unit.recovery?.actionId !== expectedRecovery.actionId ||
+            snapshot.unit.recovery.workflowId !== expectedRecovery.workflowId ||
+            snapshot.action?.state !== "pending"
+          ) {
+            refusal = "stale";
+            return;
+          }
+          if (snapshot.instance.stop || snapshot.unit.ending || snapshot.unit.recoveryHold) {
+            refusal = "ended";
+            return;
+          }
+        } else if (!instance || !row || instance.stop || row.ending || row.recovery || row.recoveryHold) {
           refusal = "ended";
           return;
         }
@@ -3758,7 +4597,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     seqs: number[],
     by: string,
     now: number,
-  ): Promise<{ ok: true } | { ok: false; reason: "settled" }> {
+  ): Promise<{ ok: true } | { ok: false; reason: "settled" | PullBindingRefusal }> {
     return this.writeUnfencedUnit(() => {
       const updated = { ...unit, wakes: { ...(unit.wakes ?? {}), [waitId]: answer } };
       const row = this.sql
@@ -3770,6 +4609,8 @@ export class RunHistoryDO extends DurableObject<Env> {
         .toArray()[0];
       const current = row ? (JSON.parse(row.json) as CoordinatorUnit) : undefined;
       const prepared = prepareUnfencedUnitWrite(current, updated);
+      const reason = this.bindingRefusal(current, prepared);
+      if (reason) return reason;
       this.pinUnitContext(prepared, current, now);
       this.sql.exec(
         `INSERT INTO coordinator_units (instance_id, unit, json, updated_at) VALUES (?, ?, ?, ?)
@@ -4440,6 +5281,48 @@ export class RunHistoryDO extends DurableObject<Env> {
       }));
   }
 
+  /** Derive protective roots from private facts only for policy-excluded records. */
+  private publicationRetentionIds(rows: readonly RetentionRow[], policy: RetentionPolicy, now: number): string[] {
+    const ordinary = RunHistoryDO.keptIds(rows, policy, now);
+    return this.sql
+      .exec<{ run_id: string; summary_json: string; work_evidence_json: string | null }>(
+        `SELECT run_id, summary_json, work_evidence_json FROM runs WHERE run_id NOT IN (SELECT value FROM json_each(?))`,
+        JSON.stringify([...ordinary]),
+      )
+      .toArray()
+      .filter((row) => this.publicationRetainsRow(row))
+      .map((row) => row.run_id);
+  }
+
+  private publicationRetainsRow(row: { summary_json: string; work_evidence_json: string | null }): boolean {
+    const summary = parseSummary(row);
+    if (!summary) return true;
+    try {
+      const evidence =
+        row.work_evidence_json === null ? undefined : parseWorkEvidence(JSON.parse(row.work_evidence_json), summary);
+      if (row.work_evidence_json !== null && evidence === undefined) return true;
+      return (
+        terminalPublicationRetentionRequired(JSON.parse(row.summary_json)) ||
+        evidence?.branchPublication !== undefined ||
+        evidence?.doorPublicationPending !== undefined ||
+        evidence?.reviewPublication !== undefined ||
+        evidence?.branchPushReceipts !== undefined
+      );
+    } catch {
+      return true;
+    }
+  }
+
+  private publicationRetains(runId: string): boolean {
+    const row = this.sql
+      .exec<{ summary_json: string; work_evidence_json: string | null }>(
+        `SELECT summary_json, work_evidence_json FROM runs WHERE run_id = ?`,
+        runId,
+      )
+      .toArray()[0];
+    return row !== undefined && this.publicationRetainsRow(row);
+  }
+
   private contextKeptIds(rows: readonly RetentionRow[], policy: RetentionPolicy, now: number): Set<string> {
     const kept = applyRetention(
       rows.map((r) => ({ id: r.run_id, finishedAt: r.finished_at, bytes: r.bytes })),
@@ -4447,6 +5330,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       now,
       {
         references: this.contextReferences(),
+        protectedIds: this.publicationRetentionIds(rows, policy, now),
         liveHolderIds: this.sql
           .exec<{ run_id: string }>(`SELECT run_id FROM live_runs`)
           .toArray()
@@ -4542,6 +5426,13 @@ export class RunHistoryDO extends DurableObject<Env> {
       let out: ClaimResult = { ok: true };
       this.ctx.storage.transactionSync(() => {
         const existing = this.liveByThread(req.threadKey);
+        const retained = this.sql
+          .exec<{ summary_json: string }>(`SELECT summary_json FROM runs WHERE run_id = ?`, req.runId)
+          .toArray()[0];
+        const original =
+          this.liveRow(req.runId)?.meta ?? (retained ? (JSON.parse(retained.summary_json) as unknown) : undefined);
+        if (!validMaintenanceTransport(req.meta) || (original && !sameMaintenanceTransport(original, req.meta)))
+          throw new Error("maintenance transport identity conflicts with retained state");
         if (!preserveCheckpointState(existing?.state ?? {}, req.state ?? {}))
           throw new Error("checkpoint state is immutable");
         if (!workEvidenceBelongsToRun(req.state ?? {}, { id: req.runId, ...req.meta }))
@@ -4677,6 +5568,31 @@ export class RunHistoryDO extends DurableObject<Env> {
     this.ctx.storage.transactionSync(() => {
       out = checkFence(this.liveRow(runId), gen);
       if (!out.ok) return;
+      if (
+        !maintenanceEventsMatch(
+          this.liveRow(runId)!.meta,
+          events.map((event) => JSON.parse(event.json)),
+        )
+      ) {
+        out = { ok: false, reason: "fenced" };
+        return;
+      }
+      const originalMeta = this.liveRow(runId)!.meta;
+      if (originalMeta.maintenanceActionId !== undefined) {
+        const previousBySeq = new Map<number, unknown>();
+        for (const event of events) {
+          const saved = this.sql
+            .exec<{ json: string }>(`SELECT json FROM run_events WHERE run_id = ? AND seq = ?`, runId, event.seq)
+            .toArray()[0];
+          const previous = previousBySeq.get(event.seq) ?? (saved ? (JSON.parse(saved.json) as unknown) : undefined);
+          const next: unknown = JSON.parse(event.json);
+          if (!preserveMaintenanceEvent(originalMeta, previous, next)) {
+            out = { ok: false, reason: "fenced" };
+            return;
+          }
+          previousBySeq.set(event.seq, next);
+        }
+      }
       for (let i = 0; i < events.length; i += RUN_EVENT_INSERT_BATCH) {
         const batch = events.slice(i, i + RUN_EVENT_INSERT_BATCH);
         const params: (string | number)[] = [];
@@ -4925,6 +5841,17 @@ export class RunHistoryDO extends DurableObject<Env> {
     point?: RunMetricsPoint,
     requireStoppedPause = false,
   ): Promise<FenceResult & { stored?: boolean; event?: RunFinishedSend["kind"] }> {
+    const opening = this.liveRow(runId);
+    const admitted = checkFence(opening, gen);
+    if (!admitted.ok) return admitted;
+    if (
+      !opening ||
+      !terminalWorkspaceRecordMatches(opening, record) ||
+      !sameMaintenanceTransport(opening.meta, record) ||
+      !maintenanceEventsMatch(opening.meta, record.events)
+    )
+      return { ok: false, reason: "fenced" };
+    this.checkWorkspaceFinishCapacity(opening, record);
     record = await this.archiveCheckpoint(record);
     let out: FenceResult & { stored?: boolean } = { ok: true };
     let turnedFinal = false;
@@ -4945,7 +5872,27 @@ export class RunHistoryDO extends DurableObject<Env> {
         out = { ok: false, reason: "fenced" };
         return;
       }
+      if (
+        !row ||
+        !terminalWorkspaceRecordMatches(row, record) ||
+        !sameMaintenanceTransport(row.meta, record) ||
+        !maintenanceEventsMatch(row.meta, record.events)
+      ) {
+        out = { ok: false, reason: "fenced" };
+        return;
+      }
+      if (row) this.checkWorkspaceFinishCapacity(row, record);
       const put = this.upsertInTransaction(record, proposal);
+      const obligation = row && terminalWorkspaceSettlement(row, record);
+      if (obligation) {
+        obligation.revision = nextWorkspaceRevision(this.workspaceRevision(obligation.owner));
+        this.sql.exec(
+          `INSERT INTO workspace_settlements (owner_key, revision, json) VALUES (?, ?, ?)`,
+          workspaceOwnerKey(obligation.owner),
+          obligation.revision,
+          JSON.stringify(obligation),
+        );
+      }
       this.deleteLiveRows([runId]);
       // The ending's cause (record 0064), recorded exactly when the live
       // row closes: the record's own status word, `restarting` reading as the
@@ -5089,24 +6036,47 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   /** Exact owner evidence for resident cleanup. Read live first and bypass
    * history retention: absence from a retained history view is not an ending. */
-  async preservationOwner(runId: string): Promise<unknown> {
+  async preservationOwner(runId: string, owner?: WorkspaceOwner): Promise<unknown> {
     const live = this.sql
-      .exec<Pick<LiveRow, "run_id" | "thread_key" | "owner_gen" | "phase" | "state_json">>(
-        `SELECT run_id, thread_key, owner_gen, phase, state_json FROM live_runs WHERE run_id = ?`,
+      .exec<Pick<LiveRow, "run_id" | "thread_key" | "owner_gen" | "phase" | "state_json" | "meta_json">>(
+        `SELECT run_id, thread_key, owner_gen, phase, state_json, meta_json FROM live_runs WHERE run_id = ?`,
         runId,
       )
       .toArray()[0];
     if (live) {
       let binding: unknown;
+      let workspaceThreadKey: string | undefined;
       try {
+        workspaceThreadKey = terminalThreadKey({ threadKey: live.thread_key, meta: JSON.parse(live.meta_json) });
         binding = (JSON.parse(live.state_json) as RunState).binding;
       } catch {
         return { kind: "unknown" };
       }
       return {
         kind: "live",
-        row: { runId: live.run_id, threadKey: live.thread_key, ownerGen: live.owner_gen, phase: live.phase, binding },
+        row: {
+          runId: live.run_id,
+          threadKey: live.thread_key,
+          ownerGen: live.owner_gen,
+          phase: live.phase,
+          binding,
+          workspaceThreadKey,
+        },
       };
+    }
+    if (owner) {
+      const settlement = this.workspaceSettlementRow(owner);
+      if (settlement) return { kind: "terminal", record: settlement.record, settlement };
+      const revision = this.workspaceRevision(owner);
+      return settlement === undefined && revision !== undefined
+        ? {
+            kind: "acknowledged",
+            owner: { runId: owner.runId, ownerGen: owner.ownerGen, ownerFence: owner.ownerFence },
+            revision,
+          }
+        : settlement === undefined
+          ? { kind: "absent", owner: { runId: owner.runId, ownerGen: owner.ownerGen, ownerFence: owner.ownerFence } }
+          : { kind: "unknown" };
     }
     const row = this.sql
       .exec<{ summary_json: string }>(`SELECT summary_json FROM runs WHERE run_id = ?`, runId)
@@ -5127,6 +6097,74 @@ export class RunHistoryDO extends DurableObject<Env> {
         publicationSettlement: record.publicationSettlement,
       },
     };
+  }
+
+  private workspaceSettlementRow(owner: WorkspaceOwner, revision?: number): WorkspaceSettlement | null | undefined {
+    const row = this.sql
+      .exec<{ json: string | null; revision: number }>(
+        `SELECT json, revision FROM workspace_settlements WHERE owner_key = ? AND ${revision === undefined ? "json IS NOT NULL" : "revision = ?"} ORDER BY revision ASC LIMIT 1`,
+        workspaceOwnerKey(owner),
+        ...(revision === undefined ? [] : [revision]),
+      )
+      .toArray()[0];
+    if (!row || row.json === null) return;
+    try {
+      const value = workspaceSettlementOf(JSON.parse(row.json));
+      return value && workspaceOwnerKey(value.owner) === workspaceOwnerKey(owner) && value.revision === row.revision
+        ? value
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private checkWorkspaceFinishCapacity(row: LiveRunRow, record: RunRecord): void {
+    const value = terminalWorkspaceSettlement(row, record);
+    if (!value) return;
+    const count =
+      this.sql
+        .exec<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM workspace_settlements WHERE owner_key = ? AND json IS NOT NULL`,
+          workspaceOwnerKey(value.owner),
+        )
+        .toArray()[0]?.n ?? 0;
+    if (count >= WORKSPACE_SETTLEMENTS_MAX) throw new Error("workspace obligation capacity exhausted");
+  }
+
+  private workspaceRevision(owner: WorkspaceOwner): number | undefined {
+    return (
+      this.sql
+        .exec<{ revision: number }>(
+          `SELECT MAX(revision) AS revision FROM workspace_settlements WHERE owner_key = ?`,
+          workspaceOwnerKey(owner),
+        )
+        .toArray()[0]?.revision ?? undefined
+    );
+  }
+
+  async ackWorkspaceSettlement(owner: WorkspaceOwner, revision: number): Promise<WorkspaceAck> {
+    let result: WorkspaceAck = { ok: false, reason: "unverified" };
+    this.ctx.storage.transactionSync(() => {
+      result = workspaceAcknowledgment(
+        this.workspaceSettlementRow(owner, revision),
+        revision,
+        this.liveRow(owner.runId) !== undefined,
+        this.workspaceRevision(owner),
+      );
+      if (result.ok) {
+        this.sql.exec(
+          `UPDATE workspace_settlements SET json = NULL WHERE owner_key = ? AND revision = ?`,
+          workspaceOwnerKey(owner),
+          revision,
+        );
+        this.sql.exec(
+          `DELETE FROM workspace_settlements WHERE owner_key = ? AND json IS NULL AND revision < (SELECT MAX(revision) FROM workspace_settlements WHERE owner_key = ?)`,
+          workspaceOwnerKey(owner),
+          workspaceOwnerKey(owner),
+        );
+      }
+    });
+    return result;
   }
 
   /** The events a live run has appended so far (item 30), in seq order — what
@@ -5296,7 +6334,7 @@ export class RunHistoryDO extends DurableObject<Env> {
    * order is the JS string order `newestFirst` uses.
    */
   private isKept(row: RetentionRow, policy: RetentionPolicy, now: number): boolean {
-    if (this.isKeptByPolicy(row, policy, now)) return true;
+    if (this.isKeptByPolicy(row, policy, now) || this.publicationRetains(row.run_id)) return true;
     const holders = this.sql
       .exec<{ holder_run_id: string }>(
         `SELECT DISTINCT holder_run_id FROM context_refs WHERE source_run_id = ? AND (retention_pin = 1 OR ordinary_pin = 1)`,
@@ -5314,7 +6352,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     const holder = this.sql
       .exec<RetentionRow>(`SELECT run_id, finished_at, bytes FROM runs WHERE run_id = ?`, runId)
       .toArray()[0];
-    return holder !== undefined && this.isKeptByPolicy(holder, policy, now);
+    return holder !== undefined && (this.isKeptByPolicy(holder, policy, now) || this.publicationRetains(runId));
   }
 
   private isKeptByPolicy(row: RetentionRow, policy: RetentionPolicy, now: number): boolean {
@@ -5463,10 +6501,65 @@ export class RunHistoryDO extends DurableObject<Env> {
         JSON.stringify(stored.contextCheckpointReceipt) !== JSON.stringify(priorReceipt)
       )
         throw new Error("checkpoint receipt is not canonical");
-      const priorWork = this.sql
-        .exec<{ work_evidence_json: string | null }>(`SELECT work_evidence_json FROM runs WHERE run_id = ?`, stored.id)
-        .toArray()[0]?.work_evidence_json;
-      const canonicalWork = this.liveRow(stored.id)?.state ?? (priorWork ? JSON.parse(priorWork) : {});
+      const priorRecord = this.sql
+        .exec<{ work_evidence_json: string | null; summary_json: string }>(
+          `SELECT work_evidence_json, summary_json FROM runs WHERE run_id = ?`,
+          stored.id,
+        )
+        .toArray()[0];
+      const priorEvidence =
+        priorRecord?.work_evidence_json != null
+          ? parseWorkEvidence(JSON.parse(priorRecord.work_evidence_json), stored)
+          : undefined;
+      if (priorRecord?.work_evidence_json != null && priorEvidence === undefined)
+        throw new Error("work evidence is unreadable");
+      const liveWork = this.liveRow(stored.id)?.state;
+      const canonicalWork = liveWork ?? {
+        ...priorEvidence,
+        ...(priorRecord &&
+        (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).branchPublication !== undefined
+          ? { branchPublication: (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).branchPublication }
+          : {}),
+        ...(priorRecord &&
+        (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).reviewPublication !== undefined
+          ? { reviewPublication: (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).reviewPublication }
+          : {}),
+        ...(priorRecord &&
+        (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).branchPushReceipts !== undefined
+          ? { branchPushReceipts: (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).branchPushReceipts }
+          : {}),
+      };
+      // Terminal outcome and cost do not depend on a process-local publication
+      // acknowledgment. Only saved producer state can authorize branch release.
+      const canonicalDoor = liveWork
+        ? liveWork.doorPublicationPending
+        : priorRecord
+          ? priorEvidence && Object.hasOwn(priorEvidence, "doorPublicationPending")
+            ? priorEvidence.doorPublicationPending
+            : JSON.parse(priorRecord.summary_json).doorPublicationPending
+          : stored.doorPublicationPending;
+      delete stored.doorPublicationPending;
+      const doorPublicationPending = doorPublicationOf(canonicalDoor);
+      if (doorPublicationPending !== undefined) stored.doorPublicationPending = doorPublicationPending;
+      delete stored.branchPublication;
+      const branchPublication = branchPublicationOf(canonicalWork.branchPublication, stored.repo);
+      if (branchPublication !== undefined) stored.branchPublication = branchPublication;
+      delete stored.branchPushReceipts;
+      const branchPushReceipts = branchPushReceiptsOf(canonicalWork.branchPushReceipts);
+      if (branchPushReceipts !== undefined) stored.branchPushReceipts = branchPushReceipts;
+      const unreadablePush =
+        branchPushReceipts === undefined && canonicalWork.branchPushReceipts !== undefined
+          ? { branchPushReceipts: canonicalWork.branchPushReceipts }
+          : {};
+      delete stored.reviewPublication;
+      const decodedReview = reviewPublicationOf(canonicalWork.reviewPublication);
+      const reviewPublication =
+        decodedReview?.runId === stored.id && decodedReview.target.repo === stored.repo ? decodedReview : undefined;
+      if (reviewPublication !== undefined) stored.reviewPublication = reviewPublication;
+      const unreadableReview =
+        reviewPublication === undefined && canonicalWork.reviewPublication !== undefined
+          ? { reviewPublication: canonicalWork.reviewPublication }
+          : {};
       if (
         stored.unitSeedReceipt !== undefined &&
         JSON.stringify(stored.unitSeedReceipt) !== JSON.stringify(canonicalWork.unitSeedReceipt)
@@ -5487,7 +6580,21 @@ export class RunHistoryDO extends DurableObject<Env> {
       this.pinContext(stored.id, stored.childHandoff, stored.contextDependencies);
       const { events, sourceReads, workReads, unitSeedReceipt, contextCheckpointReceipt, directAudience, ...summary } =
         stored;
-      const bytes = utf8ByteLength(JSON.stringify(stored));
+      const unreadableDoor =
+        doorPublicationPending === undefined && canonicalDoor !== undefined && canonicalDoor !== null
+          ? { doorPublicationPending: canonicalDoor }
+          : {};
+      const bytes = utf8ByteLength(
+        JSON.stringify({
+          ...unreadableDoor,
+          ...unreadableReview,
+          ...unreadablePush,
+          ...stored,
+          ...(branchPublication === undefined && canonicalWork.branchPublication !== undefined
+            ? { branchPublication: canonicalWork.branchPublication }
+            : {}),
+        }),
+      );
       const existing = this.sql
         .exec<{ event_count: number; finished_at: number; bytes: number; summary_json: string }>(
           `SELECT event_count, finished_at, bytes, summary_json FROM runs WHERE run_id = ?`,
@@ -5559,9 +6666,24 @@ export class RunHistoryDO extends DurableObject<Env> {
         sourceReads === undefined ? null : JSON.stringify(sourceReads),
         contextCheckpointReceipt === undefined ? null : JSON.stringify(contextCheckpointReceipt),
         directAudience === undefined ? null : JSON.stringify(directAudience),
-        workReads === undefined && unitSeedReceipt === undefined
+        workReads === undefined &&
+          unitSeedReceipt === undefined &&
+          !(branchPublication === undefined && canonicalWork.branchPublication !== undefined) &&
+          Object.keys(unreadablePush).length === 0 &&
+          Object.keys(unreadableReview).length === 0 &&
+          Object.keys(unreadableDoor).length === 0
           ? null
-          : JSON.stringify({ version: 1, workReads, unitSeedReceipt }),
+          : JSON.stringify({
+              version: 1,
+              ...unreadableDoor,
+              ...unreadableReview,
+              ...unreadablePush,
+              workReads,
+              unitSeedReceipt,
+              ...(branchPublication === undefined && canonicalWork.branchPublication !== undefined
+                ? { branchPublication: canonicalWork.branchPublication }
+                : {}),
+            }),
       );
       // The session's registry row learns its newest finish (session-log item
       // 7); a record that reaches the store without a claim (the plain put
@@ -5617,13 +6739,24 @@ export class RunHistoryDO extends DurableObject<Env> {
   }
 
   /** Remove a run and its events. Returns whether a run row existed. */
-  async delete(id: string): Promise<boolean> {
+  async delete(id: string): Promise<boolean | { ok: false; reason: "publication_pending" }> {
     return this.ctx.blockConcurrencyWhile(async () => {
       let deleted = false;
+      let refused = false;
       this.ctx.storage.transactionSync(() => {
+        // A live owner may also have a provisional terminal record. Neither
+        // that record nor its events and context pins can be erased here.
+        if (this.liveRow(id)) return;
         deleted = this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM runs WHERE run_id = ?`, id).one().n === 1;
+        // Retention may have removed the record while its checkpoint alias
+        // survives. Explicit deletion still revokes the alias.
+        if (this.publicationRetains(id)) {
+          refused = true;
+          return;
+        }
         this.deleteRuns([id], true);
       });
+      if (refused) return { ok: false as const, reason: "publication_pending" as const };
       await this.syncRangePins();
       return deleted;
     });
@@ -5637,6 +6770,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     const root = startAdoptedRoot(tracer, "state.alarm", { sinks: traceSinks });
     try {
       const now = systemClock();
+      await this.discoverCoordinatorWorkflows(now);
       let deleted = 0;
       if (this.env.RUN_HISTORY_MAINTENANCE === "enabled") {
         const { policy } = this.policyState();
@@ -5704,13 +6838,20 @@ export class RunHistoryDO extends DurableObject<Env> {
         );
         this.pushPlaneEffects(this.openPlaneEffects());
       }
-      await this.ctx.storage.setAlarm(now + RUN_SWEEP_INTERVAL_MS);
-      await this.ensurePlaneAlarm(now);
       root.end("ok", { swept: deleted });
     } catch (err) {
       root.fail(err);
       root.end("error");
       throw err;
+    } finally {
+      // Platform alarm retries are bounded. Persist the next due and arm it
+      // even when discovery or physical maintenance failed in this pass.
+      const now = systemClock();
+      const set = await this.ctx.storage.getAlarm();
+      if (set === null || set > now + RUN_SWEEP_INTERVAL_MS)
+        await this.ctx.storage.setAlarm(now + RUN_SWEEP_INTERVAL_MS);
+      await this.armCoordinatorReconciliation(now);
+      await this.ensurePlaneAlarm(now);
     }
   }
 
@@ -5802,24 +6943,27 @@ export class RunHistoryDO extends DurableObject<Env> {
     if (!summary) return null;
     const events: RunEvent[] = parseEventRows(this.eventRows(id, 0, Number.MAX_SAFE_INTEGER));
     let sourceReads: unknown;
+    let branchPublication: unknown;
+    let reviewPublication: unknown;
+    let branchPushReceipts: unknown;
     let workReads: unknown;
     let unitSeedReceipt: unknown;
     let contextCheckpointReceipt: unknown;
     let directAudience: unknown;
     try {
+      branchPublication = (JSON.parse(row.summary_json) as Record<string, unknown>).branchPublication;
+      if (branchPublication !== undefined && !branchPublicationOf(branchPublication, summary.repo)) return null;
+      reviewPublication = (JSON.parse(row.summary_json) as Record<string, unknown>).reviewPublication;
+      if (reviewPublication !== undefined) {
+        const receipt = reviewPublicationOf(reviewPublication);
+        if (!receipt || receipt.runId !== id || receipt.target.repo !== summary.repo) return null;
+      }
+      branchPushReceipts = (JSON.parse(row.summary_json) as Record<string, unknown>).branchPushReceipts;
+      if (branchPushReceipts !== undefined && !branchPushReceiptsOf(branchPushReceipts)) return null;
       sourceReads = row.source_reads_json == null ? undefined : JSON.parse(row.source_reads_json);
       if (row.work_evidence_json != null) {
-        const evidence: unknown = JSON.parse(row.work_evidence_json);
-        if (
-          !evidence ||
-          typeof evidence !== "object" ||
-          Array.isArray(evidence) ||
-          (evidence as { version?: unknown }).version !== 1 ||
-          Object.keys(evidence).some(
-            (field) => field !== "version" && field !== "workReads" && field !== "unitSeedReceipt",
-          )
-        )
-          return null;
+        const evidence = parseWorkEvidence(JSON.parse(row.work_evidence_json), summary);
+        if (evidence === undefined) return null;
         workReads = (evidence as { workReads?: unknown }).workReads;
         unitSeedReceipt = (evidence as { unitSeedReceipt?: unknown }).unitSeedReceipt;
       }
@@ -5833,6 +6977,9 @@ export class RunHistoryDO extends DurableObject<Env> {
     const record = {
       ...summary,
       events,
+      ...(branchPublication === undefined ? {} : { branchPublication }),
+      ...(reviewPublication === undefined ? {} : { reviewPublication }),
+      ...(branchPushReceipts === undefined ? {} : { branchPushReceipts }),
       ...(sourceReads === undefined ? {} : { sourceReads }),
       ...(workReads === undefined ? {} : { workReads }),
       ...(unitSeedReceipt === undefined ? {} : { unitSeedReceipt }),
@@ -6032,8 +7179,10 @@ export class RunHistoryDO extends DurableObject<Env> {
     // manifest rows with neither pin are not edges. Check existence without
     // materializing the graph (or scanning runs) on ordinary pages.
     const hasContext =
+      boundExceeded ||
       this.sql.exec(`SELECT 1 FROM context_refs WHERE retention_pin = 1 OR ordinary_pin = 1 LIMIT 1`).toArray().length >
-      0;
+        0 ||
+      this.sql.exec(`SELECT 1 FROM runs WHERE finished_at < ? LIMIT 1`, cutoff).toArray().length > 0;
     const before = q.before ?? Number.MAX_SAFE_INTEGER;
     const addFilters = (where: string[], params: (string | number)[]): void => {
       if (q.sinceMs !== undefined) {
@@ -6144,9 +7293,9 @@ export class RunHistoryDO extends DurableObject<Env> {
       items,
     };
     if (q.recoveryEvidence !== undefined) out.evidenceComplete = !malformed && rows.length < limit;
-    if (items.length === limit) {
-      const last = items[items.length - 1];
-      out.nextBefore = { finishedAt: last.finishedAt, id: last.id };
+    if (rows.length === limit) {
+      const last = rows[rows.length - 1];
+      out.nextBefore = { finishedAt: last.finished_at, id: last.run_id };
     }
     return out;
   }
@@ -6254,10 +7403,39 @@ function identityOfSummary(raw: string): {
   }
 }
 
+/** Private evidence can carry an unreadable producer projection for preservation only. */
+function parseWorkEvidence(value: unknown, owner: RunListItem | RunRecord): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const evidence = value as Record<string, unknown>;
+  if (
+    evidence.version !== 1 ||
+    Object.keys(evidence).some(
+      (field) =>
+        field !== "version" &&
+        field !== "workReads" &&
+        field !== "unitSeedReceipt" &&
+        field !== "branchPublication" &&
+        field !== "reviewPublication" &&
+        field !== "branchPushReceipts" &&
+        field !== "doorPublicationPending",
+    ) ||
+    !workEvidenceBelongsToRun(evidence, owner)
+  )
+    return undefined;
+  return evidence;
+}
+
 function parseSummary(row: Pick<RunRow, "summary_json">): RunListItem | null {
   try {
     const parsed: unknown = JSON.parse(row.summary_json);
-    return isRunListItem(parsed) ? normalizeStored(parsed) : null;
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const {
+      branchPublication: _branchPublication,
+      reviewPublication: _reviewPublication,
+      branchPushReceipts: _branchPushReceipts,
+      ...summary
+    } = parsed as Record<string, unknown>;
+    return isRunListItem(summary) ? normalizeStored(summary as unknown as RunListItem) : null;
   } catch {
     return null;
   }
@@ -7579,10 +8757,14 @@ const LEDGER_ROUTES = new Set([
   "/runs/coordinator/units/put",
   "/runs/coordinator/units/claim-legacy-continuation",
   "/runs/coordinator/recovery/transition",
+  "/runs/coordinator/units/effect-transition",
+  "/runs/coordinator/maintenance/admit",
   "/runs/coordinator/recovery/action",
   "/runs/coordinator/recovery/history",
   "/runs/coordinator/units/list-active-recoveries",
+  "/runs/coordinator/pull-owners",
   "/runs/coordinator/units/list",
+  "/runs/coordinator/reconcile/offer",
   "/runs/coordinator/events/append",
   "/runs/coordinator/events/list",
   "/runs/coordinator/events/mark-consumed",
@@ -7605,6 +8787,7 @@ const LEDGER_ROUTES = new Set([
   "/runs/reclaim",
   "/runs/live",
   "/runs/preservation-owner",
+  "/runs/workspace-ack",
   "/runs/live-events",
   "/runs/intake",
   "/runs/intake/read",
@@ -7716,6 +8899,12 @@ async function handlePlane(pathname: string, body: unknown, env: Env): Promise<R
       if (typeof rawOwner.gen !== "string" || rawOwner.gen.length === 0)
         return json({ error: "owner generation must be a non-empty string" }, 400);
       owner = { runId: runId.value, gen: rawOwner.gen };
+    }
+    if (b.reconciliation !== undefined) {
+      if (!isCoordinatorReconcileReceipt(b.reconciliation) || b.outcome !== "done")
+        return json({ error: "invalid reconciliation acknowledgement" }, 400);
+      const result = await stub.ackCoordinatorReconciliation(b.id, b.reconciliation, now);
+      return json(result, result.ok ? 200 : 409);
     }
     return json(await stub.planeAck(b.id, b.outcome as PlaneAckOutcome, now, owner));
   }
@@ -7920,6 +9109,8 @@ function parseClaim(b: Record<string, unknown>): Validated<ClaimRequest> {
   // by the finish's send and the refusal a second claim meets: shaped or
   // refused, and both fields or neither — one alone is no tag.
   const meta = r.meta as Record<string, unknown>;
+  if (!validMaintenanceTransport(meta))
+    return invalid("run.meta maintenance transport must name its original logical owner");
   if (meta.childHandoff !== undefined && !isChildHandoff(meta.childHandoff))
     return invalid("run.meta.childHandoff must be a valid bounded handoff");
   if (meta.session !== undefined && !isRunSession(meta.session))
@@ -8339,7 +9530,15 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
   if (pathname === "/runs/preservation-owner") {
     const runId = parseRunId(b.runId);
     if (!runId.ok) return json({ error: runId.error }, 400);
-    return json(await stub.preservationOwner(runId.value));
+    const exact = b.ownerGen !== undefined || b.ownerFence !== undefined;
+    if (exact && !isWorkspaceOwner(b)) return json({ error: "invalid workspace owner" }, 400);
+    return json(await stub.preservationOwner(runId.value, exact ? (b as unknown as WorkspaceOwner) : undefined));
+  }
+  if (pathname === "/runs/workspace-ack") {
+    if (!isWorkspaceOwner(b) || !Number.isSafeInteger(b.revision) || Number(b.revision) <= 0)
+      return json({ error: "invalid workspace acknowledgment" }, 400);
+    const result = await stub.ackWorkspaceSettlement(b, Number(b.revision));
+    return json(result, result.ok ? 200 : 409);
   }
   if (pathname === "/runs/reclaim") {
     const g = gen(b.gen);
@@ -8484,6 +9683,16 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
   }
   // The units of the plan an instance runs (run-history item 50): rows
   // validated by the shared contract, each replaced whole; a list by instance.
+  if (pathname === "/runs/coordinator/maintenance/admit") {
+    if (!isMaintenanceAdmissionInput(b.input)) return json({ error: "invalid maintenance intent" }, 400);
+    const result = await stub.admitMaintenance(b.input, now);
+    return result.ok ? json(result) : json(result, 409);
+  }
+  if (pathname === "/runs/coordinator/units/effect-transition") {
+    if (!isUnitEffectTransition(b.input)) return json({ error: "invalid unit effect transition" }, 400);
+    const result = await stub.transitionUnitEffect(b.input, now);
+    return json(result, result.ok ? 200 : 409);
+  }
   if (pathname === "/runs/coordinator/recovery/transition") {
     if (recoveryBytes(b) > RECOVERY_HISTORY_LIMITS.requestBytes) return json({ ok: false, reason: "capacity" }, 409);
     if (!isRecoveryTransition(b.input)) return json({ error: "invalid recovery transition" }, 400);
@@ -8502,12 +9711,29 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
       return json({ error: "invalid recovery work key" }, 400);
     const recoveryKey = { instanceId: address.instanceId, unit: address.unit };
     if (pathname.endsWith("/action")) {
-      if (!isRecoveryRequest(b.request)) return json({ error: "invalid recovery request" }, 400);
-      return json({ action: await stub.getRecoveryAction(recoveryKey, b.request) });
+      const byId = typeof b.actionId === "string" && /^r_[a-f0-9]{64}$/.test(b.actionId);
+      if (byId ? b.request !== undefined : b.actionId !== undefined || !isRecoveryRequest(b.request))
+        return json({ error: "invalid recovery request" }, 400);
+      return json({
+        action: await stub.getRecoveryAction(
+          recoveryKey,
+          byId ? (b.actionId as string) : (b.request as RecoveryRequest),
+        ),
+      });
     }
     if (!Number.isSafeInteger(b.after) || (b.after as number) < 0)
       return json({ error: "invalid recovery cursor" }, 400);
     return json(await stub.listRecoveryHistory(recoveryKey, b.after as number));
+  }
+  if (pathname === "/runs/coordinator/reconcile/offer") {
+    if (
+      typeof b.instanceId !== "string" ||
+      !INSTANCE_ID_PATTERN.test(b.instanceId) ||
+      typeof b.unit !== "string" ||
+      !UNIT_PATTERN.test(b.unit)
+    )
+      return json({ error: "invalid reconciliation work key" }, 400);
+    return json(await stub.offerCoordinatorReconciliation(b.instanceId, b.unit, now));
   }
   if (pathname === "/runs/coordinator/units/put") {
     if (!Array.isArray(b.units) || b.units.length === 0 || b.units.length > MAX_UNITS_PER_PUT)
@@ -8533,6 +9759,10 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     if (typeof b.instanceId !== "string" || !INSTANCE_ID_PATTERN.test(b.instanceId))
       return json({ error: "instanceId must be a Workflow instance id" }, 400);
     return json({ units: await stub.listUnits(b.instanceId) });
+  }
+  if (pathname === "/runs/coordinator/pull-owners") {
+    if (!isPullTarget(b.target)) return json({ error: "target must name a repository and PR or ref" }, 400);
+    return json(await stub.findPullOwners(b.target));
   }
   if (pathname === "/runs/coordinator/units/list-active-recoveries")
     return json({ units: await stub.listActiveRecoveries() });
@@ -8563,6 +9793,21 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
         return json({ error: "requireActive must be boolean" }, 400);
       if (b.binding !== undefined && !isMainTaskBinding(b.binding))
         return json({ error: "binding must name one main task claim" }, 400);
+      if (b.expectedRecovery !== undefined) {
+        const exact = b.expectedRecovery as { actionId?: unknown; workflowId?: unknown };
+        if (
+          !exact ||
+          typeof exact !== "object" ||
+          Array.isArray(exact) ||
+          Object.keys(exact).length !== 2 ||
+          typeof exact.actionId !== "string" ||
+          !/^r_[a-f0-9]{64}$/.test(exact.actionId) ||
+          typeof exact.workflowId !== "string" ||
+          !INSTANCE_ID_PATTERN.test(exact.workflowId) ||
+          b.requireActive !== true
+        )
+          return json({ error: "expectedRecovery must name an active exact action and Workflow" }, 400);
+      }
       // The store assigns the sequence and the consumer: a caller's `seq` or
       // `consumedBy` is dropped, so no row is born consumed in its JSON while
       // its column still lists it unconsumed.
@@ -8573,6 +9818,7 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
         event as Omit<ThreadEvent, "seq" | "consumedBy">,
         b.requireActive === true,
         b.binding as MainTaskBinding | undefined,
+        b.expectedRecovery as { actionId: string; workflowId: string } | undefined,
       );
       if (!r.ok) return json(r, 409);
       console.log(`[runs/coordinator/events/append] ${key.value} ${b.instanceId}:${b.unit} seq ${r.seq}`);
@@ -8800,6 +10046,7 @@ async function handleRuns(pathname: string, body: unknown, env: Env): Promise<Re
   const parsed = parseRunTarget(body);
   if (!parsed.ok) return json({ error: parsed.error }, 400);
   const deleted = await stub(parsed.value.storeKey).delete(parsed.value.id);
+  if (typeof deleted !== "boolean") return json(deleted, 409);
   console.log(`[runs/delete] ${parsed.value.storeKey} ${parsed.value.id} -> deleted=${deleted}`);
   return json({ ok: true, deleted });
 }

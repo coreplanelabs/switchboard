@@ -30,6 +30,8 @@ interface Entry {
   /** In-process request fence: unregister/re-register never revives an older request. */
   generation: symbol;
   binding: GitBinding;
+  /** Retire model transports without replacing the original post-step recorder. */
+  modelPublicationClosed?: true;
   /** Existing-PR writes start blocked and are authorized only after fresh verification. */
   publication?: GitPublicationAuthority;
   recorder?: GitPublicationRecorder;
@@ -86,8 +88,13 @@ export class GitBindings {
   }
 
   publicationOf(runId: string): GitPublicationAuthority | undefined {
-    const publication = this.entries.get(runId)?.publication;
+    const entry = this.entries.get(runId);
+    const publication = entry?.publication;
     return publication ? { ...publication } : undefined;
+  }
+
+  isModelClosed(runId: string): boolean {
+    return this.entries.get(runId)?.modelPublicationClosed === true;
   }
 
   /** The harness opts in before the first model call. Old command-run and
@@ -106,7 +113,7 @@ export class GitBindings {
 
   hasToolPush(runId: string, credentialHash?: string): boolean {
     const entry = this.entries.get(runId);
-    if (!entry?.toolPush) return false;
+    if (!entry?.toolPush || entry.modelPublicationClosed) return false;
     return credentialHash !== undefined && entry.toolPush.credentialHash === credentialHash;
   }
 
@@ -121,6 +128,7 @@ export class GitBindings {
     const entry = this.entries.get(runId);
     if (
       !entry?.toolPushRequired ||
+      entry.modelPublicationClosed ||
       !credentialHash ||
       entry.pending ||
       !callId ||
@@ -152,7 +160,7 @@ export class GitBindings {
    * before any upstream write. A wrong attempt does not consume a good one. */
   takeToolPush(runId: string, update: GitPublicationUpdate, credentialHash?: string): boolean {
     const entry = this.entries.get(runId);
-    if (!entry) return false;
+    if (!entry || entry.modelPublicationClosed) return false;
     if (!entry.toolPushRequired) return true;
     const granted = entry.toolPush;
     if (
@@ -221,10 +229,51 @@ export class GitBindings {
     return true;
   }
 
+  /** Invalidate model request generations and transport grants. A forwarded
+   * claim may still finish; this bit never clears a real authorization block. */
+  closeModelTurn(runId: string): boolean {
+    const entry = this.entries.get(runId);
+    if (!entry) return false;
+    entry.modelPublicationClosed = true;
+    entry.toolPush = undefined;
+    entry.generation = Symbol();
+    return true;
+  }
+
+  /** Trusted post-steps use the same original recorder after the model door
+   * closes. The caller must freshly fence the canonical run and grants. */
+  async beginPostStepPublication(
+    runId: string,
+    update: GitPublicationUpdate,
+  ): Promise<GitPublicationClaim | undefined> {
+    const entry = this.entries.get(runId);
+    if (
+      !entry?.modelPublicationClosed ||
+      entry.pending ||
+      !/^[0-9a-f]{40}$/.test(update.old) ||
+      !/^[0-9a-f]{40}$/.test(update.next)
+    )
+      return undefined;
+    const authority = entry.publication;
+    if (authority) {
+      if (
+        "blocked" in authority ||
+        !entry.recorder ||
+        branch(authority.ref) !== update.ref ||
+        authority.expectedHeadSha !== update.old
+      )
+        return undefined;
+      return this.beginClaim(runId, entry, update, entry.recorder, authority, true);
+    }
+    if (!entry.branchRecorder || entry.binding.ref !== update.ref) return undefined;
+    return this.beginClaim(runId, entry, update, entry.branchRecorder, undefined, true);
+  }
+
   async beginBranch(runId: string, update: GitPublicationUpdate): Promise<GitPublicationClaim | undefined> {
     const entry = this.entries.get(runId);
     if (
       !entry?.branchRecorder ||
+      entry.modelPublicationClosed ||
       entry.publication ||
       entry.pending ||
       entry.binding.ref !== update.ref ||
@@ -239,6 +288,7 @@ export class GitBindings {
     const authority = entry?.publication;
     if (
       !entry?.recorder ||
+      entry.modelPublicationClosed ||
       !authority ||
       "blocked" in authority ||
       entry.pending ||
@@ -256,6 +306,7 @@ export class GitBindings {
     update: GitPublicationUpdate,
     recorder: GitPublicationRecorder,
     authority?: { ref: string; expectedHeadSha: string },
+    postStep = false,
   ): Promise<GitPublicationClaim | undefined> {
     entry.pending = update;
     let settlePending!: () => void;
@@ -266,7 +317,12 @@ export class GitBindings {
     } catch {
       // A failed durable intent never authorizes an upstream write.
     }
-    if (!begun || this.entries.get(runId) !== entry || entry.pending !== update) {
+    if (
+      !begun ||
+      this.entries.get(runId) !== entry ||
+      entry.pending !== update ||
+      (entry.modelPublicationClosed && !postStep)
+    ) {
       if (begun) await recorder.finish(update, "not_forwarded").catch(() => false);
       if (this.entries.get(runId) === entry) {
         entry.pending = undefined;
@@ -352,14 +408,14 @@ export class GitBindings {
 
   private change(runId: string, decide: (binding: GitBinding) => GitBinding | undefined): Promise<boolean> {
     const entry = this.entries.get(runId);
-    if (!entry) return Promise.resolve(false);
+    if (!entry || entry.modelPublicationClosed) return Promise.resolve(false);
     const action = entry.queue.then(async () => {
-      if (this.entries.get(runId) !== entry) return false;
+      if (this.entries.get(runId) !== entry || entry.modelPublicationClosed) return false;
       const next = decide(entry.binding);
       if (!next) return false;
       if (next === entry.binding) return true;
       if (!entry.persist || !(await entry.persist(next))) return false;
-      if (this.entries.get(runId) !== entry) return false;
+      if (this.entries.get(runId) !== entry || entry.modelPublicationClosed) return false;
       entry.binding = next;
       return true;
     });

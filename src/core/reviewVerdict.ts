@@ -712,7 +712,7 @@ export function isReviewVerdictShape(v: unknown): v is ReviewVerdict {
  *  review list can lag a post it accepted a second ago. */
 export type ReviewPost =
   | { posted: true; target: { repo: string; number: number }; head: string; verdict?: ReviewVerdictKind }
-  | { posted: false; reason: string };
+  | { posted: false; reason: string; uncertain?: true };
 
 const REVIEW_POST_HEAD = /^[0-9a-f]{7,40}$/;
 
@@ -721,8 +721,8 @@ const REVIEW_POST_HEAD = /^[0-9a-f]{7,40}$/;
  *  present) a known kind; a skipped one carries a string reason. */
 export function isReviewPostShape(v: unknown): v is ReviewPost {
   if (!isRecordLike(v)) return false;
-  if (v.posted === false) return typeof v.reason === "string";
-  if (v.posted !== true) return false;
+  if (v.posted === false) return typeof v.reason === "string" && (v.uncertain === undefined || v.uncertain === true);
+  if (v.posted !== true || v.uncertain !== undefined) return false;
   const target = v.target;
   if (
     !isRecordLike(target) ||
@@ -739,7 +739,9 @@ export function isReviewPostShape(v: unknown): v is ReviewPost {
 /** The skip's reason through the redaction seam (it may carry GitHub's own
  *  words); a posted outcome has no free text and is returned as it is. */
 export function redactReviewPost(post: ReviewPost, redact: (s: string) => string = redactSecrets): ReviewPost {
-  return post.posted ? post : { posted: false, reason: redact(post.reason) };
+  return post.posted
+    ? post
+    : { posted: false, reason: redact(post.reason), ...(post.uncertain ? { uncertain: true } : {}) };
 }
 
 /** Structural check on a disposition set read back from a stored record. */

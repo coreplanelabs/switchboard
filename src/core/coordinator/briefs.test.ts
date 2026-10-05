@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { MAX_FILE_CHARS } from "../../execution/githubApi.js";
 import { parseDirectives } from "../../directives.js";
 import { childRequestText } from "../dispatch/spawn.js";
+import { buildReviewPostBody, type ReviewVerdict } from "../reviewVerdict.js";
 import { GUARDS, parsePlanUnit, PLAN_MAX_CHARS, renderContract } from "../ship/contract.js";
 import type { Brief } from "../ship/coordinator.js";
 import type { CoordinatorInstance, CoordinatorUnit } from "./contract.js";
@@ -699,6 +700,84 @@ describe("composeChild — the child a brief names", () => {
     expect(child.contract).toBeUndefined();
   });
 
+  it.each(["run", "brief"] as const)(
+    "an approved review with four fixed resolutions and failed checks briefs only the check IDs: %s",
+    async (source) => {
+      const verdict: ReviewVerdict = {
+        verdict: "approve",
+        summary: "All four prior findings are resolved; CI remains red.",
+        findings: [],
+        resolutions: [1, 2, 3, 4].map((id) => ({
+          findingId: `review:prior:F${id}`,
+          disposition: "fixed",
+          note: "Verified at this head.",
+        })),
+      };
+      const review = buildReviewPostBody("No new findings; repair CI only.", verdict);
+      const { r } = readers({ runs: { "run-approved": { findings: verdict.findings, finalReply: review } } });
+      const checks = ["ci / bot", "ci / bot / format:check", "ci / bot / test 4 of 4"].map((name) => ({
+        id: `check:${name}`,
+        severity: "blocking" as const,
+        file: name,
+        title: "CI check failed (failure)",
+        check: true as const,
+      }));
+      const child = await composeChild(
+        {
+          kind: "findings",
+          unit: "U10",
+          pr: 7,
+          reviewRunId: "run-approved",
+          ...(source === "brief" ? { findings: verdict.findings } : {}),
+          checks,
+        },
+        instance,
+        unit,
+        r,
+      );
+      expect(child.prompt).toContain("Required CI checks for acme/api#7 failed.");
+      expect(child.prompt).toContain("Repair only the listed checks");
+      expect(child.prompt).not.toContain("The review of acme/api#7 requested changes");
+      expect(child.prompt).not.toContain("address its prose");
+      expect(child.prompt).toContain("submit_dispositions");
+      expect(child.prompt).toContain("Copy each finding ID exactly");
+      expect(child.prompt).toContain("submit_pr_description");
+      expect(child.prompt).toContain("Never merge and never approve.");
+      expect(child.issuedFindingIds).toEqual(checks.map((check) => check.id));
+      for (const resolution of verdict.resolutions!) expect(child.issuedFindingIds).not.toContain(resolution.findingId);
+      expect(child.prompt).toContain(review);
+      expect(child.ref).toBe(unit.branch);
+      expect(child.contract).toBeUndefined();
+    },
+  );
+
+  it("finding-source wording uses typed review and check arrays, not IDs or review prose", async () => {
+    const { r } = readers({ runs: { "run-r1": { finalReply: "LGTM: previous findings resolved." } } });
+    const child = await composeChild(
+      {
+        kind: "findings",
+        unit: "U10",
+        pr: 7,
+        reviewRunId: "run-r1",
+        findings: [{ ...FINDING, id: "check:reviewer-chosen-id" }],
+      },
+      instance,
+      unit,
+      r,
+    );
+    expect(child.prompt).toContain("The review of acme/api#7 requested changes.");
+    expect(child.prompt).not.toContain("Required CI checks");
+    expect(child.issuedFindingIds).toEqual(["check:reviewer-chosen-id"]);
+    const checkOnly = await composeChild(
+      { kind: "findings", unit: "U10", pr: 7, checks: [{ ...FINDING, id: "F1", check: true }] },
+      instance,
+      unit,
+      r,
+    );
+    expect(checkOnly.prompt).toContain("Required CI checks for acme/api#7 failed.");
+    expect(checkOnly.issuedFindingIds).toEqual(["F1"]);
+  });
+
   it("a findings brief binds exact review and check IDs beside its message, with no contract; a review run the history lacks throws by name; no `fix` brief composes", async () => {
     const { r } = readers({ runs: { "run-r1": { findings: [FINDING], finalReply: "Changes requested: one nit." } } });
     const findings = await composeChild(
@@ -735,6 +814,8 @@ describe("composeChild — the child a brief names", () => {
       r,
     );
     expect(withChecks.issuedFindingIds).toEqual(["F1", "check:ci / bot", "check:ci / workers"]);
+    expect(withChecks.prompt).toContain("The review of acme/api#7 requested changes.");
+    expect(withChecks.prompt).toContain("Required CI checks also failed.");
     const withCases = await composeChild(
       {
         kind: "findings",
@@ -769,6 +850,8 @@ describe("composeChild — the child a brief names", () => {
     );
     expect(byProse.prompt).toContain("Findings:\n(the review listed no structured findings, address its prose)");
     expect(byProse.issuedFindingIds).toEqual([]);
+    expect(byProse.prompt).toContain("Address the review feedback for acme/api#7.");
+    expect(byProse.prompt).not.toContain("requested changes");
     const answered = await composeChild(
       {
         kind: "findings",

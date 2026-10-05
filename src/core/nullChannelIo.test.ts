@@ -7,6 +7,17 @@ import { nullChannelIO } from "./nullChannelIo.js";
 // refused for want of a thread).
 
 describe("nullChannelIO", () => {
+  it("declares state report delivery only for known machine jobs and their children", async () => {
+    for (const key of ["http:ops:task", "mcp:ops:task"]) {
+      const io = nullChannelIO(key, () => {});
+      expect(io.reportDelivery).toBe("state");
+      const child = await io.openThread!("unit", "pipeline:unit");
+      expect(child.io.reportDelivery).toBe("state");
+      expect(child.io.undeliverable).toBeDefined();
+    }
+    expect(nullChannelIO("slack:C1:1", () => {}).reportDelivery).toBeUndefined();
+    expect(nullChannelIO("unknown:task", () => {}).reportDelivery).toBeUndefined();
+  });
   it("replies are logged, never delivered; the status handle is inert; the history is empty", async () => {
     const lines: string[] = [];
     const io = nullChannelIO("slack:CX:1.0", (l) => lines.push(l));

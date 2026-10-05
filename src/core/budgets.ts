@@ -18,6 +18,10 @@ import BUILTIN_CONFIG from "../agents/defaults.json" with { type: "json" };
 // Workflow-driven coordinator and the deploy Workers can bundle it — the
 // dependency runs registry → budgets, never the reverse.
 
+/** Count bounds for retained resident delivery references and one watchdog metadata page. */
+export const WORKSPACE_PREDECESSORS_MAX = 20;
+export const WORKSPACE_RECONCILE_BINDINGS_MAX = 20;
+
 export const SECOND_MS = 1_000;
 
 /** Only slow session-pin RPCs need completion logs; starts identify one that stalls. */

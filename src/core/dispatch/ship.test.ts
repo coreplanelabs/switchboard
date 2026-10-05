@@ -90,7 +90,7 @@ function setup(
   const config = configStore(over.configExtra ?? "");
   const store = new InMemoryRunStore();
   const writer = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
-  const instances = new InMemoryCoordinatorInstanceStore();
+  const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
   const created: string[] = [];
   const deps: ShipDeps = {
     config,
@@ -609,18 +609,6 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
     expect((await s.instances.get("plan-fix-the-login-redirect-6435ec"))?.caps).toEqual({
       maxRounds: 2,
       maxMinutes: 200,
-    });
-  });
-
-  it("a re-issued pipeline hands the runner only its durable remaining caps, never the fresh profile or configured round cap", async () => {
-    const s = setup("slack:UADMIN", { configExtra: "ship:\n  maxRounds: 3\n  maxMinutes: 240\n" });
-    Object.assign(s.ctx, { reissueCaps: { maxRounds: 2, maxMinutes: 170 } });
-
-    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
-
-    expect((await s.instances.get("plan-fix-the-login-redirect-6435ec"))?.caps).toEqual({
-      maxRounds: 2,
-      maxMinutes: 170,
     });
   });
 

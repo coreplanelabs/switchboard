@@ -85,7 +85,11 @@ import {
   type ReclaimOutcome,
 } from "./core/boot.js";
 import { launchResumes, resumeIoTarget } from "./core/resumeLaunch.js";
-import { RunnerOwnershipFence } from "./core/runnerOwnership.js";
+import { findRunnerPullOwner } from "./core/runnerOwnership.js";
+import type {
+  CoordinatorReconcileEffect,
+  CoordinatorReconcileReceipt,
+} from "./core/coordinator/workflowReconciliation.js";
 import { ThreadsElsewhere } from "./core/runLedger/threadsElsewhere.js";
 import { LedgerTakeover } from "./core/runLedger/takeover.js";
 import { nullChannelIO } from "./core/nullChannelIo.js";
@@ -133,7 +137,7 @@ import {
   HELD_NOT_HANDED_OFF,
   createDrainDeadline,
 } from "./core/drain.js";
-import { MINUTE_MS, PULL_SWEEP } from "./core/budgets.js";
+import { MINUTE_MS } from "./core/budgets.js";
 import { startProcessRoot } from "./core/requestTrace.js";
 import { configureInternalHosts, internalHostsOf } from "./core/trace/internalHosts.js";
 import { getCatchUpStatus } from "./channels/slackCatchUpStatus.js";
@@ -142,6 +146,7 @@ import { PROJECT_DOCS_URL, docsRedirectTarget } from "./core/docsLink.js";
 import { activeRunCount, dispatch, type CoreDeps } from "./core/dispatcher.js";
 import {
   createAdminCoordinatorHandler,
+  reconcileCoordinatorReport,
   createCoordinatorChildAdmission,
   isCoordinatorAdminPath,
   recoverOriginalUnit,
@@ -154,7 +159,7 @@ import { createGithubWebhookHandler, GITHUB_WEBHOOK_PATH } from "./channels/gith
 import { createMergeWaitRegistry } from "./core/coordinator/checksIntake.js";
 import { sendPullMerged } from "./core/coordinator/contract.js";
 import { createMergeReadyBook, createMergeWatch } from "./core/mergeWatch.js";
-import type { PullsCommandDeps } from "./core/commands/pulls.js";
+import type { SweepOrigin, PullsCommandDeps } from "./core/commands/pulls.js";
 import {
   createInstanceViaShim,
   fetchInstanceStatusViaShim,
@@ -178,6 +183,7 @@ import {
   fetchPullRequestComments,
   fetchPullRequestFacts,
   fetchBranchHeadSha,
+  fetchBranchRef,
   fetchRepoShipInfo,
   fetchPullRequestTitleBody,
   fixupCommitSubjects,
@@ -188,17 +194,27 @@ import {
   createDraftPullRequest,
   listOpenPullRequests,
   mergePullRequest,
-  openPullRequest,
   pullRequestChangedPaths,
-  refirePullRequestEvent,
+  setPullRequestState,
+  fetchCheckRetryTargets,
+  rerunActionsFailedJobs,
+  rerequestCheckRun,
   requiredCheckContexts,
-  rerunFailedJobs,
-  updatePullRequest,
+  updatePullRequestEffect,
+  createRecoveryPullRequest,
 } from "./execution/githubPulls.js";
 import { postReviewComment } from "./execution/githubComments.js";
 import { createSweepGit, sweepAuthHeader, sweepCloneUrl } from "./execution/sweepCheckout.js";
-import { createPullSweepService } from "./core/pullSweep.js";
-import { buildPullSweepDeps } from "./core/pullSweepWiring.js";
+import { createPullSweepService, createPullSweepThroughput, type SweepEffectJournal } from "./core/pullSweep.js";
+import { buildPullSweepDeps, type SweepDispatchRequest } from "./core/pullSweepWiring.js";
+import { createMaintenanceSweepService } from "./core/coordinator/maintenanceSweep.js";
+import { dispatchMaintenanceChild } from "./core/coordinator/maintenanceChild.js";
+import { appendPrivateWorkerInput } from "./channels/privateWorker.js";
+import { authorize, intersectGrants } from "./core/authz/authorize.js";
+import { chatActorOf } from "./core/authz/actor.js";
+import type { Actor } from "./core/authz/types.js";
+import type { CoordinatorInstance, CoordinatorUnit } from "./core/coordinator/contract.js";
+import type { UnitEffectCompletionOutcome } from "./core/coordinator/unitEffect.js";
 import { RestGithubApi } from "./execution/githubApi.js";
 import { resolveGithubIdentity } from "./execution/githubApp.js";
 import { bindingOf } from "./execution/authorBinding.js";
@@ -488,12 +504,16 @@ export async function runBot(): Promise<void> {
   // — the restart-from-request path (run-history item 42). Wired once the boot
   // reclaim exists (below); until then every effect defers and stays offered.
   let planeAdmitPass: (() => Promise<void>) | undefined;
+  let planeReconcilePass:
+    ((effect: CoordinatorReconcileEffect) => Promise<CoordinatorReconcileReceipt | undefined>) | undefined;
   // ONE executor for both transports (orchestration-plane item 44): the
   // heartbeat/reclaim answers (writeThrough) and the state Worker's push
   // (`POST /plane/effects` below) run an effect through this same object, so
   // the two paths cannot disagree on what an admit does.
   const planeEffectExecutor = {
     draining: () => draining,
+    reconcile: async (effect: CoordinatorReconcileEffect): Promise<CoordinatorReconcileReceipt | undefined> =>
+      planeReconcilePass?.(effect),
     admit: async (effect: Extract<PlaneEffect, { kind: "admit" }>): Promise<PlaneAckOutcome> => {
       // A duplicate admit after a roll: the run is already live here.
       if (defaultRunRegistry.getById(effect.runId)) return "skipped";
@@ -778,78 +798,94 @@ export async function runBot(): Promise<void> {
           new AnalyticsEngineSqlSource({ accountId: costsCfg.cloudflareAccountId, token: metricsToken.reveal() }),
         )
       : new NullMetricsService();
-  // The sweep behind `pulls rebase` (record 0071, mechanism two; issue 2067):
-  // the two-rung resolver over the pipeline's open pull requests. The listing
-  // and the effects are src/core/pullSweepWiring.ts over the GitHub REST
-  // modules; rung one runs in a throwaway clone of the pull request's branch
-  // (src/execution/sweepCheckout.ts); the delta re-review and the one bounded
-  // model round go through `dispatch()` as the requester — the command
-  // handler never starts a run itself (AGENTS.md invariant 3). One shared
-  // state per process, so the per-repository bound and the spent-round flag
-  // hold across sweeps and requesters — and across the merge watch (record
-  // 0071, mechanism three), whose resolver rounds are the same sweep on one
-  // named pull request.
-  // Shared across requesters and with the merge watch: the unowned sweep's
-  // spent-round flags (one model round per pull request) and the per-repository
-  // queue (one rebase in flight per repository, whoever asked) — each requester's
-  // service already queues its own sweeps, this chain queues them across
-  // requesters too, and the watch's spend read counts the spent rounds.
-  const sweepState = { roundSpent: new Set<string>() };
-  // New claims are process-local for an immediate fence. Recovered claims are
-  // rebuilt before Slack opens from the durable unit rows of every hosted
-  // runner this generation reclaimed or still sees under another generation.
-  // A ledger-backed process fails closed until one complete live listing has
-  // supplied that durable view.
-  const runnerOwnership = new RunnerOwnershipFence(capabilities.runLedger);
-  deps.runnerOwnership = runnerOwnership;
-  const pullsWiring: PullsCommandDeps["pulls"] = (() => {
-    const state = sweepState;
-    const chains = new Map<string, Promise<unknown>>();
-    return {
-      service: async (origin) => {
-        // A fresh service per ask, parameterized by the origin — everything
-        // that must outlive the ask (the spent-round flags, the per-repository
-        // queue) rides `state` and `chains` above, so caching a service per
-        // requester would only accumulate entries.
-        const inner = createPullSweepService(
-          buildPullSweepDeps({
-            github: {
-              listOpen: listOpenPullRequests,
-              facts: fetchPullRequestFacts,
-              reviews: fetchPullRequestReviews,
-              selfIdentity: resolveGithubIdentity,
-              postReview: postReviewComment,
-              titleBody: fetchPullRequestTitleBody,
-              update: (pr, patch) => updatePullRequest(pr.repo, pr.number, patch),
-            },
-            git: createSweepGit({ cloneUrl: sweepCloneUrl, authHeader: sweepAuthHeader }),
-            origin,
-            state,
-            runnerOwns: async (pr) => runnerOwnership.owns(pr.repo, pr.number),
-            dispatch: async (m) => {
-              const io = threadIoFor({ threadKey: m.threadKey, userId: m.userId }) ?? nullChannelIO(m.threadKey);
-              await dispatch(deps, m, io);
-            },
-          }),
-        );
-        return {
-          sweep: (target) => {
-            const tail = chains.get(target.repo) ?? Promise.resolve();
-            const next = tail.then(
-              () => inner.sweep(target),
-              () => inner.sweep(target),
-            );
-            const stored = next.catch(() => {});
-            chains.set(target.repo, stored);
-            void stored.then(() => {
-              if (chains.get(target.repo) === stored) chains.delete(target.repo);
-            });
-            return next;
-          },
-        };
+  const dispatchSweepChild = (
+    owner: { instance: CoordinatorInstance; unit: CoordinatorUnit },
+    request: SweepDispatchRequest,
+    agent: "coding" | "review",
+  ) =>
+    dispatchMaintenanceChild(owner, request, agent, {
+      dispatch: (msg, io, options) => dispatch(deps, msg, io, options),
+      readOwner: async (instanceId, unit) => {
+        const instance = await coordinatorInstances.get(instanceId);
+        const rows = (await coordinatorInstances.listUnits(instanceId)).filter((row) => row.unit === unit);
+        return instance !== null && rows.length === 1 ? { instance, unit: rows[0] } : undefined;
       },
-    };
-  })();
+      ioFor: (thread, request) => threadIoFor(thread, request),
+      now: systemClock,
+      childAdmission: { enter: () => coordinatorChildAdmission.enter() },
+      ...(privateWorkerLog ? { privateWorkerLog, appendPrivateInput: appendPrivateWorkerInput } : {}),
+    });
+  // Commands, authenticated watch jobs and live runners share throughput;
+  // their durable per-PR journals still admit each individual write.
+  const sweepThroughput = createPullSweepThroughput();
+  const sweepWiring = (
+    origin: SweepOrigin,
+    effect?: SweepEffectJournal,
+    dispatchEffect?: (request: SweepDispatchRequest) => Promise<UnitEffectCompletionOutcome>,
+  ) => ({
+    ...buildPullSweepDeps({
+      github: {
+        listOpen: listOpenPullRequests,
+        facts: fetchPullRequestFacts,
+        reviews: fetchPullRequestReviews,
+        selfIdentity: resolveGithubIdentity,
+        postReview: postReviewComment,
+        titleBody: fetchPullRequestTitleBody,
+        update: (pr, patch, target) => updatePullRequestEffect(pr, target, patch),
+      },
+      git: createSweepGit({ cloneUrl: sweepCloneUrl, authHeader: sweepAuthHeader }),
+      origin,
+      ...(effect ? { effect } : {}),
+      // Payload preparation requires a typed child admission seam. The per-PR
+      // maintenance service binds it to the exact original owner before dispatch.
+      dispatchEffect: dispatchEffect ?? (async () => ({ state: "uncertain" })),
+      runnerOwns: async (pr) => {
+        const owners = await coordinatorInstances.findPullOwners({ repo: pr.repo, pr: pr.number });
+        if (!owners.ok) throw new Error(`pull ownership ${owners.reason}`);
+        return owners.owners.length > 0;
+      },
+    }),
+    throughput: sweepThroughput,
+  });
+  const freshActor = (actor: Actor): Actor => ({
+    ...actor,
+    grants: actor.id === "cli:local" ? actor.grants : intersectGrants(actor.grants, config.grantsFor(actor.id)),
+    ...(actor.onBehalfOf ? { onBehalfOf: freshActor(actor.onBehalfOf) } : {}),
+  });
+  const pullsWiring: PullsCommandDeps["pulls"] = {
+    service: async (origin) => {
+      if (!ledgerClient) throw new Error("durable maintenance ledger unavailable");
+      return createMaintenanceSweepService(origin, {
+        instances: coordinatorInstances,
+        ledger: ledgerClient,
+        now: systemClock,
+        build: (requester) => sweepWiring(requester),
+        dispatch: dispatchSweepChild,
+        canWrite: async (requester, pr) => {
+          if (!requester.actor || !requester.intent) return false;
+          const actor = freshActor(requester.actor);
+          const authorized =
+            requester.intent.kind === "watch"
+              ? config.mergeWatchOf(pr.repo).watch && config.canRunAgent(actor, "ship")
+              : authorize(actor, "pulls:write", { type: "command", id: "pulls.rebase" }).allow;
+          return !draining && authorized && config.canUseRepo(actor, pr.repo);
+        },
+        readHead: async (pr) => {
+          const facts = await fetchPullRequestFacts({ repo: pr.repo, number: pr.number });
+          return facts?.state === "open" &&
+            facts.sameRepoHead &&
+            facts.headBranchExists === true &&
+            facts.headRef === pr.branch &&
+            facts.baseRef === pr.base &&
+            facts.verifiedHead?.repo.toLowerCase() === pr.repo.toLowerCase() &&
+            facts.verifiedHead.ref === pr.branch &&
+            facts.verifiedHead.sha === facts.headSha
+            ? { ...facts.verifiedHead, base: pr.base }
+            : undefined;
+        },
+      });
+    },
+  };
   const commands = buildCoreCommands(config, runStore, {
     credentialInspection: (runId, expected) => inspectLiveCredentials(harnesses, runId, expected),
     registry: defaultRunRegistry,
@@ -1215,8 +1251,17 @@ export async function runBot(): Promise<void> {
           ...(facts.mergeableState !== undefined ? { mergeableState: facts.mergeableState } : {}),
         };
       },
-      resolve: async (entry) => {
-        const service = await pullsWiring!.service({ userId: entry.requester });
+      resolve: async (entry, intent) => {
+        const instance = await coordinatorInstances.get(entry.instanceId);
+        if (!instance || instance.userId !== entry.requester) throw new Error("original watch requester unavailable");
+        const origin = {
+          userId: instance.userId,
+          channelId: instance.channelId,
+          threadKey: instance.threadKey,
+          ...(instance.authenticatedAs ? { authenticatedAs: instance.authenticatedAs } : {}),
+          ...(instance.postedBy ? { postedBy: instance.postedBy } : {}),
+        };
+        const service = await pullsWiring!.service({ ...origin, intent, actor: chatActorOf(config, origin) });
         return service.sweep({ repo: entry.repo, number: entry.number });
       },
       // The spend read (the per-pull-request limit): a plain dispatch has no
@@ -1224,8 +1269,11 @@ export async function runBot(): Promise<void> {
       // model round counts as the round's cap, and the default limit buys one;
       // a configured `pulls.spendLimitUsd` other than the default has no finer
       // effect until that lever lands (agent-ship.md item 21 discloses it).
-      spendOf: async (entry) =>
-        sweepState.roundSpent.has(`${entry.repo}#${entry.number}`) ? PULL_SWEEP.spendCapUsd : 0,
+      spendOf: async (entry) => {
+        const rows = (await coordinatorInstances.listUnits(entry.instanceId)).filter((row) => row.unit === entry.unit);
+        if (rows.length !== 1) throw new Error("original maintenance spend unavailable");
+        return rows[0]!.rounds.reduce((sum, round) => sum + (round.maintenance?.budgetUsd ?? 0), 0);
+      },
       card: async (entry, line) => {
         const io = threadIoFor({ threadKey: entry.threadKey, userId: entry.requester });
         await io?.reply(line);
@@ -1247,7 +1295,7 @@ export async function runBot(): Promise<void> {
     const githubWebhook = createGithubWebhookHandler({
       secret: processSecrets.get("GITHUB_WEBHOOK_SECRET")?.reveal(),
       watch: mergeWatch,
-      ownerOf: (repo, prNumber) => runnerOwnership.owner(repo, prNumber),
+      ownerOf: (repo, prNumber) => findRunnerPullOwner(coordinatorInstances, repo, prNumber),
       instances: coordinatorInstances,
       ...(artifacts !== undefined ? { artifacts } : {}),
       commenterAuthorized,
@@ -1267,12 +1315,10 @@ export async function runBot(): Promise<void> {
       instances: coordinatorInstances,
       // The spawn's tier gate reads the current app config.
       appConfig: () => config.config,
-      runnerOwnership,
-      runnerRebase: async (instance, prNumber) => {
-        const service = await pullsWiring!.service({
-          userId: instance.userId,
-          channelId: instance.channelId,
-        });
+      runnerRebase: async (instance, prNumber, journal) => {
+        const service = createPullSweepService(
+          sweepWiring({ userId: instance.userId, channelId: instance.channelId }, journal),
+        );
         return service.sweep({ repo: instance.repo, number: prNumber, owner: "runner" });
       },
       shipGrantFor: (instance) => {
@@ -1332,7 +1378,7 @@ export async function runBot(): Promise<void> {
       // The recover path (agent-ship item 15): a coding child that pushed and
       // then died has its pull request opened from the branch itself — after
       // the identity rewrite verified or rewrote its commits (record 0062).
-      openPullRequest,
+      createRecoveryPullRequest,
       // The recover open's preferred title (record 0064's `unit_title` move):
       // the head commit's subject, when it passes the title rule.
       branchHeadSubject,
@@ -1350,6 +1396,7 @@ export async function runBot(): Promise<void> {
       // gate's "the verdict stands" question is answered from.
       github: deps.githubApi ?? new RestGithubApi(),
       createBranchRef,
+      fetchBranchRef,
       fetchPrReviews: fetchPullRequestReviews,
       fetchPrComments: fetchPullRequestComments,
       commenterAuthorized,
@@ -1383,11 +1430,14 @@ export async function runBot(): Promise<void> {
         const required = baseRef !== undefined ? await requiredCheckContexts(repo, baseRef) : undefined;
         return classifyRoundChecks(runs, changed, required);
       },
-      rerunFailedChecks: rerunFailedJobs,
-      refirePullRequest: refirePullRequestEvent,
+      fetchCheckRetryTargets,
+      rerunActionsFailedJobs,
+      rerequestCheckRun,
+      setPullRequestState,
       startRecovery: (id, params) => createInstanceViaShim(processShimOptions(), id, params),
       recoveryStatus: (id) => fetchInstanceStatusViaShim(processShimOptions(), id),
     };
+    planeReconcilePass = (effect) => reconcileCoordinatorReport(effect, coordinatorDeps);
     const coordinatorAdmin = createAdminCoordinatorHandler(coordinatorDeps);
     deps.recoverOriginalUnit = async (key, caller) => {
       const answer = await recoverOriginalUnit(
@@ -1739,12 +1789,13 @@ export async function runBot(): Promise<void> {
           execute: ledgerClient ? planeEffectExecutor : undefined,
           fenceSteer: async (effect) =>
             (await ledgerClient?.planeFenceSteer(effect.id, effect.runId, generation, LEASE_MS)) ?? false,
-          ack: async (effect, outcome) => {
+          ack: async (effect, outcome, reconciliation) => {
             if (ledgerClient)
               await ledgerClient.planeAck(
                 effect.id,
                 outcome,
                 effect.kind === "steer" ? { runId: effect.runId, gen: generation } : undefined,
+                reconciliation,
               );
           },
           warn: (w) => console.warn(w),
@@ -1948,11 +1999,6 @@ export async function runBot(): Promise<void> {
   // Two acts, because the boot performs them at different times: the cards
   // before the socket opens (the sweep must see them), the resumes after it.
   const guardCards = async (outcome: ReclaimOutcome): Promise<void> => {
-    // Rebuild the sweep's sole-owner fence only from a complete durable view.
-    // An incomplete pass still remembers any rehost it took so a later empty
-    // complete listing can recover that now-local runner.
-    await runnerOwnership.recover(outcome, coordinatorInstances);
-
     // Only a complete listing may replace the foreign-card view. A failed
     // listing is no evidence that another generation stopped owning its rows.
     if (outcome.liveListingComplete)
@@ -2030,9 +2076,17 @@ export async function runBot(): Promise<void> {
   const storedStatus = async (runId: string) => (await runStore.get(runId))?.status;
   const hostedInstanceLive = async (instanceId: string): Promise<boolean | undefined> => {
     const answer = await fetchInstanceStatusViaShim(processShimOptions(), instanceId);
-    if (answer.kind !== "status") return answer.kind === "absent" ? false : undefined;
+    const terminal =
+      answer.kind === "absent" ||
+      (answer.kind === "status" && ["complete", "errored", "terminated"].includes(answer.status));
+    if (terminal) {
+      const units = await coordinatorInstances.listUnits(instanceId).catch(() => []);
+      for (const unit of units)
+        await coordinatorInstances.offerReconciliation({ instanceId, unit: unit.unit }).catch(() => undefined);
+      return false;
+    }
+    if (answer.kind !== "status") return undefined;
     if (["queued", "running", "paused", "waiting", "waitingForPause"].includes(answer.status)) return true;
-    if (["complete", "errored", "terminated"].includes(answer.status)) return false;
     return undefined;
   };
   let bootReclaim: ReclaimOutcome | undefined;

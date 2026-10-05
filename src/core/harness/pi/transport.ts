@@ -37,6 +37,8 @@ export interface PiRpcTransportDeps {
   sleep: (ms: number) => Promise<void>;
   /** Where to begin reading the log — a re-attach continues from the offset it recorded. */
   offset?: number;
+  /** Rechecked when a queued command reaches its FIFO write. A refusal drops it without replay. */
+  admitWrite?: (command: Record<string, unknown>) => boolean;
 }
 
 const NEWLINE = 0x0a;
@@ -168,6 +170,7 @@ export class PiRpcTransport implements PiTransport {
         if (at < 0) return this.handedOver.delete(command) ? "held" : "dropped";
         if (this.heldForReattach || this.sendError !== undefined) return "held";
         this.queued.splice(at, 1);
+        if (this.deps.admitWrite?.(command) === false) return "dropped";
         return this.land(line);
       })
       .catch((err: unknown): Landing => {

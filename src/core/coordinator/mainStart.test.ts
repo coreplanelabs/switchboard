@@ -1,3 +1,4 @@
+import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { describe, expect, it, vi } from "vitest";
 import { ALL_GRANTS } from "../authz/grants.js";
 import type { Actor } from "../authz/types.js";
@@ -50,7 +51,7 @@ const brief = {
 };
 
 function harness(over: Partial<MainStartDeps> = {}) {
-  const instances = new InMemoryCoordinatorInstanceStore();
+  const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
   void instances.recordRequesterTurn({
     threadKey: msg.threadKey,
     requesterId: msg.userId,

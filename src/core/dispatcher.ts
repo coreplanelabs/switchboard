@@ -30,6 +30,7 @@ import {
 } from "./audienceDecision.js";
 import { sourceBinding, type SessionSources } from "./references/receipts.js";
 import { configuredAgent } from "../config/agents.js";
+import { isRunProfile } from "../config/profile.js";
 import { MINUTE_MS, minutesToMs } from "./budgets.js";
 import type { LedgerRun } from "./runLedger/writeThrough.js";
 import { settleRetryPause } from "./runLedger/threadsElsewhere.js";
@@ -195,7 +196,6 @@ import {
 } from "./dispatch/reattach.js";
 import { prepareColdPublicationCheckout, workspaceBindingFor, workspaceBindingOf } from "../execution/factory.js";
 import { readyEnvironmentCommand, type ReadyEnvironmentRequirement } from "../execution/seedPlan.js";
-import { fetchPullRequestFacts } from "../execution/githubPulls.js";
 import { fleetBusyEndingFactsOf, fleetBusyRunEndedLine } from "../execution/sandboxErrors.js";
 import { lineageOf, lineageParent, tellParent, type LineageHeard } from "./dispatch/lineage.js";
 import { sessionSeedFor } from "./dispatch/seed.js";
@@ -210,7 +210,6 @@ import {
   readPrOwnerThread,
   releasedPrOf,
   requesterOf,
-  shipRequestOf,
   stickyAgentOf,
   threadPrOf,
   threadRouteOf,
@@ -225,7 +224,6 @@ import {
   unitKeyOf,
   unitNudgeEventType,
   unitOfIdempotencyKey,
-  type CoordinatorInstance,
   type CoordinatorTag,
   type CoordinatorUnit,
 } from "./coordinator/contract.js";
@@ -300,22 +298,6 @@ export interface CoreDeps
   /** The one runs service (`RunDeps.runs`): the run tools, the thread read and stage A's paste check
    *  (record 0044) all read it — declared here so the two bases that name it agree. */
   runs?: RunsService;
-  /** The live runner's sole-owner fence. Legacy merge-ready continuation
-   * reserves it before its awaited full-row repair, so another runner can
-   * never be displaced by a reply in an ended pipeline's thread. */
-  runnerOwnership?: {
-    owner(repo: string, prNumber: number): { instanceId: string; unit: string } | undefined;
-    reserve(repo: string, prNumber: number, owner: { instanceId: string; unit: string }): symbol | undefined;
-    transferReservation(
-      repo: string,
-      prNumber: number,
-      token: symbol,
-      currentOwner: { instanceId: string; unit: string },
-      nextOwner: { instanceId: string; unit: string },
-    ): boolean;
-    releaseReservation(repo: string, prNumber: number, token: symbol): boolean;
-    release(repo: string, prNumber: number, owner: { instanceId: string; unit: string }): boolean;
-  };
   /** The tracer behind every root this process starts; the no-gaps test injects one with its `SpanContext`. */
   tracer?: Tracer;
   /** The root's leading sinks (a test's recording sink); default: the one log sink at `tracing.log`. */
@@ -419,7 +401,6 @@ async function answerUnitOwnedThread(
       const why = status.kind === "absent" ? "no such instance" : status.status;
       if (owner.unit.recovery !== undefined) {
         const recovery = owner.unit.recovery;
-        const recoveryInstance = await store.get(owner.instanceId).catch(() => null);
         const { recovery: _recovery, ...withoutRecovery } = owner.unit;
         const closed = {
           ...withoutRecovery,
@@ -445,11 +426,6 @@ async function answerUnitOwnedThread(
           );
           return "acked";
         }
-        if (recoveryInstance !== null && owner.unit.pr !== undefined)
-          deps.runnerOwnership?.release(recoveryInstance.repo, owner.unit.pr.number, {
-            instanceId: owner.instanceId,
-            unit: owner.unit.unit,
-          });
         await store
           .markConsumed(key, [appended.seq], `recovery-terminal:${recovery.workflowId}`)
           .catch(() => undefined);
@@ -458,7 +434,7 @@ async function answerUnitOwnedThread(
         );
         return "acked";
       }
-      await store.putUnits([
+      const settled = await store.putUnits([
         {
           ...owner.unit,
           ending: {
@@ -468,6 +444,10 @@ async function answerUnitOwnedThread(
           },
         },
       ]);
+      if (!settled.ok) {
+        await io.reply(`Unit ${unitKey}'s ending could not be recorded; this message started no replacement work.`);
+        return "acked";
+      }
       console.log(`[dispatch] ${msg.threadKey}: unit ${unitKey} ended terminated (${why}) — routing fresh`);
       await io.reply(
         `⚠️ Unit ${owner.unit.unit}'s plan runner instance \`${owner.instanceId}\` is gone (${why}) — the unit's row is closed and this message runs fresh.`,
@@ -503,6 +483,11 @@ export function activeRunCount(): number {
 }
 
 export interface DispatchOptions {
+  /** Trusted original action clock, without inventing run lineage. */
+  parentRemainingMs?: number;
+  /** The original action's absolute deadline. A sampled remainder cannot
+   * renew this bound while authorization, reservation or setup awaits. */
+  parentDeadlineAt?: number;
   /** The parent's admitted operation target, not a prompt hint. Reviews keep
    * their independently resolved PR target; ordinary authorization still runs. */
   operationTarget?: OperationTarget;
@@ -611,114 +596,6 @@ class LiveStateCommitError extends Error {
   }
 }
 
-type ContinuationBudget =
-  | { kind: "remaining"; caps: { maxRounds: number; maxMinutes: number } }
-  | { kind: "exhausted"; budget: "wall-clock" | "review-round" }
-  | { kind: "unavailable" };
-
-/** The budget an ended generated pipeline may carry into its next attempt.
- *  Both inputs are durable coordinator facts: the unit's persisted wall-clock
- *  window and review boundaries against the caps the original hand-off stored.
- *  A missing or contradictory fact fails closed instead of recreating either
- *  cap from today's config or from the original request directive. */
-function continuationBudgetOf(
-  instance: Pick<CoordinatorInstance, "caps">,
-  unit: Pick<CoordinatorUnit, "ending" | "rounds" | "startedAt">,
-): ContinuationBudget {
-  if (unit.ending?.kind === "wall_clock_cap" || unit.ending?.kind === "review_pending")
-    return { kind: "exhausted", budget: "wall-clock" };
-  if (unit.ending?.kind === "round_cap") return { kind: "exhausted", budget: "review-round" };
-  const caps = instance.caps;
-  if (
-    caps === undefined ||
-    unit.startedAt === undefined ||
-    unit.ending === undefined ||
-    caps.maxMinutes <= 0 ||
-    caps.maxRounds <= 0 ||
-    unit.ending.at < unit.startedAt
-  )
-    return { kind: "unavailable" };
-  const remainingMinutes = caps.maxMinutes - (unit.ending.at - unit.startedAt) / MINUTE_MS;
-  if (remainingMinutes <= 0) return { kind: "exhausted", budget: "wall-clock" };
-  const reviewRounds = unit.rounds.reduce(
-    (highest, round) => (round.agent === "review" ? Math.max(highest, round.index) : highest),
-    0,
-  );
-  const remainingRounds = caps.maxRounds - reviewRounds;
-  if (remainingRounds <= 0) return { kind: "exhausted", budget: "review-round" };
-  return { kind: "remaining", caps: { maxRounds: remainingRounds, maxMinutes: remainingMinutes } };
-}
-
-const FULL_SHA = /^[0-9a-f]{40}$/i;
-
-/** The one exact head jointly attested by this unit's own coding and approving
- * review records. Coding evidence is its final head or a durable push of the
- * exact unit branch. The unit key on every child is the authority boundary:
- * runs merely sharing the thread, repository or pull request never enter the set. */
-async function legacyReviewedHeadOf(
-  runs: Pick<RunsService, "listUnitRuns">,
-  instance: Pick<CoordinatorInstance, "id" | "repo" | "userId">,
-  unit: Pick<CoordinatorUnit, "unit" | "branch">,
-  prNumber: number,
-): Promise<string | undefined> {
-  const listed = await runs
-    .listUnitRuns(unitKeyOf({ instanceId: instance.id, unit: unit.unit }), { kind: "all" })
-    .catch(() => undefined);
-  if (
-    listed === undefined ||
-    !listed.ok ||
-    listed.value.unit !== unitKeyOf({ instanceId: instance.id, unit: unit.unit }) ||
-    listed.value.instanceId !== instance.id ||
-    listed.value.id !== unit.unit ||
-    listed.value.branch !== unit.branch ||
-    listed.value.pr?.number !== prNumber ||
-    listed.value.instance.id !== instance.id ||
-    listed.value.instance.repo.toLowerCase() !== instance.repo.toLowerCase()
-  )
-    return undefined;
-  const prefix = `${instance.id}:${unit.unit}/`;
-  const owned = listed.value.runs.filter(
-    (run) =>
-      run.finished &&
-      run.status === "completed" &&
-      run.parentInstanceId === instance.id &&
-      run.idempotencyKey?.startsWith(prefix) === true &&
-      run.userId === instance.userId &&
-      run.repo?.toLowerCase() === instance.repo.toLowerCase(),
-  );
-  const coding = new Set(
-    owned.flatMap((run) => {
-      if (run.agent !== "coding" || run.pr?.number !== prNumber) return [];
-      return [
-        ...(typeof run.headSha === "string" && FULL_SHA.test(run.headSha) ? [run.headSha.toLowerCase()] : []),
-        ...(run.pushed ?? []).flatMap((pushed) =>
-          pushed.ref === unit.branch && FULL_SHA.test(pushed.sha) ? [pushed.sha.toLowerCase()] : [],
-        ),
-      ];
-    }),
-  );
-  const approved = new Set(
-    owned.flatMap((run) => {
-      const head = run.reviewHead;
-      const post = run.reviewPost;
-      return run.agent === "review" &&
-        typeof head === "string" &&
-        FULL_SHA.test(head) &&
-        run.verdict?.verdict === "approve" &&
-        run.verdict.head?.toLowerCase() === head.toLowerCase() &&
-        post?.posted === true &&
-        post.target.repo.toLowerCase() === instance.repo.toLowerCase() &&
-        post.target.number === prNumber &&
-        post.head.toLowerCase() === head.toLowerCase() &&
-        post.verdict === "approve"
-        ? [head.toLowerCase()]
-        : [];
-    }),
-  );
-  const exact = [...approved].filter((head) => coding.has(head));
-  return exact.length === 1 ? exact[0] : undefined;
-}
-
 /** A reclaimed pilot uses its saved admission check, not a later config edit. */
 function recordedReadyRequirement(value: unknown): ReadyEnvironmentRequirement | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
@@ -773,7 +650,7 @@ export async function dispatch(
     (resume
       ? carriedCoordinatorTag(resume.row, resume.events)
       : restart
-        ? carriedCoordinatorTag(restart.row, [])
+        ? carriedCoordinatorTag(restart.row, restart.events)
         : undefined);
   const recovery = opts.recovery ?? coordinator?.recovery;
   const clock = deps.clock ?? systemClock;
@@ -1007,9 +884,9 @@ export async function dispatch(
          *  a restart dispatch that dies before the successor's claim ends that
          *  record for real instead of leaving it answering still-running. */
         closed?: RunRecord;
+        profile?: CarriedRunIdentity["profile"];
       }
     | undefined;
-  let releaseLegacyOwnership: (() => boolean) | undefined;
   let pendingStop: StopMode | undefined;
   const relayStop = (mode: StopMode) => {
     if (registered) {
@@ -1164,7 +1041,8 @@ export async function dispatch(
     const bareShipPrRequest = typedAgent === undefined && /^ship\s+\S/i.test(msg.text.trimStart()) && !!explicitPr;
     // Exact original-unit operations have their own requester, thread and
     // publication gates. The operator cannot turn one into another action.
-    const originalRecoveryCommand = typedAgent === "ship" && namesOriginalUnitRecovery(typed.text);
+    const originalRecoveryCommand =
+      (typedAgent === undefined || typedAgent === "ship") && namesOriginalUnitRecovery(typed.text);
     const originalAdoptionCommand =
       typedAgent === "ship" &&
       Object.keys(typed).every((key) => key === "agent" || key === "text") &&
@@ -1192,13 +1070,6 @@ export async function dispatch(
     let operatorPrTarget: OperatorBind["prTarget"];
     let operatorShipEntry: ShipContext["shipEntry"];
     let operatorPrBatch: PrBatchBinding | undefined;
-    // An ended generated pipeline's stable plan id and remaining caps: read
-    // from its coordinator rows and handed to ship so neither a formatted
-    // durable input nor today's config can mint a new identity or budget.
-    let reissuePlanId: string | undefined;
-    let reissueCaps: { maxRounds: number; maxMinutes: number } | undefined;
-    let beforeCoordinatorStart: ShipContext["beforeCoordinatorStart"];
-    let reserveLegacyOwnership: (() => Refusal | undefined) | undefined;
     // The thread page the operator reads (newest first): the tail's session
     // keys and, on the newest record, an `on` question still pending — whose
     // "yes" this event may be (routing-and-config item 29). Read here once and
@@ -1627,7 +1498,10 @@ export async function dispatch(
     // class). A confirmed proposal carries its own task: its tail is the
     // request, since the person's message was the word "yes".
     if (operatorRequest !== undefined) directives.text = operatorRequest;
-    const originalUnitRecovery = directives.agent === "ship" && /^\s*recover\s+unit\b/i.test(directives.text);
+    const originalUnitRecovery =
+      (directives.agent === undefined || directives.agent === "ship") &&
+      /^\s*(?:recover|renew)\s+unit\b/i.test(directives.text);
+    if (originalUnitRecovery) directives.agent ??= "ship";
 
     // The thread's runs, read once (dispatch/thread.ts) for a reply in an
     // existing thread — a message that starts a thread has none, and a spawn,
@@ -1901,6 +1775,7 @@ export async function dispatch(
       }
       if (
         owner.kind === "pipeline" &&
+        !originalUnitRecovery &&
         !(canReviewEndedPr && operatorPreset === "review") &&
         (!freshShipTask || operatorMode === "on") &&
         ((operatorMode === "on" &&
@@ -1926,352 +1801,12 @@ export async function dispatch(
           await recordPendingOperator();
           return ended;
         }
-        if (owner.unit.recoveryReceipt !== undefined || owner.unit.recoveryHold !== undefined) {
-          await io.reply(
-            `The original-unit recovery for \`${owner.instanceId}:${owner.unit.unit}\` is terminal and its evidence is consumed. This reply was not turned into replacement work.`,
-          );
-          await recordPendingOperator();
-          return ended;
-        }
-        // The ended generated pipeline still owns this thread until its unit
-        // merges. Its durable parent input — not this reply — is the task that
-        // re-issues the stable plan id, branch and open pull request. Any
-        // missing or contradictory durable fact names its blocker instead of
-        // manufacturing a task from a fragment or running a substitute read.
-        const instance = await deps.coordinatorInstances.get(owner.instanceId).catch(() => null);
-        if (instance === null) {
-          await io.reply(
-            `The ended pipeline's record \`${owner.instanceId}\` is unavailable, so continuation did not start.`,
-          );
-          await recordPendingOperator();
-          return ended;
-        }
-        const actor = chatActorOf(deps.config, msg);
-        if (
-          authorizeSteerOwner({
-            caller: { ids: actorIdsOf(actor), grants: effectiveGrants(actor) },
-            target: { runId: owner.run.id, requesterId: instance.userId },
-          }).kind === "refused"
-        ) {
-          await io.reply(STEER_OWNER_REFUSED);
-          await recordPendingOperator();
-          return ended;
-        }
-        if (instance.threadKey !== msg.threadKey || instance.plan === undefined || instance.plan.path !== undefined) {
-          await io.reply(
-            `The ended pipeline's durable generated-task identity does not match this thread, so continuation did not start.`,
-          );
-          await recordPendingOperator();
-          return ended;
-        }
-        if (instance.repo !== owner.run.repo || instance.branch !== owner.unit.branch) {
-          await io.reply(
-            `The ended pipeline's repository or branch identity no longer matches unit ${owner.unit.unit}, so continuation did not start.`,
-          );
-          await recordPendingOperator();
-          return ended;
-        }
-        const continuationBudget = continuationBudgetOf(instance, owner.unit);
-        if (continuationBudget.kind === "unavailable") {
-          await io.reply(
-            `Unit ${owner.unit.unit} does not retain a complete durable wall-clock and review-round budget, so continuation did not start. Nothing else ran.`,
-          );
-          await recordPendingOperator();
-          return ended;
-        }
-        if (continuationBudget.kind === "exhausted") {
-          await io.reply(
-            `Unit ${owner.unit.unit} exhausted the ended pipeline's ${continuationBudget.budget} budget, so continuation did not start. Nothing else ran.`,
-          );
-          await recordPendingOperator();
-          return ended;
-        }
-        const original = await shipRequestOf(runsService, owner.run.id);
-        if (original === undefined) {
-          await io.reply(
-            `The ended pipeline's original task is unavailable from run \`${owner.run.id}\`, so continuation did not start.`,
-          );
-          await recordPendingOperator();
-          return ended;
-        }
-        const recordedPr = owner.unit.pr;
-        if (recordedPr === undefined) {
-          await io.reply(
-            `Unit ${owner.unit.unit} does not retain a durable pull request identity, so continuation did not start. Nothing else ran.`,
-          );
-          await recordPendingOperator();
-          return ended;
-        }
-        const savedPublication = owner.unit.publication;
-        const boundHead =
-          savedPublication !== undefined &&
-          savedPublication.repo.toLowerCase() === instance.repo.toLowerCase() &&
-          savedPublication.pr === recordedPr.number &&
-          savedPublication.headRef === owner.unit.branch &&
-          savedPublication.publicationRef === owner.unit.branch &&
-          savedPublication.baseRef === instance.base &&
-          savedPublication.owner.instanceId === owner.instanceId &&
-          savedPublication.owner.unit === owner.unit.unit &&
-          FULL_SHA.test(savedPublication.expectedHeadSha)
-            ? savedPublication.expectedHeadSha
-            : undefined;
-        let expectedHead = owner.unit.lastPush ?? boundHead;
-        const recoverLegacyBinding =
-          owner.unit.ending?.kind === "merge_ready" &&
-          (owner.unit.lastPush === undefined || savedPublication === undefined);
-        if (recoverLegacyBinding) {
-          const recovered = await legacyReviewedHeadOf(runsService, instance, owner.unit, recordedPr.number);
-          if (recovered === undefined || (expectedHead !== undefined && expectedHead.toLowerCase() !== recovered)) {
-            await io.reply(
-              `Unit ${owner.unit.unit} has no single exact reviewed head in its durable child records, so continuation did not start. Nothing else ran.`,
-            );
-            await recordPendingOperator();
-            return ended;
-          }
-          expectedHead = recovered;
-        }
-        if (expectedHead === undefined) {
-          await io.reply(
-            `Unit ${owner.unit.unit} does not retain the pull request's durable expected head, so continuation did not start. Nothing else ran.`,
-          );
-          await recordPendingOperator();
-          return ended;
-        }
-        const target = { repo: instance.repo, number: recordedPr.number };
-        const facts = await (deps.fetchPrFacts ?? fetchPullRequestFacts)(target).catch(() => undefined);
-        if (facts === undefined) {
-          await io.reply(
-            `GitHub did not return current facts for ${instance.repo}#${recordedPr.number}, so continuation did not start.`,
-          );
-          await recordPendingOperator();
-          return ended;
-        }
-        if (facts.state !== "open") {
-          await io.reply(
-            `${instance.repo}#${recordedPr.number} is closed, so this ended pipeline has no open pull request to continue. Nothing started.`,
-          );
-          await recordPendingOperator();
-          return ended;
-        }
-        const verifiedHead = facts.verifiedHead;
-        if (
-          !facts.sameRepoHead ||
-          facts.headBranchExists !== true ||
-          facts.headRef !== owner.unit.branch ||
-          verifiedHead === undefined ||
-          verifiedHead.repo.toLowerCase() !== instance.repo.toLowerCase() ||
-          verifiedHead.ref !== owner.unit.branch ||
-          facts.headSha !== verifiedHead.sha
-        ) {
-          await io.reply(
-            `${instance.repo}#${recordedPr.number} no longer has the pipeline's verifiable \`${owner.unit.branch}\` head, so continuation did not start.`,
-          );
-          await recordPendingOperator();
-          return ended;
-        }
-        if (verifiedHead.sha !== expectedHead) {
-          await io.reply(
-            `${instance.repo}#${recordedPr.number} moved from the pipeline's expected head \`${expectedHead}\` to \`${verifiedHead.sha}\`, so continuation did not start. Nothing else ran.`,
-          );
-          await recordPendingOperator();
-          return ended;
-        }
-        if (
-          owner.unit.lastPush === undefined &&
-          boundHead !== undefined &&
-          facts.baseRef !== savedPublication?.baseRef
-        ) {
-          await io.reply(
-            `${instance.repo}#${recordedPr.number} no longer has the pipeline's verifiable base ref, so continuation did not start. Nothing else ran.`,
-          );
-          await recordPendingOperator();
-          return ended;
-        }
-        if (recoverLegacyBinding) {
-          const baseRef = instance.base;
-          if (baseRef === undefined || facts.baseRef !== baseRef) {
-            await io.reply(
-              `${instance.repo}#${recordedPr.number} no longer has the pipeline's verifiable base ref, so continuation did not start. Nothing else ran.`,
-            );
-            await recordPendingOperator();
-            return ended;
-          }
-          const existingBinding = owner.unit.publication;
-          if (
-            existingBinding !== undefined &&
-            (existingBinding.repo.toLowerCase() !== instance.repo.toLowerCase() ||
-              existingBinding.pr !== recordedPr.number ||
-              existingBinding.headRef !== owner.unit.branch ||
-              existingBinding.baseRef !== baseRef ||
-              existingBinding.expectedHeadSha.toLowerCase() !== expectedHead ||
-              existingBinding.publicationRef !== owner.unit.branch ||
-              existingBinding.owner.instanceId !== owner.instanceId ||
-              existingBinding.owner.unit !== owner.unit.unit)
-          ) {
-            await io.reply(
-              `Unit ${owner.unit.unit}'s durable publication binding no longer matches this pipeline, so continuation did not start. Nothing else ran.`,
-            );
-            await recordPendingOperator();
-            return ended;
-          }
-          let currentOwner: { instanceId: string; unit: string } | undefined;
-          const runnerOwnership = deps.runnerOwnership;
-          try {
-            if (runnerOwnership === undefined) throw new Error("runner ownership is unavailable");
-            currentOwner = runnerOwnership.owner(instance.repo, recordedPr.number);
-          } catch {
-            await io.reply(
-              `Runner ownership for ${instance.repo}#${recordedPr.number} could not be verified, so continuation did not start. Nothing else ran.`,
-            );
-            await recordPendingOperator();
-            return ended;
-          }
-          if (
-            currentOwner !== undefined &&
-            (currentOwner.instanceId !== owner.instanceId || currentOwner.unit !== owner.unit.unit)
-          ) {
-            await io.reply(
-              `${instance.repo}#${recordedPr.number} is owned by another runner, so continuation of ${owner.instanceId}:${owner.unit.unit} did not start. Nothing else ran.`,
-            );
-            await recordPendingOperator();
-            return ended;
-          }
-          const legacyUnit = owner.unit;
-          const coordinatorInstances = deps.coordinatorInstances!;
-          const reservationOwner = { instanceId: owner.instanceId, unit: owner.unit.unit };
-          const recoveredUnit: CoordinatorUnit = {
-            ...legacyUnit,
-            lastPush: expectedHead,
-            publication: {
-              repo: instance.repo,
-              pr: recordedPr.number,
-              headRef: legacyUnit.branch,
-              baseRef,
-              expectedHeadSha: expectedHead,
-              publicationRef: legacyUnit.branch,
-              owner: reservationOwner,
-            },
-          };
-          // The local fence is reserved only after the agent and profile gates,
-          // but before thread admission can coalesce a concurrent reply. The
-          // durable repair waits for the hand-off's final start gate below.
-          let token: symbol | undefined;
-          let transferredOwner: { instanceId: string; unit: string } | undefined;
-          releaseLegacyOwnership = () => {
-            if (token !== undefined) {
-              const released = runnerOwnership!.releaseReservation(instance.repo, recordedPr.number, token);
-              if (released) token = undefined;
-              return released;
-            }
-            if (transferredOwner !== undefined) {
-              const released = runnerOwnership!.release(instance.repo, recordedPr.number, transferredOwner);
-              if (released) transferredOwner = undefined;
-              return released;
-            }
-            return true;
-          };
-          reserveLegacyOwnership = () => {
-            try {
-              token = runnerOwnership!.reserve(instance.repo, recordedPr.number, reservationOwner);
-            } catch {
-              return refusalOf(
-                "publication_ownership_unknown",
-                `Runner ownership for ${instance.repo}#${recordedPr.number} is being rebuilt, so continuation did not start. Nothing else ran.`,
-              );
-            }
-            if (token !== undefined) return undefined;
-            const competing = runnerOwnership!.owner(instance.repo, recordedPr.number);
-            const sameContinuation =
-              competing?.instanceId === reservationOwner.instanceId && competing.unit === reservationOwner.unit;
-            return refusalOf(
-              "setup_failed",
-              sameContinuation
-                ? `Unit ${legacyUnit.unit} changed while its legacy continuation was being reserved, so continuation did not start. Nothing else ran.`
-                : `${instance.repo}#${recordedPr.number} is owned by another runner, so continuation of ${owner.instanceId}:${legacyUnit.unit} did not start. Nothing else ran.`,
-            );
-          };
-          beforeCoordinatorStart = async () => {
-            const activeToken = token;
-            if (activeToken === undefined)
-              return {
-                ok: false,
-                refusal: refusalOf(
-                  "setup_failed",
-                  `Unit ${legacyUnit.unit}'s ownership reservation was lost, so continuation did not start. Nothing else ran.`,
-                ),
-              };
-            const persisted = await coordinatorInstances
-              .compareAndReplaceUnit(legacyUnit, recoveredUnit)
-              .catch(() => undefined);
-            if (persisted?.ok !== true) {
-              const released = releaseLegacyOwnership?.() ?? true;
-              const reason =
-                persisted?.reason === "stale"
-                  ? `Unit ${legacyUnit.unit} changed while its legacy continuation was being reserved, so continuation did not start.`
-                  : `Unit ${legacyUnit.unit}'s recovered continuation binding could not be stored, so continuation did not start.`;
-              const text = released
-                ? `${reason} Nothing else ran.`
-                : `${reason} Its ownership reservation could not be released. Nothing else ran.`;
-              return { ok: false, refusal: refusalOf("setup_failed", text) };
-            }
-            const reservedOwner = runnerOwnership!.owner(instance.repo, recordedPr.number);
-            if (
-              reservedOwner?.instanceId !== reservationOwner.instanceId ||
-              reservedOwner.unit !== reservationOwner.unit
-            ) {
-              const restored = await coordinatorInstances
-                .compareAndReplaceUnit(recoveredUnit, legacyUnit)
-                .catch(() => undefined);
-              const released = releaseLegacyOwnership?.() ?? true;
-              const rollbackFailure = restored?.ok === true ? undefined : (restored?.reason ?? "unavailable");
-              const cleanupFailure = released ? "" : " and its ownership reservation could not be released";
-              const text =
-                rollbackFailure === undefined
-                  ? `${instance.repo}#${recordedPr.number} changed runner ownership while its legacy continuation was being reserved${cleanupFailure}, so continuation did not start. Nothing else ran.`
-                  : `${instance.repo}#${recordedPr.number} changed runner ownership while its legacy continuation was being reserved, and the exact legacy row could not be restored (${rollbackFailure})${cleanupFailure}; continuation did not start. Nothing else ran.`;
-              return { ok: false, refusal: refusalOf("setup_failed", text) };
-            }
-            owner.unit = recoveredUnit;
-            return {
-              ok: true,
-              commit: async (nextOwner) => {
-                if (
-                  !runnerOwnership!.transferReservation(
-                    instance.repo,
-                    recordedPr.number,
-                    activeToken,
-                    reservationOwner,
-                    nextOwner,
-                  )
-                )
-                  throw new Error("legacy continuation ownership reservation or current owner changed");
-                token = undefined;
-                transferredOwner = nextOwner;
-              },
-              complete: () => {
-                transferredOwner = undefined;
-              },
-              abort: async () => {
-                const restored = await coordinatorInstances
-                  .compareAndReplaceUnit(recoveredUnit, legacyUnit)
-                  .catch(() => undefined);
-                const released = releaseLegacyOwnership?.() ?? true;
-                owner.unit = legacyUnit;
-                const failures = [
-                  ...(restored?.ok === true
-                    ? []
-                    : [`legacy continuation rollback failed (${restored?.reason ?? "unavailable"})`]),
-                  ...(released ? [] : ["legacy continuation ownership cleanup failed"]),
-                ];
-                if (failures.length > 0) throw new Error(failures.join("; "));
-              },
-            };
-          };
-        }
-        reissuePlanId = instance.plan.id;
-        reissueCaps = continuationBudget.caps;
-        const durableRequest = parseDirectives(original);
-        Object.assign(directives, durableRequest, { agent: undefined, budget: reissueCaps.maxMinutes });
+        // Recovery owns the original identity, budget and GitHub checks. A reply
+        // carries its adapter event ID to that same durable action journal.
+        Object.assign(directives, {
+          agent: "ship",
+          text: `recover unit ${owner.instanceId}:${owner.unit.unit}`,
+        });
         operatorPreset = "ship";
         settled = resolveCurrent();
         ({ sticky, resolved, agentSource } = settled);
@@ -2330,13 +1865,73 @@ export async function dispatch(
     // boundary caps is refused by name with no card, no row and no executor.
     // Every stage below reads the profile — the factory, the ledger row, the
     // runner — never the preset's own fields.
+    if (opts.parentDeadlineAt !== undefined && !Number.isFinite(opts.parentDeadlineAt)) {
+      await refuseSilently("run_budget_exhausted", async () => {});
+      return ended;
+    }
     const recoveryRemainingMs = recovery === undefined ? undefined : Math.max(0, recovery.deadlineAt - clock());
-    const inheritedRemainingMs =
-      parent?.remainingMs === undefined
-        ? recoveryRemainingMs
-        : recoveryRemainingMs === undefined
-          ? parent.remainingMs
-          : Math.min(parent.remainingMs, recoveryRemainingMs);
+    const actionRemainingMs =
+      opts.parentDeadlineAt === undefined ? undefined : Math.max(0, opts.parentDeadlineAt - clock());
+    const inheritedBounds = [
+      parent?.remainingMs,
+      recoveryRemainingMs,
+      opts.parentRemainingMs,
+      actionRemainingMs,
+    ].filter((value): value is number => value !== undefined);
+    const inheritedRemainingMs = inheritedBounds.length ? Math.min(...inheritedBounds) : undefined;
+    const originalEvents = resume?.events ?? restart?.events ?? opts.restartCarried?.events;
+    const savedMeta = (resume ?? restart)?.row.meta;
+    const hadCoordinator =
+      coordinator !== undefined ||
+      savedMeta?.parentInstanceId !== undefined ||
+      savedMeta?.idempotencyKey !== undefined ||
+      savedMeta?.coordinatorUnit !== undefined ||
+      originalEvents?.some((event) => event.type === "coordinator_tag") === true;
+    const recoveringCanonical =
+      hadCoordinator && (resume !== undefined || restart !== undefined || opts.restartOf !== undefined);
+    const originalProfile = recoveringCanonical
+      ? (resume?.row.meta.profile ?? restart?.row.meta.profile ?? opts.restartCarried?.profile)
+      : undefined;
+    const originalAdmission = originalEvents?.find((event) => event.type === "run_state" && event.state === "admitted");
+    if (
+      recoveringCanonical &&
+      (coordinator === undefined ||
+        (resume !== undefined &&
+          (typeof resume.plan.remainingMs !== "number" ||
+            !Number.isFinite(resume.plan.remainingMs) ||
+            resume.plan.remainingMs <= 0)) ||
+        !isRunProfile(originalProfile) ||
+        originalAdmission?.type !== "run_state" ||
+        typeof originalAdmission.at !== "number" ||
+        !Number.isFinite(originalAdmission.at) ||
+        typeof originalAdmission.bound !== "number" ||
+        !Number.isFinite(originalAdmission.bound) ||
+        originalAdmission.bound <= originalAdmission.at)
+    ) {
+      resumeRowRetained = true;
+      await refuseSilently("run_budget_exhausted", async () => {});
+      return ended;
+    }
+    const originalDeadlineBounds = [
+      recoveringCanonical && originalAdmission?.type === "run_state" ? originalAdmission.bound : undefined,
+      recovery?.deadlineAt,
+      opts.parentDeadlineAt,
+    ].filter((value): value is number => value !== undefined);
+    const originalDeadline = originalDeadlineBounds.length ? Math.min(...originalDeadlineBounds) : undefined;
+    const minimumActionRemainder =
+      opts.parentDeadlineAt !== undefined || coordinator?.maintenanceActionId !== undefined ? MINUTE_MS : 0;
+    const assertOriginalActionBudget = (at = clock()) => {
+      if (originalDeadline === undefined && coordinator?.maintenanceActionId === undefined) return;
+      if (originalDeadline === undefined)
+        throw new RefusalError(refusalOf("run_budget_exhausted", "The original work's time allowance is unavailable."));
+      const remaining = originalDeadline - at;
+      if (remaining <= 0 || remaining < minimumActionRemainder)
+        throw new RefusalError(
+          refusalOf("run_budget_exhausted", "The original work's time allowance ended before its model started."),
+        );
+    };
+    assertOriginalActionBudget();
+
     const profileGate = await authorizeProfile(deps, {
       msg,
       io,
@@ -2346,23 +1941,15 @@ export async function dispatch(
         agent,
         resolved,
         resume,
+        ...(coordinator && restart ? { restart } : {}),
+        ...(coordinator && opts.restartCarried?.profile ? { carriedProfile: opts.restartCarried.profile } : {}),
         budget: directives.budget,
         ...(inheritedRemainingMs !== undefined ? { parentRemainingMs: inheritedRemainingMs } : {}),
       }),
     });
     if (profileGate.kind === "refused") return ended;
     let { profile } = profileGate;
-
-    // A legacy continuation claims the process-local PR fence only after both
-    // identity gates, and before admission can fold a concurrent reply into
-    // this attempt. The durable row remains untouched until the hand-off's
-    // final start gate; every later refusal releases this provisional token.
-    const legacyOwnershipRefusal = reserveLegacyOwnership?.();
-    if (legacyOwnershipRefusal !== undefined) {
-      await refuse(legacyOwnershipRefusal);
-      await recordPendingOperator();
-      return ended;
-    }
+    assertOriginalActionBudget();
 
     // A review resolves its repository state before admission. A pull request
     // GitHub already closed cannot be reviewed, so it must not claim the
@@ -2800,11 +2387,6 @@ export async function dispatch(
           ? { confirmedPrWork: opts.redispatch.binding }
           : {}),
         ...(operatorRepoSource !== undefined ? { shipRepoSource: operatorRepoSource } : {}),
-        ...(reissuePlanId !== undefined ? { reissuePlanId } : {}),
-        ...(beforeCoordinatorStart !== undefined ? { beforeCoordinatorStart } : {}),
-        ...(reissueCaps !== undefined
-          ? { reissueCaps: { ...reissueCaps, maxMinutes: Math.min(reissueCaps.maxMinutes, profile.minutes) } }
-          : {}),
         sticky,
         history,
         repoCtx,
@@ -3137,6 +2719,10 @@ export async function dispatch(
     // back with a named note that rides on every status frame below.
     // Unknown-head check (dispatch/authorize.ts): a review whose PR head could
     // not be resolved is not started, before any attach.
+    if (coordinator && agent.name === "review" && !coordinator.publication) {
+      await refuse(refusalOf("workspace_head_mismatch", "The saved review target could not be verified."));
+      return ended;
+    }
     const headPreflight = await authorizePrHead({
       msg,
       io,
@@ -3148,6 +2734,7 @@ export async function dispatch(
       agent,
       directives,
       repoCtx,
+      ...(coordinator?.publication ? { publication: coordinator.publication } : {}),
     });
     if (headPreflight.kind === "refused") return ended;
     if (agent.name === "review" && repoCtx.repo !== undefined && repoCtx.pr !== undefined)
@@ -3166,6 +2753,7 @@ export async function dispatch(
     // `coordinator` was reconstructed before profile resolution so its
     // recovery deadline constrains every resumed/restarted phase.
     const reserveIdentity = async (runId: string, channelVisibility: ChannelVisibility) => {
+      assertOriginalActionBudget();
       const reservation = await reserveRun(deps, {
         msg,
         agent,
@@ -3344,6 +2932,7 @@ export async function dispatch(
       repoCtx,
       carriedRow,
       resume,
+      restart,
       startedAt,
       receivedAt,
       clock,
@@ -3373,7 +2962,6 @@ export async function dispatch(
       run.control.requestStop(pendingStop);
       pendingStop = undefined;
     }
-    if (coordinator) io.runStarted?.({ id: runId });
     // What the session seed could not do (session-log item 9), on the record
     // before the first turn — the run is not changed by it.
     for (const summary of seedNotes)
@@ -3494,14 +3082,18 @@ export async function dispatch(
     const resumeNeedsSegment =
       resume !== undefined && (resume.row.liveState !== undefined || registry.getById(runId)?.liveState !== undefined);
     const admissionAt = clock();
-    const admissionBound = resume
+    const segmentBound = resume
       ? admissionAt + resume.plan.remainingMs
       : Math.max(startedAt, admissionAt) + minutesToMs(profile.minutes);
+    const admissionBound = originalDeadline === undefined ? segmentBound : Math.min(originalDeadline, segmentBound);
+    assertOriginalActionBudget(admissionAt);
+
     if (typeof registry.commitLiveState === "function") {
       await events.write(async () => {
         const current = registry.getById(runId);
         if (current && current.liveState === undefined) {
           const at = clock();
+          assertOriginalActionBudget(at);
           const eventSeq = current.eventCount + 1;
           const assignment = {
             expectedSeq: 0,
@@ -3552,6 +3144,14 @@ export async function dispatch(
           }
         }
       });
+    }
+
+    // Admission commits the reserved identity and setup stream, including the coordinator tag, before notifying its owner.
+    if (coordinator) {
+      assertOriginalActionBudget();
+      if (!(reserved ?? ledgerRun)?.tracked() || typeof registry.commitLiveState !== "function")
+        throw new Error("the coordinator child has no durable admission receipt");
+      io.runStarted?.({ id: runId });
     }
 
     type LiveCommit = { ok: true } | LiveCommitFailure;
@@ -3615,7 +3215,7 @@ export async function dispatch(
       if (observation.attempt < residentAttachAttempt) return;
       residentAttachAttempt = observation.attempt;
       const accepted = await assignLive(
-        { state: observation.state, bound: observation.bound },
+        { state: observation.state, bound: Math.min(observation.bound, admissionBound) },
         clock(),
         liveStateWords(observation.state),
       );
@@ -3811,6 +3411,9 @@ export async function dispatch(
         throw error;
       }
     }
+    assertOriginalActionBudget();
+    if (originalDeadline !== undefined && admissionBound <= clock())
+      throw new RefusalError(refusalOf("run_budget_exhausted", "The original child budget ended before attachment."));
     const control = registered?.control;
     const attach = await attachWorkspace(deps, {
       runId: run.id,
@@ -3841,7 +3444,12 @@ export async function dispatch(
       ...(control
         ? {
             stopSignal: control.hardSignal,
-            remainingMs: () => control.remainingMs() ?? (resume ? Math.max(0, admissionBound - clock()) : undefined),
+            remainingMs: () => {
+              const remaining = control.remainingMs();
+              return resume || coordinator !== undefined || originalDeadline !== undefined
+                ? Math.min(remaining ?? Infinity, Math.max(0, admissionBound - clock()))
+                : remaining;
+            },
           }
         : {}),
       onLiveStateObservation: observeResidentLiveState,
@@ -3901,6 +3509,7 @@ export async function dispatch(
         if (abandoned)
           restartRequest = {
             request: abandoned.request,
+            profile,
             restartOf: resume.row.runId,
             note: "workspace lost, resumed from the request",
             ...(abandoned.closed !== undefined ? { closed: abandoned.closed } : {}),
@@ -3923,6 +3532,7 @@ export async function dispatch(
     // exists, it may narrow that deadline, never renew it. Recheck each boundary
     // because committing fallback or preparing the prompt can consume the rest.
     const assertAdmissionBudget = (at = clock()): number => {
+      assertOriginalActionBudget(at);
       const remaining = control?.remainingMs();
       const bound = remaining === undefined ? admissionBound : Math.min(admissionBound, at + remaining);
       if (bound <= at) {
@@ -4062,6 +3672,7 @@ export async function dispatch(
       resume,
       selection: round.selection,
       repoCtx,
+      ...(coordinator?.publication ? { publication: coordinator.publication } : {}),
       ...(githubDoor ? { githubDoor } : {}),
       stopSignal: run.control.hardSignal,
       root,
@@ -4689,6 +4300,7 @@ export async function dispatch(
       loopStartedAt,
       assertAdmissionBudget,
       admissionRemainingMs: () => Math.max(0, admissionBound - clock()),
+      ...(coordinator || originalDeadline !== undefined ? { admissionDeadlineAt: admissionBound } : {}),
       channelVisibility,
       slackContext,
       privateAudienceLatch,
@@ -4770,6 +4382,7 @@ export async function dispatch(
       // reason.
       restartRequest = {
         ...ran.restart,
+        profile,
         ...(operationTarget !== undefined ? { operationTarget } : {}),
         note:
           ran.refusal === "container_replaced" || ran.refusal === "workspace_lost"
@@ -5027,7 +4640,6 @@ export async function dispatch(
       .catch(() => {});
   } finally {
     clearInterval(setupHeartbeat); // a refusal or a setup failure ended the request before the run loop took the card
-    releaseLegacyOwnership?.();
     // Every admitted run has a terminal same-id path, including a refusal
     // returned before the model loop.
     setupFinalizer?.();
@@ -5150,7 +4762,16 @@ export async function dispatch(
         pending,
         clock,
         ...(restartRequest.restartOf !== undefined ? { restartOf: restartRequest.restartOf } : {}),
-        ...(restartIdentity !== undefined ? { carried: restartIdentity } : {}),
+        ...(restartIdentity !== undefined
+          ? {
+              carried: {
+                ...restartIdentity,
+                ...((restartRequest.profile ?? restartRequest.closed?.profile)
+                  ? { profile: restartRequest.profile ?? restartRequest.closed!.profile }
+                  : {}),
+              },
+            }
+          : {}),
         ...(restartRequest.coordinator !== undefined ? { coordinator: restartRequest.coordinator } : {}),
         ...(restartRequest.operationTarget !== undefined ? { operationTarget: restartRequest.operationTarget } : {}),
       });

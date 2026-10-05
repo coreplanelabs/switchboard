@@ -78,6 +78,9 @@ export interface RunSummary {
   /** `RunMeta.parentInstanceId` / `RunMeta.idempotencyKey`: the coordinator
    *  instance a child belongs to and the key its spawn carried (item 48). */
   parentInstanceId?: string;
+  maintenanceActionId?: string;
+  coordinatorUnit?: string;
+  coordinatorAttempt?: number;
   idempotencyKey?: string;
   /** The admitted Ship unit cap, retained for an interrupted child's record. */
   costCapUsd?: number;
@@ -176,6 +179,9 @@ export function summaryOf(run: RunState, now: number): RunSummary {
     ...(m?.authenticatedAs !== undefined ? { authenticatedAs: m.authenticatedAs } : {}),
     ...(m?.parentRunId !== undefined ? { parentRunId: m.parentRunId } : {}),
     ...(m?.parentInstanceId !== undefined ? { parentInstanceId: m.parentInstanceId } : {}),
+    ...(m?.maintenanceActionId !== undefined ? { maintenanceActionId: m.maintenanceActionId } : {}),
+    ...(m?.coordinatorUnit !== undefined ? { coordinatorUnit: m.coordinatorUnit } : {}),
+    ...(m?.coordinatorAttempt !== undefined ? { coordinatorAttempt: m.coordinatorAttempt } : {}),
     ...(m?.idempotencyKey !== undefined ? { idempotencyKey: m.idempotencyKey } : {}),
     ...(m?.costCapUsd !== undefined ? { costCapUsd: m.costCapUsd } : {}),
     ...(m?.seed !== undefined ? { seed: m.seed } : {}),

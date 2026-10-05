@@ -518,6 +518,31 @@ describe("authorizePrHead — the PR head preflight", () => {
     expect(replies[0]).toMatch(/^🔀 Review of acme\/api#41 not started: GitHub did not give me a usable head commit/);
   });
 
+  it("a coordinator review cannot resolve another pull or head than its durable publication", async () => {
+    const publication = {
+      repo: "acme/api",
+      pr: 41,
+      headRef: "feature/x",
+      baseRef: "main",
+      publicationRef: "feature/x",
+      expectedHeadSha: SHA_A,
+      owner: { instanceId: "ship_review", unit: "ONE" },
+    };
+    for (const moved of [{ pr: 42 }, { headSha: SHA_B }, { headSha: undefined }]) {
+      const h = setup({ text });
+      expect(
+        await authorizePrHead({
+          ...h.gate,
+          ...h.cardCtx,
+          agent: review,
+          directives: { text },
+          publication,
+          repoCtx: { repo: "acme/api", pr: 41, ref: "feature/x", baseRef: "main", headSha: SHA_A, ...moved },
+        }),
+      ).toEqual({ kind: "refused", reason: "workspace_head_mismatch" });
+      expect(h.refusals).toEqual(["workspace_head_mismatch"]);
+    }
+  });
   it("a resolved head, a non-review agent, or no PR at all pass untouched", async () => {
     const pinned = setup({ text });
     expect(
@@ -669,6 +694,57 @@ describe("authorizeAttachedHead — every review workspace is at the PR head bef
       headAdopted: true,
     });
     expect(asked).toEqual([{ repo: "acme/api", number: 41 }]);
+  });
+
+  it("a coordinator review cannot adopt a raced head outside its durable permission", async () => {
+    const s = setup();
+    const { selection: sel, releases } = selection({ sha: SHA_B, observed: `${SHA_B}\n` });
+    const publication = {
+      repo: "acme/api",
+      pr: 41,
+      headRef: "feature/x",
+      baseRef: "main",
+      publicationRef: "feature/x",
+      expectedHeadSha: SHA_A,
+      owner: { instanceId: "ship_review", unit: "ONE" },
+    };
+    expect(
+      await authorizeAttachedHead(
+        { ...s.deps, fetchPrHead: async () => SHA_B },
+        {
+          ...ctx(s, sel),
+          publication,
+        },
+      ),
+    ).toEqual({ kind: "refused", reason: "workspace_head_mismatch" });
+    expect(s.refusals).toEqual(["workspace_head_mismatch"]);
+    expect(releases).toEqual(["always"]);
+  });
+  it("a resumed coordinator review still verifies the saved head before its next turn", async () => {
+    const publication = {
+      repo: "acme/api",
+      pr: 41,
+      headRef: "feature/x",
+      baseRef: "main",
+      publicationRef: "feature/x",
+      expectedHeadSha: SHA_A,
+      owner: { instanceId: "ship_review", unit: "ONE" },
+    };
+    for (const observed of [SHA_A, SHA_B]) {
+      const s = setup();
+      const { selection: sel, commands, releases } = selection({ sha: observed, observed: `${observed}\n` });
+      const resume = { row: { runId: "run-old" } } as unknown as ResumeContext;
+      const out = await authorizeAttachedHead(
+        { ...s.deps, fetchPrHead: async () => observed },
+        {
+          ...ctx(s, sel, { resume }),
+          publication,
+        },
+      );
+      expect(out.kind).toBe(observed === SHA_A ? "allowed" : "refused");
+      expect(commands).toContain("git rev-parse HEAD");
+      expect(releases).toEqual(observed === SHA_A ? [] : ["always"]);
+    }
   });
 
   it("the workspace stays mismatched after one reprovision: refused — the pool user released, the card closed, one evidence-only reply, no model turn", async () => {

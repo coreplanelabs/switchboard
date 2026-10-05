@@ -11,7 +11,7 @@
 // before the next step that can throw and its outer finally releases exactly
 // what the inline code did.
 import type { ConfigStore, ResolvedRequest } from "../../config.js";
-import { coordinatorFields, type CoordinatorTag } from "../coordinator/contract.js";
+import { coordinatorFields, unitOfIdempotencyKey, type CoordinatorTag } from "../coordinator/contract.js";
 import { AGENTS, type AgentDef } from "../../agents/registry.js";
 import { chatActorOf } from "../authz/actor.js";
 import { clipSourceLabel, type RunProfile } from "../../config/profile.js";
@@ -20,6 +20,7 @@ import {
   WorkspaceReattachLeaseSpentError,
   WorkspaceReattachRefusedError,
   ReadyEnvironmentError,
+  workspaceBindingFor,
   type ReadyEnvironmentReason,
   type ExecutorSelection,
   type GithubCredentialProvider,
@@ -363,6 +364,7 @@ export interface RegisterRunContext {
   repoCtx: RepoContext;
   carriedRow: LiveRunRow | undefined;
   resume: ResumeContext | undefined;
+  restart?: RestartContext;
   startedAt: number;
   receivedAt: number;
   clock: Clock;
@@ -437,6 +439,7 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
     repoCtx,
     carriedRow,
     resume,
+    restart,
     startedAt,
     receivedAt,
     clock,
@@ -545,9 +548,11 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
         : {}),
       ...(resume
         ? { replay: resume.events }
-        : ctx.restartCarried
-          ? { replay: ctx.restartCarried.events, token: ctx.restartCarried.token, resetLiveState: true }
-          : {}),
+        : restart
+          ? { replay: restart.events }
+          : ctx.restartCarried
+            ? { replay: ctx.restartCarried.events, token: ctx.restartCarried.token, resetLiveState: true }
+            : {}),
     },
   );
   ctx.afterCreate?.({ runId, channelVisibility });
@@ -649,6 +654,9 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
   const publishMeta = (repoCtx: RepoContext) =>
     events.publish({
       type: "run_meta",
+      ...(coordinator?.maintenanceActionId !== undefined
+        ? { maintenanceActionId: coordinator.maintenanceActionId }
+        : {}),
       agent: agent.name,
       agentSource,
       model: resolved.modelRef,
@@ -712,6 +720,32 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
   // not the thread its lead was posted in: the record shows what the model saw.
   if (!resume && deps.config.config.runHistory?.includeContext !== false) {
     for (const text of contextMessageTexts(seedTurns ?? history, humanize)) publishText("context", text);
+  }
+  // Admission persists this setup tag with the reserved identity before registration can be acknowledged.
+  if (
+    !resume &&
+    coordinator &&
+    !(restart?.events ?? ctx.restartCarried?.events)?.some((event) => event.type === "coordinator_tag")
+  ) {
+    const unit = unitOfIdempotencyKey(coordinator.idempotencyKey);
+    registry.publish(run.id, {
+      type: "coordinator_tag",
+      parentInstanceId: coordinator.parentInstanceId,
+      ...(coordinator.maintenanceActionId !== undefined
+        ? { maintenanceActionId: coordinator.maintenanceActionId }
+        : {}),
+      ...(coordinator.costCapUsd !== undefined ? { costCapUsd: coordinator.costCapUsd } : {}),
+      ...(unit !== undefined ? { unit } : {}),
+      ...(coordinator.branch !== undefined ? { branch: coordinator.branch } : {}),
+      ...(coordinator.transportWorkflowId !== undefined
+        ? { transportWorkflowId: coordinator.transportWorkflowId }
+        : {}),
+      ...(coordinator.recovery !== undefined ? { recovery: coordinator.recovery } : {}),
+      ...(coordinator.base !== undefined ? { base: coordinator.base } : {}),
+      ...(coordinator.publication !== undefined ? { publication: coordinator.publication } : {}),
+      ...(coordinator.issuedFindingIds !== undefined ? { issuedFindingIds: coordinator.issuedFindingIds } : {}),
+      at: clock(),
+    });
   }
   return { run, runId, channelVisibility, liveUrl, events, publishText, publishMeta };
 }
@@ -957,6 +991,7 @@ async function attachRound(
   const ledger = deps.runLedger;
   const runId = ctx.runId;
   const residentClaim = ledger && runId ? () => ledger.claimResident(runId, threadKey) : undefined;
+  let recordedBinding = reattach;
   // A review target's PR-derived ref is authoritative. Passing `ownPr` asks
   // the resident to preserve or conditionally move a sticky thread binding;
   // that is right for a coding follow-up, but can keep a plan unit's branch
@@ -1044,6 +1079,21 @@ async function attachRound(
           ...(remainingMs !== undefined ? { remainingMs } : {}),
           ...(requester !== undefined ? { requester } : {}),
           ...(onLiveStateObservation !== undefined ? { onLiveStateObservation } : {}),
+          onResidentBinding: async (physical) => {
+            const binding = workspaceBindingFor(
+              { backend: "resident", binding: physical },
+              profile.machine,
+              recordedBinding,
+            );
+            const tracked = ledger?.liveRuns().find((run) => run.runId === runId);
+            if (
+              ledger?.sessionPersistence &&
+              runId &&
+              (!binding || !tracked?.tracked() || (await tracked.commitState({ binding })) !== "ok")
+            )
+              throw new RefusalError(refusalOf("setup_failed", "attachment binding not durable"));
+            recordedBinding = binding;
+          },
         },
         logKey: threadKey,
         span,

@@ -1,6 +1,7 @@
 ---
 title: The ship pipeline dissolves into the orchestrator — the unit machine is the deterministic atom, judgement composes units, and the pipeline graph retires
-status: accepted
+status: superseded
+superseded_by: 0090-one-unit-lifetime-keeps-effects-and-settlement-under-existing-owners.md
 date: 2026-09-21
 pattern: Agentic orchestration over deterministic unit workflows — coding → review → fix → checks → merge remains one leased, single-owner state machine; an LLM loop reads each durable ending and chooses the next bounded act, while DAG planning, recovery directives and person-managed workflow columns retire
 ---

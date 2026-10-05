@@ -1,3 +1,12 @@
+import { PUSHED_MAX } from "../../execution/residentRebind.js";
+import {
+  reviewPublicationOf,
+  acceptedReviewPublication,
+  sameReviewPublication,
+  REVIEW_PUBLICATION_OWNER_ABSENT,
+  type ReviewPublicationReceipt,
+} from "../reviewPublication.js";
+import { doorPublicationOf, branchPublicationOf, type BranchPublication } from "../branchPublication.js";
 import { createWorkFreshness } from "./workFreshness.js";
 import { appendRunReport } from "../runLedger/threadSession.js";
 import { directAudienceStampOf } from "../runLedger/inboxMessage.js";
@@ -140,6 +149,7 @@ import {
   workLeftBehindLabel,
   workLeftBehindOf,
   workLeftBehindSummary,
+  type PrPublicationFact,
 } from "../codingPrPostStep.js";
 import { descriptionTurnTarget, runDescriptionTurn } from "../descriptionTurn.js";
 import { runVerdictTurn } from "../verdictTurn.js";
@@ -151,12 +161,13 @@ import { RunEventLane } from "../runEventLane.js";
 import { oneLine } from "../redact.js";
 import { analyzeRunFriction, type FrictionDiagnosis } from "../runFriction.js";
 import { markdownOutput } from "../llmOutput/index.js";
-import { callsInFlight, pushedBranchesOf, type RunFailure, type RunSeed, type RunStatus } from "../runRecord.js";
+import { branchPushReceiptsOf, callsInFlight, type RunFailure, type RunSeed, type RunStatus } from "../runRecord.js";
 import type { RunHandle, RunRegistry } from "../runRegistry.js";
 import type { LedgerRun } from "../runLedger/writeThrough.js";
 import { assignRunLiveState } from "../runLiveState.js";
 import { causeOfClose } from "../plane/decide.js";
-import { RefusalError } from "../refusal.js";
+import { RefusalError, refusalOf } from "../refusal.js";
+import { shellQuote } from "../../execution/shellQuote.js";
 import type { RunsReadCapability, SteerCapability } from "../../tools/runs.js";
 import type { WaitCapability } from "./awaitChildren.js";
 import type { SpawnCapability } from "./spawn.js";
@@ -309,6 +320,7 @@ export interface RunLoopContext {
    *  first open. Relaunches continue the harness's lease instead. */
   assertAdmissionBudget: () => void;
   admissionRemainingMs?: () => number;
+  admissionDeadlineAt?: number;
   channelVisibility: ChannelVisibility;
   slackContext?: SlackContextBinding;
   privateAudienceLatch?: PrivateAudienceLatch;
@@ -413,6 +425,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     coordinator,
     seed,
   } = ctx;
+  const ledgerTrackedAtEntry = ledgerRun?.tracked() === true;
   // A private tool's result can reach model-authored progress before the final
   // answer. Keep every card frame free of model text for the whole DM run.
   const privateRun = privateAudienceRequired(msg) || slackContext !== undefined;
@@ -519,6 +532,113 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // the checklist the card shows, the verdict/description already submitted,
   // the branch already pushed.
   const restored = resume?.row.state ?? {};
+  let reviewPublication = restored.reviewPublication as ReviewPublicationReceipt | undefined;
+  let branchPublication: BranchPublication | undefined = branchPublicationOf(restored.branchPublication, repoCtx.repo);
+  if (resume === undefined && (isCodingPrRun || agent.name === "review") && ledgerRun?.tracked())
+    branchPublication = {
+      version: 1,
+      ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
+      branches: [],
+      complete: true,
+    };
+  if (branchPublication) ledgerRun?.setState({ branchPublication });
+  let publicationAction: BranchPublication["pending"];
+  const recordBranchPublication = async (
+    { kind, target, ownsBranch }: PrPublicationFact | (Omit<PrPublicationFact, "kind"> & { kind: "refused" }),
+    statePatch: Record<string, unknown> = {},
+  ): Promise<void> => {
+    if ((kind === "pending" || kind === "observed") && tailSkipped()) throw new Error("publication stopped");
+    if (
+      (ownsBranch && !target.ref) ||
+      (target.pr !== undefined && (!Number.isSafeInteger(target.pr) || target.pr < 1)) ||
+      (!target.ref && (!Number.isSafeInteger(target.pr) || target.pr! < 1)) ||
+      !/^[0-9a-f]{40}$/.test(target.headSha)
+    )
+      throw new Error("publication target unavailable");
+    const current =
+      branchPublication ??
+      (resume === undefined ? { version: 1 as const, repo: target.repo, branches: [], complete: true } : undefined);
+    if (
+      !current ||
+      (current.repo !== undefined && current.repo !== target.repo) ||
+      (!current.complete && current.pending !== undefined && publicationAction === undefined)
+    )
+      throw new Error("publication mapping incomplete");
+    if (ownsBranch && !current.branches.some((b) => b.ref === target.ref) && current.branches.length >= PUSHED_MAX) {
+      branchPublication = { ...current, complete: false };
+      await ledgerRun?.commitState({ branchPublication });
+      throw new Error("publication mapping capacity");
+    }
+    if (
+      kind === "pending" &&
+      !ownsBranch &&
+      !current.targets?.some((t) => t.pr === target.pr) &&
+      (current.targets?.length ?? 0) >= PUSHED_MAX
+    ) {
+      throw new Error("publication mapping capacity");
+    }
+    let proposed: BranchPublication;
+    if (kind === "pending") {
+      if (
+        publicationAction &&
+        (publicationAction.ref !== target.ref ||
+          publicationAction.headSha !== target.headSha ||
+          (publicationAction.pr !== undefined && publicationAction.pr !== target.pr))
+      )
+        throw new Error("publication target changed");
+      publicationAction = {
+        id: publicationAction?.id ?? randomUUID(),
+        ref: target.ref,
+        headSha: target.headSha,
+        ...(target.pr !== undefined ? { pr: target.pr } : {}),
+      };
+      proposed = { ...current, repo: target.repo, complete: false, pending: publicationAction };
+      branchPublication = proposed;
+    } else {
+      if (!Number.isSafeInteger(target.pr) || target.pr! < 1) {
+        branchPublication = { ...current, complete: false };
+        await ledgerRun?.commitState({ branchPublication });
+        throw new Error("publication target unavailable");
+      }
+      if (
+        (kind === "accepted" || kind === "refused") &&
+        (!publicationAction ||
+          publicationAction.ref !== target.ref ||
+          publicationAction.headSha !== target.headSha ||
+          (publicationAction.pr !== undefined && publicationAction.pr !== target.pr))
+      )
+        throw new Error("publication acceptance mismatch");
+      const branches = ownsBranch
+        ? [...current.branches.filter((b) => b.ref !== target.ref), { ref: target.ref!, pr: target.pr! }]
+        : current.branches;
+      const targets =
+        kind === "accepted" && !ownsBranch
+          ? [
+              ...(current.targets ?? []).filter((t) => t.pr !== target.pr),
+              { pr: target.pr!, ...(target.ref ? { ref: target.ref } : {}), headSha: target.headSha },
+            ]
+          : current.targets;
+      proposed = {
+        version: 1,
+        repo: target.repo,
+        branches,
+        ...(targets ? { targets } : {}),
+        complete: [...branchReceipts, ...publicationReceipts].every((receipt) =>
+          branches.some((branch) => branch.ref === receipt.ref),
+        ),
+      };
+      if (!branchPublicationOf(proposed)) throw new Error("publication mapping capacity");
+      // Until the accepted projection is acknowledged, local release stays closed.
+      branchPublication = { ...current, complete: false };
+    }
+    const gate = await ledgerRun?.commitState({ ...statePatch, branchPublication: proposed });
+    if (gate !== "ok") throw new Error(`publication state ${gate ?? "unavailable"}`);
+    branchPublication = proposed;
+    if (kind !== "pending") publicationAction = undefined;
+    // A stop can arrive while the intent is being saved. Acceptance must still
+    // be recorded for an already-issued mutation; no new call follows a stop.
+    if ((kind === "pending" || kind === "observed") && tailSkipped()) throw new Error("publication stopped");
+  };
   // An intent without a completed outcome is a possible remote write. A
   // restart never guesses that it was harmless from an absent local event.
   // The recorder's same durable intent carries a terminal no-write outcome.
@@ -528,6 +648,21 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   const unresolvedDoorPublication =
     restoredDoorIntent !== undefined && restoredDoorIntent !== null && !restoredDoorIntent.outcome;
   const resumedDoorPublication = unresolvedDoorPublication ? restoredDoorIntent : undefined;
+  const newDoorIntent = (update: GitPublicationUpdate) =>
+    doorPublicationOf({
+      id: randomUUID(),
+      update,
+      repo: coordinator?.publication?.repo ?? repoCtx.repo ?? deps.githubBindings?.get(run.id)?.repo,
+      ...(coordinator?.publication ? { pr: coordinator.publication.pr } : {}),
+      ...(coordinator && unitOfIdempotencyKey(coordinator.idempotencyKey) !== undefined
+        ? {
+            owner: {
+              instanceId: coordinator.parentInstanceId,
+              unit: unitOfIdempotencyKey(coordinator.idempotencyKey)!,
+            },
+          }
+        : {}),
+    });
   let activeDoorPublication: { id: string; update: GitPublicationUpdate } | undefined;
   let lastDoorRefusal = restoredDoorIntent?.outcome === "rejected" ? restoredDoorIntent : undefined;
   // The bounded display backlog may trim a push during a long test run. Its
@@ -538,21 +673,21 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     restoredPublicationHead(restoredReceipts, coordinator.publication) !== undefined
       ? restoredReceipts
       : [];
+  const restoredBranchReceipts = branchPushReceiptsOf(restored.branchPushReceipts);
+  // Unreadable canonical history remains evidence, never an empty baseline
+  // that a later accepted native write can replace.
+  const malformedBranchReceipts = restored.branchPushReceipts !== undefined && restoredBranchReceipts === undefined;
   const branchReceipts: Array<Extract<RunEvent, { type: "pushed_head" }>> =
-    Array.isArray(restored.branchPushReceipts) &&
-    restored.branchPushReceipts.every(
-      (value: unknown) =>
-        typeof value === "object" &&
-        value !== null &&
-        (value as { type?: unknown }).type === "pushed_head" &&
-        (value as { by?: unknown }).by === "push" &&
-        typeof (value as { ref?: unknown }).ref === "string" &&
-        typeof (value as { sha?: unknown }).sha === "string" &&
-        /^[0-9a-f]{40}$/.test((value as { sha: string }).sha) &&
-        (value as { receipt?: unknown }).receipt === undefined,
+    restoredBranchReceipts?.map((receipt) => ({ type: "pushed_head", ...receipt })) ?? [];
+  if (
+    branchPublication &&
+    [...branchReceipts, ...publicationReceipts].some(
+      (receipt) => !branchPublication?.branches.some((branch) => branch.ref === receipt.ref),
     )
-      ? (restored.branchPushReceipts as Array<Extract<RunEvent, { type: "pushed_head" }>>)
-      : [];
+  ) {
+    branchPublication = { ...branchPublication, complete: false };
+    ledgerRun?.setState({ branchPublication });
+  }
   const pushedEventsOn = (ref: string): Extract<RunEvent, { type: "pushed_head" }>[] =>
     (registry.snapshot(run.id, run.token)?.events ?? []).filter(
       (event): event is Extract<RunEvent, { type: "pushed_head" }> => event.type === "pushed_head" && event.ref === ref,
@@ -1420,6 +1555,39 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
    *  soft pre-review stop can land while the preceding tail step awaits. */
   const tailSkipped = (): boolean =>
     run.control.requested === "hard" || relaunchEndedRun || latchReviewStoppedBeforeStart();
+  const originalPublicationOwner = async () => {
+    if (!ledgerRun?.tracked() || !deps.runLedger) return undefined;
+    const rows = (await deps.runLedger.readLiveRuns()).filter((row) => row.runId === run.id);
+    if (rows.length !== 1) return undefined;
+    const row = rows[0]!;
+    if (
+      row.ownerGen !== deps.runLedger.gen ||
+      row.meta.threadKey !== msg.threadKey ||
+      row.meta.userId !== msg.userId ||
+      row.meta.channelId !== msg.channelId ||
+      row.meta.authenticatedAs !== msg.authenticatedAs ||
+      row.meta.postedBy !== msg.postedBy ||
+      row.meta.repo !== repoCtx.repo ||
+      (agent.name === "review" && row.meta.pr !== repoCtx.pr)
+    )
+      return undefined;
+    return row;
+  };
+  const publicationWriteAllowed = async (): Promise<boolean> => {
+    const row = await originalPublicationOwner();
+    const actor = chatActorOf(deps.config, msg);
+    return (
+      !!row &&
+      !malformedBranchReceipts &&
+      row.stop === null &&
+      run.control.requested === undefined &&
+      !tailSkipped() &&
+      deps.config.canRunAgent(actor, agent.name) &&
+      !!repoCtx.repo &&
+      deps.config.canUseRepo(actor, repoCtx.repo) &&
+      (ctx.publicationContextCheck === undefined || (await ctx.publicationContextCheck()).ok)
+    );
+  };
   // Give the workspace back now rather than at the inactivity sweep: a
   // resident's pool user is a scarce slot (docs/reference/specs/resident-repos.md item
   // 16a). The release mode is paired to the round's agent by the attach
@@ -1444,7 +1612,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // thread. Hard-stop is read at CALL time — it may land during the run.
   // Under `post.workspace_release`: the release's own call is that span's child.
   // The release hands over what the run pushed (resident-repos item 16a) —
-  // the branches its `pr_opened` events name, read off the run's own backlog
+  // the producer's retained branch mappings
   // (the same read the finish makes) at CALL time so the post-step's event is
   // in — so a resident thread remembers its own branches once the clean tree
   // is gone and a follow-up can rebind onto them.
@@ -1487,7 +1655,20 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         }).catch(() => false);
         if (!recorded && !mandatory && publicationSettlement.publication.kind !== "accepted") return;
       }
-      const pushed = pushedBranchesOf(recordEvents());
+      if (
+        isCodingPrRun &&
+        (!ledgerRun?.tracked() ||
+          malformedBranchReceipts ||
+          branchPublication?.complete !== true ||
+          [...branchReceipts, ...publicationReceipts].some(
+            (receipt) => !branchPublication?.branches.some((branch) => branch.ref === receipt.ref),
+          ) ||
+          (acceptedSalvageHead !== undefined &&
+            !branchPublication?.branches.some((branch) => branch.ref === acceptedSalvageHead?.ref))) &&
+        !mandatory
+      )
+        return;
+      const pushed = branchPublication?.branches ?? [];
       const result = await round
         .release({
           hardStopped: run.control.requested === "hard",
@@ -1878,10 +2059,25 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   const reentry = resume?.plan.kind === "resume" ? resume.plan : undefined;
   const loopEnding: LoopEnding = finish && resume ? loopEndingOf(resume.events) : { kind: "answered" };
   if (loopEnding.kind === "soft_stop") run.control.requestStop("soft");
-  // A verdict a previous generation already posted (agent-review item 18): the
-  // replayed `review_posted` event is the post-step's outcome, so neither the
-  // settle nor the post runs again, and the reviewed head is the event's.
-  const postedBefore = resume ? reviewPostedBefore(resume.events) : undefined;
+  // Only canonical native acceptance grants replay credit. A display event
+  // without that receipt retains uncertainty and cannot authorize another POST.
+  const replayedPost = resume ? reviewPostedBefore(resume.events) : undefined;
+  const replayedReceipt =
+    resume && agent.name === "review"
+      ? reviewPublicationOf((await originalPublicationOwner().catch(() => undefined))?.state.reviewPublication)
+      : undefined;
+  const postedBefore =
+    replayedReceipt?.state === "accepted" &&
+    replayedReceipt.runId === run.id &&
+    replayedReceipt.target.repo === repoCtx.repo &&
+    replayedReceipt.target.number === repoCtx.pr &&
+    (coordinator?.publication === undefined ||
+      (replayedReceipt.target.repo === coordinator.publication.repo &&
+        replayedReceipt.target.number === coordinator.publication.pr &&
+        replayedReceipt.target.commitId === coordinator.publication.expectedHeadSha))
+      ? acceptedReviewPublication(replayedReceipt)
+      : undefined;
+  const unconfirmedReplayedPost = replayedPost !== undefined && postedBefore === undefined;
   if (postedBefore) reviewHead = postedBefore.head;
   // The row's harness facts (harness.md item 7; harness-pi item 8), read by
   // whichever harness wrote them: for the harness's re-attach or, on a finish,
@@ -1995,6 +2191,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               const authority = existingPrPublicationFence?.authority;
               if (
                 !ledgerRun?.tracked() ||
+                malformedBranchReceipts ||
                 unresolvedDoorPublication ||
                 activeDoorPublication ||
                 !authority ||
@@ -2003,8 +2200,14 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                 update.old !== authority.expectedHeadSha
               )
                 return;
-              const pending = { id: randomUUID(), update };
-              committed = await ledgerRun.setStateAndFlush({ doorPublicationPending: pending });
+              const pending = newDoorIntent(update);
+              if (!pending) return;
+              if (branchPublication && !branchPublication.branches.some((branch) => branch.ref === authority.ref))
+                branchPublication = { ...branchPublication, complete: false };
+              committed = await ledgerRun.setStateAndFlush({
+                doorPublicationPending: pending,
+                ...(branchPublication !== undefined ? { branchPublication } : {}),
+              });
               if (committed) activeDoorPublication = pending;
               else blockExistingPrPublication("the Git door publication intent could not be committed durably");
             });
@@ -2041,6 +2244,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                 committed = await ledgerRun.setStateAndFlush({
                   doorPublicationPending: null,
                   publicationReceipts: [...publicationReceipts, receipt],
+                  ...(branchPublication !== undefined ? { branchPublication } : {}),
                 });
                 if (committed) {
                   activeDoorPublication = undefined;
@@ -2124,9 +2328,16 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           begin: async (update) => {
             let committed = false;
             await events.write(async () => {
-              if (!ledgerRun?.tracked() || activeDoorPublication) return;
-              const pending = { id: randomUUID(), update };
-              committed = await ledgerRun.setStateAndFlush({ doorPublicationPending: pending });
+              if (!ledgerRun?.tracked() || malformedBranchReceipts || activeDoorPublication) return;
+              const pending = newDoorIntent(update);
+              if (!pending) return;
+              const ref = update.ref.slice("refs/heads/".length);
+              if (branchPublication && !branchPublication.branches.some((branch) => branch.ref === ref))
+                branchPublication = { ...branchPublication, complete: false };
+              committed = await ledgerRun.setStateAndFlush({
+                doorPublicationPending: pending,
+                ...(branchPublication !== undefined ? { branchPublication } : {}),
+              });
               if (committed) activeDoorPublication = pending;
             });
             return committed;
@@ -2150,9 +2361,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                   sha: update.next,
                   by: "push",
                 };
+                if (branchPublication && !branchPublication.branches.some((branch) => branch.ref === receipt.ref))
+                  branchPublication = { ...branchPublication, complete: false };
                 committed = await ledgerRun.setStateAndFlush({
                   doorPublicationPending: null,
                   branchPushReceipts: [...branchReceipts, receipt],
+                  ...(branchPublication !== undefined ? { branchPublication } : {}),
                 });
                 if (committed) {
                   activeDoorPublication = undefined;
@@ -2314,7 +2528,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         // lease), so the control's clock starts here from the remainder the
         // record kept — the run loop's reading of the same lease the harness
         // continues, a moment earlier than the harness's own.
-        const resumeDeadline = clock() + reentry.remainingMs;
+        const resumeDeadline = Math.min(clock() + reentry.remainingMs, ctx.admissionDeadlineAt ?? Infinity);
         run.control.startLease(() => resumeDeadline - clock());
         updateResidentRunDeadline(resumeDeadline - clock());
       }
@@ -2363,6 +2577,54 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             })
           : undefined;
       const openRun = async () => {
+        ctx.assertAdmissionBudget();
+        if (agent.name === "review" && coordinator?.publication !== undefined) {
+          const publication = coordinator.publication;
+          const workspace = currentCheckout;
+          const command = `${workspace ? `git -C ${shellQuote(workspace)}` : "git"} rev-parse HEAD`;
+          const probe = await executor
+            .execResult?.(command, {
+              timeoutMs: Math.min(30_000, ctx.admissionRemainingMs?.() ?? 30_000),
+              signal: run.control.hardSignal,
+            })
+            .catch(() => undefined);
+          const head =
+            probe?.exitCode === 0 && probe.truncated === false && /^[a-f0-9]{40}$/i.test(probe.stdout.trim())
+              ? probe.stdout.trim().toLowerCase()
+              : undefined;
+          const fresh = await (deps.fetchPrFacts ?? fetchPullRequestFacts)({
+            repo: publication.repo,
+            number: publication.pr,
+          }).catch(() => undefined);
+          const selected = firstTestSelection.binding ?? firstTestSelection.seeded ?? firstTestSelection.cold;
+          const verified = verifyExistingPrPublication(
+            publication,
+            {
+              repo: repoCtx.repo,
+              pr: repoCtx.pr,
+              ref: repoCtx.ref,
+              baseRef: repoCtx.baseRef,
+              requestHeadSha: repoCtx.headSha,
+              workspaceRef: selected?.ref,
+              workspaceHeadSha: head,
+              owner: {
+                instanceId: coordinator.parentInstanceId,
+                unit: unitOfIdempotencyKey(coordinator.idempotencyKey) ?? "",
+              },
+            },
+            fresh,
+          );
+          if (
+            !verified.ok ||
+            fresh?.verifiedHead?.repo !== publication.repo ||
+            fresh.verifiedHead.ref !== publication.headRef ||
+            fresh.verifiedHead.sha.toLowerCase() !== publication.expectedHeadSha.toLowerCase()
+          )
+            throw new RefusalError(
+              refusalOf("workspace_head_mismatch", "The reattached workspace does not match the saved review target."),
+            );
+          ctx.assertAdmissionBudget();
+        }
         const container =
           harnessDeps.containerFor?.(executor, profile.machine) ?? harnessContainerFor(executor, profile.machine);
         const requirement = ctx.readyRequirementOverride;
@@ -2427,6 +2689,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           {
             runId: run.id,
             agent,
+            ...(ctx.admissionDeadlineAt !== undefined ? { deadlineAt: ctx.admissionDeadlineAt } : {}),
             ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
             model: { id: modelId, provider: providerName, providerType: providerCfg.type },
             ...(ctx.modelCard ? { card: ctx.modelCard } : {}),
@@ -2701,6 +2964,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // gate (agent-review item 10).
     if (isPrReview && repoCtx.repo && repoCtx.pr !== undefined && !tailSkipped() && postedBefore === undefined) {
       const settled = await settleReviewedHead({
+        ...(coordinator?.publication ? { publication: coordinator.publication } : {}),
         span: root,
         pr: { repo: repoCtx.repo, number: repoCtx.pr },
         baseRef: repoCtx.baseRef,
@@ -2948,9 +3212,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // outcome to this run before the PR observes the remote branch.
     let doorPostStepBlocked = refusalOnObservedBranch();
     if (ctx.githubDoor && deps.githubBindings) {
-      if (existingPrPublication !== undefined)
-        deps.githubBindings.setPublication(run.id, { blocked: "the model turn has ended" });
-      else deps.githubBindings.blockBranch(run.id, "the model turn has ended");
+      deps.githubBindings.closeModelTurn(run.id);
       await deps.githubBindings.waitForPublication(run.id, GIT_PUBLICATION_SETTLE_TIMEOUT_MS);
       await events.drain();
       retainPublicationReceipts();
@@ -3099,6 +3361,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // An existing-PR publication denial also blocks the whole post-step.
     if (
       isCodingPrRun &&
+      !malformedBranchReceipts &&
       !tailSkipped() &&
       !endingSalvageAttempted &&
       !doorPostStepBlocked &&
@@ -3136,6 +3399,21 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             threadUrl: threadPageLink(requester.threadKey),
           },
           target: prTarget,
+          publication: recordBranchPublication,
+          refPublication: {
+            begin: async ({ repo, update }) => {
+              if (repo !== repoCtx.repo || !(await publicationWriteAllowed())) return undefined;
+              const bindings = deps.githubBindings;
+              if (!bindings || bindings.get(run.id)?.repo?.toLowerCase() !== repo.toLowerCase()) return undefined;
+              const claim = await bindings.beginPostStepPublication(run.id, update);
+              if (!claim) return undefined;
+              if (!(await publicationWriteAllowed())) {
+                await claim.finish("not_forwarded");
+                return undefined;
+              }
+              return claim;
+            },
+          },
           openPullRequest: deps.openPullRequest ?? openPullRequest,
           findOpenPr: deps.findOpenPrByHead ?? findOpenPrByHead,
           updatePullRequest: deps.updatePullRequest ?? updatePullRequest,
@@ -3365,6 +3643,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     else if (agent.name === "review" && !tailSkipped())
       reviewPost = await root.span("run.review_post_step", () =>
         runReviewPostStep({
+          ...(coordinator?.publication ? { publication: coordinator.publication } : {}),
           agent,
           requestText: ctx.requestText,
           repoCtx,
@@ -3380,6 +3659,50 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                 fetchPrFacts: deps.fetchPrFacts ?? fetchPullRequestFacts,
               }
             : { guardTransition: false as const }),
+          publicationJournal: {
+            runId: run.id,
+            read: async () => {
+              if (!ledgerRun?.tracked())
+                return resume || ledgerTrackedAtEntry ? undefined : REVIEW_PUBLICATION_OWNER_ABSENT;
+              const row = await originalPublicationOwner();
+              return row
+                ? row.state.reviewPublication === undefined
+                  ? unconfirmedReplayedPost
+                    ? undefined
+                    : null
+                  : row.state.reviewPublication === null
+                    ? undefined
+                    : row.state.reviewPublication
+                : undefined;
+            },
+            canPublish: async () => (await publicationWriteAllowed()) && (await publicationAllowed()),
+            commit: async (receipt: ReviewPublicationReceipt) => {
+              const admission: { state: "committed" | "refused" | "unknown" } = { state: "unknown" };
+              await events.write(async () => {
+                const row = await originalPublicationOwner();
+                if (
+                  !row ||
+                  receipt.runId !== run.id ||
+                  receipt.target.repo !== repoCtx.repo ||
+                  receipt.target.number !== repoCtx.pr
+                )
+                  return;
+                const prior = reviewPublicationOf(row.state.reviewPublication);
+                if (receipt.state === "pending") {
+                  if (row.state.reviewPublication !== undefined) return;
+                  if (!(await publicationWriteAllowed()) || !(await publicationAllowed())) {
+                    const current = await originalPublicationOwner();
+                    if (current && current.state.reviewPublication === undefined) admission.state = "refused";
+                    return;
+                  }
+                } else if (!prior || prior.state !== "pending" || !sameReviewPublication(prior, receipt)) return;
+                if ((await ledgerRun!.commitState({ reviewPublication: receipt })) === "ok")
+                  admission.state = "committed";
+              });
+              if (admission.state === "committed") reviewPublication = structuredClone(receipt);
+              return admission.state;
+            },
+          },
           post: deps.postReviewComment ?? postReviewComment,
           fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
           reply: (text) => io.reply(text),
@@ -3630,6 +3953,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         ...(verdict !== undefined ? { verdict } : {}),
         ...(reviewHead !== undefined ? { reviewHead } : {}),
         ...(dispositions !== undefined ? { dispositions } : {}),
+        ...(reviewPublication !== undefined ? { reviewPublication } : {}),
+        ...(branchReceipts.length > 0 && branchPushReceiptsOf(branchReceipts) !== undefined
+          ? { branchPushReceipts: branchPushReceiptsOf(branchReceipts) }
+          : {}),
         ...(reviewPost !== undefined ? { reviewPost } : {}),
         ...(route !== undefined ? { route } : {}),
         ...(parentRunId !== undefined ? { parentRunId } : {}),

@@ -1,3 +1,4 @@
+import { seedCoordinatorInstance } from "./testing/coordinatorInstance.js";
 // Feature: docs/reference/specs/run-history.md — `RunsService`: the one async
 // service behind every `runs.*` read and stop. It merges the live registry with
 // the durable store into token-free projections, pages events with a bounded
@@ -115,6 +116,13 @@ describe("RunsService.getRun", () => {
       },
     ];
     const internal = {
+      branchPublication: {
+        version: 1 as const,
+        repo: "private/repo",
+        complete: false,
+        branches: [],
+        pending: { id: "private-intent", ref: "private/branch", headSha: "c".repeat(40) },
+      },
       workReads,
       sourceReads: {
         version: 1 as const,
@@ -165,6 +173,9 @@ describe("RunsService.getRun", () => {
     ]) {
       const json = JSON.stringify(view);
       for (const field of [
+        "branchPublication",
+        "private-intent",
+        "private/branch",
         "sourceReads",
         "workReads",
         "private-work-act",
@@ -2056,7 +2067,7 @@ describe("RunsService.listUnitRuns — a unit's runs in round order", () => {
   const PUBLIC: Predicate = { kind: "visibility-in", visibilities: new Set(["public"]) };
 
   async function world(units: CoordinatorUnit[] = [u1, u2]) {
-    const instances = new InMemoryCoordinatorInstanceStore();
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await instances.put(instance);
     await instances.putUnits(units);
     const store = new InMemoryRunStore({ now: () => NOW });
@@ -2120,7 +2131,7 @@ describe("RunsService.listUnitRuns — a unit's runs in round order", () => {
       startedAt: T0,
     };
     const { svc, instances } = await world([withFacts, u2]);
-    await instances.replace({
+    seedCoordinatorInstance(instances, {
       ...instance,
       plan: { id: "p", path: "docs/plans/p.md" },
       attempt: 2,
@@ -2249,14 +2260,14 @@ describe("RunsService.listUnitRuns — a unit's runs in round order", () => {
   // web-chat item 2: the conversation seed asks which run carries the parent's word.
   it("parentRunOfInstance answers the instance's runId under a predicate that admits it, and undefined for an unknown instance, an excluded reader, a `none` predicate, an instance with no run yet and a process without the coordinator's records", async () => {
     const { svc, instances, store } = await world();
-    await instances.replace({ ...instance, runId: "parent-run" });
+    seedCoordinatorInstance(instances, { ...instance, runId: "parent-run" });
     expect(await svc.parentRunOfInstance("plan-p-1", ALL)).toBe("parent-run");
     expect(await svc.parentRunOfInstance("plan-p-1", CHANNEL_C1)).toBe("parent-run");
     expect(await svc.parentRunOfInstance("plan-p-9", ALL)).toBeUndefined();
     expect(await svc.parentRunOfInstance("plan-p-1", CHANNEL_C2)).toBeUndefined();
     expect(await svc.parentRunOfInstance("plan-p-1", PUBLIC)).toBeUndefined();
     expect(await svc.parentRunOfInstance("plan-p-1", { kind: "none" })).toBeUndefined();
-    await instances.replace(instance); // no runId recorded yet: nothing to link
+    seedCoordinatorInstance(instances, instance); // no runId recorded yet: nothing to link
     expect(await svc.parentRunOfInstance("plan-p-1", ALL)).toBeUndefined();
     const { reg } = testRegistry();
     expect(await createRunsService({ registry: reg, store }).parentRunOfInstance("plan-p-1", ALL)).toBeUndefined();
@@ -2289,7 +2300,7 @@ describe("RunsService.unitLineage — a pipeline child's way up (live-view item 
   };
 
   async function world() {
-    const instances = new InMemoryCoordinatorInstanceStore();
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await instances.put(instance);
     await instances.putUnits([u1]);
     const { reg } = testRegistry({ now: () => NOW });
@@ -2378,7 +2389,7 @@ describe("RunsService.listFindings — a pull request's findings ledger from the
    *  the findings step answered both and edited the pull request; review 2
    *  re-raised one — and its post was skipped, so only its thread names it. */
   async function world(opts: { units?: boolean; store?: InMemoryRunStore } = {}) {
-    const instances = new InMemoryCoordinatorInstanceStore();
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await instances.put(instance);
     await instances.putUnits([unit]);
     const store = opts.store ?? new InMemoryRunStore({ now: () => NOW });
@@ -2734,7 +2745,7 @@ describe("RunsService.stopRun — a hosted parent: soft refused, hard seals (rec
   async function hostedWorld(regOver: Parameters<typeof testRegistry>[0] = {}) {
     const { reg } = testRegistry(regOver);
     const ledger = new InMemoryRunLedger(() => NOW);
-    const units = new InMemoryCoordinatorInstanceStore();
+    const units = new InMemoryCoordinatorInstanceStore(ledger);
     await units.put({
       id: "plan-p-1",
       kind: "ship",
@@ -2875,7 +2886,7 @@ describe("RunsService.stopRun — a hosted parent: soft refused, hard seals (rec
     const { reg } = testRegistry();
     const ledger = new InMemoryRunLedger(() => NOW);
     // No instance record: the mark has nowhere to land (unknown_instance).
-    const units = new InMemoryCoordinatorInstanceStore();
+    const units = new InMemoryCoordinatorInstanceStore(ledger);
     await units.putUnits([unitRow("U17", { threadKey: "web:s:u2" })]);
     const warned: string[] = [];
     const svc = createRunsService({
@@ -3144,5 +3155,63 @@ describe("RunsService — a queued ask on the plane (record 0064)", () => {
     expect(await svc.stopRun("q-run-11", "hard", actor)).toEqual({ ok: false, error: "conflict" });
     // An id the queue never held stays not_found.
     expect(await svc.stopRun("q-run-99", "hard", actor)).toEqual({ ok: false, error: "not_found" });
+  });
+});
+
+describe("original coordinator child internal final evidence", () => {
+  it("exposes the original private seed only to the internal final-record reader, never ordinary reads or listings", async () => {
+    const { store, svc } = setup();
+    const run = record("original-proof", NOW, { repo: "acme/api" });
+    const parentInstanceId = "ship_original_proof",
+      idempotencyKey = `${parentInstanceId}:UNIT/0/coding`;
+    const key = `${run.threadKey}:coding`;
+    const proof = {
+      coordinatorUnit: "UNIT",
+      coordinatorAttempt: 3,
+      unitSeedReceipt: {
+        version: 1,
+        binding: { instanceId: parentInstanceId, unit: "UNIT", instanceAttempt: 3, idempotencyKey },
+        child: { runId: run.id, requester: run.userId, channelId: run.channelId, threadKey: run.threadKey },
+        ownerGen: "original-private-seed",
+        workBriefHash: "a".repeat(64),
+        capsuleHash: "a".repeat(64),
+        contractHash: "a".repeat(64),
+        seed: { key, from: 0, through: 0, messagesHash: "a".repeat(64), systemHash: "a".repeat(64) },
+        acknowledgedAt: NOW,
+      },
+    };
+    const branchPushReceipts = [{ ref: "private/native-original", sha: "a".repeat(40), by: "push" as const }];
+    const branchPublication = {
+      version: 1 as const,
+      repo: "acme/api",
+      complete: true,
+      branches: [{ ref: "private/original", pr: 77 }],
+    };
+    await store!.put({
+      ...run,
+      ...proof,
+      branchPublication,
+      branchPushReceipts,
+      parentInstanceId,
+      idempotencyKey,
+      session: { key, seedFrom: 0, request: 0, range: { from: 0, to: 0 } },
+    } as RunRecord);
+    const internal = await svc.getRun(run.id, {
+      requireFinalRecord: true,
+      include: "messages",
+      privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
+    });
+    expect(internal).toMatchObject({ ok: true, value: { ...proof, branchPublication, branchPushReceipts } });
+    for (const read of [
+      await svc.getRun(run.id),
+      await svc.getRun(run.id, { requireFinalRecord: true, include: "messages" }),
+      await svc.getRun(run.id, { include: "messages", privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ }),
+      await svc.listRuns({ status: "all", visibleTo: ALL, privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ }),
+    ]) {
+      expect(JSON.stringify(read)).not.toContain("original-private-seed");
+      expect(JSON.stringify(read)).not.toContain("unitSeedReceipt");
+      expect(JSON.stringify(read)).not.toContain("private/original");
+      expect(JSON.stringify(read)).not.toContain("private/native-original");
+    }
   });
 });

@@ -6,6 +6,7 @@
 // `interrupted` or the run has no channel to continue on, closed with a record
 // exactly as the boot reclaim closes the rest.
 
+import type { RunEvent } from "./runEvents.js";
 import type { AgentDef } from "../agents/registry.js";
 import { parseDirectives } from "../directives.js";
 import type { ChannelIO, IncomingMessage } from "./types.js";
@@ -142,13 +143,16 @@ export function rehostMeta(row: LiveRunRow): RunMeta {
 
 /** The repo context the run had, from the row's meta — never re-resolved from
  *  the message, whose PR/branch phrasing the previous generation already read. */
-export function repoContextOf(row: LiveRunRow): RepoContext {
+export function repoContextOf(row: LiveRunRow, events: readonly RunEvent[] = []): RepoContext {
   const m = row.meta;
+  const tag = events.find((e) => e.type === "coordinator_tag");
+  const baseRef = tag?.type === "coordinator_tag" ? (tag.publication?.baseRef ?? tag.base) : undefined;
   return {
     ...(m.repo !== undefined ? { repo: m.repo } : {}),
     ...(m.ref !== undefined ? { ref: m.ref } : {}),
     ...(m.pr !== undefined ? { pr: m.pr } : {}),
     ...(m.headSha !== undefined ? { headSha: m.headSha } : {}),
+    ...(baseRef !== undefined ? { baseRef } : {}),
   };
 }
 
@@ -313,7 +317,11 @@ export async function launchResumes(
         `[resume] ${row.runId} ${row.threadKey}: restarting from its request (killed while attaching; ${run.inbox.length} follow-up(s) pending)`,
       );
       outcome.launched.push(row.runId);
-      start(row, dispatchFn(deps, restored.msg, io, { restart: { row, inbox: run.inbox } }), "restart dispatch failed");
+      start(
+        row,
+        dispatchFn(deps, restored.msg, io, { restart: { row, inbox: run.inbox, events: run.events } }),
+        "restart dispatch failed",
+      );
       continue;
     }
     const plan = planResume({ transcript: run.transcript, lastStep: run.lastStep, tools: knownToolsFor(agent) });
@@ -336,7 +344,7 @@ export async function launchResumes(
       events: run.events,
       inbox: run.inbox,
       lastSeq,
-      repoCtx: repoContextOf(row),
+      repoCtx: repoContextOf(row, run.events),
     };
     log(
       plan.kind === "finish"

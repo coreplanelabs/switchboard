@@ -11,6 +11,8 @@
 import { IDLE_DAYS_MAX, type Grant, type GrantSource } from "../budgets.js";
 import { isVerbosity, type Verbosity } from "../verbosity.js";
 import { isFindingShape } from "../reviewVerdict.js";
+import { isMaintenanceActionId } from "./maintenanceIdentity.js";
+import { RUN_ID_PATTERN } from "../runRecord.js";
 import {
   isAddressSeverity,
   type AddressSeverity,
@@ -19,6 +21,12 @@ import {
 } from "../ship/coordinator.js";
 import { isHandoffShape, type Handoff } from "../ship/handoff.js";
 import { isShipOutcome, type ShipOutcome } from "./shipOutcome.js";
+import {
+  isUnitCurrentEffect,
+  reserveUnitEffectOutcomes,
+  UNIT_EFFECT_MAX_BYTES,
+  type UnitCurrentEffect,
+} from "./unitEffect.js";
 import { isUnitContext, type UnitContext } from "../dispatch/unitContext.js";
 import { isCoordinatorReportAdmission, type CoordinatorReportAdmission } from "./reportAdmission.js";
 
@@ -42,9 +50,9 @@ export const COORDINATOR_STEP_PATH_PREFIX = "/admin/coordinator/";
 /** A Workflow instance id: the platform's own alphabet, at most 100 characters. */
 export const INSTANCE_ID_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,99}$/;
 /** A step name: `<unit>/<round>/<kind>` and its kin — no colon, which separates it from the instance in the key. */
-export const STEP_NAME_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_./-]{0,119}$/;
+export const STEP_NAME_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_./-]{0,255}$/;
 /** `<parentInstanceId>:<step>` — the idempotency key a spawn carries and the child's claim stores. */
-export const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,99}:[A-Za-z0-9_][A-Za-z0-9_./-]{0,119}$/;
+export const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,99}:[A-Za-z0-9_][A-Za-z0-9_./-]{0,255}$/;
 
 export function idempotencyKeyFor(parentInstanceId: string, step: string): string {
   return `${parentInstanceId}:${step}`;
@@ -677,6 +685,7 @@ export interface CoordinatorTag {
   /** Workflow transport for a recovered child. Identity and idempotency remain
    * on `parentInstanceId`; only lifecycle wake-ups use this checkpoint id. */
   transportWorkflowId?: string;
+  maintenanceActionId?: string;
   /** The immutable target and absolute lease of an original-unit recovery.
    * Stored on the coordinator event so a resume or request-restart cannot turn
    * the remaining lease into a fresh relative budget or adopt another head. */
@@ -717,6 +726,7 @@ export function coordinatorFields(tag: CoordinatorTag | undefined): {
   coordinatorAttempt?: number;
   idempotencyKey?: string;
   costCapUsd?: number;
+  maintenanceActionId?: string;
 } {
   return tag
     ? {
@@ -728,6 +738,7 @@ export function coordinatorFields(tag: CoordinatorTag | undefined): {
             }
           : {}),
         idempotencyKey: tag.idempotencyKey,
+        ...(tag.maintenanceActionId !== undefined ? { maintenanceActionId: tag.maintenanceActionId } : {}),
         ...(tag.costCapUsd !== undefined ? { costCapUsd: tag.costCapUsd } : {}),
       }
     : {};
@@ -741,7 +752,7 @@ export function coordinatorFields(tag: CoordinatorTag | undefined): {
  *  its two surfaces: the card the bot redraws and the final run record. */
 export interface CoordinatorInstance {
   id: string;
-  kind: "ship";
+  kind: "ship" | "maintenance";
   /** The requesting person (platform-namespaced); every child is dispatched as them. */
   userId: string;
   userName?: string;
@@ -893,6 +904,7 @@ export interface RecoveryAccounting {
   spendUsd: number;
   children: { runId: string; key: string; usd: number }[];
   grant: Grant;
+  grantSource?: GrantSource;
   renewalsSpent: number;
 }
 
@@ -1066,6 +1078,8 @@ export interface CoordinatorUnit {
    *  (null once any run's cost is unknown), `handoff` that child's lists, and
    *  `wakes` how many wakes this idle has answered — zero at the write. */
   idle?: UnitIdle;
+  /** Current action and per-call outcomes; only the owner effect transition may change it. */
+  currentEffect?: UnitCurrentEffect;
   /** Exact display proposal admitted with the latest settlement CAS. */
   reportDelivery?: CoordinatorReportAdmission;
   /** Answers to indexed idle waits, keyed by the wait step's durable identity. */
@@ -1082,6 +1096,8 @@ export interface CoordinatorUnit {
     at: number;
     gate?: RoundGate;
     patternContinuation?: true;
+    /** The actual accepted maintenance child retains its one bounded admission. */
+    maintenance?: { actionId: string; runId: string; budgetUsd: number };
   }>;
   /** An explicit recovery claim for this same durable unit. It is mutually
    * exclusive with both `idle` and `ending`; legacy readers otherwise keep
@@ -1091,7 +1107,10 @@ export interface CoordinatorUnit {
   recoveryReceipt?: OriginalUnitRecoveryReceipt;
   /** A recovered review that reached a person-only question. Recovery settles
    * truthfully instead of opening an idle renewal or replacement pipeline. */
-  recoveryHold?: { cause: "human"; gate: HumanGatePending } | { cause: "draft"; pr: { number: number; url: string } };
+  recoveryHold?:
+    | { cause: "human"; gate: HumanGatePending }
+    | { cause: "draft"; pr: { number: number; url: string } }
+    | { cause: "blocked" };
   /** How the unit ended: the ending's kind and the thread's report, when it
    *  has. `cause` names the machine's reason behind a driver-posted kind;
    *  `step` and `round` locate that reason without parsing the report. For a
@@ -1106,6 +1125,8 @@ export interface CoordinatorUnit {
     round?: number;
     /** Producer facts; absence identifies a legacy or unprojected ending. */
     outcome?: ShipOutcome;
+    /** Original thread rendering retained before immutable report freeze. */
+    threadReport?: string;
     /** Original private report delivery identity, committed with its outcome. */
     deliveryId?: string;
   };
@@ -1122,9 +1143,43 @@ export function preserveWorkBrief(current: CoordinatorUnit | undefined, replacem
   };
 }
 
+/** Failed-create cleanup can discard a draft, never evidence owned by prior work. */
+export function coordinatorUnitCanBeDiscarded(json: string): boolean {
+  let value: unknown;
+  try {
+    value = JSON.parse(json);
+  } catch {
+    return false;
+  }
+  return (
+    isCoordinatorUnit(value) &&
+    value.rounds.length === 0 &&
+    Object.keys(value).every((field) =>
+      [
+        "instanceId",
+        "unit",
+        "slug",
+        "title",
+        "branch",
+        "dependsOn",
+        "rounds",
+        "workBrief",
+        "context",
+        "generatedTask",
+        "threadEvidence",
+        "threadKey",
+        "sourceUrl",
+        "reviewThread",
+        "issue",
+        "record",
+      ].includes(field),
+    )
+  );
+}
+
 export class CoordinatorUnitWriteConflict extends Error {
   constructor() {
-    super("coordinator unit is settled; replacement requires compare-and-replace");
+    super("coordinator unit write conflicts with retained state");
     this.name = "CoordinatorUnitWriteConflict";
   }
 }
@@ -1149,7 +1204,7 @@ export function prepareUnfencedUnitWrite(
 export const RECOVERY_ROW_MAX_BYTES = 224 * 1024;
 export const RECOVERY_SETTLEMENT_MAX_BYTES = 160 * 1024;
 export function hasRecoverySettlementCapacity(unit: CoordinatorUnit): boolean {
-  const { ending: _ending, recovery, ...rest } = unit;
+  const { ending: _ending, recovery, ...rest } = reserveActiveEffect(unit);
   const { previousEnding: _previousEnding, ...claim } = recovery ?? {};
   const metadata = { ...rest, ...(recovery ? { recovery: claim } : {}) };
   return (
@@ -1158,11 +1213,66 @@ export function hasRecoverySettlementCapacity(unit: CoordinatorUnit): boolean {
   );
 }
 
+/** Account for receipts not yet written; the projection is never stored. */
+function reserveActiveEffect(unit: CoordinatorUnit): CoordinatorUnit {
+  const cell = unit.currentEffect;
+  if (cell?.phase !== "active") return unit;
+  const maintenance = cell.execution.maintenance;
+  const rounds =
+    maintenance &&
+    cell.calls.some((call) => call.operation === "spawn" && call.agent === "coding") &&
+    !unit.rounds.some((round) => round.maintenance?.actionId === maintenance.id)
+      ? [
+          ...unit.rounds,
+          {
+            index: Math.max(0, ...unit.rounds.map((round) => round.index)) + 1,
+            agent: "coding",
+            outcome: "started",
+            at: maintenance.admittedAt,
+            maintenance: {
+              actionId: maintenance.id,
+              runId: "r".repeat(64),
+              budgetUsd: maintenance.bounds.spendCapUsd!,
+            },
+          },
+        ]
+      : unit.rounds;
+  return { ...unit, rounds, currentEffect: reserveUnitEffectOutcomes(cell) };
+}
+export function hasUnitEffectCapacity(unit: CoordinatorUnit): boolean {
+  const maximum = reserveActiveEffect(unit);
+  const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
+  return (
+    maximum.rounds.length <= MAX_ROUNDS &&
+    bytes(maximum.currentEffect) <= UNIT_EFFECT_MAX_BYTES &&
+    bytes(maximum) <= RECOVERY_ROW_MAX_BYTES &&
+    (unit.recovery === undefined || hasRecoverySettlementCapacity(unit))
+  );
+}
+
 export function permitsRecoveryMetadataWrite(
   current: CoordinatorUnit | undefined,
   replacement: CoordinatorUnit,
   checked = false,
 ): boolean {
+  if (
+    JSON.stringify(current?.rounds.filter((round) => round.maintenance) ?? []) !==
+    JSON.stringify(replacement.rounds.filter((round) => round.maintenance))
+  )
+    return false;
+  if (JSON.stringify(current?.currentEffect) !== JSON.stringify(replacement.currentEffect)) return false;
+  if (replacement.currentEffect?.phase === "active" && !hasUnitEffectCapacity(replacement)) return false;
+  if (
+    current?.currentEffect?.phase === "active" &&
+    (current.branch !== replacement.branch ||
+      current.threadKey !== replacement.threadKey ||
+      current.lastPush !== replacement.lastPush ||
+      JSON.stringify(current.pr) !== JSON.stringify(replacement.pr) ||
+      JSON.stringify(current.publication) !== JSON.stringify(replacement.publication) ||
+      JSON.stringify(current.recovery) !== JSON.stringify(replacement.recovery))
+  )
+    return false;
+  if (current?.startedAt !== undefined && replacement.startedAt !== current.startedAt) return false;
   if (current?.adoption !== undefined && !checked && JSON.stringify(current) !== JSON.stringify(replacement))
     return false;
   if (JSON.stringify(current?.adoption) !== JSON.stringify(replacement.adoption)) {
@@ -1251,10 +1361,12 @@ const isFinite = (v: unknown): v is number => typeof v === "number" && Number.is
 /** A count the writers produce: a non-negative integer, never a fraction, a negative or NaN. */
 const isCount = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0;
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
-const isPr = (v: unknown): boolean => isObject(v) && isFinite(v.number) && isText(v.url, 2048);
+const isPr = (v: unknown): boolean =>
+  isObject(v) && Number.isSafeInteger(v.number) && (v.number as number) > 0 && isText(v.url, 2048);
 const isResume = (v: unknown): boolean =>
   isObject(v) &&
-  isFinite(v.pr) &&
+  Number.isSafeInteger(v.pr) &&
+  (v.pr as number) > 0 &&
   (v.headSha === undefined || isText(v.headSha)) &&
   (v.url === undefined || isText(v.url, 2048));
 const isFullSha = (v: unknown): v is string => typeof v === "string" && /^[0-9a-f]{40}$/i.test(v);
@@ -1278,12 +1390,12 @@ export const isSavedFindingsPatch = (v: unknown): v is SavedFindingsPatch =>
   isFullSha(v.sourceHeadSha) &&
   v.baseHeadSha !== v.sourceHeadSha &&
   (v.kind === "bundle" ? v.baseHeadSha === v.targetHeadSha : v.baseHeadSha !== v.targetHeadSha);
-const isPublication = (v: unknown): v is ExistingPrPublicationBinding =>
+export const isExistingPrPublicationBinding = (v: unknown): v is ExistingPrPublicationBinding =>
   isObject(v) &&
   typeof v.repo === "string" &&
   REPO_SLUG.test(v.repo) &&
   typeof v.pr === "number" &&
-  Number.isInteger(v.pr) &&
+  Number.isSafeInteger(v.pr) &&
   v.pr > 0 &&
   isText(v.headRef) &&
   isText(v.baseRef) &&
@@ -1312,7 +1424,12 @@ export function isCoordinatorInstance(v: unknown): v is CoordinatorInstance {
   if (!isObject(v)) return false;
   const r = v;
   if (typeof r.id !== "string" || !INSTANCE_ID_PATTERN.test(r.id)) return false;
-  if (r.kind !== "ship") return false;
+  if (r.kind !== "ship" && r.kind !== "maintenance") return false;
+  if (
+    r.kind === "maintenance" &&
+    (r.admission !== undefined || r.runId !== undefined || r.plan !== undefined || r.generatedTask !== undefined)
+  )
+    return false;
   if (!isText(r.userId) || !isText(r.channelId) || !isText(r.threadKey)) return false;
   if (!isOptionalText(r.userName) || !isOptionalText(r.channelName) || !isOptionalText(r.sourceUrl)) return false;
   if (r.generatedTask !== undefined && !isGeneratedTask(r.generatedTask)) return false;
@@ -1448,12 +1565,86 @@ const isRecoveryAccounting = (v: unknown): v is RecoveryAccounting =>
   Number.isSafeInteger(v.grant.renewals) &&
   (v.grant.costCapUsd === undefined || (isDollars(v.grant.costCapUsd) && v.grant.costCapUsd > v.spendUsd)) &&
   isDollars(v.renewalsSpent) &&
+  (v.grantSource === undefined || ["org", "channel", "user", "run"].includes(v.grantSource as string)) &&
   Number.isSafeInteger(v.renewalsSpent) &&
   v.renewalsSpent <= v.grant.renewals;
+
+/** Decode a recorded result; owner and PR binding belong to the containing row. */
+export function isCoordinatorEnding(v: unknown): v is NonNullable<CoordinatorUnit["ending"]> {
+  return (
+    isObject(v) &&
+    isText(v.kind) &&
+    isText(v.report, MAX_REPORT) &&
+    (v.threadReport === undefined || (typeof v.threadReport === "string" && v.threadReport.length <= MAX_REPORT)) &&
+    isFinite(v.at) &&
+    (v.deliveryId === undefined || (typeof v.deliveryId === "string" && STEP_NAME_PATTERN.test(v.deliveryId))) &&
+    (v.outcome === undefined || (isShipOutcome(v.outcome) && v.outcome.kind === v.kind)) &&
+    (v.cause === undefined || isText(v.cause, 64)) &&
+    (v.step === undefined || (typeof v.step === "string" && STEP_NAME_PATTERN.test(v.step))) &&
+    (v.round === undefined || (typeof v.round === "number" && Number.isInteger(v.round) && v.round >= 0))
+  );
+}
+
+/** Admission fields retained by the recovery journal; lease timing stays on the unit. */
+export function isRecoveryAdmissionFields(r: unknown): boolean {
+  return (
+    isObject(r) &&
+    (r.kind === "findings" || r.kind === "review" || r.kind === "coding") &&
+    typeof r.round === "number" &&
+    Number.isInteger(r.round) &&
+    (r.kind === "coding" ? r.round === 0 : r.round >= 1) &&
+    (r.patternContinuations === undefined ||
+      (Number.isSafeInteger(r.patternContinuations) &&
+        (r.patternContinuations as number) >= 0 &&
+        (r.patternContinuations as number) <= 2 &&
+        (r.patternContinuations as number) < r.round)) &&
+    typeof r.expectedHeadSha === "string" &&
+    /^[0-9a-f]{40}$/i.test(r.expectedHeadSha) &&
+    typeof r.step === "string" &&
+    STEP_NAME_PATTERN.test(r.step) &&
+    (r.kind === "coding"
+      ? isText(r.codingRunId) &&
+        isText(r.codingKey) &&
+        r.accounting !== undefined &&
+        r.externalReview === undefined &&
+        r.reviewRunId === undefined &&
+        r.reviewKey === undefined &&
+        r.findings === undefined &&
+        r.findingsRunId === undefined &&
+        r.patch === undefined
+      : isText(r.reviewRunId) && isText(r.reviewKey)) &&
+    (r.accounting === undefined || isRecoveryAccounting(r.accounting)) &&
+    (r.renewed === undefined ||
+      (r.renewed === true &&
+        r.kind === "findings" &&
+        isRecoveryAccounting(r.accounting) &&
+        r.accounting.renewalsSpent > 0)) &&
+    (r.externalReview === undefined ||
+      (isRecoveryReview(r.externalReview) &&
+        r.kind === "review" &&
+        isRecoveryAccounting(r.accounting) &&
+        r.findings === undefined &&
+        r.findingsRunId === undefined)) &&
+    (r.findingsRunId === undefined || isText(r.findingsRunId)) &&
+    (r.findingsKey === undefined || isText(r.findingsKey)) &&
+    ((r.findingsRunId === undefined && r.findingsKey === undefined) ||
+      (r.kind === "review" && r.findingsRunId !== undefined && r.findingsKey !== undefined)) &&
+    (r.findings === undefined || (Array.isArray(r.findings) && r.findings.every(isFindingShape))) &&
+    (r.priorFindings === undefined ||
+      (r.kind === "review" &&
+        r.round >= 2 &&
+        Array.isArray(r.priorFindings) &&
+        r.priorFindings.every(isFindingShape))) &&
+    (r.patch === undefined || (r.kind === "findings" && isSavedFindingsPatch(r.patch))) &&
+    typeof r.workflowId === "string" &&
+    INSTANCE_ID_PATTERN.test(r.workflowId)
+  );
+}
 
 export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
   if (!isObject(v)) return false;
   const r = v;
+  if (r.currentEffect !== undefined && !isUnitCurrentEffect(r.currentEffect)) return false;
   if (
     r.history !== undefined &&
     (!isObject(r.history) ||
@@ -1482,7 +1673,7 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
   if (r.issue !== undefined && !isFinite(r.issue)) return false;
   if (r.pr !== undefined && !isPr(r.pr)) return false;
   if (r.resume !== undefined && !isResume(r.resume)) return false;
-  if (r.publication !== undefined && !isPublication(r.publication)) return false;
+  if (r.publication !== undefined && !isExistingPrPublicationBinding(r.publication)) return false;
   if (
     r.adoption !== undefined &&
     (!isObject(r.adoption) ||
@@ -1521,7 +1712,16 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
         isText(x.outcome) &&
         isFinite(x.at) &&
         (x.gate === undefined || isRoundGate(x.gate)) &&
-        (x.patternContinuation === undefined || x.patternContinuation === true),
+        (x.patternContinuation === undefined || x.patternContinuation === true) &&
+        (x.maintenance === undefined ||
+          (isObject(x.maintenance) &&
+            Object.keys(x.maintenance).every((key) => ["actionId", "runId", "budgetUsd"].includes(key)) &&
+            typeof x.maintenance.actionId === "string" &&
+            /^m_[a-f0-9]{64}$/.test(x.maintenance.actionId) &&
+            typeof x.maintenance.runId === "string" &&
+            RUN_ID_PATTERN.test(x.maintenance.runId) &&
+            isFinite(x.maintenance.budgetUsd) &&
+            x.maintenance.budgetUsd > 0)),
     )
   )
     return false;
@@ -1533,63 +1733,17 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
         (r.history !== undefined &&
           typeof r.recovery.actionId === "string" &&
           /^r_[a-f0-9]{64}$/.test(r.recovery.actionId))) &&
-      (r.recovery.kind === "findings" || r.recovery.kind === "review" || r.recovery.kind === "coding") &&
-      typeof r.recovery.round === "number" &&
-      Number.isInteger(r.recovery.round) &&
-      (r.recovery.kind === "coding" ? r.recovery.round === 0 : r.recovery.round >= 1) &&
-      (r.recovery.patternContinuations === undefined ||
-        (Number.isSafeInteger(r.recovery.patternContinuations) &&
-          (r.recovery.patternContinuations as number) >= 0 &&
-          (r.recovery.patternContinuations as number) <= 2 &&
-          (r.recovery.patternContinuations as number) < r.recovery.round)) &&
-      typeof r.recovery.expectedHeadSha === "string" &&
-      /^[0-9a-f]{40}$/i.test(r.recovery.expectedHeadSha) &&
+      isRecoveryAdmissionFields(r.recovery) &&
       isFinite(r.recovery.remainingMs) &&
       r.recovery.remainingMs > 0 &&
       isFinite(r.recovery.claimedAt) &&
-      typeof r.recovery.step === "string" &&
-      STEP_NAME_PATTERN.test(r.recovery.step) &&
-      (r.recovery.kind === "coding"
-        ? isText(r.recovery.codingRunId) &&
-          isText(r.recovery.codingKey) &&
-          r.recovery.accounting !== undefined &&
-          r.recovery.externalReview === undefined &&
-          r.recovery.reviewRunId === undefined &&
-          r.recovery.reviewKey === undefined &&
-          r.recovery.findings === undefined &&
-          r.recovery.findingsRunId === undefined &&
-          r.recovery.patch === undefined
-        : isText(r.recovery.reviewRunId) && isText(r.recovery.reviewKey)) &&
-      (r.recovery.accounting === undefined || isRecoveryAccounting(r.recovery.accounting)) &&
       (r.recovery.renewed === undefined ||
-        (r.recovery.renewed === true &&
-          r.recovery.kind === "findings" &&
-          isRecoveryAccounting(r.recovery.accounting) &&
+        (isRecoveryAccounting(r.recovery.accounting) &&
           r.recovery.accounting.renewalsSpent > (r.segments?.length ?? 0))) &&
-      (r.recovery.externalReview === undefined ||
-        (isRecoveryReview(r.recovery.externalReview) &&
-          r.recovery.kind === "review" &&
-          isRecoveryAccounting(r.recovery.accounting) &&
-          r.recovery.findings === undefined &&
-          r.recovery.findingsRunId === undefined)) &&
-      (r.recovery.findingsRunId === undefined || isText(r.recovery.findingsRunId)) &&
-      (r.recovery.findingsKey === undefined || isText(r.recovery.findingsKey)) &&
-      ((r.recovery.findingsRunId === undefined && r.recovery.findingsKey === undefined) ||
-        (r.recovery.kind === "review" &&
-          r.recovery.findingsRunId !== undefined &&
-          r.recovery.findingsKey !== undefined)) &&
-      (r.recovery.findings === undefined ||
-        (Array.isArray(r.recovery.findings) && r.recovery.findings.every(isFindingShape))) &&
-      (r.recovery.priorFindings === undefined ||
-        (r.recovery.kind === "review" &&
-          r.recovery.round >= 2 &&
-          Array.isArray(r.recovery.priorFindings) &&
-          r.recovery.priorFindings.every(isFindingShape))) &&
-      (r.recovery.patch === undefined || (r.recovery.kind === "findings" && isSavedFindingsPatch(r.recovery.patch))) &&
       (r.recovery.previousBinding === undefined ||
         (isObject(r.recovery.previousBinding) &&
           (r.recovery.previousBinding.publication === undefined ||
-            isPublication(r.recovery.previousBinding.publication)) &&
+            isExistingPrPublicationBinding(r.recovery.previousBinding.publication)) &&
           (r.recovery.previousBinding.lastPush === undefined ||
             (typeof r.recovery.previousBinding.lastPush === "string" &&
               /^[0-9a-f]{40}$/i.test(r.recovery.previousBinding.lastPush))))) &&
@@ -1619,6 +1773,7 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
     r.recoveryHold !== undefined &&
     (!isObject(r.recoveryHold) ||
       !(
+        (r.recoveryHold.cause === "blocked" && Object.keys(r.recoveryHold).length === 1) ||
         (r.recoveryHold.cause === "human" && isHumanGatePending(r.recoveryHold.gate)) ||
         (r.recoveryHold.cause === "draft" &&
           isObject(r.recoveryHold.pr) &&
@@ -1629,27 +1784,29 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
   )
     return false;
   if (r.recovery !== undefined && (r.idle !== undefined || r.ending !== undefined)) return false;
+  if (r.ending !== undefined && !isCoordinatorEnding(r.ending)) return false;
   if (
-    r.ending !== undefined &&
-    !(
-      isObject(r.ending) &&
-      isText(r.ending.kind) &&
-      isText(r.ending.report, MAX_REPORT) &&
-      isFinite(r.ending.at) &&
-      (r.ending.deliveryId === undefined ||
-        (typeof r.ending.deliveryId === "string" && STEP_NAME_PATTERN.test(r.ending.deliveryId))) &&
-      (r.ending.outcome === undefined ||
-        (isShipOutcome(r.ending.outcome) &&
-          r.ending.outcome.kind === r.ending.kind &&
-          (r.ending.outcome.terminalPr === undefined ||
-            (isObject(r.pr) &&
-              r.ending.outcome.terminalPr.number === r.pr.number &&
-              r.ending.outcome.terminalPr.url === r.pr.url)))) &&
-      (r.ending.cause === undefined || isText(r.ending.cause, 64)) &&
-      (r.ending.step === undefined || (typeof r.ending.step === "string" && STEP_NAME_PATTERN.test(r.ending.step))) &&
-      (r.ending.round === undefined ||
-        (typeof r.ending.round === "number" && Number.isInteger(r.ending.round) && r.ending.round >= 0))
-    )
+    isObject(r.ending) &&
+    isShipOutcome(r.ending.outcome) &&
+    r.ending.outcome.terminalPr !== undefined &&
+    (!isObject(r.pr) ||
+      r.ending.outcome.terminalPr.number !== r.pr.number ||
+      r.ending.outcome.terminalPr.url !== r.pr.url)
+  )
+    return false;
+  if (
+    isObject(r.ending) &&
+    isObject(r.ending.outcome) &&
+    r.ending.outcome.recoveryStop !== undefined &&
+    (!isObject(r.recoveryReceipt) || !isText(r.recoveryReceipt.codingRunId))
+  )
+    return false;
+  if (
+    r.recoveryHold !== undefined &&
+    (!isObject(r.ending) ||
+      r.ending.kind !== "held" ||
+      !isObject(r.recoveryReceipt) ||
+      (isObject(r.recoveryHold) && r.recoveryHold.cause === "blocked" && !isText(r.recoveryReceipt.codingRunId)))
   )
     return false;
   if (r.startedAt !== undefined && !isFinite(r.startedAt)) return false;
@@ -1744,13 +1901,21 @@ export async function sendChildSignal(
     runId: string;
     parentInstanceId: string;
     transportWorkflowId?: string;
+    maintenanceActionId?: string;
     kind: "interrupted" | "resumed";
     reason: string;
     at: number;
   },
 ): Promise<RunFinishedSend> {
   const { runId, parentInstanceId: instance, kind, reason, at } = signal;
-  if (!workflow) return { kind: "no-binding", instance };
+  if (signal.maintenanceActionId !== undefined && !isMaintenanceActionId(signal.maintenanceActionId))
+    return {
+      kind: "failed",
+      instance,
+      type: kind === "interrupted" ? childInterruptedEventType(runId) : childResumedEventType(runId),
+      reason: "invalid maintenance transport identity",
+    };
+  if (isMaintenanceActionId(signal.maintenanceActionId) || !workflow) return { kind: "no-binding", instance };
   const type = kind === "interrupted" ? childInterruptedEventType(runId) : childResumedEventType(runId);
   try {
     const handle = await workflow.get(signal.transportWorkflowId ?? instance);
@@ -1770,11 +1935,19 @@ export async function sendRunFinished(
     finishedAt: number;
     parentInstanceId?: string;
     transportWorkflowId?: string;
+    maintenanceActionId?: string;
   },
 ): Promise<RunFinishedSend> {
   const instance = record.parentInstanceId;
   if (instance === undefined) return { kind: "none" };
-  if (!workflow) return { kind: "no-binding", instance };
+  if (record.maintenanceActionId !== undefined && !isMaintenanceActionId(record.maintenanceActionId))
+    return {
+      kind: "failed",
+      instance,
+      type: runFinishedEventType(record.id),
+      reason: "invalid maintenance transport identity",
+    };
+  if (isMaintenanceActionId(record.maintenanceActionId) || !workflow) return { kind: "no-binding", instance };
   const type = runFinishedEventType(record.id);
   const payload: RunFinishedPayload = {
     runId: record.id,

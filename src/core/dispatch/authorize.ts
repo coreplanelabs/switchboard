@@ -8,6 +8,7 @@
 // the target has landed and the ack card is up, the head gates around the
 // workspace attach.
 import type { ConfigStore } from "../../config.js";
+import type { ExistingPrPublicationBinding } from "../coordinator/contract.js";
 import type { AgentDef } from "../../agents/registry.js";
 import { chatActorOf } from "../authz/actor.js";
 import type { BoundaryScope, ProfileRefusal, ProfileResolution, RunProfile } from "../../config/profile.js";
@@ -378,14 +379,44 @@ export async function authorizeRepo(
  * the reply live in `checkPrHeadPreflight`).
  */
 export async function authorizePrHead(
-  ctx: GateContext & GateCard & { agent: AgentDef; directives: RequestDirectives; repoCtx: RepoContext },
-): Promise<Gate<"pr_head_unknown">> {
+  ctx: GateContext &
+    GateCard & {
+      agent: AgentDef;
+      directives: RequestDirectives;
+      repoCtx: RepoContext;
+      publication?: ExistingPrPublicationBinding;
+    },
+): Promise<Gate<"pr_head_unknown" | "workspace_head_mismatch">> {
   const { msg, refuse, card, shell, closeLines, clock, agent, directives, repoCtx } = ctx;
   // Unknown-head check (docs/reference/specs/agent-review.md item 11): a review whose PR
   // head could not be resolved is a guaranteed refusal downstream — not
   // started instead, before any attach, one named reply (the decision and
   // the reply live in `checkPrHeadPreflight`; otherwise a minute and a
   // model turn are spent on a Slack-only "cannot review").
+  const bound = ctx.publication;
+  if (
+    agent.name === "review" &&
+    bound &&
+    (repoCtx.repo?.toLowerCase() !== bound.repo.toLowerCase() ||
+      repoCtx.pr !== bound.pr ||
+      repoCtx.ref !== bound.headRef ||
+      repoCtx.baseRef !== bound.baseRef ||
+      repoCtx.headSha?.toLowerCase() !== bound.expectedHeadSha.toLowerCase())
+  ) {
+    await refuse(
+      refusalOf("workspace_head_mismatch", "The review target changed from its saved pull request and commit."),
+      () =>
+        card.done(
+          shell.close({
+            kind: "not_started",
+            icon: "🔀",
+            reason: "workspace head mismatch",
+            ...closeLines(clock(), false),
+          }),
+        ),
+    );
+    return { kind: "refused", reason: "workspace_head_mismatch" };
+  }
   const preflight = checkPrHeadPreflight({ agent, requestText: directives.text, repoCtx });
   if (!preflight.ok) {
     console.log(`[review] ${msg.threadKey} not started: PR head unknown (${preflight.where})`);
@@ -479,6 +510,7 @@ export async function authorizeAttachedHead(
       selection: ExecutorSelection;
       repoCtx: RepoContext;
       githubDoor?: { baseUrl: string };
+      publication?: ExistingPrPublicationBinding;
       stopSignal: AbortSignal;
       root: Span;
     },
@@ -494,15 +526,20 @@ export async function authorizeAttachedHead(
   // model to turn an infrastructure failure into a finding.
   let verifiedAtAttach = false;
   let headAdopted = false;
-  if (!resume && agent.name === "review" && repoCtx.pr !== undefined && repoCtx.repo) {
+  if (
+    (!resume || ctx.publication !== undefined) &&
+    agent.name === "review" &&
+    repoCtx.pr !== undefined &&
+    repoCtx.repo
+  ) {
     const pr = { repo: repoCtx.repo, number: repoCtx.pr };
     const expectedHeadSha = repoCtx.headSha;
-    const guard = await root
+    let guard = await root
       .span("dispatch.gate.attached_head", async (span) => {
         const command = selection.seeded?.workspace
           ? `git -C ${shellQuote(selection.seeded.workspace)} rev-parse HEAD`
           : "git rev-parse HEAD";
-        if (!resident && selection.seeded === undefined && expectedHeadSha !== undefined) {
+        if (!resume && !resident && selection.seeded === undefined && expectedHeadSha !== undefined) {
           await executor.exec(
             coldReviewCheckoutCommand(
               { ...repoCtx, repo: pr.repo, pr: pr.number, headSha: expectedHeadSha },
@@ -579,6 +616,12 @@ export async function authorizeAttachedHead(
         throw err;
       });
     if (stopSignal.aborted || guard.outcome === "stopped") return { kind: "stopped" };
+    if (
+      guard.outcome === "adopted" &&
+      ctx.publication &&
+      guard.headSha.toLowerCase() !== ctx.publication.expectedHeadSha.toLowerCase()
+    )
+      guard = { outcome: "refused", reply: "The attached review head changed from its saved commit." };
     if (guard.outcome === "verified") {
       verifiedAtAttach = true;
     } else if (guard.outcome === "adopted") {

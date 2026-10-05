@@ -8,6 +8,7 @@ import {
   idempotencyKeyFor,
   INSTANCE_ID_PATTERN,
   isCoordinatorInstance,
+  isCoordinatorEnding,
   runFinishedEventType,
   childInterruptedEventType,
   childResumedEventType,
@@ -332,6 +333,34 @@ describe("isCoordinatorUnit — one unit's row", () => {
     startedAt: 900,
   };
 
+  it("binds terminal recovery facts to a coding receipt and held ending", () => {
+    const receipt = { codingRunId: "run-coding", workflowId: "recovery-coding", at: 2000 };
+    const ending = {
+      kind: "aborted",
+      report: "No continuation admitted",
+      at: 2000,
+      outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 0, recoveryStop: "continuation_not_admitted" },
+    };
+    expect(isCoordinatorUnit({ ...unit, ending, recoveryReceipt: receipt })).toBe(true);
+    expect(isCoordinatorUnit({ ...unit, ending })).toBe(false);
+    expect(
+      isCoordinatorUnit({
+        ...unit,
+        ending,
+        recoveryReceipt: { reviewRunId: "run-review", workflowId: "recovery-review", at: 2000 },
+      }),
+    ).toBe(false);
+    const held = {
+      ...unit,
+      ending: { kind: "held", report: "Blocked", at: 2000 },
+      recoveryReceipt: receipt,
+      recoveryHold: { cause: "blocked" },
+    };
+    expect(isCoordinatorUnit(held)).toBe(true);
+    expect(isCoordinatorUnit({ ...held, ending: unit.ending })).toBe(false);
+    expect(isCoordinatorUnit({ ...held, recoveryReceipt: undefined })).toBe(false);
+  });
+
   it("rejects malformed or retargeted report delivery admission", () => {
     const reportDelivery = {
       version: 1,
@@ -634,6 +663,36 @@ describe("isCoordinatorUnit — one unit's row", () => {
 });
 
 describe("sendRunFinished — the event a terminal record sends", () => {
+  it("never addresses a native Workflow for an explicitly typed maintenance child", async () => {
+    let calls = 0;
+    const sender: WorkflowSender = {
+      get: async () => {
+        calls++;
+        throw new Error("must not get");
+      },
+    };
+    const maintenanceActionId = "m_" + "a".repeat(64);
+    expect(
+      await sendRunFinished(sender, {
+        id: "real-child",
+        status: "completed",
+        finishedAt: 2,
+        parentInstanceId: "logical_owner",
+        maintenanceActionId,
+      }),
+    ).toEqual({ kind: "no-binding", instance: "logical_owner" });
+    expect(
+      await sendChildSignal(sender, {
+        runId: "real-child",
+        parentInstanceId: "logical_owner",
+        maintenanceActionId,
+        kind: "resumed",
+        reason: "reclaimed",
+        at: 2,
+      }),
+    ).toEqual({ kind: "no-binding", instance: "logical_owner" });
+    expect(calls).toBe(0);
+  });
   function workflow(behaviour: "ok" | "not-running" = "ok") {
     const sent: Array<{ instance: string; type: string; payload: unknown }> = [];
     const sender: WorkflowSender = {
@@ -895,5 +954,17 @@ describe("capThreadEvent and isThreadEvent — one event row of a unit's list", 
     expect(isThreadEvent({ ...event, seq: 0 })).toBe(false);
     expect(isThreadEvent({ ...event, seq: 1, mode: "queue" })).toBe(false);
     expect(isThreadEvent({ seq: 1, text: "x", mode: "steer", at: 1 })).toBe(false); // no sender
+  });
+});
+
+// Feature: docs/reference/specs/orchestration-plane.md — the original terminal rendering survives a crash before immutable report freeze.
+describe("retained terminal report rendering", () => {
+  it("accepts a bounded original thread rendering including silence and rejects malformed bytes", () => {
+    const ending = { kind: "terminated", report: "original detail", at: 1 };
+    expect(isCoordinatorEnding(ending)).toBe(true);
+    expect(isCoordinatorEnding({ ...ending, threadReport: "original summary" })).toBe(true);
+    expect(isCoordinatorEnding({ ...ending, threadReport: "" })).toBe(true);
+    for (const threadReport of [null, 1, {}, "x".repeat(20_001)])
+      expect(isCoordinatorEnding({ ...ending, threadReport })).toBe(false);
   });
 });

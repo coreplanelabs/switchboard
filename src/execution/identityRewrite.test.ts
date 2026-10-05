@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type { ComparedCommit, CompareResult } from "./githubPulls.js";
 import {
@@ -10,6 +11,7 @@ import {
   type BranchStartState,
   type IdentityPair,
   type RewriteApi,
+  type IdentityRefPublication,
 } from "./identityRewrite.js";
 
 // Feature: docs/reference/specs/agent-coding.md item 2 (record 0062, "The
@@ -67,6 +69,7 @@ const runRewrite = (
     bot?: IdentityPair | undefined;
     expectedTip?: string;
     readOnly?: true;
+    refPublication?: IdentityRefPublication | false;
   } = {},
 ) =>
   rewriteRunCommits({
@@ -78,10 +81,145 @@ const runRewrite = (
     bot: "bot" in over ? over.bot : BOT,
     ...(over.requester !== undefined ? { requester: over.requester } : {}),
     api,
+    ...(over.refPublication === false
+      ? {}
+      : {
+          refPublication: over.refPublication ?? {
+            begin: async () => ({ finish: async () => true }),
+          },
+        }),
     ...(over.readOnly ? { readOnly: true as const } : {}),
   });
 
 describe("rewriteRunCommits — the run's commits carry only the allowed identities (record 0062)", () => {
+  it("reproduces a frozen ref proposal after a crash before begin by preserving deterministic commit dates", async () => {
+    const old = "a".repeat(40);
+    let head = old;
+    let preparations = 0;
+    let begins = 0;
+    let frozen: { repo: string; update: { ref: string; old: string; next: string } } | undefined;
+    const created: Array<Parameters<RewriteApi["createCommit"]>[1]> = [];
+    const moves: string[] = [];
+    const api: RewriteApi = {
+      compareRange: async () => ({
+        totalCommits: 1,
+        commits: [head === old ? commit(old, { author: RAJ }) : commit(head)],
+      }),
+      createCommit: async (_repo, value) => {
+        created.push(value);
+        preparations++;
+        const native = {
+          ...value,
+          committer: {
+            ...value.committer,
+            date: "date" in value.committer ? value.committer.date : `native-now-${preparations}`,
+          },
+        };
+        return createHash("sha1").update(JSON.stringify(native)).digest("hex");
+      },
+      forceMoveRef: async (_repo, _branch, next, expected) => {
+        expect(head).toBe(expected);
+        moves.push(next);
+        head = next;
+      },
+    };
+    const refPublication: IdentityRefPublication = {
+      begin: async (proposal) => {
+        begins++;
+        if (!frozen) frozen = structuredClone(proposal);
+        if (begins === 1 || JSON.stringify(frozen) !== JSON.stringify(proposal)) return undefined;
+        return { finish: async () => true };
+      },
+    };
+    expect((await runRewrite(api, { requester: IVY, expectedTip: old, refPublication })).kind).toBe("unreadable");
+    expect(moves).toEqual([]);
+    expect((await runRewrite(api, { requester: IVY, expectedTip: old, refPublication })).kind).toBe("rewritten");
+    expect(moves).toHaveLength(1);
+    expect(created.map((value) => value.committer)).toEqual([
+      { ...BOT, date: "2026-09-18T10:00:00Z" },
+      { ...BOT, date: "2026-09-18T10:00:00Z" },
+    ]);
+  });
+  it("requires original durable ref admission before a changed identity ref and records acceptance before verification", async () => {
+    const old = "a".repeat(40),
+      next = "b".repeat(40);
+    const compare = { totalCommits: 1, commits: [commit(old, { author: RAJ })] };
+    for (const refPublication of [
+      false,
+      { begin: async () => undefined },
+      {
+        begin: async () => {
+          throw new Error("lost admission acknowledgement");
+        },
+      },
+    ] as const) {
+      const { api, moved } = apiOf([compare]);
+      api.createCommit = async () => next;
+      expect(await runRewrite(api, { requester: IVY, expectedTip: old, refPublication })).toMatchObject({
+        kind: "unreadable",
+      });
+      expect(moved).toHaveLength(0);
+    }
+    const order: string[] = [];
+    const { api } = apiOf([compare, { totalCommits: 1, commits: [commit(next)] }]);
+    api.createCommit = async () => next;
+    api.forceMoveRef = async (_repo, branch, sha, expected) => {
+      expect({ branch, sha, expected }).toEqual({ branch: "feat/x", sha: next, expected: old });
+      order.push("write");
+    };
+    expect(
+      await runRewrite(api, {
+        requester: IVY,
+        expectedTip: old,
+        refPublication: {
+          begin: async (target) => {
+            expect(target).toEqual({ repo: "acme/api", update: { ref: "refs/heads/feat/x", old, next } });
+            order.push("pending");
+            return {
+              finish: async (outcome) => {
+                expect(outcome).toBe("accepted");
+                order.push("accepted");
+                return true;
+              },
+            };
+          },
+        },
+      }),
+    ).toMatchObject({ kind: "rewritten", tip: next });
+    expect(order).toEqual(["pending", "write", "accepted"]);
+  });
+
+  it("retains lost ref responses and failed durable acceptance without replay or success credit", async () => {
+    for (const lost of [true, false]) {
+      const old = "a".repeat(40),
+        next = "b".repeat(40);
+      const compare = { totalCommits: 1, commits: [commit(old, { author: RAJ })] };
+      const { api } = apiOf([compare]);
+      api.createCommit = async () => next;
+      const move = vi.fn(async () => {
+        if (lost) throw new Error("HTTP 422 may be a lost GraphQL mutation reply");
+      });
+      api.forceMoveRef = move;
+      let pending = false;
+      const finish = vi.fn(async () => false);
+      const refPublication: IdentityRefPublication = {
+        begin: async () => {
+          if (pending) return undefined;
+          pending = true;
+          return { finish };
+        },
+      };
+      expect(await runRewrite(api, { requester: IVY, expectedTip: old, refPublication })).toMatchObject({
+        kind: "unreadable",
+      });
+      expect(finish).toHaveBeenCalledWith(lost ? "unknown" : "accepted");
+      expect(await runRewrite(api, { requester: IVY, expectedTip: old, refPublication })).toMatchObject({
+        kind: "unreadable",
+      });
+      expect(move).toHaveBeenCalledTimes(1);
+      expect(pending).toBe(true);
+    }
+  });
   it("holds a published head requiring rewrite without creating commits or moving its ref", async () => {
     const { api, created, moved } = apiOf([{ totalCommits: 1, commits: [commit("a1b2", { author: RAJ })] }]);
     expect(await runRewrite(api, { requester: IVY, readOnly: true })).toMatchObject({ kind: "unreadable" });
@@ -136,7 +274,7 @@ describe("rewriteRunCommits — the run's commits carry only the allowed identit
         tree: "tree-b2c3",
         parents: ["a1b2"],
         author: { name: IVY.name, email: IVY.email, date: "2026-09-18T11:00:00Z" },
-        committer: { name: BOT.name, email: BOT.email },
+        committer: { name: BOT.name, email: BOT.email, date: "2026-09-18T11:00:00Z" },
       },
     ]);
     expect(moved).toEqual([{ branch: "feat/x", sha: "r1", expectedSha: "b2c3" }]);
@@ -150,7 +288,7 @@ describe("rewriteRunCommits — the run's commits carry only the allowed identit
       ]);
       const result = await runRewrite(api, { requester: IVY });
       expect(result.kind).toBe("rewritten");
-      expect(created[0].committer).toEqual({ name: BOT.name, email: BOT.email });
+      expect(created[0].committer).toEqual({ name: BOT.name, email: BOT.email, date: "2026-09-18T10:00:00Z" });
     }
   });
 
@@ -295,7 +433,7 @@ describe("rewriteRunCommits — the run's commits carry only the allowed identit
         tree: "tree-bbbb2222",
         parents: ["aaaa1111"],
         author: { name: IVY.name, email: IVY.email, date: "2026-09-18T10:00:00Z" },
-        committer: { name: BOT.name, email: BOT.email },
+        committer: { name: BOT.name, email: BOT.email, date: "2026-09-18T10:00:00Z" },
       },
     ]);
     expect(moved).toEqual([{ branch: "feat/x", sha: "r1", expectedSha: "bbbb2222" }]);
@@ -378,13 +516,13 @@ describe("rewriteRunCommits — the run's commits carry only the allowed identit
     expect(before.moved).toEqual([]);
   });
 
-  it("a ruleset's 422 on the ref move is unreadable with the rule named", async () => {
+  it("a ref move error remains unverified even when its prose names a ruleset", async () => {
     const { api } = apiOf([{ totalCommits: 1, commits: [commit("a1b2", { author: { ...RAJ } })] }]);
     api.forceMoveRef = async () => {
       throw new Error("ref move failed for feat/x: HTTP 422 force pushes are blocked by a ruleset");
     };
     const result = await runRewrite(api, { requester: IVY });
-    expect(result).toMatchObject({ kind: "unreadable", reason: expect.stringContaining("HTTP 422") });
+    expect(result).toMatchObject({ kind: "unreadable", reason: expect.stringContaining("outcome remains unverified") });
   });
 });
 

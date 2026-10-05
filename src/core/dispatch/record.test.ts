@@ -1184,3 +1184,112 @@ describe("assembleRunRecord — the pull request on the record (docs/reference/s
     expect("references" in assembleRunRecord(base())).toBe(false);
   });
 });
+
+describe("terminal review publication receipt", () => {
+  const receipt = (state: "pending" | "accepted" | "refused" | "uncertain") => ({
+    version: 1 as const,
+    runId: "review-owner",
+    state,
+    target: { repo: "acme/api", number: 7, commitId: "a".repeat(40) },
+    bodyHash: "b".repeat(64),
+  });
+  it.each(["pending", "accepted", "refused", "uncertain"] as const)(
+    "retains %s original publication independently of surviving events",
+    (state) => {
+      const row: LiveRunRow = {
+        runId: "review-owner",
+        threadKey: "slack:C1:1",
+        ownerGen: "original-generation",
+        leaseUntil: 100,
+        startedAt: 1,
+        phase: "live",
+        stop: null,
+        meta: {
+          agent: "review",
+          repo: "acme/api",
+          channelId: "slack:C1",
+          userId: "slack:UPERSON",
+          threadKey: "slack:C1:1",
+        },
+        card: null,
+        system: "",
+        tools: [],
+        state: { reviewPublication: receipt(state) },
+      };
+      const archived = reclaimedRunRecord({ row, events: [], status: "interrupted", finishedAt: 10 });
+      expect(archived.reviewPublication).toEqual(receipt(state));
+      expect(isRunRecord(archived)).toBe(true);
+      expect(fitRecordToBudget(archived, 2048).reviewPublication).toEqual(receipt(state));
+      expect(archived.events).toEqual([]);
+    },
+  );
+  it("does not launder malformed saved publication into an empty legacy record", () => {
+    const invalid = { ...receipt("uncertain"), bodyHash: "invalid" };
+    const row: LiveRunRow = {
+      runId: "review-owner",
+      threadKey: "slack:C1:1",
+      ownerGen: "original-generation",
+      leaseUntil: 100,
+      startedAt: 1,
+      phase: "live",
+      stop: null,
+      meta: {
+        agent: "review",
+        repo: "acme/api",
+        channelId: "slack:C1",
+        userId: "slack:UPERSON",
+        threadKey: "slack:C1:1",
+      },
+      card: null,
+      system: "",
+      tools: [],
+      state: { reviewPublication: invalid },
+    };
+    const archived = reclaimedRunRecord({ row, events: [], status: "interrupted", finishedAt: 10 });
+    expect(archived.reviewPublication).toEqual(invalid);
+    expect(isRunRecord(archived)).toBe(false);
+  });
+});
+
+describe("original native branch receipt on the terminal record", () => {
+  it("projects latest exact producer receipts independently of trimmed display events", () => {
+    const row: LiveRunRow = {
+      runId: "original-native",
+      threadKey: "slack:C1:1",
+      ownerGen: "gen-A",
+      leaseUntil: 100,
+      startedAt: 1,
+      phase: "live",
+      stop: null,
+      meta: {
+        agent: "coding",
+        channelId: "slack:C1",
+        userId: "slack:UPERSON",
+        threadKey: "slack:C1:1",
+        repo: "acme/api",
+      },
+      card: null,
+      system: "",
+      tools: [],
+      state: {
+        branchPushReceipts: [
+          { type: "pushed_head", ref: "fix/original", sha: "a".repeat(40), by: "push" },
+          { type: "pushed_head", ref: "fix/original", sha: "b".repeat(40), by: "push" },
+        ],
+      },
+    };
+    const terminal = reclaimedRunRecord({ row, events: [], status: "interrupted", finishedAt: 10 });
+    expect(terminal.branchPushReceipts).toEqual([{ ref: "fix/original", sha: "b".repeat(40), by: "push" }]);
+    expect(terminal.pushed).toBeUndefined();
+    expect(isRunRecord(terminal)).toBe(true);
+    expect(
+      isRunRecord({ ...terminal, branchPushReceipts: [{ by: "push", sha: "b".repeat(40), ref: "fix/original" }] }),
+    ).toBe(true);
+    expect(
+      isRunRecord({
+        ...terminal,
+        branchPushReceipts: [{ ref: "fix/original", sha: "b".repeat(40), by: "push", type: "pushed_head" }],
+      }),
+    ).toBe(false);
+  });
+});

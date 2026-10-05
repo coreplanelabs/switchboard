@@ -2174,8 +2174,14 @@ export async function driveOpenCode(
   // the lease ends at `deadline`, the loop at `loopEnd` with the write-up and
   // the post-step held back, the warning lands at `warnAt`, the write-up is
   // bounded by `finaleMs`. A resume continues the lease the record holds.
-  const remainingMs = run.resume?.remainingMs ?? run.agent.maxMinutes * MINUTE_MS;
-  const lease = loopClock(now(), remainingMs, run.agent.name, kind);
+  const startedAt = now();
+  if (run.deadlineAt !== undefined && startedAt >= run.deadlineAt)
+    throw new Error("The admitted run deadline ended before model admission.");
+  const remainingMs = Math.min(
+    run.resume?.remainingMs ?? run.agent.maxMinutes * MINUTE_MS,
+    run.deadlineAt === undefined ? Infinity : Math.max(0, run.deadlineAt - startedAt),
+  );
+  const lease = loopClock(startedAt, remainingMs, run.agent.name, kind);
   const { deadline, loopEnd, warnAt } = lease;
   const emit = (event: RunEvent) => run.onEvent?.(event.at === undefined ? { ...event, at: now() } : event);
   if (kind === "loop") {
@@ -2231,14 +2237,17 @@ export async function driveOpenCode(
 
   const auth = { Authorization: openCodeAuthHeader(conn.password) };
   const sessionRoutes = openCodeSessionRoutes(conn.sessionID);
-  const request = (route: { method: string; path: string }, body?: unknown) =>
-    conn.container.request(conn.paths, {
+  const request = (route: { method: string; path: string }, body?: unknown) => {
+    if (route.path === sessionRoutes["session.prompt"].path && now() >= (run.deadlineAt ?? Infinity))
+      return Promise.reject(new Error("The admitted run deadline ended before model admission."));
+    return conn.container.request(conn.paths, {
       method: route.method,
       port: conn.port,
       path: route.path,
       secretHeaders: auth,
       ...(body !== undefined ? { headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {}),
     });
+  };
   let transport = new PiRpcTransport({
     container: conn.container,
     paths: { ...conn.paths.tailer, log: conn.paths.feed },
@@ -2276,7 +2285,7 @@ export async function driveOpenCode(
    *  the finale clock counts from its post — never a finale run out with
    *  nothing executing. */
   const steerUnpostedWriteUp = () => {
-    if (writeUpInstruction === undefined) return;
+    if (writeUpInstruction === undefined || now() >= (run.deadlineAt ?? Infinity)) return;
     writeUpUnposted = false;
     budgetStopWhileCutting = false;
     writeUpAt = now();
@@ -2488,6 +2497,12 @@ export async function driveOpenCode(
     writeUpInstruction = instruction;
     // The checkpoint turn: the proxy sends what follows with `tool_choice: none` (model-proxy item 6).
     deps.bearers?.markLoopEnded(run.runId);
+    if (run.deadlineAt !== undefined && now() >= run.deadlineAt) {
+      ended = "finale";
+      writeUpFailed = finaleAbortReason(lease.finaleMs);
+      void interrupt({ ending: "the admitted deadline" });
+      return;
+    }
     // The relay's door refuses new tool calls while the run writes up (the
     // minor the review named), as pi's `toolsBlocked` does.
     if (conn.writeUp)
@@ -2533,7 +2548,8 @@ export async function driveOpenCode(
       // round-trip and not yet read by the loop's next check: then the
       // write-up is not posted — an execution nobody would read, billed all
       // the same.
-      if (ended !== undefined || left || run.control?.requested === "hard") return;
+      if (ended !== undefined || left || run.control?.requested === "hard" || now() >= (run.deadlineAt ?? Infinity))
+        return;
       // Nothing to interrupt: the tool completed on its own during the
       // round-trip and its execution ran on to its end — the loop's own settle,
       // no end the cut's. The write-up stays unposted: should that end be the
@@ -2694,7 +2710,7 @@ export async function driveOpenCode(
       // failed under the wind-down; a tool call — the loop-end cut's tool with
       // its interrupt still unanswered, or a tool the write-up's own execution
       // made — is a wait the bound ended, no model call having failed.
-      if (writeUpAt !== undefined && now() - writeUpAt >= lease.finaleMs) {
+      if ((writeUpAt !== undefined && now() - writeUpAt >= lease.finaleMs) || now() >= (run.deadlineAt ?? Infinity)) {
         writeUpAt = undefined;
         ended = "finale";
         const reason = finaleAbortReason(lease.finaleMs);

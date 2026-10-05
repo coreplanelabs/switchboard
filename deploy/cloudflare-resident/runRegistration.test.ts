@@ -1,10 +1,16 @@
+import {
+  isWorkspaceOwner,
+  workspaceOwnerKey,
+  workspaceBindingOf,
+  workspaceSettlementOf,
+} from "../../src/core/workspaceSettlement";
 import { webcrypto } from "node:crypto";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import { methodOf, readSource } from "./testing/sourceScan";
 import { mayRunAsPoolUser, parsePoolBindings, spendPoolUser } from "../../src/execution/residentPoolSpends";
-import { admitThreadDiskWithRollback, boundByFor } from "../../src/execution/residentRebind";
+import { admitThreadDiskWithRollback, boundByFor, rememberOwnBranches } from "../../src/execution/residentRebind";
 import { planForceDetach } from "../../src/execution/residentDetach";
 import { decideWorkspaceRemoval, hasRunOwnerField } from "./workspacePreservation";
 import {
@@ -559,6 +565,7 @@ describe("exact-thread owner reconciliation", () => {
     expect(await instance.reconcileRetainedOwner(threadKey)).toMatchObject({ migrated: 1, ledger: 1 });
     const attached = await fixture.attach("new-run", 8);
     expect(attached).not.toHaveProperty("error");
+    expect(attached).toMatchObject({ ownerFence: 8 });
     expect(rows.get(`runReg:${threadKey}`)).toMatchObject({ runId: "new-run", ownerGen: "new-gen", ownerFence: 8 });
     expect(rows.get(`runFence:${threadKey}`)).toEqual({ runId: "new-run", ownerGen: "new-gen", ownerFence: 8 });
     expect(fixture.privateBytes()).toBe("private uncommitted work");
@@ -791,11 +798,14 @@ describe("a run's registration is held from attach to release", () => {
     expect(source).toContain('"/run-deadline": { scope: "operator", method: "POST" }');
   });
 
-  it("a successful attach registers the run; a refused attach does not", () => {
-    const attach = method("attachThreadTraced");
-    expect(attach).toMatch(
-      /if \(!\("error" in res\)\) await this\.registerRun\(threadKey, runBudgetMs, runId, ownerGen, ownerFence\);/,
-    );
+  it("a successful attach registers the run; a refused attach does not", async () => {
+    const fixture = await ownerFlow("canonical");
+    expect(await fixture.attach("new-run", 8)).toMatchObject({ ownerFence: 8 });
+    const registration = structuredClone(fixture.rows.get(`runReg:${fixture.threadKey}`));
+    const refused = await fixture.attach("other-run", 8);
+    expect(refused).toMatchObject({ status: 409 });
+    expect(refused).not.toHaveProperty("ownerFence");
+    expect(fixture.rows.get(`runReg:${fixture.threadKey}`)).toEqual(registration);
   });
 
   it("the binding's eviction clears the registration — detach, sweep and disk pressure all end there", () => {
@@ -907,6 +917,10 @@ const ownerMethods = [
   "poolUserOwnerMatches",
   "registerRun",
   "detachThread",
+  "retainWorkspacePredecessor",
+  "reconcileWorkspaceSettlements",
+  "reconcileWorkspaceBinding",
+  "ackWorkspaceSettlement",
   "evictBinding",
   "workspaceRemovalDecision",
   "reportBlockedWorkspace",
@@ -996,14 +1010,23 @@ async function ownerFlow(pathForm: "canonical" | "collision-safe replacement" | 
       planForceDetach,
       decideWorkspaceRemoval,
       hasRunOwnerField,
+      isWorkspaceOwner,
+      workspaceOwnerKey,
+      workspaceSettlementOf,
+      workspaceBindingOf,
+      WORKSPACE_PREDECESSORS_MAX: 20,
+      WORKSPACE_RECONCILE_BINDINGS_MAX: 20,
+      WORKSPACE_SETTLEMENT_CURSOR_KEY: "settlement-cursor",
       admitThreadDiskWithRollback,
       boundByFor,
+      rememberOwnBranches,
       planReadonlyAttach: () => ({}),
       replacementWorktreeCleanup: () => null,
       threadUserCacheCleanArgv: () => ["true"],
       evictedTreeSentence: () => "",
       catchAllErr: (err: unknown) => ({ error: String(err), status: 500 }),
-      console: { log: () => {} },
+      console: { log: () => {}, warn: () => {} },
+      errMsg: (err: unknown) => String(err),
     },
   ) as {
     OwnerFlowUnderTest: new () => OwnerFlowInstance;
@@ -1046,6 +1069,7 @@ async function ownerFlow(pathForm: "canonical" | "collision-safe replacement" | 
   const checkedPaths: string[] = [];
   let materializations = 0;
   let safeToRelease = false;
+  let metadataAcked = false;
   const storage = {
     get: async (key: string | string[]) =>
       Array.isArray(key) ? new Map(key.map((part) => [part, rows.get(part)])) : rows.get(key),
@@ -1061,6 +1085,7 @@ async function ownerFlow(pathForm: "canonical" | "collision-safe replacement" | 
   const instance = new Suite.OwnerFlowUnderTest();
   Object.assign(instance, {
     ctx: { storage },
+    env: {},
     threadAttaches: { run: async (_key: string, action: () => Promise<unknown>) => action() },
     threadOpsInFlight: new Map(),
     opUsersInUse: new Map(),
@@ -1075,21 +1100,68 @@ async function ownerFlow(pathForm: "canonical" | "collision-safe replacement" | 
     reconcileImage: async () => "current",
     refreshIfStale: async () => {},
     isRuntimeActive: async () => true,
+    containerIdentity: async () => "vm-known",
     poolUserHasOldThreadDir: async () => false,
     rebindToOwnPr: async (prior: unknown) => ({ binding: prior }),
     admitThreadDisk: async () => ({ committedKiB: 0 }),
     diskCommittedKiB: 0,
-    attachThreadCreate: async ({ binding: attached }: { binding: unknown }) => {
+    attachThreadCreate: async ({
+      binding: attached,
+    }: {
+      binding: { threadKey: string; ref: string; worktreePath: string; user: string };
+    }) => {
       materializations++;
-      return { binding: attached };
+      rows.set(`thread:${attached.threadKey}`, { ...attached, sha: "a".repeat(40), container: "vm-known" });
+      return {
+        workspace: attached.worktreePath,
+        ref: attached.ref,
+        user: attached.user,
+        sha: "a".repeat(40),
+        container: "vm-known",
+      };
     },
     putThreadBinding: async (row: { threadKey: string }) => {
       rows.set(`thread:${row.threadKey}`, row);
     },
-    observeRunForEviction: async () =>
-      safeToRelease
-        ? { kind: "terminal", record: { id: "new-run", threadKey, status: "completed" } }
-        : { kind: "live", row: { runId: "new-run", threadKey, ownerGen: "new-gen" } },
+    ackWorkspaceSettlement: async () => {
+      expect(rows.get(`thread:${threadKey}`)).toMatchObject({ workspaceSettlement: { revision: 1 } });
+      metadataAcked = true;
+      return true;
+    },
+    observeRunForEviction: async () => {
+      if (!safeToRelease) return { kind: "live", row: { runId: "new-run", threadKey, ownerGen: "new-gen" } };
+      const registration = rows.get(`runReg:${threadKey}`) as {
+        workspace: unknown;
+        runId: string;
+        ownerGen: string;
+        ownerFence: number;
+      };
+      if (metadataAcked)
+        return {
+          kind: "acknowledged",
+          owner: { runId: registration.runId, ownerGen: registration.ownerGen, ownerFence: registration.ownerFence },
+          revision: 1,
+        };
+      const terminal = {
+        id: registration.runId,
+        threadKey,
+        status: "completed",
+        repo: "owner/name",
+        userId: "slack:UOWNER",
+      };
+      return {
+        kind: "terminal",
+        record: terminal,
+        settlement: {
+          version: 1,
+          revision: 1,
+          owner: { runId: registration.runId, ownerGen: registration.ownerGen, ownerFence: registration.ownerFence },
+          binding: registration.workspace,
+          record: terminal,
+          publication: { version: 1, repo: "owner/name", branches: [], complete: true },
+        },
+      };
+    },
     observePrivateTree: async () => ({
       present: true,
       branch: ref,

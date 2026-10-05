@@ -16,12 +16,17 @@ import {
   fetchPullRequestFacts,
   fetchPullRequestTitleBody,
   fetchCommitChecks,
+  fetchCheckRetryTargets,
+  setPullRequestState,
+  rerunActionsFailedJobs,
+  rerequestCheckRun,
   listOpenPullRequests,
   fixupCommitSubjects,
   fetchPullRequestReviews,
   branchHeadSubject,
   fetchRefExists,
   fetchBranchHeadSha,
+  fetchBranchRef,
   fetchRepoShipInfo,
   findMergedPrByHead,
   findOpenPrByHead,
@@ -29,9 +34,9 @@ import {
   openPullRequest,
   listAnyPrByHead,
   createDraftPullRequest,
-  refirePullRequestEvent,
-  rerunFailedJobs,
   updatePullRequest,
+  updatePullRequestEffect,
+  createRecoveryPullRequest,
 } from "./githubPulls.js";
 
 // Feature: docs/reference/specs/pr-description.md — the bot process opens and edits PRs
@@ -143,6 +148,31 @@ describe("githubPulls", () => {
     });
     expect((calls[1].init.headers as Record<string, string>).authorization).toBe("Bearer ghtok");
     expect(result).toEqual({ number: 7, htmlUrl: "https://github.com/acme/api/pull/7", created: true });
+  });
+
+  it.each([undefined, 5])("commits the resolved target before the PR mutation: %s", async (pr) => {
+    stubToken();
+    const calls = stubFetch((_url, init) =>
+      (init.method ?? "GET") === "GET"
+        ? new Response(
+            JSON.stringify(
+              pr === undefined
+                ? []
+                : [{ number: pr, html_url: `https://github.com/acme/api/pull/${pr}`, head: { sha: "a".repeat(40) } }],
+            ),
+            { status: 200 },
+          )
+        : new Response('{"number":7,"html_url":"https://github.com/acme/api/pull/7"}', { status: 201 }),
+    );
+    const recorder = vi.fn(async (target) => {
+      expect(target).toBe(pr);
+      expect(calls).toHaveLength(1);
+      expect(calls[0].init.method ?? "GET").toBe("GET");
+      throw new Error("intent unavailable");
+    });
+    await expect(openPullRequest(target, recorder)).rejects.toThrow("intent unavailable");
+    expect(recorder).toHaveBeenCalledOnce();
+    expect(calls).toHaveLength(1);
   });
 
   it("edits the existing open PR instead of creating a second one", async () => {
@@ -292,6 +322,106 @@ describe("githubPulls", () => {
     expect(payload.body).toBe(hostile); // passed through verbatim — inert data, not directives
   });
 
+  describe("durable pull mutation receipts", () => {
+    const headSha = "a".repeat(40);
+    const input = { ...target, headSha };
+    const native = () => ({
+      number: 31,
+      html_url: "https://github.com/acme/api/pull/31",
+      state: "open",
+      merged: false,
+      draft: false,
+      title: input.title,
+      body: input.body,
+      head: { sha: headSha, ref: input.headBranch, repo: { full_name: input.repo } },
+      base: { ref: input.base, repo: { full_name: input.repo } },
+    });
+    it("creates only once and accepts only the exact frozen original pull receipt", async () => {
+      stubToken();
+      const calls = stubFetch(() => Response.json(native(), { status: 201 }));
+      expect(await createRecoveryPullRequest(input)).toMatchObject({ state: "accepted", pr: { number: 31 }, headSha });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.init.method).toBe("POST");
+      expect(JSON.parse(String(calls[0]!.init.body))).toEqual({
+        title: input.title,
+        head: input.headBranch,
+        base: input.base,
+        body: input.body,
+        draft: false,
+      });
+      for (const row of [
+        { ...native(), head: { ...native().head, sha: "b".repeat(40) } },
+        { ...native(), head: { ...native().head, repo: { full_name: "foreign/api" } } },
+        { ...native(), base: { ...native().base, ref: "foreign" } },
+        { ...native(), title: "changed" },
+        { ...native(), body: "changed" },
+        { ...native(), number: 0 },
+        {},
+      ]) {
+        stubFetch(() => Response.json(row, { status: 201 }));
+        expect(await createRecoveryPullRequest(input)).toEqual({ state: "uncertain" });
+      }
+    });
+    it("distinguishes definite refusal from lost or unavailable create acknowledgement", async () => {
+      stubToken();
+      for (const status of [403, 422]) {
+        stubFetch(() => new Response("refused", { status }));
+        expect(await createRecoveryPullRequest(input)).toEqual({ state: "refused", status });
+      }
+      for (const status of [408, 500]) {
+        stubFetch(() => new Response("unavailable", { status }));
+        expect(await createRecoveryPullRequest(input)).toEqual({ state: "uncertain" });
+      }
+      stubFetch(() => {
+        throw new Error("ACK lost");
+      });
+      expect(await createRecoveryPullRequest(input)).toEqual({ state: "uncertain" });
+    });
+    it("certifies a description edit only from its exact frozen native response", async () => {
+      stubToken();
+      const exact = { headSha, headRef: input.headBranch, baseRef: input.base };
+      const patch = { title: input.title, body: input.body };
+      const calls = stubFetch(() => Response.json(native()));
+      expect(await updatePullRequestEffect({ repo: input.repo, number: 31 }, exact, patch)).toEqual({
+        state: "accepted",
+      });
+      expect(calls).toHaveLength(1);
+      for (const row of [
+        { ...native(), body: "changed" },
+        { ...native(), head: { ...native().head, sha: "b".repeat(40) } },
+        {},
+      ]) {
+        stubFetch(() => Response.json(row));
+        expect(await updatePullRequestEffect({ repo: input.repo, number: 31 }, exact, patch)).toEqual({
+          state: "uncertain",
+        });
+      }
+      const refused = stubFetch(() => new Response("refused", { status: 422 }));
+      expect(await updatePullRequestEffect({ repo: input.repo, number: 31 }, exact, patch)).toEqual({
+        state: "refused",
+        status: 422,
+      });
+      expect(refused).toHaveLength(1);
+    });
+    it("refuses malformed heads and oversized frozen bytes before any native request", async () => {
+      stubToken();
+      const calls = stubFetch(() => Response.json(native(), { status: 201 }));
+      for (const changed of [
+        { ...input, headSha: "short" },
+        { ...input, body: "x".repeat(65001) },
+      ])
+        expect(await createRecoveryPullRequest(changed)).toEqual({ state: "refused" });
+      expect(
+        await updatePullRequestEffect(
+          { repo: input.repo, number: 31 },
+          { headSha, headRef: input.headBranch, baseRef: input.base },
+          { title: input.title, body: "x".repeat(65001) },
+        ),
+      ).toEqual({ state: "refused" });
+      expect(calls).toHaveLength(0);
+    });
+  });
+
   it("updatePullRequest PATCHes the known PR number directly and throws on non-2xx", async () => {
     stubToken();
     const calls = stubFetch(() => new Response("{}", { status: 200 }));
@@ -310,51 +440,224 @@ describe("githubPulls", () => {
     );
   });
 
-  it("refirePullRequestEvent closes then reopens the known pull request so GitHub emits pull_request again, retrying a failed reopen so the pull request is restored open", async () => {
-    stubToken();
-    const calls = stubFetch(() => new Response("{}", { status: 200 }));
-    expect(await refirePullRequestEvent("acme/api", 31)).toBe(true);
-    expect(calls.map((c) => ({ method: c.init.method, body: JSON.parse(String(c.init.body)) }))).toEqual([
-      { method: "PATCH", body: { state: "closed" } },
-      { method: "PATCH", body: { state: "open" } },
-    ]);
-    expect(calls.every((c) => c.url === "https://api.github.com/repos/acme/api/pulls/31")).toBe(true);
-
-    let request = 0;
-    const unavailableCalls = stubFetch(
-      () => new Response(request++ === 1 ? "unavailable" : "{}", { status: request === 2 ? 503 : 200 }),
-    );
-    expect(await refirePullRequestEvent("acme/api", 31)).toBe(true);
-    expect(unavailableCalls.map((c) => JSON.parse(String(c.init.body)))).toEqual([
-      { state: "closed" },
-      { state: "open" },
-      { state: "open" },
-    ]);
-
-    request = 0;
-    const timeoutCalls = stubFetch(() => {
-      if (request++ === 1) throw new DOMException("The operation was aborted", "TimeoutError");
-      return new Response("{}", { status: 200 });
+  describe("frozen check retry and PR state writes", () => {
+    const sha = "c".repeat(40);
+    const target = { headSha: sha, headRef: "fix/unit", baseRef: "main" };
+    const check = (id: number, name = "ci / depot") => ({
+      id,
+      name,
+      head_sha: sha,
+      status: "completed",
+      conclusion: "failure",
+      details_url: "https://depot.dev/run/one",
+      check_suite: { id: 5 },
     });
-    expect(await refirePullRequestEvent("acme/api", 31)).toBe(true);
-    expect(timeoutCalls.map((c) => JSON.parse(String(c.init.body)))).toEqual([
-      { state: "closed" },
-      { state: "open" },
-      { state: "open" },
-    ]);
-  });
+    const pull = (state: "open" | "closed") => ({
+      number: 31,
+      state,
+      merged: false,
+      head: { sha, ref: target.headRef, repo: { full_name: "acme/api" } },
+      base: { ref: target.baseRef, repo: { full_name: "acme/api" } },
+    });
+    const listing = (rows: unknown[], total = rows.length) => ({ total_count: total, check_runs: rows });
+    it("accepts canonical repository casing without losing a native close or refusing its retry IDs", async () => {
+      stubToken();
+      const closed = pull("closed");
+      stubFetch(() =>
+        Response.json({
+          ...closed,
+          head: { ...closed.head, repo: { full_name: "Acme/API" } },
+          base: { ...closed.base, repo: { full_name: "Acme/API" } },
+        }),
+      );
+      expect(await setPullRequestState({ repo: "acme/api", number: 31 }, target, "closed")).toEqual({
+        state: "accepted",
+      });
+      const row = { ...check(11), details_url: "https://github.com/Acme/API/actions/runs/99/job/5" };
+      stubFetch((url) =>
+        Response.json(
+          url.includes("/check-runs?")
+            ? listing([row])
+            : {
+                id: 99,
+                head_sha: sha,
+                check_suite_id: 5,
+                repository: { full_name: "Acme/API" },
+              },
+        ),
+      );
+      expect(await fetchCheckRetryTargets("acme/api", sha, ["ci / depot"])).toEqual([
+        { operation: "actions_rerun", resourceId: 99 },
+      ]);
+    });
 
-  it("never reports a completed refire after an accepted close while reopening is unavailable", async () => {
-    stubToken();
-    let request = 0;
-    const calls = stubFetch(() => new Response("unavailable", { status: request++ === 0 ? 200 : 503 }));
-    await expect(refirePullRequestEvent("acme/api", 31)).rejects.toThrow(/could not be reopened/);
-    expect(calls.map((c) => JSON.parse(String(c.init.body)))).toEqual([
-      { state: "closed" },
-      { state: "open" },
-      { state: "open" },
-      { state: "open" },
-    ]);
+    it("freezes native retry IDs after complete exact-head reads and verifies Actions URL locators against native run facts", async () => {
+      stubToken();
+      const rows = [
+        { ...check(11, "shard 2"), details_url: "https://github.com/acme/api/actions/runs/99/job/5" },
+        { ...check(12, "shard 3"), details_url: "https://github.com/acme/api/actions/runs/99/job/6" },
+        check(42),
+      ];
+      const calls = stubFetch((url) =>
+        Response.json(
+          url.includes("/check-runs?")
+            ? listing(rows)
+            : {
+                id: 99,
+                head_sha: sha,
+                check_suite_id: 5,
+                repository: { full_name: "acme/api" },
+              },
+        ),
+      );
+      expect(await fetchCheckRetryTargets("acme/api", sha, ["shard 2", "shard 3", "ci / depot"])).toEqual([
+        { operation: "actions_rerun", resourceId: 99 },
+        { operation: "check_rerequest", resourceId: 42 },
+      ]);
+      expect(calls.every((call) => (call.init.method ?? "GET") === "GET")).toBe(true);
+      expect(calls.filter((call) => call.url.endsWith("/actions/runs/99"))).toHaveLength(1);
+    });
+
+    it("distinguishes named checks already pending or green from unavailable retry evidence", async () => {
+      stubToken();
+      for (const row of [
+        { ...check(42), status: "in_progress", conclusion: null },
+        { ...check(42), conclusion: "success" },
+      ]) {
+        const calls = stubFetch(() => Response.json(listing([row])));
+        expect(await fetchCheckRetryTargets("acme/api", sha, ["ci / depot"])).toEqual([]);
+        expect(calls).toHaveLength(1);
+        expect(calls[0]!.init.method ?? "GET").toBe("GET");
+      }
+      stubFetch(() => Response.json(listing([check(42), { ...check(43, "other"), conclusion: "success" }])));
+      expect(await fetchCheckRetryTargets("acme/api", sha, ["ci / depot", "other"])).toEqual([
+        { operation: "check_rerequest", resourceId: 42 },
+      ]);
+      stubFetch(() => Response.json(listing([check(42, "other")])));
+      expect(await fetchCheckRetryTargets("acme/api", sha, ["ci / depot"])).toBeUndefined();
+    });
+
+    it("reads the final check page before freezing a target and refuses unstable, duplicate, foreign or incomplete native evidence", async () => {
+      stubToken();
+      const page = Array.from({ length: 100 }, (_, i) => check(i + 1, `other-${i}`));
+      const calls = stubFetch((url) => Response.json(listing(url.endsWith("page=1") ? page : [check(101)], 101)));
+      expect(await fetchCheckRetryTargets("acme/api", sha, ["ci / depot"])).toEqual([
+        { operation: "check_rerequest", resourceId: 101 },
+      ]);
+      expect(calls).toHaveLength(2);
+      for (const row of [
+        { ...check(42), id: 0 },
+        { ...check(42), head_sha: "d".repeat(40) },
+      ]) {
+        stubFetch(() => Response.json(listing([row])));
+        expect(await fetchCheckRetryTargets("acme/api", sha, ["ci / depot"])).toBeUndefined();
+      }
+      for (const body of [listing([check(42)], 2), listing([check(42), check(42)]), listing([check(42, "other")])]) {
+        stubFetch(() => Response.json(body));
+        expect(await fetchCheckRetryTargets("acme/api", sha, ["ci / depot"])).toBeUndefined();
+      }
+      stubFetch((url) =>
+        Response.json(listing(url.endsWith("page=1") ? page : [check(101)], url.endsWith("page=1") ? 101 : 102)),
+      );
+      expect(await fetchCheckRetryTargets("acme/api", sha, ["ci / depot"])).toBeUndefined();
+      stubFetch(
+        () =>
+          new Response(JSON.stringify(listing([check(42)])), {
+            headers: { link: '<https://api.github.com/next>; rel="next"' },
+          }),
+      );
+      expect(await fetchCheckRetryTargets("acme/api", sha, ["ci / depot"])).toBeUndefined();
+    });
+
+    it("does not let a URL, malformed native Actions identity, or unavailable read grant a retry", async () => {
+      stubToken();
+      const row = { ...check(11), details_url: "https://github.com/acme/api/actions/runs/99/job/5" };
+      const native = { id: 99, head_sha: sha, check_suite_id: 5, repository: { full_name: "acme/api" } };
+      for (const run of [
+        { ...native, id: 98 },
+        { ...native, head_sha: "d".repeat(40) },
+        { ...native, check_suite_id: 6 },
+        { ...native, repository: { full_name: "other/api" } },
+        {},
+      ]) {
+        stubFetch((url) => Response.json(url.includes("/check-runs?") ? listing([row]) : run));
+        expect(await fetchCheckRetryTargets("acme/api", sha, ["ci / depot"])).toBeUndefined();
+      }
+      const calls = stubFetch(() =>
+        Response.json(listing([{ ...row, details_url: "https://github.com/other/api/actions/runs/99" }])),
+      );
+      expect(await fetchCheckRetryTargets("acme/api", sha, ["ci / depot"])).toBeUndefined();
+      expect(calls).toHaveLength(1);
+      stubFetch(() => {
+        throw new Error("offline");
+      });
+      expect(await fetchCheckRetryTargets("acme/api", sha, ["ci / depot"])).toBeUndefined();
+    });
+
+    it("writes one PR state and accepts only the exact native target and requested state", async () => {
+      stubToken();
+      for (const state of ["closed", "open"] as const) {
+        const calls = stubFetch(() => Response.json(pull(state)));
+        expect(await setPullRequestState({ repo: "acme/api", number: 31 }, target, state)).toEqual({
+          state: "accepted",
+        });
+        expect(calls).toHaveLength(1);
+        expect(calls[0].init.method).toBe("PATCH");
+        expect(calls[0].init.redirect).toBe("error");
+        expect(JSON.parse(String(calls[0].init.body))).toEqual({ state });
+      }
+      for (const body of [
+        {},
+        { ...pull("closed"), number: 32 },
+        pull("open"),
+        { ...pull("closed"), merged: true },
+        { ...pull("closed"), head: { ...pull("closed").head, sha: "d".repeat(40) } },
+        { ...pull("closed"), base: { ...pull("closed").base, ref: "other" } },
+      ]) {
+        const calls = stubFetch(() => Response.json(body));
+        expect(await setPullRequestState({ repo: "acme/api", number: 31 }, target, "closed")).toEqual({
+          state: "uncertain",
+        });
+        expect(calls).toHaveLength(1);
+      }
+    });
+
+    it("keeps server, timeout, transport and unexpected success uncertain without a second request", async () => {
+      stubToken();
+      for (const write of [
+        () => setPullRequestState({ repo: "acme/api", number: 31 }, target, "open"),
+        () => rerunActionsFailedJobs("acme/api", 99),
+        () => rerequestCheckRun("acme/api", 42),
+      ]) {
+        for (const status of [202, 408, 503]) {
+          const calls = stubFetch(() => new Response("{}", { status }));
+          expect(await write()).toEqual({ state: "uncertain" });
+          expect(calls).toHaveLength(1);
+        }
+        const calls = stubFetch(() => {
+          throw new Error("lost reply");
+        });
+        expect(await write()).toEqual({ state: "uncertain" });
+        expect(calls).toHaveLength(1);
+        stubFetch(() => new Response("{}", { status: 403 }));
+        expect(await write()).toEqual({ state: "refused", status: 403 });
+      }
+    });
+
+    it("accepts only native 201 retry dispatch acknowledgments and refuses invalid IDs without calling GitHub", async () => {
+      stubToken();
+      const calls = stubFetch(() => new Response(null, { status: 201 }));
+      expect(await rerunActionsFailedJobs("acme/api", 99)).toEqual({ state: "accepted" });
+      expect(await rerequestCheckRun("acme/api", 42)).toEqual({ state: "accepted" });
+      expect(calls.map((call) => call.url)).toEqual([
+        "https://api.github.com/repos/acme/api/actions/runs/99/rerun-failed-jobs",
+        "https://api.github.com/repos/acme/api/check-runs/42/rerequest",
+      ]);
+      expect(calls.every((call) => call.init.method === "POST" && call.init.redirect === "error")).toBe(true);
+      expect(await rerunActionsFailedJobs("acme/api", 0)).toEqual({ state: "refused" });
+      expect(await rerequestCheckRun("acme/api", Number.MAX_SAFE_INTEGER + 1)).toEqual({ state: "refused" });
+      expect(calls).toHaveLength(2);
+    });
   });
 
   it("clips an oversized body with a visible note so a huge description still lands", async () => {
@@ -387,73 +690,65 @@ describe("githubPulls", () => {
   // pipeline branch on origin BEFORE the first attach: the resident refuses to
   // bind a thread to a ref GitHub does not have. 422 "already exists" is
   // success (a restarted pipeline reuses its own deterministic branch name).
-  describe("createBranchRef (ship round 0)", () => {
-    const BASE_SHA = "c".repeat(40);
-
-    /** Base-ref lookup answers `main`'s tip; the ref create answers `createStatus`. */
-    function stubRefPath(createStatus = 201, createBody = "{}") {
-      return stubFetch((url, init) =>
-        (init.method ?? "GET") === "GET"
-          ? new Response(JSON.stringify({ ref: "refs/heads/main", object: { sha: BASE_SHA, type: "commit" } }), {
-              status: 200,
-            })
-          : new Response(createBody, { status: createStatus }),
+  it("exact branch reads reject foreign or missing ref identities and distinguish missing from unavailable", async () => {
+    stubToken();
+    const sha = "a".repeat(40);
+    for (const ref of [undefined, "refs/heads/foreign", "refs/heads/release/one"]) {
+      const calls = stubFetch(() => Response.json({ ref, object: { type: "commit", sha } }));
+      expect(await fetchBranchRef("acme/api", "release/one")).toEqual(
+        ref === "refs/heads/release/one" ? { kind: "verified", ref, sha } : { kind: "unverified" },
       );
+      expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/git/ref/heads/release/one");
     }
-
-    it("GETs the base ref's sha and POSTs the new ref at it", async () => {
-      stubToken();
-      const calls = stubRefPath();
-      await createBranchRef("acme/api", "ship/fix-login-abc123", "main");
-      expect(calls).toHaveLength(2);
-      expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/git/ref/heads/main");
-      expect(calls[0].init.method ?? "GET").toBe("GET");
-      expect(calls[1].url).toBe("https://api.github.com/repos/acme/api/git/refs");
-      expect(calls[1].init.method).toBe("POST");
-      expect(JSON.parse(String(calls[1].init.body))).toEqual({
-        ref: "refs/heads/ship/fix-login-abc123",
-        sha: BASE_SHA,
+    for (const status of [404, 403, 503]) {
+      stubFetch(() => new Response("{}", { status }));
+      expect(await fetchBranchRef("acme/api", "release/one")).toEqual({
+        kind: status === 404 ? "missing" : "unverified",
       });
-      expect((calls[1].init.headers as Record<string, string>).authorization).toBe("Bearer ghtok");
-    });
+    }
+  });
 
-    it("a 422 'already exists' is success — a restarted pipeline reuses its own branch", async () => {
+  describe("createBranchRef (ship round 0)", () => {
+    const SHA = "c".repeat(40);
+    it("POSTs only the frozen full SHA and returns an exact typed receipt", async () => {
       stubToken();
-      stubRefPath(422, '{"message":"Reference already exists"}');
-      await expect(createBranchRef("acme/api", "ship/fix-login-abc123", "main")).resolves.toBeUndefined();
+      const calls = stubFetch(() =>
+        Response.json({ ref: "refs/heads/fix/unit", object: { type: "commit", sha: SHA } }, { status: 201 }),
+      );
+      expect(await createBranchRef("acme/api", "fix/unit", SHA)).toEqual({ state: "accepted", commitSha: SHA });
+      expect(calls).toHaveLength(1);
+      expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/git/refs");
+      expect(JSON.parse(String(calls[0].init.body))).toEqual({ ref: "refs/heads/fix/unit", sha: SHA });
     });
-
-    it("anything else throws: a non-already-exists 422, another non-2xx, a failed base lookup, a sha-less answer, a missing credential", async () => {
+    it("keeps malformed success, server failure and transport loss uncertain", async () => {
       stubToken();
-      stubRefPath(422, '{"message":"Object does not exist"}');
-      await expect(createBranchRef("acme/api", "b", "main")).rejects.toThrow(/HTTP 422/);
-
-      stubRefPath(403, '{"message":"Resource not accessible"}');
-      await expect(createBranchRef("acme/api", "b", "main")).rejects.toThrow(/HTTP 403/);
-
-      stubFetch(() => new Response("{}", { status: 404 }));
-      await expect(createBranchRef("acme/api", "b", "missing-base")).rejects.toThrow(/HTTP 404/);
-
-      stubFetch(() => new Response('{"object":{}}', { status: 200 }));
-      await expect(createBranchRef("acme/api", "b", "main")).rejects.toThrow(/without a sha/);
-
+      for (const [status, body] of [
+        [201, {}],
+        [201, { ref: "refs/heads/foreign", object: { type: "commit", sha: SHA } }],
+        [201, { ref: "refs/heads/fix/unit", object: { type: "commit", sha: "d".repeat(40) } }],
+        [503, {}],
+      ] as const) {
+        stubFetch(() => Response.json(body, { status }));
+        expect(await createBranchRef("acme/api", "fix/unit", SHA)).toEqual({ state: "uncertain" });
+      }
+      stubFetch(() => {
+        throw new Error("connection lost");
+      });
+      expect(await createBranchRef("acme/api", "fix/unit", SHA)).toEqual({ state: "uncertain" });
+    });
+    it("known HTTP refusal and unavailable credentials never claim an accepted ref", async () => {
+      stubToken();
+      for (const status of [403, 409, 422]) {
+        stubFetch(() => new Response('{"message":"Reference already exists"}', { status }));
+        expect(await createBranchRef("acme/api", "fix/unit", SHA)).toEqual({ state: "refused", status });
+      }
       vi.stubEnv("GH_TOKEN", "");
-      const calls = stubFetch(() => new Response("{}", { status: 200 }));
-      await expect(createBranchRef("acme/api", "b", "main")).rejects.toThrow(/credential/);
-      expect(calls).toHaveLength(0); // refused before any fetch
-    });
-
-    it("a base ref with slashes stays a path (segment-encoded, never a single escaped blob)", async () => {
-      stubToken();
-      const calls = stubRefPath();
-      await createBranchRef("acme/api", "ship/x", "release/1.x");
-      expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/git/ref/heads/release/1.x");
+      const calls = stubFetch(() => new Response("{}", { status: 201 }));
+      expect(await createBranchRef("acme/api", "fix/unit", SHA)).toEqual({ state: "refused" });
+      expect(calls).toHaveLength(0);
     });
   });
 
-  // The fact the round-0 ending reads (docs/reference/specs/agent-ship.md
-  // item 12, issue 1699): how many commits the unit's branch has over the
-  // base, from GitHub's compare — zero is a branch with nothing to ship.
   describe("commitsOverBase (the branch's commits over the base)", () => {
     it("GETs the compare of base...branch (each ref's segments encoded) and answers `ahead_by`", async () => {
       stubToken();
@@ -1157,6 +1452,41 @@ describe("githubPulls", () => {
   // the bot squashes a plan branch's pull request itself at the approved head,
   // the title as the commit and an empty body, and reads the checks at the head.
   describe("the merge queue — the rule, the enqueue and the queue's outcome (issue 2011)", () => {
+    it("enqueue requires a native receipt for the exact PR and head; prose and partial data cannot acknowledge a write", async () => {
+      stubToken();
+      for (const receipt of [
+        {},
+        { data: { enqueuePullRequest: null } },
+        { errors: [{ message: "The pull request is already in the merge queue" }] },
+        {
+          data: {
+            enqueuePullRequest: {
+              mergeQueueEntry: { id: "MQ_one", pullRequest: { id: "PR_other", headRefOid: "a".repeat(40) } },
+            },
+          },
+        },
+      ]) {
+        const replies = [
+          { data: { repository: { pullRequest: { id: "PR_one", headRefOid: "a".repeat(40) } } } },
+          receipt,
+        ];
+        const calls = stubFetch(() => new Response(JSON.stringify(replies.shift()), { status: 200 }));
+        await expect(enqueuePullRequest({ repo: "acme/api", number: 7 }, { sha: "a".repeat(40) })).rejects.toThrow();
+        expect(calls).toHaveLength(2);
+      }
+    });
+
+    it("an incomplete or errored queue read cannot report removal", async () => {
+      stubToken();
+      for (const reply of [
+        { data: { repository: { pullRequest: {} } } },
+        { data: { repository: { pullRequest: { mergeQueueEntry: null } } }, errors: [{ message: "unavailable" }] },
+        { data: { repository: { pullRequest: { mergeQueueEntry: "queued" } } } },
+      ]) {
+        stubFetch(() => new Response(JSON.stringify(reply), { status: 200 }));
+        expect(await fetchMergeQueueState({ repo: "acme/api", number: 7 })).toBeUndefined();
+      }
+    });
     it("branchHasMergeQueue reads the base branch's rules: a merge_queue rule answers true, none false, and an unreadable or out-of-shape answer undefined", async () => {
       stubToken();
       const calls = stubFetch(
@@ -1176,46 +1506,30 @@ describe("githubPulls", () => {
       expect(await branchHasMergeQueue("acme/api", "main")).toBeUndefined();
     });
 
-    it("enqueuePullRequest pins the mutation to the reviewed head; already-queued is success, any other GraphQL error is an answer in GitHub's words", async () => {
+    it("enqueuePullRequest pins the mutation and validates the native entry; a failed lookup or write cannot acknowledge it", async () => {
       stubToken();
+      const head = "a".repeat(40);
       const answers = [
-        { data: { repository: { pullRequest: { id: "PR_node1" } } } },
-        { data: { enqueuePullRequest: { mergeQueueEntry: { position: 1 } } } },
+        { data: { repository: { pullRequest: { id: "PR_node1", headRefOid: head } } } },
+        {
+          data: {
+            enqueuePullRequest: {
+              mergeQueueEntry: { id: "MQ_one", pullRequest: { id: "PR_node1", headRefOid: head } },
+            },
+          },
+        },
       ];
       const calls = stubFetch(() => new Response(JSON.stringify(answers.shift()), { status: 200 }));
-      expect(await enqueuePullRequest({ repo: "acme/api", number: 7 }, { sha: "a".repeat(40) })).toEqual({ ok: true });
+      expect(await enqueuePullRequest({ repo: "acme/api", number: 7 }, { sha: head })).toEqual({ ok: true });
       expect(calls.map((c) => c.url)).toEqual(["https://api.github.com/graphql", "https://api.github.com/graphql"]);
-      expect(String(calls[1].init.body)).toContain("enqueuePullRequest");
       expect(String(calls[1].init.body)).toContain("expectedHeadOid: $sha");
-      expect(JSON.parse(String(calls[1].init.body)).variables).toEqual({ id: "PR_node1", sha: "a".repeat(40) });
-      // Already in the queue — a replayed step: the ask is satisfied.
-      const replay = [
-        { data: { repository: { pullRequest: { id: "PR_node1" } } } },
-        { errors: [{ message: "The pull request is already in the merge queue" }] },
-      ];
-      stubFetch(() => new Response(JSON.stringify(replay.shift()), { status: 200 }));
-      expect(await enqueuePullRequest({ repo: "acme/api", number: 7 }, { sha: "a".repeat(40) })).toEqual({ ok: true });
-      // Any other GraphQL error is an answer, never a throw.
-      const refused = [
-        { data: { repository: { pullRequest: { id: "PR_node1" } } } },
-        { errors: [{ message: "Pull request is not mergeable" }] },
-      ];
-      stubFetch(() => new Response(JSON.stringify(refused.shift()), { status: 200 }));
-      expect(await enqueuePullRequest({ repo: "acme/api", number: 7 }, { sha: "a".repeat(40) })).toEqual({
-        ok: false,
-        reason: "Pull request is not mergeable",
-      });
-      // No node id — the lookup's own error rides the answer.
+      expect(JSON.parse(String(calls[1].init.body)).variables).toEqual({ id: "PR_node1", sha: head });
       stubFetch(() => new Response(JSON.stringify({ errors: [{ message: "Could not resolve" }] }), { status: 200 }));
-      expect(await enqueuePullRequest({ repo: "acme/api", number: 7 }, { sha: "a".repeat(40) })).toEqual({
-        ok: false,
-        reason: "Could not resolve",
-      });
-      // An HTTP failure throws, like every write here.
-      stubFetch(() => new Response("bad gateway", { status: 502 }));
-      await expect(enqueuePullRequest({ repo: "acme/api", number: 7 }, { sha: "a".repeat(40) })).rejects.toThrow(
-        /HTTP 502/,
+      await expect(enqueuePullRequest({ repo: "acme/api", number: 7 }, { sha: head })).rejects.toThrow(
+        /Could not resolve/,
       );
+      stubFetch(() => new Response("bad gateway", { status: 502 }));
+      await expect(enqueuePullRequest({ repo: "acme/api", number: 7 }, { sha: head })).rejects.toThrow(/HTTP 502/);
     });
 
     it("fetchMergeQueueState reads the entry and the last removal's reason: queued with the position, removed with the queue's reason (or without one), undefined when GitHub cannot be read", async () => {
@@ -1263,6 +1577,43 @@ describe("githubPulls", () => {
   });
 
   describe("the plan runner's merge — mergePullRequest and fetchCommitChecks", () => {
+    it("a successful HTTP response without native merged true is not a merge receipt", async () => {
+      stubToken();
+      for (const merged of [false, undefined, "true"]) {
+        stubFetch(() => new Response(JSON.stringify({ sha: "9".repeat(40), merged }), { status: 200 }));
+        await expect(
+          mergePullRequest({ repo: "acme/api", number: 7 }, { sha: "a".repeat(40), title: "title" }),
+        ).rejects.toThrow();
+      }
+    });
+
+    it("the complete check listing includes a failure beyond the first page and rejects duplicate or foreign-head pages", async () => {
+      stubToken();
+      const head = "c".repeat(40);
+      const first = Array.from({ length: 100 }, (_, i) => ({
+        id: i + 1,
+        head_sha: head,
+        name: `check ${i}`,
+        status: "completed",
+        conclusion: "success",
+      }));
+      for (const last of [
+        { id: 101, head_sha: head, name: "last check", status: "completed", conclusion: "failure" },
+        first[0],
+        { id: 101, head_sha: "d".repeat(40), name: "other head", status: "completed", conclusion: "success" },
+      ]) {
+        const replies = [
+          { total_count: 101, check_runs: first },
+          { total_count: 101, check_runs: [last] },
+        ];
+        const calls = stubFetch(() => new Response(JSON.stringify(replies.shift()), { status: 200 }));
+        const result = await fetchCommitChecks("acme/api", head);
+        expect(result).toEqual(
+          last.id === 101 && last.head_sha === head ? { total: 101, pending: [], failed: ["last check"] } : undefined,
+        );
+        expect(calls).toHaveLength(2);
+      }
+    });
     it("the facts carry the pull request's title", async () => {
       stubToken();
       const titled = {
@@ -1335,6 +1686,7 @@ describe("githubPulls", () => {
         () =>
           new Response(
             JSON.stringify({
+              total_count: 7,
               check_runs: [
                 { name: "ci / bot / lint", status: "completed", conclusion: "success" },
                 { name: "ci / deploy the docs site", status: "completed", conclusion: "skipped" },
@@ -1342,8 +1694,8 @@ describe("githubPulls", () => {
                 { name: "ci / bot / test 1 of 4", status: "in_progress", conclusion: null },
                 { name: "ci / web", status: "queued" },
                 { name: "ci / package", status: "completed", conclusion: "failure" },
-                { status: "completed", conclusion: "cancelled" },
-              ],
+                { name: "cancelled check", status: "completed", conclusion: "cancelled" },
+              ].map((run, i) => ({ ...run, id: i + 1, head_sha: "c".repeat(40) })),
             }),
             { status: 200 },
           ),
@@ -1351,12 +1703,12 @@ describe("githubPulls", () => {
       expect(await fetchCommitChecks("acme/api", "c".repeat(40))).toEqual({
         total: 7,
         pending: ["ci / bot / test 1 of 4", "ci / web"],
-        failed: ["ci / package", "(unnamed)"],
+        failed: ["ci / package", "cancelled check"],
       });
       expect(calls[0].url).toBe(
-        `https://api.github.com/repos/acme/api/commits/${"c".repeat(40)}/check-runs?per_page=100`,
+        `https://api.github.com/repos/acme/api/commits/${"c".repeat(40)}/check-runs?per_page=100&page=1`,
       );
-      stubFetch(() => new Response(JSON.stringify({ check_runs: [] }), { status: 200 }));
+      stubFetch(() => new Response(JSON.stringify({ total_count: 0, check_runs: [] }), { status: 200 }));
       expect(await fetchCommitChecks("acme/api", "c".repeat(40))).toEqual({ total: 0, pending: [], failed: [] });
       stubFetch(() => new Response("nope", { status: 502 }));
       expect(await fetchCommitChecks("acme/api", "c".repeat(40))).toBeUndefined();
@@ -1401,60 +1753,6 @@ describe("githubPulls", () => {
         throw new Error("offline");
       });
       expect(await fixupCommitSubjects({ repo: "acme/api", number: 7 })).toBeUndefined();
-    });
-  });
-
-  // Feature: docs/reference/specs/agent-ship.md item 9 (record 0055's flake
-  // rule): the one re-run dispatches through the retry the check run's host
-  // understands — rerun-failed-jobs for a check backed by an Actions run,
-  // GitHub's check-run rerequest (which asks the creating app to run it again)
-  // for any other, this repository's Depot CI legs included — and answers
-  // false when nothing could be dispatched, never a silent no-op.
-  describe("rerunFailedJobs — the flake rule's one re-run (record 0055)", () => {
-    const listing = {
-      check_runs: [
-        { id: 11, name: "test 2 of 4", details_url: "https://github.com/acme/api/actions/runs/99/job/5" },
-        { id: 12, name: "test 3 of 4", details_url: "https://github.com/acme/api/actions/runs/99/job/6" },
-        { id: 42, name: "ci / depot", details_url: "https://depot.dev/orgs/acme/workflows/runs/abc" },
-        { id: 13, name: "untouched", details_url: "https://github.com/acme/api/actions/runs/77/job/1" },
-      ],
-    };
-
-    it("re-runs an Actions run's failed jobs once per run and rerequests a non-Actions check run by id — the Depot CI case — true when every dispatch was accepted", async () => {
-      stubToken();
-      const calls = stubFetch((url) =>
-        url.includes("/check-runs?")
-          ? new Response(JSON.stringify(listing), { status: 200 })
-          : new Response("{}", { status: 201 }),
-      );
-      expect(await rerunFailedJobs("acme/api", "c".repeat(40), ["test 2 of 4", "test 3 of 4", "ci / depot"])).toBe(
-        true,
-      );
-      const posts = calls.filter((c) => c.init.method === "POST").map((c) => c.url);
-      // The two shards share run 99: one rerun-failed-jobs, never two; and the
-      // Depot check run is rerequested by its check-run id, untouched runs untouched.
-      expect(posts).toEqual([
-        "https://api.github.com/repos/acme/api/actions/runs/99/rerun-failed-jobs",
-        "https://api.github.com/repos/acme/api/check-runs/42/rerequest",
-      ]);
-    });
-
-    it("answers false — never a silent no-op — when no named check is found, when the listing cannot be read, or when a dispatch is refused", async () => {
-      stubToken();
-      stubFetch(() => new Response(JSON.stringify({ check_runs: [] }), { status: 200 }));
-      expect(await rerunFailedJobs("acme/api", "c".repeat(40), ["ci / depot"])).toBe(false);
-      stubFetch(() => new Response("nope", { status: 502 }));
-      expect(await rerunFailedJobs("acme/api", "c".repeat(40), ["ci / depot"])).toBe(false);
-      stubFetch((url) =>
-        url.includes("/check-runs?")
-          ? new Response(JSON.stringify(listing), { status: 200 })
-          : new Response(JSON.stringify({ message: "Forbidden" }), { status: 403 }),
-      );
-      expect(await rerunFailedJobs("acme/api", "c".repeat(40), ["ci / depot"])).toBe(false);
-      vi.stubGlobal("fetch", async () => {
-        throw new Error("offline");
-      });
-      expect(await rerunFailedJobs("acme/api", "c".repeat(40), ["ci / depot"])).toBe(false);
     });
   });
 });

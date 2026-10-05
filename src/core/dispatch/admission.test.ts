@@ -452,7 +452,7 @@ describe("admit — the thread admission claim", () => {
     const admission = new ThreadAdmission<DispatchFollowUp>();
     admission.claim(THREAD, { agent: "general" });
     const ledger = new RecordingLedger();
-    const restart: RestartContext = { row: await rowOf("run-reserved"), inbox: [] };
+    const restart: RestartContext = { row: await rowOf("run-reserved"), events: [], inbox: [] };
     const { deps, ctx, replies } = setup("(restart)", { admission, ledger, restart });
     expect(await admit(deps, ctx)).toEqual({ kind: "superseded", of: "restart" });
     expect(ledger.puts).toMatchObject([{ id: "run-reserved", status: "interrupted", events: [] }]);
@@ -766,7 +766,7 @@ describe("adoptCarriedRun — taking up a resumed or restarted run's row", () =>
     const ledger = new RecordingLedger();
     const request = durableInboxMessage(msg("hello there"), "hello there", 5_000);
     const row = await rowOf("run-reserved", { request });
-    const { deps, ctx } = setup("(restart)", { ledger, restart: { row, inbox: [] } });
+    const { deps, ctx } = setup("(restart)", { ledger, restart: { row, events: [], inbox: [] } });
     const taken = await adoptCarriedRun(deps, ctx);
     expect(ledger.reserved).toMatchObject([
       {
@@ -812,7 +812,11 @@ describe("adoptCarriedRun — taking up a resumed or restarted run's row", () =>
 
     listed("run-reserved");
     const row = await rowOf("run-reserved", { request: durableInboxMessage(msg("hello there"), "hello there", 5_000) });
-    const restarted = setup("(restart)", { ledger: new RecordingLedger(), elsewhere, restart: { row, inbox: [] } });
+    const restarted = setup("(restart)", {
+      ledger: new RecordingLedger(),
+      elsewhere,
+      restart: { row, events: [], inbox: [] },
+    });
     await adoptCarriedRun(restarted.deps, restarted.ctx);
     expect(elsewhere.get(THREAD)).toBeUndefined();
 
@@ -979,7 +983,7 @@ describe("closeResumedRow / closeRestartRow — one attempt, the final word said
     await expect(
       closeResumedRow(adopted, { row, events: [] } as unknown as ResumeContext, "the test says so"),
     ).resolves.toBeUndefined();
-    await expect(closeRestartRow(adopted, { row, inbox: [] }, "the test says so")).resolves.toBeUndefined();
+    await expect(closeRestartRow(adopted, { row, events: [], inbox: [] }, "the test says so")).resolves.toBeUndefined();
     expect(spoken).toEqual([
       { id: "run-x", why: "run ledger /runs/finish: HTTP 503" },
       { id: "run-x", why: "run ledger /runs/finish: HTTP 503" },
@@ -998,7 +1002,9 @@ describe("closeResumedRow / closeRestartRow — one attempt, the final word said
     await expect(
       closeResumedRow(adopted, { row: broken, events: [] } as unknown as ResumeContext, "the test says so"),
     ).resolves.toBeUndefined();
-    await expect(closeRestartRow(adopted, { row: broken, inbox: [] }, "the test says so")).resolves.toBeUndefined();
+    await expect(
+      closeRestartRow(adopted, { row: broken, events: [], inbox: [] }, "the test says so"),
+    ).resolves.toBeUndefined();
     expect(puts).toBe(0);
     expect(spoken).toEqual([]);
   });

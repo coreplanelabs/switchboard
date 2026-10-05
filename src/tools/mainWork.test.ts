@@ -1,3 +1,4 @@
+import { InMemoryRunLedger } from "../core/runLedger/inMemory.js";
 import { describe, expect, it, vi } from "vitest";
 import type { Actor } from "../core/authz/types.js";
 import type { CoordinatorInstance, CoordinatorUnit } from "../core/coordinator/contract.js";
@@ -75,7 +76,7 @@ function requester(over: Partial<Actor> = {}): Actor {
 }
 
 async function fixture(over: Partial<CoordinatorUnit> = {}) {
-  const instances = new InMemoryCoordinatorInstanceStore();
+  const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
   await instances.recordRequesterTurn({ threadKey: THREAD, requesterId: INSTANCE.userId, messageId: "1" });
   expect(
     await instances.claimMainTask({ mainThreadKey: THREAD, actId: ACT }, INSTANCE, UNIT, {

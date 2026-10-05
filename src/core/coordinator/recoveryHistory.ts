@@ -1,5 +1,8 @@
 import {
   isCoordinatorUnit,
+  isCoordinatorEnding,
+  isRecoveryAdmissionFields,
+  INSTANCE_ID_PATTERN,
   mainTaskClaimMatches,
   preserveWorkBrief,
   hasRecoverySettlementCapacity,
@@ -66,7 +69,7 @@ export type RecoveryTransition = { expected: CoordinatorUnit; replacement: Coord
 );
 export type RecoveryTransitionResult =
   | { ok: true; unit: CoordinatorUnit; replayed?: true }
-  | { ok: false; reason: "stale" | "conflict" | "capacity" | "unavailable" };
+  | { ok: false; reason: "stale" | "conflict" | "capacity" | "unavailable" | "owned" | "incomplete" };
 
 export const RECOVERY_HISTORY_LIMITS = {
   actions: 32,
@@ -177,6 +180,37 @@ export function isRecoveryAction(v: unknown): v is RecoveryAction {
     recoveryBytes(v) <= RECOVERY_HISTORY_LIMITS.actionBytes
   );
 }
+/** Read intent from the existing digest-bound admission payload after the live claim is gone. */
+export async function recoveryActionRenewed(action: RecoveryAction): Promise<boolean | null> {
+  if (!isRecoveryAction(action)) return null;
+  try {
+    const payload: unknown = JSON.parse(action.payload);
+    if (
+      !object(payload) ||
+      payload.version !== 1 ||
+      payload.instanceId !== action.instanceId ||
+      payload.unit !== action.unit ||
+      payload.branch !== action.branch ||
+      payload.predecessorId !== action.predecessorId ||
+      canonical(payload.request) !== canonical(action.request) ||
+      !object(payload.transition) ||
+      !isRecoveryAdmissionFields(payload.transition) ||
+      payload.transition.workflowId !== action.workflowId ||
+      payload.transition.expectedHeadSha !== action.expectedHeadSha ||
+      payload.transition.reviewRunId !== action.reviewRunId ||
+      payload.transition.codingRunId !== action.codingRunId ||
+      (object(payload.transition.externalReview) ? payload.transition.externalReview.id : undefined) !==
+        action.externalReviewId ||
+      canonical(payload) !== action.payload ||
+      (await digest(payload)) !== action.payloadDigest
+    )
+      return null;
+    return payload.transition.renewed === true;
+  } catch {
+    return null;
+  }
+}
+
 export function isRecoveryReceipt(v: unknown): v is RecoveryReceipt {
   if (!object(v)) return false;
   const fields = [
@@ -198,18 +232,10 @@ export function isRecoveryReceipt(v: unknown): v is RecoveryReceipt {
     object(v.ending) &&
     Number.isSafeInteger(v.seq) &&
     (v.seq as number) > 0 &&
-    isCoordinatorUnit({
-      instanceId: v.instanceId,
-      unit: v.unit,
-      slug: "history",
-      branch: "history",
-      dependsOn: [],
-      rounds: [],
-      ending: v.ending,
-      ...(object(v.ending) && object(v.ending.outcome) && object(v.ending.outcome.terminalPr)
-        ? { pr: { number: v.ending.outcome.terminalPr.number, url: v.ending.outcome.terminalPr.url } }
-        : {}),
-    }) &&
+    typeof v.instanceId === "string" &&
+    INSTANCE_ID_PATTERN.test(v.instanceId) &&
+    text(v.unit, 32) &&
+    isCoordinatorEnding(v.ending) &&
     ((v.provenance === "observed_predecessor" &&
       v.predecessorId === undefined &&
       v.actionId === undefined &&
@@ -304,6 +330,7 @@ export function planRecoveryTransition(
     )
   )
     return { ok: false, reason: "conflict" };
+  if (!same(expected.currentEffect, input.replacement.currentEffect)) return { ok: false, reason: "conflict" };
   // Each transition is a whole-row write, but none can move the original
   // conversation, request, or pull request to a different identity.
   for (const field of [
@@ -331,6 +358,12 @@ export function planRecoveryTransition(
       return { ok: true, unit: current, replayed: true };
     return { ok: false, reason: "conflict" };
   }
+  // Exact journal replay above changes no cell, execution, owner or allowance.
+  if (
+    current.currentEffect?.phase === "active" &&
+    (input.kind === "claim" || !same(current.recovery, input.replacement.recovery))
+  )
+    return { ok: false, reason: "conflict" };
   let unit = preserveWorkBrief(expected, input.replacement);
   if (input.kind === "refuse" && unit.history === undefined && expected.history !== undefined)
     unit = { ...unit, history: expected.history };

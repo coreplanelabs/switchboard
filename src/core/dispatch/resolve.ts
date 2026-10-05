@@ -38,7 +38,7 @@ import {
 import type { AgentSource } from "../runEvents.js";
 import type { Span } from "../trace/types.js";
 import type { ChannelIO, HistoryItem, IncomingMessage } from "../types.js";
-import type { ResumeContext } from "./admission.js";
+import type { ResumeContext, RestartContext } from "./admission.js";
 
 /** What the resolve stage reads off the dispatcher's dependencies. `CoreDeps`
  *  extends this; a caller's shape is unchanged. */
@@ -182,12 +182,14 @@ export function resolveProfile(ctx: {
   agent: AgentDef;
   resolved: ResolvedRequest;
   resume: ResumeContext | undefined;
+  restart?: RestartContext;
+  carriedProfile?: RunProfile;
   /** The request's `budget:` directive, in minutes; absent when it sent none. */
   budget?: number;
   /** For a spawned child: the parent's remaining wall clock at the spawn, in ms. */
   parentRemainingMs?: number;
 }): ProfileResolution {
-  const carried = ctx.resume?.row.meta.profile;
+  const carried = (ctx.resume ?? ctx.restart)?.row.meta.profile ?? ctx.carriedProfile;
   const declared = carried
     ? { machine: carried.machine, identity: carried.identity, maxMinutes: carried.minutes }
     : ctx.agent;

@@ -1,4 +1,5 @@
 import { resolveGithubToken } from "./githubApp.js";
+import { isPublicationRepo as githubRepo } from "../core/branchPublication.js";
 import type { CheckRunDetail } from "../core/ship/checkFindings.js";
 import { redactAndCap } from "../core/redact.js";
 
@@ -26,9 +27,6 @@ import { redactAndCap } from "../core/redact.js";
 const MAX_BODY_CHARS = 65000;
 
 const REQUEST_TIMEOUT_MS = 15_000;
-/** Immediate attempts restore an accepted close before the Workflow's durable
- * step retry takes over for a longer GitHub outage. */
-const REOPEN_ATTEMPTS = 3;
 
 export interface PullRequestTarget {
   /** `owner/name` */
@@ -234,13 +232,18 @@ export async function findMergedPrByHead(repo: string, branch: string): Promise<
  * non-2xx response so the caller can report honestly instead of fabricating a
  * URL.
  */
-export async function openPullRequest(target: PullRequestTarget): Promise<OpenedPullRequest> {
+export async function openPullRequest(
+  target: PullRequestTarget,
+  beforeMutation?: (pr: number | undefined) => Promise<void>,
+): Promise<OpenedPullRequest> {
   const existing = await findOpenPrByHead(target.repo, target.headBranch);
   if (existing) {
+    await beforeMutation?.(existing.number);
     await updatePullRequest(target.repo, existing.number, { title: target.title, body: target.body });
     return { number: existing.number, htmlUrl: existing.htmlUrl, created: false };
   }
   const token = await requireToken();
+  await beforeMutation?.(undefined);
   const res = await fetch(`https://api.github.com/repos/${target.repo}/pulls`, {
     method: "POST",
     headers: apiHeaders(token, true),
@@ -282,80 +285,242 @@ export async function updatePullRequest(
   }
 }
 
-/** Re-fire GitHub's `pull_request` event without changing the head: close the
- * pull request and reopen it, the recovery for a CI run that started no
- * workflows. A refused close returns false so callers spend the one event
- * attempt. Once GitHub accepts the close, reopening is retried immediately;
- * exhaustion throws so the Workflow retries the durable step instead of
- * recording a completed effect while the pull request remains closed. */
-export async function refirePullRequestEvent(repo: string, number: number): Promise<boolean> {
-  const token = await requireToken();
-  const url = `https://api.github.com/repos/${repo}/pulls/${number}`;
-  const setState = async (state: "closed" | "open"): Promise<boolean> => {
-    try {
-      const res = await fetch(url, {
-        method: "PATCH",
-        headers: apiHeaders(token, true),
-        body: JSON.stringify({ state }),
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
-      return res.ok;
-    } catch {
-      return false;
-    }
-  };
-  if (!(await setState("closed"))) return false;
-  for (let attempt = 0; attempt < REOPEN_ATTEMPTS; attempt += 1) {
-    if (await setState("open")) return true;
-  }
-  throw new Error(`pull request ${repo}#${number} could not be reopened after its event re-fire`);
+/** One native request, after the caller durably admits its frozen target. */
+export type GithubWriteResult = { state: "accepted" } | { state: "refused"; status?: number } | { state: "uncertain" };
+export type CheckRetryTarget = { operation: "actions_rerun" | "check_rerequest"; resourceId: number };
+const DEFINITIVE_WRITE_REFUSALS = new Set([400, 401, 403, 404, 405, 409, 422, 429]);
+const positiveNativeId = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) > 0;
+const fullHead = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{40}$/i.test(value);
+
+function writeRefusal(status: number): Exclude<GithubWriteResult, { state: "accepted" }> {
+  return DEFINITIVE_WRITE_REFUSALS.has(status) ? { state: "refused", status } : { state: "uncertain" };
 }
 
-/**
- * Create `refs/heads/<branch>` at the current tip of `fromRef` (ship round 0,
- * docs/reference/specs/agent-ship.md item 3). The resident binds a thread's
- * worktree to a ref that must already exist on origin — an attach naming a
- * branch GitHub has never heard of is refused, and the executor factory's
- * sandbox fallback would then misreport "onboard the repo" on every fresh
- * pipeline — so the BOT creates the pipeline branch itself BEFORE the first
- * attach. Two REST calls with the App token (`contents:write`), same
- * conventions as the PR writes above, never a `gh` shell-out:
- *
- *   GET  /repos/{repo}/git/ref/heads/{fromRef}  → the base tip's sha
- *   POST /repos/{repo}/git/refs                 → refs/heads/<branch> at it
- *
- * A 422 "already exists" on the create is SUCCESS: a restarted pipeline
- * recreates the same deterministic branch name, and the existing ref — with
- * any work already pushed to it — is exactly what the restart wants
- * (recreatability, AGENTS.md invariant 6). Everything else throws so the
- * caller can abort honestly instead of dispatching a round that cannot bind.
- */
-export async function createBranchRef(repo: string, branch: string, fromRef: string): Promise<void> {
-  const token = await requireToken();
-  // Segment-encode the base ref: slashes are path structure (`release/1.x`),
-  // everything else inside a segment is escaped.
-  const basePath = fromRef.split("/").map(encodeURIComponent).join("/");
-  const baseRes = await fetch(`https://api.github.com/repos/${repo}/git/ref/heads/${basePath}`, {
-    headers: apiHeaders(token),
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
-  if (!baseRes.ok) {
-    const text = await baseRes.text().catch(() => "");
-    throw new Error(`base ref lookup failed for ${fromRef}: HTTP ${baseRes.status} ${redactAndCap(text, 300)}`);
+export type RecoveryPullWriteResult =
+  { state: "accepted"; pr: OpenedPullRequest; headSha: string } | Exclude<GithubWriteResult, { state: "accepted" }>;
+
+/** One native write under the caller's already-begun original effect. The
+ * native response, not a later listing, binds the frozen bytes and head. */
+async function writeFrozenPull(
+  target: PullRequestTarget & { headSha: string },
+  number?: number,
+): Promise<RecoveryPullWriteResult> {
+  if (
+    !githubRepo(target.repo) ||
+    !fullHead(target.headSha) ||
+    !target.headBranch ||
+    !target.base ||
+    typeof target.title !== "string" ||
+    !target.title ||
+    typeof target.body !== "string" ||
+    target.body.length > MAX_BODY_CHARS ||
+    (number !== undefined && !positiveNativeId(number))
+  )
+    return { state: "refused" };
+  const token = await requireToken().catch(() => undefined);
+  if (!token) return { state: "refused" };
+  try {
+    const creating = number === undefined;
+    const res = await fetch(`https://api.github.com/repos/${target.repo}/pulls${creating ? "" : `/${number}`}`, {
+      method: creating ? "POST" : "PATCH",
+      redirect: "error",
+      headers: apiHeaders(token, true),
+      body: JSON.stringify(
+        creating
+          ? { title: target.title, head: target.headBranch, base: target.base, body: target.body, draft: false }
+          : { title: target.title, body: target.body },
+      ),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (res.status !== (creating ? 201 : 200)) return writeRefusal(res.status);
+    const row = (await res.json()) as {
+      number?: unknown;
+      html_url?: unknown;
+      state?: unknown;
+      merged?: unknown;
+      draft?: unknown;
+      title?: unknown;
+      body?: unknown;
+      head?: { sha?: unknown; ref?: unknown; repo?: { full_name?: unknown } };
+      base?: { ref?: unknown; repo?: { full_name?: unknown } };
+    } | null;
+    if (
+      !row ||
+      !positiveNativeId(row.number) ||
+      (number !== undefined && row.number !== number) ||
+      row.state !== "open" ||
+      row.merged !== false ||
+      (creating && row.draft !== false) ||
+      row.title !== target.title ||
+      row.body !== target.body ||
+      typeof row.head?.sha !== "string" ||
+      row.head.sha.toLowerCase() !== target.headSha.toLowerCase() ||
+      row.head.ref !== target.headBranch ||
+      typeof row.head.repo?.full_name !== "string" ||
+      row.head.repo.full_name.toLowerCase() !== target.repo.toLowerCase() ||
+      row.base?.ref !== target.base ||
+      typeof row.base.repo?.full_name !== "string" ||
+      row.base.repo.full_name.toLowerCase() !== target.repo.toLowerCase() ||
+      typeof row.html_url !== "string" ||
+      row.html_url.length > 2048
+    )
+      return { state: "uncertain" };
+    const url = new URL(row.html_url);
+    if (url.protocol !== "https:" || url.hostname !== "github.com" || url.username || url.password)
+      return { state: "uncertain" };
+    return {
+      state: "accepted",
+      headSha: target.headSha,
+      pr: { number: row.number as number, htmlUrl: row.html_url, created: creating },
+    };
+  } catch {
+    return { state: "uncertain" };
   }
-  const base = (await baseRes.json().catch(() => null)) as { object?: { sha?: unknown } } | null;
-  const sha = typeof base?.object?.sha === "string" && base.object.sha ? base.object.sha : undefined;
-  if (!sha) throw new Error(`base ref lookup for ${fromRef} answered without a sha`);
-  const res = await fetch(`https://api.github.com/repos/${repo}/git/refs`, {
-    method: "POST",
-    headers: apiHeaders(token, true),
-    body: JSON.stringify({ ref: `refs/heads/${branch}`, sha }),
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
-  if (res.ok) return;
-  const text = await res.text().catch(() => "");
-  if (res.status === 422 && /already exists/i.test(text)) return;
-  throw new Error(`branch create failed for ${branch}: HTTP ${res.status} ${redactAndCap(text, 300)}`);
+}
+
+export async function createRecoveryPullRequest(
+  target: PullRequestTarget & { headSha: string },
+): Promise<RecoveryPullWriteResult> {
+  return writeFrozenPull(target);
+}
+
+export async function updatePullRequestEffect(
+  pr: { repo: string; number: number },
+  target: { headSha: string; headRef: string; baseRef: string },
+  patch: { title: string; body: string },
+): Promise<GithubWriteResult> {
+  const result = await writeFrozenPull(
+    {
+      repo: pr.repo,
+      headBranch: target.headRef,
+      base: target.baseRef,
+      headSha: target.headSha,
+      ...patch,
+    },
+    pr.number,
+  );
+  return result.state === "accepted" ? { state: "accepted" } : result;
+}
+
+/** GitHub does not provide a head precondition for this PATCH. The caller
+ * checks the head before admission; a raced or malformed response remains
+ * uncertain even though the state change may already have happened. */
+export async function setPullRequestState(
+  pr: { repo: string; number: number },
+  target: { headSha: string; headRef: string; baseRef: string },
+  state: "closed" | "open",
+): Promise<GithubWriteResult> {
+  if (
+    !githubRepo(pr.repo) ||
+    !positiveNativeId(pr.number) ||
+    !fullHead(target.headSha) ||
+    !target.headRef ||
+    !target.baseRef ||
+    (state !== "closed" && state !== "open")
+  )
+    return { state: "refused" };
+  const token = await requireToken().catch(() => undefined);
+  if (!token) return { state: "refused" };
+  try {
+    const res = await fetch(`https://api.github.com/repos/${pr.repo}/pulls/${pr.number}`, {
+      method: "PATCH",
+      redirect: "error",
+      headers: apiHeaders(token, true),
+      body: JSON.stringify({ state }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (res.status !== 200) return writeRefusal(res.status);
+    const row = (await res.json()) as {
+      number?: unknown;
+      state?: unknown;
+      merged?: unknown;
+      head?: { sha?: unknown; ref?: unknown; repo?: { full_name?: unknown } };
+      base?: { ref?: unknown; repo?: { full_name?: unknown } };
+    } | null;
+    return row?.number === pr.number &&
+      row.state === state &&
+      row.merged === false &&
+      typeof row.head?.sha === "string" &&
+      row.head.sha.toLowerCase() === target.headSha.toLowerCase() &&
+      row.head.ref === target.headRef &&
+      typeof row.head.repo?.full_name === "string" &&
+      row.head.repo.full_name.toLowerCase() === pr.repo.toLowerCase() &&
+      row.base?.ref === target.baseRef &&
+      typeof row.base.repo?.full_name === "string" &&
+      row.base.repo.full_name.toLowerCase() === pr.repo.toLowerCase()
+      ? { state: "accepted" }
+      : { state: "uncertain" };
+  } catch {
+    return { state: "uncertain" };
+  }
+}
+
+async function postCheckRetry(
+  repo: string,
+  resourceId: number,
+  operation: CheckRetryTarget["operation"],
+): Promise<GithubWriteResult> {
+  if (!githubRepo(repo) || !positiveNativeId(resourceId)) return { state: "refused" };
+  const token = await requireToken().catch(() => undefined);
+  if (!token) return { state: "refused" };
+  const path =
+    operation === "actions_rerun"
+      ? `actions/runs/${resourceId}/rerun-failed-jobs`
+      : `check-runs/${resourceId}/rerequest`;
+  try {
+    const res = await fetch(`https://api.github.com/repos/${repo}/${path}`, {
+      method: "POST",
+      redirect: "error",
+      headers: apiHeaders(token),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    return res.status === 201 ? { state: "accepted" } : writeRefusal(res.status);
+  } catch {
+    return { state: "uncertain" };
+  }
+}
+
+/** A native 201 acknowledges dispatch, not completion of the rerun. */
+export async function rerunActionsFailedJobs(repo: string, resourceId: number): Promise<GithubWriteResult> {
+  return postCheckRetry(repo, resourceId, "actions_rerun");
+}
+
+/** Rerequest does not update the check run itself. An unchanged check run
+ * cannot resolve an unknown request or grant permission to replay it. */
+export async function rerequestCheckRun(repo: string, resourceId: number): Promise<GithubWriteResult> {
+  return postCheckRetry(repo, resourceId, "check_rerequest");
+}
+
+/** A frozen commit is posted once. HTTP/network uncertainty is not a refusal. */
+export type BranchRefCreateResult =
+  { state: "accepted"; commitSha: string } | { state: "refused"; status?: number } | { state: "uncertain" };
+export async function createBranchRef(repo: string, branch: string, sha: string): Promise<BranchRefCreateResult> {
+  if (!/^[a-f0-9]{40}$/i.test(sha)) return { state: "refused" };
+  const token = await requireToken().catch(() => undefined);
+  if (!token) return { state: "refused" };
+  let res: Response;
+  try {
+    res = await fetch(`https://api.github.com/repos/${repo}/git/refs`, {
+      method: "POST",
+      headers: apiHeaders(token, true),
+      body: JSON.stringify({ ref: `refs/heads/${branch}`, sha }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    return { state: "uncertain" };
+  }
+  if (res.status >= 400 && res.status < 500) return { state: "refused", status: res.status };
+  if (res.status !== 201) return { state: "uncertain" };
+  const body = (await res.json().catch(() => null)) as {
+    ref?: unknown;
+    object?: { type?: unknown; sha?: unknown };
+  } | null;
+  return body?.ref === `refs/heads/${branch}` &&
+    body.object?.type === "commit" &&
+    typeof body.object.sha === "string" &&
+    body.object.sha.toLowerCase() === sha.toLowerCase()
+    ? { state: "accepted", commitSha: sha }
+    : { state: "uncertain" };
 }
 
 // ---- read-only repo/PR facts for the ship gate (docs/reference/specs/agent-ship.md) ----
@@ -531,7 +696,7 @@ export interface PullRequestFacts {
   closedBy?: string;
 }
 
-type HeadRefRead = { kind: "verified"; sha: string } | { kind: "missing" } | { kind: "unverified" };
+type HeadRefRead = { kind: "verified"; sha: string; ref?: string } | { kind: "missing" } | { kind: "unverified" };
 
 /** One read of `refs/heads/<branch>` on `repo`. A valid commit target is the
  * only positive result; 404 is known missing; every other status, network
@@ -550,12 +715,29 @@ async function readHeadRef(repo: string, branch: string, headers: Record<string,
   }
   if (res.status === 404) return { kind: "missing" };
   if (!res.ok) return { kind: "unverified" };
-  const data = (await res.json().catch(() => null)) as { object?: { sha?: unknown; type?: unknown } } | null;
+  const data = (await res.json().catch(() => null)) as {
+    ref?: unknown;
+    object?: { sha?: unknown; type?: unknown };
+  } | null;
   // A branch ref points at a commit; anything else (an annotated tag object,
   // a malformed answer) is not a head to pin a review to.
   const sha = data?.object?.sha;
   return data?.object?.type === "commit" && typeof sha === "string" && /^[0-9a-f]{40}$/.test(sha)
-    ? { kind: "verified", sha }
+    ? { kind: "verified", sha, ...(typeof data.ref === "string" ? { ref: data.ref } : {}) }
+    : { kind: "unverified" };
+}
+
+export type BranchRefRead =
+  { kind: "verified"; sha: string; ref: string } | { kind: "missing" } | { kind: "unverified" };
+
+/** Exact authenticated ref observation; absence never proves an earlier POST unstarted. */
+export async function fetchBranchRef(repo: string, branch: string): Promise<BranchRefRead> {
+  const token = await resolveGithubToken("read").catch(() => null);
+  if (!token) return { kind: "unverified" };
+  const read = await readHeadRef(repo, branch, apiHeaders(token));
+  if (read.kind !== "verified") return read;
+  return read.ref === `refs/heads/${branch}`
+    ? { kind: "verified", sha: read.sha, ref: read.ref }
     : { kind: "unverified" };
 }
 
@@ -775,6 +957,7 @@ export async function mergePullRequest(
   pr: { repo: string; number: number },
   opts: { sha: string; title: string; mergedBy?: string },
 ): Promise<MergeResult> {
+  if (!/^[0-9a-f]{40}$/i.test(opts.sha)) throw new Error("merge requires an exact full head sha");
   const token = await requireToken();
   const res = await fetch(`https://api.github.com/repos/${pr.repo}/pulls/${pr.number}/merge`, {
     method: "PUT",
@@ -790,15 +973,17 @@ export async function mergePullRequest(
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   const text = await res.text().catch(() => "");
-  let body: { sha?: unknown; message?: unknown } | null;
+  let body: { sha?: unknown; message?: unknown; merged?: unknown } | null;
   try {
-    body = JSON.parse(text) as { sha?: unknown; message?: unknown };
+    body = JSON.parse(text) as { sha?: unknown; message?: unknown; merged?: unknown };
   } catch {
     body = null;
   }
   if (res.ok) {
     const sha = typeof body?.sha === "string" && /^[0-9a-f]{40}$/.test(body.sha) ? body.sha : undefined;
     if (sha === undefined) throw new Error(`merge of ${pr.repo}#${pr.number} answered without a merge commit sha`);
+    if (res.status !== 200 || body?.merged !== true)
+      throw new Error(`merge of ${pr.repo}#${pr.number} returned no native merge receipt`);
     return { ok: true, sha };
   }
   if (res.status === 405 || res.status === 409 || res.status === 422) {
@@ -809,11 +994,6 @@ export async function mergePullRequest(
 }
 
 // ---- the merge queue (agent-ship item 9; issue 2011) --------------------------------------------------
-
-/** GitHub's own wording when a ruleset routes every change through the merge
- *  queue: the merge door recognises it on a 405 even when the base branch's
- *  rules could not be read ahead of the attempt. */
-export const MERGE_QUEUE_405 = /must be made through the merge queue|merge queue/i;
 
 /** `GET /repos/{repo}/rules/branches/{branch}`: whether a `merge_queue` rule
  *  protects the branch. Undefined when GitHub cannot be read or answers out of
@@ -831,8 +1011,8 @@ export async function branchHasMergeQueue(repo: string, branch: string): Promise
   }
   if (!res.ok) return undefined;
   const data = (await res.json().catch(() => null)) as Array<{ type?: unknown }> | null;
-  if (!Array.isArray(data)) return undefined;
-  return data.some((rule) => rule && rule.type === "merge_queue");
+  if (!Array.isArray(data) || data.some((rule) => !rule || typeof rule.type !== "string")) return undefined;
+  return data.some((rule) => rule.type === "merge_queue");
 }
 
 /** One GraphQL call on the App token: the parsed `data`, or a throw naming the
@@ -864,50 +1044,74 @@ const prGraphqlArgs = (pr: { repo: string; number: number }) => {
 
 export type EnqueueResult = { ok: true } | { ok: false; reason: string };
 
-/** The GraphQL `enqueuePullRequest` mutation — the same act `gh pr merge
- *  --auto` performs on a merge-queue repository. `expectedHeadOid` makes the
- *  mutation atomic with the review fence: GitHub refuses if the branch moved
- *  after its approved head was read. A pull request already in the queue is
- *  success (a replayed step enqueues nothing twice); any other GraphQL error is
- *  an answer with GitHub's words, never a throw — a person decides. A call that
- *  fails (network, HTTP) throws, like every write here. */
+/** One exact-head enqueue. Only the native entry acknowledges the write;
+ * errors or partial responses leave its outcome unknown to the durable caller. */
 export async function enqueuePullRequest(
   pr: { repo: string; number: number },
   opts: { sha: string },
 ): Promise<EnqueueResult> {
+  if (!/^[0-9a-f]{40}$/i.test(opts.sha)) throw new Error("enqueue requires an exact full head sha");
   const looked = await graphql(
     `
       query ($owner: String!, $name: String!, $number: Int!) {
         repository(owner: $owner, name: $name) {
           pullRequest(number: $number) {
             id
+            headRefOid
           }
         }
       }
     `,
     prGraphqlArgs(pr),
   );
-  const nodeId = (looked.data as { repository?: { pullRequest?: { id?: unknown } } } | undefined)?.repository
-    ?.pullRequest?.id;
-  if (typeof nodeId !== "string")
-    return { ok: false, reason: firstGraphqlError(looked) ?? `${pr.repo}#${pr.number} has no node id` };
+  const node = (looked.data as { repository?: { pullRequest?: { id?: unknown; headRefOid?: unknown } } } | undefined)
+    ?.repository?.pullRequest;
+  if (looked.errors !== undefined && (!Array.isArray(looked.errors) || looked.errors.length > 0))
+    throw new Error(`enqueue lookup unavailable: ${firstGraphqlError(looked) ?? "invalid errors"}`);
+  if (
+    typeof node?.id !== "string" ||
+    node.id.length === 0 ||
+    typeof node.headRefOid !== "string" ||
+    !/^[0-9a-f]{40}$/i.test(node.headRefOid)
+  )
+    throw new Error("enqueue lookup returned incomplete native identity");
+  if (node.headRefOid.toLowerCase() !== opts.sha.toLowerCase())
+    return { ok: false, reason: `${pr.repo}#${pr.number} no longer has the exact enqueue head` };
   const answer = await graphql(
     `
       mutation ($id: ID!, $sha: GitObjectID!) {
         enqueuePullRequest(input: { pullRequestId: $id, expectedHeadOid: $sha }) {
           mergeQueueEntry {
-            position
+            id
+            pullRequest {
+              id
+              headRefOid
+            }
           }
         }
       }
     `,
-    { id: nodeId, sha: opts.sha },
+    { id: node.id, sha: opts.sha },
   );
-  const error = firstGraphqlError(answer);
-  if (error === undefined) return { ok: true };
-  // Already queued — an earlier attempt's enqueue landed: the ask is satisfied.
-  if (/already.{0,20}queue/i.test(error)) return { ok: true };
-  return { ok: false, reason: error };
+  const entry = (
+    answer.data as
+      | {
+          enqueuePullRequest?: {
+            mergeQueueEntry?: { id?: unknown; pullRequest?: { id?: unknown; headRefOid?: unknown } };
+          };
+        }
+      | undefined
+  )?.enqueuePullRequest?.mergeQueueEntry;
+  if (
+    (answer.errors !== undefined && (!Array.isArray(answer.errors) || answer.errors.length > 0)) ||
+    typeof entry?.id !== "string" ||
+    entry.id.length === 0 ||
+    entry.pullRequest?.id !== node.id ||
+    typeof entry.pullRequest.headRefOid !== "string" ||
+    entry.pullRequest.headRefOid.toLowerCase() !== opts.sha.toLowerCase()
+  )
+    throw new Error(`enqueue outcome unverified: ${firstGraphqlError(answer) ?? "native entry unavailable"}`);
+  return { ok: true };
 }
 
 function firstGraphqlError(answer: { errors?: Array<{ message?: unknown }> }): string | undefined {
@@ -918,7 +1122,8 @@ function firstGraphqlError(answer: { errors?: Array<{ message?: unknown }> }): s
 /** Where an open pull request stands with the base's merge queue: in it, or
  *  out of it — with the queue's own removal reason when the timeline carries a
  *  `RemovedFromMergeQueueEvent` (a failing check in the queue, a conflict). */
-export type MergeQueueState = { queued: true; position?: number } | { queued: false; reason?: string };
+export type MergeQueueState =
+  { queued: true; position?: number; headSha?: string } | { queued: false; reason?: string };
 
 /** The pull request's `mergeQueueEntry` and the last removal's reason, over
  *  GraphQL. Undefined when GitHub cannot be read — the caller treats unknown
@@ -932,6 +1137,12 @@ export async function fetchMergeQueueState(pr: { repo: string; number: number })
           repository(owner: $owner, name: $name) {
             pullRequest(number: $number) {
               mergeQueueEntry {
+                headCommit {
+                  oid
+                }
+                pullRequest {
+                  headRefOid
+                }
                 position
               }
               timelineItems(last: 10, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT]) {
@@ -955,17 +1166,37 @@ export async function fetchMergeQueueState(pr: { repo: string; number: number })
       | {
           repository?: {
             pullRequest?: {
-              mergeQueueEntry?: { position?: unknown } | null;
+              mergeQueueEntry?: {
+                position?: unknown;
+                headCommit?: { oid?: unknown } | null;
+                pullRequest?: { headRefOid?: unknown };
+              } | null;
               timelineItems?: { nodes?: Array<{ reason?: unknown } | null> };
             } | null;
           };
         }
       | undefined
   )?.repository?.pullRequest;
-  if (node === undefined || node === null) return undefined;
+  if (
+    (answer.errors !== undefined && (!Array.isArray(answer.errors) || answer.errors.length > 0)) ||
+    node === undefined ||
+    node === null
+  )
+    return undefined;
   const entry = node.mergeQueueEntry;
-  if (entry !== null && entry !== undefined)
-    return { queued: true, ...(typeof entry.position === "number" ? { position: entry.position } : {}) };
+  if (entry === undefined) return undefined;
+  if (entry !== null) {
+    if (typeof entry !== "object" || !Number.isSafeInteger(entry.position) || (entry.position as number) < 1)
+      return undefined;
+    const headSha = entry.headCommit?.oid;
+    return {
+      queued: true,
+      position: entry.position as number,
+      ...(typeof headSha === "string" && /^[0-9a-f]{40}$/i.test(headSha) && entry.pullRequest?.headRefOid === headSha
+        ? { headSha }
+        : {}),
+    };
+  }
   const reasons = (node.timelineItems?.nodes ?? []).filter(
     (n): n is { reason: string } => n !== null && typeof n?.reason === "string" && n.reason.length > 0,
   );
@@ -983,31 +1214,168 @@ export interface CommitChecks {
 
 const GREEN_CONCLUSIONS = new Set(["success", "skipped", "neutral"]);
 
-/** `GET /repos/{repo}/commits/{sha}/check-runs` (one page of 100) → the checks
- *  at the sha, or undefined when GitHub cannot be read or the answer is not
- *  the route's. Never throws — the caller treats unknown as not green. */
-export async function fetchCommitChecks(repo: string, sha: string): Promise<CommitChecks | undefined> {
+interface NativeCheckRun {
+  id: number;
+  name: string;
+  status: string;
+  conclusion?: unknown;
+  details_url?: unknown;
+  check_suite?: { id?: unknown } | null;
+  app?: { slug?: unknown } | null;
+}
+const CHECK_STATUSES = new Set(["queued", "in_progress", "completed", "waiting", "requested", "pending"]);
+const CHECK_CONCLUSIONS = new Set([
+  "success",
+  "failure",
+  "neutral",
+  "cancelled",
+  "skipped",
+  "timed_out",
+  "action_required",
+  "waiting",
+  "pending",
+  "startup_failure",
+  "stale",
+]);
+
+/** Read every page the native endpoint exposes. Count changes, duplicate IDs
+ * or foreign heads make the read unavailable, never an all-green prefix. */
+async function readCommitCheckRuns(repo: string, sha: string): Promise<NativeCheckRun[] | undefined> {
+  if (!githubRepo(repo) || !fullHead(sha)) return undefined;
   const token = await resolveGithubToken().catch(() => null);
-  let res: Response;
+  const out: NativeCheckRun[] = [];
+  const ids = new Set<number>();
+  let total: number | undefined;
   try {
-    res = await fetch(`https://api.github.com/repos/${repo}/commits/${sha}/check-runs?per_page=100`, {
-      headers: apiHeaders(token),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
+    for (let page = 1; page <= 100; page++) {
+      const res = await fetch(
+        `https://api.github.com/repos/${repo}/commits/${sha}/check-runs?per_page=100&page=${page}`,
+        {
+          headers: apiHeaders(token),
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        },
+      );
+      if (!res.ok) return undefined;
+      const data = (await res.json()) as { total_count?: unknown; check_runs?: unknown } | null;
+      if (
+        !data ||
+        !Number.isSafeInteger(data.total_count) ||
+        (data.total_count as number) < 0 ||
+        !Array.isArray(data.check_runs)
+      )
+        return undefined;
+      total ??= data.total_count as number;
+      if (data.total_count !== total || data.check_runs.length !== Math.min(100, total - out.length)) return undefined;
+      for (const run of data.check_runs as Array<Record<string, unknown>>) {
+        if (
+          !run ||
+          typeof run !== "object" ||
+          Array.isArray(run) ||
+          !positiveNativeId(run.id) ||
+          ids.has(run.id) ||
+          typeof run.head_sha !== "string" ||
+          run.head_sha.toLowerCase() !== sha.toLowerCase() ||
+          typeof run.name !== "string" ||
+          !run.name ||
+          !CHECK_STATUSES.has(run.status as string) ||
+          (run.status === "completed" && !CHECK_CONCLUSIONS.has(run.conclusion as string))
+        )
+          return undefined;
+        ids.add(run.id);
+        out.push(run as unknown as NativeCheckRun);
+      }
+      if (out.length === total) return /rel="next"/.test(res.headers.get("link") ?? "") ? undefined : out;
+    }
   } catch {
     return undefined;
   }
-  if (!res.ok) return undefined;
-  const data = (await res.json().catch(() => null)) as { check_runs?: unknown } | null;
-  if (!data || !Array.isArray(data.check_runs)) return undefined;
-  const out: CommitChecks = { total: 0, pending: [], failed: [] };
-  for (const run of data.check_runs as Array<{ name?: unknown; status?: unknown; conclusion?: unknown }>) {
-    const name = typeof run.name === "string" ? run.name : "(unnamed)";
-    out.total++;
-    if (run.status !== "completed") out.pending.push(name);
-    else if (typeof run.conclusion !== "string" || !GREEN_CONCLUSIONS.has(run.conclusion)) out.failed.push(name);
+  return undefined;
+}
+
+export async function fetchCommitChecks(repo: string, sha: string): Promise<CommitChecks | undefined> {
+  const rows = await readCommitCheckRuns(repo, sha);
+  if (!rows) return undefined;
+  const out: CommitChecks = { total: rows.length, pending: [], failed: [] };
+  for (const row of rows) {
+    if (row.status !== "completed") out.pending.push(row.name);
+    else if (!GREEN_CONCLUSIONS.has(row.conclusion as string)) out.failed.push(row.name);
   }
   return out;
+}
+
+/** Freeze a complete set of failed native check IDs before effect admission.
+ * An Actions URL only locates a read: the native run's suite, head and repo
+ * must independently bind the ID. No write is performed by this lookup. */
+export async function fetchCheckRetryTargets(
+  repo: string,
+  sha: string,
+  names: string[],
+): Promise<CheckRetryTarget[] | undefined> {
+  if (!Array.isArray(names) || names.length === 0 || names.some((name) => typeof name !== "string" || !name))
+    return undefined;
+  const rows = await readCommitCheckRuns(repo, sha);
+  if (!rows) return undefined;
+  const wanted = new Set(names);
+  const found = new Set<string>();
+  const targets: CheckRetryTarget[] = [];
+  const actions = new Map<number, number>();
+  const token = await resolveGithubToken().catch(() => null);
+  try {
+    for (const row of rows) {
+      if (!wanted.has(row.name)) continue;
+      found.add(row.name);
+      if (row.status !== "completed" || GREEN_CONCLUSIONS.has(row.conclusion as string)) continue;
+      const url = typeof row.details_url === "string" ? new URL(row.details_url) : undefined;
+      if (url?.pathname.includes("/actions/runs/") || row.app?.slug === "github-actions") {
+        const prefix = `/${repo}/actions/runs/`;
+        if (
+          !url ||
+          url.origin !== "https://github.com" ||
+          url.username ||
+          url.password ||
+          url.search ||
+          url.hash ||
+          !url.pathname.toLowerCase().startsWith(prefix.toLowerCase())
+        )
+          return undefined;
+        const match = /^([1-9][0-9]*)(?:\/job\/[1-9][0-9]*)?\/?$/.exec(url.pathname.slice(prefix.length));
+        const id = match ? Number(match[1]) : undefined;
+        if (!positiveNativeId(id) || !positiveNativeId(row.check_suite?.id)) return undefined;
+        const suiteId = row.check_suite.id;
+        if (actions.has(id)) {
+          if (actions.get(id) !== suiteId) return undefined;
+          continue;
+        }
+        const res = await fetch(`https://api.github.com/repos/${repo}/actions/runs/${id}`, {
+          headers: apiHeaders(token),
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        });
+        if (res.status !== 200) return undefined;
+        const run = (await res.json()) as {
+          id?: unknown;
+          head_sha?: unknown;
+          check_suite_id?: unknown;
+          repository?: { full_name?: unknown };
+        } | null;
+        if (
+          run?.id !== id ||
+          typeof run.head_sha !== "string" ||
+          run.head_sha.toLowerCase() !== sha.toLowerCase() ||
+          run.check_suite_id !== suiteId ||
+          typeof run.repository?.full_name !== "string" ||
+          run.repository.full_name.toLowerCase() !== repo.toLowerCase()
+        )
+          return undefined;
+        actions.set(id, suiteId);
+        targets.push({ operation: "actions_rerun", resourceId: id });
+      } else {
+        targets.push({ operation: "check_rerequest", resourceId: row.id });
+      }
+    }
+  } catch {
+    return undefined;
+  }
+  return found.size === wanted.size ? targets : undefined;
 }
 
 /** `GET /repos/{repo}/rules/branches/{branch}` → the contexts the branch's
@@ -1145,62 +1513,6 @@ export async function pullRequestChangedPaths(pr: { repo: string; number: number
   return (data as Array<{ filename?: unknown }>)
     .map((f) => f.filename)
     .filter((f): f is string => typeof f === "string");
-}
-
-const ACTIONS_RUN_URL = /\/actions\/runs\/(\d+)/;
-
-/** The flake rule's one re-run (record 0055). A check run hosted on GitHub
- *  Actions carries an Actions run in its details URL: its FAILED jobs are
- *  re-run — `POST …/actions/runs/{id}/rerun-failed-jobs`, the same retry the
- *  deploy pipeline documents for a red deploy leg. Any other check run (this
- *  repository's primary CI legs run in Depot CI, whose check runs carry
- *  depot.dev details URLs) is re-requested through GitHub's check-run
- *  rerequest — `POST …/check-runs/{id}/rerequest`, which asks the app that
- *  created the run to run it again. True only when a dispatch was found for
- *  the named checks and every one was accepted. Never throws. */
-export async function rerunFailedJobs(repo: string, sha: string, names: string[]): Promise<boolean> {
-  const token = await resolveGithubToken().catch(() => null);
-  let res: Response;
-  try {
-    res = await fetch(`https://api.github.com/repos/${repo}/commits/${sha}/check-runs?per_page=100`, {
-      headers: apiHeaders(token),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
-  } catch {
-    return false;
-  }
-  if (!res.ok) return false;
-  const data = (await res.json().catch(() => null)) as { check_runs?: unknown } | null;
-  if (!data || !Array.isArray(data.check_runs)) return false;
-  const wanted = new Set(names);
-  const runIds = new Set<string>();
-  const rerequestIds = new Set<number>();
-  for (const run of data.check_runs as Array<{ id?: unknown; name?: unknown; details_url?: unknown }>) {
-    if (typeof run.name !== "string" || !wanted.has(run.name)) continue;
-    const m = typeof run.details_url === "string" ? ACTIONS_RUN_URL.exec(run.details_url) : null;
-    if (m) runIds.add(m[1]!);
-    else if (typeof run.id === "number") rerequestIds.add(run.id);
-  }
-  if (runIds.size === 0 && rerequestIds.size === 0) return false;
-  const post = async (url: string): Promise<boolean> => {
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: apiHeaders(token),
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
-      return res.ok;
-    } catch {
-      return false;
-    }
-  };
-  for (const id of runIds) {
-    if (!(await post(`https://api.github.com/repos/${repo}/actions/runs/${id}/rerun-failed-jobs`))) return false;
-  }
-  for (const id of rerequestIds) {
-    if (!(await post(`https://api.github.com/repos/${repo}/check-runs/${id}/rerequest`))) return false;
-  }
-  return true;
 }
 
 /** One review on a pull request as the coordinator reads it back: who posted
@@ -1640,7 +1952,7 @@ export async function createCommit(
     tree: string;
     parents: string[];
     author: { name: string; email: string; date: string };
-    committer: { name: string; email: string };
+    committer: { name: string; email: string; date?: string };
   },
 ): Promise<string> {
   const token = await requireToken();

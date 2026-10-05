@@ -1,3 +1,5 @@
+import type { RunProfile } from "../../config/profile.js";
+import { isMaintenanceActionId, validMaintenanceTransport } from "../coordinator/maintenanceIdentity.js";
 // The re-attach stage of a resumed dispatch (docs/reference/specs/run-history.md
 // item 54): where the run's row says its workspace is, so the attach reuses it
 // instead of provisioning as for a new run; and what happens when that
@@ -7,7 +9,12 @@
 // migrated silently onto another backend.
 import { workspaceBindingOf, type WorkspaceBinding } from "../../execution/factory.js";
 import { operationTargetOf, type OperationTarget } from "../repoContext.js";
-import { sendChildSignal, type CoordinatorTag, type WorkflowSender } from "../coordinator/contract.js";
+import {
+  isExistingPrPublicationBinding,
+  sendChildSignal,
+  type CoordinatorTag,
+  type WorkflowSender,
+} from "../coordinator/contract.js";
 import type { RunEvent } from "../runEvents.js";
 import { messageFromInbox } from "../runLedger/inboxMessage.js";
 import type { LiveRunRow } from "../runLedger/types.js";
@@ -21,7 +28,7 @@ import { closeResumedRow, type ResumeContext } from "./admission.js";
 import type { RunHistoryWriter } from "../runHistoryWriter.js";
 import type { RunRecord } from "../runRecord.js";
 import type { GateCard, GateContext } from "./authorize.js";
-import type { RefusalCode } from "../refusal.js";
+import { RefusalError, refusalOf, type RefusalCode } from "../refusal.js";
 import type { PersonFollowUp } from "./settle.js";
 
 /**
@@ -68,9 +75,41 @@ export function carriedOperationTarget(row: LiveRunRow): OperationTarget | undef
 export function carriedCoordinatorTag(row: LiveRunRow, events: readonly RunEvent[]): CoordinatorTag | undefined {
   const { parentInstanceId, idempotencyKey } = row.meta;
   if (typeof parentInstanceId !== "string" || typeof idempotencyKey !== "string") return undefined;
-  const tag = events.find((e) => e.type === "coordinator_tag");
+  const tags = events.filter((e) => e.type === "coordinator_tag");
+  const tag = tags[0];
+  const maintenanceActionId = row.meta.maintenanceActionId;
+  if (
+    !validMaintenanceTransport(row.meta) ||
+    (tags.some((t) => t.maintenanceActionId !== undefined) && maintenanceActionId === undefined) ||
+    (maintenanceActionId !== undefined &&
+      (tags.length > 1 ||
+        (tag !== undefined &&
+          (!validMaintenanceTransport({ ...tag, idempotencyKey }) ||
+            tag.maintenanceActionId !== maintenanceActionId ||
+            tag.parentInstanceId !== parentInstanceId ||
+            tag.unit !== row.meta.coordinatorUnit))))
+  )
+    throw new RefusalError(
+      refusalOf("publication_ownership_unknown", "the saved work’s execution identity could not be verified"),
+    );
   const base = tag?.type === "coordinator_tag" ? tag.base : undefined;
-  const publication = tag?.type === "coordinator_tag" ? tag.publication : undefined;
+  const candidate = tag?.type === "coordinator_tag" ? tag.publication : undefined;
+  const publication =
+    tags.length === 1 &&
+    isExistingPrPublicationBinding(candidate) &&
+    tag?.parentInstanceId === parentInstanceId &&
+    tag.unit === row.meta.coordinatorUnit &&
+    tag.branch === row.meta.ref &&
+    tag.base === candidate.baseRef &&
+    candidate.owner.instanceId === parentInstanceId &&
+    candidate.owner.unit === row.meta.coordinatorUnit &&
+    candidate.repo.toLowerCase() === row.meta.repo?.toLowerCase() &&
+    candidate.headRef === row.meta.ref &&
+    candidate.publicationRef === row.meta.ref &&
+    (row.meta.agent !== "review" ||
+      (candidate.pr === row.meta.pr && candidate.expectedHeadSha.toLowerCase() === row.meta.headSha?.toLowerCase()))
+      ? candidate
+      : undefined;
   const issuedFindingIds = tag?.type === "coordinator_tag" ? tag.issuedFindingIds : undefined;
   const transportWorkflowId = tag?.type === "coordinator_tag" ? tag.transportWorkflowId : undefined;
   const recovery = tag?.type === "coordinator_tag" ? tag.recovery : undefined;
@@ -85,6 +124,7 @@ export function carriedCoordinatorTag(row: LiveRunRow, events: readonly RunEvent
         }
       : {}),
     idempotencyKey,
+    ...(isMaintenanceActionId(maintenanceActionId) ? { maintenanceActionId } : {}),
     ...(costCapUsd !== undefined ? { costCapUsd } : {}),
     ...(branch !== undefined ? { branch } : {}),
     ...(transportWorkflowId !== undefined ? { transportWorkflowId } : {}),
@@ -114,6 +154,8 @@ export function lostWorkspaceNote(why: string, restarts: boolean): string {
  * transcript, in user words.
  */
 export interface CarriedRunIdentity {
+  /** Original admitted profile carried by the owner during same-run recovery. */
+  profile?: RunProfile;
   /** The predecessor's retained events, replayed under their seqs. */
   events: RunEvent[];
   /** The predecessor's capability token: posted links stay valid. */
@@ -188,6 +230,7 @@ export async function announceChildRoll(ctx: {
   const sent = await sendChildSignal(workflow, {
     runId,
     parentInstanceId: coordinator.parentInstanceId,
+    ...(coordinator.maintenanceActionId !== undefined ? { maintenanceActionId: coordinator.maintenanceActionId } : {}),
     ...(coordinator.transportWorkflowId !== undefined ? { transportWorkflowId: coordinator.transportWorkflowId } : {}),
     kind,
     reason,
@@ -319,6 +362,9 @@ export async function recordRestartDeath(ctx: {
     const sent = await sendChildSignal(workflow, {
       runId: closed.id,
       parentInstanceId: coordinator.parentInstanceId,
+      ...(coordinator.maintenanceActionId !== undefined
+        ? { maintenanceActionId: coordinator.maintenanceActionId }
+        : {}),
       ...(coordinator.transportWorkflowId !== undefined
         ? { transportWorkflowId: coordinator.transportWorkflowId }
         : {}),

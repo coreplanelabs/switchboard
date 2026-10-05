@@ -341,6 +341,8 @@ export function createGithubDoorHandler(deps: GithubDoorDeps) {
       if (action === "info/refs" ? method !== "GET" : method !== "POST") return answer(res, 405, "invalid Git method");
       if (receive && gitGrant.identity !== "write")
         return answer(res, 403, "GitHub write identity is absent for this run");
+      if (receive && deps.bindings?.isModelClosed(verdict.grant.runId))
+        return answer(res, 403, "the model turn has ended");
       if (receive && publication && "blocked" in publication)
         return answer(res, 403, "existing PR publication is blocked");
       // The model's bearer is not a blanket receive-pack grant in a harness

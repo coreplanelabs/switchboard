@@ -94,7 +94,281 @@ const record = (id: string): RunRecord =>
     diagnosis: { eventCount: 0, toolCalls: 0, byCategory: {}, findings: [], verdict: "none" },
   }) as unknown as RunRecord;
 
+describe("maintenance transport identity", () => {
+  it("retains the original action through claim, event replacement and terminal commitment", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    const runId = "maintenance-child",
+      threadKey = "slack:C1:1.0";
+    const identity = {
+      parentInstanceId: "ship_original",
+      idempotencyKey: "ship_original:ONE/maintenance",
+      coordinatorUnit: "ONE",
+      maintenanceActionId: "m_" + "a".repeat(64),
+    };
+    const req = { ...claimReq(runId, threadKey), meta: { ...claimReq(runId, threadKey).meta, ...identity } };
+    await ledger.claim(req);
+    await expect(ledger.claim({ ...req, meta: { ...req.meta, maintenanceActionId: undefined } })).rejects.toThrow(
+      "maintenance transport identity",
+    );
+    const tag: AppendableEvent = {
+      type: "coordinator_tag",
+      parentInstanceId: identity.parentInstanceId,
+      unit: "ONE",
+      branch: "fix/pr",
+      maintenanceActionId: identity.maintenanceActionId,
+      seq: 1,
+    };
+    expect(await ledger.append(runId, "g1", [tag])).toEqual({ ok: true });
+    expect(await ledger.append(runId, "g1", [{ ...tag, maintenanceActionId: "m_" + "b".repeat(64) }])).toEqual({
+      ok: false,
+      reason: "fenced",
+    });
+    expect(
+      await ledger.append(runId, "g1", [{ type: "tool_call", tool: "bash", summary: "replacement", seq: 1 }]),
+    ).toEqual({ ok: false, reason: "fenced" });
+    expect(
+      await ledger.append(runId, "g1", [
+        { ...tag, seq: 5 },
+        { type: "tool_call", tool: "bash", summary: "same batch erase", seq: 5 },
+      ]),
+    ).toEqual({ ok: false, reason: "fenced" });
+    expect(await ledger.finish(runId, "g1", record(runId))).toEqual({ ok: false, reason: "fenced" });
+    expect(ledger.live.get(runId)?.meta).toEqual(req.meta);
+    const terminal = { ...record(runId), ...identity, events: [tag], eventCount: 1, storedEventCount: 1 };
+    expect(await ledger.finish(runId, "g1", terminal)).toEqual({ ok: true, stored: true });
+    expect(ledger.finished.get(runId)).toEqual(terminal);
+    await expect(ledger.claim({ ...req, meta: { ...req.meta, maintenanceActionId: undefined } })).rejects.toThrow(
+      "maintenance transport identity",
+    );
+    expect(await ledger.claim(req)).toMatchObject({ ok: true });
+  });
+});
+
+describe("resident workspace settlement", () => {
+  const owner = { runId: "workspace", ownerGen: "g1", ownerFence: 7 };
+  const binding = {
+    backend: "resident",
+    ownerGen: "g1",
+    ref: "codex/retained",
+    workspace: "/workspace/threads/t/retained",
+    user: "worker2",
+    container: "vm-1",
+    ownerFence: 7,
+    publicationBaseSha: "a".repeat(40),
+  };
+  const publication = { version: 1, repo: "owner/name", branches: [{ ref: "codex/retained", pr: 7 }], complete: true };
+  it("retains only canonical terminal publication after record deletion and acknowledges an exact complete version", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    await ledger.claim({
+      ...claimReq(owner.runId, "slack:C1:1.0"),
+      state: { binding, branchPublication: publication },
+    });
+    expect(await ledger.finish(owner.runId, "g1", { ...record(owner.runId), repo: "owner/name" })).toEqual({
+      ok: true,
+      stored: true,
+    });
+    ledger.finished.delete(owner.runId);
+    const retained = await ledger.workspaceSettlement(owner);
+    expect(retained).toMatchObject({
+      revision: 1,
+      owner,
+      binding,
+      publication,
+      record: { id: owner.runId, status: "completed" },
+    });
+    expect(await ledger.ackWorkspaceSettlement(owner, 2)).toEqual({ ok: false, reason: "stale" });
+    expect(await ledger.workspaceSettlement(owner)).toEqual(retained);
+    expect(await ledger.ackWorkspaceSettlement(owner, 1)).toEqual({ ok: true });
+    expect(await ledger.workspaceSettlement(owner)).toBeUndefined();
+    expect(await ledger.ackWorkspaceSettlement(owner, 1)).toEqual({ ok: true });
+  });
+
+  it("retains the acknowledged attachment generation when a successor closes the run without reattaching", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    await ledger.claim({
+      ...claimReq(owner.runId, "slack:C1:1.0"),
+      state: { binding, branchPublication: publication },
+    });
+    await ledger.handoff("g1", [owner.runId]);
+    await ledger.reclaim("g2", 0, LEASE_MS);
+    await ledger.finish(owner.runId, "g2", { ...record(owner.runId), repo: "owner/name" });
+    expect(await ledger.workspaceSettlement(owner)).toMatchObject({ owner, binding });
+    expect(await ledger.workspaceSettlement({ ...owner, ownerGen: "g2" })).toBeUndefined();
+  });
+
+  it("increments the retained revision when the same physical attachment reaches a later terminal segment", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    const claim = { ...claimReq(owner.runId, "slack:C1:1.0"), state: { binding, branchPublication: publication } };
+    await ledger.claim(claim);
+    await ledger.finish(owner.runId, "g1", { ...record(owner.runId), repo: "owner/name", status: "interrupted" });
+    await ledger.claim(claim);
+    await ledger.finish(owner.runId, "g1", { ...record(owner.runId), repo: "owner/name" });
+    expect(await ledger.ackWorkspaceSettlement(owner, 1)).toEqual({ ok: true });
+    expect(await ledger.workspaceSettlement(owner)).toMatchObject({ revision: 2, record: { status: "completed" } });
+  });
+
+  it("keeps revision history after acknowledgment so an old duplicate cannot acknowledge a later ending", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    const claim = { ...claimReq(owner.runId, "slack:C1:1.0"), state: { binding, branchPublication: publication } };
+    await ledger.claim(claim);
+    await ledger.finish(owner.runId, "g1", { ...record(owner.runId), repo: "owner/name", status: "interrupted" });
+    await ledger.ackWorkspaceSettlement(owner, 1);
+    await ledger.claim(claim);
+    await ledger.finish(owner.runId, "g1", { ...record(owner.runId), repo: "owner/name" });
+    expect(await ledger.ackWorkspaceSettlement(owner, 1)).toEqual({ ok: true });
+    expect(await ledger.workspaceSettlement(owner)).toMatchObject({ revision: 2 });
+  });
+
+  it("retains an unverified physical obligation when its acknowledged owner has incomplete attachment facts", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    await ledger.claim({
+      ...claimReq(owner.runId, "slack:C1:1.0"),
+      state: { binding: { ...binding, container: undefined }, branchPublication: publication },
+    });
+    await ledger.finish(owner.runId, "g1", { ...record(owner.runId), repo: "owner/name" });
+    ledger.finished.delete(owner.runId);
+    expect(await ledger.workspaceSettlement(owner)).toMatchObject({ owner, binding: null });
+    expect(await ledger.ackWorkspaceSettlement(owner, 1)).toEqual({ ok: false, reason: "unverified" });
+  });
+
+  it("retains unresolved prior evidence when a later ending has a complete projection", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    const claim = {
+      ...claimReq(owner.runId, "slack:C1:1.0"),
+      state: { binding, branchPublication: publication, publicationSettlement: { version: 2 } },
+    };
+    await ledger.claim(claim);
+    await ledger.finish(owner.runId, "g1", { ...record(owner.runId), repo: "owner/name" });
+    await ledger.claim({ ...claim, state: { binding, branchPublication: publication } });
+    await ledger.finish(owner.runId, "g1", { ...record(owner.runId), repo: "owner/name" });
+    expect(await ledger.ackWorkspaceSettlement(owner, 1)).toEqual({ ok: false, reason: "unverified" });
+    expect(await ledger.ackWorkspaceSettlement(owner, 2)).toEqual({ ok: true });
+    expect(await ledger.workspaceSettlement(owner)).toMatchObject({
+      revision: 1,
+      record: { publicationSettlement: null },
+    });
+  });
+
+  it("retains a known physical owner when the terminal requester metadata is unverified", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    await ledger.claim({
+      ...claimReq(owner.runId, "slack:C1:1.0"),
+      state: { binding, branchPublication: publication },
+    });
+    expect(
+      await ledger.finish(owner.runId, "g1", { ...record(owner.runId), repo: "owner/name", userId: "" }),
+    ).toMatchObject({ ok: true });
+    ledger.finished.delete(owner.runId);
+    expect(await ledger.workspaceSettlement(owner)).toMatchObject({ owner, record: { userId: null } });
+    expect(await ledger.ackWorkspaceSettlement(owner, 1)).toEqual({ ok: false, reason: "unverified" });
+  });
+
+  it("retains unverified target metadata instead of dropping the owner when the saved repository exceeds the compact bound", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    const repo = "r".repeat(1025);
+    await ledger.claim({
+      ...claimReq(owner.runId, "slack:C1:1.0"),
+      state: { binding, branchPublication: { ...publication, repo } },
+    });
+    await ledger.finish(owner.runId, "g1", { ...record(owner.runId), repo });
+    ledger.finished.delete(owner.runId);
+    expect(await ledger.workspaceSettlement(owner)).toMatchObject({ owner, record: { repo: null }, publication: null });
+    expect(await ledger.ackWorkspaceSettlement(owner, 1)).toEqual({ ok: false, reason: "unverified" });
+  });
+
+  it("refuses a terminal record from a different thread without closing its live owner", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    await ledger.claim({
+      ...claimReq(owner.runId, "slack:C1:1.0"),
+      state: { binding, branchPublication: publication },
+    });
+    expect(await ledger.finish(owner.runId, "g1", { ...record(owner.runId), threadKey: "slack:OTHER:1.0" })).toEqual({
+      ok: false,
+      reason: "fenced",
+    });
+    expect(ledger.live.has(owner.runId)).toBe(true);
+    expect(ledger.finished.has(owner.runId)).toBe(false);
+    expect(await ledger.finish(owner.runId, "g1", { ...record(owner.runId), provisional: true })).toEqual({
+      ok: false,
+      reason: "fenced",
+    });
+    expect(ledger.live.has(owner.runId)).toBe(true);
+  });
+
+  it("keeps incomplete or live workspace obligations under failed and stale acknowledgments", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    await ledger.claim({
+      ...claimReq(owner.runId, "slack:C1:1.0"),
+      state: { binding, branchPublication: { ...publication, complete: false } },
+    });
+    expect(await ledger.ackWorkspaceSettlement(owner, 1)).toEqual({ ok: false, reason: "owner-live" });
+    await ledger.finish(owner.runId, "g1", { ...record(owner.runId), repo: "owner/name" });
+    ledger.finished.delete(owner.runId);
+    expect(await ledger.workspaceSettlement({ ...owner, ownerFence: 8 })).toBeUndefined();
+    expect(await ledger.ackWorkspaceSettlement(owner, 1)).toEqual({ ok: false, reason: "unverified" });
+    expect(await ledger.workspaceSettlement(owner)).toMatchObject({ revision: 1, publication: { complete: false } });
+  });
+});
+
 describe("InMemoryRunLedger", () => {
+  it.each(["valid", "malformed", "clear"])("folds canonical Door evidence at finish: %s", async (mode) => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    const door =
+      mode === "clear"
+        ? null
+        : mode === "malformed"
+          ? {}
+          : {
+              id: "call",
+              repo: "private/repo",
+              update: { ref: "refs/heads/fix/door", old: "a".repeat(40), next: "b".repeat(40) },
+            };
+    await ledger.claim({ ...claimReq("door", "slack:C1:1.0"), state: { doorPublicationPending: door } });
+    expect(await ledger.finish("door", "g1", record("door"))).toEqual({ ok: true, stored: true });
+    expect(ledger.live.has("door")).toBe(false);
+    if (mode === "valid") expect(ledger.finished.get("door")?.doorPublicationPending).toEqual(door);
+    else if (mode === "malformed") expect(ledger.finishedWorkEvidence.get("door")?.doorPublicationPending).toEqual({});
+    else {
+      expect(ledger.finishedWorkEvidence.has("door")).toBe(false);
+      expect(ledger.finished.get("door")?.doorPublicationPending).toBeUndefined();
+    }
+  });
+  it.each(["missing", "malformed", "different"])(
+    "retains the terminal outcome using only saved producer publication: %s",
+    async (mode) => {
+      const ledger = new InMemoryRunLedger(() => 0);
+      await ledger.claim(claimReq("publication", "slack:C1:1.0"));
+      const projection = { version: 1 as const, repo: "private/repo", branches: [], complete: true };
+      if (mode !== "missing")
+        await ledger.setState("publication", "g1", {
+          branchPublication: mode === "malformed" ? { ...projection, version: 2 } : projection,
+        });
+      const terminal = record("publication");
+      if (mode !== "malformed")
+        terminal.branchPublication = mode === "different" ? { ...projection, complete: false } : projection;
+      expect(await ledger.finish("publication", "g1", terminal)).toEqual({ ok: true, stored: true });
+      expect(ledger.live.has("publication")).toBe(false);
+      expect(ledger.finished.get("publication")).toMatchObject({ id: "publication", status: "completed" });
+      expect(ledger.finished.get("publication")?.branchPublication).toEqual(
+        mode === "different" ? projection : undefined,
+      );
+    },
+  );
+
+  it("folds the fenced producer projection at finish independently of events", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    await ledger.claim(claimReq("publication", "slack:C1:1.0"));
+    const branchPublication = {
+      version: 1,
+      repo: "private/repo",
+      branches: [{ ref: "accepted/branch", pr: 7 }],
+      complete: false,
+    };
+    await ledger.setState("publication", "g1", { branchPublication });
+    expect(await ledger.finish("publication", "g1", record("publication"))).toEqual({ ok: true, stored: true });
+    expect(ledger.finished.get("publication")?.branchPublication).toEqual(branchPublication);
+  });
+
   it("commits one fenced resume boundary after a provider hold without replacing its history", async () => {
     const ledger = new InMemoryRunLedger(() => 100);
     await ledger.claim(claimReq("resumed-state", "slack:C1:resume"));
@@ -1195,5 +1469,93 @@ describe("frozen child source ranges", () => {
     await ledger.step("source", "g1", stepRecord(2, 3), [turn(2, content)], key);
     expect(JSON.stringify((await ledger.readSession(key, 0, 0)).messages)).not.toContain(content);
     await expect(ledger.claim(child)).rejects.toThrow("context source range is unavailable");
+  });
+});
+
+describe("canonical terminal review publication", () => {
+  const publication = (state: "pending" | "accepted" | "refused" | "uncertain") => ({
+    version: 1 as const,
+    runId: "review-original",
+    state,
+    target: { repo: "acme/api", number: 7, commitId: "a".repeat(40) },
+    bodyHash: "b".repeat(64),
+  });
+  it.each(["pending", "accepted", "refused", "uncertain"] as const)(
+    "retains canonical %s instead of a caller's different publication",
+    async (state) => {
+      const ledger = new InMemoryRunLedger(() => 0);
+      const claim = claimReq("review-original", "slack:C1:1.0");
+      claim.meta.repo = "acme/api";
+      claim.state = { reviewPublication: publication(state) };
+      await ledger.claim(claim);
+      const terminal = {
+        ...record("review-original"),
+        repo: "acme/api",
+        reviewPublication: { ...publication("accepted"), bodyHash: "c".repeat(64) },
+      };
+      expect(await ledger.finish("review-original", "g1", terminal)).toEqual({ ok: true, stored: true });
+      expect(ledger.finished.get("review-original")?.reviewPublication).toEqual(publication(state));
+      expect(ledger.live.has("review-original")).toBe(false);
+    },
+  );
+  it("cannot manufacture a native acceptance on a run with no canonical publication", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    await ledger.claim(claimReq("review-original", "slack:C1:1.0"));
+    expect(
+      await ledger.finish("review-original", "g1", {
+        ...record("review-original"),
+        repo: "acme/api",
+        reviewPublication: publication("accepted"),
+      }),
+    ).toEqual({ ok: true, stored: true });
+    expect(ledger.finished.get("review-original")?.reviewPublication).toBeUndefined();
+  });
+  it("retains malformed original publication as unreadable evidence rather than claiming absence", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    const invalid = { ...publication("uncertain"), bodyHash: "invalid" };
+    const claim = claimReq("review-original", "slack:C1:1.0");
+    claim.meta.repo = "acme/api";
+    claim.state = { reviewPublication: invalid };
+    await ledger.claim(claim);
+    expect(await ledger.finish("review-original", "g1", { ...record("review-original"), repo: "acme/api" })).toEqual({
+      ok: true,
+      stored: true,
+    });
+    expect(ledger.finishedWorkEvidence.get("review-original")?.reviewPublication).toEqual(invalid);
+    expect(ledger.finished.get("review-original")?.reviewPublication).toBeUndefined();
+  });
+});
+
+describe("canonical terminal native branch receipt", () => {
+  it("folds latest original native ref evidence and retains malformed canonical history without granting publication credit", async () => {
+    for (const malformed of [false, true]) {
+      const ledger = new InMemoryRunLedger(() => 0);
+      const claim = claimReq("native-original", "slack:C1:1.0");
+      claim.meta.repo = "acme/api";
+      const valid = [
+        { type: "pushed_head", ref: "fix/original", sha: "a".repeat(40), by: "push" },
+        { type: "pushed_head", ref: "fix/original", sha: "b".repeat(40), by: "push" },
+      ];
+      claim.state = {
+        branchPushReceipts: malformed
+          ? [...valid, { type: "pushed_head", ref: "fix/original", sha: "short", by: "push" }]
+          : valid,
+      };
+      await ledger.claim(claim);
+      expect(
+        await ledger.finish("native-original", "g1", {
+          ...record("native-original"),
+          repo: "acme/api",
+          branchPushReceipts: [{ ref: "foreign", sha: "c".repeat(40), by: "push" }],
+        }),
+      ).toEqual({ ok: true, stored: true });
+      expect(ledger.finished.get("native-original")?.branchPushReceipts).toEqual(
+        malformed ? undefined : [{ ref: "fix/original", sha: "b".repeat(40), by: "push" }],
+      );
+      if (malformed)
+        expect(ledger.finishedWorkEvidence.get("native-original")?.branchPushReceipts).toEqual(
+          claim.state.branchPushReceipts,
+        );
+    }
   });
 });

@@ -1020,7 +1020,8 @@ export async function fixture(
   // dispositions against them (`runs findings`; the fence on a title and a
   // note is the command's own test — the same strings ride `runs unit`'s
   // views as the record carries them).
-  const units = new InMemoryCoordinatorInstanceStore();
+  const ledger = new InMemoryRunLedger(() => NOW);
+  const units = new InMemoryCoordinatorInstanceStore(ledger);
   await units.put({
     id: "ship-fin-1",
     kind: "ship",
@@ -1091,7 +1092,6 @@ export async function fixture(
     idempotencyKey: "ship-fin-1:task/1/findings",
   });
   await store.put({ ...record("child-1", NOW - 4_000), startedAt: NOW - 9_000, parentRunId: FIXTURE.persistedRun });
-  const ledger = new InMemoryRunLedger(() => NOW);
   await ledger.claimSession(FIXTURE.sessionKey, "unit-coding", "g1");
   const turn = (role: ChatMessage["role"], text: string): ChatMessage => ({ role, content: [{ type: "text", text }] });
   await ledger.seed(

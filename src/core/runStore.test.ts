@@ -141,16 +141,105 @@ function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION
           },
         },
       ];
-      await store.put({ ...base, sourceReads, contextDependencies, workReads });
+      const branchPublication = {
+        version: 1 as const,
+        repo: "private/repo",
+        complete: false,
+        branches: [],
+        pending: { id: "intent-a", ref: "private/branch", headSha: "a".repeat(40), pr: 7 },
+      };
+      await store.put({ ...base, sourceReads, contextDependencies, workReads, branchPublication });
+      expect((await store.get(base.id))?.branchPublication).toEqual(branchPublication);
       expect((await store.get(base.id))?.workReads).toEqual(workReads);
       expect((await store.get(base.id))?.sourceReads).toEqual(sourceReads);
       for (const summary of [await store.getSummary(base.id), ...(await store.list({}))]) {
         expect(summary?.contextDependencies).toEqual(contextDependencies);
+        expect(summary).not.toHaveProperty("branchPublication");
+        expect(JSON.stringify(summary)).not.toContain("private/branch");
         expect(summary).not.toHaveProperty("sourceReads");
         expect(summary).not.toHaveProperty("workReads");
         expect(JSON.stringify(summary)).not.toContain("original private source");
       }
     });
+
+    it.each(["pending", "incomplete", "door pending"])(
+      "retains unresolved publication and its context beyond ordinary history limits: %s",
+      async (mode) => {
+        const { store, clock } = make({ retentionDays: 1, maxRuns: 1 });
+        const source = record("intent-source", NOW);
+        await store.put(source);
+        const branchPublication = {
+          version: 1 as const,
+          repo: "private/repo",
+          complete: false,
+          branches: [],
+          ...(mode === "pending"
+            ? { pending: { id: "intent-a", ref: "private/branch", headSha: "a".repeat(40), pr: 7 } }
+            : {}),
+        };
+        await store.put(
+          record("intent-owner", NOW + 1, {
+            ...(mode === "door pending"
+              ? {
+                  doorPublicationPending: {
+                    id: "door-a",
+                    repo: "private/repo",
+                    update: { ref: "refs/heads/fix/door", old: "a".repeat(40), next: "b".repeat(40) },
+                  },
+                }
+              : { branchPublication }),
+            contextDependencies: {
+              version: 1,
+              status: "known",
+              revision: 1,
+              origins: [
+                {
+                  runId: source.id,
+                  requester: source.userId,
+                  channelId: source.channelId,
+                  threadKey: source.threadKey,
+                },
+              ],
+              slack: [],
+              mcp: [],
+            },
+          }),
+        );
+        clock.now = NOW + 2 * DAY;
+        await store.put(
+          record("ordinary", clock.now, {
+            contextDependencies: {
+              version: 1,
+              status: "known",
+              revision: 1,
+              origins: [
+                {
+                  runId: "intent-owner",
+                  requester: source.userId,
+                  channelId: source.channelId,
+                  threadKey: source.threadKey,
+                },
+              ],
+              slack: [],
+              mcp: [],
+            },
+          }),
+        );
+        const retained = await store.get("intent-owner");
+        expect(retained).not.toBeNull();
+        if (mode !== "door pending") expect(retained?.branchPublication).toEqual(branchPublication);
+        await expect(store.delete("intent-owner")).rejects.toThrow("publication");
+        expect(await store.get("intent-owner")).not.toBeNull();
+        expect(await store.get(source.id)).not.toBeNull();
+        expect(await store.events("intent-owner", {})).not.toBeNull();
+        const listed = await store.list({});
+        expect(listed.map((item) => item.id)).toContain("intent-owner");
+        for (const summary of [await store.getSummary("intent-owner"), ...listed]) {
+          expect(summary).not.toHaveProperty("branchPublication");
+          expect(JSON.stringify(summary)).not.toContain("private/branch");
+        }
+      },
+    );
 
     it("refuses malformed source archives without storing a source-free fallback", async () => {
       const { store } = make();
@@ -546,6 +635,28 @@ contract("FileRunStore", (policy) => {
 });
 
 describe("FileRunStore", () => {
+  it("retains private pending intent after reopening and preserves unreadable evidence during sweep", async () => {
+    const dir = tmpDir();
+    const branchPublication = {
+      version: 1 as const,
+      repo: "private/repo",
+      complete: false,
+      branches: [],
+      pending: { id: "intent-a", ref: "private/branch", headSha: "a".repeat(40) },
+    };
+    await new FileRunStore(dir, { now: () => NOW }).put(record("intent", NOW, { branchPublication }));
+    const reopened = new FileRunStore(dir, { now: () => NOW + 2 * DAY, policy: { retentionDays: 1, maxBytes: 1 } });
+    reopened.sweep();
+    expect((await reopened.get("intent"))?.branchPublication).toEqual(branchPublication);
+    expect(readFileSync(join(dir, "index.jsonl"), "utf8")).not.toContain("private/branch");
+    const path = join(dir, "intent.json");
+    writeFileSync(path, "{}");
+    reopened.sweep();
+    expect(readFileSync(path, "utf8")).toBe("{}");
+    expect(await reopened.get("intent")).toBeNull();
+    expect(await reopened.list({})).toEqual([]);
+  });
+
   const make = (dir: string, policy: Partial<typeof DEFAULT_RETENTION_POLICY> = {}, clock = { now: NOW }) =>
     new FileRunStore(dir, { policy: { ...DEFAULT_RETENTION_POLICY, ...policy }, now: () => clock.now });
 
@@ -587,6 +698,8 @@ describe("FileRunStore", () => {
     await store.put(record("kept", NOW - 2));
     rmSync(join(dir, "gone.json"));
     expect((await store.list({})).map((r) => r.id)).toEqual(["kept"]);
+    expect(readFileSync(join(dir, "index.jsonl"), "utf8")).toContain('"gone"');
+    await expect(store.delete("gone")).rejects.toThrow("unreadable publication evidence");
     expect(readFileSync(join(dir, "index.jsonl"), "utf8")).toContain('"gone"');
     await store.put(record("new", NOW));
     expect(readFileSync(join(dir, "index.jsonl"), "utf8")).not.toContain('"gone"');
@@ -714,5 +827,22 @@ describe("NullRunStore — the store of a process without run history", () => {
     expect(await store.list({ limit: 10 })).toEqual([]);
     expect(await store.events("r1", { limit: 10 })).toBeNull();
     await expect(store.delete("r1")).resolves.toBeUndefined();
+  });
+});
+
+describe("terminal review publication store privacy", () => {
+  it("retains typed original publication in the record and excludes it from every summary", async () => {
+    const store = new InMemoryRunStore({ now: () => NOW });
+    const reviewPublication = {
+      version: 1 as const,
+      runId: "review-original",
+      state: "uncertain" as const,
+      target: { repo: "acme/api", number: 7, commitId: "a".repeat(40) },
+      bodyHash: "b".repeat(64),
+    };
+    await store.put(record("review-original", NOW, { repo: "acme/api", reviewPublication }));
+    expect((await store.get("review-original"))?.reviewPublication).toEqual(reviewPublication);
+    for (const summary of [await store.getSummary("review-original"), ...(await store.list({}))])
+      expect(summary).not.toHaveProperty("reviewPublication");
   });
 });

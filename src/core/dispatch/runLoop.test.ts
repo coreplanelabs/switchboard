@@ -1,3 +1,6 @@
+import type { GithubWriteResult } from "../../execution/githubPulls.js";
+import { findPullOwnersInRows } from "../coordinator/pullOwnership.js";
+import { terminalPublicationRetentionRequired } from "../branchPublication.js";
 import { parentContextOf } from "./handoff.js";
 import { contextCapsuleOf } from "./unitContext.js";
 import { MainContextCaptureError } from "./mainContextCapture.js";
@@ -129,6 +132,65 @@ import { publicationReceiptsFromState, restoredPublicationHead } from "../public
 // settle, the description turn and the PR post-step are proven through
 // `dispatch()` in `src/core/dispatcher.test.ts` (`review post-step`, `coding
 // PR post-step`).
+
+/** Current coding fixtures have a real durable owner and explicit complete
+ * producer projection. Legacy/untracked cases supply their own ledger. */
+async function trackedCodingContext(
+  s: { deps: RunDeps; ctx: RunLoopContext; store: InMemoryRunStore },
+  ctx: RunLoopContext = s.ctx,
+  ledgerThreadKey = ctx.msg.threadKey,
+  captureLedger?: (ledger: InMemoryRunLedger) => void,
+): Promise<RunLoopContext> {
+  if ((!ctx.isCodingPrRun && ctx.agent.name !== "review") || ctx.ledgerRun !== undefined) return ctx;
+  const state = {
+    ...(ctx.resume?.row.state ?? {}),
+    branchPublication: {
+      version: 1,
+      ...(ctx.repoCtx.repo !== undefined ? { repo: ctx.repoCtx.repo } : {}),
+      branches: [],
+      complete: true,
+    },
+  };
+  if (ctx.resume) ctx.resume.row.state = state;
+  const inner = new InMemoryRunLedger(() => NOW);
+  captureLedger?.(inner);
+  const finish = inner.finish.bind(inner);
+  inner.finish = async (...args) => {
+    const result = await finish(...args);
+    const record = inner.finished.get(args[0]);
+    if (result.ok && record) await s.store.put(record);
+    return result;
+  };
+  const ledger = createLedgerWriteThrough({ ledger: inner, gen: "gen-T", fallback: s.store, warn: () => {} });
+  s.deps.runLedger = ledger;
+  const opened = await ledger.open({
+    runId: ctx.run.id,
+    threadKey: ledgerThreadKey,
+    startedAt: NOW,
+    meta: {
+      agent: ctx.agent.name,
+      channelId: ctx.msg.channelId,
+      userId: ctx.msg.userId,
+      threadKey: ctx.msg.threadKey,
+      ...(ctx.repoCtx.repo ? { repo: ctx.repoCtx.repo } : {}),
+      ...(ctx.repoCtx.pr !== undefined ? { pr: ctx.repoCtx.pr } : {}),
+    },
+    card: null,
+    system: ctx.system,
+    tools: [],
+    state,
+  });
+  if (opened.kind !== "tracked") throw new Error("untracked coding fixture");
+  s.ctx.ledgerRun = opened.run;
+  return { ...ctx, ledgerRun: opened.run };
+}
+
+async function trackedReviewContext(
+  s: { deps: RunDeps; ctx: RunLoopContext; store: InMemoryRunStore },
+  ctx = s.ctx,
+): Promise<RunLoopContext> {
+  return ctx.agent.name === "review" ? trackedCodingContext(s, ctx) : ctx;
+}
 
 const NOW = 10_000;
 const THREAD = "slack:CX:1.0";
@@ -269,7 +331,7 @@ function setup(
      *  it); `commits` answers the compare lists the settle classifies a move by (unclassifiable unless given). */
     review?: {
       head: string;
-      post: (target: ReviewCommentTarget, body: string) => Promise<void>;
+      post: (target: ReviewCommentTarget, body: string) => Promise<GithubWriteResult | void>;
       currentHead?: string;
       commits?: (sha: string) => PrCommitList | undefined;
     };
@@ -2069,7 +2131,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     });
     const channelId = "slack:DPRIVATE";
     const threadKey = `${channelId}:1.0`;
-    const instances = new InMemoryCoordinatorInstanceStore();
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     const instance = {
       id: "ship_signup_1",
       kind: "ship" as const,
@@ -2347,7 +2409,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
 
   it("a later orchestrator turn reads only its linked private worker projection through the tool context", async () => {
     const dmThread = "slack:DMAIN:1.0";
-    const instances = new InMemoryCoordinatorInstanceStore();
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     const instance = {
       id: "ship_signup_1",
       kind: "ship" as const,
@@ -2463,7 +2525,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     const threadKey = "slack:DMAIN:1.0",
       channelId = "slack:DMAIN",
       userId = "slack:UX";
-    const instances = new InMemoryCoordinatorInstanceStore();
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     const instance = {
       id: "status-work",
       kind: "ship" as const,
@@ -2570,7 +2632,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
 
   it("revokes private progress when an app follow-up folds into the live main run", async () => {
     const threadKey = "slack:DMAIN:1.0";
-    const instances = new InMemoryCoordinatorInstanceStore();
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     const instance = {
       id: "ship_signup_2",
       kind: "ship" as const,
@@ -3327,18 +3389,28 @@ describe("runLoop — the model turn and everything that rides on it", () => {
         agent: "review",
         yaml: YAML + "harness:\n  review: pi\n",
         // The workspace's head is the reviewed one, so the settle reads the PR's move and re-reviews on the session.
-        executor: { exec: async () => HEAD },
+        executor: (() => {
+          let head = HEAD;
+          return {
+            exec: async () => head,
+            execResult: async () => ({ exitCode: 0, stdout: head + "\n", stderr: "", truncated: false }),
+            moveTo: async (sha: string) => {
+              head = sha;
+              return { sha };
+            },
+          };
+        })(),
         repoCtx: { repo: "o/r", pr: 42, baseRef: "main" } as RepoContext,
         review: {
           head: HEAD,
-          post: async () => {},
+          post: async () => ({ state: "accepted" as const }),
           currentHead: NEW,
           commits: (sha) =>
             sha === HEAD ? list(["feat: the change"]) : list(["feat: the change", "fix: review nits"]),
         },
       },
     );
-    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("the re-review's steer was in flight");
+    await expect(runLoop(s.deps, await trackedReviewContext(s))).rejects.toThrow("the re-review's steer was in flight");
     expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "failed" });
     expect(s.releases).toEqual(["torn-down"]);
     s.ending.drain(undefined);
@@ -3383,18 +3455,28 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       {
         agent: "review",
         yaml: YAML + "harness:\n  review: pi\n",
-        executor: { exec: async () => HEAD },
+        executor: (() => {
+          let head = HEAD;
+          return {
+            exec: async () => head,
+            execResult: async () => ({ exitCode: 0, stdout: head + "\n", stderr: "", truncated: false }),
+            moveTo: async (sha: string) => {
+              head = sha;
+              return { sha };
+            },
+          };
+        })(),
         repoCtx: { repo: "o/r", pr: 42, baseRef: "main" } as RepoContext,
         review: {
           head: HEAD,
-          post: async () => {},
+          post: async () => ({ state: "accepted" as const }),
           currentHead: NEW,
           commits: (sha) =>
             sha === HEAD ? list(["feat: the change"]) : list(["feat: the change", "fix: review nits"]),
         },
       },
     );
-    const out = await runLoop(s.deps, s.ctx);
+    const out = await runLoop(s.deps, await trackedReviewContext(s));
     expect(out.kind).toBe("interrupted");
     expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "interrupted" });
     expect(s.releases).toEqual(["torn-down"]);
@@ -3478,7 +3560,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       },
       bearer: "sbr_run-l.s3cret",
     });
-    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("retry budget ended");
+    await expect(runLoop(s.deps, await trackedCodingContext(s))).rejects.toThrow("retry budget ended");
     s.ending.drain(undefined);
     await s.writer.settled();
     expect((await s.store.get("run-l"))!).toMatchObject({ status: "failed", failure: { kind: "provider_transient" } });
@@ -3548,7 +3630,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("retry budget ended");
     expect(commands).toContain("git -C '/srv/wt/u1' add -A");
     expect(commands).toContain(`git -C '/srv/wt/u1' push origin '${HEAD}:refs/heads/${BRANCH}'`);
-    expect(s.releases).toEqual(["paired"]);
+    expect(s.releases).toEqual([]);
     s.ending.drain(undefined);
     await s.writer.settled();
     const rec = (await s.store.get("run-l"))!;
@@ -5333,7 +5415,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       });
       // No instance in the store either: with no base on the tag, the base is lost.
       s.deps.coordinatorInstances = new InMemoryCoordinatorInstanceStore();
-      const out = answered(await runLoop(s.deps, { ...s.ctx, clock: () => clock.now }));
+      const out = answered(await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, clock: () => clock.now })));
       s.ending.drain(true);
       await s.writer.settled();
       const rec = (await s.store.get("run-l"))!;
@@ -5701,7 +5783,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     s.deps.findOpenPrByHead = vi.fn(async () => ({ number: 700, htmlUrl: "https://github.com/o/r/pull/700" }));
     s.deps.openPullRequest = async () => ({ number: 700, htmlUrl: "https://github.com/o/r/pull/700", created: false });
     s.deps.fetchRepoShipInfo = async () => ({ defaultBranch: "feat/trunk" });
-    const out = answered(await runLoop(s.deps, { ...s.ctx, clock: () => clock.now }));
+    const out = answered(await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, clock: () => clock.now })));
     s.ending.drain(true);
     await s.writer.settled();
     const rec = (await s.store.get("run-l"))!;
@@ -6437,6 +6519,75 @@ describe("the pi harness — the container replaced under a living bot: the rela
       exec.mockRestore();
     }
   });
+
+  it.each(["moved", "failed", "truncated", "stderr"])(
+    "a canonical review rejects an unverified %s workspace before reopening its harness after container replacement",
+    async (kind) => {
+      const head = "a".repeat(40),
+        moved = "b".repeat(40),
+        ref = "fix/bound";
+      const registry = new HarnessRegistry();
+      const old = new FakeHarnessContainer();
+      old.onStdin = piThatMeetsTheRoll(registry);
+      const replacement = new FakeHarnessContainer();
+      replacement.vm = "vm-new";
+      const replacementProvider = provider("must not execute");
+      scriptPiFromProvider(replacement, { provider: replacementProvider, registry });
+      const publication = {
+        repo: "o/r",
+        pr: 42,
+        headRef: ref,
+        baseRef: "main",
+        publicationRef: ref,
+        expectedHeadSha: head,
+        owner: { instanceId: "coord-p", unit: "ONE" },
+      };
+      const probe = vi.spyOn(LocalExecutor.prototype, "execResult").mockResolvedValue({
+        exitCode: kind === "failed" ? 1 : 0,
+        stdout: kind === "moved" ? moved : kind === "stderr" ? "" : head,
+        stderr: kind === "stderr" ? head : "",
+        truncated: kind === "truncated",
+      });
+      const exec = vi
+        .spyOn(LocalExecutor.prototype, "exec")
+        .mockImplementation(async (command) => (command.includes("rev-parse HEAD") ? moved : ""));
+      try {
+        let opens = 0;
+        const s = setup("unused", {
+          agent: "review",
+          yaml: yamlWithWorkspace(),
+          harness: harnessOver(registry, () => (opens++ === 0 ? old : replacement)),
+          repoCtx: { repo: "o/r", pr: 42, ref, baseRef: "main", headSha: head },
+          binding: { ref, sha: head, workspace: "/workspace/old-checkout" },
+          coordinator: {
+            parentInstanceId: "coord-p",
+            idempotencyKey: "coord-p:ONE/1/review",
+            base: "main",
+            publication,
+          },
+          executor: {
+            exec: async (command) => (command.includes("rev-parse HEAD") ? head : ""),
+            execResult: async () => ({ exitCode: 0, stdout: head, stderr: "", truncated: false }),
+          },
+          review: { head, post: async () => ({ state: "accepted" as const }) },
+        });
+        s.deps.fetchPrFacts = async () => ({
+          state: "open",
+          headRef: ref,
+          baseRef: "main",
+          headSha: head,
+          sameRepoHead: true,
+          headBranchExists: true,
+          verifiedHead: { repo: "o/r", ref, sha: head },
+        });
+        await expect(runLoop(s.deps, await trackedReviewContext(s))).rejects.toThrow("saved review target");
+        expect(replacement.commands().filter((command) => command.type === "prompt")).toEqual([]);
+      } finally {
+        exec.mockRestore();
+        probe.mockRestore();
+      }
+    },
+  );
 
   it("a coordinator's child relaunched in the replacement container publishes child_resumed on its record — the roll survived under the run's own id, tag and budget, never a restart", async () => {
     const registry = new HarnessRegistry();
@@ -7229,10 +7380,16 @@ describe("the pi harness — the review preset", () => {
       harness: { harnesses: roster(), registry, harnessUrl: "https://bot.example.com", containerFor: () => container },
       bearer: "sbr_run-l.s3cret",
       ...prThread,
-      review: { head: HEAD, post: async (target, body) => void posts.push({ target, body }) },
+      review: {
+        head: HEAD,
+        post: async (target, body) => {
+          posts.push({ target, body });
+          return { state: "accepted" as const };
+        },
+      },
     });
     seedReviewHistory(s.deps, () => HEAD);
-    const out = answered(await runLoop(s.deps, s.ctx));
+    const out = answered(await runLoop(s.deps, await trackedReviewContext(s)));
     expect(out.answer).toBe("The review: one nit, F1.");
     expect(providerCalls).toBe(0);
     // The process: pi's allowlist for a read identity, the readonly toolset's relays, the bearer, the framing.
@@ -7302,6 +7459,7 @@ describe("the pi harness — the review preset", () => {
       const moves: string[] = [];
       const executor = {
         exec: async (command: string) => (command.includes("rev-parse") ? `${worktreeHead}\n` : ""),
+        execResult: async () => ({ exitCode: 0, stdout: worktreeHead + "\n", stderr: "", truncated: false }),
         moveTo: async (sha: string) => {
           moves.push(sha);
           worktreeHead = sha;
@@ -7418,14 +7576,17 @@ describe("the pi harness — the review preset", () => {
         executor,
         review: {
           head: HEAD,
-          post: async (target, body) => void posts.push({ target, body }),
+          post: async (target, body) => {
+            posts.push({ target, body });
+            return { state: "accepted" as const };
+          },
           currentHead: NEW,
           commits: (sha) =>
             sha === HEAD ? list(["feat: the change"]) : list(["feat: the change", "fix: review nits"]),
         },
       });
       seedReviewHistory(s.deps, () => historyHead);
-      const out = answered(await runLoop(s.deps, s.ctx));
+      const out = answered(await runLoop(s.deps, await trackedReviewContext(s)));
       // One pi survives the re-review and, if needed, the verdict-only prompt.
       expect(container.starts).toHaveLength(1);
       expect(prompts).toBe(refresh ? 2 : 3);
@@ -8033,7 +8194,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       });
       const open = vi.fn(async () => ({ number: 8, htmlUrl: "https://github.com/o/r/pull/8", created: true }));
       s.deps.openPullRequest = open;
-      const out = answered(await runLoop(s.deps, { ...s.ctx, resume }));
+      const out = answered(await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume })));
       expect(out.answer).toContain(`Published \`${ref}\` at \`${head}\``);
       expect(out.answer).toContain("scoped check failed");
       expect(open).toHaveBeenCalledOnce();
@@ -8088,7 +8249,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
         events: history.map((event, index) => ({ ...event, at: NOW, seq: index + 1 })),
         state: { doorPublicationPending: null, branchPushReceipts: [receiptA, receiptB] },
       });
-      const out = answered(await runLoop(s.deps, { ...s.ctx, resume }));
+      const out = answered(await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume })));
       if (backlog.startsWith("receiptless-")) {
         expect(out.answer).toContain("No push was confirmed");
         expect(out.answer).not.toContain(`Published \`${ref}\` at \`${current}\``);
@@ -8132,7 +8293,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
           branchPushReceipts: earlierReceipt ? [{ type: "pushed_head", ref, sha: first, by: "push" }] : [],
         },
       });
-      const out = answered(await runLoop(s.deps, { ...s.ctx, resume }));
+      const out = answered(await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume })));
       expect(out.answer).not.toContain(`Published \`${ref}\` at \`${observed}\``);
       expect(out.answer).toContain("No push was confirmed");
       expect(out.answer).toContain("scoped check failed");
@@ -8170,7 +8331,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       agent: "coding",
       state: { branchPushReceipts: [receipt(other, first), receipt(ref, first), receipt(ref, latest)] },
     });
-    await runLoop(s.deps, { ...s.ctx, resume });
+    await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume }));
     s.ending.drain(undefined);
     await s.writer.settled();
     expect((await s.store.get("run-l"))?.pushed).toEqual([
@@ -8256,7 +8417,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
         events,
         state: { pushedBranch: ref, publicationReceipts: [receiptA, receiptB] },
       });
-      const out = answered(await runLoop(s.deps, { ...s.ctx, resume }));
+      const out = answered(await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume })));
       if (backlog === "stale-event") expect(out.answer).toContain(`Published \`${ref}\` at \`${current}\``);
       else expect(out.answer).toContain("Publication was refused"); // the existing PR's exact-head fence rejects C
       s.ending.drain(undefined);
@@ -8289,7 +8450,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       agent: "coding",
       state: { branchPushReceipts: [{ type: "pushed_head", ref, sha: head, by: "push" }] },
     });
-    const out = answered(await runLoop(s.deps, { ...s.ctx, resume }));
+    const out = answered(await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume })));
     expect(out.answer).toContain(`\`${ref}\` at \`${head}\``);
     expect(out.answer).toContain("Changed the allowlist. Scoped test failed; full check skipped.");
     expect(out.answer).toContain("PR updated by the push: https://github.com/o/r/pull/9");
@@ -8429,7 +8590,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
         },
       },
     });
-    const out = answered(await runLoop(s.deps, { ...s.ctx, resume }));
+    const out = answered(await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume })));
     expect(out.answer).toContain("Publication outcome is unknown");
     expect(out.answer).toContain("I did not push the branch.");
     expect(s.published).toContain(`answer:${out.answer}`);
@@ -8473,9 +8634,9 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
         agent: "coding",
         state: { publicationSettlement: stage === "invalid" ? {} : receipt },
       });
-      await expect(runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages })).rejects.toThrow(
-        "needs reconciliation",
-      );
+      await expect(
+        runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
+      ).rejects.toThrow("needs reconciliation");
       expect(s.releases).toEqual([]);
       if (stage === "invalid") {
         s.ending.drain(undefined);
@@ -8608,6 +8769,195 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       inbox: [],
     };
   }
+  it.each([
+    "accepted",
+    "metadata only",
+    "PR-only metadata",
+    "metadata capacity",
+    "invalid metadata PR",
+    "observed capacity",
+    "unmapped push",
+    "unobservable push",
+    "acceptance unavailable",
+    "response lost",
+    "untracked",
+    "hard stop",
+    "capacity",
+    "legacy",
+  ])("durable branch publication through the real run loop: %s", async (mode) => {
+    const ref = mode === "PR-only metadata" ? "main" : "fix/owned";
+    const head = "a".repeat(40);
+    const description: PrDescription = {
+      title: "fix(core): preserve accepted publication",
+      tldr: "Keeps branch ownership after interruption.",
+      why: "Display events are bounded.",
+      pointers: [{ label: "Owner", text: "Persist it.", anchor: { path: "src/a", from: 1, to: 2 } }],
+      feedbackWanted: "Crash ordering.",
+      verified: "Focused contract.",
+      decisions: [],
+      risk: "Publication loss.",
+      validation: { criteria: [{ criterion: "owner survives", proof: "durable run state" }] },
+    };
+    const s = setup("", {
+      agent: "coding",
+      coding: true,
+      provider: neverCalled(),
+      repoCtx: {
+        repo: "o/r",
+        ref,
+        baseRef: "main",
+        ...(mode === "PR-only metadata" ? { pr: 7, headSha: head, prFromRecord: true } : {}),
+      },
+      binding: { ref, sha: head, workspace: "/srv/wt/owned" },
+      backlogLimit: 2,
+      executor: {
+        exec: async (command) => {
+          if (command.includes("rev-parse --abbrev-ref HEAD")) return ref;
+          if (command.includes("ls-remote")) {
+            if (mode === "unobservable push") throw new Error("remote head unavailable");
+            return `${head}\trefs/heads/${ref}`;
+          }
+          if (mode === "unobservable push" && command.includes("@{u}")) throw new Error("upstream head unavailable");
+          if (command.includes("rev-parse")) return head;
+          return "0";
+        },
+      },
+    });
+    const resume = finishing("Done.", {
+      agent: "coding",
+      state: {
+        ...(mode === "observed capacity" || mode === "unmapped push" ? {} : { prDescription: description }),
+        branchPushReceipts:
+          mode === "metadata only" ||
+          mode === "PR-only metadata" ||
+          mode === "metadata capacity" ||
+          mode === "invalid metadata PR"
+            ? []
+            : [{ type: "pushed_head", ref, sha: head, by: "push" }],
+        ...(mode === "legacy"
+          ? {}
+          : {
+              branchPublication: {
+                version: 1,
+                repo: "o/r",
+                complete: true,
+                ...(mode === "metadata capacity"
+                  ? { targets: Array.from({ length: 20 }, (_, i) => ({ pr: i + 10, headSha: head })) }
+                  : {}),
+                branches:
+                  mode === "capacity" || mode === "observed capacity"
+                    ? Array.from({ length: 20 }, (_, i) => ({ ref: `other/${i}`, pr: i + 1 }))
+                    : [],
+              },
+            }),
+      },
+    });
+    const inner = new InMemoryRunLedger(() => NOW);
+    const ledger = createLedgerWriteThrough({ ledger: inner, gen: "gen-T", fallback: s.store, warn: () => {} });
+    s.deps.runLedger = ledger;
+    const opened = await ledger.open({
+      runId: s.run.id,
+      threadKey: THREAD,
+      startedAt: NOW,
+      meta: { agent: "coding", repo: "o/r", channelId: "slack:CX", userId: "slack:UX", threadKey: THREAD },
+      card: null,
+      system: "test",
+      tools: [],
+      state: resume.row.state,
+    });
+    if (opened.kind !== "tracked") throw new Error("untracked fixture");
+    if (mode === "acceptance unavailable") {
+      const original = inner.setState.bind(inner);
+      inner.setState = async (id, gen, state) => {
+        const publication = state.branchPublication as { complete?: boolean; branches?: unknown[] } | undefined;
+        if (publication?.complete === true && publication.branches?.length === 1)
+          throw new Error("acceptance state unavailable");
+        return original(id, gen, state);
+      };
+    }
+    if (mode === "hard stop") {
+      const original = inner.setState.bind(inner);
+      inner.setState = async (id, gen, state) => {
+        const result = await original(id, gen, state);
+        if ((state.branchPublication as { pending?: unknown } | undefined)?.pending) s.run.control.requestStop("hard");
+        return result;
+      };
+    }
+    const open = vi.fn(async () => {
+      expect(inner.live.get(s.run.id)?.state.branchPublication).toMatchObject({
+        complete: false,
+        pending: { ref, headSha: head },
+      });
+      if (mode === "response lost") throw new Error("response lost");
+      return { number: 7, htmlUrl: "https://github.com/o/r/pull/7", created: true };
+    });
+    s.deps.openPullRequest = open;
+    s.deps.findOpenPrByHead = async () =>
+      mode === "unmapped push"
+        ? null
+        : { number: mode === "invalid metadata PR" ? 0 : 7, htmlUrl: "https://github.com/o/r/pull/7", headSha: head };
+    const update = vi.fn(async () => undefined);
+    s.deps.updatePullRequest = update;
+    const release = vi.fn(async (_input?: unknown) => undefined);
+    s.ctx.round.release = release;
+    const out = answered(
+      await runLoop(s.deps, {
+        ...s.ctx,
+        resume,
+        ledgerRun:
+          mode === "untracked"
+            ? new NullLedgerRun(s.run.id, { put: (record) => s.store.put(record), abandoned: () => {} })
+            : opened.run,
+      }),
+    );
+    s.ending.drain(true);
+    await s.writer.settled();
+    const record = inner.finished.get(s.run.id) ?? (await s.store.get(s.run.id));
+    await out.releaseWorkspace();
+    if (mode === "accepted" || mode === "metadata only" || mode === "PR-only metadata") {
+      expect(open).toHaveBeenCalledTimes(mode === "accepted" ? 1 : 0);
+      expect(update).toHaveBeenCalledTimes(mode === "accepted" ? 0 : 1);
+      if (mode === "accepted") expect(record?.events.some((event) => event.type === "pr_opened")).toBe(false);
+      expect(record?.branchPublication).toEqual({
+        version: 1,
+        repo: "o/r",
+        complete: true,
+        branches: mode === "accepted" ? [{ ref, pr: 7 }] : [],
+        ...(mode !== "accepted"
+          ? { targets: [{ pr: 7, ...(mode === "metadata only" ? { ref } : {}), headSha: head }] }
+          : {}),
+      });
+      if (mode === "accepted")
+        expect(release).toHaveBeenCalledWith(expect.objectContaining({ pushed: [{ ref, pr: 7 }] }));
+      else {
+        expect(release).toHaveBeenCalledOnce();
+        expect(release.mock.calls[0]?.[0]).not.toHaveProperty("pushed");
+      }
+    } else if (mode === "invalid metadata PR") {
+      expect(open).not.toHaveBeenCalled();
+      expect(update).not.toHaveBeenCalled();
+      expect(record?.branchPublication?.pending).toBeUndefined();
+    } else if (mode === "metadata capacity") {
+      expect(open).not.toHaveBeenCalled();
+      expect(update).not.toHaveBeenCalled();
+      expect(record?.branchPublication).toMatchObject({
+        complete: true,
+        targets: Array.from({ length: 20 }, (_, i) => ({ pr: i + 10, headSha: head })),
+      });
+      expect(record?.branchPublication?.pending).toBeUndefined();
+      expect(release).toHaveBeenCalledOnce();
+      expect(release.mock.calls[0]?.[0]).not.toHaveProperty("pushed");
+    } else {
+      expect(open).toHaveBeenCalledTimes(mode === "response lost" || mode === "acceptance unavailable" ? 1 : 0);
+      if (mode !== "hard stop") expect(release).not.toHaveBeenCalled();
+      expect(record?.branchPublication?.complete).not.toBe(true);
+      if (mode === "response lost" || mode === "acceptance unavailable") {
+        expect(record?.branchPublication?.pending).toMatchObject({ ref, headSha: head });
+        expect(record).toMatchObject({ id: s.run.id, status: "completed" });
+      }
+    }
+  });
+
   it("keeps a prior private capture refusal when a resumed run finishes after its note was lost", async () => {
     const audience = {
       kind: "slack-unshared-im" as const,
@@ -8719,7 +9069,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
         headSha: head,
         verifiedHead: { repo: "o/r", ref, sha: head },
       });
-      const out = answered(await runLoop(s.deps, { ...s.ctx, resume }));
+      const out = answered(await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume })));
       s.ending.drain(undefined);
       await s.writer.settled();
       const record = (await s.store.get("run-l"))!;
@@ -8741,7 +9091,12 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     const old = "a".repeat(40);
     const next = "b".repeat(40);
     const ref = "unit-branch";
-    const pending = { id: "intent-before-restart", update: { ref: `refs/heads/${ref}`, old, next } };
+    const pending = {
+      id: "intent-before-restart",
+      repo: "o/r",
+      owner: { instanceId: "coord-p", unit: "U12" },
+      update: { ref: `refs/heads/${ref}`, old, next },
+    };
     const description: PrDescription = {
       title: "fix(core): hold an uncertain branch push",
       tldr: "Keeps the unit PR unpublished while the prior Git result is uncertain.",
@@ -8778,7 +9133,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     });
     const open = vi.fn(async () => ({ number: 9, htmlUrl: "https://github.com/o/r/pull/9", created: true }));
     s.deps.openPullRequest = open;
-    const out = answered(await runLoop(s.deps, { ...s.ctx, resume }));
+    const out = answered(await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume })));
     expect(out.prNote).toBeUndefined();
     expect(open).not.toHaveBeenCalled();
     s.ending.drain(undefined);
@@ -8889,7 +9244,9 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
   it("the model is never called: the transcript's final turn is the answer, published and finished `completed`, and a `resumed` note on the stream says the loop had ended before the restart", async () => {
     const s = setup("", { provider: neverCalled() });
     const resume = finishing("The answer, written before the restart.");
-    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+    const out = answered(
+      await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
+    );
     expect(out.answer).toBe("The answer, written before the restart.");
     expect(s.published).toEqual(["answer:The answer, written before the restart."]);
     expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
@@ -8954,7 +9311,9 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
         note("time_budget_exhausted", "cut a source read at the loop end", 3),
       ],
     });
-    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+    const out = answered(
+      await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
+    );
     await deliverAnswer({
       msg: s.ctx.msg,
       io: s.ctx.io,
@@ -8995,7 +9354,9 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
         { type: "tool_result", tool: "bash", ok: false, summary: "refused", callId: "check-1", at: 4, seq: 4 },
       ],
     });
-    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+    const out = answered(
+      await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
+    );
     await deliverAnswer({
       msg: s.ctx.msg,
       io: s.ctx.io,
@@ -9034,7 +9395,9 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
           note("time_budget_exhausted", "time budget exhausted", 2),
         ],
       });
-      const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+      const out = answered(
+        await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
+      );
       expect(out.answerOutcome).toEqual(answerOutcome);
       if (output === "absent") expect(out.answer).toContain("could not verify");
       else expect(out.answer).toContain("Rendered fallback or partial findings.");
@@ -9044,6 +9407,296 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     },
   );
 
+  it("admits exact original run review publication durably before native POST and records native acceptance", async () => {
+    let posted = 0;
+    const s = setup("", {
+      agent: "review",
+      provider: neverCalled(),
+      ...prThread,
+      executor: { exec: async (command: string) => (command.includes("rev-parse") ? `${HEAD}\n` : "") },
+      review: {
+        head: HEAD,
+        post: async () => {
+          const rows = await s.deps.runLedger!.readLiveRuns();
+          const row = rows.find((row) => row.runId === s.run.id)!;
+          expect(row.state.reviewPublication).toMatchObject({
+            runId: s.run.id,
+            state: "pending",
+            target: { repo: "o/r", number: 42, commitId: HEAD },
+          });
+          expect(row.state.branchPublication).toEqual({ version: 1, repo: "o/r", branches: [], complete: true });
+          expect(JSON.stringify(row.state.reviewPublication)).not.toContain("original review bytes");
+          posted++;
+          return { state: "accepted" as const };
+        },
+      },
+    });
+    const resume = finishing("original review bytes", {
+      agent: "review",
+      state: { verdict: VERDICT },
+      repoCtx: prThread.repoCtx,
+    });
+    const out = answered(
+      await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
+    );
+    expect(posted).toBe(1);
+    expect(out.reviewPost).toMatchObject({ posted: true, head: HEAD });
+  });
+
+  it("an uncertain terminal review retains its receipt without reserving PR mutation ownership", async () => {
+    const post = vi.fn(async () => ({ state: "uncertain" as const }));
+    const s = setup("", {
+      agent: "review",
+      provider: neverCalled(),
+      ...prThread,
+      executor: { exec: async (command: string) => (command.includes("rev-parse") ? `${HEAD}\n` : "") },
+      review: { head: HEAD, post },
+    });
+    const resume = finishing("original review bytes", {
+      agent: "review",
+      state: { verdict: VERDICT },
+      repoCtx: prThread.repoCtx,
+    });
+    const out = answered(
+      await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
+    );
+    expect(out.reviewPost).toMatchObject({ posted: false, uncertain: true });
+    expect(post).toHaveBeenCalledTimes(1);
+    s.ending.drain(true);
+    await s.writer.settled();
+    const record = (await s.store.get(s.run.id))!;
+    expect(record.reviewPublication).toMatchObject({ state: "uncertain", runId: s.run.id });
+    expect(terminalPublicationRetentionRequired(record)).toBe(true);
+    expect(
+      findPullOwnersInRows(
+        { repo: "o/r", pr: 42 },
+        {
+          complete: true,
+          units: [],
+          effects: [],
+          runs: [{ runId: record.id, repo: record.repo, live: false, publication: record.branchPublication }],
+        },
+      ),
+    ).toEqual({ ok: true, owners: [] });
+  });
+
+  it("a hosted review retains its canonical conversation owner while the ledger uses a host key", async () => {
+    const post = vi.fn(async () => ({ state: "accepted" as const }));
+    const s = setup("", {
+      agent: "review",
+      provider: neverCalled(),
+      ...prThread,
+      executor: { exec: async (command: string) => (command.includes("rev-parse") ? `${HEAD}\n` : "") },
+      review: { head: HEAD, post },
+    });
+    const resume = finishing("original review bytes", {
+      agent: "review",
+      state: { verdict: VERDICT },
+      repoCtx: prThread.repoCtx,
+    });
+    const ctx = await trackedCodingContext(
+      s,
+      { ...s.ctx, resume, messages: resume.plan.messages },
+      "host:original-review",
+    );
+    const row = (await s.deps.runLedger!.readLiveRuns())[0]!;
+    expect(row.threadKey).toBe("host:original-review");
+    expect(row.meta.threadKey).toBe(s.ctx.msg.threadKey);
+    expect(answered(await runLoop(s.deps, ctx)).reviewPost).toMatchObject({ posted: true, head: HEAD });
+    expect(post).toHaveBeenCalledTimes(1);
+    s.ending.drain(true);
+    await s.writer.settled();
+    expect((await s.store.get(s.run.id))?.reviewPublication).toMatchObject({ runId: s.run.id, state: "accepted" });
+  });
+
+  it("a soft stop after durable pending admission records confirmed refusal without native dispatch", async () => {
+    const post = vi.fn(async () => ({ state: "accepted" as const }));
+    const s = setup("", {
+      agent: "review",
+      provider: neverCalled(),
+      ...prThread,
+      executor: { exec: async (command: string) => (command.includes("rev-parse") ? `${HEAD}\n` : "") },
+      review: { head: HEAD, post },
+    });
+    const resume = finishing("original review bytes", {
+      agent: "review",
+      state: { verdict: VERDICT },
+      repoCtx: prThread.repoCtx,
+    });
+    const ctx = await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages });
+    const commit = ctx.ledgerRun!.commitState.bind(ctx.ledgerRun!);
+    let stopped = false;
+    ctx.ledgerRun!.commitState = async (patch) => {
+      const result = await commit(patch);
+      if ((patch.reviewPublication as { state?: string } | undefined)?.state === "pending" && result === "ok") {
+        stopped = true;
+        s.run.control.requestStop("soft");
+        s.registry.publish(s.run.id, {
+          type: "run_note",
+          kind: "stop_requested",
+          summary: "soft stop requested",
+          at: NOW,
+        });
+      }
+      return result;
+    };
+    expect(answered(await runLoop(s.deps, ctx)).reviewPost).toMatchObject({
+      posted: false,
+      reason: "the review publication was refused",
+    });
+    expect(stopped).toBe(true);
+    expect(post).not.toHaveBeenCalled();
+    expect((await s.deps.runLedger!.readLiveRuns())[0]!.state.reviewPublication).toMatchObject({ state: "refused" });
+  });
+
+  it.each(["stored-null", "different-pr", "untracked"] as const)(
+    "review publication never admits from %s original owner evidence",
+    async (mode) => {
+      const post = vi.fn(async () => ({ state: "accepted" as const }));
+      const s = setup("", {
+        agent: "review",
+        provider: neverCalled(),
+        ...prThread,
+        executor: { exec: async (command: string) => (command.includes("rev-parse") ? `${HEAD}\n` : "") },
+        review: { head: HEAD, post },
+      });
+      const resume = finishing("original review bytes", {
+        agent: "review",
+        state: { verdict: VERDICT },
+        repoCtx: prThread.repoCtx,
+      });
+      const ctx = await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages });
+      if (mode === "untracked") ctx.ledgerRun = recordingLedgerRun().ledgerRun;
+      else if (mode === "stored-null") await ctx.ledgerRun!.commitState({ reviewPublication: null });
+      else {
+        const read = s.deps.runLedger!.readLiveRuns.bind(s.deps.runLedger!);
+        vi.spyOn(s.deps.runLedger!, "readLiveRuns").mockImplementation(async () =>
+          (await read()).map((row) => ({ ...row, meta: { ...row.meta, pr: 99 } })),
+        );
+      }
+      const out = answered(await runLoop(s.deps, ctx));
+      expect(post).not.toHaveBeenCalled();
+      expect(out.reviewPost).toMatchObject({ posted: false, uncertain: true });
+    },
+  );
+
+  it("a fresh review that loses its original ledger owner stays uncertain without not-posted evidence", async () => {
+    const post = vi.fn(async () => ({ state: "accepted" as const }));
+    const s = setup("original review bytes", {
+      agent: "review",
+      ...prThread,
+      executor: {
+        exec: async (command: string) => (command.includes("rev-parse") ? `${HEAD}\n` : ""),
+        execResult: async () => ({ exitCode: 0, stdout: `${HEAD}\n`, stderr: "", truncated: false }),
+      },
+      review: { head: HEAD, post },
+    });
+    let inner!: InMemoryRunLedger;
+    const ctx = await trackedCodingContext(s, s.ctx, s.ctx.msg.threadKey, (ledger) => {
+      inner = ledger;
+    });
+    const read = s.deps.fetchPrHead!;
+    s.deps.fetchPrHead = async (target) => {
+      inner.live.get(s.run.id)!.ownerGen = "gen-replacement";
+      expect(await ctx.ledgerRun!.commitState({ ownerProbe: true })).toBe("fenced");
+      expect(ctx.ledgerRun!.tracked()).toBe(false);
+      return read(target);
+    };
+    const out = answered(await runLoop(s.deps, ctx));
+    expect(out.reviewPost).toMatchObject({ posted: false, uncertain: true });
+    expect(post).not.toHaveBeenCalled();
+    expect(
+      s.registry
+        .snapshot(s.run.id, s.run.token)
+        ?.events.some((event) => event.type === "run_note" && event.kind === "review_not_posted"),
+    ).toBe(false);
+  });
+
+  it("a soft stop inside pending admission refuses before any review write", async () => {
+    const post = vi.fn(async () => ({ state: "accepted" as const }));
+    const s = setup("", {
+      agent: "review",
+      provider: neverCalled(),
+      ...prThread,
+      executor: { exec: async (command: string) => (command.includes("rev-parse") ? `${HEAD}\n` : "") },
+      review: { head: HEAD, post },
+    });
+    const resume = finishing("original review bytes", {
+      agent: "review",
+      state: { verdict: VERDICT },
+      repoCtx: prThread.repoCtx,
+    });
+    const ctx = await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages });
+    const read = s.deps.runLedger!.readLiveRuns.bind(s.deps.runLedger!);
+    let admissionReads = 0;
+    let stopped = false;
+    vi.spyOn(s.deps.runLedger!, "readLiveRuns").mockImplementation(async () => {
+      const rows = await read();
+      // The first check permits the request; the transaction's fresh read
+      // observes the stop before committing pending or issuing native POST.
+      if (admissionReads++ === 3) {
+        stopped = true;
+        s.run.control.requestStop("soft");
+      }
+      return rows;
+    });
+    const out = answered(await runLoop(s.deps, ctx));
+    expect(stopped).toBe(true);
+    expect(out.reviewPost).toEqual({ posted: false, reason: "the review publication was refused" });
+    expect(post).not.toHaveBeenCalled();
+    expect((await read())[0]!.state.reviewPublication).toBeUndefined();
+  });
+
+  it("a fresh untracked review refuses before native dispatch without inventing uncertainty", async () => {
+    const post = vi.fn(async () => ({ state: "accepted" as const }));
+    const s = setup("original review bytes", {
+      agent: "review",
+      ...prThread,
+      executor: {
+        exec: async (command: string) => (command.includes("rev-parse") ? `${HEAD}\n` : ""),
+        execResult: async () => ({ exitCode: 0, stdout: `${HEAD}\n`, stderr: "", truncated: false }),
+      },
+      review: { head: HEAD, post },
+    });
+    const out = answered(await runLoop(s.deps, s.ctx));
+    expect(out.reviewPost).toMatchObject({ posted: false, reason: "the review publication owner is unavailable" });
+    expect(post).not.toHaveBeenCalled();
+    expect(
+      s.registry
+        .snapshot(s.run.id, s.run.token)
+        ?.events.some((event) => event.type === "run_note" && event.kind === "review_not_posted"),
+    ).toBe(true);
+  });
+
+  it("refuses review native POST when the original run owner changes after pending admission", async () => {
+    const post = vi.fn(async () => ({ state: "accepted" as const }));
+    const s = setup("", {
+      agent: "review",
+      provider: neverCalled(),
+      ...prThread,
+      executor: { exec: async (command: string) => (command.includes("rev-parse") ? `${HEAD}\n` : "") },
+      review: { head: HEAD, post },
+    });
+    const resume = finishing("original review bytes", {
+      agent: "review",
+      state: { verdict: VERDICT },
+      repoCtx: prThread.repoCtx,
+    });
+    const ctx = await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages });
+    const read = s.deps.runLedger!.readLiveRuns.bind(s.deps.runLedger!);
+    let changed = false;
+    vi.spyOn(s.deps.runLedger!, "readLiveRuns").mockImplementation(async () =>
+      (await read()).map((row) => {
+        if (!row.state.reviewPublication) return row;
+        changed = true;
+        return { ...row, ownerGen: "gen-replacement" };
+      }),
+    );
+    expect(answered(await runLoop(s.deps, ctx)).reviewPost).toMatchObject({ posted: false });
+    expect(changed).toBe(true);
+    expect(post).not.toHaveBeenCalled();
+  });
+
   it("a review resumed with its answer in hand runs its post-steps: the verdict restored from the row is settled at the pinned head and posted, once", async () => {
     const posts: Array<{ target: ReviewCommentTarget; body: string }> = [];
     const s = setup("", {
@@ -9051,14 +9704,22 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       provider: neverCalled(),
       ...prThread,
       executor: { exec: async (command: string) => (command.includes("rev-parse") ? `${HEAD}\n` : "") },
-      review: { head: HEAD, post: async (target, body) => void posts.push({ target, body }) },
+      review: {
+        head: HEAD,
+        post: async (target, body) => {
+          posts.push({ target, body });
+          return { state: "accepted" as const };
+        },
+      },
     });
     const resume = finishing("The review: one nit, F1.", {
       agent: "review",
       state: { verdict: VERDICT },
       repoCtx: prThread.repoCtx,
     });
-    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+    const out = answered(
+      await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
+    );
     expect(out.answer).toBe("The review: one nit, F1.");
     expect(posts).toEqual([
       {
@@ -9093,7 +9754,13 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
         ...(agent === "review"
           ? {
               ...prThread,
-              review: { head: HEAD, post: async (_target: ReviewCommentTarget, body: string) => void posts.push(body) },
+              review: {
+                head: HEAD,
+                post: async (_target: ReviewCommentTarget, body: string) => {
+                  posts.push(body);
+                  return { state: "accepted" as const };
+                },
+              },
               executor: { exec: async (command: string) => (command.includes("rev-parse") ? `${HEAD}\n` : "") },
             }
           : {}),
@@ -9130,6 +9797,8 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
         resume.durableTurns = resume.plan.messages.length;
         resume.lastStep.turnIndex = resume.plan.messages.length;
       }
+      if (agent === "review")
+        resume.row.state.branchPublication = { version: 1, repo: prThread.repoCtx.repo, branches: [], complete: true };
       const inner = new InMemoryRunLedger(() => NOW);
       let failState = false;
       let recoveredCheckpoint: unknown;
@@ -9151,7 +9820,15 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
         runId: s.run.id,
         threadKey: s.ctx.msg.threadKey,
         startedAt: NOW,
-        meta: { agent, channelId: s.ctx.msg.channelId, userId: s.ctx.msg.userId, threadKey: s.ctx.msg.threadKey },
+        meta: {
+          agent,
+          channelId: s.ctx.msg.channelId,
+          userId: s.ctx.msg.userId,
+          threadKey: s.ctx.msg.threadKey,
+          ...(s.ctx.repoCtx.repo ? { repo: s.ctx.repoCtx.repo } : {}),
+          ...(s.ctx.repoCtx.pr !== undefined ? { pr: s.ctx.repoCtx.pr } : {}),
+        },
+        state: resume.row.state,
         card: null,
         system: s.ctx.system,
         tools: [],
@@ -9210,7 +9887,10 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
                 ...prThread,
                 review: {
                   head: HEAD,
-                  post: async (_target: ReviewCommentTarget, body: string) => void posts.push(body),
+                  post: async (_target: ReviewCommentTarget, body: string) => {
+                    posts.push(body);
+                    return { state: "accepted" as const };
+                  },
                 },
                 executor: { exec: async (command: string) => (command.includes("rev-parse") ? `${HEAD}\n` : "") },
               }
@@ -9274,7 +9954,100 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     },
   );
 
-  it("a review whose verdict a previous generation already posted (a `review_posted` event among the replayed events) posts nothing again: the settle does not run, the outcome on the record is the event's, and the reviewed head is the event's", async () => {
+  it.each(["head", "repo", "pr"])(
+    "a canonical finish rejects a replayed review post with a different %s",
+    async (drift) => {
+      const publication = {
+        repo: "o/r",
+        pr: 42,
+        headRef: "fix/the-pr-head",
+        baseRef: "main",
+        publicationRef: "fix/the-pr-head",
+        expectedHeadSha: HEAD,
+        owner: { instanceId: "coord-p", unit: "ONE" },
+      };
+      const post = vi.fn(async () => {});
+      const s = setup("", {
+        agent: "review",
+        provider: neverCalled(),
+        ...prThread,
+        repoCtx: { ...prThread.repoCtx, headSha: HEAD },
+        coordinator: { parentInstanceId: "coord-p", idempotencyKey: "coord-p:ONE/1/review", base: "main", publication },
+        review: { head: HEAD, post },
+        executor: { exec: async () => HEAD },
+      });
+      s.deps.fetchPrFacts = async () => ({
+        state: "open",
+        headRef: publication.headRef,
+        baseRef: "main",
+        headSha: HEAD,
+        sameRepoHead: true,
+        headBranchExists: true,
+        verifiedHead: { repo: "o/r", ref: publication.headRef, sha: HEAD },
+      });
+      const resume = finishing("Saved review.", {
+        agent: "review",
+        state: { verdict: VERDICT },
+        repoCtx: s.ctx.repoCtx,
+        events: [
+          {
+            type: "review_posted",
+            repo: drift === "repo" ? "other/repo" : "o/r",
+            number: drift === "pr" ? 43 : 42,
+            head: drift === "head" ? "b".repeat(40) : HEAD,
+            at: NOW,
+            seq: 1,
+          },
+        ],
+      });
+      await expect(runLoop(s.deps, { ...s.ctx, resume })).rejects.toThrow("saved review target");
+      expect(post).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([undefined, null, "pending", "uncertain"] as const)(
+    "a replayed review event grants no posted credit or repost permission with canonical receipt %s",
+    async (state) => {
+      const post = vi.fn(async () => ({ state: "accepted" as const }));
+      const s = setup("", {
+        agent: "review",
+        provider: neverCalled(),
+        ...prThread,
+        executor: { exec: async (command: string) => (command.includes("rev-parse") ? `${HEAD}\n` : "") },
+        review: { head: HEAD, post },
+      });
+      const resume = finishing("Saved review.", {
+        agent: "review",
+        repoCtx: prThread.repoCtx,
+        state: {
+          verdict: VERDICT,
+          ...(state === undefined
+            ? {}
+            : {
+                reviewPublication:
+                  state === null
+                    ? null
+                    : {
+                        version: 1,
+                        runId: s.run.id,
+                        target: { repo: "o/r", number: 42, commitId: HEAD },
+                        bodyHash: "c".repeat(64),
+                        state,
+                      },
+              }),
+        },
+        events: [{ type: "review_posted", repo: "o/r", number: 42, head: HEAD, verdict: "approve", at: NOW, seq: 1 }],
+      });
+      const ctx = await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages });
+      expect(answered(await runLoop(s.deps, ctx)).reviewPost).toMatchObject({ posted: false, uncertain: true });
+      expect(post).not.toHaveBeenCalled();
+      s.ending.drain(true);
+      await s.writer.settled();
+      expect((await s.store.get(s.run.id))?.reviewPost).toMatchObject({ posted: false, uncertain: true });
+    },
+  );
+
+  it("a review with canonical original-run acceptance skips settle and native POST even without a display event", async () => {
     const posts: Array<{ target: ReviewCommentTarget; body: string }> = [];
     const execs: string[] = [];
     const s = setup("", {
@@ -9287,18 +10060,33 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
           return command.includes("rev-parse") ? `${HEAD}\n` : "";
         },
       },
-      review: { head: HEAD, post: async (target, body) => void posts.push({ target, body }) },
+      review: {
+        head: HEAD,
+        post: async (target, body) => {
+          posts.push({ target, body });
+          return { state: "accepted" as const };
+        },
+      },
     });
     const resume = finishing("The review: one nit, F1.", {
       agent: "review",
-      state: { verdict: VERDICT },
+      state: {
+        verdict: VERDICT,
+        reviewPublication: {
+          version: 1,
+          runId: s.run.id,
+          target: { repo: "o/r", number: 42, commitId: HEAD },
+          bodyHash: "c".repeat(64),
+          verdict: "approve",
+          state: "accepted",
+        },
+      },
       repoCtx: prThread.repoCtx,
-      events: [
-        { type: "input", messageId: "m1", text: "hello there", at: 1, seq: 1 },
-        { type: "review_posted", repo: "o/r", number: 42, head: HEAD, verdict: "approve", at: 2, seq: 2 },
-      ],
+      events: [{ type: "input", messageId: "m1", text: "hello there", at: 1, seq: 1 }],
     });
-    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+    const out = answered(
+      await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
+    );
     expect(posts).toEqual([]);
     expect(execs.filter((c) => c.includes("rev-parse"))).toEqual([]);
     expect(out.reviewHead).toBe(HEAD);
@@ -9312,9 +10100,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       head: HEAD,
       verdict: "approve",
     });
-    // The replayed events are not on this loop's stream (the registry replays
-    // them at create); this generation published no review_posted of its own
-    // and no review_not_posted note.
+    // Canonical acceptance survives event trimming without a duplicate display event.
     expect(rec.events.filter((e) => e.type === "review_posted")).toHaveLength(0);
     expect(rec.events.some((e) => e.type === "run_note" && (e as { kind: string }).kind === "review_not_posted")).toBe(
       false,
@@ -9429,7 +10215,10 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
         },
       });
       const out = answered(
-        await runLoop(s.deps, { ...s.ctx, privateAudienceLatch, resume, messages: resume.plan.messages }),
+        await runLoop(
+          s.deps,
+          await trackedCodingContext(s, { ...s.ctx, privateAudienceLatch, resume, messages: resume.plan.messages }),
+        ),
       );
       expect(opened).toHaveLength(1);
       expect(checkoutReleased).toBe(true);
@@ -9515,7 +10304,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
         branchPushReceipts: [receipt(ref, head), receipt(auxiliary, "b".repeat(40))],
       },
     });
-    const out = answered(await runLoop(s.deps, { ...s.ctx, resume }));
+    const out = answered(await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume })));
     expect(open).toHaveBeenCalledOnce();
     expect(out.answer).toContain(`Published \`${ref}\` at \`${head}\``);
     expect(out.answer).toContain("PR opened");
@@ -9575,7 +10364,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
         { type: "pushed_head", ref: "assets/other", sha: "b".repeat(40), by: "push" },
       ],
     });
-    const out = answered(await runLoop(s.deps, { ...s.ctx, resume }));
+    const out = answered(await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume })));
     expect(find).toHaveBeenCalledWith("o/r", ref);
     expect(followUp).toHaveBeenCalledOnce();
     expect(out.answer).toContain(`Published \`${ref}\` at \`${head}\``);
@@ -9632,17 +10421,20 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     s.deps.findOpenPrByHead = find;
     s.deps.openPullRequest = open;
     const out = answered(
-      await runLoop(s.deps, {
-        ...s.ctx,
-        resume: reentering({
-          branchPushReceipts: [{ type: "pushed_head", ref, sha: head, by: "push" }],
-          doorPublicationPending: {
-            id: "rejected-auxiliary",
-            update: { ref: `refs/heads/${auxiliary}`, old: "b".repeat(40), next: "c".repeat(40) },
-            outcome: "rejected",
-          },
+      await runLoop(
+        s.deps,
+        await trackedCodingContext(s, {
+          ...s.ctx,
+          resume: reentering({
+            branchPushReceipts: [{ type: "pushed_head", ref, sha: head, by: "push" }],
+            doorPublicationPending: {
+              id: "rejected-auxiliary",
+              update: { ref: `refs/heads/${auxiliary}`, old: "b".repeat(40), next: "c".repeat(40) },
+              outcome: "rejected",
+            },
+          }),
         }),
-      }),
+      ),
     );
     expect(find).toHaveBeenCalledWith("o/r", ref);
     expect(followUp).toHaveBeenCalledOnce();
@@ -9700,7 +10492,9 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
         branchPushReceipts: [{ type: "pushed_head", ref: BRANCH, sha: HEAD, by: "push" }],
       },
     });
-    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+    const out = answered(
+      await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
+    );
     expect(opened).toHaveLength(1);
     expect(opened[0]).toMatchObject({ repo: "o/r", headBranch: BRANCH, base: "main" });
     expect(String(opened[0].body)).toContain(`blob/${HEAD}/`);
@@ -9751,7 +10545,9 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       agent: "coding",
       state: { prDescription: description, pushedBranch: BRANCH },
     });
-    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+    const out = answered(
+      await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
+    );
     expect(opened).toEqual([]);
     expect(out.answer).toContain("the plan's base was lost across a roll");
     expect(out.prNote).toBeUndefined();
@@ -9834,7 +10630,9 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
         branchPushReceipts: [{ type: "pushed_head", ref: BRANCH, sha: HEAD, by: "push" }],
       },
     });
-    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+    const out = answered(
+      await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
+    );
     expect(reads).toEqual([]);
     expect(startStates).toEqual([
       { kind: "unknown", reason: expect.stringContaining(`pushed ${BRANCH} before a restart`) },
@@ -9850,13 +10648,121 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       agent: "coding",
       state: { prDescription: description },
     });
-    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+    const out = answered(
+      await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
+    );
     expect(reads).toEqual([BRANCH]);
     expect(startStates).toEqual([]); // No accepted write: the PR post-step never rewrites or opens.
     expect(opened).toHaveLength(0);
     expect(out.answer).toContain("No push was confirmed");
     expect(out.prNote).toBeUndefined();
   });
+
+  it("malformed restored push history refuses a later native push and preserves the original evidence", async () => {
+    const { BRANCH, description, s, opened } = startStateFixture();
+    const bindings = new GitBindings();
+    expect(bindings.register(s.run.id, { repo: "o/r", ref: BRANCH }, undefined)).toBe(true);
+    s.deps.githubBindings = bindings;
+    const raw = [{ type: "pushed_head", ref: BRANCH, sha: "unreadable-sha", by: "push", opaque: "retained fixture" }];
+    const resume = finishing("Done", {
+      agent: "coding",
+      state: { prDescription: description, branchPushReceipts: raw },
+    });
+    const ctx = await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages });
+    ctx.githubDoor = { baseUrl: "https://door.example.com", bearer: "fixture-door" };
+    let attempted = false;
+    let nativeCalls = 0;
+    const originalExec = ctx.round.selection.executor.exec.bind(ctx.round.selection.executor);
+    ctx.round.selection.executor.exec = async (command, options) => {
+      if (!attempted && bindings.isModelClosed(s.run.id)) {
+        attempted = true;
+        const claim = await bindings.beginPostStepPublication(s.run.id, {
+          ref: `refs/heads/${BRANCH}`,
+          old: HEAD,
+          next: "f".repeat(40),
+        });
+        if (claim) {
+          nativeCalls++;
+          await claim.finish("accepted");
+        }
+      }
+      return originalExec(command, options);
+    };
+    await runLoop(s.deps, ctx);
+    expect(attempted).toBe(true);
+    expect(nativeCalls).toBe(0);
+    expect((await s.deps.runLedger!.readLiveRuns())[0]!.state.branchPushReceipts).toEqual(raw);
+    expect(opened).toHaveLength(0);
+    s.ending.drain(true);
+    await s.writer.settled();
+    expect(s.releases).toEqual([]);
+  });
+
+  it.each(["accepted", "accepted repo casing", "unknown", "stopped"] as const)(
+    "identity ref publication uses the original run's durable Door recorder: %s",
+    async (outcome) => {
+      const { BRANCH, description, s, opened } = startStateFixture();
+      const bindings = new GitBindings();
+      expect(
+        bindings.register(
+          s.run.id,
+          { repo: outcome === "accepted repo casing" ? "O/R" : "o/r", ref: BRANCH },
+          undefined,
+        ),
+      ).toBe(true);
+      s.deps.githubBindings = bindings;
+      const next = "f".repeat(40);
+      let nativeCalls = 0;
+      s.deps.identityRewrite!.rewrite = async ({ refPublication }) => {
+        const claim = await refPublication?.begin({
+          repo: "o/r",
+          update: { ref: `refs/heads/${BRANCH}`, old: HEAD, next },
+        });
+        if (!claim) return { kind: "unreadable", reason: "original publication refused" };
+        const row = (await s.deps.runLedger!.readLiveRuns()).find((row) => row.runId === s.run.id)!;
+        expect(row.state.doorPublicationPending).toMatchObject({
+          repo: "o/r",
+          update: { ref: `refs/heads/${BRANCH}`, old: HEAD, next },
+        });
+        nativeCalls++;
+        const accepted = await claim.finish(outcome.startsWith("accepted") ? "accepted" : "unknown");
+        const saved = (await s.deps.runLedger!.readLiveRuns()).find((row) => row.runId === s.run.id)!;
+        if (outcome.startsWith("accepted")) {
+          expect(accepted).toBe(true);
+          expect(saved.state.doorPublicationPending).toBeNull();
+          expect(saved.state.branchPushReceipts).toContainEqual({
+            type: "pushed_head",
+            ref: BRANCH,
+            sha: next,
+            by: "push",
+          });
+          return { kind: "rewritten", count: 1, replaced: ["author"], tip: next };
+        }
+        expect(accepted).toBe(false);
+        expect(saved.state.doorPublicationPending).toMatchObject({ update: { next } });
+        return { kind: "unreadable", reason: "original publication unconfirmed" };
+      };
+      s.deps.identityRewrite!.pullRequestHead = async () => next;
+      const resume = finishing("Done", {
+        agent: "coding",
+        state: {
+          prDescription: description,
+          pushedBranch: BRANCH,
+          branchPushReceipts: [{ type: "pushed_head", ref: BRANCH, sha: HEAD, by: "push" }],
+        },
+      });
+      const ctx = await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages });
+      if (outcome === "stopped") {
+        const read = s.deps.runLedger!.readLiveRuns.bind(s.deps.runLedger!);
+        vi.spyOn(s.deps.runLedger!, "readLiveRuns").mockImplementation(async () =>
+          (await read()).map((row) => (row.state.doorPublicationPending ? { ...row, stop: "hard" } : row)),
+        );
+      }
+      await runLoop(s.deps, ctx);
+      expect(nativeCalls).toBe(outcome === "stopped" ? 0 : 1);
+      expect(opened).toHaveLength(outcome.startsWith("accepted") ? 1 : 0);
+    },
+  );
 
   it("records the identity rewrite's final pushed head for the coordinator's exact-head read", async () => {
     const { BRANCH, description, s } = startStateFixture();
@@ -9876,7 +10782,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
         branchPushReceipts: [{ type: "pushed_head", ref: BRANCH, sha: HEAD, by: "push" }],
       },
     });
-    await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages });
+    await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages }));
     s.ending.drain(true);
     await s.writer.settled();
     const record = (await s.store.get("run-l"))!;
@@ -9917,16 +10823,19 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
           branchPushReceipts: [{ type: "pushed_head", ref: "plan/p/u1", sha: HEAD, by: "push" }],
         },
       });
-      await runLoop(s.deps, {
-        ...s.ctx,
-        coordinator: {
-          parentInstanceId: "plan-attribution",
-          idempotencyKey: "plan-attribution:U12/0/coding",
-          base: "main",
-        },
-        resume,
-        messages: resume.plan.messages,
-      });
+      await runLoop(
+        s.deps,
+        await trackedCodingContext(s, {
+          ...s.ctx,
+          coordinator: {
+            parentInstanceId: "plan-attribution",
+            idempotencyKey: "plan-attribution:U12/0/coding",
+            base: "main",
+          },
+          resume,
+          messages: resume.plan.messages,
+        }),
+      );
       expect(opened).toHaveLength(1);
       expect(opened[0]).toMatchObject({
         body: expect.stringMatching(
@@ -9954,7 +10863,9 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       agent: "coding",
       state: { harness: { pid: 777, logOffset: 10, root: "/tmp/switchboard-pi-old-build-run-l" } },
     });
-    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+    const out = answered(
+      await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
+    );
     expect(out.answer).toBe("Done: pushed the fix.");
     expect(container.starts).toEqual([]);
     expect(container.stdin).toEqual([]);
@@ -9985,7 +10896,9 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       agent: "coding",
       state: { harness: { pid: 777, logOffset: 10, root: "/var/tmp/switchboard-pi-run-l", container: "vm-old" } },
     });
-    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+    const out = answered(
+      await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
+    );
     expect(out.answer).toBe("Done: pushed the fix.");
     expect(container.killed).toEqual([]);
     expect(container.removed).toEqual([]);
@@ -10016,7 +10929,9 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       agent: "coding",
       state: { harness: { pid: 777, logOffset: 10, root: "/var/tmp/switchboard-pi-run-l", container: "vm-old" } },
     });
-    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+    const out = answered(
+      await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
+    );
     expect(out.answer).toBe("Done: pushed the fix.");
     expect(container.killed).toEqual([]);
     expect(container.removed).toEqual([]);
@@ -10062,7 +10977,9 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       },
     });
     const resume = finishing("Done: pushed the fix.", { agent: "coding", state: { harness: OPENCODE_ROW } });
-    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+    const out = answered(
+      await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
+    );
     expect(out.answer).toBe("Done: pushed the fix.");
     expect(oc.calls.find).toEqual([OPENCODE_ROW]);
     expect(oc.calls.end).toEqual([OPENCODE_ROW]);
@@ -10086,7 +11003,9 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       },
     });
     const resume = finishing("Done: pushed the fix.", { agent: "coding", state: { harness: OPENCODE_ROW } });
-    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+    const out = answered(
+      await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
+    );
     expect(out.answer).toBe("Done: pushed the fix.");
     expect(oc.calls.find).toEqual([OPENCODE_ROW]);
     expect(oc.calls.end).toEqual([]);
@@ -10116,7 +11035,9 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       },
     });
     const resume = reentering({ harness: OPENCODE_ROW }, "general");
-    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+    const out = answered(
+      await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
+    );
     expect(out.answer).toBe("Resumed on OpenCode.");
     expect(oc.calls.open).toEqual([OPENCODE_ROW]);
     expect(pi.calls.open).toEqual([]);
@@ -10139,7 +11060,9 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       },
     });
     const resume = reentering({ harness: OPENCODE_ROW }, "general");
-    answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+    answered(
+      await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
+    );
     expect(deadlines).toEqual([resume.plan.remainingMs]);
   });
 
@@ -10163,7 +11086,9 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     });
     const PI_ROW = { harness: "pi", pid: 4242, logOffset: 10, root: "/tmp/switchboard-pi-run-l", container: "vm-1" };
     const resume = reentering({ harness: PI_ROW }, "general");
-    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+    const out = answered(
+      await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
+    );
     expect(out.answer).toBe("Resumed on pi.");
     expect(pi.calls.open).toEqual([expect.objectContaining(PI_ROW)]);
     expect(oc.calls.open).toEqual([]);
@@ -10191,7 +11116,9 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       },
     });
     const resume = reentering({ harness: CODEX_ROW }, "general");
-    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+    const out = answered(
+      await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
+    );
     expect(out.answer).toBe("Rebuilt on pi.");
     // The rebuild: the preset's harness, opened with no facts — the row's are no facts to it.
     expect(pi.calls.open).toEqual([undefined]);
@@ -10492,7 +11419,13 @@ describe("the run control's lease clock — started by the run loop on the harne
           return `${HEAD}\n`;
         },
       },
-      review: { head: HEAD, post: async (target, body) => void posts.push({ target, body }) },
+      review: {
+        head: HEAD,
+        post: async (target, body) => {
+          posts.push({ target, body });
+          return { state: "accepted" as const };
+        },
+      },
     });
     const { ledgerRun, record: recorded } = recordingLedgerRun();
     const out = answered(await runLoop(s.deps, { ...s.ctx, ledgerRun }));

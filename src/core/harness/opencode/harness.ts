@@ -586,6 +586,8 @@ export async function openOpenCodeRun(
       answer,
       ...(ending ? { ending } : {}),
       followUp: async (input) => {
+        if (run.deadlineAt !== undefined && deps.clock() >= run.deadlineAt)
+          throw new Error("The admitted run deadline ended before the follow-up turn.");
         // One more turn on the same session (the post-turns: the coding
         // description, the review's verdict), driven through the same loop over
         // a connection that reads only what the turn appends. The relayed
@@ -826,6 +828,10 @@ function drainFollowUps(
             stagedLine = `Attached files could not be staged: ${err instanceof Error ? err.message : String(err)}`;
             note("follow_up", `staging the follow-up's files failed: ${redactSecrets(stagedLine)}`);
           }
+        }
+        if (!running() || deps.clock() >= (run.deadlineAt ?? Infinity)) {
+          run.inbox?.requeue([...deferred.splice(0), ...inputs.slice(inputs.indexOf(input))]);
+          return;
         }
         const prompt = followUpPrompt([input]);
         const text = stagedLine ? `${prompt}\n\n${stagedLine}` : prompt;

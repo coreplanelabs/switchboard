@@ -1,3 +1,4 @@
+import type { ExistingPrPublicationBinding } from "./coordinator/contract.js";
 // Per-round review + workspace machinery, extracted from dispatch() as
 // callable units (zero behavior change): everything a
 // review or coding round must invoke — workspace attach/release paired on the
@@ -29,6 +30,7 @@ import { leftBehindSentence } from "../execution/residentCleanliness.js";
 import type { ToolContext } from "../tools/runnableTool.js";
 import type { Span } from "../core/trace/types.js";
 import type { ResidentLiveStateObserver } from "./runLiveState.js";
+import { ResidentRegistrationMismatchError, type ResidentBinding } from "../execution/resident.js";
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import type { FollowUpTurn } from "./harness/contract.js";
 import {
@@ -43,7 +45,7 @@ import {
 } from "./headMoved.js";
 import { decideReviewPost, reviewPostIntended, reviewPostOptedOut, type ReviewPostTarget } from "./reviewPost.js";
 import { buildReviewPostBody, type ReviewPost, type ReviewVerdict } from "./reviewVerdict.js";
-import { checkReviewedHead, normalizeHead, parseRevParseOutput, sameCommit } from "./reviewedHead.js";
+import { checkReviewedHead, normalizeHead, sameCommit } from "./reviewedHead.js";
 import { reviewTargetBlock } from "./reviewTarget.js";
 import { checkDigestCoverage, type PrSize } from "./digestCoverage.js";
 import type { DigestReport } from "./diffDigest.js";
@@ -51,7 +53,16 @@ import type { RepoContext } from "./repoContext.js";
 import type { RunEvent } from "./runEvents.js";
 import type { RunControl } from "./runRegistry/runControl.js";
 import { systemClock } from "./trace/clock.js";
-import type { PullRequestFacts } from "../execution/githubPulls.js";
+import type { PullRequestFacts, GithubWriteResult } from "../execution/githubPulls.js";
+import { sourceHash } from "./references/receipts.js";
+import {
+  acceptedReviewPublication,
+  reviewPublicationOf,
+  REVIEW_PUBLICATION_OWNER_ABSENT,
+  sameReviewPublication,
+  type ReviewPublicationJournal,
+  type ReviewPublicationReceipt,
+} from "./reviewPublication.js";
 
 /** The PR's current head as GitHub reports it; undefined (or a throw) means
  *  unknown. The dispatcher passes `deps.fetchPrHead ?? currentPrHeadSha`. */
@@ -155,6 +166,7 @@ export async function attachRoundWorkspace(input: {
     requester?: string;
     /** Awaited observations from the resident's two wait states. */
     onLiveStateObservation?: ResidentLiveStateObserver;
+    onResidentBinding?: (binding: ResidentBinding) => Promise<void>;
   };
   logKey: string;
   /** The caller's `dispatch.workspace.attach` span: the probe and the attach
@@ -185,6 +197,7 @@ export async function attachRoundWorkspace(input: {
       ...(input.round.onLiveStateObservation !== undefined
         ? { onLiveStateObservation: input.round.onLiveStateObservation }
         : {}),
+      ...(input.round.onResidentBinding !== undefined ? { onResidentBinding: input.round.onResidentBinding } : {}),
     },
     input.span,
   );
@@ -583,7 +596,19 @@ export async function settleReviewedHead(input: SettleReviewedHeadInput): Promis
     : settle(input, undefined);
 }
 
+export class ReviewWorkspaceAdvanceError extends Error {
+  constructor(
+    readonly head: string,
+    reason: string,
+  ) {
+    super(`Review workspace could not advance to ${head}: ${reason}`);
+    this.name = "ReviewWorkspaceAdvanceError";
+  }
+}
+
 export interface SettleReviewedHeadInput {
+  /** Canonical child permission stays at this exact head through settlement. */
+  publication?: ExistingPrPublicationBinding;
   /** The parent span, when the run is traced. */
   span?: Span;
   pr: { repo: string; number: number };
@@ -618,21 +643,54 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
   // The probe and the move are the settle's own work: their `exec.*` spans hang
   // under `run.settle_reviewed_head` (docs/reference/specs/tracing.md item 17).
   const trace = span ? { span } : undefined;
-  const probeHead = async () => parseRevParseOutput(await executor.exec("git rev-parse HEAD", trace).catch(() => ""));
+  const stopped = () => input.preReviewStopped() || turn.control.hardSignal.aborted;
+  const probeHead = async () => {
+    if (!executor.execResult) return undefined;
+    const result = await executor
+      .execResult("git rev-parse --verify HEAD", { ...trace, signal: turn.control.hardSignal })
+      .catch((err) => {
+        if (err instanceof ResidentRegistrationMismatchError) throw err;
+        return undefined;
+      });
+    if (
+      stopped() ||
+      !result ||
+      result.exitCode !== 0 ||
+      result.truncated !== false ||
+      typeof result.stdout !== "string"
+    )
+      return undefined;
+    const head = result.stdout.trim();
+    return /^[a-f0-9]{40}$/.test(head) ? head : undefined;
+  };
   let answer = input.answer;
   let verdict = input.verdict;
   let reviewHead = input.reviewHead;
   let carried: { reviewed: string; current: string; commits: number } | undefined;
   let observedHead = await probeHead();
   const outcome = (): SettledReviewHead => ({ answer, verdict, reviewHead, observedHead, carried });
-  if (input.preReviewStopped()) return outcome();
+  if (stopped()) return outcome();
+  if (input.publication) {
+    const bound = input.publication;
+    if (
+      pr.repo.toLowerCase() !== bound.repo.toLowerCase() ||
+      pr.number !== bound.pr ||
+      input.baseRef !== bound.baseRef ||
+      !sameCommit(reviewHead ?? "", bound.expectedHeadSha) ||
+      !sameCommit(observedHead ?? "", bound.expectedHeadSha) ||
+      (verdict?.head !== undefined && !sameCommit(verdict.head, bound.expectedHeadSha))
+    )
+      throw new ReviewWorkspaceAdvanceError(bound.expectedHeadSha, "the saved review target was not confirmed");
+    // The existing post gate rechecks the remote. A moved head requires a new canonical action.
+    return outcome();
+  }
   const where = `${pr.repo}#${pr.number}`;
   const currentHead = async () => normalizeHead(await input.fetchPrHead(pr).catch(() => undefined));
   const expected = normalizeHead(reviewHead);
   const reviewed = normalizeHead(observedHead) ?? normalizeHead(verdict?.head);
   if (expected && reviewed) {
     const current = await currentHead();
-    if (input.preReviewStopped()) return outcome();
+    if (stopped()) return outcome();
     if (current && !sameCommit(current, expected) && sameCommit(reviewed, current)) {
       const history = turn.toolContext.reviewHistory;
       if (history) history.requiredHead = current;
@@ -689,7 +747,7 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
         from: expected,
         to: current,
       });
-      if (input.preReviewStopped()) return outcome();
+      if (stopped()) return outcome();
       const move = classified?.move;
       const followUp = turn.followUp;
       if (move?.kind === "rebase") {
@@ -718,28 +776,22 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
         turn.onEvent({ type: "run_note", kind: "head_moved", summary, at: systemClock() });
         input.notify.headMoved(`head moved → ${current.slice(0, 7)}`);
         await input.notify.reply(headRereviewNote({ where, reviewed: expected, current, move })).catch(() => {});
-        if (input.preReviewStopped()) return outcome();
-        // Resident: move the worktree ourselves (one re-attach at the new
-        // head), the round's hard stop riding in so a move that waits on the
-        // resident ends with the stop. Anything else — no moveTo, a refusal,
-        // a tip that moved again under the re-attach — leaves the model to
-        // check it out.
-        let worktreeMoved = false;
-        if (executor.moveTo) {
-          try {
-            const moved = await executor.moveTo(current, { ...trace, signal: turn.control.hardSignal });
-            const at = normalizeHead(moved.sha);
-            worktreeMoved = at !== undefined && sameCommit(at, current);
-            console.log(
-              `[review] ${logKey} worktree moved to ${at?.slice(0, 7) ?? "?"}${worktreeMoved ? "" : " (not the expected head)"}`,
-            );
-          } catch (err) {
-            console.warn(
-              `[review] ${logKey} worktree move failed: ${err instanceof Error ? err.message : String(err)}`,
-            );
-          }
-        }
-        if (input.preReviewStopped()) return outcome();
+        if (stopped()) return outcome();
+        // Re-review begins only after the executor and a fresh HEAD read
+        // agree on the new target. A failed move cannot delegate authority to
+        // a model turn still running in the old checkout.
+        if (!executor.moveTo)
+          throw new ReviewWorkspaceAdvanceError(current, "executor cannot advance the review workspace");
+        const moved = await executor.moveTo(current, { ...trace, signal: turn.control.hardSignal });
+        if (stopped()) return outcome();
+        const at = normalizeHead(moved.sha);
+        if (!at || !sameCommit(at, current))
+          throw new ReviewWorkspaceAdvanceError(current, "executor answered a different head");
+        const confirmed = await probeHead();
+        if (stopped()) return outcome();
+        if (!confirmed || !sameCommit(confirmed, current))
+          throw new ReviewWorkspaceAdvanceError(current, "workspace HEAD could not confirm the advance");
+        observedHead = confirmed;
         verdict = undefined; // the earlier verdict is void; the re-review must submit its own
         reviewHead = current;
         const followUpText = rereviewFollowUp({
@@ -749,7 +801,6 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
           move,
           before: classified.before,
           after: classified.after,
-          worktreeMoved,
         });
         input.messages.push(
           { role: "assistant", content: [{ type: "text", text: answer }] },
@@ -771,10 +822,10 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
           toolContext,
           ...(span ? { span } : {}),
         });
-        if (input.preReviewStopped()) return outcome();
+        if (stopped()) return outcome();
         // Re-read, not narrowed: the stop may have been requested during the turn.
         if (!turn.control.hardSignal.aborted) observedHead = await probeHead();
-        if (input.preReviewStopped()) return outcome();
+        if (stopped()) return outcome();
       }
     }
   }
@@ -803,7 +854,8 @@ async function classifyMove(
 /** How the post step ended — the `ReviewPost` the run's record carries
  *  (agent-review.md item 18): `posted: true` only when the GitHub post call
  *  succeeded, with the pull request, the pinned head and the verdict kind;
- *  every skip, guard refusal, and failure is `posted: false` with the reason
+ *  every skip or guard refusal is `posted: false` with the reason; unknown
+ *  native outcomes remain explicitly uncertain and cannot authorize reposting
  *  (already said in the thread where the contract wants it said). The run loop
  *  writes it onto the record, and a coordinator's `read-record` answers
  *  `reviewPosted` from it: an approve whose LGTM never landed on the PR must
@@ -823,13 +875,14 @@ export type ReviewPostOutcome = ReviewPost;
  * false alarm). Safe to call at any lifecycle position — it touches only its
  * inputs, so the plain dispatch path keeps calling it AFTER workspace release
  * and registry finish, while a ship round may invoke it inside its loop.
- * Never throws; the returned `ReviewPostOutcome` says whether a post landed.
+ * Never throws; the returned `ReviewPostOutcome` preserves unconfirmed writes.
  */
 export async function runReviewPostStep(
   input: {
     agent: AgentDef;
     requestText: string;
-    repoCtx: Pick<RepoContext, "repo" | "pr" | "prUnpostable" | "prSize">;
+    repoCtx: Pick<RepoContext, "repo" | "pr" | "prUnpostable" | "prSize" | "ref" | "baseRef">;
+    publication?: ExistingPrPublicationBinding;
     /** The pinned head and the workspace HEAD observed after the turn. */
     heads: { reviewHead: string | undefined; observedHead: string | undefined };
     verdict: ReviewVerdict | undefined;
@@ -840,7 +893,9 @@ export async function runReviewPostStep(
     carried: { reviewed: string; current: string; commits: number } | undefined;
     hardStopped: boolean;
     /** The GitHub post; the dispatcher passes `deps.postReviewComment ?? postReviewComment`. */
-    post: (target: ReviewCommentTarget, body: string) => Promise<void>;
+    post: (target: ReviewCommentTarget, body: string) => Promise<GithubWriteResult | void>;
+    /** The original run's fenced, trim-independent publication receipt. */
+    publicationJournal?: ReviewPublicationJournal;
     fetchPrHead: FetchPrHead;
     reply: (text: string) => Promise<void>;
     /** An acknowledgement's reply (routing-and-config item 28) — the carried-
@@ -874,7 +929,12 @@ export async function runReviewPostStep(
   // post. A non-review round posts nothing and records nothing; a hard-stopped
   // round records nothing either — the abort is the record's story.
   const record = (outcome: ReviewPostOutcome): ReviewPostOutcome => {
-    if (input.publish && agent.name === "review" && !input.hardStopped) {
+    if (
+      input.publish &&
+      agent.name === "review" &&
+      !input.hardStopped &&
+      !("uncertain" in outcome && outcome.uncertain === true)
+    ) {
       const where = outcome.posted
         ? undefined
         : repoCtx.repo && repoCtx.pr
@@ -903,6 +963,20 @@ export async function runReviewPostStep(
   let postTarget: ReviewPostTarget | null = null;
   // Why nothing was posted, carried into the typed outcome — every path that
   // leaves `postTarget` null fills it (the hard-stop skip is the default).
+  const bound = input.publication;
+  if (
+    bound &&
+    (repoCtx.repo?.toLowerCase() !== bound.repo.toLowerCase() ||
+      repoCtx.pr !== bound.pr ||
+      repoCtx.ref !== bound.headRef ||
+      repoCtx.baseRef !== bound.baseRef ||
+      !sameCommit(reviewHead ?? "", bound.expectedHeadSha) ||
+      !sameCommit(observedHead ?? "", bound.expectedHeadSha) ||
+      (verdict?.head !== undefined && !sameCommit(verdict.head, bound.expectedHeadSha)) ||
+      (carried !== undefined &&
+        (!sameCommit(carried.reviewed, bound.expectedHeadSha) || !sameCommit(carried.current, bound.expectedHeadSha))))
+  )
+    return record({ posted: false, reason: "the saved review target was not confirmed" });
   let skipReason = "the round was hard-stopped — nothing is posted after an abort";
   if (!input.hardStopped) {
     postTarget = decideReviewPost({
@@ -975,16 +1049,28 @@ export async function runReviewPostStep(
       postTarget = null;
     }
   }
-  if (input.guardTransition === true && postTarget && reviewHead) {
+  if ((input.guardTransition === true || bound !== undefined) && postTarget && reviewHead) {
     // Final transition guard immediately before the write: one fresh facts
     // read must prove the pull request is open, its head ref still exists and
     // that ref is at the commit this verdict covers. A head-only read can keep
     // reporting the last commit after a same-repository branch is deleted.
     const where = `${postTarget.repo}#${postTarget.number}`;
     const pinned = carried?.current ?? reviewHead;
-    const facts = await input.fetchPrFacts({ repo: postTarget.repo, number: postTarget.number }).catch(() => undefined);
+    const facts = await input
+      .fetchPrFacts?.({ repo: postTarget.repo, number: postTarget.number })
+      .catch(() => undefined);
+    const exactBinding =
+      bound === undefined ||
+      (facts?.headRef === bound.headRef &&
+        facts.baseRef === bound.baseRef &&
+        facts.sameRepoHead === true &&
+        facts.verifiedHead?.repo === bound.repo &&
+        facts.verifiedHead.ref === bound.headRef &&
+        sameCommit(facts.verifiedHead.sha, bound.expectedHeadSha));
     const current =
-      facts?.state === "open" && facts.headBranchExists === true ? normalizeHead(facts.headSha) : undefined;
+      exactBinding && facts?.state === "open" && facts.headBranchExists === true
+        ? normalizeHead(facts.headSha)
+        : undefined;
     if (current === undefined || !sameCommit(current, pinned)) {
       const reason =
         current === undefined
@@ -1009,13 +1095,63 @@ export async function runReviewPostStep(
     const rendered = buildReviewPostBody(input.answer, verdict, { repo: postTarget.repo, head: pinned });
     const body = carried ? `${rendered}\n\n${carriedFooter(carried)}` : rendered;
     const where = `${postTarget.repo}#${postTarget.number}`;
-    try {
-      await input.post(target, body);
-    } catch (err: unknown) {
-      const reason = err instanceof Error ? err.message : String(err);
-      console.error(`[review-post] ${logKey} failed for ${where}: ${reason}`);
+    const uncertain = async (): Promise<ReviewPostOutcome> => {
+      const reason = "the review publication outcome is unconfirmed";
+      await input.reply(`ℹ️ I could not confirm whether the review posted to ${where}.`).catch(() => {});
+      return record({ posted: false, uncertain: true, reason });
+    };
+    const refused = async (): Promise<ReviewPostOutcome> => {
+      const reason = "the review publication was refused";
       await input.reply(`ℹ️ Review not posted to ${where}: ${reason} — this verdict is Slack-only.`).catch(() => {});
       return record({ posted: false, reason });
+    };
+    const journal = input.publicationJournal;
+    if (!journal) return record({ posted: false, reason: "the review publication owner is unavailable" });
+    const pending = reviewPublicationOf({
+      version: 1,
+      runId: journal.runId,
+      target,
+      bodyHash: await sourceHash(body),
+      ...(verdict ? { verdict: verdict.verdict } : {}),
+      state: "pending",
+    });
+    if (!pending) return record({ posted: false, reason: "the complete review publication target was not confirmed" });
+    try {
+      const previous = await journal.read();
+      if (previous === REVIEW_PUBLICATION_OWNER_ABSENT)
+        return record({ posted: false, reason: "the review publication owner is unavailable" });
+      if (previous !== null) {
+        const receipt = reviewPublicationOf(previous);
+        if (!receipt || !sameReviewPublication(receipt, pending)) return uncertain();
+        const accepted = acceptedReviewPublication(receipt);
+        return accepted ? record(accepted) : receipt.state === "refused" ? refused() : uncertain();
+      }
+      if (!(await journal.canPublish())) return (await journal.read()) === null ? refused() : uncertain();
+      const admission = await journal.commit(pending);
+      if (admission === "refused") return refused();
+      if (admission !== "committed") return uncertain();
+      // An ACK alone never grants another run, target or payload authority.
+      const admitted = reviewPublicationOf(await journal.read());
+      if (!admitted || admitted.state !== "pending" || !sameReviewPublication(admitted, pending)) return uncertain();
+      if (!(await journal.canPublish())) {
+        return (await journal.commit({ ...pending, state: "refused" })) === "committed" ? refused() : uncertain();
+      }
+      let result: GithubWriteResult | void;
+      try {
+        result = await input.post(target, body);
+      } catch {
+        result = { state: "uncertain" };
+      }
+      const state: ReviewPublicationReceipt["state"] =
+        result?.state === "accepted" ? "accepted" : result?.state === "refused" ? "refused" : "uncertain";
+      // Completion records the issued call even if a stop arrived meanwhile.
+      if ((await journal.commit({ ...pending, state })) !== "committed") return uncertain();
+      if (state === "refused") return refused();
+      if (state !== "accepted") return uncertain();
+    } catch {
+      // A journal or native transport failure can hide an admitted write.
+      // Keep the original pending receipt and never emit a not-posted claim.
+      return uncertain();
     }
     console.log(
       `[review-post] ${logKey} → ${where} (${verdict?.verdict ?? "no verdict"})${carried ? ` carried ${carried.reviewed.slice(0, 7)} → ${pinned.slice(0, 7)}` : ""}`,

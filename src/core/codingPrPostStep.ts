@@ -94,7 +94,12 @@ import {
   type PrDescription,
   type RequestedBy,
 } from "./prDescription.js";
-import { EMPTY_START_STATE, type BranchStartState, type RewriteResult } from "../execution/identityRewrite.js";
+import {
+  EMPTY_START_STATE,
+  type BranchStartState,
+  type RewriteResult,
+  type IdentityRefPublication,
+} from "../execution/identityRewrite.js";
 import { submittedPrDescriptionArtifact } from "./reviewDescription.js";
 import { normalizeHead, parseRevParseOutput, sameCommit } from "./reviewedHead.js";
 import { parseExitPrefix, type RunEvent } from "./runEvents.js";
@@ -1027,6 +1032,13 @@ export interface CodingPrTarget {
  * the compare URL. `logKey` prefixes the `[pr-post]` console lines (the
  * dispatcher passes the thread key).
  */
+export type PrPublicationFact = {
+  kind: "pending" | "accepted" | "observed";
+  target: { repo: string; ref?: string; headSha: string; pr?: number };
+  /** Only an accepted push by this run supplies resident branch ownership. */
+  ownsBranch: boolean;
+};
+
 export async function runCodingPrPostStep(input: {
   /** The request's verbosity (routing-and-config item 28): the note's link
    *  and state are for everyone; the head it was rendered at is `verbose`. */
@@ -1038,7 +1050,14 @@ export async function runCodingPrPostStep(input: {
   requireConfirmedPush?: boolean;
   description: PrDescription | undefined;
   target: CodingPrTarget;
-  openPullRequest: (target: PullRequestTarget) => Promise<OpenedPullRequest>;
+  /** The owning ledger must acknowledge intent and accepted mapping. */
+  publication: (fact: PrPublicationFact) => Promise<void>;
+  /** Original run-owned pending and acceptance for an identity ref transition. */
+  refPublication?: IdentityRefPublication;
+  openPullRequest: (
+    target: PullRequestTarget,
+    beforeMutation?: (pr: number | undefined) => Promise<void>,
+  ) => Promise<OpenedPullRequest>;
   /** The open PR whose head is the branch, or null (githubPulls.ts'
    *  findOpenPrByHead — the lookup open-or-edit itself starts with). Asked
    *  when a proven-pushed branch comes with no description — the push may
@@ -1087,6 +1106,7 @@ export async function runCodingPrPostStep(input: {
       branch: string;
       expectedTip?: string;
       startState: BranchStartState;
+      refPublication?: IdentityRefPublication;
     }) => Promise<RewriteResult>;
     /** The pull request's `head.sha` after the open (githubPulls.pullRequestHead). */
     pullRequestHead: (repo: string, number: number) => Promise<string | undefined>;
@@ -1258,7 +1278,15 @@ export async function runCodingPrPostStep(input: {
         headSha: prHead,
         ...(requestedBy ? { requestedBy } : {}),
       });
+      const publicationTarget = {
+        repo,
+        ...(ownPr.headBranch !== undefined ? { ref: ownPr.headBranch } : {}),
+        headSha: prHead,
+        pr: number,
+      };
+      await input.publication({ kind: "pending", target: publicationTarget, ownsBranch: false });
       await input.updatePullRequest(repo, number, { title: prDescription.title, body });
+      await input.publication({ kind: "accepted", target: publicationTarget, ownsBranch: false });
       console.log(
         `[pr-post] ${logKey} updated ${repo}#${number} — the thread's own pull request${standing}, nothing pushed past its head (workspace on ${branchLog}; rendered at its head ${prHead.slice(0, 7)})`,
       );
@@ -1374,6 +1402,7 @@ export async function runCodingPrPostStep(input: {
           branch: headBranch,
           expectedTip: pushed ? (headSha ?? prHead) : prHead,
           startState: startStateFor(headBranch),
+          ...(input.refPublication ? { refPublication: input.refPublication } : {}),
         })
         .catch((err: unknown): RewriteResult => ({
           kind: "unreadable",
@@ -1407,7 +1436,10 @@ export async function runCodingPrPostStep(input: {
         headSha: renderHead,
         ...(requestedBy ? { requestedBy } : {}),
       });
+      const publicationTarget = { repo, ref: headBranch, headSha: renderHead, pr: existing.number };
+      await input.publication({ kind: "pending", target: publicationTarget, ownsBranch: false });
       await input.updatePullRequest(repo, existing.number, { title: prDescription.title, body });
+      await input.publication({ kind: "accepted", target: publicationTarget, ownsBranch: false });
       console.log(
         `[pr-post] ${logKey} updated ${repo}#${existing.number} — the open PR heading ${headBranch} (rendered at ${renderHead.slice(0, 7)}; the run's own push unproven)`,
       );
@@ -1469,7 +1501,14 @@ export async function runCodingPrPostStep(input: {
     const rewriteOnce = async (): Promise<RewriteResult | undefined> => {
       if (!input.identity) return undefined;
       const result = await input.identity
-        .rewrite({ repo, base, branch, expectedTip: renderHead, startState })
+        .rewrite({
+          repo,
+          base,
+          branch,
+          expectedTip: renderHead,
+          startState,
+          ...(input.refPublication ? { refPublication: input.refPublication } : {}),
+        })
         .catch((err: unknown): RewriteResult => ({
           kind: "unreadable",
           reason: err instanceof Error ? err.message : String(err),
@@ -1502,7 +1541,25 @@ export async function runCodingPrPostStep(input: {
     try {
       const renderCtx = { repo, headSha: renderHead, ...(requestedBy ? { requestedBy } : {}) };
       let body = renderPrDescriptionMarkdown(prDescription, renderCtx);
-      const opened = await input.openPullRequest({ repo, headBranch: branch, base, title: prDescription.title, body });
+      await input.publication({
+        kind: "pending",
+        target: { repo, ref: branch, headSha: renderHead },
+        ownsBranch: true,
+      });
+      const opened = await input.openPullRequest(
+        { repo, headBranch: branch, base, title: prDescription.title, body },
+        async (pr) =>
+          input.publication({
+            kind: "pending",
+            ownsBranch: true,
+            target: { repo, ref: branch, headSha: renderHead, ...(pr !== undefined ? { pr } : {}) },
+          }),
+      );
+      await input.publication({
+        kind: "accepted",
+        ownsBranch: true,
+        target: { repo, ref: branch, headSha: renderHead, pr: opened.number },
+      });
       // The head pin: after the open or edit, the pull request's head
       // must be the tip the rewrite settled; a mismatch gets one guarded
       // reread against that tip. An intervening push fails closed, while a
@@ -1531,13 +1588,10 @@ export async function runCodingPrPostStep(input: {
           }
           if (again !== undefined && again.kind !== "unreadable") {
             body = renderPrDescriptionMarkdown(prDescription, { ...renderCtx, headSha: renderHead });
-            await input
-              .updatePullRequest(repo, opened.number, { title: prDescription.title, body })
-              .catch((err: unknown) =>
-                console.error(
-                  `[pr-post] ${logKey} re-render after the head pin failed for ${repo}#${opened.number}: ${err instanceof Error ? err.message : String(err)}`,
-                ),
-              );
+            const publicationTarget = { repo, ref: branch, headSha: renderHead, pr: opened.number };
+            await input.publication({ kind: "pending", target: publicationTarget, ownsBranch: true });
+            await input.updatePullRequest(repo, opened.number, { title: prDescription.title, body });
+            await input.publication({ kind: "accepted", target: publicationTarget, ownsBranch: true });
           }
         }
         // The assignee: the requester's bound login, added after the
@@ -1585,7 +1639,7 @@ export async function runCodingPrPostStep(input: {
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       console.error(`[pr-post] ${logKey} open/edit failed for ${repo} ${branch}: ${reason}`);
-      return `⚠️ The branch \`${branch}\` is pushed but the PR could not be opened: ${reason} — compare & open manually: ${compareUrl}`;
+      return `⚠️ The branch \`${branch}\` is pushed, but its pull request outcome is unconfirmed: ${reason}. Compare: ${compareUrl}`;
     }
   }
   if (prDescription && pushedBranch && !base) {
@@ -1641,6 +1695,18 @@ export async function runCodingPrPostStep(input: {
       );
       return null;
     });
+    try {
+      await input.publication({
+        kind: "observed",
+        target: { repo, ref: branch, headSha, ...(existing ? { pr: existing.number } : {}) },
+        ownsBranch: true,
+      });
+    } catch (err) {
+      if (existing) {
+        const reason = err instanceof Error ? err.message : String(err);
+        return `⚠️ The push reached ${existing.htmlUrl}, but its branch ownership could not be saved: ${reason}.`;
+      }
+    }
     if (existing) {
       console.log(
         `[pr-post] ${logKey} no description submitted; the push updated the open ${repo}#${existing.number} (${branchLog} @ ${headSha.slice(0, 7)})`,

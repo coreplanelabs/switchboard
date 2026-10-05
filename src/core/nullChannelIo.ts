@@ -14,6 +14,7 @@ import type { ChannelIO, StatusHandle } from "./types.js";
 
 export function nullChannelIO(logKey: string, log: (line: string) => void = console.log): ChannelIO {
   return {
+    ...(logKey.startsWith("http:") || logKey.startsWith("mcp:") ? { reportDelivery: "state" as const } : {}),
     // The seal reads this: a reply logged here was not delivered (run-history.md item 38).
     undeliverable: "no channel to deliver to",
     reply: async (text) => {
