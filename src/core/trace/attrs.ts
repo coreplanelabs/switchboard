@@ -72,6 +72,8 @@ export interface AttrDomain {
   toolNames: string;
   toolChoice: "auto" | "none" | "any" | "tool";
   stopReason: "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | "other";
+  /** False identifies observed partial usage after a consuming-adapter failure. */
+  usageComplete: boolean;
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
@@ -234,6 +236,7 @@ const ATTR_TYPE: Record<SpanAttrKey, "string" | "number" | "boolean"> = {
   toolNames: "string",
   toolChoice: "string",
   stopReason: "string",
+  usageComplete: "boolean",
   inputTokens: "number",
   outputTokens: "number",
   cacheReadTokens: "number",

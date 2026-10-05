@@ -8,11 +8,18 @@ import { MODEL_STREAM_HEARTBEAT_MS, provisionalBearerExpiresAt } from "../core/b
 import { describe, expect, it, vi } from "vitest";
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { EventEmitter } from "node:events";
+import { stream as streamResponses } from "@earendil-works/pi-ai/api/openai-responses";
+import type { Model } from "@earendil-works/pi-ai";
+import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
+import { PiBridge } from "../core/harness/pi/bridge.js";
 import { secretsFrom } from "../secrets.js";
 import { createTracer } from "../core/trace/tracer.js";
 import type { SpanRecord } from "../core/trace/types.js";
 import type { RunEvent } from "../core/runEvents.js";
-import { proxyProviderFailureIsAuthenticated } from "../core/modelProxy/providerFailureAuth.js";
+import {
+  authenticateProxyProviderFailure,
+  proxyProviderFailureIsAuthenticated,
+} from "../core/modelProxy/providerFailureAuth.js";
 import { RunBearerStore, type RunBearerGrant } from "../core/modelProxy/runBearers.js";
 import type { ModelCard } from "../core/modelCard.js";
 import { classifyProviderFailure, type ProviderConfig, type ToolDef } from "../core/provider.js";
@@ -1415,6 +1422,7 @@ describe("the meter — the Responses route (model-proxy item 6)", () => {
       cacheWriteTokens: 120,
       priceSource: "none",
       ttftMs: 40,
+      usageComplete: true,
     });
     expect(h.bearers.grantOf("run-1")?.turns).toBe(1);
   });
@@ -1612,6 +1620,559 @@ describe("upstream failures", () => {
     expect(turn.attrs.inputTokens).toBeUndefined();
     expect(turn.attrs.usd).toBeUndefined();
     expect(turn.attrs.priceSource).toBe("none");
+  });
+});
+
+describe("Responses stream failure boundary", () => {
+  const model: Model<"openai-responses"> = {
+    id: "gpt-5.4",
+    name: "test",
+    api: "openai-responses",
+    provider: "openai",
+    baseUrl: "https://proxy.test/v1",
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 200000,
+    maxTokens: 1000,
+  };
+  const failed = (code: string) => ({
+    type: "response.failed",
+    sequence_number: 1,
+    response: { status: "failed", error: { code, message: "private provider body HTTP 429 retry me" } },
+  });
+  const frame = (event: unknown) => `data: ${JSON.stringify(event)}\n\n`;
+  const byteStream = (text: string) =>
+    new Response(
+      new ReadableStream<Uint8Array>({
+        start(c) {
+          for (const byte of new TextEncoder().encode(text)) c.enqueue(Uint8Array.of(byte));
+          c.close();
+        },
+      }),
+      { headers: { "content-type": "text/event-stream" } },
+    );
+  const throughPi = async (
+    h: ReturnType<typeof harness>,
+    tools: unknown = responsesRequest().tools,
+    signal?: AbortSignal,
+    over: Record<string, unknown> = {},
+  ) => {
+    const token = h.bearers.mint(h.responsesGrant("run-1"));
+    return streamResponses(model, normalizeContext({ messages: [] }), {
+      apiKey: token,
+      maxRetries: 0,
+      signal,
+      onPayload: (payload) => ({ ...(payload as object), tools, ...over }),
+      fetch: (async (_url, init) => {
+        const res = await handleModelProxyRequest(
+          request({
+            path: OPENAI_RESPONSES_PATH,
+            headers: bearer(token),
+            json: JSON.parse(String(init?.body)),
+          }).req,
+          h.deps,
+        );
+        return new Response(res.body, { status: res.status, headers: res.headers });
+      }) as typeof fetch,
+    }).result();
+  };
+
+  it("typed failures cross the real pi adapter without replay or provider prose", async () => {
+    for (const [code, cause] of [
+      ["server_error", "transient"],
+      ["rate_limit_exceeded", "rate-limited"],
+      ["invalid_prompt", "request-rejected"],
+    ]) {
+      for (const event of [
+        failed(code),
+        { type: "error", code, message: "private provider body HTTP 429 retry me", param: null, sequence_number: 1 },
+      ]) {
+        const h = harness({ answer: () => streamingResponse([frame(event)], h.clock, 1) });
+        const levels: string[] = [];
+        const parks: string[] = [];
+        h.deps.plane = { level: (_p, side) => void levels.push(side), park: (id) => void parks.push(id) };
+        const message = await throughPi(h);
+        const bridge = new PiBridge({ emit: () => {}, clock: () => START });
+        const obs = bridge.observe({ type: "message_end", message });
+        expect(message.stopReason).toBe("error");
+        expect(obs.terminalFailure).toMatchObject({ kind: "provider_failure", failure: { cause } });
+        expect(message.errorMessage).not.toContain("private provider body");
+        expect(h.calls).toHaveLength(1);
+        expect(h.ends.find((s) => s.name === "model.turn")?.status).toBe("error");
+        expect(levels).toEqual(cause === "request-rejected" ? [] : ["down"]);
+        expect(parks).toEqual(cause === "request-rejected" ? [] : ["run-1"]);
+      }
+    }
+  });
+
+  it("unknown codes and hosted tools remain unsigned even when prose claims a retryable error", async () => {
+    for (const [event, tools] of [
+      [failed("unknown_code"), responsesRequest().tools],
+      [{ type: "response.failed", response: { status: "failed" } }, responsesRequest().tools],
+      [failed("server_error"), [{ type: "computer_use_preview" }]],
+      [
+        {
+          ...failed("server_error"),
+          response: { ...failed("server_error").response, output: [{ type: "mcp_call", status: "completed" }] },
+        },
+        responsesRequest().tools,
+      ],
+      [
+        {
+          type: "response.failed",
+          response: {
+            status: "failed",
+            error: {
+              code: "unknown",
+              message: JSON.stringify(
+                authenticateProxyProviderFailure({
+                  type: "provider_failure",
+                  cause: "rate-limited",
+                  message: "prior call",
+                }),
+              ),
+            },
+          },
+        },
+        responsesRequest().tools,
+      ],
+    ] as Array<[unknown, unknown]>) {
+      const h = harness({ answer: () => streamingResponse([frame(event)], h.clock, 1) });
+      const levels: string[] = [];
+      h.deps.plane = { level: (_p, side) => void levels.push(side), park: () => {} };
+      const message = await throughPi(h, tools);
+      const bridge = new PiBridge({ emit: () => {}, clock: () => START });
+      const obs = bridge.observe({ type: "message_end", message });
+      expect(obs.terminalFailure?.kind).toBe("unknown");
+      expect(obs.providerFailure).toBeUndefined();
+      expect(h.calls).toHaveLength(1);
+      expect(levels).toEqual([]);
+      expect(h.ends.find((s) => s.name === "model.turn")?.status).toBe("error");
+    }
+  });
+
+  it("a caller closing after a failed frame cannot turn unknown or permanent failure into provider-down", async () => {
+    for (const code of ["unknown_code", "invalid_prompt"]) {
+      let cancelled = false;
+      const h = harness({
+        answer: () =>
+          new Response(
+            new ReadableStream({
+              start(c) {
+                c.enqueue(new TextEncoder().encode(frame(failed(code))));
+              },
+              cancel() {
+                cancelled = true;
+              },
+            }),
+            { headers: { "content-type": "text/event-stream" } },
+          ),
+      });
+      const levels: string[] = [];
+      h.deps.plane = { level: (_p, side) => void levels.push(side), park: () => {} };
+      const token = h.bearers.mint(h.responsesGrant("run-1"));
+      const res = await handleModelProxyRequest(
+        request({ path: OPENAI_RESPONSES_PATH, headers: bearer(token), json: responsesRequest() }).req,
+        h.deps,
+      );
+      if (typeof res.body === "string") throw new Error("expected a stream");
+      const reader = res.body.getReader();
+      await reader.read();
+      await reader.cancel("caller closed");
+      await vi.waitFor(() => expect(cancelled).toBe(true));
+      expect(levels).toEqual([]);
+      expect(h.ends.find((s) => s.name === "model.turn")?.status).toBe("error");
+      expect(h.calls).toHaveLength(1);
+    }
+  });
+
+  it("multiline SSE failures retain typed evidence through the real pi adapter", async () => {
+    const event =
+      JSON.stringify(failed("server_error"), null, 2)
+        .split("\n")
+        .map((line) => `data: ${line}`)
+        .join("\n") + "\n\n";
+    const h = harness({ answer: () => streamingResponse([...event], h.clock, 1) });
+    const message = await throughPi(h);
+    const obs = new PiBridge({ emit: () => {}, clock: () => START }).observe({ type: "message_end", message });
+    expect(obs.terminalFailure).toMatchObject({ kind: "provider_failure", failure: { cause: "transient" } });
+  });
+
+  it("SDK errors and CR-only frames cannot replay old signed failures", async () => {
+    const old = JSON.stringify(
+      authenticateProxyProviderFailure({ type: "provider_failure", cause: "rate-limited", message: "old call" }),
+    );
+    for (const event of [
+      { error: { message: old } },
+      { ...failed("unknown_code"), error: { message: old } },
+      { ...failed("unknown_code"), response: { status: "failed", error: { code: "unknown_code", message: old } } },
+    ]) {
+      for (const separator of ["\r\r", "\n\r\n", "\r\n\n", "\r\n\r\n"]) {
+        const text =
+          `data: ${JSON.stringify(event)}${separator}` +
+          frame({ type: "response.created", response: { status: "in_progress" } });
+        const h = harness({ answer: () => streamingResponse([...text], h.clock, 1) });
+        const message = await throughPi(h);
+        const obs = new PiBridge({ emit: () => {}, clock: () => START }).observe({ type: "message_end", message });
+        expect(obs.terminalFailure?.kind).toBe("unknown");
+        expect(obs.providerFailure).toBeUndefined();
+      }
+    }
+  });
+
+  it("malformed completed output cannot report provider-up or a successful model turn", async () => {
+    for (const output of [{}, [null]]) {
+      const h = harness({
+        answer: () =>
+          streamingResponse(
+            [frame({ type: "response.completed", response: { status: "completed", output } })],
+            h.clock,
+            1,
+          ),
+      });
+      const levels: string[] = [];
+      h.deps.plane = { level: (_p, side) => void levels.push(side), park: () => {} };
+      const message = await throughPi(h);
+      const obs = new PiBridge({ emit: () => {}, clock: () => START }).observe({ type: "message_end", message });
+      expect(obs.terminalFailure?.kind).toBe("unknown");
+      expect(levels).toEqual([]);
+      expect(h.ends.find((s) => s.name === "model.turn")?.status).toBe("error");
+    }
+  });
+
+  it("malformed output discriminators cannot manufacture provider-down or recovery", async () => {
+    for (const text of [
+      frame({ type: "response.output_item.added", item: { type: { toString: null } } }) + frame(failed("server_error")),
+      frame({
+        ...failed("server_error"),
+        response: { ...failed("server_error").response, output: [{ type: ["function_call"] }] },
+      }),
+    ]) {
+      const h = harness({ answer: () => streamingResponse([text], h.clock, 1) });
+      const levels: string[] = [];
+      h.deps.plane = { level: (_p, side) => void levels.push(side), park: () => {} };
+      const message = await throughPi(h);
+      const obs = new PiBridge({ emit: () => {}, clock: () => START }).observe({ type: "message_end", message });
+      expect(obs.terminalFailure?.kind).toBe("unknown");
+      expect(obs.providerFailure).toBeUndefined();
+      expect(levels).toEqual([]);
+    }
+  });
+
+  it("SDK BOM lines cannot bypass hosted-effect tracking or error sanitation", async () => {
+    const old = JSON.stringify(
+      authenticateProxyProviderFailure({ type: "provider_failure", cause: "rate-limited", message: "prior call" }),
+    );
+    const unknown = {
+      type: "response.failed",
+      response: { status: "failed", error: { code: "unknown_code", message: old } },
+    };
+    const cases: Array<{ text: string; tools?: unknown; over?: Record<string, unknown> }> = [
+      {
+        text: frame({ type: "response.output_item.added", item: { type: "mcp_call" } }) + frame(failed("server_error")),
+      },
+      {
+        text:
+          frame({ type: "response.output_item.done", item: { type: "unknown_tool" } }) +
+          frame(failed("rate_limit_exceeded")),
+      },
+      { text: frame(unknown) },
+      { text: frame({ type: "error", code: "unknown_code", message: old }) },
+      { text: frame({ error: { message: old } }) },
+      { text: frame(unknown), tools: [{ type: "mcp", server_label: "remote" }] },
+      ...[
+        { previous_response_id: "prior" },
+        { conversation: "stored" },
+        { background: true },
+        { input: [{ type: "mcp_approval_response", approval_request_id: "prior", approve: true }] },
+      ].map((over) => ({ text: frame(unknown), over })),
+    ];
+    for (const prefix of ["", ": keepalive\n\n"])
+      for (const separator of ["\n", "\r", "\r\n", "\n\r"])
+        for (const row of cases) {
+          const text = prefix + "\uFEFF" + row.text.replaceAll("\n", separator);
+          const h = harness({ answer: () => byteStream(text) });
+          const levels: string[] = [];
+          h.deps.plane = { level: (_p, side) => void levels.push(side), park: () => {} };
+          const message = await throughPi(h, row.tools ?? responsesRequest().tools, undefined, row.over);
+          const obs = new PiBridge({ emit: () => {}, clock: () => START }).observe({ type: "message_end", message });
+          expect(obs.terminalFailure?.kind).toBe("unknown");
+          expect(obs.providerFailure).toBeUndefined();
+          expect(levels).toEqual([]);
+          expect(h.calls).toHaveLength(1);
+        }
+  });
+
+  it("ordinary BOM frames keep their bytes and retain valid completion and truncation", async () => {
+    for (const prefix of ["", ": keepalive\n\n"])
+      for (const separator of ["\n", "\r", "\r\n", "\n\r"])
+        for (const status of ["completed", "incomplete", "failed"]) {
+          const terminal = {
+            type: `response.${status}`,
+            response: {
+              status,
+              output: [],
+              ...(status === "incomplete" ? { incomplete_details: { reason: "max_output_tokens" } } : {}),
+              ...(status === "failed" ? { error: { code: "server_error", message: "wire failure" } } : {}),
+            },
+          };
+          const localItem = {
+            type: "response.output_item.added",
+            output_index: 0,
+            item: { type: "function_call", id: "fc_local", call_id: "call_local", name: "bash", arguments: "{}" },
+          };
+          const text =
+            prefix +
+            "\uFEFF" +
+            (status === "failed" ? frame(localItem) + "\uFEFF" : "") +
+            frame(terminal).replaceAll("\n", separator);
+          const h = harness({ answer: () => byteStream(text) });
+          const levels: string[] = [];
+          h.deps.plane = { level: (_p, side) => void levels.push(side), park: () => {} };
+          const message = await throughPi(h);
+          expect(message.stopReason).toBe(
+            status === "completed" ? "stop" : status === "incomplete" ? "length" : "error",
+          );
+          expect(levels).toEqual(status === "completed" ? ["up"] : status === "failed" ? ["down"] : []);
+          expect(h.ends.find((s) => s.name === "model.turn")?.status).toBe(status === "failed" ? "error" : "ok");
+          if (status === "failed") {
+            const obs = new PiBridge({ emit: () => {}, clock: () => START }).observe({ type: "message_end", message });
+            expect(obs.providerFailure?.cause).toBe("transient");
+            expect(obs.message).toBeUndefined();
+            continue;
+          }
+          const raw = harness({ answer: () => streamingResponse([...text], raw.clock, 1) });
+          const token = raw.bearers.mint(raw.responsesGrant("run-1"));
+          const res = await handleModelProxyRequest(
+            request({ path: OPENAI_RESPONSES_PATH, headers: bearer(token), json: responsesRequest() }).req,
+            raw.deps,
+          );
+          expect(new Uint8Array(await new Response(res.body).arrayBuffer())).toEqual(new TextEncoder().encode(text));
+        }
+  });
+
+  it("only dispatched Responses events enter the turn meter", async () => {
+    const text =
+      frame({ type: "response.completed", response: { status: "completed", output: [] } }) +
+      "data: [DONE]\n\n" +
+      frame(failed("server_error"));
+    const h = harness({ answer: () => streamingResponse([text], h.clock, 1) });
+    const message = await throughPi(h);
+    expect(message.stopReason).toBe("stop");
+    expect(h.ends.find((s) => s.name === "model.turn")?.attrs.stopReason).toBe("end_turn");
+    expect(h.ends.find((s) => s.name === "model.turn")?.status).toBe("ok");
+  });
+
+  it("EOF residue, DONE and thread wrappers confer no terminal or health authority", async () => {
+    const terminals = [
+      { type: "response.completed", response: { status: "completed", output: [] } },
+      {
+        type: "response.incomplete",
+        response: { status: "incomplete", output: [], incomplete_details: { reason: "max_output_tokens" } },
+      },
+      failed("server_error"),
+      { type: "error", code: "rate_limit_exceeded", message: "provider failure" },
+      { error: { code: "server_error", message: "provider failure" } },
+    ];
+    for (const terminal of terminals)
+      for (const text of [
+        ...["", "\n", "\r", "\r\n"].map((ending) => `data: ${JSON.stringify(terminal)}${ending}`),
+        "data: [DONE]\n\n" + frame(terminal),
+        "event: thread.example\n" + frame(terminal),
+      ]) {
+        const h = harness({ answer: () => streamingResponse([...text], h.clock, 1) });
+        const levels: string[] = [];
+        h.deps.plane = { level: (_p, side) => void levels.push(side), park: () => {} };
+        const message = await throughPi(h);
+        const obs = new PiBridge({ emit: () => {}, clock: () => START }).observe({ type: "message_end", message });
+        expect(obs.providerFailure).toBeUndefined();
+        expect(levels).toEqual([]);
+        expect(h.ends.find((s) => s.name === "model.turn")?.status).toBe("error");
+        expect(h.ends.find((s) => s.name === "model.turn")?.attrs.stopReason).toBeUndefined();
+        expect(h.calls).toHaveLength(1);
+      }
+  });
+
+  it("BOM-only EOF lines dispatch and sanitize exactly as the SDK does", async () => {
+    const old = JSON.stringify(
+      authenticateProxyProviderFailure({ type: "provider_failure", cause: "rate-limited", message: "old" }),
+    );
+    for (const ending of ["\n", "\r", "\r\n"])
+      for (const event of [
+        { type: "response.failed", response: { status: "failed", error: { code: "unknown_code", message: old } } },
+        { type: "error", code: "unknown_code", message: old },
+        { error: JSON.parse(old) },
+      ]) {
+        const h = harness({ answer: () => byteStream(`data: ${JSON.stringify(event)}${ending}\uFEFF`) });
+        const message = await throughPi(h);
+        const obs = new PiBridge({ emit: () => {}, clock: () => START }).observe({ type: "message_end", message });
+        expect(obs.terminalFailure?.kind).toBe("unknown");
+        expect(obs.providerFailure).toBeUndefined();
+      }
+  });
+
+  it("fatal SDK and pi consumer events prevent unread terminal tails from gaining authority", async () => {
+    for (const bad of [
+      "data: not-json\n\n",
+      "data:\n\n",
+      "event: response.created\n\n",
+      "event: thread.example\ndata: not-json\n\n",
+      "data: null\n\n",
+      frame({ type: "response.created" }),
+      frame({ type: "response.created", response: null }),
+    ])
+      for (const terminal of [
+        {
+          type: "response.completed",
+          response: { status: "completed", output: [], usage: { input_tokens: 20, output_tokens: 10 } },
+        },
+        {
+          type: "response.incomplete",
+          response: { status: "incomplete", output: [], incomplete_details: { reason: "max_output_tokens" } },
+        },
+        failed("server_error"),
+        { type: "error", code: "rate_limit_exceeded", message: "later" },
+      ]) {
+        const text = bad + frame(terminal);
+        const h = harness({ answer: () => streamingResponse([text], h.clock, 1) });
+        const levels: string[] = [];
+        h.deps.plane = { level: (_p, side) => void levels.push(side), park: () => {} };
+        const message = await throughPi(h);
+        const obs = new PiBridge({ emit: () => {}, clock: () => START }).observe({ type: "message_end", message });
+        expect(obs.providerFailure).toBeUndefined();
+        expect(levels).toEqual([]);
+        expect(h.ends.find((s) => s.name === "model.turn")?.status).toBe("error");
+        expect(h.ends.find((s) => s.name === "model.turn")?.attrs.stopReason).toBeUndefined();
+        expect(h.ends.find((s) => s.name === "model.turn")?.attrs.inputTokens).toBeUndefined();
+      }
+  });
+
+  it("usage consumed before a fatal event is explicitly partial and unread usage is absent", async () => {
+    const completion = (input: number) =>
+      frame({
+        type: "response.completed",
+        response: { status: "completed", output: [], usage: { input_tokens: input, output_tokens: 10 } },
+      });
+    const h = harness({
+      answer: () => streamingResponse([completion(20) + "data: null\n\n" + completion(9900)], h.clock, 1),
+    });
+    const levels: string[] = [];
+    h.deps.plane = { level: (_p, side) => void levels.push(side), park: () => {} };
+    await throughPi(h);
+    const turn = h.ends.find((s) => s.name === "model.turn")!;
+    expect(turn.status).toBe("error");
+    expect(turn.attrs.inputTokens).toBe(20);
+    expect(turn.attrs.usageComplete).toBe(false);
+    expect(turn.attrs.stopReason).toBeUndefined();
+    expect(levels).toEqual([]);
+  });
+
+  it("malformed completed status and earlier hosted output cannot authorize completion or recovery", async () => {
+    for (const text of [
+      frame({ type: "response.completed", response: { status: "queued", output: [] } }),
+      frame({ type: "response.completed", response: { output: [] } }),
+      frame({
+        type: "response.incomplete",
+        response: { status: "queued", incomplete_details: { reason: "max_output_tokens" }, output: [] },
+      }),
+      frame({
+        type: "response.incomplete",
+        response: { incomplete_details: { reason: "max_output_tokens" }, output: [] },
+      }),
+      frame({
+        type: "response.incomplete",
+        response: {
+          status: JSON.stringify(
+            authenticateProxyProviderFailure({ type: "provider_failure", cause: "rate-limited", message: "old" }),
+          ),
+          incomplete_details: { reason: "max_output_tokens" },
+          output: [],
+        },
+      }),
+      frame({ type: "response.output_item.added", output_index: 0, item: { type: "mcp_call", status: "completed" } }) +
+        frame({ type: "error", code: "server_error", message: "error" }),
+    ]) {
+      const h = harness({ answer: () => streamingResponse([text], h.clock, 1) });
+      const message = await throughPi(h);
+      const obs = new PiBridge({ emit: () => {}, clock: () => START }).observe({ type: "message_end", message });
+      expect(obs.terminalFailure?.kind).toBe("unknown");
+      expect(obs.message).toBeUndefined();
+      expect(obs.providerFailure).toBeUndefined();
+    }
+  });
+
+  it("an actual pi abort race retains permanent and unknown stream failure evidence", async () => {
+    for (const code of ["invalid_prompt", "unknown_code"]) {
+      const controller = new AbortController();
+      const h = harness({
+        answer: () =>
+          new Response(
+            new ReadableStream({
+              start(c) {
+                c.enqueue(new TextEncoder().encode(frame(failed(code))));
+              },
+              cancel() {
+                controller.abort();
+              },
+            }),
+            { headers: { "content-type": "text/event-stream" } },
+          ),
+      });
+      const message = await throughPi(h, responsesRequest().tools, controller.signal);
+      const obs = new PiBridge({ emit: () => {}, clock: () => START }).observe({ type: "message_end", message });
+      expect(message.stopReason).toBe("aborted");
+      expect(obs.terminalFailure?.kind).toBe(code === "invalid_prompt" ? "provider_failure" : "unknown");
+      expect(obs.providerFailure?.cause).toBe(code === "invalid_prompt" ? "request-rejected" : undefined);
+    }
+  });
+
+  it("provider conversation state and approval inputs leave stream recovery unverified", async () => {
+    for (const over of [
+      { previous_response_id: "prior" },
+      { conversation: "stored" },
+      { background: true },
+      { input: [{ type: "mcp_approval_response", approval_request_id: "prior", approve: true }] },
+    ]) {
+      const h = harness({ answer: () => streamingResponse([frame(failed("server_error"))], h.clock, 1) });
+      const message = await throughPi(h, responsesRequest().tools, undefined, over);
+      const obs = new PiBridge({ emit: () => {}, clock: () => START }).observe({ type: "message_end", message });
+      expect(obs.terminalFailure?.kind).toBe("unknown");
+      expect(obs.providerFailure).toBeUndefined();
+      expect(h.calls).toHaveLength(1);
+    }
+  });
+
+  it("fragmented ordinary frames retain their bytes and only completed evidence reports up", async () => {
+    for (const complete of [false, true]) {
+      const text =
+        ': keepalive\r\n\r\ndata: {"type":"response.output_text.delta","delta":"héllo"}\r\n\r\n' +
+        (complete ? frame({ type: "response.completed", response: { status: "completed", output: [] } }) : "");
+      const bytes = new TextEncoder().encode(text);
+      const h = harness({
+        answer: () =>
+          new Response(
+            new ReadableStream({
+              start(c) {
+                for (const byte of bytes) c.enqueue(Uint8Array.of(byte));
+                c.close();
+              },
+            }),
+            { headers: { "content-type": "text/event-stream" } },
+          ),
+      });
+      const levels: string[] = [];
+      h.deps.plane = { level: (_p, side) => void levels.push(side), park: () => {} };
+      const token = h.bearers.mint(h.responsesGrant("run-1"));
+      const res = await handleModelProxyRequest(
+        request({ path: OPENAI_RESPONSES_PATH, headers: bearer(token), json: responsesRequest() }).req,
+        h.deps,
+      );
+      expect(await new Response(res.body).text()).toBe(text);
+      expect(levels).toEqual(complete ? ["up"] : []);
+      expect(h.ends.find((s) => s.name === "model.turn")?.status).toBe(complete ? "ok" : "error");
+      expect(h.calls).toHaveLength(1);
+    }
   });
 });
 

@@ -1832,7 +1832,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       c.emit(
         {
           type: "message_end",
-          message: { role: "assistant", content: [], stopReason: "other" },
+          message: { role: "assistant", content: [], stopReason: "other", rawStopReason: "failed" },
         },
         { type: "agent_settled" },
       ),
@@ -1845,7 +1845,8 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       expect.objectContaining({
         type: "run_note",
         kind: "harness_error",
-        summary: "the model call ended without a classified result; no provider failure was established",
+        summary:
+          'the model call ended without a classified result; no provider failure was established — pi stop: "other"; provider stop: "failed"',
       }),
     );
     expect(w.container.commands().filter((c) => c.type === "prompt")).toHaveLength(1);

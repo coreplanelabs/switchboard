@@ -546,6 +546,7 @@ describe("turns, narration and the answer — the loop's rules", () => {
     expect(unknown.terminalFailure).toEqual({
       kind: "unknown",
       detail: "the model call ended without a classified result",
+      stops: { pi: "error", provider: "missing" },
     });
     expect(unknown.providerFailure).toBeUndefined();
 
@@ -556,6 +557,7 @@ describe("turns, narration and the answer — the loop's rules", () => {
     expect(other.terminalFailure).toEqual({
       kind: "unknown",
       detail: 'pi ended the model call with unclassified stop reason "other"',
+      stops: { pi: "other", provider: "missing" },
     });
     expect(other.providerFailure).toBeUndefined();
     expect(other.message).toBeUndefined();

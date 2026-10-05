@@ -70,15 +70,19 @@ function parseBody(value: unknown): unknown {
   return undefined;
 }
 
-function candidates(value: unknown, into: Record<string, unknown>[] = []): Record<string, unknown>[] {
+function candidates(
+  value: unknown,
+  into: Record<string, unknown>[] = [],
+  type = "provider_failure",
+): Record<string, unknown>[] {
   if (Array.isArray(value)) {
-    for (const item of value) candidates(item, into);
+    for (const item of value) candidates(item, into, type);
     return into;
   }
   const row = isRecord(value) ? value : undefined;
   if (!row) return into;
-  if (row.type === "provider_failure") into.push(row);
-  for (const item of Object.values(row)) candidates(item, into);
+  if (row.type === type) into.push(row);
+  for (const item of Object.values(row)) candidates(item, into, type);
   return into;
 }
 
@@ -122,5 +126,39 @@ export function proxyProviderFailureIsAuthenticated(value: unknown): boolean {
     },
     nonce,
   );
+  return offered.length === expected.length && timingSafeEqual(offered, expected);
+}
+
+// An unknown terminal is not a ProviderFailure. Its separate signed type keeps
+// pi's abort race from turning missing recovery evidence into a local retry.
+const UNKNOWN_TERMINAL_TYPE = "model_terminal_unknown";
+const unknownSignature = (nonce: string): Buffer =>
+  createHmac("sha256", AUTH_KEY)
+    .update(JSON.stringify([AUTH_VERSION, nonce, UNKNOWN_TERMINAL_TYPE]))
+    .digest();
+
+export function authenticateProxyUnknownTerminal(): { type: string; [PROXY_PROVIDER_FAILURE_AUTH_FIELD]: string } {
+  const nonce = randomBytes(NONCE_BYTES).toString("base64url");
+  return {
+    type: UNKNOWN_TERMINAL_TYPE,
+    [PROXY_PROVIDER_FAILURE_AUTH_FIELD]: `${AUTH_VERSION}.${nonce}.${unknownSignature(nonce).toString("base64url")}`,
+  };
+}
+
+export function proxyUnknownTerminalIsAuthenticated(value: unknown): boolean {
+  const found = candidates(parseBody(value), [], UNKNOWN_TERMINAL_TYPE);
+  if (found.length !== 1) return false;
+  const marker = found[0][PROXY_PROVIDER_FAILURE_AUTH_FIELD];
+  if (typeof marker !== "string") return false;
+  const [version, nonce, mac, extra] = marker.split(".");
+  if (
+    version !== AUTH_VERSION ||
+    extra !== undefined ||
+    !/^[A-Za-z0-9_-]{22}$/.test(nonce ?? "") ||
+    !/^[A-Za-z0-9_-]{43}$/.test(mac ?? "")
+  )
+    return false;
+  const offered = Buffer.from(mac, "base64url");
+  const expected = unknownSignature(nonce);
   return offered.length === expected.length && timingSafeEqual(offered, expected);
 }
