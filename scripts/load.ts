@@ -25,6 +25,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
+import { intakeExperimentReport } from "../src/intakeExperiment.js";
 import {
   evaluateSlo,
   renderMarkdown,
@@ -242,6 +243,9 @@ commands
              later mentions, recovered/silent per week, printed, no model spend, no receipt file  [--since DATE]
              env: SWITCHBOARD_STATE_WORKER_URL, MEMORY_TOKEN (or --state-url / --token-env); SLACK_BOT_TOKEN (the
              thread reads and the bot's own id)
+             --live --experiment ID: JSON A/B counts, latency, known token cost and unknown-cost calls
+             by arm/model, using only the ledger; --since DATE selects the window, no Slack or model calls
+             [--samples: include message coordinates and raw measurements without message text]
   door       the door's hand-backs, the pastes that followed and the paste-through rate, per day and per command,
              read off the run store's command records; printed, nothing invoked, no receipt file
              [--since DATE]
@@ -301,6 +305,8 @@ function flags(argv: string[]): Flags {
       limit: { type: "string" },
       fixtures: { type: "string" },
       live: { type: "boolean" },
+      experiment: { type: "string" },
+      samples: { type: "boolean" },
       "default-agent": { type: "string" },
       concurrency: { type: "string" },
       verify: { type: "boolean" },
@@ -2041,6 +2047,34 @@ async function intakeLive(f: Flags): Promise<boolean> {
   });
   const since = typeof f.since === "string" ? Date.parse(f.since) : undefined;
   if (since !== undefined && Number.isNaN(since)) throw new Error(`--since must be a date (got ${String(f.since)})`);
+  if (typeof f.experiment === "string") {
+    const rows = await ledger.listIntake({ ...(since !== undefined ? { since } : {}) });
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          experiment: f.experiment,
+          arms: intakeExperimentReport(rows, f.experiment),
+          ...(f.samples === true
+            ? {
+                samples: rows
+                  .filter((row) => row.experiment?.id === f.experiment)
+                  .map(({ threadKey, decidedAt, model, verdict, source, experiment }) => ({
+                    threadKey,
+                    decidedAt,
+                    model,
+                    verdict,
+                    source,
+                    experiment,
+                  })),
+              }
+            : {}),
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    return true;
+  }
   const slackToken = bearer("SLACK_BOT_TOKEN");
   const auth = await slackCall(slackToken, "auth.test", {});
   if (typeof auth.user_id !== "string" || auth.user_id.length === 0)

@@ -206,6 +206,7 @@ export interface Scope {
 
 /** The `intake` block (`AppConfig.intake`): the gate's defaults layer. */
 export interface IntakeConfig {
+  experiment?: { id: string; model: string; percent: number };
   /** The default mode; `classify` when unset (`defaultIntakeMode`). */
   threadReplies?: IntakeMode;
   /** The verdict's model, `<provider>/<model>`; default
