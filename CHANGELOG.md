@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.286.0](https://github.com/coreplanelabs/switchboard/compare/v1.285.6...v1.286.0) (2026-10-05)
+
+
+### Features
+
+* **core:** compare intake models on live thread traffic ([#2775](https://github.com/coreplanelabs/switchboard/issues/2775)) ([e743d9d](https://github.com/coreplanelabs/switchboard/commit/e743d9dd116c7cff9918a33cb17cc949b5eb9dbc))
+
+
+### Bug fixes
+
+* **harness:** retain safe unknown model result diagnostics ([#2774](https://github.com/coreplanelabs/switchboard/issues/2774)) ([ba7f539](https://github.com/coreplanelabs/switchboard/commit/ba7f5391575597e048d0fbd2451b02082248eeae))
+* **providers:** keep model stream validation responsive ([#2772](https://github.com/coreplanelabs/switchboard/issues/2772)) ([b788e4a](https://github.com/coreplanelabs/switchboard/commit/b788e4add3f0f344c49d94fb469c57aa92283bc8))
+* **slack:** acknowledge quiet replies and render native links ([#2773](https://github.com/coreplanelabs/switchboard/issues/2773)) ([58e2d26](https://github.com/coreplanelabs/switchboard/commit/58e2d26bc10e9085305e7eb448785ab4b2ca4b74))
+
 ## [1.285.6](https://github.com/coreplanelabs/switchboard/compare/v1.285.5...v1.285.6) (2026-10-05)
 
 
