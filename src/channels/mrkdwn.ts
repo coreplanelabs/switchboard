@@ -12,8 +12,9 @@ import { encodeMrkdwnUrl, escapeMrkdwn } from "./slackEscape.js";
 // Slack's link/mention/broadcast syntax (`<url|label>`, `<@U…>`, `<!channel>`).
 // The agent's text (which can quote tool output or a prompt injection) is prose
 // we don't control, so every character of it is escaped. Only the structural
-// syntax mdToMrkdwn *itself* produces — generated `<url|label>` links, image
-// URLs, blockquote markers — is exempted, by stashing it before the escape pass
+// syntax mdToMrkdwn validates or produces — native HTTP(S) links, generated
+// `<url|label>` links, image URLs, blockquote markers — is exempted, by
+// stashing it before the escape pass
 // and restoring it after, so it is never double-escaped or corrupted.
 
 // Private-use delimiters for placeholders. Two disjoint pairs so the inline-code
@@ -89,6 +90,19 @@ function convert(text: string): string {
     stash(`<${encodeMrkdwnUrl(url)}|${escapeMrkdwn(label)}>`),
   );
 
+  // Native Slack links can arrive in quoted history or model prose. Accept
+  // only complete HTTP(S) forms outside code, and rebuild their structure
+  // through the same escaping helpers as Markdown links. Reject nested angle
+  // syntax so a forged label cannot smuggle a mention or broadcast through.
+  out = out.replace(/<(https?:\/\/[^\s<>|]+)(?:\|([^<>\n]*))?>/gi, (raw, url: string, label?: string) => {
+    try {
+      if (!new URL(url).hostname) return raw;
+    } catch {
+      return raw;
+    }
+    return stash(`<${encodeMrkdwnUrl(url)}${label === undefined ? "" : `|${escapeMrkdwn(label)}`}>`);
+  });
+
   // A person's actor id in bot-authored text — bare `slack:U…` (AGENTS.md
   // invariant 4) or a stray pre-wrapped `<@slack:U…>` — becomes the mention
   // Slack resolves: `<@U…>`. This is the ONE renderer of actor ids into Slack
@@ -113,7 +127,7 @@ function convert(text: string): string {
   out = out.replace(/^([ \t]*)(>+)/gm, (_, ws: string, gts: string) => `${ws}${stash(gts)}`);
 
   // Everything left is prose the agent controls: escape `&`/`<`/`>` so bare
-  // <!channel>/<@U…>/forged <url|label> become inert visible text. This runs
+  // <!channel>/<@U…> and invalid native links become inert visible text. This runs
   // BEFORE the marker conversions below, whose markers (*, _, ~, •) never
   // introduce `&`/`<`/`>`, so escaping first can't break or double-escape them.
   out = escapeMrkdwn(out);

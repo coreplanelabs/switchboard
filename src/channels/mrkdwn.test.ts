@@ -118,6 +118,43 @@ describe("mdToMrkdwn", () => {
     expect(out).not.toContain("<!channel>");
   });
 
+  it("normalizes native HTTP(S) links alongside Markdown links", () => {
+    const url = "https://github.com/acme/api/blob/abc/src/hook.ts?a=1&b=2#L14-L54";
+    expect(mdToMrkdwn(`<${url}|useWatchRunThread> and [hook](${url})`)).toBe(
+      `<${url}|useWatchRunThread> and <${url}|hook>`,
+    );
+    expect(mdToMrkdwn("<http://x.test/a#part>")).toBe("<http://x.test/a#part>");
+    expect(mdToMrkdwn("<https://x.test|A & B | **literal**>")).toBe("<https://x.test|A &amp; B | **literal**>");
+    expect(mdToMrkdwn("<https://x.test?q=slack:U123|slack:U123>")).toBe("<https://x.test?q=slack:U123|slack:U123>");
+  });
+
+  it("keeps native links literal in inline code and fences", () => {
+    const link = "<https://x.test?a=1&b=2|label>";
+    const escaped = "&lt;https://x.test?a=1&amp;b=2|label&gt;";
+    expect(mdToMrkdwn(`\`${link}\``)).toBe(`\`${escaped}\``);
+    expect(mdToMrkdwn(`\`\`\`\n${link}\n\`\`\``)).toBe(`\`\`\`\n${escaped}\n\`\`\``);
+  });
+
+  it("escapes invalid native links and control syntax", () => {
+    for (const input of [
+      "<javascript:alert(1)|click>",
+      "<ftp://x.test|click>",
+      "<https://|click>",
+      "<https://bad host|click>",
+      "<https://x.test|label <!channel>>",
+      "<@U123>",
+      "<!here>",
+    ]) {
+      expect(mdToMrkdwn(input)).toBe(input.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;"));
+    }
+    expect(mdToMrkdwn("<https://x.test|safe> <!channel> <@U123>")).toBe(
+      "<https://x.test|safe> &lt;!channel&gt; &lt;@U123&gt;",
+    );
+    expect(mdToMrkdwn("[x> <!channel](https://x.test/<@U123>)")).toBe(
+      "<https://x.test/%3C@U123%3E|x&gt; &lt;!channel>",
+    );
+  });
+
   // The stash/restore placeholders are private-use-area sentinels
   // (U+E000–U+E003). Agent-controlled input carrying those literal chars used to
   // collide with real placeholders — restoring an out-of-range index threw

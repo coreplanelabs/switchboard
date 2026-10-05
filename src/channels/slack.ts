@@ -964,13 +964,12 @@ export async function receiveSlackMessage(
     policy.verbosityFor?.(`${PLATFORM}:${ev.channel}`, requester.userId, parseDirectives(ev.text).verbosity) ??
     policy.verbosity ??
     DEFAULT_VERBOSITY;
-  // The acceptance reaction and catch-up note are routine lifecycle
-  // acknowledgements. They remain byte-for-byte at verbose/debug, while quiet
-  // proceeds with the same downloads and dispatch without narrating the seam.
-  if (shows(verbosity, "verbose"))
-    client.reactions.add({ channel: ev.channel, timestamp: ev.ts, name: ACK_EMOJI }).catch((err: Error) => {
-      if (!err.message.includes("already_reacted")) console.error(`[ack] ${err.message}`);
-    });
+  // Every accepted message gets a receipt, including a reply dispatch folds
+  // into an active run. Quiet controls narration, not acceptance; keep this
+  // after dedupe and intake, before downloads or dispatch.
+  client.reactions.add({ channel: ev.channel, timestamp: ev.ts, name: ACK_EMOJI }).catch((err: Error) => {
+    if (!err.message.includes("already_reacted")) console.error(`[ack] ${err.message}`);
+  });
   const delayNote =
     ev.caughtUp && shows(verbosity, "verbose")
       ? new SlackIO(client, ev).reply(catchUpDelayNote(ev.ts, systemClock())).catch((err: Error) => {
