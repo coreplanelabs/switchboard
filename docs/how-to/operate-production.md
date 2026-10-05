@@ -53,6 +53,16 @@ npx --yes <package>@<prior-version> deploy all --only bot --force
 
 This deploy updates the existing container application; no application deletion is part of rollback. Success requires all three facts: the application version advanced, its target is the prior release's image, and `/healthz.build.commit` is the prior package's exact commit. A retained target or a different/short commit fails the bot step by name.
 
+When deployment credentials live in CI, dispatch the same runner from `main` with the pinned package and only the bot selected:
+
+```bash
+gh workflow run deploy-production.yml --ref main -f cli=package -f version=<prior-version> -f targets=bot -f force=true -f copy-images=never
+```
+
+Confirm the run selects the exact prior CLI and only the bot, then verify the same application and health receipts. Package mode skips the checkout's candidate and ingress smoke scripts: a green deployment is not functional acceptance. Follow it with a read-only request through an authorized ingress client and require a completed agent answer.
+
+Before cutover, inspect unfinished effects and protected workspace ownership against the prior runtime; unknown compatibility blocks replay. Afterward, verify the memory build and resident ownership/fences remain unchanged. The state database and protected resident workspaces retain their current state; a runtime rollback does not establish that newer durable obligations can be replayed by older code.
+
 `deploy images` only copies registry inventory. A Worker-version rollback with `wrangler rollback` changes only the Worker deployment, and `deploy restart` restarts the image selected by the container application's current target. None of those operations is a container-image rollback, alone or in combination; after them a newer application target remains newer.
 
 ## Change the config without a release
@@ -145,7 +155,7 @@ The output archive directory must not exist. Capture records `.git`, tracked, un
 
 The project's own production, not Switchboard:
 
-- Deploys run from CI, which refuses any ref but `main`: `gh workflow run deploy-production.yml --ref main -f targets=affected` (also `-f targets=bot,resident`; `-f force=true` bypasses the preflights).
+- Checkout deploys run from CI, which refuses any ref but `main`: `gh workflow run deploy-production.yml --ref main -f targets=affected` (also `-f targets=bot,resident`; `-f force=true` bypasses the preflights).
 - The profile and config live in a private repository named by the variable `SWITCHBOARD_DEPLOY_PROFILE`, read with an App token minted as `CONFIG_REPO_TOKEN`.
 - CI holds `CLOUDFLARE_DEPLOY_TOKEN`, `RESIDENT_READ_TOKEN`, `RESIDENT_DRAIN_TOKEN` (drain, deploy fence, and undrain; a normal resident upload requires it) and `SANDBOX_TOKEN`; the docs deploy uses `CLOUDFLARE_API_TOKEN`.
 

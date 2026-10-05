@@ -161,6 +161,17 @@ on:
         description: that App's private key
   workflow_dispatch:
     inputs:
+      cli:
+        description: "`checkout` (default): deploy main; `package`: deploy the pinned published version, including a deliberate rollback"
+        type: choice
+        options:
+          - checkout
+          - package
+        default: checkout
+      version:
+        description: "`package` mode only: exact published CLI version; never latest"
+        type: string
+        default: ""
       targets:
         description: "`affected` (default), `all`, or a comma list of Workers (memory,bot,resident,sandbox)"
         type: string
