@@ -28,13 +28,47 @@ const input = (world: RollbackWorld, elapsedMs = LIVE_GATE_DEADLINE_MS): BotLive
   containerApp: APP,
   health: { status: 200, body: { ok: true, build: { commit: world.healthCommit }, startedAt: world.startedAt } },
   app: { value: world.app },
-  before: { value: { version: 17, image: NEWER_IMAGE } },
-  target: { image: PRIOR_IMAGE },
+  expectedImage: PRIOR_IMAGE,
+  instances: { value: [{ name: "singleton", state: "running", version: world.app.version }] },
   expectedCommit: PRIOR_COMMIT,
   elapsedMs,
 });
 
 describe("decideBotLive rollback fence", () => {
+  it("accepts a reused lower application version only when selected image and runtime agree", () => {
+    const world = newerWorld();
+    world.app = { version: 16, image: PRIOR_IMAGE };
+    world.healthCommit = PRIOR_COMMIT;
+    expect(decideBotLive(input(world))).toMatchObject({ kind: "live" });
+  });
+
+  it("refuses an old singleton despite exact selected health and target", () => {
+    const world = newerWorld();
+    world.app = { version: 18, image: PRIOR_IMAGE };
+    world.healthCommit = PRIOR_COMMIT;
+    const evidence = input(world);
+    evidence.instances = { value: [{ name: "singleton", state: "running", version: 17 }] };
+    expect(decideBotLive(evidence)).toMatchObject({ kind: "failed", reason: expect.stringContaining("singleton") });
+  });
+
+  it.each([
+    { error: "unreadable" },
+    { value: [] },
+    { value: [{ name: "singleton", state: "running", version: null }] },
+    { value: [{ name: "other", state: "running", version: 18 }] },
+    { value: [{ name: "singleton", state: "unknown", version: 18 }] },
+    {
+      value: [
+        { name: "singleton", state: "running", version: 18 },
+        { name: "singleton", state: "running", version: 17 },
+      ],
+    },
+  ])("refuses incomplete runtime evidence: %j", (instances) => {
+    const world = newerWorld();
+    world.app = { version: 18, image: PRIOR_IMAGE };
+    world.healthCommit = PRIOR_COMMIT;
+    expect(decideBotLive({ ...input(world), instances })).toMatchObject({ kind: "failed" });
+  });
   it("registry image copy changes inventory only and is refused because the named container application still targets the newer image", () => {
     const world = newerWorld();
 
@@ -74,7 +108,7 @@ describe("decideBotLive rollback fence", () => {
 
     expect(decideBotLive(input(world, 30_000))).toEqual({
       kind: "live",
-      summary: `container application ${APP} targets ${PRIOR_IMAGE} at version 18 (up from 17); /healthz serves exact ${PRIOR_COMMIT}`,
+      summary: `container application ${APP} targets ${PRIOR_IMAGE} at version 18; singleton runs on version 18; /healthz serves exact ${PRIOR_COMMIT}`,
     });
   });
 

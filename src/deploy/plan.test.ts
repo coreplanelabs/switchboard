@@ -247,7 +247,7 @@ describe("WORKER_SPECS / workersFor / DEPLOY_ORDER", () => {
     expect(p.steps.find((s) => s.name === "resident")).not.toHaveProperty("healthUrl");
     const text = formatPlan(p);
     expect(text).toContain(
-      "then wait until live (switchboard-switchboardserver advances to the deployed image + https://switchboard.example.test/healthz build.commit exactly == HEAD)",
+      "then wait until live (switchboard-switchboardserver targets the selected image + singleton on its version + https://switchboard.example.test/healthz build.commit exactly == HEAD)",
     );
     expect(text).toContain(
       "then wait until live (https://switchboard-sandbox.example.test/healthz build.commit == HEAD + every running switchboard-sandbox-switchboardsandbox instance on the app version + an /exec probe answers ok from one)",
@@ -737,6 +737,9 @@ describe("the plan's images", () => {
       { name: "switchboard-resident", tags: ["1.2.2"] },
     ];
     const p = plan({}, installed, REGISTRY, { mode: "registry", published: TEST_PUBLISHED_IMAGES, registry: listing });
+    expect(p.steps.find((step) => step.name === "bot")!.botImage).toBe(
+      `registry.cloudflare.com/${account}/switchboard:1.2.3`,
+    );
     expect(p.images).toEqual({
       mode: "registry",
       version: "1.2.3",
