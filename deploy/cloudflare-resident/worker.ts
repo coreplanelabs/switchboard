@@ -456,6 +456,7 @@ import {
   threadErrBuilders,
   type ThreadErr,
 } from "./threadErr";
+import { refusalOutcome, rootStatusForOutcome } from "./rootOutcome";
 import {
   DEFAULT_EXEC_TIMEOUT_MS,
   DEPS_STEP_OVERHEAD_MS,
@@ -520,12 +521,7 @@ function emitStepRoot(
 ): void {
   const root = startAdoptedRoot(tracer, name, { sinks: traceSinks, startedAt: t0, traceparent, attrs });
   graftResidentSteps(steps, { parent: root, prefix: "resident", baseAt: t0, clipAt: systemClock() });
-  root.end(outcome === "ok" ? "ok" : "error", { outcome });
-}
-
-/** The one word a refusal's root carries: what it needed, else `error`. */
-function refusalOutcome(err: ThreadErr): string {
-  return err.needs ? `needs_${err.needs}` : "error";
+  root.end(rootStatusForOutcome(outcome), { outcome });
 }
 
 export interface Env {
