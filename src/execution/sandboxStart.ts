@@ -33,8 +33,12 @@ export interface StartGateHost {
  *  is in, in words, for the answer's cause. */
 export type StartingCause = "container not running; starting it" | "container starting";
 
+/** Settlement of one observed host warm-up, not permission to retire a workspace. */
+export type WarmUpOutcome = { kind: "unobserved" } | { kind: "succeeded" } | { kind: "failed"; error: unknown };
+
 export class StartGate {
   private starting: Promise<void> | null = null;
+  private warmUpAttempt: Promise<void> | null = null;
   private startedAt = 0;
   private failure: { error: unknown } | null = null;
 
@@ -65,11 +69,25 @@ export class StartGate {
     return this.starting !== null;
   }
 
+  /** Join the host promise observed now, even after its request-facing failure
+   * was delivered. The logging promise catches that failure, so joining it
+   * would erase the distinction between success and rejection. A new gate
+   * has no settlement evidence for work started before its construction. */
+  joinWarmUp(): Promise<WarmUpOutcome> {
+    const attempt = this.warmUpAttempt;
+    if (!attempt) return Promise.resolve({ kind: "unobserved" });
+    return attempt.then(
+      () => ({ kind: "succeeded" }),
+      (error: unknown) => ({ kind: "failed", error }),
+    );
+  }
+
   private begin(): void {
     this.startedAt = this.host.now();
     this.host.log({ event: "sandbox.starting" });
-    this.starting = this.host
-      .warmUp()
+    const attempt = this.host.warmUp();
+    this.warmUpAttempt = attempt;
+    this.starting = attempt
       .then(
         () => {
           this.host.log({ event: "sandbox.started", durationMs: this.host.now() - this.startedAt });

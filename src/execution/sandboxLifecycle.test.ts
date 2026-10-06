@@ -339,7 +339,7 @@ describe("sandbox Worker wiring (static)", () => {
 
   it("checks an earlier bound incarnation before seed can overwrite its checkout", () => {
     const seed = worker.slice(worker.indexOf("async seed(seed:"), worker.indexOf("private async seedNow("));
-    expect(seed).toMatch(/const prior = await this\.ctx\.storage\.get<CheckpointRecord>\(PRESERVATION_KEY\)/);
+    expect(seed).toContain("const prior = await this.readLegacyPreservation()");
     expect(seed).toMatch(
       /if \(prior\) \{[\s\S]*?this\.readFile\(PRESERVATION_CONTAINER_MARKER[\s\S]*?this\.seedNow\(seed, envVars, !!prior\)/,
     );
@@ -388,7 +388,16 @@ describe("sandbox Worker wiring (static)", () => {
       worker.indexOf("async inspectRepairDependencies("),
     );
     expect(record).toContain("this.ctx.id.toString()");
-    expect(record).toContain("this.ctx.storage.get<CheckpointRecord>(PRESERVATION_KEY)");
+    expect(record).toContain("this.readLegacyPreservation()");
+    const reader = worker.slice(
+      worker.indexOf("private async readLegacyPreservation("),
+      worker.indexOf("private async saveLegacyPreservation("),
+    );
+    expect(reader).toContain("storage.get<unknown>(PRESERVATION_KEY)");
+    expect(reader).toContain("decodeLifecycle(stored)");
+    expect(reader).not.toContain(".exec(");
+    expect(reader).not.toContain(".readFile(");
+    expect(reader).not.toContain(".destroy(");
     expect(record).not.toContain(".exec(");
     expect(record).not.toContain(".readFile(");
     expect(record).not.toContain(".destroy(");
