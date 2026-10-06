@@ -5,6 +5,7 @@ import {
   preserveMaintenanceEvent,
 } from "../../src/core/coordinator/maintenanceIdentity.js";
 import { terminalPublicationRetentionRequired } from "../../src/core/branchPublication.ts";
+import { intakePointOf } from "../../src/core/intakeMetrics.js";
 import { branchPublicationOf, doorPublicationOf } from "../../src/core/branchPublication.js";
 import { reviewPublicationOf } from "../../src/core/reviewPublication.js";
 import {
@@ -6266,7 +6267,12 @@ export class RunHistoryDO extends DurableObject<Env> {
    *  and every caller acts on `stored` (`decideIntakeInsert`). `windowMs` is
    *  the writer's reconnect catch-up window; the retention bound is stamped on
    *  the row so the enabled alarm sweep is one indexed delete. */
-  async recordIntake(key: string, receipt: IntakeReceipt, windowMs: number): Promise<IntakeWriteResult> {
+  async recordIntake(
+    key: string,
+    receipt: IntakeReceipt,
+    windowMs: number,
+    telemetry = false,
+  ): Promise<IntakeWriteResult> {
     let out: IntakeWriteResult = { inserted: false, stored: receipt };
     this.ctx.storage.transactionSync(() => {
       out = decideIntakeInsert(this.intakeRow(key), receipt);
@@ -6280,6 +6286,16 @@ export class RunHistoryDO extends DurableObject<Env> {
         JSON.stringify(receipt),
       );
     });
+    if (out.inserted && telemetry) {
+      try {
+        const point = intakePointOf(out.stored);
+        if (point) this.metrics.write(point);
+      } catch (err) {
+        console.warn(
+          `[runs/intake-metrics] point not written: ${err instanceof Error ? err.constructor.name : "Error"}`,
+        );
+      }
+    }
     if ((await this.ctx.storage.getAlarm()) === null)
       await this.ctx.storage.setAlarm(systemClock() + RUN_SWEEP_INTERVAL_MS);
     return out;
@@ -9973,7 +9989,14 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     if (!isIntakeReceipt(b.receipt)) return json({ error: "receipt must be an intake receipt" }, 400);
     if (b.windowMs !== undefined && (typeof b.windowMs !== "number" || !Number.isFinite(b.windowMs) || b.windowMs < 0))
       return json({ error: "windowMs must be a non-negative number" }, 400);
-    const r = await stub.recordIntake(receiptKey, b.receipt, typeof b.windowMs === "number" ? b.windowMs : 0);
+    if (b.telemetry !== undefined && typeof b.telemetry !== "boolean")
+      return json({ error: "telemetry must be a boolean" }, 400);
+    const r = await stub.recordIntake(
+      receiptKey,
+      b.receipt,
+      typeof b.windowMs === "number" ? b.windowMs : 0,
+      b.telemetry === true,
+    );
     console.log(`[runs/intake] ${key.value} ${receiptKey} → ${r.inserted ? "inserted" : "existing"}`);
     return json(r);
   }

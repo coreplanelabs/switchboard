@@ -1,5 +1,13 @@
 import { DAY_MS } from "./budgets.js";
-import { blobColumn, blobOf, doubleColumn, doubleOf, POINT_COLUMNS, type RunMetricsPoint } from "./runMetrics.js";
+import {
+  blobColumn,
+  blobOf,
+  doubleColumn,
+  doubleOf,
+  POINT_COLUMNS,
+  POINT_SCHEMA,
+  type RunMetricsPoint,
+} from "./runMetrics.js";
 
 // The run-metrics reader (docs/reference/specs/run-metrics.md): the config
 // block, the SQL-API source seam, the three report queries and the pure report
@@ -112,6 +120,7 @@ export function metricsQueries(range: MetricsRange, dataset: string): MetricsQue
   if (!Number.isSafeInteger(since) || !Number.isSafeInteger(until))
     throw new Error("metrics range must be two finite timestamps");
   let where = `timestamp >= toDateTime(${since}) AND timestamp < toDateTime(${until})`;
+  where += ` AND ${blobColumn("schema")} = '${POINT_SCHEMA}'`;
   if (range.agent !== undefined) {
     if (!METRICS_AGENT_NAME.test(range.agent))
       throw new Error("metrics agent filter must be an agent name: lowercase letters, digits, hyphens, underscores");
@@ -205,7 +214,12 @@ export class InMemoryMetricsSource implements MetricsSource {
     const agent = new RegExp(`${AGENT} = '([^']*)'`).exec(sql)?.[1];
     const points = this.points.filter((p) => {
       const at = doubleOf(p, "finished at");
-      return at >= sinceMs && at < untilMs && (agent === undefined || p.indexes[0] === agent);
+      return (
+        blobOf(p, "schema") === POINT_SCHEMA &&
+        at >= sinceMs &&
+        at < untilMs &&
+        (agent === undefined || p.indexes[0] === agent)
+      );
     });
     if (sql.includes("GROUP BY day, status")) {
       const rows = new Map<string, { day: string; status: string; runs: number }>();

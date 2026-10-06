@@ -26,6 +26,8 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { intakeExperimentReport } from "../src/intakeExperiment.js";
+import { readIntakeTelemetry } from "../src/core/intakeMetrics.js";
+import { AnalyticsEngineSqlSource } from "../src/core/metrics.js";
 import {
   evaluateSlo,
   renderMarkdown,
@@ -246,6 +248,9 @@ commands
              --live --experiment ID: JSON A/B counts, latency, known token cost and unknown-cost calls
              by arm/model, using only the ledger; --since DATE selects the window, no Slack or model calls
              [--samples: include message coordinates and raw measurements without message text]
+             --telemetry --experiment ID --account ID --dataset NAME --since DATE [--until DATE]:
+             read the durable Analytics Engine intake report; token from --token-env (default CF_ANALYTICS_TOKEN)
+             [--samples --limit N --exclude-threads KEY,KEY --include-probes]; no Slack, ledger or model calls
   door       the door's hand-backs, the pastes that followed and the paste-through rate, per day and per command,
              read off the run store's command records; printed, nothing invoked, no receipt file
              [--since DATE]
@@ -307,6 +312,12 @@ function flags(argv: string[]): Flags {
       live: { type: "boolean" },
       experiment: { type: "string" },
       samples: { type: "boolean" },
+      telemetry: { type: "boolean" },
+      account: { type: "string" },
+      dataset: { type: "string" },
+      until: { type: "string" },
+      "exclude-threads": { type: "string" },
+      "include-probes": { type: "boolean" },
       "default-agent": { type: "string" },
       concurrency: { type: "string" },
       verify: { type: "boolean" },
@@ -1938,6 +1949,26 @@ async function routeReplay(f: Flags): Promise<boolean> {
  *  never a verdict: the labelled set is too small to prove a rate, so no
  *  check is configured and the live ratio is the gate. */
 async function intake(f: Flags): Promise<boolean> {
+  if (f.telemetry === true) {
+    const report = await readIntakeTelemetry(
+      new AnalyticsEngineSqlSource({
+        accountId: str(f, "account"),
+        token: bearer(str(f, "token-env", "CF_ANALYTICS_TOKEN")),
+      }),
+      {
+        dataset: str(f, "dataset"),
+        experiment: str(f, "experiment"),
+        sinceMs: Date.parse(str(f, "since")),
+        untilMs: typeof f.until === "string" ? Date.parse(f.until) : systemClock(),
+        samples: f.samples === true,
+        sampleLimit: num(f, "limit", 200),
+        includeProbes: f["include-probes"] === true,
+        excludeThreads: typeof f["exclude-threads"] === "string" ? f["exclude-threads"].split(",").filter(Boolean) : [],
+      },
+    );
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    return true;
+  }
   if (f.live === true) return intakeLive(f);
   const id = runId();
   const startedAt = new Date(systemClock()).toISOString();

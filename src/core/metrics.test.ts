@@ -9,7 +9,7 @@ import {
   parseMetricsConfig,
   type MetricsRange,
 } from "./metrics.js";
-import { blobColumn, doubleColumn, POINT_COLUMNS, type RunMetricsPoint } from "./runMetrics.js";
+import { blobColumn, doubleColumn, POINT_COLUMNS, POINT_SCHEMA, type RunMetricsPoint } from "./runMetrics.js";
 
 // The run-metrics reader (docs/reference/specs/run-metrics.md items 7–8): the
 // config block, the pinned query texts — weighted for sampling, columns from
@@ -26,6 +26,7 @@ function point(opts: {
   finishedAt: number;
 }): RunMetricsPoint {
   const blobs = POINT_COLUMNS.blobs.map(() => "");
+  blobs[0] = POINT_SCHEMA;
   blobs[POINT_COLUMNS.blobs.indexOf("agent")] = opts.agent;
   blobs[POINT_COLUMNS.blobs.indexOf("status")] = opts.status ?? "completed";
   const doubles = POINT_COLUMNS.doubles.map(() => 0);
@@ -84,10 +85,14 @@ describe("metricsQueries — the three texts, pinned", () => {
   it("byDayStatus counts runs per day per status by sum(_sample_interval), never count()", () => {
     expect(q.byDayStatus).toBe(
       "SELECT toStartOfInterval(timestamp, INTERVAL '1' DAY) AS day, blob5 AS status, sum(_sample_interval) AS runs " +
-        `FROM switchboard_runs WHERE timestamp >= toDateTime(${SINCE / 1000}) AND timestamp < toDateTime(${UNTIL / 1000}) ` +
+        `FROM switchboard_runs WHERE timestamp >= toDateTime(${SINCE / 1000}) AND timestamp < toDateTime(${UNTIL / 1000}) AND blob1 = '1' ` +
         "GROUP BY day, status ORDER BY day ASC",
     );
     expect(q.byDayStatus).not.toContain("count(");
+  });
+
+  it("excludes intake telemetry from completed-run aggregates", () => {
+    for (const sql of Object.values(q)) expect(sql).toContain("blob1 = '1'");
   });
 
   it("byAgent aggregates runs, failed, weighted p50/p95 wall, dollars, unpriced tokens and turns per agent", () => {
@@ -99,7 +104,7 @@ describe("metricsQueries — the three texts, pinned", () => {
         "sum(double14 * _sample_interval) AS usd, " +
         "sum(double18 * _sample_interval) AS unpricedTokens, " +
         "sum(double9 * _sample_interval) AS turns " +
-        `FROM switchboard_runs WHERE timestamp >= toDateTime(${SINCE / 1000}) AND timestamp < toDateTime(${UNTIL / 1000}) ` +
+        `FROM switchboard_runs WHERE timestamp >= toDateTime(${SINCE / 1000}) AND timestamp < toDateTime(${UNTIL / 1000}) AND blob1 = '1' ` +
         "GROUP BY agent ORDER BY runs DESC",
     );
   });
@@ -108,7 +113,7 @@ describe("metricsQueries — the three texts, pinned", () => {
     expect(q.byDayAgentP50).toBe(
       "SELECT toStartOfInterval(timestamp, INTERVAL '1' DAY) AS day, index1 AS agent, " +
         "quantileExactWeighted(0.5)(double1, _sample_interval) AS p50WallMs " +
-        `FROM switchboard_runs WHERE timestamp >= toDateTime(${SINCE / 1000}) AND timestamp < toDateTime(${UNTIL / 1000}) ` +
+        `FROM switchboard_runs WHERE timestamp >= toDateTime(${SINCE / 1000}) AND timestamp < toDateTime(${UNTIL / 1000}) AND blob1 = '1' ` +
         "GROUP BY day, agent ORDER BY day ASC",
     );
   });
