@@ -39,11 +39,14 @@ env:
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+# A stalled job can hold this group while newer pending runs displace older
+# ones. Bound every job so a stall reaches its deadline, not the platform cap.
 
 jobs:
   plan:
     name: change plan
     runs-on: depot-ubuntu-24.04
+    timeout-minutes: 20
     outputs:
       bot_checks: ${{ steps.select.outputs.bot_checks }}
       bot_tests: ${{ steps.select.outputs.bot_tests }}
@@ -71,6 +74,7 @@ jobs:
     name: bot / ${{ matrix.check }}
     needs: plan
     runs-on: depot-ubuntu-24.04-4
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -102,6 +106,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.bot_tests == 'true'
     runs-on: depot-ubuntu-24.04-4
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -127,6 +132,7 @@ jobs:
     needs: [plan, bot-checks, bot-tests]
     if: ${{ always() }}
     runs-on: depot-ubuntu-24.04
+    timeout-minutes: 20
     env:
       NEEDS: ${{ toJSON(needs) }}
     steps:
@@ -140,6 +146,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.web == 'true'
     runs-on: depot-ubuntu-24.04-4
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -157,6 +164,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.docs == 'true'
     runs-on: depot-ubuntu-24.04-4
+    timeout-minutes: 20
     env:
       WRANGLER_SEND_METRICS: "false"
     steps:
@@ -185,6 +193,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.package == 'true'
     runs-on: depot-ubuntu-24.04-4
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -207,6 +216,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.workers != '["none"]'
     runs-on: depot-ubuntu-24.04-4
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -243,6 +253,7 @@ jobs:
     needs: [plan, workers-each]
     if: ${{ always() }}
     runs-on: depot-ubuntu-24.04
+    timeout-minutes: 20
     env:
       NEEDS: ${{ toJSON(needs) }}
     steps:
@@ -266,6 +277,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.images != '["none"]'
     runs-on: depot-ubuntu-24.04-4
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -291,6 +303,7 @@ jobs:
     needs: [plan, image-each]
     if: ${{ always() }}
     runs-on: depot-ubuntu-24.04
+    timeout-minutes: 20
     env:
       NEEDS: ${{ toJSON(needs) }}
     steps:
@@ -313,6 +326,7 @@ jobs:
     name: deploy targets
     if: github.event_name == 'pull_request'
     runs-on: depot-ubuntu-24.04-4
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -333,6 +347,7 @@ jobs:
     needs: [plan, docs]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.docs == 'true' && needs.docs.result == 'success'
     runs-on: depot-ubuntu-24.04-4
+    timeout-minutes: 20
     # An assets-only Worker (deploy/cloudflare-docs/): no container, no Durable
     # Object, nothing that can be mid-rollout — which is why this one deploys on
     # every docs push, while the four runtime Workers deploy on the RELEASE
