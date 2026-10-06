@@ -1,6 +1,6 @@
 import { setImmediate } from "node:timers";
 import { describe, expect, it } from "vitest";
-import { ResponsesConsumer } from "./responsesConsumer.js";
+import { ResponsesConsumer } from "./responsesSdkConsumer.js";
 
 function* toolStream(args: string) {
   const item = { type: "function_call", id: "item", call_id: "call", name: "bash", arguments: "" };
