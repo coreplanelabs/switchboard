@@ -71,10 +71,10 @@ Every registered command has an HTTP twin behind the same dashboard gate, plus a
 | `/api/review.abridge` | `POST` | `review:write` | Abridge a finished PR review's reading diff with meat.dev on the bot host (one Opus-class call) and store it on the run; idempotent — a stored one is answered, not recomputed. |
 | `/api/friction.report` | `GET`, `POST` | `friction:read` | Ranked recurring friction patterns across recent runs — read-only, GitHub never consulted. |
 | `/api/friction.propose` | `POST` | `friction:write` | Clusters recent friction, deduplicates against open issues, and files the top proposals as labeled issues. |
-| `/api/repo.list` | `GET`, `POST` | `repo:read` | Every onboarded resident repo with its live state, ref, sha, last refresh, and disk gauge. |
-| `/api/repo.onboard` | `POST` | `repo:write` | Onboard a repo as an always-warm resident environment (provisions billable compute; admin-gated). |
-| `/api/repo.offboard` | `POST` | `repo:write` | Tear down a resident repo: registry record, schedules, container, R2 snapshots (admin-gated; --dry-run plans only). |
-| `/api/repo.reconfigure` | `POST` | `repo:write` | Change a resident's default branch and/or command table (admin-gated; takes effect on the next refresh/attach). |
+| `/api/repo.list` | `GET`, `POST` | `repo:read` | Every registered repo, including cold entries; resident state, ref, sha, last refresh, and disk gauge. |
+| `/api/repo.onboard` | `POST` | `repo:write` | Register a repo, optionally without a resident (--no-resident); resident provisioning is billable and admin-gated. |
+| `/api/repo.offboard` | `POST` | `repo:write` | Remove a repo registration and tear down its resident when present (admin-gated; --dry-run plans only). |
+| `/api/repo.reconfigure` | `POST` | `repo:write` | Change a registered repo's default branch and/or command table (admin-gated; resident changes take effect on refresh/attach). |
 | `/api/repo.rebuild` | `POST` | `repo:write` | Discard a resident's snapshot and reprovision it from scratch (admin-gated; --dry-run plans only). |
 | `/api/repo.test` | `POST` | `repo:exec` | Executes the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch). |
 | `/api/repo.build` | `POST` | `repo:exec` | Executes the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch). |

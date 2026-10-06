@@ -520,7 +520,11 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
     return value;
   };
   const admin: ResidentAdminClient = {
-    onboard: async (body) => exec(`admin.onboard ${String(body.resource)}`, { status: 202, data: {} }),
+    onboard: async (body) =>
+      exec(
+        `admin.onboard ${String(body.resource)}`,
+        body.noResident === true ? { status: 200, data: { state: "cold" } } : { status: 202, data: {} },
+      ),
     offboard: async (resource, dryRun) =>
       exec(`admin.offboard ${resource} dryRun=${dryRun}`, {
         status: 200,

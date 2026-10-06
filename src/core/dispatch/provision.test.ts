@@ -1845,6 +1845,37 @@ describe("composePrompt — the system prompt for the first turn", () => {
     );
   });
 
+  it.each(["coding", "review"])(
+    "%s sees the verified cold registration checkout without a dependency promise",
+    async (agent) => {
+      const d = deps();
+      const r = request(d, `agent:${agent} in acme/api: inspect it`, agent);
+      const out = await composePrompt(d, {
+        msg: r.message,
+        agent: r.agent,
+        profile: r.profile,
+        resolved: r.resolved,
+        directives: r.directives,
+        sticky: r.sticky,
+        repoCtx: { repo: "acme/api", ref: "develop" },
+        selection: {
+          executor: {} as never,
+          cold: { ref: "develop", sha: "a".repeat(40), workspace: "/workspace/checkout" },
+        },
+        isPrReview: false,
+        memoryBlockP: Promise.resolve(undefined),
+        verifiedAtAttach: false,
+        resume: undefined,
+        root: r.root,
+      });
+      expect(out.system).toContain("COLD CHECKOUT TARGET: acme/api on branch `develop`");
+      expect(out.system).toContain("already cloned and verified at `/workspace/checkout`");
+      expect(out.system).toContain("overrides any initial clone instruction");
+      expect(out.system).toContain("does not promise installed dependencies");
+      expect(out.system).not.toContain("seeded from the resident's snapshot");
+    },
+  );
+
   // docs/reference/specs/session-log.md item 10: what the session already knows
   // rides the prompt right after memory — the notepad, then the compaction summary.
   it("a follow-up seeded from its session carries its notes and the compaction's summary as one block after the memory block; a run without either carries no block", async () => {

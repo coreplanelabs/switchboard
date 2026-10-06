@@ -43,6 +43,7 @@ export default defineConfig({
     include: [
       "preflight.test.mjs",
       "gc.test.ts",
+      "repoRegistration.test.ts",
       "instanceSizing.test.ts",
       "refresh.test.ts",
       "instanceStep.test.ts",

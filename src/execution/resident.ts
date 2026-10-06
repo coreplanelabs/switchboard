@@ -894,7 +894,7 @@ export class ResidentOperations implements Operations {
  *  or timed out); of those, only a failure that is NOT `timedOut` may the
  *  factory's negative cache store (resident-repos.md item 25). */
 export type ResidentStatusProbe =
-  | { kind: "status"; state: string; reason: string; seed?: ResidentSeedHandle }
+  | { kind: "status"; state: string; reason: string; seed?: ResidentSeedHandle; defaultRef?: string }
   | {
       kind: "unreachable";
       error: string;
@@ -1078,6 +1078,7 @@ export class ResidentExecutor implements Executor {
     return {
       kind: "status",
       state: residentState(data.state),
+      ...(typeof data.defaultRef === "string" ? { defaultRef: data.defaultRef } : {}),
       reason: String(data.reason ?? ""),
       ...(seed ? { seed } : {}),
     };

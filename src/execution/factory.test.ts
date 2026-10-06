@@ -1,12 +1,14 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createServer } from "node:http";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { secretsFrom } from "../secrets.js";
 import { AGENTS, type AgentDef } from "../agents/registry.js";
 import { declaredProfile } from "../config/profile.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
+import { E2BExecutor } from "./e2b.js";
 import { ExecInfraError, LocalExecutor } from "./executor.js";
 import {
   DRAIN_FALLBACK_WAIT_MS,
@@ -613,7 +615,7 @@ describe("makeExecutor resident selection", () => {
     expect(calls).toEqual(["/status"]);
   });
 
-  it("a generation reclaimed during the resident probe cannot provision cold", async () => {
+  it.each(["down", "cold"])("a generation reclaimed during the resident probe cannot provision cold", async (state) => {
     stubEnvs();
     let ownsRun = true;
     const calls: string[] = [];
@@ -622,7 +624,7 @@ describe("makeExecutor resident selection", () => {
       vi.fn(async (url: unknown) => {
         calls.push(new URL(String(url)).pathname);
         ownsRun = false;
-        return new Response(JSON.stringify({ state: "down", reason: "install-failed" }));
+        return new Response(JSON.stringify({ state, reason: "install-failed" }));
       }),
     );
     const claim = vi.fn(async () => {
@@ -1968,6 +1970,461 @@ describe("makeExecutor resident selection", () => {
   // A repo that is simply not onboarded still runs — on the per-thread backend —
   // but the fall-through must be VISIBLE: the user needs to know coding
   // ran cold instead of on a warm, deps-ready resident, plus how to fix it.
+
+  describe("cold registration checkout", () => {
+    const SHA = "a".repeat(40);
+    const checkoutResult = (ref: string) => ({
+      exitCode: 0,
+      truncated: false,
+      stderr: "",
+      stdout: `/workspace/checkout\n${ref}\n${SHA}\n${SHA}\trefs/heads/${ref}\nhttps://door.example/git/jshttp/vary.git\n`,
+    });
+
+    it.each(["cloudflare", "e2b", "local"] as const)(
+      "%s prepares and verifies the registered default or explicit ref for coding and PR-less review",
+      async (type) => {
+        stubEnvs();
+        vi.stubEnv("E2B_API_KEY", "ekey");
+        const cold = { body: { state: "cold", reason: "", defaultRef: "develop" } };
+        const { calls } = stubFetch(cold, cold, cold, cold);
+        const exec = vi.fn(async (_command: string) => checkoutResult("develop"));
+        const e2b = Object.assign(new LocalExecutor("/tmp/cold-test"), { execResult: exec });
+        const open = vi.spyOn(E2BExecutor, "open").mockResolvedValue(e2b as unknown as E2BExecutor);
+        const localExec = vi.spyOn(LocalExecutor.prototype, "execResult").mockImplementation(exec);
+        const remoteExec = vi.spyOn(CloudflareSandboxExecutor.prototype, "execResult").mockImplementation(exec);
+        try {
+          for (const agent of ["coding", "review"]) {
+            for (const ref of [undefined, "feature"]) {
+              const effective = ref ?? "develop";
+              exec.mockResolvedValue(checkoutResult(effective));
+              const selection = await makeExecutor(
+                { ...residentOpts(), execution: { ...residentOpts().execution, type } },
+                { ...repoCtx(), ...ctx(agent), ref },
+              );
+              expect(selection.backend).toBe(type === "cloudflare" ? "sandbox" : type);
+              expect(selection.resident).toBeFalsy();
+              expect(selection.seeded).toBeUndefined();
+              expect(selection.cold).toEqual({ ref: effective, sha: SHA, workspace: "/workspace/checkout" });
+              expect(workspaceBindingFor(selection)).toMatchObject({
+                ref: effective,
+                workspace: "/workspace/checkout",
+              });
+              expect(exec.mock.calls.at(-1)?.[0]).toContain(`clone --quiet --single-branch --branch '${effective}'`);
+              expect(exec.mock.calls.at(-1)?.[0]).toContain("symbolic-ref --quiet --short HEAD");
+            }
+          }
+          expect(calls).toEqual(["/status", "/status", "/status", "/status"]);
+        } finally {
+          open.mockRestore();
+          localExec.mockRestore();
+          remoteExec.mockRestore();
+        }
+      },
+    );
+
+    it("keeps exact PR-head checkout preparation authoritative", async () => {
+      stubEnvs();
+      stubFetch({ body: { state: "cold", defaultRef: "develop" } });
+      const exec = vi.spyOn(CloudflareSandboxExecutor.prototype, "execResult");
+      try {
+        const selected = await makeExecutor(residentOpts(), {
+          ...repoCtx(),
+          ...ctx("review"),
+          ref: "pr-head",
+          headSha: SHA,
+        });
+        expect(selected.cold).toBeUndefined();
+        expect(exec).not.toHaveBeenCalled();
+      } finally {
+        exec.mockRestore();
+      }
+    });
+
+    it("keeps an owned Ship branch and expected head authoritative", async () => {
+      stubEnvs();
+      stubFetch({ body: { state: "cold", defaultRef: "develop" } });
+      const exec = vi
+        .spyOn(CloudflareSandboxExecutor.prototype, "execResult")
+        .mockResolvedValue(checkoutResult("plan/unit"));
+      try {
+        const selected = await makeExecutor(residentOpts(), { ...repoCtx(), ref: "plan/unit" });
+        expect(selected.cold?.ref).toBe("plan/unit");
+        const verified = await prepareColdPublicationCheckout(selected, {
+          repo: "jshttp/vary",
+          ref: "plan/unit",
+          expectedHeadSha: SHA,
+          doorUrl: "https://door.example",
+        });
+        expect(verified.ref).toBe("plan/unit");
+        await expect(
+          prepareColdPublicationCheckout(selected, {
+            repo: "jshttp/vary",
+            ref: "plan/unit",
+            expectedHeadSha: "b".repeat(40),
+            doorUrl: "https://door.example",
+          }),
+        ).rejects.toThrow(/could not be verified/);
+      } finally {
+        exec.mockRestore();
+      }
+    });
+
+    it("refuses a mismatched observed branch instead of admitting cold model work", async () => {
+      stubEnvs();
+      stubFetch({ body: { state: "cold", defaultRef: "develop" } });
+      const exec = vi
+        .spyOn(CloudflareSandboxExecutor.prototype, "execResult")
+        .mockResolvedValue(checkoutResult("main"));
+      try {
+        await expect(makeExecutor(residentOpts(), { ...repoCtx(), ref: undefined })).rejects.toThrow(
+          /could not be verified/,
+        );
+      } finally {
+        exec.mockRestore();
+      }
+    });
+
+    it("a generation reclaimed during checkout verification cannot admit cold model work", async () => {
+      stubEnvs();
+      stubFetch({ body: { state: "cold", defaultRef: "develop" } });
+      let owns = true;
+      const exec = vi.spyOn(CloudflareSandboxExecutor.prototype, "execResult").mockImplementation(async () => {
+        owns = false;
+        return checkoutResult("develop");
+      });
+      try {
+        await expect(
+          makeExecutor(residentOpts(), {
+            ...repoCtx(),
+            ref: undefined,
+            residentClaim: async () => {
+              if (!owns) throw new Error("fenced");
+              return 7;
+            },
+          }),
+        ).rejects.toThrow("fenced");
+      } finally {
+        exec.mockRestore();
+      }
+    });
+
+    it.each(["sandbox", "e2b", "local"] as const)(
+      "resumes the recorded %s workspace and ref without consulting a changed registration",
+      async (backend) => {
+        stubEnvs();
+        vi.stubEnv("E2B_API_KEY", "ekey");
+        const { calls } = stubFetch({ body: { state: "cold", defaultRef: "changed" } });
+        const recorded = { backend, ref: "develop", workspace: "/workspace/checkout" };
+        const exec = vi.fn(async (_command: string) => checkoutResult("develop"));
+        const e2b = Object.assign(new LocalExecutor("/tmp/cold-test"), {
+          execResult: exec,
+          publishBranchResult: vi.fn(),
+        });
+        const open = vi.spyOn(E2BExecutor, "open").mockResolvedValue(e2b as unknown as E2BExecutor);
+        const localExec = vi.spyOn(LocalExecutor.prototype, "execResult").mockImplementation(exec);
+        const remoteExec = vi.spyOn(CloudflareSandboxExecutor.prototype, "execResult").mockImplementation(exec);
+        try {
+          const selected = await makeExecutor(residentOpts(), { ...repoCtx(), ref: undefined, reattach: recorded });
+          expect(selected.backend).toBe(backend);
+          expect(selected.cold).toEqual({ ref: "develop", sha: SHA, workspace: "/workspace/checkout" });
+          expect(exec.mock.calls[0]?.[0]).not.toContain("clone");
+          expect(calls).toEqual([]);
+        } finally {
+          open.mockRestore();
+          localExec.mockRestore();
+          remoteExec.mockRestore();
+        }
+      },
+    );
+
+    it("clones develop rather than a real remote's main default", async () => {
+      stubEnvs();
+      const d = dirs();
+      const source = join(d.dataDir, "remote");
+      mkdirSync(source, { recursive: true });
+      const git = (...args: string[]) => execFileSync("git", ["-C", source, ...args], { encoding: "utf8" }).trim();
+      git("init", "-q", "-b", "main");
+      writeFileSync(join(source, "README.md"), "main");
+      git("add", ".");
+      git("-c", "user.name=fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "fixture");
+      git("branch", "develop");
+      git("update-server-info");
+      // A loopback dumb-HTTP remote exercises real clone/branch observation.
+      const server = createServer((req, res) => {
+        const path = new URL(req.url!, "http://fixture").pathname.replace("/git/jshttp/vary.git/", "");
+        try {
+          res.end(readFileSync(join(source, ".git", path)));
+        } catch {
+          res.writeHead(404).end();
+        }
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const port = (server.address() as import("node:net").AddressInfo).port;
+      try {
+        stubFetch({ body: { state: "cold", defaultRef: "develop" } });
+        const selected = await makeExecutor(
+          { ...d, execution: { type: "local", resident: residentOpts().execution!.resident } },
+          {
+            ...repoCtx(),
+            ref: undefined,
+            githubDoor: { baseUrl: `http://127.0.0.1:${port}`, bearer: "sbr_fixture.secret" },
+          },
+        );
+        expect(git("symbolic-ref", "--short", "HEAD")).toBe("main");
+        expect(selected.cold?.ref).toBe("develop");
+        expect(await selected.executor.exec(`git -C '${selected.cold!.workspace}' symbolic-ref --short HEAD`)).toBe(
+          "develop\n",
+        );
+      } finally {
+        await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+      }
+    });
+
+    it.each([
+      ["cloudflare", "coding"],
+      ["cloudflare", "review"],
+      ["e2b", "coding"],
+      ["e2b", "review"],
+      ["local", "coding"],
+      ["local", "review"],
+    ] as const)("%s %s prepares retained workspaces without losing the predecessor", async (type, agent) => {
+      stubEnvs();
+      vi.stubEnv("E2B_API_KEY", "ekey");
+      const d = dirs();
+      const source = join(d.dataDir, "remote");
+      mkdirSync(source, { recursive: true });
+      const git = (path: string, ...args: string[]) =>
+        execFileSync("git", ["-C", path, ...args], { encoding: "utf8" }).trim();
+      git(source, "init", "-q", "-b", "main");
+      writeFileSync(join(source, "README.md"), "initial");
+      git(source, "add", ".");
+      git(source, "-c", "user.name=fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "initial");
+      git(source, "branch", "develop");
+      git(source, "update-server-info");
+      const otherRepo = join(d.dataDir, "other-repository");
+      mkdirSync(otherRepo, { recursive: true });
+      git(otherRepo, "init", "-q", "-b", "develop");
+      writeFileSync(join(otherRepo, "README.md"), "another authorized repository");
+      git(otherRepo, "add", ".");
+      git(otherRepo, "-c", "user.name=fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "other");
+      git(otherRepo, "update-server-info");
+      const server = createServer((req, res) => {
+        const url = new URL(req.url!, "http://fixture");
+        const repository = url.pathname.startsWith("/git/acme/api.git/") ? otherRepo : source;
+        const path = url.pathname.replace(/^\/git\/[^/]+\/[^/]+\.git\//, "");
+        try {
+          res.end(readFileSync(join(repository, ".git", path)));
+        } catch {
+          res.writeHead(404).end();
+        }
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const doorUrl = `http://127.0.0.1:${(server.address() as import("node:net").AddressInfo).port}`;
+      const workspace = join(d.workspaceDir, "retained");
+      mkdirSync(workspace, { recursive: true });
+      const local = new LocalExecutor(workspace);
+      const open = vi.spyOn(E2BExecutor, "open").mockResolvedValue(local as unknown as E2BExecutor);
+      const remoteExec = vi
+        .spyOn(CloudflareSandboxExecutor.prototype, "execResult")
+        .mockImplementation(local.execResult.bind(local));
+      try {
+        // Local uses its stable thread directory; the remote doubles retain one VM.
+        const opts = { ...d, execution: { ...residentOpts().execution, type } };
+        const context = { ...repoCtx(), ...ctx(agent), githubDoor: { baseUrl: doorUrl, bearer: "sbr_fixture.secret" } };
+        stubFetch({ body: { state: "cold", defaultRef: "main" } });
+        const first = await makeExecutor(opts, { ...context, ref: undefined });
+        const prior = first.cold!.workspace;
+        const oldHead = git(prior, "rev-parse", "HEAD");
+        const scenarios = [
+          { name: "explicit branch", repo: "jshttp/vary", ref: "develop", defaultRef: "main" },
+          { name: "changed default", repo: "jshttp/vary", ref: undefined, defaultRef: "develop" },
+          { name: "advanced remote", repo: "jshttp/vary", ref: undefined, defaultRef: "main" },
+          { name: "new loopback door", repo: "jshttp/vary", ref: undefined, defaultRef: "main" },
+          { name: "redirected repository", repo: "acme/api", ref: undefined, defaultRef: "develop" },
+        ];
+        for (const scenario of scenarios) {
+          if (scenario.name === "advanced remote") {
+            writeFileSync(join(source, "README.md"), "advanced");
+            git(source, "add", ".");
+            git(source, "-c", "user.name=fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "advance");
+            git(source, "update-server-info");
+          }
+          if (scenario.name === "new loopback door")
+            git(prior, "remote", "set-url", "origin", "http://127.0.0.1:1/git/jshttp/vary.git");
+          stubFetch({ body: { state: "cold", defaultRef: scenario.defaultRef } });
+          const selected = await makeExecutor(opts, {
+            ...context,
+            repo: scenario.repo,
+            ref: scenario.ref,
+            ...(agent === "review" ? { runId: `review-${scenarios.indexOf(scenario)}` } : {}),
+          });
+          const ref = scenario.ref ?? scenario.defaultRef;
+          expect(selected.cold?.ref, scenario.name).toBe(ref);
+          expect(selected.cold?.sha, scenario.name).toBe(
+            git(scenario.repo === "acme/api" ? otherRepo : source, "rev-parse", ref),
+          );
+          expect(git(selected.cold!.workspace, "remote", "get-url", "origin")).toBe(
+            `${doorUrl}/git/${scenario.repo}.git`,
+          );
+          expect(git(prior, "rev-parse", "HEAD")).toBe(oldHead);
+          expect(selected.resident).toBeFalsy();
+          expect(selected.seeded).toBeUndefined();
+        }
+        // Fresh setup must also preserve unpublished commits and every kind of private byte.
+        writeFileSync(join(prior, "unpublished.txt"), "committed locally");
+        git(prior, "add", ".");
+        git(prior, "-c", "user.name=fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "unpublished");
+        const unpublishedHead = git(prior, "rev-parse", "HEAD");
+        writeFileSync(join(prior, "README.md"), "dirty");
+        writeFileSync(join(prior, "untracked.txt"), "private");
+        writeFileSync(join(prior, ".git", "info", "exclude"), "ignored.txt\n");
+        writeFileSync(join(prior, "ignored.txt"), "ignored private bytes");
+        stubFetch({ body: { state: "cold", defaultRef: "develop" } });
+        const fresh = await makeExecutor(opts, { ...context, ref: undefined });
+        expect(fresh.cold?.ref).toBe("develop");
+        expect(git(prior, "rev-parse", "HEAD")).toBe(unpublishedHead);
+        expect(readFileSync(join(prior, "README.md"), "utf8")).toBe("dirty");
+        expect(readFileSync(join(prior, "untracked.txt"), "utf8")).toBe("private");
+        expect(readFileSync(join(prior, "ignored.txt"), "utf8")).toBe("ignored private bytes");
+        // Recovery observes that exact predecessor, not the current registration or remote tip.
+        const recoveryProbe = stubFetch({ body: { state: "cold", defaultRef: "develop" } });
+        git(prior, "remote", "set-url", "origin", `${doorUrl}/git/jshttp/vary.git`);
+        const recovered = await makeExecutor(opts, {
+          ...context,
+          ref: undefined,
+          reattach: workspaceBindingFor(first),
+        });
+        expect(recovered.cold).toEqual({ workspace: prior, ref: "main", sha: unpublishedHead });
+        expect(workspaceBindingFor(recovered, "repo-resident", workspaceBindingFor(first))?.publicationBaseSha).toBe(
+          oldHead,
+        );
+        expect(recoveryProbe.calls).toEqual([]);
+        expect(readFileSync(join(prior, "README.md"), "utf8")).toBe("dirty");
+      } finally {
+        open.mockRestore();
+        remoteExec.mockRestore();
+        await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+      }
+    });
+
+    it("cold PR-less reviews keep their run-key sandboxes separate from the coding predecessor", async () => {
+      stubEnvs();
+      const cold = { body: { state: "cold", defaultRef: "develop" } };
+      stubFetch(cold, cold, cold);
+      const exec = vi
+        .spyOn(CloudflareSandboxExecutor.prototype, "execResult")
+        .mockResolvedValue(checkoutResult("develop"));
+      try {
+        const coding = await makeExecutor(residentOpts(), { ...repoCtx(), ...ctx("coding"), ref: undefined });
+        const first = await makeExecutor(residentOpts(), {
+          ...repoCtx(),
+          ...ctx("review"),
+          ref: undefined,
+          runId: "first-review",
+        });
+        const second = await makeExecutor(residentOpts(), {
+          ...repoCtx(),
+          ...ctx("review"),
+          ref: undefined,
+          runId: "second-review",
+        });
+        expect(coding.sandboxKey).toBeUndefined();
+        expect(first.sandboxKey).toBe("review:first-review");
+        expect(second.sandboxKey).toBe("review:second-review");
+        expect(first.cold?.ref).toBe("develop");
+        expect(second.cold?.ref).toBe("develop");
+      } finally {
+        exec.mockRestore();
+      }
+    });
+
+    it.each(["expected-head", "recorded"] as const)(
+      "fresh preparation cannot override a %s target",
+      async (binding) => {
+        const execResult = vi.fn();
+        await expect(
+          prepareColdPublicationCheckout(
+            { executor: { execResult } as unknown as LocalExecutor, backend: "local" },
+            {
+              repo: "jshttp/vary",
+              ref: "main",
+              doorUrl: "https://door.example",
+              freshRegistration: true,
+              ...(binding === "expected-head"
+                ? { expectedHeadSha: SHA }
+                : { recorded: { backend: "local" as const, workspace: "/workspace/checkout", ref: "main" } }),
+            },
+          ),
+        ).rejects.toThrow(/could not be verified/);
+        expect(execResult).not.toHaveBeenCalled();
+      },
+    );
+
+    it("a stop already pending starts no cold checkout command", async () => {
+      const controller = new AbortController();
+      controller.abort();
+      const execResult = vi.fn();
+      await expect(
+        prepareColdPublicationCheckout(
+          { executor: { execResult } as unknown as LocalExecutor, backend: "local" },
+          { repo: "jshttp/vary", ref: "main", doorUrl: "https://door.example", freshRegistration: true },
+          controller.signal,
+        ),
+      ).rejects.toMatchObject({ reason: "aborted" });
+      expect(execResult).not.toHaveBeenCalled();
+    });
+
+    it.each([false, true])(
+      "preserves a typed checkout stop on fresh/recovery setup (recorded=%s)",
+      async (recorded) => {
+        const stopped = new ExecInfraError("checkout stopped", "aborted");
+        const controller = new AbortController();
+        const execResult = vi.fn(async () => {
+          controller.abort();
+          throw stopped;
+        });
+        const selection = { executor: { execResult } as unknown as LocalExecutor, backend: "local" as const };
+        await expect(
+          prepareColdPublicationCheckout(
+            selection,
+            {
+              repo: "jshttp/vary",
+              ref: "main",
+              doorUrl: "https://door.example",
+              ...(recorded
+                ? { recorded: { backend: "local" as const, workspace: "/workspace/checkout", ref: "main" } }
+                : { freshRegistration: true }),
+            },
+            controller.signal,
+          ),
+        ).rejects.toBe(stopped);
+      },
+    );
+
+    it("a checkout failure beside a pending stop remains a setup failure", async () => {
+      const controller = new AbortController();
+      const execResult = vi.fn(async () => {
+        controller.abort();
+        throw new Error("actual preparation failure");
+      });
+      await expect(
+        prepareColdPublicationCheckout(
+          { executor: { execResult } as unknown as LocalExecutor, backend: "local" },
+          { repo: "jshttp/vary", ref: "main", doorUrl: "https://door.example" },
+          controller.signal,
+        ),
+      ).rejects.toThrow(/could not be verified/);
+    });
+
+    it("remains discoverable without a resident attach", async () => {
+      stubEnvs();
+      const { calls } = stubFetch({ body: { state: "cold", defaultRef: "develop" } });
+      const probe = residentOnboardedProbe(residentOpts().execution?.resident);
+      expect(await probe?.("jshttp/vary")).toBe(true);
+      expect(calls).toEqual(["/status"]);
+    });
+  });
+
   it("404 not-onboarded → per-thread path with a named cold-fallback note pointing at onboarding", async () => {
     stubEnvs();
     const { fn } = stubFetch({ status: 404, body: { error: "unknown resource" } });
@@ -2768,6 +3225,16 @@ describe("residentSlugsLister", () => {
     expect(new Headers(init.headers).get("authorization")).toBe("Bearer admin-tok");
   });
 
+  it("includes metadata-only registrations in repository name discovery", async () => {
+    stubFetch(
+      () =>
+        new Response(
+          JSON.stringify({ residents: [], repositories: [{ resource: "repo:Acme/API", noResident: true }] }),
+        ),
+    );
+    await expect(residentSlugsLister(cfg, env)?.()).resolves.toEqual(["acme/api"]);
+  });
+
   it("is undefined without the resident config or the admin bearer (names are then ignored by the resolver)", () => {
     expect(residentSlugsLister(undefined, env)).toBeUndefined();
     expect(residentSlugsLister(cfg, secretsFrom({}))).toBeUndefined();
@@ -2963,6 +3430,39 @@ describe("the workspace binding on the row", () => {
       publicationBaseSha: sha,
     });
   });
+
+  it.each(["unchanged", "selected head moved", "expected head differs", "selected path differs"])(
+    "rechecks the prepared cold checkout with strict publication identity: %s",
+    async (scenario) => {
+      const sha = "a".repeat(40);
+      const other = "b".repeat(40);
+      const workspace = "/workspace/.switchboard-cold.original/checkout";
+      const observed = scenario === "selected head moved" ? other : sha;
+      const path = scenario === "selected path differs" ? "/workspace/checkout" : workspace;
+      const execResult = vi.fn(async (_command: string) => ({
+        exitCode: 0,
+        truncated: false,
+        stderr: "",
+        stdout: `${path}\nplan/p/u1\n${observed}\n${observed}\trefs/heads/plan/p/u1\nhttps://door.example/git/o/r.git\n`,
+      }));
+      const selected = {
+        backend: "sandbox" as const,
+        executor: Object.assign(new LocalExecutor("/tmp/x"), { execResult }),
+      };
+      const prepared = { workspace, ref: "plan/p/u1", sha };
+      const result = prepareColdPublicationCheckout(selected, {
+        repo: "o/r",
+        ref: prepared.ref,
+        doorUrl: "https://door.example",
+        prepared,
+        expectedHeadSha: scenario === "expected head differs" ? other : undefined,
+      });
+      if (scenario === "unchanged") await expect(result).resolves.toEqual(prepared);
+      else await expect(result).rejects.toThrow(/cold publication checkout/i);
+      expect(execResult.mock.calls[0]?.[0]).toContain(`git -C '${workspace}' rev-parse`);
+      expect(execResult.mock.calls[0]?.[0]).not.toContain("clone");
+    },
+  );
 
   it("rejects an unverified or moved cold branch without creating an initial lease", async () => {
     const sha = "a".repeat(40);
@@ -3964,15 +4464,18 @@ describe("makeExecutor pilot ready environment", () => {
     expect(calls).toEqual([]);
   });
 
-  it("refuses a repository without a warm snapshot instead of provisioning cold", async () => {
-    envs();
-    const calls = fetches({ body: { state: "not-onboarded", reason: "", snapshot: null } });
-    await expect(makeExecutor(opts(), context())).rejects.toMatchObject({
-      reason: "repository_not_onboarded",
-      beforeModel: true,
-    });
-    expect(calls).toEqual(["/status"]);
-  });
+  it.each(["not-onboarded", "cold"])(
+    "refuses a %s repository without a warm snapshot instead of provisioning cold",
+    async (state) => {
+      envs();
+      const calls = fetches({ body: { state, reason: "", snapshot: null } });
+      await expect(makeExecutor(opts(), context())).rejects.toMatchObject({
+        reason: "repository_not_onboarded",
+        beforeModel: true,
+      });
+      expect(calls).toEqual(["/status"]);
+    },
+  );
 
   it("admits a warm bound resident only after installed deps and the declared tool pass a model-free check", async () => {
     envs();

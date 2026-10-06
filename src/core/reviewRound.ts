@@ -450,6 +450,8 @@ export function makeSystemComposer(input: {
   /** The sandbox was seeded from the resident's snapshot (execution.md item 26):
    *  swaps in the agent's seeded variant, naming the checkout. Never with `resident`. */
   seeded?: { workspace: string } | undefined;
+  /** A verified cold checkout; unlike a seed it promises no installed dependencies. */
+  cold?: { ref: string; workspace: string };
   /** Set for a PR review round: the REVIEW TARGET block's coordinates. */
   prTarget:
     { repo: string; pr: number; ref: string | undefined; baseRef: string | undefined; size?: PrSize } | undefined;
@@ -516,6 +518,11 @@ export function makeSystemComposer(input: {
     // memory block up front.
     return [
       residentSystem ?? seededSystem ?? agent.system,
+      ...(!resident && !seeded && input.cold
+        ? [
+            `COLD CHECKOUT TARGET: ${input.repo} on branch \`${input.cold.ref}\` is already cloned and verified at \`${input.cold.workspace}\`. Work in that checkout; do not clone again or switch to the repository's default branch. This checkout preparation overrides any initial clone instruction above. This checkout does not promise installed dependencies. Confirm the branch with \`git -C ${input.cold.workspace} branch --show-current\` before work.`,
+          ]
+        : []),
       targetBlock(head),
       input.contract,
       blocks.skills,

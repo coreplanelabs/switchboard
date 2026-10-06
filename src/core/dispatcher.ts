@@ -3538,6 +3538,12 @@ export async function dispatch(
     }
     const { round } = attach;
     setupRound = round;
+    // Cold registration preparation resolved and observed the effective ref.
+    // Keep it in the run context as well as the checkout and durable binding.
+    if (repoCtx.ref === undefined && round.selection.cold !== undefined) {
+      repoCtx = { ...repoCtx, ref: round.selection.cold.ref };
+      if (!resume) publishMeta(repoCtx);
+    }
     attachedPilotResume = !!(resume && preserveOnReattachRefusal);
     // A resident wait owns only its short wait deadline, not the run's budget.
     // Keep the admission deadline across setup transitions; if a running lease
@@ -3711,9 +3717,9 @@ export async function dispatch(
     }
     if (headGate.kind === "refused") return ended;
     repoCtx = headGate.repoCtx;
-    // A fresh unseeded Ship child has no resident/seed head to lease. Clone
-    // its owned branch and verify the remote tip before claiming the row or
-    // giving the model a turn; the claim persists the checkout and first head.
+    // A fresh unseeded Ship child needs a verified fetched head before the
+    // model turn. Recheck the factory's prepared path when present: its clean
+    // sibling must never be replaced by a retained predecessor at checkout.
     if (
       !resume &&
       coordinator !== undefined &&
@@ -3732,6 +3738,7 @@ export async function dispatch(
           repo: repoCtx.repo,
           ref: repoCtx.ref,
           doorUrl: githubDoor.baseUrl,
+          ...(round.selection.cold ? { prepared: round.selection.cold } : {}),
           ...((coordinator.publication?.expectedHeadSha ?? recovery?.expectedHeadSha)
             ? { expectedHeadSha: coordinator.publication?.expectedHeadSha ?? recovery?.expectedHeadSha }
             : {}),

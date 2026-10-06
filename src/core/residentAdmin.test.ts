@@ -98,6 +98,16 @@ describe("makeResidentAdminClient (real fetch client)", () => {
     expect(JSON.parse(String(calls[1].init.body))).toEqual({ resource: "repo:acme/api", defaultRef: "main" });
   });
 
+  it("cold registration uses a dedicated route and never retries onboarding on an older Worker", async () => {
+    const { calls } = stubFetch({ status: 404, body: { error: "unknown route" } });
+    const client = makeResidentAdminClient("https://resident.example", "admin-tok");
+    const result = await client.onboard({ resource: "repo:acme/api", noResident: true, defaultRef: "main" });
+    expect(result.status).toBe(404);
+    expect(calls).toHaveLength(1);
+    expect(route(calls[0])).toBe("/register");
+    expect((calls[0].init.headers as Record<string, string>).authorization).toBe("Bearer admin-tok");
+  });
+
   it("offboard/rebuild pass the resource and a dryRun flag only when set", async () => {
     const { calls } = stubFetch({ body: {} }, { body: {} });
     const client = makeResidentAdminClient("https://resident.example", "admin-tok");

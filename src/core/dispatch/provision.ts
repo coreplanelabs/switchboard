@@ -1541,6 +1541,7 @@ export async function composePrompt(deps: ProvisionDeps, ctx: PromptContext): Pr
     repo: repoCtx.repo,
     workspace: binding?.workspace,
     ...(seeded ? { seeded: { workspace: seeded.workspace } } : {}),
+    ...(selection.cold ? { cold: selection.cold } : {}),
     prTarget:
       isPrReview && repoCtx.repo && repoCtx.pr !== undefined
         ? {

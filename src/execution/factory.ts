@@ -10,7 +10,14 @@ import { residentTraceOf, type ResidentTrace } from "./residentTrace.js";
 import { mkdirSync } from "node:fs";
 import type { AgentDef, Identity, MachineClass } from "../agents/registry.js";
 import type { RunProfile } from "../config/profile.js";
-import { LocalExecutor, execDeadline, isDeadlineMiss, isRunStopError, type Executor } from "./executor.js";
+import {
+  ExecInfraError,
+  LocalExecutor,
+  execDeadline,
+  isDeadlineMiss,
+  isRunStopError,
+  type Executor,
+} from "./executor.js";
 import { E2BExecutor } from "./e2b.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import { fleetBusyEndingFactsOf } from "./sandboxErrors.js";
@@ -43,7 +50,7 @@ import {
   type ResidentExecutorOptions,
   type ResidentStatusProbe,
 } from "./resident.js";
-import { repoResourceId } from "../core/residentAdmin.js";
+import { repoResourceId, validRef } from "../core/residentAdmin.js";
 import { nearMatch } from "../core/nearMatch.js";
 import { githubAppConfigured, resolveGithubIdentity, type GithubTokenScope } from "./githubApp.js";
 import { bindingOf, type BindingSource } from "./authorBinding.js";
@@ -295,12 +302,21 @@ const COLD_CHECKOUT_PATH = /^\/(?:[A-Za-z0-9._-]+\/)*checkout$/;
 const safeColdCheckout = (path: string): boolean =>
   COLD_CHECKOUT_PATH.test(path) && !path.split("/").some((part) => part === "." || part === "..");
 
-/** Clone (or re-observe on resume) the coordinator's branch before model work.
- * Only a structured successful command can establish an initial publication lease;
- * a stale local HEAD, ambiguous directory or failed remote read establishes none. */
+/** Prepare a fresh registration, or strictly observe a coordinator/recovery target.
+ * A retained checkout has no fresh-run provenance: clone beside it rather than
+ * mutate a predecessor's unpublished work. Only a structured successful command
+ * can establish an initial publication lease; a stale HEAD establishes none. */
 export async function prepareColdPublicationCheckout(
   selection: ExecutorSelection,
-  target: { repo: string; ref: string; doorUrl: string; expectedHeadSha?: string; recorded?: WorkspaceBinding },
+  target: {
+    repo: string;
+    ref: string;
+    doorUrl: string;
+    expectedHeadSha?: string;
+    recorded?: WorkspaceBinding;
+    prepared?: NonNullable<ExecutorSelection["cold"]>;
+    freshRegistration?: boolean;
+  },
   signal?: AbortSignal,
 ): Promise<NonNullable<ExecutorSelection["cold"]>> {
   const fail = () => new Error("cold publication checkout or fetched branch head could not be verified");
@@ -310,24 +326,39 @@ export async function prepareColdPublicationCheckout(
     !/^[A-Za-z0-9._/-]+$/.test(target.ref) ||
     target.ref.includes("..") ||
     target.ref.startsWith("-") ||
+    (target.freshRegistration &&
+      (target.recorded !== undefined || target.prepared !== undefined || target.expectedHeadSha !== undefined)) ||
+    (target.prepared &&
+      (target.recorded !== undefined ||
+        !safeColdCheckout(target.prepared.workspace) ||
+        target.prepared.ref !== target.ref ||
+        !/^[0-9a-f]{40}$/.test(target.prepared.sha))) ||
     (target.recorded &&
       (!target.recorded.workspace ||
         !safeColdCheckout(target.recorded.workspace) ||
         (target.recorded.ref !== undefined && target.recorded.ref !== target.ref)))
   )
     throw fail();
+  if (signal?.aborted) throw new ExecInfraError("cold checkout preparation aborted: the run was stopped", "aborted");
   const remote = seedDoorRemote(target.doorUrl, target.repo);
   const helper = `!f() { test -n "$GH_ENTERPRISE_TOKEN" || exit 1; printf '%s\\n' 'username=x-access-token' "password=$GH_ENTERPRISE_TOKEN"; }; f`;
-  const checkout = target.recorded?.workspace ?? "checkout";
-  const git = `git -C ${shellQuote(checkout)}`;
+  const checkout = target.recorded?.workspace ?? target.prepared?.workspace ?? "checkout";
+  const git = target.freshRegistration ? 'git -C "$checkout"' : `git -C ${shellQuote(checkout)}`;
+  const clone = `git -c credential.helper= -c credential.helper=${shellQuote(helper)} clone --quiet --single-branch --branch ${shellQuote(target.ref)} ${shellQuote(remote)}`;
   const command = [
     "set -eu",
     `git check-ref-format --branch ${shellQuote(target.ref)} >/dev/null`,
-    ...(target.recorded
-      ? []
-      : [
-          `if test ! -e checkout; then git -c credential.helper= -c credential.helper=${shellQuote(helper)} clone --quiet --single-branch --branch ${shellQuote(target.ref)} ${shellQuote(remote)} checkout; fi`,
-        ]),
+    ...(target.freshRegistration
+      ? [
+          "checkout=checkout",
+          // Never remove, reset, fetch through or repoint an unbound predecessor.
+          // Even a clean tree can contain unpublished commits or ignored bytes.
+          'if test -e "$checkout" || test -L "$checkout"; then checkout="$(mktemp -d .switchboard-cold.XXXXXXXX)/checkout"; fi',
+          `${clone} "$checkout"`,
+        ]
+      : target.recorded || target.prepared
+        ? []
+        : [`if test ! -e checkout; then ${clone} checkout; fi`]),
     `${git} rev-parse --show-toplevel`,
     `${git} symbolic-ref --quiet --short HEAD`,
     `${git} rev-parse HEAD`,
@@ -336,7 +367,10 @@ export async function prepareColdPublicationCheckout(
   ].join("\n");
   const result = await selection.executor
     .execResult(command, { timeoutMs: BASH_TIMEOUT_MS, signal })
-    .catch(() => undefined);
+    .catch((err: unknown) => {
+      if (isRunStopError(err)) throw err;
+      return undefined;
+    });
   if (!result || result.exitCode !== 0 || result.truncated) throw fail();
   const [path, ref, sha, remoteLine, origin, ...extra] = result.stdout.trim().split(/\r?\n/);
   const remoteSha = remoteLine?.match(/^([0-9a-f]{40})\trefs\/heads\/(.+)$/);
@@ -350,6 +384,7 @@ export async function prepareColdPublicationCheckout(
     remoteSha[2] !== target.ref ||
     origin !== remote ||
     extra.length > 0 ||
+    (target.prepared !== undefined && (target.prepared.sha !== sha || target.prepared.workspace !== path)) ||
     (!target.recorded &&
       (remoteSha[1] !== sha || (target.expectedHeadSha !== undefined && target.expectedHeadSha !== sha)))
   )
@@ -580,7 +615,7 @@ export interface ExecutorSelection {
    *  what it is on — the dispatcher's seeded prompt variant and the card read
    *  it. Unset on every other path, the cold sandbox included. */
   seeded?: SeededSandbox;
-  /** Verified clone of a precreated branch, when neither attach nor seed supplied a checkout. */
+  /** Verified cold checkout, when neither attach nor seed supplied one. */
   cold?: { ref: string; sha: string; workspace: string };
   /** Where the run's commands execute (docs/reference/specs/tracing.md): recorded on its
    *  `exec.*` spans. Every production selection names one; a test double may
@@ -1126,6 +1161,31 @@ async function selectExecutor(
     } else if (probe.kind === "unreachable") {
       // A probe waited through a typed blip that never cleared names the wait.
       reason = oneLine(`resident unreachable (${probe.error})${waitedNote(probeWaitMs)}`);
+    } else if (probe.state === "cold") {
+      if (ready !== undefined)
+        throw readyFailure("repository_not_onboarded", "The pilot requires a warm repository environment.");
+      await recheckOwner();
+      const ref = ctx.ref ?? (probe.defaultRef ? validRef(probe.defaultRef) : undefined);
+      const executor = await makePerThreadExecutor(opts, perThreadCheckout(opts, { ...ctx, ref }), sandboxKey);
+      await recheckOwner();
+      const selection: ExecutorSelection = {
+        executor,
+        backend: perThreadBackend(opts),
+        note: "repo registered without a resident — running in a per-thread sandbox",
+      };
+      // Executor repo/ref options do not prepare a checkout. Ordinary cold
+      // registrations must clone and observe the effective branch before the
+      // model starts. A resolved exact head belongs to the caller's PR/Ship
+      // preparation instead; never substitute the registry default for it.
+      if (ref && ctx.githubDoor && ctx.headSha === undefined) {
+        selection.cold = await prepareColdPublicationCheckout(
+          selection,
+          { repo: ctx.repo, ref, doorUrl: ctx.githubDoor.baseUrl, freshRegistration: true },
+          ctx.stopSignal,
+        );
+        await recheckOwner();
+      }
+      return selection;
     } else if (probe.state !== "not-onboarded") {
       // Item 27: a restore that landed on a non-serviceable state still names the wait.
       const wait = waitedForRestore ? " after waiting for the resident's restore" : "";
@@ -1365,6 +1425,14 @@ async function reattachWorkspace(
   const spentAtEntry = leaseSpent();
   if (spentAtEntry) throw spentAtEntry;
   if (recorded.backend !== "resident") {
+    // Recovery follows the saved backend/ref, not today's registry default or
+    // configured fresh-run backend. Cloudflare availability is checked before
+    // selection; local and E2B retain their recorded backend here.
+    opts = {
+      ...opts,
+      execution: { ...opts.execution, type: recorded.backend === "sandbox" ? "cloudflare" : recorded.backend },
+    };
+    ctx = { ...ctx, ref: recorded.ref ?? ctx.ref };
     if (ctx.profile.machine === "blank") assertProfileIdentity(ctx.profile.identity, ctx.profile.machine);
     const input =
       ctx.profile.machine === "blank"
@@ -1378,8 +1446,7 @@ async function reattachWorkspace(
         ctx.repo &&
         ctx.ref &&
         ctx.githubDoor &&
-        executor.execResult &&
-        executor.publishBranchResult
+        executor.execResult
       ) {
         const cold = await prepareColdPublicationCheckout(
           { executor, backend: perThreadBackend(opts) },
@@ -1727,9 +1794,9 @@ export function residentSlugsLister(
       return undefined;
     }
     if (!res.ok) return undefined;
-    const data = (await res.json().catch(() => ({}))) as { residents?: unknown };
+    const data = (await res.json().catch(() => ({}))) as { residents?: unknown; repositories?: unknown };
     if (!Array.isArray(data.residents)) return undefined;
-    return data.residents
+    return [...data.residents, ...(Array.isArray(data.repositories) ? data.repositories : [])]
       .map((rec) =>
         typeof rec === "object" && rec !== null ? String((rec as { resource?: unknown }).resource ?? "") : "",
       )

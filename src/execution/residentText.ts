@@ -85,7 +85,7 @@ function walk(value: unknown, depth: number): unknown {
 /** The states a probe may report: the resident's own lifecycle union plus the
  *  two the bot mints locally. Anything else — a future state, or free text from
  *  a hostile body — reads as `unknown`, which `isServiceable` refuses. */
-export type ProbeState = ResidentLifecycleState | "not-onboarded" | "unknown";
+export type ProbeState = ResidentLifecycleState | "cold" | "not-onboarded" | "unknown";
 
 const PROBE_STATES: ReadonlySet<string> = new Set<ProbeState>([
   "onboarding",
@@ -94,6 +94,7 @@ const PROBE_STATES: ReadonlySet<string> = new Set<ProbeState>([
   "restoring",
   "degraded",
   "down",
+  "cold",
   "not-onboarded",
   "unknown",
 ]);
