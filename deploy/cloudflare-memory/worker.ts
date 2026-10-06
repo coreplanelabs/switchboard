@@ -7128,6 +7128,10 @@ export class RunHistoryDO extends DurableObject<Env> {
    *  stored under (the registry's stamp — see `eventSeqs`), or null when
    *  unknown or outside policy — one not-found shape. A corrupt event row is skipped. */
   async get(id: string): Promise<RunRecord | null> {
+    return this.canonicalRun(id);
+  }
+
+  private canonicalRun(id: string): RunRecord | null {
     const now = systemClock();
     const row = this.sql
       .exec<RunRow>(
