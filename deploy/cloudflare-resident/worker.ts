@@ -9082,11 +9082,18 @@ export class ResidentDO extends Sandbox<Env> {
    * advance a clean recorded head, but cannot grant terminal deletion. The
    * caller holds both locks and blocks file operations until attach settles. */
   private async guardWorkspaceAdvance(binding: ThreadBinding, owner: WorkspaceOwner): Promise<ThreadErr | null> {
-    const refuse = (): ThreadErr => ({
-      error: "workspace-preserved: live owner advance unverified",
-      status: 409,
-      reason: "workspace-preserved",
-    });
+    const refuse = (step: ResidentStepLabelKey): ThreadErr => {
+      const trace = this.stepTrace.getStore();
+      if (trace) {
+        const at = systemClock();
+        trace.record(step, { startedAt: at, endedAt: at, ok: false });
+      }
+      return {
+        error: "workspace-preserved: live owner advance unverified",
+        status: 409,
+        reason: "workspace-preserved",
+      };
+    };
     const [current, registration, fence] = await Promise.all([
       this.ctx.storage.get<ThreadBinding>(threadBindingKey(binding.threadKey)),
       this.ctx.storage.get<RunRegistration>(runRegKey(binding.threadKey)),
@@ -9112,7 +9119,7 @@ export class ResidentDO extends Sandbox<Env> {
       (await this.containerIdentity()) !== binding.container ||
       !(await this.poolUserOwnerMatches(binding.user, `thread:${binding.threadKey}`))
     )
-      return refuse();
+      return refuse("advance-owner-check");
     const registered = workspaceBindingOf(registration.workspace, owner);
     const answer = (await this.observeRunForEviction(registration, binding)) as {
       kind?: string;
@@ -9134,7 +9141,7 @@ export class ResidentDO extends Sandbox<Env> {
       registered.user !== binding.user ||
       registered.container !== binding.container
     )
-      return refuse();
+      return refuse("advance-live-binding");
     const tree = await this.observePrivateTree(binding);
     if (
       !tree ||
@@ -9144,7 +9151,7 @@ export class ResidentDO extends Sandbox<Env> {
       tree.untrackedNonIgnored !== 0 ||
       tree.unpushedCommits !== 0
     )
-      return refuse();
+      return refuse("advance-tree-check");
     const processes = await this.run(["pgrep", "-u", binding.user]);
     if (
       processes.exitCode !== 1 ||
@@ -9153,7 +9160,7 @@ export class ResidentDO extends Sandbox<Env> {
       processes.timedOut ||
       processes.truncated
     )
-      return refuse();
+      return refuse("advance-process-check");
     const fresh = (await this.observeRunForEviction(registration, binding)) as typeof answer;
     const freshPhysical = fresh?.kind === "live" ? workspaceBindingOf(fresh.row?.binding, owner) : undefined;
     if (
@@ -9165,7 +9172,7 @@ export class ResidentDO extends Sandbox<Env> {
         (field) => physical[field as keyof typeof physical] !== freshPhysical[field as keyof typeof freshPhysical],
       )
     )
-      return refuse();
+      return refuse("advance-owner-recheck");
     return null;
   }
 

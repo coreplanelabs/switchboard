@@ -71,6 +71,11 @@ export const RESIDENT_STEP_LABELS = {
   touch: "touching a marker",
   nproc: "counting CPUs",
   pgrep: "checking resident processes",
+  "advance-owner-check": "checking the workspace owner",
+  "advance-live-binding": "checking the current workspace",
+  "advance-tree-check": "checking for private changes",
+  "advance-process-check": "checking workspace processes",
+  "advance-owner-recheck": "rechecking the workspace owner",
   mutex_wait: "waiting for the workspace",
   kill: "stopping the previous step",
 } as const satisfies Record<string, string>;
