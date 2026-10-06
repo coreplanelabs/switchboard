@@ -1,3 +1,4 @@
+import { TerminalCommitmentUnknownError } from "../runLedger/writeThrough.js";
 // The provision stage of the dispatch pipeline (docs/decisions/0024-dispatcher-as-a-staged-pipeline.md):
 // everything a run needs before its first model turn, in the order the request
 // meets it. The memory read started; the ack card the thread sees while setup
@@ -877,9 +878,13 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
         }),
       )
       .catch((err: unknown) => {
-        if (!coordinator) throw err;
+        if (!coordinator || err instanceof TerminalCommitmentUnknownError) throw err;
         throw new RefusalError(refusalOf("child_reservation_failed", "The child could not be durably reserved."));
       });
+    if (reserved.kind === "held") {
+      const { error } = reserved;
+      throw error;
+    }
     if ((coordinator || ctx.childHandoff !== undefined) && reserved.kind !== "tracked")
       throw new RefusalError(
         refusalOf(

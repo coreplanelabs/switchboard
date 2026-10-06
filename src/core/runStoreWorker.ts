@@ -1,3 +1,6 @@
+import { PermanentStoreError, RouteMissingError, TransientStoreError, UncertainStoreError } from "./storeFailure.js";
+export { PermanentStoreError, RouteMissingError, TransientStoreError, UncertainStoreError } from "./storeFailure.js";
+import { readStoreResponse, storeRequestWitness, type StoreOperationKind } from "./storeResponse.js";
 import { errorSuffix } from "./workerError.js";
 import { tracedFetch } from "./trace/tracedFetch.js";
 import type { Span, TraceOptions } from "./trace/types.js";
@@ -47,19 +50,6 @@ export { RUN_STORE_KEY, RUN_STORE_TIMEOUT_MS } from "./runStoreConstants.js";
 
 /** Env var holding the state Worker bearer when `runHistory.worker.tokenEnv` is unset. */
 export const DEFAULT_RUN_STORE_TOKEN_ENV = "MEMORY_TOKEN";
-
-/** The `/runs/*` route answered 404: the Worker does not have this route yet. Never retried. */
-export class RouteMissingError extends Error {
-  readonly name = "RouteMissingError";
-}
-/** Network failure, timeout, 408, 429, or 5xx: retry with backoff. */
-export class TransientStoreError extends Error {
-  readonly name = "TransientStoreError";
-}
-/** Any other non-2xx, or a malformed response body: log and count, never retry. */
-export class PermanentStoreError extends Error {
-  readonly name = "PermanentStoreError";
-}
 
 /** An error's message followed by its `cause` chain — Node's fetch reports every
  *  network failure as a bare "fetch failed" and keeps the reason (ECONNRESET,
@@ -142,7 +132,18 @@ export class WorkerRunStore implements RunStore {
       body.policy = this.opts.policy;
       if (this.opts.policyUpdatedAt !== undefined) body.policyUpdatedAt = this.opts.policyUpdatedAt;
     }
-    const data = await this.post("/runs/put", body, trace?.span);
+    const data = await this.post(
+      "/runs/put",
+      body,
+      trace?.span,
+      "write",
+      (value) =>
+        value.ok === true &&
+        Number.isSafeInteger(value.retained) &&
+        Number(value.retained) >= 0 &&
+        typeof value.stored === "boolean" &&
+        typeof value.rewritten === "boolean",
+    );
     if (
       data.ok !== true ||
       typeof data.retained !== "number" ||
@@ -156,7 +157,7 @@ export class WorkerRunStore implements RunStore {
 
   async get(id: string): Promise<RunRecord | null> {
     if (!RUN_ID_PATTERN.test(id)) return null;
-    const data = await this.post("/runs/get", { storeKey: this.opts.storeKey, id });
+    const data = await this.read("/runs/get", { storeKey: this.opts.storeKey, id });
     if (data.record === null || data.record === undefined) return null;
     if (!isRunRecord(data.record) || data.record.id !== id)
       throw new PermanentStoreError("run store /runs/get returned a malformed record");
@@ -165,7 +166,7 @@ export class WorkerRunStore implements RunStore {
 
   async getSummary(id: string): Promise<RunListItem | null> {
     if (!RUN_ID_PATTERN.test(id)) return null;
-    const data = await this.post("/runs/summary", { storeKey: this.opts.storeKey, id });
+    const data = await this.read("/runs/summary", { storeKey: this.opts.storeKey, id });
     if (data.summary === null || data.summary === undefined) return null;
     if (!isRunListItem(data.summary) || data.summary.id !== id)
       throw new PermanentStoreError("run store /runs/summary returned a malformed summary");
@@ -173,7 +174,7 @@ export class WorkerRunStore implements RunStore {
   }
 
   async list(opts: RunListOptions): Promise<RunListItem[]> {
-    const data = await this.post("/runs/list", { storeKey: this.opts.storeKey, ...compact(opts) });
+    const data = await this.read("/runs/list", { storeKey: this.opts.storeKey, ...compact(opts) });
     if (!Array.isArray(data.items)) throw new PermanentStoreError("run store /runs/list returned no items array");
     if (
       opts.recoveryEvidence !== undefined &&
@@ -189,7 +190,7 @@ export class WorkerRunStore implements RunStore {
 
   async events(id: string, opts: RunEventsOptions): Promise<RunEventsPage | null> {
     if (!RUN_ID_PATTERN.test(id)) return null;
-    const data = await this.post("/runs/events", { storeKey: this.opts.storeKey, id, ...compact(opts) });
+    const data = await this.read("/runs/events", { storeKey: this.opts.storeKey, id, ...compact(opts) });
     if (data.events === null) return null; // the DO's not-found: no such run, or hidden by retention
     if (!Array.isArray(data.events)) throw new PermanentStoreError("run store /runs/events returned no events array");
     const events = data.events.filter(
@@ -212,7 +213,7 @@ export class WorkerRunStore implements RunStore {
   /** One row per run from the Worker, folded into the cells here: the arithmetic
    *  is the bot's, the Worker only reads its rows and the parents outside them. */
   async usage(query: RunUsageQuery): Promise<RunUsageReport> {
-    const data = await this.post("/runs/usage", {
+    const data = await this.read("/runs/usage", {
       storeKey: this.opts.storeKey,
       sinceMs: query.sinceMs,
       untilMs: query.untilMs,
@@ -221,10 +222,21 @@ export class WorkerRunStore implements RunStore {
     return reportOfUsageRows(data);
   }
 
+  private read(path: RunStoreRoute, payload: unknown) {
+    return this.post(path, payload, undefined, "read");
+  }
+
   /** POST a JSON body and classify the outcome. The body is a STRING; the
    *  runtime sets its numeric Content-Length (never hand-set — see header). */
-  private async post(path: RunStoreRoute, payload: unknown, span?: Span): Promise<Record<string, unknown>> {
+  private async post(
+    path: RunStoreRoute,
+    payload: unknown,
+    span?: Span,
+    kind: StoreOperationKind = "write",
+    acknowledgement?: (data: Record<string, unknown>) => boolean,
+  ): Promise<Record<string, unknown>> {
     const body = JSON.stringify(payload);
+    const request = await storeRequestWitness(path, body);
     let res: Response;
     try {
       // One `http.client` span under `span` when the caller has one (the
@@ -245,18 +257,23 @@ export class WorkerRunStore implements RunStore {
         { route: path, fetchImpl: this.fetchImpl },
       );
     } catch (err) {
+      if (kind === "write")
+        throw new UncertainStoreError(`run store ${path}: transport outcome unknown`, request, { cause: err });
       throw new TransientStoreError(`run store ${path}: ${describeError(err)}`);
     }
     if (!res.ok) {
       const message = `run store ${path} HTTP ${res.status}${await errorSuffix(res)}`;
       if (res.status === 404) throw new RouteMissingError(message);
-      if (res.status >= 500 || res.status === 408 || res.status === 429) throw new TransientStoreError(message);
+      if (res.status >= 500 || res.status === 408 || res.status === 429) {
+        if (kind === "write") throw new UncertainStoreError(message, request);
+        throw new TransientStoreError(message);
+      }
       throw new PermanentStoreError(message);
     }
-    const data = (await res.json().catch(() => null)) as unknown;
-    if (typeof data !== "object" || data === null)
-      throw new PermanentStoreError(`run store ${path} returned a non-JSON body`);
-    return data as Record<string, unknown>;
+    const data = await readStoreResponse(res, kind, request);
+    if (acknowledgement && !acknowledgement(data))
+      throw new UncertainStoreError(`run store ${path}: invalid acknowledgement`, request);
+    return data;
   }
 }
 

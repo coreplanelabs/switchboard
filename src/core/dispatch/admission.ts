@@ -20,6 +20,8 @@ import { chatActorOf } from "../authz/actor.js";
 import type { RequestDirectives } from "../../directives.js";
 import type { Verbosity } from "../verbosity.js";
 import type { LedgerRun, LedgerWriteThrough } from "../runLedger/writeThrough.js";
+import { terminalCommitmentUnknown, TerminalCommitmentUnknownError } from "../runLedger/writeThrough.js";
+import { UncertainStoreError } from "../storeFailure.js";
 import { putOnce } from "../runHistoryWriter.js";
 import type { AppendableEvent, InboxItem, LiveRunRow, StepRecord } from "../runLedger/types.js";
 import type { ThreadsElsewhere } from "../runLedger/threadsElsewhere.js";
@@ -189,8 +191,13 @@ export function foldThreadAttachments(
  *  resume's channel handle — none for a steer a run sent, which is never run
  *  fresh; undefined when the stored shape is not one this build wrote
  *  (skipped, never fatal). */
-export function followUpFromInbox(item: InboxItem, io: ChannelIO, fallbackAt: number): DispatchFollowUp | undefined {
-  const restored = messageFromInbox(item.message, fallbackAt);
+export function followUpFromInbox(
+  item: InboxItem,
+  io: ChannelIO,
+  fallbackAt: number,
+  target?: { runId: string; channelId: string; threadKey: string },
+): DispatchFollowUp | undefined {
+  const restored = messageFromInbox(item.message, fallbackAt, target);
   if (!restored) return undefined;
   const { msg, at, from } = restored;
   return followUpOf(msg, msg.text, at, { ledgerSeq: item.seq, ...(from ? { from } : { io }) });
@@ -260,6 +267,18 @@ export async function closeResumedRow(
     await putOnce(adopted.sink, record);
     return record;
   } catch (err) {
+    if (err instanceof TerminalCommitmentUnknownError) throw err;
+    if (err instanceof UncertainStoreError)
+      throw terminalCommitmentUnknown(
+        {
+          version: 1,
+          runId: resume.row.runId,
+          gen: resume.row.ownerGen,
+          threadKey: resume.row.threadKey,
+          requestDigest: err.request.digest,
+        },
+        err.request,
+      );
     console.warn(
       `[resume] ${resume.row.runId} could not be closed (${why}): ${err instanceof Error ? err.message : String(err)}`,
     );
@@ -710,6 +729,8 @@ export interface SteerSender {
   authenticatedAs?: string;
   postedBy?: string;
   channelId: string;
+  /** The sender's original thread, separate from the target run's destination. */
+  threadKey?: string;
   channelName?: string;
   sourceUrl?: string;
   /** Only the adapter-stamped direct requester's own DM may retain this provenance. */
@@ -752,7 +773,7 @@ export type SteerOutcome =
 export async function steerRun(
   deps: {
     config: Pick<ConfigStore, "canRunAgent" | "grantsFor">;
-    runLedger: Pick<LedgerWriteThrough, "pushInbox">;
+    runLedger: Pick<LedgerWriteThrough, "pushInbox"> & Partial<Pick<LedgerWriteThrough, "sessionPersistence">>;
     clock?: Clock;
     admission: Pick<ThreadAdmission<DispatchFollowUp>, "get">;
   },
@@ -789,14 +810,18 @@ export async function steerRun(
     ...(sender.authenticatedAs !== undefined ? { authenticatedAs: sender.authenticatedAs } : {}),
     ...(sender.postedBy !== undefined ? { postedBy: sender.postedBy } : {}),
     ...(sender.channelName !== undefined ? { channelName: sender.channelName } : {}),
-    threadKey: target.threadKey,
-    ...(sender.directAudience !== undefined ? { directAudience: sender.directAudience } : {}),
+    threadKey: sender.threadKey ?? target.threadKey,
+    ...(sender.directAudience !== undefined && sender.directAudience.threadKey === target.threadKey
+      ? { directAudience: sender.directAudience }
+      : {}),
     text,
     ...(sender.sourceUrl !== undefined ? { sourceUrl: sender.sourceUrl } : {}),
     receivedAt: at,
   };
   const ledgerSeq = await deps.runLedger.pushInbox(target.runId, durableInboxMessage(msg, text, at, sender.from));
   const live = deps.admission.get(target.threadKey);
+  if (ledgerSeq === undefined && (deps.runLedger.sessionPersistence !== false || live?.runId !== target.runId))
+    return { kind: "not_live" };
   if (live && live.runId === target.runId) {
     live.inbox.push(followUpOf(msg, text, at, { ledgerSeq, ...(sender.from ? { from: sender.from } : {}) }));
     console.log(
@@ -856,7 +881,7 @@ export const STEER_OWNER_REFUSED =
  */
 export function createSteerSender(deps: {
   config: Pick<ConfigStore, "canRunAgent" | "grantsFor">;
-  runLedger: Pick<LedgerWriteThrough, "pushInbox">;
+  runLedger: Pick<LedgerWriteThrough, "pushInbox"> & Partial<Pick<LedgerWriteThrough, "sessionPersistence">>;
   /** The run the id names, as the process knows it (the registry's live row). */
   runs: { getById(id: string): SteerableRun | null | Promise<SteerableRun | null> };
   admission: Pick<ThreadAdmission<DispatchFollowUp>, "get">;
@@ -889,6 +914,7 @@ export function createSteerSender(deps: {
           ...(caller.name !== undefined ? { userName: caller.name } : {}),
           ...credential,
           channelId: caller.origin?.channelId ?? run.channelId ?? "",
+          ...(caller.origin?.threadKey !== undefined ? { threadKey: caller.origin.threadKey } : {}),
           ...(caller.origin?.directAudience ? { directAudience: caller.origin.directAudience } : {}),
         },
         {
@@ -1040,10 +1066,15 @@ export async function foldCarriedInbox(
     const fallbackAt = clock();
     let folded = 0;
     for (const item of items) {
-      const followUp = followUpFromInbox(item, io, fallbackAt);
+      const followUp = followUpFromInbox(item, io, fallbackAt, {
+        runId: carriedRow.runId,
+        channelId: carriedRow.meta.channelId,
+        threadKey: carriedRow.meta.threadKey,
+      });
       if (!followUp) {
+        admitted.inbox.hold(item.seq);
         console.warn(
-          `[${carriedInbox.tag}] ${msg.threadKey} run ${carriedRow.runId}: inbox item ${item.seq} has a shape this build cannot read — skipped`,
+          `[${carriedInbox.tag}] ${msg.threadKey} run ${carriedRow.runId}: inbox item ${item.seq} is unreadable — retained pending`,
         );
         continue;
       }

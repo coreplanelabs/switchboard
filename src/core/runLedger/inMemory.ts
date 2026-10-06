@@ -1,3 +1,5 @@
+import { bindInboxCustody } from "./inboxMessage.js";
+import { closeInboxSegment, encodeInboxSegment, inboxSegmentFloor, type StepHistory } from "./inboxSegment.js";
 import {
   validMaintenanceTransport,
   sameMaintenanceTransport,
@@ -57,7 +59,13 @@ import {
 
 import { reviewPublicationOf } from "../reviewPublication.js";
 import { INTAKE_DELIVERY_CLAIM_MS } from "../budgets.js";
-import { branchPushReceiptsOf, utf8ByteLength, workEvidenceBelongsToRun, type RunRecord } from "../runRecord.js";
+import {
+  branchPushReceiptsOf,
+  MAX_RECORD_BYTES,
+  utf8ByteLength,
+  workEvidenceBelongsToRun,
+  type RunRecord,
+} from "../runRecord.js";
 import type { UnitSeedReceipt } from "../coordinator/unitSeedReceipt.js";
 import {
   assignLedgerLiveState,
@@ -203,7 +211,7 @@ export class InMemoryRunLedger implements RunLedger {
     return { ok: true, fence: ++this.residentClaimFence };
   }
   readonly live = new Map<string, LiveRunRow>();
-  readonly steps = new Map<string, StepRecord[]>();
+  readonly steps = new Map<string, StepHistory>();
   readonly events = new Map<string, AppendableEvent[]>();
   readonly inbox = new Map<string, InboxItem[]>();
   readonly jobs = new Map<string, RunJob[]>();
@@ -579,6 +587,10 @@ export class InMemoryRunLedger implements RunLedger {
     turns: TranscriptTurn[],
     session?: string,
   ): Promise<FenceResult> {
+    if (!Number.isSafeInteger(record.step) || record.step < 0) throw new Error("invalid public step key");
+    const owner = this.live.get(runId);
+    if (owner && inboxSegmentFloor(this.steps.get(runId)?.inboxSegmentArchive, owner) === undefined)
+      throw new Error("retained inbox segment boundary is unreadable");
     const written = await this.writeTurns(runId, gen, turns, session);
     if (!written.ok) return written;
     const fence = this.fence(runId, gen);
@@ -823,16 +835,82 @@ export class InMemoryRunLedger implements RunLedger {
   }
 
   async pushInbox(runId: string, message: Record<string, unknown>): Promise<{ ok: boolean; seq?: number }> {
-    if (!this.live.has(runId)) return { ok: false };
+    const row = this.live.get(runId);
+    if (!row) return { ok: false };
+    const stored = bindInboxCustody(message, {
+      runId,
+      channelId: row.meta.channelId,
+      threadKey: row.meta.threadKey,
+      requester: row.meta.userId,
+      producerGen: row.ownerGen,
+    });
+    if (!stored) return { ok: false };
     const list = this.inbox.get(runId) ?? [];
     const seq = list.length + 1;
-    list.push({ seq, message });
+    list.push({ seq, message: stored });
     this.inbox.set(runId, list);
     return { ok: true, seq };
   }
 
   async readInbox(runId: string, afterSeq: number): Promise<InboxItem[]> {
-    return (this.inbox.get(runId) ?? []).filter((i) => i.seq > afterSeq);
+    const row = this.live.get(runId);
+    const floor = row ? inboxSegmentFloor(this.steps.get(runId)?.inboxSegmentArchive, row) : 0;
+    return (this.inbox.get(runId) ?? []).filter((i) => floor !== undefined && i.seq > Math.max(afterSeq, floor));
+  }
+
+  private prepareInboxSegment(runId: string): StepHistory {
+    const row = this.live.get(runId)!;
+    const steps = this.steps.get(runId);
+    const previous = steps?.inboxSegmentArchive;
+    if (previous !== undefined && inboxSegmentFloor(previous, row) === undefined)
+      throw new Error("retained inbox segment boundary is unreadable");
+    const archive = closeInboxSegment(
+      previous,
+      row,
+      steps?.at(-1) ?? null,
+      (this.inbox.get(runId) ?? []).reduce((high, item) => Math.max(high, item.seq), 0),
+    );
+    const retained: StepHistory = [];
+    encodeInboxSegment(archive, MAX_RECORD_BYTES);
+    retained.inboxSegmentArchive = archive;
+    return retained;
+  }
+
+  async peekInbox(runId: string, gen: string, afterSeq: number): Promise<import("./types.js").InboxPeek> {
+    const row = this.live.get(runId);
+    const fence = checkFence(row, gen);
+    if (!fence.ok || !row) return fence.ok ? { ok: false, reason: "unknown-run" } : fence;
+    if (inboxSegmentFloor(this.steps.get(runId)?.inboxSegmentArchive, row) === undefined)
+      return { ok: false, reason: "incomplete" };
+    const capture = () =>
+      JSON.stringify({
+        gen: this.live.get(runId)?.ownerGen,
+        state: this.live.get(runId)?.state,
+        lastStep: this.steps.get(runId)?.at(-1) ?? null,
+        items: this.inbox.get(runId) ?? [],
+        archive: this.steps.get(runId)?.inboxSegmentArchive,
+      });
+    const before = capture();
+    const snapshot = structuredClone({
+      state: row.state,
+      lastStep: this.steps.get(runId)?.at(-1) ?? null,
+      items: await this.readInbox(runId, afterSeq),
+    });
+    const items = await Promise.all(
+      snapshot.items.map(async (item) => ({
+        ...item,
+        witness: { version: 1 as const, runId, seq: item.seq, digest: await sourceHash(item.message) },
+      })),
+    );
+    if (before !== capture()) return { ok: false, reason: "incomplete" };
+    return {
+      ok: true,
+      version: 1,
+      runId,
+      gen,
+      items,
+      boundary: { state: snapshot.state, lastStep: snapshot.lastStep },
+    };
   }
 
   async requestStop(runId: string, mode: StopMode): Promise<{ ok: boolean; ownerLive?: boolean }> {
@@ -887,6 +965,7 @@ export class InMemoryRunLedger implements RunLedger {
         record.status !== "stopped_hard")
     )
       return { ok: false, reason: "fenced" };
+    const retainedSteps = this.prepareInboxSegment(runId);
     const canonicalWork = this.preserveArchivedBaseline(runId, row.state, record);
     if (!canonicalWork) return { ok: false, reason: "fenced" };
     const {
@@ -975,9 +1054,10 @@ export class InMemoryRunLedger implements RunLedger {
       if (standing === undefined || (standing.cause === "resident_replaced" && cause !== "resident_replaced"))
         this.planeEndings.set(runId, { kind: record.status, cause, at: record.finishedAt });
     }
+    this.steps.set(runId, retainedSteps);
     this.live.delete(runId);
-    this.steps.delete(runId);
-    this.inbox.delete(runId);
+    // Terminal execution is not a native acknowledgement of queued messages.
+    // Inbox custody remains in its original rows until exact consumption.
     this.jobs.delete(runId);
     this.transcripts.delete(runId);
     // The session log is kept whole; only the owner is released.
@@ -1214,9 +1294,10 @@ export class InMemoryRunLedger implements RunLedger {
   async abandon(runId: string, gen: string): Promise<FenceResult> {
     const fence = this.fence(runId, gen);
     if (!fence.ok) return fence;
+    const retainedSteps = this.prepareInboxSegment(runId);
+    this.steps.set(runId, retainedSteps);
     this.live.delete(runId);
-    this.steps.delete(runId);
-    this.inbox.delete(runId);
+    // Abandoning execution does not dispose of unread or opaque source bytes.
     this.jobs.delete(runId);
     this.transcripts.delete(runId);
     if (!this.finished.has(runId))
@@ -1240,11 +1321,14 @@ export class InMemoryRunLedger implements RunLedger {
       const steps = this.steps.get(row.runId) ?? [];
       const lastStep = steps.length ? steps[steps.length - 1] : null;
       const unread = unreadInbox(lastStep);
+      const floor = inboxSegmentFloor(this.steps.get(row.runId)?.inboxSegmentArchive, row);
       out.push({
         row,
         reclaimedFrom,
         lastStep,
-        inbox: (this.inbox.get(row.runId) ?? []).filter(unread),
+        inbox: (this.inbox.get(row.runId) ?? []).filter(
+          (item) => floor !== undefined && item.seq > floor && unread(item),
+        ),
         jobs: this.jobs.get(row.runId) ?? [],
       });
     }

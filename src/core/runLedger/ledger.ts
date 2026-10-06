@@ -214,6 +214,7 @@ export interface RunLedger {
    *  at adopt time (run-history item 40), so a steer that landed after the
    *  reclaim's snapshot is not lost. Empty for an unknown run. */
   readInbox(runId: string, afterSeq: number): Promise<InboxItem[]>;
+  peekInbox(runId: string, gen: string, afterSeq: number): Promise<import("./types.js").InboxPeek>;
   /** Any generation; `ownerLive` says whether the owner's lease is current. */
   requestStop(runId: string, mode: StopMode): Promise<{ ok: boolean; ownerLive?: boolean }>;
   /** Mark this generation's runs for the next one. A paused retry has no

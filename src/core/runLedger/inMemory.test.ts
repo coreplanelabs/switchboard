@@ -4,6 +4,8 @@ import { testSessionSources } from "../testing/slackSources.js";
 import type { ChatMessage } from "../chatMessage.js";
 import type { RunRecord } from "../runRecord.js";
 import { InMemoryRunLedger } from "./inMemory.js";
+import { prepareRestartTurn } from "../dispatch/reattach.js";
+import type { ChannelIO } from "../types.js";
 import { RunRegistry } from "../runRegistry.js";
 import { HOSTED_PIPELINE_STARTING_DETAIL, STAGES, hostedStageDetail } from "../pipelineStanding.js";
 import type { AppendableEvent } from "./types.js";
@@ -93,6 +95,186 @@ const record = (id: string): RunRecord =>
     events: [],
     diagnosis: { eventCount: 0, toolCalls: 0, byCategory: {}, findings: [], verdict: "none" },
   }) as unknown as RunRecord;
+
+describe("durable inbox terminal custody", () => {
+  it("peeks only under the original owner fence and preserves exact row witnesses without consuming", async () => {
+    const ledger = new InMemoryRunLedger(() => 2_000);
+    await ledger.claim(claimReq("r1", "slack:C1:1.0"));
+    const original = { version: 99, text: "opaque original" };
+    ledger.inbox.set("r1", [{ seq: 1, message: original }]);
+    expect(await ledger.peekInbox("r1", "other-gen", 0)).toEqual({ ok: false, reason: "fenced" });
+    const peek = await ledger.peekInbox("r1", "g1", 0);
+    expect(peek).toMatchObject({
+      ok: true,
+      version: 1,
+      runId: "r1",
+      gen: "g1",
+      items: [{ seq: 1, witness: { version: 1, runId: "r1", seq: 1, digest: await sourceHash(original) } }],
+    });
+    expect(await ledger.readInbox("r1", 0)).toEqual([{ seq: 1, message: original }]);
+  });
+  it.each(["finish", "abandon"] as const)(
+    "%s retains unreadable original rows without an invented consumption ACK",
+    async (ending) => {
+      const ledger = new InMemoryRunLedger(() => 2_000);
+      await ledger.claim(claimReq("r1", "slack:C1:1.0"));
+      const original = [{ seq: 1, message: { version: 99, text: "opaque original" } }];
+      ledger.inbox.set("r1", structuredClone(original));
+      if (ending === "finish") expect(await ledger.finish("r1", "g1", record("r1"))).toMatchObject({ ok: true });
+      else expect(await ledger.abandon("r1", "g1")).toEqual({ ok: true });
+      expect(await ledger.readInbox("r1", 0)).toEqual(original);
+    },
+  );
+});
+
+describe("closed inbox segment admission", () => {
+  it.each([160_000, 300_000])(
+    "accounts for UTF-8 first and latest boundaries before cleanup: characters=%s",
+    async (characters) => {
+      const ledger = new InMemoryRunLedger(() => 2_000);
+      await ledger.claim(claimReq("r1", "slack:C1:1.0"));
+      await ledger.pushInbox("r1", { text: "original" });
+      const last = { ...stepRecord(1, 2), padding: "雪".repeat(characters) };
+      await ledger.step("r1", "g1", last, []);
+      const before = JSON.stringify(ledger.steps.get("r1"));
+      const rawInbox = structuredClone(ledger.inbox.get("r1"));
+      if (characters === 160_000) {
+        await ledger.finish("r1", "g1", record("r1"));
+        const archive = ledger.steps.get("r1")!.inboxSegmentArchive as {
+          first: { lastStep: unknown };
+          latest: { lastStep: unknown };
+        };
+        expect(archive.first.lastStep).toEqual(last);
+        expect(archive.latest.lastStep).toEqual(last);
+        expect(ledger.live.has("r1")).toBe(false);
+      } else {
+        await expect(ledger.finish("r1", "g1", record("r1"))).rejects.toThrow("byte limit");
+        expect(ledger.live.get("r1")?.ownerGen).toBe("g1");
+        expect(JSON.stringify(ledger.steps.get("r1"))).toBe(before);
+        expect(ledger.finished.has("r1")).toBe(false);
+      }
+      expect(ledger.inbox.get("r1")).toEqual(rawInbox);
+    },
+  );
+
+  it.each(["finish-consumed", "finish-pending", "abandon"] as const)(
+    "retains raw custody without replay after %s and a same-ID zero seed",
+    async (ending) => {
+      const ledger = new InMemoryRunLedger(() => 2_000);
+      const req = claimReq("r1", "slack:C1:1.0");
+      await ledger.claim(req);
+      const msg = {
+        channelId: req.meta.channelId,
+        threadKey: req.threadKey,
+        userId: req.meta.userId,
+        text: "also keep this",
+      };
+      await ledger.pushInbox("r1", { version: 1, kind: "message", ...msg, at: 1_500 });
+      await ledger.pushInbox("r1", { version: 99, text: "opaque original" });
+      ledger.inbox.get("r1")!.push({
+        seq: 3,
+        message: {
+          version: 1,
+          kind: "provider-reissue",
+          userId: "plane",
+          provider: "p",
+          text: "original control",
+          channelId: req.meta.channelId,
+          threadKey: req.threadKey,
+          targetRunId: "r1",
+          plane: { steer: "reissue" },
+        },
+      });
+      await ledger.step("r1", "g1", { ...stepRecord(1, 2), inboxConsumedSeq: ending === "finish-pending" ? 0 : 3 }, []);
+      const original = structuredClone(ledger.inbox.get("r1"));
+      const restart = prepareRestartTurn(
+        { clock: () => 2_000 },
+        {
+          request: { ...msg, text: "original request" },
+          pending:
+            ending === "finish-pending"
+              ? [{ text: msg.text, userId: msg.userId, at: 1_500, msg, io: {} as ChannelIO }]
+              : [],
+          clock: () => 2_000,
+          restartOf: "r1",
+        },
+      );
+      if (ending === "finish-pending") expect(restart.msg.text).toContain(msg.text);
+      if (ending === "abandon") await ledger.abandon("r1", "g1");
+      else await ledger.finish("r1", "g1", { ...record("r1"), restarting: true, restartUntil: 9_000 });
+      await ledger.claim(claimReq("r1", req.threadKey, "g2"));
+      await ledger.seed("r1", "g2", [
+        { idx: 0, message: { role: "user", content: [{ type: "text", text: restart.msg.text }] } },
+      ]);
+      await ledger.step("r1", "g2", stepRecord(0, 1), []);
+      await ledger.handoff("g2", ["r1"]);
+      expect((await ledger.reclaim("g3", 3_000, LEASE_MS))[0].inbox).toEqual([]);
+      expect(ledger.inbox.get("r1")).toEqual(original);
+      expect(await ledger.peekInbox("r1", "g3", 0)).toMatchObject({ ok: true, items: [] });
+      expect(await ledger.readInbox("r1", 0)).toEqual([]);
+      expect(await ledger.pushInbox("r1", { text: "new segment input" })).toEqual({ ok: true, seq: 4 });
+      expect((await ledger.readInbox("r1", 0)).map((row) => row.seq)).toEqual([4]);
+    },
+  );
+
+  it("keeps deferred handoff and positively undelivered attaching inputs eligible", async () => {
+    const ledger = new InMemoryRunLedger(() => 2_000);
+    await ledger.claim(claimReq("r1", "slack:C1:1.0"));
+    for (const text of ["consumed", "deferred", "consumed too"]) await ledger.pushInbox("r1", { text });
+    await ledger.step("r1", "g1", { ...stepRecord(1, 2), inboxConsumedSeq: 3, inboxDeferredSeqs: [2] }, []);
+    await ledger.handoff("g1", ["r1"]);
+    expect((await ledger.reclaim("g2", 3_000, LEASE_MS))[0].inbox.map((row) => row.seq)).toEqual([2]);
+    await ledger.claim({ ...claimReq("attaching", "slack:C1:attaching"), phase: "attaching" });
+    await ledger.pushInbox("attaching", { text: "never delivered" });
+    await ledger.abandon("attaching", "g1");
+    await ledger.claim(claimReq("attaching", "slack:C1:attaching", "g2"));
+    expect((await ledger.readInbox("attaching", 0)).map((row) => row.seq)).toEqual([1]);
+    await ledger.claim(claimReq("fresh", "slack:C1:fresh"));
+    expect(await ledger.readInbox("fresh", 0)).toEqual([]);
+  });
+
+  it("refuses a public step at the private archive key", async () => {
+    const ledger = new InMemoryRunLedger(() => 2_000);
+    await ledger.claim(claimReq("r1", "slack:C1:1.0"));
+    await expect(ledger.step("r1", "g1", stepRecord(-1, 0), [])).rejects.toThrow();
+    expect(ledger.steps.get("r1")).toBeUndefined();
+  });
+
+  it("preserves an unreadable private archive and holds eligibility without overwriting its original step", async () => {
+    const ledger = new InMemoryRunLedger(() => 2_000);
+    await ledger.claim(claimReq("r1", "slack:C1:1.0"));
+    await ledger.pushInbox("r1", { text: "original" });
+    await ledger.step("r1", "g1", stepRecord(1, 2), []);
+    const steps = ledger.steps.get("r1")!;
+    steps.inboxSegmentArchive = { version: 99, opaque: "original private bytes" };
+    const original = structuredClone(steps);
+    await expect(ledger.abandon("r1", "g1")).rejects.toThrow("unreadable");
+    expect(ledger.steps.get("r1")).toEqual(original);
+    expect(await ledger.readInbox("r1", 0)).toEqual([]);
+    expect(await ledger.peekInbox("r1", "g1", 0)).toEqual({ ok: false, reason: "incomplete" });
+    await expect(ledger.step("r1", "g1", stepRecord(0, 1), [])).rejects.toThrow("unreadable");
+    expect(ledger.steps.get("r1")).toEqual(original);
+  });
+
+  it("holds an oversized pre-existing archive before cleanup with its original step and inbox unchanged", async () => {
+    const ledger = new InMemoryRunLedger(() => 2_000);
+    await ledger.claim(claimReq("r1", "slack:C1:1.0"));
+    await ledger.pushInbox("r1", { text: "original" });
+    await ledger.step("r1", "g1", stepRecord(1, 2), []);
+    await ledger.finish("r1", "g1", record("r1"));
+    const steps = ledger.steps.get("r1")!;
+    const archive = steps.inboxSegmentArchive as { first: { lastStep: StepRecord }; latest: { lastStep: StepRecord } };
+    archive.first.lastStep = { ...archive.first.lastStep, padding: "雪".repeat(300_000) } as StepRecord;
+    archive.latest.lastStep = { ...archive.latest.lastStep, padding: "雪".repeat(300_000) } as StepRecord;
+    steps.push(stepRecord(0, 1));
+    const original = JSON.stringify({ archive, steps, inbox: ledger.inbox.get("r1") });
+    await ledger.claim(claimReq("r1", "slack:C1:1.0", "g2"));
+    await expect(ledger.abandon("r1", "g2")).rejects.toThrow("unreadable");
+    expect(await ledger.peekInbox("r1", "g2", 0)).toEqual({ ok: false, reason: "incomplete" });
+    expect(ledger.live.get("r1")?.ownerGen).toBe("g2");
+    expect(JSON.stringify({ archive: steps.inboxSegmentArchive, steps, inbox: ledger.inbox.get("r1") })).toBe(original);
+  });
+});
 
 describe("durable branch identity baseline", () => {
   const baselineOf = (id: string) => ({
@@ -1019,7 +1201,7 @@ describe("InMemoryRunLedger", () => {
     expect(await ledger.abandon("r6", "g2")).toEqual({ ok: false, reason: "fenced" });
     expect(await ledger.abandon("r6", "g1")).toEqual({ ok: true });
     expect(ledger.live.get("r6")).toBeUndefined();
-    expect(await ledger.readInbox("r6", 0)).toEqual([]);
+    expect(await ledger.readInbox("r6", 0)).toMatchObject([{ seq: 1, message: { text: "late" } }]);
     expect(ledger.finished.get("r6")).toBeUndefined();
     expect(await ledger.abandon("r6", "g1")).toEqual({ ok: false, reason: "unknown-run" });
   });

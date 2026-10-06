@@ -527,6 +527,10 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
         },
       }),
     );
+    if (opened.kind === "held") {
+      const { error } = opened;
+      throw error;
+    }
     // An acknowledged child's finalizer still owns the reservation here.
     // Promotion (including the seed) must succeed before the model can own it.
     if (coordinator && (opened.kind !== "tracked" || !opened.run.tracked()))

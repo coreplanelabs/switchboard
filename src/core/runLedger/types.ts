@@ -238,6 +238,26 @@ export interface InboxItem {
   message: Record<string, unknown>;
 }
 
+export interface InboxRowWitness {
+  version: 1;
+  runId: string;
+  seq: number;
+  digest: string;
+}
+
+/** Observation only. A native consumer must acknowledge exact row witnesses
+ * separately; neither delivery nor this boundary says a row was consumed. */
+export type InboxPeek =
+  | {
+      ok: true;
+      version: 1;
+      runId: string;
+      gen: string;
+      items: Array<InboxItem & { witness: InboxRowWitness }>;
+      boundary: { state: unknown; lastStep: unknown };
+    }
+  | { ok: false; reason: "fenced" | "unknown-run" | "incomplete" };
+
 export interface RunJob {
   kind: string;
   payload: unknown;

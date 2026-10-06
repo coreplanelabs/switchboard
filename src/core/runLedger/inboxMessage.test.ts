@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { decide, emptyPlaneState } from "../plane/decide.js";
 import type { IncomingMessage, StagedFile } from "../types.js";
 import {
+  bindInboxCustody,
   directAudienceStampOf,
   DURABLE_INBOX_MAX_BYTES,
   durableInboxMessage,
@@ -26,6 +28,97 @@ const base: IncomingMessage = {
   text: "and this video",
   userName: "alice",
 };
+
+describe("durable inbox continuity", () => {
+  it("binds the canonical destination independently of a named steer's source route", () => {
+    const destination = {
+      runId: "target-run",
+      channelId: "slack:C2",
+      threadKey: "slack:C2:2.0",
+      requester: "slack:UA",
+      producerGen: "target-gen",
+    };
+    const original = durableInboxMessage({ ...base, authenticatedAs: "http:alice" }, "cross-channel steer", 17);
+    const stored = bindInboxCustody(original, destination);
+    expect(stored).toMatchObject({
+      channelId: base.channelId,
+      threadKey: base.threadKey,
+      authenticatedAs: "http:alice",
+      target: { version: 1, ...destination },
+    });
+    expect(messageFromInbox(stored!, 0, destination)?.msg).toMatchObject({
+      channelId: base.channelId,
+      threadKey: base.threadKey,
+      userId: base.userId,
+      authenticatedAs: "http:alice",
+    });
+    expect(messageFromInbox(stored!, 0, { ...destination, runId: "foreign" })).toBeUndefined();
+    expect(original).not.toHaveProperty("target");
+    expect(bindInboxCustody({ ...original, target: { version: 1, ...destination } }, destination)).toBeUndefined();
+    expect(bindInboxCustody({ ...original, userId: "plane", kind: "provider-reissue" }, destination)).toBeUndefined();
+  });
+
+  it("does not carry private audience authority across a different canonical destination", () => {
+    const msg: IncomingMessage = {
+      channelId: "slack:DMAIN",
+      threadKey: "slack:DMAIN:1.0",
+      userId: "slack:UALICE",
+      text: "steer",
+      directAudience: {
+        kind: "slack-unshared-im",
+        channelId: "slack:DMAIN",
+        threadKey: "slack:DMAIN:1.0",
+        userId: "slack:UALICE",
+      },
+    };
+    const stored = {
+      ...durableInboxMessage(msg, msg.text, 1),
+      target: {
+        version: 1,
+        runId: "other",
+        channelId: "slack:C2",
+        threadKey: "slack:C2:2.0",
+        requester: msg.userId,
+        producerGen: "g1",
+      },
+    };
+    expect(messageFromInbox(stored, 0)).toBeUndefined();
+  });
+
+  it("round-trips a checkpoint for the original canonical run and route", () => {
+    const state = emptyPlaneState();
+    state.liveRuns["run-a"] = { channelId: base.channelId, threadKey: base.threadKey };
+    const decision = decide(state, {
+      kind: "heartbeat",
+      runId: "run-a",
+      at: 1_000,
+      noPushMs: 1,
+      facts: { coding: true, round: 1, startedAt: 0 },
+    });
+    const row = decision.writes.find((write) => write.table === "run_inbox");
+    expect(row?.table).toBe("run_inbox");
+    if (row?.table !== "run_inbox") throw new Error("checkpoint absent");
+    expect(
+      messageFromInbox(row.message, 0, { runId: "run-a", channelId: base.channelId, threadKey: base.threadKey })?.msg,
+    ).toMatchObject({ channelId: base.channelId, threadKey: base.threadKey, userId: "plane" });
+    expect(row.message).toMatchObject({ version: 1, kind: "checkpoint", targetRunId: "run-a" });
+  });
+
+  it.each(["authenticatedAs", "postedBy", "relayedBy", "fromRunId"])(
+    "retains a malformed %s without downgrading the principal",
+    (field) => {
+      const row = { ...durableInboxMessage(base, base.text, 1), [field]: 17 };
+      expect(messageFromInbox(row, 0)).toBeUndefined();
+      expect(row[field]).toBe(17);
+    },
+  );
+
+  it("refuses an unknown codec version without changing its payload", () => {
+    const row = { ...durableInboxMessage(base, base.text, 1), version: 99 };
+    expect(messageFromInbox(row, 0)).toBeUndefined();
+    expect(row.version).toBe(99);
+  });
+});
 
 describe("durable inbox — staged references (record 0033)", () => {
   it("carries a verified DM address across replay but drops malformed claims", () => {
@@ -72,10 +165,7 @@ describe("durable inbox — staged references (record 0033)", () => {
       directAudience,
     );
     expect(
-      (
-        messageFromInbox({ ...stored, directAudience: { ...directAudience, userId: "slack:WB0B" } }, 0)
-          ?.msg as IncomingMessage & { directAudience?: unknown }
-      ).directAudience,
+      messageFromInbox({ ...stored, directAudience: { ...directAudience, userId: "slack:WB0B" } }, 0),
     ).toBeUndefined();
   });
   it("a steer with a staged reference writes it on the row and reads it back as the same reference", () => {

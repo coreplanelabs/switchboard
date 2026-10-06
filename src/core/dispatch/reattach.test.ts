@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { UncertainStoreError } from "../storeFailure.js";
+import { storeRequestWitness } from "../storeResponse.js";
 import { durableInboxMessage } from "../runLedger/inboxMessage.js";
 import type { LiveRunRow, StepRecord } from "../runLedger/types.js";
 import { NullLedgerRun } from "../runLedger/writeThrough.js";
@@ -431,6 +433,31 @@ describe("abandonLostWorkspace: the resumed run closes saying why, and hands its
     lastSeq: 4,
     repoCtx: { repo: "acme/api" },
     inbox: [],
+  });
+
+  it("does not return the original restart request when the lost-workspace terminal response is unknown", async () => {
+    const w = world(resumeOf(row()));
+    const original: RunRecord[] = [];
+    let calls = 0;
+    w.ctx.ledgerRun = new NullLedgerRun("run-old", {
+      put: async (record) => {
+        calls++;
+        throw new UncertainStoreError(
+          "reply lost",
+          await storeRequestWitness("/runs/finish", JSON.stringify({ record })),
+        );
+      },
+      uncertain: (record) => {
+        original.push(structuredClone(record));
+      },
+      abandoned: () => {
+        throw new Error("unknown is not abandonment");
+      },
+    });
+    await expect(abandonLostWorkspace(w.ctx)).rejects.toMatchObject({ hold: { runId: "run-old" } });
+    expect(calls).toBe(1);
+    expect(original).toHaveLength(1);
+    expect(original[0]).toMatchObject({ id: "run-old", restarting: true, events: expect.any(Array) });
   });
 
   it("publishes the resumed note on the run's stream, closes the card, closes the adopted row interrupted with the note in its record, and hands back the row's request", async () => {

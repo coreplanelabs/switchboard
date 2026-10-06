@@ -10,6 +10,7 @@
 // literal where `clock:check` expects it.)
 
 import { PLANE, minutesToMs } from "../budgets.js";
+import { CHECKPOINT_STEER_SENTENCE, inboxControlText } from "../runLedger/inboxMessage.js";
 import type { ProviderFailureCause } from "../provider.js";
 import type { PlaneFinding } from "./findings.js";
 import type { RunLiveStateName } from "../runLiveState.js";
@@ -291,12 +292,11 @@ export interface HeartbeatFacts {
 
 /** The checkpoint steer's one fixed sentence (record 0064): the same words for
  *  every cause, so a person and a child read one instruction, never a variant. */
-export const CHECKPOINT_STEER_SENTENCE =
-  "finish the step you are on, push a checkpoint and end the round; start no new command; the resident takes your push";
+export { CHECKPOINT_STEER_SENTENCE } from "../runLedger/inboxMessage.js";
 
 /** The steer that re-issues a held turn once its provider reports up (record 0064). */
 export function reissueSteerSentence(provider: string): string {
-  return `the model provider ${provider} is answering again — re-issue the held turn and continue`;
+  return inboxControlText({ kind: "provider-reissue", provider });
 }
 
 /** The reissue steer read back (model-proxy item 12a): what the pi harness
@@ -648,6 +648,9 @@ function onRunnerStatus(
  *  live-delivery effect. */
 export interface PlaneSteerMessage {
   [key: string]: unknown;
+  version: 1;
+  kind: "provider-reissue";
+  targetRunId: string;
   channelId: string;
   threadKey: string;
   text: string;
@@ -659,16 +662,36 @@ export interface PlaneSteerMessage {
 
 /** The inbox row a plane steer writes: sender `plane` (record 0064), the sentence as
  *  the text, and the cause under `plane` so the run page can say why. */
-function planeInboxMessage(text: string, at: number, plane: Record<string, unknown>): Record<string, unknown> {
-  return { text, at, userId: "plane", userName: "plane", plane };
+function planeInboxMessage(
+  text: string,
+  at: number,
+  plane: Record<string, unknown>,
+  runId: string,
+  route: { channelId: string; threadKey: string },
+): Record<string, unknown> {
+  return {
+    version: 1,
+    kind: "checkpoint",
+    targetRunId: runId,
+    ...route,
+    text,
+    at,
+    userId: "plane",
+    userName: "plane",
+    plane,
+  };
 }
 
 function reissueInboxMessage(
   provider: string,
   at: number,
   route: { channelId: string; threadKey: string },
+  runId: string,
 ): PlaneSteerMessage {
   return {
+    version: 1,
+    kind: "provider-reissue",
+    targetRunId: runId,
     ...route,
     text: reissueSteerSentence(provider),
     at,
@@ -689,6 +712,8 @@ function onHeartbeat(
 ): PlaneDecision {
   const { facts } = event;
   if (!facts.coding) return { state, effects: [], writes: [] };
+  const route = state.liveRuns[event.runId];
+  if (!route) return { state, effects: [], writes: [] };
   const noPushMs = event.noPushMs ?? minutesToMs(PLANE.noPushMinutes);
   const noBoundMs = event.noBoundMs ?? minutesToMs(PLANE.noBoundMinutes);
   const causes: SteerCause[] = [];
@@ -713,11 +738,17 @@ function onHeartbeat(
       table: "run_inbox",
       op: "push",
       runId: event.runId,
-      message: planeInboxMessage(CHECKPOINT_STEER_SENTENCE, event.at, {
-        steer: "checkpoint",
-        causes: fresh,
-        round: facts.round,
-      }),
+      message: planeInboxMessage(
+        CHECKPOINT_STEER_SENTENCE,
+        event.at,
+        {
+          steer: "checkpoint",
+          causes: fresh,
+          round: facts.round,
+        },
+        event.runId,
+        route,
+      ),
     });
   return { state: { ...state, reservations: [...state.reservations, ...rows] }, effects: [], writes };
 }
@@ -756,7 +787,7 @@ function onProviderLevel(
     if (route) {
       const seq = (inboxSeqs[p.runId] ?? 0) + 1;
       inboxSeqs[p.runId] = seq;
-      const message = reissueInboxMessage(event.provider, event.at, route);
+      const message = reissueInboxMessage(event.provider, event.at, route, p.runId);
       const effect: PlaneEffect = { id: `steer:${p.runId}:${seq}`, kind: "steer", runId: p.runId, seq, message };
       steers.push(effect);
       writes.push({ table: "run_inbox", op: "push", runId: p.runId, message });

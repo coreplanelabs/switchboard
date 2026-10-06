@@ -142,7 +142,23 @@ describe("reclaimRuns", () => {
       compactions: [],
     });
     expect(r.events.map((e) => e.type)).toEqual(["input", "run_meta", "tool_call"]);
-    expect(r.inbox).toEqual([{ seq: 1, message: { text: "also the numbers", userId: "slack:UBOB" } }]); // the resume folds it in
+    expect(r.inbox).toEqual([
+      {
+        seq: 1,
+        message: {
+          text: "also the numbers",
+          userId: "slack:UBOB",
+          target: {
+            version: 1,
+            runId: "r1",
+            channelId: "slack:C1",
+            threadKey: "slack:C1:1.0",
+            requester: "slack:UALICE",
+            producerGen: "g1",
+          },
+        },
+      },
+    ]); // Reclaim preserves the original payload and producer custody; delivery is not consumption.
     expect(ledger.live.has("r1")).toBe(true);
     expect(ledger.steps.get("r1")).toHaveLength(2);
     expect(ledger.finished.has("r1")).toBe(false);
@@ -180,6 +196,8 @@ describe("reclaimRuns", () => {
     await ledger.claim(claim("r1", "slack:C1:1.0"));
     await ledger.seed("r1", "g1", [{ idx: 0, message: user("go") }]);
     await ledger.step("r1", "g1", seedRecord(1), []);
+    await ledger.pushInbox("r1", { version: 99, text: "opaque original custody" });
+    const originalInbox = JSON.stringify(ledger.inbox.get("r1"));
     await ledger.seed("r1", "g1", [{ idx: 1, message: assistant("half") }]); // one turn past the record, no record
     await ledger.append("r1", "g1", [
       { type: "input", messageId: "m1", text: "go", at: 1_000, seq: 1 },
@@ -220,7 +238,19 @@ describe("reclaimRuns", () => {
     });
     expect(record.events.map((e) => e.type)).toEqual(["input", "run_meta", "tool_call"]);
     expect(ledger.live.has("r1")).toBe(false);
-    expect(ledger.steps.has("r1")).toBe(false);
+    expect(ledger.steps.get("r1")).toHaveLength(0);
+    expect(ledger.steps.get("r1")!.inboxSegmentArchive).toMatchObject({
+      version: 1,
+      kind: "closed-inbox-segment",
+      first: {
+        owner: { runId: "r1", threadKey: "slack:C1:1.0", requester: "slack:UALICE", startedAt: 1_000 },
+        lastStep: seedRecord(1),
+        highWater: 1,
+      },
+      latest: { lastStep: seedRecord(1), highWater: 1 },
+      heldThrough: 1,
+    });
+    expect(JSON.stringify(ledger.inbox.get("r1"))).toBe(originalInbox);
     expect((await ledger.readTranscript("r1")).turns).toBe(0);
     expect(outcome.liveElsewhere).toEqual([]);
     expect(logs.some((l) => l.includes("r1 slack:C1:1.0 closed interrupted (from live; transcript has 2 turns"))).toBe(

@@ -24,6 +24,19 @@ const input = (text: string, over: Partial<FollowUpInput> = {}): FollowUpInput =
   ...over,
 });
 
+describe("durable inbox held rows", () => {
+  it("keeps opaque sequences owed after a later input drains without admitting raw text or a principal", () => {
+    const inbox = new FollowUpInbox();
+    inbox.hold(1);
+    inbox.push(input("later", { ledgerSeq: 2 }));
+    expect(inbox.pendingSeqs).toEqual([1, 2]);
+    expect(inbox.drain().map((item) => item.text)).toEqual(["later"]);
+    expect(inbox.pendingSeqs).toEqual([1]);
+    expect(inbox.hasOnlyDirectRequester("slack:UALICE")).toBe(false);
+    expect(inbox.arrived).toBe(1);
+  });
+});
+
 describe("ThreadAdmission — claim and release", () => {
   it("the first claim on a thread starts; a second claim while it is held sees the live run", () => {
     const adm = new ThreadAdmission();

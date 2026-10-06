@@ -45,6 +45,8 @@ import type { RecordSink } from "../runHistoryWriter.js";
 import type { AssembledTranscript } from "./transcript.js";
 import type { FenceResult, Notepad, SessionHit } from "./types.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "../runStoreWorker.js";
+import { UncertainStoreError, type StoreRequestWitness } from "../storeFailure.js";
+import { messageFromInbox } from "./inboxMessage.js";
 import { createAppendFlusher } from "./flusher.js";
 import type { HeartbeatFacts, RequesterTarget, RunLedger } from "./ledger.js";
 import type { PlaneAckOutcome, PlaneAskAnswer, PlaneEffect, PlaneOutcomePost } from "../plane/decide.js";
@@ -164,20 +166,34 @@ export function deliverPlaneSteer(
     | undefined,
 ): PlaneAckOutcome {
   if (live?.runId !== effect.runId) return "deferred";
+  const message = effect.message;
+  if (
+    !Number.isSafeInteger(effect.seq) ||
+    effect.seq < 1 ||
+    typeof message.channelId !== "string" ||
+    message.channelId.length === 0 ||
+    typeof message.threadKey !== "string" ||
+    message.threadKey.length === 0 ||
+    typeof message.at !== "number" ||
+    !Number.isFinite(message.at) ||
+    message.userId !== "plane" ||
+    message.userName !== "plane"
+  )
+    return "deferred";
+  const restored = messageFromInbox(message, message.at, {
+    runId: effect.runId,
+    channelId: message.channelId,
+    threadKey: message.threadKey,
+  });
+  if (restored?.control?.kind !== "provider-reissue") return "deferred";
   const before = live.inbox.arrived;
   live.inbox.push({
-    text: effect.message.text,
-    at: effect.message.at,
-    userId: effect.message.userId,
-    userName: effect.message.userName,
+    text: restored.msg.text,
+    at: restored.at,
+    userId: restored.msg.userId,
+    userName: restored.msg.userName,
     ledgerSeq: effect.seq,
-    msg: {
-      channelId: effect.message.channelId,
-      threadKey: effect.message.threadKey,
-      text: effect.message.text,
-      userId: effect.message.userId,
-      userName: effect.message.userName,
-    },
+    msg: restored.msg,
   });
   return live.inbox.arrived === before ? "skipped" : "done";
 }
@@ -260,24 +276,79 @@ export interface ReserveRunRequest {
  *  claim kept failing — for the run's own record, the warning in the bot log
  *  not being the only witness; `fenced` — this run's row is another
  *  generation's; `off` — the process has no ledger, nothing to say. */
+export interface TerminalCommitmentHold {
+  readonly version: 1;
+  readonly runId: string;
+  readonly gen: string;
+  readonly threadKey: string;
+  readonly requestDigest: string;
+}
+
+/** A caller must retain this original run through setup finalization. The
+ * complete private request stays on the inherited uncertain-store witness. */
+export class TerminalCommitmentUnknownError extends UncertainStoreError {
+  readonly hold: TerminalCommitmentHold;
+  constructor(hold: TerminalCommitmentHold, request: StoreRequestWitness) {
+    super("the original terminal commitment remains unknown", request);
+    this.hold = Object.freeze({ ...hold });
+  }
+}
+
+/** Named typed boundary builder: the dispatcher preserves custody instead
+ * of rendering this unknown operation as a settled refusal. */
+export function terminalCommitmentUnknown(
+  hold: TerminalCommitmentHold,
+  request: StoreRequestWitness,
+): TerminalCommitmentUnknownError {
+  return new TerminalCommitmentUnknownError(hold, request);
+}
+
 export type ReserveOutcome =
-  { kind: "tracked"; run: LedgerRun } | { kind: "untracked"; why: string } | { kind: "fenced" } | { kind: "off" };
+  | { kind: "tracked"; run: LedgerRun }
+  | { kind: "untracked"; why: string }
+  | { kind: "fenced" }
+  | { kind: "off" }
+  | { kind: "held"; hold: TerminalCommitmentHold; error: TerminalCommitmentUnknownError };
 
 /** How `open` ended (record 0060; the same discriminants as `ReserveOutcome`):
  *  `tracked` with the run's handle; `untracked` with why — the machine word
  *  `thread-live` when the thread's row refused the claim (what the ship branch
  *  refuses by name), otherwise the reason in the words the run's record gets
  *  (item 54); `fenced` — the row is another generation's, this process must not
- *  drive the run; `off` — the process has no ledger. Every caller treats a
- *  non-tracked answer as it treated `undefined` before: the run goes on
- *  untracked. */
+ *  drive the run; `off` — the process has no ledger; `held` retains an
+ *  original uncertain terminal operation and its real private witness.
+ *  It must not authorize untracked execution or setup finalization. */
 export type OpenOutcome =
-  { kind: "tracked"; run: LedgerRun } | { kind: "untracked"; why: string } | { kind: "fenced" } | { kind: "off" };
+  | { kind: "tracked"; run: LedgerRun }
+  | { kind: "untracked"; why: string }
+  | { kind: "fenced" }
+  | { kind: "off" }
+  | { kind: "held"; hold: TerminalCommitmentHold; error: TerminalCommitmentUnknownError };
 
 /** `finishing()`'s answer: `ok` — reply; `fenced` — another generation owns
  *  the run, do NOT reply (it will); `unavailable` — the ledger could not be
  *  asked or this run is untracked, reply as before (the run is this process's). */
 export type FinishingGate = "ok" | "fenced" | "unavailable";
+
+export type WriteBoundaryFailure =
+  | {
+      version: 1;
+      runId: string;
+      gen: string;
+      kind: "step";
+      requestDigest: string;
+      expectedDigest: string;
+      step: number;
+    }
+  | {
+      version: 1;
+      runId: string;
+      gen: string;
+      kind: "state";
+      requestDigest: string;
+      expectedDigest: string;
+      stateVersion: number;
+    };
 
 /** One tracked run. Every method is safe to call after a detach. */
 export interface LedgerRun {
@@ -305,6 +376,7 @@ export interface LedgerRun {
   checkpointSession(): Promise<{ key: string; through: number } | undefined>;
   /** Sanitized cause of the most recent failed checkpoint, for the run's failure event. */
   readonly lastCheckpointFailure: SessionCheckpointFailure | undefined;
+  readonly writeBoundaryFailure: WriteBoundaryFailure | undefined;
   /** Once after the initial seed ACK, before provider execution. */
   normalizeContextOrigins(): Promise<ContextCheckpointResult>;
   /** `live → finishing`, before the reply — the double-answer gate (D9). */
@@ -594,6 +666,7 @@ export class NullLedgerRun implements LedgerRun {
     return { kind: "off" };
   }
   readonly lastCheckpointFailure = undefined;
+  readonly writeBoundaryFailure = undefined;
   async normalizeContextOrigins(): Promise<ContextCheckpointResult> {
     return { ok: false, reason: "checkpoint-unavailable" };
   }
@@ -682,7 +755,11 @@ function seedSources(req: OpenRunRequest): SessionSources | undefined {
 /** How a run's finish ended (item 54): the row went (`landed`), the ledger
  *  refused it and the record went to the plain store (`refused`), or the
  *  attempt sequence failed for good (`failed`, with the last error's words). */
-export type LandingOutcome = { kind: "landed" } | { kind: "refused" } | { kind: "failed"; why: string };
+export type LandingOutcome =
+  | { kind: "landed" }
+  | { kind: "refused" }
+  | { kind: "failed"; why: string }
+  | { kind: "unknown"; requestDigest: string };
 
 /** A finish this process is landing (item 54): one entry per run from its
  *  first `put` to the outcome, settled once, awaited by a claim that met the
@@ -690,6 +767,8 @@ export type LandingOutcome = { kind: "landed" } | { kind: "refused" } | { kind: 
 interface Landing {
   settled: Promise<LandingOutcome>;
   resolve: (outcome: LandingOutcome) => void;
+  record?: string;
+  unknown: Array<{ record: string; request: StoreRequestWitness; hold: TerminalCommitmentHold }>;
 }
 
 /** Why a claim that waited for a finish ended untracked all the same (item
@@ -699,6 +778,8 @@ function untrackedWhy(awaited: string, live: { runId: string }, outcome: Landing
     return `the thread's live row belongs to run ${live.runId} now, not to run ${awaited}, whose finish this process landed or was landing`;
   const inFlight = `run ${awaited}, whose finish was in flight in this process, still holds the thread's row`;
   switch (outcome.kind) {
+    case "unknown":
+      return `${inFlight}: its original terminal commitment remains unknown`;
     case "failed":
       return `${inFlight}: its finish did not land (${outcome.why})`;
     case "refused":
@@ -762,13 +843,15 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     if (entry === undefined) {
       let resolve!: (outcome: LandingOutcome) => void;
       const settled = new Promise<LandingOutcome>((r) => (resolve = r));
-      entry = { settled, resolve };
+      entry = { settled, resolve, unknown: [] };
       landing.set(runId, entry);
     }
     return entry;
   };
   const settleLanding = (runId: string, entry: Landing, outcome: LandingOutcome): void => {
+    if (entry.unknown.length > 0 && outcome.kind !== "unknown") return;
     entry.resolve(outcome);
+    if (outcome.kind === "unknown") return;
     if (landing.get(runId) === entry) landing.delete(runId);
     if (outcome.kind === "landed") {
       landed.delete(runId); // re-inserted as the newest
@@ -791,7 +874,17 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
   type Claimed =
     | { outcome: "ok"; session?: RunSession }
     | { outcome: "fenced" }
+    | { outcome: "held"; hold: TerminalCommitmentHold; error: TerminalCommitmentUnknownError }
     | { outcome: "untracked"; why: string; refused?: "thread-live" };
+
+  const heldLanding = (entry: Landing): Extract<Claimed, { outcome: "held" }> => {
+    const original = entry.unknown[0];
+    return {
+      outcome: "held",
+      hold: original.hold,
+      error: terminalCommitmentUnknown(original.hold, original.request),
+    };
+  };
 
   /** `fenced`: the thread's row is THIS run under another generation — the
    *  reservation's lease lapsed and a reclaim took it (item 42); this process
@@ -826,6 +919,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     // run's own row standing, and the idempotent re-claim keeps it.
     const priorFinish = landing.get(req.runId);
     if (priorFinish !== undefined) awaited = { runId: req.runId, outcome: await priorFinish.settled };
+    if (awaited?.outcome.kind === "unknown") return heldLanding(landing.get(awaited.runId)!);
     for (let attempt = 1; ; attempt++) {
       try {
         let session: RunSession | undefined;
@@ -889,6 +983,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           if (inFlight !== undefined) {
             claimedAgain = true;
             awaited = { runId: result.live.runId, outcome: await inFlight.settled };
+            if (awaited.outcome.kind === "unknown") return heldLanding(inFlight);
             attempt--; // the re-claim is not a failed attempt
             continue;
           }
@@ -983,6 +1078,44 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     private broken = false;
     private checkpointFailure: SessionCheckpointFailure | undefined;
     private stateWriteFailure: "state-permanent" | "state-route-missing" | "state-unknown" | undefined;
+    private pendingBoundaries: Array<{
+      failure: WriteBoundaryFailure;
+      request: StoreRequestWitness;
+      expected: unknown;
+    }> = [];
+    get writeBoundaryFailure(): WriteBoundaryFailure | undefined {
+      const pending = this.pendingBoundaries[0];
+      return pending && { ...pending.failure };
+    }
+    private async reconcilePendingBoundary(): Promise<boolean> {
+      try {
+        for (const pending of [...this.pendingBoundaries]) {
+          const observed = await ledger.peekInbox(this.runId, gen, 0);
+          if (!this.pendingBoundaries.includes(pending)) continue;
+          if (!observed.ok) return false;
+          const value = pending.failure.kind === "step" ? observed.boundary.lastStep : observed.boundary.state;
+          if (value === undefined || value === null || (await sourceHash(value)) !== pending.failure.expectedDigest)
+            return false;
+          // Another reconciliation may have resolved this object, or an
+          // already-started mutation may have added a different obligation.
+          const index = this.pendingBoundaries.indexOf(pending);
+          if (index < 0) continue;
+          if (pending.failure.kind === "step") {
+            const expected = pending.expected as StepRecord;
+            this.turnsWritten = Math.max(this.turnsWritten ?? 0, expected.turnIndex);
+          } else {
+            this.acknowledgedStateVersion = Math.max(this.acknowledgedStateVersion, pending.failure.stateVersion);
+          }
+          this.pendingBoundaries.splice(index, 1);
+        }
+        if (this.pendingBoundaries.length > 0) return false;
+        this.stateWriteFailure = undefined;
+        this.checkpointFailure = undefined;
+        return true;
+      } catch {
+        return false;
+      }
+    }
     get lastCheckpointFailure(): SessionCheckpointFailure | undefined {
       return this.checkpointFailure;
     }
@@ -1172,16 +1305,49 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         // tries again (the history writer's ladder) or is done — and says so
         // with `abandoned`, which is the one word that settles a failed finish.
         const entry = (this.finishLanding ??= landingFor(this.runId));
-        const { value, outcome } = await this.land(plain);
-        settleLanding(this.runId, entry, outcome);
-        return value;
+        if (entry.unknown.length > 0)
+          throw new TerminalCommitmentUnknownError(entry.unknown[0].hold, entry.unknown[0].request);
+        entry.record = JSON.stringify(plain);
+        try {
+          const { value, outcome } = await this.land(plain);
+          settleLanding(this.runId, entry, outcome);
+          return value;
+        } catch (err) {
+          if (!(err instanceof UncertainStoreError)) throw err;
+          const hold = this.retainTerminalUnknown(entry, entry.record, err.request);
+          throw new TerminalCommitmentUnknownError(hold, err.request);
+        }
       },
       abandoned: (record, why) => {
         if (record.id !== this.runId) return;
         const entry = this.finishLanding;
         if (entry !== undefined) settleLanding(this.runId, entry, { kind: "failed", why });
       },
+      uncertain: (record, request) => {
+        if (record.id !== this.runId) return;
+        const entry = (this.finishLanding ??= landingFor(this.runId));
+        this.retainTerminalUnknown(entry, JSON.stringify(record), request);
+      },
     };
+
+    private retainTerminalUnknown(
+      entry: Landing,
+      record: string,
+      request: StoreRequestWitness,
+    ): TerminalCommitmentHold {
+      const existing = entry.unknown.find((pending) => pending.request.digest === request.digest);
+      if (existing) return existing.hold;
+      const hold: TerminalCommitmentHold = Object.freeze({
+        version: 1,
+        runId: this.runId,
+        gen,
+        threadKey: this.threadKey,
+        requestDigest: request.digest,
+      });
+      entry.unknown.push({ record, request, hold });
+      settleLanding(this.runId, entry, { kind: "unknown", requestDigest: request.digest });
+      return hold;
+    }
 
     /** The finish itself: the flush, then the ledger's one-transaction `finish`,
      *  else the plain store — and which of the two took the record. */
@@ -1228,6 +1394,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           ? { contextDependencies: structuredClone(this.state.contextDependencies) as ContextDependencies }
           : {}),
       };
+      if (this.finishLanding) this.finishLanding.record = JSON.stringify(record);
       let result: Awaited<ReturnType<RunLedger["finish"]>>;
       try {
         result = await ledger.finish(this.runId, gen, record);
@@ -1458,6 +1625,8 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
 
     async step(report: StepReport): Promise<void> {
       if (this.detached) return;
+      if (!(await this.reconcilePendingBoundary())) return;
+      report = structuredClone(report);
       // Every row at its log index (`rowIndex`). A compaction entry rides as
       // the row after the step's turns and counts as a turn, so the
       // completeness rule sees one index per row.
@@ -1480,6 +1649,8 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         turn: report.turn,
         iteration: report.iteration,
       };
+      const expected = structuredClone(record);
+      const expectedDigest = await sourceHash(expected);
       // The heartbeat body's step facts (record 0064): the round is the step
       // counter, and the call in flight is stamped from the stream's last move
       // — the step report lands as the assistant turn does, before the tools run.
@@ -1505,6 +1676,24 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           else this.turnsWritten = record.turnIndex;
           return;
         } catch (err) {
+          if (err instanceof UncertainStoreError) {
+            this.pendingBoundaries.push({
+              failure: {
+                version: 1,
+                kind: "step",
+                runId: this.runId,
+                gen,
+                step: expected.step,
+                requestDigest: err.request.digest,
+                expectedDigest,
+              },
+              request: err.request,
+              expected,
+            });
+            this.checkpointFailure = "state-unavailable";
+            warn(`[ledger] ${this.threadKey} step ${record.step} commitment is unknown — original boundary retained`);
+            return;
+          }
           if (err instanceof RouteMissingError || err instanceof PermanentStoreError || attempt >= 2) {
             this.detach(`step ${record.step} failed: ${describe(err)}`);
             return;
@@ -1596,9 +1785,11 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
      *  set near the end) must not be lost to one blip. */
     private async sendState(): Promise<void> {
       if (!this.stateDirty || this.detached || this.finished) return;
+      if (!(await this.reconcilePendingBoundary())) return;
       this.stateDirty = false;
-      const snapshot = { ...this.state };
+      const snapshot = structuredClone(this.state);
       const version = this.stateVersion;
+      const expectedDigest = await sourceHash(snapshot);
       for (let attempt = 1; ; attempt++) {
         try {
           const result = await ledger.setState(this.runId, gen, snapshot);
@@ -1609,6 +1800,26 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           }
           return;
         } catch (err) {
+          if (err instanceof UncertainStoreError) {
+            this.pendingBoundaries.push({
+              failure: {
+                version: 1,
+                kind: "state",
+                runId: this.runId,
+                gen,
+                stateVersion: version,
+                requestDigest: err.request.digest,
+                expectedDigest,
+              },
+              request: err.request,
+              expected: snapshot,
+            });
+            this.stateDirty = true;
+            this.stateWriteFailure = "state-unknown";
+            this.checkpointFailure = "state-unavailable";
+            warn(`[ledger] ${this.threadKey} state commitment is unknown — original snapshot retained`);
+            return;
+          }
           if (err instanceof RouteMissingError || err instanceof PermanentStoreError || attempt >= 2) {
             this.stateDirty = true;
             this.stateWriteFailure =
@@ -1789,6 +2000,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       // failing — for the run's own record, not the bot log alone.
       if (claimed.outcome === "untracked") return { kind: "untracked", why: claimed.why };
       if (claimed.outcome === "fenced") return { kind: "fenced" };
+      if (claimed.outcome === "held") return { kind: "held", hold: claimed.hold, error: claimed.error };
       const run = new TrackedRun(req);
       run.startHeartbeat();
       live.add(run);
@@ -1817,6 +2029,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           req,
           seed ? { seed, key: req.seed?.key, ...(req.seed?.log ? { log: req.seed.log } : {}) } : {},
         );
+        if (claimed.outcome === "held") return { kind: "held", hold: claimed.hold, error: claimed.error };
         if (claimed.outcome === "fenced") {
           unpromoted.delete(reserved.runId); // the row is another generation's: nothing of ours to abandon
           reserved.detach("promotion refused (fenced)", true);
@@ -1859,6 +2072,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         req,
         seed ? { seed, key: req.seed?.key, ...(req.seed?.log ? { log: req.seed.log } : {}) } : {},
       );
+      if (claimed.outcome === "held") return { kind: "held", hold: claimed.hold, error: claimed.error };
       if (claimed.outcome === "fenced") {
         warn(`[ledger] ${req.threadKey} not tracked: run ${req.runId} is live under another generation`);
         return { kind: "fenced" };
@@ -1897,6 +2111,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         warn(`[ledger] inbox push refused for run ${runId}: no live row — the follow-up rides in memory only`);
         return undefined;
       } catch (err) {
+        if (err instanceof UncertainStoreError) throw err;
         warn(`[ledger] inbox push failed for run ${runId}: ${describe(err)} — the follow-up rides in memory only`);
         return undefined;
       }
@@ -1997,7 +2212,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         return await ledger.recordIntake(key, receipt);
       } catch (err) {
         if (err instanceof RouteMissingError) return degraded("the state Worker has no intake routes");
-        if (err instanceof PermanentStoreError) return degraded(describe(err));
+        if (err instanceof PermanentStoreError && !(err instanceof UncertainStoreError)) return degraded(describe(err));
         // A lost response: the insert may have landed. Retry by reading the
         // same row after the claim's backoff — this write's own row (its gen
         // and decidedAt) answers inserted, another writer's answers what it

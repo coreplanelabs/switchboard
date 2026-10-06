@@ -23,6 +23,7 @@ import {
 } from "../core/coordinator/workflowReconciliation.js";
 import { constantTimeEqual } from "../deploy/restart.js";
 import { readBody } from "./http.js";
+import { messageFromInbox } from "../core/runLedger/inboxMessage.js";
 
 /** Effect pushes are small (at most the answer cap of effects, each one queued
  *  request); anything larger is not this route's traffic. */
@@ -76,7 +77,6 @@ function parseEffect(v: unknown): PushedEffect | undefined {
   }
   if (e.kind !== "steer" || !Number.isSafeInteger(e.seq) || (e.seq as number) < 1) return undefined;
   const message = objectValue(e.message);
-  const plane = objectValue(message?.plane);
   if (
     !message ||
     typeof message.channelId !== "string" ||
@@ -87,25 +87,32 @@ function parseEffect(v: unknown): PushedEffect | undefined {
     typeof message.at !== "number" ||
     !Number.isFinite(message.at) ||
     message.userId !== "plane" ||
-    message.userName !== "plane" ||
-    plane?.steer !== "reissue" ||
-    typeof plane.provider !== "string" ||
-    plane.provider.length === 0
+    message.userName !== "plane"
   )
     return undefined;
+  const restored = messageFromInbox(message, message.at, {
+    runId: e.runId,
+    channelId: message.channelId,
+    threadKey: message.threadKey,
+  });
+  if (restored?.control?.kind !== "provider-reissue") return;
   return {
     id: e.id,
     kind: "steer",
     runId: e.runId,
     seq: e.seq as number,
     message: {
+      version: 1,
+      kind: "provider-reissue",
+      targetRunId: e.runId,
+      ...(restored.custody ? { target: restored.custody } : {}),
       channelId: message.channelId,
       threadKey: message.threadKey,
-      text: message.text,
+      text: restored.msg.text,
       at: message.at,
       userId: "plane",
       userName: "plane",
-      plane: { steer: "reissue", provider: plane.provider },
+      plane: { steer: "reissue", provider: restored.control.provider },
     },
   };
 }
