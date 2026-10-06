@@ -4589,13 +4589,11 @@ describe("review post-step", () => {
     expect(replies).toContain("answer"); // Slack still gets the review
     // No submit_verdict call → fail-closed: the body leads with the explicit
     // non-approving line, never "LGTM".
-    expect(
-      spy.calls[0].body.startsWith(`${NO_VERDICT_LINE}\n\n> [!CAUTION]\n> **No verdict** · head \`e8e43f4\``),
-    ).toBe(true);
+    expect(spy.calls[0].body.startsWith(`${NO_VERDICT_LINE}\n\n_Reviewed at \`e8e43f4\`._`)).toBe(true);
     expect(spy.calls).toEqual([
       {
         target: { repo: "acme/api", number: 42, commitId: PR_HEAD },
-        body: expect.stringContaining("<summary>Full review</summary>\n\nanswer\n\n</details>"),
+        body: expect.stringContaining("### Full review\n\nanswer\n\n</details>"),
       },
     ]);
   });
@@ -4644,12 +4642,10 @@ describe("review post-step", () => {
     expect(spy.calls).toEqual([
       {
         target: { repo: "acme/api", number: 42, commitId: PR_HEAD },
-        body: expect.stringContaining(
-          "<summary>Full review</summary>\n\nVerdict: approve — the change is sound.\n\n</details>",
-        ),
+        body: expect.stringContaining("### Full review\n\nVerdict: approve — the change is sound.\n\n</details>"),
       },
     ]);
-    expect(spy.calls[0].body.startsWith("LGTM: the change is sound\n\n> [!NOTE]\n")).toBe(true);
+    expect(spy.calls[0].body.startsWith("LGTM: issues not itemized\n\n")).toBe(true);
     expect(replies.some((r) => r.includes("Verdict: approve — the change is sound."))).toBe(true);
     expect(replies.some((r) => r.includes("Verdict submitted."))).toBe(false);
     const events = registry.snapshot("rv1", "tv1")?.events ?? [];
@@ -5032,7 +5028,7 @@ describe("review post-step", () => {
       expect(spy.calls).toHaveLength(1);
       expect(spy.calls[0].target).toEqual({ repo: "acme/api", number: 42, commitId: OTHER_HEAD });
       expect(spy.calls[0].body).toMatch(
-        /^LGTM: ok\n\n> \[!NOTE\]\n> \*\*Approved\*\* · head `d75b5a5`[\s\S]*<summary>Full review<\/summary>\n\nLooks solid\.\n\n<\/details>\n\n<!-- switchboard:verdict [^\n]* -->\n\n_Reviewed at e8e43f4; the head moved to d75b5a5 during the review — a rebase of the same 2 commits — so this review is posted against d75b5a5\._$/,
+        /^LGTM: issues not itemized\n\n_Reviewed at `d75b5a5`\._[\s\S]*### Full review\n\nLooks solid\.\n\n<\/details>\n\n<!-- switchboard:verdict [^\n]* -->\n\n_Reviewed at e8e43f4; the head moved to d75b5a5 during the review — a rebase of the same 2 commits — so this review is posted against d75b5a5\._$/,
       );
       expect(commitAsks).toEqual([
         { base: "main", sha: PR_HEAD },
@@ -5078,12 +5074,10 @@ describe("review post-step", () => {
       // Posted once, pinned to the new head, with the SECOND verdict and answer — the first approve is void.
       expect(spy.calls).toHaveLength(1);
       expect(spy.calls[0].target).toEqual({ repo: "acme/api", number: 42, commitId: OTHER_HEAD });
-      expect(
-        spy.calls[0].body.startsWith("Changes requested: ok\n\n> [!WARNING]\n> **Changes requested** · head `d75b5a5`"),
-      ).toBe(true);
-      expect(spy.calls[0].body).toContain(
-        "<summary>Full review</summary>\n\nSecond review: the new test is wrong.\n\n</details>",
+      expect(spy.calls[0].body.startsWith("Changes requested: issues not itemized\n\n_Reviewed at `d75b5a5`")).toBe(
+        true,
       );
+      expect(spy.calls[0].body).toContain("### Full review\n\nSecond review: the new test is wrong.\n\n</details>");
       // The thread: the 🔀 note at detection, the second answer as the reply, no stale-pin note.
       expect(replies).toContain(
         "🔀 acme/api#42 moved during the run: reviewed e8e43f4, head is now d75b5a5 — 1 → 2 commits (+ “fix: review nits”). Re-reviewing at d75b5a5 before posting.",
@@ -5325,10 +5319,8 @@ describe("review post-step", () => {
     const { io } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
     expect(spy.calls).toHaveLength(1);
-    expect(spy.calls[0].body.startsWith("LGTM: no blocking issues\n\n> [!NOTE]\n> **Approved** · head `ccccccc`")).toBe(
-      true,
-    );
-    expect(spy.calls[0].body).toContain("<summary>Full review</summary>\n\nLooks solid.\n- nit: naming\n\n</details>");
+    expect(spy.calls[0].body.startsWith("LGTM: issues not itemized\n\n_Reviewed at `ccccccc`")).toBe(true);
+    expect(spy.calls[0].body).toContain("### Full review\n\nLooks solid.\n- nit: naming\n\n</details>");
     // pinned to the reviewed head so the workflow's stale-review guard can bite
     expect(spy.calls[0].target).toEqual({ repo: "acme/api", number: 42, commitId: "c".repeat(40) });
   });
@@ -5345,7 +5337,7 @@ describe("review post-step", () => {
     deps.postReviewComment = spy.fn;
     const { io } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
-    expect(spy.calls[0].body.startsWith("Changes requested: null deref\n\n")).toBe(true);
+    expect(spy.calls[0].body.startsWith("Changes requested: issues not itemized\n\n")).toBe(true);
     expect(spy.calls[0].body.startsWith("LGTM")).toBe(false);
     expect(spy.calls[0].target).toEqual({ repo: "acme/api", number: 42, commitId: PR_HEAD });
   });
@@ -5385,11 +5377,7 @@ describe("review post-step", () => {
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
       expect(spy.calls).toHaveLength(1);
       expect(spy.calls[0].body.startsWith("LGTM")).toBe(false);
-      expect(
-        spy.calls[0].body.startsWith(
-          "Changes requested: ship it [downgraded from approve: finding F3 (major) at or above minor, the severity to address]\n",
-        ),
-      ).toBe(true);
+      expect(spy.calls[0].body.startsWith("Changes requested: 1 issue\n")).toBe(true);
       expect(spy.calls[0].body).toContain("| major | **F3** drops the first key's ref | ");
     });
 
@@ -5398,11 +5386,7 @@ describe("review post-step", () => {
       const spy = review(deps);
       const { io } = fakeIO();
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
-      expect(
-        spy.calls[0].body.startsWith(
-          "LGTM: one nit\n\n> [!NOTE]\n> **Approved** · head `e8e43f4` · 1 finding: 1 nit\n",
-        ),
-      ).toBe(true);
+      expect(spy.calls[0].body.startsWith("LGTM: 1 issue\n\n")).toBe(true);
       expect(spy.calls[0].body).toContain(
         "| nit | **F2** a nit | [`b.ts`](https://github.com/acme/api/blob/e8e43f480a09b76989b85ebe6a2a254d99a4d2a3/b.ts) |",
       );
@@ -5422,7 +5406,7 @@ describe("review post-step", () => {
         /^LGTM: one nit\n- \[nit\] F2 b\.ts — a nit\n\nPosted to acme\/api#42 · \[Live run\]\(https:\/\/bot\.example\/runs\/[^)]+\)$/,
       );
       expect(replies.some((r) => r.includes("F2: rename it."))).toBe(false);
-      expect(spy.calls[0].body).toContain("<summary>Full review</summary>\n\nF2: rename it.\n\n</details>");
+      expect(spy.calls[0].body).toContain("### Full review\n\nF2: rename it.\n\n</details>");
     });
 
     it("item 5b: a Slack-only review (opt-out) keeps the write-up in the thread under the rendered head — the text lands nowhere else", async () => {
@@ -5443,7 +5427,7 @@ describe("review post-step", () => {
       const spy = review(deps);
       const { io } = fakeIO();
       await dispatch(deps, msg("agent:review severity:major https://github.com/acme/api/pull/42"), io);
-      expect(spy.calls[0].body.startsWith("LGTM: minor only\n")).toBe(true);
+      expect(spy.calls[0].body.startsWith("LGTM: 1 issue\n")).toBe(true);
     });
 
     it("an operator-bound review applies typed major severity without stripping the request", async () => {
@@ -5463,7 +5447,7 @@ describe("review post-step", () => {
       }));
       const { io } = fakeIO();
       await dispatch(deps, msg("Review https://github.com/acme/api/pull/42 and address major findings."), io);
-      expect(spy.calls[0]?.body.startsWith("LGTM: minor only\n")).toBe(true);
+      expect(spy.calls[0]?.body.startsWith("LGTM: 1 issue\n")).toBe(true);
     });
 
     it("a channel's `review.addressSeverity: nit` narrows the gate for every review there: an approve over a nit posts `Changes requested:`", async () => {
@@ -5472,11 +5456,7 @@ describe("review post-step", () => {
       const spy = review(deps);
       const { io } = fakeIO();
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
-      expect(
-        spy.calls[0].body.startsWith(
-          "Changes requested: one nit [downgraded from approve: finding F2 (nit) at or above nit, the severity to address]\n",
-        ),
-      ).toBe(true);
+      expect(spy.calls[0].body.startsWith("Changes requested: 1 issue\n")).toBe(true);
     });
   });
 
@@ -5648,7 +5628,7 @@ describe("review post-step", () => {
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
       expect(spy.calls).toHaveLength(1);
       expect(spy.calls[0].target).toEqual({ repo: "acme/api", number: 42, commitId: PR_HEAD });
-      expect(spy.calls[0].body.startsWith("LGTM: ok")).toBe(true);
+      expect(spy.calls[0].body.startsWith("LGTM: issues not itemized")).toBe(true);
     });
 
     it("no git in the cwd and the reported head mismatches → no post", async () => {

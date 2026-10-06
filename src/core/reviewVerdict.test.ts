@@ -249,9 +249,8 @@ describe("invariant case tables in review findings", () => {
 // is produced by code from the structured verdict, never by the model's prose.
 // Feature: docs/reference/specs/agent-review.md item 5b — both surfaces are
 // rendered from the typed verdict. The GitHub comment: the token line first
-// (the auto-approve contract), a GitHub alert callout with the verdict word,
-// the pinned head and the finding counts, a findings table linked at the head,
-// the model's text folded under `Full review`, a machine-readable marker last.
+// (the auto-approve contract), short issue bullets linked at the pinned head,
+// all agent evidence folded under `For agents`, a machine-readable marker last.
 describe("review verdict → post body", () => {
   const NIT = {
     id: "F2",
@@ -269,47 +268,145 @@ describe("review verdict → post body", () => {
   const HEAD = "ca726ad9d4f3b1c2e5a6b7c8d9e0f1a2b3c4d5e6";
   const TARGET = { repo: "acme/site", head: HEAD };
 
-  it("approve → the exact `LGTM:` token line first, a NOTE callout with the verdict word, the pinned head and the counts, the prose folded under `Full review`", () => {
-    const v = parseVerdictInput({ verdict: "approve", summary: "no blocking issues", findings: [NIT] })!;
-    const body = buildReviewPostBody("F2: the comment predates the two recipes that were cut.", v, TARGET);
-    expect(
-      body.startsWith(
-        `${LGTM_TOKEN} no blocking issues\n\n> [!NOTE]\n> **Approved** · head \`ca726ad\` · 1 finding: 1 nit\n`,
-      ),
-    ).toBe(true);
-    expect(body).toContain(
-      "<details>\n<summary>Full review</summary>\n\nF2: the comment predates the two recipes that were cut.\n\n</details>",
-    );
+  it("keeps the human summary above one fold and all scoped IDs, pattern cases and closure evidence below it", () => {
+    const v = parseVerdictInput({
+      verdict: "request_changes",
+      summary: "A long agent rationale. Another sentence that should stay folded.",
+      findings: [
+        {
+          ...MINOR,
+          id: "review:5434899067:F2",
+          kind: "pattern",
+          title: "Runs cannot resume after a bot restart.",
+          invariant: "Original custody remains authoritative",
+          cases: [{ scenario: "Foreign container", expected: "Retain the original producer" }],
+        },
+      ],
+      resolutions: [
+        { findingId: "review:5434899067:F1", disposition: "fixed", note: "Verified every cancellation path" },
+      ],
+    })!;
+    const body = buildReviewPostBody("Full explanation. Additional implementation detail.", v, TARGET);
+    const [visible, folded] = body.split("<details>");
+    expect(visible).toContain("Changes requested: 1 issue");
+    expect(visible).toContain("🟡 **Minor**");
+    expect(visible).toContain("Runs cannot resume after a bot restart.");
+    expect(visible).toContain(`/blob/${HEAD}/src/data/removed-pages.mjs`);
+    for (const hidden of [
+      "review:5434899067",
+      "Additional implementation detail",
+      "Foreign container",
+      "Verified every cancellation path",
+      "A long agent rationale",
+    ])
+      expect(visible).not.toContain(hidden);
+    expect(visible).not.toContain("| Severity |");
+    expect(folded).toContain("<summary>For agents</summary>");
+    expect(body).not.toMatch(/<details\s+open(?:\s|>|=)/i);
+    expect(folded).toContain("Foreign container");
+    expect(folded).toContain("Verified every cancellation path");
+    expect(folded).toContain("Full explanation");
+    expect(JSON.parse(body.match(/^<!-- switchboard:verdict (.*) -->$/m)![1]!).findings).toEqual(v.findings);
   });
 
-  it("request_changes → WARNING callout, never starts with LGTM even if the prose does", () => {
+  it("preserves complete short titles with abbreviations, initials and versions", () => {
+    for (const title of [
+      "Using e.g. a fork URL bypasses the destination check and pushes to the wrong repository.",
+      "Dr. Smith cannot access the account because the lookup drops his grant.",
+      "The U.S. endpoint accepts expired tokens and exposes private data.",
+      "Version 1.2.3 drops pending reads and loses their results.",
+    ]) {
+      const body = buildReviewPostBody(
+        "",
+        parseVerdictInput({ verdict: "request_changes", findings: [{ ...MINOR, title }] })!,
+      );
+      expect(body.split("<details>")[0]).toContain(title);
+    }
+  });
+
+  it("renders HTML in folded evidence as text while preserving code examples and typed values", () => {
+    const tag = "</details>";
+    const v = parseVerdictInput({
+      verdict: "request_changes",
+      summary: `The input contains "${tag}".`,
+      findings: [
+        {
+          ...MINOR,
+          title: `A ${tag} tag exposes evidence.`,
+          kind: "pattern",
+          invariant: `Do not execute ${tag}`,
+          cases: [{ scenario: `Input ${tag}`, expected: `Refuse ${tag}` }],
+        },
+      ],
+      resolutions: [{ findingId: "review:1:F1", disposition: "fixed", note: `Verified ${tag}` }],
+    })!;
+    const body = buildReviewPostBody(
+      `Text ${tag}\n\n<details open>\n\nExtra prose\n\n${tag}\n\nInline \`${tag}\`.\n\n\`\`\`html\n${tag}\n\`\`\``,
+      v,
+      TARGET,
+    );
+    expect(body).toContain('**Rationale:** The input contains "&lt;/details&gt;".');
+    expect(body).toContain("A &lt;/details&gt; tag exposes evidence.");
+    expect(body).toContain("Do not execute &lt;/details&gt;");
+    expect(body).toContain("Input &lt;/details&gt; → Refuse &lt;/details&gt;");
+    expect(body).toContain("Verified &lt;/details&gt;");
+    expect(body).toContain("&lt;details open&gt;");
+    expect(body).not.toContain("<details open>");
+    expect(body).toContain(`Inline \`${tag}\`.`);
+    expect(body).toContain(`\`\`\`html\n${tag}\n\`\`\``);
+    expect(JSON.parse(body.match(/^<!-- switchboard:verdict (.*) -->$/m)![1]!).findings).toEqual(v.findings);
+  });
+
+  it("bounds legacy titles without splitting Unicode, ranks severity, and keeps human verification visible", () => {
+    const title = "😀".repeat(200);
+    const v = parseVerdictInput({
+      verdict: "request_changes",
+      findings: [
+        NIT,
+        { ...MINOR, title, humanGated: true },
+        { ...MINOR, id: "F3", severity: "major", title: "A [link](https://example.com) hides the issue." },
+      ],
+    })!;
+    const body = buildReviewPostBody("", v, TARGET);
+    const visible = body.split("<details>")[0]!;
+    expect(visible.indexOf("🟠 **Major**")).toBeLessThan(visible.indexOf("🟡 **Minor**"));
+    expect(visible.indexOf("🟡 **Minor**")).toBeLessThan(visible.indexOf("⚪ **Nit**"));
+    expect(visible).toContain("Needs human verification");
+    expect(visible).toContain(`${"😀".repeat(179)}…`);
+    expect(visible).not.toContain(title);
+    expect(visible).toContain("A \\[link\\](https://example.com) hides the issue.");
+    expect(JSON.parse(body.match(/^<!-- switchboard:verdict (.*) -->$/m)![1]!).findings[1].title).toBe(title);
+    expect(body.match(/<details>/g)).toHaveLength(1);
+    expect(buildReviewPostBody("", { verdict: "approve", summary: "", findings: [] })).not.toContain("<details>");
+  });
+
+  it("approve → the exact `LGTM:` token line first, the count and pinned head, the prose folded for agents", () => {
+    const v = parseVerdictInput({ verdict: "approve", summary: "no blocking issues", findings: [NIT] })!;
+    const body = buildReviewPostBody("F2: the comment predates the two recipes that were cut.", v, TARGET);
+    expect(body.startsWith(`${LGTM_TOKEN} 1 issue\n\n`)).toBe(true);
+    expect(body).toContain("### Full review\n\nF2: the comment predates the two recipes that were cut.\n\n</details>");
+  });
+
+  it("request_changes → issue count, never starts with LGTM even if the prose does", () => {
     const v = parseVerdictInput({
       verdict: "request_changes",
       summary: "null deref in handler",
       findings: [MINOR, NIT],
     })!;
     const body = buildReviewPostBody("LGTM overall but one blocker...", v, TARGET);
-    expect(
-      body.startsWith(
-        `${CHANGES_TOKEN} null deref in handler\n\n> [!WARNING]\n> **Changes requested** · head \`ca726ad\` · 2 findings: 1 minor, 1 nit\n`,
-      ),
-    ).toBe(true);
+    expect(body.startsWith(`${CHANGES_TOKEN} 2 issues\n\n`)).toBe(true);
     expect(body.startsWith("LGTM")).toBe(false);
   });
 
-  it("no verdict → fail-closed: the non-approving line, a CAUTION callout, no table, the prose preserved", () => {
+  it("no verdict → fail-closed: the non-approving line, no issues, the prose preserved", () => {
     const body = buildReviewPostBody("LGTM: ship it", undefined, TARGET);
-    expect(
-      body.startsWith(
-        `${NO_VERDICT_LINE}\n\n> [!CAUTION]\n> **No verdict** · head \`ca726ad\` · the run ended without a submit_verdict call\n`,
-      ),
-    ).toBe(true);
+    expect(body.startsWith(`${NO_VERDICT_LINE}\n\n_Reviewed at \`ca726ad\`._`)).toBe(true);
     expect(body.startsWith("LGTM")).toBe(false);
     expect(body).not.toContain("| Severity |");
     expect(body).toContain("LGTM: ship it"); // the prose is kept, just not first
   });
 
-  it("findings render as a table — severity, id + title, the file linked at the pinned head, `#L<line>` when the finding has one", () => {
+  it("the folded finding index retains severity, exact id and title, and a link pinned to the reviewed head", () => {
     const v = parseVerdictInput({ verdict: "request_changes", summary: "two", findings: [MINOR, NIT] })!;
     const body = buildReviewPostBody("prose", v, TARGET);
     expect(body).toContain(
@@ -319,14 +416,14 @@ describe("review verdict → post body", () => {
     );
   });
 
-  it("without a target the Where cell is plain code and the callout names no head; backslashes and pipes in a title are escaped so the row holds", () => {
+  it("without a target the location is plain code; backslashes and pipes cannot split the folded table", () => {
     const v = parseVerdictInput({
       verdict: "request_changes",
       summary: "s",
       findings: [{ ...MINOR, title: "a \\ b | c" }],
     })!;
     const body = buildReviewPostBody("prose", v);
-    expect(body).toContain("> **Changes requested** · 1 finding: 1 minor\n");
+    expect(body).toContain("Changes requested: 1 issue\n");
     expect(body).toContain("| minor | **F1** a \\\\ b \\| c | `src/data/removed-pages.mjs` |");
   });
 
@@ -345,23 +442,23 @@ describe("review verdict → post body", () => {
     expect(body).not.toContain("blob/");
   });
 
-  it("the counts: an empty findings array says `no findings`, no array says `findings not itemized`; neither renders a table", () => {
+  it("the counts: an empty findings array says `no issues found`, no array says `issues not itemized`; neither renders an index", () => {
     const empty = buildReviewPostBody(
       "Fine.",
       parseVerdictInput({ verdict: "approve", summary: "ok", findings: [] })!,
       TARGET,
     );
-    expect(empty).toContain("> **Approved** · head `ca726ad` · no findings\n");
+    expect(empty).toContain("LGTM: no issues found\n");
     expect(empty).not.toContain("| Severity |");
     const none = buildReviewPostBody("Fine.", parseVerdictInput({ verdict: "approve", summary: "ok" })!, TARGET);
-    expect(none).toContain("> **Approved** · head `ca726ad` · findings not itemized\n");
+    expect(none).toContain("LGTM: issues not itemized\n");
     expect(none).not.toContain("| Severity |");
   });
 
   it("an empty answer renders no `Full review` block; the body ends with the machine-readable verdict marker", () => {
     const v = parseVerdictInput({ verdict: "approve", summary: "ok", findings: [NIT] })!;
     const body = buildReviewPostBody("  \n", v, TARGET);
-    expect(body).not.toContain("<details>");
+    expect(body).not.toContain("### Full review");
     const marker = body.split("\n").at(-1)!;
     const m = /^<!-- switchboard:verdict (.*) -->$/.exec(marker);
     expect(m).not.toBeNull();
@@ -386,7 +483,7 @@ describe("review verdict → post body", () => {
   it("clips only oversized prose at Unicode code-point boundaries and keeps the typed marker", () => {
     const v = parseVerdictInput({ verdict: "approve", summary: "ok", findings: [] })!;
     const clippedProse = (body: string): string =>
-      body.match(/<summary>Full review<\/summary>\n\n(.*)\n\n_\(review truncated/u)?.[1] ?? "";
+      body.match(/### Full review\n\n(.*)\n\n_\(review truncated/u)?.[1] ?? "";
     const asciiBody = buildReviewPostBody("x".repeat(MAX_REVIEW_POST_CODE_POINTS), v, TARGET);
     const proseBudget = [...clippedProse(asciiBody)].length;
     const retainedEmoji = "😀";
@@ -542,7 +639,7 @@ describe("review verdict → post body", () => {
       const v = parseVerdictInput({ verdict: "approve", summary: "minor nits only", findings: [F2] })!;
       expect(v.verdict).toBe("approve");
       const body = buildReviewPostBody("prose", v);
-      expect(body.startsWith(`${LGTM_TOKEN} minor nits only\n`)).toBe(true);
+      expect(body.startsWith(`${LGTM_TOKEN} 1 issue\n`)).toBe(true);
       expect(body).toContain("| nit | **F2** Rename x | `src/b.ts` |");
     });
 
@@ -699,7 +796,7 @@ describe("review verdict → post body", () => {
       const v = parseVerdictInput({ verdict: "approve", summary: "ok", findings: [] })!;
       expect(v.findings).toEqual([]);
       const body = buildReviewPostBody("prose", v);
-      expect(body.startsWith(`${LGTM_TOKEN} ok\n\n> [!NOTE]\n> **Approved** · no findings\n`)).toBe(true);
+      expect(body.startsWith(`${LGTM_TOKEN} no issues found\n`)).toBe(true);
       expect(body).not.toContain("| Severity |");
     });
   });

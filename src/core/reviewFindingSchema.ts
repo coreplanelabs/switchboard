@@ -15,7 +15,8 @@ const finding = {
     line: { type: "integer", description: "1-based line number, when the finding points at one" },
     title: {
       type: "string",
-      description: "One line naming the issue (the full explanation goes in your review text)",
+      description:
+        "One concise sentence, at most 180 characters, stating what fails and its impact in plain language; put paths, spec numbers and implementation detail in file/line or the evidence",
     },
     kind: {
       type: "string",

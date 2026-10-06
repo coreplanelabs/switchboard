@@ -117,7 +117,7 @@ describe("postReviewComment", () => {
 
     const payload = JSON.parse(String(calls[0].init.body)) as { body: string };
     expect([...payload.body].length).toBeLessThanOrEqual(MAX_REVIEW_POST_CODE_POINTS);
-    expect(payload.body).toMatch(/^LGTM: fine\n/);
+    expect(payload.body).toMatch(/^LGTM: no issues found\n/);
     expect(payload.body).toContain('<!-- switchboard:verdict {"verdict":"approve"');
     expect(payload.body).toContain("review truncated to fit GitHub's review size limit");
   });

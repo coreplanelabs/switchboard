@@ -196,7 +196,7 @@ const SUBMIT_VERDICT: PiToolDeclaration = {
     "Switchboard posts to the PR only if that commit IS the PR's head, so a review of the wrong branch can never land on a PR. " +
     "Enumerate EVERY issue you report in `findings` with STABLE ids assigned in order (F1, F2, …) — a fix round " +
     "references findings by these ids, so never renumber them. Severity is exactly one of blocking|major|minor|nit; " +
-    "the entry carries the file (plus line when it points at one) and a one-line title, while the full explanation " +
+    "the entry carries the file (plus line when it points at one) and a title of one concise sentence, at most 180 characters, stating the failure and impact in plain language, while the full explanation " +
     "stays in your review text keyed by the same ids. Every new finding declares kind: single or pattern. " +
     "A single finding omits invariant and cases entirely. For a pattern, declare kind: pattern, name its invariant and enumerate " +
     "independently checkable {scenario, expected} cases, including all selection and execution paths in the diff; " +
@@ -212,7 +212,7 @@ const SUBMIT_VERDICT: PiToolDeclaration = {
     type: "object",
     properties: {
       verdict: { type: "string", enum: ["approve", "request_changes"], description: "approve | request_changes" },
-      summary: { type: "string", description: "One-line rationale shown right after the verdict token" },
+      summary: { type: "string", description: "One-line rationale kept under For agents on the PR" },
       head: {
         type: "string",
         description: "Output of `git rev-parse HEAD` in the checkout you reviewed (the commit the review is about)",
@@ -244,7 +244,8 @@ const SUBMIT_VERDICT: PiToolDeclaration = {
                 },
                 title: {
                   type: "string",
-                  description: "One line naming the issue (the full explanation goes in your review text)",
+                  description:
+                    "One concise sentence, at most 180 characters, stating what fails and its impact in plain language; put paths, spec numbers and implementation detail in file/line or the evidence",
                 },
                 kind: {
                   type: "string",
@@ -281,7 +282,8 @@ const SUBMIT_VERDICT: PiToolDeclaration = {
                 },
                 title: {
                   type: "string",
-                  description: "One line naming the issue (the full explanation goes in your review text)",
+                  description:
+                    "One concise sentence, at most 180 characters, stating what fails and its impact in plain language; put paths, spec numbers and implementation detail in file/line or the evidence",
                 },
                 kind: {
                   type: "string",

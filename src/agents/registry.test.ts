@@ -1010,7 +1010,8 @@ describe("review prompts: the spec contradiction check (agent-review item 14)", 
   it("a contradiction is a finding of severity minor or higher, titled by spec file and item; a spec updated in the same diff is not one", () => {
     for (const sys of [AGENTS.review.system, AGENTS.review.residentSystem!]) {
       expect(sys).toMatch(/severity `?minor`? or higher/i);
-      expect(sys).toContain("Spec contradiction — <spec file> item <n>:");
+      expect(sys).toContain("short plain-language title naming the false promise");
+      expect(sys).toContain("spec file, numbered item and code/spec discrepancy in the evidence");
       expect(sys).toMatch(/updated in the same diff .* is not a finding/i);
       expect(sys).toMatch(/numbered behavior statement or a validation criterion/i);
     }
@@ -1060,7 +1061,7 @@ describe("review prompts: the test guard (agent-review item 16)", () => {
     for (const sys of prompts()) {
       expect(sys).toContain("`test-guard: <file> — removed: …` line");
       expect(sys).toMatch(/removed: …` line is deterministic.*?finding of severity `minor` or higher/);
-      expect(sys).toContain("Test removed — <file>: <what>");
+      expect(sys).toContain("short plain-language title naming the behavior that lost its proof");
       expect(sys).toMatch(/quotes the guard's line exactly as printed/);
       for (const marker of [".skip(", ".only(", "xit(", "xtest(", "xdescribe(", "it.todo(", "test.todo("])
         expect(sys).toContain(marker);
@@ -1237,7 +1238,7 @@ describe("review prompts: the unit contract check (agent-review item 17)", () =>
   it("a listed test scenario the diff did not add is a finding of severity minor titled by the scenario — the same severity as a spec contradiction", () => {
     for (const sys of prompts()) {
       expect(sys).toMatch(
-        /a test scenario the unit listed and the diff did not add is a finding of severity `minor` titled `Contract — test scenario missing: <the scenario>` — the same severity as a spec contradiction/,
+        /a test scenario the unit listed and the diff did not add is a finding of severity `minor` with a short plain-language title naming the unproven scenario — the same severity as a spec contradiction/,
       );
     }
   });
@@ -1245,7 +1246,9 @@ describe("review prompts: the unit contract check (agent-review item 17)", () =>
   it("a named spec row the diff leaves untouched is disposed of out loud; a weakened guard is the guard's finding; no block → skip silently", () => {
     for (const sys of prompts()) {
       expect(sys).toMatch(/a named row the diff leaves untouched is disposed of out loud/);
-      expect(sys).toContain("`Contract — spec row not updated: <spec> item <n>`");
+      expect(sys).toContain(
+        "short plain-language title naming the outdated promise and the exact spec item in its evidence",
+      );
       expect(sys).toMatch(/A guard the block names that the diff weakens is the guard's own finding \(3a\)/);
       expect(sys).toMatch(/No `## Contract` block in this prompt → nothing to check; skip this step silently/);
     }

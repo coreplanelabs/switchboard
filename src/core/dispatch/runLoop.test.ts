@@ -7784,12 +7784,12 @@ describe("the pi harness — the review preset", () => {
       expect(posts).toEqual([
         {
           target: { repo: "o/r", number: 42, commitId: NEW },
-          body: expect.stringContaining(`<summary>Full review</summary>\n\n${answer}\n\n</details>`),
+          body: expect.stringContaining(`### Full review\n\n${answer}\n\n</details>`),
         },
       ]);
       expect(
         posts[0].body.startsWith(
-          refresh ? "Changes requested: the new test is wrong\n" : "No verdict submitted — not approving.",
+          refresh ? "Changes requested: no issues found\n" : "No verdict submitted — not approving.",
         ),
       ).toBe(true);
       expect(s.published).toEqual([`answer:${answer}`]);
