@@ -1,6 +1,6 @@
 # Capacity and sizing
 
-The bot is one Node event loop on the smallest container; a resident is sized for sixteen threads sharing its vCPUs and disk; a cold sandbox is the largest predefined type.
+The bot uses one gateway event loop and bounded validation workers on a `standard-1` container; a resident is sized for sixteen threads sharing its vCPUs and disk; a cold sandbox is the largest predefined type.
 
 ## One event loop in the bot
 
@@ -11,7 +11,13 @@ Node is single-threaded, so "using the cores" means never serializing independen
 - status-card edits are coalesced;
 - the answer is sent before the resident is released.
 
-The bot's CPU goes to redaction and JSON serialization, once per event. Nothing has measured it CPU-bound, so it runs on the smallest container and grows only on evidence.
+Responses validation uses at most two workers sharing the bot's CPU and memory. The bot template uses `standard-1` (0.5 vCPU, 4 GiB), the smallest supported predefined type that passed the bounded validation workload with retained gateway memory. It remains one container. See [Cloudflare container sizes](https://developers.cloudflare.com/containers/platform/limits/).
+
+Paired Linux x64 Node24.21 tests on the same stock SDK completed two full2MiB streams at the normal baseline. Inline validation delayed the health response by6.24s; isolated validation's largest response was179ms. Both implementations OOMed on `basic` (0.25 vCPU,1GiB) with touched, held800,900 and960MiB baselines. This does not establish a fixed additive worker cost or the cause of an earlier outage.
+
+At a held960MiB baseline, the isolated pipeline passed on `standard-1`:1235.93MiB cgroup peak,100ms largest health response, two actual worker exits, zero OOM events and no remaining capacity credits. Source failure, native abort and maximal-frame refusal controls also passed. These are finite fake-upstream tests on emulated Linux AMD64 runtime components. They do not prove native-hardware performance, full image/whole-bot startup or live acceptance. A512MiB managed policy is not an RSS or native allocator limit.
+
+The sizing guard covers both build and registry profile rendering against that finite qualification footprint. It is a regression guard, not a universal memory bound. Applying the source template does not resize the running service; release, deployment and serving-capacity readback remain separate.
 
 ## Sixteen threads in a resident
 

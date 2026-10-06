@@ -5,6 +5,7 @@ import {
   proxyUnknownTerminalIsAuthenticated,
   authenticateProxyTurnBudgetExhausted,
   readProxyTurnBudgetExhausted,
+  readProxyUnknownTerminal,
   proxyProviderFailureIsAuthenticated,
 } from "./providerFailureAuth.js";
 
@@ -16,6 +17,21 @@ vi.mock("node:crypto", async (importOriginal) => ({
 // Feature: docs/reference/specs/harness-pi.md item 6 — diagnostics are signed
 // evidence, never provider causes or permission to retry a model call.
 describe("unknown terminal authentication", () => {
+  it("authenticates a pre-body JSON refusal as local unknown without provider or turn-debit authority", () => {
+    const error = authenticateProxyUnknownTerminal("consumer_rejected");
+    const body = `403 ${JSON.stringify({ error })}`;
+    expect(readProxyUnknownTerminal(body)).toEqual({ type: "model_terminal_unknown", reason: "consumer_rejected" });
+    expect(proxyProviderFailureIsAuthenticated(body)).toBe(false);
+    expect(readProxyTurnBudgetExhausted(body, "run-unparsed")).toBeUndefined();
+    expect(
+      readProxyUnknownTerminal(
+        JSON.stringify({
+          error: { ...error, type: "turn_budget_exhausted", turns: 1, maxTurns: 1, runId: "run-unparsed" },
+        }),
+      ),
+    ).toBeUndefined();
+  });
+
   it("binds local turn-cap evidence to exact run and counts without provider authority", () => {
     const signed = authenticateProxyTurnBudgetExhausted({ runId: "run-1", turns: 150, maxTurns: 150 });
     expect(readProxyTurnBudgetExhausted(`403 ${JSON.stringify({ error: signed })}`, "run-1")).toMatchObject({

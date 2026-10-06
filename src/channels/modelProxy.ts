@@ -17,11 +17,11 @@
 // blind and the Access gate does not cover them, so the bearer is the whole door.
 
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
-import { once } from "node:events";
-import { MODEL_STREAM_HEARTBEAT_MS } from "../core/budgets.js";
+import { MODEL_STREAM_HEARTBEAT_MS, RESPONSES_VALIDATION_LIMITS } from "../core/budgets.js";
 import {
   authenticateProxyProviderFailure,
   authenticateProxyTurnBudgetExhausted,
+  authenticateProxyUnknownTerminal,
 } from "../core/modelProxy/providerFailureAuth.js";
 import type { RunBearerGrant, RunBearerStore, RunMarks } from "../core/modelProxy/runBearers.js";
 import type { SpanAttrs } from "../core/trace/attrs.js";
@@ -51,6 +51,18 @@ import {
 import type { Secrets } from "../secrets.js";
 import { readBody } from "./http.js";
 import { ResponsesFailureBoundary } from "./modelProxyResponses.js";
+import { ResponsesConsumer, type ParsedResponsesFrame } from "./responsesConsumer.js";
+import {
+  inspectResponsesGraph,
+  responsesGraphCharge,
+  responsesTextCharge,
+  type ResponsesJsonTarget,
+} from "./responsesResources.js";
+import {
+  ResponsesValidationInterrupted,
+  responsesValidationCapacity,
+  type ResponsesValidationReservation,
+} from "./responsesValidationCapacity.js";
 
 export const ANTHROPIC_MESSAGES_PATH = "/v1/messages";
 export const OPENAI_CHAT_COMPLETIONS_PATH = "/v1/chat/completions";
@@ -117,7 +129,7 @@ export interface ModelProxyDeps {
   clock: Clock;
   /** Injectable for tests; the global fetch otherwise. */
   fetch?: typeof fetch;
-  /** One line per call — the run id, the turn, the status and byte counts; never a body or a credential. */
+  /** Call outcomes and validation diagnostics; verified run/turn context, never a body or credential. */
   log?: (line: string) => void;
   maxBodyBytes?: number;
   /** The operator's `costs.prices` table (costs.md item 4b), read through the
@@ -144,6 +156,8 @@ export interface ProxyRequest {
   body: AsyncIterable<Buffer | Uint8Array>;
   /** Aborts the upstream call when the caller goes away. */
   signal?: AbortSignal;
+  /** Internal adapter receipt: all output finished or the transport closed. */
+  transportSettled?: Promise<void>;
 }
 
 export interface ProxyResponse {
@@ -151,6 +165,12 @@ export interface ProxyResponse {
   headers: Record<string, string>;
   /** A refusal or a buffered answer, or the provider's stream forwarded as it arrives. */
   body: string | ReadableStream<Uint8Array>;
+  /** Internal adapter disposition; no request body was read for this answer. */
+  requestBodyDisposition?: "unread";
+  /** Internal source ownership: its boundary, rather than the call, stops the consumer. */
+  validationSourceOwned?: true;
+  /** Internal owned output handoff/HTTP drain receipt, never a wire field. */
+  releaseOutput?: (bytes: Uint8Array) => void;
 }
 
 export type Door =
@@ -609,7 +629,7 @@ function schemaKeywords(value: unknown, into = new Set<string>()): Set<string> {
   return into;
 }
 
-function providerErrorProse(body: string): string {
+function providerErrorProse(body: unknown): string {
   const strings = (value: unknown, into: string[] = []): string[] => {
     if (typeof value === "string") into.push(value);
     else if (Array.isArray(value)) for (const item of value) strings(item, into);
@@ -617,9 +637,9 @@ function providerErrorProse(body: string): string {
     return into;
   };
   try {
-    return strings(JSON.parse(body) as unknown).join(" ");
+    return strings(typeof body === "string" ? (JSON.parse(body) as unknown) : body).join(" ");
   } catch {
-    return body;
+    return typeof body === "string" ? body : "";
   }
 }
 
@@ -633,7 +653,7 @@ function quoted(text: string, word: string): boolean {
 function providerSchemaRejectionOf(
   shape: ProxyShape,
   body: Record<string, unknown>,
-  errorBody: string,
+  errorBody: unknown,
 ): ProviderSchemaRejection | undefined {
   const prose = providerErrorProse(errorBody);
   if (
@@ -828,6 +848,125 @@ export async function handleAdmitted(
   req: ProxyRequest,
   deps: ModelProxyDeps,
 ): Promise<ProxyResponse> {
+  const { shape, grant } = door;
+  if (grant.providerWire !== shape)
+    return {
+      ...refusalResponse(
+        shape,
+        400,
+        "wrong_shape",
+        `this run's provider "${grant.providerName}" speaks ${PROXY_PATHS[grant.providerWire]}, not ${PROXY_PATHS[shape]}`,
+      ),
+      requestBodyDisposition: "unread",
+    };
+  if (shape !== "openai-responses") return handleAdmittedCall(door, req, deps);
+  let reservation: ResponsesValidationReservation;
+  let queuedAt: number | undefined;
+  const logAdmission = (kind: ResponsesValidationInterrupted["kind"] | "admitted") => {
+    try {
+      const wait = queuedAt === undefined ? "" : ` waitMs=${Math.max(0, deps.clock() - queuedAt)}`;
+      (deps.log ?? console.log)(`[model-proxy] run=${grant.runId} ${shape} → validation ${kind}${wait} before body`);
+    } catch {
+      // Diagnostics cannot replace admission or the authenticated local refusal.
+    }
+  };
+  try {
+    reservation = await responsesValidationCapacity.reserve(req.signal, () => {
+      queuedAt = deps.clock();
+    });
+    if (req.signal?.aborted) {
+      reservation.finishTransport();
+      throw new ResponsesValidationInterrupted("aborted");
+    }
+    if (queuedAt !== undefined) logAdmission("admitted");
+  } catch (error) {
+    if (!(error instanceof ResponsesValidationInterrupted)) throw error;
+    logAdmission(error.kind);
+    return {
+      status: 403,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ error: authenticateProxyUnknownTerminal("consumer_rejected") }),
+      requestBodyDisposition: "unread",
+    };
+  }
+  reservation.beginRequest();
+  const consumer = new ResponsesConsumer(grant.model, {
+    signal: req.signal,
+    capacity: reservation.capacity,
+    reservation,
+  });
+  let sourceOwned = false;
+  if (req.transportSettled)
+    void req.transportSettled.then(
+      () => reservation.finishTransport(),
+      () => reservation.finishTransport(),
+    );
+  try {
+    const result = await handleAdmittedCall(door, req, deps, reservation, consumer);
+    sourceOwned = result.validationSourceOwned === true;
+    if (req.transportSettled) return result;
+    if (typeof result.body === "string") {
+      reservation.finishTransport();
+      return result;
+    }
+    const reader = result.body.getReader();
+    return {
+      ...result,
+      body: new ReadableStream<Uint8Array>(
+        {
+          pull: async (controller) => {
+            try {
+              const next = await reader.read();
+              if (next.done) {
+                controller.close();
+                reader.releaseLock();
+                reservation.finishTransport();
+              } else {
+                controller.enqueue(next.value);
+                result.releaseOutput?.(next.value);
+              }
+            } catch (error) {
+              controller.error(error);
+              reader.releaseLock();
+              reservation.finishTransport();
+            }
+          },
+          cancel: async (reason) => {
+            try {
+              await reader.cancel(reason);
+            } finally {
+              reader.releaseLock();
+              reservation.finishTransport();
+            }
+          },
+        },
+        { highWaterMark: 0 },
+      ),
+    };
+  } catch (error) {
+    if (!req.transportSettled) reservation.finishTransport();
+    if (error instanceof ResponsesValidationInterrupted) {
+      reservation.stopResponse(error);
+      return {
+        status: 403,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ error: authenticateProxyUnknownTerminal("consumer_rejected") }),
+      };
+    }
+    throw error;
+  } finally {
+    if (!sourceOwned) await consumer.dispose();
+    reservation.finishRequest();
+  }
+}
+
+async function handleAdmittedCall(
+  door: Extract<Door, { ok: true }>,
+  req: ProxyRequest,
+  deps: ModelProxyDeps,
+  reservation?: ResponsesValidationReservation,
+  consumer?: ResponsesConsumer,
+): Promise<ProxyResponse> {
   const log = deps.log ?? ((line: string) => console.log(line));
   const { shape, grant } = door;
   if (grant.providerWire !== shape) {
@@ -838,13 +977,49 @@ export async function handleAdmitted(
       `this run's provider "${grant.providerName}" speaks ${PROXY_PATHS[grant.providerWire]}, not ${PROXY_PATHS[shape]}`,
     );
   }
-  const read = await readBody(req.body, deps.maxBodyBytes ?? MAX_PROXY_BODY_BYTES);
-  if (!read.ok) return refusalResponse(shape, 413, "body_too_large", "request body too large");
   let parsed: unknown;
-  try {
-    parsed = JSON.parse(read.body);
-  } catch {
-    return refusalResponse(shape, 400, "invalid_body", "the body is not JSON");
+  if (reservation && consumer) {
+    const max = deps.maxBodyBytes ?? MAX_PROXY_BODY_BYTES;
+    const chunks: Uint8Array[] = [];
+    const permits: import("./responsesValidationCapacity.js").ResponsesStoragePermit[] = [];
+    const backing = new Set<ArrayBufferLike>();
+    let total = 0;
+    try {
+      for await (const chunk of req.body) {
+        if (total + chunk.byteLength > max)
+          return refusalResponse(shape, 413, "body_too_large", "request body too large");
+        if (!backing.has(chunk.buffer)) {
+          permits.push(reservation.reserveStorage(chunk.buffer.byteLength, "request-chunk"));
+          backing.add(chunk.buffer);
+        }
+        total += chunk.byteLength;
+        chunks.push(chunk);
+      }
+      const owned = reservation.reserveStorage(total, "request-copy");
+      const bytes = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      chunks.length = 0;
+      for (const permit of permits) permit.release();
+      const result = await consumer.parseBytes(bytes.buffer, "request", owned);
+      if (!result.ok) return refusalResponse(shape, 400, "invalid_body", "the body is not JSON");
+      parsed = result.value;
+      // Its parent graph remains in this transport reservation while schemas,
+      // pinned payload and hosted-effect decisions still refer to the request.
+    } finally {
+      for (const permit of permits) permit.release();
+    }
+  } else {
+    const read = await readBody(req.body, deps.maxBodyBytes ?? MAX_PROXY_BODY_BYTES);
+    if (!read.ok) return refusalResponse(shape, 413, "body_too_large", "request body too large");
+    try {
+      parsed = JSON.parse(read.body);
+    } catch {
+      return refusalResponse(shape, 400, "invalid_body", "the body is not JSON");
+    }
   }
   const body = record(parsed);
   if (!body) return refusalResponse(shape, 400, "invalid_body", "the body must be a JSON object");
@@ -897,6 +1072,10 @@ export async function handleAdmitted(
   // harness's marks (the checkpoint turn's none, a post-step's trimmed list)
   // and then by the selected wire's schema vocabulary. Every schema loss is a
   // typed degradation on the run, never a silent request rewrite.
+  const shapePermit = reservation?.reserveStorage(
+    RESPONSES_VALIDATION_LIMITS.shapeWorkingBytes,
+    "request-schema-shaping",
+  );
   const shaped = shapeTools(shape, body, deps.bearers.marksOf(grant.runId));
   const schemaShaped = shapeToolSchemasForWire(shape, shaped.body);
   for (const degradation of schemaShaped.degradations) {
@@ -912,7 +1091,15 @@ export async function handleAdmitted(
       at: deps.clock(),
     });
   }
+  if (shapePermit) shapePermit.resize(responsesGraphCharge(inspectResponsesGraph(schemaShaped.body, "request")));
+  const payloadPermit = reservation?.reserveStorage(
+    RESPONSES_VALIDATION_LIMITS.preparedPayloadBytes * 2 + RESPONSES_VALIDATION_LIMITS.stringHeaderBytes,
+    "request-payload",
+  );
   const payload = JSON.stringify(pinRequest(shape, schemaShaped.body, grant));
+  if (reservation && Buffer.byteLength(payload, "utf8") > RESPONSES_VALIDATION_LIMITS.preparedPayloadBytes)
+    throw new ResponsesValidationInterrupted("storage");
+  payloadPermit?.resize(responsesTextCharge(payload));
   const offered = { ...toolsOffered(shape, body), toolChoice: shaped.toolChoice };
   const startedAt = deps.clock();
   const span = grant.span.start("model.turn", {
@@ -945,13 +1132,166 @@ export async function handleAdmitted(
   // harness then holds and backs off inside its lease. Every provider answer is
   // classified before a consumer acts, and every failed response crossing the
   // proxy is rendered from the cause rather than relaying the wire payload.
-  const call = (): Promise<Response> =>
-    (deps.fetch ?? fetch)(upstream.url, {
+  const rawBodies = new WeakMap<Response, ReadableStream<Uint8Array>>();
+  const bodyTexts = new WeakMap<Response, string>();
+  const rawBody = (answer: Response): ReadableStream<Uint8Array> | null => rawBodies.get(answer) ?? answer.body;
+  const countBody = (source: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> => {
+    const reader = source.getReader();
+    reservation!.beginSource();
+    let reading = false,
+      finished = false;
+    let cancellation: Promise<void> | undefined;
+    let cancellationSettled = false;
+    let pendingRaw: import("./responsesValidationCapacity.js").ResponsesStoragePermit | undefined;
+    const finish = () => {
+      if (finished || (cancellation && !cancellationSettled)) return;
+      finished = true;
+      pendingRaw?.release();
+      reader.releaseLock();
+      reservation!.finishSource();
+    };
+    const cancelOriginal = (reason: unknown): Promise<void> => {
+      if (finished) return Promise.resolve();
+      return (cancellation ??= reader.cancel(reason).finally(() => {
+        cancellationSettled = true;
+        finish();
+      }));
+    };
+    return new ReadableStream<Uint8Array>(
+      {
+        start: (controller) => {
+          void reader.closed.catch((error: unknown) => {
+            controller.error(error);
+            if (!reading) finish();
+          });
+        },
+        pull: async (controller) => {
+          reading = true;
+          try {
+            const next = await reader.read();
+            if (next.done) {
+              controller.close();
+              finish();
+              return;
+            }
+            try {
+              reservation!.countResponseBytes(next.value.byteLength);
+              pendingRaw?.release();
+              pendingRaw = reservation!.reserveStorage(next.value.buffer.byteLength, "response-raw-backing");
+            } catch (error) {
+              if (!(error instanceof ResponsesValidationInterrupted)) throw error;
+              reservation!.stopResponse(error);
+              // Close the wrapper for authenticated local handling, but keep
+              // the original source owned until its one cancellation settles.
+              void cancelOriginal(error).catch(() => {});
+              // The owning boundary/document reader consumes the latched local
+              // interruption instead of mistaking it for an upstream failure.
+              controller.close();
+              return;
+            }
+            controller.enqueue(next.value);
+          } catch (error) {
+            controller.error(error);
+            finish();
+          } finally {
+            reading = false;
+          }
+        },
+        cancel: async (reason) => {
+          await cancelOriginal(reason);
+        },
+      },
+      { highWaterMark: 0 },
+    );
+  };
+  const readDocument = async (answer: Response): Promise<string> => {
+    const cached = bodyTexts.get(answer);
+    if (cached !== undefined) return cached;
+    if (!reservation) return answer.text();
+    const source = rawBody(answer);
+    if (!source) {
+      bodyTexts.set(answer, "");
+      return "";
+    }
+    const reader = source.getReader();
+    const chunks: Uint8Array[] = [];
+    const chunkPermits: import("./responsesValidationCapacity.js").ResponsesStoragePermit[] = [];
+    const chunkBackings = new Set<ArrayBufferLike>();
+    let bytes = 0,
+      done = false;
+    try {
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) {
+          done = true;
+          break;
+        }
+        if (bytes + next.value.byteLength > RESPONSES_VALIDATION_LIMITS.retainedFrameBytes) {
+          const error = new ResponsesValidationInterrupted("frame-bytes");
+          reservation.stopResponse(error);
+          throw error;
+        }
+        if (!chunkBackings.has(next.value.buffer)) {
+          chunkPermits.push(reservation.reserveStorage(next.value.buffer.byteLength, "document-chunk-backing"));
+          chunkBackings.add(next.value.buffer);
+        }
+        bytes += next.value.byteLength;
+        chunks.push(next.value);
+      }
+      if (reservation.responseInterruption) throw reservation.responseInterruption;
+      // Fetch's text() strips an initial UTF8 BOM and replaces invalid bytes.
+      // Stream framing deliberately uses a different, BOM-preserving decoder.
+      const copy = reservation.reserveStorage(bytes, "document-copy");
+      const textPermit = reservation.reserveStorage(
+        bytes * 2 + RESPONSES_VALIDATION_LIMITS.stringHeaderBytes,
+        "document-text",
+      );
+      let text: string;
+      try {
+        text = new TextDecoder().decode(Buffer.concat(chunks, bytes));
+      } finally {
+        copy.release();
+      }
+      textPermit.resize(responsesTextCharge(text));
+      bodyTexts.set(answer, text);
+      return text;
+    } catch (error) {
+      if (error instanceof ResponsesValidationInterrupted) reservation.stopResponse(error);
+      throw error;
+    } finally {
+      if (!done) await reader.cancel(reservation.responseInterruption).catch(() => {});
+      reader.releaseLock();
+      for (const permit of chunkPermits) permit.release();
+    }
+  };
+  const parsedDocuments = new WeakMap<Response, ParsedResponsesFrame>();
+  const parseDocument = async (answer: Response, target: ResponsesJsonTarget): Promise<ParsedResponsesFrame> => {
+    const cached = parsedDocuments.get(answer);
+    if (cached) return cached;
+    const text = await readDocument(answer);
+    const result = consumer
+      ? await consumer.parseJSON(text, target)
+      : (() => {
+          try {
+            return { ok: true as const, value: JSON.parse(text) as unknown };
+          } catch {
+            return { ok: false as const };
+          }
+        })();
+    parsedDocuments.set(answer, result);
+    return result;
+  };
+  const call = async (): Promise<Response> => {
+    if (reservation?.responseInterruption) throw reservation.responseInterruption;
+    const answer = await (deps.fetch ?? fetch)(upstream.url, {
       method: "POST",
       headers: upstream.headers,
       body: payload,
       ...(req.signal ? { signal: req.signal } : {}),
     });
+    if (reservation && answer.body) rawBodies.set(answer, countBody(answer.body));
+    return answer;
+  };
   const providerDown = (failure: ProviderFailure) => {
     deps.plane?.level(grant.providerName, "down", failure.cause);
     deps.plane?.park(grant.runId, grant.providerName);
@@ -962,19 +1302,31 @@ export async function handleAdmitted(
       return classifyProviderFailure({ error: thrown ?? new Error("fetch failed"), provider: grant.providerName });
     const contentType = (answer.headers.get("content-type") ?? "").toLowerCase();
     if (answer.ok && !contentType.includes("text/html")) return undefined;
-    const failureBody = await answer
-      .clone()
-      .text()
-      .catch(() => "");
+    const failureBody = reservation
+      ? await readDocument(answer).catch(() => "")
+      : await answer
+          .clone()
+          .text()
+          .catch(() => "");
+    let failureValue: unknown = failureBody;
+    if (consumer && reservation && !reservation.responseInterruption) {
+      try {
+        const parsed = await parseDocument(answer, "error");
+        if (parsed.ok) failureValue = parsed.value;
+      } catch (error) {
+        if (error instanceof ResponsesValidationInterrupted) reservation.stopResponse(error);
+        else throw error;
+      }
+    }
     const failure = classifyProviderFailure({
       status: answer.status,
-      body: failureBody,
+      body: failureValue,
       provider: grant.providerName,
       model: grant.model,
     });
     const schemaRejection =
       answer.status === 400 && failure.cause === "request-rejected"
-        ? providerSchemaRejectionOf(shape, schemaShaped.body, failureBody)
+        ? providerSchemaRejectionOf(shape, schemaShaped.body, failureValue)
         : undefined;
     return schemaRejection !== undefined ? withSchemaRejection(failure, schemaRejection) : failure;
   };
@@ -985,7 +1337,25 @@ export async function handleAdmitted(
   } catch (err) {
     thrown = err;
   }
+  const localResponseStop = (answer: Response | undefined): ProxyResponse => {
+    const error = reservation!.responseInterruption!;
+    span.setAttrs({ ...(answer ? { httpStatus: answer.status } : {}) });
+    span.fail(error);
+    span.end("error");
+    try {
+      log(`[model-proxy] run=${grant.runId} turn=${turn.turn}/${grant.maxTurns} ${shape} → validation ${error.kind}`);
+    } catch {
+      /* A diagnostic must not replace local authenticated evidence. */
+    }
+    return {
+      status: 403,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ error: authenticateProxyUnknownTerminal("consumer_rejected") }),
+    };
+  };
   let providerFailure = await failureOf(res, thrown);
+  if (reservation?.responseInterruption && (!providerFailure || providerFailureParks(providerFailure.cause)))
+    return localResponseStop(res);
   if (providerFailure !== undefined && providerFailureParks(providerFailure.cause) && !aborted()) {
     let retried: Response | undefined;
     let retryThrown: unknown;
@@ -999,6 +1369,8 @@ export async function handleAdmitted(
     if (retried !== undefined) res = retried;
     providerFailure = await failureOf(retried ?? res, retryThrown ?? thrown);
   }
+  if (reservation?.responseInterruption && (!providerFailure || providerFailureParks(providerFailure.cause)))
+    return localResponseStop(res);
   if (providerFailure !== undefined && providerFailureParks(providerFailure.cause) && !aborted())
     providerDown(providerFailure);
   const html = (res?.headers.get("content-type") ?? "").toLowerCase().includes("text/html");
@@ -1011,7 +1383,7 @@ export async function handleAdmitted(
   }
   const headers = pickResponseHeaders(res.headers);
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
+    const text = await (reservation ? readDocument(res) : res.text()).catch(() => "");
     const failure =
       providerFailure ??
       classifyProviderFailure({ status: res.status, body: text, provider: grant.providerName, model: grant.model });
@@ -1026,11 +1398,19 @@ export async function handleAdmitted(
   // re-issues every turn held parked on the provider, whichever run relayed it.
   const contentType = res.headers.get("content-type") ?? "";
   const responsesStream = shape === "openai-responses" && contentType.includes("text/event-stream") && res.body;
-  if (!responsesStream) deps.plane?.level(grant.providerName, "up");
+  if (!responsesStream && shape !== "openai-responses") deps.plane?.level(grant.providerName, "up");
   if (contentType.includes("text/event-stream") && res.body) {
     const meter = new SseMeter(shape);
     const boundary = responsesStream
-      ? new ResponsesFailureBoundary(schemaShaped.body, (event) => meter.observe(event))
+      ? new ResponsesFailureBoundary(schemaShaped.body, (event) => meter.observe(event), {
+          signal: req.signal,
+          ...(consumer ? { consumer } : {}),
+          ...(reservation ? { capacity: reservation.capacity, reservation } : {}),
+          onSourceSettled: () => reservation?.finishSource(),
+          ...(reservation ? { responseInterruption: () => reservation.responseInterruption } : {}),
+          onValidationInterruption: (kind) =>
+            log(`[model-proxy] run=${grant.runId} turn=${turn.turn}/${grant.maxTurns} ${shape} → validation ${kind}`),
+        })
       : undefined;
     let firstAt: number | undefined;
     let outBytes = 0;
@@ -1052,7 +1432,18 @@ export async function handleAdmitted(
       span.end("error");
       return true;
     };
-    const stream = meteredStream(boundary ? res.body.pipeThrough(boundary.transform()) : res.body, {
+    let source: ReadableStream<Uint8Array> = rawBody(res)!;
+    if (boundary) {
+      reservation?.beginSource();
+      try {
+        source = boundary.pipe(rawBody(res)!);
+      } catch (error) {
+        reservation?.finishSource();
+        void boundary.dispose();
+        throw error;
+      }
+    }
+    const stream = meteredStream(source, {
       onChunk: (chunk) => {
         firstAt ??= deps.clock();
         outBytes += chunk.byteLength;
@@ -1077,6 +1468,7 @@ export async function handleAdmitted(
         log(outcome(res.status, outBytes));
       },
       onError: (err, source) => {
+        void boundary?.dispose();
         const result = consumedResult();
         span.setAttrs({
           ...turnAttrs(
@@ -1090,7 +1482,7 @@ export async function handleAdmitted(
         });
         if (!terminalFailure()) {
           // A requester close is local cancellation, not provider-down proof.
-          if (source === "read" && !aborted())
+          if (source === "read" && !aborted() && !(err instanceof ResponsesValidationInterrupted))
             providerDown(
               classifyProviderFailure({ status: 503, error: err, provider: grant.providerName, model: grant.model }),
             );
@@ -1102,24 +1494,46 @@ export async function handleAdmitted(
         );
       },
     });
-    return { status: res.status, headers, body: stream };
+    return {
+      status: res.status,
+      headers,
+      body: stream,
+      ...(boundary
+        ? { validationSourceOwned: true as const, releaseOutput: (bytes: Uint8Array) => boundary.releaseOutput(bytes) }
+        : {}),
+    };
   }
-  const text = await res.text();
+  let text: string;
+  try {
+    text = await (reservation ? readDocument(res) : res.text());
+  } catch (error) {
+    if (reservation?.responseInterruption) return localResponseStop(res);
+    throw error;
+  }
   let meter: TurnMeter = {};
   try {
-    const json: unknown = JSON.parse(text);
+    const result = consumer
+      ? await parseDocument(res, "buffered")
+      : { ok: true as const, value: JSON.parse(text) as unknown };
+    if (!result.ok) throw new SyntaxError("buffered response is not JSON");
+    const json: unknown = result.value;
     meter =
       shape === "anthropic-messages"
         ? meterAnthropicMessage(json)
         : shape === "openai-responses"
           ? meterResponses(json)
           : meterOpenAiCompletion(json);
-  } catch {
+  } catch (error) {
+    if (reservation && error instanceof ResponsesValidationInterrupted) {
+      reservation.stopResponse(error);
+      return localResponseStop(res);
+    }
     // not JSON: forwarded as it came, metered as nothing
   }
   span.setAttrs(turnAttrs(grant, meter, undefined, offered, priceOf(meter)));
   span.end("ok");
   log(outcome(res.status, text.length));
+  if (shape === "openai-responses") deps.plane?.level(grant.providerName, "up");
   return { status: res.status, headers, body: text };
 }
 
@@ -1240,6 +1654,22 @@ export function createModelProxyHandler(deps: ModelProxyDeps): (req: HttpRequest
           return;
         }
         const controller = new AbortController();
+        let activeReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+        const transportSettled = new Promise<void>((resolve) => {
+          const failed = () => {
+            controller.abort();
+            void activeReader?.cancel().catch(() => {});
+          };
+          const settled = () => {
+            res.removeListener("error", failed);
+            resolve();
+          };
+          // Node may report an error to a write callback before emitting its
+          // error event. Keep the transport listener through actual disposal.
+          res.on("error", failed);
+          res.once("finish", settled);
+          res.once("close", settled);
+        });
         const requestId = `model-proxy-${++requestSequence}`;
         const requestStartedAt = deps.clock();
         let closeObserved = false;
@@ -1251,6 +1681,7 @@ export function createModelProxyHandler(deps: ModelProxyDeps): (req: HttpRequest
           // Abort first, as before diagnostics existed; observing the close must
           // not delay or replace the cancellation it is recording.
           controller.abort();
+          void activeReader?.cancel().catch(() => {});
           const closeAt = deps.clock();
           const socket = safelyObserve(() => res.socket) ?? safelyObserve(() => req.socket);
           const transportErrorCode = safeTransportErrorCode(
@@ -1279,22 +1710,92 @@ export function createModelProxyHandler(deps: ModelProxyDeps): (req: HttpRequest
         });
         const result = await handleAdmitted(
           door,
-          { method: req.method, path, headers: req.headers, body: req, signal: controller.signal },
+          { method: req.method, path, headers: req.headers, body: req, signal: controller.signal, transportSettled },
           planeDeps,
         );
+        if (controller.signal.aborted || safelyObserve(() => res.destroyed) === true) {
+          if (typeof result.body !== "string") await result.body.cancel().catch(() => {});
+          return;
+        }
         if (typeof result.body === "string") {
+          if (result.requestBodyDisposition === "unread") {
+            res.once("finish", () => req.destroy());
+            res.once("close", () => req.destroy());
+          }
           write(result);
           return;
         }
         head(result.status, result.headers);
         res.flushHeaders();
+        activeReader = result.body.getReader();
         try {
-          for await (const chunk of result.body) {
-            if (!res.write(chunk)) await once(res, "drain");
+          for (;;) {
+            const next = await activeReader.read();
+            if (next.done) break;
+            const chunk = next.value;
+            await new Promise<void>((resolve, reject) => {
+              let accepted: boolean | undefined;
+              let completed = false;
+              let retired = false;
+              let settled = false;
+              const retire = () => {
+                if (retired) return;
+                retired = true;
+                result.releaseOutput?.(chunk);
+              };
+              const detach = () => {
+                res.removeListener("drain", drained);
+                res.removeListener("finish", done);
+                res.removeListener("close", done);
+                res.removeListener("error", failed);
+              };
+              const done = () => {
+                if (settled) return;
+                settled = true;
+                retire();
+                detach();
+                resolve();
+              };
+              const failed = (error: Error) => {
+                if (settled) return;
+                settled = true;
+                retire();
+                detach();
+                reject(error);
+              };
+              const drained = () => {
+                // Drain means the backpressured queue no longer owns bytes.
+                // A true write return only means below the high-water mark.
+                if (accepted === false) done();
+              };
+              res.once("drain", drained);
+              res.once("finish", done);
+              res.once("close", done);
+              res.once("error", failed);
+              try {
+                accepted = res.write(chunk, (error) => {
+                  if (settled) return;
+                  if (error) failed(error);
+                  else {
+                    completed = true;
+                    retire();
+                    if (accepted === true) done();
+                  }
+                });
+                if (accepted && completed) done();
+              } catch (error) {
+                failed(error instanceof Error ? error : new Error(String(error)));
+              }
+            });
+            if (controller.signal.aborted || safelyObserve(() => res.destroyed) === true) break;
           }
-          res.end();
+          if (!controller.signal.aborted && safelyObserve(() => res.destroyed) !== true) res.end();
         } catch (err) {
+          await activeReader.cancel(err).catch(() => {});
           res.destroy(err instanceof Error ? err : new Error(String(err)));
+        } finally {
+          activeReader.releaseLock();
+          activeReader = undefined;
         }
       } catch (err) {
         log(`[model-proxy] ${err instanceof Error ? err.message : String(err)}`);
