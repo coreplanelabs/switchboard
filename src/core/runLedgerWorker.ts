@@ -1,4 +1,53 @@
+import {
+  sourceSeedReleaseOf,
+  promotionConfirmationOf,
+  confirmationMatchesPreparation,
+  type PromotionConfirmationResult,
+} from "./runLedger/seedVerification.js";
+import {
+  sourceSeedReferenceOf,
+  sourceSeedReceiptOf,
+  sourceSeedReferenceMatches,
+  SourceSeedPendingError,
+  type SourceSeedReference,
+  type SourceSeedResult,
+} from "./runLedger/seedVerification.js";
+import {
+  canonicalSeedJson,
+  expectedSeedManifestOf,
+  expectedSeedMatchesClaim,
+  seedContentHash,
+  encodeExpectedSeedHeader,
+  EXPECTED_SEED_HEADER,
+  requestHeaderBytes,
+  WORKER_REQUEST_HEADER_BYTES,
+  type ExpectedSeedManifest,
+} from "./runLedger/seedManifest.js";
 import { isContextCheckpointReceipt, type CanonicalCheckpointSource } from "./references/contextCheckpoint.js";
+import { allocationAckOf, UnknownAllocationClaimError } from "./runLedger/allocationAck.js";
+import {
+  promotionBodyOf,
+  promotionBodyHash,
+  promotionReceiptOf,
+  promotionPreparationOf,
+  promotionHeldResultOf,
+  promotionCommitReceiptOf,
+  promotionCommitMatchesPreparation,
+  samePromotionClaim,
+  PromotionPendingError,
+  promotionBytes,
+  PROMOTION_BODY_BYTES,
+  type PromotionPrepareResult,
+  type PromotionReadRequest,
+  type PromotionReadResult,
+} from "./runLedger/promotion.js";
+import {
+  workspaceAllocationOf,
+  workspaceDispositionOf,
+  sameWorkspaceAllocation,
+  type WorkspaceAllocation,
+  type WorkspaceDispositionRead,
+} from "./runLedger/workspaceDurability.js";
 import {
   isCoordinatorReconcileReceipt,
   type CoordinatorReconcileReceipt,
@@ -167,19 +216,44 @@ export class WorkerRunLedger implements RunLedger {
     this.fetchImpl = opts.fetch ?? fetch;
   }
 
+  originalPromotionBody(request: ClaimRequest): string {
+    return JSON.stringify({ storeKey: this.opts.storeKey, run: request });
+  }
+  async observeExpectedSeed(
+    key: string,
+    from: number,
+    through: number,
+  ): Promise<import("./runLedger/seedVerification.js").SourceSeedSnapshot> {
+    this.checkSessionKey(key);
+    const result = await this.read("/runs/session/read", { key, observation: { from, through } });
+    return structuredClone(result.data) as unknown as import("./runLedger/seedVerification.js").SourceSeedSnapshot;
+  }
   private async post(
     path: string,
     body: Record<string, unknown>,
     acceptBadRequest = false,
     kind: StoreOperationKind = "write",
+    encodedBody?: string,
+    expectedSeedHeader?: string,
   ): Promise<{ status: number; data: Record<string, unknown>; request: StoreRequestWitness }> {
-    const payload = JSON.stringify(body);
+    const payload = encodedBody ?? JSON.stringify(body);
     const request = await storeRequestWitness(path, payload);
+    const ordinaryHeaders = { "content-type": "application/json", authorization: `Bearer ${this.opts.token}` };
+    const headers = new Headers(ordinaryHeaders);
+    if (expectedSeedHeader !== undefined) {
+      headers.set(EXPECTED_SEED_HEADER, expectedSeedHeader);
+      // Include the runtime's normal sized-body and host headers in the existing transport budget.
+      const sized = new Headers(headers);
+      sized.set("content-length", String(new TextEncoder().encode(encodedBody ?? JSON.stringify(body)).byteLength));
+      sized.set("host", new URL(this.baseUrl).host);
+      if (requestHeaderBytes(sized) > WORKER_REQUEST_HEADER_BYTES)
+        throw new PermanentStoreError("run ledger: request headers exceed the platform limit");
+    }
     let res: Response;
     try {
       res = await this.fetchImpl(`${this.baseUrl}${path}`, {
         method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${this.opts.token}` },
+        headers: expectedSeedHeader === undefined ? ordinaryHeaders : headers,
         body: payload,
         signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
       });
@@ -195,6 +269,34 @@ export class WorkerRunLedger implements RunLedger {
       throw new TransientStoreError(`run ledger ${path}: HTTP ${res.status}`);
     }
     const data = await readStoreResponse(res, kind, request);
+    const askedRun =
+      typeof body.runId === "string"
+        ? body.runId
+        : body.run && typeof body.run === "object"
+          ? (body.run as Record<string, unknown>).runId
+          : body.record && typeof body.record === "object"
+            ? (body.record as Record<string, unknown>).id
+            : undefined;
+    if (
+      res.status === 423 &&
+      data.kind === "held" &&
+      data.reason === "source_seed_pending" &&
+      typeof data.key === "string" &&
+      data.key === body.key &&
+      typeof data.runId === "string" &&
+      Object.keys(data).every((k) => ["kind", "reason", "key", "runId"].includes(k))
+    )
+      throw new SourceSeedPendingError(data.key, data.runId);
+    if (
+      res.status === 423 &&
+      data.kind === "held" &&
+      (data.reason === "promotion_pending" || data.reason === "promotion_corrupt") &&
+      Object.keys(data).every((k) => ["kind", "reason", "runId"].includes(k)) &&
+      typeof data.runId === "string" &&
+      RUN_ID_PATTERN.test(data.runId) &&
+      data.runId === askedRun
+    )
+      throw new PromotionPendingError(data.runId, data.reason === "promotion_corrupt" ? "corrupt" : "prepared");
     if (res.status === 409 || res.ok || (acceptBadRequest && res.status === 400))
       return { status: res.status, data, request };
     throw new PermanentStoreError(`run ledger ${path}: HTTP ${res.status} ${String(data.error ?? "")}`.trim());
@@ -231,6 +333,34 @@ export class WorkerRunLedger implements RunLedger {
     if (!Number.isSafeInteger(r.data.fence) || (r.data.fence as number) <= 0)
       throw new PermanentStoreError("run ledger resident claim: invalid fence");
     return { ok: true, fence: r.data.fence as number };
+  }
+
+  async workspaceDisposition(expected: WorkspaceAllocation): Promise<WorkspaceDispositionRead> {
+    const allocation = workspaceAllocationOf(expected);
+    if (!allocation) return { kind: "held", reason: "mismatch" };
+    try {
+      const r = await this.post("/runs/workspace-disposition", { storeKey: this.opts.storeKey, allocation });
+      if (
+        r.data.kind === "held" &&
+        ["live", "unknown", "mismatch", "custody-unavailable"].includes(String(r.data.reason))
+      )
+        return { kind: "held", reason: r.data.reason as "live" | "unknown" | "mismatch" | "custody-unavailable" };
+      const actual = workspaceAllocationOf(r.data.allocation),
+        disposition = workspaceDispositionOf(r.data.disposition);
+      if (
+        r.data.kind !== "terminal" ||
+        !actual ||
+        !disposition ||
+        !sameWorkspaceAllocation(actual, allocation) ||
+        disposition.runId !== allocation.runId ||
+        (disposition.kind === "scratch-custody-closed" &&
+          (allocation.kind !== "exclusive-scratch" || disposition.allocationKey !== allocation.allocationKey))
+      )
+        return { kind: "held", reason: "unknown" };
+      return { kind: "terminal", allocation: actual, disposition };
+    } catch {
+      return { kind: "held", reason: "unknown" };
+    }
   }
 
   async workspaceSettlement(owner: WorkspaceOwner): Promise<WorkspaceSettlement | undefined> {
@@ -272,9 +402,47 @@ export class WorkerRunLedger implements RunLedger {
     throw new PermanentStoreError("run ledger: invalid workspace acknowledgment response");
   }
 
-  async claim(req: ClaimRequest): Promise<ClaimResult> {
+  async claim(req: ClaimRequest, originalBodyJson?: string): Promise<ClaimResult> {
     this.checkIds(req.runId, req.gen);
-    const r = await this.post("/runs/claim", { storeKey: this.opts.storeKey, run: req });
+    req = structuredClone(req);
+    let prepared: import("./runLedger/promotion.js").OriginalPromotionPreparation | undefined;
+    if (originalBodyJson !== undefined) {
+      const original = promotionBodyOf(originalBodyJson);
+      if (
+        !original ||
+        JSON.parse(originalBodyJson).storeKey !== this.opts.storeKey ||
+        !samePromotionClaim(original, req)
+      )
+        throw new PermanentStoreError("original promotion body does not match the claim");
+      const saved = await this.readPromotion({
+        runId: req.runId,
+        gen: req.gen,
+        bodySha256: await promotionBodyHash(originalBodyJson),
+      });
+      if (saved.kind === "held" || saved.preparation.bodyJson !== originalBodyJson)
+        throw new PermanentStoreError("original prepared promotion is unavailable; no claim was sent");
+      if (saved.kind === "committed" || saved.kind === "confirmed")
+        return {
+          ok: true,
+          allocationAck: saved.allocationAck,
+          promotionCommit: saved.kind === "confirmed" ? saved.commit : saved.receipt,
+        };
+      prepared = saved.preparation;
+    }
+    let r;
+    try {
+      r = await this.post("/runs/claim", { storeKey: this.opts.storeKey, run: req }, true, "write", originalBodyJson);
+    } catch (error) {
+      if (error instanceof PromotionPendingError) throw error;
+      if (
+        (req.meta.workspaceAllocation !== undefined || originalBodyJson !== undefined) &&
+        !(error instanceof RouteMissingError)
+      )
+        throw new UnknownAllocationClaimError(error);
+      throw error;
+    }
+    if (r.status === 400)
+      throw new PermanentStoreError(`run ledger /runs/claim: HTTP 400 ${String(r.data?.error ?? "")}`.trim());
     if (r.status === 409) {
       const live = (r.data.live ?? {}) as {
         runId?: string;
@@ -296,7 +464,201 @@ export class WorkerRunLedger implements RunLedger {
     // The run's rows go to its session log, owned by `claimSession` once the
     // caller knows the log's tail; a run's own transcript object is never
     // owned any more (rows claimed before the log existed keep theirs).
-    return { ok: true };
+    if (req.meta.workspaceAllocation !== undefined && (!r.data || r.data.ok !== true))
+      throw new UnknownAllocationClaimError("contradictory claim response");
+    const allocationAck = r.data?.ok === true ? allocationAckOf(r.data.allocationAck, req) : undefined;
+    const promotionCommit = promotionCommitReceiptOf(r.data?.promotionCommit);
+    if (r.data?.promotionCommit !== undefined) {
+      const sentBody = originalBodyJson ?? JSON.stringify({ storeKey: this.opts.storeKey, run: req });
+      if (!promotionCommit) throw new UnknownAllocationClaimError("original commit acknowledgment is unreadable");
+      const { phase: _phase, ...identity } = promotionCommit;
+      if (
+        !allocationAck ||
+        !promotionPreparationOf({
+          version: 1,
+          bodyJson: sentBody,
+          receipt: identity,
+          ...(prepared?.expectedSeed ? { expectedSeed: prepared.expectedSeed } : {}),
+        }) ||
+        promotionCommit.bodySha256 !== (await promotionBodyHash(sentBody))
+      )
+        throw new UnknownAllocationClaimError("original commit acknowledgment does not match its actual request");
+    }
+    if (
+      prepared &&
+      (!promotionCommit || !promotionCommitMatchesPreparation(promotionCommit, prepared) || !allocationAck)
+    )
+      throw new UnknownAllocationClaimError("original commit acknowledgment unavailable");
+    return { ok: true, ...(allocationAck ? { allocationAck } : {}), ...(promotionCommit ? { promotionCommit } : {}) };
+  }
+
+  async confirmPromotion(input: SourceSeedReference): Promise<PromotionConfirmationResult> {
+    const ref = sourceSeedReferenceOf(input);
+    if (!ref || ref.storeKey !== this.opts.storeKey) return { kind: "held", reason: "mismatch" };
+    try {
+      const result = await this.post("/runs/claim", { storeKey: this.opts.storeKey, confirm: ref });
+      if (result.data.kind === "held") return promotionHeldResultOf(result.data) ?? { kind: "held", reason: "unknown" };
+      const receipt = promotionConfirmationOf(result.data.receipt);
+      if (
+        result.data.kind !== "confirmed" ||
+        Object.keys(result.data).some((k) => !["kind", "receipt"].includes(k)) ||
+        !receipt ||
+        !sourceSeedReferenceMatches(receipt.source, ref, receipt.key)
+      )
+        return { kind: "held", reason: "unknown" };
+      return { kind: "confirmed", receipt };
+    } catch (error) {
+      return { kind: "held", reason: error instanceof RouteMissingError ? "unsupported" : "unknown" };
+    }
+  }
+  releaseExpectedSeed(key: string, ref: SourceSeedReference): Promise<SourceSeedResult> {
+    return this.expectedSeedSource("/runs/session/expected-seed/verify", key, ref, true);
+  }
+  private async expectedSeedSource(
+    path: string,
+    key: string,
+    input: SourceSeedReference,
+    release = false,
+  ): Promise<SourceSeedResult> {
+    this.checkSessionKey(key);
+    const ref = sourceSeedReferenceOf(input);
+    if (!ref || ref.storeKey !== this.opts.storeKey) return { kind: "held", reason: "mismatch" };
+    try {
+      const result = await this.post(
+        path,
+        release ? { key, release: ref } : { key, reference: ref },
+        false,
+        path.endsWith("/read") ? "read" : "write",
+      );
+      if (
+        result.data.kind === "held" &&
+        Object.keys(result.data).every((k) => ["kind", "reason"].includes(k)) &&
+        ["missing", "mismatch", "owner", "corrupt", "unsupported", "unknown"].includes(String(result.data.reason))
+      )
+        return result.data as SourceSeedResult;
+      const receipt = sourceSeedReceiptOf(result.data.receipt);
+      if (
+        result.data.kind !== "verified" ||
+        Object.keys(result.data).some((k) => !["kind", "receipt", "release"].includes(k)) ||
+        !receipt ||
+        !sourceSeedReferenceMatches(receipt, ref, key)
+      )
+        return { kind: "held", reason: "unknown" };
+      const released = result.data.release === undefined ? undefined : sourceSeedReleaseOf(result.data.release);
+      if (
+        result.data.release !== undefined &&
+        (!released || canonicalSeedJson(released.source) !== canonicalSeedJson(receipt))
+      )
+        return { kind: "held", reason: "unknown" };
+      return { kind: "verified", receipt, ...(released ? { release: released } : {}) };
+    } catch (error) {
+      return { kind: "held", reason: error instanceof RouteMissingError ? "unsupported" : "unknown" };
+    }
+  }
+  verifyExpectedSeed(key: string, ref: SourceSeedReference): Promise<SourceSeedResult> {
+    return this.expectedSeedSource("/runs/session/expected-seed/verify", key, ref);
+  }
+  readExpectedSeed(key: string, ref: SourceSeedReference): Promise<SourceSeedResult> {
+    return this.expectedSeedSource("/runs/session/expected-seed/read", key, ref);
+  }
+
+  async preparePromotion(bodyJson: string, expectedSeedInput?: ExpectedSeedManifest): Promise<PromotionPrepareResult> {
+    const request = promotionBodyOf(bodyJson);
+    if (!request)
+      return { kind: "held", reason: promotionBytes(bodyJson) > PROMOTION_BODY_BYTES ? "oversize" : "corrupt" };
+    if (JSON.parse(bodyJson).storeKey !== this.opts.storeKey) return { kind: "held", reason: "mismatch" };
+    this.checkIds(request.runId, request.gen);
+    const expectedSeed = expectedSeedInput === undefined ? undefined : expectedSeedManifestOf(expectedSeedInput);
+    const digest = await promotionBodyHash(bodyJson);
+    if (expectedSeedInput !== undefined && (!expectedSeed || !expectedSeedMatchesClaim(expectedSeed, request, digest)))
+      return { kind: "held", reason: "mismatch" };
+    const expectedSeedSha256 = expectedSeed ? await seedContentHash(expectedSeed) : undefined;
+    try {
+      const result = await this.post(
+        "/runs/promotion/prepare",
+        {},
+        true,
+        "write",
+        bodyJson,
+        expectedSeed ? encodeExpectedSeedHeader(expectedSeed) : undefined,
+      );
+      if (result.data.kind === "held") return promotionHeldResultOf(result.data) ?? { kind: "held", reason: "unknown" };
+      const receipt = promotionReceiptOf(result.data.receipt);
+      if (
+        result.data.kind !== "prepared" ||
+        Object.keys(result.data).some((k) => k !== "kind" && k !== "receipt") ||
+        !receipt ||
+        receipt.runId !== request.runId ||
+        receipt.threadKey !== request.threadKey ||
+        receipt.gen !== request.gen ||
+        receipt.startedAt !== request.startedAt ||
+        receipt.bodySha256 !== digest ||
+        receipt.namespace !== request.meta.channelId ||
+        receipt.requester !== request.meta.userId ||
+        receipt.authenticatedAs !== request.meta.authenticatedAs ||
+        receipt.postedBy !== request.meta.postedBy
+      )
+        return { kind: "held", reason: "unknown" };
+      if (expectedSeedSha256 !== undefined && receipt.expectedSeedSha256 === undefined)
+        return { kind: "held", reason: "unsupported" };
+      if (receipt.expectedSeedSha256 !== expectedSeedSha256) return { kind: "held", reason: "unknown" };
+      return { kind: "prepared", receipt };
+    } catch (error) {
+      return { kind: "held", reason: error instanceof RouteMissingError ? "unsupported" : "unknown" };
+    }
+  }
+  async readPromotion(query: PromotionReadRequest): Promise<PromotionReadResult> {
+    this.checkIds(query.runId, query.gen);
+    try {
+      const result = await this.read("/runs/promotion/read", { storeKey: this.opts.storeKey, ...query });
+      if (result.data.kind === "held") return promotionHeldResultOf(result.data) ?? { kind: "held", reason: "unknown" };
+      const preparation = promotionPreparationOf(result.data.preparation);
+      if (
+        (result.data.kind !== "prepared" && result.data.kind !== "committed" && result.data.kind !== "confirmed") ||
+        Object.keys(result.data).some(
+          (k) =>
+            !(
+              result.data.kind === "confirmed"
+                ? ["kind", "preparation", "receipt", "allocationAck", "commit"]
+                : result.data.kind === "committed"
+                  ? ["kind", "preparation", "receipt", "allocationAck"]
+                  : ["kind", "preparation"]
+            ).includes(k),
+        ) ||
+        !preparation ||
+        preparation.receipt.runId !== query.runId ||
+        preparation.receipt.gen !== query.gen ||
+        (query.bodySha256 && preparation.receipt.bodySha256 !== query.bodySha256) ||
+        (await promotionBodyHash(preparation.bodyJson)) !== preparation.receipt.bodySha256 ||
+        (preparation.expectedSeed !== undefined &&
+          (await seedContentHash(preparation.expectedSeed)) !== preparation.receipt.expectedSeedSha256)
+      )
+        return { kind: "held", reason: "unknown" };
+      if (result.data.kind === "confirmed") {
+        const receipt = promotionConfirmationOf(result.data.receipt),
+          commit = promotionCommitReceiptOf(result.data.commit),
+          allocationAck = allocationAckOf(result.data.allocationAck, promotionBodyOf(preparation.bodyJson)!);
+        if (
+          !receipt ||
+          !commit ||
+          !promotionCommitMatchesPreparation(commit, preparation) ||
+          !confirmationMatchesPreparation(receipt, preparation) ||
+          !allocationAck
+        )
+          return { kind: "held", reason: "unknown" };
+        return { kind: "confirmed", preparation, commit, receipt, allocationAck };
+      }
+      if (result.data.kind === "committed") {
+        const receipt = promotionCommitReceiptOf(result.data.receipt);
+        const allocationAck = allocationAckOf(result.data.allocationAck, promotionBodyOf(preparation.bodyJson)!);
+        if (!receipt || !promotionCommitMatchesPreparation(receipt, preparation) || !allocationAck)
+          return { kind: "held", reason: "unknown" };
+        return { kind: "committed", preparation, receipt, allocationAck };
+      }
+      return { kind: "prepared", preparation };
+    } catch (error) {
+      return { kind: "held", reason: error instanceof RouteMissingError ? "unsupported" : "unknown" };
+    }
   }
 
   /** The write route and its body for a run's rows: the session log when the

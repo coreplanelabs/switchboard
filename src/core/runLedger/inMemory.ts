@@ -1,5 +1,39 @@
+import { originalPromotionArchiveKey } from "./workspaceDurability.js";
+import { RUN_STORE_KEY } from "../runStoreConstants.js";
+import {
+  SOURCE_SEED_RECORD_PREFIX,
+  sourceSeedOriginalKey,
+  sourceSeedOriginalOf,
+  sourceSeedReferenceOfReceipt,
+  type SourceSeedOriginalRecord,
+} from "./seedVerification.js";
+import {
+  sourceSeedReleaseOf,
+  confirmStoredSeedBoundary,
+  type SourceSeedReleaseReceipt,
+  type PromotionConfirmationResult,
+} from "./seedVerification.js";
 import { bindInboxCustody } from "./inboxMessage.js";
 import { closeInboxSegment, encodeInboxSegment, inboxSegmentFloor, type StepHistory } from "./inboxSegment.js";
+import {
+  sourceSeedReferenceOf,
+  sourceSeedReceiptOf,
+  authenticatedSeedExpectation,
+  verifiedSourceSeedHashes,
+  sourceSeedReferenceMatches,
+  SourceSeedPendingError,
+  type SourceSeedReference,
+  type SourceSeedReceipt,
+  type SourceSeedResult,
+  type SourceSeedSnapshot,
+} from "./seedVerification.js";
+import {
+  expectedSeedManifestOf,
+  expectedSeedMatchesClaim,
+  seedContentHash,
+  canonicalSeedJson,
+  type ExpectedSeedManifest,
+} from "./seedManifest.js";
 import {
   validMaintenanceTransport,
   sameMaintenanceTransport,
@@ -37,6 +71,7 @@ import {
   sessionRangesAvailable,
   sessionRowIsPinned,
   type SessionRangePins,
+  type SessionRangePin,
 } from "./sessionRangePins.js";
 import { uncoveredSourceResult, verifiedSourceResults } from "../references/sourceResultContext.js";
 import {
@@ -58,6 +93,45 @@ import {
 // also documents the storage shape in the plainest form.
 
 import { reviewPublicationOf } from "../reviewPublication.js";
+import { allocationAckFromCanonical } from "./allocationAck.js";
+import {
+  promotionBodyOf,
+  promotionBodyHash,
+  promotionBytes,
+  promotionMatchesOriginal,
+  promotionPending,
+  promotionReceiptFromRow,
+  preparedPromotionClaim,
+  promotionCommitFromRow,
+  promotionCommittedRowMatches,
+  PromotionPendingError,
+  PROMOTION_BODY_BYTES,
+  type PromotionPrepareResult,
+  type PromotionReadRequest,
+  type PromotionReadResult,
+} from "./promotion.js";
+import {
+  workspaceAllocationOf,
+  workspaceDurabilityArchiveOf,
+  workspaceDurabilityKey,
+  sameWorkspaceAllocation,
+  allocationMatchesRecord,
+  prepareWorkspaceAllocation,
+  workspaceAuthorityFieldsPresent,
+  deriveWorkspaceDisposition,
+  workspaceCustodyFingerprint,
+  workspaceReportRowsMatch,
+  custodyPinRevisionOf,
+  custodyPinProtectionOf,
+  nextCustodyPinRevision,
+  sameWorkspaceCustody,
+  type CustodyPinRevision,
+  isCustodyRangePins,
+  type WorkspaceAllocation,
+  type WorkspaceDispositionRead,
+  type WorkspaceDurabilityArchive,
+  type StoredWorkspaceCustody,
+} from "./workspaceDurability.js";
 import { INTAKE_DELIVERY_CLAIM_MS } from "../budgets.js";
 import {
   branchPushReceiptsOf,
@@ -111,6 +185,7 @@ import {
   rowKind,
   tailCut,
   textOfStoredRow,
+  contextThreadSessionKey,
 } from "./sessionLog.js";
 import { tokenize } from "../memory/scorer.js";
 import type { Notepad, SessionHit } from "./types.js";
@@ -147,7 +222,13 @@ interface Transcript {
  *  of a thread-and-agent session, the run whose writes land right now, and the
  *  byte budget the log is held to. */
 export interface SessionLog {
+  [key: `expected_seed_original:${string}`]: string | undefined;
+  expectedSeedCurrent?: SourceSeedReference;
+  expectedSeedPending?: SourceSeedReceipt;
+  expectedSeedRelease?: SourceSeedReleaseReceipt;
   rangePins?: SessionRangePins;
+  pinRevision?: number;
+  custodyGuarded?: true;
   sources?: SessionSources;
   requiresFreshSources?: true;
   sourceStart?: number;
@@ -172,10 +253,664 @@ export interface SessionLog {
 const TRIM_MARKER_BYTES_ESTIMATE = 260;
 
 export class InMemoryRunLedger implements RunLedger {
+  originalPromotionBody(request: ClaimRequest): string {
+    return JSON.stringify({ storeKey: RUN_STORE_KEY, run: request });
+  }
+  async observeExpectedSeed(key: string, from: number, through: number): Promise<SourceSeedSnapshot> {
+    return this.sourceSeedSnapshot(key, from, through);
+  }
+  private sourceSeedRecords(key: string): SourceSeedOriginalRecord[] {
+    const log = this.sessions.get(key);
+    if (!log) return [];
+    const records: SourceSeedOriginalRecord[] = [];
+    for (const [name, raw] of Object.entries(log)) {
+      if (!name.startsWith(SOURCE_SEED_RECORD_PREFIX)) continue;
+      let record: SourceSeedOriginalRecord | undefined;
+      try {
+        record = typeof raw === "string" ? sourceSeedOriginalOf(JSON.parse(raw)) : undefined;
+      } catch {
+        /* Preserve unreadable metadata. */
+      }
+      if (!record || record.receipt.key !== key || sourceSeedOriginalKey(record.receipt) !== name)
+        throw new SourceSeedPendingError(key, log.owner?.runId ?? "unknown");
+      records.push(record);
+    }
+    if (log.expectedSeedPending !== undefined) {
+      const receipt = sourceSeedReceiptOf(log.expectedSeedPending),
+        release = log.expectedSeedRelease === undefined ? undefined : sourceSeedReleaseOf(log.expectedSeedRelease);
+      if (
+        !receipt ||
+        receipt.key !== key ||
+        (log.expectedSeedRelease !== undefined &&
+          (!release || canonicalSeedJson(release.source) !== canonicalSeedJson(receipt)))
+      )
+        throw new SourceSeedPendingError(key, log.owner?.runId ?? "unknown");
+      const saved = records.find((record) => sourceSeedOriginalKey(record.receipt) === sourceSeedOriginalKey(receipt));
+      if (
+        saved &&
+        (canonicalSeedJson(saved.receipt) !== canonicalSeedJson(receipt) ||
+          (release && canonicalSeedJson(saved.release) !== canonicalSeedJson(release)))
+      )
+        throw new SourceSeedPendingError(key, receipt.runId);
+      if (!saved) records.push({ version: 1, receipt, ...(release ? { release } : {}) });
+    }
+    return records;
+  }
+  private sourceSeedRecord(key: string, ref: SourceSeedReference): SourceSeedOriginalRecord | undefined {
+    const log = this.sessions.get(key);
+    if (!log) return;
+    const name = sourceSeedOriginalKey(ref),
+      raw = log[name];
+    if (raw !== undefined) {
+      let record: SourceSeedOriginalRecord | undefined;
+      try {
+        record = sourceSeedOriginalOf(JSON.parse(raw));
+      } catch {
+        /* Preserve unreadable metadata. */
+      }
+      if (!record || record.receipt.key !== key || sourceSeedOriginalKey(record.receipt) !== name)
+        throw new SourceSeedPendingError(key, log.owner?.runId ?? "unknown");
+      return record;
+    }
+    if (log.expectedSeedPending === undefined) return;
+    const receipt = sourceSeedReceiptOf(log.expectedSeedPending),
+      release = log.expectedSeedRelease === undefined ? undefined : sourceSeedReleaseOf(log.expectedSeedRelease);
+    if (
+      !receipt ||
+      (log.expectedSeedRelease !== undefined &&
+        (!release || canonicalSeedJson(release.source) !== canonicalSeedJson(receipt)))
+    )
+      throw new SourceSeedPendingError(key, log.owner?.runId ?? "unknown");
+    return sourceSeedOriginalKey(receipt) === name
+      ? { version: 1, receipt, ...(release ? { release } : {}) }
+      : undefined;
+  }
+  private currentSourceSeedRecord(key: string): SourceSeedOriginalRecord | undefined {
+    const log = this.sessions.get(key);
+    if (!log) return;
+    if (log.expectedSeedCurrent !== undefined) {
+      const ref = sourceSeedReferenceOf(log.expectedSeedCurrent),
+        record = ref && this.sourceSeedRecord(key, ref);
+      if (!record) throw new SourceSeedPendingError(key, log.owner?.runId ?? "unknown");
+      return record;
+    }
+    if (Object.keys(log).some((name) => name.startsWith(SOURCE_SEED_RECORD_PREFIX)))
+      throw new SourceSeedPendingError(key, log.owner?.runId ?? "unknown");
+    return log.expectedSeedPending ? this.sourceSeedRecord(key, log.expectedSeedPending) : undefined;
+  }
+  private storedSourceSeedReceipt(key: string): SourceSeedReceipt | undefined {
+    return this.currentSourceSeedRecord(key)?.receipt;
+  }
+  private sourceSeedPending(key: string): SourceSeedReceipt | undefined {
+    const current = this.currentSourceSeedRecord(key),
+      pending = this.sourceSeedRecords(key).filter((record) => !record.release);
+    if (
+      pending.some(
+        (record) => !current || sourceSeedOriginalKey(record.receipt) !== sourceSeedOriginalKey(current.receipt),
+      )
+    )
+      throw new SourceSeedPendingError(key, pending[0].receipt.runId);
+    return current?.release ? undefined : current?.receipt;
+  }
+  private retainSourceSeedRecord(key: string, record: SourceSeedOriginalRecord): void {
+    const log = this.sessions.get(key)!;
+    log[sourceSeedOriginalKey(record.receipt)] = JSON.stringify(record);
+    if (log.expectedSeedPending === undefined) log.expectedSeedPending = structuredClone(record.receipt);
+    if (
+      record.release &&
+      sourceSeedOriginalKey(log.expectedSeedPending) === sourceSeedOriginalKey(record.receipt) &&
+      log.expectedSeedRelease === undefined
+    )
+      log.expectedSeedRelease = structuredClone(record.release);
+  }
+  async releaseExpectedSeed(key: string, input: SourceSeedReference): Promise<SourceSeedResult> {
+    const ref = sourceSeedReferenceOf(input);
+    if (!ref) return { kind: "held", reason: "mismatch" };
+    const log = this.sessions.get(key),
+      record = this.sourceSeedRecord(key, ref),
+      stored = record?.receipt;
+    if (!log || !stored || !sourceSeedReferenceMatches(stored, ref, key)) return { kind: "held", reason: "mismatch" };
+    if (record?.release !== undefined) return this.readExpectedSeed(key, ref);
+    const before = canonicalSeedJson({
+      data: this.sourceSeedSnapshot(key, stored.from, stored.through),
+      record: this.sourceSeedRecord(key, ref),
+      current: log.expectedSeedCurrent,
+      pins: log.rangePins,
+      revision: log.pinRevision,
+      guarded: log.custodyGuarded,
+    });
+    const actual = await this.readPromotion({ runId: ref.runId, gen: ref.gen, bodySha256: ref.bodySha256 });
+    if (actual.kind !== "confirmed" || canonicalSeedJson(actual.receipt.source) !== canonicalSeedJson(stored))
+      return { kind: "held", reason: "mismatch" };
+    const verified = await this.readExpectedSeed(key, ref);
+    if (
+      verified.kind !== "verified" ||
+      verified.release ||
+      canonicalSeedJson(verified.receipt) !== canonicalSeedJson(stored) ||
+      before !==
+        canonicalSeedJson({
+          data: this.sourceSeedSnapshot(key, stored.from, stored.through),
+          record: this.sourceSeedRecord(key, ref),
+          current: log.expectedSeedCurrent,
+          pins: log.rangePins,
+          revision: log.pinRevision,
+          guarded: log.custodyGuarded,
+        })
+    )
+      return { kind: "held", reason: "mismatch" };
+    const release: SourceSeedReleaseReceipt = {
+      version: 1,
+      phase: "released",
+      source: structuredClone(stored),
+      confirmation: structuredClone(actual.receipt),
+    };
+    this.retainSourceSeedRecord(key, { version: 1, receipt: stored, release });
+    return { kind: "verified", receipt: structuredClone(stored), release: structuredClone(release) };
+  }
+  async confirmPromotion(input: SourceSeedReference): Promise<PromotionConfirmationResult> {
+    const ref = sourceSeedReferenceOf(input);
+    if (!ref) return { kind: "held", reason: "mismatch" };
+    const original = await this.readPromotion({ runId: ref.runId, gen: ref.gen, bodySha256: ref.bodySha256 });
+    if (original.kind === "confirmed")
+      return sourceSeedReferenceMatches(original.receipt.source, ref, original.receipt.key)
+        ? { kind: "confirmed", receipt: original.receipt }
+        : { kind: "held", reason: "mismatch" };
+    if (original.kind !== "committed" || !original.preparation.expectedSeed?.key)
+      return { kind: "held", reason: "unsupported" };
+    const row = structuredClone(this.live.get(ref.runId)!),
+      steps = structuredClone(
+        (this.steps.get(ref.runId) ?? []).slice(
+          workspaceDurabilityArchiveOf(this.allocationArchive(ref.runId))?.promotionStepBase ?? 0,
+        ),
+      ),
+      raw = structuredClone(this.allocationArchive(ref.runId));
+    const before = canonicalSeedJson({ row, steps, raw });
+    const source = await this.readExpectedSeed(original.preparation.expectedSeed.key, ref);
+    const receipt = await confirmStoredSeedBoundary(original, source, row, steps);
+    if (
+      !receipt ||
+      before !==
+        canonicalSeedJson({
+          row: this.live.get(ref.runId),
+          steps: (this.steps.get(ref.runId) ?? []).slice(
+            workspaceDurabilityArchiveOf(this.allocationArchive(ref.runId))?.promotionStepBase ?? 0,
+          ),
+          raw: this.allocationArchive(ref.runId),
+        })
+    )
+      return { kind: "held", reason: "mismatch" };
+    const archive = workspaceDurabilityArchiveOf(raw)!;
+    const next = { ...archive, promotionConfirmation: receipt };
+    if (promotionBytes(JSON.stringify(next)) > MAX_RECORD_BYTES) return { kind: "held", reason: "oversize" };
+    next.promotionAllocationAck = original.allocationAck;
+    this.retainAllocation(next);
+    return { kind: "confirmed", receipt: structuredClone(receipt) };
+  }
+  private sourceSeedSnapshot(key: string, from: number, through: number): SourceSeedSnapshot {
+    const log = this.sessions.get(key),
+      rows = (log?.rows ?? [])
+        .filter((r) => r.idx >= from && r.idx <= through)
+        .sort((a, b) => a.idx - b.idx || a.part - b.part);
+    const refs = new Set(rows.flatMap((r) => attachmentRefsOf(r.json)));
+    return structuredClone({
+      rows: rows.map((r) => ({ ...r, trimmed: log?.trimmed.has(`${r.idx}:${r.part}`) ?? true })),
+      attachments: (log?.attachments ?? []).filter((a) => refs.has(a.ref)),
+      owner: log?.owner,
+      next: log?.rows.length ? Math.max(...log.rows.map((r) => r.idx)) + 1 : 0,
+      sources: log?.sources,
+      context: log?.sources?.context,
+      notepad: log?.notepad?.text ?? "",
+    });
+  }
+  async verifyExpectedSeed(key: string, input: SourceSeedReference): Promise<SourceSeedResult> {
+    const ref = sourceSeedReferenceOf(input);
+    if (!ref) return { kind: "held", reason: "mismatch" };
+    if (this.sourceSeedRecord(key, ref)?.release) return this.readExpectedSeed(key, ref);
+    const actual = await this.readPromotion({ runId: ref.runId, gen: ref.gen, bodySha256: ref.bodySha256 }),
+      expected = authenticatedSeedExpectation(key, ref, actual);
+    if (!expected) return { kind: "held", reason: "mismatch" };
+    if (this.sourceSeedRecord(key, ref)) return this.readExpectedSeed(key, ref);
+    const previous = this.currentSourceSeedRecord(key);
+    if (previous && !previous.release) return { kind: "held", reason: "owner" };
+    const previousBefore = canonicalSeedJson(previous ?? null);
+    const snapshot = this.sourceSeedSnapshot(key, expected.from, expected.through),
+      before = canonicalSeedJson(snapshot);
+    const hashes = await verifiedSourceSeedHashes(snapshot, expected);
+    if (!hashes) return { kind: "held", reason: "mismatch" };
+    if (canonicalSeedJson(this.sourceSeedSnapshot(key, expected.from, expected.through)) !== before)
+      return { kind: "held", reason: "mismatch" };
+    const log = this.sessions.get(key)!;
+    if (this.sourceSeedRecord(key, ref)) return this.readExpectedSeed(key, ref);
+    if (canonicalSeedJson(this.currentSourceSeedRecord(key) ?? null) !== previousBefore)
+      return { kind: "held", reason: "owner" };
+    const revision = this.advanceMemoryPinRevision(log, true);
+    if (revision === undefined) return { kind: "held", reason: "corrupt" };
+    log.rangePins ??= {};
+    log.rangePins[ref.runId] = [...(log.rangePins[ref.runId] ?? []), { from: expected.from, to: expected.through }];
+    const receipt: SourceSeedReceipt = {
+      ...ref,
+      ...hashes,
+      version: 1,
+      phase: "pending-confirmation",
+      key,
+      startedAt: expected.startedAt,
+      namespace: expected.namespace,
+      requester: expected.requester,
+      from: expected.from,
+      through: expected.through,
+      count: expected.count,
+      next: snapshot.next,
+      pinRevision: revision,
+    };
+    if (previous) this.retainSourceSeedRecord(key, previous);
+    this.retainSourceSeedRecord(key, { version: 1, receipt });
+    log.expectedSeedCurrent = sourceSeedReferenceOfReceipt(receipt);
+    return { kind: "verified", receipt: structuredClone(receipt) };
+  }
+  async readExpectedSeed(key: string, input: SourceSeedReference): Promise<SourceSeedResult> {
+    const ref = sourceSeedReferenceOf(input);
+    if (!ref) return { kind: "held", reason: "mismatch" };
+    let receipt: SourceSeedReceipt | undefined;
+    try {
+      receipt = this.sourceSeedRecord(key, ref)?.receipt;
+    } catch {
+      return { kind: "held", reason: "corrupt" };
+    }
+    if (!receipt) return { kind: "held", reason: "missing" };
+    if (!sourceSeedReferenceMatches(receipt, ref, key)) return { kind: "held", reason: "mismatch" };
+    const rawRelease = this.sourceSeedRecord(key, ref)?.release;
+    if (rawRelease !== undefined) {
+      const release = sourceSeedReleaseOf(rawRelease);
+      return release && canonicalSeedJson(release.source) === canonicalSeedJson(receipt)
+        ? { kind: "verified", receipt: structuredClone(receipt), release }
+        : { kind: "held", reason: "corrupt" };
+    }
+    const actual = await this.readPromotion({ runId: ref.runId, gen: ref.gen, bodySha256: ref.bodySha256 }),
+      expected = authenticatedSeedExpectation(key, ref, actual);
+    if (!expected) return { kind: "held", reason: "mismatch" };
+    const snapshot = this.sourceSeedSnapshot(key, expected.from, expected.through),
+      before = canonicalSeedJson(snapshot),
+      hashes = await verifiedSourceSeedHashes(snapshot, expected),
+      log = this.sessions.get(key);
+    if (
+      !hashes ||
+      canonicalSeedJson(this.sourceSeedSnapshot(key, expected.from, expected.through)) !== before ||
+      canonicalSeedJson(this.sourceSeedRecord(key, ref)?.receipt) !== canonicalSeedJson(receipt) ||
+      !log?.custodyGuarded ||
+      !log.rangePins?.[ref.runId]?.some((r) => r.from === receipt!.from && r.to === receipt!.through) ||
+      (log.pinRevision ?? 0) < receipt.pinRevision
+    )
+      return { kind: "held", reason: "corrupt" };
+    return { kind: "verified", receipt: structuredClone(receipt) };
+  }
+
+  private promotionHeld(runId: string, gen?: string): boolean {
+    if (gen !== undefined && this.live.get(runId)?.ownerGen !== gen) return false;
+    const raw = this.allocationArchive(runId),
+      archive = workspaceDurabilityArchiveOf(raw);
+    if (raw === undefined) return false;
+    if (!archive || promotionPending(raw)) return true;
+    if (archive.promotionConfirmation) {
+      try {
+        const confirmation = archive.promotionConfirmation,
+          release = this.sourceSeedRecord(confirmation.key, confirmation)?.release;
+        return !release || canonicalSeedJson(release.confirmation) !== canonicalSeedJson(confirmation);
+      } catch {
+        return true;
+      }
+    }
+    return false;
+  }
+  async preparePromotion(bodyJson: string, expectedSeedInput?: ExpectedSeedManifest): Promise<PromotionPrepareResult> {
+    const req = promotionBodyOf(bodyJson);
+    if (!req) return { kind: "held", reason: promotionBytes(bodyJson) > PROMOTION_BODY_BYTES ? "oversize" : "corrupt" };
+    const expectedSeed = expectedSeedInput === undefined ? undefined : expectedSeedManifestOf(expectedSeedInput);
+    const digest = await promotionBodyHash(bodyJson);
+    if (expectedSeedInput !== undefined && (!expectedSeed || !expectedSeedMatchesClaim(expectedSeed, req, digest)))
+      return { kind: "held", reason: "mismatch" };
+    const expectedSeedSha256 = expectedSeed ? await seedContentHash(expectedSeed) : undefined;
+    const row = this.live.get(req.runId),
+      raw = this.allocationArchive(req.runId);
+    if (!row || row.ownerGen !== req.gen) return { kind: "held", reason: "fenced" };
+    if (row.stop === "hard") return { kind: "held", reason: "mismatch" };
+    let archive = workspaceDurabilityArchiveOf(raw);
+    if (!archive) return { kind: "held", reason: raw === undefined ? "legacy" : "corrupt" };
+    if (archive.runId !== row.runId || archive.startedAt !== row.startedAt) return { kind: "held", reason: "mismatch" };
+    if (
+      !promotionMatchesOriginal(row, req, archive.allocation?.headSha) ||
+      (req.meta.workspaceAllocation !== undefined &&
+        !sameWorkspaceAllocation(req.meta.workspaceAllocation, archive.allocation))
+    )
+      return { kind: "held", reason: "mismatch" };
+    if (
+      archive.promotion &&
+      archive.promotion.bodyJson !== bodyJson &&
+      row.meta.restartOf === row.runId &&
+      (row.phase === "attaching" || row.phase === "finishing") &&
+      archive.promotionConfirmation &&
+      archive.promotionAllocationAck &&
+      !this.promotionHeld(row.runId, req.gen)
+    ) {
+      this.retainPromotionOriginal(archive);
+      const {
+        promotion: _old,
+        promotionCommit: _commit,
+        promotionConfirmation: _confirmation,
+        promotionAllocationAck: _ack,
+        promotionStepBase: _stepBase,
+        ...base
+      } = archive;
+      archive = base;
+    }
+    if (archive.promotion)
+      return archive.promotion.bodyJson === bodyJson &&
+        archive.promotion.receipt.bodySha256 === digest &&
+        archive.promotion.receipt.expectedSeedSha256 === expectedSeedSha256 &&
+        canonicalSeedJson(archive.promotion.expectedSeed ?? null) === canonicalSeedJson(expectedSeed ?? null)
+        ? { kind: "prepared", receipt: structuredClone(archive.promotion.receipt) }
+        : { kind: "held", reason: "mismatch" };
+    if (row.phase !== "attaching" && !(row.phase === "finishing" && row.meta.restartOf === row.runId))
+      return { kind: "held", reason: "mismatch" };
+    const receipt = promotionReceiptFromRow(row, digest, expectedSeedSha256);
+    const next = {
+      ...archive,
+      promotion: { version: 1 as const, bodyJson, receipt, ...(expectedSeed ? { expectedSeed } : {}) },
+      promotionStepBase: this.steps.get(req.runId)?.length ?? 0,
+    };
+    if (promotionBytes(JSON.stringify(next)) > MAX_RECORD_BYTES) return { kind: "held", reason: "oversize" };
+    this.retainAllocation(next);
+    return { kind: "prepared", receipt: structuredClone(receipt) };
+  }
+  async readPromotion(query: PromotionReadRequest): Promise<PromotionReadResult> {
+    if (query.bodySha256) {
+      const historical = this.historicalPromotion(query.runId, query.bodySha256);
+      if (
+        historical?.promotion &&
+        historical.promotionCommit &&
+        historical.promotionConfirmation &&
+        historical.promotionAllocationAck &&
+        historical.promotion.receipt.gen === query.gen
+      ) {
+        const before = canonicalSeedJson(historical);
+        if (
+          (await promotionBodyHash(historical.promotion.bodyJson)) !== query.bodySha256 ||
+          before !== canonicalSeedJson(this.historicalPromotion(query.runId, query.bodySha256))
+        )
+          return { kind: "held", reason: "corrupt" };
+        return {
+          kind: "confirmed",
+          preparation: historical.promotion,
+          commit: historical.promotionCommit,
+          receipt: historical.promotionConfirmation,
+          allocationAck: historical.promotionAllocationAck,
+        };
+      }
+    }
+    const row = this.live.get(query.runId),
+      raw = this.allocationArchive(query.runId);
+    if (!row || row.ownerGen !== query.gen) return { kind: "held", reason: "fenced" };
+    if (row.stop === "hard") return { kind: "held", reason: "mismatch" };
+    const archive = workspaceDurabilityArchiveOf(raw),
+      prepared = archive?.promotion;
+    if (!archive) return { kind: "held", reason: raw === undefined ? "legacy" : "corrupt" };
+    if (!prepared) return { kind: "held", reason: "unknown" };
+    if (prepared.receipt.gen !== query.gen || (query.bodySha256 && prepared.receipt.bodySha256 !== query.bodySha256))
+      return { kind: "held", reason: "mismatch" };
+    if (
+      (await promotionBodyHash(prepared.bodyJson)) !== prepared.receipt.bodySha256 ||
+      (prepared.expectedSeed !== undefined &&
+        (await seedContentHash(prepared.expectedSeed)) !== prepared.receipt.expectedSeedSha256) ||
+      JSON.stringify(this.allocationArchive(query.runId)) !== JSON.stringify(raw)
+    )
+      return { kind: "held", reason: "corrupt" };
+    const current = this.live.get(query.runId);
+    if (
+      !current ||
+      current.ownerGen !== query.gen ||
+      JSON.stringify(
+        promotionReceiptFromRow(current, prepared.receipt.bodySha256, prepared.receipt.expectedSeedSha256),
+      ) !== JSON.stringify(prepared.receipt)
+    )
+      return { kind: "held", reason: "fenced" };
+    if (archive.promotionCommit) {
+      const allocationAck = allocationAckFromCanonical(this.allocationArchive(query.runId), current);
+      if (!promotionCommittedRowMatches(current, promotionBodyOf(prepared.bodyJson)!) || !allocationAck)
+        return { kind: "held", reason: "corrupt" };
+      if (archive.promotionConfirmation)
+        return {
+          kind: "confirmed",
+          preparation: structuredClone(prepared),
+          commit: structuredClone(archive.promotionCommit),
+          receipt: structuredClone(archive.promotionConfirmation),
+          allocationAck,
+        };
+      return {
+        kind: "committed",
+        preparation: structuredClone(prepared),
+        receipt: structuredClone(archive.promotionCommit),
+        allocationAck,
+      };
+    }
+    return { kind: "prepared", preparation: structuredClone(prepared) };
+  }
   private readonly workspaceObligations = new Map<
     string,
-    { revision: number; pending: Map<number, WorkspaceSettlement> }
+    { revision: number; pending: Map<number, WorkspaceSettlement>; allocation?: WorkspaceDurabilityArchive }
   >();
+
+  private historicalPromotion(runId: string, digest: string): WorkspaceDurabilityArchive | undefined {
+    const value = this.workspaceObligations.get(originalPromotionArchiveKey(runId, digest));
+    return value?.revision === 1 ? workspaceDurabilityArchiveOf(value.allocation) : undefined;
+  }
+  private retainPromotionOriginal(archive: WorkspaceDurabilityArchive): void {
+    const digest = archive.promotion!.receipt.bodySha256,
+      key = originalPromotionArchiveKey(archive.runId, digest),
+      standing = this.workspaceObligations.get(key);
+    if (standing && canonicalSeedJson(standing.allocation) !== canonicalSeedJson(archive))
+      throw new PromotionPendingError(archive.runId, "corrupt");
+    if (!standing)
+      this.workspaceObligations.set(key, { revision: 1, pending: new Map(), allocation: structuredClone(archive) });
+  }
+  private allocationArchive(runId: string): unknown {
+    const row = this.workspaceObligations.get(workspaceDurabilityKey(runId));
+    if (row?.allocation !== undefined && row.revision !== 1)
+      return { revision: row.revision, allocation: row.allocation };
+    return row?.allocation;
+  }
+  private retainAllocation(value: WorkspaceDurabilityArchive): void {
+    const key = workspaceDurabilityKey(value.runId);
+    const row = this.workspaceObligations.get(key) ?? { revision: 1, pending: new Map<number, WorkspaceSettlement>() };
+    row.allocation = structuredClone(value);
+    this.workspaceObligations.set(key, row);
+  }
+  async workspaceDisposition(expected: WorkspaceAllocation): Promise<WorkspaceDispositionRead> {
+    const stable = workspaceAllocationOf(expected);
+    if (!stable) return { kind: "held", reason: "mismatch" };
+    expected = stable;
+    const live = () =>
+      [...this.live.values()].some(
+        (row) =>
+          row.runId === expected.runId ||
+          (row.state.binding as { sandboxKey?: unknown } | undefined)?.sandboxKey === expected.allocationKey,
+      );
+    if (live()) return { kind: "held", reason: "live" };
+    const archive = workspaceDurabilityArchiveOf(this.allocationArchive(expected.runId));
+    if (!archive?.allocation) return { kind: "held", reason: "unknown" };
+    if (!sameWorkspaceAllocation(archive.allocation, expected)) return { kind: "held", reason: "mismatch" };
+    if (!archive.disposition) return { kind: "held", reason: "unknown" };
+    if (archive.disposition.kind === "scratch-custody-closed") {
+      const c = archive.disposition.custody,
+        log = this.sessions.get(c.sessionKey);
+      const record = this.finished.get(expected.runId),
+        lease = record?.events.find((e) => e.seq === c.leaseSeq && e.type === "lease"),
+        report = record?.events.find((e) => e.seq === c.reportSeq && e.type === "answer");
+      const reportReceipt = c.threadReport;
+      if (
+        !record ||
+        record.provisional ||
+        record.restarting ||
+        !allocationMatchesRecord(expected, record) ||
+        !lease ||
+        !report ||
+        report.type !== "answer" ||
+        (await sourceHash(lease)) !== c.leaseHash ||
+        (await sourceHash(report)) !== c.reportHash ||
+        reportReceipt.key !== contextThreadSessionKey(expected.threadKey) ||
+        reportReceipt.threadKey !== expected.threadKey ||
+        reportReceipt.rowId !== `run:${expected.runId}:answer`
+      )
+        return { kind: "held", reason: "custody-unavailable" };
+      try {
+        const loopRevision = await this.custodyPinRevision(c.sessionKey),
+          reportRevision = await this.custodyPinRevision(reportReceipt.key);
+        if (
+          !loopRevision?.guarded ||
+          loopRevision.revision < c.pinRevision ||
+          !reportRevision?.guarded ||
+          reportRevision.revision < reportReceipt.pinRevision ||
+          !custodyPinProtectionOf(
+            await this.protectCustodyRanges(c.sessionKey, expected.runId, [{ from: c.from, to: c.through }]),
+          ) ||
+          !custodyPinProtectionOf(
+            await this.protectCustodyRanges(reportReceipt.key, expected.runId, [
+              { from: reportReceipt.from, to: reportReceipt.through },
+            ]),
+          )
+        )
+          return { kind: "held", reason: "custody-unavailable" };
+        const rows = structuredClone(log?.rows.filter((r) => r.idx >= c.from && r.idx <= c.through));
+        const attachments = structuredClone(log?.attachments);
+        const reportRows = await this.readSessionEntry(reportReceipt.key, reportReceipt.rowId);
+        if (
+          !log ||
+          !rows ||
+          !attachments ||
+          !workspaceReportRowsMatch(reportRows, report.text) ||
+          reportRows![0].idx !== reportReceipt.from ||
+          (await sourceHash(reportRows)) !== reportReceipt.rowsHash ||
+          !sessionRangesAvailable(
+            log.rows.map((r) => ({ ...r, trimmed: log.trimmed.has(`${r.idx}:${r.part}`) })),
+            [{ from: c.from, to: c.through }],
+          ) ||
+          (await sourceHash(assembleTranscript(rows, attachments, c.from))) !== c.transcriptHash ||
+          JSON.stringify(await this.readSessionEntry(reportReceipt.key, reportReceipt.rowId)) !==
+            JSON.stringify(reportRows) ||
+          JSON.stringify(log.rows.filter((r) => r.idx >= c.from && r.idx <= c.through)) !== JSON.stringify(rows) ||
+          JSON.stringify(log.attachments) !== JSON.stringify(attachments) ||
+          live() ||
+          JSON.stringify(this.allocationArchive(expected.runId)) !== JSON.stringify(archive)
+        )
+          return { kind: "held", reason: "custody-unavailable" };
+      } catch {
+        return { kind: "held", reason: "custody-unavailable" };
+      }
+    }
+    return {
+      kind: "terminal",
+      allocation: structuredClone(archive.allocation),
+      disposition: structuredClone(archive.disposition),
+    };
+  }
+
+  private storedWorkspaceFacts(row: LiveRunRow): StoredWorkspaceCustody {
+    const step = this.steps.get(row.runId)?.at(-1);
+    const events = structuredClone(this.events.get(row.runId) ?? []);
+    return {
+      events,
+      step: step && structuredClone(step),
+      pendingEffects:
+        (this.jobs.get(row.runId)?.length ?? 0) > 0 ||
+        (this.inbox.get(row.runId) ?? []).some(unreadInbox(step ?? null)) ||
+        row.state.pausedForRetry === true,
+    };
+  }
+  private async workspaceCustody(row: LiveRunRow): Promise<StoredWorkspaceCustody> {
+    const read = this.storedWorkspaceFacts(row),
+      { events, step } = read;
+    const base = {
+      ...read,
+      leaseHash: await sourceHash(events.find((e) => e.type === "lease") ?? null),
+      reportHash: await sourceHash([...events].reverse().find((e) => e.type === "answer") ?? null),
+    };
+    const original = row.meta.session,
+      log = original && this.sessions.get(original.key);
+    if (
+      !original ||
+      original.range === "broken" ||
+      !step ||
+      !log ||
+      log.owner?.runId !== row.runId ||
+      log.owner.gen !== row.ownerGen
+    )
+      return base;
+    const through = original.seedFrom + step.turnIndex - 1;
+    if (
+      through < original.seedFrom ||
+      !sessionRangesAvailable(
+        log.rows.map((r) => ({ ...r, trimmed: log.trimmed.has(`${r.idx}:${r.part}`) })),
+        [{ from: original.seedFrom, to: through }],
+      )
+    )
+      return base;
+    try {
+      const rows = structuredClone(log.rows.filter((r) => r.idx >= original.seedFrom && r.idx <= through));
+      const attachments = structuredClone(log.attachments);
+      const transcript = assembleTranscript(rows, attachments, original.seedFrom);
+      if (!transcript.complete) return base;
+      const loopPins = custodyPinProtectionOf(
+        await this.protectCustodyRanges(original.key, row.runId, [{ from: original.seedFrom, to: through }]),
+      );
+      if (!loopPins) return base;
+      const transcriptHash = await sourceHash(transcript);
+      const answer = [...events].reverse().find((e) => e.type === "answer");
+      const reportKey = contextThreadSessionKey(row.meta.threadKey),
+        rowId = `run:${row.runId}:answer`;
+      const reportRows = await this.readSessionEntry(reportKey, rowId);
+      if (!answer || answer.type !== "answer" || !workspaceReportRowsMatch(reportRows, answer.text)) return base;
+      const index = reportRows![0].idx;
+      const reportPins = custodyPinProtectionOf(
+        await this.protectCustodyRanges(reportKey, row.runId, [{ from: index, to: index }]),
+      );
+      if (!reportPins) return base;
+      const rowsHash = await sourceHash(reportRows);
+      const confirmedReport = await this.readSessionEntry(reportKey, rowId);
+      if (
+        JSON.stringify(confirmedReport) !== JSON.stringify(reportRows) ||
+        log.owner?.runId !== row.runId ||
+        log.owner.gen !== row.ownerGen ||
+        JSON.stringify(log.rows.filter((r) => r.idx >= original.seedFrom && r.idx <= through)) !==
+          JSON.stringify(rows) ||
+        JSON.stringify(log.attachments) !== JSON.stringify(attachments) ||
+        !sessionRangesAvailable(
+          log.rows.map((r) => ({ ...r, trimmed: log.trimmed.has(`${r.idx}:${r.part}`) })),
+          [{ from: original.seedFrom, to: through }],
+        )
+      )
+        return base;
+      return {
+        ...base,
+        session: {
+          key: original.key,
+          from: original.seedFrom,
+          through,
+          transcriptHash,
+          pinRevision: loopPins.revision,
+        },
+        threadReport: {
+          key: reportKey,
+          threadKey: row.meta.threadKey,
+          rowId,
+          from: index,
+          through: index,
+          rowsHash,
+          pinRevision: reportPins.revision,
+          text: answer.text,
+        },
+      };
+    } catch {
+      return base;
+    }
+  }
 
   /** Canonical private obligations, read synchronously by this ledger's paired store. */
   workspacePublicationRows(): WorkspaceSettlement[] {
@@ -233,6 +968,95 @@ export class InMemoryRunLedger implements RunLedger {
 
   constructor(private readonly now: () => number = Date.now) {}
 
+  async custodyPinRevision(key: string): Promise<CustodyPinRevision | undefined> {
+    const log = this.sessions.get(key);
+    if (!log || (log.custodyGuarded && log.pinRevision === undefined) || !isCustodyRangePins(log.rangePins ?? {}))
+      return;
+    return custodyPinRevisionOf({ version: 1, revision: log.pinRevision ?? 0, guarded: log.custodyGuarded === true });
+  }
+  private advanceMemoryPinRevision(log: SessionLog, guarded = false): number | undefined {
+    if ((log.custodyGuarded && log.pinRevision === undefined) || !isCustodyRangePins(log.rangePins ?? {})) return;
+    const current = custodyPinRevisionOf({
+      version: 1,
+      revision: log.pinRevision ?? 0,
+      guarded: log.custodyGuarded === true,
+    });
+    const next = current && nextCustodyPinRevision(current);
+    if (next === undefined) return;
+    log.pinRevision = next;
+    if (guarded) log.custodyGuarded = true;
+    return next;
+  }
+  async protectCustodyRanges(key: string, holder: string, ranges: readonly SessionRangePin[]) {
+    const log = this.sessions.get(key);
+    if (
+      !log ||
+      !isCustodyRangePins(log.rangePins ?? {}) ||
+      !holder ||
+      !Array.isArray(ranges) ||
+      !ranges.length ||
+      !sessionRangesAvailable(
+        log.rows.map((row) => ({ ...row, trimmed: log.trimmed.has(`${row.idx}:${row.part}`) })),
+        ranges,
+      )
+    )
+      return { ok: false as const };
+    const pins = structuredClone(log.rangePins ?? {});
+    const previous = Object.hasOwn(pins, holder) ? pins[holder] : [];
+    Object.defineProperty(pins, holder, {
+      value: [...new Map([...previous, ...ranges].map((range) => [`${range.from}:${range.to}`, range])).values()],
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+    const revision = this.advanceMemoryPinRevision(log, true);
+    if (revision === undefined) return { ok: false as const };
+    log.rangePins = pins;
+    return { ok: true as const, version: 1 as const, revision, guarded: true as const };
+  }
+  async retainRangePinsIfRevision(key: string, expected: CustodyPinRevision, holders: readonly string[]) {
+    const log = this.sessions.get(key),
+      proposed = custodyPinRevisionOf(expected),
+      current = await this.custodyPinRevision(key);
+    if (
+      !log ||
+      !proposed ||
+      !current ||
+      !Array.isArray(holders) ||
+      !holders.every((holder) => typeof holder === "string" && holder.length > 0)
+    )
+      return { ok: false as const, reason: "unreadable" as const };
+    // Re-read after the await: a new positive dependency invalidates this plan.
+    const actual = custodyPinRevisionOf({
+      version: 1,
+      revision: log.pinRevision ?? 0,
+      guarded: log.custodyGuarded === true,
+    });
+    if (!actual) return { ok: false as const, reason: "unreadable" as const };
+    if (proposed.revision !== actual.revision || proposed.guarded !== actual.guarded)
+      return { ok: false as const, reason: "revision-changed" as const, ...actual };
+    const pins = structuredClone(log.rangePins ?? {}),
+      allowed = new Set(holders);
+    for (const { receipt: pending } of this.sourceSeedRecords(key)) {
+      allowed.add(pending.runId);
+      const held = pins[pending.runId] ?? [];
+      pins[pending.runId] = held.some((range) => range.from === pending.from && range.to === pending.through)
+        ? held
+        : [...held, { from: pending.from, to: pending.through }];
+    }
+    for (const holder of Object.keys(pins)) if (!allowed.has(holder)) delete pins[holder];
+    const revision = this.advanceMemoryPinRevision(log);
+    if (revision === undefined) return { ok: false as const, reason: "unreadable" as const };
+    log.rangePins = pins;
+    return { ok: true as const, version: 1 as const, revision, guarded: actual.guarded };
+  }
+  async retainRangePins(key: string, holders: readonly string[]) {
+    const current = await this.custodyPinRevision(key);
+    if (!current) return { ok: false as const, reason: "unreadable" as const };
+    if (current.guarded) return { ok: false as const, reason: "custody-protected" as const };
+    return this.retainRangePinsIfRevision(key, current, holders);
+  }
+
   private byThread(threadKey: string): LiveRunRow | undefined {
     for (const row of this.live.values()) if (row.threadKey === threadKey) return row;
     return undefined;
@@ -257,6 +1081,7 @@ export class InMemoryRunLedger implements RunLedger {
     }
     for (const [key, pins] of ranges) {
       const log = this.sessions.get(key)!;
+      if (this.advanceMemoryPinRevision(log) === undefined) throw new Error("session pin revision is unreadable");
       log.rangePins ??= {};
       log.rangePins[req.runId] = pins;
     }
@@ -300,8 +1125,60 @@ export class InMemoryRunLedger implements RunLedger {
     return { ...incoming, ...retained };
   }
 
-  async claim(req: ClaimRequest): Promise<ClaimResult> {
+  async claim(req: ClaimRequest, originalBodyJson?: string): Promise<ClaimResult> {
+    const seedBefore = workspaceDurabilityArchiveOf(this.allocationArchive(req.runId))?.promotion?.expectedSeed;
+    const seedJsonBefore = canonicalSeedJson(seedBefore ?? null);
+    const actualSeedSha256 = seedBefore ? await seedContentHash(seedBefore) : undefined;
+    const digest =
+      originalBodyJson !== undefined && promotionBytes(originalBodyJson) <= PROMOTION_BODY_BYTES
+        ? await promotionBodyHash(originalBodyJson)
+        : undefined;
+    if (this.promotionHeld(req.runId, req.gen)) {
+      const archive = workspaceDurabilityArchiveOf(this.allocationArchive(req.runId));
+      if (
+        canonicalSeedJson(archive?.promotion?.expectedSeed ?? null) !== seedJsonBefore ||
+        archive?.promotion?.receipt.expectedSeedSha256 !== actualSeedSha256
+      )
+        throw new PromotionPendingError(req.runId, "corrupt");
+      const original = preparedPromotionClaim(req, originalBodyJson, digest, this.live.get(req.runId), archive);
+      if (!original) throw new PromotionPendingError(req.runId);
+      req = original;
+      if (archive?.promotionCommit) {
+        const allocationAck = allocationAckFromCanonical(this.allocationArchive(req.runId), this.live.get(req.runId));
+        if (!allocationAck) throw new PromotionPendingError(req.runId, "corrupt");
+        return { ok: true, allocationAck, promotionCommit: structuredClone(archive.promotionCommit) };
+      }
+    }
+    if (Object.hasOwn(req.meta, "workspaceDisposition")) throw new Error("workspace disposition is store-derived");
+    if (workspaceAuthorityFieldsPresent(req.state))
+      throw new Error("workspace allocation cannot be written as mutable state");
     const existing = this.byThread(req.threadKey);
+    if (
+      existing?.runId === req.runId &&
+      existing.ownerGen === req.gen &&
+      req.phase === "attaching" &&
+      req.meta.restartOf === req.runId &&
+      (existing.phase === "finishing" || existing.phase === "live") &&
+      !this.promotionHeld(req.runId, req.gen)
+    ) {
+      existing.phase = "attaching";
+      existing.meta = { ...existing.meta, restartOf: req.runId };
+    }
+
+    const allocation = prepareWorkspaceAllocation(
+      req.runId,
+      req.meta,
+      this.allocationArchive(req.runId),
+      this.live.has(req.runId) || (this.finished.has(req.runId) && this.finished.get(req.runId)?.provisional !== true),
+      req.startedAt,
+    );
+    req = {
+      ...req,
+      meta: structuredClone({
+        ...req.meta,
+        ...(allocation?.allocation ? { workspaceAllocation: allocation.allocation } : {}),
+      }),
+    };
     const original = this.live.get(req.runId)?.meta ?? this.finished.get(req.runId);
     if (!validMaintenanceTransport(req.meta) || (original && !sameMaintenanceTransport(original, req.meta)))
       throw new Error("maintenance transport identity conflicts with retained state");
@@ -324,16 +1201,40 @@ export class InMemoryRunLedger implements RunLedger {
       req,
     );
     if (!decision.ok) return decision;
+    const acknowledged = (): ClaimResult => {
+      const allocationAck = allocationAckFromCanonical(this.allocationArchive(req.runId), this.live.get(req.runId));
+      const promotionCommit =
+        req.phase === "attaching"
+          ? undefined
+          : workspaceDurabilityArchiveOf(this.allocationArchive(req.runId))?.promotionCommit;
+      return {
+        ok: true,
+        ...(allocationAck ? { allocationAck } : {}),
+        ...(promotionCommit ? { promotionCommit: structuredClone(promotionCommit) } : {}),
+      };
+    };
     if (existing && state.branchIdentityBaseline !== undefined && existing.state.branchIdentityBaseline === undefined)
       existing.state = { ...existing.state, branchIdentityBaseline: structuredClone(state.branchIdentityBaseline) };
     switch (decideClaimWrite(existing, req)) {
       case "keep":
-        return decision; // idempotent re-claim
+        return acknowledged(); // idempotent re-claim
       case "refresh":
         existing!.leaseUntil = this.now() + req.leaseMs;
-        return decision;
+        return acknowledged();
       case "promote":
+        if (
+          allocation?.promotion &&
+          digest &&
+          promotionBytes(
+            JSON.stringify({
+              ...allocation,
+              promotionCommit: promotionCommitFromRow(existing!, digest, actualSeedSha256),
+            }),
+          ) > MAX_RECORD_BYTES
+        )
+          throw new PromotionPendingError(req.runId);
         this.protectHandoff(req);
+        if (allocation) this.retainAllocation(allocation);
         Object.assign(existing!, {
           leaseUntil: this.now() + req.leaseMs,
           phase: "live",
@@ -343,11 +1244,17 @@ export class InMemoryRunLedger implements RunLedger {
           tools: req.tools,
           state: { ...existing!.state, ...state },
         });
-        return decision;
+        if (allocation?.promotion && digest)
+          this.retainAllocation({
+            ...allocation,
+            promotionCommit: promotionCommitFromRow(existing!, digest, actualSeedSha256),
+          });
+        return acknowledged();
       case "insert":
         break;
     }
     this.protectHandoff(req);
+    if (allocation) this.retainAllocation(allocation);
     this.live.set(req.runId, {
       runId: req.runId,
       threadKey: req.threadKey,
@@ -371,7 +1278,7 @@ export class InMemoryRunLedger implements RunLedger {
     // misses the log is refused here as it is live. A claim without a session
     // models a row from before the log existed: it owns its own object.
     if (!req.meta.session) this.transcripts.set(req.runId, { ownerGen: req.gen, rows: [], attachments: [] });
-    return decision;
+    return acknowledged();
   }
 
   /** The rows of `turns`, into `target` under the same `(idx, part)` upsert the objects apply. */
@@ -417,6 +1324,30 @@ export class InMemoryRunLedger implements RunLedger {
 
     if (session !== undefined) {
       const log = this.sessions.get(session);
+      const pending = this.sourceSeedPending(session);
+      if (pending) {
+        const attachments = frozen.flatMap(
+          (t) =>
+            turnRows(
+              t.idx,
+              "message" in t ? t.message : { compaction: t.compaction },
+              {},
+              "message" in t ? t.actor : undefined,
+            ).attachments,
+        );
+        if (
+          log?.owner?.runId === runId &&
+          log.owner.gen === gen &&
+          incoming.every((r) =>
+            log.rows.some((old) => old.idx === r.idx && old.part === r.part && old.json === r.json),
+          ) &&
+          attachments.every((a) =>
+            log.attachments.some((old) => old.ref === a.ref && old.mediaType === a.mediaType && old.data === a.data),
+          )
+        )
+          return { ok: true };
+        throw new SourceSeedPendingError(session, pending.runId);
+      }
       if (!log?.owner) return { ok: false, reason: "unknown-run" };
       if (log.owner.gen !== gen || log.owner.runId !== runId) return { ok: false, reason: "fenced" };
       for (const row of incoming) {
@@ -477,6 +1408,8 @@ export class InMemoryRunLedger implements RunLedger {
   }
 
   async normalizeContextOrigins(request: ContextCheckpointRequest): Promise<ContextCheckpointResult> {
+    const pending = this.sourceSeedPending(request.key);
+    if (pending) throw new SourceSeedPendingError(request.key, pending.runId);
     const row = this.live.get(request.runId);
     const fence = checkFence(row, request.gen);
     if (!fence.ok) return fence;
@@ -541,6 +1474,7 @@ export class InMemoryRunLedger implements RunLedger {
       )
     )
       return unavailable();
+    if (this.advanceMemoryPinRevision(log) === undefined) return unavailable();
     this.checkpointMembers.set(row.runId, checkpointMembersOf(row.runId, receipt.coveredOrigins, sources));
     this.checkpointMemberHashes.set(row.runId, checkpointMemberHashesOf(row.runId, receipt.coveredOrigins, sources));
     log.rangePins ??= {};
@@ -555,6 +1489,16 @@ export class InMemoryRunLedger implements RunLedger {
   }
 
   async writeSessionSources(key: string, runId: string, gen: string, sources: SessionSources): Promise<FenceResult> {
+    const pending = this.sourceSeedPending(key);
+    if (pending) {
+      if (
+        pending.runId === runId &&
+        pending.gen === gen &&
+        canonicalSeedJson(this.sessions.get(key)?.sources) === canonicalSeedJson(sources)
+      )
+        return { ok: true };
+      throw new SourceSeedPendingError(key, pending.runId);
+    }
     const log = this.sessions.get(key);
     if (!log?.owner) return { ok: false, reason: "unknown-run" };
     if (log.owner.gen !== gen || log.owner.runId !== runId) return { ok: false, reason: "fenced" };
@@ -596,7 +1540,10 @@ export class InMemoryRunLedger implements RunLedger {
     const fence = this.fence(runId, gen);
     if (!fence.ok) return fence;
     const list = this.steps.get(runId) ?? [];
-    list.push(record);
+    const base = workspaceDurabilityArchiveOf(this.allocationArchive(runId))?.promotionStepBase ?? 0;
+    const index = base + record.step;
+    if (index < list.length) list[index] = record;
+    else list.push(record);
     this.steps.set(runId, list);
     return { ok: true };
   }
@@ -741,10 +1688,12 @@ export class InMemoryRunLedger implements RunLedger {
     gen: string,
     assignment: LiveStateAssignRequest,
   ): Promise<LiveStateAssignResult> {
+    if (workspaceAuthorityFieldsPresent(assignment.statePatch)) return { ok: false, reason: "fenced" };
     const row = this.live.get(runId);
     const fence = checkFence(row, gen);
     if (!fence.ok) return fence;
     if (!row) return { ok: false, reason: "unknown-run" };
+    if (this.promotionHeld(runId, gen)) throw new PromotionPendingError(runId);
     if (!preserveCheckpointState(row.state, assignment.statePatch ?? {})) return { ok: false, reason: "fenced" };
     if (!workEvidenceBelongsToRun({ ...row.state, ...assignment.statePatch }, { id: row.runId, ...row.meta }))
       return { ok: false, reason: "fenced" };
@@ -787,6 +1736,8 @@ export class InMemoryRunLedger implements RunLedger {
   }
 
   async setState(runId: string, gen: string, state: RunState): Promise<FenceResult> {
+    if (workspaceAuthorityFieldsPresent(state)) return { ok: false, reason: "fenced" };
+    if (this.promotionHeld(runId, gen)) throw new PromotionPendingError(runId);
     const row = this.live.get(runId);
     const fence = checkFence(row, gen);
     if (!fence.ok || !row) return fence;
@@ -827,6 +1778,7 @@ export class InMemoryRunLedger implements RunLedger {
         )
       )
         return { ok: false, reason: "fenced" };
+      if (this.advanceMemoryPinRevision(log) === undefined) return { ok: false, reason: "fenced" };
       log.rangePins ??= {};
       log.rangePins[runId] = [...(log.rangePins[runId] ?? []), { from: receipt.seed.from, to: receipt.seed.through }];
     }
@@ -924,7 +1876,7 @@ export class InMemoryRunLedger implements RunLedger {
     const marked: string[] = [];
     for (const id of runIds) {
       const row = this.live.get(id);
-      if (row && row.ownerGen === gen && phaseTransition(row.phase, "handoff")) {
+      if (row && row.ownerGen === gen && !this.promotionHeld(id) && phaseTransition(row.phase, "handoff")) {
         row.phase = "handoff";
         if (opts?.pausedForRetry) row.state = { ...row.state, pausedForRetry: true };
         marked.push(id);
@@ -935,6 +1887,7 @@ export class InMemoryRunLedger implements RunLedger {
 
   async finishing(runId: string, gen: string): Promise<FenceResult> {
     const row = this.live.get(runId);
+    if (this.promotionHeld(runId, gen)) throw new PromotionPendingError(runId);
     const fence = checkFence(row, gen);
     if (!fence.ok || !row) return fence;
     if (!phaseTransition(row.phase, "finishing")) return { ok: false, reason: "fenced" };
@@ -948,9 +1901,27 @@ export class InMemoryRunLedger implements RunLedger {
     record: RunRecord,
     opts?: { requireStoppedPause: true },
   ): Promise<FinishResult> {
+    if (workspaceAuthorityFieldsPresent(record)) return { ok: false, reason: "fenced" };
+    if (this.promotionHeld(runId, gen)) throw new PromotionPendingError(runId);
     const fence = this.fence(runId, gen);
     if (!fence.ok) return fence;
     const row = this.live.get(runId)!;
+    const archivedAllocation = workspaceDurabilityArchiveOf(this.allocationArchive(runId));
+    const beforeCustody = workspaceCustodyFingerprint(row, this.storedWorkspaceFacts(row));
+    const custody = archivedAllocation?.allocation ? await this.workspaceCustody(row) : undefined;
+    const confirmed = custody?.session && custody.threadReport ? await this.workspaceCustody(row) : custody;
+    if (
+      this.promotionHeld(runId, gen) ||
+      this.live.get(runId) !== row ||
+      row.ownerGen !== gen ||
+      !sameWorkspaceCustody(custody, confirmed) ||
+      workspaceCustodyFingerprint(row, this.storedWorkspaceFacts(row)) !== beforeCustody
+    )
+      return { ok: false, reason: "fenced" };
+    if (custody?.session) {
+      const current = this.sessions.get(custody.session.key)?.owner;
+      if (current?.runId !== runId || current.gen !== gen) return { ok: false, reason: "fenced" };
+    }
     if (
       !terminalWorkspaceRecordMatches(row, record) ||
       !sameMaintenanceTransport(row.meta, record) ||
@@ -1043,6 +2014,11 @@ export class InMemoryRunLedger implements RunLedger {
     if (Object.keys(unreadable).length) this.finishedWorkEvidence.set(runId, unreadable);
     else this.finishedWorkEvidence.delete(runId);
     this.finished.set(runId, record);
+    if (archivedAllocation?.allocation && confirmed)
+      this.retainAllocation({
+        ...archivedAllocation,
+        disposition: deriveWorkspaceDisposition(archivedAllocation.allocation, row, record, confirmed),
+      });
     // The ending's cause (record 0064): recorded when the row closes, first
     // cause standing — exactly the object's rule, its one keyed exception
     // included: a standing `resident_replaced` was a `restarting` close, the
@@ -1106,6 +2082,8 @@ export class InMemoryRunLedger implements RunLedger {
     log.rowIds ??= new Map();
     log.rowHashes ??= new Map();
     if (log.rowIds.has(rowId)) return { ok: log.rowHashes.get(rowId) === hash, appended: false };
+    const pending = this.sourceSeedPending(key);
+    if (pending) throw new SourceSeedPendingError(key, pending.runId);
     const idx = log.rows.length === 0 ? 0 : Math.max(...log.rows.map((r) => r.idx)) + 1;
     for (const source of receipts)
       if (log.sources?.context) log.sources.context = applyContextCheckpointAliases(log.sources.context, source);
@@ -1120,6 +2098,13 @@ export class InMemoryRunLedger implements RunLedger {
   }
 
   async claimSession(key: string, runId: string, gen: string, maxBytes?: number): Promise<void> {
+    const pending = this.sourceSeedPending(key);
+    if (pending) {
+      const current = this.sessions.get(key)!;
+      if (pending.runId === runId && pending.gen === gen && (maxBytes === undefined || maxBytes === current.maxBytes))
+        return;
+      throw new SourceSeedPendingError(key, pending.runId);
+    }
     const log = this.session(key);
     if (log.pendingSourceOwner && log.pendingSourceOwner !== `${runId}:${gen}`)
       log.sources = taintSessionSources(log.sources);
@@ -1183,6 +2168,8 @@ export class InMemoryRunLedger implements RunLedger {
   }
 
   async releaseSession(key: string, runId: string, gen: string): Promise<FenceResult> {
+    const pending = this.sourceSeedPending(key);
+    if (pending) throw new SourceSeedPendingError(key, pending.runId);
     const log = this.sessions.get(key);
     if (!log?.owner) return { ok: false, reason: "unknown-run" };
     if (log.owner.runId !== runId || log.owner.gen !== gen) return { ok: false, reason: "fenced" };
@@ -1283,6 +2270,12 @@ export class InMemoryRunLedger implements RunLedger {
   }
 
   async writeNotepad(key: string, gen: string, text: string, runId?: string): Promise<FenceResult> {
+    const pending = this.sourceSeedPending(key);
+    if (pending) {
+      if (pending.runId === runId && pending.gen === gen && this.sessions.get(key)?.notepad?.text === text)
+        return { ok: true };
+      throw new SourceSeedPendingError(key, pending.runId);
+    }
     const log = this.sessions.get(key);
     if (!log?.owner) return { ok: false, reason: "unknown-run" };
     if (log.owner.gen !== gen || ((log.sources || runId !== undefined) && log.owner.runId !== runId))
@@ -1294,19 +2287,36 @@ export class InMemoryRunLedger implements RunLedger {
   async abandon(runId: string, gen: string): Promise<FenceResult> {
     const fence = this.fence(runId, gen);
     if (!fence.ok) return fence;
+    if (this.promotionHeld(runId, gen)) throw new PromotionPendingError(runId);
     const retainedSteps = this.prepareInboxSegment(runId);
     this.steps.set(runId, retainedSteps);
+    const allocation = workspaceDurabilityArchiveOf(this.allocationArchive(runId));
+    const row = this.live.get(runId)!;
+    if (allocation?.allocation)
+      this.retainAllocation({
+        ...allocation,
+        disposition: deriveWorkspaceDisposition(allocation.allocation, row, undefined, {
+          events: [],
+          pendingEffects: true,
+        }),
+      });
     this.live.delete(runId);
     // Abandoning execution does not dispose of unread or opaque source bytes.
     this.jobs.delete(runId);
     this.transcripts.delete(runId);
     if (!this.finished.has(runId))
-      for (const log of this.sessions.values()) if (log.rangePins) delete log.rangePins[runId];
+      for (const log of this.sessions.values())
+        if (
+          log.rangePins?.[runId] &&
+          log.expectedSeedPending?.runId !== runId &&
+          this.advanceMemoryPinRevision(log) !== undefined
+        )
+          delete log.rangePins[runId];
     return { ok: true };
   }
 
   async reclaim(gen: string, now: number, leaseMs: number): Promise<ReclaimedRun[]> {
-    const taken = selectReclaim([...this.live.values()], now, gen);
+    const taken = selectReclaim([...this.live.values()], now, gen).filter((row) => !this.promotionHeld(row.runId));
     const out: ReclaimedRun[] = [];
     for (const row of taken) {
       const reclaimedFrom = row.phase;

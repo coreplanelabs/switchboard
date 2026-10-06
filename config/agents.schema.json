@@ -224,6 +224,85 @@
               "write"
             ]
           },
+          "resourceLifetime": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "version": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "purpose": {
+                    "type": "string",
+                    "const": "retained-work"
+                  },
+                  "resident": {
+                    "type": "string",
+                    "const": "retained"
+                  },
+                  "cold": {
+                    "type": "string",
+                    "const": "retained"
+                  }
+                },
+                "required": [
+                  "version",
+                  "purpose",
+                  "resident",
+                  "cold"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "version": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "purpose": {
+                    "type": "string",
+                    "const": "pull-request-review"
+                  },
+                  "resident": {
+                    "type": "string",
+                    "const": "retained"
+                  },
+                  "cold": {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "const": "exclusive-scratch"
+                      },
+                      "scope": {
+                        "type": "string",
+                        "const": "original-cold-allocation"
+                      },
+                      "custody": {
+                        "type": "string",
+                        "const": "session-report-and-review-publication"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "scope",
+                      "custody"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "version",
+                  "purpose",
+                  "resident",
+                  "cold"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
           "tiers": {
             "type": "array",
             "items": {

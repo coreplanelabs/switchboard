@@ -16,6 +16,7 @@ import type { SessionSources } from "../references/receipts.js";
 import type { RunRecord } from "../runRecord.js";
 import type { CoordinatorReconcileReceipt } from "../coordinator/workflowReconciliation.js";
 import type { WorkspaceOwner, WorkspaceSettlement, WorkspaceAck } from "../workspaceSettlement.js";
+import type { WorkspaceAllocation, WorkspaceDispositionRead } from "./workspaceDurability.js";
 import type { ProviderFailureCause } from "../provider.js";
 import type {
   HeartbeatFacts,
@@ -127,6 +128,37 @@ export function mergeRequesterTarget(prior: RequesterTarget | null, next: Reques
 }
 
 export interface RunLedger {
+  originalPromotionBody?(request: ClaimRequest): string;
+  observeExpectedSeed?(
+    key: string,
+    from: number,
+    through: number,
+  ): Promise<import("./seedVerification.js").SourceSeedSnapshot>;
+  confirmPromotion?(
+    reference: import("./seedVerification.js").SourceSeedReference,
+  ): Promise<import("./seedVerification.js").PromotionConfirmationResult>;
+  releaseExpectedSeed?(
+    key: string,
+    reference: import("./seedVerification.js").SourceSeedReference,
+  ): Promise<import("./seedVerification.js").SourceSeedResult>;
+  verifyExpectedSeed?(
+    key: string,
+    reference: import("./seedVerification.js").SourceSeedReference,
+  ): Promise<import("./seedVerification.js").SourceSeedResult>;
+  readExpectedSeed?(
+    key: string,
+    reference: import("./seedVerification.js").SourceSeedReference,
+  ): Promise<import("./seedVerification.js").SourceSeedResult>;
+  /** Private immutable original promotion prepare; no claim or model permission. */
+  preparePromotion?(
+    bodyJson: string,
+    expectedSeed?: import("./seedManifest.js").ExpectedSeedManifest,
+  ): Promise<import("./promotion.js").PromotionPrepareResult>;
+  readPromotion?(
+    request: import("./promotion.js").PromotionReadRequest,
+  ): Promise<import("./promotion.js").PromotionReadResult>;
+  /** Exact original allocation custody; never a VM stop permit. */
+  workspaceDisposition?(allocation: WorkspaceAllocation): Promise<WorkspaceDispositionRead>;
   /** Retained terminal facts for one acknowledged physical attachment. */
   workspaceSettlement(owner: WorkspaceOwner): Promise<WorkspaceSettlement | undefined>;
   /** Drop only the exact retained revision after the resident saves it. */
@@ -146,7 +178,7 @@ export interface RunLedger {
    *  transcript answers `unknown-run`. The owner's re-claim is idempotent and
    *  re-runs the owner write, so the caller's convention is: retry the whole
    *  `claim` on failure, never proceed past a claim that did not resolve `ok`. */
-  claim(req: ClaimRequest): Promise<ClaimResult>;
+  claim(req: ClaimRequest, originalBodyJson?: string): Promise<ClaimResult>;
   /** Persist cumulative trusted source metadata under the exact session owner. */
   writeSessionSources(key: string, runId: string, gen: string, sources: SessionSources): Promise<FenceResult>;
   /** The seed prefix, written once at start (chunked by the implementation).

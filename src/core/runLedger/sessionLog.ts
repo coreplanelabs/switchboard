@@ -17,6 +17,29 @@ import type { StoredRow } from "./transcript.js";
 
 export { isRunSession, SESSION_KEY_PATTERN, type RunSession } from "../runRecord.js";
 
+/** The permitted model projection keeps raw session rows available for recall. */
+export const REFUSED_REQUEST_STAND_IN = "(a request the model refused under its usage policy was left out here)";
+export function projectSessionMessages(
+  messages: readonly ChatMessage[],
+  from: number,
+  refusedRequests: readonly number[] = [],
+): ChatMessage[] {
+  const refused = new Set(refusedRequests);
+  return messages.map((message, i) => {
+    if (message.role === "user" && refused.has(from + i))
+      return { role: "user", content: [{ type: "text", text: REFUSED_REQUEST_STAND_IN }] };
+    if (message.role === "assistant") {
+      const content = message.content.filter((p) => p.type !== "thinking" && p.type !== "redacted_thinking");
+      return content.length === message.content.length
+        ? message
+        : { ...message, content: content.length ? content : [{ type: "text", text: "(reasoning omitted)" }] };
+    }
+    if (i === 0 && message.role === "user")
+      return { ...message, content: message.content.filter((p) => p.type !== "tool_result") };
+    return message;
+  });
+}
+
 /** The byte policy's default: `RetentionPolicy.sessionLogMaxBytes`. */
 export const DEFAULT_SESSION_LOG_MAX_BYTES = DEFAULT_RETENTION_POLICY.sessionLogMaxBytes;
 

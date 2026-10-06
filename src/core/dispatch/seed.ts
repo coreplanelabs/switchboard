@@ -20,7 +20,7 @@ import type { SessionSources } from "../references/receipts.js";
 // the newest one, and that entry's summary is handed back for the system
 // prompt, where the record keeps it a pointer to the log and never a loss.
 import type { ChatMessage, ContentPart } from "../chatMessage.js";
-import { GAP_MARKER, sessionKey } from "../runLedger/sessionLog.js";
+import { GAP_MARKER, sessionKey, projectSessionMessages } from "../runLedger/sessionLog.js";
 import type { AssembledTranscript } from "../runLedger/transcript.js";
 import type { LedgerWriteThrough } from "../runLedger/writeThrough.js";
 import type { RunView } from "../runsService.js";
@@ -33,10 +33,7 @@ import { previousRunOf, refusedRequestsOf } from "./thread.js";
 export const SEED_BUDGET_TOKENS = 60_000;
 export const SEED_BUDGET_BYTES = SEED_BUDGET_TOKENS * 4;
 
-/** What stands in the seed for a request the provider refused under its
- *  usage policy: the row keeps its place and its role, the words stay in the
- *  log for `recall`, and the model reads that something was left out here. */
-export const REFUSED_REQUEST_STAND_IN = "(a request the model refused under its usage policy was left out here)";
+export { REFUSED_REQUEST_STAND_IN } from "../runLedger/sessionLog.js";
 
 /** What the ledger's tail read answers (`readSessionTail`): the log index the
  *  rows start at and the transcript assembled from them, counted from 0. */
@@ -67,6 +64,8 @@ export interface SessionSeed {
   /** The rows the seed reuses: the log index the tail begins at and how many
    *  of `messages`, from the first, are those rows — one row each. */
   log: { from: number; turns: number };
+  /** Refused indices selected from the thread's typed run records. */
+  refusedRequests?: readonly number[];
   /** The newest compaction entry's summary when the log has one: for the
    *  system prompt, never a row. */
   summary?: string;
@@ -135,7 +134,8 @@ export function sessionSeed(input: {
   // Every message before `start` is a row, and so is every compaction entry —
   // all of which sit before `start` by construction.
   const logFrom = start < 0 ? from + transcript.turns : from + start + compactions.length;
-  const kept = start < 0 ? [] : transcript.messages.slice(start).map(withoutThinking);
+  const rawKept = start < 0 ? [] : transcript.messages.slice(start);
+  const kept = projectSessionMessages(rawKept, logFrom, refusedRequests);
   // The first kept turn may answer calls made before the cut: pi answers a
   // tool batch and a steer in one user turn, and a compaction entry sits
   // between that batch's calls and its results, so the turn the cut lands on
@@ -144,10 +144,9 @@ export function sessionSeed(input: {
   // themselves are one `recall` away, and the seed's notes say what was
   // dropped.
   if (kept.length > 0 && kept[0].role === "user") {
-    const first = kept[0];
+    const first = rawKept[0];
     const orphans = first.content.filter((p) => p.type === "tool_result").length;
     if (orphans > 0) {
-      kept[0] = { ...first, content: first.content.filter((p) => p.type !== "tool_result") };
       notes.push(
         orphans === 1
           ? "session seed: one tool result answering a call before the cut was dropped from the tail's first turn"
@@ -167,7 +166,6 @@ export function sessionSeed(input: {
   for (const row of new Set(refusedRequests)) {
     const k = row - logFrom;
     if (k < 0 || k >= kept.length || kept[k].role !== "user") continue;
-    kept[k] = { role: "user", content: [{ type: "text", text: REFUSED_REQUEST_STAND_IN }] };
     leftOut++;
   }
   if (leftOut > 0) {
@@ -241,6 +239,13 @@ export function sessionSeed(input: {
     ...(tail.sources ? { sources: tail.sources } : {}),
     ...(tail.requiresFreshSources ? { requiresFreshSources: true as const } : {}),
     log: { from: logFrom, turns: kept.length },
+    ...(leftOut > 0
+      ? {
+          refusedRequests: [...new Set(refusedRequests)].filter(
+            (row) => row >= logFrom && row < logFrom + kept.length && rawKept[row - logFrom].role === "user",
+          ),
+        }
+      : {}),
     ...(summary !== undefined ? { summary } : {}),
     ...(actors !== undefined ? { actors } : {}),
     notes,
@@ -320,15 +325,6 @@ export async function sessionSeedFor(input: {
     seed.sources = undefined;
   }
   return { seed, notes: seed.notes };
-}
-
-/** The message without its thinking blocks; an assistant turn of nothing but
- *  thinking keeps one text part so the row keeps its place and its role. */
-function withoutThinking(message: ChatMessage): ChatMessage {
-  if (message.role !== "assistant") return message;
-  const content = message.content.filter((p) => p.type !== "thinking" && p.type !== "redacted_thinking");
-  if (content.length === message.content.length) return message;
-  return { ...message, content: content.length ? content : [{ type: "text", text: "(reasoning omitted)" }] };
 }
 
 /** The operator's tail cap (the one-door plan's cap rule): 12,000 tokens at

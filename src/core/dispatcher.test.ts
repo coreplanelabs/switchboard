@@ -81,6 +81,7 @@ import { activityOfEvents } from "./runRegistry/activity.js";
 import { activityText } from "./statusCardFrame.js";
 import type { IndexEvent } from "./runRegistry/indexFeed.js";
 import { RunControl } from "./runRegistry/runControl.js";
+import { originalColdAllocation } from "./runLedger/workspaceDurability.js";
 import { createTracer } from "./trace/tracer.js";
 import { classOf, isStreamed } from "./trace/streamSpans.js";
 import { partition } from "./trace/partition.js";
@@ -7719,6 +7720,20 @@ const runShapeOf = (events: readonly RunEvent[]) => shapeOf(events).filter((x) =
 const contentOf = (events: readonly RunEvent[]) => events.filter((e) => !isSpanRecord(e));
 const answerOf = (events: readonly RunEvent[]) => events.find((e) => e.type === "answer");
 
+/** Preserve the original created identity in projection-only spy fixtures. */
+function withOriginalRegistryIdentity(spy: RunRegistry): RunRegistry {
+  const identity = new RunRegistry();
+  const create = spy.create.bind(spy);
+  spy.create = (label, meta, options) => {
+    const run = create(label, meta, options);
+    identity.create(label, meta, { ...options, id: run.id, token: run.token });
+    return run;
+  };
+  spy.has = identity.has.bind(identity);
+  spy.snapshot = identity.snapshot.bind(identity);
+  return spy;
+}
+
 describe("live run-view wiring (Area 2)", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
@@ -7767,7 +7782,7 @@ describe("live run-view wiring (Area 2)", () => {
     } as unknown as RunRegistry;
 
     const deps = makeDeps(YAML_FIXTURE, toolThenAnswer());
-    deps.runRegistry = spy;
+    deps.runRegistry = withOriginalRegistryIdentity(spy);
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("hello there"), io);
 
@@ -7873,7 +7888,7 @@ describe("live run-view wiring (Area 2)", () => {
       size: () => 1,
     } as unknown as RunRegistry;
     const deps = makeDeps(YAML_FIXTURE, provider);
-    deps.runRegistry = spy;
+    deps.runRegistry = withOriginalRegistryIdentity(spy);
     const replies: string[] = [];
     const io: ChannelIO = {
       reply: async (t) => {
@@ -7916,7 +7931,7 @@ describe("live run-view wiring (Area 2)", () => {
       size: () => 1,
     } as unknown as RunRegistry;
     const deps = makeDeps(YAML_FIXTURE, toolThenAnswer());
-    deps.runRegistry = spy;
+    deps.runRegistry = withOriginalRegistryIdentity(spy);
     const png = { name: "a.png", mediaType: "image/png" as const, data: "AAAA" };
     await dispatch(
       deps,
@@ -8019,7 +8034,7 @@ describe("live run-view wiring (Area 2)", () => {
       size: () => 1,
     } as unknown as RunRegistry;
     const deps = makeDeps(YAML_FIXTURE, toolThenAnswer());
-    deps.runRegistry = spy;
+    deps.runRegistry = withOriginalRegistryIdentity(spy);
     await dispatch(deps, msg("agent:general hi"), fakeIO().io);
     const input = events.find((e) => e.type === "input")!;
     if (input.type !== "input") throw new Error("unreachable");
@@ -8366,7 +8381,7 @@ describe("typed answer output (docs/reference/specs/llm-output.md)", () => {
   });
 
   function spyRegistry(events: RunEvent[]) {
-    return {
+    return withOriginalRegistryIdentity({
       mintId: () => "run-t",
       create: () => ({ id: "run-t", token: "tok-t", control: new RunControl() }),
       publish: (_id: string, e: RunEvent) => void events.push(e),
@@ -8375,7 +8390,7 @@ describe("typed answer output (docs/reference/specs/llm-output.md)", () => {
       snapshot: () => null, // the finish reads the backlog for the card's shape (docs/reference/specs/tracing.md)
       subscribe: () => () => {},
       size: () => 1,
-    } as unknown as RunRegistry;
+    } as unknown as RunRegistry);
   }
 
   it("canonicalizes the answer for the event AND the reply, keeping the raw on the event", async () => {
@@ -13684,6 +13699,322 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     },
   );
 
+  it.each(["standalone", "coordinator"] as const)(
+    "holds unknown original promotion beyond every setup finalizer and release: %s",
+    async (owner) => {
+      for (const kind of ["null", "v2"] as const)
+        for (const failure of [
+          "lost",
+          "missing",
+          "foreign",
+          "malformed",
+          "session-permanent",
+          "session-missing",
+        ] as const) {
+          const provider = capturingProvider("must not run"),
+            h = wired(provider);
+          const target = { repo: "acme/api", ref: "patch-1", baseRef: "main", pr: 42, headSha: "a".repeat(40) };
+          h.deps.resolveRepoContext = () => target;
+          const release = vi.fn(async () => ({ released: true }));
+          vi.mocked(makeExecutor).mockResolvedValueOnce({
+            resident: true,
+            backend: "resident",
+            binding: {
+              ref: target.ref,
+              sha: target.headSha,
+              workspace: "/workspace/private/original",
+              user: "worker2",
+            },
+            executor: {
+              exec: async () => target.headSha + "\n",
+              execResult: async () => ({ exitCode: 0, stdout: target.headSha + "\n", stderr: "", truncated: false }),
+              readFile: async () => "",
+              writeFile: async () => "",
+              release,
+            },
+          });
+          const claim = h.ledger.claim.bind(h.ledger);
+          let promotions = 0;
+          h.ledger.claim = async (request, bodyJson) => {
+            if (request.phase === "attaching" && kind === "v2") {
+              const allocation = originalColdAllocation({
+                runId: request.runId,
+                registered: getAgent("review"),
+                identity: request.meta,
+                target,
+              })!;
+              request = { ...request, meta: { ...request.meta, workspaceAllocation: allocation } };
+            }
+            const result = await claim(request, bodyJson);
+            if (request.phase === "attaching") return result;
+            promotions++;
+            if (failure === "lost") throw new TransientStoreError("accepted promotion response lost");
+            if (!result.ok || failure.startsWith("session")) return result;
+            if (failure === "missing") return { ok: true };
+            return {
+              ok: true,
+              allocationAck:
+                failure === "foreign"
+                  ? { ...result.allocationAck!, gen: "foreign" }
+                  : { ...result.allocationAck!, version: 9 },
+            } as never;
+          };
+          if (!failure.startsWith("session"))
+            h.ledger.readPromotion = async () => ({ kind: "held", reason: "unknown" });
+          if (failure.startsWith("session"))
+            h.ledger.claimSession = async () => {
+              throw failure === "session-permanent"
+                ? new PermanentStoreError("accepted session failed")
+                : new RouteMissingError("accepted session route unavailable");
+            };
+          const finish = vi.spyOn(h.ledger, "finish"),
+            abandon = vi.spyOn(h.ledger, "abandon"),
+            seed = vi.spyOn(h.ledger, "seed");
+          const tag: CoordinatorTag = {
+            parentInstanceId: "original-promotion-owner",
+            unit: "U12",
+            idempotencyKey: "original-promotion-owner:U12/0/review",
+            branch: target.ref,
+            base: "main",
+            publication: {
+              repo: target.repo,
+              pr: target.pr,
+              headRef: target.ref,
+              baseRef: target.baseRef,
+              expectedHeadSha: target.headSha,
+              publicationRef: target.ref,
+              owner: { instanceId: "original-promotion-owner", unit: "U12" },
+            },
+          };
+          await dispatch(
+            h.deps,
+            msg("agent:review inspect code in acme/api"),
+            ioWithCard().io,
+            owner === "coordinator" ? { coordinator: tag } : {},
+          );
+          await h.writer.settled();
+          expect(promotions).toBe(1);
+          expect(provider.requests).toEqual([]);
+          expect(seed).not.toHaveBeenCalled();
+          expect(finish).not.toHaveBeenCalled();
+          expect(abandon).not.toHaveBeenCalled();
+          expect(release).not.toHaveBeenCalled();
+          expect(h.ledger.live.get("run-l")).toMatchObject({
+            runId: "run-l",
+            ownerGen: "gen-T",
+            meta: { session: expect.any(Object) },
+            state: { binding: { backend: "resident", workspace: "/workspace/private/original" } },
+          });
+          expect(h.ledger.finished.has("run-l")).toBe(false);
+        }
+    },
+  );
+
+  it.each(["confirm-unknown", "release-unknown", "release-read-unknown", "hard-stop"])(
+    "starts no provider and preserves original custody when final promotion is %s",
+    async (mode) => {
+      const provider = capturingProvider("must not execute"),
+        h = wired(provider);
+      const release = vi.fn(async () => ({ released: true }));
+      vi.mocked(makeExecutor).mockResolvedValueOnce({
+        resident: false,
+        backend: "sandbox",
+        executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "", release },
+      });
+      const read = h.ledger.readPromotion.bind(h.ledger),
+        confirm = h.ledger.confirmPromotion.bind(h.ledger),
+        releaseSeed = h.ledger.releaseExpectedSeed.bind(h.ledger),
+        readSeed = h.ledger.readExpectedSeed.bind(h.ledger);
+      let confirmed = false,
+        released = false;
+      h.ledger.confirmPromotion = async (ref) => {
+        const result = await confirm(ref);
+        confirmed = result.kind === "confirmed";
+        if (mode === "hard-stop") await h.ledger.requestStop(ref.runId, "hard");
+        return result;
+      };
+      h.ledger.readPromotion = async (query) =>
+        mode === "confirm-unknown" && confirmed ? { kind: "held", reason: "unknown" } : read(query);
+      h.ledger.releaseExpectedSeed = async (key, ref) => {
+        if (mode === "release-unknown") return { kind: "held", reason: "unknown" };
+        const result = await releaseSeed(key, ref);
+        released = result.kind === "verified" && !!result.release;
+        return result;
+      };
+      h.ledger.readExpectedSeed = async (key, ref) =>
+        mode === "release-read-unknown" && released ? { kind: "held", reason: "unknown" } : readSeed(key, ref);
+      const finish = vi.spyOn(h.ledger, "finish"),
+        abandon = vi.spyOn(h.ledger, "abandon");
+      await dispatch(h.deps, msg("agent:review inspect the code"), ioWithCard().io);
+      await h.writer.settled();
+      expect(confirmed).toBe(true);
+      expect(provider.requests).toEqual([]);
+      expect(finish).not.toHaveBeenCalled();
+      expect(abandon).not.toHaveBeenCalled();
+      expect(release).not.toHaveBeenCalled();
+      expect(h.ledger.live.get("run-l")?.ownerGen).toBe("gen-T");
+      expect(h.ledger.finished.has("run-l")).toBe(false);
+    },
+  );
+  it("keeps an operator-targeted standalone review's verified moved head without minting an immutable allocation from the earlier observation", async () => {
+    const provider = capturingProvider(),
+      h = wired(provider);
+    const repo = "acme/api",
+      ref = "patch-1",
+      pr = 42,
+      earlier = "a".repeat(40),
+      current = "b".repeat(40);
+    h.deps.resolveRepoContext = () => ({ repo, ref, pr, headSha: earlier, baseRef: "main" });
+    h.deps.fetchPrHead = async () => current;
+    h.deps.postReviewComment = vi.fn(async () => ({ state: "accepted" as const }));
+    vi.mocked(makeExecutor).mockResolvedValueOnce({
+      resident: true,
+      binding: { ref, sha: current, workspace: "/workspace/original", user: "worker2" },
+      executor: {
+        exec: async () => current + "\n",
+        execResult: async () => ({ exitCode: 0, stdout: current + "\n", stderr: "", truncated: false }),
+        readFile: async () => "",
+        writeFile: async () => "",
+        release: async () => ({ released: true }),
+      },
+    });
+    const allocationAtFirstClaim: unknown[] = [],
+      claim = h.ledger.claim.bind(h.ledger);
+    h.ledger.claim = async (request, bodyJson) => {
+      if (request.phase === "attaching") allocationAtFirstClaim.push(request.meta.workspaceAllocation);
+      return claim(request, bodyJson);
+    };
+    const { io } = ioWithCard();
+    const outcome = await dispatch(h.deps, msg("agent:review https://github.com/acme/api/pull/42"), io, {
+      operationTarget: {
+        repo,
+        prTarget: { number: pr, source: "request", quote: "https://github.com/acme/api/pull/42" },
+      },
+    });
+    await h.writer.settled();
+    expect(outcome.status).toBe("completed");
+    expect(provider.requests.length).toBeGreaterThan(0);
+    expect(allocationAtFirstClaim).toEqual([undefined]);
+  });
+
+  it("restarts an attaching standalone review at its verified current head without changing original identity", async () => {
+    const provider = capturingProvider(),
+      h = wired(provider);
+    const repo = "acme/api",
+      ref = "patch-1",
+      pr = 42,
+      earlier = "a".repeat(40),
+      current = "b".repeat(40);
+    h.deps.resolveRepoContext = () => ({ repo, ref, pr, headSha: earlier, baseRef: "main" });
+    h.deps.fetchPrHead = async () => current;
+    h.deps.postReviewComment = vi.fn(async () => ({ state: "accepted" as const }));
+    vi.mocked(makeExecutor).mockResolvedValueOnce({
+      resident: true,
+      binding: { ref, sha: current, workspace: "/workspace/original", user: "worker2" },
+      executor: {
+        exec: async () => current + "\n",
+        execResult: async () => ({ exitCode: 0, stdout: current + "\n", stderr: "", truncated: false }),
+        readFile: async () => "",
+        writeFile: async () => "",
+        release: async () => ({ released: true }),
+      },
+    });
+    const allocationAtFirstClaim: unknown[] = [],
+      promoted: unknown[] = [],
+      claim = h.ledger.claim.bind(h.ledger);
+    h.ledger.claim = async (request, bodyJson) => {
+      if (request.phase === "attaching") allocationAtFirstClaim.push(request.meta.workspaceAllocation);
+      else promoted.push(request);
+      return claim(request, bodyJson);
+    };
+    const { io } = ioWithCard();
+    const request = msg("agent:review https://github.com/acme/api/pull/42");
+    const startedAt = Date.now();
+    expect(
+      await h.ledger.claim({
+        runId: "run-old",
+        threadKey: request.threadKey,
+        gen: "gen-OLD",
+        leaseMs: 30000,
+        startedAt,
+        phase: "attaching",
+        meta: {
+          agent: "review",
+          channelId: request.channelId,
+          userId: request.userId,
+          threadKey: request.threadKey,
+          repo,
+          ref,
+          pr,
+          headSha: earlier,
+          readonly: true,
+          profile: { machine: AGENTS.review.machine, identity: "read", minutes: AGENTS.review.maxMinutes },
+          request: durableInboxMessage(request, request.text, startedAt),
+        },
+        system: "",
+        tools: [],
+      }),
+    ).toMatchObject({ ok: true, allocationAck: { allocation: null } });
+    h.ledger.live.get("run-old")!.leaseUntil = 0;
+    const [reclaimed] = await h.ledger.reclaim("gen-T", Date.now(), 30000);
+    const outcome = await dispatch(h.deps, request, io, {
+      restart: { row: reclaimed.row, inbox: [], events: [] },
+      operationTarget: {
+        repo,
+        prTarget: { number: pr, source: "request", quote: "https://github.com/acme/api/pull/42" },
+      },
+    });
+    await h.writer.settled();
+    expect(outcome.status).toBe("completed");
+    expect(provider.requests.length).toBeGreaterThan(0);
+    expect(allocationAtFirstClaim).toEqual([undefined, undefined]);
+    expect(promoted).toHaveLength(1);
+    expect(promoted[0]).toMatchObject({
+      runId: "run-old",
+      startedAt,
+      gen: "gen-T",
+      meta: { userId: request.userId, repo, ref, pr, headSha: current },
+    });
+    expect(h.registry.getById("run-old")).toMatchObject({ finished: true, status: "completed" });
+    expect(h.ledger.finished.get("run-old")).toMatchObject({
+      startedAt,
+      userId: request.userId,
+      repo,
+      headSha: current,
+    });
+  });
+
+  it("keeps an operator-targeted unknown-head Slack-only review allocation-free and starts the existing review path", async () => {
+    const provider = capturingProvider(),
+      h = wired(provider);
+    const repo = "acme/api",
+      pr = 42;
+    h.deps.resolveRepoContext = () => ({ repo, ref: "patch-1", pr });
+    h.deps.postReviewComment = vi.fn(async () => ({ state: "accepted" as const }));
+    const allocationAtFirstClaim: unknown[] = [],
+      claim = h.ledger.claim.bind(h.ledger);
+    h.ledger.claim = async (request, bodyJson) => {
+      if (request.phase === "attaching") allocationAtFirstClaim.push(request.meta.workspaceAllocation);
+      return claim(request, bodyJson);
+    };
+    const outcome = await dispatch(
+      h.deps,
+      msg("agent:review https://github.com/acme/api/pull/42 slack only"),
+      ioWithCard().io,
+      {
+        operationTarget: {
+          repo,
+          prTarget: { number: pr, source: "request", quote: "https://github.com/acme/api/pull/42" },
+        },
+      },
+    );
+    await h.writer.settled();
+    expect(outcome.status).toBe("completed");
+    expect(provider.requests).toHaveLength(1);
+    expect(h.deps.postReviewComment).not.toHaveBeenCalled();
+    expect(allocationAtFirstClaim).toEqual([undefined]);
+  });
+
   it("keeps a direct PR review's advertised run when fleet capacity prevents setup", async () => {
     vi.stubEnv("PUBLIC_BASE_URL", "https://sb.example");
     const provider = capturingProvider("must not review");
@@ -15559,20 +15890,24 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         });
         const abandon = vi.spyOn(h.ledger, "abandon");
         const claim = h.ledger.claim.bind(h.ledger);
-        vi.spyOn(h.ledger, "claim").mockImplementation(async (request) => {
+        vi.spyOn(h.ledger, "claim").mockImplementation(async (request, bodyJson) => {
           if (request.phase !== "attaching" && failure === "claim")
             throw new PermanentStoreError("promotion unavailable");
-          return claim(request);
+          const result = await claim(request, bodyJson);
+          // This control models the supported older receiver without an allocation ACK.
+          return result.ok ? { ok: true } : result;
         });
         if (failure === "seed") vi.spyOn(h.ledger, "seed").mockRejectedValueOnce(new Error("seed unavailable"));
         const open = h.deps.runLedger.open.bind(h.deps.runLedger);
         let rowAfterOpen: ReturnType<typeof h.ledger.live.get>;
         vi.spyOn(h.deps.runLedger, "open").mockImplementationOnce(async (request) => {
           if (failure === "open") throw new Error("promotion unavailable");
-          const result = await open(request);
-          rowAfterOpen = structuredClone(h.ledger.live.get("run-l"));
-          if (failure === "working-state") h.ledger.liveStateFailure.beforeCommit = true;
-          return result;
+          try {
+            return await open(request);
+          } finally {
+            rowAfterOpen = structuredClone(h.ledger.live.get("run-l"));
+            if (failure === "working-state") h.ledger.liveStateFailure.beforeCommit = true;
+          }
         });
         expect(await h.call("spawn", h.spawnBody)).toMatchObject({ status: 200, body: { runId: "run-l" } });
         await Promise.all(h.dispatched);
@@ -18739,9 +19074,9 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
             return target.finish(runId, gen, record);
           };
         if (prop === "claim")
-          return async (req: ClaimRequest) => {
+          return async (req: ClaimRequest, bodyJson?: string) => {
             order.push(`claim ${req.runId} ${req.phase ?? "live"}`);
-            return target.claim(req);
+            return target.claim(req, bodyJson);
           };
         const v = Reflect.get(target, prop) as unknown;
         return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
@@ -18815,8 +19150,8 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
             return target.finish(runId, gen, record);
           };
         if (prop === "claim")
-          return async (req: ClaimRequest) => {
-            const result = await target.claim(req);
+          return async (req: ClaimRequest, bodyJson?: string) => {
+            const result = await target.claim(req, bodyJson);
             if (req.runId !== "run-1") {
               order.push(`claim ${req.runId} ${result.ok ? "ok" : result.reason}`);
               claimAnswered();
@@ -18916,8 +19251,8 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
             return target.abandon(runId, gen);
           };
         if (prop === "claim")
-          return async (req: ClaimRequest) => {
-            const result = await target.claim(req);
+          return async (req: ClaimRequest, bodyJson?: string) => {
+            const result = await target.claim(req, bodyJson);
             order.push(`claim ${req.runId} ${result.ok ? "ok" : result.reason}`);
             return result;
           };
@@ -19017,8 +19352,8 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
             return target.finish(...args);
           };
         if (prop === "claim")
-          return async (req: ClaimRequest) => {
-            const result = await target.claim(req);
+          return async (req: ClaimRequest, bodyJson?: string) => {
+            const result = await target.claim(req, bodyJson);
             if (req.runId !== "run-1") order.push(`claim ${req.runId} ${result.ok ? "ok" : result.reason}`);
             return result;
           };
@@ -19109,9 +19444,9 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
             throw new TransientStoreError("run ledger /runs/finish: The operation was aborted due to timeout");
           };
         if (prop === "claim")
-          return async (req: ClaimRequest) => {
+          return async (req: ClaimRequest, bodyJson?: string) => {
             order.push(`claim ${req.runId} ${req.phase ?? "live"}`);
-            return target.claim(req);
+            return target.claim(req, bodyJson);
           };
         const v = Reflect.get(target, prop) as unknown;
         return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
@@ -19307,9 +19642,9 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
             return target.pushInbox(runId, message);
           };
         if (prop === "claim")
-          return async (req: ClaimRequest) => {
+          return async (req: ClaimRequest, bodyJson?: string) => {
             order.push(`claim ${req.runId}`);
-            return target.claim(req);
+            return target.claim(req, bodyJson);
           };
         if (prop === "finish")
           return async (runId: string, gen: string, record: RunRecord) => {

@@ -10,6 +10,10 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConfigStore } from "../../config.js";
 import { getAgent } from "../../agents/registry.js";
+import { UnknownAllocationClaimError } from "../runLedger/allocationAck.js";
+import { RefusalError } from "../refusal.js";
+import { deriveWorkspaceDisposition } from "../runLedger/workspaceDurability.js";
+import type { RunRecord } from "../runRecord.js";
 import { declaredProfile } from "../../config/profile.js";
 import { parseDirectives } from "../../directives.js";
 import {
@@ -115,6 +119,265 @@ vi.mock("../reviewRound.js", async (importOriginal) => {
 
 const NOW = 10_000;
 const THREAD = "slack:CX:1.0";
+
+describe("original allocation before first reservation", () => {
+  function originalContext(d: ProvisionDeps) {
+    const r = request(d, "Review this exact PR", "review");
+    return {
+      msg: r.message,
+      agent: structuredClone(r.agent),
+      profile: r.profile,
+      resolved: r.resolved,
+      repoCtx: { repo: "acme/api", ref: "unit/review", headSha: "a".repeat(40), pr: 42 },
+      operationTarget: {
+        repo: "acme/api",
+        ref: "unit/review",
+        prTarget: { number: 42, source: "request" as const, quote: "https://github.com/acme/api/pull/42" },
+      },
+      coordinator: {
+        parentInstanceId: "original-unit",
+        unit: "U12",
+        idempotencyKey: "original-unit:U12/0/review",
+        publication: {
+          repo: "acme/api",
+          pr: 42,
+          headRef: "unit/review",
+          baseRef: "main",
+          publicationRef: "unit/review",
+          expectedHeadSha: "a".repeat(40),
+          owner: { instanceId: "original-unit", unit: "U12" },
+        },
+      },
+      admissionIdentity: {
+        requester: r.message.userId,
+        channelId: r.message.channelId,
+        threadKey: r.message.threadKey,
+      },
+      channelVisibility: "public" as const,
+      runId: "run-original-v2",
+      startedAt: NOW,
+      receivedAt: NOW,
+      resume: undefined,
+      restart: undefined,
+      card: { update() {}, async done() {} },
+      hooks: { onStop() {}, onFenced() {} },
+      admitted: r.admitted,
+      root: r.root,
+    };
+  }
+  it("puts the whole declared v2 contract on the FIRST real claim and propagates only an independent canonical ACK", async () => {
+    const d = deps(),
+      store = new InMemoryRunLedger(() => NOW),
+      original = store.claim.bind(store);
+    const requests: unknown[] = [];
+    store.claim = async (req) => {
+      requests.push(structuredClone(req));
+      return original(req);
+    };
+    const writer = createLedgerWriteThrough({
+      ledger: store,
+      gen: "gen-T",
+      now: () => NOW,
+      warn: () => {},
+      fallback: { put: async () => {}, abandoned: () => {} },
+      setInterval: () => ({ unref() {} }),
+      clearInterval: () => {},
+    });
+    const ctx = originalContext(d),
+      result = await reserveRun({ ...d, runLedger: writer }, ctx);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      phase: "attaching",
+      meta: {
+        workspaceAllocation: {
+          version: 2,
+          pr: 42,
+          policy: { purpose: "pull-request-review", resident: "retained" },
+          allocationKey: "review:run-original-v2",
+        },
+      },
+    });
+    const ack = (result as unknown as { allocationAck?: { allocation: { repo: string } } }).allocationAck;
+    expect(ack).toMatchObject({ allocation: { version: 2, repo: "acme/api" } });
+    ack!.allocation.repo = "changed/caller";
+    expect(result!.reserved!.allocationAck).toMatchObject({ allocation: { repo: "acme/api" } });
+    expect(store.live.get(ctx.runId)!.meta.workspaceAllocation).toMatchObject({ repo: "acme/api", version: 2 });
+    expect(ctx.admitted.runId).toBe(ctx.runId);
+    await store.setState(ctx.runId, "gen-T", {
+      binding: { backend: "resident", ref: "unit/review", user: "fixture", workspace: "/fixture/resident" },
+    });
+    await store.finishing(ctx.runId, "gen-T");
+    const live = store.live.get(ctx.runId)!;
+    expect(
+      deriveWorkspaceDisposition(
+        live.meta.workspaceAllocation!,
+        live,
+        {
+          id: ctx.runId,
+          userId: ctx.msg.userId,
+          threadKey: ctx.msg.threadKey,
+          repo: "acme/api",
+          startedAt: NOW,
+        } as RunRecord,
+        { events: [], pendingEffects: false },
+      ),
+    ).toMatchObject({ kind: "retained" });
+  });
+  it("refuses missing foreign echoed or legacy ACKs after one claim without a handle heartbeat admission id or deletion", async () => {
+    for (const mode of ["missing", "foreign", "echo", "null", "v1"] as const) {
+      const d = deps(),
+        store = new InMemoryRunLedger(() => NOW),
+        original = store.claim.bind(store);
+      let claims = 0,
+        beats = 0;
+      store.claim = async (req) => {
+        claims++;
+        const result = await original(req);
+        if (!result.ok) return result;
+        if (mode === "missing") return { ok: true };
+        const good = result.allocationAck!;
+        return {
+          ok: true,
+          allocationAck:
+            mode === "foreign"
+              ? { ...good, gen: "foreign" }
+              : mode === "echo"
+                ? req.meta.workspaceAllocation
+                : mode === "null"
+                  ? { ...good, allocation: null }
+                  : { ...good, allocation: { ...good.allocation, version: 1 } },
+        } as never;
+      };
+      const writer = createLedgerWriteThrough({
+        ledger: store,
+        gen: "gen-T",
+        now: () => NOW,
+        warn: () => {},
+        fallback: { put: async () => {}, abandoned: () => {} },
+        claimAttempts: 3,
+        setInterval: () => {
+          beats++;
+          return { unref() {} };
+        },
+        clearInterval: () => {},
+      });
+      const ctx = originalContext(d);
+      await expect(reserveRun({ ...d, runLedger: writer }, ctx)).rejects.toBeInstanceOf(UnknownAllocationClaimError);
+      expect({ claims, beats }).toEqual({ claims: 1, beats: 0 });
+      expect(writer.liveRuns()).toEqual([]);
+      expect(ctx.admitted.runId).toBeUndefined();
+      expect(store.live.has(ctx.runId)).toBe(true);
+    }
+  });
+  it("keeps proven fenced and occupied-thread refusals distinct from accepted claims with unknown ACKs", async () => {
+    for (const mode of ["fenced", "thread-live"] as const) {
+      const d = deps(),
+        store = new InMemoryRunLedger(() => NOW),
+        original = store.claim.bind(store);
+      let claims = 0,
+        beats = 0;
+      let preserved: LiveRunRow | undefined;
+      store.claim = async (req) => {
+        claims++;
+        const heldRunId = mode === "fenced" ? req.runId : "original-thread-owner";
+        const heldMeta = structuredClone(req.meta);
+        if (mode === "thread-live") delete heldMeta.workspaceAllocation;
+        expect(await original({ ...req, runId: heldRunId, gen: "original-generation", meta: heldMeta })).toMatchObject({
+          ok: true,
+        });
+        preserved = structuredClone(store.live.get(heldRunId)!);
+        return original(req);
+      };
+      const writer = createLedgerWriteThrough({
+        ledger: store,
+        gen: "gen-T",
+        now: () => NOW,
+        warn: () => {},
+        fallback: { put: async () => {}, abandoned: () => {} },
+        claimAttempts: 3,
+        setInterval: () => {
+          beats++;
+          return { unref() {} };
+        },
+        clearInterval: () => {},
+      });
+      const outcomes: ReserveOutcome[] = [],
+        reserve = writer.reserve.bind(writer);
+      writer.reserve = async (req) => {
+        const outcome = await reserve(req);
+        outcomes.push(outcome);
+        return outcome;
+      };
+      const ctx = originalContext(d);
+      await expect(reserveRun({ ...d, runLedger: writer }, ctx)).rejects.toMatchObject({
+        name: RefusalError.name,
+        refusal: { code: "child_reservation_failed" },
+        message:
+          mode === "fenced"
+            ? "The original review reservation belongs to another generation."
+            : "The original review reservation was refused because its thread is occupied.",
+      });
+      expect(outcomes).toEqual([
+        mode === "fenced" ? { kind: "fenced" } : expect.objectContaining({ kind: "untracked", refused: "thread-live" }),
+      ]);
+      expect({ claims, beats }).toEqual({ claims: 1, beats: 0 });
+      expect(writer.liveRuns()).toEqual([]);
+      expect(ctx.admitted.runId).toBeUndefined();
+      expect([...store.live.values()]).toEqual([preserved]);
+    }
+  });
+  it("refuses a known disabled ledger without classifying it as an accepted claim with an unknown ACK", async () => {
+    const d = deps(),
+      ctx = originalContext(d),
+      writer = new NullLedgerWriteThrough("gen-T", new NullRunStore()),
+      reserve = vi.spyOn(writer, "reserve");
+    await expect(reserveRun({ ...d, runLedger: writer }, ctx)).rejects.toMatchObject({
+      name: RefusalError.name,
+      refusal: { code: "child_reservation_failed" },
+      message: "The original review could not be durably tracked.",
+    });
+    expect(reserve).toHaveBeenCalledTimes(1);
+    expect(ctx.admitted.runId).toBeUndefined();
+    expect(writer.liveRuns()).toEqual([]);
+  });
+  it("keeps unrelated no-PR no-workspace and recovery paths without new original authority", async () => {
+    for (const mode of ["explore", "no-pr", "no-workspace", "resume", "restart"] as const) {
+      const d = deps(),
+        ctx = originalContext(d);
+      if (mode === "explore") {
+        ctx.agent = structuredClone(getAgent("explore"));
+        ctx.profile = declaredProfile(ctx.agent);
+      }
+      if (mode === "no-pr") delete (ctx.operationTarget as { prTarget?: unknown }).prTarget;
+      if (mode === "no-workspace") ctx.profile = { ...ctx.profile, machine: "none", identity: "none" };
+      const carried = await resumeOf("old-run");
+      const input = {
+        ...ctx,
+        ...(mode === "resume" ? { resume: carried } : {}),
+        ...(mode === "restart" ? { restart: { row: carried.row, events: [], inbox: [] } } : {}),
+      };
+      await reserveRun(d, input);
+      if (mode === "resume" || mode === "restart") expect(d.ledger.reserved).toHaveLength(0);
+      else expect(d.ledger.reserved[0].meta.workspaceAllocation).toBeUndefined();
+    }
+  });
+  it("refuses actor target and effective budget mismatch before sending any reserve", async () => {
+    for (const mode of ["actor", "repo", "ref", "head", "pr", "budget", "identity"] as const) {
+      const d = deps(),
+        ctx = originalContext(d);
+      if (mode === "actor") ctx.msg = { ...ctx.msg, userId: "slack:foreign" };
+      if (mode === "repo") ctx.operationTarget.repo = "foreign/repo";
+      if (mode === "ref") ctx.operationTarget.ref = "foreign/ref";
+      if (mode === "head") ctx.repoCtx.headSha = "unknown";
+      if (mode === "pr") ctx.operationTarget.prTarget.number = 43;
+      if (mode === "budget") ctx.profile = { ...ctx.profile, minutes: ctx.agent.maxMinutes + 1 };
+      if (mode === "identity") ctx.profile = { ...ctx.profile, identity: "write" };
+      await expect(reserveRun(d, ctx)).rejects.toThrow();
+      expect(d.ledger.reserved).toHaveLength(0);
+      expect(ctx.admitted.runId).toBeUndefined();
+    }
+  });
+});
 
 const YAML = `
 organization: acme

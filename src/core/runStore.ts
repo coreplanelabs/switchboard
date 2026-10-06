@@ -231,6 +231,8 @@ export function pageEvents(events: readonly RunEvent[], opts: RunEventsOptions):
 
 export function toListItem(record: RunRecord, bytes: number): RunListItem {
   const {
+    workspaceAllocation: _workspaceAllocation,
+    workspaceDisposition: _workspaceDisposition,
     events: _events,
     branchPublication: _branchPublication,
     reviewPublication: _reviewPublication,
@@ -242,7 +244,7 @@ export function toListItem(record: RunRecord, bytes: number): RunListItem {
     contextCheckpointReceipt: _contextCheckpointReceipt,
     directAudience: _directAudience,
     ...rest
-  } = record;
+  } = record as RunRecord & { workspaceAllocation?: unknown; workspaceDisposition?: unknown };
   return { ...rest, bytes };
 }
 

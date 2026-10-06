@@ -1,3 +1,12 @@
+import { buildExpectedSeedManifest } from "./seedManifest.js";
+import { PromotionPendingError, PromotionIdentityRefusal } from "./promotion.js";
+import { sourceSeedReferenceMatches, type SourceSeedReference } from "./seedVerification.js";
+import { UNKNOWN_CONTEXT_DEPENDENCIES } from "../references/contextDependencies.js";
+import { sameWorkspaceAllocation } from "./workspaceDurability.js";
+import { allocationAckOf, UnknownAllocationClaimError } from "./allocationAck.js";
+import { RefusalError, refusalOf } from "../refusal.js";
+import type { OperationTarget } from "../repoContext.js";
+import type { WorkspaceAllocationAck } from "./types.js";
 import type { SessionCheckpointFailure } from "../mainContextRefusal.js";
 import {
   applyContextCheckpoint,
@@ -230,6 +239,7 @@ export interface OpenRunRequest {
      *  at the log's tail. Named rows that do not end at the tail (the log moved
      *  under the seed) are written whole as new rows, with one warning. */
     log?: { from: number; turns: number };
+    refusedRequests?: readonly number[];
     /** Platform-namespaced author ids, parallel to `messages`, for the rows
      *  the seed writes (absent entries and undefined mean no actor; record
      *  0057). Machine turns and reused log rows carry none. */
@@ -304,8 +314,8 @@ export function terminalCommitmentUnknown(
 }
 
 export type ReserveOutcome =
-  | { kind: "tracked"; run: LedgerRun }
-  | { kind: "untracked"; why: string }
+  | { kind: "tracked"; run: LedgerRun; allocationAck?: WorkspaceAllocationAck }
+  | { kind: "untracked"; why: string; refused?: "thread-live" }
   | { kind: "fenced" }
   | { kind: "off" }
   | { kind: "held"; hold: TerminalCommitmentHold; error: TerminalCommitmentUnknownError };
@@ -352,6 +362,8 @@ export type WriteBoundaryFailure =
 
 /** One tracked run. Every method is safe to call after a detach. */
 export interface LedgerRun {
+  /** Canonical acknowledged original identity only; no disposal eligibility. */
+  readonly allocationAck?: WorkspaceAllocationAck;
   readonly runId: string;
   /** False once a write was refused or failed for good: the ledger no longer
    *  mirrors this run (it is not resumable); the finish still lands. */
@@ -872,7 +884,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
    *  `refused` marks the thread-live case — the thread's row stood — apart from
    *  the missing-route and failed-claim ones, for `open`'s answer. */
   type Claimed =
-    | { outcome: "ok"; session?: RunSession }
+    | { outcome: "ok"; session?: RunSession; allocationAck?: WorkspaceAllocationAck }
     | { outcome: "fenced" }
     | { outcome: "held"; hold: TerminalCommitmentHold; error: TerminalCommitmentUnknownError }
     | { outcome: "untracked"; why: string; refused?: "thread-live" };
@@ -900,8 +912,12 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       seed?: readonly ChatMessage[];
       key?: string;
       log?: { from: number; turns: number };
+      /** Only the validated, owned reservation supplies this private promotion witness. */
+      originalAck?: WorkspaceAllocationAck;
     } = {},
   ): Promise<Claimed> {
+    const allocationBearing = req.meta.workspaceAllocation !== undefined || opts.originalAck !== undefined;
+    req = { ...req, meta: structuredClone(req.meta) };
     // The one re-claim made after a `thread-live` naming a run this process
     // finished or is finishing, and — when its finish was waited for — how
     // that finish ended: what the untracked note says.
@@ -921,6 +937,8 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     if (priorFinish !== undefined) awaited = { runId: req.runId, outcome: await priorFinish.settled };
     if (awaited?.outcome.kind === "unknown") return heldLanding(landing.get(awaited.runId)!);
     for (let attempt = 1; ; attempt++) {
+      let claimEntered = false,
+        claimAccepted = false;
       try {
         let session: RunSession | undefined;
         if (opts.seed) {
@@ -945,7 +963,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
             range: { from: next },
           };
         }
-        const result = await ledger.claim({
+        const request = {
           runId: req.runId,
           threadKey: req.threadKey,
           gen,
@@ -957,12 +975,27 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           tools: req.tools,
           ...(req.state !== undefined ? { state: req.state } : {}),
           ...(opts.phase ? { phase: opts.phase } : {}),
-        });
+        };
+        const expected = structuredClone(request);
+        claimEntered = true;
+        const result = await ledger.claim(request);
         if (result.ok) {
+          claimAccepted = true;
+          const allocationAck = allocationAckOf(result.allocationAck, expected);
+          if (
+            opts.originalAck &&
+            (!allocationAck ||
+              (opts.originalAck.allocation === null
+                ? allocationAck.allocation !== null
+                : !sameWorkspaceAllocation(opts.originalAck.allocation, allocationAck.allocation)))
+          )
+            throw new UnknownAllocationClaimError("the original promotion acknowledgment is unavailable");
           if (session) await ledger.claimSession(session.key, req.runId, gen);
-          return session ? { outcome: "ok", session } : { outcome: "ok" };
+          return { outcome: "ok", ...(session ? { session } : {}), ...(allocationAck ? { allocationAck } : {}) };
         }
         if (result.live.runId === req.runId) return { outcome: "fenced" };
+        if (opts.originalAck)
+          return { outcome: "untracked", why: "the original reservation's thread is occupied", refused: "thread-live" };
         // The thread's live row is a run this process is closing or has just
         // closed (item 54): a restart from its request, or the fresh turn for
         // its unconsumed follow-ups, is dispatched from that run's finally right
@@ -1018,6 +1051,14 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         warn(`[ledger] ${req.threadKey} not tracked: ${why}`);
         return { outcome: "untracked", why, refused: "thread-live" };
       } catch (err) {
+        if (
+          allocationBearing &&
+          (claimAccepted ||
+            (claimEntered &&
+              (err instanceof UncertainStoreError || !(err instanceof PermanentStoreError)) &&
+              !(err instanceof RouteMissingError)))
+        )
+          throw new UnknownAllocationClaimError(err);
         if (err instanceof RouteMissingError) {
           routeMissing();
           return { outcome: "untracked", why: "the state Worker has no run-ledger routes" };
@@ -1034,6 +1075,69 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
 
   /** The per-run state machine behind `LedgerRun`. */
   class TrackedRun implements LedgerRun {
+    private readonly originalReservation?: ReserveRunRequest;
+    validatePromotion(req: OpenRunRequest): WorkspaceAllocationAck | undefined {
+      const original = this.originalReservation;
+      const held = (): never => {
+        throw new PromotionIdentityRefusal();
+      };
+      if (
+        !original ||
+        req.runId !== original.runId ||
+        req.threadKey !== original.threadKey ||
+        req.startedAt !== original.startedAt
+      )
+        held();
+      const actor = [
+        "userId",
+        "channelId",
+        "threadKey",
+        "authenticatedAs",
+        "postedBy",
+        "agent",
+        "parentRunId",
+        "parentInstanceId",
+        "coordinatorUnit",
+        "idempotencyKey",
+        "maintenanceActionId",
+      ] as const;
+      const target = ["repo", "ref", "pr"] as const;
+      const ack = this.allocationAck;
+      const originalTarget = original!.meta.operationTarget as OperationTarget | undefined;
+      const promotedTarget = req.meta.operationTarget as OperationTarget | undefined;
+      if (
+        actor.some((key) => original!.meta[key] !== req.meta[key]) ||
+        target.some((key) => original!.meta[key] !== undefined && original!.meta[key] !== req.meta[key]) ||
+        (ack?.allocation?.headSha !== undefined && original!.meta.headSha !== req.meta.headSha) ||
+        (originalTarget &&
+          (originalTarget.repo !== promotedTarget?.repo ||
+            originalTarget.ref !== promotedTarget?.ref ||
+            originalTarget.prTarget?.number !== promotedTarget?.prTarget?.number)) ||
+        (original!.meta.profile &&
+          (original!.meta.profile.identity !== req.meta.profile?.identity ||
+            !Number.isFinite(req.meta.profile?.minutes) ||
+            req.meta.profile!.minutes <= 0 ||
+            req.meta.profile!.minutes > original!.meta.profile.minutes)) ||
+        (original!.meta.readonly !== undefined && original!.meta.readonly !== req.meta.readonly)
+      )
+        held();
+      if (!ack) return undefined;
+      const validated = allocationAckOf(ack, { ...original!, gen });
+      if (
+        !validated ||
+        (req.meta.workspaceAllocation !== undefined &&
+          !sameWorkspaceAllocation(validated.allocation, req.meta.workspaceAllocation))
+      )
+        held();
+      return validated;
+    }
+    private acknowledgedAllocation?: WorkspaceAllocationAck;
+    get allocationAck(): WorkspaceAllocationAck | undefined {
+      return this.acknowledgedAllocation && structuredClone(this.acknowledgedAllocation);
+    }
+    bindAllocationAck(ack: WorkspaceAllocationAck | undefined): void {
+      this.acknowledgedAllocation = ack && structuredClone(ack);
+    }
     readonly runId: string;
     private readonly threadKey: string;
     private readonly onStop?: (mode: StopMode) => void;
@@ -1163,11 +1267,23 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         system?: string;
         startedAt?: number;
       },
-      from: { stepNo: number; lastSeq: number; resumable?: boolean; session?: RunSession; durableTurns?: number } = {
+      from: {
+        stepNo: number;
+        lastSeq: number;
+        resumable?: boolean;
+        session?: RunSession;
+        durableTurns?: number;
+        originalReservation?: ReserveRunRequest;
+      } = {
         stepNo: 0,
         lastSeq: 0,
       },
     ) {
+      this.originalReservation = from.originalReservation && {
+        ...from.originalReservation,
+        meta: structuredClone(from.originalReservation.meta),
+        ...(from.originalReservation.card ? { card: structuredClone(from.originalReservation.card) } : {}),
+      };
       this.seedSystem = req.system;
       this.hosted = req.meta?.hosted === true;
       this.coding = req.meta?.agent === "coding";
@@ -1550,6 +1666,68 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       }
     }
 
+    assertOriginalPromotionActive(): void {
+      if (this.finished || this.detached || this.fencedOut || this.stopRelayed === "hard")
+        throw new PromotionPendingError(this.runId);
+    }
+    async seedOriginal(
+      req: OpenRunRequest,
+      session: RunSession,
+      notes: string,
+      sources: SessionSources,
+    ): Promise<void> {
+      this.assertOriginalPromotionActive();
+      const seed = req.seed!;
+      const savedSources = await ledger.writeSessionSources(session.key, this.runId, gen, sources);
+      if (!savedSources.ok) throw new PromotionPendingError(this.runId);
+      this.assertOriginalPromotionActive();
+      if (session.range !== "broken" && session.range.from === 0 && !(await ledger.readNotepad(session.key))) {
+        const savedNotes = await ledger.writeNotepad(session.key, gen, notes, this.runId);
+        if (!savedNotes.ok) throw new PromotionPendingError(this.runId);
+      }
+      this.assertOriginalPromotionActive();
+      const reused = session.range !== "broken" ? session.range.from - session.seedFrom : 0;
+      const turns = seed.messages.slice(reused).map((message, i) => ({
+        idx: session.seedFrom + reused + i,
+        message,
+        ...(seed.actors?.[reused + i] !== undefined ? { actor: seed.actors[reused + i] } : {}),
+      }));
+      const saved = await ledger.seed(this.runId, gen, turns, session.key);
+      if (!saved.ok) throw new PromotionPendingError(this.runId);
+      this.assertOriginalPromotionActive();
+      const recorded = await ledger.step(
+        this.runId,
+        gen,
+        {
+          step: 0,
+          seq: this.lastSeq,
+          turnIndex: seed.messages.length,
+          inFlight: [],
+          inboxConsumedSeq: 0,
+          remainingMs: seed.budgetMs,
+          turn: 0,
+          iteration: 0,
+        },
+        [],
+        session.key,
+      );
+      if (!recorded.ok) throw new PromotionPendingError(this.runId);
+    }
+    adoptConfirmedOriginal(
+      req: OpenRunRequest,
+      session: RunSession,
+      notes: string,
+      context: ContextDependencies,
+    ): void {
+      this.assertOriginalPromotionActive();
+      this.bindSession(session);
+      this.bindHandoff(req.meta.childHandoff);
+      this.bindSeedSystem(req.system);
+      this.seedNotepad = notes;
+      this.turnsWritten = req.seed!.messages.length;
+      this.seeded = true;
+      this.adoptState({ ...req.state, contextDependencies: context });
+    }
     /** The seed, then the seed record: step 0 with no calls in flight and
      *  `turnIndex` = the seed's length, so a reclaim always has a step record
      *  to judge the transcript against (`transcriptCompleteness`) — a row with
@@ -1985,6 +2163,249 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     }
   }
 
+  async function promoteOriginal(
+    req: OpenRunRequest,
+    reserved: TrackedRun,
+    originalAck: WorkspaceAllocationAck,
+  ): Promise<OpenOutcome> {
+    const hold = (): never => {
+      throw new PromotionPendingError(req.runId);
+    };
+    if (
+      !req.seed ||
+      !req.seed.messages.length ||
+      !ledger.originalPromotionBody ||
+      !ledger.observeExpectedSeed ||
+      !ledger.preparePromotion ||
+      !ledger.readPromotion ||
+      !ledger.verifyExpectedSeed ||
+      !ledger.readExpectedSeed ||
+      !ledger.confirmPromotion ||
+      !ledger.releaseExpectedSeed
+    )
+      return hold();
+    const resolved = {
+      runId: req.runId,
+      threadKey: req.threadKey,
+      startedAt: req.startedAt,
+      system: req.system,
+      card: structuredClone(req.card ?? null),
+      tools: structuredClone(req.tools),
+      meta: structuredClone(req.meta),
+      state: structuredClone(req.state ?? {}),
+      seed: structuredClone(req.seed),
+    };
+    const originalSeed = resolved.seed,
+      meta = resolved.meta;
+    let sources = seedSources(resolved) ?? {
+      version: 1 as const,
+      status: "unknown" as const,
+      context: UNKNOWN_CONTEXT_DEPENDENCIES,
+    };
+    let context = sources.context;
+    if (!context) return hold();
+    const key = originalSeed.key ?? sessionKey(meta.threadKey, meta.agent);
+    const tail = await ledger.sessionTail(key);
+    reserved.assertOriginalPromotionActive();
+    const reuse =
+      originalSeed.log && originalSeed.log.from + originalSeed.log.turns === tail ? originalSeed.log : undefined;
+    const from = reuse?.from ?? tail;
+    const session: RunSession = {
+      key,
+      threadSession: contextThreadSessionKey(meta.threadKey),
+      seedFrom: from,
+      request: from + requestIndex(originalSeed.messages),
+      range: { from: tail },
+    };
+    const snapshot = await ledger.observeExpectedSeed(key, from, from + originalSeed.messages.length - 1);
+    reserved.assertOriginalPromotionActive();
+    if (snapshot.next !== tail) return hold();
+    sources = mergeSessionSources(snapshot.sources, sources, tail === 0);
+    context = sources.context;
+    if (!context) return hold();
+    const existingNotes = await ledger.readNotepad(key);
+    if (snapshot.notepad !== (existingNotes?.text ?? "")) return hold();
+    const notes = existingNotes?.text ?? (tail === 0 ? (originalSeed.notepad ?? "") : "");
+    const input = {
+      ...resolved,
+      meta,
+      seed: { ...originalSeed, context, notepad: notes, ...(reuse ? { log: reuse } : { log: undefined }) },
+      state: { ...resolved.state, contextDependencies: context },
+    };
+    const request = {
+      runId: resolved.runId,
+      threadKey: resolved.threadKey,
+      gen,
+      leaseMs,
+      startedAt: resolved.startedAt,
+      meta: { ...meta, session },
+      card: resolved.card,
+      system: resolved.system,
+      tools: resolved.tools,
+      state: input.state,
+    };
+    if (reuse && snapshot.rows.some((row) => row.trimmed !== 0 && row.trimmed !== false)) return hold();
+    const bodyJson = ledger.originalPromotionBody(request);
+    const built = await buildExpectedSeedManifest({
+      bodyJson,
+      open: input,
+      observation: {
+        key,
+        next: tail,
+        ...(reuse?.turns
+          ? {
+              reused: {
+                key,
+                from,
+                through: tail - 1,
+                next: tail,
+                rows: snapshot.rows.filter((row) => row.idx < tail).map(({ idx, part, json }) => ({ idx, part, json })),
+                attachments: snapshot.attachments,
+                context: snapshot.context!,
+                notepad: snapshot.notepad,
+                ...(snapshot.owner ? { owner: snapshot.owner } : {}),
+              },
+            }
+          : {}),
+      },
+    });
+    if (built.kind !== "built") return hold();
+    const reference: SourceSeedReference = {
+      storeKey: JSON.parse(bodyJson).storeKey,
+      runId: request.runId,
+      gen,
+      bodySha256: built.manifest.bodySha256,
+      expectedSeedSha256: built.digest,
+    };
+    const read = () => ledger.readPromotion!({ runId: request.runId, gen, bodySha256: reference.bodySha256 });
+    const exact = (value: Awaited<ReturnType<typeof read>>) =>
+      value.kind !== "held" &&
+      value.preparation.bodyJson === bodyJson &&
+      value.preparation.receipt.expectedSeedSha256 === built.digest;
+    try {
+      const prepared = await ledger.preparePromotion(bodyJson, built.manifest);
+      reserved.assertOriginalPromotionActive();
+      if (prepared.kind === "held" && prepared.reason === "fenced") {
+        reserved.detach("promotion refused (fenced)", true);
+        unpromoted.delete(reserved.runId);
+        return { kind: "fenced" };
+      }
+      if (
+        prepared.kind !== "prepared" ||
+        prepared.receipt.bodySha256 !== reference.bodySha256 ||
+        prepared.receipt.expectedSeedSha256 !== built.digest
+      ) {
+        const actual = await read();
+        if (!exact(actual) || actual.kind !== "prepared") return hold();
+      }
+      let result: Awaited<ReturnType<RunLedger["claim"]>> | undefined;
+      try {
+        result = await ledger.claim(request, bodyJson);
+      } catch {
+        const actual = await read();
+        if (!exact(actual) || actual.kind !== "committed")
+          throw new UnknownAllocationClaimError("the original claim remains unconfirmed");
+        result = { ok: true, allocationAck: actual.allocationAck, promotionCommit: actual.receipt };
+      }
+      reserved.assertOriginalPromotionActive();
+      if (!result.ok) {
+        if (result.live.runId === req.runId) {
+          reserved.detach("promotion refused (fenced)", true);
+          unpromoted.delete(reserved.runId);
+          return { kind: "fenced" };
+        }
+        throw new PromotionIdentityRefusal();
+      }
+      const actualCommit = await read();
+      if (!exact(actualCommit) || actualCommit.kind !== "committed")
+        throw new UnknownAllocationClaimError("the original claim remains unconfirmed");
+      const ack = allocationAckOf(actualCommit.allocationAck, request);
+      if (
+        !ack ||
+        (originalAck.allocation === null
+          ? ack.allocation !== null
+          : !sameWorkspaceAllocation(originalAck.allocation, ack.allocation))
+      )
+        throw new UnknownAllocationClaimError("the original allocation acknowledgment is unavailable");
+      try {
+        await ledger.claimSession(key, req.runId, gen);
+      } catch {
+        const actual = await ledger.observeExpectedSeed(key, from, built.manifest.through);
+        if (actual.owner?.runId !== req.runId || actual.owner.gen !== gen)
+          throw new UnknownAllocationClaimError("the original source owner is unconfirmed");
+      }
+      reserved.assertOriginalPromotionActive();
+      let seedUnknown: unknown;
+      try {
+        await reserved.seedOriginal(input, session, notes, sources);
+      } catch (error) {
+        if (error instanceof PromotionPendingError) throw error;
+        seedUnknown = error;
+      }
+      reserved.assertOriginalPromotionActive();
+      let verified: Awaited<ReturnType<NonNullable<RunLedger["verifyExpectedSeed"]>>> = {
+        kind: "held",
+        reason: "unknown",
+      };
+      try {
+        verified = await ledger.verifyExpectedSeed(key, reference);
+      } catch {
+        /* Reconcile the original, never repeat the mutation. */
+      }
+      const actualSource = await ledger.readExpectedSeed(key, reference);
+      if (
+        (verified.kind !== "verified" && actualSource.kind !== "verified") ||
+        actualSource.kind !== "verified" ||
+        actualSource.release ||
+        !sourceSeedReferenceMatches(actualSource.receipt, reference, key)
+      )
+        throw new UnknownAllocationClaimError(seedUnknown ?? "the original source is unconfirmed");
+      reserved.assertOriginalPromotionActive();
+      try {
+        await ledger.confirmPromotion(reference);
+      } catch {
+        /* Exact canonical read resolves a lost reply. */
+      }
+      const confirmed = await read();
+      if (
+        !exact(confirmed) ||
+        confirmed.kind !== "confirmed" ||
+        !sourceSeedReferenceMatches(confirmed.receipt.source, reference, key)
+      )
+        throw new UnknownAllocationClaimError("the original seed confirmation is unknown");
+      reserved.assertOriginalPromotionActive();
+      try {
+        await ledger.releaseExpectedSeed(key, reference);
+      } catch {
+        /* Exact own release read resolves a lost reply. */
+      }
+      const released = await ledger.readExpectedSeed(key, reference);
+      const current = await read();
+      if (
+        released.kind !== "verified" ||
+        !released.release ||
+        !sourceSeedReferenceMatches(released.receipt, reference, key) ||
+        !exact(current) ||
+        current.kind !== "confirmed" ||
+        JSON.stringify(released.release.confirmation) !== JSON.stringify(current.receipt)
+      )
+        throw new UnknownAllocationClaimError("the original release remains unconfirmed");
+      reserved.assertOriginalPromotionActive();
+      reserved.bindAllocationAck(ack);
+      reserved.adoptConfirmedOriginal(input, session, notes, context);
+      unpromoted.delete(reserved.runId);
+      return { kind: "tracked", run: reserved };
+    } catch (error) {
+      if (
+        error instanceof PromotionPendingError ||
+        error instanceof UnknownAllocationClaimError ||
+        error instanceof PromotionIdentityRefusal
+      )
+        throw error;
+      throw new UnknownAllocationClaimError(error);
+    }
+  }
+
   return {
     gen,
     sessionPersistence: true,
@@ -1994,20 +2415,34 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       return result.fence;
     },
     async reserve(req) {
+      req = { ...req, meta: structuredClone(req.meta) };
       const claimed = await claim({ ...req, system: "", tools: [], state: {} }, { phase: "attaching" });
       // Every untracked exit says why (item 54): the row a run this process
       // closed still stood, another run's row, no routes, a claim that kept
       // failing — for the run's own record, not the bot log alone.
-      if (claimed.outcome === "untracked") return { kind: "untracked", why: claimed.why };
       if (claimed.outcome === "fenced") return { kind: "fenced" };
       if (claimed.outcome === "held") return { kind: "held", hold: claimed.hold, error: claimed.error };
-      const run = new TrackedRun(req);
+      if (claimed.outcome === "untracked")
+        return { kind: "untracked", why: claimed.why, ...(claimed.refused ? { refused: claimed.refused } : {}) };
+      if (
+        req.meta.workspaceAllocation?.version === 2 &&
+        (claimed.allocationAck?.allocation?.version !== 2 ||
+          !sameWorkspaceAllocation(req.meta.workspaceAllocation, claimed.allocationAck.allocation))
+      )
+        throw new UnknownAllocationClaimError("original v2 allocation acknowledgment unavailable");
+      const run = new TrackedRun(req, { stepNo: 0, lastSeq: 0, originalReservation: req });
+      run.bindAllocationAck(claimed.allocationAck);
       run.startHeartbeat();
       live.add(run);
       unpromoted.add(req.runId);
-      return { kind: "tracked", run };
+      return {
+        kind: "tracked",
+        run,
+        ...(claimed.allocationAck ? { allocationAck: structuredClone(claimed.allocationAck) } : {}),
+      };
     },
     async open(req) {
+      req = { ...req, meta: structuredClone(req.meta) };
       // `untracked`'s why for the caller: the machine word for a thread-live
       // refusal — what the ship branch refuses by name (record 0060) — the
       // record's sentence for every other reason.
@@ -2017,6 +2452,10 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       });
       const reserved = req.reservation;
       const seed = req.seed?.messages;
+      if (reserved?.allocationAck && !(reserved instanceof TrackedRun))
+        throw new RefusalError(
+          refusalOf("setup_failed", "The original reservation belongs to another owner; its saved work remains held."),
+        );
       if (reserved instanceof TrackedRun) {
         // The promotion (item 42): the claim the dispatcher always made, now
         // landing on the row reserved at admission — same tracked run, its
@@ -2025,10 +2464,25 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         // continue untracked after a failed claim; a coordinator child must
         // keep its acknowledged identity and fail setup instead.
         if (!reserved.tracked()) return { kind: "untracked", why: "the run's reservation is already untracked" };
-        const claimed = await claim(
-          req,
-          seed ? { seed, key: req.seed?.key, ...(req.seed?.log ? { log: req.seed.log } : {}) } : {},
-        );
+        const originalAck = reserved.validatePromotion(req);
+        if (originalAck?.allocation) req.meta.workspaceAllocation = structuredClone(originalAck.allocation);
+        if (originalAck) {
+          try {
+            return await promoteOriginal(req, reserved, originalAck);
+          } catch (error) {
+            if (
+              error instanceof PromotionPendingError ||
+              error instanceof UnknownAllocationClaimError ||
+              error instanceof PromotionIdentityRefusal
+            )
+              throw error;
+            throw new UnknownAllocationClaimError(error);
+          }
+        }
+        const claimed = await claim(req, {
+          ...(seed ? { seed, key: req.seed?.key, ...(req.seed?.log ? { log: req.seed.log } : {}) } : {}),
+          ...(originalAck ? { originalAck } : {}),
+        });
         if (claimed.outcome === "held") return { kind: "held", hold: claimed.hold, error: claimed.error };
         if (claimed.outcome === "fenced") {
           unpromoted.delete(reserved.runId); // the row is another generation's: nothing of ours to abandon
@@ -2036,6 +2490,10 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           return { kind: "fenced" };
         }
         if (claimed.outcome !== "ok") {
+          if (originalAck)
+            throw new RefusalError(
+              refusalOf("setup_failed", "The original reservation could not be promoted; its saved work remains held."),
+            );
           // For an ordinary run, abandon — not close (close only stops the heartbeat,
           // leaving the attaching row on the ledger where the reclaim sweep
           // would see it as an expired reservation and restart the run, while
@@ -2050,6 +2508,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           req.onUntracked?.(claimed.why);
           return untracked(claimed);
         }
+        reserved.bindAllocationAck(claimed.allocationAck);
         unpromoted.delete(reserved.runId); // promoted: no longer a reservation to abandon
         if (claimed.session) reserved.bindSession(claimed.session);
         reserved.bindHandoff(req.meta.childHandoff);
@@ -2083,6 +2542,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         lastSeq: 0,
         ...(claimed.session ? { session: claimed.session } : {}),
       });
+      run.bindAllocationAck(claimed.allocationAck);
       if (req.seed)
         await run.seed(req.seed.messages, req.seed.budgetMs, req.seed.actors, req.seed.notepad, seedSources(req));
       run.startHeartbeat();

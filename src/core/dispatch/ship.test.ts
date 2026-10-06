@@ -79,6 +79,7 @@ function configStore(extra = ""): ConfigStore {
 function setup(
   userId: string,
   over: {
+    runId?: string;
     text?: string;
     repoCtx?: Record<string, unknown>;
     configExtra?: string;
@@ -114,7 +115,7 @@ function setup(
   };
   const text = over.text ?? "agent:ship in acme/api: fix the login redirect";
   const msg = { channelId: "slack:CX", userId, threadKey: THREAD, text };
-  const registry = new RunRegistry({ genId: () => "run-s", genToken: () => "tok" });
+  const registry = new RunRegistry({ genId: () => over.runId ?? "run-s", genToken: () => "tok" });
   deps.runRegistry = registry;
   const trace = startRequestRoot({ clock: () => NOW }, { channel: channelOf(msg.channelId), receivedAt: NOW });
   const replies: string[] = [];
@@ -998,8 +999,15 @@ describe("runShipBranch — the host key and the hosted marker (record 0060)", (
     await s.writer.settled();
     expect((await s.inner.listLive()).filter((r) => r.threadKey === `${THREAD}#host`)).toHaveLength(0);
 
+    const originalRecord = structuredClone(s.inner.finished.get("run-s"));
+    await expect(s.inner.claim({ ...s.claims[0], startedAt: s.claims[0].startedAt + 1 })).rejects.toThrow(
+      "workspace allocation identity changed",
+    );
+    expect(s.inner.finished.get("run-s")).toEqual(originalRecord);
+    expect(s.inner.live.size).toBe(0);
+
     // The next ship request in the thread claims the host key and is handed off.
-    const t = setup("slack:UADMIN", { minutes: 200 });
+    const t = setup("slack:UADMIN", { minutes: 200, runId: "run-next-s" });
     t.deps.runLedger = createLedgerWriteThrough({
       ledger: s.inner,
       gen: "gen-T",
@@ -1010,7 +1018,8 @@ describe("runShipBranch — the host key and the hosted marker (record 0060)", (
     expect(t.refusals).toEqual([]);
     expect(t.created).toHaveLength(1);
     expect(t.replies[0]).toContain("Handed to the plan runner");
-    expect(s.inner.live.get("run-s")).toMatchObject({ threadKey: `${THREAD}#host`, phase: "live" });
+    expect(s.inner.live.get("run-next-s")).toMatchObject({ threadKey: `${THREAD}#host`, phase: "live" });
+    expect(s.inner.finished.get("run-s")).toEqual(originalRecord);
   });
 
   it("an untracked answer that is not thread-live (missing routes) hands off as before: the runner is asked and the reply says where the plan runs", async () => {
