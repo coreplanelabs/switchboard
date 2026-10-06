@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.287.3](https://github.com/coreplanelabs/switchboard/compare/v1.287.2...v1.287.3) (2026-10-06)
+
+
+### Bug fixes
+
+* **coding:** preserve branch identity across restarts ([#2787](https://github.com/coreplanelabs/switchboard/issues/2787)) ([13121bb](https://github.com/coreplanelabs/switchboard/commit/13121bb0e505ce9a6869da7fbbed6be1dea61d02))
+
 ## [1.287.2](https://github.com/coreplanelabs/switchboard/compare/v1.287.1...v1.287.2) (2026-10-05)
 
 
