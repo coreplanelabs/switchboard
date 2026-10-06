@@ -102,10 +102,10 @@ One table per group, in registration order. "Surfaces" is where that command can
 
 | Command | What it does | Surfaces |
 |---|---|---|
-| `repo list` | Every onboarded resident repo with its live state, ref, sha, last refresh, and disk gauge. | every surface |
-| `repo onboard <slug> [--ref <string>] [--test <string>] [--build <string>] [--install <string>] [--evict-coldest]` | Onboard a repo as an always-warm resident environment (provisions billable compute; admin-gated). | every surface |
-| `repo offboard <slug> [--dry-run]` | Tear down a resident repo: registry record, schedules, container, R2 snapshots (admin-gated; --dry-run plans only). | every surface |
-| `repo reconfigure <slug> [--ref <string>] [--test <string>] [--build <string>] [--install <string>]` | Change a resident's default branch and/or command table (admin-gated; takes effect on the next refresh/attach). | every surface |
+| `repo list` | Every registered repo, including cold entries; resident state, ref, sha, last refresh, and disk gauge. | every surface |
+| `repo onboard <slug> [--ref <string>] [--test <string>] [--build <string>] [--install <string>] [--no-resident] [--evict-coldest]` | Register a repo, optionally without a resident (--no-resident); resident provisioning is billable and admin-gated. | every surface |
+| `repo offboard <slug> [--dry-run]` | Remove a repo registration and tear down its resident when present (admin-gated; --dry-run plans only). | every surface |
+| `repo reconfigure <slug> [--ref <string>] [--test <string>] [--build <string>] [--install <string>]` | Change a registered repo's default branch and/or command table (admin-gated; resident changes take effect on refresh/attach). | every surface |
 | `repo rebuild <slug> [--dry-run]` | Discard a resident's snapshot and reprovision it from scratch (admin-gated; --dry-run plans only). | every surface |
 | `repo test <slug> [ref]` | Executes the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch). | every surface |
 | `repo build <slug> [ref]` | Executes the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch). | every surface |

@@ -12,7 +12,7 @@
 // note '/' rules the id out of hostname-based preview URLs, use tunnels).
 //
 // Route surface (JSON in/out; every route below requires a bearer secret):
-//   admin scope     POST /onboard /offboard /reconfigure /rebuild /debug (all ops) /recover-admission
+//   admin scope     POST /register /onboard /offboard /reconfigure /rebuild /debug (all ops) /recover-admission
 //                   GET /deploy-admissions
 //   drain scope     POST /drain /deploy-fence /reconcile /undrain (admin implied)
 //   read scope      GET /residents   POST /debug ops info|schedules|threads only (admin implied)
@@ -69,6 +69,12 @@
 //      resident's own repo. Install/build executions
 //      (untrusted repo code) run unprivileged (worker1) and token-free
 //      (docs/decisions/0009-residents-second-credential-domain.md).
+import {
+  REPOSITORY_KEY_PREFIX,
+  repositoryKey,
+  registerRepository,
+  residentRecords,
+} from "../../src/execution/repoRegistration.js";
 import { inspectResidentCredentials } from "./credentialInspection.js";
 import {
   emptyCredentialInspection,
@@ -1196,6 +1202,8 @@ interface ResidentStatus {
 /** Registry record: the onboarded set + command table (writable only via
  *  the admin routes onboard/reconfigure). */
 interface ResidentRecord {
+  /** Metadata-only registration: never routes to a resident DO. */
+  noResident?: boolean;
   resource: string;
   /** Command table. Always contains "test" and "build"; extra named commands
    *  are allowed ("install" is honored by the provisioning/refresh engine).
@@ -1539,8 +1547,8 @@ interface RefreshFetchFacts {
 // Registry DO (singleton): onboarded set + config, atomic cap enforcement
 // ---------------------------------------------------------------------------
 
-const REGISTRY_KEY_PREFIX = "resident:";
-const registryKey = (resource: string) => `${REGISTRY_KEY_PREFIX}${resource}`;
+const REGISTRY_KEY_PREFIX = REPOSITORY_KEY_PREFIX;
+const registryKey = repositoryKey;
 /** Registry-DO key for the admin test overrides (gc.ts `StoredTestOverrides`).
  *  Deliberately OUTSIDE the `resident:` prefix so it never counts as a slot. */
 const TEST_OVERRIDES_KEY = "testOverrides";
@@ -1565,21 +1573,8 @@ export class ResidentRegistryDO extends DurableObject<Env> {
    *  own storage — so the exists-check, the count, and the insert cannot
    *  interleave with a concurrent onboard. */
   async onboard(record: ResidentRecord): Promise<OnboardResult> {
-    const key = registryKey(record.resource);
-    if (await this.ctx.storage.get(key)) {
-      return { ok: false, status: 409, error: `${record.resource} is already onboarded` };
-    }
     const { cap } = await this.limits();
-    const existing = await this.ctx.storage.list({ prefix: REGISTRY_KEY_PREFIX });
-    if (existing.size >= cap) {
-      return {
-        ok: false,
-        status: 429,
-        error: `resident cap reached (${existing.size}/${cap}); offboard a resident first, or onboard with evictColdest:true to make room`,
-      };
-    }
-    await this.ctx.storage.put(key, record);
-    return { ok: true, record };
+    return registerRepository<ResidentRecord>(this.ctx.storage, record, cap);
   }
 
   /** The limits in force: the compiled constants, lowered by a test override
@@ -1620,12 +1615,12 @@ export class ResidentRegistryDO extends DurableObject<Env> {
       return { ok: false, status: 409, error: `${record.resource} is already onboarded` };
     }
     const { cap } = await this.limits();
-    const existing = await this.ctx.storage.list({ prefix: REGISTRY_KEY_PREFIX });
-    if (existing.size - 1 >= cap) {
+    const existing = await this.list();
+    if (existing.length - 1 >= cap) {
       return {
         ok: false,
         status: 429,
-        error: `resident cap reached (${existing.size}/${cap}) even after evicting ${evict}`,
+        error: `resident cap reached (${existing.length}/${cap}) even after evicting ${evict}`,
       };
     }
     await this.ctx.storage.delete(registryKey(evict));
@@ -1634,10 +1629,19 @@ export class ResidentRegistryDO extends DurableObject<Env> {
   }
 
   async getRecord(resource: string): Promise<ResidentRecord | null> {
+    const record = await this.getRepository(resource);
+    return record?.noResident === true ? null : record;
+  }
+
+  async getRepository(resource: string): Promise<ResidentRecord | null> {
     return (await this.ctx.storage.get<ResidentRecord>(registryKey(resource))) ?? null;
   }
 
   async list(): Promise<ResidentRecord[]> {
+    return residentRecords(await this.listRepositories());
+  }
+
+  async listRepositories(): Promise<ResidentRecord[]> {
     const all = await this.ctx.storage.list<ResidentRecord>({ prefix: REGISTRY_KEY_PREFIX });
     return [...all.values()].sort((a, b) => a.resource.localeCompare(b.resource));
   }
@@ -11198,6 +11202,7 @@ function parseResidentLimits(
 // ---------------------------------------------------------------------------
 
 const ROUTES: Record<string, { scope: Scope; method: string }> = {
+  "/register": { scope: "admin", method: "POST" },
   "/onboard": { scope: "admin", method: "POST" },
   "/offboard": { scope: "admin", method: "POST" },
   "/reconfigure": { scope: "admin", method: "POST" },
@@ -11317,6 +11322,8 @@ export default {
     const res = await (async (): Promise<Response> => {
       try {
         switch (url.pathname) {
+          case "/register":
+            return await handleOnboard(env, { ...body, noResident: true });
           case "/onboard":
             return await withFleetAdmission(env, () => handleOnboard(env, body));
           case "/offboard":
@@ -11444,6 +11451,10 @@ export default {
 async function handleOnboard(env: Env, body: Record<string, unknown>): Promise<Response> {
   const resource = parseResource(body.resource);
   if ("error" in resource) return json({ error: resource.error }, 400);
+  if (body.noResident !== undefined && typeof body.noResident !== "boolean")
+    return json({ error: "noResident must be a boolean" }, 400);
+  if (body.noResident === true && body.evictColdest === true)
+    return json({ error: "noResident cannot be combined with evictColdest" }, 400);
   const commands = parseCommands(body.commands);
   if ("error" in commands) return json({ error: commands.error }, 400);
   const defaultRef = parseDefaultRef(body.defaultRef);
@@ -11489,6 +11500,7 @@ async function handleOnboard(env: Env, body: Record<string, unknown>): Promise<R
   const now = new Date(systemClock()).toISOString();
   const record: ResidentRecord = {
     resource: resource.resource,
+    ...(body.noResident === true ? { noResident: true } : {}),
     commands: commands.commands,
     defaultRef: defaultRef.defaultRef,
     ...(diskBudgetMb !== undefined ? { diskBudgetMb } : {}),
@@ -11541,6 +11553,9 @@ async function handleOnboard(env: Env, body: Record<string, unknown>): Promise<R
     );
   }
   if ("error" in result) return json({ error: result.error, ...(evicted ? { evicted } : {}) }, result.status);
+
+  if (record.noResident === true)
+    return json({ resource: record.resource, state: "cold", ...(warning ? { warning } : {}) });
 
   try {
     await residentStub(env, resource.resource).initResident(resource.resource, provisioningTimeoutMs);
@@ -11596,12 +11611,40 @@ async function handleOffboard(env: Env, body: Record<string, unknown>): Promise<
   if ("error" in resource) return json({ error: resource.error }, 400);
 
   const registry = registryStub(env);
-  const record = await registry.getRecord(resource.resource);
+  const record = await registry.getRepository(resource.resource);
   if (!record) {
     // A prior destroy may have failed after registry removal. Retry teardown
     // on that same DO identity; a fully removed resident has no resource row.
     const old = await residentStub(env, resource.resource).getResidentInfo();
     if (old.resource !== resource.resource) return json({ error: `${resource.resource} is not onboarded` }, 404);
+  }
+
+  if (record?.noResident === true) {
+    if (body.dryRun === true)
+      return json({
+        resource: record.resource,
+        dryRun: true,
+        wouldRemove: {
+          registryRecord: true,
+          schedules: [],
+          snapshotBackupIds: [],
+          backupObjects: 0,
+          r2Objects: 0,
+          threadBindings: 0,
+          container: "none",
+        },
+      });
+    const registryRemoved = await registry.remove(record.resource);
+    return json({
+      resource: record.resource,
+      registryRemoved,
+      schedulesCancelled: true,
+      containerStopped: true,
+      storageCleared: true,
+      backupObjectsDeleted: 0,
+      r2ObjectsDeleted: 0,
+      errors: [],
+    });
   }
 
   // --dry-run: the itemized plan of what the real teardown below would
@@ -11757,8 +11800,10 @@ async function handleRebuild(env: Env, body: Record<string, unknown>): Promise<R
   if ("error" in resource) return json({ error: resource.error }, 400);
   const dryRun = body.dryRun === true;
 
-  const record = await registryStub(env).getRecord(resource.resource);
+  const record = await registryStub(env).getRepository(resource.resource);
   if (!record) return json({ error: `${resource.resource} is not onboarded` }, 404);
+
+  if (record.noResident === true) return json({ error: `${record.resource} has no resident to rebuild` }, 409);
 
   const result = await residentStub(env, resource.resource).rebuild(
     resource.resource,
@@ -11938,7 +11983,8 @@ async function handleReconcile(env: Env): Promise<Response> {
 }
 
 async function handleResidents(env: Env): Promise<Response> {
-  const residents = await registryStub(env).list();
+  const registered = await registryStub(env).listRepositories();
+  const residents = residentRecords(registered);
   const settled = await Promise.allSettled(
     residents.map((record) => residentStub(env, record.resource).getResidentInfo()),
   );
@@ -11970,6 +12016,10 @@ async function handleResidents(env: Env): Promise<Response> {
       ? { testOverrides: { ...limits.override, floorS: limits.floorS, floorDefaultS: LRU_FLOOR_S } }
       : {}),
     count: residents.length,
+    repositoryCount: registered.length,
+    repositories: registered
+      .filter((record) => record.noResident === true)
+      .map((record) => ({ ...record, live: { state: "cold", reason: "", inFlight: 0 } })),
     inFlight,
     inFlightUnknown,
     // The drain in force, or null (item 69): the deploy runner and the
@@ -11983,6 +12033,11 @@ async function handleStatus(env: Env, url: URL): Promise<Response> {
   const resource = parseResource(url.searchParams.get("resource"));
   if ("error" in resource) return json({ error: resource.error }, 400);
 
+  const record = await registryStub(env).getRepository(resource.resource);
+  if (!record) return json({ error: `${resource.resource} is not onboarded` }, 404);
+  if (record.noResident === true)
+    return json({ state: "cold", reason: "", inFlight: 0, defaultRef: record.defaultRef });
+
   // Body deliberately limited to lifecycle, activity and the snapshot handle
   // — operator scope sees what a run needs (the seed's handle, execution.md
   // item 25: opaque archive ids, useless without the bucket), not config.
@@ -11990,11 +12045,9 @@ async function handleStatus(env: Env, url: URL): Promise<Response> {
   // storage, and the DO may run other work in that gap, so `state`/`reason`
   // and `inFlight` can be a hair apart (and differ slightly from a /residents
   // sample taken alongside). All are best-effort current-state reads; the
-  // deploy gate reads /residents. The registry check rides in the same flight
-  // (its 404 is judged first, the probes' results discarded then).
+  // deploy gate reads /residents. Registration is checked before any DO read.
   const stub = residentStub(env, resource.resource);
-  const [record, status, inFlight, refresh, snapshot, memory, levels] = await Promise.all([
-    registryStub(env).getRecord(resource.resource),
+  const [status, inFlight, refresh, snapshot, memory, levels] = await Promise.all([
     stub.getStatus(),
     stub.getInFlightCount(),
     stub.getRefreshView(),
@@ -12004,7 +12057,6 @@ async function handleStatus(env: Env, url: URL): Promise<Response> {
     // plane's `probe` effect is answered by exactly this read.
     stub.residentLevels().catch(() => null),
   ]);
-  if (!record) return json({ error: `${resource.resource} is not onboarded` }, 404);
   // Item 7: which scheduler drives the refresh cycle and, on the Workflow
   // lifecycle, the current instance with its last step and the last skipped
   // bucket; and the snapshot handle a seeded sandbox restores from (item 25).

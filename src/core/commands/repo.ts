@@ -172,7 +172,10 @@ async function onboardedSlugs(deps: RepoCommandDeps, span?: Span): Promise<strin
     if ("unavailable" in api) return undefined;
     const list = await (span && api.withSpan ? api.withSpan(span) : api).residents();
     if (list.status !== 200) return undefined;
-    const residents = (list.data.residents as Array<Record<string, unknown>> | undefined) ?? [];
+    const residents = [
+      ...((list.data.residents as Array<Record<string, unknown>> | undefined) ?? []),
+      ...((list.data.repositories as Array<Record<string, unknown>> | undefined) ?? []),
+    ];
     return residents
       .map((rec) =>
         String(rec.resource ?? "")
@@ -219,7 +222,10 @@ const str = (v: unknown): string => (typeof v === "string" ? v : String(v ?? "?"
 
 /** The `repo list` reply, rendered from the resident Worker's `/residents` body. */
 export function renderResidentList(data: Record<string, unknown>): string {
-  const residents = (data.residents as Array<Record<string, unknown>> | undefined) ?? [];
+  const residents = [
+    ...((data.residents as Array<Record<string, unknown>> | undefined) ?? []),
+    ...((data.repositories as Array<Record<string, unknown>> | undefined) ?? []),
+  ];
   if (residents.length === 0)
     return `No repos onboarded (0/${n(data.cap)}). Onboard one with \`repo onboard <owner/name>\`.`;
   // The fleet drain (resident-repos item 69; issue 2044): while it stands no
@@ -233,7 +239,7 @@ export function renderResidentList(data: Record<string, unknown>): string {
     const slug = String(rec.resource ?? "").replace(/^repo:/, "");
     const rawState = String(live.state ?? "unknown");
     const report = typeof live.imageReport === "string" ? live.imageReport : undefined;
-    const state = `${rawState}${drained ? " (drained — attach refused)" : ""}${report === "pending" ? " · image report pending" : ""}`;
+    const state = `${rawState}${drained && rec.noResident !== true ? " (drained — attach refused)" : ""}${report === "pending" ? " · image report pending" : ""}`;
     const reason = String(live.reason ?? "");
     const sha = typeof live.sha === "string" && live.sha ? ` · sha \`${live.sha.slice(0, 8)}\`` : "";
     const refreshed =
@@ -247,9 +253,14 @@ export function renderResidentList(data: Record<string, unknown>): string {
         : "";
     return `• \`${slug}\` — *${state}*${reason ? ` (${reason})` : ""} · ref \`${String(rec.defaultRef ?? "?")}\`${sha}${refreshed}${disk}`;
   });
+  const cold = residents.filter((rec) => rec.noResident === true).length;
+  const title =
+    cold > 0
+      ? `*Repos* (${n(data.count)}/${n(data.cap)} resident slots; ${cold} cold)`
+      : `*Resident repos* (${n(data.count)}/${n(data.cap)})`;
   const head = drained
-    ? `*Resident repos* (${n(data.count)}/${n(data.cap)}) — ⚠️ fleet drained for ${str(draining.reason)} (ends by ${str(draining.until)}): new runs wait at their attach`
-    : `*Resident repos* (${n(data.count)}/${n(data.cap)}):`;
+    ? `${title} — ⚠️ fleet drained for ${str(draining.reason)} (ends by ${str(draining.until)}): new ${cold > 0 ? "resident " : ""}runs wait at their attach`
+    : `${title}:`;
   const out = [head, ...lines];
   // Item 49: a test override lowers the enforced cap/floor for live checks —
   // say so, or the count above reads as the real cap.
@@ -268,7 +279,7 @@ export const repoList = defineCommand({
   enabledWhen: (caps) => caps.residents,
   action: "repo:read",
   effect: "read",
-  describe: "Every onboarded resident repo with its live state, ref, sha, last refresh, and disk gauge.",
+  describe: "Every registered repo, including cold entries; resident state, ref, sha, last refresh, and disk gauge.",
   render: (output) => renderResidentList(output as Record<string, unknown>),
   handler: async ({ deps, span }) => {
     const res = await call(async () => (await adminOf(deps, span)).residents());
@@ -302,6 +313,7 @@ export const repoOnboard = defineCommand({
       .describe(
         "the repo's install command (default: detected from the root lockfile / packageManager — pnpm, yarn, bun, or npm; none without a package.json)",
       ),
+    noResident: flag.optional().describe("register the repo for per-thread sandboxes without provisioning a resident"),
     evictColdest: flag
       .optional()
       .describe("over the resident cap, offboard the coldest eligible warm resident instead of failing"),
@@ -310,13 +322,21 @@ export const repoOnboard = defineCommand({
   effect: "write",
   // Reversible by `repo offboard`, but it reaches outside the bot's own state:
   // compute is billed from the moment it runs, so the risk line says so.
-  annotations: { destructive: false, openWorld: true, risk: () => "provisions a resident (billable)" },
-  describe: "Onboard a repo as an always-warm resident environment (provisions billable compute; admin-gated).",
+  annotations: {
+    destructive: false,
+    openWorld: true,
+    risk: (input) =>
+      input.options?.noResident === true ? "registers repository metadata" : "provisions a resident (billable)",
+  },
+  describe:
+    "Register a repo, optionally without a resident (--no-resident); resident provisioning is billable and admin-gated.",
   render: (output) => {
     const o = output as JsonObject;
     const commands = obj(o.commands);
     const lines = [
-      `🏗️ Onboarding \`${str(o.slug)}\` on \`${str(o.defaultRef)}\` — provisioning started (state \`onboarding\`). I'll report here when it is warm or has failed; \`repo list\` shows the live state meanwhile.`,
+      o.state === "cold"
+        ? `Registered \`${str(o.slug)}\` on \`${str(o.defaultRef)}\` — tasks run in per-thread sandboxes.`
+        : `🏗️ Onboarding \`${str(o.slug)}\` on \`${str(o.defaultRef)}\` — provisioning started (state \`onboarding\`). I'll report here when it is warm or has failed; \`repo list\` shows the live state meanwhile.`,
     ];
     const detection = obj(o.detection);
     const explicit = new Set(Array.isArray(o.explicit) ? o.explicit.map(String) : []);
@@ -344,6 +364,8 @@ export const repoOnboard = defineCommand({
     return lines.join("\n");
   },
   handler: async ({ args, options, deps, span }) => {
+    if (options.noResident && options.evictColdest)
+      throw new CommandError("invalid_input", "--no-resident cannot be combined with --evict-coldest.");
     const defaultRef = options.ref ?? DEFAULT_REF;
     // Item 52: the table comes from the repo root, not from an assumption. An
     // explicit flag wins per key; an uninspectable root falls back to the npm
@@ -393,10 +415,12 @@ export const repoOnboard = defineCommand({
         resource: repoResourceId(args.slug),
         commands,
         defaultRef,
+        ...(options.noResident ? { noResident: true } : {}),
         ...(options.evictColdest ? { evictColdest: true } : {}),
       }),
     );
-    if (r.status !== 202) {
+    const cold = options.noResident === true && r.status === 200 && r.data.state === "cold";
+    if (!cold && (options.noResident === true || r.status !== 202)) {
       // Over the cap with --evict-coldest and nothing eligible: the resident
       // itemizes why each one was kept — relay it so the admin can
       // offboard by hand with the facts in front of them.
@@ -414,12 +438,15 @@ export const repoOnboard = defineCommand({
       toolchain: detected?.toolchain ?? null,
       detection: detected ? { notes: detected.notes } : { unavailable: unavailable ?? "unknown" },
       explicit,
-      state: "onboarding",
+      state: cold ? "cold" : "onboarding",
       ...(r.data.evicted !== undefined ? { evicted: r.data.evicted as JsonValue } : {}),
       ...(typeof r.data.warning === "string" ? { warning: r.data.warning } : {}),
     };
   },
-  settle: (output, { deps }) => settleProvisioning(deps, str((output as JsonObject).slug)),
+  settle: (output, { deps }) =>
+    (output as JsonObject).state === "cold"
+      ? Promise.resolve(undefined)
+      : settleProvisioning(deps, str((output as JsonObject).slug)),
 });
 
 /** The command table's keys, in reply order. */
@@ -517,8 +544,7 @@ export const repoOffboard = defineCommand({
     destructive: true,
     risk: (input) => (dryRunRequested(input) ? PLAN_ONLY_RISK : "tears down the resident and its snapshots"),
   },
-  describe:
-    "Tear down a resident repo: registry record, schedules, container, R2 snapshots (admin-gated; --dry-run plans only).",
+  describe: "Remove a repo registration and tear down its resident when present (admin-gated; --dry-run plans only).",
   render: (output) => {
     const o = output as JsonObject;
     const slug = str(o.slug);
@@ -621,7 +647,7 @@ export const repoReconfigure = defineCommand({
   // Reversible by a second `repo reconfigure`.
   annotations: { destructive: false, risk: () => "changes the resident's branch or commands" },
   describe:
-    "Change a resident's default branch and/or command table (admin-gated; takes effect on the next refresh/attach).",
+    "Change a registered repo's default branch and/or command table (admin-gated; resident changes take effect on refresh/attach).",
   render: (output) => {
     const o = output as JsonObject;
     const changed = Object.entries(obj(o.changed)).map(([k, v]) => `${k} → \`${str(v)}\``);
@@ -637,11 +663,14 @@ export const repoReconfigure = defineCommand({
     const api = await adminOf(deps, span);
     const body: Record<string, unknown> = { resource: repoResourceId(args.slug) };
     if (Object.keys(commands).length > 0) {
-      // The resident's /reconfigure REPLACES the whole command table, so
+      // The registry's /reconfigure REPLACES the whole command table, so
       // a partial patch is merged onto the current table — fetched live.
       const list = await call(() => api.residents());
       if (list.status !== 200) throw residentFailure(list);
-      const residents = (list.data.residents as Array<Record<string, unknown>> | undefined) ?? [];
+      const residents = [
+        ...((list.data.residents as Array<Record<string, unknown>> | undefined) ?? []),
+        ...((list.data.repositories as Array<Record<string, unknown>> | undefined) ?? []),
+      ];
       const record = residents.find((rec) => rec.resource === repoResourceId(args.slug));
       if (!record) {
         // Record 0054: the list is already in hand — one near-match pass asks

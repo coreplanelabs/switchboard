@@ -83,10 +83,15 @@ describe("selfDescriptionBlock", () => {
     for (const block of [allOn, allOff]) expect(block).toContain("`help`");
   });
 
-  it("with residents on: the mechanism, onboarded = warm (no priority list), and the cap the resident Worker reported — or where to read it when it has not answered yet", () => {
+  it("with residents on: registration can be warm or cold (no priority list), and the cap counts only residents", () => {
     expect(allOn).toContain("always-warm per-repo environment");
     expect(allOn).toContain("capped at 6 residents");
-    expect(allOn).toContain('no separate "priority repos" setting: onboarded = warm');
+    expect(allOn).toContain("repo onboard <owner/name>");
+    expect(allOn).toContain("--no-resident");
+    expect(allOn).toContain("registers a repo without provisioning a resident");
+    expect(allOn).toContain("Cold registrations use per-thread workspaces and do not consume resident slots");
+    expect(allOn).toContain('no separate "priority repos" setting');
+    expect(allOn).not.toContain("onboarded = warm");
     expect(selfDescriptionBlock(AGENTS, "acme", ALL_CAPABILITIES, 9)).toContain("capped at 9 residents");
     const unknown = selfDescriptionBlock(AGENTS, "acme", ALL_CAPABILITIES, undefined);
     expect(unknown).toContain(RESIDENT_CAP_UNKNOWN_NOTE);

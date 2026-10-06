@@ -4,6 +4,8 @@ import { booleanAudienceVerifier } from "./testing/audienceVerifier.js";
 import { testSlackCapability, testSessionSources } from "./testing/slackSources.js";
 import { sourceHash, type SessionSources } from "./references/receipts.js";
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { createServer } from "node:http";
 import { memoryContent } from "./memory/provenance.js";
 import { readQuery, readResponse, readTool } from "../mcp/testing/sourceRead.js";
 import { createSourceReads, type SourceReadState } from "../mcp/sourceRead.js";
@@ -18,7 +20,7 @@ import { reviewTargetBlock } from "./reviewTarget.js";
 import { SELF_DESCRIPTION_HEADER, selfDescriptionBlock } from "./selfDescription.js";
 import { InMemoryGithubApi } from "../execution/githubApi.js";
 import type { PlaneTable } from "./plane/table.js";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -43,10 +45,10 @@ import { bindSlackContext } from "./dispatch/slackContextBinding.js";
 import { reclaimRuns } from "./boot.js";
 import { piRunPaths, RUN_BEARER_ENV } from "./harness/pi/process.js";
 import { CloudflareSandboxExecutor } from "../execution/cloudflareSandbox.js";
-import { makeExecutor } from "../execution/factory.js";
+import { makeExecutor, prepareColdPublicationCheckout } from "../execution/factory.js";
 import { TEST_GITHUB_CREDENTIALS } from "../execution/testing/githubCredentials.js";
 import { InMemoryArtifactStore } from "../artifacts/store.js";
-import { ExecCapacityError, ExecInfraError, ExecSandboxRestartedError } from "../execution/executor.js";
+import { ExecCapacityError, ExecInfraError, ExecSandboxRestartedError, LocalExecutor } from "../execution/executor.js";
 import { classifyError } from "./trace/classify.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
 import type { ChannelIO, HistoryItem, IncomingMessage, RunReceipt, StatusUpdate } from "./types.js";
@@ -3166,6 +3168,29 @@ describe("resident repo dispatch", () => {
     expect(replies.some((r) => r.includes("not onboarded"))).toBe(false);
     expect(provider.requests).toHaveLength(1);
   });
+
+  it.each(["coding", "review"])(
+    "a cold registration keeps its verified default ref in the %s run context and prompt",
+    async (agent) => {
+      const provider = capturingProvider();
+      const deps = makeDeps(REPO_PERMS_YAML, provider);
+      const registry = new RunRegistry({ genId: () => "run-registered", genToken: () => "tok" });
+      deps.runRegistry = registry;
+      deps.resolveRepoContext = () => ({ repo: "acme/api" });
+      const executor = { exec: async () => "", readFile: async () => "", writeFile: async () => "" };
+      vi.mocked(makeExecutor).mockResolvedValueOnce({
+        executor,
+        backend: "sandbox",
+        cold: { ref: "develop", sha: "a".repeat(40), workspace: "/workspace/checkout" },
+      });
+      const { io } = fakeIO();
+      await dispatch(deps, msg(`agent:${agent} in acme/api: inspect it`, "slack:UADMIN"), io);
+      expect(provider.requests).toHaveLength(1);
+      expect(provider.requests[0].system).toContain("COLD CHECKOUT TARGET: acme/api on branch `develop`");
+      const meta = registry.snapshotById("run-registered")!.events.filter((e) => e.type === "run_meta");
+      expect(meta.at(-1)).toMatchObject({ repo: "acme/api", ref: "develop" });
+    },
+  );
 
   it("a resident fallback note appears in the status frames and on the run's stream as a cold_sandbox note (named, never silent)", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
@@ -6641,6 +6666,101 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     });
     expect(commands[0]).toContain("clone --quiet --single-branch --branch 'plan/p/u1'");
   });
+
+  it.each(["different branch", "same branch with private changes"])(
+    "keeps the prepared cold Ship checkout when its predecessor has %s",
+    async (predecessor) => {
+      const root = mkdtempSync(join(tmpdir(), "swb-cold-ship-"));
+      const source = join(root, "remote");
+      const workspace = join(root, "workspace");
+      mkdirSync(source);
+      mkdirSync(workspace);
+      const git = (path: string, ...args: string[]) =>
+        execFileSync("git", ["-C", path, ...args], { encoding: "utf8" }).trim();
+      git(source, "init", "-q", "-b", "main");
+      writeFileSync(join(source, "README.md"), "published");
+      git(source, "add", ".");
+      git(source, "-c", "user.name=fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "initial");
+      const branch = "plan/p/u1";
+      git(source, "branch", branch);
+      git(source, "update-server-info");
+      const sha = git(source, "rev-parse", "HEAD");
+      const server = createServer((req, res) => {
+        const path = new URL(req.url!, "http://fixture").pathname.replace("/git/acme/api.git/", "");
+        try {
+          res.end(readFileSync(join(source, ".git", path)));
+        } catch {
+          res.writeHead(404).end();
+        }
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const doorUrl = `http://127.0.0.1:${(server.address() as import("node:net").AddressInfo).port}`;
+      const executor = Object.assign(new LocalExecutor(workspace), {
+        publishBranchResult: async () => ({ exitCode: 1, truncated: false, stdout: "", stderr: "refused" }),
+      });
+      try {
+        const selection = { backend: "sandbox" as const, executor };
+        const prior = await prepareColdPublicationCheckout(selection, {
+          repo: "acme/api",
+          ref: predecessor === "different branch" ? "main" : branch,
+          doorUrl,
+          freshRegistration: true,
+        });
+        writeFileSync(join(prior.workspace, "README.md"), "private tracked changes");
+        writeFileSync(join(prior.workspace, "private.txt"), "unpublished bytes");
+        const cold = await prepareColdPublicationCheckout(selection, {
+          repo: "acme/api",
+          ref: branch,
+          doorUrl,
+          freshRegistration: true,
+        });
+        expect(cold.workspace).not.toBe(prior.workspace);
+        let modelStarted = false;
+        let observedBinding: unknown;
+        const base = describeThenAnswer(undefined, "No changes needed.");
+        const deps = codingDeps({
+          ...base,
+          complete: async (...args) => {
+            modelStarted = true;
+            observedBinding = [...ledger.live.values()][0]?.state.binding;
+            return base.complete(...args);
+          },
+        });
+        const ledger = new InMemoryRunLedger();
+        deps.runLedger = createLedgerWriteThrough({
+          ledger,
+          gen: "gen-child",
+          fallback: new InMemoryRunStore(),
+          warn: () => {},
+        });
+        deps.githubDoor = { baseUrl: doorUrl };
+        vi.mocked(makeExecutor).mockResolvedValueOnce({ ...selection, cold });
+        const unitId = "U" + "1";
+        await dispatch(deps, msg("agent:coding in acme/api: do the unit", "slack:UADMIN"), fakeIO().io, {
+          coordinator: { parentInstanceId: "plan-p", idempotencyKey: `plan-p:${unitId}/0/coding`, base: "main" },
+          contract: contractFromPlan({
+            planMarkdown: `### ${unitId}. do the unit\n\ndo the unit\n`,
+            unitId,
+            readSpec: () => undefined,
+            rebase: { branch, onto: "main" },
+          }),
+        });
+        expect(modelStarted).toBe(true);
+        expect(observedBinding).toMatchObject({
+          backend: "sandbox",
+          ref: branch,
+          workspace: cold.workspace,
+          publicationBaseSha: sha,
+        });
+        expect(git(cold.workspace, "status", "--porcelain")).toBe("");
+        expect(readFileSync(join(prior.workspace, "README.md"), "utf8")).toBe("private tracked changes");
+        expect(readFileSync(join(prior.workspace, "private.txt"), "utf8")).toBe("unpublished bytes");
+      } finally {
+        await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("pins a coding unit's first push to its contract branch before any PR exists", async () => {
     const deps = codingDeps(describeThenAnswer(DESCRIPTION));

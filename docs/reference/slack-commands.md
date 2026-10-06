@@ -96,10 +96,10 @@ Combine freely: `agent:ship model:<provider>/<model> effort:high in acme/api: fi
 
 | Command | What it does | Who can run it |
 |---|---|---|
-| `repo list` | Every onboarded resident repo with its live state, ref, sha, last refresh, and disk gauge. | anyone |
-| `repo onboard <slug> [--ref <string>] [--test <string>] [--build <string>] [--install <string>] [--evict-coldest]` | Onboard a repo as an always-warm resident environment (provisions billable compute; admin-gated). | repo managers (`repo:write`) |
-| `repo offboard <slug> [--dry-run]` | Tear down a resident repo: registry record, schedules, container, R2 snapshots (admin-gated; --dry-run plans only). | repo managers (`repo:write`) |
-| `repo reconfigure <slug> [--ref <string>] [--test <string>] [--build <string>] [--install <string>]` | Change a resident's default branch and/or command table (admin-gated; takes effect on the next refresh/attach). | repo managers (`repo:write`) |
+| `repo list` | Every registered repo, including cold entries; resident state, ref, sha, last refresh, and disk gauge. | anyone |
+| `repo onboard <slug> [--ref <string>] [--test <string>] [--build <string>] [--install <string>] [--no-resident] [--evict-coldest]` | Register a repo, optionally without a resident (--no-resident); resident provisioning is billable and admin-gated. | repo managers (`repo:write`) |
+| `repo offboard <slug> [--dry-run]` | Remove a repo registration and tear down its resident when present (admin-gated; --dry-run plans only). | repo managers (`repo:write`) |
+| `repo reconfigure <slug> [--ref <string>] [--test <string>] [--build <string>] [--install <string>]` | Change a registered repo's default branch and/or command table (admin-gated; resident changes take effect on refresh/attach). | repo managers (`repo:write`) |
 | `repo rebuild <slug> [--dry-run]` | Discard a resident's snapshot and reprovision it from scratch (admin-gated; --dry-run plans only). | repo managers (`repo:write`) |
 | `repo test <slug> [ref]` | Executes the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch). | anyone granted `agent:run:coding` |
 | `repo build <slug> [ref]` | Executes the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch). | anyone granted `agent:run:coding` |

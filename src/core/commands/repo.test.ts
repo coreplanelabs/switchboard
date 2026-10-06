@@ -241,6 +241,23 @@ describe("repo.list", () => {
     expect(reply.split("\n")[2]).toBe("• `acme/api` — *warm* · ref `main`"); // a malformed sample adds nothing
   });
 
+  it("lists cold registrations without counting them against resident capacity or draining them", async () => {
+    const c = mockClient({
+      residents: ok({
+        cap: 1,
+        count: 0,
+        residents: [],
+        repositories: [{ resource: "repo:acme/api", noResident: true, defaultRef: "develop", live: { state: "cold" } }],
+        draining: { until: "later", reason: "deploy" },
+      }),
+    });
+    const { text } = await say(bind({ admin: c }), "repo list", chat("slack:UALICE"));
+    expect(text).toContain("0/1 resident slots");
+    expect(text).toContain("1 cold");
+    expect(text).toContain("• `acme/api` — *cold* · ref `develop`");
+    expect(text).not.toContain("cold (drained");
+  });
+
   it("an empty registry and an active test override keep their wording", async () => {
     const empty = bind({ admin: mockClient({ residents: ok({ cap: 6, count: 0, residents: [] }) }) });
     expect((await say(empty, "repo list", chat("slack:UALICE"))).text).toBe(
@@ -385,6 +402,25 @@ describe("gates (fail-closed) and scopes", () => {
 });
 
 describe("repo onboard", () => {
+  it("--no-resident registers a cold repo and never polls provisioning", async () => {
+    const c = mockClient({ onboard: ok({ resource: "repo:acme/api", state: "cold" }) });
+    const commands = bind({ admin: c, inspect: inspecting(PNPM_ROOT) });
+    const { res, text } = await say(commands, "repo onboard acme/api --no-resident --ref develop", admin);
+    expect(res.ok).toBe(true);
+    expect(c.onboard).toHaveBeenCalledWith(expect.objectContaining({ noResident: true, defaultRef: "develop" }));
+    expect(text).toContain("Registered `acme/api` on `develop` — tasks run in per-thread sandboxes.");
+    expect(text).not.toContain("provisioning started");
+    if (res.ok) expect(await commands.settle("repo.onboard", res.value, admin)).toBeUndefined();
+    expect(c.status).not.toHaveBeenCalled();
+  });
+
+  it("--no-resident refuses eviction before contacting the backend", async () => {
+    const c = mockClient();
+    const { res } = await say(bind({ admin: c }), "repo onboard acme/api --no-resident --evict-coldest", admin);
+    expect(res.ok).toBe(false);
+    expect(c.onboard).not.toHaveBeenCalled();
+  });
+
   it("item 52: the command table is detected from the repo root — a pnpm workspace gets pnpm commands, no build, and the reply explains each choice", async () => {
     const c = mockClient();
     const inspect = vi.fn(inspecting(PNPM_ROOT));
@@ -904,6 +940,31 @@ describe("repo reconfigure", () => {
     });
     expect(text).toBe("🔧 Reconfigured `acme/api`: test → `new-test`. Takes effect on the next refresh/attach.");
   });
+
+  it.each([undefined, "release"])(
+    "merges a cold registration's command overrides and optional ref (%s)",
+    async (ref) => {
+      const c = mockClient({
+        residents: ok({
+          residents: [{ resource: "repo:acme/warm", commands: { test: "warm-test" } }],
+          repositories: [
+            {
+              resource: "repo:acme/api",
+              noResident: true,
+              defaultRef: "develop",
+              commands: { test: "old-test", build: "old-build", install: "old-install" },
+            },
+          ],
+        }),
+      });
+      await say(bind({ admin: c }), `repo reconfigure acme/api --test "new-test"${ref ? ` --ref ${ref}` : ""}`, admin);
+      expect(c.reconfigure).toHaveBeenCalledWith({
+        resource: "repo:acme/api",
+        commands: { test: "new-test", build: "old-build", install: "old-install" },
+        ...(ref ? { defaultRef: ref } : {}),
+      });
+    },
+  );
 
   it("a ref-only reconfigure sends defaultRef without reading or touching the command table", async () => {
     const c = mockClient();

@@ -518,7 +518,7 @@ describe("derived naming across surfaces", () => {
     );
     expect(byId["memory.forget"]).toBe("memory forget <id>");
     expect(byId["repo.onboard"]).toBe(
-      "repo onboard <slug> [--ref <string>] [--test <string>] [--build <string>] [--install <string>] [--evict-coldest]",
+      "repo onboard <slug> [--ref <string>] [--test <string>] [--build <string>] [--install <string>] [--no-resident] [--evict-coldest]",
     );
     expect(byId["repo.offboard"]).toBe("repo offboard <slug> [--dry-run]");
     expect(byId["repo.reconfigure"]).toBe(

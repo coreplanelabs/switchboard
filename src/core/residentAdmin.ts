@@ -76,7 +76,7 @@ export class NullResidentAdminClient implements ResidentAdminClient {
 }
 
 /** The admin routes, as the span names them: the path literal, never a query. */
-type AdminRoute = "/onboard" | "/offboard" | "/reconfigure" | "/rebuild" | "/residents" | "/status";
+type AdminRoute = "/register" | "/onboard" | "/offboard" | "/reconfigure" | "/rebuild" | "/residents" | "/status";
 
 export function makeResidentAdminClient(baseUrl: string, token: string): ResidentAdminClient {
   // One closure per parent: the unbound client, and the view `withSpan` makes
@@ -117,7 +117,9 @@ export function makeResidentAdminClient(baseUrl: string, token: string): Residen
       return { status: res.status, data };
     };
     return {
-      onboard: (body) => call("/onboard", "POST", body),
+      // An older Worker must reject metadata-only registration, never ignore
+      // a new flag on /onboard and provision billable compute.
+      onboard: (body) => call(body.noResident === true ? "/register" : "/onboard", "POST", body),
       offboard: (resource, dryRun) => call("/offboard", "POST", { resource, ...(dryRun ? { dryRun: true } : {}) }),
       reconfigure: (body) => call("/reconfigure", "POST", body),
       rebuild: (resource, dryRun) => call("/rebuild", "POST", { resource, ...(dryRun ? { dryRun: true } : {}) }),

@@ -512,6 +512,10 @@ export const COMMAND_FIXTURES: Readonly<
     }
   >
 > = {
+  "repo.onboard": {
+    variants: { "all-options-set": { omit: ["evictColdest"] } },
+    why: "metadata-only registration and resident eviction are mutually exclusive; individual true/false variants still cover both flags",
+  },
   "config.show": {
     baseline: { channel: FIXTURE.channel },
     why: "a machine caller has no origin channel — `--channel` is required there",
