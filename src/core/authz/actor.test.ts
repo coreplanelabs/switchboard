@@ -41,6 +41,7 @@ const source: GrantsSource = {
   agentNames: ["general", "coding"],
   commandGroups: ["runs", "friction"],
 };
+const humanGrants = (g: Partial<Grants>): Grants => ({ ...grants(g), repoAccess: { except: set() } });
 const lookup = (id: string) => grantsFor(id, source);
 
 describe("actorIdFor — platform-namespaced ids (invariant 4)", () => {
@@ -76,7 +77,7 @@ describe("resolveActor — kind, id, grants, origin per surface", () => {
     );
     expect(a.kind).toBe("user");
     expect(a.id).toBe("slack:UNOBODY");
-    expect(a.grants).toEqual(grants({ actions: set(...CHAT_OPEN_ACTIONS) }));
+    expect(a.grants).toEqual(humanGrants({ actions: set(...CHAT_OPEN_ACTIONS) }));
   });
 
   it("Slack plain user when an agent is unrestricted → agent:run:<name> for it on top of the baseline (canRunAgent today)", () => {
@@ -84,7 +85,7 @@ describe("resolveActor — kind, id, grants, origin per surface", () => {
     if (!onlyCoding.ok) throw new Error(onlyCoding.errors.join("; "));
     const open = (id: string) => grantsFor(id, { ...source, restrict: onlyCoding.restrict });
     expect(resolveActor({ surface: "slack", subjectId: "UNOBODY" }, open).grants).toEqual(
-      grants({ actions: set(...CHAT_OPEN_ACTIONS, "agent:run:general") }),
+      humanGrants({ actions: set(...CHAT_OPEN_ACTIONS, "agent:run:general") }),
     );
   });
 
@@ -96,16 +97,16 @@ describe("resolveActor — kind, id, grants, origin per surface", () => {
     if (!everyone.ok) throw new Error(everyone.errors.join("; "));
     const withSurface = (id: string) => grantsFor(id, { ...source, grants: everyone.grants });
     expect(resolveActor({ surface: "slack", subjectId: "UNOBODY" }, withSurface).grants).toEqual(
-      grants({ actions: set(...CHAT_OPEN_ACTIONS, "runs:read"), channels: set("slack:C1") }),
+      humanGrants({ actions: set(...CHAT_OPEN_ACTIONS, "runs:read"), channels: set("slack:C1") }),
     );
     expect(resolveActor({ surface: "slack", subjectId: "UMGR" }, withSurface).grants).toEqual(
-      grants({ actions: set(...CHAT_OPEN_ACTIONS, "runs:read", "repo:write"), channels: set("slack:C1") }),
+      humanGrants({ actions: set(...CHAT_OPEN_ACTIONS, "runs:read", "repo:write"), channels: set("slack:C1") }),
     );
   });
 
   it("Slack user granted repo:write → repo:write + friction:write on top of the baseline", () => {
     const a = resolveActor({ surface: "slack", subjectId: "UMGR" }, lookup);
-    expect(a.grants).toEqual(grants({ actions: set(...CHAT_OPEN_ACTIONS, "repo:write", "friction:write") }));
+    expect(a.grants).toEqual(humanGrants({ actions: set(...CHAT_OPEN_ACTIONS, "repo:write", "friction:write") }));
     expect(a.origin).toBeUndefined();
   });
 
@@ -140,7 +141,7 @@ describe("resolveActor — kind, id, grants, origin per surface", () => {
     expect(resolveActor({ surface: "access-browser", subjectId: "op-1" }, lookup)).toEqual({
       kind: "user",
       id: "access:op-1",
-      grants: grants({
+      grants: humanGrants({
         actions: set(
           "runs:read",
           "runs:write",
@@ -156,7 +157,7 @@ describe("resolveActor — kind, id, grants, origin per surface", () => {
     expect(resolveActor({ surface: "access-browser", subjectId: "viewer" }, lookup)).toEqual({
       kind: "user",
       id: "access:viewer",
-      grants: grants({ actions: set("runs:read", "friction:read", "memory:write", "mcp:write", "steer:write") }),
+      grants: humanGrants({ actions: set("runs:read", "friction:read", "memory:write", "mcp:write", "steer:write") }),
     });
   });
 

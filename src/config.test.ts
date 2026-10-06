@@ -610,8 +610,12 @@ describe("grantsFor — the grants the policy table decides on", () => {
       ),
       { commandGroups: ["runs", "friction"] },
     );
+    const openAgents = Object.keys(AGENTS)
+      .filter((name) => name !== "coding")
+      .map((name) => `agent:run:${name}`);
     expect(s.grantsFor("access:alice@example.com")).toEqual({
       actions: new Set([
+        ...openAgents,
         "runs:read",
         "friction:read",
         "memory:write",
@@ -622,11 +626,13 @@ describe("grantsFor — the grants the policy table decides on", () => {
       ]),
       channels: "all",
       repos: new Set(),
+      repoAccess: { except: new Set() },
     });
     expect(s.grantsFor("access:stranger")).toEqual({
-      actions: new Set(["runs:read", "friction:read", "memory:write", "mcp:write", "steer:write"]),
+      actions: new Set([...openAgents, "runs:read", "friction:read", "memory:write", "mcp:write", "steer:write"]),
       channels: new Set(),
       repos: new Set(),
+      repoAccess: { except: new Set() },
     });
     expect(s.grantsFor("access:svc:reader-bot")).toEqual({
       actions: new Set(["runs:read"]),
@@ -634,8 +640,13 @@ describe("grantsFor — the grants the policy table decides on", () => {
       repos: new Set(),
     });
     expect(s.grantsFor("access:svc:stranger")).toBe(NO_GRANTS);
-    // Without the catalogue's groups the store cannot spell a group read: an unlisted browser session holds nothing.
-    expect(store().grantsFor("access:stranger")).toBe(NO_GRANTS);
+    // Without command groups, open agent and code access remain; no command reads are guessed.
+    expect(store().grantsFor("access:stranger")).toEqual({
+      actions: new Set(openAgents),
+      channels: new Set(),
+      repos: new Set(),
+      repoAccess: { except: new Set() },
+    });
   });
 
   it("no admin at all → nobody may manage repos (still closed)", async () => {

@@ -1861,6 +1861,8 @@ describe("dispatch", () => {
       },
     };
     const deps = makeDeps(mainDmYaml, provider);
+    // Isolate the missing source identity from the repository admission gate.
+    deps.config.canUseRepo = () => true;
     deps.githubApi = new InMemoryGithubApi({ "not-a-repo": { private: false } });
     const { io, replies } = mainDmIO();
     await dispatch(deps, mainDm("which repos can I reach?"), io);
@@ -10233,6 +10235,7 @@ describe("input / context / answer events in the run stream", () => {
     const history: HistoryItem[] = [{ role: "user", text: "earlier: 1 &lt; 2 <@U777|dana>" }];
     const { events } = await runWith(raw, {
       history,
+      yaml: YAML_FIXTURE.replace("restrict:\n", '  "http:ops": { actions: [agent:run:general] }\nrestrict:\n'),
       message: { channelId: "http:ops", userId: "http:ops", threadKey: "http:ops:1" },
     });
     const [input, context] = textEventsOf(events);
@@ -11330,8 +11333,8 @@ grants:
   "slack:UADMIN": { actions: all, channels: all, repos: all }
   "slack:UDEV": { actions: [agent:run:coding] }
   "slack:UREV": { repos: ["acme/api"] }
-  "http:job": { actions: [dispatch, agent:run:coding], channels: ["http:ops"], repos: ["acme/api"] }
-  "mcp:job": { actions: [dispatch, agent:run:coding], channels: ["mcp:ops"], repos: ["acme/api"] }
+  "http:job": { actions: [dispatch, agent:run:ship, agent:run:review, agent:run:coding], channels: ["http:ops"], repos: ["acme/api"] }
+  "mcp:job": { actions: [dispatch, agent:run:ship, agent:run:review, agent:run:coding], channels: ["mcp:ops"], repos: ["acme/api"] }
 restrict:
   agents: [coding]
   repos: ["acme/api"]
@@ -11410,8 +11413,13 @@ workspaceDir: __WORKDIR__
   });
 
   it("channel guard: agent:ship over a handle without openThread is refused before the runner", async () => {
-    const { deps, provider, created } = shipDeps();
-    // An unrestricted repo (open-when-absent), so the CHANNEL refusal is the
+    const { deps, provider, created } = shipDeps(
+      SHIP_YAML.replace(
+        "restrict:\n",
+        '  "http:token-ci": { actions: [agent:run:ship, agent:run:review, agent:run:coding], repos: ["acme/web"] }\nrestrict:\n',
+      ),
+    );
+    // Explicit repo and agent grants ensure the CHANNEL refusal is the
     // one that fires — not the repo allowlist, which has its own test above.
     deps.resolveRepoContext = () => ({ repo: "acme/web" });
     const { io, replies } = fakeIO();

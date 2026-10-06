@@ -1,12 +1,12 @@
 import { z } from "zod";
-import { hasAction, unionSet } from "./grantSets.js";
+import { unionSet, normalizedRepos, repoAccessOf, unionRepoAccess, withRepoAccess } from "./grantSets.js";
 import { NO_GRANTS, type Grants, type GrantSet } from "./types.js";
 
 // Grants: WHAT an actor may do, from config's one shape —
 // the native `grants` block (one entry per platform-namespaced actor id, or
 // `<ns>:*` for every actor authenticated on a surface) — plus `restrict`, which
 // names the agents and repos that are CLOSED unless a grant covers them.
-// Everything not restricted is open to everyone who can reach the bot; a grant
+// Unrestricted agents and code repos are compiled into human baselines; a grant
 // only ever adds. Pure: no I/O, no decisions — nothing here says whether an
 // action is allowed; that is `authorize`.
 
@@ -53,8 +53,7 @@ export function surfaceKeyFor(actorId: string): string | undefined {
   return (SURFACE_GRANT_PREFIXES as readonly string[]).includes(ns) ? `${ns}:*` : undefined;
 }
 
-/** The action that lets an actor run agent `<name>` — checked only for a
- *  RESTRICTED agent (`restrict.agents`); every other agent is open. */
+/** The action that lets an actor run agent `<name>` on every surface. */
 export function agentRunAction(agent: string): string {
   return `agent:run:${agent}`;
 }
@@ -169,7 +168,7 @@ export function parseGrantsConfig(raw: unknown): ParsedGrantsConfig {
     grants.set(actorId, {
       actions: toSet(parsed.data.actions),
       channels: toSet(parsed.data.channels),
-      repos: toSet(parsed.data.repos),
+      repos: normalizedRepos(toSet(parsed.data.repos)),
     });
   }
   return errors.length > 0 ? { ok: false, errors } : { ok: true, grants };
@@ -180,7 +179,7 @@ export function parseGrantsConfig(raw: unknown): ParsedGrantsConfig {
 /** `restrict:` in config.yaml. An agent listed here runs only for an actor whose
  *  grants hold `agent:run:<name>` (or `all`); a repo listed here (an `owner/name`
  *  slug) is used only by an actor whose `repos` axis names it (or `all`).
- *  Everything unlisted is open to everyone who can reach the bot. The lock and
+ *  Everything unlisted is compiled into the human code-access baseline. The lock and
  *  the allowlist are kept apart: listing a grant never takes anything from
  *  anyone else. */
 export interface RestrictConfig {
@@ -272,7 +271,7 @@ export interface GrantsTable {
   /** What every `slack:` user holds, listed or not: the open chat commands and `agent:run:<name>` for every unrestricted agent. */
   everyone: Grants;
   /** What every Access browser session (`access:<sub>`, never `access:svc:`) holds:
-   *  each registered group's read and personal chat writes. */
+   *  each registered group's read, personal chat writes and unrestricted agents. */
   browser: Grants;
   restrict: Restriction;
 }
@@ -299,8 +298,16 @@ export function grantsTable(source: GrantsSource): GrantsTable {
   const restrict = source.restrict ?? NO_RESTRICTION;
   const openAgents = (source.agentNames ?? []).filter((a) => !restrict.agents.has(a)).map(agentRunAction);
   const baselines = {
-    everyone: { ...NO_GRANTS, actions: new Set([...CHAT_OPEN_ACTIONS, ...openAgents]) },
-    browser: { ...NO_GRANTS, actions: browserActions(source.commandGroups ?? []) },
+    everyone: {
+      ...NO_GRANTS,
+      actions: new Set([...CHAT_OPEN_ACTIONS, ...openAgents]),
+      repoAccess: { except: restrict.repos },
+    },
+    browser: {
+      ...NO_GRANTS,
+      actions: new Set([...browserActions(source.commandGroups ?? []), ...openAgents]),
+      repoAccess: { except: restrict.repos },
+    },
   };
   const grants = new Map<string, Grants>();
   const surfaces = new Map<string, Grants>();
@@ -333,30 +340,15 @@ export function grantsFor(actorId: string, source: GrantsSource): Grants {
   return grantsIn(grantsTable(source), actorId);
 }
 
-/** Whether `actor` may run `agent`: every agent is open unless `restrict.agents`
- *  names it, and then only for a holder of `agent:run:<name>` — literally, through
- *  the `agent:run:*` wildcard, or `all` (the same `hasAction` the policy table reads). */
-export function mayRunAgent(table: Pick<GrantsTable, "restrict">, actorGrants: Grants, agent: string): boolean {
-  return !table.restrict.agents.has(agent) || hasAction(actorGrants.actions, agentRunAction(agent));
-}
-
-/** Whether `actor` may use repo `slug`: every repo is open unless `restrict.repos`
- *  names it, and then only for a holder whose `repos` axis names it (or `all`).
- *  Compared lowercased on both sides — slugs are case-insensitive on GitHub. */
-export function mayUseRepo(table: Pick<GrantsTable, "restrict">, actorGrants: Grants, slug: string): boolean {
-  const lower = slug.toLowerCase();
-  if (!table.restrict.repos.has(lower)) return true;
-  if (actorGrants.repos === "all") return true;
-  for (const r of actorGrants.repos) if (r.toLowerCase() === lower) return true;
-  return false;
-}
-
 function unionGrants(a: Grants, b: Grants): Grants {
-  return {
-    actions: unionSet(a.actions, b.actions),
-    channels: unionSet(a.channels, b.channels),
-    repos: unionSet(a.repos, b.repos),
-  };
+  return withRepoAccess(
+    {
+      actions: unionSet(a.actions, b.actions),
+      channels: unionSet(a.channels, b.channels),
+      repos: unionSet(normalizedRepos(a.repos), normalizedRepos(b.repos)),
+    },
+    unionRepoAccess(repoAccessOf(a), repoAccessOf(b)),
+  );
 }
 
 function isEmpty(g: Grants): boolean {
@@ -366,6 +358,7 @@ function isEmpty(g: Grants): boolean {
     g.channels !== "all" &&
     g.channels.size === 0 &&
     g.repos !== "all" &&
-    g.repos.size === 0
+    g.repos.size === 0 &&
+    g.repoAccess === undefined
   );
 }

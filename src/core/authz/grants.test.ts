@@ -7,8 +7,6 @@ import {
   grantsFor,
   grantsIn,
   grantsTable,
-  mayRunAgent,
-  mayUseRepo,
   namespaceBaseline,
   NO_RESTRICTION,
   parseGrantsConfig,
@@ -17,6 +15,7 @@ import {
   type GrantsConfig,
   type Restriction,
 } from "./grants.js";
+import { authorize } from "./authorize.js";
 import { NO_GRANTS, type Grants } from "./types.js";
 
 // Feature: docs/reference/specs/authorization.md item 9 — one authorization shape: the
@@ -27,6 +26,7 @@ import { NO_GRANTS, type Grants } from "./types.js";
 
 const set = (...names: string[]) => new Set(names);
 const grants = (g: Partial<Grants>): Grants => ({ actions: set(), channels: set(), repos: set(), ...g });
+const humanGrants = (g: Partial<Grants>): Grants => ({ ...grants(g), repoAccess: { except: set() } });
 const AGENTS = ["general", "coding", "review"];
 const parsed = (raw: GrantsConfig) => {
   const p = parseGrantsConfig(raw);
@@ -172,14 +172,14 @@ describe("the baselines — what an id holds by its namespace, listed or not", (
   it("everyone = the open chat commands + agent:run for every UNRESTRICTED agent; config:write is never a baseline", () => {
     const open = grantsTable({ agentNames: AGENTS });
     expect(open.everyone).toEqual(
-      grants({ actions: set(...CHAT_OPEN_ACTIONS, "agent:run:general", "agent:run:coding", "agent:run:review") }),
+      humanGrants({ actions: set(...CHAT_OPEN_ACTIONS, "agent:run:general", "agent:run:coding", "agent:run:review") }),
     );
     expect(open.everyone.actions).not.toContain("config:write");
     const locked = grantsTable({ agentNames: AGENTS, restrict: restriction({ agents: ["coding"] }) });
     expect(locked.everyone.actions).toContain("agent:run:general");
     expect(locked.everyone.actions).not.toContain("agent:run:coding");
     // No agents registered → no agent is open to everyone.
-    expect(grantsTable({}).everyone).toEqual(grants({ actions: set(...CHAT_OPEN_ACTIONS) }));
+    expect(grantsTable({}).everyone).toEqual(humanGrants({ actions: set(...CHAT_OPEN_ACTIONS) }));
   });
 });
 
@@ -196,26 +196,36 @@ describe("grantsTable / grantsIn / grantsFor — the lookup", () => {
       commandGroups: ["runs", "repo"],
     };
     expect(grantsFor("slack:UMGR", source)).toEqual(
-      grants({ actions: set(...CHAT_OPEN_ACTIONS, "agent:run:general", "repo:write") }),
+      humanGrants({ actions: set(...CHAT_OPEN_ACTIONS, "agent:run:general", "repo:write") }),
     );
     expect(grantsFor("slack:UNKNOWN", source)).toEqual(
-      grants({ actions: set(...CHAT_OPEN_ACTIONS, "agent:run:general") }),
+      humanGrants({ actions: set(...CHAT_OPEN_ACTIONS, "agent:run:general") }),
     );
     expect(grantsFor("access:bob", source)).toEqual(
-      grants({
-        actions: set("runs:write", "runs:read", "repo:read", "memory:write", "mcp:write", "steer:write"),
+      humanGrants({
+        actions: set(
+          "runs:write",
+          "runs:read",
+          "repo:read",
+          "memory:write",
+          "mcp:write",
+          "steer:write",
+          "agent:run:general",
+        ),
         channels: set("slack:G1"),
       }),
     );
     expect(grantsFor("access:stranger", source)).toEqual(
-      grants({ actions: set("runs:read", "repo:read", "memory:write", "mcp:write", "steer:write") }),
+      humanGrants({
+        actions: set("runs:read", "repo:read", "memory:write", "mcp:write", "steer:write", "agent:run:general"),
+      }),
     );
     expect(grantsFor("access:svc:ops", source)).toEqual(grants({ actions: set("runs:read"), channels: "all" }));
     expect(grantsFor("http:ci", source)).toEqual(grants({ actions: set("dispatch") }));
     for (const id of ["http:stranger", "mcp:ci", "access:svc:stranger", "schedule:x"])
       expect(grantsFor(id, source), id).toBe(NO_GRANTS);
-    // No command groups known → a browser session holds nothing (fail-closed).
-    expect(grantsFor("access:stranger", {})).toBe(NO_GRANTS);
+    // No groups or agents known: only open code access, never repo memory ownership.
+    expect(grantsFor("access:stranger", {})).toEqual(humanGrants({}));
   });
 
   it("`all` on an axis absorbs the baseline; an admin entry resolves to ALL_GRANTS", () => {
@@ -263,10 +273,13 @@ describe("surface entries — what every actor authenticated on a surface holds"
       commandGroups: ["runs"],
     };
     expect(grantsFor("slack:UNOBODY", source)).toEqual(
-      grants({ actions: set(...CHAT_OPEN_ACTIONS, "agent:run:general", "runs:read"), channels: set("slack:C1") }),
+      humanGrants({ actions: set(...CHAT_OPEN_ACTIONS, "agent:run:general", "runs:read"), channels: set("slack:C1") }),
     );
     expect(grantsFor("access:anyone", source)).toEqual(
-      grants({ actions: set("runs:read", "memory:write", "mcp:write", "steer:write", "runs:write"), channels: "all" }),
+      humanGrants({
+        actions: set("runs:read", "memory:write", "mcp:write", "steer:write", "runs:write", "agent:run:general"),
+        channels: "all",
+      }),
     );
     expect(grantsFor("http:anyone", source)).toEqual(grants({ actions: set("dispatch") }));
     // A service token is a named credential: `access:*` is browser sessions only.
@@ -290,7 +303,7 @@ describe("surface entries — what every actor authenticated on a surface holds"
     };
     const baseline = [...CHAT_OPEN_ACTIONS, "agent:run:general"];
     expect(grantsFor("slack:UMORE", source)).toEqual(
-      grants({
+      humanGrants({
         actions: set(...baseline, "runs:read", "repo:write", "config:write"),
         channels: set("slack:C1", "slack:C2"),
         repos: set("acme/api"),
@@ -298,14 +311,14 @@ describe("surface entries — what every actor authenticated on a surface holds"
     );
     // Listed with LESS than the surface entry: still holds the surface entry whole.
     expect(grantsFor("slack:ULESS", source)).toEqual(
-      grants({
+      humanGrants({
         actions: set(...baseline, "runs:read", "repo:write"),
         channels: set("slack:C1"),
         repos: set("acme/api"),
       }),
     );
     expect(grantsFor("slack:UADMIN", source)).toEqual(
-      grants({ actions: "all", channels: set("slack:C1"), repos: set("acme/api") }),
+      humanGrants({ actions: "all", channels: set("slack:C1"), repos: set("acme/api") }),
     );
     expect(grantsFor("access:anyone", source)).toEqual(ALL_GRANTS);
     // The service token's own entry is all it holds — the browser wildcard is not its surface.
@@ -324,9 +337,24 @@ describe("surface entries — what every actor authenticated on a surface holds"
       restrict: restriction({ agents: ["coding"] }),
       agentNames: AGENTS,
     });
-    expect(mayRunAgent(table, grantsIn(table, "slack:UDEV"), "coding")).toBe(true);
-    expect(mayRunAgent(table, grantsIn(table, "slack:UNOBODY"), "coding")).toBe(true);
-    expect(mayRunAgent(table, grantsIn(table, "access:anyone"), "coding")).toBe(false);
+    expect(
+      authorize({ kind: "user", id: "slack:UDEV", grants: grantsIn(table, "slack:UDEV") }, "agent:run", {
+        type: "agent",
+        name: "coding",
+      }).allow,
+    ).toBe(true);
+    expect(
+      authorize({ kind: "user", id: "slack:UNOBODY", grants: grantsIn(table, "slack:UNOBODY") }, "agent:run", {
+        type: "agent",
+        name: "coding",
+      }).allow,
+    ).toBe(true);
+    expect(
+      authorize({ kind: "user", id: "access:anyone", grants: grantsIn(table, "access:anyone") }, "agent:run", {
+        type: "agent",
+        name: "coding",
+      }).allow,
+    ).toBe(false);
   });
 
   it("the table keeps surface entries apart from actors: `grants` never lists a `*` key (a surface is not an actor)", () => {
@@ -338,37 +366,14 @@ describe("surface entries — what every actor authenticated on a surface holds"
   });
 });
 
-describe("mayRunAgent / mayUseRepo — open unless restricted, then only for a holder", () => {
-  const table = { restrict: restriction({ agents: ["coding"], repos: ["Acme/API"] }) };
-
-  it("an unrestricted agent runs for anyone, a restricted one only for a holder of agent:run:<name>, the agent:run:* wildcard, or `all`", () => {
-    expect(mayRunAgent(table, NO_GRANTS, "general")).toBe(true);
-    expect(mayRunAgent(table, NO_GRANTS, "coding")).toBe(false);
-    expect(mayRunAgent(table, grants({ actions: set("agent:run:coding") }), "coding")).toBe(true);
-    // The `agent:run:*` wildcard the policy table honours unlocks a restricted agent here too; another agent's grant does not.
-    expect(mayRunAgent(table, grants({ actions: set("agent:run:*") }), "coding")).toBe(true);
-    expect(mayRunAgent(table, grants({ actions: set("agent:run:general") }), "coding")).toBe(false);
-    expect(mayRunAgent(table, ALL_GRANTS, "coding")).toBe(true);
-    expect(mayRunAgent({ restrict: NO_RESTRICTION }, NO_GRANTS, "coding")).toBe(true);
-  });
-
-  it("an unrestricted repo is open to anyone, a restricted one only for a holder whose repos name it (case-insensitively) or `all`", () => {
-    expect(mayUseRepo(table, NO_GRANTS, "acme/other")).toBe(true);
-    expect(mayUseRepo(table, NO_GRANTS, "acme/api")).toBe(false);
-    expect(mayUseRepo(table, NO_GRANTS, "Acme/API")).toBe(false);
-    expect(mayUseRepo(table, grants({ repos: set("acme/api") }), "ACME/api")).toBe(true);
-    expect(mayUseRepo(table, grants({ repos: set("Acme/API") }), "acme/api")).toBe(true);
-    expect(mayUseRepo(table, ALL_GRANTS, "acme/api")).toBe(true);
-  });
-
-  it("covers: `all` or the name itself", () => {
+describe("literal grant coverage", () => {
+  it("covers: all or the name itself", () => {
     expect(covers("all", "anything")).toBe(true);
     expect(covers(set("a"), "a")).toBe(true);
     expect(covers(set("a"), "b")).toBe(false);
   });
 });
 
-// Feature: docs/reference/specs/authorization.md item 18 (record 0062) —
 // `identity:write` is never a baseline: no Slack user, no browser session and
 // no credential holds it unlisted. It is held by `all` and by a named grants
 // entry alone, and `grantsFor` is otherwise untouched by the binding.

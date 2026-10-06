@@ -80,6 +80,8 @@ defaults:
     coding: anthropic/coding-model
 grants:
   "slack:UADMIN": { actions: all, channels: all, repos: all }
+  "http:t1": { actions: [steer:write, agent:run:general] }
+  "mcp:alice": { actions: [steer:write, agent:run:general] }
 restrict:
   agents: [coding]
 `;

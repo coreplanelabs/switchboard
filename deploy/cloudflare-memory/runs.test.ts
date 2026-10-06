@@ -1514,6 +1514,40 @@ describe("run history routes", () => {
     expect((second.data.items as Array<{ id: string }>).map((row) => row.id)).toEqual(["old-source"]);
   });
 
+  it("repo complement filters match point and wire semantics in SQLite and reject malformed complements", async () => {
+    const key = storeKey();
+    const now = Date.now();
+    for (const [id, repo] of [
+      ["open", "ACME/OPEN"],
+      ["closed", "Acme/Closed"],
+      ["missing", undefined],
+    ] as const) {
+      await putDirect(key, record(id, now - 1000, { events: events(1), ...(repo ? { repo } : {}) }));
+    }
+    const ids = async (visibleTo: unknown) => {
+      const res = await post("/runs/list", { storeKey: key, visibleTo });
+      expect(res.status).toBe(200);
+      return (res.data.items as Array<{ id: string }>).map((r) => r.id).sort();
+    };
+    expect(await ids({ kind: "repos-not-in", repos: ["ACME/CLOSED"] })).toEqual(["open"]);
+    expect(await ids({ kind: "repos-not-in", repos: [] })).toEqual(["closed", "open"]);
+    expect(await ids({ kind: "repos-in", repos: ["acme/open"] })).toEqual(["open"]);
+    expect(
+      await ids({
+        kind: "and",
+        of: [
+          { kind: "repos-not-in", repos: ["acme/closed"] },
+          { kind: "repos-in", repos: ["ACME/OPEN", "acme/closed"] },
+        ],
+      }),
+    ).toEqual(["open"]);
+    for (const repos of ["all", [""], Array.from({ length: 95 }, (_, i) => `acme/r${i}`)]) {
+      expect((await post("/runs/list", { storeKey: key, visibleTo: { kind: "repos-not-in", repos } })).status).toBe(
+        400,
+      );
+    }
+  });
+
   it("list with `visibleTo` (authorization.md item 6): channels-in compiles to an indexed IN filter on the ONE LIMITed page query; visibility-in / user-is / or / and follow the same truth table as the in-memory store; none is an empty page; a bad filter is 400, never `all`", async () => {
     const key = storeKey();
     const now = Date.now();

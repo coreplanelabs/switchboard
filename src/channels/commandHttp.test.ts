@@ -572,6 +572,7 @@ describe("callerIdFor — one Access identity → caller id mapping for /api and
         actions: new Set(["runs:read", "memory:write", "mcp:write", "steer:write"]),
         channels: new Set(),
         repos: new Set(),
+        repoAccess: { except: new Set() },
       },
     });
     expect((await callerFor(readerBot, opts)).actor).toEqual({

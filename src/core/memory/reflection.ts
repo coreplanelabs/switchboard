@@ -281,6 +281,7 @@ export function reflectionActor(principal: Actor, run: { channelId?: string; rep
   return {
     ...principal,
     grants: {
+      ...principal.grants,
       actions: principal.grants.actions,
       channels: channels === "all" || run.channelId === undefined ? channels : new Set([...channels, run.channelId]),
       repos: repos === "all" || run.repo === undefined ? repos : new Set([...repos, run.repo]),

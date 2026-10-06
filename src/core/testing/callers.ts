@@ -12,7 +12,12 @@ function toGrants(g: CallerGrants): Grants {
   if (g === "all") return { actions: "all", channels: "all", repos: "all" };
   if (Array.isArray(g)) return { ...NO_GRANTS, actions: new Set(g as readonly string[]), channels: "all" };
   const over = g as Partial<Grants>;
-  return { actions: over.actions ?? new Set(), channels: over.channels ?? new Set(), repos: over.repos ?? new Set() };
+  return {
+    actions: over.actions ?? new Set(),
+    channels: over.channels ?? new Set(),
+    repos: over.repos ?? new Set(),
+    ...(over.repoAccess !== undefined ? { repoAccess: over.repoAccess } : {}),
+  };
 }
 
 /** A credential (`mcp:`, `http:`, `access:svc:`) is a `service`; everything else a `user`. */

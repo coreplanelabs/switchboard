@@ -24,6 +24,7 @@ import {
   memberChannelsOf,
   selfIdsOf,
 } from "./authorize.js";
+import { holdsRepo, normalizedRepos, repoAccessOf } from "./grantSets.js";
 import { POLICY, resolveGrant, ruleTarget } from "./policy.js";
 import { RESOURCE_KINDS, targetOf, type ResourceAttributes } from "./resource.js";
 import type {
@@ -117,7 +118,15 @@ function compileCondition(
       return actsAsPerson(selfIds) ? ALL : NONE;
     case "owner-of":
       if (grants.repos === "all") return ALL;
-      return grants.repos.size === 0 ? NONE : { kind: "repos-in", repos: grants.repos };
+      return grants.repos.size === 0
+        ? NONE
+        : { kind: "repos-in", repos: normalizedRepos(grants.repos) as ReadonlySet<string> };
+    case "repo-access": {
+      const access = repoAccessOf(grants);
+      if (access === "all") return { kind: "repos-not-in", repos: new Set() };
+      if ("except" in access) return { kind: "repos-not-in", repos: access.except };
+      return access.size === 0 ? NONE : { kind: "repos-in", repos: access };
+    }
     case "all-channels":
       return grants.channels === "all" ? ALL : NONE;
   }
@@ -178,7 +187,9 @@ export function matchesPredicate(predicate: Predicate, record: PredicateRecord):
     case "user-is":
       return record.userId !== undefined && record.userId === predicate.userId;
     case "repos-in":
-      return record.repo !== undefined && holds(predicate.repos, record.repo);
+      return record.repo !== undefined && holdsRepo(predicate.repos, record.repo);
+    case "repos-not-in":
+      return record.repo !== undefined && !holdsRepo(predicate.repos, record.repo);
     case "visibility-in":
       return predicate.visibilities.has(record.channelVisibility ?? "unknown");
     case "or":
