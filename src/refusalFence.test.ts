@@ -61,6 +61,14 @@ describe("no-raw-refusal — the rule", () => {
     expect(findings("try { f(); } catch (err) { throw err; }")).toEqual([]);
   });
 
+  it("allows only the named typed terminal-uncertainty builder while ordinary raw boundaries remain fenced", () => {
+    expect(findings("throw terminalCommitmentUnknown(hold, request);")).toEqual([]);
+    expect(findings("throw terminalCommitmentFailure(hold, request);")).toHaveLength(1);
+    expect(findings("throw new TerminalCommitmentUnknownError(hold, request);")).toHaveLength(1);
+    expect(findings("throw new Error('unknown');")).toHaveLength(1);
+    expect(findings("io.reply('unknown');")).toHaveLength(1);
+  });
+
   it("catches `p.io.reply(` too — the follow-up shape settle.ts used", () => {
     expect(findings("async function f(p) { await p.io.reply('x'); }")).toEqual([
       { line: 1, message: expect.stringMatching(/bypasses the refusal seam/) },

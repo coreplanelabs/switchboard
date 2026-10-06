@@ -26,6 +26,8 @@ import {
 } from "../runLedger/writeThrough.js";
 import { NullRunStore } from "../runStore.js";
 import { TransientStoreError } from "../runStoreWorker.js";
+import { UncertainStoreError } from "../storeFailure.js";
+import { storeRequestWitness } from "../storeResponse.js";
 import type { RunRecord } from "../runRecord.js";
 import { RESTART_CLAIM_GRACE_MS } from "../budgets.js";
 import type { PlaneAskAnswer, PlaneOutcomePost } from "../plane/decide.js";
@@ -849,11 +851,14 @@ describe("foldCarriedInbox — the durable inbox a carried run brings (item 40)"
     await foldCarriedInbox(deps, ctx, admitted);
     expect(admitted.runId).toBe("run-old");
     expect(ledger.reads).toEqual([{ runId: "run-old", afterSeq: 3 }]);
+    expect(admitted.inbox.pendingSeqs).toEqual([3, 4, 5]);
+    expect(admitted.inbox.hasOnlyDirectRequester("slack:UY")).toBe(false);
     const items = admitted.inbox.drain();
     expect(items.map((i) => [i.text, i.ledgerSeq, i.at])).toEqual([
       ["three", 3, 7_000],
       ["four", 4, 8_000],
     ]);
+    expect(admitted.inbox.pendingSeqs).toEqual([5]);
   });
 
   it("a fresh request has no carried inbox: nothing is read, the slot is untouched", async () => {
@@ -948,6 +953,37 @@ describe("followUpFromInbox — a durable inbox item back as a follow-up", () =>
 // cannot even be assembled must not escape a best-effort closer into the
 // dispatcher's finally.
 describe("closeResumedRow / closeRestartRow — one attempt, the final word said (item 54)", () => {
+  it("propagates an unknown one-shot close with its complete original record and witness", async () => {
+    const row = await rowOf("run-x");
+    let witness: Awaited<ReturnType<typeof storeRequestWitness>> | undefined;
+    let retained: RunRecord | undefined;
+    let abandoned = 0;
+    const adopted = new NullLedgerRun("run-x", {
+      put: async (record) => {
+        witness = await storeRequestWitness(
+          "/runs/finish",
+          JSON.stringify({ runId: row.runId, gen: row.ownerGen, record }),
+        );
+        throw new UncertainStoreError("finish reply lost", witness);
+      },
+      uncertain: (record, request) => {
+        retained = structuredClone(record);
+        expect(request).toEqual(witness);
+      },
+      abandoned: () => {
+        abandoned++;
+      },
+    });
+    await expect(
+      closeResumedRow(adopted, { row, events: [] } as unknown as ResumeContext, "workspace lost"),
+    ).rejects.toMatchObject({
+      request: { operation: "/runs/finish", payload: expect.any(String) },
+      hold: { version: 1, runId: "run-x", gen: row.ownerGen, threadKey: row.threadKey },
+    });
+    expect(JSON.parse(witness!.payload).record).toEqual(retained);
+    expect(abandoned).toBe(0);
+  });
+
   it("a restarting close stamps its finish and one central claim deadline from the injected clock", async () => {
     const row = await rowOf("run-restarting");
     const puts: RunRecord[] = [];
@@ -1013,6 +1049,91 @@ describe("closeResumedRow / closeRestartRow — one attempt, the final word said
 });
 
 describe("steerRun — a run steers a live run through the inbox a thread reply takes", () => {
+  it("preserves explicit ledger-off local steering without claiming a durable sequence", async () => {
+    const admission = new ThreadAdmission<DispatchFollowUp>();
+    const target = { runId: "run-child", threadKey: "slack:CX:child", agent: "general", parentRunId: "run-parent" };
+    const live = admission.claim(target.threadKey, { agent: "general" }).live;
+    live.runId = target.runId;
+    const result = await steerRun(
+      { config: configStore(), runLedger: new NullLedgerWriteThrough("off", new NullRunStore()), admission },
+      { userId: "slack:UX", channelId: "slack:CX", from: { runId: "run-parent" } },
+      target,
+      "local-only by explicit configuration",
+    );
+    expect(result).toMatchObject({ kind: "steered", where: "here" });
+    expect(result).not.toHaveProperty("ledgerSeq");
+    expect(live.inbox.drain()[0].ledgerSeq).toBeUndefined();
+  });
+
+  it.each(["missing", "enabled", "off-foreign-slot", "off-no-slot"] as const)(
+    "does not invent local or remote delivery with %s persistence",
+    async (mode) => {
+      const admission = new ThreadAdmission<DispatchFollowUp>();
+      const target = { runId: "run-child", threadKey: "slack:CX:child", agent: "general", parentRunId: "run-parent" };
+      const live = mode === "off-no-slot" ? undefined : admission.claim(target.threadKey, { agent: "general" }).live;
+      if (live) live.runId = mode === "off-foreign-slot" ? "foreign" : target.runId;
+      const ledger = {
+        ...(mode === "missing" ? {} : { sessionPersistence: mode === "enabled" }),
+        pushInbox: async () => undefined,
+      };
+      expect(
+        await steerRun(
+          { config: configStore(), runLedger: ledger, admission },
+          { userId: "slack:UX", channelId: "slack:CX", from: { runId: "run-parent" } },
+          target,
+          "do not lose this",
+        ),
+      ).toEqual({ kind: "not_live" });
+      expect(live?.inbox.size ?? 0).toBe(0);
+    },
+  );
+
+  it("does not turn an unknown inbox push into local ledger-off permission", async () => {
+    const admission = new ThreadAdmission<DispatchFollowUp>();
+    const target = { runId: "run-child", threadKey: "slack:CX:child", agent: "general", parentRunId: "run-parent" };
+    const live = admission.claim(target.threadKey, { agent: "general" }).live;
+    live.runId = target.runId;
+    const witness = await storeRequestWitness("/runs/inbox", JSON.stringify({ runId: target.runId, text: "original" }));
+    await expect(
+      steerRun(
+        {
+          config: configStore(),
+          runLedger: {
+            sessionPersistence: false,
+            pushInbox: async () => {
+              throw new UncertainStoreError("reply lost", witness);
+            },
+          },
+          admission,
+        },
+        { userId: "slack:UX", channelId: "slack:CX", from: { runId: "run-parent" } },
+        target,
+        "original",
+      ),
+    ).rejects.toBeInstanceOf(UncertainStoreError);
+    expect(live.inbox.size).toBe(0);
+  });
+
+  it("does not deliver a named steer only in memory after its durable push is refused", async () => {
+    const admission = new ThreadAdmission<DispatchFollowUp>();
+    const live = admission.claim("slack:CX:child", { agent: "general" });
+    live.live.runId = "run-child";
+    const ledger = new RecordingLedger();
+    expect(
+      await steerRun(
+        {
+          config: configStore(),
+          runLedger: { sessionPersistence: true, pushInbox: ledger.pushInbox.bind(ledger) },
+          admission,
+        },
+        { userId: "slack:UX", channelId: "slack:CX", from: { runId: "run-parent" } },
+        { runId: "run-child", threadKey: "slack:CX:child", agent: "general", parentRunId: "run-parent" },
+        "keep this durable",
+      ),
+    ).toEqual({ kind: "not_live" });
+    expect(live.live.inbox.size).toBe(0);
+  });
+
   const CHILD_THREAD = "slack:CX:9.0";
   const sender = {
     userId: "slack:UX",
@@ -1302,6 +1423,100 @@ describe("createSteerSender — the wired sender behind `steer.run` (the one-doo
     });
     return { admission, ledger, sender, redispatched };
   }
+
+  it.each([
+    [true, "requester"],
+    [false, "requester"],
+    [true, "writer"],
+    [false, "writer"],
+  ] as const)(
+    "durably delivers an authorized cross-channel %s-local %s steer with its source origin",
+    async (local, role) => {
+      const targetThread = "slack:CY:target";
+      const original = { ...requester, origin: { channelId: "slack:CX", threadKey: PLAN_THREAD } };
+      const caller =
+        role === "requester"
+          ? {
+              ...original,
+              actor: {
+                ...original.actor,
+                id: "http:t1",
+                self: ["http:t1", "slack:UREQ"],
+                asUser: { id: "slack:UREQ" },
+              },
+            }
+          : {
+              ...original,
+              id: "slack:UADMIN",
+              actor: {
+                ...original.actor,
+                id: "slack:UADMIN",
+                grants: { actions: new Set(["runs:write"]), channels: new Set<string>(), repos: new Set<string>() },
+              },
+            };
+      const ledger = new InMemoryRunLedger(() => NOW);
+      await ledger.claim({
+        runId: "cross-channel",
+        threadKey: targetThread,
+        gen: "target-gen",
+        leaseMs: 30_000,
+        startedAt: NOW,
+        meta: { channelId: "slack:CY", threadKey: targetThread, userId: "slack:UREQ", agent: "general" },
+        card: null,
+        system: "sys",
+        tools: [],
+      });
+      const admission = new ThreadAdmission<DispatchFollowUp>();
+      const live = local ? admission.claim(targetThread, { agent: "general" }).live : undefined;
+      if (live) live.runId = "cross-channel";
+      const sender = createSteerSender({
+        config: configStore(),
+        runLedger: {
+          pushInbox: async (id, message) => {
+            expect(live?.inbox.size ?? 0).toBe(0);
+            return (await ledger.pushInbox(id, message)).seq;
+          },
+        },
+        runs: {
+          getById: () => ({
+            id: "cross-channel",
+            finished: false,
+            agent: "general",
+            channelId: "slack:CY",
+            threadKey: targetThread,
+            userId: "slack:UREQ",
+          }),
+        },
+        admission,
+      });
+      expect(await sender.send("cross-channel", "preserve the original sender", caller)).toContain("Folded into");
+      const saved = (await ledger.readInbox("cross-channel", 0))[0];
+      expect(saved).toMatchObject({
+        seq: 1,
+        message: {
+          channelId: "slack:CX",
+          threadKey: PLAN_THREAD,
+          userId: role === "requester" ? "slack:UREQ" : "slack:UADMIN",
+          ...(role === "requester" ? { authenticatedAs: "http:t1" } : {}),
+          target: {
+            version: 1,
+            runId: "cross-channel",
+            channelId: "slack:CY",
+            threadKey: targetThread,
+            requester: "slack:UREQ",
+            producerGen: "target-gen",
+          },
+        },
+      });
+      const restored = followUpFromInbox(saved, {} as ChannelIO, NOW)!;
+      expect(restored.msg).toMatchObject({ channelId: "slack:CX", threadKey: PLAN_THREAD });
+      if (local)
+        expect(live!.inbox.drain()[0]).toMatchObject({
+          ledgerSeq: 1,
+          msg: { channelId: "slack:CX", threadKey: PLAN_THREAD },
+        });
+    },
+  );
 
   it("an operator-bound same-requester DM steer keeps direct provenance through the command and durable inbox", async () => {
     const { admission, ledger, sender } = senderDeps();

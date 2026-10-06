@@ -1,13 +1,17 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { CoordinatorReconcileEffect, CoordinatorReconcileReceipt } from "../coordinator/workflowReconciliation.js";
 import type { StepReport } from "./stepReport.js";
 import type { ChatMessage } from "../chatMessage.js";
 import { isRunRecord, type RunRecord } from "../runRecord.js";
 import { createRunHistoryWriter } from "../runHistoryWriter.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "../runStoreWorker.js";
+import { UncertainStoreError } from "../storeFailure.js";
+import { storeRequestWitness } from "../storeResponse.js";
+import * as receipts from "../references/receipts.js";
 import { InMemoryRunLedger } from "./inMemory.js";
 import { sealPausedHardStop } from "./pausedStop.js";
 import type { RunLedger } from "./ledger.js";
+import type { PlaneEffect } from "../plane/decide.js";
 import { FollowUpInbox } from "../threadAdmission.js";
 import { GEN_PATTERN, TRANSCRIPT_PART_BYTES, type IntakeReceipt } from "./types.js";
 import {
@@ -153,6 +157,403 @@ const step = (over: Partial<StepReport> = {}): StepReport => ({
   iteration: 0,
   remainingMs: 600_000,
   ...over,
+});
+
+describe("unknown terminal admission hold", () => {
+  it.each([false, true])(
+    "holds a later original-run claim after a lost finish reply: committed=%s",
+    async (committed) => {
+      const inner = new InMemoryRunLedger(() => 10_000);
+      let claims = 0;
+      let request: Awaited<ReturnType<typeof storeRequestWitness>> | undefined;
+      const ledger = overriding(inner, {
+        claim: async (...args) => {
+          claims++;
+          return inner.claim(...args);
+        },
+        finish: async (...args) => {
+          request = await storeRequestWitness(
+            "/runs/finish",
+            JSON.stringify({ runId: args[0], gen: args[1], record: args[2] }),
+          );
+          if (committed) await inner.finish(...args);
+          throw new UncertainStoreError("finish reply lost", request);
+        },
+      });
+      const h = harness({ ledger });
+      const run = (await openRun(h.wt, openReq()))!;
+      const original = record("r1");
+      const writer = createRunHistoryWriter({ store: { put: async () => {}, abandoned: () => {} }, warn: () => {} });
+      writer.write(original, { via: run.sink });
+      original.userId = "foreign mutation";
+      await writer.settled();
+      expect(JSON.parse(request!.payload).record).toMatchObject({
+        id: "r1",
+        userId: "slack:UALICE",
+        session: { key: expect.any(String) },
+      });
+      const expected = {
+        kind: "held",
+        hold: { version: 1, runId: "r1", gen: "gen-A", threadKey: "slack:C1:1.0", requestDigest: request!.digest },
+      };
+      for (const result of [await h.wt.reserve(openReq()), await h.wt.open(openReq())]) {
+        expect(result).toMatchObject(expected);
+        const held = result as unknown as { error: UncertainStoreError };
+        expect(held.error).toBeInstanceOf(UncertainStoreError);
+        expect(held.error.request).toEqual(request);
+        expect(Object.isFrozen(held.error.request)).toBe(true);
+        expect(Object.prototype.propertyIsEnumerable.call(held.error, "request")).toBe(false);
+        expect(JSON.parse(JSON.stringify(held.error))).not.toHaveProperty("request");
+        expect(JSON.stringify(held.error)).not.toContain(request!.payload);
+      }
+      run.sink.abandoned(record("r1"), "a later notification is not reconciliation");
+      expect(await h.wt.reserve(openReq())).toMatchObject(expected);
+      expect(claims).toBe(1);
+      expect(writer.uncertain()).toBe(1);
+      expect(h.fallbackPuts).toEqual([]);
+    },
+  );
+
+  it.each(["r1", "r2"])(
+    "resolves an already-waiting %s claim as held without another claim or untracked execution",
+    async (candidate) => {
+      const inner = new InMemoryRunLedger(() => 10_000);
+      let entered!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>((r) => (entered = r));
+      const released = new Promise<void>((r) => (release = r));
+      let claims = 0;
+      const ledger = overriding(inner, {
+        claim: async (...args) => {
+          claims++;
+          return inner.claim(...args);
+        },
+        finish: async (...args) => {
+          const request = await storeRequestWitness("/runs/finish", JSON.stringify(args));
+          entered();
+          await released;
+          throw new UncertainStoreError("finish reply lost", request);
+        },
+      });
+      const h = harness({ ledger });
+      const run = (await openRun(h.wt, openReq()))!;
+      const writer = createRunHistoryWriter({ store: { put: async () => {}, abandoned: () => {} }, warn: () => {} });
+      writer.write(record("r1"), { via: run.sink });
+      await started;
+      const waiting = h.wt.reserve(openReq({ runId: candidate }));
+      await new Promise((r) => setImmediate(r));
+      release();
+      expect(await waiting).toMatchObject({ kind: "held", hold: { runId: "r1", gen: "gen-A" } });
+      await writer.settled();
+      expect(claims).toBe(candidate === "r1" ? 1 : 2);
+      expect(inner.live.get("r1")?.ownerGen).toBe("gen-A");
+    },
+  );
+
+  it.each(["missing-route", "refused"])("retains an unknown plain fallback after a %s finish", async (primary) => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const ledger = overriding(inner, {
+      finish: async () => {
+        if (primary === "missing-route") throw new RouteMissingError("old receiver");
+        return { ok: false, reason: "unknown-run" };
+      },
+    });
+    let request: Awaited<ReturnType<typeof storeRequestWitness>> | undefined;
+    const wt = createLedgerWriteThrough({
+      ledger,
+      gen: "gen-A",
+      warn: () => {},
+      ...timers(),
+      fallback: {
+        put: async (r) => {
+          request = await storeRequestWitness("/runs/put", JSON.stringify({ record: r }));
+          throw new UncertainStoreError("fallback reply lost", request);
+        },
+        abandoned: () => {},
+      },
+    });
+    const run = (await openRun(wt, openReq()))!;
+    const writer = createRunHistoryWriter({ store: { put: async () => {}, abandoned: () => {} }, warn: () => {} });
+    writer.write(record("r1"), { via: run.sink });
+    await writer.settled();
+    expect(JSON.parse(request!.payload).record.session).toBeDefined();
+    expect(await wt.reserve(openReq())).toMatchObject({
+      kind: "held",
+      hold: { runId: "r1", requestDigest: request!.digest },
+    });
+    expect(writer.uncertain()).toBe(1);
+  });
+
+  it("keeps the original landing in flight through a separate fallback and retains its unknown witness", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const h = harness({
+      ledger: overriding(inner, {
+        finish: async () => {
+          throw new PermanentStoreError("primary rejected");
+        },
+      }),
+    });
+    const run = (await openRun(h.wt, openReq()))!;
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((r) => (entered = r));
+    const released = new Promise<void>((r) => (release = r));
+    let request: Awaited<ReturnType<typeof storeRequestWitness>> | undefined;
+    const writer = createRunHistoryWriter({
+      warn: () => {},
+      store: {
+        put: async (r) => {
+          request = await storeRequestWitness("/runs/put", JSON.stringify({ record: r }));
+          entered();
+          await released;
+          throw new UncertainStoreError("fallback reply lost", request);
+        },
+        abandoned: () => {},
+      },
+    });
+    writer.write(record("r1"), { via: run.sink });
+    await started;
+    let finished = false;
+    const waiting = h.wt.reserve(openReq()).then((result) => {
+      finished = true;
+      return result;
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(finished).toBe(false);
+    release();
+    expect(await waiting).toMatchObject({ kind: "held", hold: { runId: "r1", requestDigest: request!.digest } });
+    await writer.settled();
+    expect(writer.uncertain()).toBe(1);
+    expect(await h.wt.reserve(openReq())).toMatchObject({ kind: "held" });
+  });
+});
+
+describe("uncertain canonical boundaries", () => {
+  function deferred() {
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => (resolve = done));
+    return { promise, resolve };
+  }
+
+  it.each(["state", "step"] as const)(
+    "retains overlapping originals when the %s response becomes unknown first",
+    async (first) => {
+      const inner = new InMemoryRunLedger(() => 10_000);
+      const entered = { state: deferred(), step: deferred() };
+      const release = { state: deferred(), step: deferred() };
+      let stateArgs: Parameters<RunLedger["setState"]> | undefined;
+      let stepArgs: Parameters<RunLedger["step"]> | undefined;
+      let stateWrites = 0;
+      let stepWrites = 0;
+      const ledger = overriding(inner, {
+        setState: async (...args) => {
+          stateWrites++;
+          if (stateWrites > 1) return inner.setState(...args);
+          stateArgs = structuredClone(args);
+          const witness = await storeRequestWitness("/runs/state", JSON.stringify(args));
+          entered.state.resolve();
+          await release.state.promise;
+          if (first !== "state") await inner.setState(...args);
+          throw new UncertainStoreError("state reply lost", witness);
+        },
+        step: async (...args) => {
+          if (args[2].step === 0) return inner.step(...args);
+          stepWrites++;
+          if (stepWrites > 1) return inner.step(...args);
+          stepArgs = structuredClone(args);
+          const witness = await storeRequestWitness("/runs/step", JSON.stringify(args));
+          entered.step.resolve();
+          await release.step.promise;
+          if (first !== "step") await inner.step(...args);
+          throw new UncertainStoreError("step reply lost", witness);
+        },
+      });
+      const h = harness({ ledger });
+      const run = (await openRun(h.wt, openReq()))!;
+      const stateWrite = run.commitState({ verdict: "approve" });
+      const stepWrite = run.step(step());
+      await Promise.all([entered.state.promise, entered.step.promise]);
+      release[first].resolve();
+      if (first === "state") await stateWrite;
+      else await stepWrite;
+      const original = run.writeBoundaryFailure;
+      expect(original?.kind).toBe(first);
+      release[first === "state" ? "step" : "state"].resolve();
+      await Promise.all([stateWrite, stepWrite]);
+      expect(await run.commitState({ checklist: "later" })).toBe("unavailable");
+      await run.step(step({ firstIdx: 4, turn: 2 }));
+      expect([stateWrites, stepWrites]).toEqual([1, 1]);
+      expect(run.writeBoundaryFailure).toEqual(original);
+      if (first === "state") await inner.setState(...stateArgs!);
+      else await inner.step(...stepArgs!);
+      expect(await run.commitState({ checklist: "reconciled" })).toBe("ok");
+      await run.step(step({ firstIdx: 4, turn: 2 }));
+      expect([stateWrites, stepWrites]).toEqual([2, 2]);
+      expect(run.writeBoundaryFailure).toBeUndefined();
+      expect(h.sleeps).toEqual([]);
+      await run.close();
+    },
+  );
+
+  it("does not erase an already-started unknown write while an earlier canonical hash is in flight", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const stateEntered = deferred();
+    const stateRelease = deferred();
+    const hashEntered = deferred();
+    const hashRelease = deferred();
+    let stepWrites = 0;
+    let pauseHash = false;
+    const originalHash = receipts.sourceHash;
+    const hashSpy = vi.spyOn(receipts, "sourceHash").mockImplementation(async (value) => {
+      if (pauseHash && (value as { step?: number })?.step === 1) {
+        pauseHash = false;
+        hashEntered.resolve();
+        await hashRelease.promise;
+      }
+      return originalHash(value);
+    });
+    const ledger = overriding(inner, {
+      setState: async (...args) => {
+        const witness = await storeRequestWitness("/runs/state", JSON.stringify(args));
+        stateEntered.resolve();
+        await stateRelease.promise;
+        throw new UncertainStoreError("state reply lost", witness);
+      },
+      step: async (...args) => {
+        if (args[2].step === 0) return inner.step(...args);
+        stepWrites++;
+        const result = await inner.step(...args);
+        if (stepWrites === 1)
+          throw new UncertainStoreError(
+            "step reply lost",
+            await storeRequestWitness("/runs/step", JSON.stringify(args)),
+          );
+        return result;
+      },
+    });
+    const h = harness({ ledger });
+    const run = (await openRun(h.wt, openReq()))!;
+    try {
+      const stateWrite = run.commitState({ verdict: "approve" });
+      await stateEntered.promise;
+      await run.step(step());
+      pauseHash = true;
+      const nextStep = run.step(step({ firstIdx: 4, turn: 2 }));
+      await hashEntered.promise;
+      stateRelease.resolve();
+      await stateWrite;
+      hashRelease.resolve();
+      await nextStep;
+      expect(stepWrites).toBe(1);
+      expect(run.writeBoundaryFailure).toMatchObject({ kind: "state", runId: "r1", gen: "gen-A" });
+      expect(h.sleeps).toEqual([]);
+    } finally {
+      stateRelease.resolve();
+      hashRelease.resolve();
+      hashSpy.mockRestore();
+      await run.close();
+    }
+  });
+
+  it.each(["different", "fenced"] as const)(
+    "keeps an unknown step held when canonical data is %s",
+    async (caseName) => {
+      const inner = new InMemoryRunLedger(() => 10_000);
+      let writes = 0;
+      const ledger = overriding(inner, {
+        step: async (...args) => {
+          if (args[2].step === 0) return inner.step(...args);
+          writes++;
+          await inner.step(...args);
+          throw new UncertainStoreError(
+            "step reply lost",
+            await storeRequestWitness("/runs/step", JSON.stringify(args)),
+          );
+        },
+      });
+      const h = harness({ ledger });
+      const run = (await openRun(h.wt, openReq()))!;
+      await run.step(step());
+      const original = run.writeBoundaryFailure;
+      if (caseName === "different") inner.steps.get("r1")!.at(-1)!.turn = 99;
+      else inner.live.get("r1")!.ownerGen = "gen-B";
+      await run.step(step({ firstIdx: 4, turn: 2 }));
+      expect(writes).toBe(1);
+      expect(run.writeBoundaryFailure).toEqual(original);
+      expect(h.sleeps).toEqual([]);
+      await run.close();
+    },
+  );
+
+  it("continues ordinary state and step writes when overlapping requests both acknowledge", async () => {
+    const h = harness();
+    const run = (await openRun(h.wt, openReq()))!;
+    await Promise.all([run.commitState({ verdict: "approve" }), run.step(step())]);
+    expect(run.writeBoundaryFailure).toBeUndefined();
+    expect(await run.commitState({ checklist: "later" })).toBe("ok");
+    await run.step(step({ firstIdx: 4, turn: 2 }));
+    expect(h.ledger.steps.get("r1")!.at(-1)!.step).toBe(2);
+    expect(h.ledger.live.get("r1")!.state).toMatchObject({ verdict: "approve", checklist: "later" });
+    await run.close();
+  });
+
+  it.each([true, false])(
+    "holds state without retry and reconciles only the exact original canonical commit: committed=%s",
+    async (committed) => {
+      const inner = new InMemoryRunLedger(() => 10_000);
+      let writes = 0,
+        loseReply = true;
+      const ledger = overriding(inner, {
+        setState: async (runId, gen, state) => {
+          writes++;
+          const witness = await storeRequestWitness("/runs/state", JSON.stringify({ runId, gen, state }));
+          const result = committed || !loseReply ? await inner.setState(runId, gen, state) : { ok: true as const };
+          if (loseReply) throw new UncertainStoreError("body interrupted", witness);
+          return result;
+        },
+      });
+      const h = harness({ ledger }),
+        run = (await openRun(h.wt, openReq()))!;
+      expect(await run.commitState({ verdict: "approve" })).toBe("unavailable");
+      const failure = run.writeBoundaryFailure;
+      expect(failure).toMatchObject({ version: 1, runId: "r1", gen: "gen-A", kind: "state", stateVersion: 1 });
+      expect(h.sleeps).toEqual([]);
+      loseReply = false;
+      expect(await run.commitState({ checklist: "later" })).toBe(committed ? "ok" : "unavailable");
+      expect(writes).toBe(committed ? 2 : 1);
+      if (!committed) expect(run.writeBoundaryFailure).toEqual(failure);
+      await run.close();
+    },
+  );
+
+  it("keeps the immutable original step until a same-owner exact canonical row proves it committed", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const seen: number[] = [];
+    let loseReply = true;
+    const ledger = overriding(inner, {
+      step: async (...args) => {
+        if (args[2].step === 0) return inner.step(...args);
+        seen.push(args[2].step);
+        const witness = await storeRequestWitness(
+          "/runs/step",
+          JSON.stringify({ runId: args[0], gen: args[1], record: args[2] }),
+        );
+        const result = await inner.step(...args);
+        if (loseReply) throw new UncertainStoreError("body interrupted", witness);
+        return result;
+      },
+    });
+    const h = harness({ ledger }),
+      run = (await openRun(h.wt, openReq()))!;
+    await run.step(step());
+    expect(run.writeBoundaryFailure).toMatchObject({ version: 1, runId: "r1", gen: "gen-A", kind: "step", step: 1 });
+    expect(seen).toEqual([1]);
+    loseReply = false;
+    await run.step(step({ firstIdx: 4, turn: 2 }));
+    expect(seen).toEqual([1, 2]);
+    expect(run.writeBoundaryFailure).toBeUndefined();
+    await run.close();
+  });
 });
 
 describe("mintGeneration", () => {
@@ -904,7 +1305,7 @@ describe("reserve — the row before the prompt (item 42)", () => {
     await ledger.pushInbox("r1", { text: "late" });
     await reserved.abandon();
     expect(ledger.live.get("r1")).toBeUndefined();
-    expect(await ledger.readInbox("r1", 0)).toEqual([]);
+    expect(await ledger.readInbox("r1", 0)).toMatchObject([{ seq: 1, message: { text: "late" } }]);
     expect(ledger.finished.get("r1")).toBeUndefined();
     expect(fallbackPuts).toEqual([]);
     expect(wt.liveRuns()).toEqual([]);
@@ -1519,6 +1920,75 @@ describe("step — turns first, then the record", () => {
 });
 
 describe("events, state, heartbeat", () => {
+  it("heartbeat provider control renders canonical text instead of persisted display bytes", () => {
+    const inbox = new FollowUpInbox();
+    const effect: Extract<PlaneEffect, { kind: "steer" }> = {
+      id: "steer:r1:8",
+      kind: "steer",
+      runId: "r1",
+      seq: 8,
+      message: {
+        version: 1,
+        kind: "provider-reissue",
+        targetRunId: "r1",
+        channelId: "slack:C1",
+        threadKey: "slack:C1:1.0",
+        text: "untrusted display",
+        at: 2000,
+        userId: "plane",
+        userName: "plane",
+        plane: { steer: "reissue", provider: "anthropic" },
+      },
+    };
+    expect(deliverPlaneSteer(effect, { runId: "r1", inbox })).toBe("done");
+    expect(inbox.drain()[0].text).toBe(
+      "the model provider anthropic is answering again — re-issue the held turn and continue",
+    );
+  });
+
+  it("heartbeat steers reject malformed version, target, principal and sequence before queue delivery", () => {
+    const message = {
+      version: 1,
+      kind: "provider-reissue",
+      targetRunId: "r1",
+      channelId: "slack:C1",
+      threadKey: "slack:C1:1.0",
+      text: "display bytes",
+      at: 2000,
+      userId: "plane",
+      userName: "plane",
+      plane: { steer: "reissue", provider: "anthropic" },
+    };
+    for (const patch of [
+      { version: 99 },
+      { targetRunId: "foreign" },
+      { authenticatedAs: 17 },
+      { authenticatedAs: "mcp:foreign" },
+      { target: { version: 1, runId: "foreign" } },
+      { at: NaN },
+    ]) {
+      const inbox = new FollowUpInbox();
+      const effect = {
+        id: "steer:r1:7",
+        kind: "steer",
+        runId: "r1",
+        seq: 7,
+        message: { ...message, ...patch },
+      } as unknown as Extract<PlaneEffect, { kind: "steer" }>;
+      expect(deliverPlaneSteer(effect, { runId: "r1", inbox })).toBe("deferred");
+      expect(inbox.size).toBe(0);
+    }
+    for (const seq of [0, NaN, 1.5]) {
+      const inbox = new FollowUpInbox();
+      const effect = { id: "steer:r1:7", kind: "steer", runId: "r1", seq, message } as unknown as Extract<
+        PlaneEffect,
+        { kind: "steer" }
+      >;
+      expect(deliverPlaneSteer(effect, { runId: "r1", inbox })).toBe("deferred");
+      expect(inbox.size).toBe(0);
+    }
+  });
+
   it("events are appended in batches with the registry seq, on the flush timer or at the batch size; nothing after the finish", async () => {
     const { ledger, wt, t } = harness();
     const run = (await openRun(wt, openReq()))!;
@@ -1657,6 +2127,9 @@ describe("events, state, heartbeat", () => {
       runId: "r1",
       seq: 7,
       message: {
+        version: 1 as const,
+        kind: "provider-reissue" as const,
+        targetRunId: "r1",
         channelId: "slack:C1",
         threadKey: "slack:C1:1.0",
         text: "the model provider anthropic is answering again — re-issue the held turn and continue",
@@ -1814,13 +2287,13 @@ describe("events, state, heartbeat", () => {
     const { wt } = harness({ ledger });
     const run = (await openRun(wt, openReq()))!;
     const first = run.commitState({ checklist: "saved" });
-    await new Promise((r) => setImmediate(r)); // the first snapshot is in flight
+    await vi.waitFor(() => expect(acknowledgments).toHaveLength(1));
     const second = run.commitState({ pushedBranch: "later" });
     let secondResult: string | undefined;
     void second.then((result) => (secondResult = result));
     acknowledgments.shift()!();
     expect(await first).toBe("ok");
-    await new Promise((r) => setImmediate(r)); // the second snapshot is in flight
+    await vi.waitFor(() => expect(acknowledgments).toHaveLength(1));
     expect(secondResult).toBeUndefined();
     expect(inner.live.get("r1")!.state).toEqual({ checklist: "saved" });
     acknowledgments.shift()!();

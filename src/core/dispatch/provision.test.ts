@@ -1,3 +1,8 @@
+import { analyzeRunFriction } from "../runFriction.js";
+import { terminalCommitmentUnknown } from "../runLedger/writeThrough.js";
+import { WorkerRunLedger } from "../runLedgerWorker.js";
+import { UncertainStoreError } from "../storeFailure.js";
+import { isChildHandoff } from "./handoff.js";
 import { provisionalBearerExpiresAt } from "../budgets.js";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -948,6 +953,108 @@ describe("registerRun — the run's row on every surface before the attach", () 
 });
 
 describe("reserveRun — the ledger reservation before the attach", () => {
+  it.each(["coordinator", "childHandoff"] as const)(
+    "preserves actual held error before a generic nontracked child refusal: %s",
+    async (lane) => {
+      const d = deps(),
+        r = request(d, "hello");
+      const record: import("../runRecord.js").RunRecord = {
+        id: "original-held",
+        channelVisibility: "public",
+        startedAt: NOW,
+        finishedAt: NOW + 1,
+        channelId: r.message.channelId,
+        userId: r.message.userId,
+        threadKey: r.message.threadKey,
+        status: "completed",
+        eventCount: 0,
+        storedEventCount: 0,
+        truncated: false,
+        events: [],
+        diagnosis: analyzeRunFriction([]),
+      };
+      const receiver = new WorkerRunLedger({
+        baseUrl: "https://terminal-receiver.invalid",
+        token: "fixture",
+        storeKey: "runs:fixture",
+        fetch: async () => {
+          throw new Error("actual terminal request reply lost");
+        },
+      });
+      let uncertain: UncertainStoreError | undefined;
+      try {
+        await receiver.finish(record.id, "gen-T", record);
+      } catch (err) {
+        if (!(err instanceof UncertainStoreError)) throw err;
+        uncertain = err;
+      }
+      if (!uncertain) throw new Error("original terminal request was not captured");
+      const error = terminalCommitmentUnknown(
+        {
+          version: 1,
+          runId: record.id,
+          gen: "gen-T",
+          threadKey: record.threadKey,
+          requestDigest: uncertain.request.digest,
+        },
+        uncertain.request,
+      );
+      const originalPayload = error.request.payload;
+      const handoff = {
+        version: 1 as const,
+        source: {
+          runId: "original-parent",
+          threadKey: "slack:CX:parent",
+          channelId: "slack:CX",
+          requester: r.message.userId,
+        },
+        session: { key: "slack:CX:parent:general", from: 0, to: -1 },
+        assets: [],
+      };
+      expect(isChildHandoff(handoff)).toBe(true);
+      const calls: unknown[] = [];
+      d.ledger.reserve = async () => {
+        calls.push(error);
+        return { kind: "held", hold: error.hold, error };
+      };
+      const card = { update() {}, done: vi.fn(async () => {}) };
+      await expect(
+        reserveRun(d, {
+          msg: r.message,
+          agent: r.agent,
+          profile: r.profile,
+          resolved: r.resolved,
+          repoCtx: {},
+          channelVisibility: "public",
+          runId: "new-attempt",
+          startedAt: NOW,
+          receivedAt: NOW,
+          resume: undefined,
+          restart: undefined,
+          card,
+          hooks: { onStop() {}, onFenced() {} },
+          admitted: r.admitted,
+          root: r.root,
+          ...(lane === "coordinator"
+            ? {
+                coordinator: {
+                  parentInstanceId: "held-owner",
+                  idempotencyKey: "held-owner:U12/0/general",
+                  unit: "U12",
+                },
+              }
+            : { childHandoff: handoff }),
+        }),
+      ).rejects.toBe(error);
+      expect(calls).toEqual([error]);
+      expect(r.admitted.runId).toBeUndefined();
+      expect(card.done).not.toHaveBeenCalled();
+      expect(error.request.payload).toBe(originalPayload);
+      expect(Object.isFrozen(error.request)).toBe(true);
+      expect(Object.keys(error)).not.toContain("request");
+    },
+  );
+
   it("stores only a matching requester DM provenance on the reserved row", async () => {
     const d = deps();
     const r = request(d, "What happened?", "orchestrator");

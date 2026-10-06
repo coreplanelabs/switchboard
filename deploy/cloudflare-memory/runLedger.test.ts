@@ -26,6 +26,7 @@ import type { ContextDependencies } from "../../src/core/references/contextDepen
 import type { IntakeReceipt } from "../../src/core/runLedger/types.ts";
 import type { RunMetricsPoint } from "../../src/core/runMetrics.ts";
 import { historicalNativeChain } from "../../src/core/coordinator/historicalNativeAudit.ts";
+import { messageFromInbox } from "../../src/core/runLedger/inboxMessage.ts";
 
 // Feature: docs/reference/specs/orchestration-plane.md — exact Workflow discovery and durable report obligations.
 describe("durable coordinator Workflow reconciliation", () => {
@@ -1783,6 +1784,258 @@ const step = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
+describe("cross-channel named steer custody", () => {
+  it("persists the original sender route and credential beside the canonical SQLite target", async () => {
+    const key = storeKey();
+    const runId = "cross-channel";
+    const threadKey = "slack:C1:target";
+    await post("/runs/claim", claimBody(key, runId, threadKey));
+    const message = {
+      version: 1,
+      kind: "message",
+      channelId: "slack:C2",
+      threadKey: "slack:C2:source",
+      userId: "slack:UALICE",
+      authenticatedAs: "http:alice",
+      sourceUrl: "https://acme.slack.com/archives/C2/p10",
+      text: "keep this durable",
+      at: 2_000,
+    };
+    expect(await post("/runs/inbox", { storeKey: key, runId, message })).toEqual({
+      status: 200,
+      data: { ok: true, seq: 1 },
+    });
+    const read = await post("/runs/inbox/read", { storeKey: key, runId });
+    const target = {
+      version: 1,
+      runId,
+      channelId: "slack:C1",
+      threadKey,
+      requester: "slack:UALICE",
+      producerGen: "g1",
+    };
+    expect(read.data).toEqual({ items: [{ seq: 1, message: { ...message, target } }] });
+    expect(messageFromInbox({ ...message, target }, 0, target)?.msg).toMatchObject({
+      channelId: message.channelId,
+      threadKey: message.threadKey,
+      userId: message.userId,
+      authenticatedAs: message.authenticatedAs,
+      sourceUrl: message.sourceUrl,
+      text: message.text,
+    });
+    for (const refused of [
+      { ...message, target },
+      { ...message, userId: "plane", kind: "provider-reissue" },
+    ])
+      expect((await post("/runs/inbox", { storeKey: key, runId, message: refused })).data).toEqual({ ok: false });
+    expect((await post("/runs/inbox/read", { storeKey: key, runId })).data).toEqual(read.data);
+  });
+});
+
+describe("closed SQLite inbox segment admission", () => {
+  it("holds an oversized supported prior archive using SQLite UTF-8 bytes while retaining every original row", async () => {
+    const key = storeKey();
+    const id = "oversized-prior";
+    const thread = "slack:C1:oversized-prior";
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await post("/runs/claim", claimBody(key, id, thread));
+    await post("/runs/inbox", { storeKey: key, runId: id, message: { text: "original" } });
+    await post("/runs/step", { storeKey: key, runId: id, gen: "g1", record: step() });
+    await post("/runs/finish", { storeKey: key, runId: id, gen: "g1", record: record(id, thread) });
+    await post("/runs/claim", claimBody(key, id, thread, "g2"));
+    let original: Array<{ step: number; json: string }> = [];
+    await runInDurableObject(stub, (_owner: RunHistoryDO, state) => {
+      const archive = JSON.parse(
+        state.storage.sql.exec<{ json: string }>("SELECT json FROM run_steps WHERE run_id=? AND step=-1", id).one()
+          .json,
+      );
+      archive.first.lastStep.padding = "雪".repeat(300_000);
+      archive.latest.lastStep.padding = "雪".repeat(300_000);
+      state.storage.sql.exec("UPDATE run_steps SET json=? WHERE run_id=? AND step=-1", JSON.stringify(archive), id);
+      state.storage.sql.exec(
+        "INSERT INTO run_steps(run_id,step,json) VALUES(?,?,?)",
+        id,
+        0,
+        JSON.stringify(step({ step: 0 })),
+      );
+      original = state.storage.sql
+        .exec<{ step: number; json: string }>("SELECT step,json FROM run_steps WHERE run_id=? ORDER BY step", id)
+        .toArray();
+      const size = state.storage.sql
+        .exec<{ chars: number; bytes: number }>(
+          "SELECT LENGTH(json) AS chars,LENGTH(CAST(json AS BLOB)) AS bytes FROM run_steps WHERE run_id=? AND step=-1",
+          id,
+        )
+        .one();
+      expect(size.chars).toBeLessThan(1.5 * 1024 * 1024);
+      expect(size.bytes).toBeGreaterThan(1.5 * 1024 * 1024);
+    });
+    await expect(post("/runs/abandon", { storeKey: key, runId: id, gen: "g2" })).rejects.toThrow("unreadable");
+    expect((await post("/runs/inbox/read", { storeKey: key, runId: id, gen: "g2", peek: true })).data).toEqual({
+      ok: false,
+      reason: "incomplete",
+    });
+    await runInDurableObject(stub, (_owner: RunHistoryDO, state) => {
+      expect(
+        state.storage.sql.exec("SELECT step,json FROM run_steps WHERE run_id=? ORDER BY step", id).toArray(),
+      ).toEqual(original);
+      expect(
+        state.storage.sql.exec("SELECT * FROM live_runs WHERE run_id=? AND owner_gen='g2'", id).toArray(),
+      ).toHaveLength(1);
+      expect(state.storage.sql.exec("SELECT * FROM run_inbox WHERE run_id=?", id).toArray()).toHaveLength(1);
+    });
+  });
+
+  it.each([160_000, 300_000])(
+    "measures non-ASCII archive bytes before the closing transaction: characters=%s",
+    async (characters) => {
+      const key = storeKey();
+      const id = "archive-byte-boundary";
+      const thread = "slack:C1:archive-byte-boundary";
+      const stub = env.RUNS.get(env.RUNS.idFromName(key));
+      await post("/runs/claim", claimBody(key, id, thread));
+      await post("/runs/inbox", { storeKey: key, runId: id, message: { text: "original" } });
+      const originalStep = JSON.stringify({ ...step(), padding: "雪".repeat(characters) });
+      if (characters === 160_000) {
+        expect(
+          (await post("/runs/step", { storeKey: key, runId: id, gen: "g1", record: JSON.parse(originalStep) })).status,
+        ).toBe(200);
+        await post("/runs/finish", { storeKey: key, runId: id, gen: "g1", record: record(id, thread) });
+        await runInDurableObject(stub, (_owner: RunHistoryDO, state) => {
+          const archive = JSON.parse(
+            state.storage.sql.exec<{ json: string }>("SELECT json FROM run_steps WHERE run_id=? AND step=-1", id).one()
+              .json,
+          );
+          expect(archive.first.lastStep).toEqual(JSON.parse(originalStep));
+          expect(archive.latest.lastStep).toEqual(JSON.parse(originalStep));
+        });
+      } else {
+        await runInDurableObject(stub, (_owner: RunHistoryDO, state) => {
+          state.storage.sql.exec("INSERT INTO run_steps(run_id,step,json) VALUES(?,?,?)", id, 1, originalStep);
+        });
+        await expect(
+          post("/runs/finish", { storeKey: key, runId: id, gen: "g1", record: record(id, thread) }),
+        ).rejects.toThrow("byte limit");
+        await runInDurableObject(stub, (_owner: RunHistoryDO, state) => {
+          expect(
+            state.storage.sql.exec<{ json: string }>("SELECT json FROM run_steps WHERE run_id=? AND step=1", id).one()
+              .json,
+          ).toBe(originalStep);
+          expect(state.storage.sql.exec("SELECT * FROM live_runs WHERE run_id=?", id).toArray()).toHaveLength(1);
+          expect(state.storage.sql.exec("SELECT * FROM runs WHERE run_id=?", id).toArray()).toEqual([]);
+          expect(state.storage.sql.exec("SELECT * FROM run_inbox WHERE run_id=?", id).toArray()).toHaveLength(1);
+        });
+      }
+    },
+  );
+
+  it.each([-1, -2])(
+    "holds an unsupported private key %s without discarding or reinterpreting its original bytes",
+    async (keyValue) => {
+      const key = storeKey();
+      const id = "unknown-archive";
+      const thread = "slack:C1:unknown-archive";
+      const stub = env.RUNS.get(env.RUNS.idFromName(key));
+      await post("/runs/claim", claimBody(key, id, thread));
+      await post("/runs/step", { storeKey: key, runId: id, gen: "g1", record: step() });
+      await post("/runs/inbox", { storeKey: key, runId: id, message: { text: "original" } });
+      const original = '{"version":99,"opaque":"original private bytes"}';
+      await runInDurableObject(stub, (_owner: RunHistoryDO, state) => {
+        state.storage.sql.exec("INSERT INTO run_steps(run_id,step,json) VALUES(?,?,?)", id, keyValue, original);
+      });
+      await expect(post("/runs/abandon", { storeKey: key, runId: id, gen: "g1" })).rejects.toThrow("unreadable");
+      expect((await post("/runs/inbox/read", { storeKey: key, runId: id })).data.items).toEqual([]);
+      expect((await post("/runs/inbox/read", { storeKey: key, runId: id, gen: "g1", peek: true })).data).toEqual({
+        ok: false,
+        reason: "incomplete",
+      });
+      await post("/runs/handoff", { storeKey: key, gen: "g1", runIds: [id] });
+      expect(
+        (await post("/runs/reclaim", { storeKey: key, gen: "g3", now: 3_000, leaseMs: LEASE_MS })).data.runs,
+      ).toMatchObject([{ lastStep: { step: 1 }, inbox: [] }]);
+      await runInDurableObject(stub, (_owner: RunHistoryDO, state) => {
+        expect(
+          state.storage.sql
+            .exec<{ json: string }>("SELECT json FROM run_steps WHERE run_id=? AND step=?", id, keyValue)
+            .one().json,
+        ).toBe(original);
+      });
+    },
+  );
+
+  it.each(["finish", "abandon"] as const)(
+    "retains original bytes through %s, zero seeding and a second reclaim",
+    async (ending) => {
+      const key = storeKey();
+      const id = "closed-segment";
+      const thread = "slack:C1:closed-segment";
+      const stub = env.RUNS.get(env.RUNS.idFromName(key));
+      await post("/runs/claim", claimBody(key, id, thread));
+      await post("/runs/inbox", {
+        storeKey: key,
+        runId: id,
+        message: {
+          version: 1,
+          kind: "message",
+          channelId: "slack:C1",
+          threadKey: thread,
+          userId: "slack:UALICE",
+          text: "already delivered",
+        },
+      });
+      await post("/runs/inbox", { storeKey: key, runId: id, message: { version: 99, text: "opaque original" } });
+      await post("/plane/park", { storeKey: key, runId: id, provider: "anthropic" });
+      await post("/plane/level", { storeKey: key, name: "provider", provider: "anthropic", side: "up" });
+      let original: Array<{ seq: number; json: string }> = [];
+      await runInDurableObject(stub, (owner: RunHistoryDO, state) => {
+        original = state.storage.sql
+          .exec<{ seq: number; json: string }>("SELECT seq,json FROM run_inbox WHERE run_id=? ORDER BY seq", id)
+          .toArray();
+        expect(JSON.parse(original[2].json)).toMatchObject({ kind: "provider-reissue", targetRunId: id });
+        expect(owner.openPlaneEffects()).toMatchObject([{ kind: "steer", runId: id, seq: 3 }]);
+      });
+      await post("/runs/step", { storeKey: key, runId: id, gen: "g1", record: step({ inboxConsumedSeq: 3 }) });
+      if (ending === "finish")
+        await post("/runs/finish", {
+          storeKey: key,
+          runId: id,
+          gen: "g1",
+          record: { ...record(id, thread), restarting: true, restartUntil: 9_000 },
+        });
+      else await post("/runs/abandon", { storeKey: key, runId: id, gen: "g1" });
+      await runInDurableObject(stub, (owner: RunHistoryDO) => {
+        expect(owner.openPlaneEffects()).toEqual([]);
+      });
+      await post("/runs/claim", claimBody(key, id, thread, "g2"));
+      await post("/runs/step", {
+        storeKey: key,
+        runId: id,
+        gen: "g2",
+        record: step({ step: 0, inboxConsumedSeq: 0, inboxDeferredSeqs: [] }),
+      });
+      await post("/runs/handoff", { storeKey: key, gen: "g2", runIds: [id] });
+      const reclaimed = await post("/runs/reclaim", { storeKey: key, gen: "g3", now: 3_000, leaseMs: LEASE_MS });
+      expect(reclaimed.data.runs).toMatchObject([{ lastStep: { step: 0, inboxConsumedSeq: 0 }, inbox: [] }]);
+      expect((await post("/runs/inbox/read", { storeKey: key, runId: id, gen: "g3", peek: true })).data).toMatchObject({
+        ok: true,
+        items: [],
+      });
+      await runInDurableObject(stub, (_owner: RunHistoryDO, state) => {
+        expect(
+          state.storage.sql.exec("SELECT seq,json FROM run_inbox WHERE run_id=? ORDER BY seq", id).toArray(),
+        ).toEqual(original);
+      });
+      expect(
+        (await post("/runs/inbox", { storeKey: key, runId: id, message: { text: "new segment input" } })).data,
+      ).toEqual({ ok: true, seq: 4 });
+      expect((await post("/runs/inbox/read", { storeKey: key, runId: id })).data.items).toMatchObject([{ seq: 4 }]);
+      expect(
+        (await post("/runs/step", { storeKey: key, runId: id, gen: "g3", record: step({ step: -1 }) })).status,
+      ).toBe(400);
+    },
+  );
+});
+
 function timeSealedRunStages(
   onTestFailed: (handler: () => void) => void,
   now = () => performance.now(),
@@ -1930,7 +2183,23 @@ describe("run ledger — claim and admission (item 29)", () => {
     });
     runs = (await post("/runs/live", { storeKey: key })).data.runs as Array<Record<string, unknown>>;
     expect(runs.map((x) => x.runId)).toEqual(["r1"]);
-    expect((await post("/runs/inbox/read", { storeKey: key, runId: "r9", afterSeq: 0 })).data.items).toEqual([]);
+    // Ending the live owner cannot dispose of an opaque original row.
+    expect((await post("/runs/inbox/read", { storeKey: key, runId: "r9", afterSeq: 0 })).data.items).toEqual([
+      {
+        seq: 1,
+        message: {
+          text: "also this",
+          target: {
+            version: 1,
+            runId: "r9",
+            channelId: "slack:C1",
+            threadKey: "slack:C1:1.0",
+            requester: "slack:UA",
+            producerGen: "g1",
+          },
+        },
+      },
+    ]);
     expect((await post("/runs/list", { storeKey: key })).data.items).toEqual([]);
     expect((await post("/runs/abandon", { storeKey: key, runId: "r9", gen: "g2" })).status).toBe(409);
   });
@@ -2214,12 +2483,55 @@ describe("run ledger — steps, events, inbox, state (items 30–31)", () => {
     // Read back past a seq (item 40): the resume's re-read at adopt time.
     expect(await post("/runs/inbox/read", { storeKey: key, runId: "r1", afterSeq: 1 })).toEqual({
       status: 200,
-      data: { items: [{ seq: 2, message: { text: "b" } }] },
+      data: {
+        items: [
+          {
+            seq: 2,
+            message: {
+              text: "b",
+              target: {
+                version: 1,
+                runId: "r1",
+                channelId: "slack:C1",
+                threadKey: "slack:C1:1.0",
+                requester: "slack:UALICE",
+                producerGen: "g1",
+              },
+            },
+          },
+        ],
+      },
     });
     expect((await post("/runs/inbox/read", { storeKey: key, runId: "r1" })).data).toEqual({
       items: [
-        { seq: 1, message: { text: "a" } },
-        { seq: 2, message: { text: "b" } },
+        {
+          seq: 1,
+          message: {
+            text: "a",
+            target: {
+              version: 1,
+              runId: "r1",
+              channelId: "slack:C1",
+              threadKey: "slack:C1:1.0",
+              requester: "slack:UALICE",
+              producerGen: "g1",
+            },
+          },
+        },
+        {
+          seq: 2,
+          message: {
+            text: "b",
+            target: {
+              version: 1,
+              runId: "r1",
+              channelId: "slack:C1",
+              threadKey: "slack:C1:1.0",
+              requester: "slack:UALICE",
+              producerGen: "g1",
+            },
+          },
+        },
       ],
     });
     expect((await post("/runs/inbox/read", { storeKey: key, runId: "nope", afterSeq: 0 })).data).toEqual({ items: [] });
@@ -2230,6 +2542,49 @@ describe("run ledger — steps, events, inbox, state (items 30–31)", () => {
     );
     const live = (await post("/runs/live", { storeKey: key })).data.runs as Array<{ state: unknown }>;
     expect(live[0].state).toEqual({ verdict: "approve" });
+  });
+});
+
+describe("durable inbox terminal custody", () => {
+  it("returns an observational peek only for the current original generation and keeps SQLite bytes", async () => {
+    const key = storeKey(),
+      id = "opaque-peek",
+      thread = "slack:C1:opaque-peek";
+    await post("/runs/claim", claimBody(key, id, thread));
+    await post("/runs/inbox", { storeKey: key, runId: id, message: { version: 99, text: "opaque original" } });
+    expect(
+      (await post("/runs/inbox/read", { storeKey: key, runId: id, gen: "wrong-gen", afterSeq: 0, peek: true })).data,
+    ).toEqual({ ok: false, reason: "fenced" });
+    expect(
+      (await post("/runs/inbox/read", { storeKey: key, runId: id, gen: "g1", afterSeq: 0, peek: true })).data,
+    ).toMatchObject({
+      ok: true,
+      version: 1,
+      runId: id,
+      gen: "g1",
+      items: [{ seq: 1, witness: { version: 1, runId: id, seq: 1 } }],
+      boundary: { lastStep: null },
+    });
+    expect((await post("/runs/inbox/read", { storeKey: key, runId: id, afterSeq: 0 })).data.items).toHaveLength(1);
+  });
+  it("keeps opaque canonical SQLite rows at terminal finish without inferring consumption", async () => {
+    const key = storeKey(),
+      id = "opaque-terminal",
+      thread = "slack:C1:opaque-terminal";
+    await post("/runs/claim", claimBody(key, id, thread));
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    const original = JSON.stringify({ version: 99, text: "opaque original" });
+    await runInDurableObject(stub, (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec("INSERT INTO run_inbox(run_id,seq,json) VALUES(?,?,?)", id, 1, original);
+    });
+    expect(
+      (await post("/runs/finish", { storeKey: key, runId: id, gen: "g1", record: record(id, thread) })).data,
+    ).toMatchObject({ ok: true, stored: true });
+    await runInDurableObject(stub, (_owner: RunHistoryDO, state) => {
+      expect(
+        state.storage.sql.exec<{ json: string }>("SELECT json FROM run_inbox WHERE run_id=? AND seq=1", id).one().json,
+      ).toBe(original);
+    });
   });
 });
 

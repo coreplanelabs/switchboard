@@ -46,6 +46,48 @@ function record(id: string, evs: RunEvent[] = events(3)): RunRecord {
   };
 }
 
+describe("durable store acknowledgement continuity", () => {
+  const aborted = () =>
+    new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.error(new DOMException("body interrupted", "AbortError"));
+        },
+      }),
+      { status: 200 },
+    );
+  it("separates an interrupted read body from complete malformed JSON", async () => {
+    const store = new WorkerRunStore({
+      baseUrl: "https://memory.test",
+      token: "tok",
+      storeKey: "runs:default",
+      fetch: async () => aborted(),
+    });
+    await expect(store.get("r1")).rejects.toMatchObject({ name: "TransientStoreError", cause: { name: "AbortError" } });
+    const malformed = new WorkerRunStore({
+      baseUrl: "https://memory.test",
+      token: "tok",
+      storeKey: "runs:default",
+      fetch: async () => new Response("not JSON", { status: 200 }),
+    });
+    await expect(malformed.get("r1")).rejects.toMatchObject({ name: "PermanentStoreError" });
+  });
+  it("retains the original put when an accepted mutation loses its response body", async () => {
+    let commits = 0;
+    const store = new WorkerRunStore({
+      baseUrl: "https://memory.test",
+      token: "tok",
+      storeKey: "runs:default",
+      fetch: async () => {
+        commits++;
+        return aborted();
+      },
+    });
+    await expect(store.put(record("r1"))).rejects.toMatchObject({ name: "UncertainStoreError", outcome: "unknown" });
+    expect(commits).toBe(1);
+  });
+});
+
 interface Call {
   url: string;
   headers: Record<string, string>;
@@ -293,11 +335,14 @@ describe("WorkerRunStore", () => {
     expect(calls).toEqual([]);
   });
 
-  it("classifies failures: 404 → RouteMissingError; 503/408/429/network → TransientStoreError; 400 → PermanentStoreError", async () => {
+  it("classifies reads as availability failures and unacknowledged writes as unknown effects", async () => {
     const mk = (r: { status: number; body?: unknown } | Error) =>
       new WorkerRunStore({ ...OPTS, fetch: fakeFetch(() => r).fetch });
     await expect(mk({ status: 404, body: { error: "not found" } }).put(record("a"))).rejects.toThrow(RouteMissingError);
-    await expect(mk({ status: 503 }).put(record("a"))).rejects.toThrow(TransientStoreError);
+    await expect(mk({ status: 503 }).put(record("a"))).rejects.toMatchObject({
+      name: "UncertainStoreError",
+      outcome: "unknown",
+    });
     await expect(mk({ status: 408 }).get("a")).rejects.toThrow(TransientStoreError);
     await expect(mk({ status: 429 }).list({})).rejects.toThrow(TransientStoreError);
     await expect(mk(new Error("ECONNRESET")).get("a")).rejects.toThrow(TransientStoreError);

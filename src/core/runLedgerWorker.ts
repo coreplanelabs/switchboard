@@ -17,7 +17,7 @@ import {
   UNKNOWN_CONTEXT_DEPENDENCIES,
   type ContextDependencies,
 } from "./references/contextDependencies.js";
-import { type SessionSources, isSessionSources } from "./references/receipts.js";
+import { type SessionSources, isSessionSources, sourceHash } from "./references/receipts.js";
 // The production ledger: HTTPS to the state Worker's `/runs/*` ledger routes
 // (docs/reference/specs/run-history.md items 28–34), beside `WorkerRunStore`. Same bearer,
 // same error classes, same body convention (a STRING JSON body so the runtime
@@ -112,6 +112,8 @@ import {
   type InboxItem,
 } from "./runLedger/types.js";
 import type { Secrets } from "../secrets.js";
+import { UncertainStoreError, type StoreRequestWitness } from "./storeFailure.js";
+import { readStoreResponse, storeRequestWitness, type StoreOperationKind } from "./storeResponse.js";
 
 export interface WorkerRunLedgerOptions {
   baseUrl: string;
@@ -169,37 +171,47 @@ export class WorkerRunLedger implements RunLedger {
     path: string,
     body: Record<string, unknown>,
     acceptBadRequest = false,
-  ): Promise<{ status: number; data: Record<string, unknown> }> {
+    kind: StoreOperationKind = "write",
+  ): Promise<{ status: number; data: Record<string, unknown>; request: StoreRequestWitness }> {
+    const payload = JSON.stringify(body);
+    const request = await storeRequestWitness(path, payload);
     let res: Response;
     try {
       res = await this.fetchImpl(`${this.baseUrl}${path}`, {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${this.opts.token}` },
-        body: JSON.stringify(body),
+        body: payload,
         signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
       });
     } catch (err) {
+      if (kind === "write")
+        throw new UncertainStoreError(`run ledger ${path}: transport outcome unknown`, request, { cause: err });
       throw new TransientStoreError(`run ledger ${path}: ${err instanceof Error ? err.message : String(err)}`);
     }
     if (res.status === 404) throw new RouteMissingError(`run ledger ${path}: route missing (older state Worker)`);
     if (res.status >= 500 || res.status === 408 || res.status === 429) {
+      if (kind === "write")
+        throw new UncertainStoreError(`run ledger ${path}: mutation outcome unknown (HTTP ${res.status})`, request);
       throw new TransientStoreError(`run ledger ${path}: HTTP ${res.status}`);
     }
-    let data: Record<string, unknown>;
-    try {
-      data = (await res.json()) as Record<string, unknown>;
-    } catch {
-      throw new PermanentStoreError(`run ledger ${path}: non-JSON body (HTTP ${res.status})`);
-    }
-    if (res.status === 409 || res.ok || (acceptBadRequest && res.status === 400)) return { status: res.status, data };
+    const data = await readStoreResponse(res, kind, request);
+    if (res.status === 409 || res.ok || (acceptBadRequest && res.status === 400))
+      return { status: res.status, data, request };
     throw new PermanentStoreError(`run ledger ${path}: HTTP ${res.status} ${String(data.error ?? "")}`.trim());
   }
 
-  private fenceResult(r: { status: number; data: Record<string, unknown> }): FenceResult {
-    if (r.status === 409) {
-      return { ok: false, reason: r.data.reason === "unknown-run" ? "unknown-run" : "fenced" };
-    }
-    return { ok: true };
+  private read(path: string, body: Record<string, unknown>) {
+    return this.post(path, body, false, "read");
+  }
+
+  private fenceResult(r: { status: number; data: Record<string, unknown>; request: StoreRequestWitness }): FenceResult {
+    if (r.status === 409 && r.data.ok === false && (r.data.reason === "fenced" || r.data.reason === "unknown-run"))
+      return { ok: false, reason: r.data.reason };
+    if (r.status === 200 && r.data.ok === true) return { ok: true };
+    throw new UncertainStoreError(
+      `run ledger ${r.request.operation}: invalid acknowledgement (HTTP ${r.status})`,
+      r.request,
+    );
   }
 
   private checkIds(runId: string, gen?: string): void {
@@ -223,7 +235,7 @@ export class WorkerRunLedger implements RunLedger {
 
   async workspaceSettlement(owner: WorkspaceOwner): Promise<WorkspaceSettlement | undefined> {
     if (!isWorkspaceOwner(owner)) throw new PermanentStoreError("run ledger: invalid workspace owner");
-    const r = await this.post("/runs/preservation-owner", { storeKey: this.opts.storeKey, ...owner });
+    const r = await this.read("/runs/preservation-owner", { storeKey: this.opts.storeKey, ...owner });
     if (r.data.kind === "live" || r.data.kind === "unknown") return;
     if (
       r.data.kind === "absent" &&
@@ -395,7 +407,7 @@ export class WorkerRunLedger implements RunLedger {
 
   async sessionTail(key: string): Promise<number> {
     this.checkSessionKey(key);
-    const r = await this.post("/runs/session/tail", { key });
+    const r = await this.read("/runs/session/tail", { key });
     return typeof r.data.next === "number" ? r.data.next : 0;
   }
 
@@ -438,7 +450,7 @@ export class WorkerRunLedger implements RunLedger {
 
   async readSessionEntry(key: string, rowId: string): Promise<readonly TranscriptRow[] | undefined> {
     this.checkSessionKey(key);
-    const response = await this.post("/runs/session/entry", { key, rowId });
+    const response = await this.read("/runs/session/entry", { key, rowId });
     const rows = response.data.rows;
     if (
       !Array.isArray(rows) ||
@@ -461,7 +473,7 @@ export class WorkerRunLedger implements RunLedger {
 
   async readSession(key: string, from: number, to?: number): Promise<AssembledTranscript> {
     this.checkSessionKey(key);
-    const r = await this.post("/runs/session/read", { key, from, ...(to !== undefined ? { to } : {}) });
+    const r = await this.read("/runs/session/read", { key, from, ...(to !== undefined ? { to } : {}) });
     return assembleTranscript(
       Array.isArray(r.data.rows) ? (r.data.rows as TranscriptRow[]) : [],
       Array.isArray(r.data.attachments) ? (r.data.attachments as TranscriptAttachment[]) : [],
@@ -474,7 +486,7 @@ export class WorkerRunLedger implements RunLedger {
     maxBytes: number,
   ): Promise<{ from: number; transcript: AssembledTranscript; sources?: SessionSources; requiresFreshSources?: true }> {
     this.checkSessionKey(key);
-    const r = await this.post("/runs/session/read-tail", { key, maxBytes });
+    const r = await this.read("/runs/session/read-tail", { key, maxBytes });
     const from = typeof r.data.from === "number" ? r.data.from : 0;
     return {
       from,
@@ -490,7 +502,7 @@ export class WorkerRunLedger implements RunLedger {
 
   async searchSession(key: string, query: string, limit: number): Promise<{ hits: SessionHit[]; gaps: number[] }> {
     this.checkSessionKey(key);
-    const r = await this.post("/runs/session/search", { key, query, limit });
+    const r = await this.read("/runs/session/search", { key, query, limit });
     return {
       hits: Array.isArray(r.data.hits) ? (r.data.hits as SessionHit[]) : [],
       gaps: Array.isArray(r.data.gaps) ? (r.data.gaps as number[]) : [],
@@ -499,7 +511,7 @@ export class WorkerRunLedger implements RunLedger {
 
   async readRequesterTarget(key: string, actor: string): Promise<RequesterTarget | null> {
     this.checkSessionKey(key);
-    const r = await this.post("/runs/session/requester-target", { key, actor });
+    const r = await this.read("/runs/session/requester-target", { key, actor });
     return (r.data.target as RequesterTarget | null) ?? null;
   }
 
@@ -512,7 +524,7 @@ export class WorkerRunLedger implements RunLedger {
 
   async readNotepad(key: string): Promise<Notepad | null> {
     this.checkSessionKey(key);
-    const r = await this.post("/runs/session/notepad", { key });
+    const r = await this.read("/runs/session/notepad", { key });
     const n = r.data.notepad as { text?: unknown; updatedAt?: unknown } | null | undefined;
     return n && typeof n.text === "string" && typeof n.updatedAt === "number"
       ? { text: n.text, updatedAt: n.updatedAt }
@@ -588,7 +600,7 @@ export class WorkerRunLedger implements RunLedger {
   }
 
   async planeQueued(runId: string): Promise<PlaneQueueRow | null> {
-    const r = await this.post("/plane/queued", { storeKey: this.opts.storeKey, runId });
+    const r = await this.read("/plane/queued", { storeKey: this.opts.storeKey, runId });
     return (r.data as { row?: PlaneQueueRow | null }).row ?? null;
   }
 
@@ -663,13 +675,95 @@ export class WorkerRunLedger implements RunLedger {
   async pushInbox(runId: string, message: Record<string, unknown>): Promise<{ ok: boolean; seq?: number }> {
     this.checkIds(runId);
     const r = await this.post("/runs/inbox", { storeKey: this.opts.storeKey, runId, message });
-    return { ok: r.data.ok === true, ...(typeof r.data.seq === "number" ? { seq: r.data.seq } : {}) };
+    if (r.status === 200 && r.data.ok === false && r.data.seq === undefined) return { ok: false };
+    if (r.status === 200 && r.data.ok === true && Number.isSafeInteger(r.data.seq) && Number(r.data.seq) > 0)
+      return { ok: true, seq: Number(r.data.seq) };
+    throw new UncertainStoreError("run ledger /runs/inbox: invalid storage acknowledgement", r.request);
   }
 
   async readInbox(runId: string, afterSeq: number): Promise<InboxItem[]> {
     this.checkIds(runId);
-    const r = await this.post("/runs/inbox/read", { storeKey: this.opts.storeKey, runId, afterSeq });
-    return Array.isArray(r.data.items) ? (r.data.items as InboxItem[]) : [];
+    const r = await this.read("/runs/inbox/read", { storeKey: this.opts.storeKey, runId, afterSeq });
+    if (
+      !Array.isArray(r.data.items) ||
+      !r.data.items.every((item: unknown) => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+        const value = item as Record<string, unknown>;
+        return (
+          Number.isSafeInteger(value.seq) &&
+          Number(value.seq) > afterSeq &&
+          !!value.message &&
+          typeof value.message === "object" &&
+          !Array.isArray(value.message)
+        );
+      })
+    )
+      throw new PermanentStoreError("run ledger /runs/inbox/read: invalid observational inbox");
+    return r.data.items as InboxItem[];
+  }
+
+  async peekInbox(runId: string, gen: string, afterSeq: number): Promise<import("./runLedger/types.js").InboxPeek> {
+    this.checkIds(runId, gen);
+    const r = await this.read("/runs/inbox/read", { storeKey: this.opts.storeKey, runId, gen, afterSeq, peek: true });
+    if (r.data.ok === false && ["fenced", "unknown-run", "incomplete"].includes(String(r.data.reason)))
+      return { ok: false, reason: r.data.reason as "fenced" | "unknown-run" | "incomplete" };
+    const boundary = r.data.boundary;
+    if (
+      r.status !== 200 ||
+      r.data.ok !== true ||
+      r.data.version !== 1 ||
+      r.data.runId !== runId ||
+      r.data.gen !== gen ||
+      !Array.isArray(r.data.items) ||
+      !boundary ||
+      typeof boundary !== "object" ||
+      Array.isArray(boundary)
+    )
+      throw new PermanentStoreError("run ledger /runs/inbox/read: missing owner-bound peek");
+    const items: Array<InboxItem & { witness: import("./runLedger/types.js").InboxRowWitness }> = [];
+    let previous = afterSeq;
+    for (const raw of r.data.items) {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new PermanentStoreError("invalid inbox item");
+      const item = raw as Record<string, unknown>,
+        witness = item.witness;
+      if (
+        !Number.isSafeInteger(item.seq) ||
+        Number(item.seq) <= previous ||
+        !item.message ||
+        typeof item.message !== "object" ||
+        Array.isArray(item.message) ||
+        !witness ||
+        typeof witness !== "object" ||
+        Array.isArray(witness)
+      )
+        throw new PermanentStoreError("invalid inbox witness");
+      const proof = witness as Record<string, unknown>;
+      if (
+        proof.version !== 1 ||
+        proof.runId !== runId ||
+        proof.seq !== item.seq ||
+        typeof proof.digest !== "string" ||
+        proof.digest !== (await sourceHash(item.message))
+      )
+        throw new PermanentStoreError("inbox witness mismatch");
+      previous = Number(item.seq);
+      items.push({
+        seq: previous,
+        message: item.message as Record<string, unknown>,
+        witness: { version: 1, runId, seq: previous, digest: proof.digest },
+      });
+    }
+    const observed = boundary as Record<string, unknown>;
+    if (!Object.hasOwn(observed, "state") || !Object.hasOwn(observed, "lastStep"))
+      throw new PermanentStoreError("incomplete inbox boundary");
+    return {
+      ok: true,
+      version: 1,
+      runId,
+      gen,
+      items,
+      boundary: { state: observed.state, lastStep: observed.lastStep },
+    };
   }
 
   async requestStop(runId: string, mode: StopMode): Promise<{ ok: boolean; ownerLive?: boolean }> {
@@ -740,7 +834,7 @@ export class WorkerRunLedger implements RunLedger {
   }
 
   async listLive(): Promise<LiveRunRow[]> {
-    const r = await this.post("/runs/live", { storeKey: this.opts.storeKey });
+    const r = await this.read("/runs/live", { storeKey: this.opts.storeKey });
     const rows = r.data.runs;
     if (
       !Array.isArray(rows) ||
@@ -765,7 +859,7 @@ export class WorkerRunLedger implements RunLedger {
 
   async readEvents(runId: string): Promise<AppendableEvent[]> {
     this.checkIds(runId);
-    const r = await this.post("/runs/live-events", { storeKey: this.opts.storeKey, runId });
+    const r = await this.read("/runs/live-events", { storeKey: this.opts.storeKey, runId });
     return Array.isArray(r.data.events) ? (r.data.events as AppendableEvent[]) : [];
   }
 
@@ -785,7 +879,7 @@ export class WorkerRunLedger implements RunLedger {
   }
 
   async readIntake(key: string): Promise<IntakeReceipt | undefined> {
-    const r = await this.post("/runs/intake/read", { storeKey: this.opts.storeKey, key });
+    const r = await this.read("/runs/intake/read", { storeKey: this.opts.storeKey, key });
     return isIntakeReceipt(r.data.receipt) ? r.data.receipt : undefined;
   }
 
@@ -809,7 +903,7 @@ export class WorkerRunLedger implements RunLedger {
   }
 
   async listIntake(query: IntakeQuery): Promise<IntakeReceipt[]> {
-    const r = await this.post("/runs/intake/list", {
+    const r = await this.read("/runs/intake/list", {
       storeKey: this.opts.storeKey,
       ...(query.threadKey !== undefined ? { threadKey: query.threadKey } : {}),
       ...(query.since !== undefined ? { since: query.since } : {}),
@@ -819,7 +913,7 @@ export class WorkerRunLedger implements RunLedger {
 
   async readTranscript(runId: string): Promise<AssembledTranscript> {
     this.checkIds(runId);
-    const r = await this.post("/runs/transcript/read", { runId });
+    const r = await this.read("/runs/transcript/read", { runId });
     return assembleTranscript(
       Array.isArray(r.data.rows) ? (r.data.rows as TranscriptRow[]) : [],
       Array.isArray(r.data.attachments) ? (r.data.attachments as TranscriptAttachment[]) : [],

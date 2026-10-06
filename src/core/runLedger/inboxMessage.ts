@@ -8,6 +8,116 @@ import type { IncomingMessage, SlackDirectAudience, StagedFile } from "../types.
 /** Durable provenance only; every private action still verifies Slack live. */
 export type DirectAudienceStamp = SlackDirectAudience;
 
+/** A control is a typed fact from the canonical plane writer, never text. */
+export type InboxControl =
+  | { kind: "checkpoint"; round: number; causes: readonly ("long_call" | "no_push")[] }
+  | { kind: "provider-reissue"; provider: string };
+
+export interface InboxTarget {
+  runId: string;
+  channelId: string;
+  threadKey: string;
+  requester?: string;
+}
+
+export interface InboxCustody extends InboxTarget {
+  version: 1;
+  requester: string;
+  producerGen: string;
+}
+
+export function inboxCustodyOf(value: unknown): InboxCustody | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const v = value as Record<string, unknown>;
+  if (
+    v.version !== 1 ||
+    !["runId", "channelId", "threadKey", "requester", "producerGen"].every(
+      (key) => typeof v[key] === "string" && v[key].length > 0,
+    )
+  )
+    return;
+  return {
+    version: 1,
+    runId: String(v.runId),
+    channelId: String(v.channelId),
+    threadKey: String(v.threadKey),
+    requester: String(v.requester),
+    producerGen: String(v.producerGen),
+  };
+}
+
+/** The store stamps the destination from its live owner, not from supplied
+ * requester text. Opaque legacy payloads retain these custody coordinates. */
+export function bindInboxCustody(
+  message: Record<string, unknown>,
+  target: InboxTarget & { requester: string; producerGen: string },
+  internalControl = false,
+): Record<string, unknown> | undefined {
+  if (
+    ![target.runId, target.channelId, target.threadKey, target.requester, target.producerGen].every(
+      (field) => typeof field === "string" && field.length > 0,
+    ) ||
+    message.target !== undefined
+  )
+    return;
+  if (
+    !internalControl &&
+    (message.userId === "plane" || message.kind === "checkpoint" || message.kind === "provider-reissue")
+  )
+    return;
+  if (
+    internalControl &&
+    ((message.channelId !== undefined && message.channelId !== target.channelId) ||
+      (message.threadKey !== undefined && message.threadKey !== target.threadKey))
+  )
+    return;
+  return { ...structuredClone(message), target: { version: 1, ...target } };
+}
+
+export const CHECKPOINT_STEER_SENTENCE =
+  "finish the step you are on, push a checkpoint and end the round; start no new command; the resident takes your push";
+
+export function inboxControlText(control: InboxControl): string {
+  return control.kind === "checkpoint"
+    ? CHECKPOINT_STEER_SENTENCE
+    : `the model provider ${control.provider} is answering again — re-issue the held turn and continue`;
+}
+
+export function inboxControlOf(stored: Record<string, unknown>, target?: InboxTarget): InboxControl | undefined {
+  if (
+    stored.version !== 1 ||
+    !target ||
+    stored.targetRunId !== target.runId ||
+    stored.channelId !== target.channelId ||
+    stored.threadKey !== target.threadKey ||
+    stored.userId !== "plane" ||
+    typeof stored.plane !== "object" ||
+    stored.plane === null ||
+    ["authenticatedAs", "postedBy", "relayedBy", "fromRunId", "directAudience"].some((key) => stored[key] !== undefined)
+  )
+    return;
+  const plane = stored.plane as Record<string, unknown>;
+  if (
+    stored.kind === "checkpoint" &&
+    plane.steer === "checkpoint" &&
+    Number.isSafeInteger(plane.round) &&
+    Number(plane.round) >= 0 &&
+    Array.isArray(plane.causes) &&
+    plane.causes.length > 0 &&
+    plane.causes.every((cause) => cause === "long_call" || cause === "no_push")
+  )
+    return { kind: "checkpoint", round: Number(plane.round), causes: [...plane.causes] };
+  if (
+    stored.kind === "provider-reissue" &&
+    plane.steer === "reissue" &&
+    typeof plane.provider === "string" &&
+    plane.provider.length > 0 &&
+    plane.provider.length <= 128 &&
+    /^[A-Za-z0-9._:-]+$/.test(plane.provider)
+  )
+    return { kind: "provider-reissue", provider: plane.provider };
+}
+
 export function directAudienceStampOf(
   source: Pick<IncomingMessage, "channelId" | "userId" | "threadKey"> & {
     directAudience?: unknown;
@@ -63,6 +173,8 @@ export function durableInboxMessage(
 ): Record<string, unknown> {
   const directAudience = from === undefined ? directAudienceStampOf(msg) : undefined;
   const base: Record<string, unknown> = {
+    version: 1,
+    kind: "message",
     channelId: msg.channelId,
     userId: msg.userId,
     threadKey: msg.threadKey,
@@ -134,8 +246,42 @@ function stagedFromInbox(v: unknown): StagedFile[] | undefined {
 export function messageFromInbox(
   stored: Record<string, unknown>,
   fallbackAt: number,
-): { msg: IncomingMessage; at: number; from?: { runId: string } } | undefined {
+  target?: InboxTarget,
+):
+  | { msg: IncomingMessage; at: number; from?: { runId: string }; control?: InboxControl; custody?: InboxCustody }
+  | undefined {
   const m = stored;
+  if (typeof m !== "object" || m === null || Array.isArray(m)) return;
+  if (m.version !== undefined && m.version !== 1) return;
+  const custody = inboxCustodyOf(m.target);
+  if (m.target !== undefined) {
+    if (!custody) return;
+    const bound = custody;
+    if (
+      (m.userId === "plane" || m.directAudience !== undefined) &&
+      (bound.channelId !== m.channelId || bound.threadKey !== m.threadKey)
+    )
+      return;
+    if (
+      target &&
+      (bound.runId !== target.runId ||
+        bound.channelId !== target.channelId ||
+        bound.threadKey !== target.threadKey ||
+        (target.requester !== undefined && bound.requester !== target.requester))
+    )
+      return;
+  }
+  const control = inboxControlOf(m, target);
+  if (m.version === 1 && m.kind !== "message" && !control) return;
+  if (m.userId === "plane" && !control) return;
+  // Dropping a present malformed principal would turn an app/credential into
+  // the person's authority. Keep the row opaque instead.
+  if (
+    ["authenticatedAs", "postedBy", "relayedBy", "fromRunId"].some(
+      (key) => m[key] !== undefined && (typeof m[key] !== "string" || m[key].length === 0),
+    )
+  )
+    return;
   const str = (k: string): string | undefined => (typeof m[k] === "string" ? (m[k] as string) : undefined);
   const text = str("text");
   const userId = str("userId");
@@ -166,11 +312,13 @@ export function messageFromInbox(
     authenticatedAs,
     fromRunId,
   });
+  if (m.directAudience !== undefined && !directAudience) return;
+  if (m.version === undefined && channelId.startsWith("slack:D") && !directAudience) return;
   const msg: IncomingMessage = {
     channelId,
     userId,
     threadKey,
-    text: note ? `${text}\n\n${note}` : text,
+    text: control ? inboxControlText(control) : note ? `${text}\n\n${note}` : text,
     ...(userName !== undefined ? { userName } : {}),
     ...(authenticatedAs !== undefined ? { authenticatedAs } : {}),
     ...(postedBy !== undefined ? { postedBy } : {}),
@@ -183,7 +331,13 @@ export function messageFromInbox(
     ...(documents ? { documents } : {}),
     ...(staged ? { staged } : {}),
   };
-  return { msg, at, ...(fromRunId !== undefined ? { from: { runId: fromRunId } } : {}) };
+  return {
+    msg,
+    at,
+    ...(fromRunId !== undefined ? { from: { runId: fromRunId } } : {}),
+    ...(control ? { control } : {}),
+    ...(custody ? { custody } : {}),
+  };
 }
 
 /** A stored attachment list back as typed attachments; an entry that is not

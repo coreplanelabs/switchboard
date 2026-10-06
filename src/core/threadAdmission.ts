@@ -84,6 +84,7 @@ export function followUpMessageId(input: Pick<FollowUpInput, "messageId" | "ledg
 
 export class FollowUpInbox<T extends FollowUpInput = FollowUpInput> {
   private pending: T[] = [];
+  private readonly heldSeqs = new Set<number>();
   private readonly observers = new Set<{ notify(input: T): void }>();
   private untrustedFollowUpSeen = false;
   private readonly untrustedObservers = new Set<() => void>();
@@ -102,6 +103,7 @@ export class FollowUpInbox<T extends FollowUpInput = FollowUpInput> {
     if (input.ledgerSeq !== undefined) {
       if (this.seen.has(input.ledgerSeq)) return;
       this.seen.add(input.ledgerSeq);
+      this.heldSeqs.delete(input.ledgerSeq);
     }
     this.pending.push(input);
     this.acceptedAuthors.add(input.userId);
@@ -114,6 +116,13 @@ export class FollowUpInbox<T extends FollowUpInput = FollowUpInput> {
       this.acceptedIndirectSource = true;
     this.pushed++;
     for (const observer of this.observers) observer.notify(input);
+  }
+
+  /** Opaque rows stay owed without becoming instructions or author claims. */
+  hold(seq: number): void {
+    if (!Number.isSafeInteger(seq) || seq < 1) throw new Error("invalid held inbox sequence");
+    this.heldSeqs.add(seq);
+    this.markUntrustedFollowUp();
   }
 
   /** Observe accepted inputs, including ones queued before the runner opened. */
@@ -175,7 +184,12 @@ export class FollowUpInbox<T extends FollowUpInput = FollowUpInput> {
 
   /** The ledger seqs of the follow-ups still pending, oldest first. */
   get pendingSeqs(): number[] {
-    return this.pending.flatMap((input) => (input.ledgerSeq !== undefined ? [input.ledgerSeq] : []));
+    return [
+      ...new Set([
+        ...this.heldSeqs,
+        ...this.pending.flatMap((input) => (input.ledgerSeq !== undefined ? [input.ledgerSeq] : [])),
+      ]),
+    ].sort((a, b) => a - b);
   }
 }
 

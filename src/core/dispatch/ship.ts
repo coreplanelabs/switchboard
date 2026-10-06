@@ -16,6 +16,7 @@ import type { RunProfile } from "../../config/profile.js";
 import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
 import type { OperatorEventFields } from "./commandRun.js";
 import type { LedgerRun, OpenOutcome } from "../runLedger/writeThrough.js";
+import { TerminalCommitmentUnknownError } from "../runLedger/writeThrough.js";
 import type { HostingState } from "../runLedger/types.js";
 import { hostKeyOf } from "../runLedger/hostKey.js";
 import { systemClock } from "../trace/index.js";
@@ -490,18 +491,13 @@ export async function runShipBranch(
   // once the instance exists and the ledger still mirrors this run, and from
   // then on the branch skips the finish, `finishing` and the seal — the
   // runner's `finish` ends the run, and a reclaim re-hosts or closes the row.
-  // Every other exit after the host-key claim — a refused hand-off, a throw —
-  // finishes as today, so no host-keyed row outlives a request that handed
-  // nothing off.
+  // Ordinary refused hand-offs and throws finish as before. An unknown
+  // original terminal remains held by the dispatcher's typed error path.
   let hostedLive = false;
-  // From the registry row on, everything runs inside the try whose finally
-  // finishes the run: a throw before the hand-off — the ledger claim with the
-  // state Worker down — ends like a throw inside it, a finished `failed` run
-  // with its record and a closed card. On every exit but the hosted one a
-  // registry row left `running` would have no runner behind it — it cannot be
-  // stopped (a stop is a request to the runner) and holds the process's drain
-  // to its deadline — so no such exit leaves one; the hosted row stays
-  // `running` deliberately, with the plan runner behind it (record 0060).
+  let terminalHeld = false;
+  // Ordinary setup failures finish this request. Hosted hand-offs stay live
+  // for their runner. An unknown original terminal travels intact to the
+  // dispatcher's hold path and bypasses this inner finalizer.
   try {
     io.runStarted?.({ id: run.id });
     const publishText = (
@@ -625,6 +621,10 @@ export async function runShipBranch(
             onFenced: () => void run.control.requestStop("hard"),
           }),
         );
+    if (opened.kind === "held") {
+      const { error } = opened;
+      throw error;
+    }
     ledgerRun = opened.kind === "tracked" ? opened.run : undefined;
     if (ledgerRun) {
       const tracked = ledgerRun;
@@ -834,15 +834,19 @@ export async function runShipBranch(
     // The run record is the source of truth: the answer enters the stream
     // BEFORE finish() below (a publish on a finished run is a no-op).
     publishText("answer", outcome.reply);
+  } catch (error) {
+    // The original private terminal witness must reach the dispatcher's hold path intact.
+    if (error instanceof TerminalCommitmentUnknownError) terminalHeld = true;
+    throw error;
   } finally {
     // A throw passes through to dispatch()'s outer catch (the error reply, the
-    // drain); this block still finishes the run, registers its `failed` record
-    // and closes the card. A hosted hand-off skips it whole: the run is live
+    // drain); ordinary failures finish and close here. An unknown original
+    // terminal skips this finalizer. A hosted hand-off skips it whole: the run is live
     // for the pipeline's life, and the runner's `finish` writes its record.
     // RunStatus is the run-store contract (shared with the memory worker): a
     // refused hand-off still answered the request, so record and registry say
     // `completed` — the refusal lives in the reply and the card close below.
-    if (!hostedLive) {
+    if (!hostedLive && !terminalHeld) {
       const status: RunStatus = outcome === undefined ? "failed" : "completed";
       registry.finish(run.id, status);
       const snap = registry.snapshot(run.id, run.token);

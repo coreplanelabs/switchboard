@@ -14,14 +14,18 @@
 //   throw new RefusalError(…), throw new CommandError(…), throw new McpServiceError(…)
 //   throw err                   a rethrow (the value was fenced where it was built)
 //   throw residentFailure(r)    a named builder whose return type is a CommandError
+//   throw terminalCommitmentUnknown(h, r)
+//                               a typed custody hold, preserved by the dispatcher
 
 /** The classes whose instances carry a refusal with a cause. */
 export const REFUSAL_ERROR_CLASSES = new Set(["RefusalError", "CommandError", "McpServiceError"]);
 
-/** Helpers that build one of the classes above (the fence is syntactic; the
- *  TypeScript return annotation of each named helper is the proof it builds a
- *  fenced value). `residentFailure` is repo.ts's status-mapped CommandError. */
-export const REFUSAL_BUILDERS = new Set(["residentFailure"]);
+/** Named typed boundaries (the fence is syntactic; each explicit return
+ * annotation proves its boundary class). `residentFailure` builds a
+ * CommandError. `terminalCommitmentUnknown` builds an uncertain-store hold:
+ * it keeps the complete private witness and must not become a refusal or
+ * settlement during dispatcher finalization. */
+export const REFUSAL_BUILDERS = new Set(["residentFailure", "terminalCommitmentUnknown"]);
 
 /** The producing modules the fence applies to: the dispatch stages that refuse
  *  (never the renderer, src/core/dispatch/reply.ts, nor the dispatcher — both

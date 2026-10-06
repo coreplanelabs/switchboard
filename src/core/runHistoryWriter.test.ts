@@ -14,6 +14,8 @@ import type { RunRecord } from "./runRecord.js";
 import { InMemoryRunStore, type PutResult, type RunStore } from "./runStore.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "./runStoreWorker.js";
 import { analyzeRunFriction } from "./runFriction.js";
+import { UncertainStoreError } from "./storeFailure.js";
+import { storeRequestWitness } from "./storeResponse.js";
 import { createTracer } from "./trace/tracer.js";
 import type { TraceOptions } from "./trace/types.js";
 
@@ -36,6 +38,137 @@ function record(id = "run-1"): RunRecord {
 }
 
 const OK: PutResult = { ok: true, retained: 1, stored: true, rewritten: false };
+
+describe("unconfirmed history commitment", () => {
+  it("credits a positive fallback but keeps a definite fallback rejection distinct from unknown", async () => {
+    for (const result of [OK, new PermanentStoreError("fallback refused")]) {
+      let fallbackCalls = 0;
+      const persisted: string[] = [];
+      const writer = createRunHistoryWriter({
+        store: {
+          put: async () => {
+            fallbackCalls++;
+            if (result instanceof Error) throw result;
+            return result;
+          },
+          abandoned: () => undefined,
+        },
+        warn: () => undefined,
+        onPersisted: (id) => persisted.push(id),
+      });
+      writer.write(record(), {
+        via: {
+          put: async () => {
+            throw new PermanentStoreError("primary refused");
+          },
+          abandoned: () => undefined,
+        },
+      });
+      await writer.settled();
+      expect(fallbackCalls).toBe(1);
+      expect(persisted).toEqual(result instanceof Error ? [] : ["run-1"]);
+      expect(writer.uncertain()).toBe(0);
+      expect(writer.pending()).toBe(0);
+      expect(writer.failures()).toBe(1);
+    }
+  });
+
+  it("retains an uncertain fallback snapshot after a definite primary refusal without replay or persisted credit", async () => {
+    const original = record("fallback-uncertain"),
+      snapshot = structuredClone(original);
+    const witness = await storeRequestWitness("/runs/put", JSON.stringify({ record: snapshot }));
+    const preserved: RunRecord[] = [],
+      persisted: string[] = [];
+    let primaryCalls = 0,
+      fallbackCalls = 0,
+      primaryAbandoned = 0,
+      fallbackAbandoned = 0;
+    const writer = createRunHistoryWriter({
+      store: {
+        put: async () => {
+          fallbackCalls++;
+          throw new UncertainStoreError("fallback result lost", witness);
+        },
+        abandoned: () => {
+          fallbackAbandoned++;
+        },
+        uncertain: (value, request) => {
+          preserved.push(structuredClone(value));
+          expect(request).toBe(witness);
+        },
+      },
+      warn: () => undefined,
+      onPersisted: (id) => persisted.push(id),
+      sleep: async () => {
+        throw new Error("unknown fallback cannot retry");
+      },
+    });
+    writer.write(original, {
+      via: {
+        put: async () => {
+          primaryCalls++;
+          throw new PermanentStoreError("primary refused");
+        },
+        abandoned: () => {
+          primaryAbandoned++;
+        },
+      },
+    });
+    original.status = "failed";
+    await writer.settled();
+    expect({ primaryCalls, fallbackCalls, primaryAbandoned, fallbackAbandoned }).toEqual({
+      primaryCalls: 1,
+      fallbackCalls: 1,
+      primaryAbandoned: 0,
+      fallbackAbandoned: 0,
+    });
+    expect(preserved).toEqual([snapshot]);
+    expect(persisted).toEqual([]);
+    expect(writer.failures()).toBe(1);
+    expect(writer.uncertain()).toBe(1);
+    expect(writer.pending()).toBe(1);
+  });
+
+  it("retains an uncertain original snapshot without retry, fallback, loss or persisted credit", async () => {
+    const original = record("uncertain-record"),
+      snapshot = structuredClone(original);
+    const witness = await storeRequestWitness("/runs/put", JSON.stringify({ record: snapshot }));
+    let attempts = 0,
+      abandoned = 0;
+    const preserved: RunRecord[] = [],
+      persisted: string[] = [];
+    const writer = createRunHistoryWriter({
+      store: {
+        put: async () => {
+          attempts++;
+          throw new UncertainStoreError("response lost", witness);
+        },
+        abandoned: () => {
+          abandoned++;
+        },
+        uncertain: (value, request) => {
+          preserved.push(structuredClone(value));
+          expect(request.digest).toBe(witness.digest);
+        },
+      },
+      warn: () => undefined,
+      onPersisted: (id) => persisted.push(id),
+      sleep: async () => {
+        throw new Error("uncertain writes cannot retry");
+      },
+    });
+    writer.write(original);
+    original.events.push({ type: "answer", text: "caller edit" });
+    await writer.settled();
+    expect(attempts).toBe(1);
+    expect(preserved).toEqual([snapshot]);
+    expect(abandoned).toBe(0);
+    expect(persisted).toEqual([]);
+    expect(writer.failures()).toBe(0);
+    expect(writer.uncertain()).toBe(1);
+    expect(writer.pending()).toBe(1);
+  });
+});
 
 /** A store whose `put` plays back a scripted sequence of outcomes. */
 function scriptedStore(outcomes: Array<Error | PutResult>) {

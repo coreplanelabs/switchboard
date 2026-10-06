@@ -1,4 +1,5 @@
 import { isConfigPublicationSnapshotKey, type ConfigSourcePrecondition } from "../../src/configDocument.js";
+import { bindInboxCustody } from "../../src/core/runLedger/inboxMessage.ts";
 import {
   validMaintenanceTransport,
   sameMaintenanceTransport,
@@ -213,6 +214,12 @@ import {
   selectReclaim,
   unreadInbox,
 } from "../../src/core/runLedger/decisions.ts";
+import {
+  closeInboxSegment,
+  encodeInboxSegment,
+  inboxSegmentFloor,
+  INBOX_SEGMENT_ARCHIVE_STEP,
+} from "../../src/core/runLedger/inboxSegment.ts";
 import {
   INTAKE_DELIVERY_CLAIM_MS,
   intakeReceiptRetentionMs,
@@ -2421,7 +2428,20 @@ export class RunHistoryDO extends DurableObject<Env> {
         // run-history item 40), in the decider's own transaction: the run reads
         // it at its next boundary like any follow-up; a run with no live row
         // reads nothing and the row would be an orphan, so it is skipped.
-        if (!this.liveRow(w.runId)) continue;
+        const owner = this.liveRow(w.runId);
+        if (!owner) continue;
+        const stored = bindInboxCustody(
+          w.message,
+          {
+            runId: w.runId,
+            channelId: owner.meta.channelId,
+            threadKey: owner.meta.threadKey,
+            requester: owner.meta.userId,
+            producerGen: owner.ownerGen,
+          },
+          true,
+        );
+        if (!stored) continue;
         const last = this.sql
           .exec<{ m: number | null }>(`SELECT MAX(seq) AS m FROM run_inbox WHERE run_id = ?`, w.runId)
           .one().m;
@@ -2429,7 +2449,7 @@ export class RunHistoryDO extends DurableObject<Env> {
           `INSERT INTO run_inbox (run_id, seq, json) VALUES (?, ?, ?)`,
           w.runId,
           (last ?? 0) + 1,
-          JSON.stringify(w.message),
+          JSON.stringify(stored),
         );
       } else if (w.table === "plane_windows" && w.op === "put") {
         this.sql.exec(
@@ -2505,6 +2525,25 @@ export class RunHistoryDO extends DurableObject<Env> {
               );
         const refusal = effectCapRefusal({ total, forRun }, w.effect);
         if (refusal !== undefined) throw new Error(refusal);
+        const effect = w.effect;
+        if (effect.kind === "steer") {
+          const owner = this.liveRow(effect.runId);
+          const message =
+            owner &&
+            bindInboxCustody(
+              effect.message,
+              {
+                runId: effect.runId,
+                channelId: owner.meta.channelId,
+                threadKey: owner.meta.threadKey,
+                requester: owner.meta.userId,
+                producerGen: owner.ownerGen,
+              },
+              true,
+            );
+          if (!message) throw new Error("unverified control destination");
+          effect.message = { ...effect.message, ...message };
+        }
         // A re-offer lands after an ack for any kind — a probe re-probes after
         // its ack (one open probe per resident, record 0064), and an observation
         // re-enters an admitted run whose acked `admit:<runId>` row would
@@ -2518,7 +2557,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         this.sql.exec(
           `INSERT OR IGNORE INTO plane_effects (id, body_json, offered_at, acked_at) VALUES (?, ?, ?, NULL)`,
           w.effect.id,
-          JSON.stringify(w.effect),
+          JSON.stringify(effect),
           w.at,
         );
         // The admitted run's attaching row, in the same transaction as the
@@ -5114,7 +5153,10 @@ export class RunHistoryDO extends DurableObject<Env> {
         return { ok: true, receipt: committed.receipt };
       const session = row.meta.session;
       const lastJson = this.sql
-        .exec<{ json: string }>(`SELECT json FROM run_steps WHERE run_id = ? ORDER BY step DESC LIMIT 1`, row.runId)
+        .exec<{ json: string }>(
+          `SELECT json FROM run_steps WHERE run_id = ? AND step >= 0 ORDER BY step DESC LIMIT 1`,
+          row.runId,
+        )
         .toArray()[0]?.json;
       const last = lastJson ? (JSON.parse(lastJson) as StepRecord) : undefined;
       if (
@@ -5999,10 +6041,13 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   /** The step record (item 31), written by the client AFTER the transcript turns. Fenced. */
   async recordStep(runId: string, gen: string, record: StepRecord): Promise<FenceResult> {
+    if (!Number.isSafeInteger(record.step) || record.step < 0) throw new Error("invalid public step key");
     let out: FenceResult = { ok: true };
     this.ctx.storage.transactionSync(() => {
       out = checkFence(this.liveRow(runId), gen);
       if (!out.ok) return;
+      if (inboxSegmentFloor(this.inboxSegmentArchive(runId), this.liveRow(runId)!) === undefined)
+        throw new Error("retained inbox segment boundary is unreadable");
       this.sql.exec(
         `INSERT OR REPLACE INTO run_steps (run_id, step, json) VALUES (?, ?, ?)`,
         runId,
@@ -6116,7 +6161,10 @@ export class RunHistoryDO extends DurableObject<Env> {
       if (mintSeed && receipt) {
         const checkpoint = row.state.contextCheckpoint as { key?: string; through?: number } | undefined;
         const lastJson = this.sql
-          .exec<{ json: string }>(`SELECT json FROM run_steps WHERE run_id = ? ORDER BY step DESC LIMIT 1`, runId)
+          .exec<{ json: string }>(
+            `SELECT json FROM run_steps WHERE run_id = ? AND step >= 0 ORDER BY step DESC LIMIT 1`,
+            runId,
+          )
           .toArray()[0]?.json;
         const last = lastJson ? (JSON.parse(lastJson) as StepRecord) : undefined;
         if (
@@ -6150,12 +6198,21 @@ export class RunHistoryDO extends DurableObject<Env> {
   async pushInbox(runId: string, message: Record<string, unknown>): Promise<{ ok: boolean; seq?: number }> {
     let out: { ok: boolean; seq?: number } = { ok: false };
     this.ctx.storage.transactionSync(() => {
-      if (!this.liveRow(runId)) return;
+      const owner = this.liveRow(runId);
+      if (!owner) return;
+      const stored = bindInboxCustody(message, {
+        runId,
+        channelId: owner.meta.channelId,
+        threadKey: owner.meta.threadKey,
+        requester: owner.meta.userId,
+        producerGen: owner.ownerGen,
+      });
+      if (!stored) return;
       const last = this.sql
         .exec<{ m: number | null }>(`SELECT MAX(seq) AS m FROM run_inbox WHERE run_id = ?`, runId)
         .one().m;
       const seq = (last ?? 0) + 1;
-      this.sql.exec(`INSERT INTO run_inbox (run_id, seq, json) VALUES (?, ?, ?)`, runId, seq, JSON.stringify(message));
+      this.sql.exec(`INSERT INTO run_inbox (run_id, seq, json) VALUES (?, ?, ?)`, runId, seq, JSON.stringify(stored));
       out = { ok: true, seq };
     });
     return out;
@@ -6163,14 +6220,87 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   /** The inbox past a seq (run-history item 40): the resume's re-read at adopt. */
   async readInbox(runId: string, afterSeq: number): Promise<{ seq: number; message: Record<string, unknown> }[]> {
+    const row = this.liveRow(runId);
+    const floor = row ? inboxSegmentFloor(this.inboxSegmentArchive(runId), row) : 0;
+    if (floor === undefined) return [];
     return this.sql
       .exec<{ seq: number; json: string }>(
         `SELECT seq, json FROM run_inbox WHERE run_id = ? AND seq > ? ORDER BY seq ASC`,
         runId,
-        afterSeq,
+        Math.max(afterSeq, floor),
       )
       .toArray()
       .map((r) => ({ seq: r.seq, message: JSON.parse(r.json) as Record<string, unknown> }));
+  }
+
+  async peekInbox(
+    runId: string,
+    gen: string,
+    afterSeq: number,
+  ): Promise<import("../../src/core/runLedger/types.ts").InboxPeek> {
+    const capture = () => {
+      const row = this.liveRow(runId);
+      const step = this.sql
+        .exec<{ json: string }>(
+          "SELECT json FROM run_steps WHERE run_id=? AND step>=0 ORDER BY step DESC LIMIT 1",
+          runId,
+        )
+        .toArray()[0]?.json;
+      const inbox = this.sql
+        .exec<{ seq: number; json: string }>("SELECT seq,json FROM run_inbox WHERE run_id=? ORDER BY seq", runId)
+        .toArray();
+      const archive = this.inboxSegmentArchive(runId);
+      return { row, step, inbox, archive };
+    };
+    const initial = capture();
+    const fence = checkFence(initial.row, gen);
+    if (!fence.ok || !initial.row) return fence.ok ? { ok: false, reason: "unknown-run" } : fence;
+    if (
+      initial.inbox.length > RUN_EVENTS_MAX_PAGE ||
+      initial.inbox.reduce((size, item) => size + 3 * item.json.length, 0) > MAX_RECORD_BYTES
+    )
+      return { ok: false, reason: "incomplete" };
+    const before = JSON.stringify({
+      gen: initial.row.ownerGen,
+      state: initial.row.state,
+      step: initial.step,
+      inbox: initial.inbox,
+      archive: initial.archive,
+    });
+    try {
+      const state = structuredClone(initial.row.state);
+      const lastStep: unknown = initial.step ? JSON.parse(initial.step) : null;
+      const floor = inboxSegmentFloor(initial.archive, initial.row);
+      if (floor === undefined) return { ok: false, reason: "incomplete" };
+      const rows = initial.inbox.filter((item) => item.seq > Math.max(afterSeq, floor));
+      const items = await Promise.all(
+        rows.map(async (item) => {
+          const message: unknown = JSON.parse(item.json);
+          if (!message || typeof message !== "object" || Array.isArray(message))
+            throw new Error("unreadable inbox row");
+          return {
+            seq: item.seq,
+            message: message as Record<string, unknown>,
+            witness: { version: 1 as const, runId, seq: item.seq, digest: await sourceHash(message) },
+          };
+        }),
+      );
+      const current = capture();
+      if (
+        before !==
+        JSON.stringify({
+          gen: current.row?.ownerGen,
+          state: current.row?.state,
+          step: current.step,
+          inbox: current.inbox,
+          archive: current.archive,
+        })
+      )
+        return { ok: false, reason: "incomplete" };
+      return { ok: true, version: 1, runId, gen, items, boundary: { state, lastStep } };
+    } catch {
+      return { ok: false, reason: "incomplete" };
+    }
   }
 
   async requestStop(runId: string, mode: StopMode, now: number): Promise<{ ok: boolean; ownerLive?: boolean }> {
@@ -6328,6 +6458,10 @@ export class RunHistoryDO extends DurableObject<Env> {
   /** The live rows go with no record (item 42): a reserved run that never
    *  started. Fenced. */
   async abandon(runId: string, gen: string): Promise<FenceResult> {
+    const admitted = checkFence(this.liveRow(runId), gen);
+    if (!admitted.ok) return admitted;
+    // A private custody refusal must not break the object's input gate.
+    this.prepareInboxSegment(runId);
     return this.ctx.blockConcurrencyWhile(async () => {
       let out: FenceResult = { ok: true };
       let threadKey: string | undefined;
@@ -6363,10 +6497,57 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   private deleteLiveRows(runIds: string[]): void {
     for (const id of runIds) {
+      const encoded = this.prepareInboxSegment(id);
+      if (encoded !== undefined) {
+        this.sql.exec(
+          "INSERT OR REPLACE INTO run_steps(run_id,step,json) VALUES(?,?,?)",
+          id,
+          INBOX_SEGMENT_ARCHIVE_STEP,
+          encoded,
+        );
+        this.sql.exec("DELETE FROM run_steps WHERE run_id=? AND step>=0", id);
+      }
       this.sql.exec(`DELETE FROM live_runs WHERE run_id = ?`, id);
-      this.sql.exec(`DELETE FROM run_steps WHERE run_id = ?`, id);
-      this.sql.exec(`DELETE FROM run_inbox WHERE run_id = ?`, id);
+      // A terminal run does not acknowledge queued inputs. Keep canonical
+      // inbox bytes until their original native consumption is established.
       this.sql.exec(`DELETE FROM run_jobs WHERE run_id = ?`, id);
+    }
+  }
+
+  private prepareInboxSegment(runId: string): string | undefined {
+    const row = this.liveRow(runId);
+    if (!row) return;
+    const previous = this.inboxSegmentArchive(runId);
+    if (previous !== undefined && inboxSegmentFloor(previous, row) === undefined)
+      throw new Error("retained inbox segment boundary is unreadable");
+    const last = this.sql
+      .exec<{ json: string }>("SELECT json FROM run_steps WHERE run_id=? AND step>=0 ORDER BY step DESC LIMIT 1", runId)
+      .toArray()[0];
+    const highWater =
+      this.sql.exec<{ m: number | null }>("SELECT MAX(seq) AS m FROM run_inbox WHERE run_id=?", runId).one().m ?? 0;
+    return encodeInboxSegment(
+      closeInboxSegment(previous, row, last ? (JSON.parse(last.json) as StepRecord) : null, highWater),
+      MAX_RECORD_BYTES,
+    );
+  }
+
+  private inboxSegmentArchive(runId: string): unknown {
+    const negative = this.sql
+      .exec<{ count: number; key: number | null; bytes: number | null }>(
+        "SELECT COUNT(*) AS count,MIN(step) AS key,MAX(LENGTH(CAST(json AS BLOB))) AS bytes FROM run_steps WHERE run_id=? AND step<0",
+        runId,
+      )
+      .one();
+    if (negative.count === 0) return undefined;
+    if (negative.count !== 1 || negative.key !== INBOX_SEGMENT_ARCHIVE_STEP || (negative.bytes ?? 0) > MAX_RECORD_BYTES)
+      return null;
+    const raw = this.sql
+      .exec<{ json: string }>("SELECT json FROM run_steps WHERE run_id=? AND step=?", runId, INBOX_SEGMENT_ARCHIVE_STEP)
+      .one().json;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return null;
     }
   }
 
@@ -6389,12 +6570,16 @@ export class RunHistoryDO extends DurableObject<Env> {
           row.runId,
         );
         const stepRow = this.sql
-          .exec<{ json: string }>(`SELECT json FROM run_steps WHERE run_id = ? ORDER BY step DESC LIMIT 1`, row.runId)
+          .exec<{ json: string }>(
+            `SELECT json FROM run_steps WHERE run_id = ? AND step >= 0 ORDER BY step DESC LIMIT 1`,
+            row.runId,
+          )
           .toArray()[0];
         const lastStep = stepRow ? (JSON.parse(stepRow.json) as StepRecord) : null;
         // Past the cursor, plus the deferred rows at or below it: the lowest
         // deferred seq bounds the read, and the record's predicate filters.
         const unread = unreadInbox(lastStep);
+        const floor = inboxSegmentFloor(this.inboxSegmentArchive(row.runId), row);
         const from = Math.min(
           lastStep?.inboxConsumedSeq ?? 0,
           ...(lastStep?.inboxDeferredSeqs ?? []).map((s) => s - 1),
@@ -6407,7 +6592,7 @@ export class RunHistoryDO extends DurableObject<Env> {
           )
           .toArray()
           .map((r) => ({ seq: r.seq, message: JSON.parse(r.json) as Record<string, unknown> }))
-          .filter(unread);
+          .filter((item) => floor !== undefined && item.seq > floor && unread(item));
         const jobs = this.sql
           .exec<{ kind: string; json: string }>(`SELECT kind, json FROM run_jobs WHERE run_id = ?`, row.runId)
           .toArray()
@@ -10378,6 +10563,12 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     const after = b.afterSeq === undefined ? 0 : b.afterSeq;
     if (typeof after !== "number" || !Number.isInteger(after) || after < 0) {
       return json({ error: "afterSeq must be a non-negative integer" }, 400);
+    }
+    if (b.peek === true) {
+      const owner = gen(b.gen);
+      if (!owner.ok) return json({ error: owner.error }, 400);
+      const result = await stub.peekInbox(runId.value, owner.value, after);
+      return json(result, result.ok ? 200 : 409);
     }
     return json({ items: await stub.readInbox(runId.value, after) });
   }

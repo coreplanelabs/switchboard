@@ -1,3 +1,7 @@
+import { runShipBranch } from "./dispatch/ship.js";
+import { TerminalCommitmentUnknownError, terminalCommitmentUnknown } from "./runLedger/writeThrough.js";
+import { UncertainStoreError } from "./storeFailure.js";
+import { WorkerRunLedger } from "./runLedgerWorker.js";
 import type { ResumeContext } from "./dispatch/admission.js";
 import { seedCoordinatorUnit } from "./testing/coordinatorInstance.js";
 import { booleanAudienceVerifier } from "./testing/audienceVerifier.js";
@@ -11532,6 +11536,171 @@ workspaceDir: __WORKDIR__
     vi.mocked(runPiHarnessOpen).mockClear();
   });
 
+  it.each([
+    ["already-unknown", "returned"],
+    ["awaiting-finish", "returned"],
+    ["already-unknown", "thrown"],
+    ["awaiting-finish", "thrown"],
+  ] as const)("keeps the actual hosted terminal witness beyond both Ship finalizers: %s %s", async (mode, delivery) => {
+    const { deps, provider, instances, created } = shipDeps();
+    const originalId = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa",
+      candidateId = "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb";
+    let minted = 0;
+    const registry = new RunRegistry({
+      genId: () => (++minted === 1 ? originalId : candidateId),
+      genToken: () => "fixture-token",
+    });
+    const ledger = new InMemoryRunLedger(),
+      store = new InMemoryRunStore(),
+      fallbackPuts: string[] = [];
+    const writer = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
+    deps.runRegistry = registry;
+    deps.runHistoryWriter = writer;
+    const wt = createLedgerWriteThrough({
+      ledger,
+      gen: "gen-host-original",
+      fallback: { put: async (r) => void fallbackPuts.push(r.id), abandoned: () => {} },
+      warn: () => {},
+    });
+    deps.runLedger = wt;
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), fakeIO().io);
+    await writer.settled();
+    expect(created).toHaveLength(1);
+    const hosted = await handed(instances, originalId);
+    expect(hosted.instance).not.toBeNull();
+    expect(hosted.unit).toBeDefined();
+    seedCoordinatorUnit(instances, {
+      ...hosted.unit!,
+      ending: { kind: "completed", report: "original hosted unit completed", at: Date.now() },
+    });
+    registry.finish(originalId, "completed");
+    const snap = registry.snapshotById(originalId)!;
+    const start = await store.get(originalId);
+    expect(start).not.toBeNull();
+    const { provisional: _provisional, ...originalRecord } = start!;
+    const record: RunRecord = {
+      ...originalRecord,
+      finishedAt: snap.finishedAt!,
+      status: "completed",
+      instanceId: hosted.instance!.id,
+      eventCount: snap.events.length,
+      storedEventCount: snap.events.length,
+      truncated: snap.truncated,
+      events: snap.events,
+      diagnosis: analyzeRunFriction(snap.events),
+    };
+    let terminalEntered!: () => void, releaseTerminal!: () => void;
+    const entered = new Promise<void>((r) => (terminalEntered = r)),
+      released = new Promise<void>((r) => (releaseTerminal = r));
+    let actualPayload = "",
+      actualUnknown: UncertainStoreError | undefined;
+    const transport = new WorkerRunLedger({
+      baseUrl: "https://original-host-receiver.invalid",
+      token: "fixture",
+      storeKey: "runs:fixture",
+      fetch: async (_input, init) => {
+        actualPayload = String(init?.body);
+        terminalEntered();
+        await released;
+        throw new Error("original hosted finish reply unavailable");
+      },
+    });
+    const finish = vi.spyOn(ledger, "finish").mockImplementationOnce(async (...args) => {
+      try {
+        return await transport.finish(...args);
+      } catch (error) {
+        if (!(error instanceof UncertainStoreError)) throw error;
+        actualUnknown = error;
+        throw error;
+      }
+    });
+    const originalRun = wt.liveRuns().find((r) => r.runId === originalId)!;
+    expect(originalRun).toBeDefined();
+    writer.write(record, { via: originalRun.sink });
+    await entered;
+    const originalRow = structuredClone(ledger.live.get(originalId));
+    expect(originalRow?.threadKey).toBe("slack:CX:1.0#host");
+    const originalInstance = await instances.get(hosted.instance!.id),
+      originalUnits = await instances.listUnits(hosted.instance!.id);
+    expect(registry.getById(originalId)).toMatchObject({ finished: true, status: "completed" });
+    expect(originalUnits[0]?.ending?.kind).toBe("completed");
+    let candidateRefused!: () => void;
+    const refused = new Promise<void>((r) => (candidateRefused = r)),
+      realClaim = ledger.claim.bind(ledger);
+    vi.spyOn(ledger, "claim").mockImplementation(async (req) => {
+      const result = await realClaim(req);
+      if (req.runId === candidateId && !result.ok) candidateRefused();
+      return result;
+    });
+    let openedError: TerminalCommitmentUnknownError | undefined, caughtError: unknown;
+    const realOpen = wt.open.bind(wt);
+    vi.spyOn(wt, "open").mockImplementation(async (req) => {
+      const opened = await realOpen(req);
+      if (opened.kind === "held") {
+        openedError = opened.error;
+        if (delivery === "thrown") throw opened.error;
+      }
+      return opened;
+    });
+    deps.shipBranch = async (...args) => {
+      try {
+        return await runShipBranch(...args);
+      } catch (error) {
+        caughtError = error;
+        throw error;
+      }
+    };
+    const registryFinish = vi.spyOn(registry, "finish"),
+      abandon = vi.spyOn(ledger, "abandon"),
+      writes = vi.spyOn(writer, "write");
+    const putInstance = vi.spyOn(instances, "put"),
+      putUnits = vi.spyOn(instances, "putUnits");
+    vi.mocked(deps.createCoordinatorInstance!).mockClear();
+    if (mode === "already-unknown") {
+      releaseTerminal();
+      await writer.settled();
+    }
+    const { io, replies, statuses } = fakeIO();
+    const finished = vi.fn();
+    io.runFinished = finished;
+    const candidate = dispatch(deps, msg(TASK_MSG + " and add the original regression test", "slack:UADMIN"), io);
+    if (mode === "awaiting-finish") {
+      await refused;
+      releaseTerminal();
+    }
+    await candidate;
+    await writer.settled();
+    expect(openedError).toBeInstanceOf(TerminalCommitmentUnknownError);
+    expect(caughtError).toBe(openedError);
+    expect(openedError?.hold).toMatchObject({
+      runId: originalId,
+      gen: "gen-host-original",
+      threadKey: "slack:CX:1.0#host",
+      requestDigest: actualUnknown!.request.digest,
+    });
+    expect(openedError!.request).toEqual(actualUnknown!.request);
+    expect(openedError!.request.payload).toBe(actualPayload);
+    expect(Object.isFrozen(openedError!.request)).toBe(true);
+    expect(Object.keys(openedError!)).not.toContain("request");
+    expect(JSON.stringify(openedError)).not.toContain(actualPayload);
+    expect(deps.createCoordinatorInstance).not.toHaveBeenCalled();
+    expect(putInstance).not.toHaveBeenCalled();
+    expect(putUnits).not.toHaveBeenCalled();
+    expect(created).toHaveLength(1);
+    expect(provider.requests).toHaveLength(0);
+    expect(await instances.get(hosted.instance!.id)).toEqual(originalInstance);
+    expect(await instances.listUnits(hosted.instance!.id)).toEqual(originalUnits);
+    expect(ledger.live.get(originalId)).toEqual(originalRow);
+    expect(finish).toHaveBeenCalledTimes(1);
+    expect(abandon).not.toHaveBeenCalled();
+    expect(registryFinish).not.toHaveBeenCalled();
+    expect(finished).not.toHaveBeenCalled();
+    expect(writes.mock.calls.filter(([, options]) => options?.provisional !== true)).toEqual([]);
+    expect(fallbackPuts).toEqual([]);
+    expect(replies.join(" ")).toContain("original terminal outcome is unconfirmed");
+    expect(statuses.some((s) => s.title.includes("✅"))).toBe(false);
+  });
+
   it("channel guard: agent:ship over a handle without openThread is refused before the runner", async () => {
     const { deps, provider, created } = shipDeps(
       SHIP_YAML.replace(
@@ -13435,6 +13604,106 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     return { io, replies };
   }
 
+  it.each([
+    ["reserve", false],
+    ["reserve", true],
+    ["open", false],
+    ["open", true],
+  ] as const)(
+    "keeps the actual unknown terminal witness through setup finalization: %s coordinator=%s",
+    async (stage, coordinator) => {
+      const provider = capturingProvider("must not run"),
+        h = wired(provider);
+      const record: RunRecord = {
+        id: "original-held",
+        startedAt: 1,
+        finishedAt: 2,
+        status: "completed",
+        channelVisibility: "public",
+        channelId: "slack:CX",
+        userId: "slack:UX",
+        threadKey: "slack:CX:1.0",
+        eventCount: 0,
+        storedEventCount: 0,
+        truncated: false,
+        events: [],
+        diagnosis: analyzeRunFriction([]),
+      };
+      let actualPayload = "";
+      const transport = new WorkerRunLedger({
+        baseUrl: "https://terminal-receiver.invalid",
+        token: "fixture",
+        storeKey: "runs:fixture",
+        fetch: async (_input, init) => {
+          actualPayload = String(init?.body);
+          throw new Error("original terminal reply unavailable");
+        },
+      });
+      let originalUnknown: UncertainStoreError | undefined;
+      try {
+        await transport.finish(record.id, "gen-T", record);
+      } catch (err) {
+        if (!(err instanceof UncertainStoreError)) throw err;
+        originalUnknown = err;
+      }
+      if (!originalUnknown) throw new Error("actual transport did not preserve its uncertain request");
+      expect(originalUnknown.request.payload).toBe(actualPayload);
+      const error = terminalCommitmentUnknown(
+        {
+          version: 1,
+          runId: record.id,
+          gen: "gen-T",
+          threadKey: record.threadKey,
+          requestDigest: originalUnknown.request.digest,
+        },
+        originalUnknown.request,
+      );
+      expect(error).toBeInstanceOf(TerminalCommitmentUnknownError);
+      expect(Object.isFrozen(error.request)).toBe(true);
+      expect(Object.keys(error)).not.toContain("request");
+      const release = vi.fn(async () => ({ released: true }));
+      if (stage === "open")
+        vi.mocked(makeExecutor).mockResolvedValueOnce({
+          executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "", release },
+        });
+      const held = { kind: "held" as const, hold: error.hold, error };
+      const calls: unknown[] = [];
+      if (stage === "reserve")
+        vi.spyOn(h.deps.runLedger, "reserve").mockImplementationOnce(async () => {
+          calls.push(held);
+          return held;
+        });
+      else
+        vi.spyOn(h.deps.runLedger, "open").mockImplementationOnce(async () => {
+          calls.push(held);
+          return held;
+        });
+      const finish = vi.spyOn(h.ledger, "finish"),
+        abandon = vi.spyOn(h.ledger, "abandon");
+      const io = ioWithCard().io,
+        finished = vi.fn();
+      io.runFinished = finished;
+      await dispatch(
+        h.deps,
+        msg("agent:general hello"),
+        io,
+        coordinator
+          ? { coordinator: { parentInstanceId: "held-owner", idempotencyKey: "held-owner:U12/0/general", unit: "U12" } }
+          : {},
+      );
+      await h.writer.settled();
+      expect(calls).toEqual([held]);
+      expect(provider.requests).toEqual([]);
+      expect(finish).not.toHaveBeenCalled();
+      expect(abandon).not.toHaveBeenCalled();
+      expect(release).not.toHaveBeenCalled();
+      expect(finished).not.toHaveBeenCalled();
+      expect(error.request.payload).toBe(actualPayload);
+      expect(h.fallbackPuts).toEqual([]);
+      expect(await h.store.get("run-l")).toBeNull();
+    },
+  );
+
   it("keeps a direct PR review's advertised run when fleet capacity prevents setup", async () => {
     vi.stubEnv("PUBLIC_BASE_URL", "https://sb.example");
     const provider = capturingProvider("must not review");
@@ -14376,7 +14645,12 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(replies.at(-1)).toBe("all done");
     // The finish: live rows gone, the record in the ledger, every event appended in seq order.
     expect(ledger.live.has("run-l")).toBe(false);
-    expect(ledger.steps.has("run-l")).toBe(false);
+    expect(ledger.steps.get("run-l")).toHaveLength(0);
+    expect(ledger.steps.get("run-l")!.inboxSegmentArchive).toMatchObject({
+      version: 1,
+      kind: "closed-inbox-segment",
+      first: { owner: { runId: "run-l" }, lastStep: { step: expect.any(Number) } },
+    });
     expect(ledger.finished.get("run-l")).toMatchObject({ id: "run-l", status: "completed" });
     // The record's range: the seed rows, then the first assistant turn, the
     // results turn and the final answer — the mirror writes every turn pi
@@ -19465,7 +19739,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       sourceUrl: "https://s/2",
       at: 9_000,
     });
-    await ledger.pushInbox("run-old", { garbage: true }); // an item the parser cannot read is skipped, not fatal
+    await ledger.pushInbox("run-old", { garbage: true }); // an unreadable item stays held without blocking readable inputs
     ledger.live.get("run-old")!.leaseUntil = 0;
     const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
     expect(reclaimed.inbox.map((i) => i.seq)).toEqual([1, 2]);
@@ -19528,9 +19802,23 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(record.events.find((e) => e.type === "input" && e.text === "and also the numbers")).toMatchObject({
       source: { user: "uy", url: "https://s/2" },
     });
-    expect(
-      warnSpy.mock.calls.some((c) => /inbox item 2 has a shape this build cannot read — skipped/.test(String(c[0]))),
-    ).toBe(true);
+    expect(warnSpy.mock.calls.some((c) => /inbox item 2 is unreadable — retained pending/.test(String(c[0])))).toBe(
+      true,
+    );
+    expect((await ledger.readInbox("run-old", 0)).find((item) => item.seq === 2)).toEqual({
+      seq: 2,
+      message: {
+        garbage: true,
+        target: {
+          version: 1,
+          runId: "run-old",
+          channelId: "slack:CX",
+          threadKey: "slack:CX:1.0",
+          requester: "slack:UX",
+          producerGen: "gen-OLD",
+        },
+      },
+    });
     warnSpy.mockRestore();
   });
 
@@ -20838,6 +21126,7 @@ workspaceDir: __WORKDIR__
     await dispatch(t.deps, inChannel("CX", "agent:conductor inspect durable state"), parent.io);
     await vi.waitFor(() => expect(t.registry.getById("run-child")?.finished).toBe(true));
     await t.writer.settled();
+    await vi.waitFor(() => expect(t.ledger.finished.has("run-child")).toBe(true));
     const initial = t.ledger.finished.get("run-child")!;
     expect(await t.ledger.readNotepad(initial.session!.key)).toMatchObject({
       text: "child decision: retain the exact receipt",

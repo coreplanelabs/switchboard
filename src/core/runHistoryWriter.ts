@@ -1,6 +1,7 @@
 import type { RunRecord } from "./runRecord.js";
 import type { Span, TraceOptions } from "./trace/types.js";
 import { PermanentStoreError, RouteMissingError } from "./runStoreWorker.js";
+import { UncertainStoreError, type StoreRequestWitness } from "./storeFailure.js";
 
 // Run history (docs/decisions/0006-runs-have-two-lives.md): the dispatcher's write path. A finished run's
 // record is built synchronously at finish and handed here AFTER the reply is
@@ -60,9 +61,11 @@ export interface RunHistoryWriter {
   pending(): number;
   /** Records lost for good (retries exhausted, 4xx, or a missing route). */
   failures(): number;
+  /** Original requests with no positive or negative canonical result. */
+  uncertain(): number;
   /** True once the store answered 404 to `/runs/put`: history is off until the Worker is redeployed. */
   degraded(): boolean;
-  /** Resolves once every write pending at the time of the call has settled (tests, CLI exit). */
+  /** Resolves after the current attempts settle; uncertain requests remain pending until canonical reconciliation. */
   settled(): Promise<void>;
 }
 
@@ -78,6 +81,9 @@ export class NullRunHistoryWriter implements RunHistoryWriter {
     return 0;
   }
   failures(): number {
+    return 0;
+  }
+  uncertain(): number {
     return 0;
   }
   degraded(): boolean {
@@ -102,6 +108,7 @@ export class NullRunHistoryWriter implements RunHistoryWriter {
 export interface RecordSink {
   put(record: RunRecord, trace?: TraceOptions): Promise<unknown>;
   abandoned(record: RunRecord, why: string): void;
+  uncertain?(record: RunRecord, request: StoreRequestWitness): void;
 }
 
 /** One put with no retry, the caller's final word said for it (docs/reference/specs/
@@ -112,6 +119,14 @@ export async function putOnce(sink: RecordSink, record: RunRecord): Promise<unkn
   try {
     return await sink.put(record);
   } catch (err) {
+    if (err instanceof UncertainStoreError) {
+      try {
+        sink.uncertain?.(record, err.request);
+      } catch {
+        /* The original unknown witness must still reach the caller. */
+      }
+      throw err;
+    }
     sink.abandoned(record, describe(err));
     throw err;
   }
@@ -136,6 +151,7 @@ export function createRunHistoryWriter(opts: RunHistoryWriterOptions): RunHistor
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const random = opts.random ?? Math.random;
   const inFlight = new Set<Promise<void>>();
+  const unconfirmed = new Map<string, { record: RunRecord; request: StoreRequestWitness; sink: RecordSink }>();
   // Final-beats-provisional bookkeeping (see the header): ids with a final
   // write enqueued this process, and a stand-down flag per provisional write
   // still in flight. `finals` grows one short id per finished run — bounded in
@@ -158,6 +174,18 @@ export function createRunHistoryWriter(opts: RunHistoryWriterOptions): RunHistor
     }
   };
 
+  const retainUnknown = (record: RunRecord, sink: RecordSink, request: StoreRequestWitness): void => {
+    if (!unconfirmed.has(request.digest))
+      unconfirmed.set(request.digest, { record: structuredClone(record), request, sink });
+    const original = unconfirmed.get(request.digest)!;
+    try {
+      original.sink.uncertain?.(structuredClone(original.record), original.request);
+    } catch {
+      opts.warn(`[run-history] ${record.id} unknown-result notification failed — snapshot remains retained`);
+    }
+    opts.warn(`[run-history] ${record.id} commitment is unknown — original snapshot retained`);
+  };
+
   const attemptAll = async (
     record: RunRecord,
     flag: ProvisionalFlag | undefined,
@@ -174,18 +202,36 @@ export function createRunHistoryWriter(opts: RunHistoryWriterOptions): RunHistor
     // run's always has.
     const giveUp = async (why: string): Promise<void> => {
       failures++;
-      try {
-        sink.abandoned(record, why);
-      } catch (err) {
-        opts.warn(`[run-history] abandoned hook failed for ${record.id}: ${describe(err)}`);
+      const abandoned = (): void => {
+        try {
+          sink.abandoned(record, why);
+        } catch (err) {
+          opts.warn(`[run-history] abandoned hook failed for ${record.id}: ${describe(err)}`);
+        }
+      };
+      if (sink === opts.store || flag?.superseded) {
+        abandoned();
+        return;
       }
-      if (sink === opts.store || flag?.superseded) return;
+      const fallbackSnapshot = structuredClone(record);
       try {
-        await opts.store.put(record, span ? { span } : undefined);
+        await opts.store.put(structuredClone(fallbackSnapshot), span ? { span } : undefined);
         if (!flag) persisted(record.id);
       } catch (err) {
+        if (err instanceof UncertainStoreError) {
+          retainUnknown(fallbackSnapshot, opts.store, err.request);
+          // The original terminal owner stays held through this separate
+          // fallback. A rejected primary is not settlement of its fallback.
+          try {
+            sink.uncertain?.(structuredClone(fallbackSnapshot), err.request);
+          } catch {
+            opts.warn(`[run-history] ${record.id} original-owner unknown notification failed`);
+          }
+          return;
+        }
         opts.warn(`[run-history] ${record.id} store fallback after give-up failed: ${describe(err)}`);
       }
+      abandoned();
     };
     for (let attempt = 1; ; attempt++) {
       // A provisional write stands down (silently — not a loss) the moment the
@@ -197,6 +243,10 @@ export function createRunHistoryWriter(opts: RunHistoryWriterOptions): RunHistor
         if (!flag) persisted(record.id);
         return;
       } catch (err) {
+        if (err instanceof UncertainStoreError) {
+          retainUnknown(record, sink, err.request);
+          return;
+        }
         if (err instanceof RouteMissingError) {
           degraded = true;
           if (!routeMissingLogged) {
@@ -223,6 +273,7 @@ export function createRunHistoryWriter(opts: RunHistoryWriterOptions): RunHistor
 
   return {
     write(record, writeOpts) {
+      record = structuredClone(record);
       let flag: ProvisionalFlag | undefined;
       if (writeOpts?.provisional === true) {
         if (finals.has(record.id)) return; // the final record already exists (or is on its way) — drop, don't clobber
@@ -254,8 +305,9 @@ export function createRunHistoryWriter(opts: RunHistoryWriterOptions): RunHistor
         });
       inFlight.add(p);
     },
-    pending: () => inFlight.size,
+    pending: () => inFlight.size + unconfirmed.size,
     failures: () => failures,
+    uncertain: () => unconfirmed.size,
     degraded: () => degraded,
     settled: async () => {
       await Promise.all([...inFlight]);

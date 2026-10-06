@@ -71,6 +71,54 @@ const claimReq: ClaimRequest = {
   tools: [],
 };
 
+describe("durable ledger acknowledgement continuity", () => {
+  const aborted = () =>
+    new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.error(new DOMException("body interrupted", "AbortError"));
+        },
+      }),
+      { status: 200 },
+    );
+  it("preserves a read body interruption as an availability error with its cause", async () => {
+    const ledger = new WorkerRunLedger({
+      baseUrl: "https://memory.test",
+      token: "tok",
+      storeKey: "runs:default",
+      fetch: async () => aborted(),
+    });
+    await expect(ledger.listLive()).rejects.toMatchObject({
+      name: "TransientStoreError",
+      cause: { name: "AbortError" },
+    });
+  });
+  it("keeps a committed inbox append with a lost body unknown without a second append", async () => {
+    let commits = 0;
+    const ledger = new WorkerRunLedger({
+      baseUrl: "https://memory.test",
+      token: "tok",
+      storeKey: "runs:default",
+      fetch: async () => {
+        commits++;
+        return aborted();
+      },
+    });
+    await expect(ledger.pushInbox("r1", { text: "original" })).rejects.toMatchObject({
+      name: "UncertainStoreError",
+      outcome: "unknown",
+    });
+    expect(commits).toBe(1);
+  });
+  it("never acknowledges state from HTTP success with a contradictory refusal body", async () => {
+    const { ledger } = stubWorker(() => ({ status: 200, data: { ok: false, reason: "fenced" } }));
+    await expect(ledger.setState("r1", "g1", {})).rejects.toMatchObject({
+      name: "UncertainStoreError",
+      outcome: "unknown",
+    });
+  });
+});
+
 describe("WorkerRunLedger", () => {
   it("reads and acknowledges only an exact retained workspace version and rejects ambiguous responses", async () => {
     const owner = { runId: "r1", ownerGen: "g1", ownerFence: 7 };
@@ -629,7 +677,7 @@ describe("WorkerRunLedger", () => {
     expect(await w.ledger.readInbox("r1", 2)).toEqual(items);
     expect(w.calls.at(-1)).toMatchObject({ path: "/runs/inbox/read", body: { runId: "r1", afterSeq: 2 } });
     const empty = stubWorker(() => ({ status: 200, data: {} }));
-    expect(await empty.ledger.readInbox("r1", 0)).toEqual([]);
+    await expect(empty.ledger.readInbox("r1", 0)).rejects.toThrow("invalid observational inbox");
   });
 
   it("finish posts the record's metrics point beside it, priced through the configured table, and none for a provisional record (run-metrics.md)", async () => {

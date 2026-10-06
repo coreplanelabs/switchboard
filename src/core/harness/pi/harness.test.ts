@@ -1,5 +1,10 @@
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createServer } from "node:net";
+import { randomUUID } from "node:crypto";
 import { ALLOWANCES, bearerExpiresAt, loopClock, MINUTE_MS, PROVIDER_RETRY_BACKOFFS_MS } from "../../budgets.js";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Secret } from "../../../secrets.js";
 import { handlePlaneEffects } from "../../../channels/planeEffects.js";
@@ -30,7 +35,9 @@ import {
   wrapUpInstruction,
 } from "../windDown.js";
 import type { StepReport } from "../../runLedger/stepReport.js";
-import { InMemoryRunLedger } from "../../runLedger/inMemory.js";
+import { WorkerRunLedger } from "../../runLedgerWorker.js";
+import { messageFromInbox } from "../../runLedger/inboxMessage.js";
+import type { InboxItem } from "../../runLedger/types.js";
 import { createLedgerWriteThrough, deliverPlaneSteer } from "../../runLedger/writeThrough.js";
 import type { RunnableTool } from "../../../tools/runnableTool.js";
 import { bearerHashOf, RunBearerStore } from "../../modelProxy/runBearers.js";
@@ -405,6 +412,176 @@ function tickingWorld(opts: Parameters<typeof world>[0] = {}) {
 }
 
 describe("runPiHarness — a run on pi from the first file to the answer", () => {
+  // This local store projects the real runtime exports, including all eight
+  // Durable Objects. It proves producer/SQLite/HTTP behavior, not the unfiltered
+  // production entry or native pi persistence: the pi endpoint below is a fake.
+  let memoryWorker: import("node:child_process").ChildProcess | undefined;
+  let memoryDir: string | undefined;
+  let memoryStart: Promise<string> | undefined;
+  afterAll(async () => {
+    if (memoryWorker && memoryWorker.exitCode === null && memoryWorker.signalCode === null) {
+      const exited = new Promise<void>((resolve) => memoryWorker!.once("exit", () => resolve()));
+      if (process.platform === "win32") memoryWorker.kill("SIGTERM");
+      else process.kill(-memoryWorker.pid!, "SIGTERM");
+      await exited;
+    }
+    if (memoryDir) rmSync(memoryDir, { recursive: true, force: true });
+  });
+  const memoryFixture = async () => {
+    memoryStart ??= (async () => {
+      const { spawn } = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      memoryDir = mkdtempSync(join(tmpdir(), "pi-inbox-store-"));
+      const socket = createServer();
+      await new Promise<void>((resolve) => socket.listen(0, "127.0.0.1", resolve));
+      const address = socket.address();
+      if (!address || typeof address === "string") throw new Error("no local fixture port");
+      const port = address.port;
+      await new Promise<void>((resolve) => socket.close(() => resolve()));
+      const root = process.cwd();
+      const date = /"compatibility_date":\s*"([^"]+)"/.exec(
+        readFileSync(join(root, "deploy/cloudflare-memory/wrangler.template.jsonc"), "utf8"),
+      )?.[1];
+      if (!date) throw new Error("missing production compatibility date");
+      const entry = join(memoryDir, "worker-entry.ts");
+      writeFileSync(
+        entry,
+        `export { default, MemoryDO, ScheduleDO, ConfigDO, DeliveryDO, CostsSnapshotDO, RunHistoryDO, RunTranscriptDO, SessionLogDO } from ${JSON.stringify(join(root, "deploy/cloudflare-memory/worker.ts"))};`,
+      );
+      memoryWorker = spawn(
+        "npm",
+        [
+          "run",
+          "dev",
+          "-w",
+          "deploy/cloudflare-memory",
+          "--",
+          entry,
+          "--local",
+          "--config",
+          "wrangler.test.jsonc",
+          "--compatibility-date",
+          date,
+          "--compatibility-flags",
+          "nodejs_compat",
+          "--var",
+          "MEMORY_TOKEN:test-token",
+          "--ip",
+          "127.0.0.1",
+          "--port",
+          String(port),
+          "--inspector-port",
+          "0",
+          "--persist-to",
+          join(memoryDir, "sqlite"),
+        ],
+        {
+          cwd: root,
+          env: { PATH: process.env.PATH, WRANGLER_SEND_METRICS: "false", CI: "1" },
+          detached: process.platform !== "win32",
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      let output = "";
+      const capture = (bytes: Buffer) => {
+        output = (output + String(bytes)).slice(-65536);
+      };
+      memoryWorker.stdout?.on("data", capture);
+      memoryWorker.stderr?.on("data", capture);
+      const url = `http://127.0.0.1:${port}`;
+      for (let n = 0; n < 150; n++) {
+        if (memoryWorker.exitCode !== null) throw new Error(`local store exited: ${output}`);
+        try {
+          if ((await fetch(`${url}/healthz`, { signal: AbortSignal.timeout(200) })).ok) return url;
+        } catch {
+          /* starting */
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      throw new Error(`local store did not start: ${output}`);
+    })();
+    const ledger = new WorkerRunLedger({
+      baseUrl: await memoryStart,
+      token: "test-token",
+      storeKey: `pi-inbox-${randomUUID()}`,
+    });
+    const decoded = (row: InboxItem) => {
+      const restored = messageFromInbox(row.message, NOW, {
+        runId: "run-7",
+        channelId: "slack:C1",
+        threadKey: "slack:C1:1.0",
+        requester: "slack:UALICE",
+      });
+      if (!restored) throw new Error("canonical fixture row is unreadable");
+      expect(restored.custody).toEqual({
+        version: 1,
+        runId: "run-7",
+        channelId: "slack:C1",
+        threadKey: "slack:C1:1.0",
+        requester: "slack:UALICE",
+        producerGen: "gen-A",
+      });
+      return {
+        row,
+        input: {
+          text: restored.msg.text,
+          at: restored.at,
+          userId: restored.msg.userId,
+          userName: restored.msg.userName,
+          msg: restored.msg,
+          ledgerSeq: row.seq,
+        },
+      };
+    };
+    const externalRow = async (message: Record<string, unknown>) => {
+      const result = await ledger.pushInbox("run-7", { channelId: "slack:C1", threadKey: "slack:C1:1.0", ...message });
+      expect(result.ok).toBe(true);
+      expect(Number.isSafeInteger(result.seq) && Number(result.seq) > 0).toBe(true);
+      const row = (await ledger.readInbox("run-7", Number(result.seq) - 1)).find((item) => item.seq === result.seq);
+      if (!row) throw new Error("positive push lacks its exact canonical row");
+      expect(row.message).toEqual({
+        channelId: "slack:C1",
+        threadKey: "slack:C1:1.0",
+        ...message,
+        target: {
+          version: 1,
+          runId: "run-7",
+          channelId: "slack:C1",
+          threadKey: "slack:C1:1.0",
+          requester: "slack:UALICE",
+          producerGen: "gen-A",
+        },
+      });
+      return decoded(row);
+    };
+    const providerUp = async () => {
+      const before = await ledger.readInbox("run-7", 0);
+      await ledger.planePark("run-7", "anthropic");
+      await ledger.planeLevel({ name: "provider", provider: "anthropic", side: "up" });
+      const added = await ledger.readInbox("run-7", before.at(-1)?.seq ?? 0);
+      expect(added).toHaveLength(1);
+      const row = added[0];
+      expect(row.message).toMatchObject({
+        version: 1,
+        kind: "provider-reissue",
+        targetRunId: "run-7",
+        userId: "plane",
+        plane: { steer: "reissue", provider: "anthropic" },
+      });
+      const beat = await ledger.heartbeat("run-7", "gen-A", 30_000);
+      if (!beat.ok) throw new Error("canonical fixture owner was fenced");
+      const effect = beat.effects?.find((effect) => effect.kind === "steer" && effect.seq === row.seq);
+      if (!effect || effect.kind !== "steer") throw new Error("canonical control lacks its outbox offer");
+      expect(effect).toMatchObject({ id: `steer:run-7:${row.seq}`, runId: "run-7", message: row.message });
+      return { ...decoded(row), effect };
+    };
+    const reclaimWithLease = async () => {
+      const live = (await ledger.listLive()).find((row) => row.runId === "run-7");
+      if (!live) throw new Error("canonical fixture owner is absent");
+      return ledger.reclaim("gen-B", live.leaseUntil, 30_000);
+    };
+    return { ledger, externalRow, providerUp, reclaimWithLease };
+  };
+
   it.each(["kill", "remove"] as const)(
     "an opening failure preserves an unconfirmed %s before session handoff",
     async (phase) => {
@@ -1280,7 +1457,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
   // live through a parked 402, and every provider-up row that lands before the
   // successful release response remains consumed after restart.
   it("a 402 during a follow-up turn parks and resumes on provider-up without ending the run", async () => {
-    const ledger = new InMemoryRunLedger(() => NOW);
+    const { ledger, providerUp, reclaimWithLease } = await memoryFixture();
     const wt = createLedgerWriteThrough({
       ledger,
       gen: "gen-A",
@@ -1304,10 +1481,11 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     if (opened.kind !== "tracked") throw new Error(`the run was not tracked: ${opened.kind}`);
     const ledgerRun = opened.run;
     w.run.onStep = ledgerRun.step.bind(ledgerRun);
-    const up = { text: reissueSteerSentence("anthropic"), userId: "plane", userName: "plane", at: NOW };
-    const where = { channelId: "slack:C1", threadKey: "slack:C1:1.0" };
-    const firstUpSeq = (await ledger.pushInbox("run-7", { ...where, ...up })).seq!;
-    const inFlightUpSeq = (await ledger.pushInbox("run-7", { ...where, ...up })).seq!;
+    const firstUp = await providerUp(),
+      inFlightUp = await providerUp();
+    const up = firstUp.input,
+      firstUpSeq = firstUp.row.seq,
+      inFlightUpSeq = inFlightUp.row.seq;
     let prompts = 0;
     w.container.onStdin = (line) => {
       const cmd = JSON.parse(line) as Record<string, unknown>;
@@ -1327,7 +1505,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       if (prompt === 2) {
         // The release prompt is already in flight. A second provider-up row
         // landing now must be checkpointed with the row that caused it.
-        w.inbox.push({ ...up, ledgerSeq: inFlightUpSeq });
+        w.inbox.push(inFlightUp.input);
         w.container.emit({ type: "queue_update" });
       }
       w.container.emit({ id: cmd.id, type: "response", command: "prompt", success: true }, { type: "agent_start" });
@@ -1362,8 +1540,9 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     w.inbox.push({ ...up, ledgerSeq: firstUpSeq });
     await expect(turn).resolves.toBe("follow-up recovered");
 
-    ledger.live.get("run-7")!.leaseUntil = 0;
-    const [reclaimed] = await ledger.reclaim("gen-B", NOW, 30_000);
+    const [reclaimed] = await reclaimWithLease();
+    // Local cursor/echo proof is not native consumption: SQLite retains the exact raw rows.
+    expect(await ledger.readInbox("run-7", 0)).toEqual([firstUp.row, inFlightUp.row]);
     expect(reclaimed?.lastStep?.inboxConsumedSeq).toBe(inFlightUpSeq);
     expect(reclaimed?.inbox).toEqual([]);
     const promptsSent = w.container.commands().filter((command) => command.type === "prompt");
@@ -1380,7 +1559,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
   // replaying the provider-up row into a later hold, and the session transcript
   // remains the loop's rather than absorbing the follow-up turn.
   it("a provider-up buffered during a successful follow-up retry stays consumed across a process restart while an ordinary follow-up beside it survives", async () => {
-    const ledger = new InMemoryRunLedger(() => NOW);
+    const { ledger, externalRow, providerUp, reclaimWithLease } = await memoryFixture();
     const wt = createLedgerWriteThrough({
       ledger,
       gen: "gen-A",
@@ -1405,10 +1584,11 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     const ledgerRun = opened.run;
     w.run.onStep = ledgerRun.step.bind(ledgerRun);
     const ordinary = { text: "also bump the changelog", userId: "slack:UALICE", at: NOW };
-    const up = { text: reissueSteerSentence("anthropic"), userId: "plane", userName: "plane", at: NOW };
-    const where = { channelId: "slack:C1", threadKey: "slack:C1:1.0" };
-    const ordinarySeq = (await ledger.pushInbox("run-7", { ...where, ...ordinary })).seq!;
-    const upSeq = (await ledger.pushInbox("run-7", { ...where, ...up })).seq!;
+    const ordinaryRow = await externalRow(ordinary),
+      controlRow = await providerUp();
+    const up = controlRow.input,
+      ordinarySeq = ordinaryRow.row.seq,
+      upSeq = controlRow.row.seq;
     expect(upSeq).toBeGreaterThan(ordinarySeq);
 
     let prompts = 0;
@@ -1428,7 +1608,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
 
       const prompt = prompts++;
       if (prompt === 2) {
-        w.inbox.push({ ...ordinary, ledgerSeq: ordinarySeq });
+        w.inbox.push(ordinaryRow.input);
         w.inbox.push({ ...up, ledgerSeq: upSeq });
         // One ordinary loop iteration drains the live inbox while the local
         // retry's prompt response is still pending.
@@ -1461,8 +1641,9 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
 
     // The bot process dies here; reclaim must use the durable cursor, not the
     // in-process relaunch record, and offer only the ordinary deferred row.
-    ledger.live.get("run-7")!.leaseUntil = 0;
-    const [reclaimed] = await ledger.reclaim("gen-B", NOW, 30_000);
+    const [reclaimed] = await reclaimWithLease();
+    // Local cursor/echo proof is not native consumption: SQLite retains the exact raw rows.
+    expect(await ledger.readInbox("run-7", 0)).toEqual([ordinaryRow.row, controlRow.row]);
     expect(reclaimed?.lastStep?.inboxConsumedSeq).toBe(upSeq);
     expect(reclaimed?.lastStep?.inboxDeferredSeqs).toEqual([ordinarySeq]);
     expect(reclaimed!.inbox.map((item) => item.seq)).toEqual([ordinarySeq]);
@@ -1477,7 +1658,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
   // process restart's reclaim offers it again and the next generation delivers
   // it, while the consumed provider-up row is never replayed.
   it("an ordinary follow-up the cursor passed beside a consumed provider-up row survives a process restart: the reclaim offers it and the next generation steers it into pi", async () => {
-    const ledger = new InMemoryRunLedger(() => NOW);
+    const { ledger, externalRow, providerUp, reclaimWithLease } = await memoryFixture();
     const wt = createLedgerWriteThrough({
       ledger,
       gen: "gen-A",
@@ -1506,10 +1687,11 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       written++;
     };
     const ordinary = { text: "also bump the changelog", userId: "slack:UALICE", at: NOW };
-    const up = { text: reissueSteerSentence("anthropic"), userId: "plane", userName: "plane", at: NOW };
-    const where = { channelId: "slack:C1", threadKey: "slack:C1:1.0" };
-    const ordinarySeq = (await ledger.pushInbox("run-7", { ...where, ...ordinary })).seq!;
-    const upSeq = (await ledger.pushInbox("run-7", { ...where, ...up })).seq!;
+    const ordinaryRow = await externalRow(ordinary),
+      controlRow = await providerUp();
+    const up = controlRow.input,
+      ordinarySeq = ordinaryRow.row.seq,
+      upSeq = controlRow.row.seq;
     expect(upSeq).toBeGreaterThan(ordinarySeq);
 
     scriptedPi(w.container, (n, c) => {
@@ -1539,7 +1721,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     });
     const done = w.start().catch((error: unknown) => error);
     await vi.waitFor(() => expect(w.notes.some((note) => note.includes("the turn is held"))).toBe(true));
-    w.inbox.push({ ...ordinary, ledgerSeq: ordinarySeq });
+    w.inbox.push(ordinaryRow.input);
     w.inbox.push({ ...up, ledgerSeq: upSeq });
     await vi.waitFor(() => expect(written).toBe(2));
     const steered = w.container.commands().filter((c) => c.type === "steer");
@@ -1547,8 +1729,9 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(String(steered[0]!.message)).toContain("also bump the changelog");
 
     // The bot process dies here; the next generation reclaims the row.
-    ledger.live.get("run-7")!.leaseUntil = 0;
-    const [reclaimed] = await ledger.reclaim("gen-B", NOW, 30_000);
+    const [reclaimed] = await reclaimWithLease();
+    // Local cursor/echo proof is not native consumption: SQLite retains the exact raw rows.
+    expect(await ledger.readInbox("run-7", 0)).toEqual([ordinaryRow.row, controlRow.row]);
     expect(reclaimed?.lastStep?.inboxConsumedSeq).toBe(upSeq);
     expect(reclaimed!.inbox.map((item) => item.seq)).toEqual([ordinarySeq]);
     w.control.requestStop("hard");
@@ -1585,7 +1768,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
   // consumed when that retry wins, so reclaim cannot offer the stale control
   // row to a later provider hold after the bot process restarts.
   it("a provider-up buffered during a successful main-loop retry stays consumed across a process restart", async () => {
-    const ledger = new InMemoryRunLedger(() => NOW);
+    const { ledger, providerUp, reclaimWithLease } = await memoryFixture();
     const wt = createLedgerWriteThrough({
       ledger,
       gen: "gen-A",
@@ -1608,8 +1791,9 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     });
     if (opened.kind !== "tracked") throw new Error(`the run was not tracked: ${opened.kind}`);
     w.run.onStep = opened.run.step.bind(opened.run);
-    const up = { text: reissueSteerSentence("anthropic"), userId: "plane", userName: "plane", at: NOW };
-    const upSeq = (await ledger.pushInbox("run-7", { channelId: "slack:C1", threadKey: "slack:C1:1.0", ...up })).seq!;
+    const controlRow = await providerUp(),
+      up = controlRow.input,
+      upSeq = controlRow.row.seq;
 
     let prompts = 0;
     w.container.onStdin = (line) => {
@@ -1652,8 +1836,9 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
 
     await expect(w.start()).resolves.toBe("recovered on the local retry");
 
-    ledger.live.get("run-7")!.leaseUntil = 0;
-    const [reclaimed] = await ledger.reclaim("gen-B", NOW, 30_000);
+    const [reclaimed] = await reclaimWithLease();
+    // Local cursor/echo proof is not native consumption: SQLite retains the exact raw rows.
+    expect(await ledger.readInbox("run-7", 0)).toEqual([controlRow.row]);
     expect(reclaimed?.lastStep?.inboxConsumedSeq).toBe(upSeq);
     expect(reclaimed?.inbox).toEqual([]);
   });
@@ -1663,7 +1848,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
   // while the reissue prompt is in flight, so reclaim cannot replay it into a
   // later provider hold after the bot process restarts.
   it("provider-up rows buffered during a successful main-loop reissue stay consumed across a process restart", async () => {
-    const ledger = new InMemoryRunLedger(() => NOW);
+    const { ledger, providerUp, reclaimWithLease } = await memoryFixture();
     const wt = createLedgerWriteThrough({
       ledger,
       gen: "gen-A",
@@ -1686,10 +1871,11 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     });
     if (opened.kind !== "tracked") throw new Error(`the run was not tracked: ${opened.kind}`);
     w.run.onStep = opened.run.step.bind(opened.run);
-    const up = { text: reissueSteerSentence("anthropic"), userId: "plane", userName: "plane", at: NOW };
-    const where = { channelId: "slack:C1", threadKey: "slack:C1:1.0" };
-    const firstUpSeq = (await ledger.pushInbox("run-7", { ...where, ...up })).seq!;
-    const inFlightUpSeq = (await ledger.pushInbox("run-7", { ...where, ...up })).seq!;
+    const firstUp = await providerUp(),
+      inFlightUp = await providerUp();
+    const up = firstUp.input,
+      firstUpSeq = firstUp.row.seq,
+      inFlightUpSeq = inFlightUp.row.seq;
 
     let prompts = 0;
     w.container.onStdin = (line) => {
@@ -1710,7 +1896,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       if (prompt === 1) {
         // The release prompt is already in flight. Its success handler must
         // drain and checkpoint this second row with the row that caused it.
-        w.inbox.push({ ...up, ledgerSeq: inFlightUpSeq });
+        w.inbox.push(inFlightUp.input);
         w.container.emit({ type: "queue_update" });
       }
       w.container.emit({ id: cmd.id, type: "response", command: "prompt", success: true }, { type: "agent_start" });
@@ -1738,8 +1924,9 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     w.inbox.push({ ...up, ledgerSeq: firstUpSeq });
     await expect(done).resolves.toBe("recovered on the plane reissue");
 
-    ledger.live.get("run-7")!.leaseUntil = 0;
-    const [reclaimed] = await ledger.reclaim("gen-B", NOW, 30_000);
+    const [reclaimed] = await reclaimWithLease();
+    // Local cursor/echo proof is not native consumption: SQLite retains the exact raw rows.
+    expect(await ledger.readInbox("run-7", 0)).toEqual([firstUp.row, inFlightUp.row]);
     expect(reclaimed?.lastStep?.inboxConsumedSeq).toBe(inFlightUpSeq);
     expect(reclaimed?.inbox).toEqual([]);
     const promptsSent = w.container.commands().filter((command) => command.type === "prompt");
@@ -2193,7 +2380,41 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
   });
 
   it("a provider-up effect pushed into the owning live inbox reissues the parked turn immediately and acks done before any heartbeat or reclaim", async () => {
+    const { ledger, externalRow, providerUp } = await memoryFixture();
     const w = world({ providerPark: true });
+    const wt = createLedgerWriteThrough({
+      ledger,
+      gen: "gen-A",
+      fallback: { put: async () => {}, abandoned: () => {} },
+      warn: () => {},
+      sleep: async () => {},
+      setInterval: () => ({ unref() {} }),
+      clearInterval: () => {},
+      schedule: () => ({ cancel() {} }),
+    });
+    const opened = await wt.open({
+      runId: "run-7",
+      threadKey: "slack:C1:1.0",
+      startedAt: NOW,
+      meta: { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:1.0", agent: "coding", model: "p/m" },
+      system: "You are the coding agent.",
+      tools: [],
+      seed: { messages: w.run.messages, budgetMs: 600_000 },
+    });
+    if (opened.kind !== "tracked") throw new Error(`the run was not tracked: ${opened.kind}`);
+    w.run.onStep = async (report) => {
+      w.steps.push(report);
+      await opened.run.step(report);
+    };
+    const priorOne = await externalRow({ text: "earlier queued input", userId: "slack:UALICE", at: NOW });
+    const priorTwo = await externalRow({ text: "second queued input", userId: "slack:UALICE", at: NOW });
+    const controlRow = await providerUp();
+    const effect = controlRow.effect;
+    expect(effect.seq).toBe(3);
+    const externalControl = { ...effect.message };
+    delete externalControl.target;
+    expect(await ledger.pushInbox("run-7", externalControl)).toEqual({ ok: false });
+    expect(await ledger.readInbox("run-7", 0)).toEqual([priorOne.row, priorTwo.row, controlRow.row]);
     scriptedPi(w.container, (n, c) => {
       if (n === 0)
         c.emit(
@@ -2215,51 +2436,66 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     });
     const done = w.start();
     await vi.waitFor(() => expect(w.notes.some((n) => n.includes("the turn is held"))).toBe(true));
-    const effect = {
-      id: "steer:run-7:3",
-      kind: "steer" as const,
-      runId: "run-7",
-      seq: 3,
-      message: {
-        channelId: "slack:C1",
-        threadKey: "slack:C1:1.0",
-        text: reissueSteerSentence("anthropic"),
-        at: NOW,
-        userId: "plane" as const,
-        userName: "plane" as const,
-        plane: { steer: "reissue" as const, provider: "anthropic" },
-      },
-    };
     const acked: Array<{ id: string; outcome: string }> = [];
-    const raw = JSON.stringify({ effects: [effect] });
-    const req = {
-      method: "POST",
-      headers: { authorization: "Bearer memory-token" },
-      async *[Symbol.asyncIterator]() {
-        yield Buffer.from(raw);
-      },
-    } as unknown as IncomingMessage;
-    const res = {
-      headersSent: false,
-      writeHead: () => {},
-      end: () => {},
-    } as unknown as ServerResponse;
-    handlePlaneEffects(req, res, {
-      token: new Secret("memory-token", "MEMORY_TOKEN"),
-      execute: {
-        draining: () => false,
-        admit: async () => "done",
-        steer: async (offered) => deliverPlaneSteer(offered, { runId: "run-7", inbox: w.inbox }),
-      },
-      fenceSteer: async () => true,
-      ack: async (offered, outcome) => void acked.push({ id: offered.id, outcome }),
-      log: () => {},
-    });
+    let status = 0,
+      fences = 0;
+    const push = (body: unknown) => {
+      const raw = JSON.stringify({ effects: [body] });
+      const req = {
+        method: "POST",
+        headers: { authorization: "Bearer test-token" },
+        async *[Symbol.asyncIterator]() {
+          yield Buffer.from(raw);
+        },
+      } as unknown as IncomingMessage;
+      const res = {
+        headersSent: false,
+        writeHead: (value: number) => {
+          status = value;
+        },
+        end: () => {},
+      } as unknown as ServerResponse;
+      handlePlaneEffects(req, res, {
+        token: new Secret("test-token", "MEMORY_TOKEN"),
+        execute: {
+          draining: () => false,
+          admit: async () => "done",
+          steer: async (offered) => deliverPlaneSteer(offered, { runId: "run-7", inbox: w.inbox }),
+        },
+        fenceSteer: async (offered) => {
+          fences++;
+          return ledger.planeFenceSteer(offered.id, offered.runId, "gen-A", 30_000);
+        },
+        ack: async (offered, outcome) => {
+          if (offered.kind !== "steer") throw new Error("unexpected fixture effect kind");
+          await ledger.planeAck(offered.id, outcome, { runId: offered.runId, gen: "gen-A" });
+          acked.push({ id: offered.id, outcome });
+        },
+        log: () => {},
+      });
+    };
+    push({ ...effect, message: { ...effect.message, version: undefined } });
+    await vi.waitFor(() => expect(status).toBe(400));
+    expect(fences).toBe(0);
+    expect(acked).toEqual([]);
+    const before = await ledger.heartbeat("run-7", "gen-A", 30_000);
+    if (!before.ok) throw new Error("fixture owner was fenced");
+    expect(before.effects).toContainEqual(effect);
+    push(effect);
     await vi.waitFor(() => expect(acked).toEqual([{ id: "steer:run-7:3", outcome: "done" }]));
     expect(await done).toBe("recovered from the live push");
     expect(w.container.commands().filter((c) => c.type === "prompt")).toHaveLength(2);
     expect(w.container.commands().filter((c) => c.type === "steer")).toEqual([]);
     expect(w.steps.at(-1)?.inboxConsumedSeq).toBe(3);
+    expect(fences).toBe(1);
+    const after = await ledger.heartbeat("run-7", "gen-A", 30_000);
+    if (!after.ok) throw new Error("fixture owner was fenced");
+    expect(after.effects).not.toContainEqual(effect);
+    // The accepted local effect ACK/cursor is not a native consumption receipt.
+    expect(await ledger.readInbox("run-7", 0)).toEqual([priorOne.row, priorTwo.row, controlRow.row]);
+    expect(await ledger.abandon("run-7", "gen-A")).toEqual({ ok: true });
+    expect(await ledger.listLive()).toEqual([]);
+    expect(await ledger.readInbox("run-7", 0)).toEqual([priorOne.row, priorTwo.row, controlRow.row]);
   });
 
   it("a stream cut after a relayed success keeps the retry ladder even on a park-capable run: the proxy parked nothing, so no steer would release a hold", async () => {

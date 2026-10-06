@@ -444,6 +444,8 @@ describe("decide — the resident stage's conditions (record 0064)", () => {
 
 describe("decide — the checkpoint steers and the provider condition (record 0064)", () => {
   const MIN = 60_000;
+  const checkpointState = () =>
+    stateWith({ liveRuns: { "run-a": { channelId: "slack:C1", threadKey: "slack:C1:1.0" } } });
   const facts = (over: Partial<import("./decide.js").HeartbeatFacts> = {}) => ({
     round: 3,
     coding: true,
@@ -458,7 +460,7 @@ describe("decide — the checkpoint steers and the provider condition (record 00
       inFlight: { callId: "c1", tool: "bash", sinceAt: 0, boundMs: 5 * MIN },
       pushedHead: { ref: "b", sha: "s", at: 5 * MIN },
     });
-    const out = decide(emptyPlaneState(), decideEvent(beat(6 * MIN, f)));
+    const out = decide(checkpointState(), decideEvent(beat(6 * MIN, f)));
     const inbox = out.writes.filter((w) => w.table === "run_inbox");
     expect(inbox).toEqual([
       {
@@ -466,6 +468,11 @@ describe("decide — the checkpoint steers and the provider condition (record 00
         op: "push",
         runId: "run-a",
         message: {
+          version: 1,
+          kind: "checkpoint",
+          targetRunId: "run-a",
+          channelId: "slack:C1",
+          threadKey: "slack:C1:1.0",
           text: "finish the step you are on, push a checkpoint and end the round; start no new command; the resident takes your push",
           at: 6 * MIN,
           userId: "plane",
@@ -488,18 +495,18 @@ describe("decide — the checkpoint steers and the provider condition (record 00
       inFlight: { callId: "c1", tool: "bash", sinceAt: 0, boundMs: 10 * MIN },
       pushedHead: { ref: "b", sha: "s", at: 5 * MIN },
     });
-    expect(decide(emptyPlaneState(), decideEvent(beat(6 * MIN, within))).writes).toEqual([]);
+    expect(decide(checkpointState(), decideEvent(beat(6 * MIN, within))).writes).toEqual([]);
     const noBound = facts({
       inFlight: { callId: "c1", tool: "bash", sinceAt: 0 },
       pushedHead: { ref: "b", sha: "s", at: 14 * MIN },
     });
-    expect(decide(emptyPlaneState(), decideEvent(beat(15 * MIN, noBound))).writes).toEqual([]);
+    expect(decide(checkpointState(), decideEvent(beat(15 * MIN, noBound))).writes).toEqual([]);
     const readonly = facts({ coding: false, inFlight: { callId: "c1", tool: "bash", sinceAt: 0, boundMs: MIN } });
-    expect(decide(emptyPlaneState(), decideEvent(beat(60 * MIN, readonly))).writes).toEqual([]);
+    expect(decide(checkpointState(), decideEvent(beat(60 * MIN, readonly))).writes).toEqual([]);
   });
 
   it("a coding round with no pushed head past noPushMinutes steers no_push; a second heartbeat in the same round writes none; a new round writes one again", () => {
-    const first = decide(emptyPlaneState(), decideEvent(beat(16 * MIN)));
+    const first = decide(checkpointState(), decideEvent(beat(16 * MIN)));
     expect(first.writes.filter((w) => w.table === "run_inbox")).toHaveLength(1);
     const second = decide(first.state, decideEvent(beat(17 * MIN)));
     expect(second.writes).toEqual([]);
@@ -509,12 +516,12 @@ describe("decide — the checkpoint steers and the provider condition (record 00
 
   it("the same sentence from two causes is written once per round: both dedupe rows land, one inbox row", () => {
     const f = facts({ inFlight: { callId: "c1", tool: "bash", sinceAt: 0, boundMs: MIN } });
-    const out = decide(emptyPlaneState(), decideEvent(beat(16 * MIN, f)));
+    const out = decide(checkpointState(), decideEvent(beat(16 * MIN, f)));
     expect(out.writes.filter((w) => w.table === "plane_reservations")).toHaveLength(2);
     expect(out.writes.filter((w) => w.table === "run_inbox")).toHaveLength(1);
     // The second cause arriving on a later heartbeat of the same round records its row but repeats no sentence.
     const noPushOnly = decide(
-      decide(emptyPlaneState(), decideEvent(beat(2 * MIN, f))).state, // long_call steered at 2min (no_push not yet due)
+      decide(checkpointState(), decideEvent(beat(2 * MIN, f))).state, // long_call steered at 2min (no_push not yet due)
       decideEvent(beat(16 * MIN, facts())),
     );
     expect(noPushOnly.writes.filter((w) => w.table === "plane_reservations")).toEqual([
@@ -529,7 +536,7 @@ describe("decide — the checkpoint steers and the provider condition (record 00
 
   it("a fresh push resets the no-push clock: a head pushed within the window steers nothing", () => {
     const pushed = facts({ pushedHead: { ref: "b", sha: "s", at: 10 * MIN, clean: true } });
-    expect(decide(emptyPlaneState(), decideEvent(beat(16 * MIN, pushed))).writes).toEqual([]);
+    expect(decide(checkpointState(), decideEvent(beat(16 * MIN, pushed))).writes).toEqual([]);
   });
 
   it("a provider down report writes the level row and nothing else; a park writes one park row, a second park of the same run is a no-op", () => {
@@ -596,6 +603,9 @@ describe("decide — the checkpoint steers and the provider condition (record 00
         runId: "run-a",
         seq: 5,
         message: {
+          version: 1,
+          kind: "provider-reissue",
+          targetRunId: "run-a",
           channelId: "slack:C1",
           threadKey: "slack:C1:1.0",
           text: "the model provider anthropic is answering again — re-issue the held turn and continue",
@@ -611,6 +621,9 @@ describe("decide — the checkpoint steers and the provider condition (record 00
         runId: "run-b",
         seq: 9,
         message: {
+          version: 1,
+          kind: "provider-reissue",
+          targetRunId: "run-b",
           channelId: "slack:C2",
           threadKey: "slack:C2:2.0",
           text: "the model provider anthropic is answering again — re-issue the held turn and continue",

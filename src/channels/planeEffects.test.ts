@@ -31,6 +31,9 @@ function steer(runId = "live-run-1", seq = 7): PlaneEffect {
     runId,
     seq,
     message: {
+      version: 1,
+      kind: "provider-reissue",
+      targetRunId: runId,
       channelId: "slack:C1",
       threadKey: "slack:C1:1.0",
       text: "the model provider anthropic is answering again — re-issue the held turn and continue",

@@ -34,6 +34,7 @@ import { isRunProfile } from "../config/profile.js";
 import { MINUTE_MS, minutesToMs } from "./budgets.js";
 import type { LedgerRun } from "./runLedger/writeThrough.js";
 import { settleRetryPause } from "./runLedger/threadsElsewhere.js";
+import { TerminalCommitmentUnknownError } from "./runLedger/writeThrough.js";
 import { systemClock } from "./trace/index.js";
 import type { SpanSink, Tracer } from "./trace/types.js";
 import type { SpanLog } from "./trace/spanLog.js";
@@ -704,6 +705,7 @@ export async function dispatch(
   let setupRefusal: Refusal | undefined;
   let setupFailure: RunFailure | undefined;
   let setupFinished = false;
+  let setupTerminalHeld = false;
   let setupUntrackedWhy: string | undefined;
   const audienceTrace: AudienceTrace = { refusal: audienceRefusalOf(resume?.row.state.audienceRefusal) };
   const recordRefusalOnce = async (refusal: Refusal) => {
@@ -2800,7 +2802,7 @@ export async function dispatch(
       const reservation = reserved;
       // The same finalizer serves every admitted run.
       setupFinalizer = () => {
-        if (setupFinished || runLoopStarted || fencedWhileAttaching) return;
+        if (setupFinished || setupTerminalHeld || runLoopStarted || fencedWhileAttaching) return;
         setupFinished = true;
         const status =
           stoppedWhileAttaching === "hard"
@@ -4566,6 +4568,33 @@ export async function dispatch(
     // new generation owns the same child: no model, reply or finish from here.
     if (fencedWhileAttaching) return ended;
     caught = true;
+    if (err instanceof TerminalCommitmentUnknownError) {
+      setupTerminalHeld = true;
+      resumeRowRetained = true;
+      ended.refusal = "setup_failed";
+      ended.cause = "system";
+      root.setAttrs({ refusal: "setup_failed", cause: "system" });
+      const original = registry.getById(err.hold.runId);
+      if (original && err.hold.threadKey === msg.threadKey)
+        deps.threadsElsewhere.remember(msg.threadKey, {
+          runId: err.hold.runId,
+          agent: original.agent,
+          startedAt: original.startedAt,
+        });
+      const text = "The original terminal outcome is unconfirmed; its saved work and owner remain held.";
+      if (setupCard && setupShell)
+        await setupCard
+          .done(
+            setupShell.close({
+              kind: "setup_failed",
+              reason: text,
+              ...closeLines(clock(), false),
+            }),
+          )
+          .catch(() => {});
+      await io.reply(text).catch(() => {});
+      return ended;
+    }
     // The catch-all is the last line (record 0054): an uncaught throw is a
     // `system`/`uncaught` refusal on the trace, counted like any other —
     // unless the throw carried its own `Refusal` (a `RefusalError` from the
@@ -4675,7 +4704,7 @@ export async function dispatch(
     // The backstop: a finished run no reply attempt reached (a fenced run, a
     // branch that returned early) is sealed with no `replyOk`, and any record
     // still registered is written.
-    ending.drain(undefined);
+    if (!setupTerminalHeld) ending.drain(undefined);
     if (setupRound && !resumeRowRetained) await setupRound.release({ hardStopped: true });
     // …and a bearer minted for a run that never reached its loop (a head gate
     // after the attach, a throw in the prompt) is revoked here — the ending's
@@ -4714,7 +4743,8 @@ export async function dispatch(
     // A reservation that never got a registry row or setup finalizer must be
     // abandoned before the next queued turn claims the thread. A fenced row
     // belongs to another generation and its abandon is a no-op.
-    if (reserved && !ledgerRun && !setupFinished) await root.span("post.ledger_abandon", () => reserved!.abandon());
+    if (reserved && !ledgerRun && !setupFinished && !setupTerminalHeld)
+      await root.span("post.ledger_abandon", () => reserved!.abandon());
     // The predecessor's identity a restart keeps (run-history item 54), read
     // BEFORE the discard below takes the row: its events, its token, its
     // start — so the restart runs under the same run id and every posted link,
@@ -4731,7 +4761,7 @@ export async function dispatch(
           })
         : undefined;
     // A finalized setup run keeps its frame and record under the original id.
-    if (registered && !runLoopStarted && !setupFinished) registry.discard(registered.id);
+    if (registered && !runLoopStarted && !setupFinished && !setupTerminalHeld) registry.discard(registered.id);
     // The second net under that discard (run-history item 42): a branch that
     // opens its own registry row — `runShipBranch` does — and throws or returns
     // before finishing it would leave the row `running` with no runner behind
@@ -4742,7 +4772,7 @@ export async function dispatch(
     // survivor is the hosted parent of a completed hand-off (record 0060): the
     // branch names it (`ShipBranchEnd.hostedLive`) and the plan runner's
     // `finish` ends it, so the net leaves it live.
-    if (!shipHostedLive && !fencedWhileAttaching) {
+    if (!shipHostedLive && !fencedWhileAttaching && !setupTerminalHeld) {
       for (const boundId of new Set([trace.runId, admitted?.runId])) {
         if (boundId === undefined || registry.snapshotById?.(boundId)?.finished !== false) continue;
         console.warn(
