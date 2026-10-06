@@ -140,7 +140,7 @@ export const POLICY: readonly Rule[] = [
   // The exec grant on a repo the actor may use (not yet asked by a command).
   { action: "repo:exec", resource: "repo", when: [grant("repo:exec"), OWNER_OF] },
   // Binding a run to a repo; open-when-absent today → grants.repos = "all".
-  { action: "repo:use", resource: "repo", when: [OWNER_OF] },
+  { action: "repo:use", resource: "repo", when: [{ kind: "repo-access" }] },
 
   // ── config ───────────────────────────────────────────────────────────────
   // `config show`: the read grant.
@@ -293,6 +293,7 @@ export const CONDITION_KINDS: readonly Condition["kind"][] = [
   "is-self",
   "acts-as-person",
   "owner-of",
+  "repo-access",
   "all-channels",
 ];
 
@@ -300,6 +301,7 @@ const REQUIRED_ATTRIBUTE: Readonly<Partial<Record<Condition["kind"], AttributeNa
   "member-of": "channelId",
   "is-self": "userId",
   "owner-of": "repo",
+  "repo-access": "repo",
 };
 
 const PLACEHOLDER = /\{([^{}]*)\}/g;

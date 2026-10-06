@@ -14,6 +14,10 @@ export type ActorKind = "user" | "service" | "schedule" | "agent";
 /** A set of names, or everything. `"all"` is explicit, never a default. */
 export type GrantSet = ReadonlySet<string> | "all";
 
+/** Compiled code access: literal repos, all, or every repo except a finite set.
+ * Only human namespace baselines create complements; config retains its literal shape. */
+export type RepoAccess = GrantSet | { readonly except: ReadonlySet<string> };
+
 /** What an actor may do. One shape for humans, ingress
  *  tokens, Access identities, schedule actors, and agents. */
 export interface Grants {
@@ -21,8 +25,10 @@ export interface Grants {
   readonly actions: GrantSet;
   /** Platform-namespaced channel ids the actor is a member of (`slack:C…`, `http:ops`), or every channel. */
   readonly channels: GrantSet;
-  /** `owner/name` repos the actor may use, or every repo (open-when-absent today → `"all"`). */
+  /** `owner/name` repos the actor explicitly owns, including repo memory, or every repo. */
   readonly repos: GrantSet;
+  /** Code access, distinct from memory ownership. Absent inherits the explicit repos axis. */
+  readonly repoAccess?: RepoAccess;
 }
 // Which agents an actor may run is NOT a separate axis: it is the action
 // `agent:run:<name>` (or `agent:run:*`) in `actions`, so `has-grant` covers it
@@ -140,6 +146,8 @@ export type Condition =
   | { readonly kind: "acts-as-person" }
   /** actor.grants.repos contains the resource's repo (or is "all"). */
   | { readonly kind: "owner-of" }
+  /** Compiled code access covers the resource repo; never grants memory ownership. */
+  | { readonly kind: "repo-access" }
   /** actor.grants.channels === "all". */
   | { readonly kind: "all-channels" };
 
@@ -190,6 +198,7 @@ export type Predicate =
   | { readonly kind: "channels-in"; readonly channelIds: ReadonlySet<string> }
   | { readonly kind: "user-is"; readonly userId: string }
   | { readonly kind: "repos-in"; readonly repos: ReadonlySet<string> }
+  | { readonly kind: "repos-not-in"; readonly repos: ReadonlySet<string> }
   /** The record's stamped `channelVisibility` is one of these (`member-of`'s
    *  public half). A record without the stamp is `unknown` and never matches
    *  `visibility-in(["public"])`. */

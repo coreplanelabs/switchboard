@@ -7688,7 +7688,17 @@ function visibilitySql(f: RunVisibilityFilter, params: (string | number)[]): str
     case "visibility-in":
       return inList("channel_visibility", f.visibilities);
     case "repos-in":
-      return inList("repo", f.repos);
+      return inList(
+        "LOWER(repo)",
+        f.repos.map((r) => r.toLowerCase()),
+      );
+    case "repos-not-in":
+      return f.repos.length === 0
+        ? "repo IS NOT NULL"
+        : `(repo IS NOT NULL AND NOT (${inList(
+            "LOWER(repo)",
+            f.repos.map((r) => r.toLowerCase()),
+          )}))`;
     case "user-is":
       params.push(f.userId);
       return "user_id = ?";
@@ -8001,6 +8011,7 @@ function boundParameters(f: RunVisibilityFilter): number {
     case "visibility-in":
       return f.visibilities.length;
     case "repos-in":
+    case "repos-not-in":
       return f.repos.length;
     case "user-is":
       return 1;

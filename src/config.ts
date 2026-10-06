@@ -17,16 +17,15 @@ import { resolveMergeWatch, type MergeWatchSettings, type PullsSettings } from "
 import type { ReadingDiffConfig } from "./core/readingDiff.js";
 import type { SpawnConfig } from "./core/dispatch/spawn.js";
 import type { DashboardConfig } from "./core/dashboardAuthConfig.js";
-import { effectiveGrants, hasAction } from "./core/authz/authorize.js";
+import { authorize, effectiveGrants, hasAction } from "./core/authz/authorize.js";
 import {
   grantsIn,
   grantsTable,
-  mayRunAgent,
-  mayUseRepo,
   type GrantsConfig,
   type GrantsTable,
   type RestrictConfig,
 } from "./core/authz/grants.js";
+import { resolveChatActor } from "./core/authz/actor.js";
 import { isViewablePerson } from "./core/authz/viewAs.js";
 import {
   ConfigDocumentClient,
@@ -378,8 +377,8 @@ export interface AppConfig extends AgentConfiguration {
   /**
    * What is CLOSED unless a grant covers it: agents (run only by a holder of
    * `agent:run:<name>`) and repos (`owner/name`, used only by a holder whose
-   * `repos` names it). Everything unlisted is open to everyone who can reach
-   * the bot. Repo management (`repo:write`) and channel config (`config:write`)
+   * `repos` names it). Unlisted agents and code repos are open in human baselines;
+   * credentials always require explicit grants. Repo management (`repo:write`) and channel config (`config:write`)
    * need no entry here — they are closed by construction (held only where
    * `grants` say so, admins through `actions: all`).
    */
@@ -1318,21 +1317,21 @@ export class ConfigStore {
 
   // ---- authorization gates ----------------------------------------------------
   // Every gate reads the grants table (authorization.md item 9): what an actor
-  // holds, plus `restrict` for the two resources that are open unless listed.
+  // holds, with human openness already compiled into namespace baselines.
   // Enforcement happens at run time against the *resolved* agent and repo, so
   // no config layer (including "config set me") can bypass a restriction.
 
-  /** Every agent is open unless `restrict.agents` names it; a restricted agent
-   *  runs only for a holder of `agent:run:<name>` (admins through `all`). */
+  /** The resolved actor must hold agent:run:<name>, including its human baseline. */
   canRunAgent(actor: string | Actor, agentName: string): boolean {
-    return mayRunAgent(this.grants, this.grantsOf(actor), agentName);
+    return authorize(this.actorOf(actor), "agent:run", { type: "agent", name: agentName }).allow;
   }
 
-  /** Every repo is open unless `restrict.repos` names it; a restricted repo is
-   *  used only by a holder whose `repos` axis names it (admins through `all`).
+  /** The resolved actor must hold compiled code access to this repo.
    *  A refused actor is refused BY NAME — never a silent per-thread fallback. */
   canUseRepo(actor: string | Actor, slug: string): boolean {
-    return mayUseRepo(this.grants, this.grantsOf(actor), slug);
+    const [owner, name, extra] = slug.split("/");
+    if (!owner || !name || extra !== undefined) return false;
+    return authorize(this.actorOf(actor), "repo:use", { type: "repo", owner, name }).allow;
   }
 
   /** The channel-config right, as the policy table's `config:write` row on
@@ -1349,6 +1348,13 @@ export class ConfigStore {
    */
   canManageRepos(actor: string | Actor): boolean {
     return hasAction(this.grantsOf(actor).actions, "repo:write");
+  }
+
+  /** String callers use the same namespace resolver as adapters. Resolved actors retain delegation. */
+  private actorOf(actor: string | Actor): Actor {
+    return typeof actor === "string"
+      ? resolveChatActor({ userId: actor, channelId: "", threadKey: "" }, (id) => this.grantsFor(id))
+      : actor;
   }
 
   /** What a gate decides on: an actor id's `grants` entry, or a resolved

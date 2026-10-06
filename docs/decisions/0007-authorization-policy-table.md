@@ -42,3 +42,15 @@ Configuration is one `grants` shape (actor id → actions, channels, repos, with
 ## Pattern
 
 A rules table for authorization, evaluated by one function. Strategy at the identity-resolution seam per surface. Fail-closed by construction.
+
+## Amended 2026-10-05
+
+**Re-evaluation:** compile human code access without memory ownership.
+
+The original table separated identity from authority, but ConfigStore's open-unless-restricted shortcuts admitted ungranted agents and repos for machine credentials. The correction compiles openness into human namespace baselines and makes the two dispatch gates ask the existing policy table. A credential, including one bound to a person, holds only its configured grants; recursive delegation intersects authority on every axis.
+
+Code access needs a distinct compiled repo axis: the existing explicit `repos` axis also authorizes repository memory through `owner-of`. Giving it human openness would expose memory that was previously denied. Optional `repoAccess` inherits explicit `repos` for older/manual actors; human baselines add a finite complement of restricted repos. Configuration remains the same three literal axes. Union and intersection preserve code access and ownership independently and normalize repository case.
+
+The table adds the `repo-access` condition for `repo:use`; `owner-of` retains explicit ownership for repo memory and repo execution. The condition compiles to `repos-in` or bounded `repos-not-in`. A complement never matches a missing repo. Reference, wire and SQLite evaluators share those semantics; unknown filter kinds are rejected. Existing run-read rows do not emit complements, so their stored filters retain their prior shape.
+
+Rejected alternatives: widening ownership would change memory access; a user-kind or root-principal shortcut would exceed a bound credential or mixed delegation ceiling; closing global production resources would move credential safety into deployment configuration. The cost is finite-complement arithmetic in the existing model and one bounded store predicate, rather than a second policy mechanism. Regression proofs cover parsed credential scope, human defaults, bound admins, relays, nested delegation, memory ownership and SQLite parity.

@@ -1,6 +1,6 @@
 # Reference: authorization
 
-Two blocks in `config.yaml` decide who may do what. `grants` says what each actor **holds**; `restrict` says what is **closed unless granted**. Everything else is open to whoever can reach the bot. One policy table (`authorize(actor, action, resource)`) reads the grants on every surface — Slack, CLI, HTTP, MCP, schedules — so nothing here can be bypassed by choosing a different way to ask. Enforcement is at run time against the *resolved* agent or repo, after directives, thread stickiness, and every config layer.
+Two blocks in `config.yaml` decide who may do what. `grants` says what each actor **holds**; `restrict` says what is **closed unless granted**. Unlisted agents and code repos are open through human baselines. Credentials and jobs need explicit grants on every deployment. One policy table (`authorize(actor, action, resource)`) reads the grants on every surface — Slack, CLI, HTTP, MCP, schedules — so nothing here can be bypassed by choosing a different way to ask. Enforcement is at run time against the *resolved* agent or repo, after directives, thread stickiness, and every config layer.
 
 ## `grants`
 
@@ -30,14 +30,14 @@ Keyed by platform-namespaced actor id. Three axes, each a list of names or the e
 |---|---|---|
 | `actions` | `<group>:read` / `<group>:write` / `<group>:exec` for every command group (`runs`, `friction`, `repo`, `config`, `memory`, `mcp`, `schedule`, `deploy`, `env`, `setup`, `help`), `agent:run:<name>`, `dispatch`, `deploy:write` | which commands and agents the actor may run |
 | `channels` | channel ids (`slack:C…`, `http:<name>`, `mcp:<name>`) | whose runs the actor may read beyond the public ones |
-| `repos` | `owner/name` slugs (case-insensitive) | which restricted repos the actor may use |
+| `repos` | `owner/name` slugs (case-insensitive) | which repos a credential may use and whose repo memory it owns; adds to human code access |
 
 ### Baselines — what an id holds listed or not
 
 | Actor id | Baseline | A `grants` entry … |
 |---|---|---|
-| `slack:U…` (a Slack user) | the open chat commands (`help`/`config`/`repo`/`friction`/`memory`/`mcp`/`schedule` reads, `memory:write`, `mcp:write`) plus `agent:run:<name>` for every agent not under `restrict.agents` | **adds** to the baseline |
-| `access:<sub>` (a browser signed in through Access) | every group's `read`, plus `memory:write` and `mcp:write` for its own scope (the web chat makes a signed-in browser a chat user) | **adds** to the baseline |
+| `slack:U…` (a Slack user) | the open chat commands (`help`/`config`/`repo`/`friction`/`memory`/`mcp`/`schedule` reads, `memory:write`, `mcp:write`) plus unrestricted code repos and `agent:run:<name>` for every agent not under `restrict.agents` | **adds** to the baseline |
+| `access:<sub>` (a browser signed in through Access) | every group's `read`, unrestricted agents and code repos, plus `memory:write` and `mcp:write` for its own scope (the web chat makes a signed-in browser a chat user) | **adds** to the baseline |
 | `access:svc:<common_name>` (an Access service token) | nothing | is **exactly** what it holds |
 | `http:<subject>` / `mcp:<subject>` (an ingress token) | nothing | is **exactly** what it holds |
 | `schedule:<name>` (a cron firing) | what the schedule registry declares for it | **replaces** the declaration |
@@ -89,3 +89,10 @@ Both lists are optional and independent. An agent or repo **not** listed is open
 - [How-to: restrict who can do what](../how-to/restrict-who-can-do-what.md) — the narrative version, building up from open to locked down.
 - [Explanation: execution and trust](../explanation/execution-and-trust.md) — why `repo:write` in particular is never a baseline.
 - [Spec: authorization](specs/authorization.md) — the policy table, the actor model, and the proofs.
+
+
+## Migrating scoped credentials
+
+Before deploying the scope fix, grant each HTTP/MCP/service or schedule actor the agent actions and repos it is intended to use. `dispatch` admits a request at ingress; it does not grant an agent or repository. For example, a review credential needs `actions: [dispatch, agent:run:review]` and `repos: [acme/payments]`. A credential bound to a person keeps this ceiling, including when the person is an admin. Registry-only, plan-runner and deployment credentials keep their existing command grants.
+
+Human open code access is compiled independently of explicit repo memory ownership. Neither a human open default nor a delegated human identity grants a credential additional repo memory access. Code and memory grants intersect separately through nested delegation.

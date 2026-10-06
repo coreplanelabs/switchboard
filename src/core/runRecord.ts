@@ -956,6 +956,7 @@ export type RunVisibilityFilter =
   | { kind: "channels-in"; channelIds: string[] }
   | { kind: "user-is"; userId: string }
   | { kind: "repos-in"; repos: string[] }
+  | { kind: "repos-not-in"; repos: string[] }
   | { kind: "visibility-in"; visibilities: ChannelVisibility[] }
   | { kind: "or"; of: RunVisibilityFilter[] }
   | { kind: "and"; of: RunVisibilityFilter[] };
@@ -973,7 +974,8 @@ export function toVisibilityFilter(predicate: Predicate): RunVisibilityFilter {
     case "user-is":
       return { kind: "user-is", userId: predicate.userId };
     case "repos-in":
-      return { kind: "repos-in", repos: [...predicate.repos].sort() };
+    case "repos-not-in":
+      return { kind: predicate.kind, repos: [...predicate.repos].map((r) => r.toLowerCase()).sort() };
     case "visibility-in":
       return { kind: "visibility-in", visibilities: [...predicate.visibilities].sort() };
     case "or":
@@ -1005,6 +1007,7 @@ export function isRunVisibilityFilter(v: unknown, depth = 0): v is RunVisibility
     case "user-is":
       return typeof f.userId === "string" && f.userId.length > 0;
     case "repos-in":
+    case "repos-not-in":
       return isStringList(f.repos, MAX_FILTER_IDS);
     case "visibility-in":
       return (
@@ -1037,7 +1040,9 @@ export function matchesVisibility(
     case "user-is":
       return row.userId === filter.userId;
     case "repos-in":
-      return row.repo !== undefined && filter.repos.includes(row.repo);
+      return row.repo !== undefined && filter.repos.some((r) => r.toLowerCase() === row.repo!.toLowerCase());
+    case "repos-not-in":
+      return row.repo !== undefined && !filter.repos.some((r) => r.toLowerCase() === row.repo!.toLowerCase());
     case "visibility-in":
       return filter.visibilities.includes(row.channelVisibility ?? "unknown");
     case "or":

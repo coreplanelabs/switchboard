@@ -343,7 +343,7 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
       [A.member, repo(REPOS[0])],
     ],
   },
-  "repo:use repo [owner-of]": {
+  "repo:use repo [repo-access]": {
     allow: [
       [A.manager, repo(REPOS[0])],
       [A.admin, repo(REPOS[1])],
