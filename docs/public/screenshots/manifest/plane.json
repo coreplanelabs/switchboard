@@ -57,7 +57,7 @@
   ],
   "configHash": "76e12764484b205956af89dd5ee1fe6c495f568b2011e9d25fe0f2dd772a6307",
   "inputs": {
-    "package-lock.json": "1ad0bc017512eeda04e13211cc7fccd58c4cf5e658595e29d10dc1571381298b",
+    "package-lock.json": "00826e172230354f507b91e0665b54972c2c86f45d3c2bd9bcf3931304bf9c51",
     "package.json": "bb89e4a09a18928dee8eba9ba4e9ed26a0bc2368251384b99c1c34f7f05aeaf9",
     "scripts/screenshot-output-worker.mts": "4183d9c7909ebb82903a8caa715b4facc48076eb2d9238c8706cacf35862003b",
     "scripts/screenshots.mts": "cf676e658502c7ad59c4b262ed878c4c7591a2f83d31bc26806e19d9c0d5493e",
