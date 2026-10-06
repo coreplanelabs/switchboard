@@ -61,7 +61,7 @@ import { processSecrets } from "../../secrets.js";
 import { oneLine, redactAndCap } from "../redact.js";
 import { RefusalError, refusalOf } from "../refusal.js";
 import type { HarnessRoster } from "../harness/roster.js";
-import type { HarnessContainer } from "../harness/container.js";
+import type { HarnessContainer, HarnessOperationScope } from "../harness/container.js";
 import type { HarnessRegistry } from "../harness/pi/relay.js";
 import type { Executor } from "../../execution/executor.js";
 import type { MachineClass } from "../../agents/registry.js";
@@ -91,7 +91,7 @@ export interface HarnessProcessDeps {
   /** The container for a run, given its executor and machine class; absent →
    *  `harnessContainerFor`: over the executor for a class with a workspace, the
    *  bot host for `none`. */
-  containerFor?: (executor: Executor, machine: MachineClass) => HarnessContainer;
+  containerFor?: (executor: Executor, machine: MachineClass, scope?: HarnessOperationScope) => HarnessContainer;
   /** How often the harness polls pi's log and checks the budgets, and the
    *  sleep that paces it, for a test that drives a scripted pi (one under fake
    *  timers hands the harness a clock of its own); absent, the harness's own

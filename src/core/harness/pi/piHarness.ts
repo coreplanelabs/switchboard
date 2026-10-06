@@ -69,7 +69,7 @@ export class PiHarness implements Harness {
    *  container the facts name (`find`), so it decides whether to call this. */
   async end(facts: HarnessFacts, container: HarnessContainer): Promise<void> {
     if (!isPiFacts(facts)) return;
-    await container.kill(facts.pid).catch(() => {});
-    if (facts.root !== undefined) await container.remove(piRunPathsAt(facts.root)).catch(() => {});
+    await container.kill(facts.pid);
+    if (facts.root !== undefined) await container.remove(piRunPathsAt(facts.root));
   }
 }

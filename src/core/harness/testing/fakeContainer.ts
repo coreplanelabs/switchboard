@@ -212,6 +212,16 @@ export class FakeHarnessContainer implements HarnessContainer {
     return { pid: this.pid, port };
   }
 
+  cancelInput(paths: HarnessPaths, line: string): Promise<void> {
+    return this.writeLine(paths, line);
+  }
+  cancelRequest(paths: HarnessPaths, req: HarnessRequest): Promise<HarnessResponse> {
+    return this.request(paths, req);
+  }
+  observeRequest(paths: HarnessPaths, req: HarnessRequest): Promise<HarnessResponse> {
+    return this.request(paths, req);
+  }
+
   async writeLine(paths: HarnessPaths, line: string): Promise<void> {
     this.maybeFail("send");
     if (this.failSendType !== undefined) {

@@ -117,6 +117,8 @@ export interface OpenCodeHarnessFacts {
    *  second one over the same feed. Absent on a row written before it was
    *  recorded: the tailer is then judged by the feed alone. */
   tailerPid?: number;
+  /** The tailer's own launch birth; the server's birth cannot attest a second process. */
+  tailerProcessBirth?: string;
   /** The byte the next generation reads the run's feed from — the JSONL the
    *  in-container tailer writes and the harness reads through the log
    *  transport — the boundary after the last record whose effect the ledger
@@ -202,6 +204,7 @@ function openCodeFactsOf(v: Record<string, unknown>): OpenCodeHarnessFacts | und
     processBirth,
     port,
     tailerPid,
+    tailerProcessBirth,
     logOffset,
     sessionID,
     root,
@@ -223,6 +226,7 @@ function openCodeFactsOf(v: Record<string, unknown>): OpenCodeHarnessFacts | und
     root,
     relaunches: relaunchesOf(relaunches),
     ...(typeof tailerPid === "number" ? { tailerPid } : {}),
+    ...(typeof tailerProcessBirth === "string" ? { tailerProcessBirth } : {}),
     ...(typeof bearerHash === "string" ? { bearerHash } : {}),
     ...(typeof container === "string" ? { container } : {}),
   };

@@ -67,6 +67,7 @@ import {
   ExecHarnessContainer,
   HarnessContainerControlResetError,
   HarnessContainerError,
+  HarnessEndingUnconfirmedError,
   HarnessControlFileLostError,
   HarnessContainerRuntimeReplacedError,
   identityChangedCondition,
@@ -404,6 +405,38 @@ function tickingWorld(opts: Parameters<typeof world>[0] = {}) {
 }
 
 describe("runPiHarness — a run on pi from the first file to the answer", () => {
+  it.each(["kill", "remove"] as const)(
+    "an opening failure preserves an unconfirmed %s before session handoff",
+    async (phase) => {
+      const w = world();
+      const opening = new Error("original prompt failed");
+      const closing = new ExecInfraError("local ending unknown", "transport-lost");
+      w.container.onStdin = () => {
+        throw opening;
+      };
+      w.container[phase] = async () => {
+        throw closing;
+      };
+      const error = await w.open().catch((err: unknown) => err);
+      expect(error).toBeInstanceOf(HarnessEndingUnconfirmedError);
+      expect(error).toMatchObject({ runId: w.run.runId, openingError: opening, endingError: closing });
+      expect(w.container.removed).toEqual([]);
+    },
+  );
+
+  it("an unknown launch outcome retains the original root without a returned pid", async () => {
+    const w = world();
+    const unknown = new ExecInfraError("launch answer lost", "transport-lost");
+    w.container.start = async () => {
+      throw unknown;
+    };
+    const error = await w.open().catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(HarnessEndingUnconfirmedError);
+    expect(error).toMatchObject({ openingError: unknown });
+    expect(w.container.removed).toEqual([]);
+    expect(w.container.killed).toEqual([]);
+  });
+
   it.each([false, true])("restores output reads only for a recorded scratch-capable pi: %s", async (outputScratch) => {
     const w = world();
     const paths = piRunPathsAt("/tmp/recorded-pi-root");
@@ -2559,6 +2592,31 @@ describe("runPiHarness — after a bot restart", () => {
     inboxConsumedSeq: 2,
     ...(facts ? { facts: piFacts(facts) } : {}),
   });
+
+  it.each(["probe", "kill", "remove"] as const)(
+    "an unconfirmed recorded %s retains custody before any new pi",
+    async (phase) => {
+      const w = world();
+      const unknown = new ExecInfraError("recorded ending unknown", "transport-lost");
+      w.run.resume = resume({ pid: 999, logOffset: 0, root: "/tmp/original-pi" });
+      w.container.alive = async () => {
+        if (phase === "probe") throw unknown;
+        return phase === "kill";
+      };
+      if (phase !== "probe")
+        w.container[phase] = async () => {
+          throw unknown;
+        };
+      w.container.onStdin = () => {
+        throw new Error("unexpected new pi");
+      };
+      const error = await w.open().catch((err: unknown) => err);
+      expect(error).toBeInstanceOf(HarnessEndingUnconfirmedError);
+      expect(error).toMatchObject({ openingError: unknown });
+      expect(w.container.starts).toEqual([]);
+      expect(w.container.removed).toEqual([]);
+    },
+  );
 
   it("re-attaches to a pi still running: reads the log from the recorded offset, tolerates the turn that failed while the bot was away, asks it to continue", async () => {
     const w = world();

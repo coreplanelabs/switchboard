@@ -1,3 +1,4 @@
+import { HarnessEndingUnconfirmedError } from "../container.js";
 // The OpenCode harness (docs/reference/specs/harness.md item 7): OpenCode as the
 // contract's second object. `open` is the run — the server started and the
 // tailer beside it (U10's `launchOpenCode`), the run registered on the relay so
@@ -36,6 +37,9 @@ import {
   identityOrNothing,
   isContainerGone,
   isControlReset,
+  infraErrorOf,
+  HarnessOperationEndedError,
+  HarnessCommandOutcomeError,
   LOG_READ_BYTES,
   OP_TIMEOUT_MS,
   type HarnessContainer,
@@ -149,10 +153,14 @@ export class OpenCodeHarness implements Harness {
     if (oc.container !== undefined && here !== undefined && oc.container !== here) return "another-container";
     try {
       const paths = openCodeRunPathsAt(oc.root);
-      await container.request(paths, { method: "GET", port: oc.port, path: OPENCODE_ROUTES["server.info"].path });
+      await container.observeRequest(paths, {
+        method: "GET",
+        port: oc.port,
+        path: OPENCODE_ROUTES["server.info"].path,
+      });
       return "alive-here";
     } catch (err) {
-      if (isContainerGone(err)) throw err;
+      if (continuationUnknown(err) || isContainerGone(err)) throw err;
       return "dead";
     }
   }
@@ -163,9 +171,9 @@ export class OpenCodeHarness implements Harness {
   async end(facts: OpenCodeHarnessFacts | { harness: string }, container: HarnessContainer): Promise<void> {
     if (facts.harness !== "opencode") return;
     const oc = facts as OpenCodeHarnessFacts;
-    await container.kill(oc.pid).catch(() => {});
-    if (oc.tailerPid !== undefined) await container.kill(oc.tailerPid).catch(() => {});
-    await container.remove(openCodeRunPathsAt(oc.root)).catch(() => {});
+    await container.kill(oc.pid);
+    if (oc.tailerPid !== undefined) await container.kill(oc.tailerPid);
+    await container.remove(openCodeRunPathsAt(oc.root));
   }
 }
 
@@ -202,6 +210,7 @@ interface OpenCodeLive {
   pid: number;
   port: number;
   tailerPid: number;
+  tailerProcessBirth?: string;
   password: string;
   paths: OpenCodeRunPaths;
   sessionID: string;
@@ -289,6 +298,7 @@ export async function openOpenCodeRun(
 
   // What the run continues on: the fresh launch, or the re-attached server.
   let server: OpenCodeLive | undefined;
+  let openingCustodyUnknown = resumeFacts !== undefined && !relaunch;
   live.credentialInspectionProcess = () =>
     facts?.processBirth === undefined ? undefined : { pid: facts.pid, processBirth: facts.processBirth };
   // The container was replaced under the run (the ceiling's verdict): the old
@@ -320,9 +330,9 @@ export async function openOpenCodeRun(
   const end = async (): Promise<void> => {
     forget();
     if (replaced || server === undefined) return;
-    await deps.container.kill(server.pid).catch(() => {});
-    await deps.container.kill(server.tailerPid).catch(() => {});
-    await deps.container.remove(server.paths).catch(() => {});
+    await deps.container.kill(server.pid);
+    await deps.container.kill(server.tailerPid);
+    await deps.container.remove(server.paths);
     // The requests the loop posted and did not wait on — an ending's
     // interrupt, a steer — have settled by now: answered while the server
     // lived (their word on the record, the run still open) or cut by the kill
@@ -354,6 +364,7 @@ export async function openOpenCodeRun(
     } else if (resumeFacts !== undefined) {
       const elsewhere = resumeFacts.container !== undefined && here !== undefined && resumeFacts.container !== here;
       if (elsewhere) {
+        openingCustodyUnknown = false;
         note(
           "resumed",
           `resumed after a restart: the row's OpenCode (pid ${resumeFacts.pid}) ran in container ${resumeFacts.container}, not the one this run was handed (${here}); it was neither probed nor ended here, and a fresh server was started on the record`,
@@ -364,8 +375,8 @@ export async function openOpenCodeRun(
           // The row's server is gone: its root on this container's disk, when it
           // is another than the fresh start's, goes with it (as a dead pi's does);
           // nothing is ended, since a pid that does not answer is nobody's here.
-          if (resumeFacts.root !== paths.dir)
-            await deps.container.remove(openCodeRunPathsAt(resumeFacts.root)).catch(() => {});
+          if (resumeFacts.root !== paths.dir) await deps.container.remove(openCodeRunPathsAt(resumeFacts.root));
+          openingCustodyUnknown = false;
           note(
             "resumed",
             `resumed after a restart: the row's OpenCode did not answer in this container; a fresh server was started on the record with ${budgetLeft()} min of budget left`,
@@ -378,6 +389,7 @@ export async function openOpenCodeRun(
           );
           if (attempt.ok) {
             server = attempt.server;
+            openingCustodyUnknown = false;
             const inFlight = run.resume?.settlements.length ?? 0;
             const pendingAsks = attempt.server.reattach.pendingAsks.length;
             const calls =
@@ -402,6 +414,7 @@ export async function openOpenCodeRun(
             saveFacts({
               ...resumeFacts,
               tailerPid: server.tailerPid,
+              tailerProcessBirth: server.tailerProcessBirth,
               logOffset: attempt.server.reattach.catchUpTo,
               ...(here !== undefined ? { container: here } : {}),
             });
@@ -414,9 +427,10 @@ export async function openOpenCodeRun(
               "resumed",
               `resumed after a restart: the row's OpenCode (pid ${resumeFacts.pid}) still answers in this container but could not be re-attached (${attempt.why}); ended it and its tailer before a fresh start on the record with ${budgetLeft()} min of budget left`,
             );
-            await deps.container.kill(resumeFacts.pid).catch(() => {});
-            if (resumeFacts.tailerPid !== undefined) await deps.container.kill(resumeFacts.tailerPid).catch(() => {});
-            await deps.container.remove(openCodeRunPathsAt(resumeFacts.root)).catch(() => {});
+            await deps.container.kill(resumeFacts.pid);
+            if (resumeFacts.tailerPid !== undefined) await deps.container.kill(resumeFacts.tailerPid);
+            await deps.container.remove(openCodeRunPathsAt(resumeFacts.root));
+            openingCustodyUnknown = false;
           }
         }
       }
@@ -428,6 +442,8 @@ export async function openOpenCodeRun(
           container: deps.container,
           clock: deps.clock,
           sleep: deps.sleep,
+          ...(run.deadlineAt === undefined ? {} : { deadlineAt: run.deadlineAt }),
+          ...(run.control?.hardSignal ? { signal: run.control.hardSignal } : {}),
           ...(deps.pollMs !== undefined ? { pollMs: deps.pollMs } : {}),
         },
         spec,
@@ -514,6 +530,7 @@ export async function openOpenCodeRun(
             port: started.port,
             paths: started.paths,
             tailerPid: started.tailerPid,
+            tailerProcessBirth: started.tailerProcessBirth,
           },
           {
             sessionID: server.sessionID,
@@ -634,9 +651,27 @@ export async function openOpenCodeRun(
     // in the container that answers now, so `end` probes, ends and removes
     // nothing there — the loop relaunches from the record the verdict carries.
     if (err instanceof HarnessContainerReplacedError) replaced = true;
-    await end();
+    if (openingCustodyUnknown) {
+      forget();
+      throw new HarnessEndingUnconfirmedError(run.runId, err, err);
+    }
+    try {
+      await end();
+    } catch (endingError) {
+      throw new HarnessEndingUnconfirmedError(run.runId, err, endingError);
+    }
     throw err;
   }
+}
+
+/** Collection uncertainty cannot prove absence or authorize replacing a recorded producer. */
+function continuationUnknown(err: unknown): boolean {
+  return (
+    infraErrorOf(err) !== undefined ||
+    isControlReset(err) ||
+    err instanceof HarnessOperationEndedError ||
+    (err instanceof HarnessCommandOutcomeError && err.result.truncated)
+  );
 }
 
 /** The row's server probed on its recorded port in this container — with the
@@ -650,7 +685,7 @@ async function probeRecordedServer(
   facts: OpenCodeHarnessFacts,
 ): Promise<HarnessResponse | "dead"> {
   try {
-    return await container.request(openCodeRunPathsAt(facts.root), {
+    return await container.observeRequest(openCodeRunPathsAt(facts.root), {
       method: "GET",
       port: facts.port,
       path: OPENCODE_ROUTES["server.info"].path,
@@ -659,7 +694,7 @@ async function probeRecordedServer(
         : {}),
     });
   } catch (err) {
-    if (isContainerGone(err)) throw err;
+    if (continuationUnknown(err) || isContainerGone(err)) throw err;
     return "dead";
   }
 }
@@ -708,7 +743,7 @@ async function reattachOpenCode(
   const paths = openCodeRunPathsAt(facts.root);
   const auth = { Authorization: openCodeAuthHeader(password) };
   const get = (path: string): Promise<HarnessResponse> =>
-    deps.container.request(paths, { method: "GET", port: facts.port, path, secretHeaders: auth });
+    deps.container.observeRequest(paths, { method: "GET", port: facts.port, path, secretHeaders: auth });
   const routes = openCodeSessionRoutes(facts.sessionID);
   const read = await readSessionStore(get, facts.sessionID);
   if (!read.ok) return refuse(read.why);
@@ -728,7 +763,7 @@ async function reattachOpenCode(
     }
     catchUpTo = await feedEndFrom(deps.container, paths.feed, facts.logOffset);
   } catch (err) {
-    if (isContainerGone(err)) throw err;
+    if (continuationUnknown(err) || isContainerGone(err)) throw err;
     return refuse(
       `the feed could not be read from byte ${facts.logOffset} (${redactAndCap(err instanceof Error ? err.message : String(err), 200)})`,
     );
@@ -742,6 +777,7 @@ async function reattachOpenCode(
     return refuse("this generation's proxy could not adopt the row's bearer (the run's grant is gone or expired)");
 
   let tailerPid = facts.tailerPid;
+  let tailerProcessBirth = facts.tailerProcessBirth;
   let tailerRestarted = false;
   if (tailerPid === undefined || !(await deps.container.alive(tailerPid))) {
     await deps.container.writeFile(paths.tailerScript, OPENCODE_TAILER_SOURCE);
@@ -754,6 +790,7 @@ async function reattachOpenCode(
       keepLog: true,
     });
     tailerPid = tailer.pid;
+    tailerProcessBirth = tailer.processBirth;
     tailerRestarted = true;
   }
 
@@ -765,6 +802,7 @@ async function reattachOpenCode(
       pid: facts.pid,
       port: facts.port,
       tailerPid,
+      ...(tailerProcessBirth === undefined ? {} : { tailerProcessBirth }),
       password,
       paths,
       sessionID: facts.sessionID,

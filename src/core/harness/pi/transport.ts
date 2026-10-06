@@ -144,7 +144,10 @@ export class PiRpcTransport implements PiTransport {
         // for must not swallow the stop, and a teardown's abort still reaches
         // pi past an earlier failure. A write that then fails is answered
         // `failed` with nothing kept (the catch): its sender's to ask again.
-        if (abort) return this.heldForReattach ? "dropped" : this.land(line);
+        if (abort)
+          return this.heldForReattach
+            ? "dropped"
+            : this.deps.container.cancelInput(this.deps.paths, line).then(() => "landed" as const);
         // Decided when this write's turn on the chain comes, not when it was
         // queued. Once `abandon()`ed the fresh transport owns every write not
         // yet started: a queued write stays queued for `takeUnsent`, never

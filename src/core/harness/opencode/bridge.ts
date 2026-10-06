@@ -2240,7 +2240,13 @@ export async function driveOpenCode(
   const request = (route: { method: string; path: string }, body?: unknown) => {
     if (route.path === sessionRoutes["session.prompt"].path && now() >= (run.deadlineAt ?? Infinity))
       return Promise.reject(new Error("The admitted run deadline ended before model admission."));
-    return conn.container.request(conn.paths, {
+    const send =
+      route === sessionRoutes["session.interrupt"]
+        ? conn.container.cancelRequest.bind(conn.container)
+        : route.method === "GET"
+          ? conn.container.observeRequest.bind(conn.container)
+          : conn.container.request.bind(conn.container);
+    return send(conn.paths, {
       method: route.method,
       port: conn.port,
       path: route.path,
