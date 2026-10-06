@@ -348,6 +348,36 @@ describe("templateView / renderTemplate for a bot-only profile", () => {
   });
 });
 
+// A finite qualified workload selects a predefined shape. This guards the
+// generated deployment against returning to an undersized type, not native RSS.
+describe("bot container validation capacity", () => {
+  it.each([TEST_PROFILE, TEST_REGISTRY_PROFILE])(
+    "renders the smallest qualified bot type without changing instance ownership for image mode $images",
+    (profile) => {
+      const types = [
+        { name: "lite", cpu: 1 / 16, memory: 256 },
+        { name: "basic", cpu: 1 / 4, memory: 1024 },
+        { name: "standard-1", cpu: 1 / 2, memory: 4096 },
+        { name: "standard-2", cpu: 1, memory: 6144 },
+        { name: "standard-3", cpu: 2, memory: 8192 },
+        { name: "standard-4", cpu: 4, memory: 12288 },
+      ];
+      const qualified = types.find((type) => type.cpu >= 0.5 && type.memory > 1236)!;
+      const template = readFileSync(new URL(`../../deploy/cloudflare/${TEMPLATE_FILE}`, import.meta.url), "utf8");
+      const rendered = renderTemplate(template, templateView(profile, "bot", TEST_PUBLISHED_IMAGES)!);
+      expect(rendered.ok).toBe(true);
+      if (!rendered.ok) throw new Error(rendered.problems.join("\n"));
+      const config = JSON.parse(stripJsonc(rendered.text)) as {
+        containers: Array<{ class_name: string; instance_type: string; max_instances: number }>;
+      };
+      expect(config.containers).toHaveLength(1);
+      expect(config.containers[0].class_name).toBe("SwitchboardServer");
+      expect(config.containers[0].instance_type).toBe(qualified.name);
+      expect(config.containers[0].max_instances).toBe(1);
+    },
+  );
+});
+
 // Feature: docs/reference/specs/execution.md item 16 — the cold per-thread
 // sandbox is the platform's largest predefined instance type. The template
 // carries the number and its reasoning; this test keeps the two from drifting

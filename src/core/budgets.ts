@@ -645,3 +645,32 @@ export const IDLE_DAYS_MAX = 365;
  *  busy thread can keep an instance parked (read by the wait, this plan's
  *  fifth unit). */
 export const IDLE_WAKES_MAX = 100;
+
+// Bound concurrent SDK state and waiting calls within the bot's resources.
+// Heap constraints cover V8 state, not total RSS, external buffers or CPU.
+export const RESPONSES_VALIDATION_LIMITS = {
+  workers: 2,
+  queued: 2,
+  oldGenerationMb: 96,
+  youngGenerationMb: 16,
+  stackMb: 4,
+  framingSliceChars: 4096,
+  framingSliceBytes: 4096,
+  retainedFrameBytes: 16 * 1024 * 1024,
+  responseBytes: 64 * 1024 * 1024,
+  sseFields: 1024,
+  pendingOutputBytes: 32 * 1024 * 1024,
+  managedStorageBytes: 512 * 1024 * 1024,
+  graphEntries: 262144,
+  graphDepth: 128,
+  graphEntryBytes: 256,
+  stringHeaderBytes: 64,
+  requestStringBytes: 64 * 1024 * 1024,
+  responseStringBytes: 32 * 1024 * 1024,
+  requestIpcBytes: 64 * 1024 * 1024,
+  responseIpcBytes: 32 * 1024 * 1024,
+  parserWorkingBytes: 128 * 1024 * 1024,
+  serializationSlackBytes: 1024 * 1024,
+  preparedPayloadBytes: 64 * 1024 * 1024,
+  shapeWorkingBytes: 128 * 1024 * 1024,
+} as const;
