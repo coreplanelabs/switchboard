@@ -423,6 +423,50 @@ async function readArchiveJson(path: string, maxBytes: number): Promise<unknown>
   }
 }
 
+/** Validate the old format before reporting its recorded identity. These are
+ * receipt fields, not a new owner claim or proof that the source was frozen. */
+function archiveReceipt(value: unknown): ResidentArchiveReceipt {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid archive receipt");
+  const receipt = value as Record<string, unknown>;
+  if (
+    receipt.protocolVersion !== 1 ||
+    typeof receipt.threadKey !== "string" ||
+    !receipt.threadKey ||
+    typeof receipt.ref !== "string" ||
+    !receipt.ref ||
+    typeof receipt.sha !== "string" ||
+    !/^[a-f0-9]{40}$/.test(receipt.sha) ||
+    typeof receipt.user !== "string" ||
+    !receipt.user ||
+    typeof receipt.boundAt !== "string" ||
+    !receipt.boundAt ||
+    typeof receipt.bootId !== "string" ||
+    !BOOT.test(receipt.bootId) ||
+    typeof receipt.root !== "string" ||
+    !isAbsolute(receipt.root) ||
+    typeof receipt.manifestSha256 !== "string" ||
+    !SHA.test(receipt.manifestSha256) ||
+    [receipt.entryCount, receipt.fileCount, receipt.byteCount].some(
+      (count) => !Number.isSafeInteger(count) || Number(count) < 0,
+    )
+  )
+    throw new Error("invalid archive receipt");
+  return {
+    protocolVersion: 1,
+    threadKey: receipt.threadKey,
+    ref: receipt.ref,
+    sha: receipt.sha,
+    user: receipt.user,
+    boundAt: receipt.boundAt,
+    bootId: receipt.bootId,
+    root: receipt.root,
+    manifestSha256: receipt.manifestSha256,
+    entryCount: number(receipt.entryCount, "entry count"),
+    fileCount: number(receipt.fileCount, "file count"),
+    byteCount: number(receipt.byteCount, "byte count"),
+  };
+}
+
 /** Offline and credential-free: a sealed archive is restored to a new path,
  * then independently scanned with Node to compare every entry and byte. */
 export async function restoreResidentArchive(input: {
@@ -432,8 +476,7 @@ export async function restoreResidentArchive(input: {
   const archiveInfo = await lstat(input.archiveDir);
   const blobsInfo = await lstat(join(input.archiveDir, "blobs"));
   if (!archiveInfo.isDirectory() || !blobsInfo.isDirectory()) throw new Error("invalid archive directory");
-  const receipt = (await readArchiveJson(join(input.archiveDir, "receipt.json"), 16 * 1024)) as ResidentArchiveReceipt;
-  if (receipt.protocolVersion !== 1 || !SHA.test(receipt.manifestSha256)) throw new Error("invalid archive receipt");
+  const receipt = archiveReceipt(await readArchiveJson(join(input.archiveDir, "receipt.json"), 16 * 1024));
   const manifest = (await readArchiveJson(join(input.archiveDir, "manifest.json"), 64 * 1024 * 1024)) as {
     entries: ArchiveEntry[];
   };

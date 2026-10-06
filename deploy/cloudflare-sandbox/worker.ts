@@ -380,7 +380,7 @@ export class SwitchboardSandbox extends Sandbox<Env> {
       if (!record) return false;
       const incarnation = await this.readFile(PRESERVATION_CONTAINER_MARKER, { encoding: "utf-8" });
       if (incarnation.content !== record.owner.container || this.ctx.container?.running !== true) return false;
-      return await checkpointIfSafe(record.owner, {
+      await checkpointIfSafe(record.owner, {
         // Detached model writers are outside the SDK's process registry. No
         // asserted "paused" state is a quiescence witness in this unit.
         safeQuiescence: async () => false,
@@ -390,6 +390,9 @@ export class SwitchboardSandbox extends Sandbox<Env> {
         save: (backupId, owner) =>
           this.ctx.storage.put(PRESERVATION_KEY, { owner, doorOrigin: record.doorOrigin, backupId }),
       });
+      // A checkout backup observation cannot release the physical workspace.
+      // Whole custody capture and the original owner's archive ACK are unproved.
+      return false;
     } catch {
       // A failed probe, upload, stale incarnation or unreadable runtime can
       // never authorize the clean destroy OR the forced platform kill.

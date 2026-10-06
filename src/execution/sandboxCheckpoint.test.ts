@@ -14,6 +14,7 @@ import {
   type PreservationOwner,
 } from "./sandboxCheckpoint.js";
 import { IDLE_DAYS_MAX } from "../core/budgets.js";
+import { IdleGuard, SANDBOX_SLEEP_AFTER_MS, type IdleGuardHost } from "./sandboxIdle.js";
 
 const owner: PreservationOwner = {
   run: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa",
@@ -96,9 +97,47 @@ describe("bound seed marker decisions", () => {
 });
 
 describe("checkpointIfSafe", () => {
+  it("never treats sampled pause around checkout upload as complete retirement evidence", async () => {
+    const f = host();
+    // All three observations see a paused writer. A detached process can
+    // still resume and edit the checkout while the directory upload awaits.
+    let checkout = "before";
+    let uploaded = "";
+    f.backup.mockImplementation(async () => {
+      uploaded = checkout;
+      checkout = "private work after upload began";
+      return { id: "backup-id" };
+    });
+    let now = 0;
+    const destroy = vi.fn(async () => {});
+    const kill = vi.fn(async () => {});
+    const idleHost: IdleGuardHost = {
+      now: () => now,
+      containerRunning: () => true,
+      sweepScheduled: async () => true,
+      scheduleSweep: async () => {},
+      // Exercise the old direct caller even when it bypasses the type error.
+      // The guard must never accept a backup observation as its stop permit.
+      beforeDestroy: async () => (await checkpointIfSafe(owner, f)) as unknown as boolean,
+      destroySandbox: destroy,
+      killContainer: kill,
+      loadLastServedAt: async () => undefined,
+      saveLastServedAt: async () => {},
+      log: () => {},
+      wait: async () => {},
+    };
+    const idle = new IdleGuard(idleHost);
+    await idle.wake();
+    now = SANDBOX_SLEEP_AFTER_MS;
+    await idle.expired();
+    expect(checkout).not.toBe(uploaded);
+    expect(destroy).not.toHaveBeenCalled();
+    expect(kill).not.toHaveBeenCalled();
+  });
+
   it("backs up the complete checkout for longer than the Ship idle window", async () => {
     const f = host();
-    expect(await checkpointIfSafe(owner, f)).toBe(true);
+    expect(await checkpointIfSafe(owner, f)).toEqual({ state: "stored", backupId: "backup-id" });
     expect(f.backup).toHaveBeenCalledWith({
       dir: "/workspace/checkout",
       gitignore: false,
@@ -112,7 +151,7 @@ describe("checkpointIfSafe", () => {
   it("never snapshots a paused writer without an independent quiescence witness", async () => {
     const f = host();
     f.safeQuiescence.mockResolvedValue(false);
-    expect(await checkpointIfSafe(owner, f)).toBe(false);
+    expect(await checkpointIfSafe(owner, f)).toEqual({ state: "unknown" });
     expect(f.backup).not.toHaveBeenCalled();
     expect(f.save).not.toHaveBeenCalled();
   });
@@ -120,22 +159,22 @@ describe("checkpointIfSafe", () => {
   it("retains when backup fails or the owner or incarnation changes", async () => {
     const f = host();
     f.backup.mockRejectedValueOnce(new Error("upload failed"));
-    expect(await checkpointIfSafe(owner, f)).toBe(false);
+    expect(await checkpointIfSafe(owner, f)).toEqual({ state: "unknown" });
     expect(f.save).not.toHaveBeenCalled();
     f.currentOwner.mockResolvedValueOnce({ ...owner, container: crypto.randomUUID() });
-    expect(await checkpointIfSafe(owner, f)).toBe(false);
+    expect(await checkpointIfSafe(owner, f)).toEqual({ state: "unknown" });
     expect(f.save).not.toHaveBeenCalled();
     f.verify.mockResolvedValueOnce(false);
-    expect(await checkpointIfSafe(owner, f)).toBe(false);
+    expect(await checkpointIfSafe(owner, f)).toEqual({ state: "unknown" });
     expect(f.save).not.toHaveBeenCalled();
     f.safeQuiescence.mockResolvedValueOnce(false);
-    expect(await checkpointIfSafe(owner, f)).toBe(false);
+    expect(await checkpointIfSafe(owner, f)).toEqual({ state: "unknown" });
   });
 
   it("retains when ownership changes while an upload is in flight", async () => {
     const f = host();
     f.currentOwner.mockResolvedValueOnce(owner).mockResolvedValueOnce({ ...owner, run: crypto.randomUUID() });
-    expect(await checkpointIfSafe(owner, f)).toBe(false);
+    expect(await checkpointIfSafe(owner, f)).toEqual({ state: "unknown" });
     expect(f.backup).toHaveBeenCalledOnce();
     expect(f.save).not.toHaveBeenCalled();
   });

@@ -428,6 +428,44 @@ describe("resident archive harness", () => {
     );
   });
 
+  it("rejects an incomplete or malformed legacy receipt before writing a restore", async () => {
+    const f = await fixture();
+    const archiveDir = join(f.root, "archive");
+    const receipt = await captureResidentArchive({
+      transport: f.transport,
+      threadKey: f.binding.threadKey,
+      expectedRef: f.binding.ref,
+      expectedSha: f.binding.sha,
+      archiveDir,
+    });
+    const { user: _user, ...missingUser } = receipt;
+    const malformed = [
+      missingUser,
+      { ...receipt, protocolVersion: 2 },
+      { ...receipt, threadKey: null },
+      { ...receipt, ref: "" },
+      { ...receipt, sha: "main" },
+      { ...receipt, boundAt: 1 },
+      { ...receipt, bootId: "" },
+      { ...receipt, root: "relative/path" },
+      { ...receipt, manifestSha256: "short" },
+      { ...receipt, entryCount: -1 },
+      { ...receipt, fileCount: 1.5 },
+      { ...receipt, byteCount: "0" },
+      null,
+    ];
+    for (const [index, value] of malformed.entries()) {
+      await writeFile(join(archiveDir, "receipt.json"), JSON.stringify(value));
+      const restoreDir = join(f.root, `malformed-${index}`);
+      await expect(restoreResidentArchive({ archiveDir, restoreDir })).rejects.toThrow(/invalid archive receipt/i);
+      await expect(stat(restoreDir)).rejects.toThrow();
+    }
+    await writeFile(join(archiveDir, "receipt.json"), JSON.stringify(receipt));
+    const restored = await restoreResidentArchive({ archiveDir, restoreDir: join(f.root, "legacy-restored") });
+    expect(restored).toEqual(receipt);
+    expect(await readFile(join(f.root, "legacy-restored", "ignored.bin"))).toEqual(Buffer.from([0, 255, 13, 10]));
+  });
+
   it("rejects an unsafe or duplicate archive path before writing a restore", async () => {
     const f = await fixture();
     const archiveDir = join(f.root, "archive");
