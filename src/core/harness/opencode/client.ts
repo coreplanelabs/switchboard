@@ -10,7 +10,7 @@
 // read is not here.
 
 /** The version this build drives; the image pin and the readiness probe both name it. */
-export const OPENCODE_VERSION = "2.0.12";
+export const OPENCODE_VERSION = "2.0.18";
 
 /** What `opencode --version` prints at the pin, exactly (measured; the image's grep names it). */
 export const OPENCODE_VERSION_TEXT = `opencode v${OPENCODE_VERSION}`;
@@ -34,17 +34,17 @@ export interface OpenCodeRoute {
  *  endpoints (`<group>.<endpoint>`), with the source of each. A route with a
  *  session id is a function of it. */
 export const OPENCODE_ROUTES = {
-  /** `@opencode/protocol@2.0.12`, `dist/groups/server.js` — answers `ServerInfo`; behind the server password. */
+  /** `@opencode/protocol@2.0.18`, `dist/groups/server.js` — answers `ServerInfo`; behind the server password. */
   "server.info": { method: "GET", path: "/api/info" },
   /** `packages/protocol/src/groups/config.ts:9` — the loaded configuration entries, the readiness proof that the run's file took. */
   "config.get": { method: "GET", path: "/api/config" },
-  /** `@opencode/protocol@2.0.12`, `dist/groups/plugin.js` — the inventory reports each plugin's activation state. */
+  /** `@opencode/protocol@2.0.18`, `dist/groups/plugin.js` — the inventory reports each plugin's activation state. */
   "plugin.list": { method: "GET", path: "/api/plugin" },
   /** `packages/protocol/src/groups/event.ts:43` — the SSE stream the tailer subscribes to; volatile by contract. */
   "event.subscribe": { method: "GET", path: "/api/event" },
   /** `packages/protocol/src/groups/session.ts:172`. */
   "session.create": { method: "POST", path: "/api/session" },
-  /** `@opencode/protocol@2.0.12`, `dist/groups/session.js` — the authored session (the survival word). */
+  /** `@opencode/protocol@2.0.18`, `dist/groups/session.js` — the authored session (the survival word). */
   "session.import": { method: "POST", path: "/api/experimental/session/import" },
 } as const satisfies Record<string, OpenCodeRoute>;
 
@@ -53,9 +53,9 @@ export const openCodeSessionRoutes = (sessionID: string) =>
   ({
     /** `packages/protocol/src/groups/session.ts:339` — admits one input; async: the answer is the inbox item, not the turn. */
     "session.prompt": { method: "POST", path: `/api/session/${sessionID}/prompt` },
-    /** `@opencode/protocol@2.0.12`, `dist/groups/session.js` — waits until the agent loop is idle, then 204. */
+    /** `@opencode/protocol@2.0.18`, `dist/groups/session.js` — waits until the agent loop is idle, then 204. */
     "session.wait": { method: "POST", path: `/api/experimental/session/${sessionID}/wait` },
-    /** `@opencode/protocol@2.0.12`, `dist/groups/session.js` — `?resume=true|false`; answers `{ interrupted }`. */
+    /** `@opencode/protocol@2.0.18`, `dist/groups/session.js` — `?resume=true|false`; answers `{ interrupted }`. */
     "session.interrupt": { method: "POST", path: `/api/session/${sessionID}/interrupt` },
     /** `packages/protocol/src/groups/message.ts:43` — `?order=asc|desc&limit=1..200&cursor=&type=`; the store, the record's truth. */
     "session.messages": { method: "GET", path: `/api/session/${sessionID}/message` },
@@ -69,7 +69,7 @@ export const openCodePermissionReplyRoute = (sessionID: string, requestID: strin
   path: `/api/session/${sessionID}/permission/${requestID}/reply`,
 });
 
-/** The fields read from `GET /api/info` (`@opencode/protocol@2.0.12`,
+/** The fields read from `GET /api/info` (`@opencode/protocol@2.0.18`,
  *  `dist/groups/server.js`, `ServerInfo`); `pid` is 0 on a runtime without a
  *  process identity. The response also carries `urls` and `paths.tmp`, which
  *  the harness does not read. There is no `healthy` flag. */
@@ -164,7 +164,7 @@ export interface OpenCodePermissionRequest {
   message?: string;
 }
 
-/** `POST …/permission/:id/reply` payload (`@opencode/protocol@2.0.12`, `dist/groups/permission.js`).
+/** `POST …/permission/:id/reply` payload (`@opencode/protocol@2.0.18`, `dist/groups/permission.js`).
  *  The request calls it `decision`; the `permission.replied` event still calls it `reply`.
  *  `always` persists a project rule and is never sent. */
 export interface OpenCodePermissionReply {
@@ -304,7 +304,7 @@ export function parseServerInfo(body: string): OpenCodeServerInfo | undefined {
   return { version: v.version, pid: v.pid };
 }
 
-/** The plugin inventory's activation states (`@opencode/schema@2.0.12`,
+/** The plugin inventory's activation states (`@opencode/schema@2.0.18`,
  *  `dist/plugin.js`). A plugin whose discovery failed may have no id. */
 export function parsePluginStates(
   body: string,

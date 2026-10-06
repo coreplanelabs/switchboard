@@ -22,7 +22,7 @@ const ALL_IMAGES = [...EXECUTION_IMAGES, BOT] as const;
 // the run bearer is pi's only key.
 
 export const PI_PACKAGE = "@earendil-works/pi-coding-agent";
-export const PI_VERSION = "0.87.0";
+export const PI_VERSION = "0.87.1";
 const PI_PROOF = `pi --version | grep -qx '${PI_VERSION}'`;
 
 /** The instruction lines of a Dockerfile, continuations joined, comments dropped. */
@@ -79,10 +79,13 @@ describe("the three images carry one pi", () => {
   // Feature: docs/reference/specs/harness-pi.md item 13 — pi's model library
   // runs inside the bot too, for the calls made outside a run loop, at the
   // same exact version as the pi the images carry: one pin, moved together.
-  it("the bot's `@earendil-works/pi-ai` dependency is pinned exactly at the same version, so the library in the process and the pi in the images move together", () => {
-    const pkg = JSON.parse(read("package.json")) as { dependencies?: Record<string, string> };
-    expect(pkg.dependencies?.["@earendil-works/pi-ai"]).toBe(PI_VERSION);
-  });
+  it.each(["package.json", "packages/switchboard/package.json"])(
+    "%s pins `@earendil-works/pi-ai` exactly at the same version, so both bot distributions and the pi in the images move together",
+    (path) => {
+      const pkg = JSON.parse(read(path)) as { dependencies?: Record<string, string> };
+      expect(pkg.dependencies?.["@earendil-works/pi-ai"]).toBe(PI_VERSION);
+    },
+  );
 
   // harness-pi.md item 3: a process outside the images — the CLI's `ask` on a
   // developer's machine, the test that spawns it on a CI runner — starts pi
@@ -91,6 +94,13 @@ describe("the three images carry one pi", () => {
   it("`@earendil-works/pi-coding-agent` is a devDependency at the same exact pin, so `npm test` and a developer's `ask` spawn the pi the images carry", () => {
     const pkg = JSON.parse(read("package.json")) as { devDependencies?: Record<string, string> };
     expect(pkg.devDependencies?.["@earendil-works/pi-coding-agent"]).toBe(PI_VERSION);
+  });
+});
+
+describe("the installed pi packages", () => {
+  it.each(["pi-ai", "pi-coding-agent"])("%s resolves to the exact image pin", (name) => {
+    const pkg = JSON.parse(read(`node_modules/@earendil-works/${name}/package.json`)) as { version: string };
+    expect(pkg.version).toBe(PI_VERSION);
   });
 });
 

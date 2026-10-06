@@ -31,10 +31,10 @@ import {
 } from "../../contract.js";
 import { OpenCodeHarness } from "../harness.js";
 import { openCodeRunPathsAt } from "../process.js";
-import { parseFeedRecord } from "../client.js";
+import { OPENCODE_ROUTES, OPENCODE_VERSION, openCodeAuthHeader, parseFeedRecord, parseServerInfo } from "../client.js";
 
 // Feature: docs/reference/specs/harness.md item 11 (U12) — OpenCode on the
-// conformance clauses against the REAL `@opencode/cli@2.0.3` binary. A run is
+// conformance clauses against the REAL pinned `@opencode/cli` binary. A run is
 // driven end to end through the real `OpenCodeHarness` — the server started as
 // a child of this process, the relay plugin loaded, the seed imported, the
 // request prompted — with a real bot answering it (the three harness routes and
@@ -348,6 +348,17 @@ async function driveRealRun(
   };
 
   const session = await openThroughSeam(new OpenCodeHarness(), deps, run);
+  // Fresh starts, record rebuilds and same-server re-attaches must all drive
+  // the installed pin, not merely a scripted server claiming that version.
+  const current = facts.at(-1)!;
+  if (current.harness !== "opencode" || !current.bearerHash) throw new Error("the run did not record OpenCode facts");
+  const info = await container.request(openCodeRunPathsAt(current.root), {
+    ...OPENCODE_ROUTES["server.info"],
+    port: current.port,
+    secretHeaders: { Authorization: openCodeAuthHeader(current.bearerHash) },
+  });
+  expect(info.status).toBe(200);
+  expect(parseServerInfo(info.body)).toMatchObject({ version: OPENCODE_VERSION });
   return {
     session,
     events,

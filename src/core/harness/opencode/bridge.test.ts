@@ -132,7 +132,7 @@ describe("OPENCODE_EVENT_DISPOSITION — every event the server streams is decid
     expect(openCodeDispositionOf("session.made.up.kind")).toBeUndefined();
   });
 
-  it.each(["provider.updated", "model.updated", "session.permissions"])(
+  it.each(["provider.updated", "model.updated", "session.permissions", "session.metadata.updated"])(
     "%s is structure under the pinned event vocabulary, not a failure or session ending",
     (type) => {
       const { bridge, events } = harness();

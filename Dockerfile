@@ -82,21 +82,21 @@ RUN command -v meat >/dev/null && meat -h >/dev/null 2>&1
 # so the BUILD fails, not a run. Dark until a deployment sets
 # `harness: { general: pi }`: nothing here starts pi on its own, and a run's
 # pi on this host holds none of pi's own shell or file tools.
-RUN npm install -g @earendil-works/pi-coding-agent@0.87.0 \
+RUN npm install -g @earendil-works/pi-coding-agent@0.87.1 \
   && npm cache clean --force \
-  && pi --version | grep -qx '0.87.0' \
+  && pi --version | grep -qx '0.87.1' \
   && pi --help | grep -q -- '--mode <mode>'
 
 # OpenCode, the second harness (docs/reference/specs/harness.md): `@opencode/cli`
 # at the EXACT pin held by src/deploy/imageOpenCodeHarness.test.ts, beside pi.
 # The wrapper's postinstall hard-links the platform binary into place, so it
 # is the one install script allowed by name; the grep proves the binary on
-# PATH prints the pin's version text (`opencode v2.0.12`, exactly); the npm
+# PATH prints the pin's version text (`opencode v2.0.18`, exactly); the npm
 # cache (a 200 MB tarball) is dropped in the same layer. Dark until a
 # deployment names it: nothing here starts it on its own.
-RUN npm install -g --allow-scripts=@opencode/cli @opencode/cli@2.0.12 \
+RUN npm install -g --allow-scripts=@opencode/cli @opencode/cli@2.0.18 \
   && npm cache clean --force \
-  && opencode --version | grep -qx 'opencode v2.0.12'
+  && opencode --version | grep -qx 'opencode v2.0.18'
 
 # Non-root user; agents run bash with this user's (container-scoped) permissions.
 RUN useradd -m -u 1001 switchboard
