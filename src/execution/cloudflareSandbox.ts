@@ -56,7 +56,7 @@ import { tracedFetch } from "../core/trace/tracedFetch.js";
 import { SANDBOX_CREDENTIAL_FILE } from "./sandboxCredentials.js";
 import { legacySandboxCredentialScrub } from "./legacySandboxCredentials.js";
 import type { Span } from "../core/trace/types.js";
-import { coldPublicationInput } from "./coldPublication.js";
+import { coldPublicationInput, coldPublicationDiagnostics } from "./coldPublication.js";
 
 // Remote execution in a Cloudflare Sandbox, via the authenticated proxy Worker
 // in deploy/cloudflare-sandbox/ (the Sandbox SDK only runs inside Workers).
@@ -573,6 +573,8 @@ export class CloudflareSandboxExecutor implements Executor {
       );
     }
     if (response.status === 409) {
+      const diagnostics =
+        data && Object.hasOwn(data, "diagnostics") ? coldPublicationDiagnostics(data.diagnostics) : undefined;
       const phases = [
         "cold-publication-base-unavailable-or-over-limit",
         "cold-publication-graph-unavailable-or-over-limit",
@@ -583,7 +585,9 @@ export class CloudflareSandboxExecutor implements Executor {
         data !== null &&
         typeof data === "object" &&
         !Array.isArray(data) &&
-        Object.keys(data).sort().join(",") === "error,phase" &&
+        Object.keys(data).sort().join(",") ===
+          (diagnostics === undefined ? "error,phase" : "diagnostics,error,phase") &&
+        diagnostics !== null &&
         data.error === "publication refused by cold controller" &&
         phases.includes(data.phase as string)
       )

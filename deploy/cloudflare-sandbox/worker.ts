@@ -136,11 +136,15 @@ import {
   disposeColdController,
 } from "../../src/execution/coldPublicationBoundary.js";
 import {
-  COLD_PACK_MAX_BYTES,
   coldPublicationInput,
   controllerPublicationPlan,
   parseColdPublication,
   sourcePublicationPackCommand,
+  readColdPublicationPack,
+  coldPublicationBaseResult,
+  type ColdPackResult,
+  type ColdBaseResult,
+  type ColdPublicationDiagnostic,
 } from "../../src/execution/coldPublication.js";
 import { classifyError } from "../../src/core/trace/classify.js";
 import { systemClock } from "../../src/core/trace/clock.js";
@@ -988,51 +992,53 @@ export class SwitchboardSandbox extends Sandbox<Env> {
    * container and may replace Git, pack files, or output; only the fresh
    * controller validates what it receives. The source's size is checked
    * again after the read to close the stat/read race. */
-  async exportPublicationPack(next: string, old?: string, baseFetched = false): Promise<string | null> {
-    if (!/^[0-9a-f]{40}$/.test(next) || (old !== undefined && !/^[0-9a-f]{40}$/.test(old))) return null;
+  async exportPublicationPack(
+    next: string,
+    old?: string,
+    baseFetched = false,
+    ancestryOnly = false,
+  ): Promise<ColdPackResult> {
+    if (!/^[0-9a-f]{40}$/.test(next) || (old !== undefined && !/^[0-9a-f]{40}$/.test(old)))
+      return { kind: "refused", cause: "unavailable" };
     return this.checkoutFence.shared(() =>
       this.idle.served(() =>
         this.gate.through(
           async () => {
             const path = `/tmp/cold-pack-${crypto.randomUUID()}.pack`;
             try {
-              const script = sourcePublicationPackCommand(next, old, path, WORKDIR, baseFetched);
+              const script = sourcePublicationPackCommand(next, old, path, WORKDIR, baseFetched, ancestryOnly);
               const result = await this.runRoot(["bash", "-c", script], 60_000);
-              if (result.exitCode !== 0) return null;
+              if (result.exitCode !== 0) return { kind: "refused", cause: "command-refused" };
               // A model-root writer can swap the file after stat. Read the SDK's
               // binary stream under an independent byte cap, never a whole-file RPC.
               let timer: ReturnType<typeof setTimeout> | undefined;
-              const read = async (): Promise<string | null> => {
-                const stream = await this.readFileStream(path);
-                let bytes = 0;
-                const parts: string[] = [];
-                for await (const chunk of streamFile(stream)) {
-                  if (!(chunk instanceof Uint8Array) || (bytes += chunk.byteLength) > COLD_PACK_MAX_BYTES) {
-                    await stream.cancel().catch(() => undefined);
-                    return null;
-                  }
-                  for (let at = 0; at < chunk.length; at += 8192)
-                    parts.push(String.fromCharCode(...chunk.subarray(at, at + 8192)));
+              const read = async (): Promise<ColdPackResult> => {
+                try {
+                  const stream = await this.readFileStream(path);
+                  const read = await readColdPublicationPack(streamFile(stream));
+                  if (read.kind === "refused") await stream.cancel().catch(() => undefined);
+                  return read;
+                } catch {
+                  return { kind: "refused", cause: "stream-unavailable" };
                 }
-                return btoa(parts.join(""));
               };
               try {
                 return await Promise.race([
                   read(),
-                  new Promise<null>((resolve) => {
-                    timer = setTimeout(() => resolve(null), 30_000);
+                  new Promise<ColdPackResult>((resolve) => {
+                    timer = setTimeout(() => resolve({ kind: "refused", cause: "stream-timeout" }), 30_000);
                   }),
                 ]);
               } finally {
                 if (timer !== undefined) clearTimeout(timer);
               }
             } catch {
-              return null;
+              return { kind: "refused", cause: "unavailable" };
             } finally {
               await this.deleteFile(path).catch(() => undefined);
             }
           },
-          () => null,
+          () => ({ kind: "refused", cause: "unavailable" }) as const,
         ),
       ),
     );
@@ -1041,17 +1047,29 @@ export class SwitchboardSandbox extends Sandbox<Env> {
   /** A missing old-head ancestor can only be replaced by a base fetched via
    * this controller's own fixed Door URL and read grant. The returned SHA is
    * immutable and is checked in this repository before the effect runs. */
-  async fetchPublicationBase(body: unknown, baseSource: "branch" | "default" = "branch"): Promise<string | null> {
-    const input = coldPublicationInput(body);
-    if (!input) return null;
+  async fetchPublicationBase(
+    body: unknown,
+    baseSource: "branch" | "default" | "ancestor" = "branch",
+  ): Promise<ColdBaseResult> {
+    const ancestry = baseSource === "ancestor" ? parseColdPublication(body) : undefined;
+    const input = baseSource === "ancestor" ? ancestry?.input : coldPublicationInput(body);
+    if (!input) return { kind: "refused", cause: "unavailable" };
     return this.idle.served(async () => {
       try {
-        const plan = controllerPublicationPlan(input, undefined, baseSource);
-        const fetched = await this.runRoot(["bash", "-c", plan.fetchCommand], 85_000, plan.env);
-        const base = fetched.stdout.trim();
-        return fetched.exitCode === 0 && /^[0-9a-f]{40}$/.test(base) ? base : null;
+        const plan = controllerPublicationPlan(input, undefined, baseSource === "default" ? "default" : "branch");
+        if (baseSource === "ancestor") {
+          if (!ancestry || !input.old) return { kind: "refused", cause: "unavailable" };
+          const written = await this.writeFile("/workspace/ancestry.pack", ancestry.pack, { encoding: "base64" });
+          if (!written.success) return { kind: "refused", cause: "unavailable" };
+        }
+        const fetched = await this.runRoot(
+          ["bash", "-c", baseSource === "ancestor" ? plan.ancestryCommand : plan.fetchCommand],
+          85_000,
+          plan.env,
+        );
+        return coldPublicationBaseResult(fetched.exitCode, fetched.stdout);
       } catch {
-        return null;
+        return { kind: "refused", cause: "unavailable" };
       }
     });
   }
@@ -1402,27 +1420,59 @@ export default {
           // bounded full graph for a new ref. If it exceeds the cap, fetch a
           // trusted base without blobs; an initial ref or rebase can use
           // default HEAD only when it is an ancestor of the new tip.
-          let pack = await sandbox.exportPublicationPack(input.next, input.old);
+          const diagnostics: ColdPublicationDiagnostic[] = [];
+          const graph = async (
+            step: "requested-graph" | "branch-graph" | "default-graph" | "ancestry-graph" | "ancestor-graph",
+            old?: string,
+            baseFetched = false,
+            ancestryOnly = false,
+          ) => {
+            const result = await sandbox.exportPublicationPack(input.next, old, baseFetched, ancestryOnly);
+            if (result.kind === "refused") {
+              diagnostics.push({ step, cause: result.cause });
+              return null;
+            }
+            return result.pack;
+          };
+          const fetchBase = async (source: "branch" | "default") => {
+            const result = await controller.fetchPublicationBase(input, source);
+            if (result.kind === "refused") {
+              diagnostics.push({ step: source === "branch" ? "branch-base" : "default-base", cause: result.cause });
+              return undefined;
+            }
+            return result.base;
+          };
+          let pack = await graph("requested-graph", input.old);
           let base: string | undefined;
           if (!pack) {
-            base = (await controller.fetchPublicationBase(input)) ?? undefined;
-            if (base) pack = await sandbox.exportPublicationPack(input.next, base, true);
+            base = await fetchBase("branch");
+            if (base) pack = await graph("branch-graph", base, true);
           }
           if (!pack && input.old) {
-            base = (await controller.fetchPublicationBase(input, "default")) ?? undefined;
-            if (base) pack = await sandbox.exportPublicationPack(input.next, base, true);
+            base = await fetchBase("default");
+            if (base) pack = await graph("default-graph", base, true);
+          }
+          if (!pack && input.old) {
+            const ancestry = await graph("ancestry-graph", input.old, false, true);
+            if (ancestry) {
+              const result = await controller.fetchPublicationBase({ ...input, pack: ancestry }, "ancestor");
+              if (result.kind === "refused") diagnostics.push({ step: "ancestor-base", cause: result.cause });
+              else {
+                base = result.base;
+                pack = await graph("ancestor-graph", base, true);
+              }
+            }
           }
           if (!pack || !parseColdPublication({ ...input, pack })) {
-            answer = json(
-              {
-                error: "publication refused by cold controller",
-                phase:
-                  base || input.old
-                    ? "cold-publication-graph-unavailable-or-over-limit"
-                    : "cold-publication-base-unavailable-or-over-limit",
-              },
-              409,
-            );
+            if (pack || diagnostics.length === 0) diagnostics.push({ step: "pack-format", cause: "invalid" });
+            const phase =
+              base || input.old
+                ? "cold-publication-graph-unavailable-or-over-limit"
+                : "cold-publication-base-unavailable-or-over-limit";
+            // Fixed codes only: no model bytes, identities, command output or
+            // exception prose enters this operational event or response.
+            console.log(JSON.stringify({ event: "cold-publication.refused", phase, diagnostics }));
+            answer = json({ error: "publication refused by cold controller", phase, diagnostics }, 409);
           } else {
             const result = await controller.publishControlled({ ...input, pack }, base);
             answer =

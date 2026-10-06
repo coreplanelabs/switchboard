@@ -12,11 +12,16 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { transpile } from "typescript";
+import { disposeColdController } from "./coldPublicationBoundary.js";
 import {
   COLD_PACK_MAX_BYTES,
   controllerPublicationPlan,
   parseColdPublication,
   sourcePublicationPackCommand,
+  readColdPublicationPack,
+  coldPublicationBaseResult,
+  coldPublicationDiagnostics,
 } from "./coldPublication.js";
 
 const input = {
@@ -34,6 +39,394 @@ const opts = {
   resolveEnvs: vi.fn(async () => ({ GH_ENTERPRISE_TOKEN: "model-only" })),
 };
 afterEach(() => vi.unstubAllGlobals());
+
+describe("cold publication refusal diagnostics", () => {
+  // Execute the actual route operation without platform admission or a VM.
+  // Existing controller-identity tests separately pin allocation and routing.
+  const operation = (sandbox: unknown, controller: unknown, log: unknown, request = input) => {
+    const worker = readFileSync("deploy/cloudflare-sandbox/worker.ts", "utf8");
+    const start = worker.indexOf("      const operation = (async (): Promise<Response> => {");
+    const end = worker.indexOf("      ctx.waitUntil(", start);
+    if (start < 0 || end < 0) throw new Error("publication route operation missing");
+    return new Function(
+      "input",
+      "sandbox",
+      "controller",
+      "parseColdPublication",
+      "disposeColdController",
+      "ctx",
+      "OUTPUT_AFTER_EXIT_MS",
+      "json",
+      "console",
+      transpile(`${worker.slice(start, end)}\nreturn operation;`),
+    )(
+      request,
+      sandbox,
+      controller,
+      parseColdPublication,
+      disposeColdController,
+      { waitUntil: () => {} },
+      20,
+      (body: unknown, status = 200) => new Response(JSON.stringify(body), { status }),
+      { log },
+    ) as Promise<Response>;
+  };
+  it.each([
+    "valid",
+    "unrelated default",
+    "missing base",
+    "foreign next",
+    "malformed object",
+    "truncated ancestry",
+    "ambiguous merge base",
+    "stale lease",
+    "wrong repository",
+    "fake old",
+  ])(
+    "bounds a shallow sibling rewrite after default HEAD advances: %s",
+    async (damage) => {
+      const fixture = mkdtempSync(join(tmpdir(), "cold-sibling-rewrite-"));
+      try {
+        const source = join(fixture, "source");
+        const remote = join(fixture, "remote.git");
+        const dir = join(fixture, "publisher");
+        const pack = join(fixture, "transfer.pack");
+        const git = (...args: string[]) => execFileSync("git", ["-C", source, ...args], { encoding: "utf8" }).trim();
+        execFileSync("git", ["init", "-q", source]);
+        execFileSync("git", ["init", "-q", "--bare", remote]);
+        execFileSync("git", ["-C", remote, "config", "uploadpack.allowFilter", "true"]);
+        const commit = (text: string) => {
+          writeFileSync(join(source, "work.txt"), text);
+          git("add", "-A");
+          git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture");
+          return git("rev-parse", "HEAD");
+        };
+        commit("historical boundary");
+        writeFileSync(join(source, "unchanged.bin"), randomBytes(COLD_PACK_MAX_BYTES + 1_000_000));
+        const base = commit("canonical baseline");
+        let old = commit("reviewed branch");
+        git("checkout", "-q", "-b", "rewrite", base);
+        let next = commit("coherent repair");
+        if (damage === "ambiguous merge base") {
+          const left = old;
+          const right = next;
+          old = git(
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit-tree",
+            git("rev-parse", `${left}^{tree}`),
+            "-p",
+            left,
+            "-p",
+            right,
+            "-m",
+            "old merge",
+          );
+          next = git(
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit-tree",
+            git("rev-parse", `${right}^{tree}`),
+            "-p",
+            right,
+            "-p",
+            left,
+            "-m",
+            "new merge",
+          );
+        }
+        git("checkout", "-q", "-b", "default-progress", base);
+        let main = commit("advanced default");
+        if (damage === "unrelated default") {
+          git("checkout", "-q", "--orphan", "other-default");
+          commit("unrelated baseline");
+          main = commit("unrelated default tip");
+        }
+        git("push", "-q", remote, `${old}:refs/heads/${input.branch}`, `${main}:refs/heads/main`);
+        execFileSync("git", ["-C", remote, "symbolic-ref", "HEAD", "refs/heads/main"]);
+        writeFileSync(join(source, ".git", "shallow"), `${base}\n`);
+        expect(git("rev-parse", "--is-shallow-repository")).toBe("true");
+        for (const head of [old, main]) expect(() => git("merge-base", "--is-ancestor", head, next)).toThrow();
+        if (damage !== "ambiguous merge base") expect(git("merge-base", old, next)).toBe(base);
+        if (damage === "fake old")
+          execFileSync("git", ["-C", remote, "update-ref", `refs/heads/${input.branch}`, base]);
+        const request = { ...input, old, next };
+        const otherRemote = join(fixture, "other.git");
+        if (damage === "wrong repository") execFileSync("git", ["init", "-q", "--bare", otherRemote]);
+        const local = (command: string) =>
+          command
+            .replaceAll("/workspace/publisher", dir)
+            .replaceAll("/workspace/transfer.pack", pack)
+            .replaceAll("/workspace/ancestry.pack", join(fixture, "ancestry.pack"))
+            .replaceAll("/workspace/ancestry.rows", join(fixture, "ancestry.rows"))
+            .replaceAll("/workspace/", `${fixture}/`)
+            .replaceAll("https://door.example/git/acme/api.git", damage === "wrong repository" ? otherRemote : remote);
+        const fetchedBases: string[] = [];
+        let prepareError = "";
+        const sandbox = {
+          exportPublicationPack: async (_next: string, boundary?: string, fetched = false, ancestryOnly = false) => {
+            try {
+              runShell(sourcePublicationPackCommand(next, boundary, pack, source, fetched, ancestryOnly), {
+                stdio: "pipe",
+              });
+              if (ancestryOnly && damage === "missing base")
+                writeFileSync(
+                  pack,
+                  execFileSync("git", ["-C", source, "pack-objects", "--stdout"], { input: `${old}\n${next}\n` }),
+                );
+              if (ancestryOnly && damage === "foreign next")
+                writeFileSync(
+                  pack,
+                  execFileSync("git", ["-C", source, "pack-objects", "--stdout"], { input: `${old}\n${base}\n` }),
+                );
+              if (ancestryOnly && damage === "malformed object") {
+                const malformed = execFileSync(
+                  "git",
+                  ["-C", source, "hash-object", "--literally", "-t", "commit", "-w", "--stdin"],
+                  { input: "invalid commit", encoding: "utf8" },
+                ).trim();
+                writeFileSync(
+                  pack,
+                  execFileSync("git", ["-C", source, "pack-objects", "--stdout"], {
+                    input: `${old}\n${next}\n${base}\n${malformed}\n`,
+                  }),
+                );
+              }
+              const bytes = readFileSync(pack);
+              return {
+                kind: "exported",
+                pack: (ancestryOnly && damage === "truncated ancestry"
+                  ? bytes.subarray(0, bytes.length - 1)
+                  : bytes
+                ).toString("base64"),
+              };
+            } catch {
+              return { kind: "refused", cause: "command-refused" };
+            }
+          },
+        };
+        const controller = {
+          fetchPublicationBase: async (_body: { pack?: string }, from: "branch" | "default" | "ancestor") => {
+            const plan = controllerPublicationPlan(request, undefined, from === "default" ? "default" : "branch");
+            if (from === "ancestor") writeFileSync(join(fixture, "ancestry.pack"), Buffer.from(_body.pack!, "base64"));
+            try {
+              const stdout = runShell(local(from === "ancestor" ? plan.ancestryCommand : plan.fetchCommand), {
+                env: { ...process.env, ...plan.env },
+                encoding: "utf8",
+                stdio: "pipe",
+              });
+              const result = coldPublicationBaseResult(0, stdout);
+              if (result.kind === "fetched") fetchedBases.push(result.base);
+              return result;
+            } catch {
+              return { kind: "refused", cause: "command-refused" };
+            }
+          },
+          publishControlled: vi.fn(async (body, boundary) => {
+            writeFileSync(pack, Buffer.from(body.pack, "base64"));
+            const plan = controllerPublicationPlan(request, boundary);
+            expect(plan.pushCommand).toContain(`--force-with-lease='refs/heads/${input.branch}:${old}'`);
+            try {
+              runShell(local(plan.prepareCommand), {
+                env: { ...process.env, ...plan.prepareEnv },
+                stdio: "pipe",
+              });
+            } catch (error) {
+              prepareError =
+                String((error as { stderr?: unknown }).stderr) + String((error as { stdout?: unknown }).stdout);
+              throw error;
+            }
+            if (damage === "stale lease")
+              execFileSync("git", ["-C", remote, "update-ref", `refs/heads/${input.branch}`, main]);
+            try {
+              runShell(local(plan.pushCommand), {
+                env: { ...process.env, ...plan.env },
+                stdio: "pipe",
+              });
+            } catch (error) {
+              prepareError =
+                String((error as { stderr?: unknown }).stderr) + String((error as { stdout?: unknown }).stdout);
+              return { state: "unknown" };
+            }
+            return { state: "accepted" };
+          }),
+          destroy: async () => {},
+        };
+        // This route reads the real old/default bases; neither is an ancestor.
+        // Supplying the known common base manually is deliberately not an effect.
+        expect(readFileSync(join(source, ".git", "shallow"), "utf8")).toBe(`${base}\n`);
+        const response = await operation(sandbox, controller, vi.fn(), request);
+        const success = damage === "valid" || damage === "unrelated default";
+        const expected = success ? 200 : damage === "stale lease" ? 503 : 409;
+        expect(response.status, (await response.clone().text()) + prepareError).toBe(expected);
+        if (damage !== "wrong repository" && damage !== "fake old")
+          expect(fetchedBases.slice(0, 2)).toEqual([old, main]);
+        if (success || damage === "stale lease") {
+          expect(fetchedBases.at(-1)).toBe(base);
+          expect(controller.publishControlled).toHaveBeenCalledOnce();
+        } else expect(controller.publishControlled).not.toHaveBeenCalled();
+        expect(
+          execFileSync("git", ["-C", remote, "rev-parse", `refs/heads/${input.branch}`], { encoding: "utf8" }).trim(),
+        ).toBe(success ? next : damage === "stale lease" ? main : damage === "fake old" ? base : old);
+        execFileSync("git", ["-C", remote, "fsck", "--full", "--strict"], { stdio: "pipe" });
+      } finally {
+        rmSync(fixture, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
+  it("the actual Worker preserves failed export and both base failures without exposing private output or pushing", async () => {
+    const log = vi.fn();
+    const sandbox = {
+      exportPublicationPack: vi.fn(async () => ({ kind: "refused", cause: "stream-over-limit", stderr: input.bearer })),
+    };
+    const controller = {
+      fetchPublicationBase: vi.fn(async (_body, source) => ({
+        kind: "refused",
+        cause: source === "branch" ? "hash-format-refused" : "unavailable",
+        stderr: input.bearer,
+      })),
+      publishControlled: vi.fn(),
+      destroy: vi.fn(async () => {}),
+    };
+    const response = await operation(sandbox, controller, log);
+    expect(response.status).toBe(409);
+    const body = await response.json();
+    expect(body).toEqual({
+      error: "publication refused by cold controller",
+      phase: "cold-publication-graph-unavailable-or-over-limit",
+      diagnostics: [
+        { step: "requested-graph", cause: "stream-over-limit" },
+        { step: "branch-base", cause: "hash-format-refused" },
+        { step: "default-base", cause: "unavailable" },
+        { step: "ancestry-graph", cause: "stream-over-limit" },
+      ],
+    });
+    expect(log).toHaveBeenCalledWith(
+      JSON.stringify({ event: "cold-publication.refused", phase: body.phase, diagnostics: body.diagnostics }),
+    );
+    expect(JSON.stringify(log.mock.calls)).not.toContain(input.bearer);
+    expect(controller.publishControlled).not.toHaveBeenCalled();
+    expect(controller.destroy).toHaveBeenCalledOnce();
+    expect(controller.fetchPublicationBase.mock.calls.map(([, source]) => source)).toEqual(["branch", "default"]);
+  });
+  it("the actual Worker preserves unknown after a possible push and does not emit pre-effect refusal diagnostics", async () => {
+    const pack = Buffer.from([80, 65, 67, 75, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0]).toString("base64");
+    const log = vi.fn();
+    const controller = {
+      fetchPublicationBase: vi.fn(),
+      publishControlled: vi.fn(async () => ({ state: "unknown" })),
+      destroy: vi.fn(async () => {}),
+    };
+    const response = await operation(
+      { exportPublicationPack: async () => ({ kind: "exported", pack }) },
+      controller,
+      log,
+    );
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "cold publication outcome unknown" });
+    expect(controller.publishControlled).toHaveBeenCalledOnce();
+    expect(controller.fetchPublicationBase).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
+    expect(controller.destroy).toHaveBeenCalledOnce();
+  });
+  it("preserves pre-effect provenance while accepting the legacy refusal shape", async () => {
+    const diagnostics = [
+      { step: "requested-graph", cause: "command-refused" },
+      { step: "branch-base", cause: "unavailable" },
+      { step: "default-base", cause: "command-refused" },
+    ];
+    const fetch = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: "publication refused by cold controller",
+            phase: "cold-publication-graph-unavailable-or-over-limit",
+            diagnostics,
+          }),
+          { status: 409 },
+        ),
+    );
+    vi.stubGlobal("fetch", fetch);
+    expect(await new CloudflareSandboxExecutor(opts).publishBranchResult!(input)).toMatchObject({
+      exitCode: 1,
+      stderr: "publication refused by cold controller (phase: cold-publication-graph-unavailable-or-over-limit)",
+    });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(coldPublicationDiagnostics(diagnostics)).toEqual(diagnostics);
+    const result = await new CloudflareSandboxExecutor(opts).publishBranchResult!(input);
+    for (const path of ["src/core/codingPrPostStep.ts", "src/channels/adminCoordinator.ts"]) {
+      const line = readFileSync(path, "utf8")
+        .split("\n")
+        .find((line) => line.includes("/^publication refused by cold controller"));
+      expect(line).toBeDefined();
+      const literal = line!.trim();
+      const predicate = new RegExp(literal.slice(1, literal.lastIndexOf("/.test")));
+      expect(predicate.test(result.stderr)).toBe(true);
+      expect(predicate.test(`${result.stderr}; diagnostics: added`)).toBe(false);
+    }
+  });
+  it.each(
+    [
+      [],
+      [{ step: "branch-base", cause: "stream-over-limit" }],
+      [{ step: "requested-graph", cause: "command-refused", detail: input.bearer }],
+      [{ step: "requested-graph", cause: "invented" }],
+      Array.from({ length: 6 }, () => ({ step: "requested-graph", cause: "command-refused" })),
+      [
+        { step: "default-base", cause: "unavailable" },
+        { step: "branch-base", cause: "unavailable" },
+      ],
+    ].map((diagnostics) => [diagnostics]),
+  )("malformed refusal diagnostics stay unknown without replay: %j", async (diagnostics) => {
+    const fetch = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: "publication refused by cold controller",
+            phase: "cold-publication-graph-unavailable-or-over-limit",
+            diagnostics,
+          }),
+          { status: 409 },
+        ),
+    );
+    vi.stubGlobal("fetch", fetch);
+    await expect(new CloudflareSandboxExecutor(opts).publishBranchResult!(input)).rejects.toThrow(/outcome unknown/);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+  it("reads exact binary chunks and distinguishes nonbinary, measured excess and lost streams", async () => {
+    async function* chunks(...values: unknown[]) {
+      yield* values;
+    }
+    const bytes = new Uint8Array([80, 65, 67, 75, 0, 0, 0, 2, 0, 0, 0, 0]);
+    expect(await readColdPublicationPack(chunks(bytes.subarray(0, 5), bytes.subarray(5)))).toEqual({
+      kind: "exported",
+      pack: Buffer.from(bytes).toString("base64"),
+    });
+    expect(await readColdPublicationPack(chunks("PACK"))).toEqual({ kind: "refused", cause: "stream-not-binary" });
+    expect(await readColdPublicationPack(chunks(new Uint8Array(COLD_PACK_MAX_BYTES + 1)))).toEqual({
+      kind: "refused",
+      cause: "stream-over-limit",
+    });
+    async function* lost() {
+      yield bytes;
+      throw new Error(input.bearer);
+    }
+    expect(await readColdPublicationPack(lost())).toEqual({ kind: "refused", cause: "stream-unavailable" });
+  });
+  it("classifies a trusted fetch by exit status and exact hash format, never command prose", () => {
+    expect(coldPublicationBaseResult(0, `${input.old}\n`)).toEqual({ kind: "fetched", base: input.old });
+    expect(coldPublicationBaseResult(1, input.old)).toEqual({ kind: "refused", cause: "command-refused" });
+    expect(coldPublicationBaseResult(0, `over limit ${input.old}`)).toEqual({
+      kind: "refused",
+      cause: "hash-format-refused",
+    });
+  });
+});
 
 // Production runs these commands in Linux sandboxes. Translate only the
 // host-specific wrappers when exercising their Git behavior on macOS.
@@ -574,13 +967,13 @@ describe("isolated cold publication plan", () => {
   );
   it("the Worker tries a complete initial-ref graph before looking for a trusted fallback", () => {
     const worker = readFileSync("deploy/cloudflare-sandbox/worker.ts", "utf8");
-    expect(worker).toContain("sourcePublicationPackCommand(next, old, path, WORKDIR, baseFetched)");
-    expect(worker).toContain("let pack = await sandbox.exportPublicationPack(input.next, input.old);");
+    expect(worker).toContain("sourcePublicationPackCommand(next, old, path, WORKDIR, baseFetched, ancestryOnly)");
+    expect(worker).toContain('let pack = await graph("requested-graph", input.old);');
     expect(worker).toContain("if (!pack) {");
-    expect(worker.indexOf("let pack = await sandbox.exportPublicationPack(input.next, input.old);")).toBeLessThan(
-      worker.indexOf("controller.fetchPublicationBase(input)"),
+    expect(worker.indexOf('let pack = await graph("requested-graph", input.old);')).toBeLessThan(
+      worker.indexOf('base = await fetchBase("branch")'),
     );
-    expect(worker.indexOf("controller.fetchPublicationBase(input)")).toBeLessThan(
+    expect(worker.indexOf('base = await fetchBase("branch")')).toBeLessThan(
       worker.indexOf("controller.publishControlled({ ...input, pack }, base)"),
     );
   });
