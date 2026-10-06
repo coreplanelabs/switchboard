@@ -50,6 +50,7 @@ import {
   PULL_OWNER_SCAN_MAX,
   PULL_OWNER_SCAN_MAX_BYTES,
   isPullOwnersResult,
+  pullOwnerReadDiagnosticFrom,
   type PullTarget,
   type PullOwnersResult,
 } from "./pullOwnership.js";
@@ -161,7 +162,7 @@ export interface CoordinatorInstanceStore {
   /** Reserve the same unit cell from an already authorized command or native watch intent. */
   admitMaintenance(input: MaintenanceAdmissionInput): Promise<MaintenanceAdmissionResult>;
   /** Complete canonical owner snapshot; reservation must share this owner transaction. */
-  findPullOwners(target: PullTarget): Promise<PullOwnersResult>;
+  findPullOwners(target: PullTarget, options?: { diagnostic?: boolean }): Promise<PullOwnersResult>;
   /** Native ended execution discovery persists an exact existing outbox offer. */
   offerReconciliation(key: UnitEventKey): Promise<{ offered: boolean }>;
   transitionRecovery(input: RecoveryTransition): Promise<RecoveryTransitionResult>;
@@ -1048,11 +1049,19 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     if (response.status === 200 && typeof result.offered === "boolean") return { offered: result.offered };
     throw new Error(`coordinator reconciliation unavailable (HTTP ${response.status})`);
   }
-  async findPullOwners(target: PullTarget): Promise<PullOwnersResult> {
+  async findPullOwners(target: PullTarget, options?: { diagnostic?: boolean }): Promise<PullOwnersResult> {
     try {
-      const response = await this.post("/runs/coordinator/pull-owners", { target });
+      const response = await this.post("/runs/coordinator/pull-owners", {
+        target,
+        ...(options?.diagnostic === true ? { diagnostic: true } : {}),
+      });
       if (response.status !== 200 || !isPullOwnersResult(response.data)) return { ok: false, reason: "unavailable" };
-      return response.data;
+      if (response.data.ok) return { ok: true, owners: response.data.owners };
+      const diagnostic =
+        options?.diagnostic === true && response.data.reason === "incomplete"
+          ? pullOwnerReadDiagnosticFrom(response.data.diagnostic)
+          : undefined;
+      return { ok: false, reason: response.data.reason, ...(diagnostic ? { diagnostic } : {}) };
     } catch {
       return { ok: false, reason: "unavailable" };
     }

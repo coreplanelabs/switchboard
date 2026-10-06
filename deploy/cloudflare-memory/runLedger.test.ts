@@ -7337,3 +7337,345 @@ describe("coordinator admission diagnostics", () => {
     }
   });
 });
+
+describe("read-only pull-owner scan diagnostics", () => {
+  it("reports an unreadable global producer before target matching without changing raw state", async () => {
+    const key = storeKey(),
+      id = "diagnostic_foreign_private";
+    await post("/runs/claim", claimBody(key, id, "slack:C1:diagnostic"));
+    const raw = '{"private":"DO_NOT_ECHO_DIAGNOSTIC_BODY"';
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(`UPDATE live_runs SET meta_json = ? WHERE run_id = ?`, raw, id);
+    });
+    const request = { storeKey: key, target: { repo: "other/repo", pr: 7 } };
+    expect((await post("/runs/coordinator/pull-owners", request)).data).toEqual({ ok: false, reason: "incomplete" });
+    const result = (await post("/runs/coordinator/pull-owners", { ...request, diagnostic: true })).data;
+    expect(result).toMatchObject({
+      ok: false,
+      reason: "incomplete",
+      diagnostic: {
+        version: 1,
+        stage: "inventory_live_producer",
+        source: "live_runs",
+        rowIndex: 0,
+        rowsRead: 1,
+        sourceBytes: expect.any(Number),
+        cause: "json",
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain(id);
+    expect(JSON.stringify(result)).not.toContain("DO_NOT_ECHO");
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+      expect(
+        state.storage.sql.exec<{ meta_json: string }>(`SELECT meta_json FROM live_runs WHERE run_id = ?`, id).one()
+          .meta_json,
+      ).toBe(raw);
+    });
+  });
+  it("reports a byte limit with existing estimate and unchanged incomplete authority", async () => {
+    const key = storeKey();
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+      for (let i = 0; i < 4; i++) {
+        const row = {
+          ...record(`diag_large_${i}`, `slack:C1:diag-large-${i}`),
+          repo: "acme/api",
+          branchPublication: {
+            version: 1,
+            repo: "acme/api",
+            branches: [],
+            complete: false,
+            pending: { id: "x".repeat(Math.floor(1.4 * 1024 * 1024)), pr: 7, headSha: "a".repeat(40) },
+          },
+        };
+        state.storage.sql.exec(
+          `INSERT INTO runs (run_id, channel_id, user_id, thread_key, started_at, finished_at, stored_at, status, event_count, stored_event_count, truncated, bytes, diagnosis_json, summary_json) VALUES (?, 'slack:C1', 'slack:UALICE', ?, 1, 2, 2, 'completed', 0, 0, 0, ?, '{}', ?)`,
+          row.id,
+          row.threadKey,
+          JSON.stringify(row).length,
+          JSON.stringify(row),
+        );
+      }
+    });
+    const result = (
+      await post("/runs/coordinator/pull-owners", {
+        storeKey: key,
+        target: { repo: "acme/api", pr: 7 },
+        diagnostic: true,
+      })
+    ).data;
+    expect(result).toMatchObject({
+      ok: false,
+      reason: "incomplete",
+      diagnostic: {
+        version: 1,
+        stage: "inventory_byte_limit",
+        source: "runs",
+        rowIndex: 3,
+        rowsRead: 4,
+        cause: "byte-limit",
+      },
+    });
+    expect((result.diagnostic as { sourceBytes: number }).sourceBytes).toBeGreaterThan(16 * 1024 * 1024);
+  });
+  it("reports a row limit without widening the scan or mutating effect rows", async () => {
+    const key = storeKey();
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        `WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i<32768) INSERT INTO plane_effects (id, body_json, offered_at) SELECT 'diag-' || i, 'null', 1 FROM n`,
+      );
+    });
+    const result = (
+      await post("/runs/coordinator/pull-owners", {
+        storeKey: key,
+        target: { repo: "acme/api", pr: 7 },
+        diagnostic: true,
+      })
+    ).data;
+    expect(result).toMatchObject({
+      ok: false,
+      reason: "incomplete",
+      diagnostic: {
+        version: 1,
+        stage: "inventory_row_limit",
+        source: "effects",
+        rowIndex: 32768,
+        rowsRead: 32769,
+        cause: "row-limit",
+      },
+    });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+      expect(state.storage.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM plane_effects`).one().n).toBe(32769);
+    });
+  });
+  it("requires the existing bearer and leaves successful/default reads unchanged", async () => {
+    const key = storeKey(),
+      request = { storeKey: key, target: { repo: "acme/api", pr: 7 }, diagnostic: true };
+    expect((await post("/runs/coordinator/pull-owners", request, {})).status).toBe(401);
+    expect((await post("/runs/coordinator/pull-owners", request)).data).toEqual({ ok: true, owners: [] });
+  });
+});
+
+describe("pull-owner diagnostic validation and read stages", () => {
+  it("distinguishes typed validation from JSON inventory failures", async () => {
+    const key = storeKey(),
+      id = "diagnostic_validation";
+    await post("/runs/put", {
+      storeKey: key,
+      record: { ...record(id, "slack:C1:diagnostic-validation"), repo: "acme/api" },
+    });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+      const row = {
+        ...record(id, "slack:C1:diagnostic-validation"),
+        repo: "acme/api",
+        branchPublication: { version: 2 },
+      };
+      state.storage.sql.exec(`UPDATE runs SET summary_json = ? WHERE run_id = ?`, JSON.stringify(row), id);
+    });
+    const result = (
+      await post("/runs/coordinator/pull-owners", {
+        storeKey: key,
+        target: { repo: "other/repo", pr: 7 },
+        diagnostic: true,
+      })
+    ).data;
+    expect(result).toMatchObject({
+      ok: false,
+      reason: "incomplete",
+      diagnostic: { stage: "run_publication", cause: "validation", source: "runs", rowIndex: 0, rowsRead: 1 },
+    });
+    expect(JSON.stringify(result)).not.toContain(id);
+  });
+  it("marks a storage-read failure at its current source without copying the exception", async () => {
+    const key = storeKey();
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(`DROP TABLE coordinator_units`);
+      expect(await owner.findPullOwners({ repo: "acme/api", pr: 7 }, true)).toEqual({
+        ok: false,
+        reason: "incomplete",
+        diagnostic: {
+          version: 1,
+          stage: "ownership_scan",
+          cause: "read",
+          source: "units",
+          rowsRead: 0,
+          sourceBytes: 0,
+        },
+      });
+    });
+  });
+});
+
+describe("pull-owner source-local diagnostic provenance", () => {
+  const faults = [
+    ["publication", "run_publication", { branchPublication: { version: 2, privateText: "secret-fixture" } }],
+    ["door", "run_door", { doorPublicationPending: { privateText: "secret-fixture" } }],
+    [
+      "initial owner",
+      "run_initial_coding_owner",
+      { branchPublication: { version: 1, repo: "acme/api", branches: [], complete: false } },
+    ],
+  ] as const;
+  async function healthyLives(key: string, count: number) {
+    for (let i = 0; i < count; i++)
+      expect(
+        (await post("/runs/claim", claimBody(key, "provenance-live-" + i, "slack:C1:provenance:" + i))).data,
+      ).toMatchObject({ ok: true });
+  }
+  async function cells(key: string) {
+    return runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => ({
+      live: state.storage.sql.exec("SELECT * FROM live_runs").toArray(),
+      terminal: state.storage.sql.exec("SELECT * FROM runs").toArray(),
+    }));
+  }
+  async function read(key: string, diagnostic = true) {
+    return (
+      await post("/runs/coordinator/pull-owners", {
+        storeKey: key,
+        target: { repo: "acme/api", pr: 7 },
+        ...(diagnostic ? { diagnostic: true } : {}),
+      })
+    ).data;
+  }
+  it.each(faults)("retains the live source and actual local ordinal for %s validation", async (_name, stage, fault) => {
+    const key = storeKey();
+    await healthyLives(key, 2);
+    const id = "provenance-bad-live";
+    await post("/runs/claim", claimBody(key, id, "slack:C1:provenance:bad"));
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec("UPDATE live_runs SET state_json=? WHERE run_id=?", JSON.stringify(fault), id);
+    });
+    const before = await cells(key);
+    const result = await read(key);
+    expect(result).toMatchObject({
+      ok: false,
+      reason: "incomplete",
+      diagnostic: { stage, source: "live_runs", rowIndex: 2, cause: "validation" },
+    });
+    expect(await cells(key)).toEqual(before);
+    expect(JSON.stringify(result)).not.toMatch(/secret-fixture|provenance-bad-live|state_json|privateText/);
+  });
+  it("reports a live empty identity at its actual local ordinal without changing unreadable rows", async () => {
+    const key = storeKey();
+    await healthyLives(key, 2);
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec("UPDATE live_runs SET run_id='' WHERE run_id=?", "provenance-live-1");
+    });
+    const before = await cells(key);
+    expect(await read(key)).toMatchObject({
+      ok: false,
+      reason: "incomplete",
+      diagnostic: { stage: "run_shape", source: "live_runs", rowIndex: 1, cause: "validation" },
+    });
+    expect(await cells(key)).toEqual(before);
+  });
+  it.each(faults)(
+    "retains terminal ordinal zero after two healthy live rows for %s validation",
+    async (_name, stage, fault) => {
+      const key = storeKey();
+      await healthyLives(key, 2);
+      const id = "provenance-bad-terminal";
+      await post("/runs/put", {
+        storeKey: key,
+        record: { ...record(id, "slack:C1:provenance:terminal"), repo: "acme/api" },
+      });
+      await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+        const current = state.storage.sql
+          .exec<{ summary_json: string }>("SELECT summary_json FROM runs WHERE run_id=?", id)
+          .one();
+        state.storage.sql.exec(
+          "UPDATE runs SET summary_json=? WHERE run_id=?",
+          JSON.stringify({ ...JSON.parse(current.summary_json), ...fault }),
+          id,
+        );
+      });
+      const before = await cells(key);
+      expect(await read(key)).toMatchObject({
+        ok: false,
+        reason: "incomplete",
+        diagnostic: { stage, source: "runs", rowIndex: 0, cause: "validation" },
+      });
+      expect(await cells(key)).toEqual(before);
+    },
+  );
+  it("preserves terminal-local positions with no live inventory", async () => {
+    const key = storeKey(),
+      id = "provenance-terminal-only";
+    await post("/runs/put", { storeKey: key, record: { ...record(id, "slack:C1:provenance:only"), repo: "acme/api" } });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+      const current = state.storage.sql
+        .exec<{ summary_json: string }>("SELECT summary_json FROM runs WHERE run_id=?", id)
+        .one();
+      state.storage.sql.exec(
+        "UPDATE runs SET summary_json=? WHERE run_id=?",
+        JSON.stringify({ ...JSON.parse(current.summary_json), branchPublication: { version: 2 } }),
+        id,
+      );
+    });
+    expect(await read(key)).toMatchObject({
+      ok: false,
+      reason: "incomplete",
+      diagnostic: { stage: "run_publication", source: "runs", rowIndex: 0 },
+    });
+  });
+  it.each(["json", "live shape", "terminal shape"])(
+    "preserves existing physical %s failures before merged validation",
+    async (fault) => {
+      const key = storeKey();
+      await healthyLives(key, 2);
+      await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+        if (fault === "json")
+          state.storage.sql.exec("UPDATE live_runs SET state_json='{' WHERE run_id=?", "provenance-live-1");
+        if (fault === "live shape")
+          state.storage.sql.exec("UPDATE live_runs SET meta_json='{}' WHERE run_id=?", "provenance-live-1");
+      });
+      if (fault === "terminal shape") {
+        const id = "provenance-unreadable-terminal";
+        await post("/runs/put", {
+          storeKey: key,
+          record: { ...record(id, "slack:C1:provenance:unreadable"), repo: "acme/api" },
+        });
+        await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+          state.storage.sql.exec("UPDATE runs SET summary_json='null' WHERE run_id=?", id);
+        });
+      }
+      const before = await cells(key);
+      expect(await read(key)).toMatchObject({
+        ok: false,
+        reason: "incomplete",
+        diagnostic: {
+          stage: fault === "terminal shape" ? "inventory_terminal_producer" : "inventory_live_producer",
+          source: fault === "terminal shape" ? "runs" : "live_runs",
+          rowIndex: fault === "terminal shape" ? 0 : 1,
+          cause: fault === "json" ? "json" : "shape",
+        },
+      });
+      expect(await cells(key)).toEqual(before);
+    },
+  );
+  it("omits diagnostics on default incomplete reads", async () => {
+    const key = storeKey();
+    await healthyLives(key, 1);
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec("UPDATE live_runs SET state_json=?", '{"branchPublication":{"version":2}}');
+    });
+    expect(await read(key, false)).toEqual({ ok: false, reason: "incomplete" });
+  });
+  it("preserves successful owners and omits diagnostics when opted in", async () => {
+    const key = storeKey();
+    await healthyLives(key, 1);
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        "UPDATE live_runs SET state_json=?",
+        JSON.stringify({
+          branchPublication: {
+            version: 1,
+            repo: "acme/api",
+            branches: [{ ref: "fix/provenance", sha: "a".repeat(40), pr: 7 }],
+            complete: true,
+          },
+        }),
+      );
+    });
+    expect(await read(key)).toEqual({ ok: true, owners: [{ kind: "run", runId: "provenance-live-0" }] });
+  });
+});

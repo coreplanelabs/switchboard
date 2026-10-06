@@ -975,3 +975,79 @@ describe("recovery history Worker client", () => {
     ).rejects.toThrow(/action/);
   });
 });
+
+describe("pull-owner diagnostic reader", () => {
+  it("opts into the existing read route and carries only a closed diagnostic", async () => {
+    let sent: Record<string, unknown> | undefined;
+    const diagnostic = {
+      version: 1,
+      stage: "inventory_byte_limit",
+      cause: "byte-limit",
+      source: "runs",
+      rowIndex: 3,
+      rowsRead: 4,
+      sourceBytes: 17_000_000,
+    };
+    const store = new WorkerCoordinatorInstanceStore({
+      baseUrl: "https://memory.test",
+      token: "fixture",
+      storeKey: "runs:default",
+      fetch: async (_url, init) => {
+        sent = JSON.parse(String(init?.body));
+        return Response.json({ ok: false, reason: "incomplete", diagnostic });
+      },
+    });
+    expect(await store.findPullOwners({ repo: "acme/api", pr: 7 }, { diagnostic: true })).toEqual({
+      ok: false,
+      reason: "incomplete",
+      diagnostic,
+    });
+    expect(sent).toEqual({ storeKey: "runs:default", target: { repo: "acme/api", pr: 7 }, diagnostic: true });
+  });
+  it("drops malformed/private diagnostic data while preserving incomplete", async () => {
+    for (const diagnostic of [
+      {
+        version: 1,
+        stage: "inventory_byte_limit",
+        cause: "byte-limit",
+        rowsRead: 1,
+        sourceBytes: 17,
+        runId: "private-id",
+      },
+      { version: 1, stage: "opaque private body", cause: "json", rowsRead: 1, sourceBytes: 17 },
+      { version: 1, stage: "ownership_scan", cause: "read", rowsRead: -1, sourceBytes: 0 },
+    ]) {
+      const store = new WorkerCoordinatorInstanceStore({
+        baseUrl: "https://memory.test",
+        token: "fixture",
+        storeKey: "runs:default",
+        fetch: async () => Response.json({ ok: false, reason: "incomplete", diagnostic }),
+      });
+      expect(await store.findPullOwners({ repo: "acme/api", pr: 7 }, { diagnostic: true })).toEqual({
+        ok: false,
+        reason: "incomplete",
+      });
+    }
+  });
+});
+
+describe("pull-owner diagnostic default compatibility", () => {
+  it("keeps the original request and result when diagnostics were not requested", async () => {
+    let sent: unknown;
+    const store = new WorkerCoordinatorInstanceStore({
+      baseUrl: "https://memory.test",
+      token: "fixture",
+      storeKey: "runs:default",
+      fetch: async (_url, init) => {
+        sent = JSON.parse(String(init?.body));
+        return Response.json({
+          ok: false,
+          reason: "incomplete",
+          diagnostic: { version: 1, stage: "ownership_scan", cause: "read", rowsRead: 0, sourceBytes: 0 },
+        });
+      },
+    });
+    expect(await store.findPullOwners({ repo: "acme/api", pr: 7 })).toEqual({ ok: false, reason: "incomplete" });
+    expect(sent).toEqual({ storeKey: "runs:default", target: { repo: "acme/api", pr: 7 } });
+  });
+});
