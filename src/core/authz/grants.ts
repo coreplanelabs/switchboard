@@ -101,11 +101,13 @@ export function browserActions(commandGroups: readonly string[]): Set<string> {
 /** One axis as config spells it: a list of names, or the explicit word "all". */
 export type GrantListConfig = readonly string[] | "all";
 
-/** One actor's entry. An ABSENT axis is the empty set (fail-closed). */
+/** One actor's entry. Absent actions/channels/repos are empty; codeRepos inherits repos. */
 export interface GrantsEntryConfig {
   actions?: GrantListConfig;
   channels?: GrantListConfig;
   repos?: GrantListConfig;
+  /** Code access independent of repo memory ownership; omitted inherits repos. */
+  codeRepos?: GrantListConfig;
 }
 
 /** `grants:` in config.yaml — actor id → entry. */
@@ -113,7 +115,12 @@ export type GrantsConfig = Record<string, GrantsEntryConfig>;
 
 const grantList = z.union([z.literal("all"), z.array(z.string().min(1))]);
 const grantsEntrySchema = z
-  .object({ actions: grantList.optional(), channels: grantList.optional(), repos: grantList.optional() })
+  .object({
+    actions: grantList.optional(),
+    channels: grantList.optional(),
+    repos: grantList.optional(),
+    codeRepos: grantList.optional(),
+  })
   .strict();
 
 export type ParsedGrantsConfig = { ok: true; grants: Map<string, Grants> } | { ok: false; errors: string[] };
@@ -136,7 +143,7 @@ function hasKnownPrefix(actorId: string): boolean {
  *  `access:svc:*`, `agent:*`, `cli:*` name namespaces no surface entry covers. */
 export function parseGrantsConfig(raw: unknown): ParsedGrantsConfig {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw))
-    return { ok: false, errors: ["grants must be a mapping of actor id → { actions, channels, repos }"] };
+    return { ok: false, errors: ["grants must be a mapping of actor id → { actions, channels, repos, codeRepos }"] };
   const errors: string[] = [];
   const grants = new Map<string, Grants>();
   for (const [actorId, entry] of Object.entries(raw as Record<string, unknown>)) {
@@ -159,17 +166,30 @@ export function parseGrantsConfig(raw: unknown): ParsedGrantsConfig {
         const axis = issue.path.length > 0 ? `.${issue.path.map(String).join(".")}` : "";
         errors.push(
           issue.code === "unrecognized_keys"
-            ? `${where}: unknown field ${issue.keys.join(", ")} (expected actions, channels, repos)`
+            ? `${where}: unknown field ${issue.keys.join(", ")} (expected actions, channels, repos, codeRepos)`
             : `${where}${axis}: expected "all" or a list of non-empty names`,
         );
       }
       continue;
     }
-    grants.set(actorId, {
+    if (parsed.data.codeRepos !== undefined && parsed.data.codeRepos !== "all") {
+      const invalid = parsed.data.codeRepos.filter((repo) => !REPO_SLUG_RE.test(repo));
+      if (invalid.length > 0) {
+        errors.push(`${where}.codeRepos: expected owner/name slugs, got ${invalid.join(", ")}`);
+        continue;
+      }
+    }
+    const explicit: Grants = {
       actions: toSet(parsed.data.actions),
       channels: toSet(parsed.data.channels),
       repos: normalizedRepos(toSet(parsed.data.repos)),
-    });
+    };
+    grants.set(
+      actorId,
+      parsed.data.codeRepos === undefined
+        ? explicit
+        : withRepoAccess(explicit, normalizedRepos(toSet(parsed.data.codeRepos))),
+    );
   }
   return errors.length > 0 ? { ok: false, errors } : { ok: true, grants };
 }
@@ -178,7 +198,9 @@ export function parseGrantsConfig(raw: unknown): ParsedGrantsConfig {
 
 /** `restrict:` in config.yaml. An agent listed here runs only for an actor whose
  *  grants hold `agent:run:<name>` (or `all`); a repo listed here (an `owner/name`
- *  slug) is used only by an actor whose `repos` axis names it (or `all`).
+ *  slug) requires compiled code access: `codeRepos` when present, otherwise
+ *  `repos`, plus additive namespace/surface grants; delegation intersects code
+ *  separately from memory ownership.
  *  Everything unlisted is compiled into the human code-access baseline. The lock and
  *  the allowlist are kept apart: listing a grant never takes anything from
  *  anyone else. */

@@ -365,8 +365,9 @@ export interface AppConfig extends AgentConfiguration {
    * `http:<subject>`, `mcp:<subject>`, `access:<sub>`,
    * `access:svc:<cn>`, `schedule:<name>`, or `<ns>:*` for everyone authenticated
    * on a surface — `access:*` is the org Access admits) → `{ actions, channels,
-   * repos }`, each a list of names or the explicit word `all`; an absent axis is
-   * the empty set. A `slack:` entry adds to the baseline every Slack user holds
+   * repos, codeRepos }`, each a list of names or the explicit word `all`; an absent axis is
+   * the empty set, except omitted `codeRepos` inherits `repos`. Code access
+   * and repo memory ownership can be granted independently. A `slack:` entry adds to the baseline every Slack user holds
    * (the open chat commands, every unrestricted agent); a browser entry adds to
    * its baseline (every group's read and personal chat writes); every
    * other entry is exactly what it declares; a
@@ -376,8 +377,8 @@ export interface AppConfig extends AgentConfiguration {
   grants?: GrantsConfig;
   /**
    * What is CLOSED unless a grant covers it: agents (run only by a holder of
-   * `agent:run:<name>`) and repos (`owner/name`, used only by a holder whose
-   * `repos` names it). Unlisted agents and code repos are open in human baselines;
+   * `agent:run:<name>`) and repos (`owner/name`, used only by a holder whose compiled
+   * code access covers it: `codeRepos`, otherwise `repos`, plus baseline/surface grants). Unlisted agents and code repos are open in human baselines;
    * credentials always require explicit grants. Repo management (`repo:write`) and channel config (`config:write`)
    * need no entry here — they are closed by construction (held only where
    * `grants` say so, admins through `actions: all`).

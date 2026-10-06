@@ -43,6 +43,7 @@ const MEMBER_OF: Condition = { kind: "member-of" };
 const IS_SELF: Condition = { kind: "is-self" };
 const ACTS_AS_PERSON: Condition = { kind: "acts-as-person" };
 const OWNER_OF: Condition = { kind: "owner-of" };
+const REPO_ACCESS: Condition = { kind: "repo-access" };
 const ALL_CHANNELS: Condition = { kind: "all-channels" };
 
 export const POLICY: readonly Rule[] = [
@@ -138,9 +139,9 @@ export const POLICY: readonly Rule[] = [
   { action: "repo:exec", resource: "agent", when: [grant("agent:run:{name}")] },
   { action: "repo:exec", resource: "agent", when: [grant("repo:exec")] },
   // The exec grant on a repo the actor may use (not yet asked by a command).
-  { action: "repo:exec", resource: "repo", when: [grant("repo:exec"), OWNER_OF] },
-  // Binding a run to a repo; open-when-absent today → grants.repos = "all".
-  { action: "repo:use", resource: "repo", when: [{ kind: "repo-access" }] },
+  { action: "repo:exec", resource: "repo", when: [grant("repo:exec"), REPO_ACCESS] },
+  // Binding a run to code access, distinct from explicit repo memory ownership.
+  { action: "repo:use", resource: "repo", when: [REPO_ACCESS] },
 
   // ── config ───────────────────────────────────────────────────────────────
   // `config show`: the read grant.
