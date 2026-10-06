@@ -226,10 +226,13 @@ describe("sandbox Worker wiring (static)", () => {
   it("the credential goes through the exec env option, never through the command text", () => {
     expect(worker).toMatch(/env:\s*envVars/);
     expect(worker).not.toContain("base64 -d");
-    // The only base64 conversion is untrusted pack bytes, never the
-    // model-command env or the controller's effect bearer.
-    expect(worker.match(/btoa\(/g)).toHaveLength(1);
-    expect(worker).toContain('return btoa(parts.join(""))');
+    // Encoding lives in the shared byte reader. The Worker passes only the
+    // file stream, never model-command env or the controller's effect bearer.
+    const publication = readFileSync(resolve(ROOT, "src/execution/coldPublication.ts"), "utf8");
+    expect(worker).toContain("readColdPublicationPack(streamFile(stream))");
+    expect(worker).not.toMatch(/btoa\(/);
+    expect(publication.match(/btoa\(/g)).toHaveLength(1);
+    expect(publication).toContain('return { kind: "exported", pack: btoa(parts.join("")) }');
   });
 
   // Workers Logs record an invocation's request headers (redacted by a name
