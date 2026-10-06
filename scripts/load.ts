@@ -41,6 +41,7 @@ import { redactSecrets } from "../src/core/redact.js";
 import { processSecrets, type Secret } from "../src/secrets.js";
 import { simulateCards } from "../src/load/cardsLoad.js";
 import { runE2eLoad } from "../src/load/e2eLoad.js";
+import { evaluateCapacity, type CapacityLimits } from "../src/load/capacityEvidence.js";
 import { durationStats, pageAll, peakConcurrency, realRuns } from "../src/load/history.js";
 import { runResidentLoad, type ResidentThreadClient } from "../src/load/residentLoad.js";
 import { runSandboxLoad } from "../src/load/sandboxLoad.js";
@@ -204,6 +205,7 @@ commands
              checks the thread out on that branch instead of the snapshot's
   e2e        N runs through a bot's POST /ingress (synchronous mode)
              --ingress-url URL  --healthz-url URL  --text "agent:coding in owner/name: load"  --threads N  --hold S  --stagger S
+             [--capacity --sampled-span S --max-rss-mb N --max-lag-ms N --max-health-ms N --health-every S]
              env: SWITCHBOARD_LOAD_INGRESS_TOKEN (or --token-env)
   cards      the status-card path in virtual time (no network)
              --cards N  --hold S  --channels N  [--client budgeted|retrying  --budget-per-minute N  --per-app-per-minute N  --per-channel-per-second N]
@@ -281,6 +283,12 @@ function flags(argv: string[]): Flags {
       text: { type: "string" },
       "ingress-url": { type: "string" },
       "healthz-url": { type: "string" },
+      capacity: { type: "boolean" },
+      "sampled-span": { type: "string" },
+      "max-rss-mb": { type: "string" },
+      "max-lag-ms": { type: "string" },
+      "max-health-ms": { type: "string" },
+      "health-every": { type: "string" },
       "resident-url": { type: "string" },
       "sandbox-url": { type: "string" },
       "seed-from": { type: "string" },
@@ -603,27 +611,67 @@ async function e2e(f: Flags): Promise<boolean> {
     staggerMs: num(f, "stagger", 30) * 1000,
     holdMs: num(f, "hold", 600) * 1000,
     healthzUrl: typeof f["healthz-url"] === "string" ? f["healthz-url"] : undefined,
-    healthzEveryMs: 15_000,
+    healthzEveryMs: num(f, "health-every", 15) * 1000,
   };
+  let capacityLimits: CapacityLimits | undefined;
+  if (f.capacity === true) {
+    if (!params.healthzUrl) throw new Error("--capacity requires --healthz-url on an isolated bot");
+    const positive = (key: string) => {
+      const value = Number(str(f, key));
+      if (!Number.isFinite(value) || value <= 0) throw new Error(`--${key} must be a positive number`);
+      return value;
+    };
+    capacityLimits = {
+      concurrent: params.threads,
+      sampledSpanMs: positive("sampled-span") * 1000,
+      maxRssMb: positive("max-rss-mb"),
+      maxLagMs: positive("max-lag-ms"),
+      maxHealthMs: positive("max-health-ms"),
+      maxHealthGapMs: params.healthzEveryMs * 2,
+    };
+    if (
+      !Number.isSafeInteger(params.threads) ||
+      params.threads <= 0 ||
+      params.healthzEveryMs <= 0 ||
+      params.holdMs < capacityLimits.sampledSpanMs ||
+      params.healthzEveryMs > capacityLimits.sampledSpanMs
+    )
+      throw new Error(
+        "--capacity needs positive integer threads, positive health-every, and hold ≥ sampled-span ≥ health-every",
+      );
+  }
   const ac = new AbortController();
   process.once("SIGINT", () => ac.abort());
   const out = await runE2eLoad(params, { fetch, signal: ac.signal });
   const summary = summarize(out.samples);
   const checks = evaluateSlo(summary, E2E_SLO);
+  const capacity = capacityLimits ? evaluateCapacity(out, capacityLimits) : undefined;
+  if (capacity) checks.push(...capacity.checks);
   const rss = out.health.map((h) => h.rssMb).filter((n): n is number => n !== undefined);
   const lag = out.health.map((h) => h.eventLoopLagP99Ms).filter((n): n is number => n !== undefined);
   const notes = [
     `threads started ${out.result.started}, runs ${summary.total}, iteration errors ${out.result.errors}${out.result.aborted ? ", ABORTED" : ""}`,
     `healthz samples ${out.health.length}: rss max ${rss.length ? Math.max(...rss) : "—"} MB, event-loop lag p99 max ${lag.length ? Math.max(...lag) : "—"} ms`,
+    ...(capacity
+      ? [
+          `capacity evidence: client request peak ${capacity.evidence.requestPeak}, sampled server peak ${capacity.evidence.serverPeak}, consecutive sampled span ${capacity.evidence.sampledSpanMs} ms`,
+          "Health polls establish sampled occupancy only. This isolated scripted run does not establish provider quotas, cold starts, CPU-heavy builds, ledger durability, Slack delivery or production acceptance.",
+        ]
+      : []),
   ];
   return writeResults(
     "e2e",
     id,
     startedAt,
-    { ...params, token: "(redacted)" },
+    { ...params, token: "(redacted)", ...(capacityLimits ? { capacityLimits } : {}) },
     summary,
     checks,
-    { samples: out.samples, result: out.result, health: out.health },
+    {
+      samples: out.samples,
+      result: out.result,
+      health: out.health,
+      ...(capacity ? { capacity: capacity.evidence } : {}),
+    },
     notes,
   );
 }

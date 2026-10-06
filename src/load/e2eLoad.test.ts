@@ -21,6 +21,9 @@ function stubBot(opts: { failEvery?: number } = {}) {
         JSON.stringify({
           ok: true,
           inFlight: posts.length,
+          draining: false,
+          startedAt: "2026-01-01T00:00:00.000Z",
+          build: { commit: "fixture" },
           process: { rssMb: 210, heapUsedMb: 80, eventLoopLagP99Ms: 12 },
         }),
         {
@@ -76,6 +79,48 @@ describe("runE2eLoad", () => {
     expect(s.ops[0]).toMatchObject({ op: "run", failed: 0 });
     expect(out.health.length).toBeGreaterThan(0);
     expect(out.health[0]).toMatchObject({ ok: true, rssMb: 210, heapUsedMb: 80, eventLoopLagP99Ms: 12 });
+    expect(out.health[0]).toMatchObject({
+      draining: false,
+      startedAt: "2026-01-01T00:00:00.000Z",
+      buildCommit: "fixture",
+    });
+    expect(out.health[0].responseMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("times the whole health read, including body parsing, and keeps process identity", async () => {
+    let t = 0;
+    const out = await runE2eLoad(
+      {
+        runId: "health",
+        ingressUrl: "http://bot/ingress",
+        token: "t",
+        text: "x",
+        threads: 0,
+        staggerMs: 0,
+        holdMs: 0,
+        healthzUrl: "http://bot/healthz",
+      },
+      {
+        now: () => t,
+        sleep: async () => {},
+        fetch: async () => {
+          t += 20;
+          const res = new Response("{}", { status: 200 });
+          res.json = async () => {
+            t += 30;
+            return {
+              inFlight: 0,
+              draining: false,
+              startedAt: "2026-01-01T00:00:00.000Z",
+              build: { commit: "fixture" },
+            };
+          };
+          return res;
+        },
+      },
+    );
+    expect(out.health).toHaveLength(2);
+    expect(out.health.every((h) => h.responseMs === 50 && h.buildCommit === "fixture")).toBe(true);
   });
 
   it("a run that finishes failed is a failed sample with the status as its reason; a transport error is `transport`", async () => {

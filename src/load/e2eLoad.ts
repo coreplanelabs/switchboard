@@ -35,8 +35,13 @@ export interface E2eLoadDeps {
 }
 
 export interface HealthSample {
+  /** Local request start; the server observation lies before at + responseMs. */
   at: number;
   ok: boolean;
+  responseMs?: number;
+  draining?: boolean;
+  startedAt?: string;
+  buildCommit?: string;
   inFlight?: number;
   rssMb?: number;
   heapUsedMb?: number;
@@ -67,18 +72,25 @@ export async function runE2eLoad(params: E2eLoadParams, deps: E2eLoadDeps): Prom
       const res = await fetchImpl(params.healthzUrl, { signal: AbortSignal.timeout(5_000) });
       const body = (await res.json()) as {
         inFlight?: number;
+        draining?: boolean;
+        startedAt?: string;
+        build?: { commit?: string };
         process?: { rssMb?: number; heapUsedMb?: number; eventLoopLagP99Ms?: number };
       };
       health.push({
         at,
         ok: res.ok,
+        responseMs: now() - at,
+        draining: body.draining,
+        startedAt: body.startedAt,
+        buildCommit: body.build?.commit,
         ...(typeof body.inFlight === "number" ? { inFlight: body.inFlight } : {}),
         ...(body.process?.rssMb !== undefined ? { rssMb: body.process.rssMb } : {}),
         ...(body.process?.heapUsedMb !== undefined ? { heapUsedMb: body.process.heapUsedMb } : {}),
         ...(body.process?.eventLoopLagP99Ms !== undefined ? { eventLoopLagP99Ms: body.process.eventLoopLagP99Ms } : {}),
       });
     } catch (err) {
-      health.push({ at, ok: false, error: err instanceof Error ? err.message : String(err) });
+      health.push({ at, ok: false, responseMs: now() - at, error: err instanceof Error ? err.message : String(err) });
     }
   };
   // The sampler's sleep is raced against the threads finishing, so the run
@@ -114,8 +126,8 @@ export async function runE2eLoad(params: E2eLoadParams, deps: E2eLoadDeps): Prom
           body: JSON.stringify({ text: params.text, channel: "load", thread: ctx.thread }),
           signal: AbortSignal.timeout(params.requestTimeoutMs ?? 45 * 60_000),
         });
-        const ms = now() - startedAt;
         const body = (await res.json().catch(() => ({}))) as { run?: { id: string; status: string }; error?: string };
+        const ms = now() - startedAt;
         const status = body.run?.status ?? (res.ok ? "no-run" : `http-${res.status}`);
         const ok = res.ok && status === "completed";
         failed = !ok;
