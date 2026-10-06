@@ -6,7 +6,8 @@ import type { CoordinatorUnit } from "../../src/core/coordinator/contract.ts";
 import { FRICTION_CATEGORIES } from "../../src/core/runFriction.ts";
 import { LEASE_MS } from "../../src/core/runLedger/types.ts";
 import { blobOf, pointOf, type RunMetricsPoint } from "../../src/core/runMetrics.ts";
-import { featuresOf, RUN_EVENT_INSERT_BATCH, RunHistoryDO } from "./worker.ts";
+import { featuresOf, RunHistoryDO } from "./worker.ts";
+import { RUN_EVENT_INSERT_BATCH } from "../../src/memorySqlLimits.ts";
 
 // Feature: docs/reference/specs/run-history.md — the RunHistoryDO: the durable
 // run store behind the bot's WorkerRunStore. Runs in workerd against the real

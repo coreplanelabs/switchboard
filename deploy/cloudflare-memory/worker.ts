@@ -1,4 +1,5 @@
-import { isConfigPublicationSnapshotKey, type ConfigSourcePrecondition } from "../../src/configDocument.js";
+import { isConfigPublicationSnapshotKey, type ConfigSourcePrecondition } from "../../src/configPublicationProtocol.js";
+import { DO_MAX_BOUND_PARAMETERS, RUN_EVENT_INSERT_BATCH } from "../../src/memorySqlLimits.js";
 import { bindInboxCustody } from "../../src/core/runLedger/inboxMessage.ts";
 import {
   validMaintenanceTransport,
@@ -1853,9 +1854,6 @@ function parseScheduleFiring(body: unknown): Validated<ScheduleFiring> {
 // 100 ids; an event is capped to 64 KiB upstream (MAX_EVENT_BYTES) so no row
 // nears 2 MB; and `maxBytes` is clamped to 8 GiB (RETENTION_BOUNDS), under the
 // 10 GB per-object ceiling.
-const DO_MAX_BOUND_PARAMETERS = 100;
-/** Rows per `INSERT INTO run_events` statement: floor(100 / 3 parameters). */
-export const RUN_EVENT_INSERT_BATCH = Math.floor(DO_MAX_BOUND_PARAMETERS / 3);
 /** Ids per `DELETE ... WHERE run_id IN (...)` statement. */
 const RUN_DELETE_BATCH = DO_MAX_BOUND_PARAMETERS;
 /** Rows a single `put` may delete while trimming (the deletion fence): a

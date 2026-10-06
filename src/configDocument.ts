@@ -12,6 +12,8 @@
 // backing uses (`/config/get`, `/config/put` with optimistic versions).
 
 import { createHash } from "node:crypto";
+import { isConfigPublicationSnapshotKey, type ConfigSourcePrecondition } from "./configPublicationProtocol.js";
+export { isConfigPublicationSnapshotKey, type ConfigSourcePrecondition } from "./configPublicationProtocol.js";
 import type { EnvRecord, Secret, Secrets } from "./secrets.js";
 
 /** The ConfigDO key the base config lives under; the overrides key is `overrides`. */
@@ -108,12 +110,6 @@ export interface ConfigDocumentClientOptions {
 export type ReadBaseOutcome =
   { ok: true; document: BaseConfigDocument | null; version: number } | { ok: false; problem: string };
 
-/** Compared atomically with the target version in the same existing document store. */
-export interface ConfigSourcePrecondition {
-  readonly key: string;
-  readonly version: number;
-}
-
 export type PushBaseOutcome =
   { ok: true; version: number } | { ok: false; write: "not-written" | "unknown"; problem: string };
 
@@ -140,11 +136,6 @@ export interface ConfigPublicationSnapshot {
 }
 
 export const CONFIG_PUBLICATION_SNAPSHOT_MAX_BYTES = 256 * 1024;
-
-/** Only this generated namespace is immutable; ordinary named documents retain CAS updates. */
-export function isConfigPublicationSnapshotKey(key: string): boolean {
-  return /^deploy-base-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(key);
-}
 
 function validDocumentBytes(value: unknown): value is BaseConfigDocument {
   return isBaseConfigDocument(value) && sha256Hex(value.yaml) === value.sha256;
