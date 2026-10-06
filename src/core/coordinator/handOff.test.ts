@@ -2077,3 +2077,22 @@ describe("handOffToCoordinator — the plan is read whole, never through the too
     expect(await h.instances.get("plan-long")).toBeNull();
   });
 });
+
+describe("Ship admission refusal diagnostics", () => {
+  it.each(["incomplete", "unavailable", "owned", "stale"] as const)(
+    "retains the exact %s unit refusal without starting a runner",
+    async (reason) => {
+      const h = harness();
+      h.deps.instances.putUnits = async () => ({ ok: false, reason });
+      const out = await handOffToCoordinator(h.deps, input());
+      expect(out.admissionDiagnostic).toEqual({
+        operation: "units_put",
+        reason,
+        instanceId: "plan-fixture",
+        unitCount: 3,
+      });
+      expect(out.status).toBe("aborted");
+      expect(h.created).toEqual([]);
+    },
+  );
+});

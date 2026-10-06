@@ -231,6 +231,9 @@ import {
   type PlaneWrite,
 } from "../../src/core/plane/decide.ts";
 import {
+  type PullOwnershipDiagnostics,
+  type PullOwnershipSource,
+  type PullOwnershipCheck,
   findPullOwnersInRows,
   pullBindingChanges,
   needsPullBindingAdmission,
@@ -3875,7 +3878,22 @@ export class RunHistoryDO extends DurableObject<Env> {
     staged: readonly CoordinatorUnit[] = [],
     owner?: CoordinatorInstance,
   ): PullBindingRefusal | undefined {
-    if (this.pendingCoordinatorReport(current, next)) return "stale";
+    const diagnostics: PullOwnershipDiagnostics = {};
+    let stage: PullOwnershipCheck = "instance_read";
+    const report = (reason: PullBindingRefusal, check?: PullOwnershipCheck): PullBindingRefusal => {
+      console.log(
+        JSON.stringify({
+          event: "coordinator_unit_admission_refused",
+          instanceId: next.instanceId,
+          unit: next.unit,
+          reason,
+          diagnostic: diagnostics.failure ?? { check: check ?? stage },
+          ...(diagnostics.scan ? { scan: diagnostics.scan } : {}),
+        }),
+      );
+      return reason;
+    };
+    if (this.pendingCoordinatorReport(current, next)) return report("stale", "pending_report");
     force ||= current?.startedAt === undefined && next.startedAt !== undefined;
     if (!force && !needsPullBindingAdmission(current, next)) return;
     try {
@@ -3886,18 +3904,21 @@ export class RunHistoryDO extends DurableObject<Env> {
               .toArray()[0]
           : undefined;
       const instance = owner ?? (saved ? JSON.parse(saved.json) : null);
-      if (!isCoordinatorInstance(instance)) return "incomplete";
+      if (!isCoordinatorInstance(instance)) return report("incomplete", "instance_shape");
       if (!force && !pullBindingChanges(instance, current, next)) return;
-      const rows = this.pullOwnershipRows();
+      stage = "ownership_scan";
+      const rows = this.pullOwnershipRows(diagnostics);
       for (const unit of staged) {
         const saved = this.sql
           .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, unit.instanceId)
           .toArray()[0];
         rows.units.push({ unit, instance: saved ? JSON.parse(saved.json) : null });
       }
-      return unitPullBindingRefusal(rows, instance, current, next);
+      stage = "binding_validation";
+      const reason = unitPullBindingRefusal(rows, instance, current, next, diagnostics);
+      return reason === undefined ? undefined : report(reason);
     } catch {
-      return "incomplete";
+      return report("incomplete");
     }
   }
 
@@ -4295,10 +4316,11 @@ export class RunHistoryDO extends DurableObject<Env> {
   }
 
   /** Reads are also consumed by admission inside this existing owner transaction. */
-  private pullOwnershipRows(): PullOwnershipRows {
+  private pullOwnershipRows(diagnostics?: PullOwnershipDiagnostics): PullOwnershipRows {
     let count = 0,
       bytes = 0;
-    const bounded = function* <T extends Record<string, unknown>>(cursor: Iterable<T>) {
+    const bounded = function* <T extends Record<string, unknown>>(cursor: Iterable<T>, source: PullOwnershipSource) {
+      let rowIndex = 0;
       for (const row of cursor) {
         count++;
         // UTF-8 needs at most three bytes per UTF-16 code unit. Refuse before parsing.
@@ -4306,9 +4328,18 @@ export class RunHistoryDO extends DurableObject<Env> {
           (sum, value) => sum + (typeof value === "string" ? 3 * value.length : 0),
           0,
         );
-        if (count > PULL_OWNER_SCAN_MAX || bytes > PULL_OWNER_SCAN_MAX_BYTES)
+        if (diagnostics) diagnostics.scan = { source, rowIndex, rowsRead: count, sourceBytes: bytes };
+        if (count > PULL_OWNER_SCAN_MAX || bytes > PULL_OWNER_SCAN_MAX_BYTES) {
+          if (diagnostics)
+            diagnostics.failure = {
+              check: count > PULL_OWNER_SCAN_MAX ? "inventory_row_limit" : "inventory_byte_limit",
+              source,
+              rowIndex,
+            };
           throw new Error("pull owner scan incomplete");
+        }
         yield row;
+        rowIndex++;
       }
     };
     const limit = PULL_OWNER_SCAN_MAX + 1;
@@ -4318,14 +4349,19 @@ export class RunHistoryDO extends DurableObject<Env> {
           `SELECT body_json FROM plane_effects WHERE acked_at IS NULL LIMIT ?`,
           limit,
         ),
+        "effects",
       ),
-    ].map((row) => JSON.parse(row.body_json));
+    ].map((row, rowIndex) => {
+      if (diagnostics?.scan) diagnostics.scan.rowIndex = rowIndex;
+      return JSON.parse(row.body_json);
+    });
     const rows: PullOwnershipRows = { complete: true, units: [], runs: [], effects, settlements: [] };
     for (const row of bounded(
       this.sql.exec<{ unit_json: string; instance_json: string | null }>(
         `SELECT u.json AS unit_json, i.json AS instance_json FROM coordinator_units u LEFT JOIN coordinator_instances i ON i.instance_id = u.instance_id LIMIT ?`,
         limit,
       ),
+      "units",
     ))
       rows.units.push({
         unit: JSON.parse(row.unit_json),
@@ -4340,6 +4376,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         meta_json: string;
         state_json: string;
       }>(`SELECT run_id, thread_key, owner_gen, phase, meta_json, state_json FROM live_runs LIMIT ?`, limit),
+      "live_runs",
     )) {
       const meta = JSON.parse(row.meta_json),
         state = JSON.parse(row.state_json);
@@ -4360,8 +4397,15 @@ export class RunHistoryDO extends DurableObject<Env> {
             effect.threadKey === row.thread_key &&
             JSON.stringify(effect.request) === JSON.stringify(meta.request),
         );
-      if ((!isPullOwnerLiveMeta(meta) && !admitted) || !state || typeof state !== "object" || Array.isArray(state))
+      if ((!isPullOwnerLiveMeta(meta) && !admitted) || !state || typeof state !== "object" || Array.isArray(state)) {
+        if (diagnostics)
+          diagnostics.failure = {
+            check: "inventory_live_producer",
+            source: diagnostics.scan?.source,
+            rowIndex: diagnostics.scan?.rowIndex,
+          };
         throw new Error("unreadable live producer");
+      }
       rows.runs.push({
         runId: row.run_id,
         repo: meta.repo,
@@ -4393,15 +4437,39 @@ export class RunHistoryDO extends DurableObject<Env> {
            work_evidence_json FROM runs LIMIT ?`,
         limit,
       ),
+      "runs",
     )) {
       const raw: Record<string, unknown> = JSON.parse(row.owner_json);
-      if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("unreadable terminal producer");
-      const { branchPublication, branchPushReceipts, doorPublicationPending, ...identity } = raw;
-      if (!isRunWorkOwner(identity) || !isPullOwnerLiveMeta(identity) || identity.id !== row.run_id)
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+        if (diagnostics)
+          diagnostics.failure = {
+            check: "inventory_terminal_producer",
+            source: diagnostics.scan?.source,
+            rowIndex: diagnostics.scan?.rowIndex,
+          };
         throw new Error("unreadable terminal producer");
+      }
+      const { branchPublication, branchPushReceipts, doorPublicationPending, ...identity } = raw;
+      if (!isRunWorkOwner(identity) || !isPullOwnerLiveMeta(identity) || identity.id !== row.run_id) {
+        if (diagnostics)
+          diagnostics.failure = {
+            check: "inventory_terminal_producer",
+            source: diagnostics.scan?.source,
+            rowIndex: diagnostics.scan?.rowIndex,
+          };
+        throw new Error("unreadable terminal producer");
+      }
       const evidence =
         row.work_evidence_json === null ? undefined : parseWorkEvidence(JSON.parse(row.work_evidence_json), identity);
-      if (row.work_evidence_json !== null && !evidence) throw new Error("unreadable private producer");
+      if (row.work_evidence_json !== null && !evidence) {
+        if (diagnostics)
+          diagnostics.failure = {
+            check: "inventory_private_producer",
+            source: diagnostics.scan?.source,
+            rowIndex: diagnostics.scan?.rowIndex,
+          };
+        throw new Error("unreadable private producer");
+      }
       rows.runs.push({
         runId: row.run_id,
         repo: identity.repo,
@@ -4422,10 +4490,18 @@ export class RunHistoryDO extends DurableObject<Env> {
         `SELECT owner_key, revision, json FROM workspace_settlements WHERE json IS NOT NULL LIMIT ?`,
         limit,
       ),
+      "settlements",
     )) {
       const value = workspaceSettlementOf(JSON.parse(row.json));
-      if (!value || workspaceOwnerKey(value.owner) !== row.owner_key || value.revision !== row.revision)
+      if (!value || workspaceOwnerKey(value.owner) !== row.owner_key || value.revision !== row.revision) {
+        if (diagnostics)
+          diagnostics.failure = {
+            check: "inventory_workspace_owner",
+            source: diagnostics.scan?.source,
+            rowIndex: diagnostics.scan?.rowIndex,
+          };
         throw new Error("unreadable workspace owner");
+      }
       rows.settlements!.push(value);
     }
     return rows;

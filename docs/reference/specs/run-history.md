@@ -534,6 +534,8 @@ The dispatcher records `AnswerOutcome` before fallback text and Markdown renderi
 
 ## Canonical pull ownership lookup
 
+Ownership admission diagnostics identify the failing validation check, row source and index, and bounded scan counts. The state Worker logs these facts with the attempted instance and unit. It never logs row contents, publication text or private evidence. Diagnostics leave the ownership result and retained bytes unchanged.
+
 | Criterion | Proof |
 | --- | --- |
 | An admitted unit retains its original start fence across ordinary, CAS and wake writes. Delayed draft snapshots cannot erase admission and release its branch. Ordinary batches serialize all rows before committing any one, so malformed payloads leave no partial state. | `src/core/coordinator/pullOwnership.test.ts::complete canonical pull ownership::keeps the original start fence through delayed whole-row and wake writes`, `::serializes the whole batch before committing any ordinary draft` |
@@ -591,6 +593,7 @@ Terminal PR reads propagate refused durable writes before reporting merged or cl
 
 | Criterion | Proof |
 |---|---|
+| Refused ownership admission reports its failing check and bounded row location without exposing private contents or changing the refusal or retained rows. | `[unit]` `src/core/coordinator/pullOwnership.test.ts::pull ownership refusal diagnostics::*`, `deploy/cloudflare-memory/runLedger.test.ts::coordinator admission diagnostics::*` |
 | Resident, repository-matched seeded and verified cold coding checkouts capture the ref and full SHA from the same selected checkout and await the durable first baseline before writable execution. A seed from another repository refuses; an unbound model-cloned checkout remains unknown without reading a mutable ref. Legacy pushed seeded/cold runs without evidence remain held. | `[unit]` `src/core/dispatch/runLoop.test.ts::a resume with the answer in hand (the \`finish\` plan)::restores an acknowledged*`; `::awaits the frozen attachment read and its durable acknowledgment before opening writable tools*`; `::keeps a legacy pushed*`; `::refuses a seeded checkout from another repository before capturing evidence or opening writable tools`; `::keeps an unbound model-cloned checkout unknown without comparing a mutable branch` |
 | A standalone coding run persists its resolved nonprivate PR base in admitted metadata and restores that same base before matching identity evidence or publishing. Coordinator fallback applies only when admitted base metadata is absent; a conflicting resolved base does not replace the original receipt. Same-ID request restarts consume carried original identity evidence before writable tools rather than recapturing the advanced branch. | `[unit]` `src/core/dispatch/runLoop.test.ts::a resume with the answer in hand (the \`finish\` plan)::restores a standalone non-main PR base and original fingerprints after restart`; `::refuses a changed resolved PR base rather than replacing the saved identity binding`; `::uses carried original evidence on a same-ID request restart before opening writable tools` |
 
