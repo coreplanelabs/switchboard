@@ -85,6 +85,8 @@ export interface LiveRunMeta {
    *  hosted run listed from the ledger reads as its registry view does. */
   label?: string;
   ref?: string;
+  /** Resolved PR target base, retained independently of its checkout branch. */
+  baseRef?: string;
   headSha?: string;
   pr?: number;
   readonly?: boolean;

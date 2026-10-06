@@ -726,6 +726,40 @@ describe("registerRun — the run's row on every surface before the attach", () 
     expect(metas.map((e) => (e as { headSha?: string }).headSha)).toEqual(["a".repeat(40), "b".repeat(40)]);
   });
 
+  it("run_meta retains a standalone PR's resolved non-default base when its checkout head advances", async () => {
+    const d = deps();
+    const r = request(d, "fix it", "coding");
+    const registry = new RunRegistry({ genId: () => "run-p", genToken: () => "tok" });
+    const original = { ...repoCtx, ref: "feat/repair", baseRef: "release/stable" };
+    const out = await registerRun(d, {
+      agentSource: "directive",
+      msg: r.message,
+      io: fakeIO().io,
+      agent: r.agent,
+      resolved: r.resolved,
+      directives: r.directives,
+      history: [],
+      repoCtx: original,
+      carriedRow: undefined,
+      resume: undefined,
+      startedAt: NOW,
+      receivedAt: NOW,
+      clock: () => NOW,
+      root: r.root,
+      trace: r.trace,
+      registry,
+      shell: r.shell,
+      admitted: r.admitted,
+    });
+    out.publishMeta({ ...original, headSha: "b".repeat(40) });
+    const metas = registry.snapshotById("run-p")!.events.filter((event) => event.type === "run_meta");
+    expect(metas).toHaveLength(2);
+    expect(metas).toEqual([
+      expect.objectContaining({ ref: "feat/repair", baseRef: "release/stable", headSha: "a".repeat(40) }),
+      expect.objectContaining({ ref: "feat/repair", baseRef: "release/stable", headSha: "b".repeat(40) }),
+    ]);
+  });
+
   // docs/reference/specs/harness.md items 8 and 10: the run's meta names the
   // harness the preset's runs open on — the roster's object for the preset's
   // configuration word, pi without one — so a record can be told from another
@@ -929,7 +963,7 @@ describe("reserveRun — the ledger reservation before the attach", () => {
       agent: r.agent,
       profile: r.profile,
       resolved: r.resolved,
-      repoCtx: {},
+      repoCtx: { baseRef: "private/release" },
       operationTarget: { repo: "acme/api", ref: "unit/repair" },
       channelVisibility: "dm",
       runId: "run-private",
@@ -948,6 +982,7 @@ describe("reserveRun — the ledger reservation before the attach", () => {
     expect(d.ledger.reserved[0].meta.repo).toBeUndefined();
     expect(d.ledger.reserved[0].meta.operationTarget).toBeUndefined();
     expect(d.ledger.reserved[0].meta.ref).toBeUndefined();
+    expect(d.ledger.reserved[0].meta.baseRef).toBeUndefined();
     expect(d.ledger.reserved[0].meta.headSha).toBeUndefined();
     expect(d.ledger.reserved[0].meta.pr).toBeUndefined();
     expect(d.ledger.reserved[0].meta.route).toBeUndefined();
@@ -962,7 +997,7 @@ describe("reserveRun — the ledger reservation before the attach", () => {
       agent: r.agent,
       profile: r.profile,
       resolved: r.resolved,
-      repoCtx: { repo: "acme/api", ref: "main", headSha: "a".repeat(40), pr: 41 },
+      repoCtx: { repo: "acme/api", ref: "main", baseRef: "release/stable", headSha: "a".repeat(40), pr: 41 },
       channelVisibility: "public",
       runId: "run-public",
       startedAt: NOW,
@@ -978,6 +1013,7 @@ describe("reserveRun — the ledger reservation before the attach", () => {
     expect(d.ledger.reserved[0].meta).toMatchObject({
       repo: "acme/api",
       ref: "main",
+      baseRef: "release/stable",
       headSha: "a".repeat(40),
       pr: 41,
       route,

@@ -271,6 +271,9 @@ export function reclaimedRunRecord(input: {
     ...(row.state.reviewPublication !== undefined
       ? { reviewPublication: row.state.reviewPublication as RunRecord["reviewPublication"] }
       : {}),
+    ...(row.state.branchIdentityBaseline !== undefined
+      ? { branchIdentityBaseline: row.state.branchIdentityBaseline as RunRecord["branchIdentityBaseline"] }
+      : {}),
     ...(row.state.workReads !== undefined ? { workReads: row.state.workReads as RunRecord["workReads"] } : {}),
     ...(row.state.unitSeedReceipt !== undefined
       ? { unitSeedReceipt: row.state.unitSeedReceipt as RunRecord["unitSeedReceipt"] }
@@ -425,6 +428,7 @@ export function assembleRunRecord(input: {
   childHandoff?: RunRecord["childHandoff"];
   sourceReads?: RunRecord["sourceReads"];
   workReads?: RunRecord["workReads"];
+  branchIdentityBaseline?: RunRecord["branchIdentityBaseline"];
   unitSeedReceipt?: RunRecord["unitSeedReceipt"];
   contextDependencies?: RunRecord["contextDependencies"];
   contextCheckpointReceipt?: RunRecord["contextCheckpointReceipt"];
@@ -546,6 +550,9 @@ export function assembleRunRecord(input: {
       ? { contextCheckpointReceipt: structuredClone(input.contextCheckpointReceipt) }
       : {}),
     ...(input.sourceReads !== undefined ? { sourceReads: structuredClone(input.sourceReads) } : {}),
+    ...(input.branchIdentityBaseline !== undefined
+      ? { branchIdentityBaseline: structuredClone(input.branchIdentityBaseline) }
+      : {}),
     ...(input.workReads !== undefined ? { workReads: structuredClone(input.workReads) } : {}),
     ...(input.unitSeedReceipt !== undefined ? { unitSeedReceipt: structuredClone(input.unitSeedReceipt) } : {}),
     ...(input.contextDependencies !== undefined
@@ -764,6 +771,7 @@ export interface FinishRecordContext {
   doorPublicationPending?: RunRecord["doorPublicationPending"];
   reviewPublication?: RunRecord["reviewPublication"];
   branchPushReceipts?: RunRecord["branchPushReceipts"];
+  branchIdentityBaseline?: RunRecord["branchIdentityBaseline"];
   /** The handoff the run loop captured from `submit_handoff`, when one was submitted. */
   handoff?: Handoff;
   /** The verdict a review run submitted and the head it reviewed; the dispositions a fix round submitted. */
@@ -813,6 +821,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
     doorPublicationPending,
     reviewPublication,
     branchPushReceipts,
+    branchIdentityBaseline,
     publicationSettlement,
     handoff,
     verdict,
@@ -858,6 +867,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
           ...(dispositions !== undefined ? { dispositions } : {}),
           ...(reviewPublication !== undefined ? { reviewPublication } : {}),
           ...(branchPushReceipts !== undefined ? { branchPushReceipts } : {}),
+          ...(branchIdentityBaseline !== undefined ? { branchIdentityBaseline } : {}),
           ...(reviewPost !== undefined ? { reviewPost } : {}),
           ...(route !== undefined && !privateMain ? { route } : {}),
           ...(parentRunId !== undefined ? { parentRunId } : {}),

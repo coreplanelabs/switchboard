@@ -175,6 +175,9 @@ async function trackedCodingContext(
       threadKey: ctx.msg.threadKey,
       ...(ctx.repoCtx.repo ? { repo: ctx.repoCtx.repo } : {}),
       ...(ctx.repoCtx.pr !== undefined ? { pr: ctx.repoCtx.pr } : {}),
+      ...(ctx.coordinator
+        ? { parentInstanceId: ctx.coordinator.parentInstanceId, idempotencyKey: ctx.coordinator.idempotencyKey }
+        : {}),
     },
     card: null,
     system: ctx.system,
@@ -10731,6 +10734,486 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     return { BRANCH, description, s, reads, startStates, opened };
   };
 
+  it.each(["seeded", "cold"] as const)(
+    "refuses a receipt-only legacy %s checkout without recapturing its published head",
+    async (mode) => {
+      const { s, BRANCH, reads, description, opened } = startStateFixture();
+      s.ctx.round.selection.binding = undefined;
+      if (mode === "seeded")
+        s.ctx.round.selection.seeded = {
+          slug: "o/r",
+          ref: BRANCH,
+          sha: HEAD,
+          workspace: "/workspace",
+          cached: false,
+          ms: 0,
+        };
+      else s.ctx.round.selection.cold = { ref: BRANCH, sha: HEAD, workspace: "/workspace/checkout" };
+      const resume = finishing("Done", {
+        agent: "coding",
+        state: {
+          prDescription: description,
+          branchPushReceipts: [{ type: "pushed_head", ref: BRANCH, sha: HEAD, by: "push" }],
+        },
+      });
+      await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages }));
+      expect(reads).toEqual([]);
+      expect((await s.deps.runLedger!.readLiveRuns())[0]!.state.branchIdentityBaseline).toBeUndefined();
+      expect(opened).toEqual([]);
+    },
+  );
+
+  it.each(["seeded", "cold"] as const)(
+    "keeps a legacy pushed %s checkout without original evidence unknown",
+    async (mode) => {
+      const { s, BRANCH, reads, startStates, description, opened } = startStateFixture();
+      s.ctx.round.selection.binding = undefined;
+      if (mode === "seeded")
+        s.ctx.round.selection.seeded = {
+          slug: "o/r",
+          ref: BRANCH,
+          sha: HEAD,
+          workspace: "/workspace",
+          cached: false,
+          ms: 0,
+        };
+      else s.ctx.round.selection.cold = { ref: BRANCH, sha: HEAD, workspace: "/workspace/checkout" };
+      const resume = finishing("Done", {
+        agent: "coding",
+        state: {
+          pushedBranch: BRANCH,
+          prDescription: description,
+          branchPushReceipts: [{ type: "pushed_head", ref: BRANCH, sha: HEAD, by: "push" }],
+        },
+      });
+      await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages }));
+      expect(reads).toEqual([]);
+      expect(startStates).toEqual([{ kind: "unknown", reason: expect.stringContaining("before a restart") }]);
+      expect(opened).toEqual([]);
+      expect((await s.deps.runLedger!.readLiveRuns())[0]!.state.branchIdentityBaseline).toBeUndefined();
+    },
+  );
+
+  it("uses carried original evidence on a same-ID request restart before opening writable tools", async () => {
+    const { s, BRANCH, reads } = startStateFixture();
+    const baseline = {
+      version: 1 as const,
+      binding: {
+        runId: s.run.id,
+        requester: s.ctx.msg.userId,
+        threadKey: s.ctx.msg.threadKey,
+        repo: "o/r",
+        branch: BRANCH,
+        base: "main",
+        head: "b".repeat(40),
+      },
+      state: { kind: "known" as const, commits: [] },
+    };
+    const observed = watched(piHarness);
+    s.deps.harness!.harnesses = roster(observed.harness);
+    const ctx = await trackedCodingContext(s, {
+      ...s.ctx,
+      restartBranchIdentityBaseline: baseline,
+      restartIdentityUncertain: true,
+    });
+    await runLoop(s.deps, ctx);
+    expect(reads).toEqual([]);
+    expect(observed.calls.open).toHaveLength(1);
+    expect((await s.deps.runLedger!.readLiveRuns())[0]!.state.branchIdentityBaseline).toEqual(baseline);
+  });
+
+  it.each(["seeded", "cold"] as const)(
+    "restores an acknowledged %s baseline instead of recapturing its receipt-only published head",
+    async (mode) => {
+      const { s, BRANCH, reads, description, opened } = startStateFixture();
+      s.ctx.round.selection.binding = undefined;
+      if (mode === "seeded")
+        s.ctx.round.selection.seeded = {
+          slug: "o/r",
+          ref: BRANCH,
+          sha: HEAD,
+          workspace: "/workspace",
+          cached: false,
+          ms: 0,
+        };
+      else s.ctx.round.selection.cold = { ref: BRANCH, sha: HEAD, workspace: "/workspace/checkout" };
+      const baseline = {
+        version: 1 as const,
+        binding: {
+          runId: s.run.id,
+          requester: s.ctx.msg.userId,
+          threadKey: s.ctx.msg.threadKey,
+          repo: "o/r",
+          branch: BRANCH,
+          base: "main",
+          head: "b".repeat(40),
+        },
+        state: { kind: "known" as const, commits: [] },
+      };
+      const resume = finishing("Done", {
+        agent: "coding",
+        state: {
+          prDescription: description,
+          branchIdentityBaseline: baseline,
+          branchPushReceipts: [{ type: "pushed_head", ref: BRANCH, sha: HEAD, by: "push" }],
+        },
+      });
+      await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages }));
+      expect(reads).toEqual([]);
+      expect((await s.deps.runLedger!.readLiveRuns())[0]!.state.branchIdentityBaseline).toEqual(baseline);
+      expect(opened).toHaveLength(1);
+    },
+  );
+
+  it.each(["auxiliary last", "PR receipt", "accepted checkpoint", "unresolved Door"] as const)(
+    "does not read an advanced attachment from canonical history: %s",
+    async (kind) => {
+      const { s, BRANCH, reads, description, opened } = startStateFixture();
+      const original = { parentInstanceId: "pipeline", idempotencyKey: "pipeline:ONE/0/coding", base: "main" };
+      s.ctx.coordinator = original;
+      const state: Record<string, unknown> = { prDescription: description };
+      if (kind === "auxiliary last")
+        Object.assign(state, {
+          pushedBranch: "auxiliary",
+          branchPushReceipts: [{ type: "pushed_head", ref: BRANCH, sha: HEAD, by: "push" }],
+        });
+      if (kind === "PR receipt")
+        state.publicationReceipts = [
+          {
+            type: "pushed_head",
+            ref: BRANCH,
+            sha: HEAD,
+            by: "push",
+            receipt: {
+              callId: "saved",
+              previousHeadSha: "b".repeat(40),
+              repo: "o/r",
+              pr: 9,
+              owner: { instanceId: "pipeline", unit: "ONE" },
+            },
+          },
+        ];
+      if (kind === "accepted checkpoint")
+        state.publicationSettlement = {
+          version: 1,
+          binding: {
+            runId: s.run.id,
+            instanceId: "pipeline",
+            step: original.idempotencyKey,
+            repo: "o/r",
+            branch: BRANCH,
+            requester: s.ctx.msg.userId,
+            threadKey: s.ctx.msg.threadKey,
+            generation: "original",
+          },
+          checkpoint: { kind: "created", head: HEAD },
+          publication: { kind: "accepted", head: HEAD },
+          preservation: { kind: "pending" },
+          release: { kind: "pending" },
+        };
+      if (kind === "unresolved Door")
+        state.doorPublicationPending = {
+          id: "pending",
+          repo: "o/r",
+          update: { ref: `refs/heads/${BRANCH}`, old: "b".repeat(40), next: HEAD },
+        };
+      const resume = finishing("Done", { agent: "coding", state });
+      const ctx = await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages });
+      await runLoop(s.deps, ctx);
+      expect(reads).toEqual([]);
+      expect(opened).toEqual([]);
+      expect((await s.deps.runLedger!.readLiveRuns())[0]!.state.branchIdentityBaseline).toBeUndefined();
+    },
+  );
+
+  it.each(["canonical receipt", "unresolved Door", "malformed history"] as const)(
+    "carries identity refusal through a live request interruption: %s",
+    async (kind) => {
+      const { s, BRANCH, reads } = startStateFixture();
+      const state: Record<string, unknown> = {};
+      if (kind === "canonical receipt")
+        state.branchPushReceipts = [{ type: "pushed_head", ref: BRANCH, sha: HEAD, by: "push" }];
+      if (kind === "unresolved Door")
+        state.doorPublicationPending = {
+          id: "pending",
+          repo: "o/r",
+          update: { ref: `refs/heads/${BRANCH}`, old: "b".repeat(40), next: HEAD },
+        };
+      if (kind === "malformed history") state.publicationReceipts = [{ malformed: true }];
+      class Interrupted extends HarnessInterruptedError {
+        constructor() {
+          super("transport interrupted", "transport interrupted", "workspace_lost");
+        }
+      }
+      const observed = watched(piHarness);
+      s.deps.harness!.harnesses = roster({
+        ...observed.harness,
+        open: async () => {
+          throw new Interrupted();
+        },
+      });
+      const resume = reentering(state);
+      const ctx = await trackedCodingContext(s, { ...s.ctx, resume });
+      const outcome = await runLoop(s.deps, ctx);
+      expect(outcome).toMatchObject({ kind: "interrupted", restart: { identityUncertain: true } });
+      expect(reads).toEqual([]);
+      expect((await s.deps.runLedger!.readLiveRuns())[0]!.state.branchIdentityBaseline).toBeUndefined();
+    },
+  );
+
+  it("refuses a seeded checkout from another repository before capturing evidence or opening writable tools", async () => {
+    const { s, BRANCH, reads, opened } = startStateFixture();
+    s.ctx.round.selection.binding = undefined;
+    s.ctx.round.selection.seeded = {
+      slug: "other/repo",
+      ref: BRANCH,
+      sha: HEAD,
+      workspace: "/workspace",
+      cached: false,
+      ms: 0,
+    };
+    const observed = watched(piHarness);
+    s.deps.harness!.harnesses = roster(observed.harness);
+    await expect(runLoop(s.deps, await trackedCodingContext(s))).rejects.toThrow("identity baseline is invalid");
+    expect(reads).toEqual([]);
+    expect(observed.calls.open).toEqual([]);
+    expect(opened).toEqual([]);
+  });
+
+  it("keeps an unbound model-cloned checkout unknown without comparing a mutable branch", async () => {
+    const { s, BRANCH, reads, startStates, description, opened } = startStateFixture();
+    s.ctx.round.selection.binding = undefined;
+    const resume = finishing("Done", {
+      agent: "coding",
+      state: {
+        prDescription: description,
+        branchPushReceipts: [{ type: "pushed_head", ref: BRANCH, sha: HEAD, by: "push" }],
+      },
+    });
+    await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages }));
+    expect(reads).toEqual([]);
+    expect(startStates).toEqual([expect.objectContaining({ kind: "unknown" })]);
+    expect(opened).toEqual([]);
+  });
+
+  it("restores a standalone non-main PR base and original fingerprints after restart", async () => {
+    const { s, BRANCH, reads, startStates, description, opened } = startStateFixture();
+    s.ctx.repoCtx.baseRef = "release";
+    const baseline = {
+      version: 1 as const,
+      binding: {
+        runId: s.run.id,
+        requester: s.ctx.msg.userId,
+        threadKey: s.ctx.msg.threadKey,
+        repo: "o/r",
+        branch: BRANCH,
+        base: "release",
+        head: "b".repeat(40),
+      },
+      state: { kind: "known" as const, commits: [] },
+    };
+    const resume = finishing("Done", {
+      agent: "coding",
+      state: {
+        prDescription: description,
+        pushedBranch: BRANCH,
+        branchIdentityBaseline: baseline,
+        branchPushReceipts: [{ type: "pushed_head", ref: BRANCH, sha: HEAD, by: "push" }],
+      },
+    });
+    await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages }));
+    expect(reads).toEqual([]);
+    expect(startStates).toEqual([baseline.state]);
+    expect(opened).toEqual([expect.objectContaining({ base: "release" })]);
+  });
+
+  it("refuses a changed resolved PR base rather than replacing the saved identity binding", async () => {
+    const { s, BRANCH, reads, description, opened } = startStateFixture();
+    const resume = finishing("Done", {
+      agent: "coding",
+      state: {
+        prDescription: description,
+        branchIdentityBaseline: {
+          version: 1,
+          binding: {
+            runId: s.run.id,
+            requester: s.ctx.msg.userId,
+            threadKey: s.ctx.msg.threadKey,
+            repo: "o/r",
+            branch: BRANCH,
+            base: "release",
+            head: "b".repeat(40),
+          },
+          state: { kind: "known", commits: [] },
+        },
+      },
+    });
+    await expect(
+      runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
+    ).rejects.toThrow("identity baseline is invalid");
+    expect(reads).toEqual([]);
+    expect(opened).toEqual([]);
+  });
+
+  it.each(["resident", "seeded", "cold"] as const)(
+    "awaits the frozen attachment read and its durable acknowledgment before opening writable tools (%s)",
+    async (mode) => {
+      const { s, BRANCH } = startStateFixture();
+      if (mode !== "resident") {
+        s.ctx.round.selection.binding = undefined;
+        if (mode === "seeded")
+          s.ctx.round.selection.seeded = {
+            slug: "o/r",
+            ref: BRANCH,
+            sha: HEAD,
+            workspace: "/workspace",
+            cached: false,
+            ms: 0,
+          };
+        else s.ctx.round.selection.cold = { ref: BRANCH, sha: HEAD, workspace: "/workspace/checkout" };
+      }
+      const observed = watched(piHarness);
+      s.deps.harness!.harnesses = roster(observed.harness);
+      let releaseRead!: () => void;
+      let enterRead!: () => void;
+      const reading = new Promise<void>((resolve) => {
+        enterRead = resolve;
+      });
+      const readGate = new Promise<void>((resolve) => {
+        releaseRead = resolve;
+      });
+      s.deps.identityRewrite!.readStartState = async (_repo, _base, head) => {
+        expect(head).toBe(HEAD);
+        enterRead();
+        await readGate;
+        return { kind: "known", commits: [] };
+      };
+      const ctx = await trackedCodingContext(s);
+      const commit = ctx.ledgerRun!.commitState.bind(ctx.ledgerRun!);
+      let releaseAck!: () => void;
+      let enterAck!: () => void;
+      const acknowledging = new Promise<void>((resolve) => {
+        enterAck = resolve;
+      });
+      const ackGate = new Promise<void>((resolve) => {
+        releaseAck = resolve;
+      });
+      vi.spyOn(ctx.ledgerRun!, "commitState").mockImplementation(async (patch) => {
+        if (patch.branchIdentityBaseline !== undefined) {
+          enterAck();
+          await ackGate;
+        }
+        return commit(patch);
+      });
+      const task = runLoop(s.deps, ctx);
+      await reading;
+      expect(observed.calls.open).toEqual([]);
+      releaseRead();
+      await acknowledging;
+      expect(observed.calls.open).toEqual([]);
+      releaseAck();
+      await task;
+      expect(observed.calls.open).toHaveLength(1);
+      expect((await s.deps.runLedger!.readLiveRuns())[0]!.state.branchIdentityBaseline).toMatchObject({
+        binding: { head: HEAD, branch: BRANCH },
+        state: { kind: "known", commits: [] },
+      });
+    },
+  );
+
+  it.each(["fenced", "unavailable"] as const)(
+    "refuses writable tools when the identity baseline acknowledgment is %s",
+    async (status) => {
+      const { s, opened } = startStateFixture();
+      const observed = watched(piHarness);
+      s.deps.harness!.harnesses = roster(observed.harness);
+      const ctx = await trackedCodingContext(s);
+      const commit = ctx.ledgerRun!.commitState.bind(ctx.ledgerRun!);
+      vi.spyOn(ctx.ledgerRun!, "commitState").mockImplementation(async (patch) =>
+        patch.branchIdentityBaseline !== undefined ? status : commit(patch),
+      );
+      await expect(runLoop(s.deps, ctx)).rejects.toThrow("baseline could not be committed");
+      expect(observed.calls.open).toEqual([]);
+      expect(opened).toEqual([]);
+      expect((await s.deps.runLedger!.readLiveRuns())[0]!.state.branchIdentityBaseline).toBeUndefined();
+    },
+  );
+
+  it("refuses writable tools without a durable ledger for the first identity baseline", async () => {
+    const { s, opened } = startStateFixture();
+    const observed = watched(piHarness);
+    s.deps.harness!.harnesses = roster(observed.harness);
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("baseline could not be committed");
+    expect(observed.calls.open).toEqual([]);
+    expect(opened).toEqual([]);
+  });
+
+  it("rejects a foreign restored identity baseline without rereading the advanced branch", async () => {
+    const { s, reads, opened, description, BRANCH } = startStateFixture();
+    const resume = finishing("Done", { agent: "coding", state: { prDescription: description, pushedBranch: BRANCH } });
+    const ctx = await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages });
+    resume.row.state.branchIdentityBaseline = {
+      version: 1,
+      binding: {
+        runId: "foreign",
+        requester: s.ctx.msg.userId,
+        threadKey: s.ctx.msg.threadKey,
+        repo: "o/r",
+        branch: BRANCH,
+        base: "main",
+        head: HEAD,
+      },
+      state: { kind: "known", commits: [] },
+    };
+    await expect(runLoop(s.deps, ctx)).rejects.toThrow("identity baseline is invalid");
+    expect(reads).toEqual([]);
+    expect(opened).toEqual([]);
+  });
+
+  it("restores the original acknowledged identity baseline after a native push and restart", async () => {
+    const { BRANCH, description, s, reads, startStates, opened } = startStateFixture();
+    const state = {
+      kind: "known" as const,
+      commits: [
+        {
+          sha: "a".repeat(40),
+          author: { name: "prior", email: "prior@example.test" },
+          date: "2026-01-01T00:00:00Z",
+          message: "Original inherited work",
+        },
+      ],
+    };
+    const branchIdentityBaseline = {
+      version: 1 as const,
+      binding: {
+        runId: s.run.id,
+        requester: s.ctx.msg.userId,
+        threadKey: s.ctx.msg.threadKey,
+        repo: "o/r",
+        branch: BRANCH,
+        base: "main",
+        head: "b".repeat(40),
+      },
+      state,
+    };
+    const resume = finishing("Done: pushed the fix.", {
+      agent: "coding",
+      state: {
+        prDescription: description,
+        pushedBranch: BRANCH,
+        branchPushReceipts: [{ type: "pushed_head", ref: BRANCH, sha: HEAD, by: "push" }],
+        branchIdentityBaseline,
+      },
+    });
+    const ctx = await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages });
+    const out = answered(await runLoop(s.deps, ctx));
+    expect(reads).toEqual([]);
+    expect(startStates).toEqual([state]);
+    expect(opened).toHaveLength(1);
+    expect(out.answer).toContain("https://github.com/o/r/pull/9");
+    expect((await s.deps.runLedger!.readLiveRuns())[0]!.state.branchIdentityBaseline).toEqual(branchIdentityBaseline);
+  });
+
   it("a resumed run whose ledger row records a pre-restart push of its own branch fires no start-state re-read: the rewrite is asked over an UNKNOWN start state naming the restart and fails closed, so nothing opens over the pre-restart commits", async () => {
     const { BRANCH, description, s, reads, startStates, opened } = startStateFixture();
     const resume = finishing("Done: pushed the fix.", {
@@ -10745,16 +11228,14 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
     );
     expect(reads).toEqual([]);
-    expect(startStates).toEqual([
-      { kind: "unknown", reason: expect.stringContaining(`pushed ${BRANCH} before a restart`) },
-    ]);
+    expect(startStates).toEqual([{ kind: "unknown", reason: expect.stringContaining("before a restart") }]);
     expect(opened).toEqual([]);
     expect(out.answer).toContain("could not be verified");
     expect(out.prNote).toBeUndefined();
   });
 
   it("a resumed run whose ledger row records NO push of the binding branch still reads the start state at attach: the rewrite judges over the read state and a clean branch opens", async () => {
-    const { BRANCH, description, s, reads, startStates, opened } = startStateFixture();
+    const { description, s, reads, startStates, opened } = startStateFixture();
     const resume = finishing("Done: pushed the fix.", {
       agent: "coding",
       state: { prDescription: description },
@@ -10762,7 +11243,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     const out = answered(
       await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
     );
-    expect(reads).toEqual([BRANCH]);
+    expect(reads).toEqual([HEAD]);
     expect(startStates).toEqual([]); // No accepted write: the PR post-step never rewrites or opens.
     expect(opened).toHaveLength(0);
     expect(out.answer).toContain("No push was confirmed");
@@ -10931,6 +11412,21 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
         agent: "coding",
         state: {
           prDescription: description,
+          branchIdentityBaseline: {
+            version: 1,
+            binding: {
+              runId: s.run.id,
+              requester: s.ctx.msg.userId,
+              threadKey: s.ctx.msg.threadKey,
+              repo: "o/r",
+              branch: "plan/p/u1",
+              base: "main",
+              head: "b".repeat(40),
+              instanceId: "plan-attribution",
+              step: "plan-attribution:U12/0/coding",
+            },
+            state: { kind: "known", commits: [] },
+          },
           branchPushReceipts: [{ type: "pushed_head", ref: "plan/p/u1", sha: HEAD, by: "push" }],
         },
       });

@@ -12,10 +12,12 @@ import { submitDispositionsTool } from "../../tools/submit.js";
 import type { ToolContext } from "../../tools/runnableTool.js";
 import {
   abandonLostWorkspace,
+  restartEvidenceOf,
   announceChildRoll,
   carriedCoordinatorTag,
   carriedOperationTarget,
   carriedRunIdentity,
+  carriedRepoContext,
   carriedWorkspaceBinding,
   hasPilotWorkspaceBinding,
   lostWorkspaceNote,
@@ -75,6 +77,70 @@ const lastStep: StepRecord = {
   turn: 1,
   iteration: 0,
 };
+
+describe("restartEvidenceOf: boot recovery before promotion", () => {
+  it.each([
+    { branchPushReceipts: [{ ref: "unit/original", sha: "a".repeat(40), by: "push" }], pushedBranch: "auxiliary" },
+    {
+      publicationReceipts: [
+        {
+          type: "pushed_head",
+          ref: "unit/original",
+          sha: "a".repeat(40),
+          by: "push",
+          receipt: {
+            callId: "call",
+            previousHeadSha: "b".repeat(40),
+            repo: "acme/api",
+            pr: 7,
+            owner: { instanceId: "pipeline", unit: "ONE" },
+          },
+        },
+      ],
+    },
+    { branchPublication: { version: 1, repo: "acme/api", complete: false, branches: [] } },
+    { branchPushReceipts: null },
+    { publicationReceipts: [{ malformed: true }] },
+    { doorPublicationPending: { malformed: true } },
+  ])("carries canonical publication refusal with contiguous events and no owned display projection", (state) => {
+    const evidence = restartEvidenceOf(row({ state }, { ref: "unit/original", baseRef: "release" }), []);
+    expect(evidence.identityUncertain).toBe(true);
+    expect(evidence.branchIdentityBaseline).toBeUndefined();
+    expect(evidence.repoCtx).toEqual({ repo: "acme/api", ref: "unit/original", baseRef: "release" });
+  });
+
+  it("carries raw malformed baselines and independently admitted target without deriving it from the receipt", () => {
+    for (const baseline of [null, { binding: { repo: "foreign/repo", branch: "foreign", base: "foreign" } }]) {
+      const evidence = restartEvidenceOf(
+        row({ state: { branchIdentityBaseline: baseline } }, { ref: "unit/original", baseRef: "release" }),
+        [],
+      );
+      expect(evidence.branchIdentityBaseline).toEqual(baseline);
+      expect(evidence.repoCtx).toEqual({ repo: "acme/api", ref: "unit/original", baseRef: "release" });
+      expect(() =>
+        carriedRepoContext({ repo: "acme/api", ref: "unit/original", baseRef: "main" }, evidence.repoCtx),
+      ).toThrow("original run's repository target changed");
+    }
+  });
+
+  it("keeps an owned push despite a later auxiliary push and holds recapture on missing or malformed history", () => {
+    const events = [
+      { type: "pushed_head" as const, by: "push" as const, ref: "unit/original", sha: "a".repeat(40), seq: 1, at: 1 },
+      { type: "pushed_head" as const, by: "push" as const, ref: "auxiliary", sha: "b".repeat(40), seq: 2, at: 2 },
+    ];
+    expect(restartEvidenceOf(row({}, { ref: "unit/original" }), events).pushedBranch).toBe("unit/original");
+    expect(restartEvidenceOf(row({}, { restartOf: "run-old" }), []).identityUncertain).toBe(true);
+    expect(restartEvidenceOf(row(), events).identityUncertain).toBe(true);
+    expect(restartEvidenceOf(row({ state: { branchPushReceipts: null } }), []).identityUncertain).toBe(true);
+    expect(
+      restartEvidenceOf(row({ state: { pushedBranch: 42 } }, { ref: "unit/original" }), []).identityUncertain,
+    ).toBe(true);
+    expect(restartEvidenceOf(row({}, { ref: "unit/original" }), [{ ...events[0], seq: 8 }]).identityUncertain).toBe(
+      true,
+    );
+    expect(restartEvidenceOf(row({}, { ref: "unit/original" }), []).identityUncertain).toBe(false);
+  });
+});
 
 describe("carriedWorkspaceBinding: where the row says the run's workspace is", () => {
   it("retains a maintenance action from original metadata and refuses conflicting or erased event transport", () => {
@@ -587,6 +653,60 @@ describe("prepareRestartTurn: the request runs again as its own dispatch", () =>
     // A row already gone — discarded, evicted — carries nothing: the restart
     // runs under a fresh id, a page that moved, never a request that vanished.
     expect(carriedRunIdentity(registry, "run-gone", "x")).toBeUndefined();
+  });
+
+  it("carries raw original baseline and target across same-ID restart without hiding malformed evidence or an owned earlier push", () => {
+    const registry = new RunRegistry({ genId: () => "run-old", genToken: () => "tok-old" });
+    const run = registry.create("label", undefined, { startedAt: 5_000 });
+    registry.publish(run.id, { type: "pushed_head", ref: "unit/original", sha: "a".repeat(40), by: "push" });
+    registry.publish(run.id, { type: "pushed_head", ref: "auxiliary", sha: "b".repeat(40), by: "push" });
+    const original = { version: 1, malformed: true };
+    const repoCtx = { repo: "acme/api", ref: "unit/original", baseRef: "release" };
+    const carried = carriedRunIdentity(registry, run.id, "restart", {
+      branchIdentityBaseline: original,
+      repoCtx,
+      pushedBranch: "auxiliary",
+    });
+    expect(carried).toMatchObject({
+      branchIdentityBaseline: original,
+      pushedBranch: "unit/original",
+      repoCtx,
+      identityUncertain: false,
+    });
+    expect(carried!.branchIdentityBaseline).not.toBe(original);
+    const turn = prepareRestartTurn(
+      { clock: () => NOW },
+      { request: REQUEST, pending: [], clock: () => NOW, restartOf: run.id, carried },
+    );
+    expect(turn.opts.restartCarried).toBe(carried);
+    expect(
+      carriedRunIdentity(registry, run.id, "restart", { branchIdentityBaseline: null })!.branchIdentityBaseline,
+    ).toBeNull();
+  });
+
+  it("keeps unknown prior history as refusal evidence instead of inventing a first attachment", () => {
+    const registry = new RunRegistry({ genId: () => "run-old", genToken: () => "tok-old", backlogLimit: 1 });
+    const run = registry.create("label");
+    registry.publish(run.id, { type: "pushed_head", ref: "unit/original", sha: "a".repeat(40), by: "push" });
+    registry.publish(run.id, { type: "input", messageId: "later", text: "later" });
+    const carried = carriedRunIdentity(registry, run.id, "restart", { repoCtx: { ref: "unit/original" } });
+    expect(carried!.identityUncertain).toBe(true);
+    expect(carried!.branchIdentityBaseline).toBeUndefined();
+    expect(carriedRunIdentity(registry, run.id, "restart", { pushedBranch: 42 })!.identityUncertain).toBe(true);
+  });
+
+  it("restores the original same-ID repository context and refuses explicit target conflicts", () => {
+    const original = { repo: "acme/api", ref: "feature/original", baseRef: "release" };
+    expect(carriedRepoContext({ repo: "acme/api", headSha: "b".repeat(40) }, original)).toEqual({
+      ...original,
+      headSha: "b".repeat(40),
+    });
+    for (const changed of [{ repo: "acme/other" }, { ref: "feature/other" }, { baseRef: "main" }])
+      expect(() => carriedRepoContext(changed, original)).toThrow("original run's repository target changed");
+    expect(carriedRepoContext({ repo: "acme/api", ref: "feature/original" }, undefined)).toEqual({
+      repo: "acme/api",
+      ref: "feature/original",
+    });
   });
 
   it("names the run it restarts on the dispatch options, so admission never steers the request into that run's row (thread-admission item 5)", () => {

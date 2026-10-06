@@ -649,6 +649,7 @@ function persistedView(
     Pick<
       RunRecord,
       | "sourceReads"
+      | "branchIdentityBaseline"
       | "workReads"
       | "unitSeedReceipt"
       | "contextCheckpointReceipt"
@@ -662,6 +663,7 @@ function persistedView(
   const {
     audienceRefusal: _audienceRefusal,
     sourceReads: _sourceReads,
+    branchIdentityBaseline: _branchIdentityBaseline,
     workReads: _workReads,
     unitSeedReceipt: _unitSeedReceipt,
     contextCheckpointReceipt: _contextCheckpointReceipt,

@@ -146,7 +146,7 @@ export function rehostMeta(row: LiveRunRow): RunMeta {
 export function repoContextOf(row: LiveRunRow, events: readonly RunEvent[] = []): RepoContext {
   const m = row.meta;
   const tag = events.find((e) => e.type === "coordinator_tag");
-  const baseRef = tag?.type === "coordinator_tag" ? (tag.publication?.baseRef ?? tag.base) : undefined;
+  const baseRef = m.baseRef ?? (tag?.type === "coordinator_tag" ? (tag.publication?.baseRef ?? tag.base) : undefined);
   return {
     ...(m.repo !== undefined ? { repo: m.repo } : {}),
     ...(m.ref !== undefined ? { ref: m.ref } : {}),

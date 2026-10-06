@@ -64,6 +64,40 @@ interface Harness {
 
 function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION_POLICY>) => Harness) {
   describe(`${name} — RunStore contract`, () => {
+    it("retains branch identity fingerprints privately across store reloads", async () => {
+      const { store } = make();
+      const base = record("baseline", NOW);
+      const branchIdentityBaseline = {
+        version: 1 as const,
+        binding: {
+          runId: base.id,
+          requester: base.userId,
+          threadKey: base.threadKey,
+          repo: "o/r",
+          branch: "plan/p/u1",
+          base: "main",
+          head: "a".repeat(40),
+        },
+        state: {
+          kind: "known" as const,
+          commits: [
+            {
+              sha: "b".repeat(40),
+              author: { name: "inherited", email: "prior@example.test" },
+              date: "2026-01-01T00:00:00Z",
+              message: "private inherited commit",
+            },
+          ],
+        },
+      };
+      await store.put({ ...base, repo: "o/r", branchIdentityBaseline });
+      expect((await store.get(base.id))!.branchIdentityBaseline).toEqual(branchIdentityBaseline);
+      for (const summary of [await store.getSummary(base.id), ...(await store.list({}))]) {
+        expect(summary).not.toHaveProperty("branchIdentityBaseline");
+        expect(JSON.stringify(summary)).not.toContain("private inherited commit");
+      }
+    });
+
     it("archives source bodies only in full records and preserves the dependency references in summaries", async () => {
       const { store } = make();
       const base = record("archive", NOW);

@@ -154,6 +154,22 @@ function setup() {
 }
 
 describe("claimRun — the ledger claim once the prompt exists", () => {
+  it("promotes a same-ID segment with its raw original baseline, prior push and PR base before writable execution", async () => {
+    const { deps, ledger, base } = setup();
+    const raw = { version: 1, original: true };
+    await claimRun(deps, {
+      ...base,
+      repoCtx: { repo: "acme/api", ref: "feature/original", baseRef: "release" },
+      restartBranchIdentityBaseline: raw,
+      restartPushedBranch: "feature/original",
+      reserved: new NullLedgerRun(base.run.id, { put: async () => {}, abandoned: () => {} }),
+      resume: undefined,
+      ledgerRun: undefined,
+    });
+    expect(ledger.opened[0]!.meta).toMatchObject({ ref: "feature/original", baseRef: "release" });
+    expect(ledger.opened[0]!.state).toMatchObject({ branchIdentityBaseline: raw, pushedBranch: "feature/original" });
+  });
+
   it("promotes a reserved accepted target without losing it before reclaim", async () => {
     const { deps, base } = setup();
     const ledger = new InMemoryRunLedger(() => NOW);

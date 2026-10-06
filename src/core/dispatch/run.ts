@@ -295,6 +295,8 @@ export interface ClaimContext {
   mainAudienceChecked?: true;
   messages: ChatMessage[];
   resume: ResumeContext | undefined;
+  restartBranchIdentityBaseline?: unknown;
+  restartPushedBranch?: unknown;
   /** The handle a resume adopted at admission; undefined for a fresh request. */
   ledgerRun: LedgerRun | undefined;
   card: StatusHandle;
@@ -438,6 +440,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
           ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
           ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
           ...(repoCtx.ref !== undefined && !privateMain ? { ref: repoCtx.ref } : {}),
+          ...(repoCtx.baseRef !== undefined && !privateMain ? { baseRef: repoCtx.baseRef } : {}),
           ...(repoCtx.headSha !== undefined && !privateMain ? { headSha: repoCtx.headSha } : {}),
           ...(repoCtx.pr !== undefined && !privateMain ? { pr: repoCtx.pr } : {}),
           readonly: profile.identity === "read",
@@ -453,7 +456,13 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
           ...(requestRow !== undefined ? { request: requestRow } : {}),
         },
         card: card.handle ?? null,
-        ...(workspaceBinding !== undefined ? { state: { binding: workspaceBinding } } : {}),
+        state: {
+          ...(workspaceBinding !== undefined ? { binding: workspaceBinding } : {}),
+          ...(ctx.restartBranchIdentityBaseline !== undefined
+            ? { branchIdentityBaseline: ctx.restartBranchIdentityBaseline }
+            : {}),
+          ...(ctx.restartPushedBranch !== undefined ? { pushedBranch: ctx.restartPushedBranch } : {}),
+        },
         // The row reserved before the attach (item 42), promoted in place;
         // its hooks (a stop, a fence) were wired at the reservation and stay.
         reservation: reserved,

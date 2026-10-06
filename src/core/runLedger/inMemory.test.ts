@@ -94,6 +94,155 @@ const record = (id: string): RunRecord =>
     diagnosis: { eventCount: 0, toolCalls: 0, byCategory: {}, findings: [], verdict: "none" },
   }) as unknown as RunRecord;
 
+describe("durable branch identity baseline", () => {
+  const baselineOf = (id: string) => ({
+    version: 1 as const,
+    binding: {
+      runId: id,
+      requester: "slack:UALICE",
+      threadKey: "slack:C1:1.0",
+      repo: "o/r",
+      branch: "plan/p/u1",
+      base: "main",
+      head: "a".repeat(40),
+    },
+    state: { kind: "known" as const, commits: [] },
+  });
+
+  it("restores the archived first baseline on same-ID reservation and promotion before refusing a replacement", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    const req = {
+      ...claimReq("same-baseline", "slack:C1:1.0"),
+      meta: { ...claimReq("same-baseline", "slack:C1:1.0").meta, repo: "o/r" },
+    };
+    const baseline = baselineOf(req.runId);
+    await ledger.claim({ ...req, state: { branchIdentityBaseline: baseline } });
+    await ledger.finish(req.runId, "g1", { ...record(req.runId), repo: "o/r" });
+    expect(await ledger.claim({ ...req, gen: "g2", phase: "attaching", system: "", tools: [] })).toEqual({ ok: true });
+    expect(ledger.live.get(req.runId)!.state.branchIdentityBaseline).toEqual(baseline);
+    ledger.live.get(req.runId)!.state = {};
+    expect(await ledger.claim({ ...req, gen: "g2", phase: "attaching", system: "", tools: [] })).toEqual({ ok: true });
+    expect(ledger.live.get(req.runId)!.state.branchIdentityBaseline).toEqual(baseline);
+    expect(await ledger.claim({ ...req, gen: "g2", state: { binding: { backend: "sandbox" } } })).toEqual({ ok: true });
+    expect(ledger.live.get(req.runId)!.state.branchIdentityBaseline).toEqual(baseline);
+    const changed = { ...baseline, binding: { ...baseline.binding, head: "b".repeat(40) } };
+    expect(await ledger.setState(req.runId, "g2", { branchIdentityBaseline: changed })).toEqual({
+      ok: false,
+      reason: "fenced",
+    });
+    expect(await ledger.finish(req.runId, "g2", { ...record(req.runId), repo: "o/r" })).toMatchObject({ ok: true });
+    expect(ledger.finished.get(req.runId)!.branchIdentityBaseline).toEqual(baseline);
+    await expect(ledger.claim({ ...req, gen: "g3", state: { branchIdentityBaseline: changed } })).rejects.toThrow();
+    expect(ledger.live.has(req.runId)).toBe(false);
+    for (const meta of [
+      { ...req.meta, ref: "foreign" },
+      { ...req.meta, baseRef: "foreign" },
+    ])
+      await expect(ledger.claim({ ...req, gen: "g3", meta })).rejects.toThrow();
+  });
+
+  it("refuses a foreign or corrupt archived baseline before creating the same-ID successor", async () => {
+    for (const corrupted of [false, true]) {
+      const ledger = new InMemoryRunLedger(() => 0);
+      const req = {
+        ...claimReq("held-baseline", "slack:C1:1.0"),
+        meta: { ...claimReq("held-baseline", "slack:C1:1.0").meta, repo: "o/r" },
+      };
+      const baseline = baselineOf(req.runId);
+      await ledger.claim({ ...req, state: { branchIdentityBaseline: baseline } });
+      await ledger.finish(req.runId, "g1", { ...record(req.runId), repo: "o/r" });
+      if (corrupted) ledger.finishedWorkEvidence.set(req.runId, { branchIdentityBaseline: { version: 1 } });
+      await expect(
+        ledger.claim({ ...req, gen: "g2", ...(corrupted ? {} : { meta: { ...req.meta, userId: "slack:OTHER" } }) }),
+      ).rejects.toThrow();
+      expect(ledger.live.has(req.runId)).toBe(false);
+      expect(ledger.finished.get(req.runId)!.branchIdentityBaseline).toEqual(baseline);
+    }
+  });
+
+  it("refuses terminal replacement even if live state lost or substituted the archived baseline", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    const req = {
+      ...claimReq("terminal-baseline", "slack:C1:1.0"),
+      meta: { ...claimReq("terminal-baseline", "slack:C1:1.0").meta, repo: "o/r" },
+    };
+    const baseline = baselineOf(req.runId);
+    await ledger.claim({ ...req, state: { branchIdentityBaseline: baseline } });
+    await ledger.finish(req.runId, "g1", { ...record(req.runId), repo: "o/r" });
+    await ledger.claim({ ...req, gen: "g2" });
+    ledger.live.get(req.runId)!.state = {};
+    expect(await ledger.setState(req.runId, "g2", { checklist: [] })).toEqual({ ok: true });
+    expect(ledger.live.get(req.runId)!.state.branchIdentityBaseline).toEqual(baseline);
+    ledger.live.get(req.runId)!.state.branchIdentityBaseline = { ...baseline, state: { kind: "unknown" } };
+    expect(await ledger.finish(req.runId, "g2", { ...record(req.runId), repo: "o/r" })).toEqual({
+      ok: false,
+      reason: "fenced",
+    });
+    expect(ledger.finished.get(req.runId)!.branchIdentityBaseline).toEqual(baseline);
+  });
+
+  it("does not carry one live run's baseline into another run's thread conflict", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    const req = claimReq("original-baseline", "slack:C1:1.0");
+    req.meta.repo = "o/r";
+    await ledger.claim({ ...req, state: { branchIdentityBaseline: baselineOf(req.runId) } });
+    expect(await ledger.claim({ ...req, runId: "other-run" })).toMatchObject({ ok: false, reason: "thread-live" });
+    expect(ledger.live.get(req.runId)!.state.branchIdentityBaseline).toEqual(baselineOf(req.runId));
+  });
+
+  it("retains the first acknowledged baseline through push, restart and terminal archive while refusing replacement and foreign owners", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    const req = claimReq("baseline-run", "slack:C1:1.0");
+    req.meta.repo = "o/r";
+    await ledger.claim(req);
+    const baseline = {
+      version: 1 as const,
+      binding: {
+        runId: req.runId,
+        requester: req.meta.userId,
+        threadKey: req.threadKey,
+        repo: "o/r",
+        branch: "plan/p/u1",
+        base: "main",
+        head: "a".repeat(40),
+      },
+      state: {
+        kind: "known" as const,
+        commits: [
+          {
+            sha: "b".repeat(40),
+            author: { name: "inherited", email: "prior@example.test" },
+            date: "2026-01-01T00:00:00Z",
+            message: "private inherited commit",
+          },
+        ],
+      },
+    };
+    expect(
+      await ledger.setState(req.runId, "g1", {
+        branchIdentityBaseline: { ...baseline, binding: { ...baseline.binding, requester: "foreign" } },
+      }),
+    ).toEqual({ ok: false, reason: "fenced" });
+    expect(await ledger.setState(req.runId, "g1", { branchIdentityBaseline: baseline })).toEqual({ ok: true });
+    expect(
+      await ledger.setState(req.runId, "g1", {
+        branchIdentityBaseline: { ...baseline, state: { kind: "known", commits: [] } },
+      }),
+    ).toEqual({ ok: false, reason: "fenced" });
+    await ledger.setState(req.runId, "g1", { pushedBranch: "plan/p/u1" });
+    await ledger.handoff("g1", [req.runId]);
+    const taken = await ledger.reclaim("g2", 0, LEASE_MS);
+    expect(taken[0]!.row.state.branchIdentityBaseline).toEqual(baseline);
+    expect(await ledger.setState(req.runId, "g1", { branchIdentityBaseline: baseline })).toEqual({
+      ok: false,
+      reason: "fenced",
+    });
+    expect(await ledger.setState(req.runId, "g2", { pushedBranch: "plan/p/u1" })).toEqual({ ok: true });
+    expect(await ledger.finish(req.runId, "g2", { ...record(req.runId), repo: "o/r" })).toMatchObject({ ok: true });
+    expect(ledger.finished.get(req.runId)!.branchIdentityBaseline).toEqual(baseline);
+  });
+});
+
 describe("maintenance transport identity", () => {
   it("retains the original action through claim, event replacement and terminal commitment", async () => {
     const ledger = new InMemoryRunLedger(() => 0);
