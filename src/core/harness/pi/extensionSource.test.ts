@@ -652,3 +652,27 @@ describe("the harness extension", () => {
     await aborted;
   });
 });
+
+describe("hosted Review extension relay", () => {
+  it("registers the hosted command and preserves its call id and payload without a shell alias", async () => {
+    const bot = fakeBot({
+      "/harness/tools": {
+        tools: [{ name: "run_check", description: "Recorded command", inputSchema: { type: "object" } }],
+      },
+      "/harness/authorize": { allow: true },
+      "/harness/tool": { content: [{ type: "text", text: "completed with exit 1" }], isError: false },
+    });
+    const pi = fakePi();
+    await (
+      await load()
+    )(pi.api);
+    expect(pi.tools.map((tool) => tool.name)).toEqual(["run_check"]);
+    const input = { command: "git status --short", purpose: "verification", timeoutMs: 10000 };
+    expect(await pi.tools[0].execute("original-review-call", input)).toMatchObject({
+      content: [{ type: "text", text: "completed with exit 1" }],
+    });
+    expect(bot.calls.filter((call) => call.path === "/harness/tool").map((call) => call.body)).toEqual([
+      { toolCallId: "original-review-call", tool: "run_check", input },
+    ]);
+  });
+});

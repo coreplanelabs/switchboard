@@ -10,7 +10,8 @@ export interface CheckExecutionOwner {
   runId: string;
   requester: string;
   threadKey: string;
-  unit: string;
+  /** Present only for an actual coordinator-owned plan unit. */
+  unit?: string;
   repo: string;
 }
 

@@ -1,3 +1,4 @@
+import { runCheckTool } from "../../tools/check.js";
 import { PUSHED_MAX } from "../../execution/residentRebind.js";
 import {
   reviewPublicationOf,
@@ -2018,8 +2019,42 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       (receipt) => mainWorker?.restoreRead?.(receipt) ?? mainWork?.restoreRead?.(receipt),
       resume.row.state.workRefreshUsed === true,
     );
+  const checkOwner = repoCtx.repo
+    ? {
+        runId: run.id,
+        requester: msg.userId,
+        threadKey: msg.threadKey,
+        repo: repoCtx.repo,
+        ...(coordinator?.idempotencyKey !== undefined ? { unit: coordinator.idempotencyKey } : {}),
+      }
+    : undefined;
+  const canRecordReview =
+    agent.name === "review" &&
+    profile.identity === "read" &&
+    ledgerRun?.tracked() === true &&
+    checkOwner !== undefined &&
+    currentCheckout !== undefined &&
+    currentCheckout.startsWith("/") &&
+    currentCheckout.length <= 4096 &&
+    !/[\r\n\0]/.test(currentCheckout);
+  const reviewOwner = canRecordReview ? await originalPublicationOwner().catch(() => undefined) : undefined;
+  const reviewCheckReady =
+    canRecordReview &&
+    reviewOwner?.meta.agent === "review" &&
+    reviewOwner.stop === null &&
+    reviewOwner.meta.readonly === true &&
+    reviewOwner.meta.profile?.identity === "read" &&
+    reviewOwner.meta.parentInstanceId === coordinator?.parentInstanceId &&
+    reviewOwner.meta.idempotencyKey === coordinator?.idempotencyKey &&
+    reviewOwner.meta.coordinatorUnit === coordinator?.unit &&
+    reviewOwner.meta.coordinatorAttempt === coordinator?.instanceAttempt &&
+    reviewOwner.meta.maintenanceActionId === coordinator?.maintenanceActionId &&
+    typeof executor.execResult === "function" &&
+    checkOwner !== undefined &&
+    Object.values(checkOwner).every((value) => typeof value === "string" && value.length > 0);
+  const commandPolicy = canRecordReview ? ("hosted-review" as const) : undefined;
   const checkExecution =
-    agent.name === "coding" && profile.identity === "write"
+    checkOwner && ((agent.name === "coding" && profile.identity === "write") || reviewCheckReady)
       ? createCheckExecution({
           executor: () => executor,
           workspace: () => currentCheckout,
@@ -2038,13 +2073,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               judgeToolCall("bash", { command }, rules).verdict === "allowed"
             );
           },
-          owner: {
-            runId: run.id,
-            requester: msg.userId,
-            threadKey: msg.threadKey,
-            unit: coordinator?.idempotencyKey ?? "",
-            repo: repoCtx.repo ?? "",
-          },
+          owner: checkOwner,
           previous: ctx.resume?.row.state.checkExecutions,
           save: async (state) =>
             ledgerRun?.tracked() === true && (await ledgerRun.setStateAndFlush({ checkExecutions: state })),
@@ -2794,14 +2823,18 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               ? `${publicationSystem}\n\n${firstTestContext(firstTestReceipt)}`
               : publicationSystem,
             messages,
+            ...(commandPolicy ? { commandPolicy } : {}),
             tools: [
               ...filterUnavailableTools(
                 mergeTools(
-                  toolsForRun(
-                    agent.toolset,
-                    mainWork !== undefined,
-                    mainStart !== undefined && verifiedAtOpen && mainWorkTrusted && !privateAudienceLatch.revoked,
-                  ).filter((tool) => slackContext !== undefined || tool.name !== "slack_context"),
+                  [
+                    ...toolsForRun(
+                      agent.toolset,
+                      mainWork !== undefined,
+                      mainStart !== undefined && verifiedAtOpen && mainWorkTrusted && !privateAudienceLatch.revoked,
+                    ),
+                    ...(reviewCheckReady && checkExecution ? [runCheckTool] : []),
+                  ].filter((tool) => slackContext !== undefined || tool.name !== "slack_context"),
                   mcpForRun?.tools,
                 ),
                 mainWorker ? [] : ["work_progress"],

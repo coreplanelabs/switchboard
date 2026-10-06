@@ -1110,3 +1110,26 @@ describe("launchOpenCode — the original deadline and cancellation", () => {
     expect(h.container.starts).toHaveLength(0);
   });
 });
+
+describe("hosted Review permission policy", () => {
+  it("puts native shell deny last without widening direct command or coding/explore permissions", () => {
+    const hosted = { ...reviewSpec, commandPolicy: "hosted-review", relayTools: ["run_check"] } as OpenCodeLaunchSpec;
+    const permissions = openCodePermissionRules(hosted.identity, hosted.commandPolicy);
+    expect(permissions.at(-1)).toEqual({ action: "shell", resource: "*", effect: "deny" });
+    for (const action of ["execute", "subagent", "webfetch", "websearch"])
+      expect(permissions).toContainEqual({ action, resource: "*", effect: "deny" });
+    expect(openCodeConfig(hosted)).toMatchObject({ agents: { [OPENCODE_AGENT]: { permissions } } });
+    expect(openCodePermissionRules(spec.identity)).not.toContainEqual({
+      action: "shell",
+      resource: "*",
+      effect: "deny",
+    });
+    expect(openCodePermissionRules(reviewSpec.identity)).not.toContainEqual({
+      action: "shell",
+      resource: "*",
+      effect: "deny",
+    });
+    expect(openCodePromptNote(hosted.relayTools, hosted.identity, hosted.commandPolicy)).toContain("Use `run_check`");
+    expect(openCodePromptNote(hosted.relayTools, hosted.identity, hosted.commandPolicy)).not.toContain("use `shell`");
+  });
+});

@@ -7,13 +7,13 @@ import { bearerHashOf } from "../../modelProxy/runBearers.js";
 import type { RunEvent } from "../../runEvents.js";
 import type { StepReport } from "../../runLedger/stepReport.js";
 import { ExecInfraError } from "../../../execution/executor.js";
-import { identityChangedCondition } from "../container.js";
+import { HarnessEndingUnconfirmedError, identityChangedCondition } from "../container.js";
 import { HarnessContainerReplacedError } from "../contract.js";
 import { piDriver } from "../pi/testing/driver.js";
 import type { ToolRuleContext } from "../pi/toolRules.js";
 import { TRANSPORT_LOST_TEXT } from "../testing/fakeContainer.js";
 import type { DrivenRun, RunScript } from "../testing/scenarios.js";
-import { readSessionStore, readStoreSince, type OpenCodeFeedRecord } from "./client.js";
+import { openCodeAuthHeader, readSessionStore, readStoreSince, type OpenCodeFeedRecord } from "./client.js";
 import {
   InboxFate,
   judgeOpenCodeAsk,
@@ -949,16 +949,23 @@ describe("the loop — a refused request, a silent server, and a hung turn", () 
   });
 
   it("a resume's continue the server refuses is named as the continue", async () => {
-    const driver = openCodeDriver({ promptPostFails: 1 });
+    const driver = openCodeDriver({ promptPostFails: 1, reattach: {} });
+    const recorded = driver.facts({
+      pid: 999,
+      container: driver.containerWord,
+      bearerHash: bearerHashOf(driver.bearer),
+    });
+    if (recorded.harness !== "opencode") throw new Error("expected original OpenCode facts");
     const r = await driver.run({
       ...oneTurn,
+      processAliveOnResume: true,
       resume: {
         messages: [{ role: "user", content: [{ type: "text", text: "carry on" }] }],
         settlements: [],
         remainingMs: 300_000,
         turn: 0,
         inboxConsumedSeq: 0,
-        facts: driver.facts({ pid: 999, container: "vm-old" }),
+        facts: { ...recorded, tailerPid: 888 },
       },
     });
     const err = failedWith(r, "OpenCodeRequestRefusedError");
@@ -1007,16 +1014,23 @@ describe("the loop — a refused request, a silent server, and a hung turn", () 
   });
 
   it("a resume's continue answered by silence names the continue", async () => {
-    const driver = openCodeDriver({ silentAfterPrompt: 1 });
+    const driver = openCodeDriver({ silentAfterPrompt: 1, reattach: {} });
+    const recorded = driver.facts({
+      pid: 999,
+      container: driver.containerWord,
+      bearerHash: bearerHashOf(driver.bearer),
+    });
+    if (recorded.harness !== "opencode") throw new Error("expected original OpenCode facts");
     const r = await driver.run({
       ...oneTurn,
+      processAliveOnResume: true,
       resume: {
         messages: [{ role: "user", content: [{ type: "text", text: "carry on" }] }],
         settlements: [],
         remainingMs: 300_000,
         turn: 0,
         inboxConsumedSeq: 0,
-        facts: driver.facts({ pid: 999, container: "vm-old" }),
+        facts: { ...recorded, tailerPid: 888 },
       },
     });
     const err = failedWith(r, "OpenCodeSilentError");
@@ -2190,8 +2204,14 @@ describe("wind-down parity, an undelivered follow-up, and the alive-here reconci
   it("MINOR: a relayed tool asked during the write-up is refused with the write-up's words, so OpenCode and pi refuse alike", async () => {
     // No budget left: the first check opens the write-up, and the relayed tool
     // asked in it is refused at the plugin's authorize, its side effect never run.
-    // (The row's server does not answer here, so the resume starts fresh.)
-    const driver = openCodeDriver();
+    // The recorded compatible producer is continued in place; no startup is needed.
+    const driver = openCodeDriver({ reattach: {} });
+    const recorded = driver.facts({
+      pid: 31,
+      container: driver.containerWord,
+      bearerHash: bearerHashOf(driver.bearer),
+    });
+    if (recorded.harness !== "opencode") throw new Error("expected original OpenCode facts");
     const r = await driver.run({
       turns: [
         {
@@ -2200,13 +2220,14 @@ describe("wind-down parity, an undelivered follow-up, and the alive-here reconci
         },
         { content: [{ type: "text", text: "wrapped up" }], stopReason: "end_turn" },
       ],
+      processAliveOnResume: true,
       resume: {
         messages: [{ role: "user", content: [{ type: "text", text: "carry on" }] }],
         settlements: [],
         remainingMs: 0,
         turn: 0,
         inboxConsumedSeq: 0,
-        facts: driver.facts({ pid: 31, container: driver.containerWord }),
+        facts: { ...recorded, tailerPid: 888 },
       },
     });
     const refused = notes(r.events).find((n) => n.kind === "tool_refused" && /update_status/.test(n.summary));
@@ -2216,13 +2237,14 @@ describe("wind-down parity, an undelivered follow-up, and the alive-here reconci
     expect(r.statusReports).toEqual([]);
   });
 
-  it("MAJOR 2: a resume naming this container whose server still answers but refuses the session ends it and its tailer before a fresh start, removes nothing else, and says so", async () => {
+  it("a resume naming this container whose answering server refuses the session retains original custody without a fresh start", async () => {
     const root = openCodeRunPaths("run-c").dir;
     const driver = openCodeDriver({ reattach: { refuseSession: true } });
     const rowFacts = {
       ...driver.facts({ pid: 999, container: driver.containerWord, bearerHash: bearerHashOf(driver.bearer) }),
       tailerPid: 888,
     };
+    const original = structuredClone(rowFacts);
     const r = await driver.run({
       turns: [{ content: [{ type: "text", text: "resumed" }], stopReason: "end_turn" }],
       processAliveOnResume: true,
@@ -2235,25 +2257,30 @@ describe("wind-down parity, an undelivered follow-up, and the alive-here reconci
         facts: rowFacts,
       },
     });
-    expect(answered(r)).toBe("resumed");
-    // The row's server was found on its recorded port — another than the fresh
-    // launch's — with the row's password, and refused the session there before
-    // anything was ended; nothing else was asked of it.
+    expect(r.outcome.kind).toBe("failed");
+    if (r.outcome.kind !== "failed") throw new Error("expected retained custody");
+    expect(r.outcome.error).toBeInstanceOf(HarnessEndingUnconfirmedError);
+    if (!(r.outcome.error instanceof HarnessEndingUnconfirmedError)) throw new Error("expected typed custody");
+    expect(r.outcome.error.runId).toBe("run-c");
+    expect(r.outcome.error.openingError).toBeInstanceOf(Error);
+    expect((r.outcome.error.openingError as Error).message).toMatch(/the server refused the session \(404\)/);
+    // The recorded port and password identify the session being checked;
+    // its refusal grants no authority to end or replace the producer.
     const recordedPort = rowFacts.harness === "opencode" ? rowFacts.port : -1;
-    expect(r.requests.filter((q) => q.port === recordedPort).map((q) => q.path)).toEqual([
-      "/api/info",
-      "/api/session/ses_run-c/message?order=asc&limit=200",
-    ]);
-    // Both the row's server and its tailer are ended before the fresh start.
-    expect(r.killed).toContain(999);
-    expect(r.killed).toContain(888);
-    expect(r.removed).toContain(root);
-    // Exactly one fresh OpenCode is started on the record.
-    expect(r.starts).toHaveLength(1);
-    const resumed = notes(r.events).find((n) => n.kind === "resumed");
-    expect(resumed?.summary).toMatch(/still answers in this container but could not be re-attached/);
-    expect(resumed?.summary).toMatch(/the server refused the session \(404\)/);
-    expect(resumed?.summary).toMatch(/ended it and its tailer before a fresh start/);
+    const requests = r.requests.filter((q) => q.port === recordedPort);
+    expect(requests.map((q) => q.path)).toEqual(["/api/info", "/api/session/ses_run-c/message?order=asc&limit=200"]);
+    expect(requests.every((q) => q.secretHeaders?.Authorization === openCodeAuthHeader(rowFacts.bearerHash!))).toBe(
+      true,
+    );
+    expect(r.killed).toEqual([]);
+    expect(r.removed).toEqual([]);
+    expect(r.starts).toEqual([]);
+    expect(r.facts).toEqual([]);
+    expect(r.steps).toEqual([]);
+    expect(r.modelCalls).toEqual([]);
+    expect(rowFacts).toEqual(original);
+    expect(rowFacts.root).toBe(root);
+    expect(notes(r.events).some((note) => /ended it|fresh start/.test(note.summary))).toBe(false);
   });
 });
 
@@ -2455,3 +2482,19 @@ describe("an OpenCode whose container command fails on its transport with no wor
 const _obs: OpenCodeBridgeObservation = { replies: [], settled: false };
 void _obs;
 void assert;
+
+describe("hosted Review native permission admission", () => {
+  it("refuses native shell independently of its command while allowing only the named hosted relay", () => {
+    const rules: ToolRuleContext = { identity: "read", checkout: "/work/repo" };
+    const relayed = new Set(["run_check"]);
+    expect(judgeOpenCodeAsk("shell", ["git status --short"], rules, relayed, "native", "hosted-review")).toMatchObject({
+      reply: "reject",
+    });
+    expect(judgeOpenCodeAsk("run_check", [], rules, relayed, "hosted", "hosted-review")).toMatchObject({
+      reply: "once",
+    });
+    expect(judgeOpenCodeAsk("shell", ["git status --short"], rules, relayed, "ordinary")).toMatchObject({
+      reply: "once",
+    });
+  });
+});

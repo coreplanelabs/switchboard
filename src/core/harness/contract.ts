@@ -457,12 +457,17 @@ export interface HarnessResume {
   relaunch?: { from?: string; to?: string };
 }
 
+/** Runner-selected command route for a bound, tracked Review. */
+export type HarnessCommandPolicy = "hosted-review";
+
 /** One run as the loop hands it to a harness: the preset and its budget, the
  *  model, the seed, the relayed tools and their context, the gate's rules, the
  *  sinks the record is written through, and a resume. Nothing here names a
  *  harness. */
 export interface HarnessRun {
   runId: string;
+  /** Native shell is unavailable; commands use the original receipt capability. */
+  commandPolicy?: HarnessCommandPolicy;
   /** The preset with its effective budget (`budgetedAgent`). */
   agent: AgentDef;
   /** Absolute admitted bound; setup, downtime and relaunch never renew it. */

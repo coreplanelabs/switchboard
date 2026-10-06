@@ -1,3 +1,4 @@
+import { HarnessEndingUnconfirmedError } from "../container.js";
 // The conformance table (docs/reference/specs/harness.md item 11): record
 // 0038's six clauses as rows any harness is held to, each a function of a
 // `HarnessDriver` — start a run from a scripted model, read the run events and
@@ -1060,20 +1061,21 @@ export const SCENARIOS: readonly ScenarioRow[] = [
   {
     id: "survival-another-container",
     clause: "survival",
-    title:
-      "a resume whose facts name another container neither probes nor ends the pid there: a fresh process starts on the record and a resumed note names the orphan by pid and container",
+    title: "a foreign original producer holds custody without replacement",
     script: (driver) => ({
       turns: [text("resumed")],
       resume: resumeOf(driver.facts({ pid: 999, container: "vm-old" })),
     }),
     check: (run) => {
-      assert.equal(answered(run), "resumed");
-      assert.ok(!run.killed.includes(999), "the orphan's pid was ended here");
-      assert.equal(run.starts.length, 1, "no fresh process was started");
-      const note = notes(run).find(
-        (n) => n.kind === "resumed" && n.summary.includes("999") && n.summary.includes("vm-old"),
-      );
-      assert.ok(note, "no resumed note names the orphan by pid and container");
+      assert.equal(run.outcome.kind, "failed");
+      if (run.outcome.kind !== "failed") throw new Error("expected original custody held");
+      assert.ok(run.outcome.error instanceof HarnessEndingUnconfirmedError);
+      assert.deepEqual(run.starts, []);
+      assert.deepEqual(run.killed, []);
+      assert.deepEqual(run.removed, []);
+      assert.deepEqual(run.facts, []);
+      assert.deepEqual(run.steps, []);
+      assert.deepEqual(run.modelCalls, []);
     },
   },
   {
@@ -1101,6 +1103,8 @@ export const SCENARIOS: readonly ScenarioRow[] = [
         remainingMs: 5 * 60_000,
         turn: 1,
         inboxConsumedSeq: 0,
+        // Existing replacement-protocol input, not a physical stop or capture ACK.
+        relaunch: { from: "vm-old", to: driver.containerWord },
         facts: driver.facts({ pid: 999, container: "vm-old" }),
       },
     }),
@@ -1172,6 +1176,8 @@ export const SCENARIOS: readonly ScenarioRow[] = [
         remainingMs: 5 * 60_000,
         turn: 2,
         inboxConsumedSeq: 0,
+        // Existing replacement-protocol input, not a physical stop or capture ACK.
+        relaunch: { from: "vm-old", to: driver.containerWord },
         facts: driver.facts({ pid: 999, container: "vm-old" }),
       },
     }),
@@ -1221,6 +1227,8 @@ export const SCENARIOS: readonly ScenarioRow[] = [
         remainingMs: 5 * 60_000,
         turn: 1,
         inboxConsumedSeq: 0,
+        // Existing replacement-protocol input, not a physical stop or capture ACK.
+        relaunch: { from: "vm-old", to: driver.containerWord },
         facts: driver.facts({ pid: 999, container: "vm-old" }),
       },
     }),
@@ -1282,24 +1290,22 @@ export const SCENARIOS: readonly ScenarioRow[] = [
   {
     id: "survival-dead-here",
     clause: "survival",
-    title:
-      "a resume whose facts name this same container but whose process no longer answers here takes the dead-process path exactly: the dead pid is not ended, its recorded root — another than the fresh start's — is removed from this container's disk, one fresh process starts on the record, the run answers, and the one resumed note is the fresh start's, never the alive path's",
+    title: "sampled absence of an original producer holds custody without cleanup or replacement",
     script: (driver) => ({
       turns: [text("resumed fresh")],
       processAliveOnResume: false,
       resume: resumeOf(driver.facts({ pid: 999, container: driver.containerWord, root: DEAD_ROW_ROOT })),
     }),
     check: (run) => {
-      assert.equal(answered(run), "resumed fresh");
-      assert.equal(run.starts.length, 1, "one fresh process was started on the record");
-      // A pid that does not answer is nobody's here: never ended. Its root on
-      // this container's disk is dead files: removed before the fresh start.
-      assert.ok(!run.killed.includes(999), "the dead pid was ended");
-      assert.ok(run.removed.includes(DEAD_ROW_ROOT), "the dead process's recorded root was not removed");
-      const resumed = notes(run).filter((n) => n.kind === "resumed");
-      assert.equal(resumed.length, 1, "not exactly one resumed note");
-      assert.doesNotMatch(resumed[0].summary, /still (runs|answers)|ended it/, "the note took the alive path");
-      assert.ok(!notes(run).some((n) => n.kind === "harness_error"), "a harness_error on a clean resume");
+      assert.equal(run.outcome.kind, "failed");
+      if (run.outcome.kind !== "failed") throw new Error("expected original custody held");
+      assert.ok(run.outcome.error instanceof HarnessEndingUnconfirmedError);
+      assert.deepEqual(run.starts, []);
+      assert.deepEqual(run.killed, []);
+      assert.deepEqual(run.removed, []);
+      assert.deepEqual(run.facts, []);
+      assert.deepEqual(run.steps, []);
+      assert.deepEqual(run.modelCalls, []);
     },
   },
   {

@@ -248,7 +248,14 @@ export class PiBridge {
    *  judged against the gate (harness-pi item 7). */
   private readonly openTools = new Map<
     string,
-    { span: Span | undefined; tool: string; judged: boolean; command?: string; input?: unknown }
+    {
+      span: Span | undefined;
+      tool: string;
+      judged: boolean;
+      cancel: AbortController;
+      command?: string;
+      input?: unknown;
+    }
   >();
   /** The open calls an abort was sent for (`markOpenCallsCut`): their failed
    *  end, when pi answers it, is the abort's cut and not a settle — the result
@@ -287,6 +294,7 @@ export class PiBridge {
    *  reply pi settled the last loop on is not this turn's answer, so the
    *  answer state starts over — what pi settles on next is the turn's. */
   newPrompt(): void {
+    this.cancelChecks();
     this.answerText = undefined;
     this.heldAnswer = undefined;
     this.assistantStartedAt = undefined;
@@ -498,10 +506,12 @@ export class PiBridge {
     const callId = str(event.toolCallId);
     const span = this.agentSpan?.start(`tool.${tool}`);
     const input = isRecord(event.args) ? event.args : undefined;
+    this.openTools.get(callId)?.cancel.abort();
     this.openTools.set(callId, {
       span,
       tool,
       judged: this.judgeGate,
+      cancel: new AbortController(),
       ...(input ? { input } : {}),
       ...(tool === "bash" && typeof input?.command === "string" ? { command: input.command } : {}),
     });
@@ -531,6 +541,7 @@ export class PiBridge {
   private onToolEnd(event: PiEvent, out: BridgeObservation): void {
     const callId = str(event.toolCallId);
     const open = this.openTools.get(callId);
+    open?.cancel.abort();
     this.openTools.delete(callId);
     const marked = this.cutCalls.delete(callId);
     const tool = open?.tool ?? str(event.toolName);
@@ -644,6 +655,16 @@ export class PiBridge {
     return this.openTools.has(callId);
   }
 
+  checkSignal(callId: string): AbortSignal | undefined {
+    const open = this.openTools.get(callId);
+    return open?.tool === "run_check" ? open.cancel.signal : undefined;
+  }
+
+  /** Ends hosted checks only; native tool outcome recording remains separate. */
+  cancelChecks(): void {
+    for (const open of this.openTools.values()) if (open.tool === "run_check") open.cancel.abort();
+  }
+
   /** A model bearer alone cannot invent a publication ask: the bridge must
    * have observed this exact bash input from pi before the gate can admit it. */
   effectCallMatches(callId: string, tool: string, input: unknown): boolean {
@@ -676,6 +697,7 @@ export class PiBridge {
    *  item 13: the command behind it may run on, and the workspace's release
    *  reads it so); a tool that exits clean before pi handles the abort settles. */
   markOpenCallsCut(): void {
+    this.cancelChecks();
     for (const callId of this.openTools.keys()) this.cutCalls.add(callId);
   }
 
@@ -692,6 +714,7 @@ export class PiBridge {
     opts: { cut?: boolean } = {},
   ): void {
     for (const [callId, open] of this.openTools) {
+      open.cancel.abort();
       open.span?.end("error", { callId, ok: false });
       const summary = typeof reason === "string" ? reason : reason({ callId, tool: open.tool });
       this.emit({
