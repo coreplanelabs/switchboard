@@ -1,3 +1,4 @@
+import { HarnessEndingUnconfirmedError } from "../harness/container.js";
 import type { GithubWriteResult } from "../../execution/githubPulls.js";
 import { findPullOwnersInRows } from "../coordinator/pullOwnership.js";
 import { terminalPublicationRetentionRequired } from "../branchPublication.js";
@@ -16,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { ASKS } from "../budgets.js";
+import { RunEventLane } from "../runEventLane.js";
 import { ConfigStore } from "../../config.js";
 import { PLANE_ACTOR_ID } from "../authz/grants.js";
 import { reissueSteerSentence } from "../plane/decide.js";
@@ -3071,6 +3073,70 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     end,
   });
 
+  it.each(["kill", "transport", "hard", "in-flight"])(
+    "an unconfirmed producer ending retains its original workspace (%s)",
+    async (cause) => {
+      const unknown = new Error(`unconfirmed ${cause}`);
+      const s = endingIn(async (_deps, run) => {
+        if (cause === "hard") run.control?.requestStop("hard");
+        if (cause === "in-flight") openToolCall(run);
+        return sessionAnswering("done", async () => {
+          throw unknown;
+        });
+      });
+      await expect(runLoop(s.deps, s.ctx)).rejects.toBe(unknown);
+      expect(s.releases).toEqual([]);
+      s.ending.drain(undefined);
+      await s.writer.settled();
+    },
+  );
+  it("a failed ending record drain retains the original workspace", async () => {
+    const failure = new Error("ending record drain unavailable");
+    let ending = false;
+    const s = endingIn(async () =>
+      sessionAnswering("done", async () => {
+        ending = true;
+      }),
+    );
+    const events = new RunEventLane((event) => s.registry.publish(s.ctx.run.id, event));
+    const drain = events.drain.bind(events);
+    vi.spyOn(events, "drain").mockImplementation(async () => {
+      if (ending) throw failure;
+      await drain();
+    });
+    await expect(runLoop(s.deps, { ...s.ctx, events })).rejects.toBe(failure);
+    expect(s.releases).toEqual([]);
+    s.ending.drain(undefined);
+    await s.writer.settled();
+  });
+
+  it.each(["ordinary", "hard", "interrupted"])(
+    "a typed unconfirmed opening ending retains the original workspace (%s)",
+    async (mode) => {
+      const opening =
+        mode === "interrupted" ? new HarnessMismatchError("pi", "opencode") : new Error("original opening failure");
+      const ending = new Error("local ending did not confirm");
+      const s = endingIn(async (_deps, run) => {
+        if (mode === "hard") run.control?.requestStop("hard");
+        openToolCall(run);
+        throw new HarnessEndingUnconfirmedError(run.runId, opening, ending);
+      });
+      if (mode === "interrupted") expect((await runLoop(s.deps, s.ctx)).kind).toBe("interrupted");
+      else await expect(runLoop(s.deps, s.ctx)).rejects.toBe(opening);
+      expect(s.releases).toEqual([]);
+      s.ending.drain(undefined);
+      await s.writer.settled();
+    },
+  );
+
+  it("a settled original producer ending retains the existing release path", async () => {
+    const s = endingIn(async () => sessionAnswering("done"));
+    const out = answered(await runLoop(s.deps, s.ctx));
+    expect(out.answer).toBe("done");
+    await out.releaseWorkspace();
+    expect(s.releases).toEqual(["paired"]);
+  });
+
   it.each(["saved", "unavailable", "hard", "release-lost", "store-secret", "release-secret"] as const)(
     "settles an unconfirmed first publication before sealing: %s",
     async (mode) => {
@@ -3350,7 +3416,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
   // A session whose `end()` throws is not a clean end: pi may still be running
   // with its command, since the end failed before it could kill anything. The
   // read is taken all the same, under `failed` — the end's failure is the run's.
-  it("a harness session whose end() throws with a call open — the end failed before it could cut or kill: the run fails on the end's error, the record is still read, under `failed`, and the workspace is torn down with the note", async () => {
+  it("a harness session whose end() throws with a call open — the end failed before it could cut or kill: the run fails on the end's error, the record is still read, under `failed`, and the workspace is retained with an unconfirmed ending", async () => {
     const s = endingIn(async (_deps, run) => {
       openToolCall(run);
       return sessionAnswering("done", async () => {
@@ -3359,14 +3425,14 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     });
     await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("the session's end failed");
     expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "failed" });
-    expect(s.releases).toEqual(["torn-down"]);
-    expect(await tornDownNotes(s, undefined)).toEqual([expect.stringContaining("$ sleep 600")]);
+    expect(s.releases).toEqual([]);
+    expect(await tornDownNotes(s, undefined)).toEqual([]);
   });
 
   // The loop's own failure with a live session — a re-review turn on the run's
   // session that the resident's reset cut — then a session whose end() throws
   // too: the release still runs and the loop's error is the one that propagates.
-  it("the loop throws with a live session and the session's end() throws too in the catch: the workspace is still released, torn down for the open call, and the loop's own error is what propagates and what the record says", async () => {
+  it("the loop throws with a live session and the session's end() throws too in the catch: the workspace is retained for the unconfirmed ending, and the loop's own error is what propagates and what the record says", async () => {
     const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
     const NEW = "d75b5a51aba97d43c64a42c96e580dd9abbfd78e";
     const list = (subjects: string[]): PrCommitList => ({
@@ -3416,7 +3482,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     );
     await expect(runLoop(s.deps, await trackedReviewContext(s))).rejects.toThrow("the re-review's steer was in flight");
     expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "failed" });
-    expect(s.releases).toEqual(["torn-down"]);
+    expect(s.releases).toEqual([]);
     s.ending.drain(undefined);
     await s.writer.settled();
     const rec = (await s.store.get("run-l"))!;
@@ -3435,7 +3501,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
   // row of another harness) followed by an end that throws: the run's status is
   // the interruption's, and the card must say so too — a ❌ card over an
   // `interrupted` status and a restart would contradict itself.
-  it("an interrupted run whose session's end() throws stays interrupted: the status, the card and the outcome agree on the restart, and the workspace is torn down for the open call", async () => {
+  it("an interrupted run whose session's end() throws stays interrupted: the status, the card and the outcome agree on the restart, and the workspace is retained for the unconfirmed ending", async () => {
     const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
     const NEW = "d75b5a51aba97d43c64a42c96e580dd9abbfd78e";
     const list = (subjects: string[]): PrCommitList => ({
@@ -3483,7 +3549,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     const out = await runLoop(s.deps, await trackedReviewContext(s));
     expect(out.kind).toBe("interrupted");
     expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "interrupted" });
-    expect(s.releases).toEqual(["torn-down"]);
+    expect(s.releases).toEqual([]);
     expect(s.closes).toHaveLength(1);
     const close = JSON.stringify(s.closes[0]);
     expect(close).toContain("🔁");
@@ -12541,6 +12607,10 @@ describe("runLoop first coding test", () => {
       return { answer: "done", followUp: async () => "", remainingMs: () => 60_000, end: async () => {} };
     };
     const execResult = vi.fn(async (command: string) => {
+      if (command === "cat /proc/sys/kernel/random/boot_id 2>/dev/null || true") {
+        order.push("identity");
+        return { ...raw, stdout: "vm1" };
+      }
       if (command.startsWith("set -eu")) {
         order.push("preflight");
         return { ...raw, stdout: "workspace-hash" };
@@ -12605,6 +12675,37 @@ describe("runLoop first coding test", () => {
       expect(s.saved()).toMatchObject({ outcome: { kind: "unknown" } });
     },
   );
+  it("a freshly restored sandbox seed reads current typed identity before its baseline and model", async () => {
+    const s = baseline();
+    s.ctx.round.selection = {
+      ...s.ctx.round.selection,
+      backend: "sandbox",
+      binding: undefined,
+      seeded: {
+        slug: "acme/api",
+        ref: "work",
+        sha: "a".repeat(40),
+        depsBackupId: "archive-a",
+        workspace: "/workspace/checkout",
+        cached: false,
+        ms: 0,
+      },
+    };
+    expect(answered(await runLoop(s.deps, s.ctx)).answer).toBe("done");
+    expect(s.order.slice(0, 7)).toEqual([
+      "identity",
+      "preflight",
+      "persist:unknown",
+      "test",
+      "persist:completed",
+      "model",
+      "tool",
+    ]);
+    expect(s.saved()).toMatchObject({
+      checkout: { container: "vm1", backend: "sandbox" },
+      outcome: { kind: "completed" },
+    });
+  });
   it("holds a cached initial seed before any baseline or model work", async () => {
     const s = baseline();
     s.ctx.round.selection = {

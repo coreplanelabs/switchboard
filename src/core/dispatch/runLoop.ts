@@ -89,7 +89,7 @@ import type { ReadyEnvironmentRequirement } from "../../execution/seedPlan.js";
 import type { BranchStartState } from "../../execution/identityRewrite.js";
 import { branchIdentityBaselineFor, type BranchIdentityBaseline } from "../branchIdentityBaseline.js";
 import { branchIdentityCaptureBlocked } from "../branchIdentityHistory.js";
-import { isContainerGone } from "../harness/container.js";
+import { HarnessEndingUnconfirmedError, isContainerGone } from "../harness/container.js";
 import {
   ModelPolicyRefusedError,
   ModelStreamIncompleteError,
@@ -1262,31 +1262,43 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
    *  caller. An interrupted run stays interrupted: that status already reads
    *  an open call as in flight, and the card, the finish and the restart must
    *  say one thing. */
-  let harnessEnded = false;
-  const endHarness = async (): Promise<void> => {
-    if (harnessEnded) return;
-    harnessEnded = true;
+  let harnessEndState: "pending" | "ending" | "settled" | "unconfirmed" = "pending";
+  const endHarness = async (openingFailure?: unknown): Promise<void> => {
+    if (openingFailure instanceof HarnessEndingUnconfirmedError) {
+      harnessEndState = "unconfirmed";
+      return;
+    }
+    if (harnessEndState !== "pending") return;
+    harnessEndState = "ending";
     try {
-      await harnessSession?.end();
-    } catch (err) {
+      try {
+        await harnessSession?.end();
+      } catch (err) {
+        harnessEndState = "unconfirmed";
+        if (interrupted === undefined) runFailed = true;
+        throw err;
+      } finally {
+        // Session end may emit the cut/result that settles an open call. Its
+        // publication lane must drain before teardown judges the record.
+        await events.drain();
+        const calls = callsInFlight(recordEvents(), statusNow());
+        commandInFlight = calls.length > 0;
+        if (commandInFlight && harnessEndState === "ending")
+          events.publish({
+            type: "run_note",
+            kind: "workspace_torn_down",
+            summary: redactAndCap(
+              `a command may still be running in the workspace, so it is torn down rather than paired: ${calls.map((c) => c.summary).join("; ")}`,
+              ENDING_NOTE_MAX,
+            ),
+            at: clock(),
+          });
+      }
+      harnessEndState = "settled";
+    } catch (error) {
+      harnessEndState = "unconfirmed";
       if (interrupted === undefined) runFailed = true;
-      throw err;
-    } finally {
-      // Session end may emit the cut/result that settles an open call. Its
-      // publication lane must drain before teardown judges the record.
-      await events.drain();
-      const calls = callsInFlight(recordEvents(), statusNow());
-      commandInFlight = calls.length > 0;
-      if (commandInFlight)
-        events.publish({
-          type: "run_note",
-          kind: "workspace_torn_down",
-          summary: redactAndCap(
-            `a command may still be running in the workspace, so it is torn down rather than paired: ${calls.map((c) => c.summary).join("; ")}`,
-            ENDING_NOTE_MAX,
-          ),
-          at: clock(),
-        });
+      throw error;
     }
   };
   let runDiagnosis: FrictionDiagnosis | undefined; // the finish-site diagnosis: the done card's shape line
@@ -1664,6 +1676,17 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   let workspaceRelease: Promise<void> | undefined;
   const releaseWorkspace = (span?: Span): Promise<void> =>
     (workspaceRelease ??= (async () => {
+      // Failed control or record collection leaves the original custody standing.
+      // A hard stop is not authority to release an unconfirmed producer.
+      if (harnessEndState === "unconfirmed") {
+        if (publicationSettlement)
+          await recordPublicationSettlement({
+            ...publicationSettlement,
+            release: { kind: "kept", reason: "the original producer ending is unconfirmed" },
+          }).catch(() => false);
+        return;
+      }
+
       const mandatory = run.control.requested === "hard" || commandInFlight || gateBypassed;
       const unpreserved =
         (resumedUnsettledCheckpoint && publicationSettlement === undefined) ||
@@ -2453,14 +2476,25 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             `the ${agent.name} preset's run left ${facts.harness} harness facts on its row, but this process has no harness roster to end that process with`,
           );
         const judge = harnessOf(deps.harness);
+        const operationScope = {
+          runId: run.id,
+          deadlineAt: ctx.admissionDeadlineAt,
+          remainingMs: () => run.control.remainingMs(),
+          signal: run.control.hardSignal,
+          clock,
+        };
         const container =
-          deps.harness.containerFor?.(executor, profile.machine) ?? harnessContainerFor(executor, profile.machine);
+          deps.harness.containerFor?.(executor, profile.machine, operationScope) ??
+          harnessContainerFor(executor, profile.machine, operationScope);
         // The container itself may be gone under the question (harness.md
         // item 9: the seam rethrows the executor's typed word instead of
         // answering no name): then nothing of the leftover is here to end, the
         // record says so, and the post-steps run with the answer as before.
         const found = await judge.find(facts, container).catch((err: unknown) => {
-          if (!isContainerGone(err)) throw err;
+          if (!isContainerGone(err)) {
+            harnessEndState = "unconfirmed";
+            throw err;
+          }
           return "gone" as const;
         });
         switch (found) {
@@ -2492,7 +2526,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             });
             break;
           default:
-            await judge.end(facts, container);
+            try {
+              await judge.end(facts, container);
+            } catch (error) {
+              harnessEndState = "unconfirmed";
+              throw error;
+            }
         }
       } else noteUnknownWord("the run finished on the answer it already had");
       windDownEnding = windDownEndingUnder(finish.answer, loopEnding);
@@ -2671,8 +2710,16 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             );
           ctx.assertAdmissionBudget();
         }
+        const operationScope = {
+          runId: run.id,
+          deadlineAt: ctx.admissionDeadlineAt,
+          remainingMs: () => run.control.remainingMs(),
+          signal: run.control.hardSignal,
+          clock,
+        };
         const container =
-          harnessDeps.containerFor?.(executor, profile.machine) ?? harnessContainerFor(executor, profile.machine);
+          harnessDeps.containerFor?.(executor, profile.machine, operationScope) ??
+          harnessContainerFor(executor, profile.machine, operationScope);
         const requirement = ctx.readyRequirementOverride;
         if (agent.name === "coding" && profile.identity === "write" && requirement?.firstAction) {
           ctx.assertAdmissionBudget();
@@ -2693,7 +2740,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               workspace: currentCheckout ?? "",
               backend: firstTestSelection.backend ?? "",
               container:
-                firstTestSelection.binding?.container ?? (await container.identity().catch(() => undefined)) ?? "",
+                firstTestSelection.binding?.container ??
+                (firstTestSelection.backend === "sandbox" && firstTestSelection.seeded?.cached !== false
+                  ? ""
+                  : await container.identity().catch(() => undefined)) ??
+                "",
               dependencyKey: firstTestSelection.binding?.depsKey ?? firstTestSelection.seeded?.depsBackupId ?? "",
             },
             requirement,
@@ -3757,7 +3808,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           logKey: msg.threadKey,
         }),
       );
-  } catch (err) {
+  } catch (openingFailure) {
+    const openingEnding = openingFailure instanceof HarnessEndingUnconfirmedError ? openingFailure : undefined;
+    const err = openingEnding === undefined ? openingFailure : openingEnding.openingError;
     if (err instanceof FirstTestHeld) {
       if (ctx.githubDoor && deps.githubBindings) {
         if (existingPrPublication !== undefined) blockExistingPrPublication("the first test is held");
@@ -3796,10 +3849,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // end that fails here is the harness's own error, said on the record as
     // every failure of that shape is (a `harness_error` note: the cause, where
     // the `workspace_torn_down` note says the consequence) and logged: the
-    // record was read all the same, the release below must run whatever the
-    // end did, and the loop's own error — the one the record names as the
-    // run's — is the one that propagates.
-    await endHarness().catch((endErr: unknown) => {
+    // record is read, and an unconfirmed ending retains the workspace.
+    // The loop's own error is the one that propagates.
+    await endHarness(openingEnding ?? err).catch((endErr: unknown) => {
       const detail = `the harness session's end failed after the loop's own error: ${endErr instanceof Error ? endErr.message : String(endErr)}`;
       console.warn(`[run] ${msg.threadKey} ${detail}`);
       events.publish({

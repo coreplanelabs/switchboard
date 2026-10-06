@@ -5,6 +5,7 @@ import { bearerHashOf } from "../../modelProxy/runBearers.js";
 import {
   HARNESS_PORT_ENV,
   HarnessContainerError,
+  HarnessEndingUnconfirmedError,
   HarnessContainerRuntimeReplacedError,
   PORT_ARG,
   type HarnessRequest,
@@ -699,6 +700,58 @@ function harness(
 }
 
 describe("launchOpenCode — the server started through the seam and found ready", () => {
+  it.each(["server", "tailer"] as const)(
+    "an unknown %s launch retains the original root without guessing its pid",
+    async (phase) => {
+      const h = harness();
+      const unknown = new Error("launch acknowledgement unknown");
+      const start = h.container.start.bind(h.container);
+      h.container.start = async (input) => {
+        if (input.command === (phase === "server" ? OPENCODE_BIN : TAILER_BIN)) throw unknown;
+        return start(input);
+      };
+      await expect(launchOpenCode(h.deps, spec, BEARER)).rejects.toMatchObject({
+        name: "HarnessEndingUnconfirmedError",
+        runId: spec.runId,
+        openingError: unknown,
+      });
+      expect(h.container.removed).toEqual([]);
+    },
+  );
+
+  it.each(["kill", "remove"] as const)(
+    "a readiness failure preserves an unconfirmed %s before handoff",
+    async (phase) => {
+      const h = harness();
+      const closing = new Error("ending acknowledgement unknown");
+      const request = h.container.request.bind(h.container);
+      h.container.request = async (paths, req) =>
+        req.path === "/api/info" ? { status: 500, headers: {}, body: "failed readiness" } : request(paths, req);
+      h.container[phase] = async () => {
+        throw closing;
+      };
+      const error = await launchOpenCode(h.deps, spec, BEARER).catch((err: unknown) => err);
+      expect(error).toBeInstanceOf(HarnessEndingUnconfirmedError);
+      expect(error).toMatchObject({ endingError: closing });
+      expect((error as HarnessEndingUnconfirmedError).openingError).toBeInstanceOf(OpenCodeNotReadyError);
+      expect(h.container.removed).toEqual([]);
+    },
+  );
+
+  it("retains distinct server and tailer launch births in the ready facts", async () => {
+    const h = harness();
+    const birth = "11111111-1111-1111-1111-111111111111";
+    const start = h.container.start.bind(h.container);
+    h.container.start = async (input) => ({
+      ...(await start(input)),
+      processBirth: `${birth}:${input.command === OPENCODE_BIN ? "100" : "200"}`,
+    });
+    const started = await launchOpenCode(h.deps, spec, BEARER);
+    expect(
+      openCodeFacts(started, { sessionID: "ses_1", logOffset: 120, container: "vm-fake", relaunches: 0 }),
+    ).toMatchObject({ processBirth: `${birth}:100`, tailerProcessBirth: `${birth}:200` });
+  });
+
   it("writes the files, starts opencode serve on a free port with the run's environment, probes its info with the password as Basic auth, checks the configuration took, settles the plugin, and starts the tailer beside it", async () => {
     const h = harness();
     const started = await launchOpenCode(h.deps, spec, BEARER);
@@ -816,7 +869,7 @@ describe("launchOpenCode — the server started through the seam and found ready
     expect(h.clock()).toBe(1_000_000 + 3 * 250);
   });
 
-  it("fails loudly by name when the info never answers within the bound, with the server's stderr tail", async () => {
+  it("fails loudly by name when the info never answers within the bound, without a diagnostic command after expiry", async () => {
     const h = harness();
     h.container.onRequest = () => {
       throw new HarnessContainerError("request", "curl: (7) Failed to connect to 127.0.0.1 port 41000");
@@ -827,7 +880,7 @@ describe("launchOpenCode — the server started through the seam and found ready
     await expect(promise).rejects.toThrow(
       /did not answer its info within 1000 ms \(harness container: request failed — curl: \(7\)/,
     );
-    await expect(promise).rejects.toThrow(/stderr: error: EADDRINUSE/);
+    await expect(promise).rejects.not.toThrow(/EADDRINUSE/);
     expect(h.container.starts).toHaveLength(1);
   });
 
@@ -968,13 +1021,13 @@ describe("launchOpenCode — the server started through the seam and found ready
     }
   });
 
-  it("readiness ends only when the tailer says it is connected: a feed without the note within the bound is a named failure with the tailer's stderr, a tailer that exited first is another, and the feed offset answered is the byte after the note", async () => {
+  it("readiness ends only when the tailer says it is connected: a feed without the note within the bound is a named failure without a diagnostic command after expiry, a tailer that exited first is another, and the feed offset answered is the byte after the note", async () => {
     const silent = harness({ feed: false });
     silent.container.files.set(spec.paths.tailer.errLog, "tailer: ECONNREFUSED\n");
     const promise = launchOpenCode({ ...silent.deps, readyMs: 1000 }, spec, BEARER);
     await expect(promise).rejects.toBeInstanceOf(OpenCodeNotReadyError);
     await expect(promise).rejects.toThrow(/the tailer did not connect to the event stream within 1000 ms/);
-    await expect(promise).rejects.toThrow(/stderr: tailer: ECONNREFUSED/);
+    await expect(promise).rejects.not.toThrow(/ECONNREFUSED/);
     expect(silent.container.starts).toHaveLength(2);
 
     const exited = harness({ feed: false });
@@ -1020,5 +1073,40 @@ describe("launchOpenCode — the server started through the seam and found ready
     h.container.start = async () => ({ pid: 4242 });
     await expect(launchOpenCode(h.deps, spec, BEARER)).rejects.toThrow(/answered no port for opencode serve/);
     expect(h.container.requests).toHaveLength(0);
+  });
+});
+
+describe("launchOpenCode — the original deadline and cancellation", () => {
+  it("setup consumes the same readiness deadline and cannot start a server afterwards", async () => {
+    const h = harness();
+    const write = h.container.writeFile.bind(h.container);
+    h.container.writeFile = async (...args) => {
+      await h.sleep(500);
+      return write(...args);
+    };
+    await expect(launchOpenCode({ ...h.deps, readyMs: 1000 }, spec, BEARER)).rejects.toThrow(/deadline/);
+    expect(h.container.starts).toHaveLength(0);
+  });
+  it("the original run deadline caps readiness even when the info eventually answers", async () => {
+    const h = harness();
+    const request = h.container.request.bind(h.container);
+    h.container.request = async (...args) => {
+      await h.sleep(2000);
+      return request(...args);
+    };
+    await expect(launchOpenCode({ ...h.deps, deadlineAt: h.clock() + 1000 }, spec, BEARER)).rejects.toThrow(/deadline/);
+    expect(h.container.starts).toHaveLength(1);
+    expect(h.container.requests).toHaveLength(1);
+  });
+  it("a hard stop during setup admits no detached server", async () => {
+    const h = harness();
+    const stopped = new AbortController();
+    const write = h.container.writeFile.bind(h.container);
+    h.container.writeFile = async (...args) => {
+      stopped.abort();
+      return write(...args);
+    };
+    await expect(launchOpenCode({ ...h.deps, signal: stopped.signal }, spec, BEARER)).rejects.toThrow(/cancel/);
+    expect(h.container.starts).toHaveLength(0);
   });
 });

@@ -7,7 +7,7 @@ import { Writable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Executor } from "../../execution/executor.js";
 import { BotHostHarnessContainer, harnessContainerFor, type SpawnFn } from "./botHostContainer.js";
-import { ExecHarnessContainer, HARNESS_PORT_ENV, HarnessContainerError, PORT_ARG } from "./container.js";
+import { ExecHarnessContainer, HARNESS_PORT_ENV, HarnessContainerError, PORT_ARG, infraErrorOf } from "./container.js";
 import { PI_STDOUT_FILTER, piRunPaths, piRunPathsAt } from "./pi/process.js";
 
 // Feature: docs/reference/specs/harness-pi.md item 12: the container seam on
@@ -211,7 +211,7 @@ describe("BotHostHarnessContainer: pi as a child of the bot", () => {
     await expect(container.writeLine(paths, "{}")).rejects.toBeInstanceOf(HarnessContainerError);
   });
 
-  it("kill ends pi and everything in its group (TERM, then KILL for a pi that ignores TERM) and is idempotent, for an ended pid and for one this container never started", async () => {
+  it("kill ends pi and everything in its group (TERM, then KILL for a pi that ignores TERM) is idempotent for an ended pid, and refuses an unknown control target", async () => {
     const container = new BotHostHarnessContainer({ spawn: scripted(STUBBORN_PI).spawn, killGraceMs: 100 });
     const paths = await rootOf(container);
     const { pid } = await container.start({ paths, command: "pi", stdoutFilter: PI_STDOUT_FILTER, args: [], env: {} });
@@ -227,7 +227,7 @@ describe("BotHostHarnessContainer: pi as a child of the bot", () => {
     await vi.waitFor(() => expect(alive(pid)).toBe(false));
     await vi.waitFor(() => expect(alive(grandchild)).toBe(false));
     await container.kill(pid);
-    await container.kill(999_999_999);
+    await expect(container.kill(999_999_999)).rejects.toThrow(/target is unknown/);
   });
 
   it("names no container: a bot-host pi never outlives the bot, so a resume judges it by its pid alone", async () => {
@@ -463,5 +463,122 @@ describe("harnessContainerFor: the container follows the run's machine class", (
     expect(harnessContainerFor(executor, "repo-cold")).toBeInstanceOf(ExecHarnessContainer);
     expect(harnessContainerFor(executor, "blank")).toBeInstanceOf(ExecHarnessContainer);
     expect(harnessContainerFor(executor, "none")).toBeInstanceOf(BotHostHarnessContainer);
+  });
+});
+
+describe("harnessContainerFor — original run scope", () => {
+  it("uses the admitted deadline and current lease through both remote backend factories", async () => {
+    const commands: number[] = [];
+    const executor: Executor = {
+      exec: async () => {
+        throw new Error("no presentation fallback");
+      },
+      readFile: async () => "",
+      writeFile: async () => "",
+      execResult: async (_command, opts) => {
+        commands.push(opts!.timeoutMs!);
+        return { stdout: "alive", stderr: "", exitCode: 0, truncated: false };
+      },
+    };
+    for (const machine of ["repo-resident", "repo-cold"] as const) {
+      const container = harnessContainerFor(executor, machine, {
+        runId: "original",
+        deadlineAt: 10_000,
+        clock: () => 1000,
+        remainingMs: () => 5000,
+      });
+      await container.writeLine(piRunPaths("original"), "prompt");
+    }
+    expect(commands).toEqual([5000, 5000]);
+  });
+  it("a cancelled or expired host run refuses to create its root before any filesystem mutation", async () => {
+    const stopped = new AbortController();
+    stopped.abort();
+    const executor: Executor = { exec: async () => "", readFile: async () => "", writeFile: async () => "" };
+    const scope = { runId: "original", clock: () => 1000, deadlineAt: 2000, signal: stopped.signal };
+    await expect(harnessContainerFor(executor, "none", scope).makeRoot("/tmp/no-start")).rejects.toThrow(/cancel/);
+    await expect(
+      harnessContainerFor(executor, "none", { ...scope, signal: undefined, remainingMs: () => 0 }).makeRoot(
+        "/tmp/no-start",
+      ),
+    ).rejects.toThrow(/deadline/);
+  });
+});
+
+describe("BotHostHarnessContainer — typed transport uncertainty", () => {
+  it("a loopback collection failure retains typed infrastructure evidence without using diagnostic words", async () => {
+    const spy = vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(new TypeError("arbitrary collection failure"));
+    try {
+      const container = new BotHostHarnessContainer();
+      const error = await container
+        .request(piRunPaths("original"), { method: "GET", port: 41000, path: "/api/info" })
+        .catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(HarnessContainerError);
+      expect(infraErrorOf(error)?.reason).toBe("transport-lost");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe("original host producer control after admission ends", () => {
+  it.each(["cancelled", "expired"])("owns cancellation and termination after work is %s", async (kind) => {
+    const stop = new AbortController();
+    let now = 1000;
+    const container = new BotHostHarnessContainer({
+      spawn: scripted(FAKE_PI).spawn,
+      scope: { runId: "original", clock: () => now, deadlineAt: 10_000, signal: stop.signal },
+    });
+    const paths = await rootOf(container);
+    const { pid } = await container.start({ paths, command: "pi", args: [], env: {} });
+    if (kind === "cancelled") stop.abort();
+    else now = 10_000;
+    await expect(container.writeLine(paths, '{"type":"prompt"}')).rejects.toThrow();
+    await expect(container.start({ paths, command: "pi", args: [], env: {} })).rejects.toThrow();
+    await container.cancelInput(paths, '{"type":"abort"}');
+    await container.kill(pid);
+    expect(await container.alive(pid)).toBe(false);
+    await container.remove(paths);
+    expect(existsSync(paths.dir)).toBe(false);
+  });
+  it("an owned HTTP interrupt and observations survive hard stop; a foreign port is refused", async () => {
+    const stop = new AbortController();
+    const code =
+      'require("node:http").createServer((req,res)=>res.end(JSON.stringify({interrupted:true}))).listen(Number(process.env.SWITCHBOARD_HARNESS_PORT),"127.0.0.1")';
+    const container = new BotHostHarnessContainer({
+      scope: { runId: "original", clock: () => 1000, deadlineAt: 100_000, signal: stop.signal },
+    });
+    const paths = await rootOf(container);
+    const started = await container.start({ paths, command: "node", args: ["-e", code], env: {}, port: "free" });
+    const req = { method: "GET", port: started.port!, path: "/api/info" };
+    await vi.waitFor(async () => expect((await container.observeRequest(paths, req)).status).toBe(200));
+    stop.abort();
+    try {
+      await expect(container.request(paths, { ...req, method: "POST" })).rejects.toThrow(/cancel/);
+      await expect(container.cancelRequest(paths, { ...req, method: "POST", port: started.port! + 1 })).rejects.toThrow(
+        /target is unknown/,
+      );
+      expect(
+        (await container.cancelRequest(paths, { ...req, method: "POST", path: "/api/session/original/interrupt" }))
+          .body,
+      ).toBe('{"interrupted":true}');
+      expect((await container.observeRequest(paths, req)).status).toBe(200);
+    } finally {
+      await container.kill(started.pid);
+    }
+  });
+  it("unknown ownership or a live producer cannot authorize private-root removal", async () => {
+    const container = new BotHostHarnessContainer({ spawn: scripted(FAKE_PI).spawn });
+    const paths = await rootOf(container);
+    writeFileSync(`${paths.dir}/private.txt`, "retained bytes");
+    await expect(container.remove(paths)).rejects.toThrow(/target is unknown/);
+    expect(readFileSync(`${paths.dir}/private.txt`, "utf8")).toBe("retained bytes");
+    const { pid } = await container.start({ paths, command: "pi", args: [], env: {} });
+    try {
+      await expect(container.remove(paths)).rejects.toThrow(/no confirmed exit/);
+      expect(readFileSync(`${paths.dir}/private.txt`, "utf8")).toBe("retained bytes");
+    } finally {
+      await container.kill(pid);
+    }
   });
 });

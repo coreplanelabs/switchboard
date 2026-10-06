@@ -19,12 +19,12 @@
 
 import { spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { createWriteStream } from "node:fs";
-import { mkdir, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { dirname } from "node:path";
 import type { Writable } from "node:stream";
 import type { MachineClass } from "../../agents/registry.js";
-import type { Executor } from "../../execution/executor.js";
+import { ExecInfraError, infraReasonOfRequestFailure, type Executor } from "../../execution/executor.js";
 import { publicEnv, type EnvRecord } from "../../secrets.js";
 import {
   checkPortArg,
@@ -34,6 +34,8 @@ import {
   OP_TIMEOUT_MS,
   PORT_ARG,
   type HarnessContainer,
+  type HarnessOperationScope,
+  HarnessOperationEndedError,
   type HarnessPaths,
   type HarnessRequest,
   type HarnessResponse,
@@ -45,6 +47,7 @@ import { jsonlLines } from "./pi/protocol.js";
 export type SpawnFn = (command: string, args: string[], options: SpawnOptions) => ChildProcess;
 
 export interface BotHostHarnessContainerDeps {
+  scope?: HarnessOperationScope;
   /** The process spawner; a test runs Node in the harness process's place. */
   spawn?: SpawnFn;
   /** The host environment PATH and HOME are read from; the process's public
@@ -65,6 +68,7 @@ export interface BotHostHarnessContainerDeps {
 interface Child {
   process: ChildProcess;
   pid: number;
+  port?: number;
   exited: boolean;
   /** Every stdout line has been filtered into the log and the streams are closed. */
   drained: Promise<void>;
@@ -84,6 +88,7 @@ async function freeLoopbackPort(): Promise<number> {
 }
 
 export class BotHostHarnessContainer implements HarnessContainer {
+  private readonly scope?: HarnessOperationScope;
   private readonly byDir = new Map<string, Child>();
   private readonly byPid = new Map<number, Child>();
   private readonly spawn: SpawnFn;
@@ -95,6 +100,7 @@ export class BotHostHarnessContainer implements HarnessContainer {
   private readonly requestTimeoutMs: number;
 
   constructor(deps: BotHostHarnessContainerDeps = {}) {
+    this.scope = deps.scope;
     this.spawn = deps.spawn ?? (nodeSpawn as SpawnFn);
     this.env = deps.env ?? publicEnv();
     this.killGraceMs = deps.killGraceMs ?? 1000;
@@ -104,11 +110,23 @@ export class BotHostHarnessContainer implements HarnessContainer {
     this.requestTimeoutMs = deps.requestTimeoutMs ?? OP_TIMEOUT_MS;
   }
 
+  private remaining(operation: string): number {
+    const scope = this.scope;
+    if (scope?.signal?.aborted) throw new HarnessOperationEndedError(operation, scope.runId, "cancelled");
+    const remaining =
+      scope === undefined
+        ? Infinity
+        : Math.min((scope.deadlineAt ?? Infinity) - scope.clock(), scope.remainingMs?.() ?? Infinity);
+    if (remaining <= 0) throw new HarnessOperationEndedError(operation, scope!.runId, "deadline");
+    return remaining;
+  }
+
   /** A root of the run's own, made here and nowhere else: `mkdtemp` beside the
    *  root the harness proposed, on its name as the prefix, exclusive and 700
    *  in one call, with a suffix nobody can guess. The harness records it on
    *  the row (harness-pi item 8), so the next generation finds it there. */
   async makeRoot(wanted: string): Promise<string> {
+    this.remaining("makeRoot");
     try {
       return await mkdtemp(`${wanted}-`);
     } catch (err) {
@@ -130,6 +148,7 @@ export class BotHostHarnessContainer implements HarnessContainer {
    *  harness writes it, so a path already present is a named failure, never
    *  followed or truncated. */
   async writeFile(path: string, content: string): Promise<void> {
+    this.remaining("writeFile");
     try {
       await mkdir(dirname(path), { recursive: true, mode: 0o700 });
       await writeFile(path, content, { mode: 0o600, flag: "wx" });
@@ -145,6 +164,7 @@ export class BotHostHarnessContainer implements HarnessContainer {
    *  spawn that fails is a named failure, and a process that was spawned but
    *  could not be tracked is ended before the failure. */
   async start(start: HarnessStart): Promise<HarnessStarted> {
+    this.remaining("start");
     checkPortArg(start);
     const { paths } = start;
     try {
@@ -163,6 +183,7 @@ export class BotHostHarnessContainer implements HarnessContainer {
       ...start.env,
       ...(port === undefined ? {} : { [HARNESS_PORT_ENV]: String(port) }),
     };
+    this.remaining("start");
     const child = this.spawn(start.command, args, {
       cwd: paths.dir,
       env,
@@ -211,7 +232,7 @@ export class BotHostHarnessContainer implements HarnessContainer {
       if (logFailed) log.destroy();
       else await new Promise<void>((r) => log.end(() => r()));
     })().catch(() => {});
-    const entry: Child = { process: child, pid, exited: false, drained };
+    const entry: Child = { process: child, pid, ...(port === undefined ? {} : { port }), exited: false, drained };
     child.once("exit", () => {
       entry.exited = true;
     });
@@ -233,6 +254,15 @@ export class BotHostHarnessContainer implements HarnessContainer {
 
   /** One protocol line into the process's stdin; a pipe has no line length to keep under. */
   async writeLine(paths: HarnessPaths, line: string): Promise<void> {
+    this.remaining("writeLine");
+    return this.sendInput(paths, line);
+  }
+
+  async cancelInput(paths: HarnessPaths, line: string): Promise<void> {
+    return this.sendInput(paths, line);
+  }
+
+  private async sendInput(paths: HarnessPaths, line: string): Promise<void> {
     const child = this.byDir.get(paths.dir);
     if (!child || child.exited || !child.process.stdin || child.process.stdin.destroyed)
       throw new HarnessContainerError("send", `no process is running for ${paths.dir} on this host`);
@@ -280,6 +310,23 @@ export class BotHostHarnessContainer implements HarnessContainer {
    *  does not answer, or not in time, is a named failure. A secret header is a
    *  header here — nothing is logged on this road. */
   async request(_paths: HarnessPaths, req: HarnessRequest): Promise<HarnessResponse> {
+    return this.fetchResponse(req, Math.min(this.requestTimeoutMs, this.remaining("request")), this.scope?.signal);
+  }
+
+  async cancelRequest(paths: HarnessPaths, req: HarnessRequest): Promise<HarnessResponse> {
+    const child = this.byDir.get(paths.dir);
+    if (!child || child.port !== req.port)
+      throw new HarnessContainerError("cancel", "the original producer target is unknown");
+    return this.fetchResponse(req, this.requestTimeoutMs);
+  }
+
+  async observeRequest(_paths: HarnessPaths, req: HarnessRequest): Promise<HarnessResponse> {
+    if (!["GET", "HEAD", "OPTIONS"].includes(req.method))
+      throw new HarnessContainerError("observation", "a mutating HTTP request is not an observation");
+    return this.fetchResponse(req, this.requestTimeoutMs);
+  }
+
+  private async fetchResponse(req: HarnessRequest, timeoutMs: number, stop?: AbortSignal): Promise<HarnessResponse> {
     if (!Number.isInteger(req.port) || req.port < 1 || req.port > 65535)
       throw new HarnessContainerError("request", `not a port: ${String(req.port)}`);
     if (!req.path.startsWith("/")) throw new HarnessContainerError("request", `not a path: ${req.path}`);
@@ -288,11 +335,13 @@ export class BotHostHarnessContainer implements HarnessContainer {
         method: req.method,
         headers: { ...req.headers, ...req.secretHeaders },
         ...(req.body !== undefined ? { body: req.body } : {}),
-        signal: AbortSignal.timeout(this.requestTimeoutMs),
+        signal: AbortSignal.any([AbortSignal.timeout(Math.ceil(timeoutMs)), ...(stop ? [stop] : [])]),
       });
       return { status: res.status, headers: Object.fromEntries(res.headers), body: await res.text() };
     } catch (err) {
-      throw new HarnessContainerError("request", message(err));
+      const failure = new HarnessContainerError("request", message(err));
+      failure.cause = new ExecInfraError(message(err), infraReasonOfRequestFailure(err, stop));
+      throw failure;
     }
   }
 
@@ -301,7 +350,8 @@ export class BotHostHarnessContainer implements HarnessContainer {
    *  ended, is nothing to end. */
   async kill(pid: number): Promise<void> {
     const child = this.byPid.get(pid);
-    if (!child || child.exited) return;
+    if (!child) throw new HarnessContainerError("kill", "the original producer target is unknown");
+    if (child.exited) return;
     signal(pid, "SIGTERM");
     const step = Math.min(20, this.killGraceMs);
     for (let waited = 0; !child.exited && waited < this.killGraceMs; waited += step) await this.sleep(step);
@@ -332,13 +382,21 @@ export class BotHostHarnessContainer implements HarnessContainer {
    *  never waited for); a directory already gone is not a failure. */
   async remove(paths: HarnessPaths): Promise<void> {
     const child = this.byDir.get(paths.dir);
-    if (child) {
-      this.byDir.delete(paths.dir);
-      this.byPid.delete(child.pid);
-      if (child.exited) await child.drained.catch(() => {});
+    if (!child) {
+      try {
+        await lstat(paths.dir);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+        throw error;
+      }
+      throw new HarnessContainerError("remove", "the original producer target is unknown");
     }
+    if (!child.exited) throw new HarnessContainerError("remove", "the original producer has no confirmed exit");
+    await child.drained;
     try {
       await rm(paths.dir, { recursive: true, force: true });
+      this.byDir.delete(paths.dir);
+      this.byPid.delete(child.pid);
     } catch (err) {
       throw new HarnessContainerError("remove", message(err));
     }
@@ -364,6 +422,10 @@ function message(err: unknown): string {
  *  machine class: a class with a workspace has an executor to exec through
  *  and the container is over it; `none` has no executor at all, so the
  *  process runs on the bot host. */
-export function harnessContainerFor(executor: Executor, machine: MachineClass): HarnessContainer {
-  return machine === "none" ? new BotHostHarnessContainer() : new ExecHarnessContainer(executor);
+export function harnessContainerFor(
+  executor: Executor,
+  machine: MachineClass,
+  scope?: HarnessOperationScope,
+): HarnessContainer {
+  return machine === "none" ? new BotHostHarnessContainer({ scope }) : new ExecHarnessContainer(executor, scope);
 }

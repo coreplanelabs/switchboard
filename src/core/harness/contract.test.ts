@@ -233,6 +233,12 @@ describe("HarnessContainerReplacedError — the condition's tag and the words it
 });
 
 describe("harnessFactsOf — a row's facts, read by the harness that wrote them", () => {
+  it("preserves the OpenCode tailer's launch identity separately and drops malformed evidence", () => {
+    const tailerProcessBirth = "11111111-1111-1111-1111-111111111111:456";
+    expect(harnessFactsOf({ ...OPENCODE_FACTS, tailerProcessBirth })).toMatchObject({ tailerProcessBirth });
+    expect(harnessFactsOf(OPENCODE_FACTS)).not.toHaveProperty("tailerProcessBirth");
+    expect(harnessFactsOf({ ...OPENCODE_FACTS, tailerProcessBirth: 456 })).not.toHaveProperty("tailerProcessBirth");
+  });
   it("preserves launch identity for both harnesses and leaves legacy rows unattested", () => {
     const birth = "11111111-1111-1111-1111-111111111111:123";
     for (const facts of [piFactsIn(), OPENCODE_FACTS]) {
@@ -403,7 +409,7 @@ describe("PiHarness — pi as the contract's object", () => {
     expect(c.removed).toEqual([]);
   });
 
-  it("end kills the pid and removes the root the facts name; a row without a root ends the pid alone; a remove that fails is swallowed, like the session's own end", async () => {
+  it("end kills the pid and removes the root the facts name; a row without a root ends the pid alone; an unconfirmed remove propagates to the original owner", async () => {
     const pi = new PiHarness();
     const c = new FakeHarnessContainer();
     await pi.end({ harness: "pi", pid: 777, logOffset: 10, root: "/tmp/switchboard-pi-old", relaunches: 0 }, c);
@@ -415,9 +421,9 @@ describe("PiHarness — pi as the contract's object", () => {
     expect(d.removed).toEqual([]);
     const e = new FakeHarnessContainer();
     e.failNext = { operation: "remove", error: new Error("rm: refused") };
-    await expect(
-      pi.end({ harness: "pi", pid: 1, logOffset: 0, root: "/tmp/x", relaunches: 0 }, e),
-    ).resolves.toBeUndefined();
+    await expect(pi.end({ harness: "pi", pid: 1, logOffset: 0, root: "/tmp/x", relaunches: 0 }, e)).rejects.toThrow(
+      "rm: refused",
+    );
     expect(e.killed).toEqual([1]);
   });
 

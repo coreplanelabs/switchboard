@@ -24,13 +24,17 @@ import {
   ExecSandboxRestartedError,
   infraMayClear,
   type Executor,
+  type ExecResult,
 } from "../../execution/executor.js";
+import { BASH_TIMEOUT_MIN_MS } from "../../execution/bashTimeout.js";
 import { STOPPED_CONTAINER_WORDING } from "../../execution/residentRefresh.js";
 import { CONTAINER_GONE_WORDING } from "../../execution/residentWake.js";
 import { SANDBOX_START_BACKOFF_MS } from "../../execution/sandboxErrors.js";
+import { systemClock } from "../trace/clock.js";
+import type { Clock } from "../trace/types.js";
 import { HARNESS_PROBE_WAIT_MS } from "../budgets.js";
 import { shellQuote } from "../../execution/shellQuote.js";
-import { parseExitPrefix, redactAndCap } from "../runEvents.js";
+import { redactAndCap } from "../runEvents.js";
 
 /** The files a harness's process is driven through under the run's root, as
  *  the harness lays them out: the root and every directory the start makes
@@ -136,6 +140,11 @@ export interface HarnessContainer {
   start(start: HarnessStart): Promise<HarnessStarted>;
   /** One protocol line into the process's stdin. */
   writeLine(paths: HarnessPaths, line: string): Promise<void>;
+  /** Trusted producer cancellation; never a model command or a stop receipt. */
+  cancelInput(paths: HarnessPaths, line: string): Promise<void>;
+  cancelRequest(paths: HarnessPaths, req: HarnessRequest): Promise<HarnessResponse>;
+  /** Read-only producer observation, independent of model admission. */
+  observeRequest(paths: HarnessPaths, req: HarnessRequest): Promise<HarnessResponse>;
   /** Up to `maxBytes` of the log from `offset` — exact bytes, so the caller's offset arithmetic holds. */
   readLog(path: string, offset: number, maxBytes: number): Promise<Uint8Array>;
   alive(pid: number): Promise<boolean>;
@@ -431,16 +440,9 @@ export function requestScript(req: HarnessRequest, bodyFile?: string): string {
   return curl;
 }
 
-/** The exec's answer to a request as the response: an HTTP answer is parsed as
- *  it is — the server's body is anyone's text, so the executors' runtime word
- *  is never looked for in it — and anything else goes through `stdoutOf`,
- *  where the runtime word is the typed container-gone failure, a failed curl
- *  (`exit N:`) is a named failure, and any other text is no HTTP answer. */
-export function requestOutcome(out: string): HarnessResponse {
-  const cut = out.indexOf(STDERR_MARK);
-  const stdout = cut >= 0 ? out.slice(0, cut) : out;
-  if (/^HTTP\//.test(stdout)) return parseHttpResponse(stdout);
-  return parseHttpResponse(stdoutOf("request", out));
+/** Validate the command outcome before decoding its exact HTTP stdout. */
+export function requestOutcome(result: ExecResult): HarnessResponse {
+  return parseHttpResponse(stdoutOf("request", result));
 }
 
 /** `curl -i`'s output as the answer: the status line, the headers (lowercased
@@ -470,23 +472,11 @@ export function parseHttpResponse(raw: string): HarnessResponse {
   }
 }
 
-const STDERR_MARK = "\n--- stderr ---\n";
-
-/** The executors' word for the runtime under a command being gone: the
- *  resident's `runtime-replaced` (an isolate swapped under the command,
- *  resident-repos item 43) and the sandbox's `runtime-unreachable` (a runtime
- *  nothing answered, execution item 9). The word counts wherever it sits: an
- *  executor puts its own words around it (`resident /exec: …`, `exit 127:` and
- *  a newline), and the seam's commands print a pid, a port, a boot id,
- *  `alive`/`dead`, base64, an HTTP answer or nothing — never the word — so a
- *  text carrying it is the executor's, not the command's. The harness reads it
- *  for a container replaced under the run (harness-pi item 16). */
+/** Legacy thrown transport diagnostics. Structured command streams are excluded
+ *  from infrastructure classification even when they contain these words. */
 export const RUNTIME_WORD = /\bruntime-(?:unreachable|replaced)\b/;
 
-/** A container command answered with the executors' word for a replaced
- *  runtime in place of the command's output (`stdoutOf`): the command may
- *  never have run, and the harness reads the failure as the container replaced
- *  under the run (harness-pi item 16) — by this type, never by the words. */
+/** A typed replacement verdict raised by a transport adapter, never decoded from command stdout. */
 export class HarnessContainerRuntimeReplacedError extends HarnessContainerError {
   constructor(operation: string, detail: string) {
     super(operation, detail);
@@ -562,6 +552,7 @@ export async function identityOrNothing(container: Pick<HarnessContainer, "ident
 export function saysContainerDown(err: unknown): boolean {
   return (
     err instanceof Error &&
+    !(err instanceof HarnessCommandOutcomeError || err instanceof HarnessOperationEndedError) &&
     !isContainerGone(err) &&
     !RUNTIME_WORD.test(err.message) &&
     CONTAINER_DOWN_WORDING.test(err.message)
@@ -609,7 +600,14 @@ export function infraErrorOf(err: unknown): ExecInfraError | undefined {
  *  control file lost (the container answered), never a command that failed as
  *  a command. */
 export function saysTransportLost(err: unknown): boolean {
-  if (!(err instanceof Error) || isContainerGone(err) || RUNTIME_WORD.test(err.message)) return false;
+  if (
+    !(err instanceof Error) ||
+    err instanceof HarnessCommandOutcomeError ||
+    err instanceof HarnessOperationEndedError ||
+    isContainerGone(err) ||
+    RUNTIME_WORD.test(err.message)
+  )
+    return false;
   if (err instanceof HarnessControlFileLostError) return false;
   const typed = infraErrorOf(err);
   if (typed !== undefined) {
@@ -659,6 +657,7 @@ export function isControlReset(err: unknown): err is ExecControlResetError | Har
  *  the seam's own commands never print it, so a failure carrying it is the
  *  executor's. A failure without any of that is the failure it was. */
 export function saysContainerReplaced(err: unknown): boolean {
+  if (err instanceof HarnessCommandOutcomeError || err instanceof HarnessOperationEndedError) return false;
   if (err instanceof ExecSandboxRestartedError || err instanceof HarnessContainerRuntimeReplacedError) return true;
   return err instanceof Error && RUNTIME_WORD.test(err.message);
 }
@@ -866,21 +865,86 @@ export function replacedBecause(condition: ReplacedCondition, said: string | und
   return `the executor said: ${redactAndCap((said ?? "").replace(/\s+/g, " ").trim(), 240)}`;
 }
 
-/** The stdout of an executor's answer: the executors' runtime word anywhere in
- *  it is the typed failure naming it, the `exit N:` prefix is a failure, the
- *  stderr the executors append is dropped, the empty marker is empty. */
-export function stdoutOf(operation: string, out: string): string {
-  if (RUNTIME_WORD.test(out)) throw new HarnessContainerRuntimeReplacedError(operation, out);
-  if (parseExitPrefix(out).failed) throw new HarnessContainerError(operation, out);
-  const cut = out.indexOf(STDERR_MARK);
-  const stdout = cut >= 0 ? out.slice(0, cut) : out;
-  return stdout === "(no output)" ? "" : stdout;
+/** A command result is data, including diagnostic words; it is never an infrastructure verdict. */
+export class HarnessCommandOutcomeError extends HarnessContainerError {
+  constructor(
+    operation: string,
+    readonly result: ExecResult,
+  ) {
+    super(
+      operation,
+      result.truncated
+        ? "the command output was truncated; its outcome is unconfirmed"
+        : `exit ${result.exitCode}: ${result.stderr}`,
+    );
+    this.name = "HarnessCommandOutcomeError";
+  }
 }
+
+/** Validate structured command facts before interpreting stdout as protocol data. */
+export function stdoutOf(operation: string, result: ExecResult): string {
+  if (result.truncated) throw new HarnessCommandOutcomeError(operation, result);
+  if (!Number.isInteger(result.exitCode) || result.exitCode !== 0)
+    throw new HarnessCommandOutcomeError(operation, result);
+  return result.stdout;
+}
+
+/** A launched producer's local ending failed before a session could be handed over.
+ *  This carries negative custody evidence, never a physical stop receipt. */
+export class HarnessEndingUnconfirmedError extends Error {
+  constructor(
+    readonly runId: string,
+    readonly openingError: unknown,
+    readonly endingError: unknown,
+  ) {
+    super("The original producer ending is unconfirmed.", { cause: endingError });
+    this.name = "HarnessEndingUnconfirmedError";
+  }
+}
+
+/** The original run's bound, shared by setup, transport retries and collection. */
+export interface HarnessOperationScope {
+  runId: string;
+  deadlineAt?: number;
+  /** The existing run-control lease, once admitted; never a new lease. */
+  remainingMs?: () => number | undefined;
+  clock: Clock;
+  signal?: AbortSignal;
+}
+
+/** Admission ended; this does not attest that a previously launched process stopped. */
+export class HarnessOperationEndedError extends HarnessContainerError {
+  constructor(
+    operation: string,
+    readonly runId: string | undefined,
+    readonly reason: "cancelled" | "deadline",
+  ) {
+    super(operation, `the original run was ${reason === "cancelled" ? "cancelled" : "past its deadline"}`);
+    this.name = "HarnessOperationEndedError";
+  }
+}
+
+/** Closed transport operations; lifecycle control cannot execute an arbitrary model command. */
+type HarnessControlOperation =
+  | { kind: "input"; paths: HarnessPaths; line: string }
+  | { kind: "http"; request: HarnessRequest; observation: boolean }
+  | { kind: "alive"; pid: number }
+  | { kind: "identity" }
+  | { kind: "log"; path: string; offset: number; maxBytes: number }
+  | { kind: "tail"; path: string; bytes: number }
+  | { kind: "kill"; pid: number }
+  | { kind: "remove"; paths: HarnessPaths };
 
 export class ExecHarnessContainer implements HarnessContainer {
   private commandNo = 0;
+  private readonly clock: Clock;
 
-  constructor(private readonly executor: Executor) {}
+  constructor(
+    private readonly executor: Executor,
+    private readonly scope?: HarnessOperationScope,
+  ) {
+    this.clock = scope?.clock ?? systemClock;
+  }
 
   /** The root the harness proposes, directly under the sticky /tmp: no command
    *  runs here, the write and start scripts make it at 700 as the thread's user
@@ -953,13 +1017,27 @@ export class ExecHarnessContainer implements HarnessContainer {
     }
   }
 
+  async cancelInput(paths: HarnessPaths, line: string): Promise<void> {
+    await this.onControlFile("cancel", paths.fifo, paths, async () =>
+      stdoutOf("cancel", await this.control({ kind: "input", paths, line })),
+    );
+  }
+
+  async cancelRequest(_paths: HarnessPaths, req: HarnessRequest): Promise<HarnessResponse> {
+    return requestOutcome(await this.control({ kind: "http", request: req, observation: false }));
+  }
+
+  async observeRequest(_paths: HarnessPaths, req: HarnessRequest): Promise<HarnessResponse> {
+    return requestOutcome(await this.control({ kind: "http", request: req, observation: true }));
+  }
+
   async readLog(path: string, offset: number, maxBytes: number): Promise<Uint8Array> {
-    const b64 = stdoutOf("read", await this.execIdempotent("read", readLogScript(path, offset, maxBytes))).trim();
+    const b64 = stdoutOf("read", await this.control({ kind: "log", path, offset, maxBytes })).trim();
     return b64 ? new Uint8Array(Buffer.from(b64, "base64")) : new Uint8Array(0);
   }
 
   async alive(pid: number): Promise<boolean> {
-    return stdoutOf("alive", await this.execIdempotent("alive", aliveScript(pid))).trim() === "alive";
+    return stdoutOf("alive", await this.control({ kind: "alive", pid })).trim() === "alive";
   }
 
   /** One word or nothing: an empty answer, a malformed one or a command the
@@ -985,10 +1063,15 @@ export class ExecHarnessContainer implements HarnessContainer {
    *  `identityOrNothing`. */
   async identity(): Promise<string | undefined> {
     try {
-      const word = stdoutOf("identity", await this.execIdempotent("identity", identityScript())).trim();
+      const word = stdoutOf("identity", await this.control({ kind: "identity" })).trim();
       return IDENTITY_WORD.test(word) ? word : undefined;
     } catch (err) {
-      if (isContainerGone(err)) throw err;
+      if (
+        isContainerGone(err) ||
+        err instanceof HarnessOperationEndedError ||
+        (err instanceof HarnessCommandOutcomeError && err.result.truncated)
+      )
+        throw err;
       // A control reset over the probe (the resident's Durable Object reset, so
       // `execIdempotent` re-sent once and a second reset came) is the container
       // unchanged, never a container with no name: it is thrown for the caller
@@ -1037,23 +1120,125 @@ export class ExecHarnessContainer implements HarnessContainer {
   }
 
   async kill(pid: number): Promise<void> {
-    stdoutOf("kill", await this.execIdempotent("kill", killScript(pid)));
+    stdoutOf("kill", await this.control({ kind: "kill", pid }));
   }
 
   async tail(path: string, bytes: number): Promise<string> {
-    try {
-      return stdoutOf("tail", await this.execIdempotent("tail", tailScript(path, bytes)));
-    } catch {
-      return "";
-    }
+    return stdoutOf("tail", await this.control({ kind: "tail", path, bytes }));
   }
 
   async remove(paths: HarnessPaths): Promise<void> {
-    stdoutOf("remove", await this.execIdempotent("remove", removeScript(paths.dir)));
+    stdoutOf("remove", await this.control({ kind: "remove", paths }));
   }
 
-  private exec(script: string, env?: Record<string, string>): Promise<string> {
-    return this.executor.exec(script, { timeoutMs: OP_TIMEOUT_MS, ...(env ? { env } : {}) });
+  private operationDeadline(): number {
+    const now = this.clock();
+    return Math.min(
+      this.scope?.deadlineAt ?? Infinity,
+      now + OP_TIMEOUT_MS,
+      now + (this.scope?.remainingMs?.() ?? Infinity),
+    );
+  }
+
+  private async exec(
+    script: string,
+    env?: Record<string, string>,
+    deadlineAt = this.operationDeadline(),
+  ): Promise<ExecResult> {
+    const scope = this.scope;
+    if (scope?.signal?.aborted) throw new HarnessOperationEndedError("execute", scope.runId, "cancelled");
+    const remaining = deadlineAt - this.clock();
+    // Executors defensively clamp command budgets to at least one second.
+    // Refuse a smaller remainder rather than silently extend this operation.
+    if (remaining < BASH_TIMEOUT_MIN_MS) throw new HarnessOperationEndedError("execute", scope?.runId, "deadline");
+    if (!this.executor.execResult)
+      throw new HarnessContainerError("execute", "structured command outcomes are unavailable");
+    return this.executeBounded(script, remaining, env, scope?.signal);
+  }
+
+  private async executeBounded(
+    script: string,
+    remaining: number,
+    env?: Record<string, string>,
+    stop?: AbortSignal,
+  ): Promise<ExecResult> {
+    if (!this.executor.execResult)
+      throw new HarnessContainerError("execute", "structured command outcomes are unavailable");
+    const bounded = new AbortController();
+    const timer = setTimeout(
+      () => bounded.abort(new DOMException("The original operation deadline passed", "TimeoutError")),
+      remaining,
+    );
+    timer.unref?.();
+    const signal = stop === undefined ? bounded.signal : AbortSignal.any([bounded.signal, stop]);
+    try {
+      return await this.executor.execResult(script, { timeoutMs: remaining, signal, ...(env ? { env } : {}) });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async control(input: HarnessControlOperation): Promise<ExecResult> {
+    const deadlineAt = this.clock() + OP_TIMEOUT_MS;
+    let script: string;
+    let env: Record<string, string> | undefined;
+    let idempotent = true;
+    switch (input.kind) {
+      case "input":
+        if (input.line.length > INLINE_LINE_CHARS)
+          throw new HarnessContainerError("cancel", "the cancellation instruction is too large");
+        script = writeLineScript(input.paths.fifo, input.line);
+        idempotent = false;
+        break;
+      case "http":
+        if (input.observation && !["GET", "HEAD", "OPTIONS"].includes(input.request.method))
+          throw new HarnessContainerError("observation", "a mutating HTTP request is not an observation");
+        if (input.request.body !== undefined && input.request.body.length > INLINE_LINE_CHARS)
+          throw new HarnessContainerError("cancel", "the cancellation body is too large");
+        script = requestScript(input.request);
+        env = requestEnv(input.request);
+        idempotent = input.observation;
+        break;
+      case "alive":
+        script = aliveScript(input.pid);
+        break;
+      case "identity":
+        script = identityScript();
+        break;
+      case "log":
+        script = readLogScript(input.path, input.offset, input.maxBytes);
+        break;
+      case "tail":
+        script = tailScript(input.path, input.bytes);
+        break;
+      case "kill":
+        if (!Number.isSafeInteger(input.pid) || input.pid <= 1)
+          throw new HarnessContainerError("kill", "the control target is unknown");
+        script = killScript(input.pid);
+        break;
+      case "remove":
+        script = removeScript(input.paths.dir);
+        break;
+    }
+    const send = () => {
+      const remaining = deadlineAt - this.clock();
+      if (remaining < BASH_TIMEOUT_MIN_MS)
+        throw new HarnessOperationEndedError(input.kind, this.scope?.runId, "deadline");
+      return this.executeBounded(script, remaining, env);
+    };
+    try {
+      return await send();
+    } catch (error) {
+      if (!(error instanceof ExecControlResetError)) throw error;
+      if (!idempotent) throw new HarnessContainerControlResetError(input.kind, error.message);
+      try {
+        return await send();
+      } catch (again) {
+        if (again instanceof ExecControlResetError)
+          throw new HarnessContainerControlResetError(input.kind, again.message);
+        throw again;
+      }
+    }
   }
 
   /** Run an idempotent container operation, re-sending it ONCE if the executor
@@ -1062,13 +1247,14 @@ export class ExecHarnessContainer implements HarnessContainer {
    *  safe. A second control reset is the outcome-unknown case, raised as the
    *  seam's own `HarnessContainerControlResetError` for the harness to judge —
    *  never the replaced verdict. */
-  private async execIdempotent(operation: string, script: string, env?: Record<string, string>): Promise<string> {
+  private async execIdempotent(operation: string, script: string, env?: Record<string, string>): Promise<ExecResult> {
+    const deadlineAt = this.operationDeadline();
     try {
-      return await this.exec(script, env);
+      return await this.exec(script, env, deadlineAt);
     } catch (err) {
       if (!(err instanceof ExecControlResetError)) throw err;
       try {
-        return await this.exec(script, env);
+        return await this.exec(script, env, deadlineAt);
       } catch (again) {
         if (again instanceof ExecControlResetError)
           throw new HarnessContainerControlResetError(operation, again.message);
@@ -1081,7 +1267,7 @@ export class ExecHarnessContainer implements HarnessContainer {
    *  outcome is unknown, so it is raised as the seam's own for the harness to
    *  resolve by pi's echo (harness-pi item 16) — a blind re-send would duplicate
    *  a prompt or steer, a corruption. */
-  private async execWrite(operation: string, script: string, env?: Record<string, string>): Promise<string> {
+  private async execWrite(operation: string, script: string, env?: Record<string, string>): Promise<ExecResult> {
     try {
       return await this.exec(script, env);
     } catch (err) {

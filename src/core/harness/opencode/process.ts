@@ -1,3 +1,4 @@
+import { HarnessEndingUnconfirmedError, HarnessOperationEndedError } from "../container.js";
 // How a run's OpenCode is launched (docs/reference/specs/harness.md, the
 // OpenCode process item; record 0038's fourth amendment): the layout of the
 // run's directory — per-run XDG roots, the configuration
@@ -624,6 +625,9 @@ export interface OpenCodeLaunchDeps {
   pollMs?: number;
   /** The bound on readiness; the seam's default otherwise. */
   readyMs?: number;
+  /** The original admitted run bound, never renewed by setup or readiness. */
+  deadlineAt?: number;
+  signal?: AbortSignal;
 }
 
 /** What a launch answers: the server's pid (the wrapper's, the group it runs
@@ -635,6 +639,7 @@ export interface OpenCodeStarted {
   processBirth?: string;
   port: number;
   tailerPid: number;
+  tailerProcessBirth?: string;
   password: string;
   paths: OpenCodeRunPaths;
   version: string;
@@ -658,132 +663,208 @@ export async function launchOpenCode(
   const { container, clock, sleep } = deps;
   const pollMs = deps.pollMs ?? OPENCODE_READY_POLL_MS;
   const readyMs = deps.readyMs ?? OPENCODE_READY_MS;
-  const root = await container.makeRoot(spec.paths.dir);
+  const startedAt = clock();
+  const deadline = Math.min(startedAt + readyMs, deps.deadlineAt ?? Infinity);
+  let phase: "setup" | "info" | "plugin" | "tailer" = "setup";
+  let last = "no answer yet";
+  const check = () => {
+    if (deps.signal?.aborted) throw new HarnessOperationEndedError("readiness", spec.runId, "cancelled");
+    if (deps.deadlineAt !== undefined && clock() >= deps.deadlineAt)
+      throw new HarnessOperationEndedError("readiness", spec.runId, "deadline");
+    if (clock() >= deadline)
+      throw new OpenCodeNotReadyError(
+        phase === "info"
+          ? `the server did not answer its info within ${readyMs} ms (${last})`
+          : phase === "plugin"
+            ? `the relay plugin did not activate within ${readyMs} ms`
+            : phase === "tailer"
+              ? `the tailer did not connect to the event stream within ${readyMs} ms`
+              : "the readiness deadline expired during setup",
+        "",
+      );
+  };
+  const perform = async <T>(operation: () => Promise<T>): Promise<T> => {
+    check();
+    return operation();
+  };
+  const pause = async (ms: number) => {
+    check();
+    await sleep(Math.min(ms, deadline - clock()));
+    check();
+  };
+  const root = await perform(() => container.makeRoot(spec.paths.dir));
   const paths = root === spec.paths.dir ? spec.paths : openCodeRunPathsAt(root);
   const placed: OpenCodeLaunchSpec = { ...spec, paths };
-  for (const file of openCodeLaunchFiles(placed)) await container.writeFile(file.path, file.content);
+  for (const file of openCodeLaunchFiles(placed)) await perform(() => container.writeFile(file.path, file.content));
   const password = openCodePassword(bearer);
-  const started = await container.start({
-    paths,
-    command: OPENCODE_BIN,
-    args: openCodeLaunchArgs(),
-    env: openCodeLaunchEnv(placed, bearer, password),
-    port: "free",
-  });
-  if (started.port === undefined)
-    throw new HarnessContainerError("start", "the start answered no port for opencode serve");
-  const { pid, port } = started;
-  const auth = { Authorization: openCodeAuthHeader(password) };
-  const request = (route: { method: string; path: string }): Promise<HarnessResponse> =>
-    container.request(paths, { method: route.method, port, path: route.path, secretHeaders: auth });
-  const notReady = async (reason: string, errLog = paths.errLog) =>
-    new OpenCodeNotReadyError(reason, await container.tail(errLog, READY_TAIL_BYTES));
+  // A rejected start does not prove that no child exists. Keep the root
+  // when its launch answer is unknown; only acknowledged children are ended.
+  let launchPending = false;
+  let serverPid: number | undefined;
+  let tailerPid: number | undefined;
+  try {
+    const started = await perform(() => {
+      launchPending = true;
+      return container.start({
+        paths,
+        command: OPENCODE_BIN,
+        args: openCodeLaunchArgs(),
+        env: openCodeLaunchEnv(placed, bearer, password),
+        port: "free",
+      });
+    });
+    launchPending = false;
+    serverPid = started.pid;
+    if (started.port === undefined)
+      throw new HarnessContainerError("start", "the start answered no port for opencode serve");
+    const { pid, port } = started;
+    const auth = { Authorization: openCodeAuthHeader(password) };
+    const request = (route: { method: string; path: string }): Promise<HarnessResponse> =>
+      perform(() => container.request(paths, { method: route.method, port, path: route.path, secretHeaders: auth }));
+    const notReady = async (reason: string, errLog = paths.errLog) =>
+      new OpenCodeNotReadyError(reason, await container.tail(errLog, READY_TAIL_BYTES));
 
-  const startedAt = clock();
-  const deadline = startedAt + readyMs;
-  let last = "no answer yet";
-  let version: string | undefined;
-  // A server that answered any status is alive: the pid is probed only before
-  // the first request and after a request that reached no server, and the
-  // poll backs off once the first second has passed — on the exec classes
-  // every probe and every request is one command.
-  let probePid = true;
-  let poll = pollMs;
-  while (version === undefined) {
-    if (probePid && !(await container.alive(pid)))
-      throw await notReady("the server exited before it answered its info");
-    let res: HarnessResponse | undefined;
+    phase = "info";
+    let version: string | undefined;
+    // A server that answered any status is alive: the pid is probed only before
+    // the first request and after a request that reached no server, and the
+    // poll backs off once the first second has passed — on the exec classes
+    // every probe and every request is one command.
+    let probePid = true;
+    let poll = pollMs;
+    while (version === undefined) {
+      check();
+      if (probePid && !(await container.alive(pid)))
+        throw await notReady("the server exited before it answered its info");
+      let res: HarnessResponse | undefined;
+      try {
+        res = await request(OPENCODE_ROUTES["server.info"]);
+        probePid = false;
+      } catch (err) {
+        if (isContainerGone(err) || err instanceof HarnessOperationEndedError) throw err;
+        last = err instanceof Error ? err.message : String(err);
+        probePid = true;
+      }
+      check();
+      if (res) {
+        if (res.status === 401) throw await notReady("the server refused the run's password");
+        // 500 is the server's own word for a start that failed (`packages/server/src/process.ts:214-224`): nothing to poll for.
+        if (res.status === 500) throw await notReady("the server reported that its start failed (info answered 500)");
+        if (res.status === 200) {
+          const info = parseServerInfo(res.body);
+          if (!info) throw await notReady("the info answered something that is not the info shape");
+          if (info.version !== OPENCODE_VERSION)
+            throw await notReady(`the opencode on PATH is ${info.version}; this build drives ${OPENCODE_VERSION}`);
+          version = info.version;
+          break;
+        }
+        last = `the info answered ${res.status}`;
+      }
+      if (clock() >= deadline)
+        throw await notReady(`the server did not answer its info within ${readyMs} ms (${last})`);
+      await pause(poll);
+      if (clock() - startedAt >= 1000) poll = Math.min(OPENCODE_READY_POLL_MAX_MS, poll * 2);
+    }
+
+    const config = await request(OPENCODE_ROUTES["config.get"]);
+    if (config.status !== 200) throw await notReady(`the configuration route answered ${config.status}`);
+    const entries = parseConfigEntries(config.body);
+    if (!entries) throw await notReady("the configuration route answered something that is not the entry list");
+    const info = loadedDocument(entries, paths.config);
+    if (!info) throw await notReady("the server did not load the run's configuration file");
+    const problem = configProblem(info, placed);
+    if (problem) throw await notReady(`the run's configuration ${problem}`);
+
+    // The pin removed await-activation. Its inventory exposes a plugin only
+    // after setup settles, so require the relay itself to be active, not merely
+    // a successful inventory request or an unrelated plugin's active state.
+    phase = "plugin";
+    while (true) {
+      check();
+      const inventory = await request(OPENCODE_ROUTES["plugin.list"]);
+      if (inventory.status !== 200) throw await notReady(`plugin inventory answered ${inventory.status}`);
+      const plugins = parsePluginStates(inventory.body);
+      if (!plugins) throw await notReady("the plugin inventory answered something that is not the inventory shape");
+      // A discovery failure can have no id; its local source still identifies this run's relay.
+      const relay = plugins.find(
+        (plugin) => plugin.id === "switchboard" || (plugin.id === undefined && plugin.sourcePath === paths.pluginDir),
+      );
+      if (relay?.status === "failed") throw await notReady("the relay plugin failed to activate");
+      if (relay?.status === "active") break;
+      if (clock() >= deadline) throw await notReady(`the relay plugin did not activate within ${readyMs} ms`);
+      await pause(pollMs);
+    }
+
+    phase = "tailer";
+    const tailer = await perform(() => {
+      launchPending = true;
+      return container.start({
+        paths: paths.tailer,
+        command: TAILER_BIN,
+        args: [paths.tailerScript],
+        env: openCodeTailerEnv(password, pid),
+        port,
+        // The feed is read by offset and a later generation may restart the
+        // tailer over it: its log is never truncated by a start.
+        keepLog: true,
+      });
+    });
+    launchPending = false;
+    tailerPid = tailer.pid;
+    // Readiness ends when the tailer is subscribed, not when it is started: the
+    // first session's earliest events — its creation, its first step, a
+    // first-step ask — would otherwise be emitted before anyone listens, and the
+    // step-end refill repairs messages, never asks. The end of the tailer's
+    // `connected` note is the feed byte the row starts reading from.
+    let feedOffset: number | undefined;
+    poll = pollMs;
+    while (feedOffset === undefined) {
+      check();
+      const text = Buffer.from(await perform(() => container.readLog(paths.feed, 0, LOG_READ_BYTES))).toString("utf8");
+      let consumed = 0;
+      for (const line of text.split("\n").slice(0, -1)) {
+        consumed += Buffer.byteLength(line, "utf8") + 1;
+        const record = parseFeedRecord(line);
+        if (record?.feed === "tailer" && record.note === "connected") {
+          feedOffset = consumed;
+          break;
+        }
+      }
+      if (feedOffset !== undefined) break;
+      if (!(await container.alive(tailer.pid)))
+        throw await notReady("the tailer exited before it connected to the event stream", paths.tailer.errLog);
+      if (clock() >= deadline)
+        throw await notReady(
+          `the tailer did not connect to the event stream within ${readyMs} ms`,
+          paths.tailer.errLog,
+        );
+      await pause(poll);
+      if (clock() - startedAt >= 1000) poll = Math.min(OPENCODE_READY_POLL_MAX_MS, poll * 2);
+    }
+    check();
+    return {
+      pid,
+      processBirth: started.processBirth,
+      port,
+      tailerPid: tailer.pid,
+      ...(tailer.processBirth === undefined ? {} : { tailerProcessBirth: tailer.processBirth }),
+      password,
+      paths,
+      version,
+      feedOffset,
+    };
+  } catch (openingError) {
+    if (launchPending) throw new HarnessEndingUnconfirmedError(spec.runId, openingError, openingError);
+    if (isContainerGone(openingError)) throw openingError;
     try {
-      res = await request(OPENCODE_ROUTES["server.info"]);
-      probePid = false;
-    } catch (err) {
-      if (isContainerGone(err)) throw err;
-      last = err instanceof Error ? err.message : String(err);
-      probePid = true;
+      if (serverPid !== undefined) await container.kill(serverPid);
+      if (tailerPid !== undefined) await container.kill(tailerPid);
+      await container.remove(paths);
+    } catch (endingError) {
+      throw new HarnessEndingUnconfirmedError(spec.runId, openingError, endingError);
     }
-    if (res) {
-      if (res.status === 401) throw await notReady("the server refused the run's password");
-      // 500 is the server's own word for a start that failed (`packages/server/src/process.ts:214-224`): nothing to poll for.
-      if (res.status === 500) throw await notReady("the server reported that its start failed (info answered 500)");
-      if (res.status === 200) {
-        const info = parseServerInfo(res.body);
-        if (!info) throw await notReady("the info answered something that is not the info shape");
-        if (info.version !== OPENCODE_VERSION)
-          throw await notReady(`the opencode on PATH is ${info.version}; this build drives ${OPENCODE_VERSION}`);
-        version = info.version;
-        break;
-      }
-      last = `the info answered ${res.status}`;
-    }
-    if (clock() >= deadline) throw await notReady(`the server did not answer its info within ${readyMs} ms (${last})`);
-    await sleep(poll);
-    if (clock() - startedAt >= 1000) poll = Math.min(OPENCODE_READY_POLL_MAX_MS, poll * 2);
+    throw openingError;
   }
-
-  const config = await request(OPENCODE_ROUTES["config.get"]);
-  if (config.status !== 200) throw await notReady(`the configuration route answered ${config.status}`);
-  const entries = parseConfigEntries(config.body);
-  if (!entries) throw await notReady("the configuration route answered something that is not the entry list");
-  const info = loadedDocument(entries, paths.config);
-  if (!info) throw await notReady("the server did not load the run's configuration file");
-  const problem = configProblem(info, placed);
-  if (problem) throw await notReady(`the run's configuration ${problem}`);
-
-  // The pin removed await-activation. Its inventory exposes a plugin only
-  // after setup settles, so require the relay itself to be active, not merely
-  // a successful inventory request or an unrelated plugin's active state.
-  while (true) {
-    const inventory = await request(OPENCODE_ROUTES["plugin.list"]);
-    if (inventory.status !== 200) throw await notReady(`plugin inventory answered ${inventory.status}`);
-    const plugins = parsePluginStates(inventory.body);
-    if (!plugins) throw await notReady("the plugin inventory answered something that is not the inventory shape");
-    // A discovery failure can have no id; its local source still identifies this run's relay.
-    const relay = plugins.find(
-      (plugin) => plugin.id === "switchboard" || (plugin.id === undefined && plugin.sourcePath === paths.pluginDir),
-    );
-    if (relay?.status === "failed") throw await notReady("the relay plugin failed to activate");
-    if (relay?.status === "active") break;
-    if (clock() >= deadline) throw await notReady(`the relay plugin did not activate within ${readyMs} ms`);
-    await sleep(pollMs);
-  }
-
-  const tailer = await container.start({
-    paths: paths.tailer,
-    command: TAILER_BIN,
-    args: [paths.tailerScript],
-    env: openCodeTailerEnv(password, pid),
-    port,
-    // The feed is read by offset and a later generation may restart the
-    // tailer over it: its log is never truncated by a start.
-    keepLog: true,
-  });
-  // Readiness ends when the tailer is subscribed, not when it is started: the
-  // first session's earliest events — its creation, its first step, a
-  // first-step ask — would otherwise be emitted before anyone listens, and the
-  // step-end refill repairs messages, never asks. The end of the tailer's
-  // `connected` note is the feed byte the row starts reading from.
-  let feedOffset: number | undefined;
-  poll = pollMs;
-  while (feedOffset === undefined) {
-    const text = Buffer.from(await container.readLog(paths.feed, 0, LOG_READ_BYTES)).toString("utf8");
-    let consumed = 0;
-    for (const line of text.split("\n").slice(0, -1)) {
-      consumed += Buffer.byteLength(line, "utf8") + 1;
-      const record = parseFeedRecord(line);
-      if (record?.feed === "tailer" && record.note === "connected") {
-        feedOffset = consumed;
-        break;
-      }
-    }
-    if (feedOffset !== undefined) break;
-    if (!(await container.alive(tailer.pid)))
-      throw await notReady("the tailer exited before it connected to the event stream", paths.tailer.errLog);
-    if (clock() >= deadline)
-      throw await notReady(`the tailer did not connect to the event stream within ${readyMs} ms`, paths.tailer.errLog);
-    await sleep(poll);
-    if (clock() - startedAt >= 1000) poll = Math.min(OPENCODE_READY_POLL_MAX_MS, poll * 2);
-  }
-  return { pid, processBirth: started.processBirth, port, tailerPid: tailer.pid, password, paths, version, feedOffset };
 }
 
 /** What a run's row remembers about its OpenCode (`OpenCodeHarnessFacts`): the
@@ -791,7 +872,7 @@ export async function launchOpenCode(
  *  feed byte the ledger's effect reaches, the bearer's hash (never the
  *  bearer), the container's word, and the loop's relaunch count. */
 export function openCodeFacts(
-  started: Pick<OpenCodeStarted, "pid" | "processBirth" | "port" | "paths" | "tailerPid">,
+  started: Pick<OpenCodeStarted, "pid" | "processBirth" | "port" | "paths" | "tailerPid" | "tailerProcessBirth">,
   run: { sessionID: string; logOffset: number; bearer?: string; container?: string; relaunches: number },
 ): OpenCodeHarnessFacts {
   const bearerHash = run.bearer === undefined ? undefined : bearerHashOf(run.bearer);
@@ -801,6 +882,7 @@ export function openCodeFacts(
     ...(started.processBirth === undefined ? {} : { processBirth: started.processBirth }),
     port: started.port,
     tailerPid: started.tailerPid,
+    ...(started.tailerProcessBirth === undefined ? {} : { tailerProcessBirth: started.tailerProcessBirth }),
     logOffset: run.logOffset,
     sessionID: run.sessionID,
     root: started.paths.dir,

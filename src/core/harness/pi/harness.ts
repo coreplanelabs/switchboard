@@ -1,3 +1,4 @@
+import { HarnessEndingUnconfirmedError } from "../container.js";
 // The pi harness (docs/reference/specs/harness-pi.md): what drives every run.
 // It writes pi's files into the run's container, starts pi detached with the
 // run bearer as its only key on a session holding the thread's earlier turns,
@@ -745,6 +746,9 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
   for (const s of run.resume?.settlements ?? []) calls?.settle(s.toolUse.id, settlementAnswer(s));
 
   let pid: number | undefined;
+  // A launch or recorded-producer probe without an answer cannot authorize
+  // deleting the original root, even before a session is handed to dispatch.
+  let openingCustodyUnknown = recorded !== undefined && relaunch === undefined;
   live.credentialInspectionProcess = () =>
     facts?.processBirth === undefined ? undefined : { pid: facts.pid, processBirth: facts.processBirth };
   let transport: PiRpcTransport | undefined;
@@ -873,17 +877,23 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         // stands for the run loop's relaunch to take over. The transport
         // condition's container is the one exception to the kill: the
         // command's transport failed, not provably the container, so a pi
-        // still alive there is ended best-effort before the relaunch starts a
-        // fresh one — on a container that is in fact gone both commands fail
-        // silently — while the registration still stands for the relaunch.
+        // still alive there is ended before the relaunch starts a fresh one.
+        // An unconfirmed ending retains custody; the registration still
+        // stands for a confirmed relaunch.
         if (replaced.condition !== "transport") return;
-        if (pid !== undefined) await container.kill(pid).catch(() => {});
-        if (paths !== undefined) await container.remove(paths).catch(() => {});
+        if (pid !== undefined) await container.kill(pid);
+        if (paths !== undefined) await container.remove(paths);
         return;
       }
       forget();
-      if (pid !== undefined) await container.kill(pid).catch(() => {});
-      if (paths !== undefined) await container.remove(paths).catch(() => {});
+      if (pid !== undefined)
+        await container.kill(pid).catch((error: unknown) => {
+          throw error;
+        });
+      if (paths !== undefined)
+        await container.remove(paths).catch((error: unknown) => {
+          throw error;
+        });
     })();
     if (stopsOut.size > 0 && transport !== undefined) await Promise.race([transport.flushed(), teardown]);
     endSpoke = true;
@@ -936,6 +946,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     if (recorded !== undefined && relaunch === undefined) {
       const located = await locatePi(recorded, container, here);
       if (located === "another-container") {
+        openingCustodyUnknown = false;
         elsewhere = `pi is elsewhere: the row's pi (pid ${recorded.pid}) ran in container ${recorded.container}, not the one this run was handed (${here}), so it was neither probed nor ended here`;
       } else if (located === "alive-here") {
         const wireMismatch =
@@ -951,12 +962,16 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             recorded.root === undefined
               ? "named no directory for its pi"
               : (wireMismatch ?? "carried no bearer this generation could honour for its pi");
-          await container.kill(recorded.pid).catch(() => {});
+          await container.kill(recorded.pid);
+          openingCustodyUnknown = false;
         }
+      } else {
+        openingCustodyUnknown = false;
       }
     }
     if (reattached && recorded && paths !== undefined) {
       pid = recorded.pid;
+      openingCustodyUnknown = false;
       // The row learns this run's wire and the container it was found in when
       // either field predates its facts, so the next save is unambiguous.
       facts = {
@@ -998,8 +1013,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         recorded.root !== paths.dir &&
         elsewhere === undefined &&
         relaunch === undefined
-      )
-        await container.remove(piRunPathsAt(recorded.root)).catch(() => {});
+      ) {
+        openingCustodyUnknown = true;
+        await container.remove(piRunPathsAt(recorded.root));
+        openingCustodyUnknown = false;
+      }
       const spec: PiLaunchSpec = {
         runId: run.runId,
         paths,
@@ -1127,6 +1145,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       }
       const launch = sessionPath ? { ...spec, sessionPath } : spec;
       for (const file of piLaunchFiles(launch)) await container.writeFile(file.path, file.content);
+      openingCustodyUnknown = true;
       const started = await container.start({
         paths,
         command: PI_BIN,
@@ -1135,6 +1154,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         stdoutFilter: PI_STDOUT_FILTER,
       });
       pid = started.pid;
+      openingCustodyUnknown = false;
       // The root rides the first facts, so the build that comes back after a
       // restart looks for this pi where it is, not where it would file its own;
       // the bearer's hash rides beside it, so that build's proxy can honour
@@ -2775,7 +2795,15 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     // teardown — says anything or owes anything.
     dropHeld("run");
     agentSpan?.end("error");
-    await end();
+    if (openingCustodyUnknown) {
+      forget();
+      throw new HarnessEndingUnconfirmedError(run.runId, err, err);
+    }
+    try {
+      await end();
+    } catch (endingError) {
+      throw new HarnessEndingUnconfirmedError(run.runId, err, endingError);
+    }
     throw err;
   }
 }

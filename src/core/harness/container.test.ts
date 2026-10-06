@@ -1,10 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { shellQuote } from "../../execution/shellQuote.js";
 import {
   ExecControlResetError,
   ExecInfraError,
   ExecSandboxRestartedError,
   type ExecOptions,
+  type ExecResult,
   type Executor,
   infraReasonOfRequestFailure,
   requestFailedMessage,
@@ -42,6 +43,7 @@ import {
   replacedBecause,
   replacedVerdict,
   saysTransportLost,
+  saysContainerReplaced,
   PORT_ARG,
   WRITE_CHUNK_CHARS,
   aliveScript,
@@ -81,15 +83,21 @@ const piStart = (args: string[], env: Record<string, string> = {}) => ({
   stdoutFilter: PI_STDOUT_FILTER,
 });
 
-/** An executor that records every command and answers what the test says. */
-function recordingExecutor(answers: Array<string | Error> = []) {
+const ok = (stdout = "", stderr = ""): ExecResult => ({ stdout, stderr, exitCode: 0, truncated: false });
+const failed = (exitCode: number, stderr: string): ExecResult => ({ stdout: "", stderr, exitCode, truncated: false });
+
+/** Strings in this fixture are exact stdout, never rendered executor replies. */
+function recordingExecutor(answers: Array<string | ExecResult | Error> = []) {
   const calls: Array<{ command: string; opts: ExecOptions | undefined }> = [];
   const executor: Executor = {
-    exec: async (command, opts) => {
+    exec: async () => {
+      throw new Error("presentation must not be read");
+    },
+    execResult: async (command, opts) => {
       calls.push({ command, opts });
       const next = answers.shift();
       if (next instanceof Error) throw next;
-      return next ?? "(no output)";
+      return typeof next === "string" ? ok(next) : (next ?? ok());
     },
     readFile: async () => "",
     writeFile: async () => "",
@@ -287,50 +295,17 @@ describe("the container scripts", () => {
 });
 
 describe("stdoutOf — an executor's answer as the operation's stdout", () => {
-  it("keeps stdout, drops the appended stderr, reads the empty marker as empty, and names a failed command", () => {
-    expect(stdoutOf("read", "abc\n--- stderr ---\nnoise")).toBe("abc");
-    expect(stdoutOf("read", "(no output)")).toBe("");
-    expect(() => stdoutOf("start", "exit 127:\nsh: pi: not found")).toThrow(HarnessContainerError);
-    expect(() => stdoutOf("start", "exit 127:\nsh: pi: not found")).toThrow(/start failed — exit 127/);
+  it("reads structured exit and truncation facts and preserves the exact stdout stream", () => {
+    expect(stdoutOf("read", ok("abc\n--- stderr ---\nnoise", "other"))).toBe("abc\n--- stderr ---\nnoise");
+    expect(stdoutOf("read", ok("(no output)"))).toBe("(no output)");
+    expect(() => stdoutOf("start", failed(127, "sh: pi: not found"))).toThrow(/start failed — exit 127/);
+    expect(() => stdoutOf("read", { ...ok("prefix"), truncated: true })).toThrow(/truncated/);
   });
-
-  // harness-pi item 16: an executor that hands the word for a replaced runtime
-  // back as a command's text — `runtime-replaced: …`, `runtime-unreachable: …`
-  // — is not reporting what the command printed, so `alive` must not read it
-  // as "dead" nor `read` decode it as log bytes: the operation fails with the
-  // typed word. The word counts wherever it sits in the answer: behind the
-  // executors' `exit N:` prefix, behind a sentence of the executor's own. The
-  // seam's own commands print a pid, a port, a boot id, `alive`/`dead`, base64,
-  // an HTTP answer or nothing, never the word, so an answer carrying it is the
-  // executor's.
-  it("the executors' runtime word anywhere in a command's answer is the typed HarnessContainerRuntimeReplacedError naming the operation, never the command's stdout; isContainerGone knows it and the executor's own typed error", () => {
-    const replaced =
-      "runtime-replaced: the resident runtime was replaced (a deploy) while this command ran\n" +
-      "The command may have started; re-check its effects (e.g. git status, the files it writes) before re-running it.";
-    expect(() => stdoutOf("alive", replaced)).toThrow(HarnessContainerRuntimeReplacedError);
-    expect(() => stdoutOf("alive", replaced)).toThrow(
-      /^harness container: alive failed — runtime-replaced: the resident runtime was replaced/,
-    );
-    expect(() =>
-      stdoutOf("read", "runtime-unreachable: the sandbox container's runtime did not answer (container abc)"),
-    ).toThrow(HarnessContainerRuntimeReplacedError);
-    expect(() => stdoutOf("alive", "exit 127:\nruntime-replaced: the resident runtime was replaced")).toThrow(
-      HarnessContainerRuntimeReplacedError,
-    );
-    expect(() => stdoutOf("read", "resident /exec: the run met runtime-replaced: deploy")).toThrow(
-      HarnessContainerRuntimeReplacedError,
-    );
-    // The typed word is a container failure too, so every reader of the seam's failures still sees one.
-    expect(new HarnessContainerRuntimeReplacedError("read", replaced)).toBeInstanceOf(HarnessContainerError);
-    // A failure without the word is the plain failure it was.
-    expect(() => stdoutOf("read", "exit 1:\ntail: cannot open '/tmp/x' for reading")).not.toThrow(
-      HarnessContainerRuntimeReplacedError,
-    );
-    expect(() => stdoutOf("read", "exit 1:\ntail: cannot open '/tmp/x' for reading")).toThrow(HarnessContainerError);
-    expect(isContainerGone(new ExecSandboxRestartedError("the sandbox restarted (waited 42 s)", 42_000))).toBe(true);
-    expect(isContainerGone(new HarnessContainerRuntimeReplacedError("read", replaced))).toBe(true);
+  it("runtime words in stdout are data; typed replacement errors remain the replacement condition", () => {
+    expect(stdoutOf("read", ok("runtime-replaced"))).toBe("runtime-replaced");
+    expect(isContainerGone(new ExecSandboxRestartedError("replaced", 42_000))).toBe(true);
+    expect(isContainerGone(new HarnessContainerRuntimeReplacedError("read", "replaced"))).toBe(true);
     expect(isContainerGone(new HarnessContainerError("read", "exit 1"))).toBe(false);
-    expect(isContainerGone(new Error("runtime-replaced in a plain error"))).toBe(false);
   });
 });
 
@@ -790,7 +765,7 @@ describe("ExecHarnessContainer — each operation is one command over the execut
   });
 
   it("start without a pid is a named failure", async () => {
-    const { executor } = recordingExecutor(["(no output)"]);
+    const { executor } = recordingExecutor([""]);
     await expect(new ExecHarnessContainer(executor).start(piStart([]))).rejects.toThrow(/no pid came back/);
   });
 
@@ -806,7 +781,7 @@ describe("ExecHarnessContainer — each operation is one command over the execut
   });
 
   it("a send that fails because the FIFO is gone is the control-file-lost failure by name, with the file and the root; any other send failure stays what it was", async () => {
-    const { executor } = recordingExecutor([`exit 1: bash: line 4: ${paths.fifo}: No such file or directory`]);
+    const { executor } = recordingExecutor([failed(1, `bash: line 4: ${paths.fifo}: No such file or directory`)]);
     const c = new ExecHarnessContainer(executor);
     const err = await c.writeLine(paths, '{"type":"abort"}').catch((e: unknown) => e);
     expect(err).toBeInstanceOf(HarnessControlFileLostError);
@@ -815,7 +790,7 @@ describe("ExecHarnessContainer — each operation is one command over the execut
     expect((err as Error).message).toContain(`${paths.fifo} under ${paths.dir} vanished while the run was live`);
     // Never the replaced-container verdict: the container answered the command.
     expect(isContainerGone(err)).toBe(false);
-    const other = recordingExecutor(["exit 1: bash: something else went wrong"]);
+    const other = recordingExecutor([failed(1, "bash: something else went wrong")]);
     await expect(new ExecHarnessContainer(other.executor).writeLine(paths, "x")).rejects.toThrow(
       /^harness container: send failed — exit 1: bash: something else/,
     );
@@ -824,7 +799,7 @@ describe("ExecHarnessContainer — each operation is one command over the execut
   it("a long line whose command-file write fails because the file's directory is gone names the command file, not the FIFO; the feed into a gone FIFO after a good write names the FIFO", async () => {
     const long = JSON.stringify({ type: "prompt", message: "m".repeat(INLINE_LINE_CHARS + 1) });
     const file = `${paths.commandDir}/1.json`;
-    const write = recordingExecutor([`exit 1: bash: line 1: ${file}: No such file or directory`]);
+    const write = recordingExecutor([failed(1, `bash: line 1: ${file}: No such file or directory`)]);
     const lostOnWrite = await new ExecHarnessContainer(write.executor).writeLine(paths, long).catch((e: unknown) => e);
     expect(lostOnWrite).toBeInstanceOf(HarnessControlFileLostError);
     expect((lostOnWrite as HarnessControlFileLostError).file).toBe(file);
@@ -832,11 +807,7 @@ describe("ExecHarnessContainer — each operation is one command over the execut
     expect((lostOnWrite as Error).message).toMatch(/^harness container: write failed — /);
     expect(write.calls).toHaveLength(1);
 
-    const feed = recordingExecutor([
-      "(no output)",
-      "(no output)",
-      `exit 1: bash: line 4: ${paths.fifo}: No such file or directory`,
-    ]);
+    const feed = recordingExecutor(["", "", failed(1, `bash: line 4: ${paths.fifo}: No such file or directory`)]);
     const lostOnFeed = await new ExecHarnessContainer(feed.executor).writeLine(paths, long).catch((e: unknown) => e);
     expect(lostOnFeed).toBeInstanceOf(HarnessControlFileLostError);
     expect((lostOnFeed as HarnessControlFileLostError).file).toBe(paths.fifo);
@@ -844,10 +815,7 @@ describe("ExecHarnessContainer — each operation is one command over the execut
   });
 
   it("readLog decodes the base64 answer to exact bytes, and an empty answer to none", async () => {
-    const { executor } = recordingExecutor([
-      Buffer.from('{"type":"agent_start"}\n').toString("base64") + "\n",
-      "(no output)",
-    ]);
+    const { executor } = recordingExecutor([Buffer.from('{"type":"agent_start"}\n').toString("base64") + "\n", ""]);
     const c = new ExecHarnessContainer(executor);
     expect(Buffer.from(await c.readLog(paths.log, 0, 4096)).toString("utf8")).toBe('{"type":"agent_start"}\n');
     expect(await c.readLog(paths.log, 23, 4096)).toHaveLength(0);
@@ -856,9 +824,9 @@ describe("ExecHarnessContainer — each operation is one command over the execut
   it("identity reads the boot id, and answers none for an empty or malformed word or a failed command", async () => {
     const { executor, calls } = recordingExecutor([
       "3f1c2a6e-9b0d-4d2e-8a1f-0c9e7b6a5d43\n",
-      "(no output)",
+      "",
       "not an id at all, with spaces\n",
-      "exit 1:\nno shell",
+      failed(1, "no shell"),
     ]);
     const c = new ExecHarnessContainer(executor);
     expect(await c.identity()).toBe("3f1c2a6e-9b0d-4d2e-8a1f-0c9e7b6a5d43");
@@ -888,7 +856,10 @@ describe("ExecHarnessContainer — each operation is one command over the execut
   // fact the loop keys on, never a container with no name.
   it("identity rethrows the executor's typed word that the container is gone — the resident's ExecSandboxRestartedError, the seam's own for the word as text — instead of answering none", async () => {
     const restarted = new ExecSandboxRestartedError("the sandbox restarted under the run (waited 42 s)", 42_000);
-    const { executor } = recordingExecutor([restarted, "runtime-replaced: the resident runtime was replaced"]);
+    const { executor } = recordingExecutor([
+      restarted,
+      new HarnessContainerRuntimeReplacedError("execute", "runtime-replaced: the resident runtime was replaced"),
+    ]);
     const c = new ExecHarnessContainer(executor);
     await expect(c.identity()).rejects.toBe(restarted);
     await expect(c.identity()).rejects.toBeInstanceOf(HarnessContainerRuntimeReplacedError);
@@ -952,8 +923,8 @@ describe("ExecHarnessContainer — each operation is one command over the execut
       // Answers whose words are not the container's: the SDK's, and a deterministic 500 the resident answered (no state on it).
       answer(200, { error: "Command execution failed" }),
       answer(500, { error: "TypeError: Cannot read properties of undefined" }),
-      "exit 1:\nno shell",
-      "(no output)",
+      failed(1, "no shell"),
+      "",
     ]);
     const c = new ExecHarnessContainer(executor);
     for (let i = 0; i < 11; i++) await expect(c.identity()).rejects.toBeInstanceOf(HarnessContainerDownError);
@@ -982,14 +953,17 @@ describe("ExecHarnessContainer — each operation is one command over the execut
   it("request runs curl over the executor with the body on stdin, parses a 2xx and a 5xx alike — a body carrying the executors' runtime word included — writes a long body to a file first, hands a secret header's value through the exec's environment, and rethrows the container-gone word like every other operation", async () => {
     const restarted = new ExecSandboxRestartedError("the sandbox restarted under the run (waited 42 s)", 42_000);
     const { executor, calls } = recordingExecutor([
-      "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n" + '{"healthy":true}' + "\n--- stderr ---\n",
+      ok("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n" + '{"healthy":true}', "curl diagnostic"),
       "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 5\r\n\r\noops!",
-      "(no output)", // the long body's first chunk written
-      "(no output)", // …and its second
+      "", // the long body's first chunk written
+      "", // …and its second
       "HTTP/1.1 202 Accepted\r\n\r\n",
       restarted,
-      "runtime-unreachable: the sandbox container's runtime did not answer",
-      "exit 7:\ncurl: (7) Failed to connect to 127.0.0.1 port 41000",
+      new HarnessContainerRuntimeReplacedError(
+        "execute",
+        "runtime-unreachable: the sandbox container's runtime did not answer",
+      ),
+      failed(7, "curl: (7) Failed to connect to 127.0.0.1 port 41000"),
       "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\n\r\nthe log says runtime-replaced: the resident runtime was replaced",
       "HTTP/1.1 204 No Content\r\n\r\n",
     ]);
@@ -1033,14 +1007,14 @@ describe("ExecHarnessContainer — each operation is one command over the execut
     expect(calls[0].opts?.env).toBeUndefined();
   });
 
-  it("alive reads the word, kill runs the script, tail never throws", async () => {
-    const { executor, calls } = recordingExecutor(["alive\n", "dead\n", "(no output)", "exit 1:\nno such file"]);
+  it("alive reads the word, kill runs the script, tail preserves a failed command", async () => {
+    const { executor, calls } = recordingExecutor(["alive\n", "dead\n", "", failed(1, "no such file")]);
     const c = new ExecHarnessContainer(executor);
     expect(await c.alive(4242)).toBe(true);
     expect(await c.alive(4242)).toBe(false);
     await c.kill(4242);
     expect(calls[2].command).toBe(killScript(4242));
-    expect(await c.tail(paths.errLog, 2000)).toBe("");
+    await expect(c.tail(paths.errLog, 2000)).rejects.toThrow(/exit 1/);
   });
 
   it("remove takes the run's directory down as one tree, and nothing else", async () => {
@@ -1051,9 +1025,9 @@ describe("ExecHarnessContainer — each operation is one command over the execut
   });
 
   it("a command the executor reports as failed is a HarnessContainerError naming the operation", async () => {
-    const { executor } = recordingExecutor(["exit 1:\nmkfifo: cannot create fifo"]);
+    const { executor } = recordingExecutor([failed(1, "mkfifo: cannot create fifo")]);
     await expect(new ExecHarnessContainer(executor).start(piStart([]))).rejects.toThrow(
-      /start failed — exit 1:\nmkfifo/,
+      /start failed — exit 1: mkfifo/,
     );
   });
 });
@@ -1182,19 +1156,22 @@ class FakeDirectoryTree {
   /** An executor running every command as `user`, the way the resident's /exec runs a thread's. */
   executorAs(user: string, answers: string[] = []): Executor {
     return {
-      exec: async (command: string) => {
+      exec: async () => {
+        throw new Error("presentation must not be read");
+      },
+      execResult: async (command: string) => {
         for (const mkdir of command.matchAll(/mkdir -p ((?:'[^']*' ?)+)/g)) {
           const mode = command.slice(0, mkdir.index).includes("umask 077") ? 0o700 : 0o755;
           for (const [, path] of mkdir[1].matchAll(/'([^']*)'/g)) {
             const refused = this.mkdirP(path, user, mode);
-            if (refused) return `exit 1:\n${refused}`;
+            if (refused) return failed(1, refused);
           }
         }
         for (const [, path] of command.matchAll(/rm -rf '([^']*)'/g)) {
           const refused = this.rmRf(path, user);
-          if (refused) return `exit 1:\n${refused}`;
+          if (refused) return failed(1, refused);
         }
-        return answers.shift() ?? "(no output)";
+        return ok(answers.shift());
       },
       readFile: async () => "",
       writeFile: async () => "",
@@ -1218,7 +1195,7 @@ describe("ExecHarnessContainer on a resident, two thread users on one container"
     await expect(
       new ExecHarnessContainer(tree.executorAs("worker3")).writeFile("/tmp/switchboard-pi/run-b/agent/SYSTEM.md", "b"),
     ).rejects.toThrow(
-      /write failed .* exit 1:\nmkdir: cannot create directory '\/tmp\/switchboard-pi\/run-b': Permission denied/,
+      /write failed .* exit 1: mkdir: cannot create directory '\/tmp\/switchboard-pi\/run-b': Permission denied/,
     );
   });
 
@@ -1229,7 +1206,7 @@ describe("ExecHarnessContainer on a resident, two thread users on one container"
       { user: "worker3", paths: piRunPaths("run-b") },
     ];
     for (const { user, paths: p } of runs) {
-      const container = new ExecHarnessContainer(tree.executorAs(user, ["(no output)", "4242\n"]));
+      const container = new ExecHarnessContainer(tree.executorAs(user, ["", "4242\n"]));
       await container.writeFile(`${p.agentDir}/SYSTEM.md`, "the prompt");
       await expect(container.start({ ...piStart([]), paths: p })).resolves.toEqual({ pid: 4242 });
     }
@@ -1292,5 +1269,247 @@ describe("harness launch identity", () => {
     expect(script).toContain("exec 4>&-");
     expect(script.indexOf("/proc/$$/stat")).toBeLessThan(script.indexOf("pi "));
     expect(script).not.toContain(`cat ${shellQuote(paths.pidFile)}`);
+  });
+});
+
+describe("ExecHarnessContainer — typed execution authority", () => {
+  function typed(result: { stdout: string; stderr: string; exitCode: number; truncated: boolean } | Error) {
+    let sends = 0;
+    let presentations = 0;
+    const executor: Executor = {
+      exec: async () => {
+        presentations++;
+        return "9999\n";
+      },
+      execResult: async () => {
+        sends++;
+        if (result instanceof Error) throw result;
+        return result;
+      },
+      readFile: async () => "",
+      writeFile: async () => "",
+    };
+    return { container: new ExecHarnessContainer(executor), counts: () => ({ sends, presentations }) };
+  }
+  it("starts from typed stdout and never reads the rendered command presentation", async () => {
+    const h = typed({ stdout: "4242\n", stderr: "noise", exitCode: 0, truncated: false });
+    await expect(h.container.start(piStart([]))).resolves.toEqual({ pid: 4242 });
+    expect(h.counts()).toEqual({ sends: 1, presentations: 0 });
+  });
+  it("preserves stdout that contains presentation markers and runtime words", async () => {
+    const stdout = "exit 9:\nruntime-replaced\n--- stderr ---\n(no output)";
+    const h = typed({ stdout, stderr: "other stream", exitCode: 0, truncated: false });
+    await expect(h.container.tail(paths.errLog, 4096)).resolves.toBe(stdout);
+  });
+  it("rejects a nonzero command even when stdout contains a complete HTTP answer", async () => {
+    const h = typed({ stdout: "HTTP/1.1 200 OK\r\n\r\n{}", stderr: "curl failed", exitCode: 7, truncated: false });
+    await expect(h.container.request(paths, { method: "POST", port: 41000, path: "/api/session" })).rejects.toThrow(
+      /exit 7/,
+    );
+    expect(h.counts().sends).toBe(1);
+  });
+  it("rejects truncated launch and log receipts without interpreting the retained prefix", async () => {
+    const h = typed({ stdout: "4242\n", stderr: "", exitCode: 0, truncated: true });
+    await expect(h.container.start(piStart([]))).rejects.toThrow(/truncated/);
+    await expect(h.container.readLog(paths.log, 0, 1024)).rejects.toThrow(/truncated/);
+  });
+  it("a failed command's runtime-looking stderr cannot authorize a container verdict or transport retry", async () => {
+    const h = typed({ stdout: "", stderr: "runtime-replaced: Network connection lost", exitCode: 1, truncated: false });
+    const err = await h.container.start(piStart([])).catch((error: unknown) => error);
+    expect(saysContainerReplaced(err)).toBe(false);
+    expect(saysTransportLost(err)).toBe(false);
+    expect(isContainerGone(err)).toBe(false);
+    expect(h.counts().sends).toBe(1);
+  });
+  it("does not erase truncated identity or diagnostic output, or unknown diagnostic transport", async () => {
+    const h = typed({ stdout: "prefix", stderr: "", exitCode: 0, truncated: true });
+    await expect(h.container.identity()).rejects.toThrow(/truncated/);
+    await expect(h.container.tail(paths.errLog, 4096)).rejects.toThrow(/truncated/);
+    const unknown = new ExecInfraError("unknown diagnostic output", "transport-lost");
+    await expect(typed(unknown).container.tail(paths.errLog, 4096)).rejects.toBe(unknown);
+  });
+  it("retains transport uncertainty and never repeats an unknown launch", async () => {
+    const unknown = new ExecInfraError("lost launch acknowledgement", "transport-lost");
+    const h = typed(unknown);
+    await expect(h.container.start(piStart([]))).rejects.toBe(unknown);
+    expect(h.counts()).toEqual({ sends: 1, presentations: 0 });
+  });
+  it("refuses executors without structured outcomes before sending a launch", async () => {
+    const h = recordingExecutor(["4242\n"]);
+    delete h.executor.execResult;
+    await expect(new ExecHarnessContainer(h.executor).start(piStart([]))).rejects.toThrow(/structured/);
+    expect(h.calls).toHaveLength(0);
+  });
+});
+
+describe("ExecHarnessContainer — original operation deadline", () => {
+  it("reduces a retry's timeout by the time spent awaiting its first acknowledgement", async () => {
+    let now = 1000;
+    const h = recordingExecutor([new ExecControlResetError("lost read"), "HTTP/1.1 204 No Content\r\n\r\n"]);
+    const original = h.executor.execResult!;
+    h.executor.execResult = async (...args) => {
+      const result = original(...args);
+      now += 4000;
+      return result;
+    };
+    const signal = new AbortController().signal;
+    const c = new ExecHarnessContainer(h.executor, { runId: "run-7", deadlineAt: 11_000, clock: () => now, signal });
+    await expect(c.request(paths, { method: "GET", port: 41000, path: "/api/info" })).resolves.toMatchObject({
+      status: 204,
+    });
+    expect(h.calls.map((c) => c.opts?.timeoutMs)).toEqual([10_000, 6000]);
+    expect(h.calls.every((c) => c.opts?.signal !== undefined && !c.opts.signal.aborted)).toBe(true);
+  });
+  it("does not retry a read after its original operation deadline expires", async () => {
+    let now = 1000;
+    const h = recordingExecutor([new ExecControlResetError("lost read"), "alive"]);
+    h.executor.execResult = async (command, opts) => {
+      h.calls.push({ command, opts });
+      now = 70_000;
+      throw new ExecControlResetError("lost read");
+    };
+    const c = new ExecHarnessContainer(h.executor, { runId: "run-7", deadlineAt: 120_000, clock: () => now });
+    await expect(c.alive(4242)).rejects.toThrow(/deadline/);
+    expect(h.calls).toHaveLength(1);
+  });
+  it("bounds transport waiting with the original deadline and removes the timer on settlement", async () => {
+    vi.useFakeTimers();
+    try {
+      const unknown = new ExecInfraError("collection acknowledgement unknown", "deadline-passed");
+      let sends = 0;
+      let observed: AbortSignal | undefined;
+      const executor: Executor = {
+        exec: async () => {
+          throw new Error("no presentation");
+        },
+        readFile: async () => "",
+        writeFile: async () => "",
+        execResult: async (_command, opts) => {
+          sends++;
+          observed = opts!.signal;
+          return new Promise((_resolve, reject) =>
+            observed!.addEventListener("abort", () => reject(unknown), { once: true }),
+          );
+        },
+      };
+      const c = new ExecHarnessContainer(executor, { runId: "original", deadlineAt: 1000, clock: () => 0 });
+      const pending = expect(c.start(piStart([]))).rejects.toBe(unknown);
+      await vi.advanceTimersByTimeAsync(1000);
+      await pending;
+      expect(observed?.reason.name).toBe("TimeoutError");
+      expect(sends).toBe(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("the original hard-stop signal reaches an in-flight request without a repeated POST", async () => {
+    const stop = new AbortController();
+    const unknown = new ExecInfraError("request interrupted; outcome unknown", "aborted");
+    let sends = 0;
+    let started!: () => void;
+    const admitted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const executor: Executor = {
+      exec: async () => {
+        throw new Error("no presentation");
+      },
+      readFile: async () => "",
+      writeFile: async () => "",
+      execResult: async (_command, opts) => {
+        sends++;
+        started();
+        return new Promise((_resolve, reject) =>
+          opts!.signal!.addEventListener("abort", () => reject(unknown), { once: true }),
+        );
+      },
+    };
+    const c = new ExecHarnessContainer(executor, {
+      runId: "original",
+      deadlineAt: 60_000,
+      clock: () => 0,
+      signal: stop.signal,
+    });
+    const pending = expect(c.request(paths, { method: "POST", path: "/api/session", port: 41000 })).rejects.toBe(
+      unknown,
+    );
+    await admitted;
+    stop.abort();
+    await pending;
+    expect(sends).toBe(1);
+  });
+  it("refuses cancelled and expired work without sending a fresh instruction", async () => {
+    const stop = new AbortController();
+    stop.abort();
+    const h = recordingExecutor(["alive"]);
+    const scope = { runId: "run-7", deadlineAt: 10_000, clock: () => 1000, signal: stop.signal };
+    await expect(new ExecHarnessContainer(h.executor, scope).writeLine(paths, "prompt")).rejects.toThrow(/cancel/);
+    await expect(
+      new ExecHarnessContainer(h.executor, { ...scope, signal: undefined, deadlineAt: 1000 }).writeLine(
+        paths,
+        "prompt",
+      ),
+    ).rejects.toThrow(/deadline/);
+    expect(h.calls).toHaveLength(0);
+  });
+});
+
+describe("original producer control after admission ends", () => {
+  it.each(["cancelled", "expired"])(
+    "preserves bounded owned shutdown and observation when work is %s",
+    async (kind) => {
+      const stop = new AbortController();
+      if (kind === "cancelled") stop.abort();
+      const h = recordingExecutor(["alive", "vm-original", "", "", "HTTP/1.1 200 OK\r\n\r\n{}"]);
+      const c = new ExecHarnessContainer(h.executor, {
+        runId: "original",
+        deadlineAt: kind === "expired" ? 0 : 100_000,
+        remainingMs: () => (kind === "expired" ? 0 : 10_000),
+        clock: () => 1000,
+        signal: stop.signal,
+      });
+      await expect(c.start(piStart([]))).rejects.toThrow();
+      await expect(c.writeLine(paths, '{"type":"prompt"}')).rejects.toThrow();
+      await expect(c.request(paths, { method: "POST", port: 41000, path: "/api/session" })).rejects.toThrow();
+      expect(h.calls).toHaveLength(0);
+      await expect(c.alive(4242)).resolves.toBe(true);
+      await expect(c.identity()).resolves.toBe("vm-original");
+      await c.cancelInput(paths, '{"type":"abort"}');
+      await c.kill(4242);
+      await expect(
+        c.cancelRequest(paths, { method: "POST", port: 41000, path: "/api/session/original/interrupt" }),
+      ).resolves.toMatchObject({ status: 200 });
+      expect(h.calls).toHaveLength(5);
+      expect(h.calls.every((call) => call.opts?.timeoutMs === OP_TIMEOUT_MS && !call.opts.signal?.aborted)).toBe(true);
+    },
+  );
+  it("an observation cannot admit a mutating HTTP request", async () => {
+    const h = recordingExecutor();
+    const c = new ExecHarnessContainer(h.executor);
+    await expect(c.observeRequest(paths, { method: "POST", port: 41000, path: "/api/session" })).rejects.toThrow(
+      /observation/,
+    );
+    expect(h.calls).toHaveLength(0);
+  });
+  it("a reset during control shutdown consumes the original control bound", async () => {
+    let now = 1000;
+    const h = recordingExecutor([new ExecControlResetError("lost stop"), ""]);
+    const original = h.executor.execResult!;
+    h.executor.execResult = async (...args) => {
+      const result = original(...args);
+      now += 4000;
+      return result;
+    };
+    const stop = new AbortController();
+    stop.abort();
+    const c = new ExecHarnessContainer(h.executor, {
+      runId: "original",
+      deadlineAt: 0,
+      clock: () => now,
+      signal: stop.signal,
+    });
+    await c.kill(4242);
+    expect(h.calls.map((call) => call.opts?.timeoutMs)).toEqual([60_000, 56_000]);
   });
 });

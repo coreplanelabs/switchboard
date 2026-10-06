@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import type { Executor } from "../../../execution/executor.js";
+import { harnessContainerFor } from "../botHostContainer.js";
 import { LOG_READ_BYTES } from "../container.js";
 import { piRunPaths } from "./process.js";
 import { FakeHarnessContainer } from "../testing/fakeContainer.js";
@@ -693,4 +695,39 @@ describe("PiRpcTransport", () => {
     expect(handed.consumedOffset).toBe(skip);
     expect(handed.offset).toBe(skip);
   });
+});
+
+describe("PiRpcTransport — the original factory control scope", () => {
+  it.each(["repo-resident", "repo-cold"] as const)(
+    "abort survives a hard stop while prompt admission remains closed (%s)",
+    async (machine) => {
+      const stop = new AbortController();
+      const calls: string[] = [];
+      const executor: Executor = {
+        exec: async () => {
+          throw new Error("no presentation fallback");
+        },
+        readFile: async () => "",
+        writeFile: async () => "",
+        execResult: async (command) => {
+          calls.push(command);
+          return { stdout: "", stderr: "", exitCode: 0, truncated: false };
+        },
+      };
+      const container = harnessContainerFor(executor, machine, {
+        runId: "original",
+        deadlineAt: 0,
+        remainingMs: () => 0,
+        clock: () => 1000,
+        signal: stop.signal,
+      });
+      const rpc = new PiRpcTransport({ container, paths, pid: 4242, pollMs: 250, sleep: async () => {} });
+      stop.abort();
+      await expect(rpc.write({ type: "abort", id: "original-stop" })).resolves.toBe("landed");
+      await expect(rpc.write({ type: "prompt", id: "forbidden-work", message: "work" })).resolves.toBe("failed");
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toContain("original-stop");
+      expect(calls[0]).not.toContain("forbidden-work");
+    },
+  );
 });

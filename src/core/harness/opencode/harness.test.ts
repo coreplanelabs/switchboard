@@ -4,7 +4,8 @@ import { updateStatusTool } from "../../../tools/status.js";
 import type { ChatMessage } from "../../chatMessage.js";
 import type { RunEvent } from "../../runEvents.js";
 import { callsInFlight } from "../../runRecord.js";
-import { HarnessContainerError, OP_TIMEOUT_MS } from "../container.js";
+import { ExecInfraError } from "../../../execution/executor.js";
+import { HarnessContainerError, HarnessCommandOutcomeError, OP_TIMEOUT_MS } from "../container.js";
 import {
   openThroughSeam,
   type HarnessDeps,
@@ -106,6 +107,30 @@ describe("OpenCodeHarness — the contract's object", () => {
     container.vm = "vm-here";
     expect(await object.find(facts({ container: "vm-old" }), container)).toBe("another-container");
     expect(container.requests).toHaveLength(0);
+  });
+
+  it.each([
+    new ExecInfraError("recorded server transport unknown", "transport-lost"),
+    new HarnessCommandOutcomeError("request", { stdout: "prefix", stderr: "", exitCode: 0, truncated: true }),
+  ])("find retains an unknown probe instead of declaring the recorded process dead (%s)", async (unknown) => {
+    const container = new FakeHarnessContainer();
+    container.vm = "vm-here";
+    container.onRequest = () => {
+      throw unknown;
+    };
+    await expect(object.find(facts({ container: "vm-here" }), container)).rejects.toBe(unknown);
+    expect(container.killed).toHaveLength(0);
+    expect(container.removed).toHaveLength(0);
+  });
+
+  it("an unknown shutdown retains the producer root instead of removing private data", async () => {
+    const container = new FakeHarnessContainer();
+    const unknown = new ExecInfraError("original shutdown outcome unknown", "transport-lost");
+    container.kill = async () => {
+      throw unknown;
+    };
+    await expect(object.end(facts(), container)).rejects.toBe(unknown);
+    expect(container.removed).toHaveLength(0);
   });
 
   it("find answers alive-here when the recorded port answers (any status), dead when no server answers", async () => {
@@ -422,6 +447,159 @@ describe("OpenCodeHarness — the re-attach onto a still-answering server", () =
     ]);
     expect(notes(r).filter((n) => n.kind === "harness_error")).toEqual([]);
   });
+
+  it.each(["server", "tailer", "root"] as const)(
+    "an opening failure preserves a failed local ending before session handoff (%s)",
+    async (phase) => {
+      const closing = new ExecInfraError("local server shutdown unknown", "transport-lost");
+      const driver = openCodeDriver({
+        inspectContainer: (container) => {
+          const request = container.request.bind(container);
+          container.request = async (paths, req) =>
+            req.method === "POST" && req.path === "/api/session"
+              ? { status: 500, headers: {}, body: "session setup failed" }
+              : request(paths, req);
+          const kill = container.kill.bind(container);
+          let kills = 0;
+          container.kill = async (pid) => {
+            kills++;
+            if (phase === "server" || (phase === "tailer" && kills === 2)) throw closing;
+            await kill(pid);
+          };
+          if (phase === "root")
+            container.remove = async () => {
+              throw closing;
+            };
+        },
+      });
+      const result = await driver.run({
+        turns: [{ content: [{ type: "text", text: "unused" }], stopReason: "end_turn" }],
+      });
+      expect(result.outcome.kind).toBe("failed");
+      if (result.outcome.kind !== "failed") throw new Error("expected failed opening");
+      expect(result.outcome.error).toMatchObject({ name: "HarnessEndingUnconfirmedError", endingError: closing });
+      expect(result.removed).toHaveLength(0);
+    },
+  );
+
+  it.each(["server", "tailer", "root", "tailer-launch"] as const)(
+    "unconfirmed recorded %s ending blocks a second server",
+    async (phase) => {
+      const unknown = new ExecInfraError("recorded ending unknown", "transport-lost");
+      const driver = openCodeDriver({
+        reattach: {},
+        inspectContainer: (container) => {
+          const request = container.request.bind(container);
+          container.request = async (paths, req) =>
+            phase !== "tailer-launch" && req.port === 41001 && req.path === "/api/info"
+              ? { status: 401, headers: {}, body: "" }
+              : request(paths, req);
+          const kill = container.kill.bind(container);
+          container.kill = async (pid) => {
+            if ((phase === "server" && pid === 999) || (phase === "tailer" && pid === 888)) throw unknown;
+            await kill(pid);
+          };
+          if (phase === "root")
+            container.remove = async () => {
+              throw unknown;
+            };
+          if (phase === "tailer-launch") {
+            const alive = container.alive.bind(container);
+            container.alive = async (pid) => (pid === 888 ? false : alive(pid));
+            container.start = async () => {
+              throw unknown;
+            };
+          }
+        },
+      });
+      const rowFacts = rowFor(driver);
+      const result = await driver.run({
+        turns: [{ content: [{ type: "text", text: "must not restart" }], stopReason: "end_turn" }],
+        processAliveOnResume: true,
+        resume: resume(rowFacts, [request], []),
+      });
+      expect(result.outcome).toMatchObject({
+        kind: "failed",
+        error: { name: "HarnessEndingUnconfirmedError", openingError: unknown },
+      });
+      expect(result.starts).toEqual([]);
+      expect(result.removed).toEqual([]);
+    },
+  );
+
+  it.each(["probe", "session", "feed"])(
+    "unknown recorded %s collection preserves custody without cleanup or a second server",
+    async (phase) => {
+      const unknown = new ExecInfraError("recorded continuation outcome unknown", "transport-lost");
+      const driver = openCodeDriver({
+        reattach: {},
+        inspectContainer: (container) => {
+          const request = container.request.bind(container);
+          container.request = async (paths, input) => {
+            if (
+              input.port === 41001 &&
+              ((phase === "probe" && input.path === "/api/info") ||
+                (phase === "session" && input.path.includes("/message")))
+            )
+              throw unknown;
+            return request(paths, input);
+          };
+          if (phase === "feed")
+            container.readLog = async () => {
+              throw unknown;
+            };
+        },
+      });
+      const rowFacts = rowFor(driver);
+      const result = await driver.run({
+        turns: [{ content: [{ type: "text", text: "must not restart" }], stopReason: "end_turn" }],
+        processAliveOnResume: true,
+        resume: resume(rowFacts, [request], []),
+      });
+      expect(result.outcome).toMatchObject({
+        kind: "failed",
+        error: { name: "HarnessEndingUnconfirmedError", openingError: unknown },
+      });
+      expect(result.starts).toHaveLength(0);
+      expect(result.killed).toHaveLength(0);
+      expect(result.removed).toHaveLength(0);
+    },
+  );
+
+  it.each([undefined, "11111111-1111-1111-1111-111111111111:333"])(
+    "tailer-only restart retains session custody and replaces birth evidence (%s)",
+    async (birth) => {
+      const driver = openCodeDriver({
+        reattach: { tailerDead: true },
+        inspectContainer: (container) => {
+          const start = container.start.bind(container);
+          container.start = async (input) => ({
+            ...(await start(input)),
+            ...(birth === undefined ? {} : { processBirth: birth }),
+          });
+        },
+      });
+      const rowFacts = rowFor(driver, { tailerProcessBirth: "11111111-1111-1111-1111-111111111111:222" });
+      const result = await driver.run({
+        turns: [{ content: [{ type: "text", text: "continued" }], stopReason: "end_turn" }],
+        processAliveOnResume: true,
+        resume: resume(rowFacts, [request], []),
+      });
+      expect(result.outcome).toEqual({ kind: "answered", answer: "continued" });
+      expect(result.starts).toHaveLength(0);
+      expect(result.facts[0]).toMatchObject({
+        pid: rowFacts.pid,
+        sessionID: rowFacts.sessionID,
+        root: rowFacts.root,
+        relaunches: rowFacts.relaunches,
+      });
+      const saved = result.facts[0];
+      expect(saved.harness).toBe("opencode");
+      if (saved.harness !== "opencode") throw new Error("unexpected harness facts");
+      expect(saved.tailerProcessBirth).toBe(birth);
+      expect(result.facts[0].logOffset).toBeGreaterThanOrEqual(rowFacts.logOffset);
+    },
+  );
 
   it("a tailer that died with the bot is restarted over the same feed with keepLog and the password, the feed is read from the row's offset — nothing before it is said again, everything after it is — and the note and the row carry the new tailer", async () => {
     let container: { starts: HarnessStart[] } | undefined;
