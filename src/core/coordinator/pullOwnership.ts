@@ -45,46 +45,64 @@ export function unitPullTargets(instance: CoordinatorInstance, unit: Coordinator
 
 export type PullBindingRefusal = "stale" | "owned" | "incomplete" | "unavailable";
 
-export type PullOwnershipCheck =
-  | "target"
-  | "inventory_incomplete"
-  | "inventory_limit"
-  | "binding_identity"
-  | "adoption_requester"
-  | "instance_stopped"
-  | "unit_not_held"
-  | "publication_owner"
-  | "target_removed"
-  | "rival_owner"
-  | "pending_report"
-  | "instance_read"
-  | "instance_shape"
-  | "ownership_scan"
-  | "binding_validation"
-  | "inventory_row_limit"
-  | "inventory_byte_limit"
-  | "inventory_live_producer"
-  | "inventory_terminal_producer"
-  | "inventory_private_producer"
-  | "inventory_workspace_owner"
-  | "unit_shape"
-  | "unit_publication_binding"
-  | "unit_effect_binding"
-  | "run_shape"
-  | "run_publication"
-  | "run_initial_coding_owner"
-  | "run_door"
-  | "settlement_shape"
-  | "settlement_repository"
-  | "settlement_initial_coding_owner"
-  | "effect_shape"
-  | "effect_identity"
-  | "effect_reconciliation"
-  | "effect_unit_binding"
-  | "effect_kind"
-  | "effect_target";
+export const PULL_OWNERSHIP_CHECKS = [
+  "target",
+  "inventory_incomplete",
+  "inventory_limit",
+  "binding_identity",
+  "adoption_requester",
+  "instance_stopped",
+  "unit_not_held",
+  "publication_owner",
+  "target_removed",
+  "rival_owner",
+  "pending_report",
+  "instance_read",
+  "instance_shape",
+  "ownership_scan",
+  "binding_validation",
+  "inventory_row_limit",
+  "inventory_byte_limit",
+  "inventory_live_producer",
+  "inventory_terminal_producer",
+  "inventory_private_producer",
+  "inventory_workspace_owner",
+  "unit_shape",
+  "unit_publication_binding",
+  "unit_effect_binding",
+  "run_shape",
+  "run_publication",
+  "run_initial_coding_owner",
+  "run_door",
+  "settlement_shape",
+  "settlement_repository",
+  "settlement_initial_coding_owner",
+  "effect_shape",
+  "effect_identity",
+  "effect_reconciliation",
+  "effect_unit_binding",
+  "effect_kind",
+  "effect_target",
+] as const;
+export type PullOwnershipCheck = (typeof PULL_OWNERSHIP_CHECKS)[number];
 export type PullOwnershipSource = "units" | "runs" | "live_runs" | "settlements" | "effects";
+export type PullOwnerDiagnosticCause =
+  "row-limit" | "byte-limit" | "json" | "shape" | "historical" | "validation" | "read";
+export interface PullOwnerReadDiagnostic {
+  version: 1;
+  stage: PullOwnershipCheck;
+  cause: PullOwnerDiagnosticCause;
+  source?: PullOwnershipSource;
+  rowIndex?: number;
+  rowsRead: number;
+  /** Existing conservative UTF-16-to-UTF-8 estimate, not decoded private bytes. */
+  sourceBytes: number;
+}
 export interface PullOwnershipDiagnostics {
+  /** Physical locations align with merged run rows; they carry no ownership facts. */
+  runOrigins?: Array<{ source: "live_runs" | "runs"; rowIndex: number }>;
+  cursor?: { source: PullOwnershipSource; rowIndex?: number };
+  cause?: PullOwnerDiagnosticCause;
   failure?: { check: PullOwnershipCheck; source?: PullOwnershipSource; rowIndex?: number };
   scan?: { source: PullOwnershipSource; rowIndex: number; rowsRead: number; sourceBytes: number };
 }
@@ -188,7 +206,8 @@ export type PullOwner =
   | { kind: "run"; runId: string }
   | { kind: "effect"; id: string };
 export type PullOwnersResult =
-  { ok: true; owners: PullOwner[] } | { ok: false; reason: "unavailable" | "incomplete" | "invalid" };
+  | { ok: true; owners: PullOwner[] }
+  | { ok: false; reason: "unavailable" | "incomplete" | "invalid"; diagnostic?: PullOwnerReadDiagnostic };
 
 /** Bound work in the owner transaction; reaching it never proves absence. */
 export const PULL_OWNER_SCAN_MAX = 32768;
@@ -455,16 +474,17 @@ export function findPullOwnersInRows(
     };
   };
   for (const [rowIndex, run] of rows.runs.entries()) {
+    const origin = diagnostics?.runOrigins?.[rowIndex];
     if (typeof run.runId !== "string" || !run.runId || typeof run.live !== "boolean")
-      return fail("run_shape", "runs", rowIndex);
+      return fail("run_shape", origin?.source ?? "runs", origin?.rowIndex ?? rowIndex);
     if (run.publication !== undefined) {
       const publication = branchPublicationOf(run.publication, typeof run.repo === "string" ? run.repo : undefined);
       if (!publication || (!publication.complete && publication.repo === undefined))
-        return fail("run_publication", "runs", rowIndex);
+        return fail("run_publication", origin?.source ?? "runs", origin?.rowIndex ?? rowIndex);
       if (publication.repo && sameRepo(publication.repo)) {
         if (!publication.complete && !publication.pending) {
           const owner = initialCodingOwner(run);
-          if (!owner) return fail("run_initial_coding_owner", "runs", rowIndex);
+          if (!owner) return fail("run_initial_coding_owner", origin?.source ?? "runs", origin?.rowIndex ?? rowIndex);
           if (owner.holds && matches(undefined, owner.ref)) add(owner.owner);
           continue;
         }
@@ -479,7 +499,7 @@ export function findPullOwnersInRows(
     }
     if (run.door !== undefined && run.door !== null) {
       const door = doorPublicationOf(run.door);
-      if (!door) return fail("run_door", "runs", rowIndex);
+      if (!door) return fail("run_door", origin?.source ?? "runs", origin?.rowIndex ?? rowIndex);
       const update = door.update;
       if (door.outcome === "rejected" || door.outcome === "not_forwarded") continue;
       if (sameRepo(door.repo) && matches(door.pr as number | undefined, update.ref))
@@ -582,6 +602,65 @@ export function findPullOwnersInRows(
       add({ kind: "effect", id: effect.id });
   }
   return { ok: true, owners: [...owners.values()] };
+}
+
+/** Diagnostic data only: a malformed optional payload never clears ownership. */
+export function pullOwnerReadDiagnosticFrom(value: unknown): PullOwnerReadDiagnostic | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const v = value as Record<string, unknown>;
+  if (
+    Object.keys(v).some(
+      (key) => !["version", "stage", "cause", "source", "rowIndex", "rowsRead", "sourceBytes"].includes(key),
+    ) ||
+    v.version !== 1 ||
+    !PULL_OWNERSHIP_CHECKS.includes(v.stage as PullOwnershipCheck) ||
+    !["row-limit", "byte-limit", "json", "shape", "historical", "validation", "read"].includes(v.cause as string) ||
+    !Number.isSafeInteger(v.rowsRead) ||
+    Number(v.rowsRead) < 0 ||
+    Number(v.rowsRead) > PULL_OWNER_SCAN_MAX + 1 ||
+    !Number.isSafeInteger(v.sourceBytes) ||
+    Number(v.sourceBytes) < 0 ||
+    (v.source !== undefined &&
+      !["units", "runs", "live_runs", "settlements", "effects"].includes(v.source as string)) ||
+    (v.rowIndex !== undefined &&
+      (v.source === undefined ||
+        !Number.isSafeInteger(v.rowIndex) ||
+        Number(v.rowIndex) < 0 ||
+        Number(v.rowIndex) > PULL_OWNER_SCAN_MAX))
+  )
+    return;
+  return {
+    version: 1,
+    stage: v.stage as PullOwnershipCheck,
+    cause: v.cause as PullOwnerDiagnosticCause,
+    rowsRead: Number(v.rowsRead),
+    sourceBytes: Number(v.sourceBytes),
+    ...(v.source !== undefined ? { source: v.source as PullOwnershipSource } : {}),
+    ...(v.rowIndex !== undefined ? { rowIndex: Number(v.rowIndex) } : {}),
+  };
+}
+
+export function pullOwnerReadDiagnosticFor(
+  diagnostics: PullOwnershipDiagnostics,
+  fallback: "read" | "validation",
+): PullOwnerReadDiagnostic | undefined {
+  const stage = diagnostics.failure?.check ?? "ownership_scan";
+  const position = diagnostics.failure?.source ? diagnostics.failure : diagnostics.cursor;
+  const cause =
+    stage === "inventory_byte_limit"
+      ? "byte-limit"
+      : stage === "inventory_row_limit" || stage === "inventory_limit"
+        ? "row-limit"
+        : (diagnostics.cause ?? (stage.startsWith("inventory_") && diagnostics.failure ? "shape" : fallback));
+  return pullOwnerReadDiagnosticFrom({
+    version: 1,
+    stage,
+    cause,
+    rowsRead: diagnostics.scan?.rowsRead ?? 0,
+    sourceBytes: diagnostics.scan?.sourceBytes ?? 0,
+    ...(position?.source ? { source: position.source } : {}),
+    ...(position?.rowIndex !== undefined ? { rowIndex: position.rowIndex } : {}),
+  });
 }
 
 export function isPullOwnersResult(value: unknown): value is PullOwnersResult {

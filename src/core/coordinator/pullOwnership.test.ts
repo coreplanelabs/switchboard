@@ -1,3 +1,4 @@
+import { pullOwnerReadDiagnosticFrom, pullOwnerReadDiagnosticFor } from "./pullOwnership.js";
 // Feature: docs/reference/specs/run-history.md — canonical pull ownership.
 import { analyzeRunFriction } from "../runFriction.js";
 import { describe, expect, it } from "vitest";
@@ -776,5 +777,68 @@ describe("pull ownership refusal diagnostics", () => {
       ),
     ).toEqual({ ok: true, owners: [{ kind: "unit", instanceId: instance.id, unit: unit.unit }] });
     expect(diagnostics).toEqual({});
+  });
+});
+
+describe("closed pull-owner read diagnostic data", () => {
+  it("rejects IDs, private text, unsupported stages and invalid counters", () => {
+    const valid = {
+      version: 1,
+      stage: "inventory_row_limit",
+      cause: "row-limit",
+      source: "effects",
+      rowIndex: 32768,
+      rowsRead: 32769,
+      sourceBytes: 100,
+    };
+    expect(pullOwnerReadDiagnosticFrom(valid)).toEqual(valid);
+    for (const patch of [
+      { privateBody: "secret" },
+      { runId: "private" },
+      { stage: "unbounded error text" },
+      { source: "private-column" },
+      { cause: "original error message" },
+      { rowsRead: 32770 },
+      { sourceBytes: NaN },
+      { rowIndex: -1 },
+      { version: 2 },
+    ])
+      expect(pullOwnerReadDiagnosticFrom({ ...valid, ...patch })).toBeUndefined();
+  });
+  it("uses current source on a read failure without falsely naming a row", () => {
+    expect(
+      pullOwnerReadDiagnosticFor(
+        { cursor: { source: "units" }, scan: { source: "effects", rowIndex: 3, rowsRead: 4, sourceBytes: 123 } },
+        "read",
+      ),
+    ).toEqual({ version: 1, stage: "ownership_scan", cause: "read", source: "units", rowsRead: 4, sourceBytes: 123 });
+  });
+});
+
+describe("source-local run diagnostic provenance", () => {
+  it.each(["live_runs", "runs"] as const)("uses supplied physical %s positions only for diagnostics", (source) => {
+    const rows = {
+      complete: true,
+      units: [],
+      effects: [],
+      runs: [
+        { runId: "healthy", live: true },
+        { runId: "bad", live: true, publication: { version: 2 } },
+      ],
+    };
+    const original = JSON.stringify(rows);
+    const diagnostics = {
+      runOrigins: [
+        { source: "live_runs" as const, rowIndex: 3 },
+        { source, rowIndex: 7 },
+      ],
+    } as PullOwnershipDiagnostics;
+    expect(findPullOwnersInRows({ repo: "acme/api", pr: 7 }, rows, diagnostics)).toEqual({
+      ok: false,
+      reason: "incomplete",
+    });
+    expect(diagnostics.failure).toEqual({ check: "run_publication", source, rowIndex: 7 });
+    expect(JSON.stringify(rows)).toBe(original);
+    expect(findPullOwnersInRows({ repo: "acme/api", pr: 7 }, rows)).toEqual({ ok: false, reason: "incomplete" });
   });
 });
