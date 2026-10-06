@@ -58,6 +58,8 @@ When the card closes, its first line is the run's shape: time getting ready, thi
 
 The first runs as `review`, the second as `research`, the third as a `conductor` with one child per part; each card says which and why. A refused request says why and who can grant it.
 
+You can paste a PR link from its changes, files, commits or checks tab, including a query or comment anchor. For example, `@switchboard review https://github.com/acme/api/pull/123/changes` reviews that PR.
+
 ## When you want to choose
 
 Say `agent:coding` in the message and that agent runs, no picking; reply `agent:<name>` in a thread to run it another way; a routed `ship` runs your change through coding and review, and a person merges the pull request. Commands exist too, for whoever wants them: [Slack commands](../reference/slack-commands.md). To turn the picking off for a deployment, set `routing: { auto: false }` ([Turn features on and off](../how-to/turn-features-on-and-off.md)); every plain message then runs `general`.

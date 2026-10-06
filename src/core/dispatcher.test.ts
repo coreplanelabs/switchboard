@@ -26205,25 +26205,28 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     });
   });
 
-  it("a requester-authored Review PR URL reaches preflight even when the model would ask for its repository", async () => {
-    const { deps } = operatorDeps(ON_YAML);
-    const url = "https://github.com/acme/api/pull/7";
-    deps.operatorModel = vi.fn<RouteModel>(async () => ({
-      tool: "ask",
-      input: { text: "Which repository?", proposalSettings: {}, reason: "missing" },
-    }));
-    deps.resolveRepoContext = vi.fn(() => ({ repo: "acme/api", pr: 7, closedPr: { number: 7, merged: true } }));
-    await dispatch(deps, msg(`agent:review Please review pull request ${url}`, "slack:UADMIN"), fakeIO().io);
-    expect(deps.operatorModel).not.toHaveBeenCalled();
-    expect(deps.resolveRepoContext).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.anything(),
-      undefined,
-      expect.anything(),
-      true,
-      { repo: "acme/api", prTarget: { number: 7, source: "request", quote: url } },
-    );
-  });
+  it.each(["", "/changes", "/files?diff=split#diff-abc"])(
+    "a requester-authored Review PR URL reaches preflight even when the model would ask for its repository",
+    async (suffix) => {
+      const { deps } = operatorDeps(ON_YAML);
+      const url = `https://github.com/acme/api/pull/7${suffix}`;
+      deps.operatorModel = vi.fn<RouteModel>(async () => ({
+        tool: "ask",
+        input: { text: "Which repository?", proposalSettings: {}, reason: "missing" },
+      }));
+      deps.resolveRepoContext = vi.fn(() => ({ repo: "acme/api", pr: 7, closedPr: { number: 7, merged: true } }));
+      await dispatch(deps, msg(`agent:review Please review pull request ${url}`, "slack:UADMIN"), fakeIO().io);
+      expect(deps.operatorModel).not.toHaveBeenCalled();
+      expect(deps.resolveRepoContext).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        undefined,
+        expect.anything(),
+        true,
+        { repo: "acme/api", prTarget: { number: 7, source: "request", quote: url } },
+      );
+    },
+  );
 
   it("a repeat review with an App notification reaches PR preflight without earlier source context", async () => {
     const { deps } = operatorDeps(ON_YAML);
@@ -26268,9 +26271,9 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     expect(replies.join(" ")).not.toContain("earlier source data");
   });
 
-  it("the early review preflight receives the operator's verified PR target", async () => {
+  it.each(["", "/changes"])("the early review preflight receives the operator's verified PR target", async (suffix) => {
     const { deps } = operatorDeps(ON_YAML);
-    const url = "https://github.com/acme/api/pull/7";
+    const url = `https://github.com/acme/api/pull/7${suffix}`;
     deps.operatorModel = decides({
       binds: [
         {

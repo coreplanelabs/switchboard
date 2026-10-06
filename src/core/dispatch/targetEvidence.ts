@@ -20,20 +20,38 @@ function positiveNumber(text: string): number | undefined {
   return Number.isSafeInteger(number) && number > 0 ? number : undefined;
 }
 
+/** PR tabs and anchors change the view, not the repository or PR identity.
+ * Keep the authored URL as evidence; never replace it with a shortened URL. */
+export function prUrlIdentity(text: string): { repo: string; number: number } | undefined {
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    return undefined;
+  }
+  if (
+    (url.protocol !== "https:" && url.protocol !== "http:") ||
+    url.hostname !== "github.com" ||
+    url.username ||
+    url.password ||
+    url.port
+  )
+    return undefined;
+  const path = url.pathname.split("/");
+  if (path.at(-1) === "") path.pop();
+  const [, owner, repo, kind, pr, tab, commit] = path;
+  const number = kind === "pull" ? positiveNumber(pr ?? "") : undefined;
+  if (!owner || !repo || number === undefined) return undefined;
+  const conversation = path.length === 5;
+  const prTab = path.length === 6 && ["changes", "files", "commits", "checks"].includes(tab!);
+  const prCommit = path.length === 7 && tab === "commits" && /^[a-f0-9]{40}$/i.test(commit!);
+  if (!conversation && !prTab && !prCommit) return undefined;
+  return { repo: `${owner}/${repo}`.toLowerCase(), number };
+}
+
 /** Parse only the short span the operator claimed, never a whole chat turn. */
 function quotedPr(text: string): QuotedPr | undefined {
-  if (text.startsWith("https://") || text.startsWith("http://")) {
-    let url: URL;
-    try {
-      url = new URL(text);
-    } catch {
-      return undefined;
-    }
-    const path = url.pathname.split("/").filter(Boolean);
-    const number = path.length === 4 && path[2] === "pull" ? positiveNumber(path[3]!) : undefined;
-    if (url.hostname !== "github.com" || url.username || url.password || number === undefined) return undefined;
-    return { repo: `${path[0]}/${path[1]}`.toLowerCase(), number };
-  }
+  if (text.startsWith("https://") || text.startsWith("http://")) return prUrlIdentity(text);
   const hash = text.lastIndexOf("#");
   if (hash < 0) return undefined;
   const number = positiveNumber(text.slice(hash + 1));

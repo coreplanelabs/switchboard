@@ -571,6 +571,46 @@ describe("explicit PR directives at the operator stage", () => {
 });
 
 describe("the operator is one loop with typed tools", () => {
+  it("binds a Slack review request using its complete PR changes link on the first model answer", async () => {
+    const quote = "https://github.com/acme/api/pull/124/changes";
+    const model = vi.fn<RouteModel>(async () => ({
+      tool: OPERATOR_BIND_TOOL,
+      input: {
+        preset: "review",
+        repo: "acme/api",
+        prTarget: { number: 124, source: "request", quote },
+        reason: "review",
+      },
+    }));
+    const result = await runOperator(
+      input({ text: `review <${quote}|github.com/acme/api/pull/124/changes>`, projection: projectionOf(["review"]) }),
+      model,
+    );
+    expect(model).toHaveBeenCalledTimes(1);
+    expect(result.attempts).toEqual([{ outcome: "accepted" }]);
+    expect(result.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ repo: "acme/api", prTarget: { number: 124, quote } }],
+    });
+  });
+
+  it.each(["review", "ship"])("binds an explicit %s PR tab link before calling the model", async (preset) => {
+    const quote = "https://github.com/acme/api/pull/124/files?diff=split#diff-abc";
+    const model = vi.fn<RouteModel>(async () => ({ tool: OPERATOR_ASK_TOOL, input: { text: "Which PR?" } }));
+    const result = await runOperator(
+      input({
+        text: `agent:${preset} <${quote}|${quote.slice("https://".length)}>`,
+        projection: projectionOf([preset]),
+      }),
+      model,
+    );
+    expect(model).not.toHaveBeenCalled();
+    expect(result.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ repo: "acme/api", prTarget: { number: 124, quote } }],
+    });
+  });
+
   it.each(["review", "ship"])(
     "binds an explicit %s PR URL before an invalid question can exhaust the door",
     async (preset) => {
