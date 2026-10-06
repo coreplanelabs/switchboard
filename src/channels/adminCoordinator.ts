@@ -355,6 +355,13 @@ export interface AdminCoordinatorDeps {
     startState: BranchStartState;
     requester: string;
   }) => Promise<RewriteResult>;
+  verifyPinnedIdentitiesReadOnly?: (args: {
+    repo: string;
+    branch: string;
+    firstHead: string;
+    expectedTip: string;
+    requester: string;
+  }) => Promise<RewriteResult>;
   /** One create request over this admitted original head; uncertain admission remains owned. */
   createRecoveryPullRequest?: (target: PullRequestTarget & { headSha: string }) => Promise<RecoveryPullWriteResult>;
   /** The branch head commit's subject (githubPulls.branchHeadSubject): the
@@ -4185,7 +4192,7 @@ export async function adoptOriginalPublishedHead(
     })
     .catch(() => undefined);
   if (!full?.ok) return json(409, { ok: false, error: "adoption_ledger_incomplete", at });
-  const proof = publishedHeadEvidence({
+  const acceptedProof = publishedHeadEvidence({
     instance: {
       id: instance.id,
       repo: instance.repo,
@@ -4197,7 +4204,19 @@ export async function adoptOriginalPublishedHead(
     run: full.value,
     runs: listing.runs,
   });
-  if (!proof.ok) return json(409, { ok: false, error: proof.error, at });
+  const audit =
+    body.audit === true || row.adoption?.audit
+      ? await deps.instances.prepareAdoptionAudit(row, full.value.id).catch(() => undefined)
+      : undefined;
+  const proof = audit ? { ok: true as const, head: audit.head, runId: full.value.id } : acceptedProof;
+  if (!proof.ok)
+    return json(409, {
+      ok: false,
+      error: body.audit === true ? "historical_native_audit_unverified" : proof.error,
+      at,
+    });
+  if ((body.audit === true || row.adoption?.audit) && audit === undefined)
+    return json(409, { ok: false, error: "historical_native_audit_unverified", at });
   const head = proof.head;
   const actionId = await recoveryActionId(row, caller);
   const existing = row.adoption;
@@ -4220,23 +4239,32 @@ export async function adoptOriginalPublishedHead(
       existing.runId !== proof.runId ||
       existing.requester !== caller.userId ||
       existing.threadKey !== caller.threadKey ||
-      existing.messageId !== caller.messageId)
+      existing.messageId !== caller.messageId ||
+      JSON.stringify(existing.audit) !== JSON.stringify(audit))
   )
     return json(409, { ok: false, error: "adoption_already_claimed", at });
   const freshHead = await deps.fetchBranchHeadSha(instance.repo, row.branch).catch(() => undefined);
   if (freshHead !== head) return json(409, { ok: false, error: "adoption_head_moved", at });
   const ahead = await deps.commitsOverBase(instance.repo, instance.base, row.branch).catch(() => undefined);
   if (ahead === undefined || ahead <= 0) return json(409, { ok: false, error: "adoption_no_verified_commits", at });
-  const identities = await deps
-    .verifyIdentitiesReadOnly({
-      repo: instance.repo,
-      base: instance.base,
-      branch: row.branch,
-      expectedTip: head,
-      startState: EMPTY_START_STATE,
-      requester: instance.userId,
-    })
-    .catch(() => undefined);
+  const identities = await (
+    audit
+      ? deps.verifyPinnedIdentitiesReadOnly?.({
+          repo: instance.repo,
+          branch: row.branch,
+          firstHead: audit.firstHead,
+          expectedTip: head,
+          requester: instance.userId,
+        })
+      : deps.verifyIdentitiesReadOnly({
+          repo: instance.repo,
+          base: instance.base,
+          branch: row.branch,
+          expectedTip: head,
+          startState: EMPTY_START_STATE,
+          requester: instance.userId,
+        })
+  )?.catch(() => undefined);
   if (identities?.kind !== "clean" || identities.tip !== head)
     return json(409, { ok: false, error: "adoption_identity_unverified", at });
   const readPrs = async () => deps.listAnyPrByHead!(instance.repo, row.branch).catch(() => undefined);
@@ -4256,6 +4284,7 @@ export async function adoptOriginalPublishedHead(
         messageId: caller.messageId,
         claimedAt: at,
         state: "claimed",
+        ...(audit ? { audit } : {}),
       },
     };
     const saved = await deps.instances.compareAndReplaceUnit(row, claimed).catch(() => undefined);
@@ -4298,7 +4327,8 @@ export async function adoptOriginalPublishedHead(
       name: instance.userName?.trim() || instance.userId,
       threadUrl: threadPageLink(instance.threadKey, deps.runPageBase?.replace(/\/runs\/?$/, "") ?? ""),
     });
-    const prBody = `${header}\n\n${marker}\n\nOpened from the original unit's accepted pushed head \`${head}\`. The interrupted PR description and any later uncommitted sandbox work remain unverified. Review this committed head only.`;
+    const provenance = audit ? "newly audited native head" : "accepted pushed head";
+    const prBody = `${header}\n\n${marker}\n\nOpened from the original unit's ${provenance} \`${head}\`. The interrupted PR description and any later uncommitted sandbox work remain unverified. Review this committed head only.`;
     try {
       await deps.createDraftPullRequest({
         repo: instance.repo,

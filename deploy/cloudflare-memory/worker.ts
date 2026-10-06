@@ -146,6 +146,7 @@ import {
   RETENTION_BOUNDS,
   RUN_EVENTS_DEFAULT_PAGE,
   RUN_EVENTS_MAX_PAGE,
+  MAX_RECORD_BYTES,
   RUN_ID_PATTERN,
   clampListLimit,
   RUN_LIST_MAX_LIMIT,
@@ -180,6 +181,18 @@ import {
 } from "../../src/core/runLedger/sessionLog.ts";
 import { mergeRequesterTarget, type RequesterTarget } from "../../src/core/runLedger/ledger.ts";
 import type { RunEvent } from "../../src/core/runEvents.ts";
+import {
+  prepareHistoricalNativeAudit,
+  historicalOwnerEvent,
+  isHistoricalOwnerEvent,
+  isHistoricalOwnerRecord,
+  HISTORICAL_AUTHORITY_EVENT_TYPES,
+  HISTORICAL_AUTHORITY_EVENT_FIELDS,
+  type HistoricalOwnerEvent,
+  type HistoricalOwnerRecord,
+  type HistoricalAuditInput,
+  type HistoricalNativeAudit,
+} from "../../src/core/coordinator/historicalNativeAudit.ts";
 import {
   isRunUsage,
   usageOfEvents,
@@ -3908,7 +3921,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       if (!isCoordinatorInstance(instance)) return report("incomplete", "instance_shape");
       if (!force && !pullBindingChanges(instance, current, next)) return;
       stage = "ownership_scan";
-      const rows = this.pullOwnershipRows(diagnostics);
+      const rows = this.pullOwnershipRows(diagnostics, next.adoption?.audit ? next : undefined);
       for (const unit of staged) {
         const saved = this.sql
           .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, unit.instanceId)
@@ -3983,11 +3996,64 @@ export class RunHistoryDO extends DurableObject<Env> {
   /** One compare-and-replace transaction updates a unit for exactly one
    * caller. The whole expected JSON is the fence: any intervening unit write
    * makes this caller stale. */
+  private adoptionAuditInput(expected: CoordinatorUnit, runId: string): HistoricalAuditInput | undefined {
+    try {
+      if (!isCoordinatorUnit(expected)) return;
+      const unitRow = this.sql
+        .exec<{ json: string }>(
+          `SELECT json FROM coordinator_units WHERE instance_id = ? AND unit = ?`,
+          expected.instanceId,
+          expected.unit,
+        )
+        .toArray()[0];
+      if (unitRow?.json !== JSON.stringify(expected)) return;
+      const instanceRow = this.sql
+        .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, expected.instanceId)
+        .toArray()[0];
+      const instance = instanceRow && JSON.parse(instanceRow.json);
+      if (!isCoordinatorInstance(instance)) return;
+      const key = `${instance.id}:${expected.unit}/`;
+      const thread = expected.threadKey ?? instance.threadKey;
+      const rows = this.pullOwnershipRows();
+      const children = rows.runs.filter((row) => {
+        const record = row.record as
+          { idempotencyKey?: string; parentInstanceId?: string; threadKey?: string } | undefined;
+        return (
+          (expected.adoption?.audit
+            ? record?.idempotencyKey === `${key}0/coding`
+            : record?.idempotencyKey?.startsWith(key)) ||
+          (record?.idempotencyKey === undefined &&
+            record?.parentInstanceId === instance.id &&
+            record?.threadKey === thread)
+        );
+      });
+      if (children.length !== 1 || children[0]?.runId !== runId || this.liveRow(runId)) return;
+      const record = this.canonicalRun(runId, true);
+      return record ? { instance, unit: expected, record, events: record.events } : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async prepareAdoptionAudit(expected: CoordinatorUnit, runId: string): Promise<HistoricalNativeAudit | undefined> {
+    const input = this.adoptionAuditInput(expected, runId);
+    return input && (await prepareHistoricalNativeAudit(input, expected.adoption?.audit !== undefined))?.audit;
+  }
+
   async compareAndReplaceUnit(
     expected: CoordinatorUnit,
     replacement: CoordinatorUnit,
     now: number,
   ): Promise<{ ok: true } | { ok: false; reason: PullBindingRefusal }> {
+    const input = replacement.adoption?.audit && this.adoptionAuditInput(expected, replacement.adoption.runId);
+    const prepared = input
+      ? await prepareHistoricalNativeAudit(input, expected.adoption?.audit !== undefined)
+      : undefined;
+    if (
+      replacement.adoption?.audit &&
+      (!prepared || JSON.stringify(prepared.audit) !== JSON.stringify(replacement.adoption.audit))
+    )
+      return { ok: false, reason: "incomplete" };
     let out: { ok: true } | { ok: false; reason: PullBindingRefusal } = { ok: true };
     this.ctx.storage.transactionSync(() => {
       const row = this.sql
@@ -3999,6 +4065,14 @@ export class RunHistoryDO extends DurableObject<Env> {
         .toArray()[0];
       if (row?.json !== JSON.stringify(expected) || !permitsRecoveryMetadataWrite(expected, replacement, true)) {
         out = { ok: false, reason: "stale" };
+        return;
+      }
+      if (
+        replacement.adoption?.audit &&
+        (!prepared ||
+          JSON.stringify(this.adoptionAuditInput(expected, replacement.adoption.runId)) !== prepared.snapshot)
+      ) {
+        out = { ok: false, reason: "incomplete" };
         return;
       }
       const preserved = preserveWorkBrief(expected, replacement);
@@ -4317,7 +4391,54 @@ export class RunHistoryDO extends DurableObject<Env> {
   }
 
   /** Reads are also consumed by admission inside this existing owner transaction. */
-  private pullOwnershipRows(diagnostics?: PullOwnershipDiagnostics): PullOwnershipRows {
+  private historicalOwnerEvents(runId: string, record: HistoricalOwnerRecord): HistoricalOwnerEvent[] | undefined {
+    const size = this.sql
+      .exec<{ count: number; bytes: number; first: number; last: number }>(
+        `SELECT COUNT(*) AS count,COALESCE(SUM(length(CAST(json AS BLOB))),0) AS bytes,MIN(seq) AS first,MAX(seq) AS last FROM run_events WHERE run_id=?`,
+        runId,
+      )
+      .one();
+    if (
+      size.count < 1 ||
+      size.count > RUN_EVENTS_MAX_PAGE ||
+      size.count !== record.eventCount ||
+      size.count !== record.storedEventCount ||
+      record.truncated !== false ||
+      size.first !== 1 ||
+      size.last !== size.count ||
+      size.bytes > MAX_RECORD_BYTES
+    )
+      return;
+    const rows = this.sql
+      .exec<{ seq: number; authority_json: string }>(
+        `SELECT seq,
+      CASE WHEN json_valid(json) AND json_type(json)='object' THEN
+        CASE WHEN json_extract(json,'$.type') IN (SELECT value FROM json_each(?)) THEN
+          (SELECT json_group_object(key,json(CASE WHEN type IN ('array','object') THEN value WHEN type='true' THEN 'true' WHEN type='false' THEN 'false' ELSE json_quote(value) END))
+           FROM json_each(run_events.json) WHERE key IN (SELECT value FROM json_each(?)))
+        ELSE CASE WHEN json_type(json,'$.type')='text' THEN '{"type":"ignored"}' ELSE 'null' END END
+      ELSE 'null' END AS authority_json FROM run_events WHERE run_id=? ORDER BY seq LIMIT ?`,
+        JSON.stringify(HISTORICAL_AUTHORITY_EVENT_TYPES),
+        JSON.stringify(HISTORICAL_AUTHORITY_EVENT_FIELDS),
+        runId,
+        RUN_EVENTS_MAX_PAGE + 1,
+      )
+      .toArray();
+    if (rows.length !== size.count) return;
+    const events: HistoricalOwnerEvent[] = [];
+    let bytes = 0;
+    for (const row of rows) {
+      bytes += 3 * row.authority_json.length;
+      if (bytes > MAX_RECORD_BYTES || row.seq !== events.length + 1) return;
+      const value = JSON.parse(row.authority_json);
+      const event: unknown = { ...value, seq: row.seq };
+      if (!isHistoricalOwnerEvent(event)) return;
+      events.push(historicalOwnerEvent(event));
+    }
+    return events;
+  }
+
+  private pullOwnershipRows(diagnostics?: PullOwnershipDiagnostics, auditing?: CoordinatorUnit): PullOwnershipRows {
     let count = 0,
       bytes = 0;
     const bounded = function* <T extends Record<string, unknown>>(cursor: Iterable<T>, source: PullOwnershipSource) {
@@ -4365,9 +4486,17 @@ export class RunHistoryDO extends DurableObject<Env> {
       "units",
     ))
       rows.units.push({
-        unit: JSON.parse(row.unit_json),
+        unit: (() => {
+          const unit = JSON.parse(row.unit_json);
+          return auditing && auditing.instanceId === unit.instanceId && auditing.unit === unit.unit ? auditing : unit;
+        })(),
         instance: row.instance_json === null ? undefined : JSON.parse(row.instance_json),
       });
+    const auditedRunIds = new Set(
+      rows.units.flatMap((row) =>
+        isCoordinatorUnit(row.unit) && row.unit.adoption?.audit ? [row.unit.adoption.runId] : [],
+      ),
+    );
     for (const row of bounded(
       this.sql.exec<{
         run_id: string;
@@ -4411,6 +4540,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         runId: row.run_id,
         repo: meta.repo,
         live: true,
+        record: meta,
         publication: state.branchPublication,
         door: state.doorPublicationPending,
       });
@@ -4433,6 +4563,7 @@ export class RunHistoryDO extends DurableObject<Env> {
             WHERE key IN ('id', 'repo', 'userId', 'channelId', 'threadKey',
               'parentInstanceId', 'coordinatorUnit', 'coordinatorAttempt',
               'idempotencyKey', 'session', 'agent', 'status', 'provisional', 'publicationSettlement',
+              'startedAt', 'finishedAt', 'eventCount', 'storedEventCount', 'truncated', 'headSha', 'pushed', 'restarting', 'pr',
               'branchPublication', 'branchPushReceipts', 'doorPublicationPending'))
            ELSE 'null' END AS owner_json,
            work_evidence_json FROM runs LIMIT ?`,
@@ -4471,11 +4602,21 @@ export class RunHistoryDO extends DurableObject<Env> {
           };
         throw new Error("unreadable private producer");
       }
+      const audited = auditedRunIds.has(row.run_id);
+      if (audited && !isHistoricalOwnerRecord(identity)) throw new Error("unreadable historical header");
+      const historicalEvents =
+        audited && isHistoricalOwnerRecord(identity) ? this.historicalOwnerEvents(row.run_id, identity) : undefined;
+      if (audited) {
+        if (!historicalEvents) throw new Error("unreadable historical audit");
+        bytes += 3 * JSON.stringify(historicalEvents).length;
+        if (bytes > PULL_OWNER_SCAN_MAX_BYTES) throw new Error("pull owner scan incomplete");
+      }
       rows.runs.push({
         runId: row.run_id,
         repo: identity.repo,
         live: false,
         record: identity,
+        historicalEvents,
         pushReceipts:
           evidence && Object.hasOwn(evidence, "branchPushReceipts") ? evidence.branchPushReceipts : branchPushReceipts,
         publication:
@@ -7128,6 +7269,10 @@ export class RunHistoryDO extends DurableObject<Env> {
    *  stored under (the registry's stamp — see `eventSeqs`), or null when
    *  unknown or outside policy — one not-found shape. A corrupt event row is skipped. */
   async get(id: string): Promise<RunRecord | null> {
+    return this.canonicalRun(id);
+  }
+
+  private canonicalRun(id: string, privatePublication = false): RunRecord | null {
     const now = systemClock();
     const row = this.sql
       .exec<RunRow>(
@@ -7138,6 +7283,21 @@ export class RunHistoryDO extends DurableObject<Env> {
     if (!row || !this.isKept(row, this.policyState().policy, now)) return null;
     const summary = parseSummary(row);
     if (!summary) return null;
+    if (privatePublication) {
+      const size = this.sql
+        .exec<{ count: number; bytes: number }>(
+          `SELECT COUNT(*) AS count,COALESCE(SUM(length(CAST(json AS BLOB))),0) AS bytes FROM run_events WHERE run_id=?`,
+          id,
+        )
+        .one();
+      if (
+        size.count < 1 ||
+        size.count > RUN_EVENTS_MAX_PAGE ||
+        size.count !== row.event_count ||
+        size.bytes > MAX_RECORD_BYTES
+      )
+        return null;
+    }
     const events: RunEvent[] = parseEventRows(this.eventRows(id, 0, Number.MAX_SAFE_INTEGER));
     let sourceReads: unknown;
     let branchPublication: unknown;
@@ -7162,6 +7322,10 @@ export class RunHistoryDO extends DurableObject<Env> {
       if (row.work_evidence_json != null) {
         const evidence = parseWorkEvidence(JSON.parse(row.work_evidence_json), summary);
         if (evidence === undefined) return null;
+        if (privatePublication && Object.hasOwn(evidence, "branchPublication"))
+          branchPublication = evidence.branchPublication;
+        if (privatePublication && Object.hasOwn(evidence, "branchPushReceipts"))
+          branchPushReceipts = evidence.branchPushReceipts;
         workReads = (evidence as { workReads?: unknown }).workReads;
         unitSeedReceipt = (evidence as { unitSeedReceipt?: unknown }).unitSeedReceipt;
         branchIdentityBaseline = evidence.branchIdentityBaseline;
@@ -8957,6 +9121,7 @@ const LEDGER_ROUTES = new Set([
   "/runs/coordinator/stop",
   "/runs/coordinator/units/put",
   "/runs/coordinator/units/claim-legacy-continuation",
+  "/runs/coordinator/units/adoption-audit",
   "/runs/coordinator/recovery/transition",
   "/runs/coordinator/units/effect-transition",
   "/runs/coordinator/maintenance/admit",
@@ -9955,6 +10120,11 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
       `[runs/coordinator/units/claim-legacy-continuation] ${key.value} ${b.expected.instanceId}:${b.expected.unit} → ${r.ok ? "replaced" : r.reason}`,
     );
     return r.ok ? json(r) : json(r, 409);
+  }
+  if (pathname === "/runs/coordinator/units/adoption-audit") {
+    if (!isCoordinatorUnit(b.expected) || typeof b.runId !== "string" || !RUN_ID_PATTERN.test(b.runId))
+      return json({ error: "expected unit and original run required" }, 400);
+    return json({ audit: (await stub.prepareAdoptionAudit(b.expected, b.runId)) ?? null });
   }
   if (pathname === "/runs/coordinator/units/list") {
     if (typeof b.instanceId !== "string" || !INSTANCE_ID_PATTERN.test(b.instanceId))

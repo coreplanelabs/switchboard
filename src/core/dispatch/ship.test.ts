@@ -356,6 +356,12 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
       unit: "U12",
     });
     expect(parseOriginalUnitAdoptionRequest("adopt unit plan-old:U12 again")).toBeUndefined();
+    expect(parseOriginalUnitAdoptionRequest("adopt unit plan-old:U12 audit")).toEqual({
+      instanceId: "plan-old",
+      unit: "U12",
+      audit: true,
+    });
+    expect(parseOriginalUnitAdoptionRequest("adopt unit plan-old:U12 audit again")).toBeUndefined();
     const s = setup("slack:UADMIN", { text: "agent:ship adopt unit plan-old:U12" });
     const calls: unknown[] = [];
     s.deps.adoptOriginalPublishedHead = async (key, caller) => {

@@ -14,6 +14,7 @@ import { isFindingShape } from "../reviewVerdict.js";
 import { isMaintenanceActionId } from "./maintenanceIdentity.js";
 import { RUN_ID_PATTERN, IDEMPOTENCY_KEY_PATTERN, INSTANCE_ID_PATTERN } from "../runIdentity.js";
 export { IDEMPOTENCY_KEY_PATTERN, INSTANCE_ID_PATTERN } from "../runIdentity.js";
+import { isHistoricalNativeAudit, type HistoricalNativeAudit } from "./historicalNativeAudit.js";
 import {
   isAddressSeverity,
   type AddressSeverity,
@@ -1048,6 +1049,8 @@ export interface CoordinatorUnit {
     messageId: string;
     claimedAt: number;
     state: "claimed" | "posting" | "bound";
+    /** Original-owner read-only audit; the old producer record remains unchanged. */
+    audit?: HistoricalNativeAudit;
     pr?: { number: number; url: string };
   };
   /** The decision-record number reserved at admission for this unit. A unit
@@ -1302,6 +1305,7 @@ export function permitsRecoveryMetadataWrite(
           before.threadKey !== after.threadKey ||
           before.messageId !== after.messageId ||
           before.claimedAt !== after.claimedAt ||
+          JSON.stringify(before.audit) !== JSON.stringify(after.audit) ||
           (after.state === "posting" &&
             (after.pr !== undefined ||
               JSON.stringify(replacement.pr) !== JSON.stringify(current.pr) ||
@@ -1682,6 +1686,8 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
       !isText(r.adoption.threadKey) ||
       !isText(r.adoption.messageId) ||
       !isFinite(r.adoption.claimedAt) ||
+      (r.adoption.audit !== undefined &&
+        (!isHistoricalNativeAudit(r.adoption.audit) || r.adoption.audit.head !== r.adoption.headSha)) ||
       (r.adoption.state !== "claimed" && r.adoption.state !== "posting" && r.adoption.state !== "bound") ||
       (r.adoption.state !== "bound" && r.adoption.pr !== undefined) ||
       (r.adoption.state === "bound" && !isPr(r.adoption.pr)))

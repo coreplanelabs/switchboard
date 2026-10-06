@@ -115,7 +115,7 @@ export interface ShipDeps extends RunDeps, Pick<FastPathDeps, "clock" | "runRegi
     caller: { userId: string; threadKey: string; messageId?: string },
   ) => Promise<{ status: number; body: Record<string, unknown> }>;
   adoptOriginalPublishedHead?: (
-    key: { instanceId: string; unit: string },
+    key: { instanceId: string; unit: string; audit?: true },
     caller: { userId: string; threadKey: string; messageId?: string },
   ) => Promise<{ status: number; body: Record<string, unknown> }>;
   /**
@@ -164,9 +164,12 @@ export function parseOriginalUnitRecoveryRequest(
 export const namesOriginalUnitRecovery = (text: string): boolean =>
   /^(?:recover|renew)\s+unit(?:\s|$)/i.test(text.trim());
 
-export function parseOriginalUnitAdoptionRequest(text: string): { instanceId: string; unit: string } | undefined {
-  const match = /^adopt\s+unit\s+(\S+)\s*$/i.exec(text.trim());
-  return match ? parseUnitKey(match[1]!) : undefined;
+export function parseOriginalUnitAdoptionRequest(
+  text: string,
+): { instanceId: string; unit: string; audit?: true } | undefined {
+  const match = /^adopt\s+unit\s+(\S+)(?:\s+(audit))?\s*$/i.exec(text.trim());
+  const key = match ? parseUnitKey(match[1]!) : undefined;
+  return key ? { ...key, ...(match?.[2] ? { audit: true as const } : {}) } : undefined;
 }
 
 export const namesOriginalUnitAdoption = (text: string): boolean => /^adopt\s+unit(?:\s|$)/i.test(text.trim());
@@ -263,7 +266,7 @@ export async function runShipBranch(
   const shell = createCardShell({ label, startedAt: ctx.startedAt, now: clock });
   const adoption = parseOriginalUnitAdoptionRequest(directives.text);
   if (adoption === undefined && namesOriginalUnitAdoption(directives.text)) {
-    const reason = "original-unit adoption must be `adopt unit <instanceId>:<unit>`";
+    const reason = "original-unit adoption must be `adopt unit <instanceId>:<unit> [audit]`";
     await refuse(refusalOf("setup_failed", reason), () =>
       card.done(shell.close({ kind: "refused", icon: "🚫", reason, ...closeLines(clock(), false) })),
     );

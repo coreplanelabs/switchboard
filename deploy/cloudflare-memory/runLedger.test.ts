@@ -25,6 +25,7 @@ import { appendCoordinatorStatus } from "../../src/core/coordinator/unitStatus.t
 import type { ContextDependencies } from "../../src/core/references/contextDependencies.ts";
 import type { IntakeReceipt } from "../../src/core/runLedger/types.ts";
 import type { RunMetricsPoint } from "../../src/core/runMetrics.ts";
+import { historicalNativeChain } from "../../src/core/coordinator/historicalNativeAudit.ts";
 
 // Feature: docs/reference/specs/orchestration-plane.md — exact Workflow discovery and durable report obligations.
 describe("durable coordinator Workflow reconciliation", () => {
@@ -1237,6 +1238,496 @@ async function post(path: string, body: unknown, headers: Record<string, string>
 }
 
 const ZERO = { count: 0, durationMs: 0 };
+
+describe("historical original native adoption owner CAS", () => {
+  it("admits a fourth verbose history and preserves standing, posting and ordinary ownership capacity", async () => {
+    const key = storeKey(),
+      stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (owner: RunHistoryDO, state) => {
+      const first = "a".repeat(40),
+        head = "b".repeat(40);
+      const claims: CoordinatorUnit[] = [];
+      for (let n = 0; n < 4; n++) {
+        const id = `verbose_native_${n}`,
+          thread = `slack:C1:verbose-native-${n}`,
+          instanceId = `verbose-unit-${n}`,
+          ref = `fix/verbose-native-${n}`;
+        const terminal: RunRecord = {
+          ...record(id, thread),
+          agent: "coding",
+          repo: "acme/api",
+          parentInstanceId: instanceId,
+          coordinatorUnit: "U12",
+          coordinatorAttempt: 0,
+          idempotencyKey: `${instanceId}:U12/0/coding`,
+          headSha: head,
+          pushed: [{ ref, sha: head, by: "push" }],
+          branchPushReceipts: [{ ref, sha: head, by: "push" }],
+          branchPublication: { version: 1, repo: "acme/api", branches: [], complete: false },
+          publicationSettlement: {
+            version: 1,
+            binding: {
+              runId: id,
+              instanceId,
+              step: `${instanceId}:U12/0/coding`,
+              repo: "acme/api",
+              branch: ref,
+              requester: "slack:UALICE",
+              threadKey: thread,
+              generation: "g1",
+              baseHeadSha: first,
+            },
+            checkpoint: { kind: "clean", head },
+            publication: { kind: "not_attempted" },
+            preservation: { kind: "pending" },
+            release: { kind: "pending" },
+          },
+        };
+        terminal.events = [
+          { type: "coordinator_tag", parentInstanceId: instanceId, unit: "U12", base: "main", seq: 1 },
+          { type: "run_meta", agent: "coding", repo: "acme/api", ref, headSha: first, seq: 2 },
+          { type: "tool_call", tool: "publish_branch", callId: "native-call", summary: "publish", seq: 3 },
+          { type: "publication_push_authorized", callId: "native-call", ref, expectedHeadSha: first, seq: 4 },
+          { type: "pushed_head", ref, sha: head, by: "push", seq: 5 },
+          {
+            type: "tool_result",
+            tool: "publish_branch",
+            callId: "native-call",
+            ok: true,
+            summary: "published",
+            seq: 6,
+          },
+          { type: "publication_settlement", settlement: terminal.publicationSettlement!, seq: 7 },
+          ...Array.from({ length: 30 }, (_, i) =>
+            i % 2 === 0
+              ? {
+                  type: "tool_result" as const,
+                  tool: "bash",
+                  callId: `display-${i}`,
+                  ok: true,
+                  summary: "output",
+                  output: "x".repeat(47000),
+                  seq: 8 + i,
+                }
+              : { type: "answer" as const, text: "x".repeat(47000), seq: 8 + i },
+          ),
+        ];
+        terminal.eventCount = terminal.storedEventCount = terminal.events.length;
+        const instance: CoordinatorInstance = {
+          id: instanceId,
+          kind: "ship",
+          repo: "acme/api",
+          base: "main",
+          branch: ref,
+          userId: terminal.userId,
+          channelId: terminal.channelId,
+          threadKey: thread,
+          createdAt: terminal.startedAt - 100,
+        };
+        const unit: CoordinatorUnit = {
+          instanceId,
+          unit: "U12",
+          slug: "u12",
+          branch: ref,
+          dependsOn: [],
+          startedAt: terminal.startedAt - 1,
+          rounds: [{ index: 0, agent: "coding", outcome: "aborted", at: terminal.finishedAt }],
+          ending: { kind: "aborted", report: "not published", at: terminal.finishedAt + 1 },
+          currentEffect: {
+            version: 1,
+            id: "U12/0/coding",
+            ordinal: 1,
+            phase: "settled",
+            execution: { workflowId: instanceId },
+            target: { repo: instance.repo, ref, base: "main", headSha: first },
+            calls: [{ operation: "spawn", state: "accepted", runId: id }],
+          },
+        };
+        expect(await owner.putInstance(instance)).toEqual({ ok: true });
+        state.storage.sql.exec(
+          `INSERT INTO coordinator_units(instance_id,unit,json,updated_at) VALUES(?,?,?,?)`,
+          instanceId,
+          unit.unit,
+          JSON.stringify(unit),
+          terminal.finishedAt,
+        );
+        expect(
+          await owner.claim(
+            {
+              runId: id,
+              threadKey: thread,
+              gen: "g1",
+              leaseMs: LEASE_MS,
+              startedAt: terminal.startedAt,
+              meta: {
+                agent: "coding",
+                channelId: terminal.channelId,
+                userId: terminal.userId,
+                threadKey: thread,
+                repo: terminal.repo,
+                parentInstanceId: instanceId,
+                coordinatorUnit: unit.unit,
+                coordinatorAttempt: 0,
+                idempotencyKey: terminal.idempotencyKey,
+              },
+              card: null,
+              system: "",
+              tools: [],
+              state: { branchPublication: terminal.branchPublication, branchPushReceipts: terminal.branchPushReceipts },
+            },
+            terminal.startedAt,
+          ),
+        ).toEqual({ ok: true });
+        expect(await owner.finishing(id, "g1")).toEqual({ ok: true });
+        expect((await owner.finish(id, "g1", terminal)).stored).toBe(true);
+        const proof = await owner.prepareAdoptionAudit(unit, id);
+        expect(proof).toBeDefined();
+        const claimed: CoordinatorUnit = {
+          ...unit,
+          adoption: {
+            version: 1,
+            actionId: `large-action-${n}`,
+            runId: id,
+            headSha: head,
+            requester: instance.userId,
+            threadKey: thread,
+            messageId: `source-${n}`,
+            claimedAt: terminal.finishedAt + 2,
+            state: "claimed",
+            audit: proof!,
+          },
+        };
+        expect(await owner.compareAndReplaceUnit(unit, claimed, terminal.finishedAt + 3)).toEqual({ ok: true });
+        claims.push(claimed);
+      }
+      expect(await owner.findPullOwners({ repo: "acme/api", ref: claims[3].branch })).toMatchObject({ ok: true });
+      expect(await owner.findPullOwners({ repo: "other/repo", ref: "fix/ordinary" })).toEqual({ ok: true, owners: [] });
+      const last = claims[3],
+        posting: CoordinatorUnit = { ...last, adoption: { ...last.adoption!, state: "posting" } };
+      expect(await owner.compareAndReplaceUnit(last, posting, Date.now())).toEqual({ ok: true });
+      const pr = { number: 777, url: "https://github.com/acme/api/pull/777" };
+      const bound: CoordinatorUnit = {
+        ...posting,
+        pr,
+        lastPush: head,
+        publication: {
+          repo: "acme/api",
+          pr: pr.number,
+          headRef: posting.branch,
+          baseRef: "main",
+          expectedHeadSha: head,
+          publicationRef: posting.branch,
+          owner: { instanceId: posting.instanceId, unit: posting.unit },
+        },
+        adoption: { ...posting.adoption!, state: "bound", pr },
+      };
+      expect(await owner.compareAndReplaceUnit(posting, bound, Date.now())).toEqual({ ok: true });
+      const ordinary: CoordinatorInstance = {
+        id: "ordinary-next",
+        kind: "ship",
+        repo: "acme/api",
+        base: "main",
+        branch: "fix/ordinary-next",
+        userId: "slack:UALICE",
+        channelId: "slack:C1",
+        threadKey: "slack:C1:ordinary",
+        createdAt: Date.now(),
+      };
+      expect(await owner.putInstance(ordinary)).toEqual({ ok: true });
+      const next: CoordinatorUnit = {
+        instanceId: ordinary.id,
+        unit: "U99",
+        slug: "u99",
+        branch: ordinary.branch!,
+        dependsOn: [],
+        rounds: [],
+        pr: { number: 888, url: "https://github.com/acme/api/pull/888" },
+      };
+      expect(await owner.putUnits([next], Date.now())).toEqual({ ok: true });
+      const rival = { ...ordinary, id: "ordinary-rival", branch: "fix/ordinary-rival" };
+      expect(await owner.putInstance(rival)).toEqual({ ok: true });
+      expect(await owner.putUnits([{ ...next, instanceId: rival.id, branch: rival.branch! }], Date.now())).toEqual({
+        ok: false,
+        reason: "owned",
+      });
+      const changed = JSON.parse(
+        state.storage.sql
+          .exec<{ json: string }>(`SELECT json FROM run_events WHERE run_id='verbose_native_0' AND seq=4`)
+          .one().json,
+      );
+      changed.expectedHeadSha = head;
+      state.storage.sql.exec(
+        `UPDATE run_events SET json=? WHERE run_id='verbose_native_0' AND seq=4`,
+        JSON.stringify(changed),
+      );
+      expect(await owner.findPullOwners({ repo: "acme/api", ref: claims[0].branch })).toEqual({
+        ok: false,
+        reason: "incomplete",
+      });
+      changed.expectedHeadSha = first;
+      state.storage.sql.exec(
+        `UPDATE run_events SET json=? WHERE run_id='verbose_native_0' AND seq=4`,
+        JSON.stringify(changed),
+      );
+      const malformed = JSON.parse(
+        state.storage.sql
+          .exec<{ json: string }>(`SELECT json FROM run_events WHERE run_id='verbose_native_0' AND seq=6`)
+          .one().json,
+      );
+      malformed.ok = 1;
+      state.storage.sql.exec(
+        `UPDATE run_events SET json=? WHERE run_id='verbose_native_0' AND seq=6`,
+        JSON.stringify(malformed),
+      );
+      expect(await owner.findPullOwners({ repo: "acme/api", ref: claims[0].branch })).toEqual({
+        ok: false,
+        reason: "incomplete",
+      });
+    });
+  });
+  it("validates canonical SQLite history before claiming, keeps the audit immutable and refuses stale or forged proof", async () => {
+    const key = storeKey(),
+      stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (owner: RunHistoryDO, state) => {
+      const first = "a".repeat(40),
+        head = "b".repeat(40),
+        id = "original_native_writer",
+        thread = "slack:C1:native-audit";
+      const terminal: RunRecord = {
+        ...record(id, thread),
+        agent: "coding",
+        repo: "acme/api",
+        parentInstanceId: "original_native_unit",
+        coordinatorUnit: "U12",
+        coordinatorAttempt: 0,
+        idempotencyKey: "original_native_unit:U12/0/coding",
+        headSha: head,
+        pushed: [{ ref: "fix/original-native", sha: head, by: "push" }],
+        branchPushReceipts: [{ ref: "fix/original-native", sha: head, by: "push" }],
+        branchPublication: { version: 1, repo: "acme/api", branches: [], complete: false },
+        publicationSettlement: {
+          version: 1,
+          binding: {
+            runId: id,
+            instanceId: "original_native_unit",
+            step: "original_native_unit:U12/0/coding",
+            repo: "acme/api",
+            branch: "fix/original-native",
+            requester: "slack:UALICE",
+            threadKey: thread,
+            generation: "g1",
+            baseHeadSha: first,
+          },
+          checkpoint: { kind: "clean", head },
+          publication: { kind: "not_attempted" },
+          preservation: { kind: "pending" },
+          release: { kind: "pending" },
+        },
+      };
+      terminal.events = [
+        { type: "coordinator_tag", parentInstanceId: "original_native_unit", unit: "U12", base: "main", seq: 1 },
+        { type: "run_meta", agent: "coding", repo: "acme/api", ref: "fix/original-native", headSha: first, seq: 2 },
+        { type: "tool_call", tool: "publish_branch", callId: "native-call", summary: "publish", seq: 3 },
+        {
+          type: "publication_push_authorized",
+          callId: "native-call",
+          ref: "fix/original-native",
+          expectedHeadSha: first,
+          seq: 4,
+        },
+        { type: "pushed_head", ref: "fix/original-native", sha: head, by: "push", seq: 5 },
+        { type: "tool_result", tool: "publish_branch", callId: "native-call", ok: true, summary: "published", seq: 6 },
+        { type: "publication_settlement", settlement: terminal.publicationSettlement!, seq: 7 },
+      ];
+      terminal.eventCount = terminal.storedEventCount = terminal.events.length;
+      const instance: CoordinatorInstance = {
+        id: "original_native_unit",
+        kind: "ship",
+        repo: "acme/api",
+        base: "main",
+        branch: "fix/original-native",
+        userId: terminal.userId,
+        channelId: terminal.channelId,
+        threadKey: thread,
+        createdAt: terminal.startedAt - 100,
+      };
+      const unit: CoordinatorUnit = {
+        instanceId: instance.id,
+        unit: "U12",
+        slug: "u1",
+        branch: "fix/original-native",
+        dependsOn: [],
+        startedAt: terminal.startedAt - 1,
+        rounds: [{ index: 0, agent: "coding", outcome: "aborted", at: terminal.finishedAt }],
+        ending: { kind: "aborted", report: "not published", at: terminal.finishedAt + 1 },
+        currentEffect: {
+          version: 1,
+          id: "U12/0/coding",
+          ordinal: 1,
+          phase: "settled",
+          execution: { workflowId: instance.id },
+          target: { repo: instance.repo, ref: "fix/original-native", base: "main", headSha: first },
+          calls: [{ operation: "spawn", state: "accepted", runId: id }],
+        },
+      };
+      expect(await owner.putInstance(instance)).toEqual({ ok: true });
+      state.storage.sql.exec(
+        `INSERT INTO coordinator_units(instance_id,unit,json,updated_at) VALUES(?,?,?,?)`,
+        instance.id,
+        unit.unit,
+        JSON.stringify(unit),
+        terminal.finishedAt,
+      );
+      expect(
+        await owner.claim(
+          {
+            runId: id,
+            threadKey: thread,
+            gen: "g1",
+            leaseMs: LEASE_MS,
+            startedAt: terminal.startedAt,
+            meta: {
+              agent: "coding",
+              channelId: terminal.channelId,
+              userId: terminal.userId,
+              threadKey: thread,
+              repo: terminal.repo,
+              parentInstanceId: instance.id,
+              coordinatorUnit: unit.unit,
+              coordinatorAttempt: 0,
+              idempotencyKey: terminal.idempotencyKey,
+            },
+            card: null,
+            system: "",
+            tools: [],
+            state: { branchPublication: terminal.branchPublication, branchPushReceipts: terminal.branchPushReceipts },
+          },
+          terminal.startedAt,
+        ),
+      ).toEqual({ ok: true });
+      const resident = await owner.residentClaim(id, "g1", thread);
+      expect(resident.ok).toBe(true);
+      if (!resident.ok) throw new Error("resident fixture claim refused");
+      const workspaceOwner = { runId: id, ownerGen: "g1", ownerFence: resident.fence };
+      expect(
+        await owner.setState(id, "g1", {
+          branchPublication: terminal.branchPublication,
+          branchPushReceipts: terminal.branchPushReceipts,
+          publicationSettlement: terminal.publicationSettlement,
+          binding: {
+            backend: "resident",
+            ownerGen: "g1",
+            ownerFence: resident.fence,
+            ref: "fix/original-native",
+            publicationBaseSha: first,
+            workspace: "/workspace/threads/original/work",
+            user: "worker1",
+            container: "fixture-container",
+          },
+        }),
+      ).toEqual({ ok: true });
+      expect(await owner.finishing(id, "g1")).toEqual({ ok: true });
+      expect((await owner.finish(id, "g1", terminal)).stored).toBe(true);
+      const before = await owner.get(id);
+      const custody = await owner.preservationOwner(id, workspaceOwner);
+      expect(custody).toMatchObject({ kind: "terminal", settlement: { revision: 1, owner: workspaceOwner } });
+      expect(before).not.toBeNull();
+      expect(historicalNativeChain({ instance, unit, record: before!, events: before!.events })).toEqual({
+        firstHead: first,
+        head,
+      });
+      const audit = (await owner.prepareAdoptionAudit(unit, id))!;
+      expect(audit).toMatchObject({ firstHead: first, head, eventCount: 7 });
+      const claimed: CoordinatorUnit = {
+        ...unit,
+        adoption: {
+          version: 1,
+          actionId: "original-native-audit",
+          runId: id,
+          headSha: head,
+          requester: terminal.userId,
+          threadKey: thread,
+          messageId: "mcp:original-request",
+          claimedAt: terminal.finishedAt + 2,
+          state: "claimed",
+          audit,
+        },
+      };
+      expect(
+        await owner.compareAndReplaceUnit(
+          unit,
+          { ...claimed, adoption: { ...claimed.adoption!, audit: { ...audit, eventDigest: "f".repeat(64) } } },
+          terminal.finishedAt + 3,
+        ),
+      ).toEqual({ ok: false, reason: "incomplete" });
+      const event = terminal.events[5];
+      state.storage.sql.exec(
+        `UPDATE run_events SET json=? WHERE run_id=? AND seq=6`,
+        JSON.stringify({ ...event, summary: "changed canonical bytes" }),
+        id,
+      );
+      expect(await owner.compareAndReplaceUnit(unit, claimed, terminal.finishedAt + 3)).toEqual({
+        ok: false,
+        reason: "incomplete",
+      });
+      state.storage.sql.exec(`UPDATE run_events SET json=? WHERE run_id=? AND seq=6`, JSON.stringify(event), id);
+      const obligation = state.storage.sql
+        .exec<{ owner_key: string; revision: number; json: string }>(
+          `SELECT owner_key,revision,json FROM workspace_settlements WHERE json IS NOT NULL`,
+        )
+        .toArray()[0];
+      const corrupt = JSON.parse(obligation.json);
+      corrupt.binding.ownerFence += 1;
+      state.storage.sql.exec(
+        `UPDATE workspace_settlements SET json=? WHERE owner_key=? AND revision=?`,
+        JSON.stringify(corrupt),
+        obligation.owner_key,
+        obligation.revision,
+      );
+      expect(await owner.compareAndReplaceUnit(unit, claimed, terminal.finishedAt + 3)).toEqual({
+        ok: false,
+        reason: "incomplete",
+      });
+      state.storage.sql.exec(
+        `UPDATE workspace_settlements SET json=? WHERE owner_key=? AND revision=?`,
+        obligation.json,
+        obligation.owner_key,
+        obligation.revision,
+      );
+      const rivalInstance = { ...instance, id: "rival_native_unit" };
+      const rivalUnit = { ...unit, instanceId: rivalInstance.id, currentEffect: undefined, ending: undefined };
+      expect(await owner.putInstance(rivalInstance)).toEqual({ ok: true });
+      state.storage.sql.exec(
+        `INSERT INTO coordinator_units(instance_id,unit,json,updated_at) VALUES(?,?,?,?)`,
+        rivalInstance.id,
+        rivalUnit.unit,
+        JSON.stringify(rivalUnit),
+        terminal.finishedAt,
+      );
+      expect(await owner.compareAndReplaceUnit(unit, claimed, terminal.finishedAt + 3)).toEqual({
+        ok: false,
+        reason: "owned",
+      });
+      state.storage.sql.exec(`DELETE FROM coordinator_units WHERE instance_id=?`, rivalInstance.id);
+      expect(await owner.compareAndReplaceUnit(unit, claimed, terminal.finishedAt + 3)).toEqual({ ok: true });
+      expect(await owner.findPullOwners({ repo: instance.repo, ref: unit.branch })).toMatchObject({
+        ok: true,
+        owners: [{ kind: "unit", instanceId: instance.id, unit: unit.unit }],
+      });
+      const posting: CoordinatorUnit = { ...claimed, adoption: { ...claimed.adoption!, state: "posting" } };
+      expect(
+        await owner.compareAndReplaceUnit(
+          claimed,
+          { ...posting, adoption: { ...posting.adoption!, audit: { ...audit, firstHead: head } } },
+          terminal.finishedAt + 4,
+        ),
+      ).toMatchObject({ ok: false });
+      expect(await owner.compareAndReplaceUnit(claimed, posting, terminal.finishedAt + 4)).toEqual({ ok: true });
+      expect(await owner.get(id)).toEqual(before);
+      expect(await owner.preservationOwner(id, workspaceOwner)).toEqual(custody);
+    });
+  });
+});
 const diagnosis = () => ({
   eventCount: 0,
   toolCalls: 0,
