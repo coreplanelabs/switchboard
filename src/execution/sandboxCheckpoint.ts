@@ -128,23 +128,30 @@ export interface CheckpointHost {
   save(id: string, owner: PreservationOwner): Promise<void>;
 }
 
-/** Any uncertainty retains the container. No SDK backup is a coherent snapshot
- * of a detached writer unless quiescence is independently established. */
-export async function checkpointIfSafe(owner: PreservationOwner, host: CheckpointHost): Promise<boolean> {
+/** An observed legacy checkout backup is not a complete custody archive or a
+ * retirement permit. In particular, object presence and sampled pause checks
+ * cannot establish that current private bytes still match the stored backup. */
+export type CheckpointObservation = { state: "unknown" } | { state: "stored"; backupId: string };
+
+/** Only report the checkout backup stored by this attempt. Continuous physical
+ * writer exclusion, whole runtime custody, independent restore verification
+ * and the original owner's exact archive ACK belong to retirement authority. */
+export async function checkpointIfSafe(owner: PreservationOwner, host: CheckpointHost): Promise<CheckpointObservation> {
   try {
-    if (!(await host.safeQuiescence())) return false;
+    if (!(await host.safeQuiescence())) return { state: "unknown" };
     const current = await host.currentOwner();
-    if (!current || !sameOwner(owner, current)) return false;
+    if (!current || !sameOwner(owner, current)) return { state: "unknown" };
     const { id } = await host.backup({ dir: CHECKOUT_DIR, gitignore: false, ttl: CHECKPOINT_TTL_SECONDS });
-    if (!id || !(await host.verify(id))) return false;
+    if (!id || !(await host.verify(id))) return { state: "unknown" };
     const after = await host.currentOwner();
-    if (!after || !sameOwner(owner, after) || !(await host.safeQuiescence())) return false;
+    if (!after || !sameOwner(owner, after) || !(await host.safeQuiescence())) return { state: "unknown" };
     await host.save(id, owner);
-    // A changed incarnation after persistence cannot license teardown either.
+    // A changed incarnation after persistence invalidates this observation.
     const saved = await host.currentOwner();
-    return !!saved && sameOwner(owner, saved) && (await host.safeQuiescence());
+    if (!saved || !sameOwner(owner, saved) || !(await host.safeQuiescence())) return { state: "unknown" };
+    return { state: "stored", backupId: id };
   } catch {
-    return false;
+    return { state: "unknown" };
   }
 }
 

@@ -350,7 +350,13 @@ describe("sandbox Worker wiring (static)", () => {
 
   it("declines a paused writer backup without an independent quiescence witness", () => {
     expect(worker).toContain("safeQuiescence: async () => false");
-    expect(worker).toContain("return await checkpointIfSafe(record.owner, {");
+    const preservation = worker.slice(
+      worker.indexOf("private async preserveBeforeDestroy("),
+      worker.indexOf("async preservationRecord()"),
+    );
+    expect(preservation).toContain("await checkpointIfSafe(record.owner, {");
+    expect(preservation).not.toContain("return await checkpointIfSafe");
+    expect(preservation).toMatch(/await checkpointIfSafe[\s\S]*?\}\);[\s\S]*?return false;/);
   });
 
   it("the stopped-container receipt bypasses getSandbox StartGate and exec", () => {
