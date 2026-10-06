@@ -104,7 +104,7 @@ function bind(world: World = {}) {
         present: async () => ({ ok: true, present: new Set() }),
         put: async () => ({ code: 0, output: "" }),
       },
-      pushConfig: async () => ({ ok: false, problem: "must not push" }),
+      pushConfig: async () => ({ ok: false, write: "not-written", problem: "must not push" }),
       images: {
         registry: async () => ({ error: "must not read the registry" }),
         credential: async () => ({ ok: false, problem: "must not mint a credential" }),
@@ -288,9 +288,10 @@ describe("setup.init — flags", () => {
         { path: "deploy/cloudflare-docs/wrangler.jsonc", status: "written" },
       ],
     });
-    expect((value.next as string[]).slice(-3)).toEqual([
+    expect((value.next as string[]).slice(-4)).toEqual([
       "npm run cli -- deploy secrets memory",
       "npm run cli -- deploy secrets bot",
+      'MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" npm run cli -- deploy all --only memory',
       'MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" npm run cli -- deploy all',
     ]);
     const text = renderText(setupInit, res.ok ? res.value : null);

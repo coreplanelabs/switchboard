@@ -14,6 +14,8 @@ import {
 import type { ImagesHostIO } from "../../deploy/imagesHost.js";
 import {
   CONFIG_DOCUMENT_KEY,
+  configConsumerTargetFor,
+  type ConfigConsumerTarget,
   DEPLOY_ORDER,
   formatPlan,
   planDeploy,
@@ -93,8 +95,13 @@ export interface DeployCommandDeps {
     };
     /** `deploy secrets`: the manifest, which names the source has a value for, and one `wrangler secret put` (src/deploy/secretsHost.ts). */
     secrets: SecretsHostIO;
-    /** `deploy config`: read the source, validate, push the `base` document to the state Worker (src/deploy/run.ts `pushConfigOnHost`). */
-    pushConfig(opts: { source: string; stateWorkerUrl: string; key: string }): Promise<ConfigPushOutcome>;
+    /** `deploy config`: validate the source and conditionally publish to the actual consumer's owned slot (src/deploy/run.ts `pushConfigOnHost`). */
+    pushConfig(opts: {
+      source: string;
+      stateWorkerUrl: string;
+      key: string;
+      consumerTarget: ConfigConsumerTarget;
+    }): Promise<ConfigPushOutcome>;
     /** `deploy images` (and `deploy plan` / `deploy all` in `registry` mode): the account registry's listing, the
      *  credential the copy pushes with, one image copy over HTTPS (src/deploy/imagesHost.ts). */
     images: ImagesHostIO;
@@ -538,6 +545,7 @@ const configOptions = z.object({
 });
 
 interface ConfigPushOutput {
+  snapshotKey?: string;
   source: string;
   how: string;
   document: string;
@@ -554,10 +562,10 @@ export const deployConfig = defineCommand({
   effect: "write",
   surfaces: { chat: false, mcp: false, http: false },
   describe:
-    "Push the bot's config to the state Worker as the `base` document the bot reads at startup — from the profile's configSource (or --source), validated first. The running container keeps its config until `deploy restart`.",
+    "Validate the profile's configSource (or --source) and conditionally publish to the running bot's image-owned config slot on the state Worker. Requires this CLI's parser to match the actual consumer and its application target. Apply it with `deploy restart`.",
   render: (output) => {
     const o = output as unknown as ConfigPushOutput;
-    return `pushed ${o.how} → document "${o.document}" v${o.version} on ${o.stateWorkerUrl} (sha256 ${o.sha256.slice(0, 12)}, ${o.bytes} bytes)\nthe bot reads it on its next start: \`deploy restart\``;
+    return `${o.snapshotKey ? `private input snapshot "${o.snapshotKey}"\n` : ""}pushed ${o.how} → document "${o.document}" v${o.version} on ${o.stateWorkerUrl} (sha256 ${o.sha256.slice(0, 12)}, ${o.bytes} bytes)\nthe bot reads it on its next start: \`deploy restart\``;
   },
   handler: async ({ options, deps }) => {
     const loaded = await loadProfile(deps);
@@ -568,12 +576,18 @@ export const deployConfig = defineCommand({
         "unavailable",
         `${loaded.path} names no memory (state) Worker — there is no document to push the config to; the bot reads its config from SWITCHBOARD_CONFIG`,
       );
-    const pushed = await deps.deploy.pushConfig({ source, stateWorkerUrl, key: CONFIG_DOCUMENT_KEY });
+    const pushed = await deps.deploy.pushConfig({
+      source,
+      stateWorkerUrl,
+      key: CONFIG_DOCUMENT_KEY,
+      consumerTarget: configConsumerTargetFor(loaded.profile),
+    });
     if (!pushed.ok) throw new CommandError("unavailable", pushed.problem);
     const output: ConfigPushOutput = {
+      ...(pushed.snapshotKey ? { snapshotKey: pushed.snapshotKey } : {}),
       source,
       how: pushed.how,
-      document: CONFIG_DOCUMENT_KEY,
+      document: pushed.document,
       stateWorkerUrl,
       version: pushed.version,
       sha256: pushed.sha256,

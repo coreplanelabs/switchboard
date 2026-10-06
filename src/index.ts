@@ -1,3 +1,4 @@
+import { readImageConfigConsumerIdentity, type ConfigConsumerIdentity } from "./configConsumer.js";
 import "./loadEnv.js";
 import { createServer } from "node:http";
 import { join } from "node:path";
@@ -292,12 +293,19 @@ export async function runBot(): Promise<void> {
   // them (docs/reference/specs/routing-and-config.md item 12); the JSON file otherwise.
   // The command groups are what an Access browser session's baseline reads span.
   let config: Awaited<ReturnType<typeof openConfigStore>>;
+  let consumer: ConfigConsumerIdentity | undefined;
   try {
+    if (parseConfigLocation(CONFIG_PATH).kind === "state") {
+      const imageIdentity = readImageConfigConsumerIdentity();
+      if (!imageIdentity.ok) throw new Error(imageIdentity.problem);
+      consumer = imageIdentity.identity;
+    }
     config = await openConfigStore(CONFIG_PATH, {
       overridesPath: OVERRIDES_PATH,
       env: publicEnv(),
       secrets: processSecrets,
       commandGroups: coreCommandGroups(),
+      consumer,
     });
   } catch (err) {
     // The production image has no local fallback: a missing or invalid base
@@ -307,7 +315,7 @@ export async function runBot(): Promise<void> {
     if (parseConfigLocation(CONFIG_PATH).kind !== "state" || !process.env.PORT) throw err;
     const problem = configRefusalReason(err);
     console.error(`[config] REFUSED: ${problem}`);
-    const server = createConfigRefusalServer({ problem, startedAt: PROCESS_STARTED_AT });
+    const server = createConfigRefusalServer({ problem, startedAt: PROCESS_STARTED_AT, consumer });
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
       server.listen(Number(process.env.PORT), resolve);
@@ -480,7 +488,7 @@ export async function runBot(): Promise<void> {
   const generation = mintGeneration();
   const loadedBase = config.loadedBase
     ? bindLoadedBaseConfigReceipt(config.loadedBase, {
-        commit: build.commit,
+        commit: consumer?.commit ?? build.commit,
         ...(build.builtAt !== undefined ? { builtAt: build.builtAt } : {}),
         startedAt: PROCESS_STARTED_AT,
         ...(capabilities.runLedger ? { generation } : {}),

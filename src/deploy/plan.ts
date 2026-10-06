@@ -28,7 +28,7 @@
 
 import { formatAffectedText, type AffectedReport } from "./affected.js";
 import { RESIDENT_DRAIN_TOKEN_ENV } from "./residentDrain.js";
-import { BASE_CONFIG_DOCUMENT_KEY } from "../configDocument.js";
+import { BASE_CONFIG_DOCUMENT_KEY, type ConfigSourceObservation } from "../configDocument.js";
 import {
   accountImageTag,
   accountRegistryImage,
@@ -42,6 +42,13 @@ import {
 } from "./images.js";
 import { WORK_AREA_DIR, type RootMode } from "./operatorRoot.js";
 import { profileUrls, type DeploymentProfile, type LoadedProfile, type WorkerKind } from "./profile.js";
+import { BOT_CONTAINER_CLASS, BOT_WORKER_DIR, containerApplicationName } from "./configConsumerTarget.js";
+export {
+  BOT_CONTAINER_CLASS,
+  containerApplicationName,
+  configConsumerTargetFor,
+  type ConfigConsumerTarget,
+} from "./configConsumerTarget.js";
 
 /** Env vars removed from every deploy step's environment. */
 export const UNSET_ENV = ["CLOUDFLARE_ACCOUNT_ID"] as const;
@@ -90,7 +97,6 @@ export interface CapabilityCheck {
 
 /** The bot and sandbox container classes from their wrangler templates; wrangler names each
  *  Containers application `<script>-<class lowercased>`. */
-export const BOT_CONTAINER_CLASS = "SwitchboardServer";
 export const SANDBOX_CONTAINER_CLASS = "SwitchboardSandbox";
 export const RESIDENT_CONTAINER_CLASS = "ResidentDO";
 /** The bearer every route on the sandbox Worker needs, `/healthz` included (execution.md item 13). */
@@ -103,13 +109,6 @@ const R2_CAPABILITY: CapabilityCheck = {
   command: ["wrangler", "r2", "bucket", "list"],
   needs: "Workers R2 Storage: Edit",
 };
-
-/** The Containers application `wrangler deploy` creates for a Worker's container class —
- *  `<script>-<class_name lowercased>` (the bot's is `switchboard-switchboardserver`,
- *  deploy/cloudflare/preflight.mjs `APP_NAME`). The script name is the profile's. */
-export function containerApplicationName(script: string, className: string): string {
-  return `${script}-${className.toLowerCase()}`;
-}
 
 /** The static half of a live gate — WHICH proof a step needs; the profile supplies where to read it. */
 export type LiveGateSpec =
@@ -201,7 +200,7 @@ export const CONTAINERS_CAPABILITY: CapabilityCheck = {
  *  Worker of the installation — its config renders from project.json (`SITE_DIR` there). */
 export const WORKER_DIRS: Readonly<Record<WorkerKind, string>> = {
   memory: "deploy/cloudflare-memory",
-  bot: "deploy/cloudflare",
+  bot: BOT_WORKER_DIR,
   resident: "deploy/cloudflare-resident",
   sandbox: "deploy/cloudflare-sandbox",
 };
@@ -332,9 +331,8 @@ export function workersFor(profile: DeploymentProfile): WorkerDef[] {
   });
 }
 
-/** Where the bot's runtime config lands: the `base` document on the state
- *  Worker's ConfigDO (src/configDocument.ts), which the bot Worker points its
- *  container at with `SWITCHBOARD_CONFIG=state://base`. */
+/** Legacy mode hint; new consumers derive their actual document inside the image.
+ *  This constant never selects a new publisher's target document. */
 export const CONFIG_DOCUMENT_KEY = BASE_CONFIG_DOCUMENT_KEY;
 
 export interface DeployOptions {
@@ -406,10 +404,10 @@ export interface DeployPlan {
   /** Where the deploy runs from (src/deploy/operatorRoot.ts): a checkout, or the published package in an operator's directory. */
   root: DeployRoot;
   /** The deployment profile the plan was computed from. `deploy all` refuses a plan from the example. */
-  profile: { origin: LoadedProfile["origin"]; path: string };
+  profile: { origin: LoadedProfile["origin"]; path: string; selection: DeploymentProfile };
   /** The bot's runtime config: where it comes from, and the state Worker document the runner pushes it to
    *  before the bot step — no `stateWorkerUrl` when the profile has no state Worker (nothing is pushed). */
-  config: { source: string; document: string; stateWorkerUrl?: string };
+  config: { source: string; document: string; stateWorkerUrl?: string; originalSource?: ConfigSourceObservation };
   /** Where the planned steps' container images come from (the profile's `images` mode). */
   images: PlanImages;
   warnings: string[];
@@ -558,10 +556,15 @@ export function planDeploy(
       nodeModulesMissing: steps.filter((s) => !host.hasNodeModules(s.dir)).map((s) => s.dir),
     },
     root: host.root,
-    profile: { origin: loaded.origin, path: loaded.path },
+    profile: { origin: loaded.origin, path: loaded.path, selection: structuredClone(profile) },
     config: {
       source: profile.configSource,
-      document: CONFIG_DOCUMENT_KEY,
+      document:
+        stateWorkerUrl === undefined
+          ? CONFIG_DOCUMENT_KEY
+          : typeof host.root.commit === "string" && /^[0-9a-f]{40}$/.test(host.root.commit)
+            ? `base-${host.root.commit}`
+            : "consumer slot (exact source unresolved)",
       ...(stateWorkerUrl !== undefined ? { stateWorkerUrl } : {}),
     },
     images: planImages(steps, profile.account, images),

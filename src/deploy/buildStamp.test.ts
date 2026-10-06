@@ -7,7 +7,7 @@ import {
   DEFINE_COMMIT,
   DEFINE_BUILT_AT,
 } from "../../deploy/bin/build-stamp.mjs";
-import { COMMIT_ENV, readBuildInfo } from "../../deploy/cloudflare/write-build.mjs";
+import { COMMIT_ENV, readBuildInfo, readConsumerBuildInfo } from "../../deploy/cloudflare/write-build.mjs";
 import { BUILD_COMMIT_ENV, buildId, injectedBuildStamp, resolveBuildStamp, UNKNOWN_COMMIT } from "./buildStamp.js";
 
 // Feature: docs/reference/specs/execution.md item 13 — every Worker script reports the
@@ -149,5 +149,58 @@ describe("buildStamp / defineArgs (the deploy side)", () => {
       message: "wrangler was killed by SIGINT — the deploy did not finish",
     });
     expect(spawnOutcome({ status: null })).toEqual({ code: 1, message: "wrangler exited with no status" });
+  });
+});
+
+describe("consumer image stamp", () => {
+  const commit = "a".repeat(40);
+  const git = (args: string[]) => (args[0] === "status" ? "" : commit);
+  it("binds the image stamp to its actual clean checkout", () => {
+    expect(readConsumerBuildInfo({ [COMMIT_ENV]: commit }, git).commit).toBe(commit);
+    expect(() => readConsumerBuildInfo({ [COMMIT_ENV]: "b".repeat(40) }, git)).toThrow("does not match");
+  });
+  it("refuses short or dirty source identity", () => {
+    expect(() => readConsumerBuildInfo({}, () => "short")).toThrow();
+    expect(() => readConsumerBuildInfo({}, (args: string[]) => (args[0] === "status" ? " M source" : commit))).toThrow(
+      "dirty",
+    );
+  });
+  it("readable HEAD with an unreadable cleanliness check cannot fall back to matching package metadata", () => {
+    let packageReads = 0;
+    expect(() =>
+      readConsumerBuildInfo(
+        { [COMMIT_ENV]: commit },
+        (args: string[]) => {
+          if (args[0] === "status") throw new Error("cleanliness unavailable");
+          return commit;
+        },
+        () => {
+          packageReads++;
+          return { commit };
+        },
+      ),
+    ).toThrow("cleanliness unavailable");
+    expect(packageReads).toBe(0);
+  });
+
+  it("a package with no checkout uses only its exact published source", () => {
+    expect(
+      readConsumerBuildInfo(
+        { [COMMIT_ENV]: commit },
+        () => {
+          throw new Error("no git");
+        },
+        () => ({ commit }),
+      ).commit,
+    ).toBe(commit);
+    expect(() =>
+      readConsumerBuildInfo(
+        { [COMMIT_ENV]: "b".repeat(40) },
+        () => {
+          throw new Error("no git");
+        },
+        () => ({ commit }),
+      ),
+    ).toThrow("does not match");
   });
 });

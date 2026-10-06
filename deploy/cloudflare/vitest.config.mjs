@@ -15,6 +15,7 @@ export default defineConfig({
     include: [
       "preflight.test.mjs",
       "ensure-bucket.test.mjs",
+      "selected-config.test.mjs",
       "artifactsCopy.test.ts",
       "prImages.test.ts",
       "depotCi.test.ts",

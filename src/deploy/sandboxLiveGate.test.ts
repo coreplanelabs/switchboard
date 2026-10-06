@@ -447,6 +447,13 @@ describe("wrangler and /exec parsers", () => {
     expect(rolloutTargetFromDeployOutput("")).toBeNull();
   });
 
+  it("parseInstancesPage refuses malformed rows instead of hiding contradictory inventory", () => {
+    const singleton = { name: "singleton", state: "running", version: 18 };
+    expect(parseInstancesPage([singleton, null])).toBeUndefined();
+    expect(parseInstancesPage({ instances: [singleton, "unknown row"] })).toBeUndefined();
+    expect(parseInstancesPage([singleton])).toBeDefined();
+  });
+
   it("parseInstancesPage reads the bare array wrangler prints unpaginated AND the {instances, result_info} shape --per-page switches to, keeping name/state/version and the next page token", () => {
     const rows = [
       { id: "i1", name: KEY, state: "running", location: "sjc", version: 12, created: "2026-09-07T23:35:00Z" },

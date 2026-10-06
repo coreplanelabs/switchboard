@@ -238,6 +238,25 @@ describe("planInit — the capability summary and the next commands", () => {
     expect(withShellToken.capabilities.github).toBe(true);
   });
 
+  it.each([
+    { inCheckout: true, cli: "npm run cli --" },
+    { inCheckout: false, package: "@example/switchboard", cli: "npx @example/switchboard" },
+  ])("the first Cloudflare deployment boots Memory before selecting Bot ($cli)", (world) => {
+    const installation = planned({ ...minimal, cloudflare: ACCOUNT, zone: "example.com" }, world);
+    const profile = parseProfile(JSON.parse(fileAt(installation, PROFILE_PATH).text));
+    if (!profile.ok) throw new Error(profile.problems.join("\n"));
+    expect(profile.profile.workers.memory).toBeDefined();
+    const deploys = installation.next.filter((command) => command.includes(" deploy all"));
+    expect(deploys).toEqual([
+      `MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" ${world.cli} deploy all --only memory`,
+      `MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" ${world.cli} deploy all`,
+    ]);
+    expect(deploys[0]).not.toContain("bot");
+    const fileMode = planned(minimal, world);
+    expect(fileMode.profile).toBe(false);
+    expect(fileMode.next.some((command) => command.includes(" deploy all"))).toBe(false);
+  });
+
   it("in a checkout the next commands are the CLI's ask, the bot from source (npm run dev), and docker compose with the image fact; a profile adds deploy secrets/config/all", () => {
     const local = planned(minimal);
     expect(local.next).toEqual([
@@ -249,6 +268,7 @@ describe("planInit — the capability summary and the next commands", () => {
     expect(prod.next.slice(3)).toEqual([
       "npm run cli -- deploy secrets memory",
       "npm run cli -- deploy secrets bot",
+      'MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" npm run cli -- deploy all --only memory',
       'MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" npm run cli -- deploy all',
     ]);
   });
@@ -284,6 +304,7 @@ describe("planInit — the capability summary and the next commands", () => {
       "npx @example/switchboard deploy secrets bot",
       "npx @example/switchboard deploy secrets resident",
       "npx @example/switchboard deploy secrets sandbox",
+      'MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" npx @example/switchboard deploy all --only memory',
       'MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" npx @example/switchboard deploy all',
     ]);
   });

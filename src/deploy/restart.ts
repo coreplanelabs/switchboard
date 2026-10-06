@@ -3,6 +3,7 @@ import { hasAction } from "../core/authz/authorize.js";
 import type { GrantsLookup } from "../core/authz/actor.js";
 import { LIVE_GATE_DEADLINE_MS, parseHealthz, type HealthzBody } from "./liveGate.js";
 import { profileUrls, type DeploymentProfile } from "./profile.js";
+import { configConsumerTargetFor, type ConfigConsumerTarget } from "./configConsumerTarget.js";
 
 // `deploy restart` — restart the bot container WITHOUT an image build, so a
 // rotated bot secret goes live in seconds instead of a full `deploy all --only
@@ -362,11 +363,12 @@ export interface RestartOptions {
 
 export interface RestartPlan {
   target: "bot";
+  consumerTarget: ConfigConsumerTarget;
   adminUrl: string;
   healthUrl: string;
   /** The source and durable base document this restart must prove equal before
    * it stops anything. `generation` is the document version read at runtime. */
-  config: { source: string; document: "base"; stateWorkerUrl?: string };
+  config: { source: string; document: "actual consumer slot"; stateWorkerUrl?: string };
   tokenEnv: string;
   force: boolean;
   /** Budget for waiting out a 409 (runs in flight) before giving up. */
@@ -380,11 +382,12 @@ export function planRestart(opts: RestartOptions, profile: DeploymentProfile): R
   const urls = profileUrls(profile);
   return {
     target: opts.only,
+    consumerTarget: configConsumerTargetFor(profile),
     adminUrl: urls.botAdminRestartUrl,
     healthUrl: `${urls.publicBaseUrl}/healthz`,
     config: {
       source: profile.configSource,
-      document: "base",
+      document: "actual consumer slot",
       ...(urls.stateWorkerUrl !== undefined ? { stateWorkerUrl: urls.stateWorkerUrl } : {}),
     },
     tokenEnv: RESTART_TOKEN_ENV,

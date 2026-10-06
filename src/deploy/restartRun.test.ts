@@ -46,6 +46,24 @@ function harness(
   );
   const deps: RestartRunnerDeps = {
     env,
+    publisherIdentity: async () => ({ ok: true, identity: { commit: "a".repeat(40) } }),
+    actualConsumer: async () => ({
+      health: {
+        status: 200,
+        body: {
+          ok: true,
+          draining: false,
+          loadedBase: {
+            schema: 1,
+            source: { kind: "state", key: "base-" + "a".repeat(40), version: 7 },
+            sha256: document.sha256,
+            process: { commit: "a".repeat(40) },
+          },
+        },
+      },
+      application: { value: { version: 3, image: "registry.example/actual" } },
+      instances: { value: [{ name: "singleton", state: "running", version: 3 }] },
+    }),
     readConfig: async () => ({
       ok: true,
       text: sourceText,
@@ -96,11 +114,147 @@ const refused = (n: number) => ({
 });
 
 describe("runBotRestart", () => {
+  it.each([false, true])(
+    "a changed profile cannot supply readiness for a foreign frozen target (force=%s)",
+    async (force) => {
+      const selected = plan(force);
+      const h = harness({ health: [healthz(0, AFTER)], restart: [stopping(BEFORE)] });
+      const original = h.deps.actualConsumer;
+      const observations: unknown[] = [];
+      h.deps.actualConsumer = async (target) => {
+        observations.push(target);
+        const binding = await original(target);
+        if (target?.healthUrl !== selected.healthUrl) return binding;
+        return {
+          ...binding,
+          health: {
+            ...binding.health,
+            body: {
+              ok: true,
+              draining: false,
+              loadedBase: {
+                schema: 1,
+                source: { kind: "state", key: `base-${"b".repeat(40)}`, version: 7 },
+                sha256: baseConfigDocument("organization: acme\n", "other", new Date(0)).sha256,
+                process: { commit: "b".repeat(40) },
+              },
+            },
+          },
+        };
+      };
+      expect(await runBotRestart(selected, h.io, h.deps)).toMatchObject({ kind: "refused" });
+      expect(h.calls).toEqual([]);
+      expect(observations).toEqual([selected.consumerTarget]);
+    },
+  );
+
+  it.each(["foreign consumer", "different installed slot"])(
+    "profile changes during final read cannot credit another fleet's %s",
+    async (failure) => {
+      const selected = plan();
+      const h = harness({ health: [healthz(0, AFTER)], restart: [stopping(BEFORE)] });
+      const original = h.deps.actualConsumer;
+      const observations: unknown[] = [];
+      h.deps.actualConsumer = async (target) => {
+        const binding = await original(target);
+        observations.push(target);
+        if (observations.length === 1 || target?.healthUrl !== selected.healthUrl) return binding;
+        const cid = failure === "foreign consumer" ? "b".repeat(40) : "a".repeat(40);
+        return {
+          ...binding,
+          health: {
+            status: 200,
+            body: {
+              ok: true,
+              draining: false,
+              loadedBase: {
+                schema: 1,
+                source: { kind: "state", key: `base-${cid}`, version: failure === "different installed slot" ? 8 : 7 },
+                sha256: baseConfigDocument("organization: acme\n", "source", new Date(0)).sha256,
+                process: { commit: cid },
+              },
+            },
+          },
+        };
+      };
+      expect(await runBotRestart(selected, h.io, h.deps)).toMatchObject({ kind: "ran", ok: false });
+      expect(observations).toEqual([selected.consumerTarget, selected.consumerTarget]);
+      expect(h.calls.filter((call) => call.method === "POST")).toHaveLength(1);
+    },
+  );
+
+  it.each([false, true])("a foreign running row cannot authorize a restart (force=%s)", async (force) => {
+    const h = harness({ health: [healthz(0, AFTER)], restart: [stopping(BEFORE)] });
+    const original = h.deps.actualConsumer;
+    h.deps.actualConsumer = async (target) => ({
+      ...(await original(target)),
+      instances: {
+        value: [
+          { name: "singleton", state: "stopped", version: 3 },
+          { name: "other", state: "running", version: 3 },
+        ],
+      },
+    });
+    expect(await runBotRestart(plan(force), h.io, h.deps)).toMatchObject({ kind: "refused" });
+    expect(h.calls).toEqual([]);
+  });
+
+  it("fresh contradictory inventory cannot credit the final restart", async () => {
+    const h = harness({ health: [healthz(0, AFTER)], restart: [stopping(BEFORE)] });
+    const original = h.deps.actualConsumer;
+    let reads = 0;
+    h.deps.actualConsumer = async (target) => {
+      const binding = await original(target);
+      return reads++ === 0
+        ? binding
+        : {
+            ...binding,
+            instances: {
+              value: [
+                { name: "singleton", state: "stopped", version: 3 },
+                { name: "other", state: "running", version: 3 },
+              ],
+            },
+          };
+    };
+    expect(await runBotRestart(plan(), h.io, h.deps)).toMatchObject({ kind: "ran", ok: false });
+    expect(h.calls.filter((call) => call.method === "POST")).toHaveLength(1);
+  });
+
   it("refuses without the bearer in the env — nothing is posted", async () => {
     const h = harness({ health: [healthz(0, BEFORE)], restart: [stopping(BEFORE)] }, {});
     const r = await runBotRestart(plan(), h.io, h.deps);
     expect(r).toEqual({ kind: "refused", problems: [expect.stringContaining("SWITCHBOARD_DEPLOY_TOKEN is not set")] });
     expect(h.calls).toEqual([]);
+  });
+
+  it("a mismatched publisher refuses before even a forced restart", async () => {
+    const h = harness({ health: [healthz(0, BEFORE)], restart: [stopping(BEFORE)] });
+    h.deps.publisherIdentity = async () => ({ ok: true, identity: { commit: "b".repeat(40) } });
+    expect(await runBotRestart(plan(true), h.io, h.deps)).toMatchObject({ kind: "refused" });
+    expect(h.calls).toEqual([]);
+  });
+
+  it("an unknown actual application cannot restart through force", async () => {
+    const h = harness({ health: [healthz(0, BEFORE)], restart: [stopping(BEFORE)] });
+    const original = h.deps.actualConsumer;
+    h.deps.actualConsumer = async (target) => ({ ...(await original(target)), application: { error: "unknown" } });
+    expect(await runBotRestart(plan(true), h.io, h.deps)).toMatchObject({ kind: "refused" });
+    expect(h.calls).toEqual([]);
+  });
+
+  it("a native target changed during restart is not credited as the original config tuple", async () => {
+    const h = harness({ health: [healthz(0, AFTER)], restart: [stopping(BEFORE)] });
+    const original = h.deps.actualConsumer;
+    let reads = 0;
+    h.deps.actualConsumer = async (target) => {
+      const result = await original(target);
+      return reads++ === 0
+        ? result
+        : { ...result, application: { value: { version: 4, image: "registry.example/newer" } } };
+    };
+    expect(await runBotRestart(plan(), h.io, h.deps)).toMatchObject({ kind: "ran", ok: false });
+    expect(h.calls.filter((call) => call.method === "POST")).toHaveLength(1);
   });
 
   it("refuses before POST when the base document is missing or its digest is older than the current source, naming deploy config and the generation", async () => {
@@ -111,7 +265,7 @@ describe("runBotRestart", () => {
     });
     expect(await runBotRestart(plan(), stale.io, stale.deps)).toEqual({
       kind: "refused",
-      problems: [expect.stringMatching(/base document "base" v6.*older than.*run `deploy config` first/)],
+      problems: [expect.stringMatching(/base document "base-[a-f0-9]{40}" v6.*older than.*run `deploy config` first/)],
     });
     expect(stale.calls).toEqual([]);
 
@@ -123,7 +277,7 @@ describe("runBotRestart", () => {
       kind: "refused",
       problems: [
         expect.stringMatching(
-          /base document "base" v7 \(pushed 2026-08-30T09:00:00.000Z\).*source changed 2026-08-30T09:30:00.000Z.*run `deploy config` first/,
+          /base document "base-[a-f0-9]{40}" v7 \(pushed 2026-08-30T09:00:00.000Z\).*source changed 2026-08-30T09:30:00.000Z.*run `deploy config` first/,
         ),
       ],
     });
@@ -134,7 +288,7 @@ describe("runBotRestart", () => {
     });
     expect(await runBotRestart(plan(), missing.io, missing.deps)).toEqual({
       kind: "refused",
-      problems: ['config: missing base document "base" — run `deploy config` first'],
+      problems: [`config: missing base document "base-${"a".repeat(40)}" — run \`deploy config\` first`],
     });
     expect(missing.calls).toEqual([]);
   });
@@ -151,9 +305,9 @@ describe("runBotRestart", () => {
       ok: true,
       previousStartedAt: BEFORE,
       startedAt: AFTER,
-      configGeneration: "base v7",
+      configGeneration: `base-${"a".repeat(40)} v7`,
     });
-    expect(h.lines[0]).toContain("config: base v7");
+    expect(h.lines[0]).toContain(`config: base-${"a".repeat(40)} v7`);
     expect(h.calls[0]).toMatchObject({
       method: "POST",
       url: "https://switchboard.example.test/admin/restart",

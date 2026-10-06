@@ -1,3 +1,4 @@
+import { consumerConfigLocation, type ConfigConsumerIdentity } from "./configConsumer.js";
 import { normalizeAgentConfig, settingsForAgent, type AgentConfiguration } from "./config/agents.js";
 import type { Grant } from "./core/budgets.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -872,9 +873,16 @@ export function loadAppConfig(configPath: string): AppConfig {
  */
 export async function loadAppConfigWithReceiptFrom(
   location: string,
-  opts: { env: EnvRecord; secrets: Secrets; warn: (message: string) => void; fetch?: typeof fetch },
+  opts: {
+    env: EnvRecord;
+    secrets: Secrets;
+    warn: (message: string) => void;
+    fetch?: typeof fetch;
+    consumer?: ConfigConsumerIdentity;
+  },
 ): Promise<{ config: AppConfig; receipt: LoadedBaseConfigReceipt }> {
-  const parsed = parseConfigLocation(location);
+  const selectedLocation = opts.consumer ? consumerConfigLocation(location, opts.consumer) : location;
+  const parsed = parseConfigLocation(selectedLocation);
   if (parsed.kind === "file") {
     const yaml = readFileSync(resolve(parsed.path), "utf8");
     const config = parseAppConfigText(yaml);
@@ -938,6 +946,7 @@ export async function openConfigStore(
     secrets: Secrets;
     warn?: (message: string) => void;
     fetch?: typeof fetch;
+    consumer?: ConfigConsumerIdentity;
   } & ConfigStoreOptions,
 ): Promise<ConfigStore> {
   const warn = opts.warn ?? ((m: string) => console.warn(m));
@@ -946,6 +955,7 @@ export async function openConfigStore(
     secrets: opts.secrets,
     warn,
     ...(opts.fetch ? { fetch: opts.fetch } : {}),
+    consumer: opts.consumer,
   });
   const backing = overridesBackingFor(loaded.config, opts);
   const initial = await backing.load();

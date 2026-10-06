@@ -87,11 +87,11 @@ export function wranglerFailureText(err, stdout, stderr, { maxLines = 3 } = {}) 
 
 /** `wrangler containers list --json`, run from this directory so wrangler.jsonc
  *  selects the account. Never throws: `{ok:true,payload}` or `{ok:false,error}`. */
-export function listContainerApps({ cwd = dirname(fileURLToPath(import.meta.url)), timeoutMs = 60_000 } = {}) {
+export function listContainerApps({ cwd = dirname(fileURLToPath(import.meta.url)), timeoutMs = 60_000, config } = {}) {
   return new Promise((resolve) => {
     execFile(
       "npx",
-      ["wrangler", "containers", "list", "--json"],
+      ["wrangler", "containers", "list", "--json", ...(config ? ["--config", config] : [])],
       { cwd, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 },
       (err, stdout, stderr) => {
         if (err)
@@ -230,7 +230,10 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     );
     return 2;
   }
-  const [health, apps] = await Promise.all([fetchHealth(baseUrl), listContainerApps()]);
+  const [health, apps] = await Promise.all([
+    fetchHealth(baseUrl),
+    listContainerApps({ config: env.SWITCHBOARD_DEPLOY_CONFIG }),
+  ]);
   const d = decide({ health, apps }, { force });
   (d.allow && !d.forced && d.warnings.length === 0 ? console.log : console.error)(`[bot-preflight] ${d.message}`);
   return d.allow ? 0 : 1;

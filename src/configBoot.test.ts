@@ -29,6 +29,20 @@ describe("the production config boot refusal", () => {
     );
   });
 
+  it("a known image's refusal names its own missing slot without claiming loaded eligibility", async () => {
+    const commit = "a".repeat(40);
+    const server = createConfigRefusalServer({ problem: "missing consumer slot", startedAt: 0, consumer: { commit } });
+    servers.push(server);
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const { port } = server.address() as AddressInfo;
+    const response = await fetch(`http://127.0.0.1:${port}/healthz`);
+    expect(response.status).toBe(503);
+    const body = await response.json();
+    expect(body).toMatchObject({ ok: false, consumer: { commit, expectedKey: `base-${commit}` } });
+    expect(body).not.toHaveProperty("loadedBase");
+  });
+
   it("boots a refusal-only HTTP fixture: /healthz is 503 JSON naming the config problem and no request is served as a live bot", async () => {
     const server = createConfigRefusalServer({
       problem: "missing base document — push one with `deploy config`",

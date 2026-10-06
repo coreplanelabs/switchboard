@@ -359,8 +359,9 @@ export function parseInstancesPage(
     rows = page.instances;
     next = isRecord(page.result_info) ? page.result_info.next_page_token : null;
   } else return undefined;
+  if (!(rows as unknown[]).every(isRecord)) return undefined;
   return {
-    rows: (rows as unknown[]).filter(isRecord).map((r) => ({
+    rows: (rows as Record<string, unknown>[]).map((r) => ({
       name: typeof r.name === "string" ? r.name : null,
       state: typeof r.state === "string" ? r.state : "unknown",
       version: asVersion(r.version),

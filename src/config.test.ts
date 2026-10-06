@@ -2029,7 +2029,7 @@ describe("loadAppConfigFrom", () => {
   const secrets = secretsFrom({ MEMORY_TOKEN: "tok" });
   /** A state Worker whose `base` document is `document` (null = never pushed). */
   const stateWorker =
-    (document: unknown, version = 3): typeof fetch =>
+    (document: unknown, version = document === null ? 0 : 3): typeof fetch =>
     async (input, init) => {
       const body = JSON.parse(String(init?.body ?? "{}")) as { key?: string };
       if (String(input) === "https://state.example/config/get" && body.key === "base")
@@ -2163,7 +2163,7 @@ runHistory:
           throw new Error("ECONNREFUSED");
         },
       }),
-    ).rejects.toThrow("/config/get failed — ECONNREFUSED");
+    ).rejects.toThrow("/config/get request failed");
   });
 
   it("a pushed document whose YAML does not validate fails startup with the validation error, never a silent partial config", async () => {

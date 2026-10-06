@@ -48,7 +48,7 @@ async function waitForHealth(url: string): Promise<Response> {
 }
 
 describe("the production process boot fixture", () => {
-  it("boots against a missing base document into refusal-only health, never a bare default runtime", async () => {
+  it("boots with unavailable state config or image identity into refusal-only health, never a bare default runtime", async () => {
     const statePort = await listen(
       createServer((_req, res) => {
         res.writeHead(200, { "content-type": "application/json" });
@@ -77,10 +77,13 @@ describe("the production process boot fixture", () => {
     const body = await health.json();
     expect(body).toMatchObject({
       ok: false,
-      config: "missing base document — push one with `deploy config`",
       inFlight: 0,
     });
+    expect(typeof body.config).toBe("string");
+    expect(body.config.length).toBeGreaterThan(0);
     expect(body).not.toHaveProperty("loadedBase");
+    const blocked = await fetch(`http://127.0.0.1:${botPort}/ingress`, { method: "POST" });
+    expect(blocked.status).toBe(503);
     expect(child.exitCode).toBeNull();
   }, 25_000);
 });
