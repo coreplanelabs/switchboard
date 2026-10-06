@@ -65,6 +65,7 @@ import {
   type PreservationOwner,
 } from "../../src/execution/sandboxCheckpoint.js";
 import { StartGate, type StartGateHost, type StartingCause } from "../../src/execution/sandboxStart.js";
+import { decodeLifecycle, updateCheckpoint } from "../../src/execution/sandboxOperationWindow.js";
 import {
   RUNTIME_REPLACEMENT_WORDING,
   isRuntimeUnreachableSignal,
@@ -368,6 +369,41 @@ export class SwitchboardSandbox extends Sandbox<Env> {
     };
   }
 
+  /** Unsupported lifecycle data is unavailable, never an absent checkpoint.
+   * Only a genuinely missing row may keep the ordinary legacy birth path. */
+  private async readLegacyPreservation(
+    storage: Pick<DurableObjectStorage, "get"> = this.ctx.storage,
+  ): Promise<CheckpointRecord | null> {
+    const stored = await storage.get<unknown>(PRESERVATION_KEY);
+    if (stored === undefined) return null;
+    const decoded = decodeLifecycle(stored);
+    if (decoded.kind !== "legacy") throw new Error("preservation lifecycle unavailable");
+    return decoded.record;
+  }
+
+  /** A delayed legacy callback must not replace a newer lifecycle, owner or
+   * checkpoint. The transaction does only metadata work, so a storage retry
+   * cannot repeat a backup, seed or marker write. */
+  private async saveLegacyPreservation(record: CheckpointRecord, expected: CheckpointRecord | null): Promise<void> {
+    const proposed = decodeLifecycle(record);
+    if (proposed.kind !== "legacy") throw new Error("preservation lifecycle unavailable");
+    await this.ctx.storage.transaction(async (storage) => {
+      const current = await this.readLegacyPreservation(storage);
+      if (
+        expected
+          ? !current ||
+            !sameOwner(current.owner, expected.owner) ||
+            current.doorOrigin !== expected.doorOrigin ||
+            current.backupId !== expected.backupId
+          : current !== null
+      )
+        throw new Error("preservation record changed");
+      const next = current ? updateCheckpoint(current, proposed.record) : proposed;
+      if (next.kind !== "legacy") throw new Error("preservation lifecycle unavailable");
+      await storage.put(PRESERVATION_KEY, next.record);
+    });
+  }
+
   /** Inspect only an already-running container. A missing file marker is NOT
    * proof of an unseeded tree: a model-root writer can remove it while .git and
    * unpublished work remain. Only a durable pre-start unseeded classification
@@ -375,12 +411,26 @@ export class SwitchboardSandbox extends Sandbox<Env> {
   private async preserveBeforeDestroy(_why: "idle" | "stuck"): Promise<boolean> {
     if (this.ctx.container?.running !== true) return false;
     try {
+      // A new or unreadable lifecycle cannot enter the legacy unseeded stop
+      // path. Read durable metadata before any SDK probe that could wake it.
+      const record = await this.readLegacyPreservation();
       const seedState = await this.ctx.storage.get<"seeded" | "unseeded">(PRESERVATION_SEED_STATE_KEY);
+      if (record ? seedState !== "seeded" : seedState !== "unseeded") return false;
       const marker = await this.exists(SEED_MARKER);
       if (!marker.success || this.ctx.container?.running !== true) return false;
+      const afterProbe = await this.readLegacyPreservation();
+      if (
+        record
+          ? !afterProbe ||
+            !sameOwner(afterProbe.owner, record.owner) ||
+            afterProbe.doorOrigin !== record.doorOrigin ||
+            afterProbe.backupId !== record.backupId
+          : afterProbe !== null
+      )
+        return false;
+      if ((await this.ctx.storage.get(PRESERVATION_SEED_STATE_KEY)) !== seedState) return false;
       if (seedState === "unseeded" && !marker.exists) return true;
       if (!marker.exists) return false;
-      const record = await this.ctx.storage.get<CheckpointRecord>(PRESERVATION_KEY);
       if (!record) return false;
       const incarnation = await this.readFile(PRESERVATION_CONTAINER_MARKER, { encoding: "utf-8" });
       if (incarnation.content !== record.owner.container || this.ctx.container?.running !== true) return false;
@@ -388,11 +438,11 @@ export class SwitchboardSandbox extends Sandbox<Env> {
         // Detached model writers are outside the SDK's process registry. No
         // asserted "paused" state is a quiescence witness in this unit.
         safeQuiescence: async () => false,
-        currentOwner: async () => (await this.ctx.storage.get<CheckpointRecord>(PRESERVATION_KEY))?.owner ?? null,
+        currentOwner: async () => (await this.readLegacyPreservation())?.owner ?? null,
         backup: (options) => this.createBackup(options),
         verify: async (id) => (await backupExists(this.env.BACKUP_BUCKET, id)) === true,
         save: (backupId, owner) =>
-          this.ctx.storage.put(PRESERVATION_KEY, { owner, doorOrigin: record.doorOrigin, backupId }),
+          this.saveLegacyPreservation({ owner, doorOrigin: record.doorOrigin, backupId }, record),
       });
       // A checkout backup observation cannot release the physical workspace.
       // Whole custody capture and the original owner's archive ACK are unproved.
@@ -416,7 +466,7 @@ export class SwitchboardSandbox extends Sandbox<Env> {
     return {
       objectId: this.ctx.id.toString(),
       threadName: this.ctx.id.name,
-      record: (await this.ctx.storage.get<CheckpointRecord>(PRESERVATION_KEY)) ?? null,
+      record: await this.readLegacyPreservation(),
       seedState: await this.ctx.storage.get<"seeded" | "unseeded">(PRESERVATION_SEED_STATE_KEY),
       running: this.ctx.container?.running,
     };
@@ -425,13 +475,18 @@ export class SwitchboardSandbox extends Sandbox<Env> {
   /** A trusted, single-effect repair on the original running container. No
    *  SDK or start gate is used: native exec cannot wake a stopped runtime. */
   async inspectRepairDependencies(owner: PreservationOwner, targetHead: string): Promise<InstallRepairAttempt> {
+    let record: CheckpointRecord | null;
+    try {
+      record = await this.readLegacyPreservation();
+    } catch {
+      return { kind: "unknown" };
+    }
     const prior = await this.ctx.storage.get<{
       owner: PreservationOwner;
       targetHead: string;
       receipt?: InstallRepairReceipt;
     }>(`switchboard.install-repair.attempt:${owner.run}:${owner.seed}`);
     if (!prior) return { kind: "none" };
-    const record = await this.ctx.storage.get<CheckpointRecord>(PRESERVATION_KEY);
     if (!record || !sameOwner(record.owner, owner) || this.ctx.id.name !== owner.thread) return { kind: "unknown" };
     if (!sameOwner(prior.owner, owner) || prior.targetHead !== targetHead || !prior.receipt) return { kind: "unknown" };
     return verifyInstallRepairReceipt(prior.receipt, {
@@ -449,7 +504,7 @@ export class SwitchboardSandbox extends Sandbox<Env> {
     const result = this.checkoutFence.exclusive(() =>
       this.idle.served(async () => {
         if (this.ctx.container?.running !== true || !/^[0-9a-f]{40}$/.test(targetHead)) return null;
-        const record = await this.ctx.storage.get<CheckpointRecord>(PRESERVATION_KEY);
+        const record = await this.readLegacyPreservation();
         if (!record || !sameOwner(record.owner, owner) || this.ctx.id.name !== owner.thread) return null;
         if (this.ctx.container?.running !== true) return null;
         // This key belongs to the original run and seed. A lost response may
@@ -468,7 +523,7 @@ export class SwitchboardSandbox extends Sandbox<Env> {
           const output = await process.output();
           const text = new TextDecoder().decode(output.stdout);
           const match = /^REPAIRED:([0-9a-f]{64})$/.exec(text);
-          const after = await this.ctx.storage.get<CheckpointRecord>(PRESERVATION_KEY);
+          const after = await this.readLegacyPreservation();
           if (
             output.exitCode !== 0 ||
             !match ||
@@ -645,6 +700,16 @@ export class SwitchboardSandbox extends Sandbox<Env> {
    *  Inside the idle ledger and behind the start gate like every route: the
    *  container's start is waited out by the executor, never carried here. */
   async seed(seed: SandboxSeed, envVars: Record<string, string>, claim?: OwnerClaim): Promise<SeedAnswer | WaitAnswer> {
+    try {
+      await this.readLegacyPreservation();
+    } catch {
+      return {
+        seeded: false,
+        reason: "seed-incompatible",
+        detail: "preservation lifecycle unavailable",
+        step: "fixup",
+      };
+    }
     return this.checkoutFence.shared(() =>
       this.idle.served(async () => {
         // Commit the fence before any restore can create (or erase) a checkout.
@@ -654,7 +719,7 @@ export class SwitchboardSandbox extends Sandbox<Env> {
         return this.gate.through(
           async () => {
             // Do not re-seed over a checkout already bound to a different writer.
-            const prior = await this.ctx.storage.get<CheckpointRecord>(PRESERVATION_KEY);
+            const prior = await this.readLegacyPreservation();
             if (
               prior &&
               (!claim ||
@@ -725,7 +790,7 @@ export class SwitchboardSandbox extends Sandbox<Env> {
               if (!doorOrigin) throw new Error("unbound door origin");
               const owner: PreservationOwner = { ...claim, container: crypto.randomUUID() };
               await this.writeFile(PRESERVATION_CONTAINER_MARKER, owner.container);
-              await this.ctx.storage.put(PRESERVATION_KEY, { owner, doorOrigin } satisfies CheckpointRecord);
+              await this.saveLegacyPreservation({ owner, doorOrigin } satisfies CheckpointRecord, null);
               return { ...answer, preservationContainer: owner.container };
             } catch {
               return {

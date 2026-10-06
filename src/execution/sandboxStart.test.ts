@@ -127,3 +127,112 @@ describe("StartGate", () => {
     expect(f.warmUps()).toBe(1);
   });
 });
+
+describe("StartGate warm-up settlement", () => {
+  it("a new gate has no observed warm-up even when the container is running", async () => {
+    const f = fakeHost({ running: true });
+    const gate = new StartGate(f.host);
+    expect(await gate.joinWarmUp()).toEqual({ kind: "unobserved" });
+    expect(f.warmUps()).toBe(0);
+  });
+
+  it("the join stays pending after the starting response until the original warm-up succeeds", async () => {
+    const f = fakeHost({ running: false });
+    const gate = new StartGate(f.host);
+    expect(await gate.through(async () => "op", starting)).toEqual(starting("container not running; starting it"));
+    let joined = false;
+    const join = gate.joinWarmUp().then((outcome) => {
+      joined = true;
+      return outcome;
+    });
+    f.setRunning(true);
+    await flush();
+    expect(joined).toBe(false);
+    f.cameUp();
+    expect(await join).toEqual({ kind: "succeeded" });
+    await flush();
+    expect(gate.isStarting).toBe(false);
+    expect(await gate.joinWarmUp()).toEqual({ kind: "succeeded" });
+    expect(f.warmUps()).toBe(1);
+  });
+
+  it("the original rejection remains distinct after the request consumes its one-shot failure", async () => {
+    const f = fakeHost({ running: false });
+    const gate = new StartGate(f.host);
+    await gate.through(async () => "op", starting);
+    const error = new Error("original SDK warm-up failure");
+    f.failed(error);
+    await flush();
+    await expect(gate.through(async () => "op", starting)).rejects.toBe(error);
+    expect(await gate.joinWarmUp()).toEqual({ kind: "failed", error });
+    expect(await gate.joinWarmUp()).toEqual({ kind: "failed", error });
+    expect(gate.isStarting).toBe(false);
+    expect(f.warmUps()).toBe(1);
+  });
+
+  it("a caller timeout leaves the original join pending for its late failure", async () => {
+    const f = fakeHost({ running: false });
+    const gate = new StartGate(f.host);
+    await gate.through(async () => "op", starting);
+    const join = gate.joinWarmUp();
+    expect(await Promise.race([join, Promise.resolve("caller-timeout")])).toBe("caller-timeout");
+    expect(gate.isStarting).toBe(true);
+    const error = new Error("late SDK timeout");
+    f.failed(error);
+    expect(await join).toEqual({ kind: "failed", error });
+  });
+
+  it("a caller abort leaves the original join pending for its late success", async () => {
+    const f = fakeHost({ running: false });
+    const gate = new StartGate(f.host);
+    await gate.through(async () => "op", starting);
+    const join = gate.joinWarmUp();
+    const controller = new AbortController();
+    const aborted = new Promise<string>((resolve) =>
+      controller.signal.addEventListener("abort", () => resolve("caller-aborted")),
+    );
+    controller.abort();
+    expect(await Promise.race([join, aborted])).toBe("caller-aborted");
+    expect(gate.isStarting).toBe(true);
+    f.cameUp();
+    expect(await join).toEqual({ kind: "succeeded" });
+  });
+
+  it("an SDK abort is the original failed outcome rather than a successful drain", async () => {
+    const f = fakeHost({ running: false });
+    const gate = new StartGate(f.host);
+    await gate.through(async () => "op", starting);
+    const error = new DOMException("warm-up aborted", "AbortError");
+    f.failed(error);
+    expect(await gate.joinWarmUp()).toEqual({ kind: "failed", error });
+  });
+
+  it("a captured join stays with the original attempt when a later warm-up begins", async () => {
+    const f = fakeHost({ running: false });
+    const gate = new StartGate(f.host);
+    await gate.through(async () => "op", starting);
+    const original = gate.joinWarmUp();
+    f.cameUp();
+    expect(await original).toEqual({ kind: "succeeded" });
+    await flush();
+    f.setRunning(false);
+    await gate.through(async () => "op", starting);
+    const later = gate.joinWarmUp();
+    const error = new Error("second warm-up failed");
+    f.failed(error);
+    expect(await later).toEqual({ kind: "failed", error });
+    expect(await original).toEqual({ kind: "succeeded" });
+    expect(f.warmUps()).toBe(2);
+  });
+
+  it("a replacement gate cannot claim settlement of an earlier gate's pending attempt", async () => {
+    const f = fakeHost({ running: false });
+    const original = new StartGate(f.host);
+    await original.through(async () => "op", starting);
+    const replacement = new StartGate(f.host);
+    expect(await replacement.joinWarmUp()).toEqual({ kind: "unobserved" });
+    f.cameUp();
+    expect(await original.joinWarmUp()).toEqual({ kind: "succeeded" });
+    expect(await replacement.joinWarmUp()).toEqual({ kind: "unobserved" });
+  });
+});
