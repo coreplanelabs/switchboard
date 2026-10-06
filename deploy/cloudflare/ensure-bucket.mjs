@@ -41,10 +41,13 @@ function wrangler(args, cwd) {
   });
 }
 
-export async function main(dir = dirname(fileURLToPath(import.meta.url))) {
+export async function main(
+  dir = dirname(fileURLToPath(import.meta.url)),
+  config = process.env.SWITCHBOARD_DEPLOY_CONFIG,
+) {
   let rendered;
   try {
-    rendered = readFileSync(join(dir, "wrangler.jsonc"), "utf8");
+    rendered = readFileSync(config ?? join(dir, "wrangler.jsonc"), "utf8");
   } catch {
     console.error("[ensure-bucket] wrangler.jsonc is not rendered — run `npm run deploy:gen` first");
     return 2;
@@ -55,7 +58,7 @@ export async function main(dir = dirname(fileURLToPath(import.meta.url))) {
     return 0;
   }
   for (const name of names) {
-    const r = await wrangler(["r2", "bucket", "create", name], dir);
+    const r = await wrangler(["r2", "bucket", "create", name, ...(config ? ["--config", config] : [])], dir);
     const d = decide(name, r.code, r.output);
     if (!d.ok) {
       console.error(`[ensure-bucket] could not create bucket ${name}:\n${d.reason}`);

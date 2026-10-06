@@ -579,11 +579,19 @@ describe("deploy.restart", () => {
     expect(restartPlans).toEqual([
       {
         target: "bot",
+        consumerTarget: {
+          account: TEST_PROFILE.account,
+          dir: "deploy/cloudflare",
+          containerApp: "switchboard-switchboardserver",
+          healthUrl: BOT_HEALTH_URL,
+          adminUrl: BOT_ADMIN_RESTART_URL,
+          stateWorkerUrl: "https://switchboard-memory.example.test",
+        },
         adminUrl: BOT_ADMIN_RESTART_URL,
         healthUrl: BOT_HEALTH_URL,
         config: {
           source: TEST_PROFILE.configSource,
-          document: "base",
+          document: "actual consumer slot",
           stateWorkerUrl: "https://switchboard-memory.example.test",
         },
         tokenEnv: RESTART_TOKEN_ENV,
@@ -1063,6 +1071,7 @@ describe("deploy.config", () => {
   ) => bind(neverRunsPlan, () => true, neverRestarts, neverAffected, profile, new Map(), noSecrets, p);
   const PUSHED = {
     ok: true as const,
+    document: "base-" + "a".repeat(40),
     how: "config from config/config.production.yaml",
     version: 7,
     sha256: "ab".repeat(32),
@@ -1107,12 +1116,20 @@ describe("deploy.config", () => {
         source: "config/config.production.yaml",
         stateWorkerUrl: "https://switchboard-memory.example.test",
         key: "base",
+        consumerTarget: {
+          account: TEST_PROFILE.account,
+          dir: "deploy/cloudflare",
+          containerApp: "switchboard-switchboardserver",
+          healthUrl: "https://switchboard.example.test/healthz",
+          adminUrl: "https://switchboard.example.test/admin/restart",
+          stateWorkerUrl: "https://switchboard-memory.example.test",
+        },
       },
     ]);
     expect(res.value).toEqual({
       source: "config/config.production.yaml",
       how: "config from config/config.production.yaml",
-      document: "base",
+      document: "base-" + "a".repeat(40),
       stateWorkerUrl: "https://switchboard-memory.example.test",
       version: 7,
       sha256: "ab".repeat(32),
@@ -1120,7 +1137,7 @@ describe("deploy.config", () => {
     });
     expect(renderText(commands.get("deploy.config")!, res.value)).toBe(
       [
-        'pushed config from config/config.production.yaml → document "base" v7 on https://switchboard-memory.example.test (sha256 abababababab, 9007 bytes)',
+        'pushed config from config/config.production.yaml → document "base-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" v7 on https://switchboard-memory.example.test (sha256 abababababab, 9007 bytes)',
         "the bot reads it on its next start: `deploy restart`",
       ].join("\n"),
     );
@@ -1138,10 +1155,23 @@ describe("deploy.config", () => {
     expect(p.calls[0].source).toBe("github://acme/infra/switchboard/config.yaml@main");
   });
 
+  it("returns the private input snapshot key without returning either config document", async () => {
+    const snapshotKey = "deploy-base-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    const p = pusher({ ...PUSHED, snapshotKey });
+    const { commands } = withPush(p.pushConfig);
+    const result = await commands.invoke("deploy.config", {}, cli);
+    if (!result.ok) throw new Error(result.message);
+    expect(result.value).toMatchObject({ snapshotKey, version: 7 });
+    expect(deployConfig.render!(result.value)).toContain(snapshotKey);
+    expect(result.value).not.toHaveProperty("candidate");
+    expect(result.value).not.toHaveProperty("priorDocument");
+  });
+
   it("an unreadable or invalid source, a missing bearer, or a refusing Worker is `unavailable` with the host's problem", async () => {
     const p = pusher({
       ok: false,
       problem: "configSource config/nope.yaml: the config does not validate — No model configured",
+      write: "not-written",
     });
     const res = await withPush(p.pushConfig).commands.invoke("deploy.config", {}, cli);
     expect(res).toMatchObject({ ok: false, error: "unavailable" });

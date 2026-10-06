@@ -1,4 +1,12 @@
-import { spawn } from "node:child_process";
+import {
+  consumerConfigKey,
+  parseConfigConsumerIdentity,
+  servedConfigConsumer,
+  type ServedConfigConsumer,
+  type ConfigConsumerIdentity,
+} from "../configConsumer.js";
+import { randomUUID } from "node:crypto";
+import { spawn, execFileSync } from "node:child_process";
 import { MINUTE_MS } from "../core/budgets.js";
 import {
   DRAINED_GAVE_UP_SUFFIX,
@@ -23,8 +31,9 @@ import {
   residentImageReportsProblem,
   reconciledResources,
 } from "./residentReadiness.js";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join } from "node:path";
+import { tmpdir } from "node:os";
 import { startProcessRoot } from "../core/requestTrace.js";
 import { systemClock } from "../core/trace/clock.js";
 import { createLogSink } from "../core/trace/sinks.js";
@@ -50,6 +59,7 @@ import {
   workersFor,
   type DeployHost,
   type BotLiveGate,
+  type ConfigConsumerTarget,
   type DeployPlan,
   type DeployStep,
   type SandboxLiveGate,
@@ -64,7 +74,12 @@ import {
   sha256Hex,
   STATE_WORKER_TOKEN_ENV,
   type ReadBaseOutcome,
+  type BaseConfigDocument,
+  sameConfigPublicationSnapshot,
+  type ConfigPublicationSnapshot,
+  type ConfigSourceObservation,
 } from "../configDocument.js";
+export type { ConfigSourceObservation } from "../configDocument.js";
 import { BUILD_COMMIT_ENV } from "./buildStamp.js";
 import { cliVersionOnHost, ensureWorkAreaOnHost, OPERATOR_ROOT, packageSourceOnHost } from "./host.js";
 import { assetPath, installationPath, workPath, type OperatorRoot } from "./operatorRoot.js";
@@ -327,8 +342,25 @@ export function deployHostOnHost(): DeployHost {
       version = undefined;
     }
   }
+  if (OPERATOR_ROOT.mode === "checkout") {
+    try {
+      const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: OPERATOR_ROOT.root, encoding: "utf8" }).trim();
+      const dirty = execFileSync("git", ["status", "--porcelain"], {
+        cwd: OPERATOR_ROOT.root,
+        encoding: "utf8",
+      }).trim();
+      commit = `${head}${dirty ? "-dirty" : ""}`;
+    } catch {
+      commit = undefined;
+    }
+  }
   return {
-    root: { mode: OPERATOR_ROOT.mode, path: OPERATOR_ROOT.root, ...(version !== undefined ? { version, commit } : {}) },
+    root: {
+      mode: OPERATOR_ROOT.mode,
+      path: OPERATOR_ROOT.root,
+      ...(version !== undefined ? { version } : {}),
+      ...(commit !== undefined ? { commit } : {}),
+    },
     hasNodeModules,
   };
 }
@@ -408,8 +440,9 @@ export async function renderWorkerConfigsOnHost(
   io: Pick<DeployRunnerIO, "log">,
   env: Record<string, string | undefined> = process.env,
   writeFile: (path: string, text: string) => void | Promise<void> = (path, text) => hostDeployFiles.write(path, text),
+  selection?: LoadedProfile,
 ): Promise<string[]> {
-  const loaded = await loadProfileOnHost(env);
+  const loaded = selection ?? (await loadProfileOnHost(env));
   const published = await publishedImagesOnHost();
   if (!published.ok) return [published.problem];
   const rendered = renderWorkerConfigs(loaded.profile, (path) => readShipped(path), published.images);
@@ -547,7 +580,8 @@ export async function readConfigForPush(
 }
 
 export type ConfigPushOutcome =
-  { ok: true; how: string; version: number; sha256: string; bytes: number } | { ok: false; problem: string };
+  | { ok: true; how: string; version: number; sha256: string; bytes: number; snapshotKey?: string; document: string }
+  | { ok: false; problem: string; write: "not-written" | "unknown" };
 
 /** What the runner needs to push: the plan's state Worker, the document key, the bearer's env. */
 export interface ConfigPushTarget {
@@ -556,50 +590,457 @@ export interface ConfigPushTarget {
   env: Record<string, string | undefined>;
   fetch?: typeof fetch;
   now?: () => Date;
+  /** Printed before send, so a lost answer can be investigated by this exact private record key. */
+  onSnapshot?: (key: string) => void;
+  consumer?: ConfigConsumerIdentity;
+  inputSourceKey?: string;
+  expectedInputSource?: Readonly<{ version: number; sha256: string }>;
 }
 
-/** Push a validated config as the `base` document on the state Worker (src/configDocument.ts); the
- *  bearer is `MEMORY_TOKEN`, named when missing. The bot picks the document up on its next start. */
-export async function pushConfigDocument(
+/** Private operation inputs. Prior YAML is recovery material, never public output
+ *  or authority to restore over a successor or an uncertain application target. */
+export interface PreparedConfigPublication {
+  readonly stateWorkerUrl: string;
+  readonly key: string;
+  readonly how: string;
+  readonly snapshotKey: string;
+  readonly candidate: Readonly<BaseConfigDocument>;
+  readonly prior: Readonly<{ version: number; document: Readonly<BaseConfigDocument> | null }>;
+  readonly inputSource?: NonNullable<ConfigPublicationSnapshot["inputSource"]>;
+}
+
+/** Freeze validated candidate bytes and canonical state before any Worker upload. */
+export async function prepareConfigPublication(
   read: Extract<ConfigRead, { ok: true }>,
   target: ConfigPushTarget,
-): Promise<ConfigPushOutcome> {
+): Promise<{ ok: true; publication: PreparedConfigPublication } | { ok: false; problem: string }> {
   const token = target.env[STATE_WORKER_TOKEN_ENV];
   if (!token)
     return {
       ok: false,
       problem: `${STATE_WORKER_TOKEN_ENV} is not set — the config is pushed to ${target.stateWorkerUrl} with the state Worker's bearer`,
     };
-  const client = new ConfigDocumentClient({
-    baseUrl: target.stateWorkerUrl,
-    token,
-    ...(target.fetch ? { fetch: target.fetch } : {}),
-  });
-  const document = baseConfigDocument(
-    read.text,
-    read.how.replace(/^config from /, ""),
-    (target.now ?? (() => new Date(systemClock())))(),
+  const { stateWorkerUrl, key } = target;
+  if (target.consumer && key !== consumerConfigKey(target.consumer))
+    return { ok: false, problem: "config publication target does not belong to the publishing consumer" };
+  const how = read.how;
+  const candidate = Object.freeze(
+    baseConfigDocument(read.text, how.replace(/^config from /, ""), (target.now ?? (() => new Date(systemClock())))()),
   );
-  const pushed = await client.pushBase(document, target.key);
-  if (!pushed.ok) return pushed;
+  const client = new ConfigDocumentClient({ baseUrl: stateWorkerUrl, token, fetch: target.fetch });
+  const prior = await client.readBase(key);
+  if (!prior.ok) return prior;
+  const inputKey = target.inputSourceKey;
+  const inputRead = inputKey && inputKey !== key ? await client.readBase(inputKey) : prior;
+  if (!inputRead.ok) return inputRead;
+  if (
+    target.expectedInputSource &&
+    (inputRead.version !== target.expectedInputSource.version ||
+      inputRead.document?.sha256 !== target.expectedInputSource.sha256)
+  )
+    return {
+      ok: false,
+      problem: "input source changed since its observed serving pair; reconcile current settings before publication",
+    };
+  const inputSource = inputKey
+    ? Object.freeze({
+        key: inputKey,
+        version: inputRead.version,
+        document: inputRead.document ? Object.freeze({ ...inputRead.document }) : null,
+      })
+    : undefined;
+  const publicationId = randomUUID();
+  const snapshotKey = `deploy-base-${publicationId}`;
+  const priorDocument = prior.document ? Object.freeze({ ...prior.document }) : null;
+  const snapshot: ConfigPublicationSnapshot = Object.freeze({
+    schema: 1,
+    kind: "base-config-publication",
+    publicationId,
+    stateWorkerUrl,
+    baseKey: key,
+    priorVersion: prior.version,
+    priorDocument,
+    expectedCandidateVersion: prior.version + 1,
+    candidate,
+    ...(inputSource ? { inputSource } : {}),
+  });
+  target.onSnapshot?.(snapshotKey);
+  const stored = await client.recordPublicationSnapshot(snapshotKey, snapshot);
+  if (!stored.ok)
+    return {
+      ok: false,
+      problem: `config input snapshot "${snapshotKey}": ${stored.problem}; base config was not sent`,
+    };
+  const readback = await client.readPublicationSnapshot(snapshotKey);
+  if (!readback.ok || !sameConfigPublicationSnapshot(readback.snapshot, snapshot))
+    return {
+      ok: false,
+      problem: `config input snapshot "${snapshotKey}" readback is uncertain; base config was not sent`,
+    };
   return {
     ok: true,
-    how: read.how,
-    version: pushed.version,
-    sha256: document.sha256,
-    bytes: Buffer.byteLength(read.text),
+    publication: Object.freeze({
+      stateWorkerUrl,
+      key,
+      how,
+      snapshotKey,
+      candidate,
+      ...(inputSource ? { inputSource } : {}),
+      prior: Object.freeze({ version: prior.version, document: priorDocument }),
+    }),
   };
 }
 
-/** `deploy config` on this host: read the source, validate, push. */
-export async function pushConfigOnHost(opts: {
+/** Send the immutable publication once against its captured canonical version. */
+export async function publishConfigPublication(
+  publication: PreparedConfigPublication,
+  transport: Pick<ConfigPushTarget, "env" | "fetch">,
+): Promise<ConfigPushOutcome> {
+  const token = transport.env[STATE_WORKER_TOKEN_ENV];
+  if (!token) return { ok: false, write: "not-written", problem: `${STATE_WORKER_TOKEN_ENV} is not set` };
+  const client = new ConfigDocumentClient({ baseUrl: publication.stateWorkerUrl, token, fetch: transport.fetch });
+  const pushed = await client.pushBase(
+    publication.candidate,
+    publication.key,
+    publication.prior.version,
+    publication.inputSource
+      ? { key: publication.inputSource.key, version: publication.inputSource.version }
+      : undefined,
+  );
+  if (!pushed.ok) return { ...pushed, problem: `${pushed.problem}; input snapshot "${publication.snapshotKey}"` };
+  return {
+    ok: true,
+    snapshotKey: publication.snapshotKey,
+    document: publication.key,
+    how: publication.how,
+    version: pushed.version,
+    sha256: publication.candidate.sha256,
+    bytes: Buffer.byteLength(publication.candidate.yaml),
+  };
+}
+
+/** Complete inventory must identify the one serving singleton, without hiding contradictory rows. */
+function hasServingConfigSingleton(
+  app: Read<AppState>,
+  instances: Read<ContainerInstance[]>,
+): app is { value: AppState & { image: string } } {
+  if (
+    "error" in app ||
+    "error" in instances ||
+    !Number.isSafeInteger(app.value.version) ||
+    app.value.version < 0 ||
+    !app.value.image
+  )
+    return false;
+  const knownStates = ["running", "stopped", "stopping", "failed", "provisioning", "unhealthy", "inactive"];
+  if (
+    instances.value.some(
+      (row) =>
+        !row.name?.trim() ||
+        !knownStates.includes(row.state.toLowerCase()) ||
+        row.version === null ||
+        !Number.isSafeInteger(row.version) ||
+        row.version < 0,
+    )
+  )
+    return false;
+  if (new Set(instances.value.map((row) => row.name)).size !== instances.value.length) return false;
+  const singleton = instances.value.filter((row) => row.name === "singleton");
+  const running = instances.value.filter((row) => row.state.toLowerCase() === "running");
+  return (
+    singleton.length === 1 &&
+    running.length === 1 &&
+    running[0] === singleton[0] &&
+    singleton[0].version === app.value.version
+  );
+}
+
+/** A frozen source observation is data from an installed process and native app.
+ *  It deliberately does not declare that the legacy build display is an owned CID. */
+export function configSourceObservation(
+  health: HealthRead,
+  app: Read<AppState>,
+  instances: Read<ContainerInstance[]>,
+): { ok: true; source: ConfigSourceObservation } | { ok: false; problem: string } {
+  if ("error" in health || health.status !== 200 || !health.body || "error" in app || "error" in instances)
+    return {
+      ok: false,
+      problem:
+        "config source serving pair is unavailable; bootstrap requires proven native absence or original observation",
+    };
+  const body = health.body;
+  const loaded = body.loadedBase;
+  if (
+    body.ok !== true ||
+    body.draining !== false ||
+    typeof loaded !== "object" ||
+    loaded === null ||
+    Array.isArray(loaded)
+  )
+    return { ok: false, problem: "config source is not installed by a non-draining process" };
+  const receipt = loaded as Record<string, unknown>;
+  const state = receipt.source;
+  const process = receipt.process;
+  if (
+    receipt.schema !== 1 ||
+    typeof state !== "object" ||
+    state === null ||
+    Array.isArray(state) ||
+    typeof process !== "object" ||
+    process === null ||
+    Array.isArray(process)
+  )
+    return { ok: false, problem: "config source observation is incomplete" };
+  const source = state as Record<string, unknown>;
+  const commit = (process as Record<string, unknown>).commit;
+  if (
+    source.kind !== "state" ||
+    typeof source.key !== "string" ||
+    !/^[a-z][a-z0-9-]{0,63}$/.test(source.key) ||
+    typeof source.version !== "number" ||
+    !Number.isSafeInteger(source.version) ||
+    source.version < 1 ||
+    typeof receipt.sha256 !== "string" ||
+    !/^[0-9a-f]{64}$/.test(receipt.sha256)
+  )
+    return { ok: false, problem: "config source is unknown, file-backed or malformed" };
+  if (
+    source.key !== "base" &&
+    (typeof commit !== "string" || !/^[0-9a-f]{40}$/.test(commit) || source.key !== consumerConfigKey({ commit }))
+  )
+    return { ok: false, problem: "config source is foreign to the observed process" };
+  if (!hasServingConfigSingleton(app, instances))
+    return { ok: false, problem: "config source application and serving instance do not agree" };
+  return {
+    ok: true,
+    source: Object.freeze({
+      key: source.key,
+      version: source.version,
+      sha256: receipt.sha256,
+      ...(typeof commit === "string" ? { observedProcessCommit: commit } : {}),
+      application: Object.freeze({ version: app.value.version, image: app.value.image }),
+    }),
+  };
+}
+
+/** Construct legacy input data from the exact original document/native app
+ *  observations. No legacy display/environment value becomes an owned CID. */
+export function frozenLegacyConfigSourceInput(
+  base: ReadBaseOutcome,
+  app: Read<AppState>,
+): { ok: true; source: ConfigSourceObservation } | { ok: false; problem: string } {
+  if (
+    !base.ok ||
+    !base.document ||
+    !Number.isSafeInteger(base.version) ||
+    base.version < 1 ||
+    base.document.sha256 !== sha256Hex(base.document.yaml) ||
+    "error" in app ||
+    !Number.isSafeInteger(app.value.version) ||
+    app.value.version < 0 ||
+    !app.value.image
+  )
+    return { ok: false, problem: "original legacy source/native application observation is incomplete" };
+  return {
+    ok: true,
+    source: Object.freeze({
+      key: "base",
+      version: base.version,
+      sha256: base.document.sha256,
+      application: Object.freeze({ version: app.value.version, image: app.value.image }),
+    }),
+  };
+}
+
+export function originalConfigSourceObservation(
+  source: ConfigSourceObservation,
+  app: Read<AppState>,
+  instances: Read<ContainerInstance[]>,
+): boolean {
+  if (
+    !/^[a-z][a-z0-9-]{0,63}$/.test(source.key) ||
+    !Number.isSafeInteger(source.version) ||
+    source.version < 1 ||
+    !/^[0-9a-f]{64}$/.test(source.sha256) ||
+    (source.key !== "base" &&
+      (typeof source.observedProcessCommit !== "string" ||
+        !/^[0-9a-f]{40}$/.test(source.observedProcessCommit) ||
+        source.key !== consumerConfigKey({ commit: source.observedProcessCommit }))) ||
+    !unchangedConfigSourceApplication(source, app) ||
+    "error" in instances
+  )
+    return false;
+  return hasServingConfigSingleton(app, instances);
+}
+
+export function unchangedConfigSourceApplication(source: ConfigSourceObservation, app: Read<AppState>): boolean {
+  return (
+    "value" in app && app.value.version === source.application.version && app.value.image === source.application.image
+  );
+}
+
+/** Both native application and serving receipt identify the same current consumer.
+ *  A desired Worker image or permissive build display alone grants no eligibility. */
+export function eligibleConfigPublicationConsumer(
+  identity: ConfigConsumerIdentity,
+  health: HealthRead,
+  app: Read<AppState>,
+  instances: Read<ContainerInstance[]>,
+  expectedImage?: string,
+): { ok: true; consumer: ServedConfigConsumer } | { ok: false; problem: string } {
+  if ("error" in health || health.status !== 200 || "error" in app || "error" in instances)
+    return { ok: false, problem: "actual config consumer or application target is unavailable" };
+  const serving = servedConfigConsumer(health.body);
+  if (!serving.ok) return serving;
+  if (serving.consumer.identity.commit !== identity.commit)
+    return { ok: false, problem: "publishing parser does not match the actual config consumer" };
+  if ((expectedImage !== undefined && app.value.image !== expectedImage) || !hasServingConfigSingleton(app, instances))
+    return { ok: false, problem: "actual application and serving instance target do not agree" };
+  return serving;
+}
+
+/** Final read-only acceptance: source writes during image activation remain a
+ *  cutover failure, not permission to restore or to refresh either config. */
+export async function confirmConsumerConfigPublication(
+  publication: PreparedConfigPublication,
+  identity: ConfigConsumerIdentity,
+  health: HealthRead,
+  app: Read<AppState>,
+  instances: Read<ContainerInstance[]>,
+  readSource: (key: string) => Promise<ReadBaseOutcome>,
+  expectedImage?: string,
+): Promise<{ ok: true } | { ok: false; problem: string }> {
+  const current = eligibleConfigPublicationConsumer(identity, health, app, instances, expectedImage);
+  if (!current.ok) return current;
+  if (
+    current.consumer.key !== publication.key ||
+    current.consumer.version !== publication.prior.version + 1 ||
+    current.consumer.sha256 !== publication.candidate.sha256
+  )
+    return { ok: false, problem: "activated consumer did not install the exact published config" };
+  if (publication.inputSource) {
+    const source = await readSource(publication.inputSource.key);
+    const sameTarget = publication.inputSource.key === publication.key;
+    if (
+      !source.ok ||
+      source.version !== (sameTarget ? publication.prior.version + 1 : publication.inputSource.version) ||
+      source.document?.sha256 !== (sameTarget ? publication.candidate.sha256 : publication.inputSource.document?.sha256)
+    )
+      return {
+        ok: false,
+        problem: "input source changed during image activation; sole writer must reconcile current settings",
+      };
+  }
+  return { ok: true };
+}
+
+/** Direct config writes prepare and send immediately; deployments prepare before
+ *  uploads and call publishConfigPublication with those same operation inputs. */
+export async function pushConfigDocument(
+  read: Extract<ConfigRead, { ok: true }>,
+  target: ConfigPushTarget,
+): Promise<ConfigPushOutcome> {
+  const prepared = await prepareConfigPublication(read, target);
+  if (!prepared.ok) return { ...prepared, write: "not-written" };
+  return publishConfigPublication(prepared.publication, target);
+}
+
+/** One publishing parser's own source; runtime variables never choose it. */
+async function configPublisherIdentityOnHost(): Promise<
+  { ok: true; identity: ConfigConsumerIdentity } | { ok: false; problem: string }
+> {
+  if (OPERATOR_ROOT.mode === "package") return parseConfigConsumerIdentity(JSON.stringify(packageSourceOnHost()));
+  const status = await run("git", ["status", "--porcelain"], { cwd: OPERATOR_ROOT.root });
+  if (status.code !== 0 || status.output.trim())
+    return { ok: false, problem: "config publication requires a clean publishing parser checkout" };
+  const source = await run("git", ["rev-parse", "HEAD"], { cwd: OPERATOR_ROOT.root });
+  if (source.code !== 0) return { ok: false, problem: "publishing parser identity is unavailable" };
+  return parseConfigConsumerIdentity(JSON.stringify({ commit: source.output.trim() }));
+}
+
+/** Direct config writes are only for the consumer actually serving its owned slot. */
+export async function pushConfigForServedConsumer(
+  read: Extract<ConfigRead, { ok: true }>,
+  target: ConfigPushTarget,
+  identity: ConfigConsumerIdentity,
+  health: HealthRead,
+  app: Read<AppState>,
+  instances: Read<ContainerInstance[]>,
+  expectedImage?: string,
+): Promise<ConfigPushOutcome> {
+  const current = eligibleConfigPublicationConsumer(identity, health, app, instances, expectedImage);
+  if (!current.ok) return { ...current, write: "not-written" };
+  const prepared = await prepareConfigPublication(read, {
+    ...target,
+    key: current.consumer.key,
+    consumer: identity,
+    inputSourceKey: current.consumer.key,
+    expectedInputSource: { version: current.consumer.version, sha256: current.consumer.sha256 },
+  });
+  if (!prepared.ok) return { ...prepared, write: "not-written" };
+  return publishConfigPublication(prepared.publication, target);
+}
+
+export interface ActualConfigConsumerBinding {
+  readonly health: HealthRead;
+  readonly application: Read<AppState>;
+  readonly instances: Read<ContainerInstance[]>;
+}
+
+async function readActualConfigConsumerOnHost(target: ConfigConsumerTarget): Promise<ActualConfigConsumerBinding> {
+  // Wrangler prefers account_id in its config over the environment. A private
+  // account-only file binds these reads even if the installation's files change.
+  const directory = mkdtempSync(join(tmpdir(), "switchboard-consumer-read-"));
+  const config = join(directory, "wrangler.jsonc");
+  try {
+    writeFileSync(config, JSON.stringify({ account_id: target.account }));
+    const [health, application, instances] = await Promise.all([
+      defaultSandboxGateDeps.readHealth(target.healthUrl),
+      defaultSandboxGateDeps.readAppState(target.dir, target.containerApp, config),
+      defaultSandboxGateDeps.readInstances(target.dir, target.containerApp, config),
+    ]);
+    return { health, application, instances };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/** `deploy config` validates its own publisher and actual native target before writing. */
+export async function pushConfigOnHost(input: {
   source: string;
   stateWorkerUrl: string;
   key: string;
+  consumerTarget: ConfigConsumerTarget;
 }): Promise<ConfigPushOutcome> {
+  const opts = Object.freeze({ ...input, consumerTarget: Object.freeze({ ...input.consumerTarget }) });
+  if (!opts.consumerTarget.stateWorkerUrl || opts.stateWorkerUrl !== opts.consumerTarget.stateWorkerUrl)
+    return {
+      ok: false,
+      write: "not-written",
+      problem: "config publication state endpoint differs from the frozen deployment target",
+    };
+  const publisher = await configPublisherIdentityOnHost();
+  if (!publisher.ok) return { ...publisher, write: "not-written" };
+  const binding = await readActualConfigConsumerOnHost(opts.consumerTarget);
+  const { health, application: app, instances } = binding;
+  const current = eligibleConfigPublicationConsumer(publisher.identity, health, app, instances);
+  if (!current.ok) return { ...current, write: "not-written" };
   const read = await readConfigForPush(opts.source);
-  if (!read.ok) return read;
-  return pushConfigDocument(read, { stateWorkerUrl: opts.stateWorkerUrl, key: opts.key, env: process.env });
+  if (!read.ok) return { ...read, write: "not-written" };
+  return pushConfigForServedConsumer(
+    read,
+    {
+      stateWorkerUrl: opts.stateWorkerUrl,
+      key: current.consumer.key,
+      env: process.env,
+      onSnapshot: (key) =>
+        process.stderr.write(`config input snapshot "${key}" (private data, not restoration authority)\n`),
+    },
+    publisher.identity,
+    health,
+    app,
+    instances,
+  );
 }
 
 async function ensureNodeModules(step: DeployStep, io: DeployRunnerIO): Promise<boolean> {
@@ -663,9 +1104,9 @@ export interface SandboxGateDeps {
   env: Record<string, string | undefined>;
   readHealth(url: string, bearer?: string, timeoutMs?: number): Promise<HealthRead>;
   /** `wrangler containers info <app> --json` → the application's version and image, run in `dir`. */
-  readAppState(dir: string, containerApp: string): Promise<Read<AppState>>;
+  readAppState(dir: string, containerApp: string, config?: string): Promise<Read<AppState>>;
   /** `wrangler containers instances <app> --json`, every page, run in `dir`. */
-  readInstances(dir: string, containerApp: string): Promise<Read<ContainerInstance[]>>;
+  readInstances(dir: string, containerApp: string, config?: string): Promise<Read<ContainerInstance[]>>;
   /** The application list Wrangler uses to compute its deploy diff. */
   readListedAppState?(dir: string, containerApp: string, account: string): Promise<Read<AppState>>;
   /** `POST /exec` `echo ok` on the probe thread; the streamed body parsed. */
@@ -679,8 +1120,11 @@ export interface SandboxGateDeps {
 
 /** One read-only wrangler command in a Worker's dir, its `--json` payload parsed;
  *  `CLOUDFLARE_ACCOUNT_ID` stripped like every other wrangler call here. */
-async function wranglerJson(dir: string, args: string[]): Promise<Read<unknown>> {
-  const r = await run("npx", ["wrangler", ...args], { cwd: workerDir(dir), unset: UNSET_ENV });
+async function wranglerJson(dir: string, args: string[], config?: string): Promise<Read<unknown>> {
+  const r = await run("npx", ["wrangler", ...args, ...(config ? ["--config", config] : [])], {
+    cwd: workerDir(dir),
+    unset: UNSET_ENV,
+  });
   if (r.code !== 0)
     return { error: `wrangler ${args.join(" ")} failed: ${lastErrorLines(r.output) || `exit ${r.code}, no output`}` };
   const parsed = parseWranglerJson(r.output);
@@ -690,17 +1134,18 @@ async function wranglerJson(dir: string, args: string[]): Promise<Read<unknown>>
 /** The application id behind a Containers application name — stable, so a
  *  success is remembered for the process; a failure is retried next poll. */
 const containerAppIds = new Map<string, string>();
-async function resolveContainerAppId(dir: string, containerApp: string): Promise<Read<string>> {
-  const known = containerAppIds.get(containerApp);
+async function resolveContainerAppId(dir: string, containerApp: string, config?: string): Promise<Read<string>> {
+  const cacheKey = `${workerDir(dir)}:${config ?? ""}:${containerApp}`;
+  const known = containerAppIds.get(cacheKey);
   if (known) return { value: known };
-  const listing = await wranglerJson(dir, ["containers", "list", "--json"]);
+  const listing = await wranglerJson(dir, ["containers", "list", "--json"], config);
   if ("error" in listing) return listing;
   const id = containerAppId(listing.value, containerApp);
   if (!id)
     return {
       error: `container application ${containerApp} not in \`wrangler containers list\` (wrong account, or renamed class?)`,
     };
-  containerAppIds.set(containerApp, id);
+  containerAppIds.set(cacheKey, id);
   return { value: id };
 }
 
@@ -718,25 +1163,25 @@ export const defaultSandboxGateDeps: SandboxGateDeps = {
     if (auth.code !== 0) return { error: "Wrangler credentials unavailable for the raw application list" };
     return readRawBotApplication(account, containerApp, parseWranglerJson(auth.output));
   },
-  readAppState: async (dir, containerApp) => {
-    const id = await resolveContainerAppId(dir, containerApp);
+  readAppState: async (dir, containerApp, config) => {
+    const id = await resolveContainerAppId(dir, containerApp, config);
     if ("error" in id) return id;
-    const info = await wranglerJson(dir, ["containers", "info", id.value, "--json"]);
+    const info = await wranglerJson(dir, ["containers", "info", id.value, "--json"], config);
     if ("error" in info) return info;
     const state = parseAppState(info.value);
     return state === null
       ? { error: `wrangler containers info ${id.value}: no numeric version in the output` }
       : { value: state };
   },
-  readInstances: async (dir, containerApp) => {
-    const id = await resolveContainerAppId(dir, containerApp);
+  readInstances: async (dir, containerApp, config) => {
+    const id = await resolveContainerAppId(dir, containerApp, config);
     if ("error" in id) return id;
     const rows: ContainerInstance[] = [];
     let pageToken: string | null = null;
     do {
       const args = ["containers", "instances", id.value, "--json", "--per-page", String(INSTANCES_PER_PAGE)];
       if (pageToken) args.push("--page-token", pageToken);
-      const page = await wranglerJson(dir, args);
+      const page = await wranglerJson(dir, args, config);
       if ("error" in page) return page;
       const parsed = parseInstancesPage(page.value);
       if (!parsed) return { error: `wrangler containers instances ${id.value}: unexpected JSON shape` };
@@ -1435,9 +1880,34 @@ async function deployStepLoop(
 /** Execute a plan for real: pre-checks, then the steps in order, stopping at
  *  the first failure so the order holds (later Workers are NOT deployed). */
 export async function runDeployPlan(
+  input: DeployPlan,
+  io: DeployRunnerIO,
+  originalDeps: SandboxGateDeps = defaultSandboxGateDeps,
+): Promise<DeployRunResult> {
+  const plan = structuredClone(input);
+  if (plan.steps.length === 0) return runSelectedDeployPlan(plan, io, originalDeps);
+  const directory = mkdtempSync(join(tmpdir(), "switchboard-plan-native-"));
+  const config = join(directory, "wrangler.jsonc");
+  const uploadConfigs: string[] = [];
+  try {
+    writeFileSync(config, JSON.stringify({ account_id: plan.checks.account }));
+    const deps: SandboxGateDeps = {
+      ...originalDeps,
+      readAppState: (dir, app) => originalDeps.readAppState(dir, app, config),
+      readInstances: (dir, app) => originalDeps.readInstances(dir, app, config),
+    };
+    return await runSelectedDeployPlan(plan, io, deps, uploadConfigs);
+  } finally {
+    for (const path of uploadConfigs) rmSync(path, { force: true });
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+async function runSelectedDeployPlan(
   plan: DeployPlan,
   io: DeployRunnerIO,
   deps: SandboxGateDeps = defaultSandboxGateDeps,
+  uploadConfigs: string[] = [],
 ): Promise<DeployRunResult> {
   if (plan.affected) io.log(formatAffectedText(plan.affected));
   if (plan.steps.length === 0) {
@@ -1462,38 +1932,30 @@ export async function runDeployPlan(
     (l) => io.log(l),
   );
   if (!ready.ok) return { kind: "refused", problems: [ready.problem] };
-  const renderProblems = await renderWorkerConfigsOnHost(io);
+  const selectedConfigs = new Map<string, string>();
+  const renderProblems = await renderWorkerConfigsOnHost(
+    io,
+    process.env,
+    async (path, text) => {
+      await hostDeployFiles.write(path, text);
+      // A sibling keeps Wrangler's relative source/image paths intact. Each
+      // operation owns its copy; shared generated configs cannot redirect it.
+      const selected = join(dirname(workerDir(path)), `.wrangler-plan-${randomUUID()}.jsonc`);
+      writeFileSync(selected, text, { flag: "wx", mode: 0o400 });
+      uploadConfigs.push(selected);
+      selectedConfigs.set(path, selected);
+    },
+    { origin: plan.profile.origin, path: plan.profile.path, profile: plan.profile.selection },
+  );
   if (renderProblems.length > 0) return { kind: "refused", problems: renderProblems };
+  for (const step of plan.steps) {
+    const config = selectedConfigs.get(`${step.dir}/${RENDERED_FILE}`);
+    if (!config) return { kind: "refused", problems: [`${step.name}: selected Worker configuration was not rendered`] };
+    step.command.push("--", "--config", config);
+    step.setEnv.SWITCHBOARD_DEPLOY_CONFIG = config;
+  }
   const problems = await preChecks(plan, io);
   if (problems.length > 0) return { kind: "refused", problems };
-  // The bot reads its config from the state Worker, so the bot step is preceded
-  // by a push of this installation's config from wherever the profile says it
-  // lives. Read and validated HERE, before any Worker deploys: an unreadable
-  // source or an invalid config is a refusal up front, not a bot that fails to
-  // start after the memory Worker has already rolled.
-  let configToPush: Extract<ConfigRead, { ok: true }> | undefined;
-  const stateWorkerUrl = plan.config.stateWorkerUrl;
-  if (plan.steps.some((s) => s.name === "bot")) {
-    if (stateWorkerUrl === undefined) {
-      io.warn(
-        "[deploy:all] config: the profile has no state Worker — nothing is pushed; the bot reads SWITCHBOARD_CONFIG",
-      );
-    } else {
-      const read = await readConfigForPush(plan.config.source);
-      if (!read.ok) return { kind: "refused", problems: [read.problem] };
-      if (!process.env[STATE_WORKER_TOKEN_ENV])
-        return {
-          kind: "refused",
-          problems: [
-            `${STATE_WORKER_TOKEN_ENV} is not set — the bot step pushes the config to ${stateWorkerUrl} with it`,
-          ],
-        };
-      configToPush = read;
-      io.log(`[deploy:all] config: ${read.how} validates; pushed to ${stateWorkerUrl} before the bot step`);
-    }
-  }
-  for (const w of plan.warnings) io.warn(`[deploy:all] WARNING ${w}`);
-
   // The commit being deployed — what a gated Worker's /healthz must report
   // before its step counts as live. In a checkout, HEAD, read AFTER the origin/main check;
   // from the package, the commit it was built from (its `source.json`), which the steps stamp
@@ -1515,6 +1977,74 @@ export async function runDeployPlan(
       ],
     };
   }
+
+  // The bot reads its config from the state Worker, so the bot step is preceded
+  // by a push of this installation's config from wherever the profile says it
+  // lives. Read and validated HERE, before any Worker deploys: an unreadable
+  // source or an invalid config is a refusal up front, not a bot that fails to
+  // start after the memory Worker has already rolled.
+  let configPublication: PreparedConfigPublication | undefined;
+  let configSource: ConfigSourceObservation | undefined;
+  const stateWorkerUrl = plan.config.stateWorkerUrl;
+  if (plan.steps.some((s) => s.name === "bot")) {
+    if (stateWorkerUrl === undefined) {
+      io.warn(
+        "[deploy:all] config: the profile has no state Worker — nothing is pushed; the bot reads SWITCHBOARD_CONFIG",
+      );
+    } else {
+      const read = await readConfigForPush(plan.config.source);
+      if (!read.ok) return { kind: "refused", problems: [read.problem] };
+      const identity = parseConfigConsumerIdentity(JSON.stringify({ commit: expectedCommit }));
+      if (!identity.ok) return { kind: "refused", problems: [identity.problem] };
+      const bot = plan.steps.find((step) => step.name === "bot");
+      if (!bot || bot.liveGate?.kind !== "bot")
+        return { kind: "refused", problems: ["config input source needs an actual bot application binding"] };
+      const [sourceHealth, sourceApp, sourceInstances] = await Promise.all([
+        deps.readHealth(bot.liveGate.healthUrl),
+        deps.readAppState(bot.dir, bot.liveGate.containerApp),
+        deps.readInstances(bot.dir, bot.liveGate.containerApp),
+      ]);
+      const observed = configSourceObservation(sourceHealth, sourceApp, sourceInstances);
+      const original = plan.config.originalSource;
+      const input = observed.ok
+        ? observed.source
+        : original && originalConfigSourceObservation(original, sourceApp, sourceInstances)
+          ? original
+          : undefined;
+      if (!input || !unchangedConfigSourceApplication(input, sourceApp))
+        return {
+          kind: "refused",
+          problems: [observed.ok ? "config source native application changed" : observed.problem],
+        };
+      if (
+        original &&
+        observed.ok &&
+        (original.key !== observed.source.key ||
+          original.version !== observed.source.version ||
+          original.sha256 !== observed.source.sha256 ||
+          !unchangedConfigSourceApplication(original, sourceApp))
+      )
+        return { kind: "refused", problems: ["original config source changed; reconcile current settings"] };
+      const prepared = await prepareConfigPublication(read, {
+        stateWorkerUrl,
+        key: consumerConfigKey(identity.identity),
+        consumer: identity.identity,
+        inputSourceKey: input.key,
+        expectedInputSource: { version: input.version, sha256: input.sha256 },
+        env: process.env,
+        onSnapshot: (key) =>
+          io.log(`[deploy:all] config: input snapshot "${key}" (private data, not restoration authority)`),
+      });
+      if (!prepared.ok) return { kind: "refused", problems: [prepared.problem] };
+      configPublication = prepared.publication;
+      configSource = input;
+      io.log(
+        `[deploy:all] config: ${read.how} validates; frozen "${configPublication.key}" v${configPublication.prior.version} ` +
+          `(sha256 ${configPublication.prior.document?.sha256 ?? "absent"}); candidate sha256 ${configPublication.candidate.sha256}`,
+      );
+    }
+  }
+  for (const w of plan.warnings) io.warn(`[deploy:all] WARNING ${w}`);
 
   // The supersede guard (src/deploy/supersede.ts, release-and-deploy.md item 32): each
   // selected Worker's live build.commit is read before anything uploads, and a live
@@ -1548,13 +2078,22 @@ export async function runDeployPlan(
   const results: DeployStepResult[] = [];
   try {
     for (const step of plan.steps) {
-      if (step.name === "bot" && configToPush && stateWorkerUrl !== undefined) {
+      if (step.name === "bot" && configPublication) {
         // After the memory step (the document lives there), before the bot rolls (it reads it on start).
-        const pushed = await pushConfigDocument(configToPush, {
-          stateWorkerUrl,
-          key: plan.config.document,
-          env: process.env,
-        });
+        const currentApp =
+          step.liveGate?.kind === "bot"
+            ? await deps.readAppState(step.dir, step.liveGate.containerApp)
+            : { error: "bot application unavailable" };
+        if (!configSource || !unchangedConfigSourceApplication(configSource, currentApp)) {
+          results.push({
+            name: step.name,
+            script: step.script,
+            live: "not deployed",
+            status: "FAILED: original config source application target changed before activation",
+          });
+          break;
+        }
+        const pushed = await publishConfigPublication(configPublication, { env: process.env });
         if (!pushed.ok) {
           results.push({
             name: step.name,
@@ -1565,14 +2104,36 @@ export async function runDeployPlan(
           break;
         }
         io.log(
-          `[deploy:all] config: ${pushed.how} → document "${plan.config.document}" v${pushed.version} on ${stateWorkerUrl} (sha256 ${pushed.sha256.slice(0, 12)}, ${pushed.bytes} bytes)`,
+          `[deploy:all] config: ${pushed.how} → document "${configPublication.key}" v${pushed.version} on ${stateWorkerUrl} (sha256 ${pushed.sha256.slice(0, 12)}, ${pushed.bytes} bytes)`,
         );
       }
       if (!(await ensureNodeModules(step, io))) {
         results.push({ name: step.name, script: step.script, live: "not deployed", status: "npm ci failed" });
         break;
       }
-      const r = await deployStep(step, plan, expectedCommit, io, deps);
+      let r = await deployStep(step, plan, expectedCommit, io, deps);
+      if (r.ok && step.liveGate?.kind === "bot" && configPublication) {
+        const client = new ConfigDocumentClient({
+          baseUrl: configPublication.stateWorkerUrl,
+          token: process.env[STATE_WORKER_TOKEN_ENV] ?? "",
+        });
+        const [health, app, instances] = await Promise.all([
+          deps.readHealth(step.liveGate.healthUrl),
+          deps.readAppState(step.dir, step.liveGate.containerApp),
+          deps.readInstances(step.dir, step.liveGate.containerApp),
+        ]);
+        const confirmed = await confirmConsumerConfigPublication(
+          configPublication,
+          { commit: expectedCommit },
+          health,
+          app,
+          instances,
+          (key) => client.readBase(key),
+          step.botImage,
+        );
+        if (!confirmed.ok)
+          r = { ...r, ok: false, live: `deployed, not live: ${confirmed.problem}`, reason: confirmed.problem };
+      }
       // wrangler always prints `Current Version ID`; a deploy that exits 0 without one is odd enough to say so.
       results.push({
         name: step.name,
@@ -1732,6 +2293,8 @@ export type RestartRunResult =
 /** The runner's I/O, injectable so the loop is unit-tested without a network or a clock. */
 export interface RestartRunnerDeps {
   env: Record<string, string | undefined>;
+  publisherIdentity: () => Promise<{ ok: true; identity: ConfigConsumerIdentity } | { ok: false; problem: string }>;
+  actualConsumer: (target: ConfigConsumerTarget) => Promise<ActualConfigConsumerBinding>;
   /** The profile's current config source, validated exactly as deploy config reads it. */
   readConfig: (source: string) => Promise<ConfigRead>;
   /** The durable base document and its ConfigDO version. */
@@ -1746,6 +2309,8 @@ export interface RestartRunnerDeps {
 
 export const defaultRestartRunnerDeps: RestartRunnerDeps = {
   env: process.env,
+  publisherIdentity: configPublisherIdentityOnHost,
+  actualConsumer: readActualConfigConsumerOnHost,
   readConfig: (source) => readConfigForPush(source),
   readBase: async (target, env) => {
     const token = env[STATE_WORKER_TOKEN_ENV];
@@ -1770,7 +2335,18 @@ async function fetchHealthzWith(deps: RestartRunnerDeps, url: string): Promise<H
 }
 
 export type RestartConfigReadiness =
-  { ok: true; generation: string; pushedAt: string; source: string } | { ok: false; problem: string };
+  | {
+      ok: true;
+      generation: string;
+      pushedAt: string;
+      source: string;
+      consumer: ConfigConsumerIdentity;
+      key: string;
+      version: number;
+      sha256: string;
+      application: { version: number; image: string | null };
+    }
+  | { ok: false; problem: string };
 
 /** Prove the durable base is the config source this command would push now.
  * Compare both clocks when the source exposes one (filesystem mtime or the
@@ -1778,7 +2354,7 @@ export type RestartConfigReadiness =
  * timestamp nor a changed-then-restored source can silently restart stale. */
 export async function restartConfigReadiness(
   plan: RestartPlan,
-  deps: Pick<RestartRunnerDeps, "env" | "readConfig" | "readBase">,
+  deps: Pick<RestartRunnerDeps, "env" | "readConfig" | "readBase" | "publisherIdentity" | "actualConsumer">,
 ): Promise<RestartConfigReadiness> {
   const stateWorkerUrl = plan.config.stateWorkerUrl;
   if (stateWorkerUrl === undefined)
@@ -1786,16 +2362,33 @@ export async function restartConfigReadiness(
       ok: false,
       problem: "the deployment profile has no state Worker — `deploy restart` cannot identify a base config generation",
     };
+  if (
+    plan.consumerTarget.stateWorkerUrl !== stateWorkerUrl ||
+    plan.consumerTarget.healthUrl !== plan.healthUrl ||
+    plan.consumerTarget.adminUrl !== plan.adminUrl
+  )
+    return { ok: false, problem: "restart endpoints differ from the frozen deployment target" };
+  const publisher = await deps.publisherIdentity();
+  if (!publisher.ok) return publisher;
+  const binding = await deps.actualConsumer(plan.consumerTarget);
+  const current = eligibleConfigPublicationConsumer(
+    publisher.identity,
+    binding.health,
+    binding.application,
+    binding.instances,
+  );
+  if (!current.ok) return current;
+  const key = current.consumer.key;
   const source = await deps.readConfig(plan.config.source);
   if (!source.ok) return source;
-  const base = await deps.readBase({ stateWorkerUrl, key: plan.config.document }, deps.env);
+  const base = await deps.readBase({ stateWorkerUrl, key }, deps.env);
   if (!base.ok) return base;
   if (!base.document)
     return {
       ok: false,
-      problem: `config: missing base document "${plan.config.document}" — run \`deploy config\` first`,
+      problem: `config: missing base document "${key}" — run \`deploy config\` first`,
     };
-  const generation = `${plan.config.document} v${base.version}`;
+  const generation = `${key} v${base.version}`;
   const sourceModifiedAt = source.modifiedAt;
   const pushedAtMs = Date.parse(base.document.pushedAt);
   const modifiedAtMs = sourceModifiedAt === undefined ? Number.NaN : Date.parse(sourceModifiedAt);
@@ -1804,7 +2397,7 @@ export async function restartConfigReadiness(
     return {
       ok: false,
       problem:
-        `base document "${plan.config.document}" v${base.version} (pushed ${base.document.pushedAt}) is older than ` +
+        `base document "${key}" v${base.version} (pushed ${base.document.pushedAt}) is older than ` +
         `${source.how}${sourceIsNewer ? ` (source changed ${sourceModifiedAt})` : " (content differs)"} — ` +
         "run `deploy config` first",
     };
@@ -1813,6 +2406,11 @@ export async function restartConfigReadiness(
     generation,
     pushedAt: base.document.pushedAt,
     source: base.document.source,
+    consumer: publisher.identity,
+    key,
+    version: base.version,
+    sha256: base.document.sha256,
+    application: "value" in binding.application ? { ...binding.application.value } : { version: -1, image: null },
   };
 }
 
@@ -1826,10 +2424,15 @@ export async function restartConfigReadiness(
  * (`decideRestarted`), logging every poll so the drain is visible.
  */
 export async function runBotRestart(
-  plan: RestartPlan,
+  input: RestartPlan,
   io: Pick<DeployRunnerIO, "log" | "warn">,
   deps: RestartRunnerDeps = defaultRestartRunnerDeps,
 ): Promise<RestartRunResult> {
+  const plan = Object.freeze({
+    ...input,
+    config: Object.freeze({ ...input.config }),
+    consumerTarget: Object.freeze({ ...input.consumerTarget }),
+  });
   const token = deps.env[plan.tokenEnv];
   if (!token)
     return {
@@ -1926,6 +2529,31 @@ export async function runBotRestart(
       plan.liveDeadlineMs,
     );
     if (d.kind === "live") {
+      const binding = await deps.actualConsumer(plan.consumerTarget);
+      const current = eligibleConfigPublicationConsumer(
+        config.consumer,
+        binding.health,
+        binding.application,
+        binding.instances,
+      );
+      if (
+        !current.ok ||
+        "error" in binding.application ||
+        binding.application.value.version !== config.application.version ||
+        binding.application.value.image !== config.application.image ||
+        current.consumer.key !== config.key ||
+        current.consumer.version !== config.version ||
+        current.consumer.sha256 !== config.sha256
+      ) {
+        return {
+          kind: "ran",
+          ok: false,
+          target: plan.target,
+          configGeneration,
+          waitedMs: deps.now() - started,
+          reason: current.ok ? "restart did not preserve the exact consumer/application/config tuple" : current.problem,
+        };
+      }
       io.log(
         `[${tag}] ${plan.target}: restarted — startedAt ${d.startedAt} (was ${previousStartedAt ?? "unknown"}), live after ${Math.round(elapsed / 1000)}s`,
       );

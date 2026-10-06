@@ -120,16 +120,17 @@ describe("WORKER_SPECS / workersFor / DEPLOY_ORDER", () => {
     ]);
     const p = plan();
     expect(p.checks.account).toBe(TEST_PROFILE.account);
-    expect(p.profile).toEqual({ origin: "profile", path: "deploy/profile.json" });
-    // The config goes to the state Worker's `base` document, never into the image.
+    expect(p.profile).toEqual({ origin: "profile", path: "deploy/profile.json", selection: TEST_PROFILE });
+    expect(p.profile.selection).not.toBe(TEST_PROFILE);
+    // A state-backed plan resolves the publishing consumer before selecting its document.
     expect(p.config).toEqual({
       source: "config/config.production.yaml",
-      document: CONFIG_DOCUMENT_KEY,
+      document: "consumer slot (exact source unresolved)",
       stateWorkerUrl: "https://switchboard-memory.example.test",
     });
     expect(CONFIG_DOCUMENT_KEY).toBe("base");
     expect(formatPlan(p)).toContain(
-      'Profile: deploy/profile.json; config: config/config.production.yaml → document "base" on https://switchboard-memory.example.test',
+      'Profile: deploy/profile.json; config: config/config.production.yaml → document "consumer slot (exact source unresolved)" on https://switchboard-memory.example.test',
     );
     // Another installation, another fleet — the same specs.
     const other = workersFor({
@@ -527,7 +528,9 @@ describe("planDeploy over a partial profile", () => {
     const p = plan({}, installed, botAndState);
     expect(p.steps.map((s) => s.name)).toEqual(["memory", "bot"]);
     expect(p.config.stateWorkerUrl).toBe("https://switchboard-memory.example.test");
-    expect(formatPlan(p)).toContain('→ document "base" on https://switchboard-memory.example.test');
+    expect(formatPlan(p)).toContain(
+      '→ document "consumer slot (exact source unresolved)" on https://switchboard-memory.example.test',
+    );
   });
 
   it("`--only` naming a Worker the profile lacks deploys nothing for it and says so in a warning; `--skip` of an absent Worker is silent", () => {
@@ -542,7 +545,7 @@ describe("planDeploy over a partial profile", () => {
     expect(p.steps.map((s) => s.name)).toEqual(["memory", "bot", "resident", "sandbox"]);
     expect(p.config).toEqual({
       source: "config/config.production.yaml",
-      document: CONFIG_DOCUMENT_KEY,
+      document: "consumer slot (exact source unresolved)",
       stateWorkerUrl: "https://switchboard-memory.example.test",
     });
     expect(p.warnings).toEqual([]);

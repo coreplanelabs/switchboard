@@ -1,3 +1,4 @@
+import { consumerConfigKey, type ConfigConsumerIdentity } from "./configConsumer.js";
 import { createServer, type Server } from "node:http";
 
 /** The stable public sentence for a production config startup failure. The
@@ -14,10 +15,17 @@ export function configRefusalReason(error: unknown): string {
  * keeping the port up lets the platform and deploy CLI report why the new
  * generation is not live and lets an authorized restart replace it after the
  * base document is repaired. */
-export function createConfigRefusalServer(opts: { problem: string; startedAt: number }): Server {
+export function createConfigRefusalServer(opts: {
+  problem: string;
+  startedAt: number;
+  consumer?: ConfigConsumerIdentity;
+}): Server {
   const payload = {
     ok: false as const,
     config: opts.problem,
+    ...(opts.consumer
+      ? { consumer: { commit: opts.consumer.commit, expectedKey: consumerConfigKey(opts.consumer) } }
+      : {}),
     inFlight: 0,
     draining: false,
     startedAt: new Date(opts.startedAt).toISOString(),

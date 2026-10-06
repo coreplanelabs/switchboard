@@ -1,3 +1,4 @@
+import { isConfigPublicationSnapshotKey, type ConfigSourcePrecondition } from "../../src/configDocument.js";
 import {
   validMaintenanceTransport,
   sameMaintenanceTransport,
@@ -1292,12 +1293,42 @@ export class ConfigDO extends DurableObject<Env> {
     document: unknown,
     expectedVersion: number,
     now: number,
-  ): Promise<{ ok: true; version: number } | { ok: false; version: number }> {
-    let outcome: { ok: true; version: number } | { ok: false; version: number } = { ok: false, version: 0 };
+    source?: ConfigSourcePrecondition,
+  ): Promise<
+    { ok: true; version: number; sourcePrecondition?: ConfigSourcePrecondition } | { ok: false; version: number }
+  > {
+    let outcome:
+      { ok: true; version: number; sourcePrecondition?: ConfigSourcePrecondition } | { ok: false; version: number } = {
+      ok: false,
+      version: 0,
+    };
     this.ctx.storage.transactionSync(() => {
       const row = this.sql.exec<{ version: number }>(`SELECT version FROM documents WHERE key = ?`, key).toArray()[0];
       const current = row?.version ?? 0;
-      if (current !== expectedVersion) {
+      if (source) {
+        const sourceRow = this.sql
+          .exec<{ version: number }>(`SELECT version FROM documents WHERE key = ?`, source.key)
+          .toArray()[0];
+        if ((sourceRow?.version ?? 0) !== source.version) {
+          try {
+            console.log(
+              `[config/put] refused ${key}: source ${source.key} v${sourceRow?.version ?? 0} != v${source.version}`,
+            );
+          } catch {
+            // Telemetry cannot change a known compare-and-swap refusal.
+          }
+          outcome = { ok: false, version: current };
+          return;
+        }
+      }
+      if (current !== expectedVersion || (current > 0 && isConfigPublicationSnapshotKey(key))) {
+        if (current > 0 && isConfigPublicationSnapshotKey(key)) {
+          try {
+            console.log(`[config/put] refused replacing snapshot ${key} v${current}`);
+          } catch {
+            // Telemetry cannot change a known compare-and-swap refusal.
+          }
+        }
         outcome = { ok: false, version: current };
         return;
       }
@@ -1309,7 +1340,7 @@ export class ConfigDO extends DurableObject<Env> {
         JSON.stringify(document),
         now,
       );
-      outcome = { ok: true, version: next };
+      outcome = { ok: true, version: next, ...(source ? { sourcePrecondition: { ...source } } : {}) };
     });
     return outcome;
   }
@@ -1764,10 +1795,28 @@ async function handleConfig(pathname: string, body: unknown, env: Env): Promise<
       return json({ error: "expectedVersion must be a non-negative integer" }, 400);
     if (new TextEncoder().encode(JSON.stringify(b.document)).byteLength > MAX_CONFIG_DOCUMENT_BYTES)
       return json({ error: `document must be at most ${MAX_CONFIG_DOCUMENT_BYTES} bytes` }, 413);
-    const out = await dO.put(b.key, b.document, b.expectedVersion, systemClock());
+    let source: ConfigSourcePrecondition | undefined;
+    if (b.sourcePrecondition !== undefined) {
+      const value = b.sourcePrecondition;
+      if (
+        !isJsonObject(value) ||
+        typeof value.key !== "string" ||
+        !CONFIG_KEY_RE.test(value.key) ||
+        typeof value.version !== "number" ||
+        !Number.isSafeInteger(value.version) ||
+        value.version < 0
+      )
+        return json({ error: "sourcePrecondition must name a document and a non-negative safe version" }, 400);
+      source = { key: value.key, version: value.version };
+    }
+    const out = await dO.put(b.key, b.document, b.expectedVersion, systemClock(), source);
     if (!out.ok) return json({ error: "version conflict", version: out.version }, 409);
     console.log(`[config/put] ${b.key} v${out.version}`);
-    return json({ ok: true, version: out.version });
+    return json({
+      ok: true,
+      version: out.version,
+      ...(out.sourcePrecondition ? { sourcePrecondition: out.sourcePrecondition } : {}),
+    });
   }
   return json({ error: "not found" }, 404);
 }

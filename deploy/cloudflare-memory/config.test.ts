@@ -1,3 +1,7 @@
+import { randomUUID } from "node:crypto";
+import { env, runInDurableObject } from "cloudflare:test";
+import type { ConfigDO } from "./worker.ts";
+import { baseConfigDocument, ConfigDocumentClient, type ConfigPublicationSnapshot } from "../../src/configDocument.ts";
 import { fetchMemoryTest } from "./testFetch.ts";
 import { describe, expect, it } from "vitest";
 
@@ -25,6 +29,81 @@ async function post(path: string, body: unknown, headers: Record<string, string>
 }
 
 describe("ConfigDO routes", () => {
+  it("counts input-source drift without private bytes or changing a refusal when telemetry fails", async () => {
+    const sourceKey = key();
+    const targetKey = key();
+    const stub = env.CONFIG.get(env.CONFIG.idFromName("config"));
+    const captured = await runInDurableObject(stub, async (instance: ConfigDO) => {
+      const lines: unknown[][] = [];
+      const log = console.log;
+      try {
+        await instance.put(sourceKey, { private: "source secret" }, 0, 0);
+        await instance.put(targetKey, { private: "target secret" }, 0, 0);
+        console.log = (...args: unknown[]) => {
+          lines.push(args);
+        };
+        const refused = await instance.put(targetKey, { private: "candidate secret" }, 1, 1, {
+          key: sourceKey,
+          version: 0,
+        });
+        await instance.put(targetKey, {}, 0, 2, { key: sourceKey, version: 1 });
+        console.log = () => {
+          throw new Error("telemetry unavailable");
+        };
+        const loggingFailure = await instance.put(targetKey, {}, 1, 3, { key: sourceKey, version: 0 });
+        return {
+          lines,
+          refused,
+          loggingFailure,
+          source: await instance.get(sourceKey),
+          target: await instance.get(targetKey),
+        };
+      } finally {
+        console.log = log;
+      }
+    });
+    expect(captured).toEqual({
+      lines: [[`[config/put] refused ${targetKey}: source ${sourceKey} v1 != v0`]],
+      refused: { ok: false, version: 1 },
+      loggingFailure: { ok: false, version: 1 },
+      source: { document: { private: "source secret" }, version: 1 },
+      target: { document: { private: "target secret" }, version: 1 },
+    });
+  });
+
+  it("counts snapshot replacement refusals without private bytes or changes to stored inputs", async () => {
+    const snapshotKey = `deploy-base-${randomUUID()}`;
+    const mutableKey = key();
+    const stub = env.CONFIG.get(env.CONFIG.idFromName("config"));
+    const captured = await runInDurableObject(stub, async (instance: ConfigDO) => {
+      const lines: unknown[][] = [];
+      const log = console.log;
+      console.log = (...args: unknown[]) => {
+        lines.push(args);
+      };
+      try {
+        await instance.put(snapshotKey, { private: "original private bytes" }, 0, 0);
+        const refusal = await instance.put(snapshotKey, { private: "replacement private bytes" }, 1, 1);
+        await instance.put(mutableKey, { private: "ordinary config" }, 0, 0);
+        await instance.put(mutableKey, { private: "ordinary replacement" }, 1, 1);
+        await instance.put(mutableKey, {}, 0, 2);
+        console.log = () => {
+          throw new Error("telemetry unavailable");
+        };
+        const loggingFailure = await instance.put(snapshotKey, {}, 1, 2);
+        return { lines, refusal, loggingFailure, stored: await instance.get(snapshotKey) };
+      } finally {
+        console.log = log;
+      }
+    });
+    expect(captured).toEqual({
+      lines: [[`[config/put] refused replacing snapshot ${snapshotKey} v1`]],
+      refusal: { ok: false, version: 1 },
+      loggingFailure: { ok: false, version: 1 },
+      stored: { document: { private: "original private bytes" }, version: 1 },
+    });
+  });
+
   it("advertises the feature; refuses unauthenticated and non-POST", async () => {
     const health = await fetchMemoryTest(`${BASE}/healthz`, undefined, (res) => res.json());
     expect((health as { features: string[] }).features).toContain("config");
@@ -66,6 +145,192 @@ describe("ConfigDO routes", () => {
       document: { channels: {}, users: { u: { effort: "low" } } },
       version: 2,
     });
+  });
+
+  it("the base client preserves a successor document on the real SQLite compare-and-swap", async () => {
+    const k = key();
+    const client = new ConfigDocumentClient({
+      baseUrl: BASE,
+      token: "test-token",
+      fetch: (input, init) => fetchMemoryTest(String(input), init),
+    });
+    const original = baseConfigDocument("# original\n", "admin", new Date(0));
+    const successor = baseConfigDocument("# successor\n", "admin", new Date(1));
+    const candidate = baseConfigDocument("# candidate\n", "deploy", new Date(2));
+    expect(await client.pushBase(original, k, 0)).toEqual({ ok: true, version: 1 });
+    const frozen = await client.readBase(k);
+    if (!frozen.ok) throw new Error(frozen.problem);
+    expect(await client.pushBase(successor, k, frozen.version)).toEqual({ ok: true, version: 2 });
+    expect(await client.pushBase(candidate, k, frozen.version)).toMatchObject({ ok: false, write: "not-written" });
+    expect(await client.readBase(k)).toEqual({ ok: true, document: successor, version: 2 });
+  });
+
+  it("an input snapshot survives a new client and cannot be replaced even with its current version", async () => {
+    const publicationId = randomUUID();
+    const snapshotKey = `deploy-base-${publicationId}`;
+    const original = baseConfigDocument("# original private bytes\n", "admin", new Date(0));
+    const candidate = baseConfigDocument("# candidate private bytes\n", "deploy", new Date(1));
+    const snapshot: ConfigPublicationSnapshot = {
+      schema: 1,
+      kind: "base-config-publication",
+      publicationId,
+      stateWorkerUrl: BASE,
+      baseKey: key(),
+      priorVersion: 7,
+      priorDocument: original,
+      expectedCandidateVersion: 8,
+      candidate,
+    };
+    const client = () =>
+      new ConfigDocumentClient({
+        baseUrl: BASE,
+        token: "test-token",
+        fetch: (input, init) => fetchMemoryTest(String(input), init),
+      });
+    expect(await client().recordPublicationSnapshot(snapshotKey, snapshot)).toEqual({ ok: true, version: 1 });
+    expect(await client().readPublicationSnapshot(snapshotKey)).toEqual({ ok: true, snapshot });
+    expect(
+      (
+        await post("/config/put", {
+          key: snapshotKey,
+          document: { ...snapshot, candidate: original },
+          expectedVersion: 1,
+        })
+      ).status,
+    ).toBe(409);
+    expect(await client().readPublicationSnapshot(snapshotKey)).toEqual({ ok: true, snapshot });
+  });
+
+  it("an unknown committed snapshot ACK is not retried and the exact inputs remain readable", async () => {
+    const publicationId = randomUUID();
+    const snapshotKey = `deploy-base-${publicationId}`;
+    const snapshot: ConfigPublicationSnapshot = {
+      schema: 1,
+      kind: "base-config-publication",
+      publicationId,
+      stateWorkerUrl: BASE,
+      baseKey: key(),
+      priorVersion: 0,
+      priorDocument: null,
+      expectedCandidateVersion: 1,
+      candidate: baseConfigDocument("# original request\n", "deploy", new Date(1)),
+    };
+    let writes = 0;
+    const uncertain = new ConfigDocumentClient({
+      baseUrl: BASE,
+      token: "test-token",
+      fetch: async (input, init) => {
+        writes++;
+        await fetchMemoryTest(String(input), init, (response) => response.text());
+        return Response.json({});
+      },
+    });
+    expect(await uncertain.recordPublicationSnapshot(snapshotKey, snapshot)).toMatchObject({
+      ok: false,
+      write: "unknown",
+    });
+    expect(writes).toBe(1);
+    const fresh = new ConfigDocumentClient({
+      baseUrl: BASE,
+      token: "test-token",
+      fetch: (input, init) => fetchMemoryTest(String(input), init),
+    });
+    expect(await fresh.readPublicationSnapshot(snapshotKey)).toEqual({ ok: true, snapshot });
+    expect(await fresh.readBase(snapshot.baseKey)).toEqual({ ok: true, document: null, version: 0 });
+  });
+
+  it("two snapshot owners race one base without losing either request or attributing the loser", async () => {
+    const baseKey = key();
+    const snapshots: ConfigPublicationSnapshot[] = [0, 1].map((n) => ({
+      schema: 1,
+      kind: "base-config-publication",
+      publicationId: randomUUID(),
+      stateWorkerUrl: BASE,
+      baseKey,
+      priorVersion: 0,
+      priorDocument: null,
+      expectedCandidateVersion: 1,
+      candidate: baseConfigDocument("# identical YAML\n", `writer-${n}`, new Date(n)),
+    }));
+    const client = () =>
+      new ConfigDocumentClient({
+        baseUrl: BASE,
+        token: "test-token",
+        fetch: (input, init) => fetchMemoryTest(String(input), init),
+      });
+    for (const snapshot of snapshots)
+      expect(await client().recordPublicationSnapshot(`deploy-base-${snapshot.publicationId}`, snapshot)).toEqual({
+        ok: true,
+        version: 1,
+      });
+    const outcomes = await Promise.all(snapshots.map((snapshot) => client().pushBase(snapshot.candidate, baseKey, 0)));
+    expect(outcomes.filter((o) => o.ok)).toHaveLength(1);
+    expect(outcomes.filter((o) => !o.ok)).toEqual([expect.objectContaining({ write: "not-written" })]);
+    const winner = snapshots[outcomes.findIndex((o) => o.ok)];
+    expect(await client().readBase(baseKey)).toEqual({ ok: true, document: winner.candidate, version: 1 });
+    for (const snapshot of snapshots)
+      expect(await client().readPublicationSnapshot(`deploy-base-${snapshot.publicationId}`)).toEqual({
+        ok: true,
+        snapshot,
+      });
+  });
+
+  it("a new target slot cannot bless an input source changed after preparation", async () => {
+    const sourceKey = key();
+    const targetKey = key();
+    const original = baseConfigDocument("# original\n", "admin", new Date(0));
+    const successor = baseConfigDocument("# successor\n", "admin", new Date(1));
+    const client = new ConfigDocumentClient({
+      baseUrl: BASE,
+      token: "test-token",
+      fetch: (input, init) => fetchMemoryTest(String(input), init),
+    });
+    expect(await client.pushBase(original, sourceKey, 0)).toEqual({ ok: true, version: 1 });
+    expect(await client.pushBase(successor, sourceKey, 1)).toEqual({ ok: true, version: 2 });
+    expect(await client.pushBase(original, targetKey, 0, { key: sourceKey, version: 1 })).toMatchObject({
+      ok: false,
+      write: "not-written",
+    });
+    expect(await client.readBase(targetKey)).toEqual({ ok: true, document: null, version: 0 });
+    expect(await client.readBase(sourceKey)).toEqual({ ok: true, document: successor, version: 2 });
+  });
+
+  it("matching source and target predicates publish once while preserving the input source", async () => {
+    const sourceKey = key();
+    const targetKey = key();
+    const original = baseConfigDocument("# original\n", "admin", new Date(0));
+    const candidate = baseConfigDocument("# candidate\n", "publisher", new Date(1));
+    const client = new ConfigDocumentClient({
+      baseUrl: BASE,
+      token: "test-token",
+      fetch: (input, init) => fetchMemoryTest(String(input), init),
+    });
+    expect(await client.pushBase(original, sourceKey, 0)).toEqual({ ok: true, version: 1 });
+    expect(await client.pushBase(candidate, targetKey, 0, { key: sourceKey, version: 1 })).toEqual({
+      ok: true,
+      version: 1,
+    });
+    expect(await client.pushBase(original, targetKey, 0, { key: sourceKey, version: 1 })).toMatchObject({
+      ok: false,
+      write: "not-written",
+    });
+    expect(await client.readBase(sourceKey)).toEqual({ ok: true, document: original, version: 1 });
+    expect(await client.readBase(targetKey)).toEqual({ ok: true, document: candidate, version: 1 });
+  });
+
+  it("an invalid source predicate refuses before creating the target", async () => {
+    const targetKey = key();
+    expect(
+      (
+        await post("/config/put", {
+          key: targetKey,
+          document: {},
+          expectedVersion: 0,
+          sourcePrecondition: { key: "base", version: -1 },
+        })
+      ).status,
+    ).toBe(400);
+    expect((await post("/config/get", { key: targetKey })).data).toEqual({ document: null, version: 0 });
   });
 
   it("validates: bad key, non-object document, bad expectedVersion, oversize document; unknown route 404", async () => {

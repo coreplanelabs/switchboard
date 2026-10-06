@@ -214,11 +214,19 @@ describe("planRestart / formatRestartPlan", () => {
     const plan = planRestart({ only: "bot", force: false, waitMaxMinutes: 30, pollSeconds: 60 }, TEST_PROFILE);
     expect(plan).toEqual({
       target: "bot",
+      consumerTarget: {
+        account: TEST_PROFILE.account,
+        dir: "deploy/cloudflare",
+        containerApp: "switchboard-switchboardserver",
+        healthUrl: "https://switchboard.example.test/healthz",
+        adminUrl: "https://switchboard.example.test/admin/restart",
+        stateWorkerUrl: "https://switchboard-memory.example.test",
+      },
       adminUrl: "https://switchboard.example.test/admin/restart",
       healthUrl: "https://switchboard.example.test/healthz",
       config: {
         source: "config/config.production.yaml",
-        document: "base",
+        document: "actual consumer slot",
         stateWorkerUrl: "https://switchboard-memory.example.test",
       },
       tokenEnv: RESTART_TOKEN_ENV,

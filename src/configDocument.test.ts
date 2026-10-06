@@ -136,7 +136,7 @@ describe("ConfigDocumentClient", () => {
   });
 
   it("pushes over the current version (get, then put) and reports the new one; a concurrent push is a 409 said as such", async () => {
-    const state = { document: null as unknown, version: 2 };
+    const state = { document: DOC as unknown, version: 2 };
     const { calls, client } = fake(state);
     expect(await client.pushBase(DOC)).toEqual({ ok: true, version: 3 });
     expect(calls.map((c) => c.path)).toEqual(["/config/get", "/config/put"]);
@@ -148,7 +148,7 @@ describe("ConfigDocumentClient", () => {
       token: "tok",
       fetch: async (input) =>
         String(input).endsWith("/config/get")
-          ? Response.json({ document: null, version: 5 })
+          ? Response.json({ document: DOC, version: 5 })
           : Response.json({ error: "version conflict", version: 6 }, { status: 409 }),
     });
     expect(await racy.pushBase(DOC)).toMatchObject({
@@ -157,14 +157,202 @@ describe("ConfigDocumentClient", () => {
     });
   });
 
+  it("a frozen version refuses a newer admin setting without refreshing or retrying", async () => {
+    const successor = baseConfigDocument("# newer admin setting\n", "admin", new Date(1));
+    const state = { document: successor as unknown, version: 5 };
+    const { client, calls } = fake(state);
+    const outcome = await client.pushBase(DOC, "base", 4);
+    expect(outcome).toMatchObject({ ok: false, write: "not-written" });
+    expect(calls.map((c) => c.path)).toEqual(["/config/put"]);
+    expect(state).toEqual({ document: successor, version: 5 });
+  });
+
+  it.each([
+    {},
+    { ok: false, version: 5 },
+    { ok: true },
+    { ok: true, version: 4 },
+    { ok: true, version: 6 },
+    { ok: true, version: 5.5 },
+    null,
+    [[]],
+  ])("does not credit an uncertain acknowledgement: %j", async (body) => {
+    let puts = 0;
+    const client = new ConfigDocumentClient({
+      baseUrl: "https://state.example",
+      token: "tok",
+      fetch: async (input) => {
+        if (String(input).endsWith("/config/get")) return Response.json({ document: DOC, version: 4 });
+        puts++;
+        return Response.json(body);
+      },
+    });
+    expect(await client.pushBase(DOC)).toMatchObject({ ok: false, write: "unknown" });
+    expect(puts).toBe(1);
+  });
+
+  it.each(["transport", "server", "non-json"])("a %s failure after send leaves one unknown write", async (failure) => {
+    let puts = 0;
+    const client = new ConfigDocumentClient({
+      baseUrl: "https://state.example",
+      token: "tok",
+      fetch: async (input) => {
+        if (String(input).endsWith("/config/get")) return Response.json({ document: DOC, version: 4 });
+        puts++;
+        if (failure === "transport") throw new Error("connection lost");
+        return failure === "server" ? Response.json({ error: "failed" }, { status: 500 }) : new Response("<html>");
+      },
+    });
+    expect(await client.pushBase(DOC)).toMatchObject({ ok: false, write: "unknown" });
+    expect(puts).toBe(1);
+  });
+
+  it.each([-1, 1.5, Number.MAX_SAFE_INTEGER, Number.NaN])(
+    "an invalid frozen version %s sends nothing",
+    async (version) => {
+      const { client, calls } = fake({ document: DOC, version: 4 });
+      expect(await client.pushBase(DOC, "base", version)).toMatchObject({ ok: false, write: "not-written" });
+      expect(calls).toEqual([]);
+    },
+  );
+
+  it("does not treat a missing field or a corrupt stored null as initial absence", async () => {
+    for (const document of [undefined, null]) {
+      const { client, calls } = fake({ document, version: 4 });
+      expect(await client.pushBase(DOC)).toMatchObject({ ok: false, write: "not-written" });
+      expect(calls.map((c) => c.path)).toEqual(["/config/get"]);
+    }
+  });
+
+  it("a committed write with a lost body is unknown and never retried", async () => {
+    let stored: unknown;
+    let puts = 0;
+    const client = new ConfigDocumentClient({
+      baseUrl: "https://state.example",
+      token: "tok",
+      fetch: async (input, init) => {
+        if (String(input).endsWith("/config/get")) return Response.json({ document: null, version: 0 });
+        puts++;
+        stored = JSON.parse(String(init?.body)).document;
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.error(new Error("body lost"));
+            },
+          }),
+        );
+      },
+    });
+    expect(await client.pushBase(DOC)).toMatchObject({ ok: false, write: "unknown" });
+    expect(stored).toEqual(DOC);
+    expect(puts).toBe(1);
+  });
+
+  it("refuses canonical bytes whose digest disagrees before a direct write", async () => {
+    const { client, calls } = fake({ document: { ...DOC, yaml: "# changed bytes" }, version: 4 });
+    expect(await client.readBase()).toMatchObject({ ok: false });
+    expect(await client.pushBase(DOC)).toMatchObject({ ok: false, write: "not-written" });
+    expect(calls.every((c) => c.path === "/config/get")).toBe(true);
+  });
+
+  it("keeps private bytes out of failure output from a server or transport", async () => {
+    for (const fail of [
+      async () => {
+        throw new Error(DOC.yaml);
+      },
+      async () => Response.json({ error: DOC.yaml }, { status: 500 }),
+    ]) {
+      const client = new ConfigDocumentClient({ baseUrl: "https://state.example", token: "tok", fetch: fail });
+      const result = await client.pushBase(DOC, "base", 4);
+      expect(result).toMatchObject({ ok: false, write: "unknown" });
+      expect(JSON.stringify(result)).not.toContain(DOC.yaml.trim());
+    }
+  });
+
+  it.each([
+    [new DOMException("private timeout details", "TimeoutError"), "timeout"],
+    [new DOMException("private abort details", "AbortError"), "request aborted"],
+    [
+      new TypeError("private fetch details", {
+        cause: Object.assign(new Error("private DNS details"), { code: "ENOTFOUND" }),
+      }),
+      "DNS lookup failed (ENOTFOUND)",
+    ],
+    [
+      new TypeError("private fetch details", {
+        cause: Object.assign(new Error("private connection details"), { code: "ECONNREFUSED" }),
+      }),
+      "connection refused (ECONNREFUSED)",
+    ],
+    [Object.assign(new Error("private lookup details"), { code: "EAI_AGAIN" }), "DNS lookup failed (EAI_AGAIN)"],
+    [Object.assign(new Error("private reset details"), { code: "ECONNRESET" }), "connection reset (ECONNRESET)"],
+    [Object.assign(new Error("private timeout details"), { code: "ETIMEDOUT" }), "timeout (ETIMEDOUT)"],
+    [
+      Object.assign(new Error("private timeout details"), { code: "UND_ERR_CONNECT_TIMEOUT" }),
+      "timeout (UND_ERR_CONNECT_TIMEOUT)",
+    ],
+  ])("keeps a safe transport cause without crediting or retrying the write: %s", async (error, reason) => {
+    let sends = 0;
+    const client = new ConfigDocumentClient({
+      baseUrl: "https://state.example",
+      token: "private-bearer",
+      fetch: async () => {
+        sends++;
+        throw error;
+      },
+    });
+    expect(await client.pushBase(DOC, "base", 4)).toEqual({
+      ok: false,
+      write: "unknown",
+      problem: `state Worker https://state.example: /config/put request failed — ${reason}; config write outcome unknown`,
+    });
+    expect(sends).toBe(1);
+  });
+
+  it("does not disclose arbitrary transport fields or thrown values", async () => {
+    for (const error of [
+      "private-bearer",
+      Object.assign(new Error(DOC.yaml), { code: "private-bearer", cause: { code: DOC.yaml } }),
+    ]) {
+      const client = new ConfigDocumentClient({
+        baseUrl: "https://state.example",
+        token: "private-bearer",
+        fetch: async () => {
+          throw error;
+        },
+      });
+      const result = await client.pushBase(DOC, "base", 4);
+      expect(result).toMatchObject({ ok: false, write: "unknown" });
+      expect(JSON.stringify(result)).not.toContain("private-bearer");
+      expect(JSON.stringify(result)).not.toContain(DOC.yaml.trim());
+    }
+  });
+
+  it("an old server's positive put without a source-fence receipt remains unknown", async () => {
+    let writes = 0;
+    const client = new ConfigDocumentClient({
+      baseUrl: "https://state.example",
+      token: "test",
+      fetch: async () => {
+        writes++;
+        return Response.json({ ok: true, version: 1 });
+      },
+    });
+    expect(await client.pushBase(DOC, "base-" + "a".repeat(40), 0, { key: "base", version: 3 })).toMatchObject({
+      ok: false,
+      write: "unknown",
+    });
+    expect(writes).toBe(1);
+  });
+
   it("an unreachable Worker, a non-2xx (401 hints at the bearer), and a non-JSON answer are problems naming the Worker", async () => {
     expect(await fake({ document: null, version: 0 }, { down: true }).client.readBase()).toMatchObject({
       ok: false,
-      problem: expect.stringContaining("state Worker https://state.example: /config/get failed — ECONNREFUSED"),
+      problem: expect.stringContaining("state Worker https://state.example: /config/get request failed"),
     });
     expect(await fake({ document: null, version: 0 }, { failStatus: 401 }).client.readBase()).toMatchObject({
       ok: false,
-      problem: expect.stringContaining("HTTP 401 (nope) — is MEMORY_TOKEN the Worker's bearer?"),
+      problem: expect.stringContaining("HTTP 401 — is MEMORY_TOKEN the Worker's bearer?"),
     });
     expect(await fake({ document: null, version: 0 }, { nonJson: true }).client.readBase()).toMatchObject({
       ok: false,

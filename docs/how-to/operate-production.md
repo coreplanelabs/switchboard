@@ -77,6 +77,14 @@ Before cutover, inspect unfinished effects and protected workspace ownership aga
 
 `deploy images` only copies registry inventory. A Worker-version rollback with `wrangler rollback` changes only the Worker deployment, and `deploy restart` restarts the image selected by the container application's current target. None of those operations is a container-image rollback, alone or in combination; after them a newer application target remains newer.
 
+## Consumer-owned configuration
+
+New state-backed images choose `base-<full-build-commit>` from the protected build artifact inside the image. Worker desired-image variables and health display overrides do not choose that slot. Legacy images retain their existing `base` document throughout a rollout; a missing or foreign new slot refuses instead of falling back.
+
+The publishing CLI stages the target slot before image activation. It freezes the input-source document and native application pair, preserves full input witnesses privately, and compares source and target versions in the same existing store transaction. A changed source or unknown conditional acknowledgement stops the operation. An unknown prior consumer or unproved cold application absence refuses rather than inventing bootstrap authority.
+
+Direct config updates and restarts require the publishing parser to match the consumer actually serving its owned slot and the native application/running-container target. Final readback must prove the exact loaded slot and that the input source did not change during activation. Keep one configuration writer through cutover; independent image and config services are not atomic. A retained snapshot, matching bytes or a restart does not authorize restoration or prove original-write attribution.
+
 ## Change the config without a release
 
 ```bash
@@ -84,7 +92,15 @@ npx --yes @coreplane/switchboard@<version> deploy config     # from the profile'
 npx --yes @coreplane/switchboard@<version> deploy restart    # the running container keeps the config it started with
 ```
 
-`deploy config` refuses an unreadable source, an invalid config, or a missing `MEMORY_TOKEN`. Secrets are the same two steps: [Rotate a secret](rotate-a-secret.md).
+`deploy config` refuses an unreadable source, an invalid config, or a missing `MEMORY_TOKEN`. It requires this CLI's exact parser identity to match the running consumer's installed owned-slot receipt and native application/container target. It reads that slot and publishes conditionally against the frozen version; a successor setting survives. Legacy consumers and missing or foreign owned slots refuse direct publication. A malformed acknowledgement or lost response leaves the write unknown. Read the actual owned document and application target before another operation; the runner never retries or restores config automatically.
+
+For a release, the driver freezes a proven current source/native pair or an original input witness still bound to the unchanged native target before uploads. It stages the publishing image's own slot, comparing both source and target versions in one store transaction. Legacy `base` stays untouched, so an old-binary restart continues reading its prior document. CLI validation alone does not establish serving acceptance: after activation, verify the exact installed target slot and re-read the source. A late source write leaves cutover incomplete for the sole configuration writer to reconcile.
+
+Before uploads or direct slot publication, the runner stores full source, prior target and candidate request witnesses in a private, immutable `deploy-base-<UUID>` document on the existing state Worker. It prints the key before send and requires a positive acknowledgement plus exact readback. A fresh client can recover the inputs after CLI exit; the snapshot grants no restoration authority. The combined snapshot must fit the state Worker's 256 KiB document limit or the operation refuses before uploads. Snapshots remain retained for the recovery owner; the runner neither replaces nor deletes them. Full candidate source, timestamp and bytes distinguish an identical-YAML successor; even a full match alone cannot attribute an unknown write to its original sender.
+
+Cold state-backed bootstrap remains unsupported: an absent target slot at version zero permits conditional creation only after the input source and native target are proven. A readable legacy document or a missing-slot 503 carrying the image's own identity does not supply that proof. Unknown prior consumers, file/environment source observations and unproved native application absence refuse before uploads or writes. Deploying Memory first does not establish Bot bootstrap eligibility. Empty or non-Bot selections publish no config; file-mode profiles without a state Worker retain their existing path. A printed plan is a source-derived target hint, not proof of a loaded consumer slot.
+
+Secrets are the same two steps: [Rotate a secret](rotate-a-secret.md).
 
 ## Read the bot's span log
 

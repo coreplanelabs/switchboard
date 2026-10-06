@@ -365,6 +365,9 @@ function nextCommands(world: InitWorld, profile: boolean): string[] {
   const bot = `docker run -d --restart unless-stopped --env-file .env -v "$PWD/config:/app/config:ro" ${image}`;
   const deploySteps = (cli: string, workers: string[]) => [
     ...workers.map((w) => `${cli} deploy secrets ${w}`),
+    ...(workers.includes("memory")
+      ? [`MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" ${cli} deploy all --only memory`]
+      : []),
     `MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" ${cli} deploy all`,
   ];
   // From the npm package: `ask`, `start` — the bot, the same process the image runs — and the

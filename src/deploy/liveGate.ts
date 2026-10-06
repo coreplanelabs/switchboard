@@ -25,6 +25,9 @@ export interface HealthzBody {
   /** A refusal-only production boot's public reason. Such a generation owns a
    *  port so the operator can diagnose it, but is never live. */
   config?: unknown;
+  /** Transport only: eligibility validates these with the owned consumer contract. */
+  loadedBase?: unknown;
+  consumer?: unknown;
 }
 
 /** Parse a `/healthz` response body; undefined when it is not a JSON object

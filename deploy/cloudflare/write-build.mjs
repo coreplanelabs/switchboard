@@ -13,7 +13,7 @@
 // Dependency-free Node (child_process + fs). `buildInfo()` is pure given its
 // inputs; `main()` does the I/O.
 import { execFileSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { writeFileSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -38,8 +38,34 @@ export function readBuildInfo(
   return buildInfo({ commit: git(["rev-parse", "HEAD"]), dirty: git(["status", "--porcelain"]) !== "" });
 }
 
+/** The config consumer stamp must describe the code being packaged, not an
+ * arbitrary environment label. A package without git uses its published source. */
+export function readConsumerBuildInfo(
+  env = process.env,
+  git = (args) => execFileSync("git", args, { cwd: REPO_ROOT, encoding: "utf8" }).trim(),
+  readSource = () => JSON.parse(readFileSync(join(REPO_ROOT, "source.json"), "utf8")),
+) {
+  let commit;
+  let checkout = false;
+  try {
+    commit = git(["rev-parse", "HEAD"]);
+    checkout = true;
+  } catch {
+    commit = readSource()?.commit;
+  }
+  // Once HEAD identifies a checkout, an unavailable status is uncertainty,
+  // not evidence of a package. It must propagate before a stamp is written.
+  if (checkout && git(["status", "--porcelain"]) !== "") throw new Error("dirty publishing tree");
+  if (typeof commit !== "string" || !/^[0-9a-f]{40}$/.test(commit))
+    throw new Error("config consumer build requires an exact clean source commit");
+  const given = env[COMMIT_ENV];
+  if (given !== undefined && given !== commit)
+    throw new Error("provided build commit does not match the packaged consumer source");
+  return buildInfo({ commit, dirty: false });
+}
+
 export function main() {
-  const info = readBuildInfo();
+  const info = readConsumerBuildInfo();
   const path = join(REPO_ROOT, "build.json");
   writeFileSync(path, `${JSON.stringify(info)}\n`);
   console.log(`[build] ${path}: ${info.commit} @ ${info.builtAt}`);

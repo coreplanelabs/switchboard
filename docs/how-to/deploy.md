@@ -87,6 +87,8 @@ MEMORY_TOKEN="$(cat ~/.secrets/switchboard/MEMORY_TOKEN)" npx --yes @coreplane/s
 
 `deploy plan` executes nothing; its `Images:` line reads `0 of 1 present; deploy all copies the rest`, or `not probed (<why>)` without a token. `deploy all` checks the account, copies the missing images into your registry, deploys the state Worker, pushes your config to it, deploys the bot, and waits until `/healthz` answers from the new container.
 
+The state Worker's canonical config must be readable before a Bot-selected deployment starts. For the first installation, deploy Memory with `deploy all --only memory`, then deploy Bot. An unreadable endpoint is a refusal, not evidence that no config exists.
+
 You should see:
 
 ```

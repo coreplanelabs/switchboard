@@ -109,6 +109,10 @@ COPY --from=build /app/web/dist ./web/dist
 # served on /healthz as `build`; the glob keeps it optional so a bare
 # `wrangler deploy` / docker compose still builds (the bot then says "unknown").
 COPY package.json project.json build.jso[n] ./
+# The state-config selector reads only this protected copy. The package marker
+# keeps unstamped file-mode builds valid; state-mode boot refuses a missing stamp.
+COPY package.json build.jso[n] /usr/share/switchboard/
+RUN chmod 0555 /usr/share/switchboard && chmod 0444 /usr/share/switchboard/*
 # No config in the image: SWITCHBOARD_CONFIG names a file mounted at run time
 # (docker compose: ./config → /app/config) or `state://base`, the document
 # `deploy config` pushed to the state Worker (what the Cloudflare shim sets).

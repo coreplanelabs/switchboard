@@ -22,6 +22,8 @@ docs/.vitepress/cache
 # Worker's wrangler.jsonc is rendered from its template by `npm run deploy:gen`.
 deploy/profile.json
 deploy/*/wrangler.jsonc
+# Per-operation sibling configs retain relative paths without dirtying image stamps.
+deploy/*/.wrangler-plan-*.jsonc
 
 # The npm package's build copies the repository's LICENSE beside its manifest so the tarball carries it.
 packages/switchboard/LICENSE

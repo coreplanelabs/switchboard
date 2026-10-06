@@ -877,6 +877,7 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
       pushConfig: async (o) =>
         exec(`deploy.config push ${o.source} → ${o.key}@${o.stateWorkerUrl}`, {
           ok: true,
+          document: "base-" + "a".repeat(40),
           how: `config from ${o.source}`,
           version: 1,
           sha256: "ab".repeat(32),

@@ -4,4 +4,9 @@ export type BuildInfo = { commit: string; builtAt: string };
 export const COMMIT_ENV: "SWITCHBOARD_BUILD_COMMIT";
 export function buildInfo(input: { commit: string; dirty: boolean; now?: Date }): BuildInfo;
 export function readBuildInfo(env?: Record<string, string | undefined>, git?: (args: string[]) => string): BuildInfo;
+export function readConsumerBuildInfo(
+  env?: Record<string, string | undefined>,
+  git?: (args: string[]) => string,
+  readSource?: () => { commit?: unknown },
+): BuildInfo;
 export function main(): number;
