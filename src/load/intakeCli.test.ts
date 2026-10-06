@@ -1,9 +1,64 @@
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 describe("intake A/B CLI", () => {
+  it("reads the telemetry report without touching the ledger, Slack or a model", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "intake-telemetry-cli-"));
+    const shim = join(dir, "fetch.mjs");
+    writeFileSync(
+      shim,
+      `globalThis.fetch = async (url, options) => {
+      if (url !== "https://api.cloudflare.com/client/v4/accounts/account/analytics_engine/sql") throw new Error("unexpected endpoint");
+      if (options.headers.authorization !== "Bearer test-only") throw new Error("missing authenticated query");
+      if (!options.body.includes("blob1 = 'intake-1'") || !options.body.includes("blob2 = 'trial'") || !options.body.includes("blob8 NOT IN ('slack:C1:1.0')")) throw new Error("missing query filters");
+      return new Response(JSON.stringify({ data: [] }), { status: 200, headers: { "content-type": "application/json" } });
+    };`,
+    );
+    try {
+      const { stdout } = await promisify(execFile)(
+        process.execPath,
+        [
+          "--import",
+          "tsx",
+          "--import",
+          shim,
+          "scripts/load.ts",
+          "intake",
+          "--telemetry",
+          "--account",
+          "account",
+          "--dataset",
+          "runs",
+          "--experiment",
+          "trial",
+          "--since",
+          "2026-10-05T00:00:00Z",
+          "--until",
+          "2026-10-06T00:00:00Z",
+          "--samples",
+          "--exclude-threads",
+          "slack:C1:1.0",
+          "--token-env",
+          "INTAKE_CLI_TEST_TOKEN",
+        ],
+        { cwd: process.cwd(), env: { PATH: process.env.PATH, INTAKE_CLI_TEST_TOKEN: "test-only" } },
+      );
+      expect(JSON.parse(stdout)).toMatchObject({
+        source: "analytics-engine",
+        experiment: "trial",
+        dataset: "runs",
+        arms: [],
+        samples: [],
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
   it("accepts the documented experiment and samples flags and reads only the ledger", async () => {
     const requests: string[] = [];
     const server = createServer((request, response) => {

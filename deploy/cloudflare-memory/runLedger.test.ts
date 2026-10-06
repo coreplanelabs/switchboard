@@ -23,6 +23,8 @@ import {
 } from "../../src/core/coordinator/reportPublicDelivery.ts";
 import { appendCoordinatorStatus } from "../../src/core/coordinator/unitStatus.ts";
 import type { ContextDependencies } from "../../src/core/references/contextDependencies.ts";
+import type { IntakeReceipt } from "../../src/core/runLedger/types.ts";
+import type { RunMetricsPoint } from "../../src/core/runMetrics.ts";
 
 // Feature: docs/reference/specs/orchestration-plane.md — exact Workflow discovery and durable report obligations.
 describe("durable coordinator Workflow reconciliation", () => {
@@ -3730,6 +3732,63 @@ describe("the sessions registry and the sweep's drop of a session log", () => {
 });
 
 describe("run ledger — intake receipts (item 59)", () => {
+  it("emits telemetry after one committed receipt, never on replay or legacy writes, and contains sink failures", async () => {
+    const key = storeKey();
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (instance: RunHistoryDO) => {
+      const holder = instance as unknown as { metrics: { write(point: RunMetricsPoint): void } };
+      const previous = holder.metrics;
+      const points: RunMetricsPoint[] = [];
+      holder.metrics = {
+        write: (point) => {
+          points.push(point);
+        },
+      };
+      const row: IntakeReceipt = {
+        verdict: "silent",
+        reason: "private text",
+        source: "model",
+        mode: "classify",
+        model: "typesafe/jev-1.13.0",
+        gen: 1,
+        threadKey: "slack:C1:1.0",
+        decidedAt: 1000,
+        experiment: {
+          id: "trial",
+          messageKey: "C1:2.0",
+          arm: "jev",
+          elapsedMs: 150,
+          calls: 1,
+          inputTokens: 800,
+          outputTokens: 42,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          knownCostUsd: 0.0000336,
+          unpricedCalls: 0,
+          missingUsageCalls: 0,
+        },
+      };
+      try {
+        expect((await instance.recordIntake("C1:2.0", row, 0, true)).inserted).toBe(true);
+        expect(await instance.readIntake("C1:2.0")).toEqual(row);
+        expect((await instance.recordIntake("C1:2.0", { ...row, verdict: "addressed" }, 0, true)).inserted).toBe(false);
+        await instance.recordIntake("legacy", row, 0);
+        expect(points).toHaveLength(1);
+        expect(points[0]!.blobs[0]).toBe("intake-1");
+        expect(points[0]!.blobs[5]).toBe("silent");
+        await instance.recordIntake("C1:3.0", { ...row, verdict: "addressed" }, 0, true);
+        expect(points.map((point) => point.blobs[5])).toEqual(["silent", "addressed"]);
+        holder.metrics = {
+          write: () => {
+            throw new Error("sink unavailable");
+          },
+        };
+        expect((await instance.recordIntake("C1:4.0", { ...row, verdict: "addressed" }, 0, true)).inserted).toBe(true);
+        expect((await instance.readIntake("C1:4.0"))?.verdict).toBe("addressed");
+      } finally {
+        holder.metrics = previous;
+      }
+    });
+  });
   const HOUR = 3_600_000;
   const intakeReceipt = (threadKey: string, over: Record<string, unknown> = {}) => ({
     verdict: "silent",

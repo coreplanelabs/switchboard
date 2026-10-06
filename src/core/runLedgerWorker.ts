@@ -774,6 +774,8 @@ export class WorkerRunLedger implements RunLedger {
       storeKey: this.opts.storeKey,
       key,
       receipt,
+      // New readers isolate intake's schema before opting in to its emission.
+      telemetry: true,
       ...(this.opts.catchUpWindowMs !== undefined ? { windowMs: this.opts.catchUpWindowMs } : {}),
     });
     return {

@@ -737,7 +737,12 @@ describe("intake receipts — the routes and the retry (run-history item 59)", (
     const w = stubWorker(() => ({ status: 200, data: { inserted: true, stored } }));
     expect(await w.ledger.recordIntake("slack:C1:2.0", stored)).toEqual({ inserted: true, stored });
     expect(w.calls.map((c) => c.path)).toEqual(["/runs/intake"]);
-    expect(w.calls[0].body).toEqual({ storeKey: "runs:default", key: "slack:C1:2.0", receipt: stored });
+    expect(w.calls[0].body).toEqual({
+      storeKey: "runs:default",
+      key: "slack:C1:2.0",
+      receipt: stored,
+      telemetry: true,
+    });
 
     const windowed = stubWorker(() => ({ status: 200, data: { inserted: true, stored } }), {
       catchUpWindowMs: 1_800_000,
@@ -748,6 +753,7 @@ describe("intake receipts — the routes and the retry (run-history item 59)", (
       key: "slack:C1:2.0",
       receipt: stored,
       windowMs: 1_800_000,
+      telemetry: true,
     });
   });
 

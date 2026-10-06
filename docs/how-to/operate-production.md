@@ -5,6 +5,9 @@
 Compare the configured fast model with Jev using a stable split of threads.
 Only the selected model runs. The existing durable records hold latency,
 usage, estimated cost, decisions and failures for each arm.
+Newly inserted measured receipts also emit reply telemetry to the existing
+Analytics Engine dataset, including decisions that stay silent. The telemetry
+report can read a multi-day observation without keeping a local client open.
 [Configuration and report commands](../reference/specs/load-harness.md#short-production-ab-run)
 cover a short trial and rollback. Review a few messages from each arm as well
 as the numbers; response rate alone does not measure correctness.
