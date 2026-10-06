@@ -7,8 +7,8 @@
 // structured `submit_verdict` tool (src/tools/submit.ts); this module turns
 // that structured value into the first line of the posted body:
 //
-//   approve          → "LGTM: <summary>"
-//   request_changes  → "Changes requested: <summary>"
+//   approve          → "LGTM: <issue count>"
+//   request_changes  → "Changes requested: <issue count>"
 //   (no verdict)     → "No verdict submitted — not approving." (fail-closed)
 //
 // The model's prose follows after a blank line. Whatever the prose says, only
@@ -31,6 +31,7 @@
 // ladder is what ship's coordinator holds a posted approve to (agent-ship.md
 // item 9) — that check is now defense in depth behind this one.
 
+import { fromMarkdown } from "mdast-util-from-markdown";
 import { normalizeHead } from "./reviewedHead.js";
 import { toolResultText, type ChatMessage } from "./chatMessage.js";
 import { redactSecrets } from "./redact.js";
@@ -388,29 +389,64 @@ export interface ReviewBodyTarget {
   head: string;
 }
 
-/** The verdict word the callout carries, per verdict kind (or its absence). */
-function verdictWord(verdict: ReviewVerdict | undefined): string {
-  if (!verdict) return "No verdict";
-  return verdict.verdict === "approve" ? "Approved" : "Changes requested";
+const SEVERITY_LABEL: Record<FindingSeverity, string> = {
+  blocking: "🔴 **Blocking**",
+  major: "🟠 **Major**",
+  minor: "🟡 **Minor**",
+  nit: "⚪ **Nit**",
+};
+
+/** Presentation only: retain the complete title in the evidence and marker. */
+function findingSentence(title: string): string {
+  const text = oneLine(title);
+  // The reviewer authors one sentence. Guessing its boundary from punctuation
+  // can erase the failure after an abbreviation, initial or version number.
+  const points = [...text];
+  const bounded = points.length > 180 ? `${points.slice(0, 179).join("")}…` : text;
+  return bounded.replace(/[\\`*_{}[\]<>#|]/g, "\\$&");
 }
 
-/** GitHub's alert callout kind per verdict: an approve is a note, changes
- *  requested a warning, a missing verdict a caution. */
-function calloutKind(verdict: ReviewVerdict | undefined): "NOTE" | "WARNING" | "CAUTION" {
-  if (!verdict) return "CAUTION";
-  return verdict.verdict === "approve" ? "NOTE" : "WARNING";
+/** Raw HTML cannot close or open the surrounding fold. Markdown code spans
+ * and fences already render tags as text, so leave their source unchanged. */
+function escapeReviewHtml(markdown: string): string {
+  if (!markdown.includes("<")) return markdown;
+  type Node = {
+    type: string;
+    children?: Node[];
+    position?: { start: { offset?: number }; end: { offset?: number } };
+  };
+  const pending: Node[] = [fromMarkdown(markdown)];
+  const ranges: { from: number; to: number }[] = [];
+  while (pending.length) {
+    const node = pending.pop()!;
+    const from = node.position?.start.offset;
+    const to = node.position?.end.offset;
+    if (node.type === "html" && from !== undefined && to !== undefined) ranges.push({ from, to });
+    for (const child of node.children ?? []) pending.push(child);
+  }
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const { from, to } of ranges.sort((a, b) => a.from - b.from)) {
+    parts.push(
+      markdown.slice(cursor, from),
+      markdown.slice(from, to).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"),
+    );
+    cursor = to;
+  }
+  parts.push(markdown.slice(cursor));
+  return parts.join("");
 }
 
-/** `2 findings: 1 minor, 1 nit` — counted on the ladder, most severe first;
- *  an empty array is `no findings`, no array `findings not itemized`. */
-function findingCounts(findings: readonly Finding[] | undefined): string {
-  if (findings === undefined) return "findings not itemized";
-  if (findings.length === 0) return "no findings";
-  const by = FINDING_SEVERITIES.map((sev) => [sev, findings.filter((f) => f.severity === sev).length] as const)
-    .filter(([, n]) => n > 0)
-    .map(([sev, n]) => `${n} ${sev}`)
-    .join(", ");
-  return `${findings.length} finding${findings.length === 1 ? "" : "s"}: ${by}`;
+function reviewHeadline(verdict: ReviewVerdict | undefined): string {
+  if (!verdict) return NO_VERDICT_LINE;
+  const findings = verdict.findings;
+  const count =
+    findings === undefined
+      ? "issues not itemized"
+      : findings.length === 0
+        ? "no issues found"
+        : `${findings.length} issue${findings.length === 1 ? "" : "s"}`;
+  return `${verdict.verdict === "approve" ? LGTM_TOKEN : CHANGES_TOKEN} ${count}`;
 }
 
 /** A one-line Markdown table cell. Backslashes are escaped before pipes so
@@ -470,9 +506,8 @@ function verdictMarker(verdict: ReviewVerdict | undefined, target: ReviewBodyTar
  * Build the body posted to GitHub, rendered from the typed verdict
  * (docs/reference/specs/agent-review.md item 5b): the deterministic verdict
  * line first (the auto-approve contract — never `LGTM:` unless the verdict is
- * `approve`), a GitHub alert callout with the verdict word, the pinned head
- * and the finding counts, the findings as a table (severity, id + title, the
- * file linked at the head), the model's text folded under `Full review`, and
+ * `approve`), one short sentence per issue with severity and a pinned link,
+ * all agent evidence folded under `For agents`, and
  * the machine-readable marker last. Only the prose may be clipped to fit the
  * platform: every fixed verdict section and the marker remain byte-for-byte.
  * If those sections leave no room for a visible bounded review, the oversized
@@ -484,15 +519,25 @@ export function buildReviewPostBody(
   verdict: ReviewVerdict | undefined,
   target?: ReviewBodyTarget,
 ): string {
-  const facts = [
-    `**${verdictWord(verdict)}**`,
-    ...(target ? [`head \`${target.head.slice(0, 7)}\``] : []),
-    verdict ? findingCounts(verdict.findings) : "the run ended without a submit_verdict call",
-  ];
-  const fixedParts: string[] = [verdictLine(verdict), `> [!${calloutKind(verdict)}]\n> ${facts.join(" · ")}`];
+  const fixedParts = [reviewHeadline(verdict)];
   const findings = verdict?.findings ?? [];
-  if (findings.length > 0) {
+  if (findings.length) {
+    const ranked = FINDING_SEVERITIES.flatMap((severity) => findings.filter((f) => f.severity === severity));
     fixedParts.push(
+      ranked
+        .map(
+          (f) =>
+            `- ${SEVERITY_LABEL[f.severity]} · ${whereCell(f, target)}${f.humanGated ? " · Needs human verification" : ""}  \n  ${findingSentence(f.title)}`,
+        )
+        .join("\n\n"),
+    );
+  }
+  const head = target?.head ?? verdict?.head;
+  if (head) fixedParts.push(`_Reviewed at \`${head.slice(0, 7)}\`._`);
+  const agentParts: string[] = [];
+  if (verdict?.summary) agentParts.push(`**Rationale:** ${oneLine(verdict.summary)}`);
+  if (findings.length > 0) {
+    agentParts.push(
       [
         "| Severity | Finding | Where |",
         "| --- | --- | --- |",
@@ -506,7 +551,7 @@ export function buildReviewPostBody(
 
   for (const f of findings) {
     if (f.invariant && f.cases) {
-      fixedParts.push(
+      agentParts.push(
         `**${escapeMarkdownTableCell(f.id)} invariant:** ${f.invariant}\n\n` +
           f.cases.map((row) => `- ${row.scenario} → ${row.expected}`).join("\n"),
       );
@@ -515,7 +560,7 @@ export function buildReviewPostBody(
 
   const marker = verdictMarker(verdict, target);
   if (verdict?.resolutions?.length) {
-    fixedParts.push(
+    agentParts.push(
       [
         "| Prior finding | Resolution | Evidence at this head |",
         "| --- | --- | --- |",
@@ -525,14 +570,22 @@ export function buildReviewPostBody(
       ].join("\n"),
     );
   }
-  const fixedBody = [...fixedParts, marker].join("\n\n");
-  const prose = answer.trim();
-  if (!prose) return fixedBody;
-
-  const details = (text: string, truncated: boolean): string =>
-    `<details>\n<summary>Full review</summary>\n\n${text}${truncated ? `${text ? "\n\n" : ""}${REVIEW_TRUNCATION_NOTE}` : ""}\n\n</details>`;
-  const render = (text: string, truncated: boolean): string =>
-    [...fixedParts, details(text, truncated), marker].join("\n\n");
+  const fixedEvidence = escapeReviewHtml(agentParts.join("\n\n"));
+  const prose = escapeReviewHtml(answer.trim());
+  const render = (text: string, truncated: boolean): string => {
+    const evidence = [
+      ...(fixedEvidence ? [fixedEvidence] : []),
+      ...(text || truncated
+        ? [`### Full review\n\n${text}${truncated ? `${text ? "\n\n" : ""}${REVIEW_TRUNCATION_NOTE}` : ""}`]
+        : []),
+    ].join("\n\n");
+    return [
+      ...fixedParts,
+      ...(evidence ? [`<details>\n<summary>For agents</summary>\n\n${evidence}\n\n</details>`] : []),
+      marker,
+    ].join("\n\n");
+  };
+  if (!prose) return render("", false);
   const full = render(prose, false);
   if ([...full].length <= MAX_REVIEW_POST_CODE_POINTS) return full;
 

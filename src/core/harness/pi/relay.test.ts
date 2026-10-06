@@ -581,7 +581,7 @@ describe("runRelayedTool — the verdict path", () => {
     expect(answer).toEqual({ content: [{ type: "text", text: nativeText }], isError: false });
     const body = buildReviewPostBody("The review.", relayed[0]);
     expect(body).toBe(buildReviewPostBody("The review.", native[0]));
-    expect(body.startsWith("LGTM: looks correct\n\n> [!NOTE]\n")).toBe(true);
+    expect(body.startsWith("LGTM: 1 issue\n\n")).toBe(true);
     expect(body).toContain("| nit | **F1** a name | `src/x.ts:3` |");
   });
   // live-view.md item 26: a relayed tool sees the call it runs under, the same id
