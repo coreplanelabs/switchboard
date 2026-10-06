@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.287.5](https://github.com/coreplanelabs/switchboard/compare/v1.287.4...v1.287.5) (2026-10-06)
+
+
+### Bug fixes
+
+* **authz:** grant code access without repo memory ownership ([#2802](https://github.com/coreplanelabs/switchboard/issues/2802)) ([27c1c8f](https://github.com/coreplanelabs/switchboard/commit/27c1c8fd5ab42392be61126f6bb1a35bdee23288))
+* **authz:** keep credentials within their agent and repo grants ([#2799](https://github.com/coreplanelabs/switchboard/issues/2799)) ([08b791e](https://github.com/coreplanelabs/switchboard/commit/08b791e63716832e9c3f2d8220a1b9abba105cbe))
+* **sandbox:** keep backups from releasing private workspaces ([#2800](https://github.com/coreplanelabs/switchboard/issues/2800)) ([ccb3fde](https://github.com/coreplanelabs/switchboard/commit/ccb3fde2715746630dc33c079d46eaa48b16eaf1))
+* **ship:** recover original published work after a lost checkpoint ([#2794](https://github.com/coreplanelabs/switchboard/issues/2794)) ([3766041](https://github.com/coreplanelabs/switchboard/commit/37660417dbfd12165d0f3aa8f706e9d4db3c3d42))
+* **ship:** retain ownership admission diagnostics ([#2793](https://github.com/coreplanelabs/switchboard/issues/2793)) ([ee30ea8](https://github.com/coreplanelabs/switchboard/commit/ee30ea8a1c24d5dae76fec6fe09ff0c6be715cb5))
+
 ## [1.287.4](https://github.com/coreplanelabs/switchboard/compare/v1.287.3...v1.287.4) (2026-10-06)
 
 
