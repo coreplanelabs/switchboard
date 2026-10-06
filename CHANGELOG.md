@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.288.0](https://github.com/coreplanelabs/switchboard/compare/v1.287.5...v1.288.0) (2026-10-06)
+
+
+### Features
+
+* **resident:** onboard repositories without a resident ([#2798](https://github.com/coreplanelabs/switchboard/issues/2798)) ([b6f3138](https://github.com/coreplanelabs/switchboard/commit/b6f3138f58cf54d5d1d3b1d9ac88c33b514ff590))
+* **runs:** diagnose incomplete pull-owner scans ([#2811](https://github.com/coreplanelabs/switchboard/issues/2811)) ([bb20149](https://github.com/coreplanelabs/switchboard/commit/bb201493a580a1d6e5c1b52f0b3bf3e92bb30f3d))
+
+
+### Bug fixes
+
+* **harness:** preserve typed outcomes and original operation bounds ([#2801](https://github.com/coreplanelabs/switchboard/issues/2801)) ([a8d347d](https://github.com/coreplanelabs/switchboard/commit/a8d347dadc42231166d5ddd47d5b33b5e71d86d7))
+* **sandbox:** publish rewrites when the default branch advances ([#2808](https://github.com/coreplanelabs/switchboard/issues/2808)) ([6143d6b](https://github.com/coreplanelabs/switchboard/commit/6143d6b79339511395e16f11d962df1ebb2bd3ac))
+
 ## [1.287.5](https://github.com/coreplanelabs/switchboard/compare/v1.287.4...v1.287.5) (2026-10-06)
 
 
