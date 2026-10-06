@@ -90,6 +90,8 @@ export const OPENCODE_EVENT_DISPOSITION: Readonly<Record<string, Disposition>> =
   "session.inbox.cancelled": "structure",
   "session.inbox.delivery.changed": "structure",
   "session.instructions.updated": "structure",
+  // Opaque session annotations do not change the run's turns or execution.
+  "session.metadata.updated": "structure",
   "session.permissions": "structure",
   "session.synthetic": "structure",
   "session.viewed": "structure",
