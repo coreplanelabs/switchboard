@@ -139,6 +139,28 @@ export function controllerPublicationPlan(
   const setup = ["set -euo pipefail", "umask 077", "ulimit -f 32768", "ulimit -v 524288"];
   const objectBounds = `git -C ${dir} verify-pack -v ${dir}/.git/objects/pack/*.idx | awk 'NF >= 5 && $2 ~ /^(commit|tree|blob|tag|ofs-delta|ref-delta)$/ { count++; size += $3; if (count > 50000 || size > 134217728) exit 1 } END { if (count == 0) exit 1 }'`;
   const fetchOld = baseSource === "branch" && input.old !== undefined;
+  const trustedFetch = (target: string, expected?: string, closure = true, setupFirst = true) =>
+    [
+      ...(setupFirst ? setup : []),
+      "ulimit -f 16384",
+      `mkdir -p ${dir}`,
+      `git -C ${dir} init -q`,
+      `git -C ${dir} config remote.publication-base.url ${shellQuote(remote)}`,
+      `git -C ${dir} config remote.publication-base.promisor true`,
+      `timeout -k 5 45 git -C ${dir} -c fetch.fsckObjects=true fetch --no-tags --no-recurse-submodules --depth=1 --filter=blob:none -- publication-base ${target}`,
+      // Older Git ignores NO_LAZY_FETCH; removing the URL prevents promised
+      // objects from triggering another read during graph checks or packing.
+      `git -C ${dir} config --unset remote.publication-base.url`,
+      `test "$(du -sk ${dir}/.git/objects | cut -f1)" -le ${COLD_PACK_MAX_BYTES / 1024}`,
+      objectBounds,
+      `git -C ${dir} cat-file -e FETCH_HEAD^{commit}`,
+      ...(expected ? [`test "$(git -C ${dir} rev-parse FETCH_HEAD)" = ${expected}`] : []),
+      ...(closure
+        ? [`timeout -k 5 30 git -C ${dir} fsck --full --strict --no-reflogs --no-progress >/dev/null 2>&1`]
+        : []),
+      `git -C ${dir} rev-parse FETCH_HEAD`,
+    ].join("\n");
+  const fetchCommand = trustedFetch(shellQuote(fetchOld ? ref : "HEAD"), fetchOld ? input.old : undefined);
   const prepare = [
     `mkdir -p ${dir}`,
     `git -C ${dir} init -q`,
@@ -177,24 +199,7 @@ export function controllerPublicationPlan(
   };
   return {
     command: [...setup, ...prepare, push].join("\n"),
-    fetchCommand: [
-      ...setup,
-      "ulimit -f 16384",
-      `mkdir -p ${dir}`,
-      `git -C ${dir} init -q`,
-      `git -C ${dir} config remote.publication-base.url ${shellQuote(remote)}`,
-      `git -C ${dir} config remote.publication-base.promisor true`,
-      `timeout -k 5 45 git -C ${dir} -c fetch.fsckObjects=true fetch --no-tags --no-recurse-submodules --depth=1 --filter=blob:none -- publication-base ${shellQuote(fetchOld ? ref : "HEAD")}`,
-      // Keep only the trusted promise metadata. Removing the remote URL also
-      // disables on-demand reads on image Git versions predating NO_LAZY_FETCH.
-      `git -C ${dir} config --unset remote.publication-base.url`,
-      `test "$(du -sk ${dir}/.git/objects | cut -f1)" -le ${COLD_PACK_MAX_BYTES / 1024}`,
-      objectBounds,
-      `git -C ${dir} cat-file -e FETCH_HEAD^{commit}`,
-      ...(fetchOld ? [`test "$(git -C ${dir} rev-parse FETCH_HEAD)" = ${input.old}`] : []),
-      `timeout -k 5 30 git -C ${dir} fsck --full --strict --no-reflogs --no-progress >/dev/null 2>&1`,
-      `git -C ${dir} rev-parse FETCH_HEAD`,
-    ].join("\n"),
+    fetchCommand,
     prepareCommand: [...setup, ...prepare].join("\n"),
     pushCommand: [...setup, push].join("\n"),
     prepareEnv: {
