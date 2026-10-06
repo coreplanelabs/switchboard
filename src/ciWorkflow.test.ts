@@ -40,6 +40,7 @@ interface Job {
   name?: string;
   steps: Step[];
   "runs-on": string;
+  "timeout-minutes"?: number;
   needs?: string | string[];
   if?: string;
   env?: Record<string, string>;
@@ -170,6 +171,23 @@ describe("the gate workflows run only the repository's own scripts", () => {
     const github = parse(read(".github/workflows/ci.yml")) as Workflow;
     expect(github.on).toEqual({ workflow_dispatch: null });
     expect(github.jobs).toEqual(ci.jobs);
+  });
+
+  it("every CI job has a finite deadline below the platform cap", () => {
+    for (const [id, job] of Object.entries(ci.jobs)) {
+      const timeout = job["timeout-minutes"];
+      expect(Number.isInteger(timeout), `${id} must have an explicit deadline`).toBe(true);
+      expect(timeout, id).toBeGreaterThan(0);
+      expect(timeout, id).toBeLessThanOrEqual(60);
+    }
+  });
+
+  it("main pushes keep their running verification while stale PR checks cancel", () => {
+    const workflow = parse(read(".depot/workflows/ci.yml"));
+    expect(workflow.concurrency).toEqual({
+      group: "ci-${{ github.workflow }}-${{ github.ref }}",
+      "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
+    });
   });
 
   it("the plan feeds each costly job and uses the repository's own script", () => {
