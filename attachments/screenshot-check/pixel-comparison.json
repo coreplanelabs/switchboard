@@ -1,0 +1,354 @@
+[
+  {
+    "name": "conductor-page-dark.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 177945,
+    "percentChanged": 3.433,
+    "meanChannelDelta": 2.177
+  },
+  {
+    "name": "conductor-page-light.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 210508,
+    "percentChanged": 4.061,
+    "meanChannelDelta": 2.02
+  },
+  {
+    "name": "costs-dark.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 171962,
+    "percentChanged": 3.317,
+    "meanChannelDelta": 1.783
+  },
+  {
+    "name": "costs-light.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 181136,
+    "percentChanged": 3.494,
+    "meanChannelDelta": 1.725
+  },
+  {
+    "name": "costs-models-dark.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 171962,
+    "percentChanged": 3.317,
+    "meanChannelDelta": 1.783
+  },
+  {
+    "name": "costs-models-light.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 181136,
+    "percentChanged": 3.494,
+    "meanChannelDelta": 1.725
+  },
+  {
+    "name": "costs-users-dark.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 171962,
+    "percentChanged": 3.317,
+    "meanChannelDelta": 1.783
+  },
+  {
+    "name": "costs-users-light.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 181136,
+    "percentChanged": 3.494,
+    "meanChannelDelta": 1.725
+  },
+  {
+    "name": "home-conversation-dark.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 227332,
+    "percentChanged": 4.385,
+    "meanChannelDelta": 2.759
+  },
+  {
+    "name": "home-conversation-light.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 325419,
+    "percentChanged": 6.277,
+    "meanChannelDelta": 2.568
+  },
+  {
+    "name": "home-empty-dark.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 105944,
+    "percentChanged": 2.044,
+    "meanChannelDelta": 1.124
+  },
+  {
+    "name": "home-empty-light.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 126429,
+    "percentChanged": 2.439,
+    "meanChannelDelta": 1.132
+  },
+  {
+    "name": "home-live-dark.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 112946,
+    "percentChanged": 2.179,
+    "meanChannelDelta": 1.325
+  },
+  {
+    "name": "home-live-light.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 279113,
+    "percentChanged": 5.384,
+    "meanChannelDelta": 1.262
+  },
+  {
+    "name": "metrics-dark.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 93179,
+    "percentChanged": 1.797,
+    "meanChannelDelta": 0.947
+  },
+  {
+    "name": "metrics-light.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 101644,
+    "percentChanged": 1.961,
+    "meanChannelDelta": 0.904
+  },
+  {
+    "name": "plane-dark.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 175209,
+    "percentChanged": 3.38,
+    "meanChannelDelta": 2.47
+  },
+  {
+    "name": "plane-light.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 183392,
+    "percentChanged": 3.538,
+    "meanChannelDelta": 2.302
+  },
+  {
+    "name": "residents-dark.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 64955,
+    "percentChanged": 1.253,
+    "meanChannelDelta": 0.749
+  },
+  {
+    "name": "residents-light.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 73834,
+    "percentChanged": 1.424,
+    "meanChannelDelta": 0.736
+  },
+  {
+    "name": "review-page-dark.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 197144,
+    "percentChanged": 3.803,
+    "meanChannelDelta": 2.87
+  },
+  {
+    "name": "review-page-light.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 226210,
+    "percentChanged": 4.364,
+    "meanChannelDelta": 2.618
+  },
+  {
+    "name": "run-page-dark.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 146413,
+    "percentChanged": 2.824,
+    "meanChannelDelta": 1.403
+  },
+  {
+    "name": "run-page-light.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 105828,
+    "percentChanged": 2.041,
+    "meanChannelDelta": 1.082
+  },
+  {
+    "name": "runs-index-dark.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 183243,
+    "percentChanged": 3.535,
+    "meanChannelDelta": 1.874
+  },
+  {
+    "name": "runs-index-light.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 218484,
+    "percentChanged": 4.215,
+    "meanChannelDelta": 1.847
+  },
+  {
+    "name": "runs-index-viewing-as-dark.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 148722,
+    "percentChanged": 2.869,
+    "meanChannelDelta": 1.545
+  },
+  {
+    "name": "runs-index-viewing-as-light.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 352224,
+    "percentChanged": 6.794,
+    "meanChannelDelta": 1.547
+  },
+  {
+    "name": "scheduled-dark.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 62190,
+    "percentChanged": 1.2,
+    "meanChannelDelta": 0.755
+  },
+  {
+    "name": "scheduled-light.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 70291,
+    "percentChanged": 1.356,
+    "meanChannelDelta": 0.741
+  },
+  {
+    "name": "settings-channel-dark.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 146613,
+    "percentChanged": 2.828,
+    "meanChannelDelta": 1.66
+  },
+  {
+    "name": "settings-channel-light.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 154902,
+    "percentChanged": 2.988,
+    "meanChannelDelta": 1.605
+  },
+  {
+    "name": "settings-installation-dark.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 274541,
+    "percentChanged": 5.296,
+    "meanChannelDelta": 3.092
+  },
+  {
+    "name": "settings-installation-light.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 283225,
+    "percentChanged": 5.463,
+    "meanChannelDelta": 2.967
+  },
+  {
+    "name": "settings-mcps-dark.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 196790,
+    "percentChanged": 3.796,
+    "meanChannelDelta": 1.988
+  },
+  {
+    "name": "settings-mcps-light.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 198153,
+    "percentChanged": 3.822,
+    "meanChannelDelta": 1.898
+  },
+  {
+    "name": "unit-page-coding-only-dark.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 84248,
+    "percentChanged": 1.625,
+    "meanChannelDelta": 1.079
+  },
+  {
+    "name": "unit-page-coding-only-light.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 111957,
+    "percentChanged": 2.16,
+    "meanChannelDelta": 1.058
+  },
+  {
+    "name": "unit-page-dark.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 295738,
+    "percentChanged": 5.705,
+    "meanChannelDelta": 3.825
+  },
+  {
+    "name": "unit-page-light.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 346114,
+    "percentChanged": 6.677,
+    "meanChannelDelta": 3.739
+  },
+  {
+    "name": "unit-search-dark.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 330534,
+    "percentChanged": 6.376,
+    "meanChannelDelta": 4.362
+  },
+  {
+    "name": "unit-search-landed-dark.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 261373,
+    "percentChanged": 5.042,
+    "meanChannelDelta": 2.117
+  },
+  {
+    "name": "unit-search-landed-light.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 297229,
+    "percentChanged": 5.734,
+    "meanChannelDelta": 2.039
+  },
+  {
+    "name": "unit-search-light.png",
+    "width": 2880,
+    "height": 1800,
+    "changedPixels": 376934,
+    "percentChanged": 7.271,
+    "meanChannelDelta": 4.278
+  }
+]
