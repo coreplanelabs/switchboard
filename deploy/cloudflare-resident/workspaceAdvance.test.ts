@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest";
 import { isWorkspaceOwner, workspaceBindingOf, workspaceOwnerKey } from "../../src/core/workspaceSettlement";
 import { decideWorktree } from "../../src/execution/residentReuse";
 import { shellQuote } from "../../src/execution/shellQuote";
+import { createStepTrace } from "../../src/execution/residentStepTrace";
+import { sanitizeGraftedSteps } from "../../src/execution/residentTrace";
 import { readSource } from "./testing/sourceScan";
 
 const source = ts.createSourceFile("worker.ts", readSource("worker.ts"), ts.ScriptTarget.Latest, true);
@@ -59,6 +61,7 @@ function harness(
     processes?: boolean;
     physicalMissing?: boolean;
     ownerChangedDuringProbe?: boolean;
+    traceMissing?: boolean;
   } = {},
 ) {
   const calls: string[] = [];
@@ -78,6 +81,7 @@ function harness(
     threadBindingKey: (s: string) => "thread:" + s,
     runRegKey: (s: string) => "reg:" + s,
     runFenceKey: (s: string) => "fence:" + s,
+    systemClock: () => 1000,
   });
   const rows = new Map<string, unknown>([
     ["thread:" + binding.threadKey, binding],
@@ -85,7 +89,9 @@ function harness(
     ["fence:" + binding.threadKey, { ...owner, ownerFence: options.fence ?? owner.ownerFence }],
   ]);
   const instance = new C();
+  const trace = createStepTrace(0);
   Object.assign(instance, {
+    stepTrace: { getStore: () => (options.traceMissing ? undefined : trace) },
     ctx: { storage: { get: async (key: string) => rows.get(key) } },
     threadOpsInFlight: new Map(options.busy ? [[binding.threadKey, 1]] : []),
     opUsersInUse: new Map(),
@@ -135,6 +141,8 @@ function harness(
   });
   return {
     calls,
+    trace: () => sanitizeGraftedSteps(trace.steps()),
+    refusal: () => instance.guardWorkspaceAdvance(binding, owner),
     advance: () =>
       instance.ensureThreadWorktree(binding, newHead, "/workspace/mirror", false, {
         detached: false,
@@ -146,10 +154,35 @@ function harness(
   };
 }
 describe("exact-owner review workspace advance", () => {
+  it.each([
+    [{ fence: 8 }, "advance-owner-check"],
+    [{ physicalMissing: true }, "advance-live-binding"],
+    [{ dirty: true }, "advance-tree-check"],
+    [{ processes: true }, "advance-process-check"],
+    [{ ownerChangedDuringProbe: true }, "advance-owner-recheck"],
+  ] as const)("records the refused advance check without releasing bytes: %j", async (options, stage) => {
+    const h = harness({ ...options });
+    await expect(h.advance()).rejects.toThrow("workspace-preserved: live owner advance unverified");
+    expect(h.trace()).toEqual([{ name: stage, startMs: 1000, durationMs: 0, status: "error" }]);
+    expect(h.calls.some((call) => /^(worktree-clean|worktree-clone|checkout-retire):/.test(call))).toBe(false);
+  });
+
+  it("keeps the original refusal shape when a trace collector is unavailable", async () => {
+    const h = harness({ fence: 8, traceMissing: true });
+    await expect(h.refusal()).resolves.toEqual({
+      error: "workspace-preserved: live owner advance unverified",
+      status: 409,
+      reason: "workspace-preserved",
+    });
+    expect(h.trace()).toEqual([]);
+    expect(h.calls).toEqual([]);
+  });
+
   it("advances a clean live owner's same physical binding to the requested head", async () => {
     const h = harness();
     await expect(h.advance()).resolves.toBe(true);
     expect(h.calls.some((s) => s.startsWith("worktree-clone:"))).toBe(true);
+    expect(h.trace()).toEqual([]);
   });
   it.each([
     { live: false },
