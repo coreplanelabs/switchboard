@@ -33,7 +33,7 @@ import {
 // harness calls is read back from the pinned `@opencode/protocol`'s own endpoint
 // definitions, built here exactly as the server builds them, and the shapes
 // the harness reads are decoded by the pinned schemas from server response
-// samples (historical live responses updated to the 2.0.12 schemas).
+// samples (historical live responses updated to the 2.0.18 schemas).
 // A bump of the pin that moves a route or a field fails here, not in a run.
 
 // The pinned session group takes both session and form location middleware;
@@ -229,13 +229,13 @@ describe("the shapes are the pinned schemas', from server response samples", () 
             {
               type: "tool",
               id: "call_0",
-              tool: "shell",
+              name: "shell",
               state: {
                 status: "completed",
                 input: { command: "echo hi-from-shell" },
                 content: [{ type: "text", text: "hi-from-shell\n" }],
-                time: { start: 1, end: 2 },
               },
+              time: { created: 1789578563794, ran: 1789578563801, completed: 1789578564254 },
             },
           ],
         },
@@ -243,9 +243,7 @@ describe("the shapes are the pinned schemas', from server response samples", () 
       ],
       cursor: {},
     };
-    const problem = decodes(successOf(pinned(MessageGroup, "session.messages")), page);
-    // The tool content's inner state is the schema's to shape; what the harness reads — id, type, time, agent — is decoded here.
-    if (problem) expect(problem).not.toMatch(/\["data", \d+, "(id|type|time|agent)"\]/);
+    expect(decodes(successOf(pinned(MessageGroup, "session.messages")), page)).toBeUndefined();
     expect(
       decodes(successOf(pinned(MessageGroup, "session.messages")), { data: [page.data[0], page.data[2]], cursor: {} }),
     ).toBeUndefined();
