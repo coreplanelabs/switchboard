@@ -39,6 +39,50 @@ export function unitPullTargets(instance: CoordinatorInstance, unit: Coordinator
 
 export type PullBindingRefusal = "stale" | "owned" | "incomplete" | "unavailable";
 
+export type PullOwnershipCheck =
+  | "target"
+  | "inventory_incomplete"
+  | "inventory_limit"
+  | "binding_identity"
+  | "adoption_requester"
+  | "instance_stopped"
+  | "unit_not_held"
+  | "publication_owner"
+  | "target_removed"
+  | "rival_owner"
+  | "pending_report"
+  | "instance_read"
+  | "instance_shape"
+  | "ownership_scan"
+  | "binding_validation"
+  | "inventory_row_limit"
+  | "inventory_byte_limit"
+  | "inventory_live_producer"
+  | "inventory_terminal_producer"
+  | "inventory_private_producer"
+  | "inventory_workspace_owner"
+  | "unit_shape"
+  | "unit_publication_binding"
+  | "unit_effect_binding"
+  | "run_shape"
+  | "run_publication"
+  | "run_initial_coding_owner"
+  | "run_door"
+  | "settlement_shape"
+  | "settlement_repository"
+  | "settlement_initial_coding_owner"
+  | "effect_shape"
+  | "effect_identity"
+  | "effect_reconciliation"
+  | "effect_unit_binding"
+  | "effect_kind"
+  | "effect_target";
+export type PullOwnershipSource = "units" | "runs" | "live_runs" | "settlements" | "effects";
+export interface PullOwnershipDiagnostics {
+  failure?: { check: PullOwnershipCheck; source?: PullOwnershipSource; rowIndex?: number };
+  scan?: { source: PullOwnershipSource; rowIndex: number; rowsRead: number; sourceBytes: number };
+}
+
 export function needsPullBindingAdmission(current: CoordinatorUnit | undefined, next: CoordinatorUnit): boolean {
   const established = (unit: CoordinatorUnit | undefined) =>
     !!(unit && (unit.pr || unit.resume || unit.publication || unit.adoption || unit.startedAt !== undefined));
@@ -74,24 +118,29 @@ export function unitPullBindingRefusal(
   instance: CoordinatorInstance,
   current: CoordinatorUnit | undefined,
   next: CoordinatorUnit,
+  diagnostics?: PullOwnershipDiagnostics,
 ): PullBindingRefusal | undefined {
+  const fail = (reason: PullBindingRefusal, check: PullOwnershipCheck): PullBindingRefusal => {
+    if (diagnostics) diagnostics.failure = { check };
+    return reason;
+  };
   if (!isCoordinatorInstance(instance) || !isCoordinatorUnit(next) || next.instanceId !== instance.id)
-    return "incomplete";
+    return fail("incomplete", "binding_identity");
   const adoptionTransition =
     next.adoption !== undefined &&
     JSON.stringify(current?.adoption) !== JSON.stringify(next.adoption) &&
     permitsRecoveryMetadataWrite(current, next, true);
-  if (instance.stop !== undefined && !adoptionTransition) return "stale";
-  if (next.adoption && next.adoption.requester !== instance.userId) return "incomplete";
+  if (instance.stop !== undefined && !adoptionTransition) return fail("stale", "instance_stopped");
+  if (next.adoption && next.adoption.requester !== instance.userId) return fail("incomplete", "adoption_requester");
   if (!unitHoldsPulls(next, instance) && !(current?.adoption?.state === "posting" && next.adoption?.state === "bound"))
-    return "stale";
+    return fail("stale", "unit_not_held");
   if (
     next.publication &&
     (next.publication.repo.toLowerCase() !== instance.repo.toLowerCase() ||
       next.publication.owner.instanceId !== next.instanceId ||
       next.publication.owner.unit !== next.unit)
   )
-    return "incomplete";
+    return fail("incomplete", "publication_owner");
   const targets = unitPullTargets(instance, next);
   if (
     current &&
@@ -99,8 +148,8 @@ export function unitPullBindingRefusal(
       (old) => !targets.some((target) => JSON.stringify(target) === JSON.stringify(old)),
     )
   )
-    return "stale";
-  return unitPullTargetsRefusal(rows, instance, next);
+    return fail("stale", "target_removed");
+  return unitPullTargetsRefusal(rows, instance, next, diagnostics);
 }
 
 /** Exact canonical targets, checked inside the existing owner transaction. */
@@ -108,18 +157,23 @@ export function unitPullTargetsRefusal(
   rows: PullOwnershipRows,
   instance: CoordinatorInstance,
   next: CoordinatorUnit,
+  diagnostics?: PullOwnershipDiagnostics,
 ): PullBindingRefusal | undefined {
+  const fail = (reason: PullBindingRefusal, check: PullOwnershipCheck): PullBindingRefusal => {
+    if (diagnostics) diagnostics.failure = { check };
+    return reason;
+  };
   if (!isCoordinatorInstance(instance) || !isCoordinatorUnit(next) || next.instanceId !== instance.id)
-    return "incomplete";
+    return fail("incomplete", "binding_identity");
   for (const target of unitPullTargets(instance, next)) {
-    const owners = findPullOwnersInRows(target, rows);
+    const owners = findPullOwnersInRows(target, rows, diagnostics);
     if (!owners.ok) return owners.reason === "unavailable" ? "unavailable" : "incomplete";
     if (
       owners.owners.some(
         (owner) => owner.kind !== "unit" || owner.instanceId !== next.instanceId || owner.unit !== next.unit,
       )
     )
-      return "owned";
+      return fail("owned", "rival_owner");
   }
 }
 
@@ -193,13 +247,27 @@ export function unitHoldsPulls(unit: CoordinatorUnit, instance?: CoordinatorInst
 }
 
 /** A complete snapshot is useful only inside the same owner's admission transaction. */
-export function findPullOwnersInRows(target: PullTarget, rows: PullOwnershipRows): PullOwnersResult {
-  if (!isPullTarget(target)) return { ok: false, reason: "invalid" };
+export function findPullOwnersInRows(
+  target: PullTarget,
+  rows: PullOwnershipRows,
+  diagnostics?: PullOwnershipDiagnostics,
+): PullOwnersResult {
+  const fail = (
+    check: PullOwnershipCheck,
+    source?: PullOwnershipSource,
+    rowIndex?: number,
+    reason: "invalid" | "incomplete" = "incomplete",
+  ): PullOwnersResult => {
+    if (diagnostics)
+      diagnostics.failure = { check, ...(source ? { source } : {}), ...(rowIndex !== undefined ? { rowIndex } : {}) };
+    return { ok: false, reason };
+  };
+  if (!isPullTarget(target)) return fail("target", undefined, undefined, "invalid");
   if (
     !rows.complete ||
     rows.units.length + rows.runs.length + rows.effects.length + (rows.settlements?.length ?? 0) > PULL_OWNER_SCAN_MAX
   )
-    return { ok: false, reason: "incomplete" };
+    return fail(!rows.complete ? "inventory_incomplete" : "inventory_limit");
   const owners = new Map<string, PullOwner>();
   const sameRepo = (repo: string) => repo.toLowerCase() === target.repo.toLowerCase();
   const matches = (pr?: number, ref?: string) =>
@@ -216,9 +284,9 @@ export function findPullOwnersInRows(target: PullTarget, rows: PullOwnershipRows
         ? { actionId: unit.adoption.actionId }
         : {}),
   });
-  for (const row of rows.units) {
+  for (const [rowIndex, row] of rows.units.entries()) {
     if (!isCoordinatorInstance(row.instance) || !isCoordinatorUnit(row.unit) || row.unit.instanceId !== row.instance.id)
-      return { ok: false, reason: "incomplete" };
+      return fail("unit_shape", "units", rowIndex);
     const unit = row.unit;
     if (
       unit.publication &&
@@ -226,14 +294,14 @@ export function findPullOwnersInRows(target: PullTarget, rows: PullOwnershipRows
         unit.publication.owner.instanceId !== unit.instanceId ||
         unit.publication.owner.unit !== unit.unit)
     )
-      return { ok: false, reason: "incomplete" };
+      return fail("unit_publication_binding", "units", rowIndex);
     if (
       unit.currentEffect?.phase === "active" &&
       (unit.currentEffect.target.repo.toLowerCase() !== row.instance.repo.toLowerCase() ||
         unit.currentEffect.target.ref !== unit.branch ||
         unit.currentEffect.target.pr !== unit.pr?.number)
     )
-      return { ok: false, reason: "incomplete" };
+      return fail("unit_effect_binding", "units", rowIndex);
     if (!sameRepo(row.instance.repo)) continue;
     const held =
       unitHoldsPulls(unit, row.instance) ||
@@ -352,17 +420,17 @@ export function findPullOwnersInRows(target: PullTarget, rows: PullOwnershipRows
       holds: unitHoldsPulls(unit, instance),
     };
   };
-  for (const run of rows.runs) {
+  for (const [rowIndex, run] of rows.runs.entries()) {
     if (typeof run.runId !== "string" || !run.runId || typeof run.live !== "boolean")
-      return { ok: false, reason: "incomplete" };
+      return fail("run_shape", "runs", rowIndex);
     if (run.publication !== undefined) {
       const publication = branchPublicationOf(run.publication, typeof run.repo === "string" ? run.repo : undefined);
       if (!publication || (!publication.complete && publication.repo === undefined))
-        return { ok: false, reason: "incomplete" };
+        return fail("run_publication", "runs", rowIndex);
       if (publication.repo && sameRepo(publication.repo)) {
         if (!publication.complete && !publication.pending) {
           const owner = initialCodingOwner(run);
-          if (!owner) return { ok: false, reason: "incomplete" };
+          if (!owner) return fail("run_initial_coding_owner", "runs", rowIndex);
           if (owner.holds && matches(undefined, owner.ref)) add(owner.owner);
           continue;
         }
@@ -377,19 +445,19 @@ export function findPullOwnersInRows(target: PullTarget, rows: PullOwnershipRows
     }
     if (run.door !== undefined && run.door !== null) {
       const door = doorPublicationOf(run.door);
-      if (!door) return { ok: false, reason: "incomplete" };
+      if (!door) return fail("run_door", "runs", rowIndex);
       const update = door.update;
       if (door.outcome === "rejected" || door.outcome === "not_forwarded") continue;
       if (sameRepo(door.repo) && matches(door.pr as number | undefined, update.ref))
         add({ kind: "run", runId: run.runId });
     }
   }
-  for (const value of rows.settlements ?? []) {
+  for (const [rowIndex, value] of (rows.settlements ?? []).entries()) {
     const settlement = workspaceSettlementOf(value);
-    if (!settlement) return { ok: false, reason: "incomplete" };
+    if (!settlement) return fail("settlement_shape", "settlements", rowIndex);
     const publication = settlement.publication;
     if (!publication || publication.complete) continue;
-    if (!publication.repo) return { ok: false, reason: "incomplete" };
+    if (!publication.repo) return fail("settlement_repository", "settlements", rowIndex);
     if (!sameRepo(publication.repo)) continue;
     if (!publication.pending) {
       const run = rows.runs.find((run) => run.runId === settlement.owner.runId);
@@ -404,7 +472,7 @@ export function findPullOwnersInRows(target: PullTarget, rows: PullOwnershipRows
         JSON.stringify(settlement.record.publicationSettlement) !==
           JSON.stringify((run.record as { publicationSettlement?: unknown }).publicationSettlement)
       )
-        return { ok: false, reason: "incomplete" };
+        return fail("settlement_initial_coding_owner", "settlements", rowIndex);
       if (owner.holds && matches(undefined, proof.binding.branch)) add(owner.owner);
       continue;
     }
@@ -416,12 +484,12 @@ export function findPullOwnersInRows(target: PullTarget, rows: PullOwnershipRows
     )
       add({ kind: "run", runId: settlement.owner.runId });
   }
-  for (const value of rows.effects) {
-    if (!value || typeof value !== "object" || Array.isArray(value)) return { ok: false, reason: "incomplete" };
+  for (const [rowIndex, value] of rows.effects.entries()) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return fail("effect_shape", "effects", rowIndex);
     const effect = value as Record<string, unknown>;
-    if (typeof effect.id !== "string" || !effect.id) return { ok: false, reason: "incomplete" };
+    if (typeof effect.id !== "string" || !effect.id) return fail("effect_identity", "effects", rowIndex);
     if (effect.kind === "coordinator_reconcile") {
-      if (!isCoordinatorReconcileEffect(effect)) return { ok: false, reason: "incomplete" };
+      if (!isCoordinatorReconcileEffect(effect)) return fail("effect_reconciliation", "effects", rowIndex);
       const bound = rows.units.filter(
         (row) =>
           isCoordinatorInstance(row.instance) &&
@@ -430,7 +498,7 @@ export function findPullOwnersInRows(target: PullTarget, rows: PullOwnershipRows
           row.unit.instanceId === effect.instanceId &&
           row.unit.unit === effect.unit,
       );
-      if (bound.length !== 1) return { ok: false, reason: "incomplete" };
+      if (bound.length !== 1) return fail("effect_unit_binding", "effects", rowIndex);
       const { instance, unit } = bound[0] as { instance: CoordinatorInstance; unit: CoordinatorUnit };
       if (
         unitPullTargets(instance, unit).some(
@@ -447,13 +515,13 @@ export function findPullOwnersInRows(target: PullTarget, rows: PullOwnershipRows
     }
     if (["admit", "probe", "steer", "reissue"].includes(effect.kind as string)) continue;
     if (!["retitle", "pr_open", "rebase_round"].includes(effect.kind as string) || !isPublicationRepo(effect.repo))
-      return { ok: false, reason: "incomplete" };
+      return fail("effect_kind", "effects", rowIndex);
     if (
       effect.kind === "pr_open"
         ? typeof effect.branch !== "string" || !effect.branch
         : !Number.isSafeInteger(effect.number) || (effect.number as number) < 1
     )
-      return { ok: false, reason: "incomplete" };
+      return fail("effect_target", "effects", rowIndex);
     if (sameRepo(effect.repo) && matches(effect.number as number | undefined, effect.branch as string | undefined))
       add({ kind: "effect", id: effect.id });
   }

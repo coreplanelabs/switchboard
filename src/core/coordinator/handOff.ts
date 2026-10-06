@@ -164,8 +164,16 @@ export interface HandOffDeps {
   log?: (line: string) => void;
 }
 
+export interface HandOffAdmissionDiagnostic {
+  operation: "units_put";
+  reason: "owned" | "stale" | "incomplete" | "unavailable";
+  instanceId: string;
+  unitCount: number;
+}
+
 /** The ship outcome's shape, as the ship branch closes its card and replies from it. */
 export interface HandOffOutcome {
+  admissionDiagnostic?: HandOffAdmissionDiagnostic;
   issues?: WorkBriefIssue[];
   status: "completed" | "pending" | "aborted";
   reply: string;
@@ -1279,12 +1287,20 @@ async function start(
   }
   const rows = mainClaim !== undefined ? { ok: true as const } : await deps.instances.putUnits(units);
   if (!rows.ok)
-    return refused(
-      rows.reason === "owned" || rows.reason === "stale" ? "plan_runner_conflict" : "plan_history_unavailable",
-      rows.reason === "owned" || rows.reason === "stale"
-        ? "The original unit retains its branch and pull request; no replacement runner started."
-        : "The plan runner could not verify durable ownership: no runner started.",
-    );
+    return {
+      admissionDiagnostic: {
+        operation: "units_put",
+        reason: rows.reason,
+        instanceId: instance.id,
+        unitCount: units.length,
+      },
+      ...refused(
+        rows.reason === "owned" || rows.reason === "stale" ? "plan_runner_conflict" : "plan_history_unavailable",
+        rows.reason === "owned" || rows.reason === "stale"
+          ? "The original unit retains its branch and pull request; no replacement runner started."
+          : "The plan runner could not verify durable ownership: no runner started.",
+      ),
+    };
   // A generated task's accepted inline media enters the same durable event
   // list as a later thread reply. The unit row exists first, and the Workflow
   // starts only after the append, so its first coding spawn can fold the bytes.

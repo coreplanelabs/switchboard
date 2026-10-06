@@ -1063,3 +1063,22 @@ describe("runShipBranch — the ship_handoff event (record 0051 R2)", () => {
     expect(record === null || record.instanceId === undefined).toBe(true);
   });
 });
+
+describe("Ship admission diagnostic events", () => {
+  it("persists the exact refused stage and reason before closing the Ship request", async () => {
+    const s = setup("slack:UADMIN");
+    s.instances.putUnits = async () => ({ ok: false, reason: "incomplete" });
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+    const record = await s.store.get("run-s");
+    expect(record?.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "run_note",
+          kind: "ship_admission",
+          summary: expect.stringContaining('"reason":"incomplete"'),
+        }),
+      ]),
+    );
+    expect(s.created).toEqual([]);
+  });
+});

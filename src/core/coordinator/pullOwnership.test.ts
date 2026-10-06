@@ -3,7 +3,7 @@ import { analyzeRunFriction } from "../runFriction.js";
 import { describe, expect, it } from "vitest";
 import { InMemoryCoordinatorInstanceStore, NullCoordinatorInstanceStore } from "./instanceStore.js";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
-import { findPullOwnersInRows } from "./pullOwnership.js";
+import { findPullOwnersInRows, type PullOwnershipDiagnostics } from "./pullOwnership.js";
 import type { CoordinatorInstance, CoordinatorUnit } from "./contract.js";
 
 const instance: CoordinatorInstance = {
@@ -722,5 +722,59 @@ describe("complete canonical pull ownership", () => {
     (store as unknown as { units: Map<string, string> }).units.set(`${instance.id}\0UOWNER`, "{");
     expect(await store.findPullOwners({ repo: "acme/api", pr: 7 })).toEqual({ ok: false, reason: "incomplete" });
     expect(await store.findPullOwners({ repo: "acme/api" })).toEqual({ ok: false, reason: "invalid" });
+  });
+});
+
+describe("pull ownership refusal diagnostics", () => {
+  it("identifies the failing row shape without exposing its contents or changing refusal", () => {
+    const diagnostics: PullOwnershipDiagnostics = {};
+    const rows = {
+      complete: true,
+      units: [{ instance, unit: { privateText: "secret-fixture" } }],
+      runs: [],
+      effects: [],
+    };
+    expect(findPullOwnersInRows({ repo: instance.repo, pr: 7 }, rows, diagnostics)).toEqual({
+      ok: false,
+      reason: "incomplete",
+    });
+    expect(diagnostics.failure).toEqual({ check: "unit_shape", source: "units", rowIndex: 0 });
+    expect(JSON.stringify(diagnostics)).not.toContain("secret-fixture");
+  });
+  it("distinguishes a malformed publication from an incomplete inventory", () => {
+    const diagnostics: PullOwnershipDiagnostics = {};
+    expect(
+      findPullOwnersInRows(
+        { repo: instance.repo, pr: 7 },
+        {
+          complete: true,
+          units: [],
+          effects: [],
+          runs: [{ runId: "producer", live: false, publication: { privateText: "secret-fixture" } }],
+        },
+        diagnostics,
+      ),
+    ).toEqual({ ok: false, reason: "incomplete" });
+    expect(diagnostics.failure).toEqual({ check: "run_publication", source: "runs", rowIndex: 0 });
+    const inventory: PullOwnershipDiagnostics = {};
+    expect(
+      findPullOwnersInRows(
+        { repo: instance.repo, pr: 7 },
+        { complete: false, units: [], runs: [], effects: [] },
+        inventory,
+      ),
+    ).toEqual({ ok: false, reason: "incomplete" });
+    expect(inventory.failure).toEqual({ check: "inventory_incomplete" });
+  });
+  it("leaves successful ownership reads and their diagnostic sink unchanged", () => {
+    const diagnostics: PullOwnershipDiagnostics = {};
+    expect(
+      findPullOwnersInRows(
+        { repo: instance.repo, pr: 7 },
+        { complete: true, units: [{ instance, unit }], runs: [], effects: [] },
+        diagnostics,
+      ),
+    ).toEqual({ ok: true, owners: [{ kind: "unit", instanceId: instance.id, unit: unit.unit }] });
+    expect(diagnostics).toEqual({});
   });
 });

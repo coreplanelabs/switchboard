@@ -6777,3 +6777,72 @@ describe("durable original report eligibility", () => {
     });
   });
 });
+
+describe("coordinator admission diagnostics", () => {
+  it("logs a bounded failing check and retains the refused ownership rows", async () => {
+    const key = storeKey();
+    const instance: CoordinatorInstance = {
+      id: "diagnostic_owner",
+      kind: "ship",
+      userId: "cli:owner",
+      channelId: "cli:local",
+      threadKey: "cli:task",
+      repo: "acme/api",
+      branch: "fix/task",
+      base: "main",
+      merge: "person",
+      createdAt: 1,
+    };
+    await post("/runs/coordinator/put", { storeKey: key, instance });
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO coordinator_units (instance_id, unit, json, updated_at) VALUES (?, ?, ?, ?)",
+        "foreign_owner",
+        "BROKEN",
+        JSON.stringify({ privateText: "secret-fixture" }),
+        1,
+      );
+    });
+    const log = vi.spyOn(console, "log");
+    try {
+      const row: CoordinatorUnit = {
+        instanceId: instance.id,
+        unit: "ROOT",
+        slug: "task",
+        branch: instance.branch,
+        dependsOn: [],
+        rounds: [],
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+      };
+      expect(await post("/runs/coordinator/units/put", { storeKey: key, units: [row] })).toMatchObject({
+        status: 409,
+        data: { ok: false, reason: "incomplete" },
+      });
+      const lines = log.mock.calls.map(([line]) => String(line));
+      const diagnostic = lines
+        .filter((line) => line.startsWith("{"))
+        .map((line) => JSON.parse(line))
+        .find((value) => value.event === "coordinator_unit_admission_refused");
+      expect(diagnostic).toMatchObject({
+        instanceId: instance.id,
+        unit: "ROOT",
+        reason: "incomplete",
+        diagnostic: { check: "unit_shape", source: "units", rowIndex: 0 },
+      });
+      expect(JSON.stringify(diagnostic)).not.toContain("secret-fixture");
+      await runInDurableObject(stub, async (_owner: RunHistoryDO, state) => {
+        expect(
+          state.storage.sql
+            .exec<{ json: string }>("SELECT json FROM coordinator_units WHERE instance_id = ?", "foreign_owner")
+            .one().json,
+        ).toBe(JSON.stringify({ privateText: "secret-fixture" }));
+        expect(
+          state.storage.sql.exec("SELECT json FROM coordinator_units WHERE instance_id = ?", instance.id).toArray(),
+        ).toEqual([]);
+      });
+    } finally {
+      log.mockRestore();
+    }
+  });
+});

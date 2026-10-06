@@ -772,6 +772,16 @@ export async function runShipBranch(
             },
           ),
         );
+    if (outcome.admissionDiagnostic) {
+      const diagnostic = { event: "ship_admission_refused", runId: run.id, ...outcome.admissionDiagnostic };
+      console.log(JSON.stringify(diagnostic));
+      registry.publish(run.id, {
+        type: "run_note",
+        kind: "ship_admission",
+        summary: JSON.stringify(diagnostic),
+        at: clock(),
+      });
+    }
     // The instance reserved for the hand-off enters the stream first (record
     // 0051 R2), including when the create reply is lost. The thread's owner
     // rule finds this same runner identity from the ship run.

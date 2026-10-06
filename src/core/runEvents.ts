@@ -75,6 +75,7 @@ export interface PrDescriptionArtifactEvent extends PrDescriptionArtifact {
  *  `stop_requested` is published by the registry when an operator asks the run
  *  to stop from /runs; `stopped` by the harness when it honors it. */
 export type RunNoteKind =
+  | "ship_admission"
   | "first_test"
   | "wrap_up"
   | "time_budget_exhausted"
@@ -346,6 +347,7 @@ export type RunNoteKind =
 /** Every `RunNoteKind`, as a value (a reader that filters notes by kind uses
  *  this; adding a kind to the union without adding it here is a type error). */
 export const RUN_NOTE_KINDS = [
+  "ship_admission",
   "first_test",
   "wrap_up",
   "time_budget_exhausted",
