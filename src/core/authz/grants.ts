@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { hasAction } from "./authorize.js";
+import { hasAction, unionSet } from "./grantSets.js";
 import { NO_GRANTS, type Grants, type GrantSet } from "./types.js";
 
 // Grants: WHAT an actor may do, from config's one shape —
@@ -349,11 +349,6 @@ export function mayUseRepo(table: Pick<GrantsTable, "restrict">, actorGrants: Gr
   if (actorGrants.repos === "all") return true;
   for (const r of actorGrants.repos) if (r.toLowerCase() === lower) return true;
   return false;
-}
-
-function unionSet(a: GrantSet, b: GrantSet): GrantSet {
-  if (a === "all" || b === "all") return "all";
-  return new Set([...a, ...b]);
 }
 
 function unionGrants(a: Grants, b: Grants): Grants {
