@@ -8,6 +8,7 @@ import {
   readBranchStartState,
   requesterPairFor,
   rewriteRunCommits,
+  verifyPinnedRunCommits,
   type BranchStartState,
   type IdentityPair,
   type RewriteApi,
@@ -26,6 +27,48 @@ import {
 const BOT: IdentityPair = { name: "switchboard-dev[bot]", email: "9999+switchboard-dev[bot]@users.noreply.github.com" };
 const IVY = pairOfBinding({ login: "ivy-dev", id: 4242 });
 const RAJ: IdentityPair = { name: "Raj", email: "raj@example.com" };
+
+describe("read-only pinned native range identity audit", () => {
+  const first = "a".repeat(40),
+    middle = "b".repeat(40),
+    tip = "c".repeat(40);
+  const repo = "acme/api",
+    branch = "fix/pinned";
+  const input = (commits: ComparedCommit[], heads = [tip, tip]) => {
+    let i = 0;
+    const api = {
+      compareRange: vi.fn(async () => ({ totalCommits: commits.length, commits })),
+      readHead: vi.fn(async () => heads[Math.min(i++, heads.length - 1)]),
+    };
+    return { repo, branch, firstHead: first, expectedTip: tip, bot: BOT, requester: IVY, api };
+  };
+  const chain = () => [commit(middle, { parents: [first] }), commit(tip, { parents: [middle] })];
+  it("checks the excluded first-head range with the existing identity policy and no write seam", async () => {
+    const f = input(chain());
+    expect(await verifyPinnedRunCommits(f)).toEqual({ kind: "clean", tip });
+    expect(f.api.compareRange).toHaveBeenCalledWith(repo, first, tip);
+    expect(f.api.readHead).toHaveBeenCalledTimes(2);
+  });
+  it.each(["author", "committer", "coauthor", "merge", "wrong-parent", "tip"] as const)(
+    "holds a pinned range with %s mismatch",
+    async (failure) => {
+      const commits = chain();
+      if (failure === "author") commits[0].author.email = RAJ.email;
+      if (failure === "committer") commits[0].committer.email = RAJ.email;
+      if (failure === "coauthor") commits[0].message += `\n\nCo-authored-by: ${IVY.name} <${RAJ.email}>`;
+      if (failure === "merge") commits[0].parents.push(tip);
+      if (failure === "wrong-parent") commits[1].parents = [first];
+      const f = input(commits, failure === "tip" ? [tip, first] : [tip, tip]);
+      expect(await verifyPinnedRunCommits(f)).toMatchObject({ kind: "unreadable" });
+    },
+  );
+  it("holds missing requester identity and incomplete immutable comparison", async () => {
+    const f = input(chain());
+    expect(await verifyPinnedRunCommits({ ...f, requester: undefined })).toMatchObject({ kind: "unreadable" });
+    f.api.compareRange = vi.fn(async () => ({ totalCommits: 3, commits: chain() }));
+    expect(await verifyPinnedRunCommits(f)).toMatchObject({ kind: "unreadable" });
+  });
+});
 
 const commit = (
   sha: string,

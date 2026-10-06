@@ -11,6 +11,7 @@ import { ALL_GRANTS } from "../core/authz/grants.js";
 import { InMemoryCoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import { createMainTaskStarter } from "../core/coordinator/mainStart.js";
 import { generatedTaskOf } from "../core/coordinator/generatedTask.js";
+import { prepareHistoricalNativeAudit } from "../core/coordinator/historicalNativeAudit.js";
 import { coordinatorReconciliationEffect } from "../core/coordinator/workflowReconciliation.js";
 import { workflowSteps } from "../core/coordinator/steps.js";
 import {
@@ -9366,6 +9367,444 @@ describe("original committed head adoption — create-only draft PR", () => {
   }
   const adopt = (h: ReturnType<typeof harness>) =>
     adoptOriginalPublishedHead({ parentInstanceId: INSTANCE.id, unit: "U12" }, h.deps, caller);
+
+  function historical() {
+    const child = coding();
+    child.coordinatorUnit = "U12";
+    child.coordinatorAttempt = 0;
+    child.publicationSettlement = {
+      version: 1,
+      binding: {
+        runId: child.id,
+        instanceId: INSTANCE.id,
+        step: child.idempotencyKey!,
+        repo: INSTANCE.repo,
+        branch: INSTANCE.branch!,
+        requester: INSTANCE.userId,
+        threadKey: INSTANCE.threadKey,
+        generation: "gen-A",
+        baseHeadSha: prior,
+      },
+      checkpoint: { kind: "clean", head },
+      publication: { kind: "not_attempted" },
+      preservation: { kind: "pending" },
+      release: { kind: "pending" },
+    };
+    child.branchPublication = { version: 1, repo: INSTANCE.repo, branches: [], complete: false };
+    child.branchPushReceipts = [{ ref: INSTANCE.branch!, sha: head, by: "push" }];
+    const history: RunEvent[] = [
+      { type: "coordinator_tag", parentInstanceId: INSTANCE.id, unit: "U12", base: "main" },
+      { type: "run_meta", agent: "coding", repo: INSTANCE.repo, ref: INSTANCE.branch!, headSha: prior },
+      ...child.events,
+      { type: "publication_settlement", settlement: child.publicationSettlement },
+    ];
+    child.events = history.map((event, i) => ({ ...event, seq: i + 1 }));
+    child.eventCount = child.storedEventCount = child.events.length;
+    const row: CoordinatorUnit = {
+      ...unit(),
+      currentEffect: {
+        version: 1,
+        id: "U12/0/coding",
+        ordinal: 1,
+        phase: "settled",
+        execution: { workflowId: INSTANCE.id },
+        target: { repo: INSTANCE.repo, ref: INSTANCE.branch!, base: "main", headSha: prior },
+        calls: [{ operation: "spawn", state: "accepted", runId: child.id }],
+      },
+    };
+    return { child, row };
+  }
+  async function auditedSetup() {
+    const { child, row } = historical();
+    const out = await setup(original(), row, child);
+    out.h.ledger.finished.set(child.id, structuredClone(child));
+    out.h.deps.verifyPinnedIdentitiesReadOnly = async () => ({ kind: "clean", tip: head });
+    return { ...out, child, row };
+  }
+  const audit = (h: ReturnType<typeof harness>) =>
+    adoptOriginalPublishedHead({ parentInstanceId: INSTANCE.id, unit: "U12", audit: true }, h.deps, caller);
+
+  it("refuses malformed native success before the initial audit", async () => {
+    const { h, child, row, posts } = await auditedSetup();
+    const saved = h.ledger.finished.get(child.id)!;
+    const result = saved.events.find((event) => event.type === "tool_result" && event.tool === "publish_branch")!;
+    Object.assign(result, { ok: 1 });
+    expect(await h.instances.prepareAdoptionAudit(row, child.id)).toBeUndefined();
+    expect(await audit(h)).toMatchObject({ status: 409 });
+    expect(posts).toEqual([]);
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.adoption).toBeUndefined();
+  });
+
+  it("audits only the original native range into one new action without rewriting old custody", async () => {
+    const { h, posts, child } = await auditedSetup();
+    const before = structuredClone(child);
+    const identity = vi.spyOn(h.deps, "verifyPinnedIdentitiesReadOnly");
+    expect(await adopt(h)).toMatchObject({ status: 409, body: { error: "publication_settlement_unverified" } });
+    expect(await audit(h)).toMatchObject({ status: 200, body: { outcome: "bound", head, pr: 99 } });
+    expect(identity).toHaveBeenCalledWith({
+      repo: INSTANCE.repo,
+      branch: INSTANCE.branch,
+      firstHead: prior,
+      expectedTip: head,
+      requester: INSTANCE.userId,
+    });
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.adoption?.audit).toMatchObject({
+      firstHead: prior,
+      head,
+      eventCount: child.eventCount,
+    });
+    expect(h.ledger.finished.get(child.id)).toEqual(before);
+    expect(posts).toHaveLength(1);
+  });
+  it("keeps an audited lost create response under the same original action without reposting", async () => {
+    const { h, posts } = await auditedSetup();
+    h.deps.createDraftPullRequest = async (target) => {
+      posts.push(target.body);
+      throw new Error("lost response");
+    };
+    expect(await audit(h)).toMatchObject({ status: 200, body: { outcome: "indeterminate" } });
+    expect(await audit(h)).toMatchObject({ status: 200, body: { outcome: "indeterminate" } });
+    expect(posts).toHaveLength(1);
+  });
+  it("retains audited original ownership after the unit advances to review", async () => {
+    const { h, row } = await auditedSetup();
+    expect(await audit(h)).toMatchObject({ status: 200, body: { outcome: "bound" } });
+    const bound = (await h.instances.listUnits(INSTANCE.id))[0]!;
+    const advanced: CoordinatorUnit = {
+      ...bound,
+      ending: undefined,
+      currentEffect: {
+        version: 1,
+        id: "U12/1/review",
+        ordinal: 2,
+        phase: "active",
+        execution: { workflowId: INSTANCE.id },
+        target: { repo: INSTANCE.repo, ref: row.branch, base: "main", headSha: head, pr: 99 },
+        calls: [{ operation: "spawn", state: "unstarted" }],
+      },
+    };
+    seedCoordinatorUnit(h.instances, advanced);
+    expect(await h.instances.findPullOwners({ repo: INSTANCE.repo, ref: row.branch })).toMatchObject({
+      ok: true,
+      owners: [{ kind: "unit", instanceId: INSTANCE.id, unit: row.unit }],
+    });
+  });
+  it("refuses standing ownership when authoritative history changes at the same count and heads", async () => {
+    const { h, child, row } = await auditedSetup();
+    expect(await audit(h)).toMatchObject({ status: 200, body: { outcome: "bound" } });
+    expect(await h.instances.findPullOwners({ repo: INSTANCE.repo, ref: row.branch })).toMatchObject({ ok: true });
+    const saved = h.ledger.finished.get(child.id)!;
+    const count = saved.eventCount;
+    const tip = saved.headSha;
+    saved.publicationSettlement!.binding.generation = "changed-gen";
+    for (const event of saved.events)
+      if (event.type === "publication_settlement") event.settlement.binding.generation = "changed-gen";
+    expect(saved.eventCount).toBe(count);
+    expect(saved.headSha).toBe(tip);
+    expect(await h.instances.findPullOwners({ repo: INSTANCE.repo, ref: row.branch })).toEqual({
+      ok: false,
+      reason: "incomplete",
+    });
+  });
+  it("refuses moved native head and failing pinned identities before an audit claim or create", async () => {
+    for (const failure of ["head", "identities"] as const) {
+      const { h, posts } = await auditedSetup();
+      if (failure === "head") h.deps.fetchBranchHeadSha = async () => prior;
+      else h.deps.verifyPinnedIdentitiesReadOnly = async () => ({ kind: "unreadable", reason: "foreign coauthor" });
+      expect(await audit(h)).toMatchObject({ status: 409 });
+      expect((await h.instances.listUnits(INSTANCE.id))[0]?.adoption).toBeUndefined();
+      expect(posts).toEqual([]);
+    }
+  });
+  it.each(["digest", "native-history", "spawn", "rival"] as const)(
+    "owner CAS refuses a forged or stale historical audit: %s",
+    async (failure) => {
+      const { h, row, child } = await auditedSetup();
+      const proof = (await h.instances.prepareAdoptionAudit(row, child.id))!;
+      expect(proof).toBeDefined();
+      const claimed: CoordinatorUnit = {
+        ...row,
+        adoption: {
+          version: 1,
+          actionId: "audited-action",
+          runId: child.id,
+          headSha: head,
+          requester: caller.userId,
+          threadKey: caller.threadKey,
+          messageId: caller.messageId,
+          claimedAt: NOW,
+          state: "claimed",
+          audit: proof,
+        },
+      };
+      if (failure === "digest") claimed.adoption!.audit = { ...proof, eventDigest: "f".repeat(64) };
+      if (failure === "native-history") {
+        const saved = h.ledger.finished.get(child.id)!;
+        const result = saved.events.find((event) => event.type === "tool_result")!;
+        if (result.type === "tool_result") result.summary = "different canonical bytes";
+      }
+      if (failure === "spawn") {
+        const saved = {
+          ...row,
+          currentEffect: { ...row.currentEffect!, target: { ...row.currentEffect!.target, headSha: head } },
+        };
+        seedCoordinatorUnit(h.instances, saved);
+      }
+      if (failure === "rival") {
+        const rival = { ...original(), id: "rival-original", branch: row.branch };
+        seedCoordinatorInstance(h.instances, rival);
+        seedCoordinatorUnit(h.instances, {
+          ...row,
+          instanceId: rival.id,
+          unit: "U99",
+          ending: undefined,
+          currentEffect: undefined,
+        });
+      }
+      expect(await h.instances.compareAndReplaceUnit(row, claimed)).toMatchObject({ ok: false });
+      expect((await h.instances.listUnits(INSTANCE.id))[0]?.adoption).toBeUndefined();
+    },
+  );
+  it("keeps a committed historical audit immutable through posting", async () => {
+    const { h, row, child } = await auditedSetup();
+    const proof = (await h.instances.prepareAdoptionAudit(row, child.id))!;
+    const claimed: CoordinatorUnit = {
+      ...row,
+      adoption: {
+        version: 1,
+        actionId: "audited-action",
+        runId: child.id,
+        headSha: head,
+        requester: caller.userId,
+        threadKey: caller.threadKey,
+        messageId: caller.messageId,
+        claimedAt: NOW,
+        state: "claimed",
+        audit: proof,
+      },
+    };
+    expect(await h.instances.compareAndReplaceUnit(row, claimed)).toEqual({ ok: true });
+    const changed: CoordinatorUnit = {
+      ...claimed,
+      adoption: { ...claimed.adoption!, state: "posting", audit: { ...proof, firstHead: head } },
+    };
+    expect(await h.instances.compareAndReplaceUnit(claimed, changed)).toMatchObject({ ok: false });
+    expect((await h.instances.listUnits(INSTANCE.id))[0]).toEqual(claimed);
+  });
+  it("does not let ordinary unit writes manufacture an adoption audit", async () => {
+    const { h, row, child } = await auditedSetup();
+    const proof = (await h.instances.prepareAdoptionAudit(row, child.id))!;
+    const claimed: CoordinatorUnit = {
+      ...row,
+      adoption: {
+        version: 1,
+        actionId: "audited-action",
+        runId: child.id,
+        headSha: head,
+        requester: caller.userId,
+        threadKey: caller.threadKey,
+        messageId: caller.messageId,
+        claimedAt: NOW,
+        state: "claimed",
+        audit: proof,
+      },
+    };
+    await expect(h.instances.putUnits([claimed])).rejects.toThrow();
+    expect((await h.instances.listUnits(INSTANCE.id))[0]).toEqual(row);
+  });
+  it("rechecks canonical bytes after the asynchronous audit digest before owner CAS", async () => {
+    const { h, row, child } = await auditedSetup();
+    const proof = (await h.instances.prepareAdoptionAudit(row, child.id))!;
+    const claimed: CoordinatorUnit = {
+      ...row,
+      adoption: {
+        version: 1,
+        actionId: "audited-action",
+        runId: child.id,
+        headSha: head,
+        requester: caller.userId,
+        threadKey: caller.threadKey,
+        messageId: caller.messageId,
+        claimedAt: NOW,
+        state: "claimed",
+        audit: proof,
+      },
+    };
+    const digest = crypto.subtle.digest.bind(crypto.subtle);
+    const spy = vi.spyOn(crypto.subtle, "digest").mockImplementationOnce(async (...args) => {
+      const result = h.ledger.finished.get(child.id)!.events.find((e) => e.type === "tool_result")!;
+      if (result.type === "tool_result") result.summary = "changed while digest was pending";
+      return digest(...args);
+    });
+    try {
+      expect(await h.instances.compareAndReplaceUnit(row, claimed)).toEqual({ ok: false, reason: "incomplete" });
+    } finally {
+      spy.mockRestore();
+    }
+    expect((await h.instances.listUnits(INSTANCE.id))[0]?.adoption).toBeUndefined();
+  });
+  it("freezes a read-only audit count with its snapshot while digest preparation awaits", async () => {
+    const { child, row } = historical();
+    const count = child.events.length;
+    const digest = crypto.subtle.digest.bind(crypto.subtle);
+    const spy = vi.spyOn(crypto.subtle, "digest").mockImplementationOnce(async (...args) => {
+      child.events.push({ type: "answer", text: "later native event", seq: count + 1 });
+      child.eventCount = child.storedEventCount = child.events.length;
+      return digest(...args);
+    });
+    let prepared: Awaited<ReturnType<typeof prepareHistoricalNativeAudit>>;
+    try {
+      prepared = await prepareHistoricalNativeAudit({
+        instance: original(),
+        unit: row,
+        record: child,
+        events: child.events,
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(prepared).toBeDefined();
+    const frozen = JSON.parse(prepared!.snapshot) as { record: RunRecord; events: RunEvent[] };
+    expect(child.events).toHaveLength(count + 1);
+    expect(prepared!.audit.eventCount).toBe(count);
+    expect(frozen.events).toHaveLength(count);
+    expect(frozen.record.eventCount).toBe(count);
+    const bytes = new Uint8Array(await digest("SHA-256", new TextEncoder().encode(JSON.stringify(frozen.events))));
+    expect(prepared!.audit.eventDigest).toBe([...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join(""));
+  });
+  it("keeps verbose audited histories out of initial and standing global ownership capacity", async () => {
+    const h = harness({ branchHead: head, ahead: 1 });
+    const claims: CoordinatorUnit[] = [];
+    for (let n = 0; n < 4; n++) {
+      const { child, row } = historical();
+      const instance = { ...original(), id: `verbose-owner-${n}`, threadKey: `slack:C1:verbose-${n}` };
+      row.instanceId = instance.id;
+      row.branch = `fix/verbose-${n}`;
+      row.threadKey = instance.threadKey;
+      row.currentEffect = {
+        ...row.currentEffect!,
+        execution: { workflowId: instance.id },
+        target: { ...row.currentEffect!.target, ref: row.branch },
+        calls: [{ operation: "spawn", state: "accepted", runId: `verbose-child-${n}` }],
+      };
+      child.id = `verbose-child-${n}`;
+      child.parentInstanceId = instance.id;
+      child.threadKey = instance.threadKey;
+      child.idempotencyKey = `${instance.id}:${row.unit}/0/coding`;
+      child.publicationSettlement!.binding = {
+        ...child.publicationSettlement!.binding,
+        runId: child.id,
+        instanceId: instance.id,
+        step: child.idempotencyKey,
+        threadKey: child.threadKey,
+        branch: row.branch,
+      };
+      child.pushed = [{ ref: row.branch, sha: head, by: "push" }];
+      child.branchPushReceipts = [{ ref: row.branch, sha: head, by: "push" }];
+      child.events = child.events.map((event) => {
+        if (event.type === "coordinator_tag") return { ...event, parentInstanceId: instance.id };
+        if (event.type === "run_meta" || event.type === "publication_push_authorized" || event.type === "pushed_head")
+          return { ...event, ref: row.branch };
+        if (event.type === "publication_settlement") return { ...event, settlement: child.publicationSettlement! };
+        return event;
+      });
+      child.events.push(
+        ...Array.from({ length: 30 }, (_, i): RunEvent =>
+          i % 2 === 0
+            ? {
+                type: "tool_result",
+                tool: "bash",
+                callId: `display-${i}`,
+                ok: true,
+                summary: "output",
+                output: "x".repeat(47000),
+                seq: child.events.length + i + 1,
+              }
+            : {
+                type: "answer",
+                text: "x".repeat(47000),
+                seq: child.events.length + i + 1,
+              },
+        ),
+      );
+      child.eventCount = child.storedEventCount = child.events.length;
+      await h.instances.put(instance);
+      seedCoordinatorUnit(h.instances, row);
+      h.ledger.finished.set(child.id, child);
+      const proof = await h.instances.prepareAdoptionAudit(row, child.id);
+      expect(proof).toBeDefined();
+      const claimed: CoordinatorUnit = {
+        ...row,
+        adoption: {
+          version: 1,
+          actionId: `large-action-${n}`,
+          runId: child.id,
+          headSha: head,
+          requester: instance.userId,
+          threadKey: instance.threadKey,
+          messageId: `original-message-${n}`,
+          claimedAt: NOW,
+          state: "claimed",
+          audit: proof!,
+        },
+      };
+      expect(await h.instances.compareAndReplaceUnit(row, claimed)).toEqual({ ok: true });
+      claims.push(claimed);
+    }
+    expect(await h.instances.findPullOwners({ repo: INSTANCE.repo, ref: claims[3].branch })).toMatchObject({
+      ok: true,
+    });
+    expect(await h.instances.findPullOwners({ repo: "other/repo", ref: "fix/ordinary" })).toEqual({
+      ok: true,
+      owners: [],
+    });
+    const last = claims[3],
+      posting: CoordinatorUnit = { ...last, adoption: { ...last.adoption!, state: "posting" } };
+    expect(await h.instances.compareAndReplaceUnit(last, posting)).toEqual({ ok: true });
+    const pr = { number: 777, url: "https://github.com/acme/api/pull/777" };
+    const bound: CoordinatorUnit = {
+      ...posting,
+      pr,
+      lastPush: head,
+      publication: {
+        repo: INSTANCE.repo,
+        pr: pr.number,
+        headRef: posting.branch,
+        baseRef: "main",
+        expectedHeadSha: head,
+        publicationRef: posting.branch,
+        owner: { instanceId: posting.instanceId, unit: posting.unit },
+      },
+      adoption: { ...posting.adoption!, state: "bound", pr },
+    };
+    expect(await h.instances.compareAndReplaceUnit(posting, bound)).toEqual({ ok: true });
+    const ordinary = { ...original(), id: "ordinary-next", branch: "fix/ordinary-next" };
+    await h.instances.put(ordinary);
+    const next: CoordinatorUnit = {
+      instanceId: ordinary.id,
+      unit: "U99",
+      slug: "u99",
+      branch: ordinary.branch!,
+      dependsOn: [],
+      rounds: [],
+      pr: { number: 888, url: "https://github.com/acme/api/pull/888" },
+    };
+    expect(await h.instances.putUnits([next])).toEqual({ ok: true });
+    const rival = { ...ordinary, id: "ordinary-rival", branch: "fix/ordinary-rival" };
+    await h.instances.put(rival);
+    expect(await h.instances.putUnits([{ ...next, instanceId: rival.id, branch: rival.branch! }])).toEqual({
+      ok: false,
+      reason: "owned",
+    });
+    const altered = h.ledger.finished.get(claims[0].adoption!.runId)!;
+    altered.publicationSettlement!.binding.generation = "different-gen";
+    for (const event of altered.events)
+      if (event.type === "publication_settlement") event.settlement.binding.generation = "different-gen";
+    expect(await h.instances.findPullOwners({ repo: INSTANCE.repo, ref: claims[0].branch })).toEqual({
+      ok: false,
+      reason: "incomplete",
+    });
+  });
 
   it("binds the accepted final native update after same-head salvage without changing original custody", async () => {
     const child = coding();

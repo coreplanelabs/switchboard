@@ -11,6 +11,14 @@
 
 import { isRunRecord } from "../runRecord.js";
 import {
+  prepareHistoricalNativeAudit,
+  isHistoricalNativeAudit,
+  historicalOwnerRecord,
+  historicalOwnerEvent,
+  type HistoricalNativeAudit,
+  type HistoricalAuditInput,
+} from "./historicalNativeAudit.js";
+import {
   isMaintenanceAdmissionInput,
   isMaintenanceAdmissionResult,
   prepareMaintenanceAdmission,
@@ -196,6 +204,8 @@ export interface CoordinatorInstanceStore {
    * caller's expected row. A missing or changed row is stale, so concurrent
    * or delayed writers cannot overwrite newer unit state. */
   compareAndReplaceUnit(expected: CoordinatorUnit, replacement: CoordinatorUnit): Promise<CompareAndReplaceUnitResult>;
+  /** Read canonical private native history for an explicit original-owner audit. */
+  prepareAdoptionAudit(expected: CoordinatorUnit, runId: string): Promise<HistoricalNativeAudit | undefined>;
   /** An instance's unit rows in the order they were first written — the plan's. */
   listUnits(instanceId: string): Promise<CoordinatorUnit[]>;
   /** Every row carrying an active original-unit recovery claim. Boot ownership
@@ -321,24 +331,47 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
       return { ok: false, reason: "incomplete" };
     }
   }
-  private pullOwnershipRows(): PullOwnershipRows {
+  private pullOwnershipRows(auditing?: CoordinatorUnit): PullOwnershipRows {
     if (!this.runOwner) throw new Error("pull owner unavailable");
     let count = 0,
       bytes = 0;
+    const auditedRunIds = new Set<string>();
     const visit = (...text: string[]) => {
       count++;
       bytes += text.reduce((sum, item) => sum + 3 * item.length, 0);
       if (count > PULL_OWNER_SCAN_MAX || bytes > PULL_OWNER_SCAN_MAX_BYTES)
         throw new Error("pull owner scan incomplete");
     };
-    for (const text of this.units.values()) {
-      const unit = JSON.parse(text);
-      visit(text, this.rows.get(unit.instanceId) ?? "");
+    const units = [...this.units.values()].map((text) => {
+      const current = JSON.parse(text);
+      return auditing && auditing.instanceId === current.instanceId && auditing.unit === current.unit
+        ? auditing
+        : current;
+    });
+    for (const unit of units) {
+      visit(JSON.stringify(unit), this.rows.get(unit.instanceId) ?? "");
+      if (isCoordinatorUnit(unit) && unit.adoption?.audit) auditedRunIds.add(unit.adoption.runId);
     }
     for (const row of this.runOwner.live.values()) visit(JSON.stringify(row.meta), JSON.stringify(row.state));
     for (const record of this.runOwner.finished.values()) {
-      const { events: _events, ...summary } = record;
-      visit(JSON.stringify(summary), JSON.stringify(this.runOwner.finishedWorkEvidence.get(record.id) ?? {}));
+      const evidence = this.runOwner.finishedWorkEvidence.get(record.id);
+      const canonical = {
+        ...record,
+        branchPublication:
+          evidence && Object.hasOwn(evidence, "branchPublication")
+            ? evidence.branchPublication
+            : record.branchPublication,
+        branchPushReceipts:
+          evidence && Object.hasOwn(evidence, "branchPushReceipts")
+            ? evidence.branchPushReceipts
+            : record.branchPushReceipts,
+        doorPublicationPending:
+          evidence && Object.hasOwn(evidence, "doorPublicationPending")
+            ? evidence.doorPublicationPending
+            : record.doorPublicationPending,
+      };
+      visit(JSON.stringify(historicalOwnerRecord(canonical)));
+      if (auditedRunIds.has(record.id)) visit(JSON.stringify(record.events.map(historicalOwnerEvent)));
     }
     const settlements = this.runOwner.workspacePublicationRows();
     for (const row of settlements) visit(JSON.stringify(row));
@@ -353,8 +386,7 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
       throw new Error("unreadable pull owner");
     return {
       complete: true,
-      units: [...this.units.values()].map((text) => {
-        const unit = JSON.parse(text);
+      units: units.map((unit) => {
         const owner = this.rows.get(unit.instanceId);
         return { unit, instance: owner === undefined ? undefined : JSON.parse(owner) };
       }),
@@ -363,6 +395,7 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
           runId: row.runId,
           repo: row.meta.repo,
           live: true,
+          record: row.meta,
           publication: row.state.branchPublication,
           door: row.state.doorPublicationPending,
         })),
@@ -372,7 +405,8 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
             runId: row.id,
             repo: row.repo,
             live: false,
-            record: row,
+            record: historicalOwnerRecord(row),
+            historicalEvents: auditedRunIds.has(row.id) ? row.events.map(historicalOwnerEvent) : undefined,
             pushReceipts: Object.hasOwn(this.runOwner!.finishedWorkEvidence.get(row.id) ?? {}, "branchPushReceipts")
               ? this.runOwner!.finishedWorkEvidence.get(row.id)!.branchPushReceipts
               : row.branchPushReceipts,
@@ -420,7 +454,7 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
       if (!isCoordinatorInstance(instance)) return "incomplete";
       if (!force && !pullBindingChanges(instance, current, next)) return;
       if (!this.runOwner) return "unavailable";
-      const rows = this.pullOwnershipRows();
+      const rows = this.pullOwnershipRows(next.adoption?.audit ? next : undefined);
       for (const unit of staged)
         rows.units.push({ unit, instance: JSON.parse(this.rows.get(unit.instanceId) ?? "null") });
       return unitPullBindingRefusal(rows, instance, current, next);
@@ -644,10 +678,68 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     for (const [key, text] of serialized) this.units.set(key, text);
     return { ok: true };
   }
+  private adoptionAuditInput(expected: CoordinatorUnit, runId: string): HistoricalAuditInput | undefined {
+    try {
+      if (
+        !isCoordinatorUnit(expected) ||
+        !this.runOwner ||
+        this.units.get(unitKey(expected)) !== JSON.stringify(expected)
+      )
+        return;
+      const instance = JSON.parse(this.rows.get(expected.instanceId) ?? "null");
+      if (!isCoordinatorInstance(instance)) return;
+      const key = `${instance.id}:${expected.unit}/`;
+      const thread = expected.threadKey ?? instance.threadKey;
+      const matches = this.pullOwnershipRows().runs.filter((row) => {
+        const record = row.record as
+          { idempotencyKey?: string; parentInstanceId?: string; threadKey?: string } | undefined;
+        return (
+          (expected.adoption?.audit
+            ? record?.idempotencyKey === `${key}0/coding`
+            : record?.idempotencyKey?.startsWith(key)) ||
+          (record?.idempotencyKey === undefined &&
+            record?.parentInstanceId === instance.id &&
+            record?.threadKey === thread)
+        );
+      });
+      if (matches.length !== 1 || matches[0]?.runId !== runId || this.runOwner.live.has(runId)) return;
+      const saved = this.runOwner.finished.get(runId);
+      const evidence = this.runOwner.finishedWorkEvidence.get(runId);
+      const record = {
+        ...saved,
+        ...(evidence?.branchPublication === undefined ? {} : { branchPublication: evidence.branchPublication }),
+        ...(evidence?.branchPushReceipts === undefined ? {} : { branchPushReceipts: evidence.branchPushReceipts }),
+        ...(evidence?.doorPublicationPending === undefined
+          ? {}
+          : { doorPublicationPending: evidence.doorPublicationPending }),
+      };
+      if (!isRunRecord(record) || record.id !== runId) return;
+      return { instance, unit: expected, record, events: record.events };
+    } catch {
+      return undefined;
+    }
+  }
+
+  async prepareAdoptionAudit(expected: CoordinatorUnit, runId: string): Promise<HistoricalNativeAudit | undefined> {
+    const input = this.adoptionAuditInput(expected, runId);
+    return input && (await prepareHistoricalNativeAudit(input, expected.adoption?.audit !== undefined))?.audit;
+  }
+
   async compareAndReplaceUnit(
     expected: CoordinatorUnit,
     replacement: CoordinatorUnit,
   ): Promise<CompareAndReplaceUnitResult> {
+    const input = replacement.adoption?.audit && this.adoptionAuditInput(expected, replacement.adoption.runId);
+    const prepared = input
+      ? await prepareHistoricalNativeAudit(input, expected.adoption?.audit !== undefined)
+      : undefined;
+    if (
+      replacement.adoption?.audit &&
+      (!prepared ||
+        JSON.stringify(prepared.audit) !== JSON.stringify(replacement.adoption.audit) ||
+        JSON.stringify(this.adoptionAuditInput(expected, replacement.adoption.runId)) !== prepared.snapshot)
+    )
+      return { ok: false, reason: "incomplete" };
     const key = unitKey(expected);
     if (
       unitKey(replacement) !== key ||
@@ -808,6 +900,9 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
 /** Without a durable state Worker, writes refuse and unit-owner reads are
  *  unavailable rather than evidence that the instance has no units. */
 export class NullCoordinatorInstanceStore implements CoordinatorInstanceStore {
+  async prepareAdoptionAudit(_expected: CoordinatorUnit, _runId: string): Promise<HistoricalNativeAudit | undefined> {
+    return undefined;
+  }
   async admitMaintenance(): Promise<MaintenanceAdmissionResult> {
     return { ok: false, reason: "unavailable" };
   }
@@ -927,6 +1022,11 @@ export interface WorkerCoordinatorInstanceStoreOptions {
  *  the run store's client. An answer this client cannot read is thrown, never
  *  read as "no instance": a spawn on a guess would be a spawn nobody asked for. */
 export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore {
+  async prepareAdoptionAudit(expected: CoordinatorUnit, runId: string): Promise<HistoricalNativeAudit | undefined> {
+    const r = await this.post("/runs/coordinator/units/adoption-audit", { expected, runId });
+    const audit = (r.data as { audit?: unknown }).audit;
+    return r.status === 200 && isHistoricalNativeAudit(audit) ? audit : undefined;
+  }
   async admitMaintenance(input: MaintenanceAdmissionInput): Promise<MaintenanceAdmissionResult> {
     if (!isMaintenanceAdmissionInput(input)) return { ok: false, reason: "conflict" };
     try {

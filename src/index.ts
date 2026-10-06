@@ -1389,6 +1389,9 @@ export async function runBot(): Promise<void> {
       verifyIdentitiesReadOnly: (args) =>
         dispatchIdentityRewrite(config).verify?.(args) ??
         Promise.resolve({ kind: "unreadable", reason: "read-only identity verifier unavailable" }),
+      verifyPinnedIdentitiesReadOnly: (args) =>
+        dispatchIdentityRewrite(config).verifyPinned?.(args) ??
+        Promise.resolve({ kind: "unreadable", reason: "read-only pinned-range identity verifier unavailable" }),
       // The round-0 fact (agent-ship item 12): a branch with no commits over
       // the base, beside a handoff naming where the scope landed, ends the
       // unit already_landed instead of aborting it.
@@ -1455,7 +1458,7 @@ export async function runBot(): Promise<void> {
     };
     deps.adoptOriginalPublishedHead = async (key, caller) => {
       const answer = await adoptOriginalPublishedHead(
-        { parentInstanceId: key.instanceId, unit: key.unit },
+        { parentInstanceId: key.instanceId, unit: key.unit, ...(key.audit ? { audit: true } : {}) },
         coordinatorDeps,
         caller,
       );

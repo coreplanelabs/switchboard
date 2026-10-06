@@ -16,6 +16,7 @@
 import {
   addAssignee,
   compareRange,
+  fetchBranchHeadSha,
   createCommit,
   forceMoveRef,
   isAssignable,
@@ -334,11 +335,69 @@ export async function rewriteRunCommits(input: RewriteInput): Promise<RewriteRes
   return { kind: "unreadable", reason: "the rewrite could not settle the branch" };
 }
 
+/** Audit only an immutable native-produced range. Its base is deliberately
+ * excluded from the compare; no inherited fingerprint is fabricated. */
+export async function verifyPinnedRunCommits(input: {
+  repo: string;
+  branch: string;
+  firstHead: string;
+  expectedTip: string;
+  bot: IdentityPair | undefined;
+  requester: IdentityPair | undefined;
+  api: Pick<RewriteApi, "compareRange"> & { readHead(repo: string, branch: string): Promise<string | undefined> };
+}): Promise<RewriteResult> {
+  const refuse = (reason: string): RewriteResult => ({ kind: "unreadable", reason });
+  if (
+    !/^[a-f0-9]{40}$/.test(input.firstHead) ||
+    !/^[a-f0-9]{40}$/.test(input.expectedTip) ||
+    input.firstHead === input.expectedTip ||
+    !input.bot ||
+    !input.requester
+  )
+    return refuse("the original range or current identities are unavailable");
+  if ((await input.api.readHead(input.repo, input.branch)) !== input.expectedTip)
+    return refuse("the original published head moved");
+  const compared = await input.api.compareRange(input.repo, input.firstHead, input.expectedTip);
+  if (
+    !compared ||
+    compared === "missing" ||
+    compared.totalCommits !== compared.commits.length ||
+    compared.totalCommits < 1 ||
+    compared.totalCommits > MAX_RUN_COMMITS
+  )
+    return refuse("the original published range is incomplete");
+  let parent = input.firstHead;
+  const seen = new Set([parent]);
+  for (const commit of compared.commits) {
+    if (
+      !/^[a-f0-9]{40}$/.test(commit.sha) ||
+      seen.has(commit.sha) ||
+      commit.parents.length !== 1 ||
+      commit.parents[0] !== parent
+    )
+      return refuse("the original published range is not linear");
+    if (offenceOf(commit, { bot: input.bot, requester: input.requester, start: [] }))
+      return refuse("the original published range contains an unverified identity");
+    seen.add(commit.sha);
+    parent = commit.sha;
+  }
+  if (parent !== input.expectedTip || (await input.api.readHead(input.repo, input.branch)) !== input.expectedTip)
+    return refuse("the original published head moved");
+  return { kind: "clean", tip: input.expectedTip };
+}
+
 /** The seam the dispatch and the recover path run the rewrite over — the
  *  production wiring below in the bot process, stubs in tests. `requester` is
  *  the run's requester (the platform-namespaced user id) whose binding the
  *  rewrite reads; the flag decides whether the pair is used. */
 export interface DispatchIdentityRewrite {
+  verifyPinned?(args: {
+    repo: string;
+    branch: string;
+    firstHead: string;
+    expectedTip: string;
+    requester: string;
+  }): Promise<RewriteResult>;
   readStartState(repo: string, base: string, branch: string): Promise<BranchStartState>;
   rewrite(args: {
     repo: string;
@@ -371,6 +430,19 @@ export interface DispatchIdentityRewrite {
  *  binding (authorBinding.ts) under the author-env flag. */
 export function dispatchIdentityRewrite(store: BindingSource): DispatchIdentityRewrite {
   return {
+    verifyPinned: async ({ repo, branch, firstHead, expectedTip, requester }) => {
+      const bot = await resolveGithubIdentity();
+      const binding = await bindingOf(requester, store, { fresh: true }).catch(() => undefined);
+      return verifyPinnedRunCommits({
+        repo,
+        branch,
+        firstHead,
+        expectedTip,
+        bot: bot === undefined ? undefined : pairOfBinding(bot),
+        requester: requesterPairFor(binding),
+        api: { compareRange, readHead: fetchBranchHeadSha },
+      });
+    },
     readStartState: (repo, base, branch) => readBranchStartState(repo, base, branch, compareRange),
     rewrite: async ({ repo, base, branch, expectedTip, startState, requester, refPublication }) => {
       const bot = await resolveGithubIdentity();

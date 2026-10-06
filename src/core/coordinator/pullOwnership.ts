@@ -1,5 +1,11 @@
 import { doorPublicationOf, branchPublicationOf, isPublicationRepo } from "../branchPublication.js";
 import { branchPushReceiptsOf, isRunWorkOwner } from "../runRecord.js";
+import {
+  historicalNativeChain,
+  isHistoricalNativeAudit,
+  isHistoricalOwnerRecord,
+  type HistoricalOwnerEvent,
+} from "./historicalNativeAudit.js";
 import { publicationSettlementForRun } from "../publicationSettlement.js";
 import { workspaceSettlementOf } from "../workspaceSettlement.js";
 import { isCoordinatorReconcileEffect } from "./workflowReconciliation.js";
@@ -198,6 +204,7 @@ export interface PullOwnershipRows {
     door?: unknown;
     record?: unknown;
     pushReceipts?: unknown;
+    historicalEvents?: readonly HistoricalOwnerEvent[];
   }>;
   effects: unknown[];
   settlements?: unknown[];
@@ -356,17 +363,6 @@ export function findPullOwnersInRows(
       const door = doorPublicationOf(run.door);
       if (!door || (door.outcome !== "rejected" && door.outcome !== "not_forwarded")) return;
     }
-    const proof = publicationSettlementForRun(terminal.publicationSettlement, record);
-    const pushes = branchPushReceiptsOf(run.pushReceipts);
-    if (
-      !proof ||
-      proof.checkpoint.kind !== "created" ||
-      proof.publication.kind !== "accepted" ||
-      pushes?.length !== 1 ||
-      pushes[0]!.ref !== proof.binding.branch ||
-      pushes[0]!.sha !== proof.publication.head
-    )
-      return;
     const bound = rows.units.filter(
       (row) =>
         isCoordinatorInstance(row.instance) &&
@@ -377,6 +373,44 @@ export function findPullOwnersInRows(
     );
     if (bound.length !== 1) return;
     const { instance, unit } = bound[0] as { instance: CoordinatorInstance; unit: CoordinatorUnit };
+    const proof = publicationSettlementForRun(terminal.publicationSettlement, record);
+    const full = { ...record, branchPublication: run.publication, branchPushReceipts: run.pushReceipts };
+    const audited =
+      unit.adoption?.audit &&
+      isHistoricalNativeAudit(unit.adoption.audit) &&
+      unit.adoption.runId === run.runId &&
+      unit.adoption.requester === instance.userId &&
+      unit.adoption.threadKey === (unit.threadKey ?? instance.threadKey) &&
+      isHistoricalOwnerRecord(full) &&
+      run.historicalEvents !== undefined
+        ? historicalNativeChain({ instance, unit, record: full, events: run.historicalEvents }, true)
+        : undefined;
+    const audit = unit.adoption?.audit;
+    const historical =
+      audited &&
+      audit &&
+      audit.head === audited.head &&
+      audit.firstHead === audited.firstHead &&
+      audit.eventCount === (full as { eventCount?: unknown }).eventCount &&
+      unit.adoption?.headSha === audited.head;
+    const accepted = proof?.checkpoint.kind === "created" && proof.publication.kind === "accepted";
+    const branch = historical ? unit.branch : proof?.binding.branch;
+    const head = historical
+      ? audited.head
+      : proof?.publication.kind === "accepted"
+        ? proof.publication.head
+        : undefined;
+    const firstHead = historical ? audited.firstHead : proof?.binding.baseHeadSha;
+    const pushes = branchPushReceiptsOf(run.pushReceipts);
+    if (
+      (!accepted && !historical) ||
+      !branch ||
+      !head ||
+      pushes?.length !== 1 ||
+      pushes[0]?.ref !== branch ||
+      pushes[0].sha !== head
+    )
+      return;
     const effect = unit.currentEffect;
     if (
       instance.kind !== "ship" ||
@@ -386,7 +420,7 @@ export function findPullOwnersInRows(
       instance.userId !== record.userId ||
       instance.channelId !== record.channelId ||
       (unit.threadKey ?? instance.threadKey) !== record.threadKey ||
-      unit.branch !== proof.binding.branch ||
+      unit.branch !== branch ||
       (effect !== undefined && effect.target.base !== instance.base)
     )
       return;
@@ -399,13 +433,13 @@ export function findPullOwnersInRows(
       effect.execution.maintenance === undefined &&
       effect.target.ref === unit.branch &&
       effect.target.repo === instance.repo &&
-      (proof.binding.baseHeadSha === undefined || effect.target.headSha === proof.binding.baseHeadSha) &&
+      (firstHead === undefined || effect.target.headSha === firstHead) &&
       effect.calls.some((call) => call.operation === "spawn" && call.state === "accepted" && call.runId === run.runId);
     const publishing =
       effect?.id === `${unit.unit}/0/coding/pr-check` &&
       effect.target.ref === unit.branch &&
       effect.target.repo === instance.repo &&
-      effect.target.headSha === proof.publication.head;
+      effect.target.headSha === head;
     const mapped = unit.publication?.headRef === unit.branch && unit.publication.repo === instance.repo;
     if (
       !admitted &&
@@ -416,7 +450,7 @@ export function findPullOwnersInRows(
       return;
     return {
       owner: unitOwner(unit),
-      ref: proof.binding.branch,
+      ref: branch,
       holds: unitHoldsPulls(unit, instance),
     };
   };
@@ -463,10 +497,32 @@ export function findPullOwnersInRows(
       const run = rows.runs.find((run) => run.runId === settlement.owner.runId);
       const owner = run && initialCodingOwner(run);
       const proof = publicationSettlementForRun(settlement.record.publicationSettlement, settlement.record);
+      const historical =
+        proof?.checkpoint.kind === "clean" &&
+        proof.binding.generation === settlement.owner.ownerGen &&
+        settlement.binding?.ref === proof.binding.branch &&
+        (settlement.binding.publicationBaseSha === undefined ||
+          settlement.binding.publicationBaseSha === proof.binding.baseHeadSha) &&
+        (rows.settlements ?? []).filter((value) => {
+          const candidate = workspaceSettlementOf(value);
+          return (
+            candidate?.owner.runId === settlement.owner.runId &&
+            JSON.stringify(candidate.record.publicationSettlement) ===
+              JSON.stringify(settlement.record.publicationSettlement) &&
+            JSON.stringify(candidate.publication) === JSON.stringify(settlement.publication)
+          );
+        }).length === 1 &&
+        rows.units.some(
+          (row) =>
+            isCoordinatorUnit(row.unit) &&
+            row.unit.adoption?.audit !== undefined &&
+            row.unit.adoption.runId === run?.runId &&
+            row.unit.adoption.headSha === (proof.checkpoint.kind === "clean" ? proof.checkpoint.head : undefined),
+        );
       if (
         !owner ||
         !proof ||
-        proof.publication.kind !== "accepted" ||
+        (proof.publication.kind !== "accepted" && !historical) ||
         !run ||
         JSON.stringify(settlement.publication) !== JSON.stringify(run.publication) ||
         JSON.stringify(settlement.record.publicationSettlement) !==
