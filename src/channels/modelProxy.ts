@@ -828,6 +828,14 @@ export async function handleAdmitted(
   req: ProxyRequest,
   deps: ModelProxyDeps,
 ): Promise<ProxyResponse> {
+  return handleAdmittedCall(door, req, deps);
+}
+
+async function handleAdmittedCall(
+  door: Extract<Door, { ok: true }>,
+  req: ProxyRequest,
+  deps: ModelProxyDeps,
+): Promise<ProxyResponse> {
   const log = deps.log ?? ((line: string) => console.log(line));
   const { shape, grant } = door;
   if (grant.providerWire !== shape) {
