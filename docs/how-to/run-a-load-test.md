@@ -92,6 +92,32 @@ npm run load -- e2e --ingress-url http://127.0.0.1:8080/ingress --healthz-url ht
 
 `/healthz` is sampled every 15 s for in-flight runs, RSS, heap and event-loop lag. Nothing is pushed or opened: the default profile never calls `submit_pr_description`.
 
+### Check concurrency evidence
+
+`--threads 100` requests concurrency; it does not measure it. On a dedicated bot with no customer work, add `--capacity` and explicit limits:
+
+```sh
+SWITCHBOARD_LOAD_INGRESS_TOKEN=<disposable-token> \
+npm run load -- e2e --ingress-url http://127.0.0.1:8080/ingress --healthz-url http://127.0.0.1:8080/healthz \
+  --text "agent:coding in acme/api: load harness" --threads 25 --hold 300 --stagger 30 \
+  --capacity --sampled-span 60 --health-every 5 --max-rss-mb 3000 --max-lag-ms 100 --max-health-ms 500
+```
+
+These are example qualification limits, not measured production guarantees. Run stages 25, 50 and 100 separately; advance after the preceding receipt passes. Keep the workload, build, machine size and limits fixed between stages. The receipt requires:
+
+- every requested thread completing successfully, without abort or driver errors;
+- overlapping client requests reaching the requested count;
+- server `inFlight` reaching that count over a consecutive sampled span, while client requests overlap throughout the same interval, with no polling gap longer than twice the polling interval;
+- complete successful health reads, an unchanged process start and build, no drain, and RSS, event-loop lag and health-response time within the supplied limits.
+
+Server `inFlight` includes other work, so a shared bot cannot establish this evidence. Polls measure sampled occupancy; they do not prove continuous occupancy between reads. Record health samples and the interval with the receipt. A restart, missing telemetry, brief peak or queued server fails even if every request eventually succeeds. Ordinary e2e mode retains its zero-failed-run check.
+
+A probe's server observation happens between its local request start and receipt. The credited span is the last probe's start minus the first probe's receipt, clamped at zero. Client overlap must cover the entire probe windows and intervening time. Each possible observation gap is bounded by the current receipt minus the previous probe start. Variable response latency therefore cannot make the receipt claim a longer sampled span than the evidence supports.
+
+Run separate qualifications for 100 concurrent cold starts and 100 CPU-heavy builds. HTTP ingress produces no Slack cards; use `load cards` for the local delivery simulation, then obtain authorized real Slack delivery evidence. Scripted calls do not establish provider rate or token quotas. Ledger write latency, durable endings, recovery and cleanup need their own receipts.
+
+Before a production stage, agree on the disposable scope, served build/config, workload and duration, provider quotas, resource limits, stop conditions, preservation and reclamation owner, and maximum cost. Local success does not authorize production load, resizing or deployment. Final acceptance names actual peaks, sampled duration, setup and interaction latency, failures, recovery, resource headroom and cost.
+
 ## Ask what Slack does with fifty cards
 
 ```
