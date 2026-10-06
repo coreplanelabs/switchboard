@@ -43,7 +43,8 @@ import {
   type OpenCodeConfigEntry,
   type OpenCodePermissionRule,
 } from "./client.js";
-import { OPENCODE_PLUGIN_SOURCE } from "./pluginSource.js";
+import { openCodePluginSource } from "./pluginSource.js";
+import type { HarnessCommandPolicy } from "../contract.js";
 import { OPENCODE_SERVE_PID_ENV, OPENCODE_TAILER_SOURCE } from "./tailerSource.js";
 
 /** The program the container starts: OpenCode on the container's PATH (`@opencode/cli`'s `opencode`). */
@@ -202,10 +203,14 @@ export function openCodeDeniedActions(identity: Identity): readonly string[] {
  *  ask that followed the denies would be the last word for everything and
  *  un-hide them. The rules go on the agent so a session created without any
  *  is still gated; a session may repeat them. */
-export function openCodePermissionRules(identity: Identity): OpenCodePermissionRule[] {
+export function openCodePermissionRules(
+  identity: Identity,
+  commandPolicy?: HarnessCommandPolicy,
+): OpenCodePermissionRule[] {
   return [
     ASK_ALL_RULE,
     ...openCodeDeniedActions(identity).map((action) => ({ action, resource: "*", effect: "deny" as const })),
+    ...(commandPolicy === "hosted-review" ? [{ action: "shell", resource: "*", effect: "deny" as const }] : []),
   ];
 }
 
@@ -235,6 +240,7 @@ export interface OpenCodeLaunchSpec {
   /** The bot's base URL as the server reaches it: the public one from a run's container, the bot's loopback from the bot host. */
   harnessUrl: string;
   identity: Identity;
+  commandPolicy?: HarnessCommandPolicy;
   /** The composed system prompt the dispatcher would hand the native loop. */
   system: string;
   /** Public runner-owned values inherited by OpenCode and its shell. */
@@ -357,7 +363,11 @@ export function openCodeVariantId(
  *  the rest of the run's tools keep theirs. Said once and last, as pi's note
  *  is, so a prompt written for the native loop's names lands on a tool that
  *  exists. */
-export function openCodePromptNote(relayTools: readonly string[], identity: Identity): string {
+export function openCodePromptNote(
+  relayTools: readonly string[],
+  identity: Identity,
+  commandPolicy?: HarnessCommandPolicy,
+): string {
   const named = relayTools.map((t) => `\`${t}\``).join(", ");
   if (identity === "none") {
     return [
@@ -367,6 +377,14 @@ export function openCodePromptNote(relayTools: readonly string[], identity: Iden
         : "No tools are available in this run.",
     ].join(" ");
   }
+  if (commandPolicy === "hosted-review")
+    return (
+      "HARNESS NOTE: this review uses `read`, `glob`, `grep` and `skill` for workspace reads. Native `shell` is unavailable." +
+      (relayTools.includes("run_check")
+        ? " Use `run_check` for recorded commands."
+        : " Recorded commands are unavailable for this run.") +
+      (relayTools.length > 0 ? ` Other tools: ${named}.` : "")
+    );
   const write = identity === "write";
   return [
     write
@@ -383,7 +401,7 @@ export function openCodePromptNote(relayTools: readonly string[], identity: Iden
 
 /** The agent's system prompt: the dispatcher's composed prompt, then the harness note. */
 export function openCodeSystemPrompt(spec: OpenCodeLaunchSpec): string {
-  return `${spec.system.trimEnd()}\n\n${openCodePromptNote(spec.relayTools, spec.identity)}\n`;
+  return `${spec.system.trimEnd()}\n\n${openCodePromptNote(spec.relayTools, spec.identity, spec.commandPolicy)}\n`;
 }
 
 /** The run's configuration as the object the file holds (`packages/schema/src/config.ts`):
@@ -468,7 +486,7 @@ export function openCodeConfig(spec: OpenCodeLaunchSpec): Record<string, unknown
       [OPENCODE_AGENT]: {
         mode: "primary",
         system: openCodeSystemPrompt(spec),
-        permissions: openCodePermissionRules(spec.identity),
+        permissions: openCodePermissionRules(spec.identity, spec.commandPolicy),
       },
       title: { disabled: true },
     },
@@ -509,7 +527,7 @@ export interface OpenCodeFile {
 export function openCodeLaunchFiles(spec: OpenCodeLaunchSpec): OpenCodeFile[] {
   return [
     { path: spec.paths.config, content: openCodeConfigJson(spec) },
-    { path: spec.paths.plugin, content: OPENCODE_PLUGIN_SOURCE },
+    { path: spec.paths.plugin, content: openCodePluginSource(spec.commandPolicy) },
     { path: spec.paths.tailerScript, content: OPENCODE_TAILER_SOURCE },
   ];
 }

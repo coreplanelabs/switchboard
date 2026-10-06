@@ -1,3 +1,4 @@
+import type { HarnessCommandPolicy } from "../contract.js";
 // The bot's side of the extension (docs/reference/specs/harness-pi.md item 7):
 // what a run's pi asks over the four harness routes. `tools` — the run's
 // relayed tool definitions, one JSON Schema each, so the extension registers
@@ -35,6 +36,7 @@ import { leasedPushCommand } from "../../publicationPush.js";
 /** One run driving a pi, as the routes see it. */
 export interface LiveHarness {
   runId: string;
+  commandPolicy?: HarnessCommandPolicy;
   /** Trusted live process identity for the operator-only diagnostic, never supplied by a caller. */
   credentialInspectionProcess?: () => { pid: number; processBirth: string } | undefined;
   /** The tools pi relays to the bot — the native definitions, run here. */
@@ -61,6 +63,9 @@ export interface LiveHarness {
   gateSaw: (callId: string) => void;
   /** The reason every tool is refused right now — the write-up — or nothing. */
   toolsBlocked: () => string | undefined;
+  /** The observed native check call's cancellation and originating turn's
+   * bound. Captured before queueing; a later turn cannot revive this call. */
+  checkControl?: (callId: string) => { signal: AbortSignal; remainingMs?: () => number } | undefined;
   /** The failure the run's last compaction ended in for good — a policy
    *  refusal of the summary, a summary over its cap: never a blip pi's next
    *  try would ride out — taken once: the compaction asked for next is
@@ -345,6 +350,8 @@ export function authorizeToolCall(harness: LiveHarness, ask: ToolCallAsk): Autho
   if (blocked !== undefined) return refuse(blocked);
   const pending = publicationAttributionRefusal(harness.rules, ask.toolCallId);
   if (pending !== undefined) return refuse(pending);
+  if (harness.commandPolicy === "hosted-review" && ask.tool === "bash")
+    return refuse("This review runs commands through recorded checks.");
   if (harness.tools.some((t) => t.name === ask.tool)) {
     if (ask.tool !== "publish_branch") return { allow: true };
     // Establish exclusivity before waiting for pi's log. An opaque shell
@@ -430,6 +437,20 @@ export async function runRelayedTool(
 ): Promise<RelayedToolAnswer> {
   const tool = harness.tools.find((t) => t.name === ask.tool);
   if (!tool) return { content: [{ type: "text", text: `Unknown tool: ${ask.tool}` }], isError: true };
+  let checkControl: ReturnType<NonNullable<LiveHarness["checkControl"]>>;
+  if (ask.tool === "run_check" && harness.commandPolicy === "hosted-review") {
+    try {
+      await harness.callSeen?.(ask.toolCallId);
+      checkControl = harness.checkControl?.(ask.toolCallId);
+    } catch {
+      // An unobserved originating call grants no hosted execution authority.
+    }
+    if (!checkControl || checkControl.signal.aborted || harness.toolsBlocked() !== undefined)
+      return {
+        content: [{ type: "text", text: "error: the originating check call is unavailable; command did not start" }],
+        isError: true,
+      };
+  }
   if (ask.tool === "publish_branch") {
     try {
       await harness.callSeen?.(ask.toolCallId);
@@ -459,6 +480,16 @@ export async function runRelayedTool(
         }
       : { ...base, publish: (e) => harness.emit(e) }),
     ...(opts.signal && !base.signal ? { signal: opts.signal } : {}),
+    ...(checkControl
+      ? {
+          signal: AbortSignal.any([
+            checkControl.signal,
+            ...(base.signal ? [base.signal] : []),
+            ...(opts.signal ? [opts.signal] : []),
+          ]),
+          ...(checkControl.remainingMs ? { remainingMs: checkControl.remainingMs } : {}),
+        }
+      : {}),
     ...(readConversation && harness.callSeen
       ? { conversation: () => harness.callSeen!(ask.toolCallId).then(() => readConversation()) }
       : {}),

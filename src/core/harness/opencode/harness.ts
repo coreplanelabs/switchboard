@@ -22,8 +22,9 @@ import { HarnessEndingUnconfirmedError } from "../container.js";
 // resume whose server is gone rebuilds from the record: the ledger's transcript
 // imported into a fresh store with the settlement of any call in flight; a
 // server that answers but cannot be re-attached (its password refused, its
-// session gone, its feed unreadable) is ended before that fresh start, the
-// `resumed` note saying why. The relaunch ceiling under a living bot (a
+// session gone, its feed unreadable) retains its original session and custody;
+// a refused continuation does not authorize cleanup or a fresh start.
+// The relaunch ceiling under a living bot (a
 // container replaced mid-run, the bearer rotated, at most twice) is the
 // OpenCode half of the survival clause the run loop drives; this module builds
 // the rebuild path `open` takes with a resume, so that loop can call it.
@@ -38,6 +39,7 @@ import {
   isContainerGone,
   isControlReset,
   infraErrorOf,
+  HarnessContainerError,
   HarnessOperationEndedError,
   HarnessCommandOutcomeError,
   LOG_READ_BYTES,
@@ -138,31 +140,17 @@ export class OpenCodeHarness implements Harness {
     return openOpenCodeRun(deps, run, this.settings);
   }
 
-  /** Where the row's OpenCode is (the survival clause), before any pid is
-   *  probed: another harness's facts answer `another-harness` with no command;
-   *  a row naming another container than this run was handed is
-   *  `another-container` (a pid here is a stranger's); else the recorded port is
-   *  probed — any HTTP answer (even the 401 the password-guarded info returns
-   *  without the bearer, which `find` does not hold) means the server is up
-   *  (`alive-here`), a connection that reaches no server means `dead`. A
-   *  container gone under the probe is the typed error, as pi's `find` rethrows. */
+  /** A complete response locates the recorded server. Foreign placement or
+   *  missing collection leaves custody unconfirmed; another harness is disowned. */
   async find(facts: OpenCodeHarnessFacts | { harness: string }, container: HarnessContainer): Promise<Finding> {
     if (facts.harness !== "opencode") return "another-harness";
     const oc = facts as OpenCodeHarnessFacts;
     const here = await identityOrNothing(container);
-    if (oc.container !== undefined && here !== undefined && oc.container !== here) return "another-container";
-    try {
-      const paths = openCodeRunPathsAt(oc.root);
-      await container.observeRequest(paths, {
-        method: "GET",
-        port: oc.port,
-        path: OPENCODE_ROUTES["server.info"].path,
-      });
-      return "alive-here";
-    } catch (err) {
-      if (continuationUnknown(err) || isContainerGone(err)) throw err;
-      return "dead";
-    }
+    if (oc.container !== undefined && oc.container !== here)
+      throw new HarnessContainerError("find", "the original OpenCode producer cannot be verified in this container");
+    const paths = openCodeRunPathsAt(oc.root);
+    await container.observeRequest(paths, { method: "GET", port: oc.port, path: OPENCODE_ROUTES["server.info"].path });
+    return "alive-here";
   }
 
   /** End the OpenCode a previous generation left behind — the server and its
@@ -238,6 +226,13 @@ export async function openOpenCodeRun(
     run.onProgress?.(summary);
     emit({ type: "run_note", kind, summary });
   };
+  if (run.commandPolicy === "hosted-review" && run.resume !== undefined) {
+    const held = new HarnessContainerError(
+      "resume",
+      "The original session's recorded-command policy has not been verified.",
+    );
+    throw new HarnessEndingUnconfirmedError(run.runId, held, held);
+  }
   const identity = run.agent.identity;
 
   // The run on the relay, so the plugin's `/harness/tools`, `/harness/authorize`
@@ -256,6 +251,7 @@ export async function openOpenCodeRun(
     runId: run.runId,
     tools: run.tools,
     toolContext: run.toolContext,
+    ...(run.commandPolicy ? { commandPolicy: run.commandPolicy } : {}),
     ...(run.backend ? { backend: run.backend } : {}),
     rules: { ...run.rules, identity },
     emit,
@@ -287,6 +283,7 @@ export async function openOpenCodeRun(
     harnessUrl: deps.harnessUrl,
     ...(run.card ? { card: run.card } : {}),
     identity,
+    ...(run.commandPolicy ? { commandPolicy: run.commandPolicy } : {}),
     system: run.system,
     ...(run.environment !== undefined ? { environment: run.environment } : {}),
     relayTools: run.tools.map((t) => t.name),
@@ -344,17 +341,9 @@ export async function openOpenCodeRun(
   };
 
   try {
-    // A resume names the row's OpenCode before anything is started (the survival
-    // clause). A relaunch under a living bot: its container was replaced, so the
-    // row's process is gone with the old disk — nothing is probed or ended, the
-    // registration is already taken over, and a fresh server is started on the
-    // record. Otherwise a row naming another container is the orphan (neither
-    // probed nor ended here); a row naming THIS container may still have its
-    // server running on its recorded root, so it is probed: a server that
-    // answers with the row's password is re-attached onto — the run continues
-    // on the session it was driving — and one that answers but cannot be
-    // re-attached is ended before a fresh launch that would otherwise collide
-    // with it.
+    // An original recorded producer must be continued where it is. Foreign
+    // placement or missing response retains custody. The caller's explicit
+    // replacement protocol remains separate from those observations.
     if (relaunch) {
       const rl = run.resume?.relaunch;
       note(
@@ -362,76 +351,58 @@ export async function openOpenCodeRun(
         `relaunched after the container was replaced (${rl?.from ?? "unknown"} → ${rl?.to ?? here ?? "unknown"}); a fresh server was started on the record with ${budgetLeft()} min of budget left`,
       );
     } else if (resumeFacts !== undefined) {
-      const elsewhere = resumeFacts.container !== undefined && here !== undefined && resumeFacts.container !== here;
-      if (elsewhere) {
-        openingCustodyUnknown = false;
-        note(
-          "resumed",
-          `resumed after a restart: the row's OpenCode (pid ${resumeFacts.pid}) ran in container ${resumeFacts.container}, not the one this run was handed (${here}); it was neither probed nor ended here, and a fresh server was started on the record`,
+      const placementUnverified = resumeFacts.container !== undefined && resumeFacts.container !== here;
+      if (placementUnverified) {
+        throw new HarnessContainerError(
+          "resume",
+          "the original OpenCode producer cannot be continued in this container",
         );
       } else {
         const info = await probeRecordedServer(deps.container, resumeFacts);
-        if (info === "dead") {
-          // The row's server is gone: its root on this container's disk, when it
-          // is another than the fresh start's, goes with it (as a dead pi's does);
-          // nothing is ended, since a pid that does not answer is nobody's here.
-          if (resumeFacts.root !== paths.dir) await deps.container.remove(openCodeRunPathsAt(resumeFacts.root));
+
+        const attempt = await reattachOpenCode(
+          { container: deps.container, runId: run.runId, ...(deps.bearers ? { bearers: deps.bearers } : {}) },
+          resumeFacts,
+          info,
+        );
+        if (attempt.ok) {
+          server = attempt.server;
           openingCustodyUnknown = false;
+          const inFlight = run.resume?.settlements.length ?? 0;
+          const pendingAsks = attempt.server.reattach.pendingAsks.length;
+          const calls =
+            inFlight > 0
+              ? ` — ${inFlight} call(s) were in flight, ` +
+                (pendingAsks > 0
+                  ? `${pendingAsks} of them pending asks the gate decides, the rest answered with a restart note if OpenCode asks the relay for them again`
+                  : "each answered with a restart note if OpenCode asks the relay for it again")
+              : pendingAsks > 0
+                ? ` — ${pendingAsks} pending ask(s) on the server the gate decides`
+                : "";
+          const tailer = attempt.tailerRestarted
+            ? `; its tailer had died and was restarted on the same feed (pid ${server.tailerPid})`
+            : "";
           note(
             "resumed",
-            `resumed after a restart: the row's OpenCode did not answer in this container; a fresh server was started on the record with ${budgetLeft()} min of budget left`,
+            `resumed after a restart: OpenCode still runs in the container (pid ${server.pid}, port ${server.port}); continuing its session with ${budgetLeft()} min of budget left${calls}${tailer}`,
           );
+          // The row learns the tailer it continues with, the feed byte this
+          // generation caught up to, and the container it was found in when
+          // the row did not say; the relaunch count is the loop's, carried.
+          saveFacts({
+            ...resumeFacts,
+            tailerPid: server.tailerPid,
+            tailerProcessBirth: server.tailerProcessBirth,
+            logOffset: attempt.server.reattach.catchUpTo,
+            ...(here !== undefined ? { container: here } : {}),
+          });
         } else {
-          const attempt = await reattachOpenCode(
-            { container: deps.container, runId: run.runId, ...(deps.bearers ? { bearers: deps.bearers } : {}) },
-            resumeFacts,
-            info,
+          // A failed continuation check does not authorize ending the
+          // recorded producer or replacing its private state.
+          throw new HarnessContainerError(
+            "resume",
+            `the recorded OpenCode session cannot be continued: ${attempt.why}`,
           );
-          if (attempt.ok) {
-            server = attempt.server;
-            openingCustodyUnknown = false;
-            const inFlight = run.resume?.settlements.length ?? 0;
-            const pendingAsks = attempt.server.reattach.pendingAsks.length;
-            const calls =
-              inFlight > 0
-                ? ` — ${inFlight} call(s) were in flight, ` +
-                  (pendingAsks > 0
-                    ? `${pendingAsks} of them pending asks the gate decides, the rest answered with a restart note if OpenCode asks the relay for them again`
-                    : "each answered with a restart note if OpenCode asks the relay for it again")
-                : pendingAsks > 0
-                  ? ` — ${pendingAsks} pending ask(s) on the server the gate decides`
-                  : "";
-            const tailer = attempt.tailerRestarted
-              ? `; its tailer had died and was restarted on the same feed (pid ${server.tailerPid})`
-              : "";
-            note(
-              "resumed",
-              `resumed after a restart: OpenCode still runs in the container (pid ${server.pid}, port ${server.port}); continuing its session with ${budgetLeft()} min of budget left${calls}${tailer}`,
-            );
-            // The row learns the tailer it continues with, the feed byte this
-            // generation caught up to, and the container it was found in when
-            // the row did not say; the relaunch count is the loop's, carried.
-            saveFacts({
-              ...resumeFacts,
-              tailerPid: server.tailerPid,
-              tailerProcessBirth: server.tailerProcessBirth,
-              logOffset: attempt.server.reattach.catchUpTo,
-              ...(here !== undefined ? { container: here } : {}),
-            });
-          } else {
-            // The row's server answers here but cannot be continued: end it and
-            // its tailer and remove its root before a fresh launch, so no second
-            // server writes the same feed and no orphaned plugin keeps posting
-            // under the run id.
-            note(
-              "resumed",
-              `resumed after a restart: the row's OpenCode (pid ${resumeFacts.pid}) still answers in this container but could not be re-attached (${attempt.why}); ended it and its tailer before a fresh start on the record with ${budgetLeft()} min of budget left`,
-            );
-            await deps.container.kill(resumeFacts.pid);
-            if (resumeFacts.tailerPid !== undefined) await deps.container.kill(resumeFacts.tailerPid);
-            await deps.container.remove(openCodeRunPathsAt(resumeFacts.root));
-            openingCustodyUnknown = false;
-          }
         }
       }
     }
@@ -545,6 +516,7 @@ export async function openOpenCodeRun(
 
     for (const m of server.reattach?.store ?? []) known.add(m.id);
     const conn: OpenCodeConnection = {
+      relay: live,
       container: deps.container,
       posted,
       knownMessageIds: known,
@@ -678,25 +650,17 @@ function continuationUnknown(err: unknown): boolean {
  *  row's password when the row carries a bearer hash (the answer then doubles
  *  as the password check the re-attach needs), without one otherwise: any
  *  HTTP answer means the server is up; a connection that reaches no server
- *  means it is gone. A container gone under the probe is the typed error,
+ *  does not confirm its ending. A container gone under the probe is the typed error,
  *  rethrown, never read as gone. */
-async function probeRecordedServer(
-  container: HarnessContainer,
-  facts: OpenCodeHarnessFacts,
-): Promise<HarnessResponse | "dead"> {
-  try {
-    return await container.observeRequest(openCodeRunPathsAt(facts.root), {
-      method: "GET",
-      port: facts.port,
-      path: OPENCODE_ROUTES["server.info"].path,
-      ...(facts.bearerHash !== undefined
-        ? { secretHeaders: { Authorization: openCodeAuthHeader(facts.bearerHash) } }
-        : {}),
-    });
-  } catch (err) {
-    if (continuationUnknown(err) || isContainerGone(err)) throw err;
-    return "dead";
-  }
+async function probeRecordedServer(container: HarnessContainer, facts: OpenCodeHarnessFacts): Promise<HarnessResponse> {
+  return container.observeRequest(openCodeRunPathsAt(facts.root), {
+    method: "GET",
+    port: facts.port,
+    path: OPENCODE_ROUTES["server.info"].path,
+    ...(facts.bearerHash !== undefined
+      ? { secretHeaders: { Authorization: openCodeAuthHeader(facts.bearerHash) } }
+      : {}),
+  });
 }
 
 /** How many store pages a re-attach reads back at most, and how many messages each carries (the route's cap). */

@@ -575,3 +575,20 @@ describe("piLaunchFiles", () => {
     expect(piLaunchEnv(generalSpec, "sbr_x.y")[HARNESS_URL_ENV]).toBe("http://127.0.0.1:8080");
   });
 });
+
+describe("hosted Review launch policy", () => {
+  it("omits native bash while retaining the direct hosted command and read tools", () => {
+    const hosted = {
+      ...reviewSpec,
+      commandPolicy: "hosted-review",
+      relayTools: ["run_check", "submit_verdict"],
+    } as PiLaunchSpec;
+    const args = piLaunchArgs(hosted);
+    const tools = args[args.indexOf("--tools") + 1].split(",");
+    expect(tools).not.toContain("bash");
+    expect(harnessPromptNote(hosted.relayTools, hosted.identity, hosted.commandPolicy)).toContain("Use `run_check`");
+    expect(tools).toEqual(["read", "grep", "find", "ls", "run_check", "submit_verdict"]);
+    expect(piLaunchArgs(spec)[piLaunchArgs(spec).indexOf("--tools") + 1].split(",")).toContain("bash");
+    expect(piLaunchArgs(reviewSpec)[piLaunchArgs(reviewSpec).indexOf("--tools") + 1].split(",")).toContain("bash");
+  });
+});

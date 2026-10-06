@@ -1,3 +1,7 @@
+import { RunControl } from "../../runRegistry/runControl.js";
+import { createCheckExecution } from "../../checkExecution.js";
+import type { CheckExecutionState } from "../../checkExecutionTypes.js";
+import { runCheckTool } from "../../../tools/check.js";
 import { describe, expect, it } from "vitest";
 import type { RunnableTool } from "../../../tools/runnableTool.js";
 import { updateStatusTool } from "../../../tools/status.js";
@@ -5,7 +9,12 @@ import type { ChatMessage } from "../../chatMessage.js";
 import type { RunEvent } from "../../runEvents.js";
 import { callsInFlight } from "../../runRecord.js";
 import { ExecInfraError } from "../../../execution/executor.js";
-import { HarnessContainerError, HarnessCommandOutcomeError, OP_TIMEOUT_MS } from "../container.js";
+import {
+  HarnessContainerError,
+  HarnessCommandOutcomeError,
+  HarnessEndingUnconfirmedError,
+  OP_TIMEOUT_MS,
+} from "../container.js";
 import {
   openThroughSeam,
   type HarnessDeps,
@@ -102,10 +111,22 @@ describe("OpenCodeHarness — the contract's object", () => {
     expect(container.requests).toHaveLength(0);
   });
 
-  it("find answers another-container for a row naming another container, probing no pid there", async () => {
+  it("find holds a known original container before probing an answering peer when current identity is unavailable", async () => {
+    const container = new FakeHarnessContainer();
+    container.vm = undefined;
+    container.onRequest = () => ({ status: 200, headers: {}, body: "{}" });
+    await expect(object.find(facts({ container: "vm-recorded" }), container)).rejects.toBeInstanceOf(
+      HarnessContainerError,
+    );
+    expect(container.requests).toEqual([]);
+    expect(container.killed).toEqual([]);
+    expect(container.removed).toEqual([]);
+  });
+
+  it("find holds custody for a row naming another container, probing no pid there", async () => {
     const container = new FakeHarnessContainer();
     container.vm = "vm-here";
-    expect(await object.find(facts({ container: "vm-old" }), container)).toBe("another-container");
+    await expect(object.find(facts({ container: "vm-old" }), container)).rejects.toBeInstanceOf(HarnessContainerError);
     expect(container.requests).toHaveLength(0);
   });
 
@@ -133,7 +154,7 @@ describe("OpenCodeHarness — the contract's object", () => {
     expect(container.removed).toHaveLength(0);
   });
 
-  it("find answers alive-here when the recorded port answers (any status), dead when no server answers", async () => {
+  it("find answers alive-here for a complete response and holds custody without one", async () => {
     const alive = new FakeHarnessContainer();
     alive.vm = "vm-here";
     // The password-guarded info answers 401 without the bearer find does not hold: an answer means the server is up.
@@ -143,14 +164,13 @@ describe("OpenCodeHarness — the contract's object", () => {
     const dead = new FakeHarnessContainer();
     dead.vm = "vm-here";
     // No onRequest: a request reaches no server (connection refused).
-    expect(await object.find(facts({ container: "vm-here" }), dead)).toBe("dead");
+    await expect(object.find(facts({ container: "vm-here" }), dead)).rejects.toBeInstanceOf(HarnessContainerError);
   });
 
   it("find rethrows a container gone under the probe, never reads it as dead", async () => {
     const container = new FakeHarnessContainer();
     container.failNext = { operation: "request", error: new HarnessContainerError("request", "runtime-replaced") };
-    // A plain HarnessContainerError (not the typed gone error) is `dead`; the typed gone rethrows — covered by container.test.
-    expect(await object.find(facts(), container)).toBe("dead");
+    await expect(object.find(facts(), container)).rejects.toBeInstanceOf(HarnessContainerError);
   });
 
   it("end kills the server and its tailer at the pids the facts name and removes the root; another harness's facts are left alone", async () => {
@@ -309,7 +329,7 @@ describe("OpenCodeHarness — the relaunch in the replacement container, and a r
     slow.release("too late");
   });
 
-  it("a resume naming this container whose server no longer answers on the recorded port probes it once, ends nothing of the row's, removes its recorded root, starts one fresh server on the record, and says the row's OpenCode did not answer", async () => {
+  it("a resume without a recorded server response holds its original root and starts no replacement", async () => {
     const driver = openCodeDriver();
     const recordedRoot = "/tmp/switchboard-oc-run-c-before";
     const rowFacts = {
@@ -328,22 +348,15 @@ describe("OpenCodeHarness — the relaunch in the replacement container, and a r
         facts: rowFacts,
       },
     });
-    expect(r.outcome).toEqual({ kind: "answered", answer: "fresh" });
-    // The recorded port was probed — and refused the connection — before the fresh start.
+    expect(r.outcome).toMatchObject({ kind: "failed", error: { name: "HarnessEndingUnconfirmedError" } });
     const probes = r.requests.filter((q) => q.port === recordedPortOf(rowFacts));
     expect(probes.map((q) => q.path)).toEqual(["/api/info"]);
-    // A pid that does not answer is nobody's here; the dead server's root on this disk goes.
-    expect(r.killed).not.toContain(999);
-    expect(r.killed).not.toContain(888);
-    expect(r.removed[0]).toBe(recordedRoot);
-    expect(r.starts).toHaveLength(1);
-    expect(
-      notes(r)
-        .filter((n) => n.kind === "resumed")
-        .map((n) => n.summary),
-    ).toEqual([
-      "resumed after a restart: the row's OpenCode did not answer in this container; a fresh server was started on the record with 5 min of budget left",
-    ]);
+    expect(r.killed).toEqual([]);
+    expect(r.removed).toEqual([]);
+    expect(r.starts).toEqual([]);
+    expect(r.facts).toEqual([]);
+    expect(r.modelCalls).toEqual([]);
+    expect(rowFacts.root).toBe(recordedRoot);
   });
 });
 
@@ -352,8 +365,8 @@ describe("OpenCodeHarness — the relaunch in the replacement container, and a r
 // and carries the bearer's hash continues the session the dead generation drove
 // — no second server, the tailer kept or restarted over the same feed, the feed
 // read from the row's offset, the pending asks decided through the gate, the
-// in-flight call's result reaching the record — and falls back to ending the
-// server before a fresh start only when the re-attach itself cannot be done.
+// in-flight call's result reaching the record. A refused continuation retains
+// the recorded producer and its original session instead of authorizing replacement.
 describe("OpenCodeHarness — the re-attach onto a still-answering server", () => {
   const request: ChatMessage = { role: "user", content: [{ type: "text", text: "fix the failing test" }] };
   const notes = (r: DrivenRun) =>
@@ -448,6 +461,106 @@ describe("OpenCodeHarness — the re-attach onto a still-answering server", () =
     expect(notes(r).filter((n) => n.kind === "harness_error")).toEqual([]);
   });
 
+  it("open holds a known original container before probing an answering peer when current identity is unavailable", async () => {
+    let probes = 0;
+    const driver = openCodeDriver({
+      reattach: {},
+      inspectContainer: (container) => {
+        container.vm = undefined;
+        const request = container.request.bind(container);
+        container.request = (paths, req) => {
+          probes++;
+          return request(paths, req);
+        };
+      },
+    });
+    const original = rowFor(driver, { container: "vm-recorded" });
+    const before = structuredClone(original);
+    const result = await driver.run({
+      turns: [{ content: [{ type: "text", text: "must not continue peer" }], stopReason: "end_turn" }],
+      containerWord: null,
+      processAliveOnResume: true,
+      resume: resume(original, [request], []),
+    });
+    expect(result.outcome).toMatchObject({ kind: "failed", error: { name: "HarnessEndingUnconfirmedError" } });
+    expect(probes).toBe(0);
+    expect(result.starts).toEqual([]);
+    expect(result.killed).toEqual([]);
+    expect(result.removed).toEqual([]);
+    expect(result.facts).toEqual([]);
+    expect(result.modelCalls).toEqual([]);
+    expect(original).toEqual(before);
+  });
+
+  it.each(["timeout", "foreign", "no-response"] as const)(
+    "holds an original OpenCode producer on %s before reusing or removing its root",
+    async (condition) => {
+      const unknown = new HarnessCommandOutcomeError("request", {
+        stdout: "",
+        stderr: "curl: (28) Operation timed out",
+        exitCode: 28,
+        truncated: false,
+      });
+      const driver = openCodeDriver({
+        reattach: {},
+        inspectContainer: (container) => {
+          const request = container.request.bind(container);
+          container.request = (paths, req) =>
+            condition !== "foreign" && req.port === 41001 && req.path === "/api/info"
+              ? Promise.reject(unknown)
+              : request(paths, req);
+        },
+      });
+      const original = rowFor(driver, {
+        container: condition === "foreign" ? "vm-old" : driver.containerWord,
+        root: condition === "timeout" ? "/tmp/original-recorded-opencode" : openCodeRunPaths("run-c").dir,
+      });
+      const before = structuredClone(original);
+      const result = await driver.run({
+        turns: [{ content: [{ type: "text", text: "must not replace" }], stopReason: "end_turn" }],
+        processAliveOnResume: condition !== "no-response",
+        resume: resume(original, [request], []),
+      });
+      expect(result.outcome.kind).toBe("failed");
+      if (result.outcome.kind !== "failed") throw new Error("expected original custody held");
+      expect(result.outcome.error).toBeInstanceOf(HarnessEndingUnconfirmedError);
+      expect(result.starts).toEqual([]);
+      expect(result.killed).toEqual([]);
+      expect(result.removed).toEqual([]);
+      expect(result.facts).toEqual([]);
+      expect(result.modelCalls).toEqual([]);
+      expect(original).toEqual(before);
+    },
+  );
+
+  it("a supported prior OpenCode 2.0.12 session is retained when the current adapter cannot continue it", async () => {
+    const driver = openCodeDriver({ reattach: { otherVersion: "2.0.12" } });
+    const original = rowFor(driver, {
+      root: "/tmp/original-opencode",
+      sessionID: "ses_original",
+      logOffset: 123,
+      processBirth: "11111111-1111-1111-1111-111111111111:100",
+      tailerProcessBirth: "11111111-1111-1111-1111-111111111111:200",
+    });
+    const before = structuredClone(original);
+    const result = await driver.run({
+      turns: [{ content: [{ type: "text", text: "must not restart" }], stopReason: "end_turn" }],
+      processAliveOnResume: true,
+      resume: resume(original, [request], []),
+    });
+    expect(result.outcome).toMatchObject({
+      kind: "failed",
+      error: { name: "HarnessEndingUnconfirmedError", runId: "run-c" },
+    });
+    expect(result.starts).toEqual([]);
+    expect(result.killed).toEqual([]);
+    expect(result.removed).toEqual([]);
+    expect(result.facts).toEqual([]);
+    expect(result.steps).toEqual([]);
+    expect(result.modelCalls).toEqual([]);
+    expect(original).toEqual(before);
+  });
+
   it.each(["server", "tailer", "root"] as const)(
     "an opening failure preserves a failed local ending before session handoff (%s)",
     async (phase) => {
@@ -483,7 +596,7 @@ describe("OpenCodeHarness — the re-attach onto a still-answering server", () =
   );
 
   it.each(["server", "tailer", "root", "tailer-launch"] as const)(
-    "unconfirmed recorded %s ending blocks a second server",
+    "recorded %s uncertainty or refusal never authorizes a second server",
     async (phase) => {
       const unknown = new ExecInfraError("recorded ending unknown", "transport-lost");
       const driver = openCodeDriver({
@@ -520,8 +633,12 @@ describe("OpenCodeHarness — the re-attach onto a still-answering server", () =
       });
       expect(result.outcome).toMatchObject({
         kind: "failed",
-        error: { name: "HarnessEndingUnconfirmedError", openingError: unknown },
+        error: {
+          name: "HarnessEndingUnconfirmedError",
+          ...(phase === "tailer-launch" ? { openingError: unknown } : {}),
+        },
       });
+      expect(result.killed).toEqual([]);
       expect(result.starts).toEqual([]);
       expect(result.removed).toEqual([]);
     },
@@ -861,12 +978,14 @@ describe("OpenCodeHarness — the re-attach onto a still-answering server", () =
       });
       return { driver, r };
     };
-    // Refused after the info passed (the session refused): the row's bearer never joins this generation's proxy, and the fresh start runs on this generation's own.
+    // Refused after the info passed: the old bearer is not adopted and the original session is retained.
     const refused = new RunBearerStore({ clock });
     refused.mint(grant());
     const a = await run({ bearers: refused, reattach: { refuseSession: true } });
-    expect(a.r.outcome).toEqual({ kind: "answered", answer: "went through" });
-    expect(a.r.starts).toHaveLength(1);
+    expect(a.r.outcome).toMatchObject({ kind: "failed", error: { name: "HarnessEndingUnconfirmedError" } });
+    expect(a.r.starts).toHaveLength(0);
+    expect(a.r.killed).toEqual([]);
+    expect(a.r.removed).toEqual([]);
     expect(refused.verify(a.driver.bearer)).toMatchObject({ ok: false, reason: "unknown_bearer" });
     // Went through: the bearer the server keeps presenting verifies on this generation's proxy beside its own.
     const adopted = new RunBearerStore({ clock });
@@ -966,36 +1085,91 @@ describe("OpenCodeHarness — the re-attach onto a still-answering server", () =
       why: /not the page shape \(expected \{ data: \[\{ id, type, … \}\], cursor: \{ next\? \} \}, down to limit=1\); the answer began: "/,
     },
     {
+      fault: "answers an unavailable info status",
+      options: {
+        inspectContainer: (container: FakeHarnessContainer) => {
+          const request = container.request.bind(container);
+          container.request = (paths, req) =>
+            req.port === 41001 && req.path === "/api/info"
+              ? Promise.resolve({ status: 503, headers: {}, body: "unavailable" })
+              : request(paths, req);
+        },
+      },
+      why: /the info answered 503/,
+    },
+    {
+      fault: "answers malformed info",
+      options: {
+        inspectContainer: (container: FakeHarnessContainer) => {
+          const request = container.request.bind(container);
+          container.request = (paths, req) =>
+            req.port === 41001 && req.path === "/api/info"
+              ? Promise.resolve({ status: 200, headers: {}, body: "{}" })
+              : request(paths, req);
+        },
+      },
+      why: /not the info shape/,
+    },
+    {
+      fault: "refuses its pending asks",
+      options: {
+        inspectContainer: (container: FakeHarnessContainer) => {
+          const request = container.request.bind(container);
+          container.request = (paths, req) =>
+            req.port === 41001 && req.path.includes("/permission")
+              ? Promise.resolve({ status: 503, headers: {}, body: "unavailable" })
+              : request(paths, req);
+        },
+      },
+      why: /pending asks \(503\)/,
+    },
+    {
+      fault: "has a feed shorter than its recorded offset",
+      options: {},
+      shortFeed: true,
+      why: /the feed is shorter than the row's offset/,
+    },
+    {
+      fault: "has a bearer this generation cannot adopt",
+      options: { bearers: new RunBearerStore({ clock: () => 1_700_000_000_000 }) },
+      why: /could not adopt the row's bearer/,
+    },
+    {
       fault: "is named by a row with no bearer hash",
       options: {},
       why: /the row carries no bearer hash/,
       noHash: true,
     },
   ])(
-    "a server that answers but $fault cannot be re-attached: it and its tailer are ended and its root removed before one fresh start on the record, and the one resumed note says why",
-    async ({ options, why, noHash }) => {
+    "a server that answers but $fault retains its producer and original session when continuation is refused",
+    async ({ options, why, noHash, shortFeed }) => {
       const driver = openCodeDriver(options as FakeServeOptions);
       const rowFacts = rowFor(driver);
       if (noHash) delete (rowFacts as { bearerHash?: string }).bearerHash;
+      if (shortFeed) rowFacts.logOffset = 99999;
       const r = await driver.run({
         turns: [{ content: [{ type: "text", text: "fresh" }], stopReason: "end_turn" }],
         processAliveOnResume: true,
         resume: resume(rowFacts, [request], []),
       });
-      expect(r.outcome).toEqual({ kind: "answered", answer: "fresh" });
-      // Ended before the fresh start: the row's pids first, then the fresh server's and its tailer's at the session's end.
-      expect(r.killed.slice(0, 2)).toEqual([999, 888]);
-      expect(r.removed[0]).toBe(rowFacts.root);
-      expect(r.starts).toHaveLength(1);
-      const resumed = notes(r).filter((n) => n.kind === "resumed");
-      expect(resumed).toHaveLength(1);
-      expect(resumed[0].summary).toMatch(
-        /^resumed after a restart: the row's OpenCode \(pid 999\) still answers in this container but could not be re-attached \(/,
-      );
-      expect(resumed[0].summary).toMatch(why);
-      expect(resumed[0].summary).toMatch(
-        /\); ended it and its tailer before a fresh start on the record with 20 min of budget left$/,
-      );
+      expect(r.outcome).toMatchObject({
+        kind: "failed",
+        error: { name: "HarnessEndingUnconfirmedError", runId: "run-c" },
+      });
+      if (r.outcome.kind !== "failed") throw new Error("expected held continuation");
+      expect(r.outcome.error).toBeInstanceOf(HarnessEndingUnconfirmedError);
+      if (!(r.outcome.error instanceof HarnessEndingUnconfirmedError)) throw new Error("expected typed custody");
+      const refusal = r.outcome.error.openingError;
+      expect(refusal).toBeInstanceOf(HarnessContainerError);
+      if (!(refusal instanceof HarnessContainerError)) throw new Error("expected original refusal");
+      expect(refusal.message).toMatch(why);
+      expect(r.killed).toEqual([]);
+      expect(r.removed).toEqual([]);
+      expect(r.starts).toEqual([]);
+      expect(r.facts).toEqual([]);
+      expect(r.steps).toEqual([]);
+      expect(r.modelCalls).toEqual([]);
+      expect(notes(r).some((note) => /ended it|fresh start/.test(note.summary))).toBe(false);
     },
   );
 });
@@ -1048,6 +1222,8 @@ describe("the model reference on every request that carries one names the config
         remainingMs: 300_000,
         turn: 1,
         inboxConsumedSeq: 0,
+        // Exercise the existing replacement protocol, not an inferred death.
+        relaunch: { from: "vm-old", to: driver.containerWord },
         facts: driver.facts({ pid: 999, container: "vm-old" }),
       },
     });
@@ -2551,5 +2727,131 @@ describe("resumeOpenCodeFacts", () => {
         facts: { harness: "pi", pid: 1, logOffset: 0, relaunches: 0 },
       }),
     ).toBeUndefined();
+  });
+});
+
+describe("hosted Review originating lifecycle", () => {
+  async function openCheck(lateAck: boolean) {
+    const clock = { now: 1_700_000_000_000 };
+    const container = new FakeHarnessContainer();
+    const registry = new HarnessRegistry();
+    const control = new RunControl();
+    const saved: CheckExecutionState[] = [];
+    const timeouts: number[] = [];
+    let executions = 0;
+    const agent = {
+      name: "review",
+      description: "",
+      system: "Review",
+      toolset: "readonly",
+      machine: "repo-resident",
+      identity: "read",
+      tiers: ["strong"],
+      maxTurns: 50,
+      maxTokens: 4096,
+      maxMinutes: 20,
+    } as const;
+    const lease = loopClock(clock.now, 20 * MINUTE_MS, "review");
+    const command = { command: "git status --short", purpose: "verification", timeoutMs: 5 * MINUTE_MS };
+    const script: RunScript = {
+      turns: lateAck
+        ? [
+            {
+              content: [{ type: "tool_use", id: "native-check", name: "run_check", input: command }],
+              stopReason: "tool_use",
+            },
+            { content: [{ type: "text", text: "done" }], stopReason: "end_turn" },
+          ]
+        : [{ content: [{ type: "text", text: "first review" }], stopReason: "end_turn" }],
+      relayed: [runCheckTool],
+    };
+    scriptOpenCodeServe(container, {
+      script,
+      registry,
+      advanceClock: (ms) => void (clock.now += ms),
+      spendBudget: () => void (clock.now = lease.loopEnd + 1),
+      finaleMs: lease.finaleMs,
+    });
+    const checkExecution = createCheckExecution({
+      owner: { runId: "run-p", requester: "u", threadKey: "t", repo: "acme/repo" },
+      executor: () => ({
+        execResult: async (cmd, opts) => {
+          executions++;
+          if (!cmd.startsWith("set -eu")) timeouts.push(opts!.timeoutMs!);
+          return {
+            exitCode: 0,
+            stdout: cmd.startsWith("set -eu") ? `/work/repo\n${"a".repeat(40)}\n${"b".repeat(40)}\n` : "done",
+            stderr: "",
+            truncated: false,
+          };
+        },
+      }),
+      workspace: () => "/work/repo",
+      recordingAvailable: true,
+      authorizeCommand: () => true,
+      signal: control.hardSignal,
+      remainingMs: () => 20 * MINUTE_MS,
+      clock: () => clock.now,
+      save: async (state) => {
+        saved.push(structuredClone(state));
+        if (lateAck && state.receipts[0]!.outcome.kind === "pending") {
+          clock.now = lease.loopEnd + 1;
+          while (!registry.get("run-p")?.toolsBlocked()) await new Promise<void>((r) => setTimeout(r, 1));
+        }
+        return true;
+      },
+    });
+    const run: HarnessRun = {
+      runId: "run-p",
+      agent,
+      commandPolicy: "hosted-review",
+      model: { id: "claude-fable-5", provider: "anthropic", providerType: "anthropic" },
+      system: agent.system,
+      messages: [{ role: "user", content: [{ type: "text", text: "review" }] }],
+      tools: [runCheckTool],
+      toolContext: {
+        executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "" },
+        checkExecution,
+      },
+      rules: { checkout: "/work/repo" },
+      control,
+      onStep: async () => {},
+    };
+    const deps: HarnessDeps = {
+      container,
+      bearer: "sbr_run-p.check-secret",
+      harnessUrl: "https://bot.example.com",
+      registry,
+      clock: () => clock.now,
+      sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 2))),
+      pollMs: 1,
+      tickMs: 5,
+    };
+    const session = await openThroughSeam(new OpenCodeHarness(), deps, run);
+    return { session, saved, timeouts, executions, run, script, registry, command };
+  }
+  it("cuts the original observed check before a late pending ACK permits dispatch", async () => {
+    const w = await openCheck(true);
+    expect(w.executions).toBe(1);
+    expect(w.saved.at(-1)?.receipts[0]?.outcome).toEqual({ kind: "not_started", reason: "stopped" });
+    await w.session.end();
+  });
+  it("binds a fresh same-session follow-up check to that turn's narrower clock", async () => {
+    const w = await openCheck(false);
+    w.script.turns.splice(
+      0,
+      w.script.turns.length,
+      {
+        content: [{ type: "tool_use", id: "fresh-check", name: "run_check", input: w.command }],
+        stopReason: "tool_use",
+      },
+      { content: [{ type: "text", text: "fresh review" }], stopReason: "end_turn" },
+    );
+    await w.session.followUp({ text: "review new head", maxTurns: 5, maxMinutes: 2, toolContext: w.run.toolContext });
+    expect(w.timeouts).toHaveLength(1);
+    expect(w.timeouts[0]).toBeLessThanOrEqual(2 * MINUTE_MS);
+    expect(w.timeouts[0]).toBeGreaterThan(0);
+    expect(w.saved.at(-1)?.receipts[0]?.outcome.kind).toBe("completed");
+    await w.session.end();
   });
 });

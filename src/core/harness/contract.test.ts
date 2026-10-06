@@ -1,3 +1,4 @@
+import { OpenCodeHarness } from "./opencode/harness.js";
 import { describe, expect, it } from "vitest";
 import type { AgentDef } from "../../agents/registry.js";
 import type { Executor } from "../../execution/executor.js";
@@ -29,6 +30,8 @@ import { runPiHarnessOpen } from "./pi/harness.js";
 import { PiHarness } from "./pi/piHarness.js";
 import { piBuiltinToolsFor, piRunPaths, piSettingsJson, piThinkingLevel } from "./pi/process.js";
 import { HarnessRegistry } from "./pi/relay.js";
+import { HarnessEndingUnconfirmedError } from "./container.js";
+import { piDriver } from "./pi/testing/driver.js";
 import { FakeHarnessContainer } from "./testing/fakeContainer.js";
 import { scriptPiFromProvider } from "./pi/testing/providerPi.js";
 
@@ -379,24 +382,19 @@ describe("PiHarness — pi as the contract's object", () => {
     );
   });
 
-  it("find: a row naming another container is another-container with no pid probed; this container's word, or none, or a container that cannot name itself, probes the pid — alive-here while pi runs, dead once it exited", async () => {
+  it("find holds foreign or sampled-absent original custody and preserves alive-here observations", async () => {
     const pi = new PiHarness();
     const c = new WatchedContainer();
-    expect(await pi.find(piFactsIn("vm-old"), c)).toBe("another-container");
+    await expect(pi.find(piFactsIn("vm-old"), c)).rejects.toThrow(/original pi producer/);
     expect(c.asked).toEqual(["identity"]);
     await c.start({ paths, command: "pi", args: [], env: {} });
     expect(await pi.find(piFactsIn("vm-fake"), c)).toBe("alive-here");
     expect(await pi.find(piFactsIn(), c)).toBe("alive-here");
     c.die();
-    expect(await pi.find(piFactsIn("vm-fake"), c)).toBe("dead");
+    await expect(pi.find(piFactsIn("vm-fake"), c)).rejects.toThrow(/original pi producer/);
     c.vm = undefined;
-    expect(await pi.find(piFactsIn("vm-old"), c)).toBe("dead");
-    expect(c.asked.filter((a) => a.startsWith("alive"))).toEqual([
-      "alive 4242",
-      "alive 4242",
-      "alive 4242",
-      "alive 4242",
-    ]);
+    await expect(pi.find(piFactsIn("vm-old"), c)).rejects.toThrow(/original pi producer/);
+    expect(c.asked.filter((a) => a.startsWith("alive"))).toEqual(["alive 4242", "alive 4242", "alive 4242"]);
   });
 
   it("find: another harness's facts are another-harness with no container command at all, and end leaves them alone too", async () => {
@@ -460,7 +458,7 @@ describe("PiHarness — pi as the contract's object", () => {
     expect(w.facts).toEqual([]);
   });
 
-  it("relaunches and a key this build does not know survive a parse-and-rewrite round trip: a re-attached pi's every save carries the row's count and the key, and a pi restarted on the transcript keeps the count", async () => {
+  it("relaunches and a key this build does not know survive a parse-and-rewrite round trip: a re-attached pi's every save carries the row's count and the key, and an unconfirmed restart retains the original facts", async () => {
     // The re-attach: pi alive at the recorded root under the row's bearer.
     const row = harnessFactsOf({
       pid: 4242,
@@ -489,7 +487,7 @@ describe("PiHarness — pi as the contract's object", () => {
     expect(reattach.container.starts).toHaveLength(1); // no second pi
     expect(reattach.facts.length).toBeGreaterThan(0);
     for (const f of reattach.facts) expect(f).toMatchObject({ harness: "pi", relaunches: 2, futureField: "kept" });
-    // The restart on the transcript: pi dead, a fresh pi under this build's root, the count carried.
+    // Sampled absence does not authorize replacing the original record.
     const restart = world({
       resume: {
         messages: [],
@@ -500,10 +498,10 @@ describe("PiHarness — pi as the contract's object", () => {
         facts: harnessFactsOf({ pid: 4242, logOffset: 0, root: paths.dir, relaunches: 1 })!,
       },
     });
-    const t = await new PiHarness().open(restart.deps, restart.run);
-    await t.end();
-    expect(restart.container.starts).toHaveLength(1);
-    expect(restart.facts[0]).toMatchObject({ harness: "pi", pid: 4242, logOffset: 0, relaunches: 1 });
+    await expect(new PiHarness().open(restart.deps, restart.run)).rejects.toBeInstanceOf(HarnessEndingUnconfirmedError);
+    expect(restart.container.starts).toEqual([]);
+    expect(restart.container.removed).toEqual([]);
+    expect(restart.facts).toEqual([]);
   });
 });
 
@@ -574,5 +572,122 @@ describe("openThroughSeam — the seam's door", () => {
     ]);
     expect(fresh.events).toEqual([]);
     expect(own.events).toEqual([]);
+  });
+});
+
+// Feature: harness.md — an original recorded producer needs continuation or typed custody.
+describe("original pi producer custody", () => {
+  it("open holds a known original container before probing an alive peer when current identity is unavailable", async () => {
+    const w = world({ provider: textOnlyProvider() });
+    await w.container.start({ paths, command: "pi", args: [], env: { SWITCHBOARD_RUN_ID: "run-7" } });
+    w.container.vm = undefined;
+    let probes = 0;
+    const alive = w.container.alive.bind(w.container);
+    w.container.alive = async (pid) => {
+      probes++;
+      return alive(pid);
+    };
+    w.run.resume = {
+      messages: [],
+      settlements: [],
+      remainingMs: 300000,
+      turn: 0,
+      inboxConsumedSeq: 0,
+      facts: {
+        harness: "pi",
+        pid: 4242,
+        root: paths.dir,
+        logOffset: 0,
+        relaunches: 0,
+        container: "vm-recorded",
+        bearerHash: bearerHashOf(BEARER),
+      },
+    };
+    await expect(new PiHarness().open(w.deps, w.run)).rejects.toBeInstanceOf(HarnessEndingUnconfirmedError);
+    expect(probes).toBe(0);
+    expect(w.container.starts).toHaveLength(1);
+    expect(w.container.killed).toEqual([]);
+    expect(w.container.removed).toEqual([]);
+    expect(w.facts).toEqual([]);
+    expect(w.steps).toEqual([]);
+  });
+
+  it("find holds a known original container before probing an alive peer when current identity is unavailable", async () => {
+    const container = new FakeHarnessContainer();
+    container.vm = undefined;
+    let probes = 0;
+    container.alive = async () => {
+      probes++;
+      return true;
+    };
+    await expect(
+      new PiHarness().find(
+        { harness: "pi", pid: 777, root: paths.dir, logOffset: 0, relaunches: 0, container: "vm-recorded" },
+        container,
+      ),
+    ).rejects.toThrow(/original pi producer/);
+    expect(probes).toBe(0);
+    expect(container.killed).toEqual([]);
+    expect(container.removed).toEqual([]);
+  });
+
+  it.each(["absent", "foreign", "missing-root", "wire", "bearer"] as const)(
+    "holds an original recorded pi on %s instead of replacing it",
+    async (condition) => {
+      const driver = piDriver();
+      const facts = driver.facts({
+        pid: 999,
+        container: condition === "foreign" ? "vm-old" : driver.containerWord,
+        root: "/tmp/original-recorded-pi",
+        bearerHash: bearerHashOf(driver.bearer),
+      });
+      if (facts.harness !== "pi") throw new Error("expected pi facts");
+      if (condition === "missing-root") delete facts.root;
+      if (condition === "bearer") delete facts.bearerHash;
+      if (condition === "wire") facts.wire = "openai-responses";
+      const before = structuredClone(facts);
+      const result = await driver.run({
+        turns: [{ content: [{ type: "text", text: "must not replace" }], stopReason: "end_turn" }],
+        processAliveOnResume: condition !== "absent",
+        resume: {
+          messages: [{ role: "user", content: [{ type: "text", text: "carry on" }] }],
+          settlements: [],
+          remainingMs: 300000,
+          turn: 0,
+          inboxConsumedSeq: 0,
+          facts,
+        },
+      });
+      expect(result.outcome.kind).toBe("failed");
+      if (result.outcome.kind !== "failed") throw new Error("expected original custody held");
+      expect(result.outcome.error).toBeInstanceOf(HarnessEndingUnconfirmedError);
+      expect(result.starts).toEqual([]);
+      expect(result.killed).toEqual([]);
+      expect(result.removed).toEqual([]);
+      expect(result.facts).toEqual([]);
+      expect(result.modelCalls).toEqual([]);
+      expect(facts).toEqual(before);
+    },
+  );
+});
+
+describe("hosted Review retained session policy", () => {
+  it.each(["pi", "opencode"] as const)("holds cached %s policy before any producer effect", async (name) => {
+    const original = name === "pi" ? piFactsIn("vm-1") : OPENCODE_FACTS;
+    const w = world({
+      resume: { messages: [], settlements: [], remainingMs: 60000, turn: 1, inboxConsumedSeq: 0, facts: original },
+    });
+    w.run.agent = { ...agent, name: "review", identity: "read", toolset: "readonly" };
+    w.run.commandPolicy = "hosted-review";
+    const before = structuredClone(original);
+    const harness = name === "pi" ? new PiHarness() : new OpenCodeHarness();
+    await expect(harness.open(w.deps, w.run)).rejects.toBeInstanceOf(HarnessEndingUnconfirmedError);
+    expect(w.container.starts).toEqual([]);
+    expect(w.container.killed).toEqual([]);
+    expect(w.container.removed).toEqual([]);
+    expect(w.container.requests).toEqual([]);
+    expect(w.facts).toEqual([]);
+    expect(original).toEqual(before);
+    expect(w.registry.get(w.run.runId)).toBeUndefined();
   });
 });

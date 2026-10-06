@@ -1,3 +1,4 @@
+import { RUN_DEADLINE_RESERVE_MS } from "../../../execution/bashTimeout.js";
 import { HarnessEndingUnconfirmedError } from "../container.js";
 // The pi harness (docs/reference/specs/harness-pi.md): what drives every run.
 // It writes pi's files into the run's container, starts pi detached with the
@@ -505,6 +506,13 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     run.onEvent?.({ type: "run_note", kind: "harness_error", summary: mismatch.message, at: now() });
     throw mismatch;
   }
+  if (run.commandPolicy === "hosted-review" && run.resume !== undefined) {
+    const held = new HarnessContainerError(
+      "resume",
+      "The original session's recorded-command policy has not been verified.",
+    );
+    throw new HarnessEndingUnconfirmedError(run.runId, held, held);
+  }
   const agentSpan = run.span?.start("run.agent");
   if (agentSpan) deps.bearers?.reparent(run.runId, agentSpan);
   /** The session-log row a tool event's turn lands on (run-history item 53):
@@ -698,6 +706,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     runId: run.runId,
     tools: run.tools,
     toolContext: run.toolContext,
+    ...(run.commandPolicy ? { commandPolicy: run.commandPolicy } : {}),
     ...(run.backend ? { backend: run.backend } : {}),
     rules,
     ...(run.admitPush
@@ -710,6 +719,17 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     emit,
     effectCallMatches: (id, tool, input) => bridge.effectCallMatches(id, tool, input),
     toolSpan: (callId) => bridge.openSpan(callId),
+    checkControl: (callId) => {
+      const signal = bridge.checkSignal(callId);
+      if (!signal) return undefined;
+      const remainingMs = live.toolContext.remainingMs;
+      const loopEndsIn = live.rules.loopEndsIn;
+      return {
+        signal,
+        remainingMs: () =>
+          Math.min(remainingMs?.() ?? deadline - now(), (loopEndsIn?.() ?? 0) + RUN_DEADLINE_RESERVE_MS),
+      };
+    },
     gateSaw: (callId) => bridge.gateSaw(callId),
     toolsBlocked,
     takeCompactionFailure: () => {
@@ -906,22 +926,10 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
   };
 
   try {
-    // The container's pi outlived the bot when its pid answers and the row
-    // says where it was filed: the re-attach reads its log and feeds its FIFO
-    // there, whatever root this build files a fresh run under. A row without
-    // a root (written before the root was recorded) names a pi this build
-    // cannot find: it is ended where it runs and a fresh pi starts below, as
-    // after a death. A dead pi's root, when known and not the one the fresh
-    // start is filed under, goes with it (below).
+    // Continue an original recorded pi only with its location, root, wire
+    // and bearer verified. Sampled absence or incompatible facts cannot
+    // authorize ending it, deleting its root or starting another producer.
     let reattached = false;
-    /** Why a live pi was ended here for the fresh start: the row named no
-     *  root, its immutable model configuration speaks another wire, or it
-     *  carried no bearer this generation could honour. */
-    let ended: string | undefined;
-    /** The row's pi runs in another container than this run was handed: it
-     *  is named by pid and container, and neither probed nor ended here: a
-     *  pid in this container is a stranger's. */
-    let elsewhere: string | undefined;
     // Which container this is, asked once: compared with the row's word on a
     // resume, recorded on the facts of every pi started here. A container down
     // or unreachable under the question names nothing here; only the one more
@@ -944,30 +952,20 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     // probed or ended by the pid, whatever this container answers for its name
     // (item 16: the word is corroboration, never the condition).
     if (recorded !== undefined && relaunch === undefined) {
+      if (recorded.container !== undefined && recorded.container !== here)
+        throw new HarnessContainerError("resume", "the original pi producer placement cannot be verified");
       const located = await locatePi(recorded, container, here);
-      if (located === "another-container") {
-        openingCustodyUnknown = false;
-        elsewhere = `pi is elsewhere: the row's pi (pid ${recorded.pid}) ran in container ${recorded.container}, not the one this run was handed (${here}), so it was neither probed nor ended here`;
-      } else if (located === "alive-here") {
-        const wireMismatch =
-          recorded.wire !== undefined && recorded.wire !== runWire
-            ? `was configured for ${recorded.wire} while provider ${run.model.provider} now declares ${runWire}`
-            : undefined;
-        if (recorded.root !== undefined && wireMismatch === undefined && honoured(recorded.bearerHash)) {
-          reattached = true;
-          paths = piRunPathsAt(recorded.root);
-          rules.outputDir = recorded.outputScratch === true ? paths.outputDir : undefined;
-        } else {
-          ended =
-            recorded.root === undefined
-              ? "named no directory for its pi"
-              : (wireMismatch ?? "carried no bearer this generation could honour for its pi");
-          await container.kill(recorded.pid);
-          openingCustodyUnknown = false;
-        }
-      } else {
-        openingCustodyUnknown = false;
-      }
+      if (located !== "alive-here")
+        throw new HarnessContainerError("resume", "the original pi producer cannot be verified for continuation");
+      const wireMismatch = recorded.wire !== undefined && recorded.wire !== runWire;
+      if (recorded.root === undefined || wireMismatch || !honoured(recorded.bearerHash))
+        throw new HarnessContainerError(
+          "resume",
+          "the original pi session cannot be continued with its recorded configuration",
+        );
+      reattached = true;
+      paths = piRunPathsAt(recorded.root);
+      rules.outputDir = recorded.outputScratch === true ? paths.outputDir : undefined;
     }
     if (reattached && recorded && paths !== undefined) {
       pid = recorded.pid;
@@ -1001,23 +999,9 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     } else {
       // The fresh start's root is the container's to make, from the
       // predictable one pi proposes (`piRunPaths`); pi's files are laid out
-      // under whatever root comes back. A dead pi's recorded root, when it is
-      // another, goes with it.
+      // under whatever root comes back. Original recorded custody was checked above.
       paths = piRunPathsAt(await container.makeRoot(piRunPaths(run.runId).dir));
       rules.outputDir = paths.outputDir;
-      // A dead pi's root elsewhere on THIS container goes; a pi in another
-      // container, or one gone with the replaced container, left nothing here
-      // to remove.
-      if (
-        recorded?.root !== undefined &&
-        recorded.root !== paths.dir &&
-        elsewhere === undefined &&
-        relaunch === undefined
-      ) {
-        openingCustodyUnknown = true;
-        await container.remove(piRunPathsAt(recorded.root));
-        openingCustodyUnknown = false;
-      }
       const spec: PiLaunchSpec = {
         runId: run.runId,
         paths,
@@ -1027,6 +1011,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         ...(run.card ? { card: run.card } : {}),
         ...(run.effort ? { effort: run.effort } : {}),
         identity: run.agent.identity,
+        ...(run.commandPolicy ? { commandPolicy: run.commandPolicy } : {}),
         system: run.system,
         ...(run.environment !== undefined ? { environment: run.environment } : {}),
         relayTools: run.tools.map((t) => t.name),
@@ -1132,15 +1117,9 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         );
       } else if (run.resume) {
         const lost = run.resume.settlements.length;
-        const how =
-          elsewhere !== undefined
-            ? `${elsewhere}, and pi restarted`
-            : ended !== undefined && recorded !== undefined
-              ? `the row ${ended} (pid ${recorded.pid}), so it was ended and pi restarted`
-              : "pi restarted";
         note(
           "resumed",
-          `resumed after a restart: ${how} on the mirrored transcript — ${lost} call(s) were in flight, each answered with a restart note; ${Math.round(remainingMs / MINUTE_MS)} min of budget left`,
+          `resumed after a restart: pi restarted on the mirrored transcript — ${lost} call(s) were in flight, each answered with a restart note; ${Math.round(remainingMs / MINUTE_MS)} min of budget left`,
         );
       }
       const launch = sessionPath ? { ...spec, sessionPath } : spec;
@@ -2216,6 +2195,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     // The loop is over: a follow-up still staging goes back to the inbox
     // (`drainFollowUps`), never through the gate emptied below.
     loopEnded = true;
+    bridge.cancelChecks();
     // A steer pi never echoed was never read: pi reads a queued steer at its
     // next turn boundary and had none. Back to the inbox, for the fresh turn.
     requeueUnechoed();
@@ -2771,6 +2751,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         throw err;
       } finally {
         turnRetryGeneration += 1;
+        bridge.cancelChecks();
         deps.bearers?.clearTurn(run.runId);
         live.toolContext = runContext;
         live.rules = rules;

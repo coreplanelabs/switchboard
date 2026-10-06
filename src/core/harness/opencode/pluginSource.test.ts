@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { OC_BLOCKED_AT_DOOR_PREFIX, OPENCODE_PLUGIN_SOURCE } from "./pluginSource.js";
+import { OC_BLOCKED_AT_DOOR_PREFIX, OPENCODE_PLUGIN_SOURCE, openCodePluginSource } from "./pluginSource.js";
 
 // Feature: docs/reference/specs/harness.md item 3 — the relay plugin. The plugin
 // text is a constant the harness writes into the run's plugin directory; loaded
@@ -26,9 +26,12 @@ interface AddedTool {
 }
 
 /** Loads the plugin from the file the container would run and returns its default export. */
-async function loadPlugin(dir: string): Promise<{ id: string; setup: (ctx: unknown) => Promise<void> }> {
+async function loadPlugin(
+  dir: string,
+  source = OPENCODE_PLUGIN_SOURCE,
+): Promise<{ id: string; setup: (ctx: unknown) => Promise<void> }> {
   const file = join(dir, `plugin-${Math.random().toString(36).slice(2)}.mjs`);
-  writeFileSync(file, OPENCODE_PLUGIN_SOURCE);
+  writeFileSync(file, source);
   const mod = (await import(pathToFileURL(file).href)) as {
     default: { id: string; setup: (ctx: unknown) => Promise<void> };
   };
@@ -185,5 +188,41 @@ describe("the OpenCode relay plugin", () => {
     const fake = fakeHarness({ toolAnswer: { content: [{ type: "text", text: "the tool blew up" }], isError: true } });
     const [tool] = await register(fake);
     await expect(tool.execute({}, { id: "call_e" })).rejects.toThrow("the tool blew up");
+  });
+});
+
+describe("hosted Review plugin table", () => {
+  it("removes native shell and relays the direct command with original id", async () => {
+    const fake = fakeHarness({
+      tools: [{ name: "run_check", description: "Recorded command", inputSchema: { type: "object" } }],
+    });
+    process.env.SWITCHBOARD_RUN_BEARER = BEARER;
+    process.env.SWITCHBOARD_HARNESS_URL = URL;
+    globalThis.fetch = fake.fetch;
+    const plugin = await loadPlugin(scratch(), openCodePluginSource("hosted-review"));
+    const added: AddedTool[] = [];
+    const removed: string[] = [];
+    await plugin.setup({
+      tool: {
+        transform: async (fn: (editor: unknown) => void) =>
+          fn({
+            add: (tool: AddedTool) => added.push(tool),
+            remove: (name: string) => removed.push(name),
+          }),
+        hook: () => {},
+      },
+    });
+    expect(removed).toEqual(["shell"]);
+    expect(added.map((tool) => tool.name)).toEqual(["run_check"]);
+    expect(added[0].options).toEqual({ codemode: false });
+    await added[0].execute({ command: "git status --short", purpose: "verification" }, { id: "original-command" });
+    expect(fake.calls.filter((call) => call.path === "/harness/tool").map((call) => call.body)).toEqual([
+      {
+        toolCallId: "original-command",
+        tool: "run_check",
+        input: { command: "git status --short", purpose: "verification" },
+      },
+    ]);
+    expect(openCodePluginSource()).not.toContain('editor.remove("shell")');
   });
 });

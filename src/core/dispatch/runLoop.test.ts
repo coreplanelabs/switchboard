@@ -1,3 +1,4 @@
+import type { CheckExecutionReceipt } from "../checkExecutionTypes.js";
 import { HarnessEndingUnconfirmedError } from "../harness/container.js";
 import type { GithubWriteResult } from "../../execution/githubPulls.js";
 import { findPullOwnersInRows } from "../coordinator/pullOwnership.js";
@@ -34,7 +35,12 @@ import { createRunHistoryWriter } from "../runHistoryWriter.js";
 import { RunRegistry } from "../runRegistry.js";
 import type { RunEvent } from "../runEvents.js";
 import { createRunsService } from "../runsService.js";
-import { createLedgerWriteThrough, NullLedgerRun, NullLedgerWriteThrough } from "../runLedger/writeThrough.js";
+import {
+  createLedgerWriteThrough,
+  NullLedgerRun,
+  NullLedgerWriteThrough,
+  type LedgerRun,
+} from "../runLedger/writeThrough.js";
 import { PermanentStoreError, TransientStoreError } from "../runStoreWorker.js";
 import type { PublicationSettlement } from "../publicationSettlement.js";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
@@ -98,6 +104,7 @@ import {
   ModelTransientFailureError,
   PiContainerReplacedError,
   UNKNOWN_MODEL_TERMINAL_MESSAGE,
+  settlementResults,
 } from "../harness/pi/harness.js";
 import { PiHarness } from "../harness/pi/piHarness.js";
 import { OpenCodeHarness } from "../harness/opencode/harness.js";
@@ -7065,7 +7072,7 @@ describe("the pi harness — the container replaced under a living bot: the rela
   // call (a resume from the ledger, rebuild two). The second rebuild is only
   // possible because the first wrote the settlement turn its session started
   // on onto the ledger.
-  it("two deaths in one run: the container rolls under the living bot (a relaunch), then the bot rolls with pi inside its next call — the ledger the next generation reads back carries the settlement turn the relaunch's session started on, so planResume yields a transcript with a result for every call and pi restarts on it in a third container, the model handed a result after every tool_use", async () => {
+  it("two deaths preserve the relaunch transcript while an unverified third container holds custody; pure settlement projection pairs every tool result", async () => {
     const inner = new InMemoryRunLedger(() => NOW);
     const ledger = createLedgerWriteThrough({
       ledger: inner,
@@ -7203,10 +7210,11 @@ describe("the pi harness — the container replaced under a living bot: the rela
     ]);
     expect(plan.settlements.map((st) => st.toolUse.id)).toEqual(["c2"]);
 
-    // pi restarts on it in a third container, and the model is handed a result after every call.
+    // B remains alive after the bot-only death. C has no replacement authority.
     const c = new FakeHarnessContainer();
     c.vm = "vm-third";
     const modelC = scriptPiFromProvider(c, { provider: provider("third time"), registry });
+    const savedFacts = structuredClone(facts);
     const third = await openThroughSeam(
       piHarness,
       depsFor(c),
@@ -7219,16 +7227,22 @@ describe("the pi harness — the container replaced under a living bot: the rela
         inboxConsumedSeq: plan.inboxConsumedSeq,
         facts: facts.at(-1)!,
       }),
-    );
-    expect(third.answer).toBe("third time");
-    await third.end();
-    const view = modelC.requests[0]!.messages;
+    ).catch((error: unknown) => error);
+    expect(third).toBeInstanceOf(HarnessEndingUnconfirmedError);
+    expect(c.starts).toEqual([]);
+    expect(c.killed).toEqual([]);
+    expect(c.removed).toEqual([]);
+    expect(modelC.requests).toEqual([]);
+    expect(facts).toEqual(savedFacts);
+    // Pure existing settlement projection: this is not a C model call or restore receipt.
+    const settlement = settlementResults(plan.settlements);
+    expect(settlement).toBeDefined();
+    const view = [...plan.messages, settlement!];
     expect(view).toHaveLength(5);
     for (const [i, m] of view.entries())
       for (const part of m.content)
         if (part.type === "tool_use")
           expect(view[i + 1]!.content.some((q) => q.type === "tool_result" && q.toolUseId === part.id)).toBe(true);
-    expect(facts.at(-1)).toMatchObject({ relaunches: 1, container: "vm-third" });
 
     // Generation B, gone: its pending model call fails and its pi is ended where it ran.
     botDies();
@@ -7476,20 +7490,26 @@ describe("the pi harness — the review preset", () => {
       if (cmd.type !== "prompt") return;
       const live = registry.get("run-l")!;
       c.emit({ id: cmd.id, type: "response", command: "prompt", success: true }, { type: "agent_start" });
-      const probe = { command: "git rev-parse HEAD" };
-      const t1 = assistant([{ type: "toolCall", id: "c1", name: "bash", arguments: probe }]);
+      const probe = { command: "git rev-parse HEAD", purpose: "verification" };
+      const t1 = assistant([{ type: "toolCall", id: "c1", name: "run_check", arguments: probe }]);
       c.emit(
         { type: "message_end", message: t1 },
-        { type: "tool_execution_start", toolCallId: "c1", toolName: "bash", args: probe },
+        { type: "tool_execution_start", toolCallId: "c1", toolName: "run_check", args: probe },
       );
-      authorizeToolCall(live, { toolCallId: "c1", tool: "bash", input: probe });
+      expect(await authorizeToolCall(live, { toolCallId: "c1", tool: "run_check", input: probe })).toEqual({
+        allow: true,
+      });
+      const check = await runRelayedTool(live, { toolCallId: "c1", tool: "run_check", input: probe });
+      expect(check.content).toEqual([
+        expect.objectContaining({ text: expect.stringContaining("completed with exit 0") }),
+      ]);
       c.emit(
         {
           type: "tool_execution_end",
           toolCallId: "c1",
-          toolName: "bash",
-          result: { content: [{ type: "text", text: HEAD }] },
-          isError: false,
+          toolName: "run_check",
+          result: { content: check.content },
+          isError: check.isError,
         },
         { type: "turn_end", message: t1, toolResults: [] },
       );
@@ -7560,6 +7580,15 @@ describe("the pi harness — the review preset", () => {
       harness: { harnesses: roster(), registry, harnessUrl: "https://bot.example.com", containerFor: () => container },
       bearer: "sbr_run-l.s3cret",
       ...prThread,
+      executor: {
+        ...prThread.executor,
+        execResult: async (command: string) => ({
+          stdout: command.startsWith("set -eu") ? `/srv/wt/pr-42\n${HEAD}\n${"b".repeat(40)}\n` : HEAD,
+          stderr: "",
+          exitCode: 0,
+          truncated: false,
+        }),
+      },
       review: {
         head: HEAD,
         post: async (target, body) => {
@@ -7569,14 +7598,21 @@ describe("the pi harness — the review preset", () => {
       },
     });
     seedReviewHistory(s.deps, () => HEAD);
-    const out = answered(await runLoop(s.deps, await trackedReviewContext(s)));
+    const ctx = await trackedCodingContext(s, s.ctx, s.ctx.msg.threadKey, (inner) => {
+      const claim = inner.claim.bind(inner);
+      inner.claim = (request) =>
+        claim({ ...request, meta: { ...request.meta, readonly: true, profile: s.ctx.profile } });
+    });
+    const out = answered(await runLoop(s.deps, ctx));
     expect(out.answer).toBe("The review: one nit, F1.");
     expect(providerCalls).toBe(0);
     // The process: pi's allowlist for a read identity, the readonly toolset's relays, the bearer, the framing.
     expect(container.starts).toHaveLength(1);
     const args = container.starts[0].args;
     const tools = args[args.indexOf("--tools") + 1].split(",");
-    expect(tools.slice(0, 5)).toEqual(["read", "bash", "grep", "find", "ls"]);
+    expect(tools.slice(0, 4)).toEqual(["read", "grep", "find", "ls"]);
+    expect(tools).not.toContain("bash");
+    expect(tools).toContain("run_check");
     expect(tools).not.toContain("edit");
     expect(tools).not.toContain("write");
     expect(tools).toEqual(expect.arrayContaining(["update_status", "submit_verdict", "diff_digest", "web_fetch"]));
@@ -7585,7 +7621,7 @@ describe("the pi harness — the review preset", () => {
     expect(container.starts[0].env.SWITCHBOARD_RUN_BEARER).toBe("sbr_run-l.s3cret");
     const system = container.files.get("/var/tmp/switchboard-pi-run-l/agent/SYSTEM.md")!;
     expect(system.startsWith("the system prompt\n\nHARNESS NOTE:")).toBe(true);
-    expect(system).toContain("no `edit` and no `write`");
+    expect(system).toContain("Native `bash` is unavailable");
     expect(system).not.toContain("`write_file` use `write`");
     // The gate's rules read the preset's identity.
     // The verdict path: the same post-step, the same guard, the same first line — a comment, never an approval.
@@ -7601,7 +7637,7 @@ describe("the pi harness — the review preset", () => {
     await s.writer.settled();
     const rec = (await s.store.get("run-l"))!;
     expect(rec.events.filter((e) => e.type === "tool_call").map((e) => (e as { tool: string }).tool)).toEqual([
-      "bash",
+      "run_check",
       "edit",
       "github_pull_get",
       "submit_verdict",
@@ -11521,6 +11557,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
 
   it("on the pi harness no pi is started and the one the previous generation left is ended at its recorded pid and root (harness-pi item 8)", async () => {
     const container = new FakeHarnessContainer();
+    container.alivePids.add(777); // Observed original producer, not a physical stop/capture ACK.
     const s = setup("", {
       agent: "coding",
       provider: neverCalled(),
@@ -11585,7 +11622,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
   });
 
-  it("on the pi harness a leftover pi whose facts name another container than this run was handed is not ended here: the pid is a stranger's in this container, and a note names the orphan (harness-pi item 8)", async () => {
+  it("on the pi harness a foreign original finish retains its workspace without ending the producer", async () => {
     const container = new FakeHarnessContainer();
     const s = setup("", {
       agent: "coding",
@@ -11602,20 +11639,14 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       agent: "coding",
       state: { harness: { pid: 777, logOffset: 10, root: "/var/tmp/switchboard-pi-run-l", container: "vm-old" } },
     });
-    const out = answered(
-      await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
-    );
-    expect(out.answer).toBe("Done: pushed the fix.");
+    await expect(
+      runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
+    ).rejects.toThrow(/original pi producer/);
     expect(container.killed).toEqual([]);
     expect(container.removed).toEqual([]);
-    const notes = s.registry
-      .snapshotById("run-l")!
-      .events.filter((e) => e.type === "run_note")
-      .map((e) => (e as { summary: string }).summary);
-    expect(notes).toContainEqual(
-      "the run's pi process (pid 777) ran in container vm-old, not the one this run was handed (vm-fake): it was not ended here",
-    );
-    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
+    expect(container.starts).toEqual([]);
+    expect(s.releases).toEqual([]);
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "failed" });
   });
 
   // docs/reference/specs/harness.md item 8: the row's word wins. A resumed row
@@ -12398,6 +12429,8 @@ describe("the relaunch ceiling — the mid-run re-attach spike (the record's fir
         remainingMs: plan.remainingMs,
         turn: plan.turn,
         inboxConsumedSeq: plan.inboxConsumedSeq,
+        // Protocol projection after the typed replacement above; not whole-capture authority.
+        relaunch: { from: "vm-fake", to: "vm-new" },
         facts: facts.at(-1)!,
       }),
     );
@@ -12425,9 +12458,7 @@ describe("the relaunch ceiling — the mid-run re-attach spike (the record's fir
     expect(parts.at(-1)).toMatchObject({ type: "text", text: expect.stringMatching(/^Continue where you left off/) });
     const notes = events.filter((e) => e.type === "run_note").map((e) => e as { kind: string; summary: string });
     expect(notes.map((n) => n.kind)).toEqual(["sandbox_restarted", "resumed"]);
-    expect(notes[1]!.summary).toMatch(
-      /pi is elsewhere: the row's pi \(pid 4242\) ran in container vm-fake, not the one this run was handed \(vm-new\)/,
-    );
+    expect(notes[1]!.summary).toMatch(/relaunched after the container was replaced \(vm-fake → vm-new\)/);
     // The record clause across two deaths (harness.md item 6): the ledger's
     // transcript after the rebuild holds the settlement turn pi's session
     // started on — a result for every call — so the next reclaim rebuilds a
@@ -12584,6 +12615,403 @@ describe("runLoop adaptive coding checks", () => {
       expect(answered(await runLoop(s.deps, { ...s.ctx, ledgerRun })).answer).toBe("choose a scoped check");
     },
   );
+});
+
+describe("tracked Review command receipt binding", () => {
+  async function canonicalOwner(s: ReturnType<typeof setup>, adopt = false) {
+    let now = NOW;
+    const inner = new InMemoryRunLedger(() => now);
+    const meta = {
+      agent: s.ctx.agent.name,
+      channelId: s.ctx.msg.channelId,
+      userId: s.ctx.msg.userId,
+      threadKey: s.ctx.msg.threadKey,
+      repo: s.ctx.repoCtx.repo,
+      readonly: s.ctx.profile.identity === "read",
+      profile: s.ctx.profile,
+      ...(s.ctx.coordinator
+        ? {
+            parentInstanceId: s.ctx.coordinator.parentInstanceId,
+            idempotencyKey: s.ctx.coordinator.idempotencyKey,
+            coordinatorUnit: s.ctx.coordinator.unit,
+          }
+        : {}),
+    };
+    const ledger = createLedgerWriteThrough({
+      ledger: inner,
+      gen: "review-current",
+      fallback: s.store,
+      warn: () => {},
+    });
+    s.deps.runLedger = ledger;
+    let ledgerRun: LedgerRun;
+    if (adopt) {
+      await inner.claim({
+        runId: s.run.id,
+        threadKey: meta.threadKey,
+        gen: "review-old",
+        leaseMs: 1000,
+        startedAt: now,
+        meta,
+        system: s.ctx.system,
+        tools: [],
+      });
+      now += 2000;
+      const [{ row }] = await inner.reclaim(ledger.gen, now, 1000);
+      ledgerRun = ledger.adopt({
+        runId: row.runId,
+        threadKey: row.threadKey,
+        meta: row.meta,
+        startedAt: row.startedAt,
+        state: row.state,
+        lastStep: 0,
+        lastSeq: 0,
+      });
+    } else {
+      const opened = await ledger.open({
+        runId: s.run.id,
+        threadKey: meta.threadKey,
+        startedAt: now,
+        meta,
+        card: null,
+        system: s.ctx.system,
+        tools: [],
+      });
+      if (opened.kind !== "tracked") throw new Error("canonical Review claim required");
+      ledgerRun = opened.run;
+    }
+    return {
+      ledgerRun,
+      inner,
+      takeover: async () => {
+        now += 1_000_000;
+        return inner.reclaim("review-next", now, 1000);
+      },
+    };
+  }
+
+  it.each(["pi", "opencode"] as const)("binds hosted %s Review through its original canonical ledger", async (name) => {
+    const observed = watched(name === "pi" ? piHarness : openCodeHarness);
+    const states: Record<string, unknown>[] = [];
+    let canonical: Awaited<ReturnType<typeof canonicalOwner>>;
+    const execResult = vi.fn(async (command: string, options?: { signal?: AbortSignal; timeoutMs?: number }) => {
+      expect(options?.signal).toBeInstanceOf(AbortSignal);
+      expect(options?.timeoutMs).toBeGreaterThan(0);
+      if (command.startsWith("set -eu"))
+        return {
+          stdout: `/workspace/threads/t/work\n${"a".repeat(40)}\n${"b".repeat(40)}\n`,
+          stderr: "",
+          exitCode: 0,
+          truncated: false,
+        };
+      expect(canonical.inner.live.get("run-l")!.state.checkExecutions).toMatchObject({
+        receipts: [{ callId: "review-call", outcome: { kind: "pending" } }],
+      });
+      expect(command).toContain("cd -- '/workspace/threads/t/work'");
+      return { stdout: "known failure", stderr: "", exitCode: 1, truncated: false };
+    });
+    observed.harness.open = async (_deps, request) => {
+      expect(request.tools.some((tool) => tool.name === "run_check")).toBe(true);
+      expect(request.commandPolicy).toBe("hosted-review");
+      expect(request.toolContext.checkExecution?.run).toBeTypeOf("function");
+      request.onEvent?.({ type: "lease", startedAt: NOW, endsAt: NOW + 600_000, loopEndsAt: NOW + 600_000, at: NOW });
+      const live: LiveHarness = {
+        runId: request.runId,
+        tools: request.tools,
+        toolContext: request.toolContext,
+        commandPolicy: request.commandPolicy,
+        checkControl: () => ({ signal: new AbortController().signal }),
+        rules: { ...request.rules, identity: "read" },
+        emit: () => {},
+        toolSpan: () => undefined,
+        gateSaw: () => {},
+        toolsBlocked: () => undefined,
+      };
+      const answer = await runRelayedTool(live, {
+        toolCallId: "review-call",
+        tool: "run_check",
+        input: { command: "git status --short", purpose: "verification" },
+      });
+      expect(answer.content).toEqual([
+        expect.objectContaining({ text: expect.stringContaining("completed with exit 1") }),
+      ]);
+      const receipt = {
+        kind: "recorded" as const,
+        receipt: (
+          canonical.inner.live.get(request.runId)!.state.checkExecutions as { receipts: CheckExecutionReceipt[] }
+        ).receipts[0],
+      };
+      expect(receipt).toMatchObject({
+        kind: "recorded",
+        receipt: {
+          owner: { runId: "run-l", requester: "slack:UX", threadKey: THREAD, repo: "acme/api" },
+          outcome: { kind: "completed", exitCode: 1 },
+        },
+      });
+      if (receipt.kind !== "recorded") throw new Error("expected canonical command observation");
+      expect(Object.hasOwn(receipt.receipt.owner, "unit")).toBe(false);
+      expect(
+        states.map(
+          (state) => (state.checkExecutions as { receipts: { outcome: { kind: string } }[] }).receipts[0].outcome.kind,
+        ),
+      ).toEqual(["pending", "completed"]);
+      return {
+        answer: "review capability observed",
+        followUp: async () => "",
+        remainingMs: () => 60000,
+        end: async () => {},
+      };
+    };
+    const s = setup("unused", {
+      agent: "review",
+      yaml: `${YAML}harness:\n  review: ${name}\n`,
+      executor: { execResult },
+      repoCtx: { repo: "acme/api", ref: "work" },
+      binding: {
+        ref: "work",
+        sha: "a".repeat(40),
+        workspace: "/workspace/threads/t/work",
+        user: "worker1",
+        container: "vm1",
+        depsKey: "deps1",
+      },
+      harness: {
+        harnesses: name === "pi" ? roster(observed.harness) : roster(piHarness, observed.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example",
+        loopbackUrl: "http://127.0.0.1:8080",
+      },
+    });
+    canonical = await canonicalOwner(s, name === "opencode");
+    const setState = canonical.inner.setState.bind(canonical.inner);
+    vi.spyOn(canonical.inner, "setState").mockImplementation(async (...args) => {
+      const result = await setState(...args);
+      if (result.ok && args[2].checkExecutions) states.push(structuredClone(args[2]));
+      return result;
+    });
+    try {
+      expect(answered(await runLoop(s.deps, { ...s.ctx, ledgerRun: canonical.ledgerRun })).answer).toBe(
+        "review capability observed",
+      );
+      expect(execResult).toHaveBeenCalledTimes(2);
+      expect(canonical.inner.live.get(s.run.id)!.ownerGen).toBe("review-current");
+    } finally {
+      await canonical.ledgerRun.close();
+    }
+  });
+
+  it.each(["intent", "result"] as const)(
+    "holds %s credit after actual write-through generation takeover",
+    async (phase) => {
+      const observed = watched(piHarness);
+      let canonical: Awaited<ReturnType<typeof canonicalOwner>>;
+      const execResult = vi.fn(async (command: string) => {
+        if (command.startsWith("set -eu")) {
+          if (phase === "intent") await canonical.takeover();
+          return {
+            stdout: `/workspace/threads/t/work\n${"a".repeat(40)}\n${"b".repeat(40)}\n`,
+            stderr: "",
+            exitCode: 0,
+            truncated: false,
+          };
+        }
+        await canonical.takeover();
+        return { stdout: "", stderr: "", exitCode: 0, truncated: false };
+      });
+      observed.harness.open = async (_deps, request) => {
+        request.onEvent?.({ type: "lease", startedAt: NOW, endsAt: NOW + 600_000, loopEndsAt: NOW + 600_000, at: NOW });
+        const result = await request.toolContext.checkExecution!.run(
+          { command: "git status --short", purpose: "verification" },
+          "fenced-review",
+        );
+        expect(result).toEqual({ kind: "unavailable", reason: "persistence_failed" });
+        const state = canonical.inner.live.get(request.runId)!.state.checkExecutions;
+        if (phase === "result")
+          expect(state).toMatchObject({ receipts: [{ callId: "fenced-review", outcome: { kind: "pending" } }] });
+        else expect(state).toBeUndefined();
+        return { answer: "generation held", followUp: async () => "", remainingMs: () => 60000, end: async () => {} };
+      };
+      const s = setup("unused", {
+        agent: "review",
+        executor: { execResult },
+        repoCtx: { repo: "acme/api", ref: "work" },
+        binding: {
+          ref: "work",
+          sha: "a".repeat(40),
+          workspace: "/workspace/threads/t/work",
+          user: "worker1",
+          container: "vm1",
+          depsKey: "deps1",
+        },
+        harness: {
+          harnesses: roster(observed.harness),
+          registry: new HarnessRegistry(),
+          harnessUrl: "https://bot.example",
+        },
+      });
+      canonical = await canonicalOwner(s);
+      try {
+        await runLoop(s.deps, { ...s.ctx, ledgerRun: canonical.ledgerRun });
+        expect(execResult).toHaveBeenCalledTimes(phase === "intent" ? 1 : 2);
+        expect(canonical.inner.live.get(s.run.id)!.ownerGen).toBe("review-next");
+      } finally {
+        await canonical.ledgerRun.close();
+      }
+    },
+  );
+
+  it("preserves actual coordinator unit coding owner and its original command path", async () => {
+    const observed = watched(piHarness);
+    const key = "coding-plan:ONE/0/coding";
+    const execResult = vi.fn(async (command: string) => ({
+      stdout: command.startsWith("set -eu") ? `/workspace/threads/t/work\n${"a".repeat(40)}\n${"b".repeat(40)}\n` : "",
+      stderr: "",
+      exitCode: 0,
+      truncated: false,
+    }));
+    observed.harness.open = async (_deps, request) => {
+      expect(request.commandPolicy).toBeUndefined();
+      request.onEvent?.({ type: "lease", startedAt: NOW, endsAt: NOW + 600_000, loopEndsAt: NOW + 600_000, at: NOW });
+      expect(
+        await request.toolContext.checkExecution!.run(
+          { command: "git status --short", purpose: "verification" },
+          "unit-coding",
+        ),
+      ).toMatchObject({
+        kind: "recorded",
+        receipt: { owner: { unit: key }, outcome: { kind: "completed", exitCode: 0 } },
+      });
+      return { answer: "unit retained", followUp: async () => "", remainingMs: () => 60000, end: async () => {} };
+    };
+    const s = setup("unused", {
+      agent: "coding",
+      executor: { execResult },
+      repoCtx: { repo: "acme/api", ref: "work" },
+      coordinator: { parentInstanceId: "coding-plan", idempotencyKey: key, unit: "ONE" },
+      binding: {
+        ref: "work",
+        sha: "a".repeat(40),
+        workspace: "/workspace/threads/t/work",
+        user: "worker1",
+        container: "vm1",
+        depsKey: "deps1",
+      },
+      harness: {
+        harnesses: roster(observed.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example",
+      },
+    });
+    const canonical = await canonicalOwner(s);
+    try {
+      await runLoop(s.deps, { ...s.ctx, ledgerRun: canonical.ledgerRun });
+      expect(execResult).toHaveBeenCalledTimes(2);
+    } finally {
+      await canonical.ledgerRun.close();
+    }
+  });
+
+  it.each(["typed executor", "canonical actor", "canonical generation", "canonical unit"] as const)(
+    "does not expose a command for unready %s evidence",
+    async (missing) => {
+      const observed = watched(piHarness);
+      const execResult = vi.fn();
+      observed.harness.open = async (_deps, request) => {
+        expect(request.toolContext.checkExecution).toBeUndefined();
+        expect(request.tools.some((tool) => tool.name === "run_check")).toBe(false);
+        return { answer: "capability held", followUp: async () => "", remainingMs: () => 60000, end: async () => {} };
+      };
+      const s = setup("unused", {
+        agent: "review",
+        executor: missing === "typed executor" ? {} : { execResult },
+        repoCtx: { repo: "acme/api", ref: "work" },
+        binding: {
+          ref: "work",
+          sha: "a".repeat(40),
+          workspace: "/workspace/threads/t/work",
+          user: "worker1",
+          container: "vm1",
+          depsKey: "deps1",
+        },
+        harness: {
+          harnesses: roster(observed.harness),
+          registry: new HarnessRegistry(),
+          harnessUrl: "https://bot.example",
+        },
+      });
+      const canonical = await canonicalOwner(s);
+      if (missing === "canonical actor") canonical.inner.live.get(s.run.id)!.meta.userId = "slack:UOTHER";
+      if (missing === "canonical unit")
+        Object.assign(canonical.inner.live.get(s.run.id)!.meta, {
+          parentInstanceId: "review-plan",
+          idempotencyKey: "review-plan:ONE/0/review",
+          coordinatorUnit: "ONE",
+        });
+      if (missing === "canonical generation") await canonical.takeover();
+      try {
+        await runLoop(s.deps, { ...s.ctx, ledgerRun: canonical.ledgerRun });
+        expect(execResult).not.toHaveBeenCalled();
+      } finally {
+        await canonical.ledgerRun.close();
+      }
+    },
+  );
+
+  it.each(["repository", "checkout", "absolute checkout"] as const)(
+    "does not bind tracked Review without a real %s",
+    async (missing) => {
+      const observed = watched(piHarness);
+      const execResult = vi.fn();
+      observed.harness.open = async (_deps, request) => {
+        expect(request.toolContext.checkExecution).toBeUndefined();
+        return { answer: "binding held", followUp: async () => "", remainingMs: () => 60000, end: async () => {} };
+      };
+      const s = setup("unused", {
+        agent: "review",
+        executor: { execResult },
+        repoCtx: missing === "repository" ? {} : { repo: "acme/api", ref: "work" },
+        ...(missing !== "checkout"
+          ? {
+              binding: {
+                ref: "work",
+                sha: "a".repeat(40),
+                workspace: missing === "absolute checkout" ? "relative/work" : "/workspace/threads/t/work",
+                user: "worker1",
+                container: "vm1",
+                depsKey: "deps1",
+              },
+            }
+          : {}),
+        harness: {
+          harnesses: roster(observed.harness),
+          registry: new HarnessRegistry(),
+          harnessUrl: "https://bot.example",
+        },
+      });
+      const { ledgerRun } = recordingLedgerRun();
+      ledgerRun.tracked = () => true;
+      expect(answered(await runLoop(s.deps, { ...s.ctx, ledgerRun })).answer).toBe("binding held");
+      expect(execResult).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not bind command recording to an untracked Review", async () => {
+    const observed = watched(piHarness);
+    observed.harness.open = async (_deps, request) => {
+      expect(request.toolContext.checkExecution).toBeUndefined();
+      return { answer: "untracked held", followUp: async () => "", remainingMs: () => 60000, end: async () => {} };
+    };
+    const s = setup("unused", {
+      agent: "review",
+      repoCtx: { repo: "acme/api", ref: "work" },
+      harness: {
+        harnesses: roster(observed.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example",
+      },
+    });
+    expect(answered(await runLoop(s.deps, s.ctx)).answer).toBe("untracked held");
+  });
 });
 
 describe("runLoop first coding test", () => {

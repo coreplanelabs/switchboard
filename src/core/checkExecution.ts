@@ -31,8 +31,15 @@ const storedResultSchema = resultSchema.extend({
   stderr: z.string().max(STREAM_CAP),
 });
 const ownerSchema = z
-  .object({ runId: z.string(), requester: z.string(), threadKey: z.string(), unit: z.string(), repo: z.string() })
-  .strict();
+  .object({
+    runId: z.string().min(1),
+    requester: z.string().min(1),
+    threadKey: z.string().min(1),
+    unit: z.string().min(1).optional(),
+    repo: z.string().min(1),
+  })
+  .strict()
+  .refine((owner) => !Object.hasOwn(owner, "unit") || owner.unit !== undefined);
 const receiptSchema = z
   .object({
     callId: z.string().min(1).max(200),
@@ -114,12 +121,16 @@ function boundedResult(value: unknown): ExecResult | undefined {
  * certify their relevance, test collection, side effects or ordering before edits. */
 export function createCheckExecution(binding: CheckExecutionBinding): CheckExecutionCapability {
   const parsed = stateSchema.safeParse(binding.previous ?? { version: 1, receipts: [] });
+  const parsedOwner = ownerSchema.safeParse(binding.owner);
   const owner = { ...binding.owner };
   const valid =
+    parsedOwner.success &&
     parsed.success &&
     parsed.data.receipts.every(
       (receipt) =>
-        Object.entries(owner).every(([key, value]) => receipt.owner[key as keyof CheckExecutionOwner] === value) &&
+        (["runId", "requester", "threadKey", "repo"] as const).every((key) => receipt.owner[key] === owner[key]) &&
+        Object.hasOwn(receipt.owner, "unit") === Object.hasOwn(owner, "unit") &&
+        receipt.owner.unit === owner.unit &&
         (receipt.outcome.kind === "pending" || Number.isFinite(receipt.completedAt)) &&
         (receipt.outcome.kind !== "completed" || ![124, 137, 143].includes(receipt.outcome.exitCode)),
     ) &&

@@ -1,8 +1,13 @@
+import { createLedgerWriteThrough } from "./runLedger/writeThrough.js";
+import { InMemoryRunStore } from "./runStore.js";
+import { UncertainStoreError } from "./storeFailure.js";
+import { storeRequestWitness } from "./storeResponse.js";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { InMemoryRunLedger } from "./runLedger/inMemory.js";
 import { createCheckExecution, type CheckExecutionBinding } from "./checkExecution.js";
 import type { CheckExecutionInput, CheckExecutionState } from "./checkExecutionTypes.js";
 import { BASH_TIMEOUT_MS, RUN_DEADLINE_RESERVE_MS } from "../execution/bashTimeout.js";
@@ -319,6 +324,300 @@ describe("recorded coding checks", () => {
       expect(await capability.run(actualInput, "real-call")).toEqual(receipt);
     } finally {
       rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+});
+
+// Phase 1: command observations bind to a real run, optionally an actual plan unit.
+describe("recorded command owner binding", () => {
+  it("records and replays a genuine standalone run without minting a unit", async () => {
+    const s = setup();
+    delete (s.binding.owner as { unit?: string }).unit;
+    const first = await s.capability().run(input, "standalone-call");
+    expect(first).toMatchObject({ kind: "recorded", receipt: { owner: { runId: "r1", repo: "acme/repo" } } });
+    if (first.kind !== "recorded") throw new Error("expected real run owner");
+    expect(Object.hasOwn(first.receipt.owner, "unit")).toBe(false);
+    const resumed = setup(s.saved.at(-1));
+    delete (resumed.binding.owner as { unit?: string }).unit;
+    expect(await resumed.capability().run(input, "standalone-call")).toEqual(first);
+    expect(resumed.execResult).not.toHaveBeenCalled();
+  });
+
+  it.each(["runId", "requester", "threadKey", "repo", "unit"] as const)(
+    "rejects an empty owner %s before any metadata or command",
+    async (field) => {
+      const s = setup();
+      s.binding.owner[field] = "";
+      expect(await s.capability().run(input, "invalid-owner")).toEqual({
+        kind: "unavailable",
+        reason: "invalid_state",
+      });
+      expect(s.execResult).not.toHaveBeenCalled();
+      expect(s.saved).toEqual([]);
+    },
+  );
+
+  it("rejects an explicitly undefined unit before metadata or persistence", async () => {
+    const s = setup();
+    s.binding.owner.unit = undefined;
+    expect(await s.capability().run(input, "undefined-unit")).toEqual({ kind: "unavailable", reason: "invalid_state" });
+    expect(s.execResult).not.toHaveBeenCalled();
+    expect(s.saved).toEqual([]);
+  });
+
+  it.each(["absent", "different"] as const)("rejects %s historical unit ownership", async (kind) => {
+    const prior = setup();
+    if (kind === "absent") delete prior.binding.owner.unit;
+    await prior.capability().run(input, "owner-call");
+    const resumed = setup(prior.saved.at(-1));
+    if (kind === "different") resumed.binding.owner.unit = "another-unit";
+    expect(await resumed.capability().run(input, "owner-call")).toEqual({
+      kind: "unavailable",
+      reason: "invalid_state",
+    });
+    expect(resumed.execResult).not.toHaveBeenCalled();
+    expect(resumed.saved).toEqual([]);
+  });
+
+  it("holds a legacy standalone coding receipt even with matching canonical original metadata", async () => {
+    let now = 100;
+    const ledger = new InMemoryRunLedger(() => now);
+    const prior = setup();
+    prior.binding.owner = { runId: "r1", requester: "slack:UALICE", threadKey: "slack:C1:1", repo: "acme/repo" };
+    await prior.capability().run(input, "legacy-standalone");
+    const legacy = structuredClone(prior.saved.at(-1)!);
+    legacy.receipts[0].owner.unit = ""; // The former standalone producer's exact owner shape.
+    await ledger.claim({
+      runId: "r1",
+      threadKey: "slack:C1:1",
+      gen: "g1",
+      leaseMs: 1000,
+      startedAt: now,
+      meta: {
+        channelId: "slack:C1",
+        userId: "slack:UALICE",
+        threadKey: "slack:C1:1",
+        agent: "coding",
+        repo: "acme/repo",
+      },
+      system: "",
+      tools: [],
+      state: { checkExecutions: legacy },
+    });
+    now = 2000;
+    const [{ row }] = await ledger.reclaim("g2", now, 1000);
+    expect(row.meta).toEqual({
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:1",
+      agent: "coding",
+      repo: "acme/repo",
+    });
+    expect(Object.hasOwn(row.meta, "idempotencyKey")).toBe(false);
+    expect(Object.hasOwn(row.meta, "parentInstanceId")).toBe(false);
+    const before = structuredClone(row.state.checkExecutions);
+    const resumed = setup(row.state.checkExecutions);
+    resumed.binding.owner = {
+      runId: row.runId,
+      requester: row.meta.userId,
+      threadKey: row.meta.threadKey,
+      repo: row.meta.repo!,
+    };
+    const save = vi.fn(
+      async (state: CheckExecutionState) => (await ledger.setState(row.runId, "g2", { checkExecutions: state })).ok,
+    );
+    resumed.binding.save = save;
+    for (const callId of ["legacy-standalone", "new-call"])
+      expect(await resumed.capability().run(input, callId)).toEqual({ kind: "unavailable", reason: "invalid_state" });
+    expect(resumed.execResult).not.toHaveBeenCalled();
+    expect(save).not.toHaveBeenCalled();
+    expect(ledger.live.get("r1")!.state.checkExecutions).toEqual(before);
+  });
+
+  it("does not dispatch after an actual generation-fenced pending write", async () => {
+    let now = 100;
+    const ledger = new InMemoryRunLedger(() => now);
+    expect(
+      (
+        await ledger.claim({
+          runId: "r1",
+          threadKey: "slack:C1:1",
+          gen: "g1",
+          leaseMs: 1000,
+          startedAt: now,
+          meta: {
+            channelId: "slack:C1",
+            userId: "slack:UALICE",
+            threadKey: "slack:C1:1",
+            agent: "review",
+            model: "p/m",
+          },
+          system: "",
+          tools: [],
+        })
+      ).ok,
+    ).toBe(true);
+    now = 2000;
+    expect((await ledger.reclaim("g2", now, 1000)).map((r) => r.row.ownerGen)).toEqual(["g2"]);
+    const s = setup();
+    s.binding.owner = { runId: "r1", requester: "slack:UALICE", threadKey: "slack:C1:1", repo: "acme/repo" };
+    s.binding.save = async (state) => (await ledger.setState("r1", "g1", { checkExecutions: state })).ok;
+    expect(await s.capability().run(input, "fenced-intent")).toEqual({
+      kind: "unavailable",
+      reason: "persistence_failed",
+    });
+    expect(s.execResult).toHaveBeenCalledTimes(1); // Structural metadata only; no command dispatch.
+  });
+
+  it("returns no result credit after an actual generation-fenced completion write", async () => {
+    let now = 100;
+    const ledger = new InMemoryRunLedger(() => now);
+    await ledger.claim({
+      runId: "r1",
+      threadKey: "slack:C1:1",
+      gen: "g1",
+      leaseMs: 1000,
+      startedAt: now,
+      meta: { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:1", agent: "review", model: "p/m" },
+      system: "",
+      tools: [],
+    });
+    const s = setup();
+    s.binding.owner = { runId: "r1", requester: "slack:UALICE", threadKey: "slack:C1:1", repo: "acme/repo" };
+    s.binding.save = async (state) => (await ledger.setState("r1", "g1", { checkExecutions: state })).ok;
+    s.execResult
+      .mockReset()
+      .mockResolvedValueOnce(metadata)
+      .mockImplementationOnce(async () => {
+        now = 2000;
+        await ledger.reclaim("g2", now, 1000);
+        return ok;
+      });
+    expect(await s.capability().run(input, "fenced-result")).toEqual({
+      kind: "unavailable",
+      reason: "persistence_failed",
+    });
+    expect(ledger.live.get("r1")?.state.checkExecutions).toMatchObject({
+      receipts: [{ outcome: { kind: "pending" } }],
+    });
+    expect(s.execResult).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects a unit receipt when the current actual owner has no unit", async () => {
+    const prior = setup();
+    await prior.capability().run(input, "unit-call");
+    const runOnly = setup(prior.saved.at(-1));
+    delete (runOnly.binding.owner as { unit?: string }).unit;
+    expect(await runOnly.capability().run(input, "unit-call")).toEqual({
+      kind: "unavailable",
+      reason: "invalid_state",
+    });
+    expect(runOnly.execResult).not.toHaveBeenCalled();
+    expect(runOnly.saved).toEqual([]);
+  });
+
+  it("retains an ambiguous legacy empty-unit receipt without normalizing or executing", async () => {
+    const prior = setup();
+    await prior.capability().run(input, "legacy-call");
+    const legacy = structuredClone(prior.saved.at(-1)!);
+    legacy.receipts[0].owner.unit = "";
+    const before = structuredClone(legacy);
+    const resumed = setup(legacy);
+    delete (resumed.binding.owner as { unit?: string }).unit;
+    expect(await resumed.capability().run(input, "legacy-call")).toEqual({
+      kind: "unavailable",
+      reason: "invalid_state",
+    });
+    expect(resumed.execResult).not.toHaveBeenCalled();
+    expect(resumed.saved).toEqual([]);
+    expect(legacy).toEqual(before);
+  });
+});
+
+describe("recorded checks with uncertain canonical ACK", () => {
+  it.each([
+    ["intent", true],
+    ["intent", false],
+    ["result", true],
+    ["result", false],
+  ] as const)("holds %s receipt credit after unknown state ACK (committed=%s)", async (phase, committed) => {
+    const inner = new InMemoryRunLedger(() => 100);
+    const writes: CheckExecutionState[] = [];
+    let lost = false;
+    const ledger = new Proxy(inner, {
+      get(target, key) {
+        if (key === "setState")
+          return async (runId: string, gen: string, state: Record<string, unknown>) => {
+            const checks = state.checkExecutions as CheckExecutionState | undefined;
+            if (checks) writes.push(structuredClone(checks));
+            const outcome = checks?.receipts.at(-1)?.outcome.kind;
+            if (!lost && outcome === (phase === "intent" ? "pending" : "completed")) {
+              lost = true;
+              const witness = await storeRequestWitness("/runs/state", JSON.stringify({ runId, gen, state }));
+              if (committed) expect((await inner.setState(runId, gen, state)).ok).toBe(true);
+              throw new UncertainStoreError("body interrupted", witness);
+            }
+            return inner.setState(runId, gen, state);
+          };
+        const value = Reflect.get(target, key, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const wt = createLedgerWriteThrough({
+      ledger,
+      gen: "check-current",
+      fallback: new InMemoryRunStore(),
+      warn: () => {},
+    });
+    const opened = await wt.open({
+      runId: "r1",
+      threadKey: "slack:C1:1",
+      startedAt: 100,
+      meta: {
+        agent: "review",
+        channelId: "slack:C1",
+        userId: "slack:UALICE",
+        threadKey: "slack:C1:1",
+        repo: "acme/repo",
+      },
+      card: null,
+      system: "",
+      tools: [],
+    });
+    if (opened.kind !== "tracked") throw new Error("canonical claim required");
+    const s = setup();
+    s.binding.owner = { runId: "r1", requester: "slack:UALICE", threadKey: "slack:C1:1", repo: "acme/repo" };
+    s.binding.save = (state) => opened.run.setStateAndFlush({ checkExecutions: state });
+    const cap = s.capability();
+    try {
+      expect(await cap.run(input, "lost-check")).toEqual({ kind: "unavailable", reason: "persistence_failed" });
+      expect(s.execResult).toHaveBeenCalledTimes(phase === "intent" ? 1 : 2);
+      expect(writes).toHaveLength(phase === "intent" ? 1 : 2);
+      const before = structuredClone(inner.live.get("r1")!.state.checkExecutions);
+      if (phase === "intent" && !committed) expect(before).toBeUndefined();
+      else
+        expect(before).toMatchObject({
+          receipts: [
+            {
+              callId: "lost-check",
+              outcome: {
+                kind: phase === "result" && committed ? "completed" : "pending",
+              },
+            },
+          ],
+        });
+      const failure = opened.run.writeBoundaryFailure;
+      expect(failure).toMatchObject({ kind: "state", runId: "r1", gen: "check-current" });
+      expect(await opened.run.commitState({ checklist: "after canonical reconciliation" })).toBe(
+        committed ? "ok" : "unavailable",
+      );
+      expect(writes).toHaveLength((phase === "intent" ? 1 : 2) + (committed ? 1 : 0));
+      if (!committed) expect(opened.run.writeBoundaryFailure).toEqual(failure);
+      expect(await cap.run(input, "another-check")).toEqual({ kind: "unavailable", reason: "persistence_failed" });
+      expect(s.execResult).toHaveBeenCalledTimes(phase === "intent" ? 1 : 2);
+      expect(inner.live.get("r1")!.state.checkExecutions).toEqual(before);
+    } finally {
+      await opened.run.close();
     }
   });
 });

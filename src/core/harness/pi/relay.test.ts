@@ -1,4 +1,8 @@
 import { parentContextOf } from "../../dispatch/handoff.js";
+import { createCheckExecution } from "../../checkExecution.js";
+import type { CheckExecutionState } from "../../checkExecutionTypes.js";
+import { RUN_DEADLINE_RESERVE_MS } from "../../../execution/bashTimeout.js";
+import { runCheckTool } from "../../../tools/check.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Executor, PublicationTransport } from "../../../execution/executor.js";
 import type { ChatMessage } from "../../chatMessage.js";
@@ -1316,5 +1320,258 @@ describe("HarnessRegistry.replace and RelayedCalls.awaitInFlight — a relaunche
       },
     ]);
     expect(calls.inFlight()).toEqual([]);
+  });
+});
+
+describe("hosted Review native admission", () => {
+  it("denies stale native bash while preserving ordinary read command validation and hosted relay", async () => {
+    const s = live({ identity: "read" });
+    Object.assign(s.harness, { commandPolicy: "hosted-review" });
+    s.harness.tools.push({ ...echo, name: "run_check" });
+    expect(
+      await authorizeToolCall(s.harness, {
+        toolCallId: "native",
+        tool: "bash",
+        input: { command: "git status --short" },
+      }),
+    ).toMatchObject({ allow: false });
+    expect(
+      await authorizeToolCall(s.harness, {
+        toolCallId: "hosted",
+        tool: "run_check",
+        input: { command: "git status --short", purpose: "verification" },
+      }),
+    ).toEqual({ allow: true });
+    const ordinary = live({ identity: "read" });
+    expect(
+      await authorizeToolCall(ordinary.harness, {
+        toolCallId: "ordinary",
+        tool: "bash",
+        input: { command: "git status --short" },
+      }),
+    ).toEqual({ allow: true });
+  });
+});
+
+// Both harnesses share the relay; native observers supply the original call's
+// control, independently of the run's hard stop and the native HTTP poll.
+describe.each(["pi", "opencode"])("hosted %s check lifecycle", (name) => {
+  function deferred() {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => (resolve = r));
+    return { promise, resolve };
+  }
+  function setupCheck() {
+    const hard = new AbortController();
+    const original = new AbortController();
+    const saved: CheckExecutionState[] = [];
+    const execResult = vi.fn(async (_command: string, _opts?: { signal?: AbortSignal; timeoutMs?: number }) => ({
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+      truncated: false,
+    }));
+    execResult.mockImplementation(async (command) =>
+      command.startsWith("set -eu")
+        ? { exitCode: 0, stdout: `/work/repo\n${"a".repeat(40)}\n${"b".repeat(40)}\n`, stderr: "", truncated: false }
+        : { exitCode: 0, stdout: "done", stderr: "", truncated: false },
+    );
+    const save = vi.fn(async (state: CheckExecutionState) => {
+      saved.push(structuredClone(state));
+      return true;
+    });
+    const capability = createCheckExecution({
+      executor: () => ({ execResult }),
+      workspace: () => "/work/repo",
+      recordingAvailable: true,
+      owner: { runId: name, requester: "u1", threadKey: "t1", repo: "acme/repo" },
+      authorizeCommand: (command) => command.startsWith("git status"),
+      save,
+      remainingMs: () => RUN_DEADLINE_RESERVE_MS + 60_000,
+      signal: hard.signal,
+      clock: () => 100,
+    });
+    const { harness } = live({ identity: "read" });
+    harness.runId = name;
+    harness.commandPolicy = "hosted-review";
+    harness.tools = [runCheckTool];
+    harness.toolContext = { executor, checkExecution: capability, signal: hard.signal };
+    harness.checkControl = () => ({ signal: original.signal, remainingMs: () => RUN_DEADLINE_RESERVE_MS + 60_000 });
+    const ask = (id = "check", command = "git status --short") =>
+      runRelayedTool(harness, {
+        toolCallId: id,
+        tool: "run_check",
+        input: { command, purpose: "verification", timeoutMs: 10_000 },
+      });
+    return { hard, original, saved, execResult, save, harness, ask };
+  }
+  it("does not dispatch when the originating loop-end cut precedes the pending ACK", async () => {
+    const w = setupCheck();
+    const pending = deferred();
+    const ack = deferred();
+    w.save.mockImplementationOnce(async (state) => {
+      w.saved.push(structuredClone(state));
+      pending.resolve();
+      await ack.promise;
+      return true;
+    });
+    const answer = w.ask();
+    await pending.promise;
+    w.original.abort();
+    ack.resolve();
+    await answer;
+    expect(w.execResult).toHaveBeenCalledTimes(1);
+    expect(w.saved.at(-1)?.receipts[0]?.outcome).toEqual({ kind: "not_started", reason: "stopped" });
+  });
+  it("rechecks a cancelled serialized check before metadata or dispatch", async () => {
+    const w = setupCheck();
+    const dispatched = deferred();
+    const finish = deferred();
+    const second = new AbortController();
+    w.harness.checkControl = (id) => ({ signal: id === "second" ? second.signal : w.original.signal });
+    const initial = w.execResult.getMockImplementation()!;
+    w.execResult.mockImplementation(async (command, opts) => {
+      if (!command.startsWith("set -eu")) {
+        dispatched.resolve();
+        await finish.promise;
+      }
+      return initial(command, opts);
+    });
+    const first = w.ask("first");
+    await dispatched.promise;
+    const next = w.ask("second", "git status --porcelain");
+    second.abort();
+    finish.resolve();
+    await Promise.all([first, next]);
+    expect(w.execResult).toHaveBeenCalledTimes(2);
+    expect(w.saved.at(-1)?.receipts).toHaveLength(1);
+  });
+  it("propagates an executing call's cut and retains typed interrupted uncertainty", async () => {
+    const w = setupCheck();
+    const dispatched = deferred();
+    const finish = deferred();
+    let signal!: AbortSignal;
+    w.execResult.mockImplementation(async (command, opts) => {
+      if (command.startsWith("set -eu"))
+        return {
+          exitCode: 0,
+          stdout: `/work/repo\n${"a".repeat(40)}\n${"b".repeat(40)}\n`,
+          stderr: "",
+          truncated: false,
+        };
+      signal = opts!.signal!;
+      dispatched.resolve();
+      await finish.promise;
+      return { exitCode: 0, stdout: "late output", stderr: "", truncated: false };
+    });
+    const answer = w.ask();
+    await dispatched.promise;
+    w.original.abort();
+    const cancelled = signal.aborted;
+    finish.resolve();
+    await answer;
+    expect(cancelled).toBe(true);
+    expect(w.saved.at(-1)?.receipts[0]?.outcome).toMatchObject({
+      kind: "unknown",
+      reason: "interrupted",
+      result: { exitCode: 0 },
+    });
+  });
+  it.each(["before", "executing"])("preserves the owning run's hard stop %s dispatch", async (when) => {
+    const w = setupCheck();
+    if (when === "before") {
+      w.hard.abort();
+      await w.ask();
+      expect(w.execResult).not.toHaveBeenCalled();
+      return;
+    }
+    const dispatched = deferred();
+    const finish = deferred();
+    let signal!: AbortSignal;
+    const initial = w.execResult.getMockImplementation()!;
+    w.execResult.mockImplementation(async (command, opts) => {
+      if (!command.startsWith("set -eu")) {
+        signal = opts!.signal!;
+        dispatched.resolve();
+        await finish.promise;
+      }
+      return initial(command, opts);
+    });
+    const answer = w.ask();
+    await dispatched.promise;
+    w.hard.abort();
+    const cancelled = signal.aborted;
+    finish.resolve();
+    await answer;
+    expect(cancelled).toBe(true);
+    expect(w.saved.at(-1)?.receipts[0]?.outcome).toMatchObject({ kind: "unknown", reason: "interrupted" });
+  });
+  it("keeps owner and read policy with pending-before-execute and result-before-credit ACKs", async () => {
+    const w = setupCheck();
+    const pending = deferred();
+    const pendingAck = deferred();
+    const result = deferred();
+    const resultAck = deferred();
+    w.save.mockImplementation(async (state) => {
+      w.saved.push(structuredClone(state));
+      if (state.receipts[0]!.outcome.kind === "pending") {
+        pending.resolve();
+        await pendingAck.promise;
+      } else {
+        result.resolve();
+        await resultAck.promise;
+      }
+      return true;
+    });
+    let credited = false;
+    const answer = w.ask().then(() => {
+      credited = true;
+    });
+    await pending.promise;
+    expect(w.execResult).toHaveBeenCalledTimes(1);
+    expect(credited).toBe(false);
+    pendingAck.resolve();
+    await result.promise;
+    expect(w.execResult).toHaveBeenCalledTimes(2);
+    expect(credited).toBe(false);
+    resultAck.resolve();
+    await answer;
+    expect(w.saved.at(-1)?.receipts[0]).toMatchObject({
+      owner: { runId: name, requester: "u1", threadKey: "t1", repo: "acme/repo" },
+      outcome: { kind: "completed", exitCode: 0 },
+    });
+    expect(Object.hasOwn(w.saved.at(-1)!.receipts[0]!.owner, "unit")).toBe(false);
+    await w.ask("write", "rm -rf /work/repo");
+    expect(w.execResult).toHaveBeenCalledTimes(2);
+  });
+  it("captures the original call control across a fresh narrowed follow-up without reviving the old check", async () => {
+    const w = setupCheck();
+    const pending = deferred();
+    const ack = deferred();
+    w.save.mockImplementationOnce(async (state) => {
+      w.saved.push(structuredClone(state));
+      pending.resolve();
+      await ack.promise;
+      return true;
+    });
+    const old = w.ask("old");
+    await pending.promise;
+    w.original.abort();
+    const fresh = new AbortController();
+    w.harness.checkControl = () => ({ signal: fresh.signal, remainingMs: () => RUN_DEADLINE_RESERVE_MS + 4_000 });
+    const next = w.ask("fresh", "git status --porcelain");
+    ack.resolve();
+    await Promise.all([old, next]);
+    expect(w.saved.at(-1)?.receipts.map((r) => r.outcome.kind)).toEqual(["not_started", "completed"]);
+    expect(w.execResult.mock.calls.at(-1)?.[1]?.timeoutMs).toBe(4_000);
+    expect(fresh.signal.aborted).toBe(false);
+  });
+  it("refuses a hosted check without an observed originating lifecycle", async () => {
+    const w = setupCheck();
+    w.harness.checkControl = () => undefined;
+    const answer = await w.ask();
+    expect(answer.isError).toBe(true);
+    expect(w.execResult).not.toHaveBeenCalled();
+    expect(w.saved).toEqual([]);
   });
 });

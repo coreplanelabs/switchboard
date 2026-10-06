@@ -1,3 +1,6 @@
+import { createCheckExecution } from "../../checkExecution.js";
+import type { CheckExecutionState } from "../../checkExecutionTypes.js";
+import { runCheckTool } from "../../../tools/check.js";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -2830,9 +2833,10 @@ describe("runPiHarness — after a bot restart", () => {
   });
 
   it.each(["probe", "kill", "remove"] as const)(
-    "an unconfirmed recorded %s retains custody before any new pi",
+    "recorded %s uncertainty or refusal retains custody before any new pi",
     async (phase) => {
       const w = world();
+      let cleanupAttempted = false;
       const unknown = new ExecInfraError("recorded ending unknown", "transport-lost");
       w.run.resume = resume({ pid: 999, logOffset: 0, root: "/tmp/original-pi" });
       w.container.alive = async () => {
@@ -2841,6 +2845,7 @@ describe("runPiHarness — after a bot restart", () => {
       };
       if (phase !== "probe")
         w.container[phase] = async () => {
+          cleanupAttempted = true;
           throw unknown;
         };
       w.container.onStdin = () => {
@@ -2848,7 +2853,8 @@ describe("runPiHarness — after a bot restart", () => {
       };
       const error = await w.open().catch((err: unknown) => err);
       expect(error).toBeInstanceOf(HarnessEndingUnconfirmedError);
-      expect(error).toMatchObject({ openingError: unknown });
+      if (phase === "probe") expect(error).toMatchObject({ openingError: unknown });
+      expect(cleanupAttempted).toBe(false);
       expect(w.container.starts).toEqual([]);
       expect(w.container.removed).toEqual([]);
     },
@@ -3340,27 +3346,19 @@ describe("runPiHarness — after a bot restart", () => {
   // A row a build before the root was recorded wrote names a pid and nothing
   // this build can find it by: that pi is ended where it runs and the run goes
   // on as it does when pi died, on a session rebuilt from the mirror.
-  it("a row whose facts name no root cannot be re-attached: its pi is ended by pid and a fresh pi starts on this build's root from the mirrored transcript, the note saying why", async () => {
+  it("a row with no recorded root retains original custody before any replacement", async () => {
     const w = world();
     const theirs = piRunPathsAt("/tmp/switchboard-pi/run-7");
     await w.container.start({ paths: theirs, command: "pi", args: [], env: {} }); // alive, filed where this build never looks
     w.run.resume = resume({ pid: 4242, logOffset: 0, sessionFile: "s.jsonl" });
     scriptedPi(w.container, (_n, c) => finalTurn(c, "continued"));
-    expect(await w.start()).toBe("continued");
-    // The old pi ended before the new one starts, then the new one at the end.
-    expect(w.container.killed).toEqual([4242, 4242]);
-    expect(w.container.starts).toHaveLength(2);
-    const started = w.container.starts[1];
-    expect(started.paths.dir).toBe(paths.dir);
-    expect(started.args[started.args.indexOf("--session") + 1]).toMatch(
-      new RegExp(`^${paths.sessionDir}/resumed-\\d+\\.jsonl$`),
-    );
-    expect(w.facts.at(-1)).toMatchObject({ pid: 4242, root: paths.dir });
-    const notes = w.events.filter((e) => e.type === "run_note").map((e) => (e as { summary: string }).summary);
-    expect(notes[0]).toMatch(
-      /^resumed after a restart: the row named no directory for its pi \(pid 4242\), so it was ended and pi restarted on the mirrored transcript — 1 call\(s\) were in flight/,
-    );
-    expect(w.container.removed).toEqual([paths.dir]);
+    const before = structuredClone(w.run.resume!.facts);
+    await expect(w.open()).rejects.toBeInstanceOf(HarnessEndingUnconfirmedError);
+    expect(w.container.killed).toEqual([]);
+    expect(w.container.removed).toEqual([]);
+    expect(w.container.starts).toHaveLength(1);
+    expect(w.facts).toEqual([]);
+    expect(w.run.resume!.facts).toEqual(before);
   });
 
   // The bearer pi holds is the previous generation's (model-proxy item 2): the
@@ -3399,7 +3397,7 @@ describe("runPiHarness — after a bot restart", () => {
     expect(w.facts.at(-1)).toMatchObject({ pid: 4242, root: theirs.dir, bearerHash: bearerHashOf(theirToken) });
   });
 
-  it("restarts a live pi whose immutable model config speaks another wire, then writes the run provider's Responses wire before continuing", async () => {
+  it("an incompatible recorded wire retains the original pi without rewriting its configuration", async () => {
     const w = world();
     const theirs = piRunPathsAt("/tmp/switchboard-pi-worker2/run-7");
     await w.container.start({ paths: theirs, command: "pi", args: [], env: {} });
@@ -3434,19 +3432,29 @@ describe("runPiHarness — after a bot restart", () => {
     });
     scriptedPi(w.container, (_n, c) => finalTurn(c, "continued on Responses"));
 
-    expect(await w.start()).toBe("continued on Responses");
-    expect(w.container.starts).toHaveLength(2);
-    const models = JSON.parse(w.container.files.get(`${paths.agentDir}/models.json`)!) as {
+    const before = structuredClone(w.run.resume!.facts);
+    await expect(w.open()).rejects.toBeInstanceOf(HarnessEndingUnconfirmedError);
+    expect(w.container.killed).toEqual([]);
+    expect(w.container.removed).toEqual([]);
+    expect(w.container.starts).toHaveLength(1);
+    expect(w.facts).toEqual([]);
+    expect(w.run.resume!.facts).toEqual(before);
+    // The new configuration still renders on an unbound first attachment.
+    const fresh = world();
+    fresh.run.model = w.run.model;
+    fresh.run.card = w.run.card;
+    scriptedPi(fresh.container, (_n, c) => finalTurn(c, "continued on Responses"));
+    expect(await fresh.start()).toBe("continued on Responses");
+    const models = JSON.parse(fresh.container.files.get(`${paths.agentDir}/models.json`)!) as {
       providers: Record<string, { api: string }>;
     };
     expect(models.providers.switchboard.api).toBe("openai-responses");
-    expect(w.facts.at(-1)).toMatchObject({ wire: "openai-responses" });
-    expect(w.notes[0]).toContain("was configured for openai-chat while provider openai now declares openai-responses");
+    expect(fresh.facts.at(-1)).toMatchObject({ wire: "openai-responses" });
   });
 
   it.each([
     { recordedWire: undefined, expectedStarts: 1, case: "an absent wire re-attaches" },
-    { recordedWire: "openai-chat" as const, expectedStarts: 2, case: "a differing wire restarts" },
+    { recordedWire: "openai-chat" as const, expectedStarts: 1, case: "a differing wire retains custody" },
     { recordedWire: "anthropic-messages" as const, expectedStarts: 1, case: "a matching wire re-attaches" },
   ])("uses the recorded model wire compatibly: $case", async ({ recordedWire, expectedStarts }) => {
     const w = world();
@@ -3462,33 +3470,39 @@ describe("runPiHarness — after a bot restart", () => {
     });
     scriptedPi(w.container, (_n, c) => finalTurn(c, "continued on a compatible wire"));
 
-    expect(await w.start()).toBe("continued on a compatible wire");
-    expect(w.container.starts).toHaveLength(expectedStarts);
-    expect(w.facts.at(-1)).toMatchObject({ wire: "anthropic-messages" });
+    if (recordedWire !== undefined && recordedWire !== "anthropic-messages") {
+      await expect(w.open()).rejects.toBeInstanceOf(HarnessEndingUnconfirmedError);
+      expect(w.container.killed).toEqual([]);
+      expect(w.container.removed).toEqual([]);
+      expect(w.container.starts).toHaveLength(1);
+      expect(w.facts).toEqual([]);
+    } else {
+      expect(await w.start()).toBe("continued on a compatible wire");
+      expect(w.container.starts).toHaveLength(expectedStarts);
+      expect(w.facts.at(-1)).toMatchObject({ wire: "anthropic-messages" });
+    }
   });
 
-  it("a row whose facts carry no bearer hash cannot be re-attached: its pi is ended by pid and a fresh pi starts with this generation's bearer, the note saying why", async () => {
+  it("a row without an adoptable bearer retains original pi custody", async () => {
     const w = world();
     const theirs = piRunPathsAt("/tmp/switchboard-pi-worker2/run-7");
     await w.container.start({ paths: theirs, command: "pi", args: [], env: {} }); // alive and findable, holding a bearer nobody here can verify
     w.run.resume = resume({ pid: 4242, logOffset: 0, sessionFile: "s.jsonl", root: theirs.dir });
     scriptedPi(w.container, (_n, c) => finalTurn(c, "continued"));
-    expect(await w.start()).toBe("continued");
-    expect(w.container.killed).toEqual([4242, 4242]);
-    expect(w.container.starts).toHaveLength(2);
-    expect(w.container.starts[1].env[RUN_BEARER_ENV]).toBe(w.bearer);
-    expect(w.facts.at(-1)).toMatchObject({ pid: 4242, root: paths.dir, bearerHash: bearerHashOf(w.bearer) });
-    const notes = w.events.filter((e) => e.type === "run_note").map((e) => (e as { summary: string }).summary);
-    expect(notes[0]).toMatch(
-      /^resumed after a restart: the row carried no bearer this generation could honour for its pi \(pid 4242\), so it was ended and pi restarted on the mirrored transcript/,
-    );
+    const before = structuredClone(w.run.resume!.facts);
+    await expect(w.open()).rejects.toBeInstanceOf(HarnessEndingUnconfirmedError);
+    expect(w.container.killed).toEqual([]);
+    expect(w.container.removed).toEqual([]);
+    expect(w.container.starts).toHaveLength(1);
+    expect(w.facts).toEqual([]);
+    expect(w.run.resume!.facts).toEqual(before);
   });
 
   // The row's facts name the container pi runs in (harness-pi item 8): a run
   // handed another container (a per-thread sandbox recycled under the same
   // thread key, a pid reused) must not read its pi as dead, let alone end a
   // stranger's process at that pid. It is "pi is elsewhere": named, never probed.
-  it("a row whose facts name another container than the one this run was handed is 'pi is elsewhere': the pid is neither probed nor ended here, a fresh pi starts on the mirrored transcript, and the note names the orphan by pid and container", async () => {
+  it("foreign original pi custody is held without probing or replacing its process", async () => {
     const w = world();
     let probed = 0;
     const alive = w.container.alive.bind(w.container);
@@ -3503,16 +3517,14 @@ describe("runPiHarness — after a bot restart", () => {
       container: "vm-old",
     });
     scriptedPi(w.container, (_n, c) => finalTurn(c, "continued"));
-    expect(await w.start()).toBe("continued");
+    const before = structuredClone(w.run.resume!.facts);
+    await expect(w.open()).rejects.toBeInstanceOf(HarnessEndingUnconfirmedError);
+    expect(w.container.killed).toEqual([]);
+    expect(w.container.removed).toEqual([]);
+    expect(w.container.starts).toHaveLength(1);
+    expect(w.facts).toEqual([]);
+    expect(w.run.resume!.facts).toEqual(before);
     expect(probed).toBe(0);
-    expect(w.container.killed).toEqual([4242]); // the fresh pi's end alone, not the orphan's
-    expect(w.container.starts).toHaveLength(2);
-    expect(w.container.removed).toEqual([paths.dir]); // the orphan's root is not here to remove
-    expect(w.facts.at(-1)).toMatchObject({ pid: 4242, root: paths.dir, container: "vm-fake" });
-    const notes = w.events.filter((e) => e.type === "run_note").map((e) => (e as { summary: string }).summary);
-    expect(notes[0]).toMatch(
-      /^resumed after a restart: pi is elsewhere: the row's pi \(pid 4242\) ran in container vm-old, not the one this run was handed \(vm-fake\), so it was neither probed nor ended here, and pi restarted on the mirrored transcript — 1 call\(s\) were in flight/,
-    );
   });
 
   it("a row whose facts name this very container re-attaches as before, and a row from before the container was recorded is judged by its pid alone, the re-attach recording the container it found", async () => {
@@ -3545,7 +3557,7 @@ describe("runPiHarness — after a bot restart", () => {
     expect(legacy.facts.at(-1)).toMatchObject({ pid: 4242, container: "vm-fake" });
   });
 
-  it("a container that cannot name itself judges nothing: the row's pi is found by its pid as before", async () => {
+  it("a known original container requires current identity while legacy unbound facts retain observational compatibility", async () => {
     const w = world();
     w.container.vm = undefined;
     await w.container.start({ paths, command: "pi", args: [], env: {} });
@@ -3557,15 +3569,45 @@ describe("runPiHarness — after a bot restart", () => {
       bearerHash: bearerHashOf(w.bearer),
       container: "vm-old",
     });
-    scriptedPi(w.container, (_n, c) => finalTurn(c, "picked up where I left off"));
-    expect(await w.start()).toBe("picked up where I left off");
+    let probes = 0;
+    const alive = w.container.alive.bind(w.container);
+    w.container.alive = async (pid) => {
+      probes++;
+      return alive(pid);
+    };
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "must not continue peer"));
+    const before = structuredClone(w.run.resume!.facts);
+    await expect(w.open()).rejects.toBeInstanceOf(HarnessEndingUnconfirmedError);
+    expect(probes).toBe(0);
     expect(w.container.starts).toHaveLength(1);
-    expect(w.facts.at(-1)).toMatchObject({ pid: 4242, container: "vm-old" }); // the row's word stands
+    expect(w.container.killed).toEqual([]);
+    expect(w.container.removed).toEqual([]);
+    expect(w.facts).toEqual([]);
+    expect(w.steps).toEqual([]);
+    expect(w.run.resume!.facts).toEqual(before);
+
+    // Legacy no-container compatibility is observational, not placement/birth/capture proof.
+    const legacy = world();
+    legacy.container.vm = undefined;
+    await legacy.container.start({ paths, command: "pi", args: [], env: {} });
+    legacy.run.resume = resume({
+      pid: 4242,
+      logOffset: 0,
+      sessionFile: "s.jsonl",
+      root: paths.dir,
+      bearerHash: bearerHashOf(legacy.bearer),
+    });
+    scriptedPi(legacy.container, (_n, c) => finalTurn(c, "legacy continued"));
+    expect(await legacy.start()).toBe("legacy continued");
+    expect(legacy.container.starts).toHaveLength(1);
+    expect(legacy.facts.at(-1)).toMatchObject({ pid: 4242, root: paths.dir });
   });
 
-  it("restarts a dead pi on a session rebuilt from the mirrored transcript, the calls in flight answered with the restart note, and continues", async () => {
+  it("the explicit replacement protocol rebuilds the transcript and settles calls in flight before continuing", async () => {
     const w = world();
     w.run.resume = resume({ pid: 999, logOffset: 50 }); // a pid no longer alive
+    // Existing replacement-protocol projection; no physical stop/capture ACK.
+    w.run.resume!.relaunch = { from: "vm-old", to: "vm-fake" };
     scriptedPi(w.container, (_n, c) => {
       echoPrompt(c);
       finalTurn(c, "continued");
@@ -3591,7 +3633,7 @@ describe("runPiHarness — after a bot restart", () => {
       /^The bot restarted while this bash call was in flight/,
     );
     expect(w.events.filter((e) => e.type === "run_note").map((e) => (e as { summary: string }).summary)[0]).toMatch(
-      /^resumed after a restart: pi restarted on the mirrored transcript — 1 call\(s\) were in flight/,
+      /^relaunched after the container was replaced .*pi restarted .* — 1 call\(s\) were in flight/,
     );
     expect(w.steps.at(-1)?.inboxConsumedSeq).toBe(2);
     // A fresh pi is idle by construction: its continue is the plain prompt.
@@ -3626,12 +3668,14 @@ describe("runPiHarness — after a bot restart", () => {
   // docs/reference/specs/session-log.md item 6: the compaction rows the ledger
   // kept are rendered where they sat, so the restarted pi's window is the
   // summary and the turns after it, not the raw turns compacted again.
-  it("restarts pi on a session carrying the transcript's compaction entries where they sat", async () => {
+  it("the explicit replacement protocol preserves compaction entries at their original positions", async () => {
     const w = world();
     w.run.resume = {
       ...resume({ pid: 999, logOffset: 50 }),
       compactions: [{ before: 1, entry: { summary: "the user asked for the tests", tokensBefore: 120_000 } }],
     };
+    // Existing replacement-protocol projection; no physical stop/capture ACK.
+    w.run.resume!.relaunch = { from: "vm-old", to: "vm-fake" };
     scriptedPi(w.container, (n, c) => finalTurn(c, "continued"));
     await w.start();
     const [started] = w.container.starts;
@@ -6675,7 +6719,7 @@ describe("runPiHarness: the root the container makes", () => {
     expect(sessionPath).toMatch(new RegExp(`^${piRunPathsAt(started.paths.dir).sessionDir}/${stem}-\\d+\\.jsonl$`));
     return { root: started.paths.dir, header: JSON.parse(w.container.files.get(sessionPath)!.split("\n")[0]) };
   };
-  it("a dead pi on the bot host is restarted on a session whose working directory is the root this generation made, not the checkout and not the root the row recorded, which goes", async () => {
+  it("the explicit replacement protocol uses the current host root as session cwd and retains the prior root", async () => {
     const w = world({ container: new BotHostShapedContainer() });
     const previous = piRunPathsAt(`${paths.dir}-gen0`);
     w.run.resume = {
@@ -6689,13 +6733,15 @@ describe("runPiHarness: the root the container makes", () => {
       inboxConsumedSeq: 0,
       facts: piFacts({ pid: 999, logOffset: 50, root: previous.dir }),
     };
+    // Existing replacement-protocol projection; no physical stop/capture ACK.
+    w.run.resume!.relaunch = { from: "vm-old", to: "vm-fake" };
     scriptedPi(w.container, (_n, c) => finalTurn(c, "continued"));
     expect(await w.start()).toBe("continued");
     const resumed = header(w, "resumed");
     expect(resumed.root).toBe(`${paths.dir}-gen1`);
     expect(resumed.header).toMatchObject({ type: "session", version: 3, cwd: `${paths.dir}-gen1` });
     expect(resumed.header.cwd).not.toBe(w.run.rules.checkout);
-    expect(w.container.removed).toEqual([previous.dir, `${paths.dir}-gen1`]);
+    expect(w.container.removed).toEqual([`${paths.dir}-gen1`]);
   });
   it("a fresh run on the bot host with the thread's earlier turns starts on a seed session whose working directory is that root too", async () => {
     const w = world({ container: new BotHostShapedContainer() });
@@ -6720,6 +6766,8 @@ describe("runPiHarness: the root the container makes", () => {
       inboxConsumedSeq: 0,
       facts: piFacts({ pid: 999, logOffset: 50, root: paths.dir }),
     };
+    // Existing replacement-protocol projection; no physical stop/capture ACK.
+    w.run.resume!.relaunch = { from: "vm-old", to: "vm-fake" };
     scriptedPi(w.container, (_n, c) => finalTurn(c, "continued"));
     expect(await w.start()).toBe("continued");
     expect(header(w, "resumed").header).toMatchObject({ cwd: "/workspace/threads/t/main" });
@@ -7395,5 +7443,138 @@ describe("runPiHarness — the relaunch in the replacement container", () => {
       .map((e) => e.message as { toolCallId: string; isError: boolean; content: Array<{ text: string }> })
       .map((m) => ({ id: m.toolCallId, isError: m.isError, text: m.content[0]!.text }));
     expect(sessionResults).toEqual([{ id: "c1", isError: true, text: replacedCallNote("bash") }]);
+  });
+});
+
+describe("hosted Review originating lifecycle", () => {
+  it("cuts the original observed check before a late pending ACK permits dispatch", async () => {
+    const w = world({ agent: { name: "review", identity: "read", maxMinutes: 20 } });
+    const saved: CheckExecutionState[] = [];
+    let executions = 0;
+    const check = createCheckExecution({
+      owner: { runId: "run-7", requester: "u", threadKey: "t", repo: "acme/repo" },
+      executor: () => ({
+        execResult: async (command) => {
+          executions++;
+          return {
+            exitCode: 0,
+            stdout: command.startsWith("set -eu") ? `/work/repo\n${"a".repeat(40)}\n${"b".repeat(40)}\n` : "late",
+            stderr: "",
+            truncated: false,
+          };
+        },
+      }),
+      workspace: () => "/work/repo",
+      recordingAvailable: true,
+      authorizeCommand: () => true,
+      signal: w.control.hardSignal,
+      remainingMs: () => 20 * MINUTE_MS,
+      clock: () => w.clock.now,
+      save: async (state) => {
+        saved.push(structuredClone(state));
+        if (state.receipts[0]!.outcome.kind === "pending") {
+          w.clock.now = loopClock(NOW, 20 * MINUTE_MS, "review").loopEnd + 1;
+          while (!w.registry.get("run-7")?.toolsBlocked()) await new Promise<void>((r) => setImmediate(r));
+        }
+        return true;
+      },
+    });
+    w.run.commandPolicy = "hosted-review";
+    w.run.tools = [runCheckTool];
+    w.run.toolContext.checkExecution = check;
+    let relayed!: Promise<unknown>;
+    scriptedPi(w.container, (_n, c) => {
+      c.emit({
+        type: "tool_execution_start",
+        toolCallId: "native-check",
+        toolName: "run_check",
+        args: { command: "git status --short", purpose: "verification" },
+      });
+      w.registry.get("run-7")!.gateSaw("native-check");
+      relayed = runRelayedTool(w.registry.get("run-7")!, {
+        toolCallId: "native-check",
+        tool: "run_check",
+        input: { command: "git status --short", purpose: "verification" },
+      }).then((answer) => {
+        c.emit({
+          type: "tool_execution_end",
+          toolCallId: "native-check",
+          toolName: "run_check",
+          result: { content: answer.content },
+          isError: answer.isError,
+        });
+        finalTurn(c, "review ended");
+      });
+    });
+    const session = await w.open();
+    await relayed;
+    expect(executions).toBe(1);
+    expect(saved.at(-1)?.receipts[0]?.outcome).toEqual({ kind: "not_started", reason: "stopped" });
+    await session.end();
+  });
+  it("binds a fresh same-session follow-up check to that turn's narrower clock", async () => {
+    const w = world({ agent: { name: "review", identity: "read", maxMinutes: 20 } });
+    w.run.commandPolicy = "hosted-review";
+    w.run.tools = [runCheckTool];
+    const saved: CheckExecutionState[] = [];
+    const timeouts: number[] = [];
+    w.run.toolContext.checkExecution = createCheckExecution({
+      owner: { runId: "run-7", requester: "u", threadKey: "t", repo: "acme/repo" },
+      executor: () => ({
+        execResult: async (command, opts) => {
+          if (!command.startsWith("set -eu")) timeouts.push(opts!.timeoutMs!);
+          return {
+            exitCode: 0,
+            stdout: command.startsWith("set -eu") ? `/work/repo\n${"a".repeat(40)}\n${"b".repeat(40)}\n` : "done",
+            stderr: "",
+            truncated: false,
+          };
+        },
+      }),
+      workspace: () => "/work/repo",
+      recordingAvailable: true,
+      authorizeCommand: () => true,
+      signal: w.control.hardSignal,
+      remainingMs: () => 20 * MINUTE_MS,
+      clock: () => w.clock.now,
+      save: async (state) => {
+        saved.push(structuredClone(state));
+        return true;
+      },
+    });
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0) {
+        finalTurn(c, "first review");
+        return;
+      }
+      c.emit({
+        type: "tool_execution_start",
+        toolCallId: "fresh-check",
+        toolName: "run_check",
+        args: { command: "git status --short", purpose: "verification" },
+      });
+      w.registry.get("run-7")!.gateSaw("fresh-check");
+      void runRelayedTool(w.registry.get("run-7")!, {
+        toolCallId: "fresh-check",
+        tool: "run_check",
+        input: { command: "git status --short", purpose: "verification", timeoutMs: 5 * MINUTE_MS },
+      }).then((answer) => {
+        c.emit({
+          type: "tool_execution_end",
+          toolCallId: "fresh-check",
+          toolName: "run_check",
+          result: { content: answer.content },
+          isError: answer.isError,
+        });
+        finalTurn(c, "fresh review");
+      });
+    });
+    const session = await w.open();
+    await session.followUp({ text: "review new head", maxTurns: 5, maxMinutes: 2, toolContext: w.run.toolContext });
+    expect(timeouts).toHaveLength(1);
+    expect(timeouts[0]).toBeLessThanOrEqual(2 * MINUTE_MS);
+    expect(timeouts[0]).toBeGreaterThan(0);
+    expect(saved.at(-1)?.receipts[0]?.outcome.kind).toBe("completed");
+    await session.end();
   });
 });

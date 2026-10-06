@@ -1,3 +1,4 @@
+import type { HarnessCommandPolicy } from "../contract.js";
 // The OpenCode plugin a run's container loads (docs/reference/specs/harness.md
 // item 3; the relay clause), the sibling of pi's `extensionSource.ts`, as the
 // text the harness writes into the run's plugin directory before `opencode
@@ -24,10 +25,9 @@
 //
 // The bearer and the bot's URL come from the process environment the harness
 // started the server with (`SWITCHBOARD_RUN_BEARER`, `SWITCHBOARD_HARNESS_URL`);
-// nothing here holds a rule, a key or a decision. Shipped as a constant string
-// on purpose, like pi's extension: the file the container runs is exactly this
-// text, the tests import it from a file they write, and `tsc` carries it to
-// `dist/` like any constant.
+// the runner may render native-shell removal for its hosted Review policy.
+// The bot still decides each admitted call. The tests import the exact rendered
+// file; no plugin configuration or model text supplies this policy.
 
 /** The two reasons the plugin blocks a call with by itself, without a verdict
  *  from the bot — the same words pi's extension uses, so the record reads a
@@ -35,7 +35,8 @@
 export const OC_BLOCKED_AT_DOOR_PREFIX = "authorization refused at the door: ";
 export const OC_BLOCKED_UNAVAILABLE_PREFIX = "authorization unavailable: ";
 
-export const OPENCODE_PLUGIN_SOURCE = `// Switchboard's OpenCode plugin. Written into the run's plugin directory by the
+export function openCodePluginSource(commandPolicy?: HarnessCommandPolicy): string {
+  return `// Switchboard's OpenCode plugin. Written into the run's plugin directory by the
 // bot before \`opencode serve\` starts; loaded as \`./plugins/switchboard\`'s
 // \`index.js\`. Imports nothing.
 
@@ -210,6 +211,7 @@ export default {
     const { json } = await call("GET", "/harness/tools");
     const tools = (json && json.tools) || [];
     await ctx.tool.transform((editor) => {
+      ${commandPolicy === "hosted-review" ? 'editor.remove("shell");' : ""}
       for (const def of tools) editor.add(relayTool(def));
     });
     // The seam the harness watches for a call OpenCode is about to run; the gate
@@ -218,3 +220,6 @@ export default {
   },
 };
 `;
+}
+
+export const OPENCODE_PLUGIN_SOURCE = openCodePluginSource();

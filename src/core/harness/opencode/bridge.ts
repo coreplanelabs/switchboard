@@ -1,3 +1,7 @@
+import { RUN_DEADLINE_RESERVE_MS } from "../../../execution/bashTimeout.js";
+import { OP_TIMEOUT_MS } from "../container.js";
+import type { LiveHarness } from "../pi/relay.js";
+import type { HarnessCommandPolicy } from "../contract.js";
 // The OpenCode bridge (docs/reference/specs/harness.md items 2 and 4): the gate
 // and the record for the OpenCode harness. It reads the run's feed — the JSONL
 // the in-container tailer writes and the harness reads through pi's log
@@ -399,6 +403,7 @@ export function judgeOpenCodeAsk(
   rules: ToolRuleContext,
   relayedToolNames: ReadonlySet<string>,
   callId?: string,
+  commandPolicy?: HarnessCommandPolicy,
 ): { reply: "once" | "reject"; message?: string; tool: string } {
   // OpenCode's repeat guard: the same call, made over and over with the same
   // input whatever it returned, and the server asks whether to go on. The gate
@@ -419,6 +424,8 @@ export function judgeOpenCodeAsk(
   const tool = TOOL_NAME_WORD[action] ?? word;
   const pending = publicationAttributionRefusal(rules, callId);
   if (pending !== undefined) return { reply: "reject", message: pending, tool };
+  if (commandPolicy === "hosted-review" && word === "bash")
+    return { reply: "reject", tool, message: "This review runs commands through recorded checks." };
   if (relayedToolNames.has(action) || relayedToolNames.has(word)) return { reply: "once", tool: action };
   const refuse = (reason: string) => ({ reply: "reject" as const, message: reason, tool });
 
@@ -454,6 +461,7 @@ export interface OpenCodeBridgeDeps {
   rules: ToolRuleContext;
   /** The tools the bot relays to the run: allowed by name at the ask. */
   relayedToolNames: ReadonlySet<string>;
+  commandPolicy?: HarnessCommandPolicy;
   onStep?: (report: StepReport) => Promise<void>;
   /** The ledger rows the transcript holds before the first step (the seed). */
   seedLength: number;
@@ -496,7 +504,7 @@ export class OpenCodeBridge {
   /** callId → the tool name the model gave it (from `session.tool.input.started`). */
   private readonly toolNames = new Map<string, string>();
   /** The open calls' spans, by callId. */
-  private readonly openTools = new Map<string, { span: Span | undefined; tool: string }>();
+  private readonly openTools = new Map<string, { span: Span | undefined; tool: string; cancel: AbortController }>();
   /** The calls whose `tool_call` line is on the record (`openCall`), open or
    *  settled since: what a later ask cannot amend. A call the stream only named
    *  (`toolNames`, from `session.tool.input.started`) has no line yet. */
@@ -767,11 +775,25 @@ export class OpenCodeBridge {
     return [...this.store.keys()];
   }
 
+  callOpen(callId: string): boolean {
+    return this.openTools.has(callId);
+  }
+
+  checkSignal(callId: string): AbortSignal | undefined {
+    const open = this.openTools.get(callId);
+    return open?.tool === "run_check" ? open.cancel.signal : undefined;
+  }
+
+  cancelChecks(): void {
+    for (const open of this.openTools.values()) if (open.tool === "run_check") open.cancel.abort();
+  }
+
   /** The loop-end interrupt has landed: every call still open is cut by it,
    *  not settled — its settle, whenever the server sends it (the interrupted
    *  execution's tail lands only with the next queued prompt), is marked `cut`
    *  (harness.md item 13). */
   markOpenCallsCut(): void {
+    this.cancelChecks();
     for (const callId of this.openTools.keys()) this.cutCalls.add(callId);
   }
 
@@ -779,6 +801,7 @@ export class OpenCodeBridge {
    *  cut's, not the loop's settle, and the step open now is the cut's step
    *  (`cutInterrupt`, `cutSteps`). */
   cutInterruptPosted(): void {
+    this.cancelChecks();
     this.cutInterrupt = true;
     this.cutLanded = false;
     if (this.currentStep !== undefined) this.cutSteps.add(this.currentStep);
@@ -821,6 +844,7 @@ export class OpenCodeBridge {
    *  command may still be running (harness.md item 13). */
   closeOpenSpans(reason: (open: { callId: string; tool: string }) => string, opts: { cut?: boolean } = {}): void {
     for (const [callId, open] of this.openTools) {
+      open.cancel.abort();
       open.span?.end("error", { callId, ok: false });
       this.emit({
         type: "tool_result",
@@ -1251,7 +1275,7 @@ export class OpenCodeBridge {
   private openCall(callId: string, name: string, input: Record<string, unknown> | undefined): void {
     const tool = openCodeToolNameWord(name);
     const span = this.deps.agentSpan?.start(`tool.${tool}`);
-    this.openTools.set(callId, { span, tool });
+    this.openTools.set(callId, { span, tool, cancel: new AbortController() });
     this.announced.add(callId);
     this.toolCalls++;
     if (this.pendingNarration) {
@@ -1323,6 +1347,7 @@ export class OpenCodeBridge {
       this.openCall(callId, named ?? first.action, foldInputs(held, undefined));
     }
     const open = this.openTools.get(callId);
+    open?.cancel.abort();
     this.openTools.delete(callId);
     // A tool failing `aborted` under a cut interrupt in flight or landed is the
     // interrupt's own doing (the measured shape of an ask pending at it: the
@@ -1575,6 +1600,7 @@ export class OpenCodeBridge {
       this.deps.rules,
       this.deps.relayedToolNames,
       callId,
+      this.deps.commandPolicy,
     );
     // One decision per call, the strictest standing: a refusal is never lifted
     // by a later allowance (the tool's own ask after the repeat guard's), so a
@@ -1981,6 +2007,8 @@ export function openCodePromptText(messages: readonly ChatMessage[]): string {
  *  is and where its writes go (the container seam, the port, the password), the
  *  session the conversation drives, and the feed byte to read from. */
 export interface OpenCodeConnection {
+  /** Original relay registration; each drive binds its own native call lifecycle. */
+  relay?: LiveHarness;
   container: HarnessContainer;
   paths: OpenCodeRunPaths;
   port: number;
@@ -2183,6 +2211,12 @@ export async function driveOpenCode(
   );
   const lease = loopClock(startedAt, remainingMs, run.agent.name, kind);
   const { deadline, loopEnd, warnAt } = lease;
+  /** The loop has left: a request that fails on its transport now was cut by
+   *  the caller's end of the process — that end's own effect, not the record's.
+   *  An answer the server gives is its word whenever it comes, noted to the
+   *  record alone — the card is closed. */
+  let left = false;
+  const pollMs = deps.pollMs ?? 250;
   const emit = (event: RunEvent) => run.onEvent?.(event.at === undefined ? { ...event, at: now() } : event);
   if (kind === "loop") {
     deps.bearers?.leaseStarted(run.runId, deadline);
@@ -2202,6 +2236,7 @@ export async function driveOpenCode(
     ...(agentSpan ? { agentSpan } : {}),
     rules: { ...run.rules, identity: run.agent.identity },
     relayedToolNames: new Set(run.tools.map((t) => t.name)),
+    ...(run.commandPolicy ? { commandPolicy: run.commandPolicy } : {}),
     ...(run.onStep ? { onStep: run.onStep } : {}),
     // The mirror skips the seed's rows: a fresh run's is the thread's turns plus
     // the request (`run.messages`); a rebuild's is the record it imported (its
@@ -2218,6 +2253,22 @@ export async function driveOpenCode(
     remainingMs: () => deadline - now(),
     textFailing: new Set(run.tools.filter((t) => t.failsInText).map((t) => t.name)),
   });
+  if (conn.relay && run.commandPolicy === "hosted-review") {
+    conn.relay.checkControl = (callId) => {
+      const signal = bridge.checkSignal(callId);
+      return signal
+        ? {
+            signal,
+            remainingMs: () => Math.min(deadline - now(), loopEnd - now() + RUN_DEADLINE_RESERVE_MS),
+          }
+        : undefined;
+    };
+    conn.relay.callSeen = async (callId) => {
+      const bound = AbortSignal.timeout(OP_TIMEOUT_MS);
+      while (!bridge.callOpen(callId) && !left && !bound.aborted && !run.control?.hardSignal.aborted)
+        await deps.sleep(pollMs);
+    };
+  }
   bridge.startFromTurn(run.resume?.turn ?? 0);
   // A rebuild starts on the settlement turn: each call in flight at the death a
   // tool result carrying its note, primed as the ledger's first step's user
@@ -2258,7 +2309,7 @@ export async function driveOpenCode(
     container: conn.container,
     paths: { ...conn.paths.tailer, log: conn.paths.feed },
     pid: conn.tailerPid,
-    pollMs: deps.pollMs ?? 250,
+    pollMs,
     sleep: deps.sleep,
     offset: conn.feedOffset,
   });
@@ -2312,11 +2363,6 @@ export async function driveOpenCode(
    *  wind-down's write-up; a hard stop that follows writes its own note, so the
    *  record shows both operator actions. */
   let softNoted = false;
-  /** The loop has left: a request that fails on its transport now was cut by
-   *  the caller's end of the process — that end's own effect, not the record's.
-   *  An answer the server gives is its word whenever it comes, noted to the
-   *  record alone — the card is closed. */
-  let left = false;
   /** The execution the loop drives has begun: set by the server's own
    *  `session.execution.started` for the session after the prompt (the record
    *  that also lifts the first-event bound), or from the start on a re-attach
@@ -3302,6 +3348,7 @@ export async function driveOpenCode(
       check();
     }
   } finally {
+    bridge.cancelChecks();
     left = true;
     conn.boundaries?.left();
     // Any steer still waiting for inbox delivery (`inboxFate.wait`) is unblocked

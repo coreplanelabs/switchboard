@@ -13,6 +13,7 @@ import type { ModelCard } from "../../modelCard.js";
 import { billerHarnessProvider, WIRE_ALIASES, type ProviderConfig, type Wire } from "../../provider.js";
 import type { PiCompactionConfig } from "../../../config.js";
 import type { HarnessPaths, HarnessStart } from "../container.js";
+import type { HarnessCommandPolicy } from "../contract.js";
 import { PI_EXTENSION_SOURCE } from "./extensionSource.js";
 
 /** The program the container starts: pi on the container's PATH. */
@@ -135,6 +136,7 @@ export interface PiLaunchSpec {
   /** The preset's identity: it decides which of pi's own tools the allowlist
    *  carries and what the harness note says of them. */
   identity: Identity;
+  commandPolicy?: HarnessCommandPolicy;
   /** The composed system prompt the dispatcher would hand the native loop. */
   system: string;
   /** Public runner-owned values inherited by pi and its shell. */
@@ -180,7 +182,10 @@ export function piLaunchArgs(spec: PiLaunchSpec): string[] {
     "-e",
     spec.paths.extension,
     "--tools",
-    [...piBuiltinToolsFor(spec.identity), ...spec.relayTools].join(","),
+    [
+      ...piBuiltinToolsFor(spec.identity).filter((tool) => spec.commandPolicy !== "hosted-review" || tool !== "bash"),
+      ...spec.relayTools,
+    ].join(","),
     "--provider",
     PROXY_PROVIDER,
     "--model",
@@ -352,7 +357,11 @@ export function piModelsJson(spec: PiLaunchSpec): string {
  *  names neither is not contradicted and one that did would be; a run without
  *  a workspace is told it has none of pi's own tools, and no native name is
  *  mapped onto one. */
-export function harnessPromptNote(relayTools: readonly string[], identity: Identity): string {
+export function harnessPromptNote(
+  relayTools: readonly string[],
+  identity: Identity,
+  commandPolicy?: HarnessCommandPolicy,
+): string {
   const named = relayTools.map((t) => `\`${t}\``).join(", ");
   if (identity === "none") {
     return [
@@ -362,6 +371,14 @@ export function harnessPromptNote(relayTools: readonly string[], identity: Ident
         : "No tools are available in this run.",
     ].join(" ");
   }
+  if (commandPolicy === "hosted-review")
+    return (
+      "HARNESS NOTE: this review uses `read`, `grep`, `find` and `ls` for workspace reads. Native `bash` is unavailable." +
+      (relayTools.includes("run_check")
+        ? " Use `run_check` for recorded commands."
+        : " Recorded commands are unavailable for this run.") +
+      (relayTools.length > 0 ? ` Other tools: ${named}.` : "")
+    );
   const write = identity === "write";
   return [
     write
@@ -379,7 +396,7 @@ export function harnessPromptNote(relayTools: readonly string[], identity: Ident
 /** The run's system prompt as pi reads it from `SYSTEM.md`: the dispatcher's
  *  composed prompt, then the harness note. */
 export function piSystemPrompt(spec: PiLaunchSpec): string {
-  return `${spec.system.trimEnd()}\n\n${harnessPromptNote(spec.relayTools, spec.identity)}\n`;
+  return `${spec.system.trimEnd()}\n\n${harnessPromptNote(spec.relayTools, spec.identity, spec.commandPolicy)}\n`;
 }
 
 /** What pi's settings prepend to every bash command (`shellCommandPrefix`),
