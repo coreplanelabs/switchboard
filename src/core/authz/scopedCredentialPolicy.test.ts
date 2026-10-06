@@ -6,10 +6,11 @@ import { predicateFor, matchesPredicate } from "./predicate.js";
 import { attributesOf } from "./resource.js";
 import { isRunVisibilityFilter, matchesVisibility, toVisibilityFilter } from "../runRecord.js";
 import { ALL_GRANTS, grantsFor } from "./grants.js";
+import { holdsAll } from "./viewAs.js";
 import type { Actor, Grants, RepoAccess, Resource } from "./types.js";
 
 // Feature: docs/reference/specs/authorization.md — Credential scope proof.
-function config(restricted = false): ConfigStore {
+function config(restricted = false, extraGrants = ""): ConfigStore {
   const validated = parseAppConfigText(`
 organization: acme
 providers:
@@ -25,9 +26,10 @@ grants:
   "http:fixture":
     actions: [dispatch, agent:run:general, agent:run:explore, agent:run:review]
     channels: ["http:fixture"]
-    repos: ["Acme/Fixture"]
+    codeRepos: ["Acme/Fixture"]
   "slack:UADMIN": { actions: all, channels: all, repos: all }
   "slack:UDEV": { actions: [agent:run:coding], repos: ["Acme/Closed"] }
+${extraGrants}
 ${restricted ? 'restrict:\n  agents: [coding]\n  repos: ["Acme/Closed"]' : ""}
 `);
   return new ConfigStore({ validated }, { backing: new InMemoryOverridesBacking(), initial: undefined });
@@ -55,9 +57,54 @@ describe("compiled credential authority", () => {
     expect(s.canUseRepo(service, "ACME/FIXTURE")).toBe(true);
     for (const action of ["memory:read", "memory:write"]) {
       expect(authorize(service, action, memory("acme/customer")).allow).toBe(false);
+      expect(authorize(service, action, memory("acme/fixture")).allow).toBe(false);
     }
     expect(s.canRunAgent("http:unlisted", "general")).toBe(false);
     expect(s.canUseRepo("http:unlisted", "acme/fixture")).toBe(false);
+  });
+
+  it("explicit codeRepos grants code without repo memory, supports empty ceilings and rejects config complements", () => {
+    const s = config(
+      false,
+      `
+  "http:operator": { actions: [agent:run:general, agent:run:coding], codeRepos: all }
+  "mcp:operator": { actions: [agent:run:review, repo:exec], codeRepos: ["Acme/Code"], repos: ["Acme/Memory"] }
+  "http:memory-owner": { actions: all, channels: all, repos: all, codeRepos: [] }
+`,
+    );
+    const operator = actor(s, "http", "operator");
+    expect(s.canRunAgent(operator, "coding")).toBe(true);
+    expect(s.canUseRepo(operator, "acme/customer")).toBe(true);
+    for (const action of ["memory:read", "memory:write"]) {
+      expect(authorize(operator, action, memory("acme/customer")).allow).toBe(false);
+    }
+    const scoped = resolveActor({ surface: "mcp", subjectId: "operator" }, (id) => s.grantsFor(id));
+    expect(s.canUseRepo(scoped, "ACME/CODE")).toBe(true);
+    expect(s.canUseRepo(scoped, "acme/memory")).toBe(false);
+    expect(s.canUseRepo(scoped, "acme/customer")).toBe(false);
+    expect(authorize(scoped, "repo:exec", repo("acme/code")).allow).toBe(true);
+    expect(authorize(scoped, "repo:exec", repo("acme/memory")).allow).toBe(false);
+    expect(authorize(scoped, "memory:read", memory("acme/memory")).allow).toBe(true);
+    expect(authorize(scoped, "memory:write", memory("acme/code")).allow).toBe(false);
+    const owner = actor(s, "http", "memory-owner");
+    expect(s.canUseRepo(owner, "acme/customer")).toBe(false);
+    expect(authorize(owner, "repo:exec", repo("acme/customer")).allow).toBe(false);
+    expect(holdsAll(owner)).toBe(false);
+    expect(authorize(owner, "memory:read", memory("acme/customer")).allow).toBe(true);
+    const bound = chatActorOf(s, {
+      userId: "slack:UADMIN",
+      authenticatedAs: scoped.id,
+      channelId: "mcp:operator",
+      threadKey: "mcp:operator:1",
+    });
+    const delegated: Actor = { ...operator, kind: "agent", onBehalfOf: scoped };
+    for (const caller of [bound, delegated]) {
+      expect(s.canUseRepo(caller, "acme/customer")).toBe(false);
+      expect(s.canUseRepo(caller, "acme/code")).toBe(true);
+      expect(authorize(caller, "memory:read", memory("acme/customer")).allow).toBe(false);
+    }
+    expect(() => config(false, '  "http:bad": { codeRepos: { except: ["acme/customer"] } }')).toThrow(/codeRepos/);
+    expect(() => config(false, '  "http:bad": { codeRepos: ["not-a-slug"] }')).toThrow(/codeRepos/);
   });
 
   it("human open and restricted defaults preserve memory ownership and admin and CLI authority", () => {

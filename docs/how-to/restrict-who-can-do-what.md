@@ -40,7 +40,7 @@ grants:
     actions: [agent:run:coding]         # … and the grant
 ```
 
-Checked when the run starts, against the resolved agent; unlisted agents stay open.
+Checked when the run starts, against the resolved agent; unlisted agents stay open to humans. Credentials and jobs need explicit agent grants.
 
 ## Close a repository
 
@@ -52,7 +52,7 @@ grants:
     repos: [acme/payments]              # … on the `repos` axis
 ```
 
-Unlisted repositories stay open; slugs are case-insensitive.
+Unlisted code repositories stay open to humans; credentials and jobs use only granted repositories. Slugs are case-insensitive. Open code access does not grant repository memory ownership.
 
 ## Cap what a channel's runs may have
 
@@ -102,11 +102,12 @@ grants:
     actions: [runs:read, runs:write, friction:read]
     channels: all
   http:ci:                              # ingress token subject (`mcp:ci` over MCP)
-    actions: [dispatch, runs:read]
+    actions: [dispatch, runs:read, agent:run:review]
+    codeRepos: [acme/payments]            # code access; no repo memory ownership
 ```
 
 - An Access sign-in holds every group's `read`; writes need a grant.
-- Service and ingress tokens hold exactly their entry; unlisted ones cannot `dispatch`. `SWITCHBOARD_INGRESS_TOKENS` only identifies.
+- Service and ingress tokens hold exactly their entry, including agent actions and repositories; `dispatch` alone grants neither. Unlisted ones cannot `dispatch`. `SWITCHBOARD_INGRESS_TOKENS` only identifies.
 
 ## Check it
 
@@ -132,7 +133,7 @@ grants:
     repos: [acme/payments]
 ```
 
-Everything unnamed stays open: `review`, `research`, `explore`, `conductor`, `general`, other repositories. Add a `boundary` under a channel to cap what even the granted may have there. `conductor` starts child runs as the person who asked — each child passes these same gates as that person, so it grants nothing they lack — and the example config lists it under `restrict.agents` for a deployment that wants fan-out closed by default: uncomment one line.
+For humans, everything unnamed stays open: `review`, `research`, `explore`, `conductor`, `general`, other repositories. Add a `boundary` under a channel to cap what even the granted may have there. `conductor` starts child runs as the person who asked — each child passes these same gates as that person, so it grants nothing they lack — and the example config lists it under `restrict.agents` for a deployment that wants fan-out closed by default: uncomment one line.
 
 ## Next
 

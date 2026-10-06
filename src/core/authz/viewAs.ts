@@ -1,3 +1,4 @@
+import { allRepos, repoAccessOf } from "./grantSets.js";
 import type { Actor } from "./types.js";
 
 // Viewing as a person (docs/decisions/0053-viewing-as-a-person-borrows-their-ceiling-and-keeps-your-name-on-the-line.md):
@@ -9,7 +10,12 @@ import type { Actor } from "./types.js";
 /** Whether a session may view as another person: it holds `all` on every axis of its OWN
  *  grants (the admin's, never the effective ones — an admin already viewing still holds them). */
 export function holdsAll(actor: Actor): boolean {
-  return actor.grants.actions === "all" && actor.grants.channels === "all" && actor.grants.repos === "all";
+  return (
+    actor.grants.actions === "all" &&
+    actor.grants.channels === "all" &&
+    actor.grants.repos === "all" &&
+    allRepos(repoAccessOf(actor.grants))
+  );
 }
 
 /** A person a session may view as: a Slack person id, the one kind the directory knows. */

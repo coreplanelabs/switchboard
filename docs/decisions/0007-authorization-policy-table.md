@@ -54,3 +54,14 @@ Code access needs a distinct compiled repo axis: the existing explicit `repos` a
 The table adds the `repo-access` condition for `repo:use`; `owner-of` retains explicit ownership for repo memory and repo execution. The condition compiles to `repos-in` or bounded `repos-not-in`. A complement never matches a missing repo. Reference, wire and SQLite evaluators share those semantics; unknown filter kinds are rejected. Existing run-read rows do not emit complements, so their stored filters retain their prior shape.
 
 Rejected alternatives: widening ownership would change memory access; a user-kind or root-principal shortcut would exceed a bound credential or mixed delegation ceiling; closing global production resources would move credential safety into deployment configuration. The cost is finite-complement arithmetic in the existing model and one bounded store predicate, rather than a second policy mechanism. Regression proofs cover parsed credential scope, human defaults, bound admins, relays, nested delegation, memory ownership and SQLite parity.
+
+
+## Amended 2026-10-05 — Declare code access independently of memory ownership
+
+**Re-evaluation:** the compiled separation above fixed the credential bypass, but the three-axis config could not preserve an operator's previous code access without granting additional repo memory ownership. Adding `repos: all` would change that ownership. A permanent configuration must state these independent rights directly.
+
+The existing grant shape gains optional `codeRepos`, a literal owner/name list or explicit `all`. When absent it inherits `repos`, preserving existing entries. When present it declares code access independently of repo memory ownership; an empty list grants none beyond the human baseline. Raw complements are rejected. Operators can keep `repos` absent, set `codeRepos: all`, and list each intended agent action explicitly so future agents remain closed. Both finite lists and delegated scopes are normalized and intersected by the existing compiled model.
+
+The existing `repo:exec` row requires its action grant and code access, while `owner-of` retains repo memory ownership. An actor claiming all rights must cover code access as well. Point and predicate evaluation continue to use the same compiled code axis and store vocabulary.
+
+Resource-scoped action aliases were rejected because they overload action wildcard semantics instead of stating the independent resource scope. Borrowing a human baseline or widening ownership would change authority. No new policy table, controller or adapter exception is introduced. Parsed-config tests cover independent code/memory scopes, omitted legacy fields, empty code ceilings, mixed delegation and rejected complements; an offline operator migration matrix verifies existing code access with memory still denied.

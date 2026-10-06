@@ -39,6 +39,10 @@ export function repoAccessOf(grants: Grants): RepoAccess {
 function isComplement(access: RepoAccess): access is { readonly except: ReadonlySet<string> } {
   return typeof access === "object" && "except" in access;
 }
+/** Whether compiled code access covers every repo. An empty exclusion is universal. */
+export function allRepos(access: RepoAccess): boolean {
+  return access === "all" || (isComplement(access) && access.except.size === 0);
+}
 export function holdsRepo(access: RepoAccess, repo: string): boolean {
   const lower = repo.toLowerCase();
   if (access === "all") return true;

@@ -24,13 +24,14 @@ grants:
     channels: [mcp:ops]
 ```
 
-Keyed by platform-namespaced actor id. Three axes, each a list of names or the explicit word `all`; an **absent axis is the empty set**. `all` is never a default.
+Keyed by platform-namespaced actor id. Four axes, each a list of names or the explicit word `all`. Absent `actions`, `channels` and `repos` are empty; omitted `codeRepos` inherits `repos`. `all` is never a default.
 
 | Axis | Names | Decides |
 |---|---|---|
 | `actions` | `<group>:read` / `<group>:write` / `<group>:exec` for every command group (`runs`, `friction`, `repo`, `config`, `memory`, `mcp`, `schedule`, `deploy`, `env`, `setup`, `help`), `agent:run:<name>`, `dispatch`, `deploy:write` | which commands and agents the actor may run |
 | `channels` | channel ids (`slack:C…`, `http:<name>`, `mcp:<name>`) | whose runs the actor may read beyond the public ones |
-| `repos` | `owner/name` slugs (case-insensitive) | which repos a credential may use and whose repo memory it owns; adds to human code access |
+| `repos` | `owner/name` slugs (case-insensitive) | explicit repository memory ownership; also code access when `codeRepos` is omitted |
+| `codeRepos` | `owner/name` slugs (case-insensitive), or `all` | code access independent of repo memory ownership; an explicit empty list grants no code access beyond the human baseline |
 
 ### Baselines — what an id holds listed or not
 
@@ -55,7 +56,7 @@ grants:
     actions: [runs:read]
 ```
 
-A key `slack:*`, `http:*`, `mcp:*` or `access:*` is a **surface entry**; `mcp:personal:*` is a separate family for browser-approved personal credentials: the same three axes, held by every actor that authenticated on that surface. Who may authenticate there is decided elsewhere (Access admits the org, Slack the workspace, the token maps the credentials), so the set is one an operator already trusts. An actor's grants are the **union** of its own entry (or its baseline) and its surface entry — a person listed for extra rights keeps what everyone holds, and a personal entry never narrows the surface entry. `access:*` is browser sign-ins only: an `access:svc:` service token is a named credential and holds exactly its own entry. A surface entry is not an actor.
+A key `slack:*`, `http:*`, `mcp:*` or `access:*` is a **surface entry**; `mcp:personal:*` is a separate family for browser-approved personal credentials: the same four axes, held by every actor that authenticated on that surface. Who may authenticate there is decided elsewhere (Access admits the org, Slack the workspace, the token maps the credentials), so the set is one an operator already trusts. An actor's grants are the **union** of its own entry (or its baseline) and its surface entry — a person listed for extra rights keeps what everyone holds, and a personal entry never narrows the surface entry. `access:*` is browser sign-ins only: an `access:svc:` service token is a named credential and holds exactly its own entry. A surface entry is not an actor.
 
 Never a baseline, held only by a grant (or `all`): `config:write` (`config set/clear/instructions channel`, a channel's MCP servers), `repo:write` (`repo onboard/offboard/reconfigure/rebuild`, `friction propose`, forgetting shared memories, org-wide MCP servers), every `runs:*` action, every `*:exec`, `dispatch`, `deploy:write` (the restart, the crash injection, and a probe bearer for the model proxy, `POST /admin/model-proxy/bearer`), `trace:read` (the bot's span log, `GET /admin/trace/log`). **No entry with `actions: all` means nobody is an admin** — the fail-closed default.
 
@@ -70,10 +71,10 @@ The load fails, naming the entry and field, on an unknown id prefix (`slack:`, `
 ```yaml
 restrict:
   agents: [coding, ship]            # run only for actors granted agent:run:<name> (or `all`)
-  repos: [acme/payments]            # used only by actors whose `repos` axis names it (or `all`)
+  repos: [acme/payments]            # requires compiled code access (codeRepos, or the repos fallback)
 ```
 
-Both lists are optional and independent. An agent or repo **not** listed is open to everyone who can reach the bot; a listed one is closed to everyone whose grants do not cover it — admins pass through `all`. Restricting never takes a grant away from anyone, and granting never restricts anyone else: the lock and the key are separate keys, so a config reads exactly as it is enforced.
+Both lists are optional and independent. An agent or code repo **not** listed is open through human namespace baselines; credentials and jobs always need explicit grants; a listed code repo requires compiled code access (`codeRepos` when present, otherwise `repos`, with additive human/surface grants and separate delegation intersections) — admins pass through `all`. Restricting never takes a grant away from anyone, and granting never restricts anyone else: the lock and the key are separate keys, so a config reads exactly as it is enforced.
 
 - `restrict.agents` must name registered agents (`general`, `research`, `review`, `coding`, `ship`); an unknown name fails the load rather than restricting nothing silently.
 - `restrict.repos` must be `owner/name` slugs; comparison is case-insensitive on both sides.
@@ -90,9 +91,8 @@ Both lists are optional and independent. An agent or repo **not** listed is open
 - [Explanation: execution and trust](../explanation/execution-and-trust.md) — why `repo:write` in particular is never a baseline.
 - [Spec: authorization](specs/authorization.md) — the policy table, the actor model, and the proofs.
 
-
 ## Migrating scoped credentials
 
-Before deploying the scope fix, grant each HTTP/MCP/service or schedule actor the agent actions and repos it is intended to use. `dispatch` admits a request at ingress; it does not grant an agent or repository. For example, a review credential needs `actions: [dispatch, agent:run:review]` and `repos: [acme/payments]`. A credential bound to a person keeps this ceiling, including when the person is an admin. Registry-only, plan-runner and deployment credentials keep their existing command grants.
+Before deploying the scope fix, grant each HTTP/MCP/service or schedule actor the agent actions and repos it is intended to use. `dispatch` admits a request at ingress; it does not grant an agent or repository. For example, a review credential needs `actions: [dispatch, agent:run:review]` and `codeRepos: [acme/payments]`. Leave `repos` absent to preserve its lack of repo memory rights. Use `codeRepos: all` for an operator intended to use every code repo; name each intended agent explicitly, so future agents stay closed. A credential bound to a person keeps this ceiling, including when the person is an admin. Registry-only, plan-runner and deployment credentials keep their existing command grants.
 
 Human open code access is compiled independently of explicit repo memory ownership. Neither a human open default nor a delegated human identity grants a credential additional repo memory access. Code and memory grants intersect separately through nested delegation.

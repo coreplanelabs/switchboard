@@ -24,16 +24,16 @@ import type { RunnableTool } from "./runnableTool.js";
 // Reads are `sideEffectFree` (the runner may run several from one turn
 // concurrently); the issue writes are not, and each one is gated by
 // `ctx.github.canWrite(repo)` — the caller's per-repo permission
-// (`restrict.repos` + the `repos` grant, open unless restricted), resolved by the dispatcher for
-// the requesting user, so a tool can never write to a repo the user may not use.
+// (compiled human defaults or explicit credential grants), resolved by the
+// dispatcher for the requesting actor, so a tool never exceeds that actor's code access.
 // Tools return strings for errors — never throw — so the model can recover in
 // budget; a 404 is worded as what it usually is: a repo outside the App
 // installation, or a path/number that does not exist.
 
-/** What the dispatcher injects: the API and the requesting user's write gate. */
+/** What the dispatcher injects: the API and the resolved actor's write gate. */
 export interface GithubCapability {
   api: GithubApi;
-  /** True when the requesting user may write to `repo` (`canUseRepo`: open unless `restrict.repos` names it). */
+  /** True when the resolved actor holds code access to `repo` (`canUseRepo`). */
   canWrite(repo: string): boolean;
   /** Fresh requester and publication scoped list for the main conversation. Absent means no main-agent GitHub reads. */
   readableRepos?: (repos?: readonly string[]) => Promise<InstallationRepo[]>;
