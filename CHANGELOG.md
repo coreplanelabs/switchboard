@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.287.4](https://github.com/coreplanelabs/switchboard/compare/v1.287.3...v1.287.4) (2026-10-06)
+
+
+### Bug fixes
+
+* **runs:** retain intake experiment telemetry in production ([5232c21](https://github.com/coreplanelabs/switchboard/commit/5232c2164b6c3332e870b419e7e538c38262614e))
+
 ## [1.287.3](https://github.com/coreplanelabs/switchboard/compare/v1.287.2...v1.287.3) (2026-10-06)
 
 
