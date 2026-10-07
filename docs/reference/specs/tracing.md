@@ -38,6 +38,10 @@ One measurement primitive, a span, records every unit of work Switchboard does â
 ## Validation criteria
 
 | Criterion | Proof |
+| --- | --- |
+| A state-write failure root retains its original private exception and adds only the exact wire digest, closed failing stage and HTTP500. The diagnostic response contains no exception or request bytes and proves no mutation acknowledgment. | `[unit]` `deploy/cloudflare-memory/runLedger.test.ts::state-write holds across Durable Object RPC::binds bounded*` |
+
+| Criterion | Proof |
 |---|---|
 | 3: `slack.receive` records the raw event file count and canonical resolved file count as numeric attributes so a missing attachment can be distinguished from a text-only request | `[unit]` `src/core/trace/streamSpans.test.ts::attrs::validates domains and identifier shapes; unknown keys and free text are refused`; `src/channels/slack.test.ts::receiveSlackMessage â€” the intake gate (docs/reference/specs/slack-channel.md item 15)::an app mention missing file metadata reads its exact Slack message before the operator sees the request` |
 | 1: `span(fn)` invokes `fn` synchronously, ends ok with the measured duration and nests under its parent; a throwing `fn` ends the span as error and rethrows; `end()` is idempotent; `startedAt` backdates; a late child is recorded with true times; a throwing sink never reaches traced code; records are copies; the test context propagates the current span through awaits and a bare await sees none | `[unit]` `src/core/trace/tracer.test.ts::createTracer::*` |

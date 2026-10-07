@@ -116,6 +116,9 @@ export interface AttrDomain {
   route: string;
   host: string;
   httpStatus: number;
+  /** State-write failure facts; identifiers and closed vocabulary, no request bytes. */
+  stateWriteStage: "promotion-preflight" | "state-rpc" | "acknowledgment";
+  requestDigest: string;
   // mcp.*
   bytes: number;
   // ship.round
@@ -272,6 +275,8 @@ const ATTR_TYPE: Record<SpanAttrKey, "string" | "number" | "boolean"> = {
   route: "string",
   host: "string",
   httpStatus: "number",
+  stateWriteStage: "string",
+  requestDigest: "string",
   bytes: "number",
   agent: "string",
   waitedMs: "number",

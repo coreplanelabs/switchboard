@@ -5,6 +5,8 @@ import { sourceHash } from "../references/receipts.js";
 import { createLedgerWriteThrough } from "./writeThrough.js";
 import { InMemoryRunLedger } from "./inMemory.js";
 import { InMemoryRunStore } from "../runStore.js";
+import { STATE_WRITE_DIAGNOSTIC_HEADER } from "../runStateWriteDiagnostic.js";
+import { storeRequestWitness } from "../storeResponse.js";
 
 const id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
 const gen = "diagnostic-owner";
@@ -34,6 +36,100 @@ function response(mode: string): Response {
 }
 
 describe("original uncertain write diagnostics", () => {
+  it("keeps missing, malformed, truncated, foreign and non-state 5xx diagnostics generic and unknown", async () => {
+    for (const mode of ["missing", "malformed", "truncated", "foreign", "extra", "step"]) {
+      let calls = 0;
+      const wire = new WorkerRunLedger({
+        baseUrl: "https://state.invalid",
+        token: "fixture",
+        storeKey: "fixture",
+        fetch: async (url, init) => {
+          calls++;
+          const digest = (await storeRequestWitness(new URL(String(url)).pathname, String(init?.body))).digest;
+          const value = {
+            version: 1,
+            requestDigest: mode === "foreign" ? "f".repeat(64) : digest,
+            failure: { stage: "state-rpc", errorKind: "type" },
+            ...(mode === "extra" ? { secret: "private bytes" } : {}),
+          };
+          const header =
+            mode === "malformed"
+              ? "<html>private bytes"
+              : mode === "truncated"
+                ? JSON.stringify(value).slice(0, -1)
+                : JSON.stringify(value);
+          const reply = new Response("<html>private response", {
+            status: 500,
+            headers: mode === "missing" ? {} : { [STATE_WRITE_DIAGNOSTIC_HEADER]: header },
+          });
+          reply.text = async () => {
+            throw new Error("private 5xx body must stay unread");
+          };
+          return reply;
+        },
+      });
+      let failure: unknown;
+      try {
+        if (mode === "step")
+          await wire.step(
+            id,
+            gen,
+            { step: 0, seq: 0, turnIndex: 0, inFlight: [], inboxConsumedSeq: 0, remainingMs: 1, turn: 0, iteration: 0 },
+            [],
+          );
+        else await wire.setState(id, gen, {});
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(UncertainStoreError);
+      expect((failure as UncertainStoreError).diagnosis).toEqual({ kind: "http", status: 500 });
+      expect(calls).toBe(1);
+    }
+  });
+  it("retains only a bounded state failure bound to the original wire digest, without reading or replaying its body", async () => {
+    let calls = 0;
+    const wire = new WorkerRunLedger({
+      baseUrl: "https://state.invalid",
+      token: "private token",
+      storeKey: "fixture",
+      fetch: async (_url, init) => {
+        calls++;
+        const request = await storeRequestWitness("/runs/state", String(init?.body));
+        const reply = new Response("private response bytes", {
+          status: 500,
+          headers: {
+            [STATE_WRITE_DIAGNOSTIC_HEADER]: JSON.stringify({
+              version: 1,
+              requestDigest: request.digest,
+              failure: { stage: "state-rpc", errorKind: "type" },
+            }),
+          },
+        });
+        reply.text = async () => {
+          throw new Error("must not consume private 5xx body");
+        };
+        return reply;
+      },
+    });
+    let failure: UncertainStoreError | undefined;
+    try {
+      await wire.setState(id, gen, { harness: { private: "original bytes" } });
+    } catch (error) {
+      if (!(error instanceof UncertainStoreError)) throw error;
+      failure = error;
+    }
+    expect(failure).toBeDefined();
+    expect(failure!.diagnosis).toEqual({
+      kind: "http",
+      status: 500,
+      stateWrite: { stage: "state-rpc", errorKind: "type" },
+    });
+    expect(uncertainStoreSummary(failure!)).toBe(
+      "operation=/runs/state failure=http status=500 stage=state-rpc errorKind=type",
+    );
+    expect(JSON.stringify(failure)).not.toContain("private");
+    expect(calls).toBe(1);
+  });
   it.each(cases)(
     "classifies %s from observed transport facts and preserves the exact request",
     async (mode, diagnosis) => {

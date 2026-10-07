@@ -54,6 +54,8 @@ import { createLedgerWriteThrough } from "../../src/core/runLedger/writeThrough.
 import { UnknownAllocationClaimError } from "../../src/core/runLedger/allocationAck.ts";
 import { PROMOTION_BODY_BYTES, promotionBytes, promotionBodyOf } from "../../src/core/runLedger/promotion.ts";
 import { deployRegistrationState } from "../cloudflare-resident/runRegistration.ts";
+import { STATE_WRITE_DIAGNOSTIC_HEADER } from "../../src/core/runStateWriteDiagnostic.ts";
+import { storeRequestWitness } from "../../src/core/storeResponse.ts";
 
 // The check producer imports the unused LocalExecutor environment helper.
 // Workerd has no host secret manifest; no local execution uses this stub.
@@ -10215,6 +10217,57 @@ it("matches omitted-policy caller bytes to actual SQLite readback after accepted
   expect(writes).toBe(1);
 });
 
+it("keeps one rejected archive from resetting unrelated live ownership", async () => {
+  const key = "runs:archive-reset-domain:" + crypto.randomUUID();
+  const stub = env.RUNS.get(env.RUNS.idFromName(key));
+  const thread = "http:fixture:archive";
+  expect((await post("/runs/claim", claimBody(key, "archive-source", thread))).status).toBe(200);
+  expect((await post("/runs/claim", claimBody(key, "policy-sibling", "http:fixture:policy"))).status).toBe(200);
+  await runInDurableObject(stub, async (instance, state) => {
+    (instance as unknown as { fixtureIdentity?: string }).fixtureIdentity = "same-object";
+    state.storage.sql.exec(
+      "UPDATE live_runs SET state_json=? WHERE run_id=?",
+      JSON.stringify({ unitSeedReceipt: { version: 1 } }),
+      "archive-source",
+    );
+  });
+  const refusal = await runInDurableObject(stub, async (instance) => {
+    try {
+      await instance.put(record("archive-source", thread));
+      return { accepted: true };
+    } catch (error) {
+      return { accepted: false, message: error instanceof Error ? error.message : "unknown" };
+    }
+  });
+  expect(refusal).toEqual({ accepted: false, message: "work evidence does not match its canonical run" });
+  const fresh = env.RUNS.get(env.RUNS.idFromName(key));
+  const observed = await runInDurableObject(fresh, async (instance) => ({
+    identity: (instance as unknown as { fixtureIdentity?: string }).fixtureIdentity,
+    live: (await instance.listLive()).map((row) => ({ id: row.runId, gen: row.ownerGen })),
+  }));
+  expect(observed.live).toContainEqual({ id: "policy-sibling", gen: "g1" });
+  expect(observed.identity).toBe("same-object");
+  const policy = {
+    harness: {
+      harness: "pi",
+      pid: 2,
+      logOffset: 0,
+      sessionPolicy: { version: 1, commandRoute: "native", identity: "none" },
+    },
+  };
+  expect(await post("/runs/state", { storeKey: key, runId: "policy-sibling", gen: "g1", state: policy })).toMatchObject(
+    { status: 200, data: { ok: true } },
+  );
+  const stored = await runInDurableObject(fresh, async (_instance, state) => ({
+    corrupt: state.storage.sql
+      .exec<{ state_json: string }>("SELECT state_json FROM live_runs WHERE run_id=?", "archive-source")
+      .one().state_json,
+    archived: state.storage.sql.exec("SELECT run_id FROM runs WHERE run_id=?", "archive-source").toArray(),
+  }));
+  expect(JSON.parse(stored.corrupt)).toEqual({ unitSeedReceipt: { version: 1 } });
+  expect(stored.archived).toEqual([]);
+});
+
 describe("state-write holds across Durable Object RPC", () => {
   const id = "eeeeeeee-eeee-4eee-aeee-eeeeeeeeeeee",
     gen = "g-rpc";
@@ -10279,6 +10332,93 @@ describe("state-write holds across Durable Object RPC", () => {
       },
     });
   }
+  it.each(["promotion-preflight", "state-rpc-before", "state-rpc-after", "acknowledgment"] as const)(
+    "binds bounded %s failure facts to the exact wire request without acknowledging or replaying state",
+    async (stage) => {
+      const key = "runs:state-failure:" + stage,
+        stub = env.RUNS.get(env.RUNS.idFromName(key));
+      expect((await stub.claim(claim(), 1)).ok).toBe(true);
+      let calls = 0;
+      const routed = routedEnv(stub, (name) => {
+        if (
+          (stage === "promotion-preflight" && name === "promotionHold") ||
+          (stage !== "promotion-preflight" && name === "setState")
+        )
+          return async (...args: unknown[]) => {
+            calls++;
+            if (stage === "state-rpc-after")
+              expect(await Reflect.apply(stub.setState, stub, args)).toEqual({ ok: true });
+            if (stage === "acknowledgment") return { ok: true, privateCause: "private reply bytes" };
+            throw new TypeError("private request and exception bytes");
+          };
+        return undefined;
+      });
+      const wire = (await request(key).text()) + " \n";
+      const digest = (await storeRequestWitness("/runs/state", wire)).digest;
+      const logs: string[] = [];
+      const log = vi.spyOn(console, "log").mockImplementation((line) => logs.push(String(line)));
+      let response: Response;
+      try {
+        response = await memoryWorker.fetch(
+          new Request(request(key).url, {
+            method: "POST",
+            body: wire,
+            headers: {
+              ...Object.fromEntries(request(key).headers),
+              "content-length": String(new TextEncoder().encode(wire).length),
+            },
+          }),
+          routed,
+        );
+      } finally {
+        log.mockRestore();
+      }
+      expect(response.status).toBe(500);
+      const diagnosis = JSON.parse(response.headers.get(STATE_WRITE_DIAGNOSTIC_HEADER)!);
+      expect(diagnosis).toEqual({
+        version: 1,
+        requestDigest: digest,
+        failure:
+          stage === "acknowledgment"
+            ? { stage, replyShape: "ok" }
+            : {
+                stage: stage === "promotion-preflight" ? stage : "state-rpc",
+                errorKind: "type",
+              },
+      });
+      const body = await response.text();
+      expect(body).not.toContain("private");
+      expect(JSON.stringify(diagnosis)).not.toContain("private");
+      expect(calls).toBe(1);
+      const trace = logs
+        .map((line) => {
+          try {
+            return JSON.parse(line);
+          } catch {
+            return null;
+          }
+        })
+        .find((value) => value?.span === "state.fetch");
+      expect(trace).toMatchObject({
+        status: "error",
+        attrs: {
+          httpStatus: 500,
+          requestDigest: digest,
+          stateWriteStage: stage === "promotion-preflight" || stage === "acknowledgment" ? stage : "state-rpc",
+        },
+      });
+      expect(trace.errorMessage).toBe(
+        stage === "acknowledgment"
+          ? "run state RPC returned an invalid acknowledgement"
+          : "private request and exception bytes",
+      );
+      const current = (await stub.listLive())[0];
+      expect(current.ownerGen).toBe(gen);
+      if (stage === "state-rpc-after")
+        expect(current.state).toHaveProperty("harness.sessionPolicy", state.harness.sessionPolicy);
+      else expect(current.state).not.toHaveProperty("harness");
+    },
+  );
   it("returns the existing held response when preparation arrives after the actual RPC preflight", async () => {
     const key = "runs:rpc-state-race",
       stub = env.RUNS.get(env.RUNS.idFromName(key));
@@ -10322,9 +10462,10 @@ describe("state-write holds across Durable Object RPC", () => {
           }
         : undefined,
     );
-    await expect(memoryWorker.fetch(request(key), routed)).rejects.toMatchObject({
-      name: "PromotionPendingError",
-      remote: true,
+    const response = await memoryWorker.fetch(request(key), routed);
+    expect(response.status).toBe(500);
+    expect(JSON.parse(response.headers.get(STATE_WRITE_DIAGNOSTIC_HEADER)!)).toMatchObject({
+      failure: { stage: "state-rpc", errorKind: "error" },
     });
     expect((await stub.listLive())[0].state).toHaveProperty("harness.sessionPolicy", state.harness.sessionPolicy);
   });
@@ -10352,7 +10493,11 @@ describe("state-write holds across Durable Object RPC", () => {
       stub = env.RUNS.get(env.RUNS.idFromName(key));
     expect((await stub.claim(claim(), 1)).ok).toBe(true);
     const routed = routedEnv(stub, (name) => (name === "setState" ? async () => value : undefined));
-    await expect(memoryWorker.fetch(request(key), routed)).rejects.toThrow("invalid acknowledgement");
+    const response = await memoryWorker.fetch(request(key), routed);
+    expect(response.status).toBe(500);
+    expect(JSON.parse(response.headers.get(STATE_WRITE_DIAGNOSTIC_HEADER)!)).toMatchObject({
+      failure: { stage: "acknowledgment" },
+    });
     expect((await stub.listLive())[0].state).not.toHaveProperty("harness");
   });
   it("keeps an actual foreign-generation state write fenced without changing its owner", async () => {

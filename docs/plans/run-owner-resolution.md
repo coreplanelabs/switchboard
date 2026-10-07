@@ -42,7 +42,7 @@ settlement ACK it can return `acknowledged` with the original owner tuple and a
 positive retained revision. The former deploy reader understood only `live`
 and `terminal`; it rejected that valid third result. Activity classification,
 UID-ledger classification and owner reconciliation reproduced the mismatch.
-All ACK consumers now share the same exact-owner validator. Retained activity
+Resident ACK consumers now share the same exact-owner validator. Retained activity
 still needs the current registration, thread, fence, UID spend and sole
 claimant. Consumers that remove files still need their original saved revision
 and full custody checks.
