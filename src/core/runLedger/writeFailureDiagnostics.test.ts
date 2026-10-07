@@ -1,0 +1,189 @@
+import { describe, expect, it } from "vitest";
+import { WorkerRunLedger } from "../runLedgerWorker.js";
+import { UncertainStoreError, uncertainStoreSummary } from "../storeFailure.js";
+import { sourceHash } from "../references/receipts.js";
+import { createLedgerWriteThrough } from "./writeThrough.js";
+import { InMemoryRunLedger } from "./inMemory.js";
+import { InMemoryRunStore } from "../runStore.js";
+
+const id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+const gen = "diagnostic-owner";
+const cases = [
+  ["transport", { kind: "transport" }],
+  ["http", { kind: "http", status: 503 }],
+  ["body", { kind: "response-body", status: 200 }],
+  ["json", { kind: "response-json", status: 200 }],
+  ["shape", { kind: "response-shape", status: 200 }],
+  ["ack", { kind: "acknowledgement", status: 200 }],
+] as const;
+
+function response(mode: string): Response {
+  if (mode === "transport") throw new Error("private transport bytes");
+  if (mode === "http") return new Response("private server body", { status: 503 });
+  if (mode === "body") {
+    const reply = Response.json({ ok: true });
+    reply.text = async () => {
+      throw new Error("private response bytes");
+    };
+    return reply;
+  }
+  if (mode === "json") return new Response("private invalid JSON");
+  if (mode === "shape") return Response.json([]);
+  if (mode === "refused") return Response.json({ ok: false, reason: "fenced" }, { status: 409 });
+  return Response.json({ unexpected: "private malformed ACK" });
+}
+
+describe("original uncertain write diagnostics", () => {
+  it.each(cases)(
+    "classifies %s from observed transport facts and preserves the exact request",
+    async (mode, diagnosis) => {
+      let payload = "";
+      let calls = 0;
+      const wire = new WorkerRunLedger({
+        baseUrl: "https://state.invalid",
+        token: "private credential",
+        storeKey: "fixture",
+        fetch: async (_url, init) => {
+          calls++;
+          payload = String(init?.body);
+          return response(mode);
+        },
+      });
+      const failure = await wire.setState(id, gen, { notepad: "private request bytes" }).catch((error) => error);
+      expect(failure).toBeInstanceOf(UncertainStoreError);
+      expect(failure.diagnosis).toEqual(diagnosis);
+      expect(Object.isFrozen(failure.diagnosis)).toBe(true);
+      expect(failure.request.payload).toBe(payload);
+      expect(failure.request.digest).toBe(await sourceHash({ operation: "/runs/state", payload }));
+      expect(calls).toBe(1);
+    },
+  );
+
+  it.each(["state", "live-state"] as const)(
+    "keeps the first %s diagnostic through later held patches without replay or private logging",
+    async (kind) => {
+      const inner = new InMemoryRunLedger(() => 100);
+      const warnings: string[] = [];
+      let calls = 0;
+      let payload = "";
+      let original: UncertainStoreError | undefined;
+      const wire = new WorkerRunLedger({
+        baseUrl: "https://state.invalid",
+        token: "private credential",
+        storeKey: "fixture",
+        fetch: async (_url, _init) => {
+          calls++;
+          payload = String(_init?.body);
+          return response("http");
+        },
+      });
+      const ledger = new Proxy(inner, {
+        get(target, key) {
+          if (key === "setState")
+            return async (...args: Parameters<typeof wire.setState>) => {
+              try {
+                return await wire.setState(...args);
+              } catch (error) {
+                original = error as UncertainStoreError;
+                throw error;
+              }
+            };
+          if (key === "assignLiveState")
+            return async (...args: Parameters<typeof wire.assignLiveState>) => {
+              try {
+                return await wire.assignLiveState(...args);
+              } catch (error) {
+                original = error as UncertainStoreError;
+                throw error;
+              }
+            };
+          const value = Reflect.get(target, key, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      const wt = createLedgerWriteThrough({
+        ledger,
+        gen,
+        fallback: new InMemoryRunStore(),
+        warn: (message) => warnings.push(message),
+        setInterval: () => ({ unref() {} }),
+        clearInterval: () => {},
+      });
+      const opened = await wt.open({
+        runId: id,
+        threadKey: "slack:C1:1",
+        startedAt: 100,
+        system: "",
+        tools: [],
+        card: null,
+        meta: {
+          agent: "general",
+          channelId: "slack:C1",
+          userId: "slack:UALICE",
+          threadKey: "slack:C1:1",
+          channelVisibility: "public",
+        },
+      });
+      if (opened.kind !== "tracked") throw new Error("fixture did not open");
+      if (kind === "state")
+        expect(await opened.run.commitState({ notepad: "private request bytes" })).toBe("unavailable");
+      else
+        expect(
+          await opened.run.assignLiveState({
+            expectedSeq: 0,
+            at: 100,
+            state: "admitted",
+            bound: 1000,
+            eventSeq: 1,
+            statePatch: { notepad: "private request bytes" },
+          }),
+        ).toEqual({ ok: false, reason: "unavailable" });
+      const first = opened.run.writeBoundaryFailure;
+      expect(first).toMatchObject({
+        kind,
+        diagnosis: { kind: "http", status: 503 },
+        requestDigest: original!.request.digest,
+      });
+      expect(original!.request.payload).toBe(payload);
+      expect(await opened.run.commitState({ notepad: "later private bytes" })).toBe("unavailable");
+      expect(opened.run.writeBoundaryFailure).toEqual(first);
+      expect(calls).toBe(1);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain(`operation=/runs/${kind} failure=http status=503`);
+      expect(warnings.join("\n")).not.toMatch(/private|later/);
+    },
+  );
+
+  it("keeps a known refusal definite and never manufactures an uncertain diagnostic", async () => {
+    const wire = new WorkerRunLedger({
+      baseUrl: "https://state.invalid",
+      token: "fixture",
+      storeKey: "fixture",
+      fetch: async () => response("refused"),
+    });
+    expect(await wire.setState(id, gen, {})).toEqual({ ok: false, reason: "fenced" });
+  });
+
+  it("does not infer a diagnosis from arbitrary exception prose", () => {
+    const failure = new UncertainStoreError("HTTP 503 private body", {
+      version: 1,
+      operation: "/runs/state",
+      payload: "private bytes",
+      digest: "a".repeat(64),
+    });
+    expect(failure.diagnosis).toBeUndefined();
+  });
+
+  it("rejects malformed diagnostic metadata and hides unknown operation bytes", () => {
+    const failure = new UncertainStoreError(
+      "private exception",
+      { version: 1, operation: "private operation", payload: "private bytes", digest: "a".repeat(64) },
+      {
+        diagnosis: { kind: "http", status: 503, body: "private response" } as never,
+      },
+    );
+    expect(failure.diagnosis).toBeUndefined();
+    expect(uncertainStoreSummary(failure)).toBe("operation=other failure=unclassified");
+    expect(JSON.stringify(failure)).not.toContain("private");
+  });
+});

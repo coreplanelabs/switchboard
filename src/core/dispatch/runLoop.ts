@@ -168,7 +168,7 @@ import { analyzeRunFriction, type FrictionDiagnosis } from "../runFriction.js";
 import { markdownOutput } from "../llmOutput/index.js";
 import { branchPushReceiptsOf, callsInFlight, type RunFailure, type RunSeed, type RunStatus } from "../runRecord.js";
 import type { RunHandle, RunRegistry } from "../runRegistry.js";
-import type { LedgerRun } from "../runLedger/writeThrough.js";
+import { writeBoundaryDiagnosticSummary, type LedgerRun } from "../runLedger/writeThrough.js";
 import { assignRunLiveState } from "../runLiveState.js";
 import { causeOfClose } from "../plane/decide.js";
 import { RefusalError, refusalOf } from "../refusal.js";
@@ -3888,10 +3888,19 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       // The record must say why a failed run failed even when the reply is
       // never delivered (run-history.md): the error's message, redacted and
       // capped, published before the finish below closes the stream.
+      const boundary = ledgerRun?.writeBoundaryFailure;
+      const diagnosis =
+        boundary?.runId === run.id && boundary.gen === deps.runLedger.gen
+          ? writeBoundaryDiagnosticSummary(boundary)
+          : undefined;
+      const cause = redactAndCap(
+        err instanceof Error ? err.message : String(err),
+        ENDING_NOTE_MAX - (diagnosis ? diagnosis.length + 2 : 0),
+      );
       events.publish({
         type: "run_note",
         kind: "run_failed",
-        summary: redactAndCap(err instanceof Error ? err.message : String(err), ENDING_NOTE_MAX),
+        summary: diagnosis ? `${cause}; ${diagnosis}` : cause,
       });
     }
     // pi first: it runs in the workspace released next; what the ending left

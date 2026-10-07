@@ -42,6 +42,7 @@ import {
   type LedgerRun,
 } from "../runLedger/writeThrough.js";
 import { PermanentStoreError, TransientStoreError } from "../runStoreWorker.js";
+import { UncertainStoreError } from "../storeFailure.js";
 import type { PublicationSettlement } from "../publicationSettlement.js";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { planResume, transcriptSource } from "../runLedger/resume.js";
@@ -3580,6 +3581,48 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect(rec.events.filter((e) => e.type === "run_note" && e.kind === "run_failed")).toEqual([
       expect.objectContaining({ summary: expect.stringContaining(UNKNOWN_MODEL_TERMINAL_MESSAGE) }),
     ]);
+  });
+
+  it("a failed run exposes only its original owner-bound write diagnosis on the readable failure event", async () => {
+    for (const owner of ["same", "foreign"] as const) {
+      const s = setup(new Error("answer context checkpoint was not persisted (state-unknown)"));
+      const failure = new UncertainStoreError(
+        "private exception body",
+        {
+          version: 1,
+          operation: "/runs/state",
+          payload: "private request bytes",
+          digest: "a".repeat(64),
+        },
+        { diagnosis: { kind: "http", status: 503 } },
+      );
+      const ledger = new NullLedgerRun(s.run.id, s.store);
+      Object.defineProperty(ledger, "writeBoundaryFailure", {
+        value: {
+          version: 1,
+          kind: "state",
+          runId: s.run.id,
+          gen: owner === "same" ? s.deps.runLedger.gen : "foreign",
+          requestDigest: "a".repeat(64),
+          expectedDigest: "b".repeat(64),
+          stateVersion: 1,
+          diagnosis: failure.diagnosis,
+        },
+      });
+      await expect(runLoop(s.deps, { ...s.ctx, ledgerRun: ledger })).rejects.toThrow();
+      s.ending.drain(undefined);
+      await s.writer.settled();
+      const record = (await s.store.get(s.run.id))!;
+      const note = record.events.find((event) => event.type === "run_note" && event.kind === "run_failed");
+      expect(note).toBeDefined();
+      const serialized = JSON.stringify(note);
+      expect(serialized).toContain(UNKNOWN_MODEL_TERMINAL_MESSAGE);
+      if (owner === "same") expect(serialized).toContain("operation=/runs/state failure=http status=503");
+      else expect(serialized).not.toContain("failure=http");
+      expect(serialized).not.toContain("private");
+      expect(serialized).not.toContain("a".repeat(64));
+      expect(serialized).not.toContain("b".repeat(64));
+    }
   });
 
   // docs/reference/specs/run-history.md item 57: the failure by name. The
