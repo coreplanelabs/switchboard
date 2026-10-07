@@ -2409,6 +2409,10 @@ export async function runOperator(
   const timeoutMs = opts.timeoutMs ?? OPERATOR_TIMEOUT_MS;
   const signal = AbortSignal.timeout(timeoutMs);
   const expired = () => signal.aborted || now() - started >= timeoutMs;
+  const reAskAction = (answer: string, violation: string, noun = "a decision") => {
+    violations++;
+    turns.push({ answer, violation: reAskTurn(noun, "offered", violation) });
+  };
   const sourceTurns = input.requesterId
     ? input.tail
         .filter((turn) => turn.actor === input.requesterId && turn.text.startsWith("user: "))
@@ -2578,8 +2582,7 @@ export async function runOperator(
           }
           return answered({ kind: "non_decision", reason: tidy(violation) });
         }
-        violations++;
-        turns.push({ answer: calls, violation: reAskTurn("a decision", "offered", violation) });
+        reAskAction(calls, violation);
         continue;
       }
       const answerText =
@@ -2645,8 +2648,7 @@ export async function runOperator(
           !ctx.commands.some((command) => command.tool.name === answer.tool);
         if ((reads >= OPERATOR_READS_MAX && withdrawnCommand) || violations >= STRUCTURED_RETRIES_MAX)
           return answered({ kind: "non_decision", reason: tidy(violation) });
-        violations++;
-        turns.push({ answer: answerText, violation: reAskTurn("a decision", "offered", violation) });
+        reAskAction(answerText, violation);
         continue;
       }
       const beforeCheck = attempts.length;
@@ -2654,11 +2656,7 @@ export async function runOperator(
       if (fulfillmentViolation !== undefined) {
         if (expired() || reads >= OPERATOR_READS_MAX || violations >= STRUCTURED_RETRIES_MAX)
           return answered({ kind: "non_decision", reason: fulfillmentViolation });
-        violations++;
-        turns.push({
-          answer: answerText,
-          violation: reAskTurn("a decision that fulfills the whole request", "offered", fulfillmentViolation),
-        });
+        reAskAction(answerText, fulfillmentViolation, "a decision that fulfills the whole request");
         continue;
       }
       if (turn.decision.kind !== "non_decision" && attempts.length === beforeCheck)
