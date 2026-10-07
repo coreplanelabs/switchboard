@@ -2462,7 +2462,23 @@ export async function runOperator(
     if (expired()) return violation("command fulfillment deadline expired");
     const verdict = parseVerifierAnswer(answer, { strict: true });
     if (!verdict) return violation("command fulfillment verdict is unknown");
-    if (!verdict.agrees) return violation(`command does not fulfill the whole request: ${verdict.reason}`);
+    if (!verdict.agrees) {
+      // An argument-free command has no corrected variant for this request.
+      // Withdraw only that known rejected choice; argument repairs stay offered.
+      if (
+        !command.def.args?.length &&
+        command.def.options === undefined &&
+        !invocation.input.args?.length &&
+        Object.keys(invocation.input.options ?? {}).length === 0
+      ) {
+        const narrowed = promptWithoutTool(prompt, command.tool.name);
+        if (narrowed) {
+          prompt = narrowed;
+          ctx.commands = ctx.commands.filter((entry) => entry.tool.name !== command.tool.name);
+        }
+      }
+      return violation(`command does not fulfill the whole request: ${verdict.reason}`);
+    }
     attempts.push({ outcome: "accepted", stage: "command_fulfillment" });
     return undefined;
   };
@@ -2618,7 +2634,8 @@ export async function runOperator(
                 ? turn.violation
                 : "";
         attempts.push({ outcome: "violation", violation });
-        if (violations >= STRUCTURED_RETRIES_MAX) return answered({ kind: "non_decision", reason: tidy(violation) });
+        if (reads >= OPERATOR_READS_MAX || violations >= STRUCTURED_RETRIES_MAX)
+          return answered({ kind: "non_decision", reason: tidy(violation) });
         violations++;
         turns.push({ answer: answerText, violation: reAskTurn("a decision", "offered", violation) });
         continue;
