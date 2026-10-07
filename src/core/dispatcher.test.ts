@@ -28340,7 +28340,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     deps.operatorModel = decides({ reason: "list runs", binds: [{ line: "runs list", reason: "list runs" }] });
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("runs list", "slack:UADMIN"), io);
-    expect(deps.operatorModel).toHaveBeenCalledTimes(1);
+    expect(deps.operatorModel).toHaveBeenCalledTimes(2);
     expect(deps.invoked).toEqual(["runs.list"]);
     expect(slot.live.inbox.size).toBe(0);
     expect(replies.length).toBeGreaterThan(0);
@@ -28555,6 +28555,61 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     expect(registry.snapshotById("r1")!.events.find((e) => e.type === "run_meta")).toMatchObject({
       agentSource: "operator",
     });
+  });
+
+  it("on: a requested owned Review catalog read keeps the original run and needs a positive verdict", async () => {
+    const { deps, registry } = operatorDeps(ON_YAML);
+    wireCommands(deps, { ...deps.capabilities, residents: true });
+    const review = registry.create("the original Review", {
+      agent: "review",
+      channelId: "slack:CX",
+      userId: "slack:UADMIN",
+      threadKey: "slack:CX:1.0",
+    });
+    const slot = deps.admission!.claim("slack:CX:1.0", { agent: "review" });
+    slot.live.runId = review.id;
+    deps.operatorModel = vi.fn<RouteModel>(async (prompt) =>
+      prompt.tool.name === "verify"
+        ? { tool: "verify", input: { agrees: true, reason: "The catalog answers this question." } }
+        : { tool: "repo_list", input: { intent: "read", reason: "List connected repositories." } },
+    );
+    await dispatch(deps, msg("Which repositories are connected?", "slack:UADMIN"), fakeIO().io);
+    expect(deps.invoked).toEqual(["repo.list"]);
+    expect(slot.live.inbox.drain()).toEqual([]);
+    expect(deps.operatorModel).toHaveBeenCalledTimes(2);
+    expect(registry.getById(review.id)?.agent).toBe("review");
+    expect(registry.listActive().filter((run) => run.agent === "review")).toHaveLength(1);
+  });
+
+  it("on: an owned Review follow-up cannot complete as repository discovery", async () => {
+    const { deps, registry } = operatorDeps(ON_YAML);
+    wireCommands(deps, { ...deps.capabilities, residents: true });
+    const review = registry.create("the original Review", {
+      agent: "review",
+      channelId: "slack:CX",
+      userId: "slack:UADMIN",
+      threadKey: "slack:CX:1.0",
+    });
+    const slot = deps.admission!.claim("slack:CX:1.0", { agent: "review" });
+    slot.live.runId = review.id;
+    const text = "Inspect more cases in the current Review and retain its exact target.";
+    let proposals = 0;
+    deps.operatorModel = vi.fn<RouteModel>(async (prompt) => {
+      if (prompt.tool.name === "verify")
+        return { tool: "verify", input: { agrees: false, reason: "Discovery does not inspect the requested cases." } };
+      return proposals++ === 0
+        ? { tool: "repo_list", input: { intent: "read", reason: "Find the repository for this Review follow-up." } }
+        : {
+            tool: "steer_run",
+            input: { id: review.id, words: text, intent: "write", reason: "Continue the original Review." },
+          };
+    });
+    await dispatch(deps, msg(text, "slack:UADMIN"), fakeIO().io);
+    expect(deps.invoked).not.toContain("repo.list");
+    expect(slot.live.inbox.drain()).toEqual([expect.objectContaining({ text })]);
+    expect(deps.operatorModel).toHaveBeenCalledTimes(3);
+    expect(registry.getById(review.id)?.agent).toBe("review");
+    expect(registry.listActive().filter((run) => run.agent === "review")).toHaveLength(1);
   });
 
   it("on: a registry read needs a fulfillment verdict before the ladder", async () => {

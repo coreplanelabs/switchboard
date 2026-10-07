@@ -249,9 +249,27 @@ describe("terminal command fulfillment", () => {
     const presetAnswer = await runOperator(fix, preset);
     expect(presetAnswer.decision.kind).toBe("binds");
     expect(preset).toHaveBeenCalledTimes(1);
-    const owned = vi.fn<RouteModel>(async () => listing);
+    const owned = vi.fn<RouteModel>(async () => ({
+      tool: "steer_run",
+      input: { id: "original", words: fix.text, intent: "write", reason: "steer the original owner" },
+    }));
     const ownedAnswer = await runOperator({ ...fix, owner: { kind: "live", runId: "original" } }, owned);
     expect(ownedAnswer.decision.kind).toBe("binds");
     expect(owned).toHaveBeenCalledTimes(1);
+  });
+  it("a requested owned catalog listing is verified while a unit action still folds", async () => {
+    const model = vi.fn<RouteModel>(async (prompt) =>
+      prompt.tool.name === VERIFY_TOOL_NAME ? verdict(true) : listing,
+    );
+    const live = await runOperator(
+      { ...fix, text: "Which repositories are connected?", owner: { kind: "live", runId: "original" } },
+      model,
+    );
+    expect(live.decision.kind).toBe("binds");
+    expect(model).toHaveBeenCalledTimes(2);
+    model.mockClear();
+    const unit = await runOperator({ ...fix, owner: { kind: "unit", unit: "original-unit" } }, model);
+    expect(unit.decision.kind).toBe("binds");
+    expect(model).toHaveBeenCalledTimes(1); // The execution predicate folds this inferred unit read.
   });
 });

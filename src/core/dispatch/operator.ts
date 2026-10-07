@@ -2405,9 +2405,17 @@ export async function runOperator(
   }
   sourceTurns.push(input.text);
   const commandCheck = async (decision: OperatorDecision): Promise<string | undefined> => {
-    if (input.owner || decision.kind !== "binds") return undefined;
+    if (decision.kind !== "binds") return undefined;
     const invocation = decision.binds.length === 1 ? decision.binds[0]?.invocation : undefined;
     if (invocation?.kind !== "invoke") return undefined;
+    const command = ctx.commands.find((entry) => entry.def.id === invocation.id);
+    if (
+      input.owner &&
+      (!command ||
+        invocation.id === "steer.run" ||
+        !ownedCommandRuns(input.owner, command.def, invocation.input, input.text, decision.binds[0]?.line))
+    )
+      return undefined;
     // Record the proposal separately from the verdict; neither is command execution.
     attempts.push({ outcome: "accepted" });
     const violation = (reason: string) => {
@@ -2418,7 +2426,6 @@ export async function runOperator(
     if (expired()) return violation("command fulfillment deadline expired");
     if (reads >= OPERATOR_READS_MAX) return violation("command fulfillment read allowance is spent");
     reads++;
-    const command = ctx.commands.find((entry) => entry.def.id === invocation.id);
     if (!command) return violation("command fulfillment definition is unavailable");
     let answer: RouteToolCall | string;
     try {

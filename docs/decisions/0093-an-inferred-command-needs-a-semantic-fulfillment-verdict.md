@@ -14,8 +14,7 @@ current write intent. Neither a keyword nor a command's reason closes that gap.
 
 ## Decision
 
-Before accepting an inferred terminal registry invocation on an unowned chat
-turn, the operator asks its same configured `RouteModel` whether the complete
+Before accepting an inferred terminal registry invocation that can run after the existing ownership fold, the operator asks its same configured `RouteModel` whether the complete
 typed invocation fulfills the whole current request. The checker receives the
 original current text, earlier turns stamped with that requester and an
 available requester-owned checkpoint. Other actors, unattributed turns and
@@ -41,8 +40,11 @@ repair budget. Proposal and verdict attempts are recorded separately; all model
 usage rides the same provider accounting. Valid inferred commands therefore
 cost an additional model call, not an unchanged cost claim.
 
-Presets, helper reads, owned-thread folding and CLI/HTTP/MCP explicit machine
-commands retain their paths. The old load/replay verifier and its default parser
+Live-owner terminal reads receive the same check. The existing pure ownership
+predicate is shared by semantic eligibility and execution: an actual unit or
+pipeline fold and a known original-owner steer retain their paths without a
+verdict or replacement writer. Presets, helper reads and CLI/HTTP/MCP explicit
+machine commands retain their paths. The old load/replay verifier and its default parser
 keep their separate contract. A natural catalog question can validly complete
 as a listing; a listing used to discover a repository for a requested correction
 cannot complete that correction.
