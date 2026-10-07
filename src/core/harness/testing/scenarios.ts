@@ -73,6 +73,12 @@ export interface RunScript {
   turns: ModelTurn[];
   /** The preset's identity the harness reads (its own tools, the gate's reach); `write` unless said. */
   identity?: Identity;
+  /** Runner-selected route, supplied explicitly by policy contract fixtures. */
+  commandPolicy?: import("../contract.js").HarnessCommandPolicy;
+  /** Explicit facts transport for policy ACK/uncertainty fixtures. */
+  onFacts?: import("../contract.js").HarnessRun["saveFacts"];
+  /** Original run control, for admission-boundary fixtures. */
+  control?: import("../../runRegistry/runControl.js").RunControl;
   /** The thread's earlier turns before the request (the seed rule). */
   seed?: ChatMessage[];
   /** The request, the seed's last user turn. */

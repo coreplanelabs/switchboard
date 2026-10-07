@@ -12690,6 +12690,135 @@ describe("tracked Review command receipt binding", () => {
     };
   }
 
+  it("never converts tracking lost after admission into untracked native facts permission", async () => {
+    const observed = watched(piHarness);
+    let canonical: Awaited<ReturnType<typeof canonicalOwner>>;
+    let seen = false;
+    observed.harness.open = async (_deps, request) => {
+      canonical.ledgerRun.tracked = () => false;
+      const producer = {
+        harness: "pi" as const,
+        pid: 42,
+        logOffset: 0,
+        root: "/var/tmp/original",
+        relaunches: 0,
+        sessionPolicy: { version: 1 as const, commandRoute: "native" as const, identity: "read" as const },
+      };
+      expect(await request.saveFacts?.(producer, { requireAcknowledgement: true })).toBe(false);
+      seen = true;
+      return {
+        answer: "binding refusal observed",
+        followUp: async () => "",
+        remainingMs: () => 60_000,
+        end: async () => {},
+      };
+    };
+    const s = setup("unused", {
+      agent: "review",
+      repoCtx: { repo: "acme/api", ref: "work" },
+      binding: {
+        ref: "work",
+        sha: "a".repeat(40),
+        workspace: "/workspace/threads/t/work",
+        user: "worker1",
+        container: "vm1",
+        depsKey: "deps1",
+      },
+      harness: {
+        harnesses: roster(observed.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example",
+        loopbackUrl: "http://127.0.0.1:8080",
+      },
+    });
+    canonical = await canonicalOwner(s);
+    await runLoop(s.deps, { ...s.ctx, ledgerRun: canonical.ledgerRun });
+    expect(seen).toBe(true);
+    expect(canonical.inner.live.get(s.run.id)?.state.harness).toBeUndefined();
+  });
+
+  it("uses the original native session route without upgrading it from current Review eligibility", async () => {
+    const observed = watched(piHarness);
+    const policy = { version: 1 as const, commandRoute: "native" as const, identity: "read" as const };
+    const original = {
+      harness: "pi" as const,
+      pid: 42,
+      logOffset: 0,
+      root: "/var/tmp/original",
+      bearerHash: "h",
+      relaunches: 0,
+      sessionPolicy: policy,
+    };
+    observed.harness.open = async (_deps, request) => {
+      expect(request.commandPolicy).toBeUndefined();
+      expect(request.tools.some((tool) => tool.name === "run_check")).toBe(false);
+      expect(request.toolContext.checkExecution).toBeUndefined();
+      expect(request.resume?.facts).toMatchObject(original);
+      return {
+        answer: "original native route",
+        followUp: async () => "",
+        remainingMs: () => 60_000,
+        end: async () => {},
+      };
+    };
+    const s = setup("unused", {
+      agent: "review",
+      repoCtx: { repo: "acme/api", ref: "work" },
+      binding: {
+        ref: "work",
+        sha: "a".repeat(40),
+        workspace: "/workspace/threads/t/work",
+        user: "worker1",
+        container: "vm1",
+        depsKey: "deps1",
+      },
+      executor: { execResult: async () => ({ exitCode: 0, stdout: "", stderr: "", truncated: false }) },
+      harness: {
+        harnesses: roster(observed.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example",
+        loopbackUrl: "http://127.0.0.1:8080",
+      },
+    });
+    const canonical = await canonicalOwner(s);
+    expect(await canonical.ledgerRun.setStateAndFlush({ harness: original })).toBe(true);
+    const row = structuredClone(canonical.inner.live.get(s.run.id)!);
+    const messages: ChatMessage[] = [{ role: "user", content: [{ type: "text", text: "original review" }] }];
+    const resume: ResumeContext = {
+      row,
+      lastSeq: 0,
+      events: [],
+      inbox: [],
+      repoCtx: s.ctx.repoCtx,
+      lastStep: {
+        step: 1,
+        seq: 1,
+        turnIndex: 1,
+        inFlight: [],
+        inboxConsumedSeq: 0,
+        remainingMs: 240_000,
+        turn: 1,
+        iteration: 1,
+      },
+      plan: {
+        kind: "resume",
+        messages,
+        compactions: [],
+        settlements: [],
+        stepRecorded: true,
+        inboxConsumedSeq: 0,
+        step: 1,
+        turn: 1,
+        iteration: 1,
+        remainingMs: 240_000,
+      },
+    };
+    expect(answered(await runLoop(s.deps, { ...s.ctx, ledgerRun: canonical.ledgerRun, resume, messages })).answer).toBe(
+      "original native route",
+    );
+    expect(canonical.inner.live.get(s.run.id)?.state.harness).toEqual(original);
+  });
+
   it.each(["pi", "opencode"] as const)("binds hosted %s Review through its original canonical ledger", async (name) => {
     const observed = watched(name === "pi" ? piHarness : openCodeHarness);
     const states: Record<string, unknown>[] = [];

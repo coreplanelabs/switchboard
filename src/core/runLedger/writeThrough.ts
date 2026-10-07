@@ -55,6 +55,7 @@ import type { AssembledTranscript } from "./transcript.js";
 import type { FenceResult, Notepad, SessionHit } from "./types.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "../runStoreWorker.js";
 import { UncertainStoreError, type StoreRequestWitness } from "../storeFailure.js";
+import { preserveHarnessPolicy } from "./checkpointState.js";
 import { messageFromInbox } from "./inboxMessage.js";
 import { createAppendFlusher } from "./flusher.js";
 import type { HeartbeatFacts, RequesterTarget, RunLedger } from "./ledger.js";
@@ -1954,7 +1955,9 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
 
     setState(patch: RunState): void {
       if (this.detached || this.finished || this.finishLanding) return;
-      this.state = { ...this.state, ...patch };
+      const next = preserveHarnessPolicy(this.state, { ...this.state, ...patch });
+      if (!next) throw new PermanentStoreError("run state conflicts with original session policy");
+      this.state = next;
       this.stateDirty = true;
       this.stateVersion++;
       this.stateSending = this.stateSending.then(() => this.sendState());

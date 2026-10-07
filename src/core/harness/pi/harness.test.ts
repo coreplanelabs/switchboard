@@ -355,7 +355,8 @@ function world(
     onStep: async (r) => void steps.push(r),
     ...(opts.logIndexOf ? { logIndexOf: opts.logIndexOf } : {}),
     // pi's loop writes pi's facts alone; the guard keeps the recorder typed as such.
-    saveFacts: (f) => {
+    saveFacts: (f, control) => {
+      if (control?.requireAcknowledgement) return "untracked" as const;
       if (isPiFacts(f)) facts.push(f);
     },
   };
@@ -7479,6 +7480,10 @@ describe("hosted Review originating lifecycle", () => {
         return true;
       },
     });
+    w.run.saveFacts = (facts, control) => {
+      if (isPiFacts(facts)) w.facts.push(facts);
+      return control?.requireAcknowledgement ? true : undefined;
+    };
     w.run.commandPolicy = "hosted-review";
     w.run.tools = [runCheckTool];
     w.run.toolContext.checkExecution = check;
@@ -7514,6 +7519,10 @@ describe("hosted Review originating lifecycle", () => {
   });
   it("binds a fresh same-session follow-up check to that turn's narrower clock", async () => {
     const w = world({ agent: { name: "review", identity: "read", maxMinutes: 20 } });
+    w.run.saveFacts = (facts, control) => {
+      if (isPiFacts(facts)) w.facts.push(facts);
+      return control?.requireAcknowledgement ? true : undefined;
+    };
     w.run.commandPolicy = "hosted-review";
     w.run.tools = [runCheckTool];
     const saved: CheckExecutionState[] = [];
@@ -7576,5 +7585,30 @@ describe("hosted Review originating lifecycle", () => {
     expect(timeouts[0]).toBeGreaterThan(0);
     expect(saved.at(-1)?.receipts[0]?.outcome.kind).toBe("completed");
     await session.end();
+  });
+});
+
+describe("original policy ACK model admission bounds", () => {
+  it("does not send the first model prompt after a hard stop arrives during the original facts ACK", async () => {
+    const w = world({ agent: { name: "review", identity: "read" } });
+    w.run.commandPolicy = "hosted-review";
+    let confirmed = 0;
+    w.run.saveFacts = async (_facts, control) => {
+      if (control?.requireAcknowledgement) {
+        confirmed++;
+        w.control.requestStop("hard");
+      }
+      return true;
+    };
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "must not call model"));
+    let opened;
+    try {
+      opened = await w.open();
+    } catch {
+      /* The existing stop may end opening by name. */
+    }
+    expect(confirmed).toBe(1);
+    expect(w.container.commands().filter((command) => command.type === "prompt")).toEqual([]);
+    await opened?.end();
   });
 });

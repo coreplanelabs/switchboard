@@ -2805,6 +2805,7 @@ describe("hosted Review originating lifecycle", () => {
       runId: "run-p",
       agent,
       commandPolicy: "hosted-review",
+      saveFacts: async () => true,
       model: { id: "claude-fable-5", provider: "anthropic", providerType: "anthropic" },
       system: agent.system,
       messages: [{ role: "user", content: [{ type: "text", text: "review" }] }],

@@ -1,3 +1,4 @@
+import type { ExecInfraReason } from "../execution/executor.js";
 import type { ExecResult } from "../execution/execResult.js";
 
 export interface CheckExecutionInput {
@@ -39,10 +40,24 @@ export interface CheckExecutionState {
   receipts: CheckExecutionReceipt[];
 }
 
+/** Safe observations of a refused metadata read, never command/ACK authority. */
+export interface CheckMetadataFailure {
+  phase: "execute" | "result" | "framing";
+  kind: "thrown" | "invalid_result" | "nonzero_exit" | "truncated" | "invalid_fields";
+  infrastructureReason?: ExecInfraReason;
+  exitCode?: number;
+  truncated?: boolean;
+  lineCount?: number;
+  cwdAbsolute?: boolean;
+  headValid?: boolean;
+  fingerprintValid?: boolean;
+}
+
 export type CheckExecutionResponse =
   | { kind: "recorded"; receipt: CheckExecutionReceipt }
   | {
       kind: "unavailable";
+      metadataFailure?: CheckMetadataFailure;
       reason:
         | "invalid_input"
         | "command_refused"

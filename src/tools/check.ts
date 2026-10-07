@@ -42,7 +42,9 @@ export const runCheckTool: RunnableTool = {
     if (response.kind === "unavailable" && response.reason === "recording_unavailable")
       return "error: recording capability unavailable; command did not start";
     if (response.kind === "unavailable")
-      return `error: recorded check unavailable (${response.reason}); no completion receipt was returned`;
+      return `error: recorded check unavailable (${response.reason}); no completion receipt was returned${
+        response.metadataFailure ? `\nMetadata diagnostic: ${JSON.stringify(response.metadataFailure)}` : ""
+      }`;
     const receipt = response.receipt;
     // Output and command text remain evidence, even when they contain fake tags.
     const encoded = JSON.stringify(receipt)

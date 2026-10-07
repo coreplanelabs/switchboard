@@ -1,3 +1,4 @@
+import { openCodeDriver } from "./opencode/testing/driver.js";
 import { OpenCodeHarness } from "./opencode/harness.js";
 import { describe, expect, it } from "vitest";
 import type { AgentDef } from "../../agents/registry.js";
@@ -690,4 +691,181 @@ describe("hosted Review retained session policy", () => {
     expect(original).toEqual(before);
     expect(w.registry.get(w.run.runId)).toBeUndefined();
   });
+});
+
+// Causal fixtures for the proposed original logical launch-policy contract.
+// These scripted originals do not attest a retained production SDK table.
+describe("original hosted policy compatible continuation", () => {
+  it.each(["pi", "opencode"] as const)(
+    "continues the same %s original with its compatible recorded policy",
+    async (name) => {
+      const driver = name === "pi" ? piDriver() : openCodeDriver();
+      const original = {
+        ...driver.facts({ pid: 999, container: driver.containerWord, bearerHash: bearerHashOf(driver.bearer) }),
+        sessionPolicy: { version: 1, commandRoute: "hosted-review", identity: "read" } as const,
+      };
+      const before = structuredClone(original);
+      const result = await driver.run({
+        identity: "read",
+        commandPolicy: "hosted-review",
+        processAliveOnResume: true,
+        onFacts: async () => true,
+        turns: [{ content: [{ type: "text", text: "continued original review" }], stopReason: "end_turn" }],
+        resume: {
+          messages: [{ role: "user", content: [{ type: "text", text: "continue the original review" }] }],
+          settlements: [],
+          remainingMs: 300_000,
+          turn: 1,
+          inboxConsumedSeq: 0,
+          facts: original,
+        },
+      });
+      expect(result.outcome).toEqual({ kind: "answered", answer: "continued original review" });
+      expect(result.starts).toEqual([]);
+      expect(result.facts[0]).toMatchObject({
+        pid: original.pid,
+        root: original.root,
+        bearerHash: original.bearerHash,
+        sessionPolicy: original.sessionPolicy,
+      });
+      expect(original).toEqual(before);
+    },
+  );
+});
+
+describe("original hosted policy uncertainty remains held", () => {
+  it.each(["pi", "opencode"] as const)(
+    "retains %s originals on missing, malformed or incompatible policy without current-label upgrade",
+    async (name) => {
+      for (const sessionPolicy of [
+        undefined,
+        { version: 0, commandRoute: "hosted-review", identity: "read" },
+        { version: 1, commandRoute: "unknown", identity: "read" },
+        { version: 1, commandRoute: "native", identity: "read" },
+        { version: 1, commandRoute: "hosted-review", identity: "write" },
+        { version: 1, commandRoute: "hosted-review", identity: "read", upgrade: true },
+      ]) {
+        const facts = {
+          ...(name === "pi" ? piFactsIn("vm-1") : OPENCODE_FACTS),
+          ...(sessionPolicy === undefined ? {} : { sessionPolicy }),
+        };
+        const before = structuredClone(facts);
+        const w = world({
+          resume: {
+            messages: [],
+            settlements: [],
+            remainingMs: 60_000,
+            turn: 1,
+            inboxConsumedSeq: 0,
+            facts: facts as unknown as HarnessFacts,
+          },
+        });
+        w.run.agent = { ...agent, name: "review", identity: "read", toolset: "readonly" };
+        w.run.commandPolicy = "hosted-review";
+        const harness = name === "pi" ? new PiHarness() : new OpenCodeHarness();
+        await expect(harness.open(w.deps, w.run)).rejects.toBeInstanceOf(HarnessEndingUnconfirmedError);
+        expect(w.container.starts).toEqual([]);
+        expect(w.container.killed).toEqual([]);
+        expect(w.container.removed).toEqual([]);
+        expect(w.container.requests).toEqual([]);
+        expect(w.facts).toEqual([]);
+        expect(facts).toEqual(before);
+      }
+    },
+  );
+});
+
+describe("original session policy canonical first-fact ACK", () => {
+  it.each(["pi", "opencode"] as const)(
+    "holds the newly started %s producer on an unknown ACK before any model turn",
+    async (name) => {
+      const driver = name === "pi" ? piDriver() : openCodeDriver();
+      const result = await driver.run({
+        identity: "read",
+        commandPolicy: "hosted-review",
+        onFacts: async () => false,
+        turns: [{ content: [{ type: "text", text: "must not enter model" }], stopReason: "end_turn" }],
+      });
+      expect(result.outcome.kind).toBe("failed");
+      if (result.outcome.kind !== "failed") throw new Error("expected unknown original policy held");
+      expect(result.outcome.error).toBeInstanceOf(HarnessEndingUnconfirmedError);
+      expect(result.modelCalls).toEqual([]);
+      expect(result.starts).toHaveLength(1);
+      expect(result.killed).toEqual([]);
+      expect(result.removed).toEqual([]);
+      expect(result.facts[0]).toMatchObject({
+        sessionPolicy: { version: 1, commandRoute: "hosted-review", identity: "read" },
+      });
+    },
+  );
+  it.each(["pi", "opencode"] as const)(
+    "holds the actual started %s producer when the original facts save throws",
+    async (name) => {
+      const driver = name === "pi" ? piDriver() : openCodeDriver();
+      const original = new Error("actual facts transport error");
+      const result = await driver.run({
+        identity: "read",
+        commandPolicy: "hosted-review",
+        onFacts: async () => {
+          throw original;
+        },
+        turns: [{ content: [{ type: "text", text: "must not enter model" }], stopReason: "end_turn" }],
+      });
+      expect(result.outcome.kind).toBe("failed");
+      if (result.outcome.kind !== "failed") throw new Error("expected original save error held");
+      expect(result.outcome.error).toBeInstanceOf(HarnessEndingUnconfirmedError);
+      expect(result.outcome.error.cause).toBe(original);
+      expect(result.modelCalls).toEqual([]);
+      expect(result.killed).toEqual([]);
+      expect(result.removed).toEqual([]);
+    },
+  );
+  it.each(["pi", "opencode"] as const)(
+    "records the actual %s launch policy with a known ACK before model entry",
+    async (name) => {
+      const driver = name === "pi" ? piDriver() : openCodeDriver();
+      const committed: HarnessFacts[] = [];
+      const result = await driver.run({
+        identity: "read",
+        commandPolicy: "hosted-review",
+        onFacts: async (facts, control) => {
+          if (control?.requireAcknowledgement) committed.push(structuredClone(facts));
+          return true;
+        },
+        turns: [{ content: [{ type: "text", text: "fresh original review" }], stopReason: "end_turn" }],
+      });
+      expect(result.outcome).toEqual({ kind: "answered", answer: "fresh original review" });
+      expect(committed).toHaveLength(1);
+      expect(committed[0]).toMatchObject({
+        sessionPolicy: { version: 1, commandRoute: "hosted-review", identity: "read" },
+      });
+      expect(result.modelCalls).toHaveLength(1);
+    },
+  );
+});
+
+describe("original facts ACK cancellation admission", () => {
+  it.each(["pi", "opencode"] as const)(
+    "does not admit a %s model after hard stop during the first facts ACK",
+    async (name) => {
+      const driver = name === "pi" ? piDriver() : openCodeDriver();
+      const control = new RunControl();
+      let confirmed = 0;
+      const result = await driver.run({
+        identity: "read",
+        commandPolicy: "hosted-review",
+        control,
+        onFacts: async (_facts, save) => {
+          if (save?.requireAcknowledgement) {
+            confirmed++;
+            control.requestStop("hard");
+          }
+          return true;
+        },
+        turns: [{ content: [{ type: "text", text: "must not enter model" }], stopReason: "end_turn" }],
+      });
+      expect(confirmed).toBe(1);
+      expect(result.modelCalls).toEqual([]);
+    },
+  );
 });

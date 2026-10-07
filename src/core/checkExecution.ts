@@ -1,12 +1,19 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { execDeadline, type Executor, type ExecResult } from "../execution/executor.js";
+import {
+  execDeadline,
+  ExecInfraError,
+  EXEC_INFRA_REASONS,
+  type Executor,
+  type ExecResult,
+} from "../execution/executor.js";
 import { bashBudgetWithinRun, clampBashTimeout } from "../execution/bashTimeout.js";
 import { shellQuote } from "../execution/shellQuote.js";
 import { FIRST_TEST_PREFLIGHT_MS } from "./budgets.js";
 import { redactAndCap } from "./redact.js";
 import type {
   CheckExecutionCapability,
+  CheckMetadataFailure,
   CheckExecutionControl,
   CheckExecutionInput,
   CheckExecutionOwner,
@@ -85,6 +92,19 @@ export interface CheckExecutionBinding {
   clock: () => number;
 }
 
+/** Only the actual typed cause supplies an allowlisted infrastructure reason.
+ * Diagnostic prose and class names are not classifiers. */
+function metadataInfrastructureReason(error: unknown): CheckMetadataFailure["infrastructureReason"] {
+  const seen = new Set<unknown>();
+  let current = error;
+  while (current instanceof Error && !seen.has(current)) {
+    seen.add(current);
+    if (current instanceof ExecInfraError && EXEC_INFRA_REASONS.includes(current.reason)) return current.reason;
+    current = current.cause;
+  }
+  return undefined;
+}
+
 /** Fixed metadata only. Git output is a structural observation, never a control instruction. */
 function metadataCommand(workspace: string): string {
   const git = "git --no-optional-locks -c core.fsmonitor=false";
@@ -141,7 +161,8 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
   let queue: Promise<unknown> = Promise.resolve();
   const unavailable = (
     reason: Extract<CheckExecutionResponse, { kind: "unavailable" }>["reason"],
-  ): CheckExecutionResponse => ({ kind: "unavailable", reason });
+    metadataFailure?: CheckMetadataFailure,
+  ): CheckExecutionResponse => ({ kind: "unavailable", reason, ...(metadataFailure ? { metadataFailure } : {}) });
   const persist = async (): Promise<boolean> => {
     try {
       if (await binding.save(structuredClone(state))) return true;
@@ -227,10 +248,22 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
           signal: execDeadline(metadataTimeout, signal),
         }),
       );
-    } catch {
-      return unavailable("metadata_unavailable");
+    } catch (error) {
+      const infrastructureReason = metadataInfrastructureReason(error);
+      return unavailable("metadata_unavailable", {
+        phase: "execute",
+        kind: "thrown",
+        ...(infrastructureReason ? { infrastructureReason } : {}),
+      });
     }
-    if (!observed || observed.exitCode !== 0 || observed.truncated) return unavailable("metadata_unavailable");
+    if (!observed) return unavailable("metadata_unavailable", { phase: "result", kind: "invalid_result" });
+    if (observed.exitCode !== 0 || observed.truncated)
+      return unavailable("metadata_unavailable", {
+        phase: "result",
+        kind: observed.exitCode !== 0 ? "nonzero_exit" : "truncated",
+        exitCode: observed.exitCode,
+        truncated: observed.truncated,
+      });
     const fields = observed.stdout.split("\n");
     if (
       fields.length !== 4 ||
@@ -239,7 +272,14 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
       !sha.safeParse(fields[1]).success ||
       !sha.safeParse(fields[2]).success
     )
-      return unavailable("metadata_unavailable");
+      return unavailable("metadata_unavailable", {
+        phase: "framing",
+        kind: "invalid_fields",
+        lineCount: fields.length,
+        cwdAbsolute: fields[0]?.startsWith("/") === true,
+        headValid: sha.safeParse(fields[1]).success,
+        fingerprintValid: sha.safeParse(fields[2]).success,
+      });
     if (signal.aborted) return unavailable("stopped");
     const nextBudget = budget();
     if (nextBudget.kind === "exhausted") return unavailable("budget_exhausted");

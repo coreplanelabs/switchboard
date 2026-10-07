@@ -1,3 +1,4 @@
+import { sourceHash } from "../../src/core/references/receipts.ts";
 import { sessionSeed } from "../../src/core/dispatch/seed.ts";
 import type { ChatMessage } from "../../src/core/chatMessage.ts";
 import {
@@ -10041,4 +10042,154 @@ describe("pull-owner source-local diagnostic provenance", () => {
     });
     expect(await read(key)).toEqual({ ok: true, owners: [{ kind: "run", runId: "provenance-live-0" }] });
   });
+});
+
+describe("original policy owning SQLite state transaction", () => {
+  it.each([
+    "omitted-harness",
+    "omitted-policy",
+    "changed",
+    "invalid",
+    "legacy-backfill",
+    "lifecycle",
+    "first-launch",
+    "legacy-absence",
+  ])("preserves admitted policy through actual HTTP state: %s", async (mode) => {
+    const id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa",
+      sk = "runs:session-policy:" + crypto.randomUUID();
+    const client = new WorkerRunLedger({
+      baseUrl: BASE,
+      token: "test-token",
+      storeKey: sk,
+      fetch: (url, init) => fetchMemoryTest(String(url), init),
+    });
+    const policy = { version: 1, commandRoute: "hosted-review", identity: "read" };
+    const facts = {
+      harness: "pi",
+      pid: 42,
+      processBirth: "original",
+      root: "/workspace/original",
+      bearerHash: "a".repeat(64),
+      sessionFile: "/workspace/original/session.jsonl",
+      wire: "openai-responses",
+      logOffset: 0,
+      sessionPolicy: policy,
+    };
+    const { sessionPolicy: _, ...legacy } = facts;
+    const initial = mode === "first-launch" ? {} : { harness: mode.startsWith("legacy") ? legacy : facts };
+    expect(
+      await client.claim({
+        runId: id,
+        threadKey: "mcp:fixture:policy",
+        gen: "g1",
+        startedAt: 1,
+        leaseMs: 10000,
+        system: "original",
+        tools: [],
+        meta: {
+          channelId: "mcp:fixture",
+          threadKey: "mcp:fixture:policy",
+          userId: "slack:fixture",
+          profile: { machine: "repo-resident", identity: "read", minutes: 25 },
+        },
+        state: initial,
+      }),
+    ).toMatchObject({ ok: true });
+    const before = await client.peekInbox(id, "g1", 0);
+    expect(before.ok).toBe(true);
+    const incoming =
+      mode === "omitted-harness"
+        ? { verdict: "later" }
+        : mode === "omitted-policy"
+          ? { harness: { ...legacy, logOffset: 12 } }
+          : mode === "changed"
+            ? { harness: { ...facts, sessionPolicy: { version: 1, commandRoute: "native", identity: "read" } } }
+            : mode === "invalid"
+              ? { harness: { ...facts, sessionPolicy: { ...policy, extra: true } } }
+              : mode === "legacy-absence"
+                ? { harness: { ...legacy, logOffset: 12 } }
+                : { harness: { ...facts, logOffset: 12 } };
+    const result = await client.setState(id, "g1", incoming);
+    const after = await client.peekInbox(id, "g1", 0);
+    expect(after.ok).toBe(true);
+    if (["changed", "invalid", "legacy-backfill"].includes(mode)) {
+      expect(result).toEqual({ ok: false, reason: "fenced" });
+      expect(after).toEqual(before);
+    } else {
+      expect(result).toEqual({ ok: true });
+      if (after.ok && mode !== "legacy-absence")
+        expect(after.boundary.state).toHaveProperty("harness.sessionPolicy", policy);
+    }
+    expect(await client.setState(id, "foreign", incoming)).toEqual({ ok: false, reason: "fenced" });
+    expect(await client.peekInbox(id, "g1", 0)).toEqual(after);
+  });
+});
+
+import { preserveHarnessPolicy } from "../../src/core/runLedger/checkpointState.ts";
+it("matches omitted-policy caller bytes to actual SQLite readback after accepted HTTP reply loss", async () => {
+  const id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa",
+    sk = "runs:session-policy:" + crypto.randomUUID();
+  let writes = 0;
+  const ordinary = (url: RequestInfo | URL, init?: RequestInit) => fetchMemoryTest(String(url), init);
+  const client = new WorkerRunLedger({ baseUrl: BASE, token: "test-token", storeKey: sk, fetch: ordinary });
+  const policy = { version: 1, commandRoute: "hosted-review", identity: "read" };
+  const facts = {
+    harness: "pi",
+    pid: 42,
+    processBirth: "original",
+    root: "/workspace/original",
+    bearerHash: "a".repeat(64),
+    sessionFile: "/workspace/original/session.jsonl",
+    wire: "openai-responses",
+    logOffset: 0,
+    sessionPolicy: policy,
+  };
+  expect(
+    await client.claim({
+      runId: id,
+      threadKey: "mcp:fixture:policy",
+      gen: "g1",
+      startedAt: 1,
+      leaseMs: 10000,
+      system: "original",
+      tools: [],
+      meta: { channelId: "mcp:fixture", threadKey: "mcp:fixture:policy", userId: "slack:fixture" },
+      state: { harness: facts, original: "retained" },
+    }),
+  ).toMatchObject({ ok: true });
+  const before = await client.peekInbox(id, "g1", 0);
+  if (!before.ok) throw new Error("owner missing");
+  const { sessionPolicy: _, ...legacy } = facts;
+  const expected = preserveHarnessPolicy(before.boundary.state as Record<string, unknown>, {
+    ...(before.boundary.state as Record<string, unknown>),
+    harness: { ...legacy, logOffset: 12 },
+  })!;
+  const saved = structuredClone(expected);
+  const lost = new WorkerRunLedger({
+    baseUrl: BASE,
+    token: "test-token",
+    storeKey: sk,
+    fetch: async (url, init) => {
+      expect(new URL(String(url)).pathname).toBe("/runs/state");
+      writes++;
+      const response = await ordinary(url, init);
+      expect(response.status).toBe(200);
+      await response.text();
+      throw new Error("accepted reply lost");
+    },
+  });
+  let witness: unknown;
+  try {
+    await lost.setState(id, "g1", expected);
+    throw new Error("reply was not lost");
+  } catch (error) {
+    expect(error).toMatchObject({ name: "UncertainStoreError" });
+    witness = (error as { request: unknown }).request;
+  }
+  const actual = await client.peekInbox(id, "g1", 0);
+  if (!actual.ok) throw new Error("owner missing");
+  expect(await sourceHash(actual.boundary.state)).toBe(await sourceHash(expected));
+  expect(actual.boundary.state).toEqual(JSON.parse((witness as { payload: string }).payload).state);
+  expect(expected).toEqual(saved);
+  expect(writes).toBe(1);
 });
