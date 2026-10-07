@@ -164,7 +164,10 @@ export interface RunLedger {
   /** Drop only the exact retained revision after the resident saves it. */
   ackWorkspaceSettlement(owner: WorkspaceOwner, revision: number): Promise<WorkspaceAck>;
   /** Replace equivalent ordinary origins only through a verified durable checkpoint. */
-  normalizeContextOrigins(request: ContextCheckpointRequest): Promise<ContextCheckpointResult>;
+  normalizeContextOrigins(
+    request: ContextCheckpointRequest,
+    expectedSession?: Readonly<import("../references/contextCheckpoint.js").ContextCheckpointSession>,
+  ): Promise<ContextCheckpointResult>;
   readContextCheckpoint(runId: string): Promise<CanonicalCheckpointSource | undefined>;
   /** Atomically mint a monotonic resident attachment fence for the live ledger owner. */
   residentClaim(

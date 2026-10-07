@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { sourceHash } from "../references/receipts.js";
 import { testSessionSources } from "../testing/slackSources.js";
 import type { ChatMessage } from "../chatMessage.js";
@@ -1897,4 +1897,64 @@ describe("canonical terminal native branch receipt", () => {
         );
     }
   });
+});
+
+describe("local original checkpoint boundary before effects", () => {
+  it.each(["key", "seedFrom", "request", "from", "through"])(
+    "refuses a local %s mismatch before checkpoint recovery",
+    async (key) => {
+      const ledger = new InMemoryRunLedger(() => 1000),
+        runId = "local-checkpoint";
+      const session = {
+        key: "slack:C1:1.0:review",
+        threadSession: "slack:C1:1.0:@thread",
+        seedFrom: 0,
+        request: 0,
+        range: { from: 0 },
+      };
+      await ledger.claim({
+        runId,
+        threadKey: "slack:C1:1.0",
+        gen: "g1",
+        leaseMs: 10000,
+        startedAt: 1,
+        system: "original",
+        tools: [],
+        meta: {
+          channelId: "slack:C1",
+          threadKey: "slack:C1:1.0",
+          userId: "slack:UA",
+          channelVisibility: "public",
+          session,
+        },
+      });
+      await ledger.step(
+        runId,
+        "g1",
+        { step: 0, seq: 0, turnIndex: 1, inFlight: [], inboxConsumedSeq: 0, remainingMs: 1000, turn: 0, iteration: 0 },
+        [],
+      );
+      const before = structuredClone(ledger.live.get(runId));
+      const recovery = vi.spyOn(ledger, "readContextCheckpoint");
+      const expected = { key: session.key, seedFrom: 0, request: 0, from: 0, through: 0 };
+      if (key === "key") expected.key = "slack:C1:2.0:review";
+      else (expected as Record<string, unknown>)[key] = 1;
+      const request = {
+        key: session.key,
+        runId,
+        gen: "g1",
+        expected: {
+          beforeHash: "a".repeat(64),
+          revision: 0,
+          inputs: { transcriptHash: "b".repeat(64), systemHash: "c".repeat(64), notepadHash: "d".repeat(64) },
+        },
+      };
+      expect(await ledger.normalizeContextOrigins(request, expected)).toEqual({
+        ok: false,
+        reason: "checkpoint-unavailable",
+      });
+      expect(recovery).not.toHaveBeenCalled();
+      expect(ledger.live.get(runId)).toEqual(before);
+    },
+  );
 });
