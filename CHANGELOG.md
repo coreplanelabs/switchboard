@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.289.2](https://github.com/coreplanelabs/switchboard/compare/v1.289.1...v1.289.2) (2026-10-07)
+
+
+### Bug fixes
+
+* **dispatcher:** keep preset requests on the work path ([#2825](https://github.com/coreplanelabs/switchboard/issues/2825)) ([741841e](https://github.com/coreplanelabs/switchboard/commit/741841ebebae1de280530fe20cced6f9fd4de24e))
+
 ## [1.289.1](https://github.com/coreplanelabs/switchboard/compare/v1.289.0...v1.289.1) (2026-10-07)
 
 
