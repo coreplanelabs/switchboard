@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.289.8](https://github.com/coreplanelabs/switchboard/compare/v1.289.7...v1.289.8) (2026-10-07)
+
+
+### Bug fixes
+
+* **dispatcher:** retain bounded action repair after helper reads ([#2838](https://github.com/coreplanelabs/switchboard/issues/2838)) ([7e17cec](https://github.com/coreplanelabs/switchboard/commit/7e17cec41cc6da900cfda9008f42cb034ae64c79))
+* **sandbox:** retain capacity at 250 across deployments ([#2839](https://github.com/coreplanelabs/switchboard/issues/2839)) ([ea95059](https://github.com/coreplanelabs/switchboard/commit/ea95059f96680c436e466e644ad5cdae55954b56))
+
 ## [1.289.7](https://github.com/coreplanelabs/switchboard/compare/v1.289.6...v1.289.7) (2026-10-07)
 
 
