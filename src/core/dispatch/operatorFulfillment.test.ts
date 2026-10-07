@@ -58,6 +58,77 @@ const work: RouteToolCall = {
 
 // These models script semantic verdicts; they prove the boundary, not live model accuracy.
 describe("terminal command fulfillment", () => {
+  it("a known rejected argument-free command is withdrawn from the same request's repair offer", async () => {
+    const model = vi.fn<RouteModel>(async (prompt) => {
+      if (prompt.tool.name === VERIFY_TOOL_NAME) return verdict(false);
+      const offered = [prompt.tool, ...(prompt.tools ?? [])].some((tool) => tool.name === "repo_list");
+      return offered ? listing : work;
+    });
+    const answer = await runOperator(fix, model);
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ shipEntry: "work_from_thread", repo: "acme/api", repoSource: "thread" }],
+    });
+    if (answer.decision.kind !== "binds") throw new Error("expected original requested work");
+    expect(answer.decision.binds[0]).not.toHaveProperty("prTarget");
+    expect(model).toHaveBeenCalledTimes(3);
+    expect(
+      [model.mock.calls[2]![0].tool, ...(model.mock.calls[2]![0].tools ?? [])].map((tool) => tool.name),
+    ).not.toContain("repo_list");
+    expect(model.mock.calls[2]![0].user).toContain("Fix it.");
+    expect(model.mock.calls[2]![0].user).toContain("acme/old/pull/7");
+  });
+
+  it("a withdrawn selection cannot be re-admitted by a provider returning its old tool", async () => {
+    let verification = 0;
+    const model = vi.fn<RouteModel>(async (prompt) => {
+      if (prompt.tool.name === VERIFY_TOOL_NAME) {
+        verification++;
+        return verdict(false);
+      }
+      return listing;
+    });
+    const answer = await runOperator(fix, model);
+    expect(answer.decision.kind).toBe("non_decision");
+    expect(verification).toBe(1);
+    expect(model).toHaveBeenCalledTimes(4); // One verdict; two bounded structural reselects.
+    expect(answer.attempts?.filter((a) => a.stage === "command_fulfillment")).toHaveLength(1);
+  });
+
+  it("a parameterized command remains offered so an incorrect argument can be repaired", async () => {
+    const proposed = { tool: "runs_list", input: { intent: "read", reason: "requested status", status: "all" } };
+    let verified = 0;
+    let routed = 0;
+    const model = vi.fn<RouteModel>(async (prompt) => {
+      if (prompt.tool.name === VERIFY_TOOL_NAME) return verdict(++verified > 1);
+      routed++;
+      expect([prompt.tool, ...(prompt.tools ?? [])].map((tool) => tool.name)).toContain("runs_list");
+      return routed === 1 ? proposed : { ...proposed, input: { ...proposed.input, status: "failed" } };
+    });
+    const answer = await runOperator({ ...fix, text: "List only failed runs." }, model);
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ invocation: { id: "runs.list", input: { options: { status: "failed" } } } }],
+    });
+    expect(model).toHaveBeenCalledTimes(4);
+  });
+
+  it("an unknown verdict leaves the catalog choice offered for normal repair", async () => {
+    let routed = 0;
+    let verified = 0;
+    const model = vi.fn<RouteModel>(async (prompt) => {
+      if (prompt.tool.name === VERIFY_TOOL_NAME)
+        return ++verified === 1 ? { tool: VERIFY_TOOL_NAME, input: {} } : verdict(true);
+      routed++;
+      expect([prompt.tool, ...(prompt.tools ?? [])].map((tool) => tool.name)).toContain("repo_list");
+      return listing;
+    });
+    const answer = await runOperator({ ...fix, text: "Which repositories are connected?" }, model);
+    expect(answer.decision.kind).toBe("binds");
+    expect(routed).toBe(2);
+    expect(model).toHaveBeenCalledTimes(4);
+  });
+
   it("repairs the exact same-thread fix listing without replacing its issue target", async () => {
     const replies = [listing, verdict(false), work];
     const model = vi.fn<RouteModel>(async () => replies.shift()!);
