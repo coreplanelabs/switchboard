@@ -757,6 +757,143 @@ describe("uncertain canonical boundaries", () => {
     return { promise, resolve };
   }
 
+  it.each([true, false])(
+    "terminal landing reconciles an original unknown state before closing its owner: committed=%s",
+    async (committed) => {
+      const inner = new InMemoryRunLedger(() => 10_000);
+      let stateWrites = 0;
+      let originalRequest: Awaited<ReturnType<typeof storeRequestWitness>> | undefined;
+      const finish = vi.spyOn(inner, "finish");
+      const ledger = overriding(inner, {
+        setState: async (...args) => {
+          stateWrites++;
+          originalRequest = await storeRequestWitness("/runs/state", JSON.stringify(args));
+          if (committed) expect((await inner.setState(...args)).ok).toBe(true);
+          throw new UncertainStoreError("state reply unavailable", originalRequest);
+        },
+      });
+      const h = harness({ ledger });
+      const run = (await openRun(h.wt, openReq()))!;
+      try {
+        expect(await run.commitState({ harness: { harness: "pi", pid: 1, logOffset: 0, relaunches: 0 } })).toBe(
+          "unavailable",
+        );
+        const original = run.writeBoundaryFailure;
+        const before = structuredClone(inner.live.get("r1"));
+        if (committed) {
+          await run.sink.put(record("r1"));
+          expect(run.writeBoundaryFailure).toBeUndefined();
+          expect(finish).toHaveBeenCalledTimes(1);
+          expect(inner.live.has("r1")).toBe(false);
+        } else {
+          await expect(run.sink.put(record("r1"))).rejects.toMatchObject({
+            hold: { runId: "r1", gen: "gen-A", requestDigest: originalRequest!.digest },
+            request: originalRequest,
+          });
+          expect(finish).not.toHaveBeenCalled();
+          expect(inner.live.get("r1")).toEqual(before);
+          expect(run.writeBoundaryFailure).toEqual(original);
+          expect(await h.wt.reserve(openReq())).toMatchObject({ kind: "held" });
+        }
+        expect(stateWrites).toBe(1);
+        expect(h.fallbackPuts).toEqual([]);
+        expect(h.sleeps).toEqual([]);
+      } finally {
+        await run.close();
+      }
+    },
+  );
+
+  it.each(["state", "step"] as const)("terminal landing waits for an already-started %s reply", async (kind) => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const entered = deferred(),
+      release = deferred();
+    let originalRequest: Awaited<ReturnType<typeof storeRequestWitness>> | undefined;
+    const finish = vi.spyOn(inner, "finish");
+    const ledger = overriding(inner, {
+      [kind === "state" ? "setState" : "step"]: async (...args: unknown[]) => {
+        if (kind === "step" && (args[2] as { step: number }).step === 0)
+          return inner.step(...(args as Parameters<RunLedger["step"]>));
+        originalRequest = await storeRequestWitness(`/runs/${kind}`, JSON.stringify(args));
+        entered.resolve();
+        await release.promise;
+        throw new UncertainStoreError("reply unavailable", originalRequest);
+      },
+    });
+    const h = harness({ ledger });
+    const run = (await openRun(h.wt, openReq()))!;
+    const writing = kind === "state" ? run.commitState({ checklist: "pending" }) : run.step(step());
+    await entered.promise;
+    const terminal = run.sink.put(record("r1")).then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    );
+    try {
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(finish).not.toHaveBeenCalled();
+      release.resolve();
+      await writing;
+      expect(await terminal).toMatchObject({
+        error: {
+          hold: { runId: "r1", gen: "gen-A", requestDigest: originalRequest!.digest },
+          request: originalRequest,
+        },
+      });
+      expect(run.writeBoundaryFailure).toMatchObject({ kind, requestDigest: originalRequest!.digest });
+      expect(inner.live.has("r1")).toBe(true);
+      expect(h.fallbackPuts).toEqual([]);
+      expect(h.sleeps).toEqual([]);
+    } finally {
+      release.resolve();
+      await Promise.allSettled([writing, terminal]);
+      await run.close();
+    }
+  });
+
+  it.each([
+    ["abandon", true],
+    ["abandon", false],
+    ["pause", true],
+    ["pause", false],
+  ] as const)(
+    "%s preserves an original unknown state until same-owner readback: committed=%s",
+    async (action, committed) => {
+      const inner = new InMemoryRunLedger(() => 10_000);
+      const abandon = vi.spyOn(inner, "abandon");
+      const handoff = vi.spyOn(inner, "handoff");
+      let writes = 0;
+      const h = harness({
+        ledger: overriding(inner, {
+          setState: async (...args) => {
+            writes++;
+            const request = await storeRequestWitness("/runs/state", JSON.stringify(args));
+            if (committed) expect((await inner.setState(...args)).ok).toBe(true);
+            throw new UncertainStoreError("reply unavailable", request);
+          },
+        }),
+      });
+      const run = (await openRun(h.wt, openReq()))!;
+      try {
+        expect(await run.commitState({ checklist: "original" })).toBe("unavailable");
+        const original = run.writeBoundaryFailure;
+        const before = structuredClone(inner.live.get("r1"));
+        if (action === "abandon") await run.abandon();
+        else expect(await run.pauseForRetry()).toBe(committed);
+        expect(action === "abandon" ? abandon : handoff).toHaveBeenCalledTimes(committed ? 1 : 0);
+        if (!committed) {
+          expect(inner.live.get("r1")).toEqual(before);
+          expect(run.writeBoundaryFailure).toEqual(original);
+          expect(run.tracked()).toBe(true);
+        } else expect(run.writeBoundaryFailure).toBeUndefined();
+        expect(writes).toBe(1);
+        expect(h.sleeps).toEqual([]);
+        expect(h.fallbackPuts).toEqual([]);
+      } finally {
+        await run.close();
+      }
+    },
+  );
+
   it.each(["state", "step"] as const)(
     "retains overlapping originals when the %s response becomes unknown first",
     async (first) => {

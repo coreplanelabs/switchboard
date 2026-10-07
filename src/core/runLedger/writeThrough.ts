@@ -372,7 +372,7 @@ export interface LedgerRun {
   step(report: StepReport): Promise<void>;
   /** A registry event, in publish order, with the registry's `seq`. */
   event(event: RunEvent, seq: number): void;
-  /** Flush older events, then atomically commit a live-state boundary and projection. */
+  /** Reconcile uncertain snapshots before a live-state assignment can change their canonical readback. */
   assignLiveState(assignment: LiveStateAssignRequest): Promise<LiveStateAssignResult>;
   /** Merge into the run's state and send it (coalesced: the newest wins). */
   setState(patch: RunState): void;
@@ -1229,6 +1229,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     private lastSeq: number;
     private state: RunState;
     private stateSending: Promise<void> = Promise.resolve();
+    private stepSending: Promise<void> = Promise.resolve();
     private stateDirty = false;
     private stateVersion = 0;
     private acknowledgedStateVersion = 0;
@@ -1362,10 +1363,11 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     pauseRetained = false;
 
     async pauseForRetry(): Promise<boolean> {
-      if (!this.resumable || !this.tracked() || this.handedOff || this.finished) return false;
+      if (!this.resumable || !this.tracked() || this.handedOff || this.finished || this.finishLanding) return false;
       try {
-        await this.stateSending;
+        await Promise.all([this.stateSending, this.stepSending]);
         await this.flusher.flush();
+        if (!(await this.reconcilePendingBoundary())) return false;
         const { marked } = await ledger.handoff(gen, [this.runId], { pausedForRetry: true });
         if (!marked.includes(this.runId)) {
           // A completed handoff that did not mark this row refused its owner.
@@ -1413,8 +1415,6 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
 
     readonly sink: RecordSink = {
       put: async (plain) => {
-        this.finished = true; // no event or state write after this point
-        live.delete(this);
         // Named in `landing` from the first attempt to the outcome, so a claim
         // meeting this run's row can await it and say why the row stood (item
         // 54). A failure here settles nothing: the caller decides whether it
@@ -1423,6 +1423,15 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         const entry = (this.finishLanding ??= landingFor(this.runId));
         if (entry.unknown.length > 0)
           throw new TerminalCommitmentUnknownError(entry.unknown[0].hold, entry.unknown[0].request);
+        await Promise.all([this.stateSending, this.stepSending]);
+        if (!(await this.reconcilePendingBoundary())) {
+          for (const pending of this.pendingBoundaries)
+            this.retainTerminalUnknown(entry, JSON.stringify(plain), pending.request);
+          if (entry.unknown.length > 0)
+            throw new TerminalCommitmentUnknownError(entry.unknown[0].hold, entry.unknown[0].request);
+        }
+        this.finished = true; // no event or state write after this point
+        live.delete(this);
         entry.record = JSON.stringify(plain);
         try {
           const { value, outcome } = await this.land(plain);
@@ -1801,7 +1810,14 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       }
     }
 
-    async step(report: StepReport): Promise<void> {
+    step(report: StepReport): Promise<void> {
+      if (this.finished || this.finishLanding) return Promise.resolve();
+      const sending = this.sendStep(report);
+      this.stepSending = Promise.allSettled([this.stepSending, sending]).then(() => {});
+      return sending;
+    }
+
+    private async sendStep(report: StepReport): Promise<void> {
       if (this.detached) return;
       if (!(await this.reconcilePendingBoundary())) return;
       report = structuredClone(report);
@@ -1911,9 +1927,11 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
 
     async assignLiveState(assignment: LiveStateAssignRequest): Promise<LiveStateAssignResult> {
       if (this.detached || this.finished) return { ok: false, reason: "unknown-run" };
+      if (this.finishLanding) return { ok: false, reason: "unavailable" };
       await this.flusher.flush();
-      await this.stateSending;
+      await Promise.all([this.stateSending, this.stepSending]);
       try {
+        if (!(await this.reconcilePendingBoundary())) return { ok: false, reason: "unavailable" };
         const result = await ledger.assignLiveState(this.runId, gen, assignment);
         if (!result.ok) {
           if (result.reason === "fenced" || result.reason === "unknown-run")
@@ -1935,7 +1953,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     }
 
     setState(patch: RunState): void {
-      if (this.detached) return;
+      if (this.detached || this.finished || this.finishLanding) return;
       this.state = { ...this.state, ...patch };
       this.stateDirty = true;
       this.stateVersion++;
@@ -1948,7 +1966,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
 
     async commitState(patch: RunState): Promise<FinishingGate> {
       if (this.fencedOut || this.finished) return "fenced";
-      if (this.detached) return "unavailable";
+      if (this.detached || this.finishLanding) return "unavailable";
       this.setState(patch);
       const requestedVersion = this.stateVersion;
       await this.stateSending;
@@ -2039,7 +2057,9 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     }
 
     async abandon(): Promise<void> {
-      if (this.detached || this.finished) return;
+      if (this.detached || this.finished || this.finishLanding) return;
+      await Promise.all([this.stateSending, this.stepSending]);
+      if (!(await this.reconcilePendingBoundary())) return;
       this.finished = true; // nothing is written after this
       live.delete(this);
       await this.close();
@@ -2158,7 +2178,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
 
     async close(): Promise<void> {
       this.stopHeartbeat();
-      await this.stateSending;
+      await Promise.all([this.stateSending, this.stepSending]);
       await this.flusher.close();
     }
   }
