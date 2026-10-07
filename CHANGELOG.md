@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.289.3](https://github.com/coreplanelabs/switchboard/compare/v1.289.2...v1.289.3) (2026-10-07)
+
+
+### Bug fixes
+
+* **dispatcher:** verify inferred commands fulfill the request ([#2827](https://github.com/coreplanelabs/switchboard/issues/2827)) ([22396f6](https://github.com/coreplanelabs/switchboard/commit/22396f6ad918780bab4be67966a153fbe8747fbd))
+
 ## [1.289.2](https://github.com/coreplanelabs/switchboard/compare/v1.289.1...v1.289.2) (2026-10-07)
 
 
