@@ -29,6 +29,30 @@ import { TIMEOUT_ON_LONG_COMMANDS } from "../core/ship/contract.js";
 // change forces a feature-file update (and vice versa).
 
 describe("agent registry matches the feature specs", () => {
+  it("declares Review lifetime as purpose data while every unrelated agent remains retained", () => {
+    const policy = (AGENTS.review as AgentDef & { resourceLifetime?: unknown }).resourceLifetime;
+    expect(policy).toEqual({
+      version: 1,
+      purpose: "pull-request-review",
+      resident: "retained",
+      cold: {
+        kind: "exclusive-scratch",
+        scope: "original-cold-allocation",
+        custody: "session-report-and-review-publication",
+      },
+    });
+    for (const entry of Object.values(AGENTS).filter((entry) => entry !== AGENTS.review))
+      expect((entry as AgentDef & { resourceLifetime?: unknown }).resourceLifetime).toEqual({
+        version: 1,
+        purpose: "retained-work",
+        resident: "retained",
+        cold: "retained",
+      });
+    const renamed = { ...AGENTS.review, name: "reader-alias" };
+    expect((renamed as AgentDef & { resourceLifetime?: unknown }).resourceLifetime).toEqual(policy);
+    expect(AGENTS.review).toMatchObject({ machine: "repo-resident", identity: "read", maxMinutes: 25 });
+    expect(AGENTS.explore).toMatchObject({ machine: "repo-cold", identity: "read", maxMinutes: 120 });
+  });
   it("general: the assistant toolset (GitHub reads + issue writes + web_fetch, no shell), 60 min", () => {
     expect(AGENTS.general.toolset).toBe("assistant");
     expect(AGENTS.general.maxMinutes).toBe(60);

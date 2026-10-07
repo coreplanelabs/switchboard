@@ -11,6 +11,7 @@ import type { ChannelVisibility } from "../authz/types.js";
 import type { RunProfile } from "../../config/profile.js";
 import type { RunEvent } from "../runEvents.js";
 import type { RunSeed, RunSession } from "../runRecord.js";
+import type { WorkspaceAllocation } from "./workspaceDurability.js";
 import type { AssignRunLiveStateInput, AssignRunLiveStateResult, RunLiveState } from "../runLiveState.js";
 
 /** How long a generation's claim on a run lasts without a heartbeat. */
@@ -47,6 +48,8 @@ export interface CardHandle {
  *  registry is a Node module and this file is shared with the state Worker)
  *  plus what a resume needs that the dispatcher otherwise keeps in closures. */
 export interface LiveRunMeta {
+  /** Explicit first-admission contract; missing on legacy allocations. */
+  workspaceAllocation?: WorkspaceAllocation;
   agent?: string;
   model?: string;
   /** The main conversation's source audience was checked before this row's
@@ -284,12 +287,26 @@ export interface ClaimRequest {
  *  its row carries (item 48), so a retried spawn can tell its own child from
  *  a busy thread. */
 export type ClaimResult =
-  | { ok: true }
+  | {
+      ok: true;
+      allocationAck?: WorkspaceAllocationAck;
+      promotionCommit?: import("./promotion.js").PromotionCommitReceipt;
+    }
   | {
       ok: false;
       reason: "thread-live";
       live: { runId: string; agent?: string; startedAt: number; idempotencyKey?: string };
     };
+
+/** Receiver-produced original admission identity, not a disposal permit. */
+export interface WorkspaceAllocationAck {
+  version: 1;
+  runId: string;
+  threadKey: string;
+  gen: string;
+  startedAt: number;
+  allocation: WorkspaceAllocation | null;
+}
 
 export type FenceResult = { ok: true } | { ok: false; reason: "fenced" | "unknown-run" };
 

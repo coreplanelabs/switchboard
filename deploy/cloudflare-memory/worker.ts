@@ -1,6 +1,58 @@
+import { originalPromotionArchiveKey } from "../../src/core/runLedger/workspaceDurability.ts";
 import { isConfigPublicationSnapshotKey, type ConfigSourcePrecondition } from "../../src/configPublicationProtocol.js";
 import { DO_MAX_BOUND_PARAMETERS, RUN_EVENT_INSERT_BATCH } from "../../src/memorySqlLimits.js";
+import {
+  SOURCE_SEED_RECORD_PREFIX,
+  sourceSeedOriginalKey,
+  sourceSeedOriginalOf,
+  sourceSeedReferenceOfReceipt,
+  type SourceSeedOriginalRecord,
+} from "../../src/core/runLedger/seedVerification.ts";
 import { bindInboxCustody } from "../../src/core/runLedger/inboxMessage.ts";
+import {
+  sourceSeedReleaseOf,
+  confirmStoredSeedBoundary,
+  type SourceSeedReleaseReceipt,
+  type PromotionConfirmationResult,
+  sourceSeedReferenceOf,
+  sourceSeedReceiptOf,
+  authenticatedSeedExpectation,
+  verifiedSourceSeedHashes,
+  sourceSeedReferenceMatches,
+  SourceSeedPendingError,
+  type SourceSeedReference,
+  type SourceSeedReceipt,
+  type SourceSeedResult,
+  type SourceSeedSnapshot,
+} from "../../src/core/runLedger/seedVerification.ts";
+import {
+  decodeExpectedSeedHeader,
+  EXPECTED_SEED_HEADER,
+  requestHeaderBytes,
+  WORKER_REQUEST_HEADER_BYTES,
+  expectedSeedManifestOf,
+  expectedSeedMatchesClaim,
+  seedContentHash,
+  canonicalSeedJson,
+  type ExpectedSeedManifest,
+} from "../../src/core/runLedger/seedManifest.ts";
+import { allocationAckFromCanonical } from "../../src/core/runLedger/allocationAck.js";
+import {
+  promotionBodyOf,
+  promotionBodyHash,
+  promotionBytes,
+  promotionMatchesOriginal,
+  promotionPending,
+  promotionReceiptFromRow,
+  preparedPromotionClaim,
+  promotionCommitFromRow,
+  promotionCommittedRowMatches,
+  PromotionPendingError,
+  PROMOTION_BODY_BYTES,
+  type PromotionPrepareResult,
+  type PromotionReadRequest,
+  type PromotionReadResult,
+} from "../../src/core/runLedger/promotion.js";
 import {
   validMaintenanceTransport,
   sameMaintenanceTransport,
@@ -79,6 +131,30 @@ import {
   mergeContextDependencies,
 } from "../../src/core/references/contextDependencies.js";
 import { assembleTranscript } from "../../src/core/runLedger/transcript.js";
+import {
+  workspaceAllocationOf,
+  workspaceDurabilityArchiveOf,
+  workspaceDurabilityKey,
+  sameWorkspaceAllocation,
+  allocationMatchesRecord,
+  allocationMatchesRun,
+  prepareWorkspaceAllocation,
+  workspaceAuthorityFieldsPresent,
+  deriveWorkspaceDisposition,
+  workspaceCustodyFingerprint,
+  workspaceReportRowsMatch,
+  workspaceEffectNeedsCustody,
+  custodyPinRevisionOf,
+  custodyPinProtectionOf,
+  nextCustodyPinRevision,
+  sameWorkspaceCustody,
+  type CustodyPinRevision,
+  isCustodyRangePins,
+  type WorkspaceAllocation,
+  type WorkspaceDispositionRead,
+  type WorkspaceDurabilityArchive,
+  type StoredWorkspaceCustody,
+} from "../../src/core/runLedger/workspaceDurability.js";
 import {
   handoffRangePins,
   sessionRangesAvailable,
@@ -181,6 +257,7 @@ import {
   tailCut,
   textOfStoredRow,
   logicalThreadOfSession,
+  contextThreadSessionKey,
 } from "../../src/core/runLedger/sessionLog.ts";
 import { mergeRequesterTarget, type RequesterTarget } from "../../src/core/runLedger/ledger.ts";
 import type { RunEvent } from "../../src/core/runEvents.ts";
@@ -2089,6 +2166,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         owner_key TEXT NOT NULL,
         revision INTEGER NOT NULL DEFAULT 1,
         json TEXT,
+        allocation_json TEXT,
         PRIMARY KEY (owner_key, revision)
       );
       CREATE TABLE IF NOT EXISTS run_steps (
@@ -2110,6 +2188,14 @@ export class RunHistoryDO extends DurableObject<Env> {
         PRIMARY KEY (run_id, kind)
       );
     `);
+    const allocationColumns = new Set(
+      this.sql
+        .exec<{ name: string }>(`PRAGMA table_info(workspace_settlements)`)
+        .toArray()
+        .map((row) => row.name),
+    );
+    if (!allocationColumns.has("allocation_json"))
+      this.sql.exec(`ALTER TABLE workspace_settlements ADD COLUMN allocation_json TEXT`);
     // The intake receipts (run-history item 59): one verdict per message key,
     // first writer wins, beside the live rows because the reconnect catch-up
     // reads them through the same store key. `prune_after` is stamped at the
@@ -3781,7 +3867,7 @@ export class RunHistoryDO extends DurableObject<Env> {
    *  dropped, in one transaction — an attempt starting over: the leftover of one
    *  whose Workflow instance was never created, once the shim said so. */
   async replaceInstance(instance: CoordinatorInstance): Promise<{ ok: true } | { ok: false; reason: "exists" }> {
-    return this.ctx.blockConcurrencyWhile(async () => {
+    const result = await this.ctx.blockConcurrencyWhile(async () => {
       let out: { ok: true } | { ok: false; reason: "exists" } = { ok: true };
       this.ctx.storage.transactionSync(() => {
         if (
@@ -3811,9 +3897,10 @@ export class RunHistoryDO extends DurableObject<Env> {
         );
         this.sql.exec(`DELETE FROM coordinator_units WHERE instance_id = ?`, instance.id);
       });
-      if (out.ok) await this.syncRangePins();
       return out;
     });
+    if (result.ok) await this.syncRangePins();
+    return result;
   }
 
   /** Confirm only the exact record whose create returned success. Keep its unit
@@ -5472,8 +5559,8 @@ export class RunHistoryDO extends DurableObject<Env> {
       return JSON.stringify(existing) !== JSON.stringify(holder.handoff);
     });
     if (!holders.some((holder) => handoffRangePins(holder.handoff).size)) return commit();
+    const touched = new Set<string>();
     const outcome = await this.ctx.blockConcurrencyWhile(async () => {
-      const touched = new Set<string>();
       try {
         const { policy } = this.policyState();
         for (const holder of holders) {
@@ -5487,13 +5574,12 @@ export class RunHistoryDO extends DurableObject<Env> {
           }
         }
         const value = await commit();
-        await this.syncRangePins([...touched]);
         return { ok: true as const, value };
       } catch (error) {
-        await this.syncRangePins([...touched]);
         return { ok: false as const, error };
       }
     });
+    await this.syncRangePins([...touched]);
     if (!outcome.ok) throw outcome.error;
     return outcome.value;
   }
@@ -5503,45 +5589,117 @@ export class RunHistoryDO extends DurableObject<Env> {
     const sessions =
       keys ??
       this.sql
-        .exec<{ key: string }>(`SELECT key FROM sessions`)
+        .exec<{ key: string }>("SELECT key FROM sessions")
         .toArray()
         .map((row) => row.key);
-    const { policy } = this.policyState();
-    const now = systemClock();
     for (const key of new Set(sessions)) {
-      const holders = this.sql
-        .exec<{ holder_run_id: string }>(
-          `SELECT DISTINCT holder_run_id FROM context_refs WHERE session_key = ? AND (retention_pin = 1 OR ordinary_pin = 1)
+      const id = this.env.SESSION_LOGS.idFromName(key),
+        log = this.env.SESSION_LOGS.get(id),
+        started = systemClock();
+      try {
+        // Read the receiver's revision BEFORE selecting canonical holders.
+        // Protection during either the selection or a delayed RPC invalidates
+        // the prune in the receiver's own transaction. No input gate or retry.
+        const revision = custodyPinRevisionOf(await log.custodyPinRevision());
+        if (!revision) throw new Error("session pin revision is unavailable");
+        const { policy } = this.policyState();
+        const now = systemClock();
+        const holders = this.sql
+          .exec<{ holder_run_id: string }>(
+            `SELECT DISTINCT holder_run_id FROM context_refs WHERE session_key = ? AND (retention_pin = 1 OR ordinary_pin = 1)
          AND source_run_id IN (SELECT run_id FROM runs UNION SELECT run_id FROM live_runs)`,
-          key,
-        )
-        .toArray()
-        .map((row) => row.holder_run_id)
-        .filter((holder) => {
-          if (this.contextHolderIsLiveOrKept(holder, policy, now)) return true;
-          const record = this.sql
-            .exec<RetentionRow & { context_checkpoint_json: string | null; work_evidence_json: string | null }>(
-              `SELECT run_id, finished_at, bytes, context_checkpoint_json, work_evidence_json FROM runs WHERE run_id = ?`,
-              holder,
+            key,
+          )
+          .toArray()
+          .map((row) => row.holder_run_id)
+          .filter((holder) => {
+            if (this.contextHolderIsLiveOrKept(holder, policy, now)) return true;
+            const record = this.sql
+              .exec<RetentionRow & { context_checkpoint_json: string | null; work_evidence_json: string | null }>(
+                `SELECT run_id, finished_at, bytes, context_checkpoint_json, work_evidence_json FROM runs WHERE run_id = ?`,
+                holder,
+              )
+              .toArray()[0];
+            return (
+              !!(record?.context_checkpoint_json || record?.work_evidence_json) && this.isKept(record, policy, now)
+            );
+          });
+
+        for (const entry of this.sql
+          .exec<{ allocation_json: string }>(
+            "SELECT allocation_json FROM workspace_settlements WHERE allocation_json IS NOT NULL",
+          )
+          .toArray()) {
+          const archive = workspaceDurabilityArchiveOf(JSON.parse(entry.allocation_json));
+          if (!archive) throw new Error("workspace allocation authority is unreadable");
+          const allocation = archive.allocation;
+          if (allocation?.kind !== "exclusive-scratch") continue;
+          const live = this.liveRow(archive.runId);
+          if (live) {
+            if (live.startedAt !== archive.startedAt || !allocationMatchesRun(allocation, live.runId, live.meta))
+              throw new Error("workspace allocation owner changed");
+            if (
+              live.meta.session?.range === "broken" ||
+              (revision.guarded && key !== contextThreadSessionKey(allocation.threadKey) && !live.meta.session)
+            )
+              throw new Error("workspace allocation session is unavailable");
+            if (key === contextThreadSessionKey(allocation.threadKey) || live.meta.session?.key === key)
+              holders.push(archive.runId);
+            continue;
+          }
+          const saved = this.sql
+            .exec<RetentionRow & { summary_json: string }>(
+              "SELECT run_id,finished_at,bytes,summary_json FROM runs WHERE run_id=?",
+              archive.runId,
             )
             .toArray()[0];
-          return !!(record?.context_checkpoint_json || record?.work_evidence_json) && this.isKept(record, policy, now);
+          if (!saved || !this.isKept(saved, policy, now)) continue;
+          const record = JSON.parse(saved.summary_json) as RunRecord;
+          if (
+            record.startedAt !== archive.startedAt ||
+            record.provisional ||
+            !allocationMatchesRecord(allocation, record)
+          )
+            throw new Error("workspace allocation record changed");
+          if (
+            record.session?.range === "broken" ||
+            (revision.guarded && key !== contextThreadSessionKey(allocation.threadKey) && !record.session)
+          )
+            throw new Error("workspace allocation session is unavailable");
+          const custody =
+            archive.disposition?.kind === "scratch-custody-closed" ? archive.disposition.custody : undefined;
+          if (
+            custody &&
+            (custody.sessionKey !== record.session?.key ||
+              record.session.range.to !== custody.through ||
+              custody.threadReport.key !== contextThreadSessionKey(allocation.threadKey))
+          )
+            throw new Error("workspace custody reference changed");
+          if (key === contextThreadSessionKey(allocation.threadKey) || record.session?.key === key)
+            holders.push(archive.runId);
+        }
+        const applied = await log.retainRangePinsIfRevision(revision, [...new Set(holders)]);
+        if (!applied.ok) {
+          console.warn(`[range-pins] session=${id.toString()} retained: ${applied.reason}`);
+          continue;
+        }
+        const received = custodyPinRevisionOf({
+          version: applied.version,
+          revision: applied.revision,
+          guarded: applied.guarded,
         });
-      const id = this.env.SESSION_LOGS.idFromName(key);
-      const started = systemClock();
-      // The object ID joins this attempt to the Cloudflare RPC trace without
-      // printing a thread or session key. A missing completion marks a stall.
-      console.log(`[range-pins] session=${id.toString()} holders=${holders.length} start`);
-      try {
-        await this.env.SESSION_LOGS.get(id).retainRangePins(holders);
-      } catch (error) {
-        console.warn(`[range-pins] session=${id.toString()} failed after ${systemClock() - started}ms`);
-        throw error;
+        if (!received || received.revision !== revision.revision + 1 || received.guarded !== revision.guarded)
+          throw new Error("session pin prune receipt is unreadable");
+        const elapsed = systemClock() - started;
+        if (elapsed >= RANGE_PIN_RPC_SLOW_MS)
+          console.log(
+            `[range-pins] session=${id.toString()} holders=${holders.length} complete in ${elapsed}ms (slow)`,
+          );
+      } catch {
+        // Unsupported or unknown receivers retain their pins. A timed-out
+        // unconditional prune must never be retried against another revision.
+        console.warn(`[range-pins] session=${id.toString()} retained: pin revision unavailable`);
       }
-      const elapsed = systemClock() - started;
-      const completed = `[range-pins] session=${id.toString()} complete in ${elapsed}ms`;
-      if (elapsed >= RANGE_PIN_RPC_SLOW_MS) console.warn(`${completed} (slow)`);
-      else console.log(completed);
     }
   }
 
@@ -5837,11 +5995,361 @@ export class RunHistoryDO extends DurableObject<Env> {
     return { ...incoming, ...retained };
   }
 
-  async claim(req: ClaimRequest, now: number): Promise<ClaimResult> {
+  private promotionHeld(runId: string, gen?: string): boolean {
+    if (gen !== undefined && this.liveRow(runId)?.ownerGen !== gen) return false;
+    const raw = this.allocationArchive(runId);
+    return raw !== undefined && (!workspaceDurabilityArchiveOf(raw) || promotionPending(raw));
+  }
+  /** Thin negative precondition from actual private state; never a witness or permit. */
+  async promotionHold(
+    runId: string,
+    gen?: string,
+  ): Promise<{ kind: "held"; reason: "promotion_pending" | "promotion_corrupt"; runId: string } | null> {
+    const row = this.liveRow(runId);
+    if (!row || (gen !== undefined && row.ownerGen !== gen)) return null;
+    const raw = this.allocationArchive(runId),
+      before = canonicalSeedJson(raw),
+      archive = workspaceDurabilityArchiveOf(raw);
+    if (raw === undefined) return null;
+    if (archive?.promotionConfirmation && !this.promotionHeld(runId)) {
+      try {
+        const confirmation = archive.promotionConfirmation;
+        const source = await this.env.SESSION_LOGS.get(
+          this.env.SESSION_LOGS.idFromName(confirmation.key),
+        ).readExpectedSeed(confirmation.key, sourceSeedReferenceOfReceipt(confirmation));
+        if (
+          source.kind === "verified" &&
+          source.release &&
+          canonicalSeedJson(source.release.confirmation) === canonicalSeedJson(confirmation) &&
+          before === canonicalSeedJson(this.allocationArchive(runId))
+        )
+          return null;
+      } catch {
+        /* Unknown source release preserves the original. */
+      }
+      return { kind: "held", reason: "promotion_pending", runId };
+    }
+    if (!this.promotionHeld(runId)) return null;
+    const original = await this.readPromotion({ runId, gen: row.ownerGen });
+    const current = this.liveRow(runId);
+    if (!current || current.ownerGen !== row.ownerGen) return null;
+    return {
+      kind: "held",
+      reason: original.kind !== "held" ? "promotion_pending" : "promotion_corrupt",
+      runId: current.runId,
+    };
+  }
+  private async requirePromotionRelease(runId: string, gen: string): Promise<void> {
+    const raw = canonicalSeedJson(this.allocationArchive(runId));
+    if (await this.promotionHold(runId, gen)) throw new PromotionPendingError(runId);
+    if (raw !== canonicalSeedJson(this.allocationArchive(runId))) throw new PromotionPendingError(runId);
+  }
+  async preparePromotion(bodyJson: string, expectedSeedInput?: ExpectedSeedManifest): Promise<PromotionPrepareResult> {
+    const req = promotionBodyOf(bodyJson);
+    if (!req) return { kind: "held", reason: promotionBytes(bodyJson) > PROMOTION_BODY_BYTES ? "oversize" : "corrupt" };
+    const expectedSeed = expectedSeedInput === undefined ? undefined : expectedSeedManifestOf(expectedSeedInput);
+    const digest = await promotionBodyHash(bodyJson);
+    if (expectedSeedInput !== undefined && (!expectedSeed || !expectedSeedMatchesClaim(expectedSeed, req, digest)))
+      return { kind: "held", reason: "mismatch" };
+    const expectedSeedSha256 = expectedSeed ? await seedContentHash(expectedSeed) : undefined;
+    const releaseBefore = canonicalSeedJson(this.allocationArchive(req.runId));
+    const pendingRelease = await this.promotionHold(req.runId, req.gen);
+    let result: PromotionPrepareResult = { kind: "held", reason: "unknown" };
+    this.ctx.storage.transactionSync(() => {
+      const row = this.liveRow(req.runId),
+        raw = this.allocationArchive(req.runId);
+      if (!row || row.ownerGen !== req.gen) {
+        result = { kind: "held", reason: "fenced" };
+        return;
+      }
+      if (row.stop === "hard") {
+        result = { kind: "held", reason: "mismatch" };
+        return;
+      }
+      let archive = workspaceDurabilityArchiveOf(raw);
+      if (!archive) {
+        result = { kind: "held", reason: raw === undefined ? "legacy" : "corrupt" };
+        return;
+      }
+      if (
+        archive.runId !== row.runId ||
+        archive.startedAt !== row.startedAt ||
+        !promotionMatchesOriginal(row, req, archive.allocation?.headSha) ||
+        (req.meta.workspaceAllocation !== undefined &&
+          !sameWorkspaceAllocation(req.meta.workspaceAllocation, archive.allocation))
+      ) {
+        result = { kind: "held", reason: "mismatch" };
+        return;
+      }
+      if (
+        archive.promotion &&
+        archive.promotion.bodyJson !== bodyJson &&
+        row.meta.restartOf === row.runId &&
+        (row.phase === "attaching" || row.phase === "finishing") &&
+        archive.promotionConfirmation &&
+        archive.promotionAllocationAck &&
+        !pendingRelease &&
+        canonicalSeedJson(raw) === releaseBefore
+      ) {
+        this.retainPromotionOriginal(archive);
+        const {
+          promotion: _old,
+          promotionCommit: _commit,
+          promotionConfirmation: _confirmation,
+          promotionAllocationAck: _ack,
+          promotionStepBase: _stepBase,
+          ...base
+        } = archive;
+        archive = base;
+      }
+      if (archive.promotion) {
+        result =
+          archive.promotion.bodyJson === bodyJson &&
+          archive.promotion.receipt.bodySha256 === digest &&
+          archive.promotion.receipt.expectedSeedSha256 === expectedSeedSha256 &&
+          canonicalSeedJson(archive.promotion.expectedSeed ?? null) === canonicalSeedJson(expectedSeed ?? null)
+            ? { kind: "prepared", receipt: structuredClone(archive.promotion.receipt) }
+            : { kind: "held", reason: "mismatch" };
+        return;
+      }
+      if (row.phase !== "attaching" && !(row.phase === "finishing" && row.meta.restartOf === row.runId)) {
+        result = { kind: "held", reason: "mismatch" };
+        return;
+      }
+      const receipt = promotionReceiptFromRow(row, digest, expectedSeedSha256);
+      const next = {
+        ...archive,
+        promotion: { version: 1 as const, bodyJson, receipt, ...(expectedSeed ? { expectedSeed } : {}) },
+        promotionStepBase: this.sql
+          .exec<{ next: number }>(
+            "SELECT COALESCE(MAX(step)+1,0) AS next FROM run_steps WHERE run_id=? AND step>=0",
+            req.runId,
+          )
+          .one().next,
+      };
+      if (promotionBytes(JSON.stringify(next)) > MAX_RECORD_BYTES) {
+        result = { kind: "held", reason: "oversize" };
+        return;
+      }
+      this.retainAllocation(next);
+      result = { kind: "prepared", receipt: structuredClone(receipt) };
+    });
+    return result;
+  }
+  private confirmationSnapshot(runId: string) {
+    const entries = this.sql
+      .exec<{ step: number; json: string }>(
+        "SELECT step,json FROM run_steps WHERE run_id=? AND step>=? ORDER BY step",
+        runId,
+        workspaceDurabilityArchiveOf(this.allocationArchive(runId))?.promotionStepBase ?? 0,
+      )
+      .toArray();
+    return { row: this.liveRow(runId), archive: this.allocationArchive(runId), entries };
+  }
+  async confirmPromotion(input: SourceSeedReference): Promise<PromotionConfirmationResult> {
+    const ref = sourceSeedReferenceOf(input);
+    if (!ref || !this.ctx.id.equals(this.env.RUNS.idFromName(ref.storeKey)))
+      return { kind: "held", reason: "mismatch" };
+    const original = await this.readPromotion({ runId: ref.runId, gen: ref.gen, bodySha256: ref.bodySha256 });
+    if (original.kind === "confirmed")
+      return sourceSeedReferenceMatches(original.receipt.source, ref, original.receipt.key)
+        ? { kind: "confirmed", receipt: original.receipt }
+        : { kind: "held", reason: "mismatch" };
+    if (original.kind !== "committed" || !original.preparation.expectedSeed?.key)
+      return { kind: "held", reason: "unsupported" };
+    const snapshot = this.confirmationSnapshot(ref.runId),
+      before = canonicalSeedJson(snapshot);
+    if (!snapshot.row) return { kind: "held", reason: "fenced" };
+    let steps: StepRecord[];
+    try {
+      steps = snapshot.entries.map((entry) => {
+        const record = JSON.parse(entry.json) as StepRecord;
+        if (record.step + (workspaceDurabilityArchiveOf(snapshot.archive)?.promotionStepBase ?? 0) !== entry.step)
+          throw new Error("unreadable canonical seed key");
+        return record;
+      });
+    } catch {
+      return { kind: "held", reason: "corrupt" };
+    }
+    const key = original.preparation.expectedSeed.key;
+    const source = await this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(key)).readExpectedSeed(key, ref);
+    const receipt = await confirmStoredSeedBoundary(original, source, snapshot.row, steps);
+    if (!receipt) return { kind: "held", reason: "mismatch" };
+    let result: PromotionConfirmationResult = { kind: "held", reason: "mismatch" };
+    this.ctx.storage.transactionSync(() => {
+      if (canonicalSeedJson(this.confirmationSnapshot(ref.runId)) !== before) return;
+      const archive = workspaceDurabilityArchiveOf(snapshot.archive);
+      if (!archive?.promotion || !archive.promotionCommit) return;
+      const next = { ...archive, promotionConfirmation: receipt, promotionAllocationAck: original.allocationAck };
+      if (promotionBytes(JSON.stringify(next)) > MAX_RECORD_BYTES) {
+        result = { kind: "held", reason: "oversize" };
+        return;
+      }
+      this.retainAllocation(next);
+      result = { kind: "confirmed", receipt: structuredClone(receipt) };
+    });
+    return result;
+  }
+  async readPromotion(query: PromotionReadRequest): Promise<PromotionReadResult> {
+    if (query.bodySha256) {
+      const historical = this.historicalPromotion(query.runId, query.bodySha256);
+      if (
+        historical?.promotion &&
+        historical.promotionCommit &&
+        historical.promotionConfirmation &&
+        historical.promotionAllocationAck &&
+        historical.promotion.receipt.gen === query.gen
+      ) {
+        const before = canonicalSeedJson(historical);
+        if (
+          (await promotionBodyHash(historical.promotion.bodyJson)) !== query.bodySha256 ||
+          before !== canonicalSeedJson(this.historicalPromotion(query.runId, query.bodySha256))
+        )
+          return { kind: "held", reason: "corrupt" };
+        return {
+          kind: "confirmed",
+          preparation: historical.promotion,
+          commit: historical.promotionCommit,
+          receipt: historical.promotionConfirmation,
+          allocationAck: historical.promotionAllocationAck,
+        };
+      }
+    }
+    const row = this.liveRow(query.runId),
+      raw = this.allocationArchive(query.runId);
+    if (!row || row.ownerGen !== query.gen) return { kind: "held", reason: "fenced" };
+    if (row.stop === "hard") return { kind: "held", reason: "mismatch" };
+    const archive = workspaceDurabilityArchiveOf(raw),
+      prepared = archive?.promotion;
+    if (!archive) return { kind: "held", reason: raw === undefined ? "legacy" : "corrupt" };
+    if (!prepared) return { kind: "held", reason: "unknown" };
+    if (prepared.receipt.gen !== query.gen || (query.bodySha256 && prepared.receipt.bodySha256 !== query.bodySha256))
+      return { kind: "held", reason: "mismatch" };
+    if (
+      (await promotionBodyHash(prepared.bodyJson)) !== prepared.receipt.bodySha256 ||
+      (prepared.expectedSeed !== undefined &&
+        (await seedContentHash(prepared.expectedSeed)) !== prepared.receipt.expectedSeedSha256) ||
+      JSON.stringify(this.allocationArchive(query.runId)) !== JSON.stringify(raw)
+    )
+      return { kind: "held", reason: "corrupt" };
+    const current = this.liveRow(query.runId);
+    if (
+      !current ||
+      current.ownerGen !== query.gen ||
+      JSON.stringify(
+        promotionReceiptFromRow(current, prepared.receipt.bodySha256, prepared.receipt.expectedSeedSha256),
+      ) !== JSON.stringify(prepared.receipt)
+    )
+      return { kind: "held", reason: "fenced" };
+    if (archive.promotionCommit) {
+      const allocationAck = allocationAckFromCanonical(this.allocationArchive(query.runId), current);
+      if (!promotionCommittedRowMatches(current, promotionBodyOf(prepared.bodyJson)!) || !allocationAck)
+        return { kind: "held", reason: "corrupt" };
+      if (archive.promotionConfirmation)
+        return {
+          kind: "confirmed",
+          preparation: structuredClone(prepared),
+          commit: structuredClone(archive.promotionCommit),
+          receipt: structuredClone(archive.promotionConfirmation),
+          allocationAck,
+        };
+      return {
+        kind: "committed",
+        preparation: structuredClone(prepared),
+        receipt: structuredClone(archive.promotionCommit),
+        allocationAck,
+      };
+    }
+    return { kind: "prepared", preparation: structuredClone(prepared) };
+  }
+  async claim(req: ClaimRequest, now: number, originalBodyJson?: string): Promise<ClaimResult> {
+    const restartArchiveBefore = canonicalSeedJson(this.allocationArchive(req.runId));
+    const restartHeld =
+      req.phase === "attaching" && req.meta.restartOf === req.runId
+        ? await this.promotionHold(req.runId, req.gen)
+        : undefined;
+    const seedBefore = workspaceDurabilityArchiveOf(this.allocationArchive(req.runId))?.promotion?.expectedSeed;
+    const seedJsonBefore = canonicalSeedJson(seedBefore ?? null);
+    const actualSeedSha256 = seedBefore ? await seedContentHash(seedBefore) : undefined;
+    const digest =
+      originalBodyJson !== undefined && promotionBytes(originalBodyJson) <= PROMOTION_BODY_BYTES
+        ? await promotionBodyHash(originalBodyJson)
+        : undefined;
+    if (this.promotionHeld(req.runId, req.gen)) {
+      const archive = workspaceDurabilityArchiveOf(this.allocationArchive(req.runId));
+      if (
+        canonicalSeedJson(archive?.promotion?.expectedSeed ?? null) !== seedJsonBefore ||
+        archive?.promotion?.receipt.expectedSeedSha256 !== actualSeedSha256
+      )
+        throw new PromotionPendingError(req.runId, "corrupt");
+      const original = preparedPromotionClaim(req, originalBodyJson, digest, this.liveRow(req.runId), archive);
+      if (!original) throw new PromotionPendingError(req.runId);
+      req = original;
+      if (archive?.promotionCommit) {
+        const allocationAck = allocationAckFromCanonical(this.allocationArchive(req.runId), this.liveRow(req.runId));
+        if (!allocationAck) throw new PromotionPendingError(req.runId, "corrupt");
+        return { ok: true, allocationAck, promotionCommit: structuredClone(archive.promotionCommit) };
+      }
+    }
+    if (Object.hasOwn(req.meta, "workspaceDisposition")) throw new Error("workspace disposition is store-derived");
+    if (workspaceAuthorityFieldsPresent(req.state))
+      throw new Error("workspace allocation cannot be written as mutable state");
+    req = structuredClone(req);
     return this.withRangePins([{ id: req.runId, handoff: req.meta.childHandoff }], async () => {
       let out: ClaimResult = { ok: true };
+      let duplicateCommit = false;
       this.ctx.storage.transactionSync(() => {
+        if (this.promotionHeld(req.runId, req.gen)) {
+          const archive = workspaceDurabilityArchiveOf(this.allocationArchive(req.runId));
+          if (
+            canonicalSeedJson(archive?.promotion?.expectedSeed ?? null) !== seedJsonBefore ||
+            archive?.promotion?.receipt.expectedSeedSha256 !== actualSeedSha256
+          )
+            throw new PromotionPendingError(req.runId, "corrupt");
+          const original = preparedPromotionClaim(req, originalBodyJson, digest, this.liveRow(req.runId), archive);
+          if (!original) throw new PromotionPendingError(req.runId);
+          req = original;
+          if (archive?.promotionCommit) {
+            const allocationAck = allocationAckFromCanonical(
+              this.allocationArchive(req.runId),
+              this.liveRow(req.runId),
+            );
+            if (!allocationAck) throw new PromotionPendingError(req.runId, "corrupt");
+            out = { ok: true, allocationAck, promotionCommit: structuredClone(archive.promotionCommit) };
+            duplicateCommit = true;
+            return;
+          }
+        }
         const existing = this.liveByThread(req.threadKey);
+        if (
+          existing?.runId === req.runId &&
+          existing.ownerGen === req.gen &&
+          req.phase === "attaching" &&
+          req.meta.restartOf === req.runId &&
+          (existing.phase === "live" || existing.phase === "finishing") &&
+          !restartHeld &&
+          restartArchiveBefore === canonicalSeedJson(this.allocationArchive(req.runId))
+        ) {
+          existing.phase = "attaching";
+          existing.meta = { ...existing.meta, restartOf: req.runId };
+          this.sql.exec(
+            "UPDATE live_runs SET phase='attaching',meta_json=? WHERE run_id=? AND owner_gen=?",
+            JSON.stringify(existing.meta),
+            req.runId,
+            req.gen,
+          );
+        }
+        const allocation = prepareWorkspaceAllocation(
+          req.runId,
+          req.meta,
+          this.allocationArchive(req.runId),
+          this.liveRow(req.runId) !== undefined || this.finalRecordExists(req.runId),
+          req.startedAt,
+        );
+        req = {
+          ...req,
+          meta: { ...req.meta, ...(allocation?.allocation ? { workspaceAllocation: allocation.allocation } : {}) },
+        };
         const retained = this.sql
           .exec<{ summary_json: string }>(`SELECT summary_json FROM runs WHERE run_id = ?`, req.runId)
           .toArray()[0];
@@ -5869,6 +6377,19 @@ export class RunHistoryDO extends DurableObject<Env> {
           req,
         );
         if (!out.ok) return;
+        const acknowledged = () => {
+          const allocationAck = allocationAckFromCanonical(this.allocationArchive(req.runId), this.liveRow(req.runId));
+          const promotionCommit =
+            req.phase === "attaching"
+              ? undefined
+              : workspaceDurabilityArchiveOf(this.allocationArchive(req.runId))?.promotionCommit;
+          out = {
+            ok: true,
+            ...(allocationAck ? { allocationAck } : {}),
+            ...(promotionCommit ? { promotionCommit: structuredClone(promotionCommit) } : {}),
+          };
+        };
+        if (allocation) this.retainAllocation(allocation);
         if (
           existing &&
           state.branchIdentityBaseline !== undefined &&
@@ -5887,9 +6408,11 @@ export class RunHistoryDO extends DurableObject<Env> {
         this.sql.exec(`DELETE FROM plane_reservations WHERE kind = 'thread' AND key = ?`, req.threadKey);
         switch (decideClaimWrite(existing, req)) {
           case "keep":
+            acknowledged();
             return;
           case "refresh":
             this.sql.exec(`UPDATE live_runs SET lease_until = ? WHERE run_id = ?`, now + req.leaseMs, req.runId);
+            acknowledged();
             return;
           case "promote":
             // The prompt landed on the owner's own attaching row (item 42): the
@@ -5906,6 +6429,16 @@ export class RunHistoryDO extends DurableObject<Env> {
               req.runId,
             );
             this.registerSession(req);
+            if (allocation?.promotion && digest) {
+              const committed = {
+                ...allocation,
+                promotionCommit: promotionCommitFromRow(this.liveRow(req.runId)!, digest, actualSeedSha256),
+              };
+              if (promotionBytes(JSON.stringify(committed)) > MAX_RECORD_BYTES)
+                throw new PromotionPendingError(req.runId);
+              this.retainAllocation(committed);
+            }
+            acknowledged();
             return;
           case "insert":
             break;
@@ -5926,8 +6459,9 @@ export class RunHistoryDO extends DurableObject<Env> {
           JSON.stringify(req.tools),
           JSON.stringify(state),
         );
+        acknowledged();
       });
-      if (out.ok) {
+      if (out.ok && !duplicateCommit) {
         // A `restartOf` claim under a coordinator (record 0064): the plane
         // tells the waiting parent the child resumed — best effort, beside the
         // bot's own announcement; a duplicate is consumed and re-armed, harmless.
@@ -6049,7 +6583,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       this.sql.exec(
         `INSERT OR REPLACE INTO run_steps (run_id, step, json) VALUES (?, ?, ?)`,
         runId,
-        record.step,
+        (workspaceDurabilityArchiveOf(this.allocationArchive(runId))?.promotionStepBase ?? 0) + record.step,
         JSON.stringify(record),
       );
     });
@@ -6061,9 +6595,13 @@ export class RunHistoryDO extends DurableObject<Env> {
     gen: string,
     assignment: LiveStateAssignRequest,
   ): Promise<LiveStateAssignResult> {
+    if (workspaceDurabilityArchiveOf(this.allocationArchive(runId))?.promotion)
+      await this.requirePromotionRelease(runId, gen);
+    if (workspaceAuthorityFieldsPresent(assignment.statePatch)) return { ok: false, reason: "fenced" };
     let out: LiveStateAssignResult = { ok: false, reason: "unknown-run" };
     this.ctx.storage.transactionSync(() => {
       const row = this.liveRow(runId);
+      if (this.promotionHeld(runId, gen)) throw new PromotionPendingError(runId);
       const fence = checkFence(row, gen);
       if (!fence.ok) {
         out = fence;
@@ -6143,11 +6681,16 @@ export class RunHistoryDO extends DurableObject<Env> {
   }
 
   async setState(runId: string, gen: string, state: RunState): Promise<FenceResult> {
-    return this.ctx.blockConcurrencyWhile(async () => {
+    if (workspaceDurabilityArchiveOf(this.allocationArchive(runId))?.promotion)
+      await this.requirePromotionRelease(runId, gen);
+    if (workspaceAuthorityFieldsPresent(state)) return { ok: false, reason: "fenced" };
+    if (this.promotionHeld(runId, gen)) throw new PromotionPendingError(runId);
+    const result = await this.ctx.blockConcurrencyWhile(async (): Promise<FenceResult | PromotionPendingError> => {
       const row = this.liveRow(runId);
       const fence = checkFence(row, gen);
       if (!fence.ok) return fence;
       if (!row) return { ok: false, reason: "unknown-run" };
+      if (this.promotionHeld(runId, gen)) return new PromotionPendingError(runId);
       const restored = this.preserveArchivedBaseline(runId, state, { id: runId, ...row.meta });
       if (!restored) return { ok: false, reason: "fenced" };
       state = restored;
@@ -6182,14 +6725,22 @@ export class RunHistoryDO extends DurableObject<Env> {
         )
           return { ok: false, reason: "fenced" };
       }
+      let promotionRefusal: PromotionPendingError | undefined;
       this.ctx.storage.transactionSync(() => {
+        if (this.promotionHeld(runId, gen)) {
+          promotionRefusal = new PromotionPendingError(runId);
+          return;
+        }
         if (isContextDependencies(preserved.contextDependencies))
           this.pinContext(runId, undefined, preserved.contextDependencies);
         if (receipt) this.pinReference(runId, runId, receipt.seed.key);
         this.sql.exec(`UPDATE live_runs SET state_json = ? WHERE run_id = ?`, JSON.stringify(preserved), runId);
       });
+      if (promotionRefusal) return promotionRefusal;
       return { ok: true };
     });
+    if (result instanceof PromotionPendingError) throw result;
+    return result;
   }
 
   /** Any generation: a steer arrives on whichever container is up. */
@@ -6314,11 +6865,21 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   /** SIGTERM: mark this generation's live runs for the next one (item 33). */
   async handoff(gen: string, runIds: string[], pausedForRetry = false): Promise<{ marked: string[] }> {
+    const released = await Promise.all(
+      runIds.map(async (runId) => ({
+        runId,
+        raw: canonicalSeedJson(this.allocationArchive(runId)),
+        held: await this.promotionHold(runId, gen),
+      })),
+    );
+    runIds = released
+      .filter((item) => !item.held && item.raw === canonicalSeedJson(this.allocationArchive(item.runId)))
+      .map((item) => item.runId);
     const marked: string[] = [];
     this.ctx.storage.transactionSync(() => {
       for (const id of runIds) {
         const row = this.liveRow(id);
-        if (row && row.ownerGen === gen && phaseTransition(row.phase, "handoff")) {
+        if (row && row.ownerGen === gen && !this.promotionHeld(id) && phaseTransition(row.phase, "handoff")) {
           this.sql.exec(
             `UPDATE live_runs SET phase = 'handoff', state_json = ? WHERE run_id = ?`,
             JSON.stringify(pausedForRetry ? { ...row.state, pausedForRetry: true } : row.state),
@@ -6333,9 +6894,12 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   /** CAS live → finishing, taken before the reply (item 33). Fenced. */
   async finishing(runId: string, gen: string): Promise<FenceResult> {
+    if (workspaceDurabilityArchiveOf(this.allocationArchive(runId))?.promotion)
+      await this.requirePromotionRelease(runId, gen);
     let out: FenceResult = { ok: true };
     this.ctx.storage.transactionSync(() => {
       const row = this.liveRow(runId);
+      if (this.promotionHeld(runId, gen)) throw new PromotionPendingError(runId);
       const fence = checkFence(row, gen);
       if (!fence.ok || !row) {
         out = fence;
@@ -6363,6 +6927,10 @@ export class RunHistoryDO extends DurableObject<Env> {
     point?: RunMetricsPoint,
     requireStoppedPause = false,
   ): Promise<FenceResult & { stored?: boolean; event?: RunFinishedSend["kind"] }> {
+    if (workspaceDurabilityArchiveOf(this.allocationArchive(runId))?.promotion)
+      await this.requirePromotionRelease(runId, gen);
+    if (workspaceAuthorityFieldsPresent(record)) return { ok: false, reason: "fenced" };
+    if (this.promotionHeld(runId, gen)) throw new PromotionPendingError(runId);
     const opening = this.liveRow(runId);
     const admitted = checkFence(opening, gen);
     if (!admitted.ok) return admitted;
@@ -6374,11 +6942,18 @@ export class RunHistoryDO extends DurableObject<Env> {
     )
       return { ok: false, reason: "fenced" };
     this.checkWorkspaceFinishCapacity(opening, record);
+    const allocation = workspaceDurabilityArchiveOf(this.allocationArchive(runId));
+    const custodyBefore = allocation?.allocation ? this.workspaceCustodyFingerprint(opening) : undefined;
+    const custody = allocation?.allocation ? await this.workspaceCustody(opening) : undefined;
     record = await this.archiveCheckpoint(record);
+    const confirming = this.liveRow(runId);
+    const confirmed =
+      custody?.session && custody.threadReport && confirming ? await this.workspaceCustody(confirming) : custody;
     let out: FenceResult & { stored?: boolean } = { ok: true };
     let turnedFinal = false;
     this.ctx.storage.transactionSync(() => {
       const row = this.liveRow(runId);
+      if (this.promotionHeld(runId, gen)) throw new PromotionPendingError(runId);
       const fence = checkFence(row, gen);
       if (!fence.ok) {
         out = fence;
@@ -6404,7 +6979,20 @@ export class RunHistoryDO extends DurableObject<Env> {
         return;
       }
       if (row) this.checkWorkspaceFinishCapacity(row, record);
+      if (
+        allocation?.allocation &&
+        row &&
+        (custodyBefore !== this.workspaceCustodyFingerprint(row) || !sameWorkspaceCustody(custody, confirmed))
+      ) {
+        out = { ok: false, reason: "fenced" };
+        return;
+      }
       const put = this.upsertInTransaction(record, proposal);
+      if (allocation?.allocation && row && confirmed)
+        this.retainAllocation({
+          ...allocation,
+          disposition: deriveWorkspaceDisposition(allocation.allocation, row, record, confirmed),
+        });
       const obligation = row && terminalWorkspaceSettlement(row, record);
       if (obligation) {
         obligation.revision = nextWorkspaceRevision(this.workspaceRevision(obligation.owner));
@@ -6456,21 +7044,38 @@ export class RunHistoryDO extends DurableObject<Env> {
   /** The live rows go with no record (item 42): a reserved run that never
    *  started. Fenced. */
   async abandon(runId: string, gen: string): Promise<FenceResult> {
+    if (workspaceDurabilityArchiveOf(this.allocationArchive(runId))?.promotion)
+      await this.requirePromotionRelease(runId, gen);
     const admitted = checkFence(this.liveRow(runId), gen);
     if (!admitted.ok) return admitted;
+    if (this.promotionHeld(runId, gen)) throw new PromotionPendingError(runId);
     // A private custody refusal must not break the object's input gate.
     this.prepareInboxSegment(runId);
-    return this.ctx.blockConcurrencyWhile(async () => {
+    let pinKeys: string[] = [];
+    const result = await this.ctx.blockConcurrencyWhile(async () => {
       let out: FenceResult = { ok: true };
+      let held: PromotionPendingError | undefined;
       let threadKey: string | undefined;
-      let pinKeys: string[] = [];
       this.ctx.storage.transactionSync(() => {
+        if (this.promotionHeld(runId, gen)) {
+          held = new PromotionPendingError(runId);
+          return;
+        }
         const row = this.liveRow(runId);
         out = checkFence(row, gen);
         if (!out.ok) return;
+        const allocation = workspaceDurabilityArchiveOf(this.allocationArchive(runId));
+        if (allocation?.allocation && row)
+          this.retainAllocation({
+            ...allocation,
+            disposition: deriveWorkspaceDisposition(allocation.allocation, row, undefined, {
+              events: [],
+              pendingEffects: true,
+            }),
+          });
         threadKey = row?.threadKey;
         // Only this holder or source can lose a pin when its live row goes.
-        // A store-wide walk waits on every session object behind this input gate.
+        // The conditional pin sweep runs after the owning commit's input gate.
         pinKeys = this.sql
           .exec<{ session_key: string }>(
             `SELECT DISTINCT session_key FROM context_refs
@@ -6482,15 +7087,15 @@ export class RunHistoryDO extends DurableObject<Env> {
           .map((ref) => ref.session_key);
         this.deleteLiveRows([runId]);
       });
+      if (held) return held;
       if (!out.ok) return out;
       // An abandoned reservation seals like a finish does: the thread frees and the queue walks.
       if (threadKey !== undefined) this.planeSealed(runId, threadKey, systemClock());
-      const pinSyncStart = systemClock();
-      console.log(`[runs/abandon] ${runId}: syncing range pins for ${pinKeys.length} session(s)`);
-      if (pinKeys.length > 0) await this.syncRangePins(pinKeys);
-      console.log(`[runs/abandon] ${runId}: range pins synced in ${systemClock() - pinSyncStart}ms`);
       return out;
     });
+    if (result instanceof PromotionPendingError) throw result;
+    if (result.ok && pinKeys.length > 0) await this.syncRangePins(pinKeys);
+    return result;
   }
 
   private deleteLiveRows(runIds: string[]): void {
@@ -6552,10 +7157,31 @@ export class RunHistoryDO extends DurableObject<Env> {
   /** A booting generation takes every expired or handed-off run (item 31),
    *  atomically, with what a resume needs. */
   async reclaim(gen: string, now: number, leaseMs: number): Promise<ReclaimedRun[]> {
+    const candidates = selectReclaim(
+      this.sql.exec<LiveRow>("SELECT * FROM live_runs").toArray().map(rowToLive),
+      now,
+      gen,
+    );
+    const observed = await Promise.all(
+      candidates.map(async (row) => ({
+        runId: row.runId,
+        raw: canonicalSeedJson(this.allocationArchive(row.runId)),
+        held: await this.promotionHold(row.runId, row.ownerGen),
+      })),
+    );
     const out: ReclaimedRun[] = [];
     this.ctx.storage.transactionSync(() => {
       const rows = this.sql.exec<LiveRow>(`SELECT * FROM live_runs`).toArray().map(rowToLive);
-      for (const row of selectReclaim(rows, now, gen)) {
+      for (const row of selectReclaim(rows, now, gen).filter(
+        (row) =>
+          !this.promotionHeld(row.runId) &&
+          observed.some(
+            (item) =>
+              item.runId === row.runId &&
+              !item.held &&
+              item.raw === canonicalSeedJson(this.allocationArchive(row.runId)),
+          ),
+      )) {
         const phase = reclaimPhase(row.phase);
         const state = { ...row.state };
         delete state.pausedForRetry;
@@ -6613,6 +7239,267 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   /** Exact owner evidence for resident cleanup. Read live first and bypass
    * history retention: absence from a retained history view is not an ending. */
+  private historicalPromotion(runId: string, digest: string): WorkspaceDurabilityArchive | undefined {
+    const rows = this.sql
+      .exec<{ revision: number; allocation_json: string }>(
+        "SELECT revision,allocation_json FROM workspace_settlements WHERE owner_key=?",
+        originalPromotionArchiveKey(runId, digest),
+      )
+      .toArray();
+    if (!rows.length) return;
+    if (rows.length !== 1 || rows[0].revision !== 1) throw new PromotionPendingError(runId, "corrupt");
+    try {
+      return workspaceDurabilityArchiveOf(JSON.parse(rows[0].allocation_json));
+    } catch {
+      throw new PromotionPendingError(runId, "corrupt");
+    }
+  }
+  private retainPromotionOriginal(archive: WorkspaceDurabilityArchive): void {
+    const key = originalPromotionArchiveKey(archive.runId, archive.promotion!.receipt.bodySha256),
+      old = this.historicalPromotion(archive.runId, archive.promotion!.receipt.bodySha256);
+    if (old && canonicalSeedJson(old) !== canonicalSeedJson(archive))
+      throw new PromotionPendingError(archive.runId, "corrupt");
+    if (!old)
+      this.sql.exec(
+        "INSERT INTO workspace_settlements(owner_key,revision,json,allocation_json) VALUES(?,1,NULL,?)",
+        key,
+        JSON.stringify(archive),
+      );
+  }
+  private allocationArchive(runId: string): unknown {
+    const rows = this.sql
+      .exec<{ revision: number; allocation_json: string }>(
+        `SELECT revision,allocation_json FROM workspace_settlements WHERE owner_key = ? AND allocation_json IS NOT NULL`,
+        workspaceDurabilityKey(runId),
+      )
+      .toArray();
+    if (rows.length === 0) return undefined;
+    if (rows.length !== 1 || rows[0].revision !== 1) return { unreadableRevision: rows };
+    try {
+      return JSON.parse(rows[0].allocation_json);
+    } catch {
+      return null;
+    }
+  }
+
+  private retainAllocation(value: WorkspaceDurabilityArchive): void {
+    this.sql.exec(
+      `INSERT INTO workspace_settlements (owner_key, revision, json, allocation_json) VALUES (?, 1, NULL, ?)
+      ON CONFLICT(owner_key, revision) DO UPDATE SET allocation_json = excluded.allocation_json`,
+      workspaceDurabilityKey(value.runId),
+      JSON.stringify(value),
+    );
+  }
+
+  private finalRecordExists(runId: string): boolean {
+    const row = this.sql
+      .exec<{ summary_json: string }>(`SELECT summary_json FROM runs WHERE run_id = ?`, runId)
+      .toArray()[0];
+    if (!row) return false;
+    try {
+      return JSON.parse(row.summary_json).provisional !== true;
+    } catch {
+      return true;
+    }
+  }
+
+  private storedWorkspaceFacts(row: LiveRunRow): StoredWorkspaceCustody {
+    const stepRow = this.sql
+      .exec<{ json: string }>(`SELECT json FROM run_steps WHERE run_id = ? ORDER BY step DESC LIMIT 1`, row.runId)
+      .toArray()[0];
+    const events = this.sql
+      .exec<{ seq: number; json: string }>(`SELECT seq, json FROM run_events WHERE run_id = ? ORDER BY seq`, row.runId)
+      .toArray()
+      .map((e) => ({ ...JSON.parse(e.json), seq: e.seq }) as RunEvent);
+    const step = stepRow && (JSON.parse(stepRow.json) as StepRecord);
+    const jobs =
+      this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM run_jobs WHERE run_id = ?`, row.runId).toArray()[0]?.n ??
+      0;
+    const unread = this.sql
+      .exec<{ seq: number }>(`SELECT seq FROM run_inbox WHERE run_id = ?`, row.runId)
+      .toArray()
+      .some(unreadInbox(step ?? null));
+    // The delivery response is globally capped; it cannot prove absence for a
+    // particular run. Only the exact intents retired by planeSealed are exempt.
+    const openEffects = this.sql
+      .exec<{ id: string; body_json: string }>(
+        `SELECT id,body_json FROM plane_effects WHERE acked_at IS NULL AND
+       CASE WHEN json_valid(body_json) THEN json_extract(body_json,'$.runId') = ? OR id = ? ELSE 1 END`,
+        row.runId,
+        `admit:${row.runId}`,
+      )
+      .toArray()
+      .some((e) => workspaceEffectNeedsCustody(row.runId, row.threadKey, e));
+    return {
+      events,
+      step,
+      pendingEffects: jobs > 0 || unread || openEffects || row.state.pausedForRetry === true,
+    };
+  }
+
+  private workspaceCustodyFingerprint(row: LiveRunRow): string {
+    return workspaceCustodyFingerprint(row, this.storedWorkspaceFacts(row));
+  }
+
+  private async workspaceCustody(row: LiveRunRow): Promise<StoredWorkspaceCustody> {
+    const read = this.storedWorkspaceFacts(row),
+      session = row.meta.session;
+    const facts = {
+      ...read,
+      leaseHash: await sourceHash(read.events.find((e) => e.type === "lease") ?? null),
+      reportHash: await sourceHash([...read.events].reverse().find((e) => e.type === "answer") ?? null),
+    };
+    if (!session || session.range === "broken" || !facts.step) return facts;
+    const through = session.seedFrom + facts.step.turnIndex - 1;
+    if (through < session.seedFrom) return facts;
+    try {
+      const log = this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(session.key));
+      const snapshot = await log.checkpointSnapshot(session.seedFrom, through);
+      if (snapshot.owner?.runId !== row.runId || snapshot.owner.gen !== row.ownerGen || snapshot.next !== through + 1)
+        return facts;
+      const loopPins = custodyPinProtectionOf(
+        await log.protectCustodyRanges(row.runId, [{ from: session.seedFrom, to: through }]),
+      );
+      if (!loopPins) return facts;
+      const transcript = assembleTranscript(snapshot.rows, snapshot.attachments, session.seedFrom);
+      if (!transcript.complete) return facts;
+      const transcriptHash = await sourceHash(transcript);
+      const answer = [...read.events].reverse().find((e) => e.type === "answer");
+      const reportKey = contextThreadSessionKey(row.meta.threadKey),
+        rowId = `run:${row.runId}:answer`;
+      const reportLog = this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(reportKey));
+      const reportRows = await reportLog.readEntry(rowId);
+      if (!answer || answer.type !== "answer" || !workspaceReportRowsMatch(reportRows, answer.text)) return facts;
+      const index = reportRows![0].idx;
+      const reportPins = custodyPinProtectionOf(
+        await reportLog.protectCustodyRanges(row.runId, [{ from: index, to: index }]),
+      );
+      if (!reportPins) return facts;
+      const rowsHash = await sourceHash(reportRows);
+      const current = await log.checkpointSnapshot(session.seedFrom, through);
+      if (
+        current.owner?.runId !== row.runId ||
+        current.owner.gen !== row.ownerGen ||
+        current.next !== snapshot.next ||
+        JSON.stringify(current.rows) !== JSON.stringify(snapshot.rows) ||
+        JSON.stringify(current.attachments) !== JSON.stringify(snapshot.attachments) ||
+        JSON.stringify(await reportLog.readEntry(rowId)) !== JSON.stringify(reportRows)
+      )
+        return facts;
+      return {
+        ...facts,
+        session: {
+          key: session.key,
+          from: session.seedFrom,
+          through,
+          transcriptHash,
+          pinRevision: loopPins.revision,
+        },
+        threadReport: {
+          key: reportKey,
+          threadKey: row.meta.threadKey,
+          rowId,
+          from: index,
+          through: index,
+          rowsHash,
+          pinRevision: reportPins.revision,
+          text: answer.text,
+        },
+      };
+    } catch {
+      return facts;
+    }
+  }
+
+  async workspaceDisposition(expected: WorkspaceAllocation): Promise<WorkspaceDispositionRead> {
+    const stable = workspaceAllocationOf(expected);
+    if (!stable) return { kind: "held", reason: "mismatch" };
+    expected = stable;
+    const live = () =>
+      this.sql
+        .exec(
+          `SELECT run_id FROM live_runs WHERE run_id = ? OR json_extract(state_json, '$.binding.sandboxKey') = ? LIMIT 1`,
+          expected.runId,
+          expected.allocationKey,
+        )
+        .toArray().length > 0;
+    if (live()) return { kind: "held", reason: "live" };
+    const raw = this.allocationArchive(expected.runId),
+      archive = workspaceDurabilityArchiveOf(raw);
+    if (!archive?.allocation || !archive.disposition) return { kind: "held", reason: "unknown" };
+    if (!sameWorkspaceAllocation(expected, archive.allocation)) return { kind: "held", reason: "mismatch" };
+    if (archive.disposition.kind === "scratch-custody-closed") {
+      const effectsPending = () =>
+        this.sql
+          .exec<{ id: string; body_json: string }>(
+            `SELECT id,body_json FROM plane_effects WHERE acked_at IS NULL AND
+         CASE WHEN json_valid(body_json) THEN json_extract(body_json,'$.runId') = ? OR id = ? ELSE 1 END`,
+            expected.runId,
+            `admit:${expected.runId}`,
+          )
+          .toArray()
+          .some((e) => workspaceEffectNeedsCustody(expected.runId, expected.threadKey, e));
+      if (effectsPending()) return { kind: "held", reason: "custody-unavailable" };
+      const c = archive.disposition.custody;
+      const record = await this.get(expected.runId);
+      const lease = record?.events.find((e) => e.seq === c.leaseSeq && e.type === "lease"),
+        report = record?.events.find((e) => e.seq === c.reportSeq && e.type === "answer");
+      if (
+        !record ||
+        record.provisional ||
+        record.restarting ||
+        !allocationMatchesRecord(expected, record) ||
+        !lease ||
+        !report ||
+        report.type !== "answer" ||
+        (await sourceHash(lease)) !== c.leaseHash ||
+        (await sourceHash(report)) !== c.reportHash ||
+        c.threadReport.key !== contextThreadSessionKey(expected.threadKey) ||
+        c.threadReport.threadKey !== expected.threadKey ||
+        c.threadReport.rowId !== `run:${expected.runId}:answer`
+      )
+        return { kind: "held", reason: "custody-unavailable" };
+      try {
+        const log = this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(c.sessionKey));
+        const reportLog = this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(c.threadReport.key));
+        const loopRevision = custodyPinRevisionOf(await log.custodyPinRevision()),
+          reportRevision = custodyPinRevisionOf(await reportLog.custodyPinRevision());
+        if (
+          !loopRevision?.guarded ||
+          loopRevision.revision < c.pinRevision ||
+          !reportRevision?.guarded ||
+          reportRevision.revision < c.threadReport.pinRevision ||
+          !custodyPinProtectionOf(await log.protectCustodyRanges(expected.runId, [{ from: c.from, to: c.through }])) ||
+          !custodyPinProtectionOf(
+            await reportLog.protectCustodyRanges(expected.runId, [
+              { from: c.threadReport.from, to: c.threadReport.through },
+            ]),
+          )
+        )
+          return { kind: "held", reason: "custody-unavailable" };
+        const data = await log.checkpointSnapshot(c.from, c.through);
+        const transcript = assembleTranscript(data.rows, data.attachments, c.from);
+        const reportRows = await reportLog.readEntry(c.threadReport.rowId);
+        if (
+          !transcript.complete ||
+          !workspaceReportRowsMatch(reportRows, report.text) ||
+          reportRows![0].idx !== c.threadReport.from ||
+          (await sourceHash(reportRows)) !== c.threadReport.rowsHash ||
+          (await sourceHash(transcript)) !== c.transcriptHash ||
+          JSON.stringify(await reportLog.readEntry(c.threadReport.rowId)) !== JSON.stringify(reportRows) ||
+          JSON.stringify((await log.checkpointSnapshot(c.from, c.through)).rows) !== JSON.stringify(data.rows) ||
+          effectsPending() ||
+          live() ||
+          JSON.stringify(this.allocationArchive(expected.runId)) !== JSON.stringify(raw)
+        )
+          return { kind: "held", reason: "custody-unavailable" };
+      } catch {
+        return { kind: "held", reason: "custody-unavailable" };
+      }
+    }
+    return { kind: "terminal", allocation: archive.allocation, disposition: archive.disposition };
+  }
+
   async preservationOwner(runId: string, owner?: WorkspaceOwner): Promise<unknown> {
     const live = this.sql
       .exec<Pick<LiveRow, "run_id" | "thread_key" | "owner_gen" | "phase" | "state_json" | "meta_json">>(
@@ -7026,10 +7913,12 @@ export class RunHistoryDO extends DurableObject<Env> {
     proposal?: RunPolicyProposal,
     point?: RunMetricsPoint,
   ): Promise<{ ok: true; retained: number; stored: boolean; rewritten: boolean; turnedFinal: boolean }> {
+    if (this.promotionHeld(record.id)) throw new PromotionPendingError(record.id);
     record = await this.archiveCheckpoint(record);
     return this.withRangePins([{ id: record.id, handoff: record.childHandoff }], async () => {
       let result = { ok: true as const, retained: 0, stored: false, rewritten: false, turnedFinal: false };
       this.ctx.storage.transactionSync(() => {
+        if (this.promotionHeld(record.id)) throw new PromotionPendingError(record.id);
         result = this.upsertInTransaction(record, proposal);
       });
       this.writeMetricsPoint(record.id, point, result.turnedFinal && result.stored);
@@ -7064,6 +7953,8 @@ export class RunHistoryDO extends DurableObject<Env> {
     record: RunRecord,
     proposal?: RunPolicyProposal,
   ): { ok: true; retained: number; stored: boolean; rewritten: boolean; turnedFinal: boolean } {
+    if (workspaceAuthorityFieldsPresent(record))
+      throw new Error("workspace allocation authority cannot be written through a run record");
     {
       const now = systemClock();
       const policy = proposal ? this.applyProposal(proposal, now).policy : this.policyState().policy;
@@ -7356,7 +8247,7 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   /** Remove a run and its events. Returns whether a run row existed. */
   async delete(id: string): Promise<boolean | { ok: false; reason: "publication_pending" }> {
-    return this.ctx.blockConcurrencyWhile(async () => {
+    const result = await this.ctx.blockConcurrencyWhile(async () => {
       let deleted = false;
       let refused = false;
       this.ctx.storage.transactionSync(() => {
@@ -7373,9 +8264,10 @@ export class RunHistoryDO extends DurableObject<Env> {
         this.deleteRuns([id], true);
       });
       if (refused) return { ok: false as const, reason: "publication_pending" as const };
-      await this.syncRangePins();
       return deleted;
     });
+    if (typeof result === "boolean") await this.syncRangePins();
+    return result;
   }
 
   /** The shared alarm always serves live plane work. Scheduled physical
@@ -7422,7 +8314,7 @@ export class RunHistoryDO extends DurableObject<Env> {
             .toArray()
             .map((r) => ({ key: r.key, threadKey: r.thread_key }));
         });
-        await this.ctx.blockConcurrencyWhile(() => this.syncRangePins());
+        await this.syncRangePins();
         const dropped = await this.sweepSessions(candidates);
         console.log(
           `[runs/alarm] swept ${deleted} rows outside policy, pruned ${receipts} intake receipt(s), dropped ${dropped} session log(s)`,
@@ -8668,8 +9560,333 @@ export class SessionLogDO extends DurableObject<Env> {
   /** The live writer: the run and the generation whose writes land. Replaced
    *  by every claim and reclaim, as the transcript object's owner is. The byte
    *  budget rides along so the object enforces the store's policy on write. */
+  private sourceSeedRecords(): SourceSeedOriginalRecord[] {
+    const records: SourceSeedOriginalRecord[] = [];
+    for (const row of this.sql
+      .exec<{ key: string; value: string }>(
+        "SELECT key,value FROM meta WHERE key GLOB ?",
+        SOURCE_SEED_RECORD_PREFIX + "*",
+      )
+      .toArray()) {
+      let record: SourceSeedOriginalRecord | undefined;
+      try {
+        record = sourceSeedOriginalOf(JSON.parse(row.value));
+      } catch {
+        /* Preserve unreadable metadata. */
+      }
+      if (
+        !record ||
+        sourceSeedOriginalKey(record.receipt) !== row.key ||
+        !this.ctx.id.equals(this.env.SESSION_LOGS.idFromName(record.receipt.key))
+      )
+        throw new SourceSeedPendingError(this.ctx.id.toString(), this.owner()?.runId ?? "unknown");
+      records.push(record);
+    }
+    const legacy = this.sourceMeta("expected_seed_pending"),
+      rawRelease = this.sourceMeta("expected_seed_release");
+    if (legacy !== undefined) {
+      let receipt: SourceSeedReceipt | undefined, release: SourceSeedReleaseReceipt | undefined;
+      try {
+        receipt = sourceSeedReceiptOf(JSON.parse(legacy));
+        release = rawRelease === undefined ? undefined : sourceSeedReleaseOf(JSON.parse(rawRelease));
+      } catch {
+        /* Preserve unreadable legacy evidence. */
+      }
+      if (
+        !receipt ||
+        !this.ctx.id.equals(this.env.SESSION_LOGS.idFromName(receipt.key)) ||
+        (rawRelease !== undefined && (!release || canonicalSeedJson(release.source) !== canonicalSeedJson(receipt)))
+      )
+        throw new SourceSeedPendingError(this.ctx.id.toString(), this.owner()?.runId ?? "unknown");
+      const saved = records.find((record) => sourceSeedOriginalKey(record.receipt) === sourceSeedOriginalKey(receipt!));
+      if (
+        saved &&
+        (canonicalSeedJson(saved.receipt) !== canonicalSeedJson(receipt) ||
+          (release && canonicalSeedJson(saved.release) !== canonicalSeedJson(release)))
+      )
+        throw new SourceSeedPendingError(receipt.key, receipt.runId);
+      if (!saved) records.push({ version: 1, receipt, ...(release ? { release } : {}) });
+    }
+    return records;
+  }
+  private sourceSeedRecord(ref: SourceSeedReference): SourceSeedOriginalRecord | undefined {
+    const name = sourceSeedOriginalKey(ref),
+      raw = this.sourceMeta(name);
+    if (raw !== undefined) {
+      let record: SourceSeedOriginalRecord | undefined;
+      try {
+        record = sourceSeedOriginalOf(JSON.parse(raw));
+      } catch {
+        /* Preserve unreadable metadata. */
+      }
+      if (
+        !record ||
+        sourceSeedOriginalKey(record.receipt) !== name ||
+        !this.ctx.id.equals(this.env.SESSION_LOGS.idFromName(record.receipt.key))
+      )
+        throw new SourceSeedPendingError(this.ctx.id.toString(), this.owner()?.runId ?? "unknown");
+      return record;
+    }
+    const legacy = this.sourceMeta("expected_seed_pending"),
+      rawRelease = this.sourceMeta("expected_seed_release");
+    if (legacy === undefined) return;
+    let receipt: SourceSeedReceipt | undefined, release: SourceSeedReleaseReceipt | undefined;
+    try {
+      receipt = sourceSeedReceiptOf(JSON.parse(legacy));
+      release = rawRelease === undefined ? undefined : sourceSeedReleaseOf(JSON.parse(rawRelease));
+    } catch {
+      /* Preserve unreadable metadata. */
+    }
+    if (
+      !receipt ||
+      (rawRelease !== undefined && (!release || canonicalSeedJson(release.source) !== canonicalSeedJson(receipt)))
+    )
+      throw new SourceSeedPendingError(this.ctx.id.toString(), this.owner()?.runId ?? "unknown");
+    return sourceSeedOriginalKey(receipt) === name
+      ? { version: 1, receipt, ...(release ? { release } : {}) }
+      : undefined;
+  }
+  private currentSourceSeedRecord(): SourceSeedOriginalRecord | undefined {
+    const raw = this.sourceMeta("expected_seed_current");
+    if (raw !== undefined) {
+      let ref: SourceSeedReference | undefined;
+      try {
+        ref = sourceSeedReferenceOf(JSON.parse(raw));
+      } catch {
+        /* A pointer alone proves nothing. */
+      }
+      const record = ref && this.sourceSeedRecord(ref);
+      if (!record) throw new SourceSeedPendingError(this.ctx.id.toString(), this.owner()?.runId ?? "unknown");
+      return record;
+    }
+    if (
+      this.sql.exec("SELECT key FROM meta WHERE key GLOB ? LIMIT 1", SOURCE_SEED_RECORD_PREFIX + "*").toArray().length
+    )
+      throw new SourceSeedPendingError(this.ctx.id.toString(), this.owner()?.runId ?? "unknown");
+    const legacy = this.sourceMeta("expected_seed_pending");
+    if (legacy === undefined) return;
+    let receipt: SourceSeedReceipt | undefined;
+    try {
+      receipt = sourceSeedReceiptOf(JSON.parse(legacy));
+    } catch {
+      /* Preserve unreadable metadata. */
+    }
+    if (!receipt) throw new SourceSeedPendingError(this.ctx.id.toString(), this.owner()?.runId ?? "unknown");
+    return this.sourceSeedRecord(receipt);
+  }
+  private storedSourceSeedReceipt(): SourceSeedReceipt | undefined {
+    return this.currentSourceSeedRecord()?.receipt;
+  }
+  private sourceSeedRelease(): SourceSeedReleaseReceipt | undefined {
+    return this.currentSourceSeedRecord()?.release;
+  }
+  private sourceSeedPending(): SourceSeedReceipt | undefined {
+    const current = this.currentSourceSeedRecord(),
+      pending = this.sourceSeedRecords().filter((record) => !record.release);
+    if (
+      pending.some(
+        (record) => !current || sourceSeedOriginalKey(record.receipt) !== sourceSeedOriginalKey(current.receipt),
+      )
+    )
+      throw new SourceSeedPendingError(pending[0].receipt.key, pending[0].receipt.runId);
+    return current?.release ? undefined : current?.receipt;
+  }
+  private retainSourceSeedRecord(record: SourceSeedOriginalRecord): void {
+    this.setSourceMeta(sourceSeedOriginalKey(record.receipt), JSON.stringify(record));
+    const legacy = this.sourceMeta("expected_seed_pending");
+    if (legacy === undefined) this.setSourceMeta("expected_seed_pending", JSON.stringify(record.receipt));
+    if (
+      record.release &&
+      this.sourceMeta("expected_seed_release") === undefined &&
+      sourceSeedOriginalKey(sourceSeedReceiptOf(JSON.parse(this.sourceMeta("expected_seed_pending")!))!) ===
+        sourceSeedOriginalKey(record.receipt)
+    )
+      this.setSourceMeta("expected_seed_release", JSON.stringify(record.release));
+  }
+  async releaseExpectedSeed(key: string, input: SourceSeedReference): Promise<SourceSeedResult> {
+    const ref = sourceSeedReferenceOf(input);
+    if (!ref || !this.ctx.id.equals(this.env.SESSION_LOGS.idFromName(key))) return { kind: "held", reason: "mismatch" };
+    let stored: SourceSeedReceipt | undefined;
+    try {
+      stored = this.sourceSeedRecord(ref)?.receipt;
+    } catch {
+      return { kind: "held", reason: "corrupt" };
+    }
+    if (!stored || !sourceSeedReferenceMatches(stored, ref, key)) return { kind: "held", reason: "mismatch" };
+    if (this.sourceSeedRecord(ref)?.release) return this.readExpectedSeed(key, ref);
+    const snapshot = () => ({
+      data: this.sourceSeedSnapshot(stored!.from, stored!.through),
+      record: this.sourceSeedRecord(ref),
+      current: this.sourceMeta("expected_seed_current"),
+      pins: this.sourceMeta("range_pins"),
+      revision: this.sourceMeta("range_pin_revision"),
+      guarded: this.sourceMeta("custody_pin_guard"),
+    });
+    const before = canonicalSeedJson(snapshot());
+    const actual = await this.env.RUNS.get(this.env.RUNS.idFromName(ref.storeKey)).readPromotion({
+      runId: ref.runId,
+      gen: ref.gen,
+      bodySha256: ref.bodySha256,
+    });
+    if (actual.kind !== "confirmed" || canonicalSeedJson(actual.receipt.source) !== canonicalSeedJson(stored))
+      return { kind: "held", reason: "mismatch" };
+    const verified = await this.readExpectedSeed(key, ref);
+    if (
+      verified.kind !== "verified" ||
+      verified.release ||
+      canonicalSeedJson(verified.receipt) !== canonicalSeedJson(stored)
+    )
+      return { kind: "held", reason: "mismatch" };
+    let result: SourceSeedResult = { kind: "held", reason: "mismatch" };
+    this.ctx.storage.transactionSync(() => {
+      if (canonicalSeedJson(snapshot()) !== before) return;
+      const release: SourceSeedReleaseReceipt = {
+        version: 1,
+        phase: "released",
+        source: stored!,
+        confirmation: actual.receipt,
+      };
+      this.retainSourceSeedRecord({ version: 1, receipt: stored!, release });
+      result = { kind: "verified", receipt: structuredClone(stored!), release: structuredClone(release) };
+    });
+    return result;
+  }
+  async observeExpectedSeed(from: number, through: number): Promise<SourceSeedSnapshot> {
+    return this.sourceSeedSnapshot(from, through);
+  }
+  private sourceSeedSnapshot(from: number, through: number): SourceSeedSnapshot {
+    const rows = this.sql
+      .exec<{ idx: number; part: number; json: string; trimmed: number }>(
+        "SELECT idx,part,json,trimmed FROM turns WHERE idx >= ? AND idx <= ? ORDER BY idx,part",
+        from,
+        through,
+      )
+      .toArray();
+    return {
+      rows,
+      attachments: this.attachmentsOf(rows),
+      owner: this.owner(),
+      next: this.next(),
+      sources: this.sources(),
+      context: this.sources()?.context,
+      notepad: this.sql.exec<{ text: string }>("SELECT text FROM notepad WHERE k=1").toArray()[0]?.text ?? "",
+    };
+  }
+  async verifyExpectedSeed(key: string, input: SourceSeedReference): Promise<SourceSeedResult> {
+    const ref = sourceSeedReferenceOf(input);
+    if (!ref || !this.ctx.id.equals(this.env.SESSION_LOGS.idFromName(key))) return { kind: "held", reason: "mismatch" };
+    if (this.sourceSeedRecord(ref)?.release) return this.readExpectedSeed(key, ref);
+    const actual = await this.env.RUNS.get(this.env.RUNS.idFromName(ref.storeKey)).readPromotion({
+      runId: ref.runId,
+      gen: ref.gen,
+      bodySha256: ref.bodySha256,
+    });
+    const expected = authenticatedSeedExpectation(key, ref, actual);
+    if (!expected) return { kind: "held", reason: "mismatch" };
+    if (this.sourceSeedRecord(ref)) return this.readExpectedSeed(key, ref);
+    const previous = this.currentSourceSeedRecord();
+    if (previous && !previous.release) return { kind: "held", reason: "owner" };
+    const previousBefore = canonicalSeedJson(previous ?? null);
+    const snapshot = this.sourceSeedSnapshot(expected.from, expected.through),
+      before = canonicalSeedJson(snapshot),
+      hashes = await verifiedSourceSeedHashes(snapshot, expected);
+    if (!hashes) return { kind: "held", reason: "mismatch" };
+    let result: SourceSeedResult = { kind: "held", reason: "mismatch" };
+    this.ctx.storage.transactionSync(() => {
+      if (canonicalSeedJson(this.sourceSeedSnapshot(expected.from, expected.through)) !== before) return;
+      const pending = this.sourceSeedRecord(ref)?.receipt;
+      if (pending) {
+        if (sourceSeedReferenceMatches(pending, ref, key))
+          result = { kind: "verified", receipt: structuredClone(pending) };
+        return;
+      }
+      if (canonicalSeedJson(this.currentSourceSeedRecord() ?? null) !== previousBefore) return;
+      const pins = this.rangePins();
+      pins[ref.runId] = [...(pins[ref.runId] ?? []), { from: expected.from, to: expected.through }];
+      const revision = this.writeRangePins(pins, true);
+      if (revision === undefined) {
+        result = { kind: "held", reason: "corrupt" };
+        return;
+      }
+      const receipt: SourceSeedReceipt = {
+        ...ref,
+        ...hashes,
+        version: 1,
+        phase: "pending-confirmation",
+        key,
+        startedAt: expected.startedAt,
+        namespace: expected.namespace,
+        requester: expected.requester,
+        from: expected.from,
+        through: expected.through,
+        count: expected.count,
+        next: snapshot.next,
+        pinRevision: revision,
+      };
+      if (previous) this.retainSourceSeedRecord(previous);
+      this.retainSourceSeedRecord({ version: 1, receipt });
+      this.setSourceMeta("expected_seed_current", JSON.stringify(sourceSeedReferenceOfReceipt(receipt)));
+      result = { kind: "verified", receipt: structuredClone(receipt) };
+    });
+    return result;
+  }
+  async readExpectedSeed(key: string, input: SourceSeedReference): Promise<SourceSeedResult> {
+    const ref = sourceSeedReferenceOf(input);
+    if (!ref || !this.ctx.id.equals(this.env.SESSION_LOGS.idFromName(key))) return { kind: "held", reason: "mismatch" };
+    let receipt: SourceSeedReceipt | undefined;
+    try {
+      receipt = this.sourceSeedRecord(ref)?.receipt;
+    } catch {
+      return { kind: "held", reason: "corrupt" };
+    }
+    if (!receipt) return { kind: "held", reason: "missing" };
+    if (!sourceSeedReferenceMatches(receipt, ref, key)) return { kind: "held", reason: "mismatch" };
+    if (this.sourceSeedRecord(ref)?.release !== undefined) {
+      try {
+        return { kind: "verified", receipt: structuredClone(receipt), release: this.sourceSeedRecord(ref)!.release! };
+      } catch {
+        return { kind: "held", reason: "corrupt" };
+      }
+    }
+    const actual = await this.env.RUNS.get(this.env.RUNS.idFromName(ref.storeKey)).readPromotion({
+        runId: ref.runId,
+        gen: ref.gen,
+        bodySha256: ref.bodySha256,
+      }),
+      expected = authenticatedSeedExpectation(key, ref, actual);
+    if (!expected) return { kind: "held", reason: "mismatch" };
+    const snapshot = this.sourceSeedSnapshot(expected.from, expected.through),
+      before = canonicalSeedJson(snapshot),
+      hashes = await verifiedSourceSeedHashes(snapshot, expected),
+      revision = await this.custodyPinRevision();
+    if (
+      !hashes ||
+      canonicalSeedJson(this.sourceSeedSnapshot(expected.from, expected.through)) !== before ||
+      canonicalSeedJson(this.sourceSeedPending()) !== canonicalSeedJson(receipt) ||
+      !revision?.guarded ||
+      revision.revision < receipt.pinRevision ||
+      !this.rangePins()[ref.runId]?.some((r) => r.from === receipt!.from && r.to === receipt!.through)
+    )
+      return { kind: "held", reason: "corrupt" };
+    return { kind: "verified", receipt: structuredClone(receipt) };
+  }
+  /** Actual source precondition, not a fabricated ownership fence or terminal witness. */
+  async expectedSeedMutationHold(): Promise<{
+    kind: "held";
+    reason: "source_seed_pending";
+    key: string;
+    runId: string;
+  } | null> {
+    const pending = this.sourceSeedPending();
+    return pending ? { kind: "held", reason: "source_seed_pending", key: pending.key, runId: pending.runId } : null;
+  }
   async setOwner(runId: string, gen: string, maxBytes: number = DEFAULT_SESSION_LOG_MAX_BYTES): Promise<{ ok: true }> {
     this.ctx.storage.transactionSync(() => {
+      const held = this.sourceSeedPending();
+      if (held) {
+        if (held.runId === runId && held.gen === gen && String(maxBytes) === this.sourceMeta("max_bytes")) return;
+        throw new SourceSeedPendingError(held.key, held.runId);
+      }
       const pending = this.sourceMeta("source_pending_owner");
       if (pending && pending !== `${runId}:${gen}`)
         this.setSourceMeta("sources", JSON.stringify(taintSessionSources(this.sources())));
@@ -8715,6 +9932,8 @@ export class SessionLogDO extends DurableObject<Env> {
   }
 
   async installCheckpoint(runId: string, gen: string, receipt: ContextCheckpointReceipt): Promise<FenceResult> {
+    const pending = this.sourceSeedPending();
+    if (pending) throw new SourceSeedPendingError(pending.key, pending.runId);
     const { seedFrom, through } = receipt.session;
     const snapshot = await this.checkpointSnapshot(seedFrom, through);
     if (snapshot.owner?.runId !== runId || snapshot.owner.gen !== gen) return { ok: false, reason: "fenced" };
@@ -8735,6 +9954,8 @@ export class SessionLogDO extends DurableObject<Env> {
     const current = await this.checkpointSnapshot(seedFrom, through);
     if (JSON.stringify(current) !== JSON.stringify(snapshot)) return { ok: false, reason: "fenced" };
     return this.ctx.storage.transactionSync(() => {
+      const pending = this.sourceSeedPending();
+      if (pending) throw new SourceSeedPendingError(pending.key, pending.runId);
       const owner = this.owner();
       if (
         owner?.runId !== runId ||
@@ -8763,7 +9984,7 @@ export class SessionLogDO extends DurableObject<Env> {
         return { ok: false, reason: "fenced" };
       const pins = this.rangePins();
       pins[runId] = [...(pins[runId] ?? []), { from: seedFrom, to: through }];
-      this.setSourceMeta("range_pins", JSON.stringify(pins));
+      if (this.writeRangePins(pins) === undefined) return { ok: false, reason: "fenced" };
       this.setSourceMeta("sources", JSON.stringify({ ...this.sources(), context: receipt.normalized }));
       return { ok: true };
     });
@@ -8797,14 +10018,116 @@ export class SessionLogDO extends DurableObject<Env> {
         return { ok: false, reason: "fenced" };
       const pins = this.rangePins();
       pins[runId] = [...(pins[runId] ?? []), { from, to: through }];
-      this.setSourceMeta("range_pins", JSON.stringify(pins));
-      return { ok: true };
+      return this.writeRangePins(pins) === undefined ? { ok: false, reason: "fenced" } : { ok: true };
     });
   }
 
   private rangePins(): SessionRangePins {
     const stored = this.sourceMeta("range_pins");
     return stored ? (JSON.parse(stored) as SessionRangePins) : {};
+  }
+
+  /** A separate RPC capability: an older receiver cannot silently execute a
+   * legacy unconditional prune when this revision protocol is requested. */
+  async custodyPinRevision(): Promise<CustodyPinRevision | undefined> {
+    const raw = this.sourceMeta("range_pin_revision"),
+      guard = this.sourceMeta("custody_pin_guard");
+    if (
+      (guard !== undefined && guard !== "1") ||
+      (guard !== undefined && raw === undefined) ||
+      !isCustodyRangePins(this.rangePins())
+    )
+      return;
+    const revision = raw === undefined ? 0 : Number(raw);
+    if (raw !== undefined && String(revision) !== raw) return;
+    return custodyPinRevisionOf({ version: 1, revision, guarded: guard === "1" });
+  }
+
+  private writeRangePins(pins: SessionRangePins, guarded = false): number | undefined {
+    pins = structuredClone(pins);
+    for (const { receipt: pending } of this.sourceSeedRecords()) {
+      const held = pins[pending.runId] ?? [];
+      pins[pending.runId] = held.some((range) => range.from === pending.from && range.to === pending.through)
+        ? held
+        : [...held, { from: pending.from, to: pending.through }];
+      guarded = true;
+    }
+    const raw = this.sourceMeta("range_pin_revision"),
+      guard = this.sourceMeta("custody_pin_guard");
+    if (
+      (guard !== undefined && guard !== "1") ||
+      (guard !== undefined && raw === undefined) ||
+      !isCustodyRangePins(this.rangePins()) ||
+      !isCustodyRangePins(pins)
+    )
+      return;
+    const current = custodyPinRevisionOf({
+      version: 1,
+      revision: raw === undefined ? 0 : Number(raw),
+      guarded: guard === "1",
+    });
+    if (!current || (raw !== undefined && String(current.revision) !== raw)) return;
+    const revision = nextCustodyPinRevision(current);
+    if (revision === undefined) return;
+    this.setSourceMeta("range_pins", JSON.stringify(pins));
+    this.setSourceMeta("range_pin_revision", String(revision));
+    if (guarded) this.setSourceMeta("custody_pin_guard", "1");
+    return revision;
+  }
+
+  async protectCustodyRanges(holder: string, ranges: readonly SessionRangePin[]) {
+    return this.ctx.storage.transactionSync(() => {
+      if (typeof holder !== "string" || !holder || !Array.isArray(ranges) || !ranges.length)
+        return { ok: false as const };
+      const rows = this.sql
+        .exec<{ idx: number; part: number; json: string; trimmed: number }>("SELECT idx,part,json,trimmed FROM turns")
+        .toArray();
+      if (!sessionRangesAvailable(rows, ranges)) return { ok: false as const };
+      const pins = this.rangePins();
+      const previous = Object.hasOwn(pins, holder) ? pins[holder] : [];
+      Object.defineProperty(pins, holder, {
+        value: [...new Map([...previous, ...ranges].map((range) => [`${range.from}:${range.to}`, range])).values()],
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+      const revision = this.writeRangePins(pins, true);
+      return revision === undefined
+        ? { ok: false as const }
+        : { ok: true as const, version: 1 as const, revision, guarded: true as const };
+    });
+  }
+
+  async retainRangePinsIfRevision(expected: CustodyPinRevision, holders: readonly string[]) {
+    return this.ctx.storage.transactionSync(() => {
+      const proposed = custodyPinRevisionOf(expected);
+      const raw = this.sourceMeta("range_pin_revision"),
+        guard = this.sourceMeta("custody_pin_guard");
+      const current = custodyPinRevisionOf({
+        version: 1,
+        revision: raw === undefined ? 0 : Number(raw),
+        guarded: guard === "1",
+      });
+      if (
+        !proposed ||
+        !current ||
+        (guard !== undefined && guard !== "1") ||
+        (guard !== undefined && raw === undefined) ||
+        (raw !== undefined && String(current.revision) !== raw) ||
+        !Array.isArray(holders) ||
+        !holders.every((holder) => typeof holder === "string" && holder.length > 0)
+      )
+        return { ok: false as const, reason: "unreadable" as const };
+      if (proposed.revision !== current.revision || proposed.guarded !== current.guarded)
+        return { ok: false as const, reason: "revision-changed" as const, ...current };
+      const pins = this.rangePins(),
+        allowed = new Set(holders);
+      for (const holder of Object.keys(pins)) if (!allowed.has(holder)) delete pins[holder];
+      const revision = this.writeRangePins(pins);
+      return revision === undefined
+        ? { ok: false as const, reason: "unreadable" as const }
+        : { ok: true as const, version: 1 as const, revision, guarded: current.guarded };
+    });
   }
 
   async protectRanges(holder: string, ranges: readonly SessionRangePin[]): Promise<{ ok: boolean }> {
@@ -8819,17 +10142,18 @@ export class SessionLogDO extends DurableObject<Env> {
       pins[holder] = [
         ...new Map([...(pins[holder] ?? []), ...ranges].map((range) => [`${range.from}:${range.to}`, range])).values(),
       ];
-      this.setSourceMeta("range_pins", JSON.stringify(pins));
-      return { ok: true };
+      return { ok: this.writeRangePins(pins) !== undefined };
     });
   }
 
-  async retainRangePins(holders: readonly string[]): Promise<void> {
-    this.ctx.storage.transactionSync(() => {
+  async retainRangePins(holders: readonly string[]) {
+    return this.ctx.storage.transactionSync(() => {
+      if (this.sourceMeta("custody_pin_guard") !== undefined)
+        return { ok: false as const, reason: "custody-protected" as const };
       const pins = this.rangePins();
       const allowed = new Set(holders);
       for (const holder of Object.keys(pins)) if (!allowed.has(holder)) delete pins[holder];
-      this.setSourceMeta("range_pins", JSON.stringify(pins));
+      return { ok: this.writeRangePins(pins) !== undefined };
     });
   }
 
@@ -8846,6 +10170,8 @@ export class SessionLogDO extends DurableObject<Env> {
   async clearOwner(runId: string, gen: string): Promise<FenceResult> {
     let out: FenceResult = { ok: true };
     this.ctx.storage.transactionSync(() => {
+      const pending = this.sourceSeedPending();
+      if (pending) throw new SourceSeedPendingError(pending.key, pending.runId);
       const owner = this.owner();
       if (!owner) {
         out = { ok: false, reason: "unknown-run" };
@@ -8917,6 +10243,8 @@ export class SessionLogDO extends DurableObject<Env> {
         ok = seen.row_hash === hash;
         return;
       }
+      const pending = this.sourceSeedPending();
+      if (pending) throw new SourceSeedPendingError(pending.key, pending.runId);
       const idx = this.next();
       const previous = this.sources();
       for (const checkpoint of checkpoints)
@@ -8957,6 +10285,31 @@ export class SessionLogDO extends DurableObject<Env> {
     const verified = await verifiedSourceResults(rows);
     let out: FenceResult & { bytes?: number; sourcesSaved?: true } = { ok: true };
     this.ctx.storage.transactionSync(() => {
+      const pending = this.sourceSeedPending();
+      if (pending) {
+        const owner = this.owner();
+        const unchanged =
+          owner?.runId === (sourceUpdate?.runId ?? runId) &&
+          owner?.gen === gen &&
+          rows.every(
+            (r) =>
+              this.sql
+                .exec<{ json: string }>("SELECT json FROM turns WHERE idx=? AND part=?", r.idx, r.part)
+                .toArray()[0]?.json === r.json,
+          ) &&
+          attachments.every((a) => {
+            const old = this.sql
+              .exec<{ media_type: string; data: string }>("SELECT media_type,data FROM attachments WHERE ref=?", a.ref)
+              .toArray()[0];
+            return old?.data === a.data && old.media_type === a.mediaType;
+          }) &&
+          (!sourceUpdate || canonicalSeedJson(sourceUpdate.sources) === canonicalSeedJson(this.sources()));
+        if (unchanged) {
+          out = { ok: true, ...(sourceUpdate ? { sourcesSaved: true as const } : {}) };
+          return;
+        }
+        throw new SourceSeedPendingError(pending.key, pending.runId);
+      }
       const owner = this.owner();
       if (owner === undefined) {
         out = { ok: false, reason: "unknown-run" };
@@ -9342,6 +10695,16 @@ export class SessionLogDO extends DurableObject<Env> {
   async writeNotepad(gen: string, text: string, now: number, runId?: string): Promise<FenceResult> {
     let out: FenceResult = { ok: true };
     this.ctx.storage.transactionSync(() => {
+      const pending = this.sourceSeedPending();
+      if (pending) {
+        if (
+          pending.runId === runId &&
+          pending.gen === gen &&
+          this.sql.exec<{ text: string }>("SELECT text FROM notepad WHERE k=1").toArray()[0]?.text === text
+        )
+          return;
+        throw new SourceSeedPendingError(pending.key, pending.runId);
+      }
       const owner = this.owner();
       if (owner === undefined) {
         out = { ok: false, reason: "unknown-run" };
@@ -9381,6 +10744,8 @@ export class SessionLogDO extends DurableObject<Env> {
    *  every row, index entry, attachment, the notepad and the budget. */
   async drop(): Promise<{ ok: true }> {
     this.ctx.storage.transactionSync(() => {
+      const pending = this.storedSourceSeedReceipt();
+      if (pending) throw new SourceSeedPendingError(pending.key, pending.runId);
       this.sql.exec(`DELETE FROM owner`);
       this.sql.exec(`INSERT INTO turns_fts (turns_fts) VALUES ('delete-all')`);
       this.sql.exec(`DELETE FROM turns`);
@@ -9426,6 +10791,8 @@ const LEDGER_ROUTES = new Set([
   "/runs/coordinator/wake",
   "/runs/decision-record/reserve",
   "/runs/claim",
+  "/runs/promotion/prepare",
+  "/runs/promotion/read",
   "/runs/resident-claim",
   "/runs/heartbeat",
   "/runs/append",
@@ -9442,6 +10809,7 @@ const LEDGER_ROUTES = new Set([
   "/runs/reclaim",
   "/runs/live",
   "/runs/preservation-owner",
+  "/runs/workspace-disposition",
   "/runs/workspace-ack",
   "/runs/live-events",
   "/runs/intake",
@@ -9453,6 +10821,8 @@ const LEDGER_ROUTES = new Set([
   "/runs/transcript/write",
   "/runs/transcript/read",
   "/runs/transcript/clear",
+  "/runs/session/expected-seed/verify",
+  "/runs/session/expected-seed/read",
   "/runs/session/tail",
   "/runs/session/owner",
   "/runs/session/write",
@@ -9914,7 +11284,13 @@ function parseAttachments(v: unknown): Validated<TranscriptAttachment[]> {
 /** The ledger routes (run-history items 28–34). Bodies are validated before
  *  any object call; fenced answers are 409 with the reason; observability
  *  lines carry ids and counts only. */
-async function handleLedger(pathname: string, body: unknown, env: Env): Promise<Response> {
+async function handleLedger(
+  pathname: string,
+  body: unknown,
+  env: Env,
+  originalBody?: string,
+  expectedSeed?: ExpectedSeedManifest,
+): Promise<Response> {
   if (typeof body !== "object" || body === null) return json({ error: "body must be a JSON object" }, 400);
   const b = body as Record<string, unknown>;
   const fenced = (r: FenceResult) => (r.ok ? json(r) : json(r, 409));
@@ -9923,207 +11299,243 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     const key = parseSessionKey(b.key);
     if (!key.ok) return json({ error: key.error }, 400);
     const stub = env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(key.value));
-    if (pathname === "/runs/session/checkpoint") {
-      const store = parseStoreKey(b);
-      if (!store.ok) return json({ error: store.error }, 400);
-      const run = parseRunId(b.runId);
-      if (!run.ok) return json({ error: run.error }, 400);
-      const owner = gen(b.gen);
-      if (!owner.ok) return json({ error: owner.error }, 400);
-      const request = {
-        key: key.value,
-        runId: run.value,
-        gen: owner.value,
-        expected: b.expected,
-      } as ContextCheckpointRequest;
-      if (
-        !request.expected ||
-        typeof request.expected.beforeHash !== "string" ||
-        !Number.isSafeInteger(request.expected.revision) ||
-        !request.expected.inputs
-      )
-        return json({ error: "invalid checkpoint request" }, 400);
-      const result = await env.RUNS.get(env.RUNS.idFromName(store.value)).normalizeContextOrigins(request);
-      return json(result, result.ok ? 200 : 409);
-    }
-    if (pathname === "/runs/session/tail") return json(await stub.nextIndex());
-    if (pathname === "/runs/session/owner") {
-      const runId = parseRunId(b.runId);
-      if (!runId.ok) return json({ error: runId.error }, 400);
-      const g = gen(b.gen);
-      if (!g.ok) return json({ error: g.error }, 400);
-      const max = parseSessionMaxBytes(b.maxBytes);
-      if (!max.ok) return json({ error: max.error }, 400);
-      return json(await stub.setOwner(runId.value, g.value, max.value));
-    }
-    if (pathname === "/runs/session/write") {
-      const g = gen(b.gen);
-      if (!g.ok) return json({ error: g.error }, 400);
-      const rows = parseTranscriptRows(b.rows);
-      if (!rows.ok) return json({ error: rows.error }, 400);
-      const attachments = parseAttachments(b.attachments);
-      if (!attachments.ok) return json({ error: attachments.error }, 400);
-      if (b.sources !== undefined) {
-        if (!isSessionSources(b.sources) || typeof b.sourceRunId !== "string")
-          return json({ error: "invalid trusted source metadata" }, 400);
-        let owner: SessionSourceOwner | null | undefined;
-        if (b.storeKey !== undefined) {
-          const store = parseStoreKey(b);
-          if (!store.ok) return json({ error: store.error }, 400);
-          owner = await env.RUNS.get(env.RUNS.idFromName(store.value)).sourceSessionOwner(
-            b.sourceRunId,
-            g.value,
-            key.value,
-          );
+    try {
+      if (pathname === "/runs/session/expected-seed/verify" || pathname === "/runs/session/expected-seed/read") {
+        if (b.release !== undefined && pathname.endsWith("/verify")) {
+          const release = sourceSeedReferenceOf(b.release);
+          if (!release || Object.keys(b).some((k) => !["key", "release"].includes(k)))
+            return json({ error: "invalid original source release reference" }, 400);
+          return json(await stub.releaseExpectedSeed(key.value, release));
         }
-        if (!sourcesBelongToSession(key.value, b.sources, owner))
-          return json({ error: "source metadata does not belong to the claimed session" }, 409);
-      }
-      const r = await stub.write(
-        g.value,
-        rows.value,
-        attachments.value,
-        b.sources !== undefined ? { runId: b.sourceRunId as string, sources: b.sources as SessionSources } : undefined,
-        typeof b.runId === "string" ? b.runId : undefined,
-        b.seed === true,
-      );
-      console.log(
-        `[runs/session/write] ${key.value} <- ${rows.value.length} row(s), ${attachments.value.length} attachment(s), ok=${r.ok}`,
-      );
-      return fenced(r);
-    }
-    if (pathname === "/runs/session/append") {
-      const rowId = parseRowId(b.rowId);
-      if (!rowId.ok) return json({ error: rowId.error }, 400);
-      const rows = parseKeyedRows(b.rows);
-      if (!rows.ok) return json({ error: rows.error }, 400);
-      if (b.context !== undefined && !isContextDependencies(b.context))
-        return json({ error: "invalid context dependencies" }, 400);
-      const store = b.storeKey !== undefined ? parseStoreKey(b) : undefined;
-      if (store && !store.ok) return json({ error: store.error }, 400);
-      if (
-        !store &&
-        logicalThreadOfSession(key.value) !== undefined &&
-        contextReferencesOf("@pending", undefined, b.context as ContextDependencies | undefined).length
-      )
-        return json({ ok: false, appended: false, reason: "context-index-unavailable" }, 409);
-      const context = b.context as ContextDependencies | undefined;
-      const checkpoints: CanonicalCheckpointSource[] = [];
-      if (store?.ok)
-        for (const origin of context?.origins ?? []) {
-          if (!origin.checkpoint) continue;
-          const source = await env.RUNS.get(env.RUNS.idFromName(store.value)).readContextCheckpoint(origin.runId);
-          if (source?.receipt?.hash === origin.checkpoint) checkpoints.push(source);
-        }
-      const r = await stub.appendKeyed(rowId.value, rows.value, context, checkpoints);
-      if (r.ok && store?.ok && logicalThreadOfSession(key.value) !== undefined) {
-        const indexed = await env.RUNS.get(env.RUNS.idFromName(store.value)).registerThreadSession(
-          key.value,
-          logicalThreadOfSession(key.value)!,
-          systemClock(),
-          b.context as ContextDependencies | undefined,
+        const reference = sourceSeedReferenceOf(b.reference);
+        if (!reference) return json({ error: "invalid original source reference" }, 400);
+        return json(
+          pathname.endsWith("/verify")
+            ? await stub.verifyExpectedSeed(key.value, reference)
+            : await stub.readExpectedSeed(key.value, reference),
         );
-        if (!indexed.ok) return json({ ok: false, appended: r.appended, reason: indexed.reason }, 409);
       }
-      console.log(
-        `[runs/session/append] ${key.value} <- ${rows.value.length} row(s) under ${rowId.value}, appended=${r.appended}`,
-      );
-      return json({ ...r, ...(r.ok && b.context !== undefined ? { contextSaved: true } : {}) });
-    }
-    if (pathname === "/runs/session/entry") {
-      const rowId = parseRowId(b.rowId);
-      if (!rowId.ok) return json({ error: rowId.error }, 400);
-      return json({ rows: (await stub.readEntry(rowId.value)) ?? null });
-    }
-    if (pathname === "/runs/session/read") {
-      const from = parseLogIndex(b.from, "from");
-      if (!from.ok) return json({ error: from.error }, 400);
-      if (b.to !== undefined) {
-        const to = parseLogIndex(b.to, "to");
-        if (!to.ok) return json({ error: to.error }, 400);
-        if (to.value < from.value) return json({ error: "to must be at least from" }, 400);
-        return json(await stub.read(from.value, to.value));
+      if (pathname === "/runs/session/checkpoint") {
+        const store = parseStoreKey(b);
+        if (!store.ok) return json({ error: store.error }, 400);
+        const run = parseRunId(b.runId);
+        if (!run.ok) return json({ error: run.error }, 400);
+        const owner = gen(b.gen);
+        if (!owner.ok) return json({ error: owner.error }, 400);
+        const request = {
+          key: key.value,
+          runId: run.value,
+          gen: owner.value,
+          expected: b.expected,
+        } as ContextCheckpointRequest;
+        if (
+          !request.expected ||
+          typeof request.expected.beforeHash !== "string" ||
+          !Number.isSafeInteger(request.expected.revision) ||
+          !request.expected.inputs
+        )
+          return json({ error: "invalid checkpoint request" }, 400);
+        const result = await env.RUNS.get(env.RUNS.idFromName(store.value)).normalizeContextOrigins(request);
+        return json(result, result.ok ? 200 : 409);
       }
-      return json(await stub.read(from.value));
+      if (pathname === "/runs/session/tail") return json(await stub.nextIndex());
+      if (pathname === "/runs/session/owner") {
+        const runId = parseRunId(b.runId);
+        if (!runId.ok) return json({ error: runId.error }, 400);
+        const g = gen(b.gen);
+        if (!g.ok) return json({ error: g.error }, 400);
+        const max = parseSessionMaxBytes(b.maxBytes);
+        if (!max.ok) return json({ error: max.error }, 400);
+        return json(await stub.setOwner(runId.value, g.value, max.value));
+      }
+      if (pathname === "/runs/session/write") {
+        const g = gen(b.gen);
+        if (!g.ok) return json({ error: g.error }, 400);
+        const rows = parseTranscriptRows(b.rows);
+        if (!rows.ok) return json({ error: rows.error }, 400);
+        const attachments = parseAttachments(b.attachments);
+        if (!attachments.ok) return json({ error: attachments.error }, 400);
+        if (b.sources !== undefined) {
+          if (!isSessionSources(b.sources) || typeof b.sourceRunId !== "string")
+            return json({ error: "invalid trusted source metadata" }, 400);
+          let owner: SessionSourceOwner | null | undefined;
+          if (b.storeKey !== undefined) {
+            const store = parseStoreKey(b);
+            if (!store.ok) return json({ error: store.error }, 400);
+            owner = await env.RUNS.get(env.RUNS.idFromName(store.value)).sourceSessionOwner(
+              b.sourceRunId,
+              g.value,
+              key.value,
+            );
+          }
+          if (!sourcesBelongToSession(key.value, b.sources, owner))
+            return json({ error: "source metadata does not belong to the claimed session" }, 409);
+        }
+        const r = await stub.write(
+          g.value,
+          rows.value,
+          attachments.value,
+          b.sources !== undefined
+            ? { runId: b.sourceRunId as string, sources: b.sources as SessionSources }
+            : undefined,
+          typeof b.runId === "string" ? b.runId : undefined,
+          b.seed === true,
+        );
+        console.log(
+          `[runs/session/write] ${key.value} <- ${rows.value.length} row(s), ${attachments.value.length} attachment(s), ok=${r.ok}`,
+        );
+        return fenced(r);
+      }
+      if (pathname === "/runs/session/append") {
+        const rowId = parseRowId(b.rowId);
+        if (!rowId.ok) return json({ error: rowId.error }, 400);
+        const rows = parseKeyedRows(b.rows);
+        if (!rows.ok) return json({ error: rows.error }, 400);
+        if (b.context !== undefined && !isContextDependencies(b.context))
+          return json({ error: "invalid context dependencies" }, 400);
+        const store = b.storeKey !== undefined ? parseStoreKey(b) : undefined;
+        if (store && !store.ok) return json({ error: store.error }, 400);
+        if (
+          !store &&
+          logicalThreadOfSession(key.value) !== undefined &&
+          contextReferencesOf("@pending", undefined, b.context as ContextDependencies | undefined).length
+        )
+          return json({ ok: false, appended: false, reason: "context-index-unavailable" }, 409);
+        const context = b.context as ContextDependencies | undefined;
+        const checkpoints: CanonicalCheckpointSource[] = [];
+        if (store?.ok)
+          for (const origin of context?.origins ?? []) {
+            if (!origin.checkpoint) continue;
+            const source = await env.RUNS.get(env.RUNS.idFromName(store.value)).readContextCheckpoint(origin.runId);
+            if (source?.receipt?.hash === origin.checkpoint) checkpoints.push(source);
+          }
+        const r = await stub.appendKeyed(rowId.value, rows.value, context, checkpoints);
+        if (r.ok && store?.ok && logicalThreadOfSession(key.value) !== undefined) {
+          const indexed = await env.RUNS.get(env.RUNS.idFromName(store.value)).registerThreadSession(
+            key.value,
+            logicalThreadOfSession(key.value)!,
+            systemClock(),
+            b.context as ContextDependencies | undefined,
+          );
+          if (!indexed.ok) return json({ ok: false, appended: r.appended, reason: indexed.reason }, 409);
+        }
+        console.log(
+          `[runs/session/append] ${key.value} <- ${rows.value.length} row(s) under ${rowId.value}, appended=${r.appended}`,
+        );
+        return json({ ...r, ...(r.ok && b.context !== undefined ? { contextSaved: true } : {}) });
+      }
+      if (pathname === "/runs/session/entry") {
+        const rowId = parseRowId(b.rowId);
+        if (!rowId.ok) return json({ error: rowId.error }, 400);
+        return json({ rows: (await stub.readEntry(rowId.value)) ?? null });
+      }
+      if (pathname === "/runs/session/read") {
+        if (b.observation !== undefined) {
+          const observation = b.observation as { from?: unknown; through?: unknown };
+          const from = parseLogIndex(observation?.from, "from"),
+            through = parseLogIndex(observation?.through, "through");
+          if (
+            !from.ok ||
+            !through.ok ||
+            through.value < from.value ||
+            Object.keys(b).some((k) => !["key", "observation"].includes(k))
+          )
+            return json({ error: "invalid original seed observation" }, 400);
+          return json(await stub.observeExpectedSeed(from.value, through.value));
+        }
+        const from = parseLogIndex(b.from, "from");
+        if (!from.ok) return json({ error: from.error }, 400);
+        if (b.to !== undefined) {
+          const to = parseLogIndex(b.to, "to");
+          if (!to.ok) return json({ error: to.error }, 400);
+          if (to.value < from.value) return json({ error: "to must be at least from" }, 400);
+          return json(await stub.read(from.value, to.value));
+        }
+        return json(await stub.read(from.value));
+      }
+      if (pathname === "/runs/session/read-tail") {
+        const max = b.maxBytes;
+        if (typeof max !== "number" || !Number.isInteger(max) || max < 1)
+          return json({ error: "maxBytes must be an integer >= 1" }, 400);
+        return json(await stub.readTail(max));
+      }
+      if (pathname === "/runs/session/clear-owner") {
+        const runId = parseRunId(b.runId);
+        if (!runId.ok) return json({ error: runId.error }, 400);
+        const g = gen(b.gen);
+        if (!g.ok) return json({ error: g.error }, 400);
+        return fenced(await stub.clearOwner(runId.value, g.value));
+      }
+      // `recall` (session-log item 10): the hits in relevance order, and the gap
+      // markers that lie between the oldest and the newest of them.
+      if (pathname === "/runs/session/search") {
+        if (
+          typeof b.query !== "string" ||
+          b.query.trim().length === 0 ||
+          utf8ByteLength(b.query) > MAX_SEARCH_QUERY_BYTES
+        )
+          return json({ error: `query must be a non-empty string of at most ${MAX_SEARCH_QUERY_BYTES} bytes` }, 400);
+        const limit = b.limit;
+        if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > SEARCH_MAX_HITS)
+          return json({ error: `limit must be an integer in 1..${SEARCH_MAX_HITS}` }, 400);
+        const hits = await stub.search(b.query, limit);
+        const gaps =
+          hits.length > 1
+            ? await stub.gapsBetween(Math.min(...hits.map((h) => h.idx)), Math.max(...hits.map((h) => h.idx)))
+            : [];
+        console.log(`[runs/session/search] ${key.value} -> ${hits.length} hit(s), ${gaps.length} gap(s)`);
+        return json({ hits, gaps });
+      }
+      if (pathname === "/runs/session/requester-target" || pathname === "/runs/session/requester-target/write") {
+        const actor = b.actor;
+        if (typeof actor !== "string" || !/^[a-z][\w-]*:[^\s]{1,150}$/.test(actor))
+          return json({ error: "actor must be a namespaced identity" }, 400);
+        if (pathname === "/runs/session/requester-target") return json({ target: await stub.requesterTarget(actor) });
+        const target = b.target as Record<string, unknown> | undefined;
+        if (
+          !target ||
+          typeof target.repo !== "string" ||
+          !/^[\w.-]+\/[\w.-]+$/.test(target.repo) ||
+          typeof target.provenance !== "string" ||
+          utf8ByteLength(target.provenance) > 2_000 ||
+          !target.provenance ||
+          (target.issue !== undefined &&
+            (typeof target.issue !== "string" ||
+              !target.issue.startsWith(`${target.repo}#`) ||
+              !/^\d+$/.test(target.issue.slice(target.repo.length + 1))))
+        )
+          return json({ error: "invalid requester target" }, 400);
+        return json({
+          target: await stub.checkpointRequesterTarget(actor, {
+            repo: target.repo,
+            provenance: target.provenance,
+            ...(target.issue ? { issue: target.issue as string } : {}),
+          }),
+        });
+      }
+      if (pathname === "/runs/session/notepad") return json({ notepad: await stub.notepad() });
+      if (pathname === "/runs/session/notepad/write") {
+        const g = gen(b.gen);
+        if (!g.ok) return json({ error: g.error }, 400);
+        if (typeof b.text !== "string") return json({ error: "text must be a string" }, 400);
+        const bytes = utf8ByteLength(b.text);
+        if (bytes > NOTEPAD_MAX_BYTES)
+          return json({ error: `text is ${bytes} bytes; the notepad holds at most ${NOTEPAD_MAX_BYTES}` }, 400);
+        const r = await stub.writeNotepad(
+          g.value,
+          b.text,
+          systemClock(),
+          typeof b.runId === "string" ? b.runId : undefined,
+        );
+        console.log(`[runs/session/notepad/write] ${key.value} <- ${bytes} byte(s), ok=${r.ok}`);
+        return fenced(r);
+      }
+      return json({ error: "not found" }, 404);
+    } catch (error) {
+      const pending = await stub.expectedSeedMutationHold();
+      if (pending) return json(pending, 423);
+      throw error;
     }
-    if (pathname === "/runs/session/read-tail") {
-      const max = b.maxBytes;
-      if (typeof max !== "number" || !Number.isInteger(max) || max < 1)
-        return json({ error: "maxBytes must be an integer >= 1" }, 400);
-      return json(await stub.readTail(max));
-    }
-    if (pathname === "/runs/session/clear-owner") {
-      const runId = parseRunId(b.runId);
-      if (!runId.ok) return json({ error: runId.error }, 400);
-      const g = gen(b.gen);
-      if (!g.ok) return json({ error: g.error }, 400);
-      return fenced(await stub.clearOwner(runId.value, g.value));
-    }
-    // `recall` (session-log item 10): the hits in relevance order, and the gap
-    // markers that lie between the oldest and the newest of them.
-    if (pathname === "/runs/session/search") {
-      if (
-        typeof b.query !== "string" ||
-        b.query.trim().length === 0 ||
-        utf8ByteLength(b.query) > MAX_SEARCH_QUERY_BYTES
-      )
-        return json({ error: `query must be a non-empty string of at most ${MAX_SEARCH_QUERY_BYTES} bytes` }, 400);
-      const limit = b.limit;
-      if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > SEARCH_MAX_HITS)
-        return json({ error: `limit must be an integer in 1..${SEARCH_MAX_HITS}` }, 400);
-      const hits = await stub.search(b.query, limit);
-      const gaps =
-        hits.length > 1
-          ? await stub.gapsBetween(Math.min(...hits.map((h) => h.idx)), Math.max(...hits.map((h) => h.idx)))
-          : [];
-      console.log(`[runs/session/search] ${key.value} -> ${hits.length} hit(s), ${gaps.length} gap(s)`);
-      return json({ hits, gaps });
-    }
-    if (pathname === "/runs/session/requester-target" || pathname === "/runs/session/requester-target/write") {
-      const actor = b.actor;
-      if (typeof actor !== "string" || !/^[a-z][\w-]*:[^\s]{1,150}$/.test(actor))
-        return json({ error: "actor must be a namespaced identity" }, 400);
-      if (pathname === "/runs/session/requester-target") return json({ target: await stub.requesterTarget(actor) });
-      const target = b.target as Record<string, unknown> | undefined;
-      if (
-        !target ||
-        typeof target.repo !== "string" ||
-        !/^[\w.-]+\/[\w.-]+$/.test(target.repo) ||
-        typeof target.provenance !== "string" ||
-        utf8ByteLength(target.provenance) > 2_000 ||
-        !target.provenance ||
-        (target.issue !== undefined &&
-          (typeof target.issue !== "string" ||
-            !target.issue.startsWith(`${target.repo}#`) ||
-            !/^\d+$/.test(target.issue.slice(target.repo.length + 1))))
-      )
-        return json({ error: "invalid requester target" }, 400);
-      return json({
-        target: await stub.checkpointRequesterTarget(actor, {
-          repo: target.repo,
-          provenance: target.provenance,
-          ...(target.issue ? { issue: target.issue as string } : {}),
-        }),
-      });
-    }
-    if (pathname === "/runs/session/notepad") return json({ notepad: await stub.notepad() });
-    if (pathname === "/runs/session/notepad/write") {
-      const g = gen(b.gen);
-      if (!g.ok) return json({ error: g.error }, 400);
-      if (typeof b.text !== "string") return json({ error: "text must be a string" }, 400);
-      const bytes = utf8ByteLength(b.text);
-      if (bytes > NOTEPAD_MAX_BYTES)
-        return json({ error: `text is ${bytes} bytes; the notepad holds at most ${NOTEPAD_MAX_BYTES}` }, 400);
-      const r = await stub.writeNotepad(
-        g.value,
-        b.text,
-        systemClock(),
-        typeof b.runId === "string" ? b.runId : undefined,
-      );
-      console.log(`[runs/session/notepad/write] ${key.value} <- ${bytes} byte(s), ok=${r.ok}`);
-      return fenced(r);
-    }
-    return json({ error: "not found" }, 404);
   }
 
   if (pathname.startsWith("/runs/transcript/")) {
@@ -10156,6 +11568,37 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
   if (!key.ok) return json({ error: key.error }, 400);
   const stub = env.RUNS.get(env.RUNS.idFromName(key.value));
   const now = systemClock();
+  if (["/runs/state", "/runs/live-state", "/runs/finishing", "/runs/finish", "/runs/abandon"].includes(pathname)) {
+    const id = parseRunId(b.runId),
+      owner = gen(b.gen);
+    if (id.ok && owner.ok) {
+      const pending = await stub.promotionHold(id.value, owner.value);
+      if (pending) return json(pending, 423);
+    }
+  }
+
+  if (pathname === "/runs/promotion/prepare") {
+    const parsed = parseClaim(b);
+    if (!parsed.ok || originalBody === undefined) return json({ error: "invalid original promotion body" }, 400);
+    return json(await stub.preparePromotion(originalBody, expectedSeed));
+  }
+  if (pathname === "/runs/promotion/read") {
+    const run = parseRunId(b.runId),
+      owner = gen(b.gen);
+    if (
+      !run.ok ||
+      !owner.ok ||
+      (b.bodySha256 !== undefined && (typeof b.bodySha256 !== "string" || !/^[a-f0-9]{64}$/.test(b.bodySha256)))
+    )
+      return json({ error: "invalid promotion read identity" }, 400);
+    return json(
+      await stub.readPromotion({
+        runId: run.value,
+        gen: owner.value,
+        ...(typeof b.bodySha256 === "string" ? { bodySha256: b.bodySha256 } : {}),
+      }),
+    );
+  }
 
   if (pathname === "/runs/context-checkpoint") {
     const run = parseRunId(b.runId);
@@ -10163,9 +11606,24 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     return json({ source: (await stub.readContextCheckpoint(run.value)) ?? null });
   }
   if (pathname === "/runs/claim") {
+    if (b.confirm !== undefined) {
+      const reference = sourceSeedReferenceOf(b.confirm);
+      if (
+        !reference ||
+        reference.storeKey !== key.value ||
+        Object.keys(b).some((k) => !["storeKey", "confirm"].includes(k))
+      )
+        return json({ error: "invalid original confirmation reference" }, 400);
+      return json(await stub.confirmPromotion(reference));
+    }
     const req = parseClaim(b);
     if (!req.ok) return json({ error: req.error }, 400);
-    const r = await stub.claim(req.value, now);
+    const pending = await stub.promotionHold(req.value.runId, req.value.gen);
+    if (pending) {
+      const saved = await stub.readPromotion({ runId: req.value.runId, gen: req.value.gen });
+      if (saved.kind === "held" || saved.preparation.bodyJson !== originalBody) return json(pending, 423);
+    }
+    const r = await stub.claim(req.value, now, originalBody);
     console.log(
       `[runs/claim] ${key.value} ${req.value.runId} on ${req.value.threadKey} → ${r.ok ? "claimed" : r.reason}`,
     );
@@ -10188,6 +11646,11 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     const exact = b.ownerGen !== undefined || b.ownerFence !== undefined;
     if (exact && !isWorkspaceOwner(b)) return json({ error: "invalid workspace owner" }, 400);
     return json(await stub.preservationOwner(runId.value, exact ? (b as unknown as WorkspaceOwner) : undefined));
+  }
+  if (pathname === "/runs/workspace-disposition") {
+    const allocation = workspaceAllocationOf(b.allocation);
+    if (!allocation) return json({ error: "invalid original workspace allocation" }, 400);
+    return json(await stub.workspaceDisposition(allocation));
   }
   if (pathname === "/runs/workspace-ack") {
     if (!isWorkspaceOwner(b) || !Number.isSafeInteger(b.revision) || Number(b.revision) <= 0)
@@ -10665,6 +12128,8 @@ async function handleRuns(pathname: string, body: unknown, env: Env): Promise<Re
     const parsed = parseRunPut(body);
     if (!parsed.ok) return json({ error: parsed.error }, 400);
     const { storeKey, record, proposal, point } = parsed.value;
+    const pendingPromotion = await stub(storeKey).promotionHold(record.id);
+    if (pendingPromotion) return json(pendingPromotion, 423);
     // `turnedFinal` stays internal: the wire answer is exactly the shape it
     // always was, binding or no binding (run-metrics.md item 4).
     const { turnedFinal: _turnedFinal, ...result } = await stub(storeKey).put(record, proposal, point);
@@ -10798,6 +12263,23 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
   }
 
   let body: unknown;
+  if (url.pathname === "/runs/promotion/prepare" || url.pathname === "/runs/claim") {
+    const header = request.headers.get(EXPECTED_SEED_HEADER);
+    const expectedSeed = header === null ? undefined : decodeExpectedSeedHeader(header);
+    if (
+      header !== null &&
+      (url.pathname !== "/runs/promotion/prepare" ||
+        !expectedSeed ||
+        requestHeaderBytes(request.headers) > WORKER_REQUEST_HEADER_BYTES)
+    )
+      return json({ error: "invalid expected seed header" }, 400);
+    try {
+      const originalBody = await request.text();
+      return handleLedger(url.pathname, JSON.parse(originalBody), env, originalBody, expectedSeed);
+    } catch {
+      return json({ error: "body must be valid JSON" }, 400);
+    }
+  }
   try {
     body = await request.json();
   } catch {
@@ -10898,6 +12380,10 @@ export default {
       root.end(res.status >= 500 ? "error" : "ok", { httpStatus: res.status });
       return res;
     } catch (err) {
+      if (err instanceof PromotionPendingError) {
+        root.end("ok", { httpStatus: 423 });
+        return json({ kind: "held", reason: "promotion_pending", runId: err.runId }, 423);
+      }
       root.fail(err);
       root.end("error");
       throw err;

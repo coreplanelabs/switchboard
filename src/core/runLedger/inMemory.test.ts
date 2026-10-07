@@ -300,12 +300,18 @@ describe("durable branch identity baseline", () => {
     const baseline = baselineOf(req.runId);
     await ledger.claim({ ...req, state: { branchIdentityBaseline: baseline } });
     await ledger.finish(req.runId, "g1", { ...record(req.runId), repo: "o/r" });
-    expect(await ledger.claim({ ...req, gen: "g2", phase: "attaching", system: "", tools: [] })).toEqual({ ok: true });
+    expect(await ledger.claim({ ...req, gen: "g2", phase: "attaching", system: "", tools: [] })).toMatchObject({
+      ok: true,
+    });
     expect(ledger.live.get(req.runId)!.state.branchIdentityBaseline).toEqual(baseline);
     ledger.live.get(req.runId)!.state = {};
-    expect(await ledger.claim({ ...req, gen: "g2", phase: "attaching", system: "", tools: [] })).toEqual({ ok: true });
+    expect(await ledger.claim({ ...req, gen: "g2", phase: "attaching", system: "", tools: [] })).toMatchObject({
+      ok: true,
+    });
     expect(ledger.live.get(req.runId)!.state.branchIdentityBaseline).toEqual(baseline);
-    expect(await ledger.claim({ ...req, gen: "g2", state: { binding: { backend: "sandbox" } } })).toEqual({ ok: true });
+    expect(await ledger.claim({ ...req, gen: "g2", state: { binding: { backend: "sandbox" } } })).toMatchObject({
+      ok: true,
+    });
     expect(ledger.live.get(req.runId)!.state.branchIdentityBaseline).toEqual(baseline);
     const changed = { ...baseline, binding: { ...baseline.binding, head: "b".repeat(40) } };
     expect(await ledger.setState(req.runId, "g2", { branchIdentityBaseline: changed })).toEqual({
@@ -1017,7 +1023,7 @@ describe("InMemoryRunLedger", () => {
 
   it("claim → seed → steps → finishing → finish: the live row exists between claim and finish, the transcript reads back whole", async () => {
     const ledger = new InMemoryRunLedger(() => 0);
-    expect(await ledger.claim(claimReq("r1", "slack:C1:1.0"))).toEqual({ ok: true });
+    expect(await ledger.claim(claimReq("r1", "slack:C1:1.0"))).toMatchObject({ ok: true });
     expect((await ledger.listLive()).map((r) => r.runId)).toEqual(["r1"]);
     expect(
       await ledger.seed(
@@ -1067,8 +1073,8 @@ describe("InMemoryRunLedger", () => {
       reason: "thread-live",
       live: { runId: "r1", agent: "review", startedAt: 1_000 },
     });
-    expect(await ledger.claim(claimReq("r3", "slack:C1:2.0"))).toEqual({ ok: true });
-    expect(await ledger.claim(claimReq("r1", "slack:C1:1.0"))).toEqual({ ok: true });
+    expect(await ledger.claim(claimReq("r3", "slack:C1:2.0"))).toMatchObject({ ok: true });
+    expect(await ledger.claim(claimReq("r1", "slack:C1:1.0"))).toMatchObject({ ok: true });
   });
 
   // docs/reference/specs/run-history.md item 48: the key a coordinator's spawn
@@ -1142,16 +1148,18 @@ describe("InMemoryRunLedger", () => {
       card: null,
       meta: { agent: "review", channelId: "slack:C1", userId: "slack:UA", threadKey: "slack:C1:1.0", request },
     };
-    expect(await ledger.claim(reserve)).toEqual({ ok: true });
+    expect(await ledger.claim(reserve)).toMatchObject({ ok: true });
     expect(ledger.live.get("r1")).toMatchObject({ phase: "attaching", system: "", tools: [], card: null });
     expect(ledger.live.get("r1")?.meta.request).toEqual(request);
     expect(await ledger.claim(claimReq("r2", "slack:C1:1.0"))).toMatchObject({ ok: false, reason: "thread-live" });
     // A re-reserve (a retry after a lost response) only refreshes the lease.
     t = 5_000;
-    expect(await ledger.claim(reserve)).toEqual({ ok: true });
+    expect(await ledger.claim(reserve)).toMatchObject({ ok: true });
     expect(ledger.live.get("r1")).toMatchObject({ phase: "attaching", leaseUntil: 5_000 + LEASE_MS });
     // The prompt lands: the same claim the dispatcher always made, now a promotion.
-    expect(await ledger.claim({ ...claimReq("r1", "slack:C1:1.0"), state: { checklist: [] } })).toEqual({ ok: true });
+    expect(await ledger.claim({ ...claimReq("r1", "slack:C1:1.0"), state: { checklist: [] } })).toMatchObject({
+      ok: true,
+    });
     expect(ledger.live.get("r1")).toMatchObject({
       phase: "live",
       system: "you are a reviewer",
@@ -1161,7 +1169,7 @@ describe("InMemoryRunLedger", () => {
     });
     expect(ledger.live.get("r1")?.tools.map((x) => x.name)).toEqual(["bash"]);
     // A re-claim on the live row changes nothing (idempotent, as before).
-    expect(await ledger.claim({ ...claimReq("r1", "slack:C1:1.0"), system: "other" })).toEqual({ ok: true });
+    expect(await ledger.claim({ ...claimReq("r1", "slack:C1:1.0"), system: "other" })).toMatchObject({ ok: true });
     expect(ledger.live.get("r1")?.system).toBe("you are a reviewer");
     // A reserved run whose owner died: the reclaim keeps `attaching` so the launcher knows to restart it.
     await ledger.claim({
@@ -1179,7 +1187,7 @@ describe("InMemoryRunLedger", () => {
     expect(r9.row.meta.request).toEqual(request);
     expect(r9.inbox.map((i) => i.message.text)).toEqual(["also this"]);
     // The new generation promotes it when its own attach lands.
-    expect(await ledger.claim({ ...claimReq("r9", "slack:C1:9.0", "g2") })).toEqual({ ok: true });
+    expect(await ledger.claim({ ...claimReq("r9", "slack:C1:9.0", "g2") })).toMatchObject({ ok: true });
     expect(ledger.live.get("r9")).toMatchObject({ phase: "live", ownerGen: "g2" });
     // An attaching row can finish (a dispatch that fails before its prompt) but never be handed off.
     await ledger.claim({
@@ -1215,7 +1223,7 @@ describe("InMemoryRunLedger", () => {
       tools: [],
       card: null,
     };
-    expect(await ledger.claim(reserve)).toEqual({ ok: true });
+    expect(await ledger.claim(reserve)).toMatchObject({ ok: true });
 
     const admitted = await ledger.assignLiveState("promoted", "g1", {
       expectedSeq: 0,
@@ -1235,7 +1243,7 @@ describe("InMemoryRunLedger", () => {
         ...claimReq("promoted", "slack:C1:promoted"),
         state: { binding: { backend: "resident", workspace: "/workspace/promoted" } },
       }),
-    ).toEqual({ ok: true });
+    ).toMatchObject({ ok: true });
     expect(await ledger.listLive()).toMatchObject([
       {
         runId: "promoted",

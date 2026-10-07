@@ -661,6 +661,8 @@ function persistedView(
   prices: ModelPriceTable,
 ): RunView {
   const {
+    workspaceAllocation: _workspaceAllocation,
+    workspaceDisposition: _workspaceDisposition,
     audienceRefusal: _audienceRefusal,
     sourceReads: _sourceReads,
     branchIdentityBaseline: _branchIdentityBaseline,
@@ -674,7 +676,7 @@ function persistedView(
     childHandoff: _childHandoff,
     contextDependencies: _contextDependencies,
     ...visible
-  } = item;
+  } = item as typeof item & { workspaceAllocation?: unknown; workspaceDisposition?: unknown };
   return {
     ...visible,
     finished: true,

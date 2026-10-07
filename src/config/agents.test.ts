@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ConfigStore, parseAppConfigText } from "../config.js";
 import { configuredAgent, settingsForAgent } from "./agents.js";
+import { getAgent, type AgentDef } from "../agents/registry.js";
 
 // Feature: docs/reference/specs/agent-configuration.md.
 const installation = (extra = "") => `
@@ -16,6 +17,82 @@ providers:
 ${extra}`;
 
 describe("agent configuration DSL", () => {
+  const scratch = {
+    version: 1,
+    purpose: "pull-request-review",
+    resident: "retained",
+    cold: {
+      kind: "exclusive-scratch",
+      scope: "original-cold-allocation",
+      custody: "session-report-and-review-publication",
+    },
+  };
+  const retained = { version: 1, purpose: "retained-work", resident: "retained", cold: "retained" };
+  it("keeps lifetime registered while names prompts tools and model settings cannot elevate it", () => {
+    const config = parseAppConfigText(
+      installation(
+        "agents:\n  coding: { instructions: Review this, tools: readonly, model: openai/custom, limits: { maxMinutes: 12 } }",
+      ),
+    );
+    const coding = configuredAgent(config, "coding") as AgentDef & { resourceLifetime?: unknown };
+    expect(coding.resourceLifetime).toEqual(retained);
+    expect({ ...coding, name: "review" }.resourceLifetime).toEqual(retained);
+    expect(configuredAgent(config, "review")).toMatchObject({
+      machine: "repo-resident",
+      identity: "read",
+      maxMinutes: 25,
+      resourceLifetime: scratch,
+    });
+    expect(settingsForAgent(config, "coding")).toMatchObject({ model: "openai/custom", effort: "high" });
+    const forged = parseAppConfigText(installation());
+    (forged.agents!.coding as unknown as Record<string, unknown>).resourceLifetime = scratch;
+    expect((configuredAgent(forged, "coding") as AgentDef & { resourceLifetime?: unknown }).resourceLifetime).toEqual(
+      retained,
+    );
+  });
+  it("accepts an unchanged registered declaration but rejects lifetime changes and malformed schema", () => {
+    expect(() =>
+      parseAppConfigText(installation(`agents:\n  review: { resourceLifetime: ${JSON.stringify(scratch)} }`)),
+    ).not.toThrow();
+    for (const [name, policy] of [
+      ["coding", scratch],
+      ["explore", scratch],
+      ["review", retained],
+    ])
+      expect(() =>
+        parseAppConfigText(installation(`agents:\n  ${name}: { resourceLifetime: ${JSON.stringify(policy)} }`)),
+      ).toThrow(/registered capability cannot be changed/);
+    for (const policy of [
+      { ...scratch, version: 2 },
+      { purpose: "pull-request-review" },
+      { ...scratch, ephemeral: true },
+      { ...scratch, cold: { kind: "exclusive-scratch" } },
+    ])
+      expect(() =>
+        parseAppConfigText(installation(`agents:\n  review: { resourceLifetime: ${JSON.stringify(policy)} }`)),
+      ).toThrow();
+    expect(() =>
+      parseAppConfigText(installation(`profiles:\n  disposable: { resourceLifetime: ${JSON.stringify(scratch)} }`)),
+    ).toThrow();
+  });
+  it("isolates nested lifetime data between runs builtin definitions and installation snapshots", () => {
+    const config = parseAppConfigText(installation());
+    const first = configuredAgent(config, "review") as AgentDef & { resourceLifetime?: unknown };
+    const second = configuredAgent(config, "review") as AgentDef & { resourceLifetime?: unknown };
+    expect(first.resourceLifetime).toEqual(scratch);
+    expect(first.resourceLifetime).not.toBe(second.resourceLifetime);
+    const mutable = first.resourceLifetime as typeof scratch;
+    mutable.cold.scope = "mutated scope";
+    expect(second.resourceLifetime).toEqual(scratch);
+    expect((getAgent("review") as AgentDef & { resourceLifetime?: unknown }).resourceLifetime).toEqual(scratch);
+    expect((configuredAgent(config, "review") as AgentDef & { resourceLifetime?: unknown }).resourceLifetime).toEqual(
+      scratch,
+    );
+    expect(
+      (configuredAgent(parseAppConfigText(installation()), "review") as AgentDef & { resourceLifetime?: unknown })
+        .resourceLifetime,
+    ).toEqual(scratch);
+  });
   it("extends the shipped DSL and resolves every agent and internal caller explicitly", () => {
     const config = parseAppConfigText(installation());
     for (const name of ["general", "coding", "review", "research", "explore", "conductor", "orchestrator", "memory"])

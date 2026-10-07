@@ -9,6 +9,7 @@ import type { AudienceCheck } from "../audienceDecision.js";
 // is record.ts).
 import type { ConfigStore, ResolvedRequest } from "../../config.js";
 import type { AgentDef } from "../../agents/registry.js";
+import type { AttachedHeadGate } from "./authorize.js";
 import type { RouteDecided } from "./route.js";
 import { coordinatorFields, type CoordinatorTag, type WorkflowSender } from "../coordinator/contract.js";
 import type { CoordinatorInstanceStore } from "../coordinator/instanceStore.js";
@@ -60,6 +61,8 @@ import type { RecordDeps } from "./record.js";
 import { processSecrets } from "../../secrets.js";
 import { oneLine, redactAndCap } from "../redact.js";
 import { RefusalError, refusalOf } from "../refusal.js";
+import { allocationAckOf } from "../runLedger/allocationAck.js";
+import type { LiveRunMeta, LiveRunRow } from "../runLedger/types.js";
 import type { HarnessRoster } from "../harness/roster.js";
 import type { HarnessContainer, HarnessOperationScope } from "../harness/container.js";
 import type { HarnessRegistry } from "../harness/pi/relay.js";
@@ -264,6 +267,9 @@ export interface RunDeps
 
 /** What `claimRun` reads off the dispatch. */
 export interface ClaimContext {
+  /** Original admission time and receiver row, carried without inventing new authority. */
+  startedAt?: number;
+  carriedRow?: LiveRunRow;
   msg: IncomingMessage;
   /** A live channel verifier must exist before its private tool enters a durable seed. */
   privateWorkVerifierAvailable?: boolean;
@@ -320,7 +326,10 @@ export interface ClaimContext {
   /** For a seed read from the session's log (session-log item 9): the rows of
    *  the log the first messages of `messages` are, so the write-through
    *  appends only what follows them. */
+  /** The actual preceding attached-head gate, before any prompt or claim. */
+  attachedHead?: Extract<AttachedHeadGate, { kind: "allowed" }>;
   seedLog?: { from: number; turns: number };
+  seedRefusedRequests?: readonly number[];
   /** The durable unit lane selected by the dispatcher; the seed reads this same key. */
   sessionKey?: string;
   /** Existing notes copied into a new canonical lane at its first claim. */
@@ -374,6 +383,81 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
   const { resident } = selection;
   const checkout = checkoutOfSelection(selection);
   let ledgerRun = ctx.ledgerRun;
+  const holdIdentity = (): never => {
+    throw new RefusalError(
+      refusalOf("setup_failed", "The original run identity could not be confirmed; its saved work remains held."),
+    );
+  };
+  if (!registry.has(run.id, run.token)) holdIdentity();
+  const snapshot = registry.snapshot(run.id, run.token),
+    originalAck = reserved?.allocationAck,
+    carried = ctx.carriedRow ?? resume?.row,
+    originalStart = ctx.startedAt ?? carried?.startedAt ?? originalAck?.startedAt ?? snapshot?.startedAt;
+  if (
+    originalStart === undefined ||
+    !Number.isFinite(originalStart) ||
+    (snapshot && (snapshot.finished || snapshot.startedAt !== originalStart)) ||
+    (!snapshot && !originalAck && !carried) ||
+    (originalAck &&
+      (originalAck.runId !== run.id ||
+        originalAck.threadKey !== msg.threadKey ||
+        originalAck.gen !== deps.runLedger.gen ||
+        originalAck.startedAt !== originalStart ||
+        !reserved?.tracked())) ||
+    (carried &&
+      (carried.runId !== run.id ||
+        carried.threadKey !== msg.threadKey ||
+        carried.ownerGen !== deps.runLedger.gen ||
+        carried.startedAt !== originalStart ||
+        carried.meta.threadKey !== msg.threadKey ||
+        carried.meta.userId !== msg.userId ||
+        carried.meta.channelId !== msg.channelId ||
+        carried.meta.authenticatedAs !== msg.authenticatedAs ||
+        carried.meta.postedBy !== msg.postedBy))
+  )
+    holdIdentity();
+  if (carried) {
+    const target = ["repo", "ref", "headSha", "pr"] as const;
+    const observedReviewHead =
+      carried.phase === "attaching" &&
+      originalAck?.allocation === null &&
+      carried.meta.workspaceAllocation === undefined &&
+      agent.name === "review" &&
+      profile.identity === "read" &&
+      !coordinator &&
+      parentRunId === undefined &&
+      carried.meta.parentInstanceId === undefined &&
+      carried.meta.coordinatorUnit === undefined &&
+      repoCtx.pr !== undefined &&
+      Number.isSafeInteger(repoCtx.pr) &&
+      repoCtx.pr > 0 &&
+      repoCtx.headSha !== undefined &&
+      /^[a-f0-9]{40}$/.test(repoCtx.headSha) &&
+      ctx.attachedHead?.verifiedAtAttach === true &&
+      ["repo", "ref", "headSha", "pr"].every(
+        (key) => ctx.attachedHead!.repoCtx[key as keyof RepoContext] === repoCtx[key as keyof RepoContext],
+      );
+    const tag = coordinatorFields(coordinator);
+    const ownership = ["parentInstanceId", "coordinatorUnit", "idempotencyKey", "maintenanceActionId"] as const;
+    if (
+      target.some(
+        (key) =>
+          !(key === "headSha" && observedReviewHead) &&
+          carried.meta[key] !== undefined &&
+          carried.meta[key] !== repoCtx[key],
+      ) ||
+      carried.meta.agent !== agent.name ||
+      carried.meta.parentRunId !== parentRunId ||
+      ownership.some((key) => carried.meta[key] !== tag[key]) ||
+      (carried.meta.profile &&
+        (carried.meta.profile.identity !== profile.identity ||
+          !Number.isFinite(profile.minutes) ||
+          profile.minutes <= 0 ||
+          profile.minutes > carried.meta.profile.minutes)) ||
+      (carried.meta.readonly !== undefined && carried.meta.readonly !== (profile.identity === "read"))
+    )
+      holdIdentity();
+  }
   // Where the run's workspace is (run-history item 54), on the row's state
   // beside the harness facts: the generation that resumes the run re-attaches
   // there instead of provisioning as for a new run.
@@ -418,43 +502,56 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
       ctx.admitted ? privateProgressSourceTrusted(msg.userId, ctx.admitted.inbox) : undefined,
     );
     const ledger = deps.runLedger;
+    const meta: LiveRunMeta = {
+      agent: agent.name,
+      model: resolved.modelRef,
+      ...(ctx.mainAudienceChecked ? { mainAudienceChecked: true as const } : {}),
+      channelId: msg.channelId,
+      userId: msg.userId,
+      threadKey: msg.threadKey,
+      ...(directAudience ? { directAudience } : {}),
+      channelVisibility,
+      ...(repoCtx.repo !== undefined && !privateMain ? { repo: repoCtx.repo } : {}),
+      ...(operationTarget !== undefined && !privateMain ? { operationTarget } : {}),
+      ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
+      ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+      ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
+      ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
+      ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
+      ...(repoCtx.ref !== undefined && !privateMain ? { ref: repoCtx.ref } : {}),
+      ...(repoCtx.baseRef !== undefined && !privateMain ? { baseRef: repoCtx.baseRef } : {}),
+      ...(repoCtx.headSha !== undefined && !privateMain ? { headSha: repoCtx.headSha } : {}),
+      ...(repoCtx.pr !== undefined && !privateMain ? { pr: repoCtx.pr } : {}),
+      readonly: profile.identity === "read",
+      profile,
+      ...(parentRunId !== undefined ? { parentRunId } : {}),
+      ...(ctx.childHandoff !== undefined ? { childHandoff: ctx.childHandoff } : {}),
+      ...(ctx.restartOf !== undefined ? { restartOf: ctx.restartOf } : {}),
+      ...coordinatorFields(coordinator),
+      ...(seed !== undefined ? { seed } : {}),
+      ...(route !== undefined && !privateMain ? { route } : {}),
+      selection: resident === true ? "resident" : "sandbox",
+      ...(checkout !== undefined ? { workspace: checkout } : {}),
+      ...(requestRow !== undefined ? { request: requestRow } : {}),
+    };
+    const acknowledged =
+      originalAck &&
+      allocationAckOf(originalAck, {
+        runId: run.id,
+        threadKey: msg.threadKey,
+        gen: ledger.gen,
+        startedAt: originalStart!,
+        meta,
+      });
+    if (originalAck && !acknowledged) holdIdentity();
+    if (acknowledged?.allocation) meta.workspaceAllocation = structuredClone(acknowledged.allocation);
+    if (!registry.has(run.id, run.token)) holdIdentity();
     const opened = await root.span("dispatch.ledger_claim", () =>
       ledger.open({
         runId: run.id,
         threadKey: msg.threadKey,
-        startedAt: registry.snapshot(run.id, run.token)?.startedAt ?? clock(),
-        meta: {
-          agent: agent.name,
-          model: resolved.modelRef,
-          ...(ctx.mainAudienceChecked ? { mainAudienceChecked: true as const } : {}),
-          channelId: msg.channelId,
-          userId: msg.userId,
-          threadKey: msg.threadKey,
-          ...(directAudience ? { directAudience } : {}),
-          channelVisibility,
-          ...(repoCtx.repo !== undefined && !privateMain ? { repo: repoCtx.repo } : {}),
-          ...(operationTarget !== undefined && !privateMain ? { operationTarget } : {}),
-          ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
-          ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
-          ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
-          ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
-          ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
-          ...(repoCtx.ref !== undefined && !privateMain ? { ref: repoCtx.ref } : {}),
-          ...(repoCtx.baseRef !== undefined && !privateMain ? { baseRef: repoCtx.baseRef } : {}),
-          ...(repoCtx.headSha !== undefined && !privateMain ? { headSha: repoCtx.headSha } : {}),
-          ...(repoCtx.pr !== undefined && !privateMain ? { pr: repoCtx.pr } : {}),
-          readonly: profile.identity === "read",
-          profile,
-          ...(parentRunId !== undefined ? { parentRunId } : {}),
-          ...(ctx.childHandoff !== undefined ? { childHandoff: ctx.childHandoff } : {}),
-          ...(ctx.restartOf !== undefined ? { restartOf: ctx.restartOf } : {}),
-          ...coordinatorFields(coordinator),
-          ...(seed !== undefined ? { seed } : {}),
-          ...(route !== undefined && !privateMain ? { route } : {}),
-          selection: resident === true ? "resident" : "sandbox",
-          ...(checkout !== undefined ? { workspace: checkout } : {}),
-          ...(requestRow !== undefined ? { request: requestRow } : {}),
-        },
+        startedAt: originalStart!,
+        meta,
         card: card.handle ?? null,
         state: {
           ...(workspaceBinding !== undefined ? { binding: workspaceBinding } : {}),
@@ -495,6 +592,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
           messages,
           budgetMs: profile.minutes * 60_000,
           ...(seedLog ? { log: seedLog } : {}),
+          ...(ctx.seedRefusedRequests ? { refusedRequests: ctx.seedRefusedRequests } : {}),
           ...(seedActors !== undefined ? { actors: seedActors } : {}),
         },
         // A stop asked of another container (`/runs/stop` there) reaches this
@@ -533,7 +631,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
     }
     // An acknowledged child's finalizer still owns the reservation here.
     // Promotion (including the seed) must succeed before the model can own it.
-    if (coordinator && (opened.kind !== "tracked" || !opened.run.tracked()))
+    if ((coordinator || originalAck) && (opened.kind !== "tracked" || !opened.run.tracked()))
       throw new RefusalError(
         refusalOf(
           "setup_failed",

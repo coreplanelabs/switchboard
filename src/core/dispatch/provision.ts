@@ -1,4 +1,9 @@
 import { TerminalCommitmentUnknownError } from "../runLedger/writeThrough.js";
+import { originalColdAllocation, sameWorkspaceAllocation } from "../runLedger/workspaceDurability.js";
+import { resourceLifetimeSchema } from "../../agents/resourceLifetime.js";
+import { allocationAckOf } from "../runLedger/allocationAck.js";
+import { UnknownAllocationClaimError } from "../runLedger/allocationAck.js";
+import type { LiveRunMeta, WorkspaceAllocationAck } from "../runLedger/types.js";
 // The provision stage of the dispatch pipeline (docs/decisions/0024-dispatcher-as-a-staged-pipeline.md):
 // everything a run needs before its first model turn, in the order the request
 // meets it. The memory read started; the ack card the thread sees while setup
@@ -756,6 +761,8 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
  *  ledger refused it — the run is then untracked) and the request as the row
  *  carries it, which the claim after the prompt re-sends. */
 export interface Reservation {
+  /** Receiver-produced original admission data only; never the requested candidate. */
+  allocationAck?: WorkspaceAllocationAck;
   reserved: LedgerRun | undefined;
   requestRow: Record<string, unknown>;
   /** Why the ledger would not take the run, when it would not (run-history item 54). */
@@ -764,6 +771,8 @@ export interface Reservation {
 
 /** What `reserveRun` reads off the dispatch. */
 export interface ReserveContext {
+  /** Identity consumed by the preceding resolved actor gates, captured by the dispatcher. */
+  admissionIdentity?: { requester: string; channelId: string; threadKey: string };
   msg: IncomingMessage;
   agent: AgentDef;
   /** The run's effective profile: the row's read-only flag reads its identity. */
@@ -836,55 +845,143 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
     const requestRow = durableInboxMessage(msg, msg.text, receivedAt);
     const directAudience = directAudienceStampOf(msg);
     const privateMain = agent.name === "orchestrator" && directAudience !== undefined;
+    const meta: LiveRunMeta = {
+      agent: agent.name,
+      model: resolved.modelRef,
+      channelId: msg.channelId,
+      userId: msg.userId,
+      threadKey: msg.threadKey,
+      ...(directAudience !== undefined ? { directAudience } : {}),
+      channelVisibility,
+      ...(repoCtx.repo !== undefined && !privateMain ? { repo: repoCtx.repo } : {}),
+      ...(operationTarget !== undefined && !privateMain ? { operationTarget } : {}),
+      ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
+      ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+      ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
+      ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
+      ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
+      ...(decisionRecord !== undefined ? { record: decisionRecord } : {}),
+      ...(decisionRecordTask !== undefined ? { recordTaskKey: decisionRecordTask } : {}),
+      ...(repoCtx.ref !== undefined && !privateMain ? { ref: repoCtx.ref } : {}),
+      ...(repoCtx.baseRef !== undefined && !privateMain ? { baseRef: repoCtx.baseRef } : {}),
+      ...(repoCtx.headSha !== undefined && !privateMain ? { headSha: repoCtx.headSha } : {}),
+      ...(repoCtx.pr !== undefined && !privateMain ? { pr: repoCtx.pr } : {}),
+      readonly: profile.identity === "read",
+      profile,
+      ...(parentRunId !== undefined ? { parentRunId } : {}),
+      ...(ctx.childHandoff !== undefined ? { childHandoff: ctx.childHandoff } : {}),
+      ...(ctx.restartOf !== undefined ? { restartOf: ctx.restartOf } : {}),
+      ...coordinatorFields(coordinator),
+      ...(seed !== undefined ? { seed } : {}),
+      ...(route !== undefined && !privateMain ? { route } : {}),
+      request: requestRow,
+    };
+    const policy = resourceLifetimeSchema.safeParse(agent.resourceLifetime);
+    const prospective =
+      policy.success &&
+      policy.data.purpose === "pull-request-review" &&
+      operationTarget?.prTarget !== undefined &&
+      coordinator?.publication !== undefined &&
+      (profile.machine === "repo-cold" || profile.machine === "repo-resident");
+    const allocation = prospective
+      ? (() => {
+          const identity = ctx.admissionIdentity;
+          if (
+            !identity ||
+            identity.requester !== msg.userId ||
+            identity.channelId !== msg.channelId ||
+            identity.threadKey !== msg.threadKey ||
+            profile.identity !== "read" ||
+            !Number.isFinite(profile.minutes) ||
+            profile.minutes <= 0 ||
+            profile.minutes > agent.maxMinutes ||
+            !Number.isFinite(startedAt) ||
+            !Number.isFinite(receivedAt)
+          )
+            throw new RefusalError(
+              refusalOf("setup_failed", "The original review identity or allowance could not be verified."),
+            );
+          const declared = originalColdAllocation({
+            runId,
+            registered: agent,
+            identity: meta,
+            target: {
+              repo: coordinator!.publication!.repo,
+              ref: coordinator!.publication!.headRef,
+              headSha: coordinator!.publication!.expectedHeadSha,
+              pr: coordinator!.publication!.pr,
+            },
+          });
+          if (
+            !declared ||
+            operationTarget!.repo !== coordinator!.publication!.repo ||
+            (operationTarget!.ref !== undefined && operationTarget!.ref !== coordinator!.publication!.headRef) ||
+            operationTarget!.prTarget!.number !== coordinator!.publication!.pr ||
+            coordinator!.publication!.owner.instanceId !== coordinator!.parentInstanceId ||
+            coordinator!.publication!.owner.unit !== meta.coordinatorUnit
+          )
+            throw new RefusalError(
+              refusalOf(
+                "workspace_head_mismatch",
+                "The accepted review target differs from its resolved original target.",
+              ),
+            );
+          return declared;
+        })()
+      : undefined;
+    if (allocation) meta.workspaceAllocation = structuredClone(allocation);
+    const expectedAdmission = {
+      runId,
+      threadKey: msg.threadKey,
+      gen: deps.runLedger.gen,
+      startedAt,
+      meta: structuredClone(meta),
+    };
     const reserved = await root
       .span("dispatch.ledger_reserve", () =>
         deps.runLedger.reserve({
           runId,
           threadKey: msg.threadKey,
           startedAt,
-          meta: {
-            agent: agent.name,
-            model: resolved.modelRef,
-            channelId: msg.channelId,
-            userId: msg.userId,
-            threadKey: msg.threadKey,
-            ...(directAudience !== undefined ? { directAudience } : {}),
-            channelVisibility,
-            ...(repoCtx.repo !== undefined && !privateMain ? { repo: repoCtx.repo } : {}),
-            ...(operationTarget !== undefined && !privateMain ? { operationTarget } : {}),
-            ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
-            ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
-            ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
-            ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
-            ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
-            ...(decisionRecord !== undefined ? { record: decisionRecord } : {}),
-            ...(decisionRecordTask !== undefined ? { recordTaskKey: decisionRecordTask } : {}),
-            ...(repoCtx.ref !== undefined && !privateMain ? { ref: repoCtx.ref } : {}),
-            ...(repoCtx.baseRef !== undefined && !privateMain ? { baseRef: repoCtx.baseRef } : {}),
-            ...(repoCtx.headSha !== undefined && !privateMain ? { headSha: repoCtx.headSha } : {}),
-            ...(repoCtx.pr !== undefined && !privateMain ? { pr: repoCtx.pr } : {}),
-            readonly: profile.identity === "read",
-            profile,
-            ...(parentRunId !== undefined ? { parentRunId } : {}),
-            ...(ctx.childHandoff !== undefined ? { childHandoff: ctx.childHandoff } : {}),
-            ...(ctx.restartOf !== undefined ? { restartOf: ctx.restartOf } : {}),
-            ...coordinatorFields(coordinator),
-            ...(seed !== undefined ? { seed } : {}),
-            ...(route !== undefined && !privateMain ? { route } : {}),
-            request: requestRow,
-          },
+          meta,
           card: card.handle ?? null,
           ...hooks,
         }),
       )
       .catch((err: unknown) => {
-        if (!coordinator || err instanceof TerminalCommitmentUnknownError) throw err;
+        if (!coordinator || err instanceof TerminalCommitmentUnknownError || err instanceof UnknownAllocationClaimError)
+          throw err;
         throw new RefusalError(refusalOf("child_reservation_failed", "The child could not be durably reserved."));
       });
     if (reserved.kind === "held") {
       const { error } = reserved;
       throw error;
     }
+    if (allocation && reserved.kind !== "tracked")
+      throw new RefusalError(
+        refusalOf(
+          "child_reservation_failed",
+          reserved.kind === "fenced"
+            ? "The original review reservation belongs to another generation."
+            : reserved.kind === "untracked" && reserved.refused === "thread-live"
+              ? "The original review reservation was refused because its thread is occupied."
+              : "The original review could not be durably tracked.",
+        ),
+      );
+    const allocationAck =
+      reserved.kind === "tracked" ? allocationAckOf(reserved.allocationAck, expectedAdmission) : undefined;
+    if (
+      allocation &&
+      (reserved.kind !== "tracked" ||
+        allocationAck?.allocation?.version !== 2 ||
+        !sameWorkspaceAllocation(allocation, allocationAck.allocation))
+    )
+      throw new RefusalError(
+        refusalOf(
+          "setup_failed",
+          "The original allocation acknowledgment is unknown; the allocation remains preserved.",
+        ),
+      );
     if ((coordinator || ctx.childHandoff !== undefined) && reserved.kind !== "tracked")
       throw new RefusalError(
         refusalOf(
@@ -904,6 +1001,7 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
     return {
       reserved: reserved.kind === "tracked" ? reserved.run : undefined,
       requestRow,
+      ...(allocationAck ? { allocationAck: structuredClone(allocationAck) } : {}),
       ...(reserved.kind === "untracked" ? { untrackedWhy: reserved.why } : {}),
     };
   }

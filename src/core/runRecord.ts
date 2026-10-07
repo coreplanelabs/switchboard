@@ -1243,6 +1243,12 @@ export function normalizeStored<T extends { diagnosis: FrictionDiagnosis; channe
  *  stay readable by an older reader; the diagnosis likewise is checked for
  *  shape, not for the current category list (see `normalizeDiagnosis`). */
 export function isRunRecord(v: unknown): v is RunRecord {
+  if (
+    v &&
+    typeof v === "object" &&
+    (Object.hasOwn(v, "workspaceAllocation") || Object.hasOwn(v, "workspaceDisposition"))
+  )
+    return false;
   if (!isRunWorkOwner(v)) return false;
   const r = v as RunWorkOwner & Record<string, unknown>;
   if (!isOptionalString(r.label) || !isOptionalString(r.agent) || !isOptionalString(r.model)) return false;

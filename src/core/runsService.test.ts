@@ -1464,7 +1464,17 @@ describe("RunsService with the run ledger — one registry across generations (r
         system: "sys",
         tools: [],
       }),
-    ).toEqual({ ok: true });
+    ).toEqual({
+      ok: true,
+      allocationAck: {
+        version: 1,
+        runId: "next-child",
+        threadKey,
+        gen: "g-SAME",
+        startedAt: NOW,
+        allocation: null,
+      },
+    });
     expect(await ledger.reclaim("g-NEXT", NOW + 31_000, 30_000)).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ row: expect.objectContaining({ runId: id }) })]),
     );

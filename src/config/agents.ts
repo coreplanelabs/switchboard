@@ -4,6 +4,11 @@ import { AGENTS, getAgent, conductorSystem, MACHINE_CLASSES, IDENTITIES, type Ag
 import { runawayTurnCap } from "../core/budgets.js";
 import { EFFORT_LEVELS, type Effort } from "../effort.js";
 import type { AppConfig } from "../config.js";
+import {
+  resourceLifetimeSchema,
+  resourceLifetimeOrRetained,
+  sameResourceLifetime,
+} from "../agents/resourceLifetime.js";
 
 const limits = z.strictObject({
   maxTokens: z.number().int().positive().optional(),
@@ -32,6 +37,7 @@ const agent = z.strictObject({
   tools: z.enum(["full", "readonly", "web", "assistant", "explore", "conductor", "orchestrator", "none"]).optional(),
   machine: z.enum(MACHINE_CLASSES).optional(),
   identity: z.enum(IDENTITIES).optional(),
+  resourceLifetime: resourceLifetimeSchema.optional(),
   tiers: z.array(z.enum(["fast", "strong"])).optional(),
   routable: z.boolean().optional(),
 });
@@ -120,6 +126,11 @@ export function normalizeAgentConfig(value: unknown): AppConfig {
         JSON.stringify(extension.agents[name]![key]) !== JSON.stringify(shipped.agents?.[name]?.[key])
       )
         throw new Error(`agents.${name}.${key}: registered capability cannot be changed`);
+    if (
+      extension.agents?.[name]?.resourceLifetime !== undefined &&
+      !sameResourceLifetime(extension.agents[name]!.resourceLifetime, shipped.agents?.[name]?.resourceLifetime)
+    )
+      throw new Error(`agents.${name}.resourceLifetime: registered capability cannot be changed`);
   }
   const resolved: Record<string, Settings> = {};
   const models: Record<string, string> = {};
@@ -198,11 +209,13 @@ export function settingsForAgent(
 export function configuredAgent(config: AppConfig, name: string): AgentDef {
   const builtin = getAgent(name);
   const entry = config.extends === "builtin" ? config.agents?.[name] : undefined;
-  if (!entry) return { ...builtin, tiers: [...builtin.tiers] };
+  const resourceLifetime = resourceLifetimeOrRetained(builtin.resourceLifetime);
+  if (!entry) return { ...builtin, tiers: [...builtin.tiers], resourceLifetime };
   const maxMinutes = entry.limits?.maxMinutes ?? builtin.maxMinutes;
   const result: AgentDef = {
     ...builtin,
     tiers: [...builtin.tiers],
+    resourceLifetime,
     description: entry.description ?? builtin.description,
     toolset: entry.tools ?? builtin.toolset,
     maxTokens: entry.limits?.maxTokens ?? builtin.maxTokens,

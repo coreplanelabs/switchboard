@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConfigStore } from "../../config.js";
 import { getAgent } from "../../agents/registry.js";
+import { originalColdAllocation } from "../runLedger/workspaceDurability.js";
 import { declaredProfile } from "../../config/profile.js";
 import { InMemoryGithubApi } from "../../execution/githubApi.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
@@ -119,7 +120,7 @@ function setup() {
     { msg: message, directives: { agent: "coding", text: "fix it" }, history: [] },
   );
   const agent = getAgent(resolved.agentName);
-  const registry = new RunRegistry({ genId: () => "run-c", genToken: () => "tok" });
+  const registry = new RunRegistry({ now: () => NOW, genId: () => "run-c", genToken: () => "tok" });
   const run = registry.create("coding · acme/api", {
     agent: "coding",
     channelId: "slack:CX",
@@ -152,6 +153,269 @@ function setup() {
   };
   return { deps, ledger, registry, run, agent, base };
 }
+
+describe("original admission identity at promotion", () => {
+  async function original(kind: "v2" | "null") {
+    const s = setup();
+    const agent = getAgent("review"),
+      profile = declaredProfile(agent),
+      repoCtx = { repo: "acme/api", ref: "main", headSha: "a".repeat(40), pr: 42 };
+    const registry = new RunRegistry({ now: () => NOW, genId: () => "run-c", genToken: () => "tok" });
+    const run = registry.create(
+      "review",
+      {
+        agent: "review",
+        userId: s.base.msg.userId,
+        channelId: s.base.msg.channelId,
+        threadKey: THREAD,
+      },
+      { startedAt: NOW },
+    );
+    const store = new InMemoryRunLedger(() => NOW + 5000);
+    const through = createLedgerWriteThrough({
+      ledger: store,
+      gen: "gen-T",
+      now: () => NOW + 5000,
+      warn: () => {},
+      fallback: new NullRunStore(),
+      setInterval: () => ({ unref() {} }),
+      clearInterval: () => {},
+    });
+    const meta = {
+      agent: "review",
+      model: s.base.resolved.modelRef,
+      userId: s.base.msg.userId,
+      channelId: s.base.msg.channelId,
+      threadKey: THREAD,
+      ...repoCtx,
+      readonly: true,
+      profile,
+    };
+    const allocation =
+      kind === "v2"
+        ? originalColdAllocation({
+            runId: run.id,
+            registered: agent,
+            identity: meta,
+            target: repoCtx,
+          })!
+        : undefined;
+    const outcome = await through.reserve({
+      runId: run.id,
+      threadKey: THREAD,
+      startedAt: NOW,
+      meta: { ...meta, ...(allocation ? { workspaceAllocation: allocation } : {}) },
+    });
+    if (outcome.kind !== "tracked") throw new Error("fixture reservation refused");
+    const ctx = {
+      ...s.base,
+      agent,
+      profile,
+      repoCtx,
+      registry,
+      run,
+      startedAt: NOW,
+      clock: () => NOW + 5000,
+      reserved: outcome.run,
+      messages: [{ role: "user" as const, content: [{ type: "text" as const, text: s.base.msg.text }] }],
+      resume: undefined,
+      ledgerRun: undefined,
+    };
+    return { ...s, ctx, store, through, allocation };
+  }
+  it("keeps actual v2 and canonical-null receiver identity with matching or missing authenticated snapshots", async () => {
+    for (const kind of ["v2", "null"] as const)
+      for (const projection of ["matching", "missing"] as const) {
+        const s = await original(kind);
+        if (projection === "missing") vi.spyOn(s.ctx.registry, "snapshot").mockReturnValue(null);
+        const claimed = await claimRun({ ...s.deps, runLedger: s.through }, s.ctx);
+        expect(claimed?.tracked()).toBe(true);
+        expect(s.store.live.get(s.ctx.run.id)).toMatchObject({ startedAt: NOW, phase: "live" });
+        expect(claimed!.allocationAck).toMatchObject({ startedAt: NOW, allocation: s.allocation ?? null });
+        expect(s.store.live.get(s.ctx.run.id)!.meta.workspaceAllocation).toEqual(s.allocation);
+        await claimed?.close();
+      }
+  });
+  it("holds conflicting start actor token or generation before promotion and preserves the original row", async () => {
+    for (const mode of ["start", "actor", "token", "generation"] as const) {
+      const s = await original("null"),
+        saved = structuredClone(s.store.live.get(s.ctx.run.id)),
+        claim = vi.spyOn(s.store, "claim");
+      if (mode === "start") {
+        const snapshot = s.ctx.registry.snapshot(s.ctx.run.id, s.ctx.run.token)!;
+        vi.spyOn(s.ctx.registry, "snapshot").mockReturnValue({ ...snapshot, startedAt: NOW + 1 });
+      }
+      if (mode === "actor") s.ctx.msg = { ...s.ctx.msg, userId: "slack:foreign" };
+      if (mode === "token") s.ctx.run = { ...s.ctx.run, token: "foreign" };
+      const deps =
+        mode === "generation"
+          ? { ...s.deps, runLedger: { ...s.through, gen: "foreign-generation" } }
+          : { ...s.deps, runLedger: s.through };
+      await expect(claimRun(deps, s.ctx)).rejects.toThrow();
+      expect(claim).not.toHaveBeenCalled();
+      expect(s.store.live.get(s.ctx.run.id)).toEqual(saved);
+      await s.ctx.reserved.close();
+    }
+  });
+  it("holds the old registry-clock versus reserved-NOW fixture conflict without claim seed or abandonment", async () => {
+    const s = await original("null"),
+      registry = new RunRegistry({ now: () => NOW + 5000, genId: () => s.ctx.run.id, genToken: () => s.ctx.run.token }),
+      run = registry.create("review"),
+      saved = structuredClone(s.store.live.get(run.id)),
+      claim = vi.spyOn(s.store, "claim"),
+      abandon = vi.spyOn(s.store, "abandon");
+    await expect(claimRun({ ...s.deps, runLedger: s.through }, { ...s.ctx, registry, run })).rejects.toMatchObject({
+      name: "RefusalError",
+    });
+    expect(claim).not.toHaveBeenCalled();
+    expect(abandon).not.toHaveBeenCalled();
+    expect((await s.store.readTranscript(run.id)).turns).toBe(0);
+    expect(s.store.live.get(run.id)).toEqual(saved);
+    expect(s.through.liveRuns()).toEqual([s.ctx.reserved]);
+    await s.ctx.reserved.close();
+  });
+  it("holds a legacy reservation with neither snapshot nor receiver identity instead of inventing a new start", async () => {
+    const { deps, ledger, base } = setup();
+    vi.spyOn(base.registry, "snapshot").mockReturnValue(null);
+    await expect(
+      claimRun(deps, {
+        ...base,
+        reserved: new NullLedgerRun(base.run.id, { put: async () => {}, abandoned: () => {} }),
+        resume: undefined,
+        ledgerRun: undefined,
+      }),
+    ).rejects.toThrow();
+    expect(ledger.opened).toEqual([]);
+  });
+  it("keeps a legacy matching snapshot without manufacturing an allocation acknowledgment", async () => {
+    const { deps, ledger, base } = setup();
+    await claimRun(deps, {
+      ...base,
+      startedAt: NOW,
+      reserved: new NullLedgerRun(base.run.id, { put: async () => {}, abandoned: () => {} }),
+      resume: undefined,
+      ledgerRun: undefined,
+    });
+    expect(ledger.opened[0]!.startedAt).toBe(NOW);
+    expect(ledger.opened[0]!.meta.workspaceAllocation).toBeUndefined();
+  });
+  it("continues a current-generation reclaimed original without a snapshot and refuses foreign carried identity", async () => {
+    for (const mode of ["matching", "generation", "actor", "time", "token"] as const) {
+      const s = await original("null");
+      await s.ctx.reserved.close();
+      s.store.live.get(s.ctx.run.id)!.leaseUntil = 0;
+      const [taken] = await s.store.reclaim("gen-reclaimed", NOW + 6000, 30_000);
+      const through = createLedgerWriteThrough({
+        ledger: s.store,
+        gen: "gen-reclaimed",
+        now: () => NOW + 6000,
+        warn: () => {},
+        fallback: new NullRunStore(),
+        setInterval: () => ({ unref() {} }),
+        clearInterval: () => {},
+      });
+      const row = structuredClone(taken.row),
+        adopted = through.adopt({
+          runId: row.runId,
+          threadKey: row.threadKey,
+          startedAt: row.startedAt,
+          meta: row.meta,
+          state: row.state,
+          lastStep: 0,
+          lastSeq: 0,
+        });
+      vi.spyOn(s.ctx.registry, "snapshot").mockReturnValue(null);
+      if (mode === "generation") row.ownerGen = "foreign";
+      if (mode === "actor") row.meta.userId = "foreign";
+      if (mode === "time") row.startedAt++;
+      const run = mode === "token" ? { ...s.ctx.run, token: "foreign" } : s.ctx.run;
+      const resume = { row, lastSeq: 0 } as ResumeContext;
+      const ctx = { ...s.ctx, run, reserved: undefined, ledgerRun: adopted, carriedRow: row, resume };
+      const claim = vi.spyOn(s.store, "claim"),
+        saved = structuredClone(s.store.live.get(row.runId));
+      if (mode === "matching") {
+        expect(await claimRun({ ...s.deps, runLedger: through }, ctx)).toBe(adopted);
+        expect(adopted.allocationAck).toBeUndefined();
+      } else
+        await expect(claimRun({ ...s.deps, runLedger: through }, ctx)).rejects.toMatchObject({ name: "RefusalError" });
+      expect(claim).not.toHaveBeenCalled();
+      expect(s.store.live.get(row.runId)).toEqual(saved);
+      await adopted.close();
+    }
+  });
+  it.each([
+    "matching",
+    "verified-head",
+    "unverified-head",
+    "missing-ack",
+    "foreign-verification",
+    "allocated-head",
+    "repo",
+    "ref",
+    "pr",
+    "actor",
+    "generation",
+    "start",
+  ])("re-reserves a reclaimed original with exact fences: %s", async (mode) => {
+    const s = await original(mode === "allocated-head" ? "v2" : "null");
+    await s.ctx.reserved.close();
+    s.store.live.get(s.ctx.run.id)!.leaseUntil = 0;
+    const [taken] = await s.store.reclaim("gen-reclaimed", NOW + 6000, 30_000);
+    const row = taken.row,
+      through = createLedgerWriteThrough({
+        ledger: s.store,
+        gen: "gen-reclaimed",
+        now: () => NOW + 6000,
+        warn: () => {},
+        fallback: new NullRunStore(),
+        setInterval: () => ({ unref() {} }),
+        clearInterval: () => {},
+      });
+    const reserved = await through.reserve({
+      runId: row.runId,
+      threadKey: row.threadKey,
+      startedAt: row.startedAt,
+      meta: row.meta,
+    });
+    if (reserved.kind !== "tracked") throw new Error("fixture restart reserve refused");
+    vi.spyOn(s.ctx.registry, "snapshot").mockReturnValue(null);
+    const ctx = {
+      ...s.ctx,
+      reserved: reserved.run,
+      carriedRow: row,
+      attachedHead: { kind: "allowed" as const, verifiedAtAttach: true, headAdopted: false, repoCtx: s.ctx.repoCtx },
+    };
+    if (["verified-head", "unverified-head", "allocated-head", "missing-ack", "foreign-verification"].includes(mode)) {
+      ctx.repoCtx = { ...ctx.repoCtx, headSha: "b".repeat(40) };
+      ctx.attachedHead = { ...ctx.attachedHead, verifiedAtAttach: mode !== "unverified-head", repoCtx: ctx.repoCtx };
+      if (mode !== "unverified-head")
+        ctx.selection = { ...ctx.selection, binding: { ...ctx.selection.binding, sha: ctx.repoCtx.headSha } };
+    }
+    if (mode === "missing-ack") vi.spyOn(reserved.run, "allocationAck", "get").mockReturnValue(undefined);
+    if (mode === "foreign-verification") ctx.attachedHead.repoCtx = s.ctx.repoCtx;
+    if (mode === "repo") ctx.repoCtx = { ...ctx.repoCtx, repo: "acme/foreign" };
+    if (mode === "ref") ctx.repoCtx = { ...ctx.repoCtx, ref: "foreign" };
+    if (mode === "pr") ctx.repoCtx = { ...ctx.repoCtx, pr: 43 };
+    if (mode === "actor") ctx.msg = { ...ctx.msg, userId: "slack:foreign" };
+    if (mode === "generation") ctx.carriedRow = { ...row, ownerGen: "foreign" };
+    if (mode === "start") ctx.carriedRow = { ...row, startedAt: row.startedAt + 1 };
+    if (mode !== "matching" && mode !== "verified-head") {
+      const saved = structuredClone(s.store.live.get(row.runId)),
+        claim = vi.spyOn(s.store, "claim");
+      await expect(claimRun({ ...s.deps, runLedger: through }, ctx)).rejects.toMatchObject({ name: "RefusalError" });
+      expect(claim).not.toHaveBeenCalled();
+      expect(s.store.live.get(row.runId)).toEqual(saved);
+      await reserved.run.close();
+      return;
+    }
+    const claimed = await claimRun({ ...s.deps, runLedger: through }, ctx);
+    expect(claimed?.allocationAck).toMatchObject({ startedAt: NOW, gen: "gen-reclaimed", allocation: null });
+    expect(s.store.live.get(row.runId)!.meta.workspaceAllocation).toBeUndefined();
+    expect(s.store.live.get(row.runId)!.meta.headSha).toBe(ctx.repoCtx.headSha);
+    expect(s.store.live.get(row.runId)!.startedAt).toBe(NOW);
+    await claimed?.close();
+  });
+});
 
 describe("claimRun — the ledger claim once the prompt exists", () => {
   it("promotes a same-ID segment with its raw original baseline, prior push and PR base before writable execution", async () => {
@@ -201,7 +465,14 @@ describe("claimRun — the ledger claim once the prompt exists", () => {
     expect(ledger.live.get(base.run.id)?.meta.operationTarget).toEqual(operationTarget);
     const claimed = await claimRun(
       { ...deps, runLedger: through },
-      { ...base, operationTarget, reserved: reservation.run, resume: undefined, ledgerRun: undefined },
+      {
+        ...base,
+        operationTarget,
+        messages: [{ role: "user", content: [{ type: "text", text: base.msg.text }] }],
+        reserved: reservation.run,
+        resume: undefined,
+        ledgerRun: undefined,
+      },
     );
     expect(claimed?.tracked()).toBe(true);
     expect(ledger.live.get(base.run.id)?.phase).toBe("live");

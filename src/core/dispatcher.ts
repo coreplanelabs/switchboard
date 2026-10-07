@@ -35,6 +35,8 @@ import { MINUTE_MS, minutesToMs } from "./budgets.js";
 import type { LedgerRun } from "./runLedger/writeThrough.js";
 import { settleRetryPause } from "./runLedger/threadsElsewhere.js";
 import { TerminalCommitmentUnknownError } from "./runLedger/writeThrough.js";
+import { UnknownAllocationClaimError } from "./runLedger/allocationAck.js";
+import { PromotionPendingError, PromotionIdentityRefusal } from "./runLedger/promotion.js";
 import { systemClock } from "./trace/index.js";
 import type { SpanSink, Tracer } from "./trace/types.js";
 import type { SpanLog } from "./trace/spanLog.js";
@@ -705,7 +707,7 @@ export async function dispatch(
   let setupRefusal: Refusal | undefined;
   let setupFailure: RunFailure | undefined;
   let setupFinished = false;
-  let setupTerminalHeld = false;
+  let setupCustodyHeld = false;
   let setupUntrackedWhy: string | undefined;
   const audienceTrace: AudienceTrace = { refusal: audienceRefusalOf(resume?.row.state.audienceRefusal) };
   const recordRefusalOnce = async (refusal: Refusal) => {
@@ -2761,10 +2763,12 @@ export async function dispatch(
     // `coordinator_tag` event the spawning dispatch published.
     // `coordinator` was reconstructed before profile resolution so its
     // recovery deadline constrains every resumed/restarted phase.
+    const admissionIdentity = { requester: msg.userId, channelId: msg.channelId, threadKey: msg.threadKey };
     const reserveIdentity = async (runId: string, channelVisibility: ChannelVisibility) => {
       assertOriginalActionBudget();
       const reservation = await reserveRun(deps, {
         msg,
+        admissionIdentity,
         agent,
         profile,
         resolved,
@@ -2802,7 +2806,7 @@ export async function dispatch(
       const reservation = reserved;
       // The same finalizer serves every admitted run.
       setupFinalizer = () => {
-        if (setupFinished || setupTerminalHeld || runLoopStarted || fencedWhileAttaching) return;
+        if (setupFinished || setupCustodyHeld || runLoopStarted || fencedWhileAttaching) return;
         setupFinished = true;
         const status =
           stoppedWhileAttaching === "hard"
@@ -3991,6 +3995,8 @@ export async function dispatch(
     };
     ledgerRun = await claimRun(deps, {
       msg,
+      startedAt,
+      ...(carriedRow ? { carriedRow } : {}),
       sessionKey: runSessionKey,
       verifyDirectAudience: io.verifyDirectAudience?.bind(io),
       privateWorkVerifierAvailable: io.verifyDirectAudience !== undefined,
@@ -4029,7 +4035,8 @@ export async function dispatch(
       coordinator,
       seed,
       ...(opts.restartOf !== undefined ? { restartOf: opts.restartOf } : {}),
-      ...(session ? { seedLog: session.log } : {}),
+      attachedHead: headGate,
+      ...(session ? { seedLog: session.log, seedRefusedRequests: session.refusedRequests } : {}),
       // A promotion gone untracked marks the card as the reserve-time path
       // above does — the label, not the bot log alone, says the run's row is gone.
       markUntracked: () => shell.note("debug", "untracked by the ledger"),
@@ -4568,20 +4575,39 @@ export async function dispatch(
     // new generation owns the same child: no model, reply or finish from here.
     if (fencedWhileAttaching) return ended;
     caught = true;
-    if (err instanceof TerminalCommitmentUnknownError) {
-      setupTerminalHeld = true;
+    if (
+      err instanceof TerminalCommitmentUnknownError ||
+      err instanceof UnknownAllocationClaimError ||
+      err instanceof PromotionPendingError ||
+      err instanceof PromotionIdentityRefusal
+    ) {
+      setupCustodyHeld = true;
       resumeRowRetained = true;
       ended.refusal = "setup_failed";
       ended.cause = "system";
       root.setAttrs({ refusal: "setup_failed", cause: "system" });
-      const original = registry.getById(err.hold.runId);
-      if (original && err.hold.threadKey === msg.threadKey)
-        deps.threadsElsewhere.remember(msg.threadKey, {
-          runId: err.hold.runId,
-          agent: original.agent,
-          startedAt: original.startedAt,
-        });
-      const text = "The original terminal outcome is unconfirmed; its saved work and owner remain held.";
+      let text: string;
+      if (err instanceof TerminalCommitmentUnknownError) {
+        const original = registry.getById(err.hold.runId);
+        if (original && err.hold.threadKey === msg.threadKey)
+          deps.threadsElsewhere.remember(msg.threadKey, {
+            runId: err.hold.runId,
+            agent: original.agent,
+            startedAt: original.startedAt,
+          });
+        text = "The original terminal outcome is unconfirmed; its saved work and owner remain held.";
+      } else {
+        const heldStart =
+          reserved?.allocationAck?.startedAt ??
+          (registered ? registry.snapshot(registered.id, registered.token)?.startedAt : undefined);
+        if (reserved && heldStart !== undefined)
+          deps.threadsElsewhere.remember(msg.threadKey, {
+            runId: reserved.runId,
+            agent: admitted?.agent,
+            startedAt: heldStart,
+          });
+        text = "The original claim outcome is unconfirmed; its saved workspace and owner remain held.";
+      }
       if (setupCard && setupShell)
         await setupCard
           .done(
@@ -4704,7 +4730,7 @@ export async function dispatch(
     // The backstop: a finished run no reply attempt reached (a fenced run, a
     // branch that returned early) is sealed with no `replyOk`, and any record
     // still registered is written.
-    if (!setupTerminalHeld) ending.drain(undefined);
+    if (!setupCustodyHeld) ending.drain(undefined);
     if (setupRound && !resumeRowRetained) await setupRound.release({ hardStopped: true });
     // …and a bearer minted for a run that never reached its loop (a head gate
     // after the attach, a throw in the prompt) is revoked here — the ending's
@@ -4743,7 +4769,7 @@ export async function dispatch(
     // A reservation that never got a registry row or setup finalizer must be
     // abandoned before the next queued turn claims the thread. A fenced row
     // belongs to another generation and its abandon is a no-op.
-    if (reserved && !ledgerRun && !setupFinished && !setupTerminalHeld)
+    if (reserved && !ledgerRun && !setupFinished && !setupCustodyHeld)
       await root.span("post.ledger_abandon", () => reserved!.abandon());
     // The predecessor's identity a restart keeps (run-history item 54), read
     // BEFORE the discard below takes the row: its events, its token, its
@@ -4761,7 +4787,7 @@ export async function dispatch(
           })
         : undefined;
     // A finalized setup run keeps its frame and record under the original id.
-    if (registered && !runLoopStarted && !setupFinished && !setupTerminalHeld) registry.discard(registered.id);
+    if (registered && !runLoopStarted && !setupFinished && !setupCustodyHeld) registry.discard(registered.id);
     // The second net under that discard (run-history item 42): a branch that
     // opens its own registry row — `runShipBranch` does — and throws or returns
     // before finishing it would leave the row `running` with no runner behind
@@ -4772,7 +4798,7 @@ export async function dispatch(
     // survivor is the hosted parent of a completed hand-off (record 0060): the
     // branch names it (`ShipBranchEnd.hostedLive`) and the plan runner's
     // `finish` ends it, so the net leaves it live.
-    if (!shipHostedLive && !fencedWhileAttaching && !setupTerminalHeld) {
+    if (!shipHostedLive && !fencedWhileAttaching && !setupCustodyHeld) {
       for (const boundId of new Set([trace.runId, admitted?.runId])) {
         if (boundId === undefined || registry.snapshotById?.(boundId)?.finished !== false) continue;
         console.warn(

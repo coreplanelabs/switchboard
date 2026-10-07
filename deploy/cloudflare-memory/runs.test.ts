@@ -2256,13 +2256,43 @@ describe("durable branch identity baseline", () => {
       };
       await inst.claim({ ...req, state: { branchIdentityBaseline: baseline } }, Date.now());
       await inst.finish(rec.id, "g1", rec);
-      expect(await inst.claim({ ...req, gen: "g2", phase: "attaching", system: "" }, Date.now())).toEqual({ ok: true });
+      expect(await inst.claim({ ...req, gen: "g2", phase: "attaching", system: "" }, Date.now())).toMatchObject({
+        ok: true,
+        allocationAck: {
+          version: 1,
+          runId: rec.id,
+          threadKey: rec.threadKey,
+          gen: "g2",
+          startedAt: rec.startedAt,
+          allocation: null,
+        },
+      });
       expect((await inst.listLive())[0]!.state.branchIdentityBaseline).toEqual(baseline);
       state.storage.sql.exec("UPDATE live_runs SET state_json = '{}' WHERE run_id = ?", rec.id);
-      expect(await inst.claim({ ...req, gen: "g2", phase: "attaching", system: "" }, Date.now())).toEqual({ ok: true });
-      expect((await inst.listLive())[0]!.state.branchIdentityBaseline).toEqual(baseline);
-      expect(await inst.claim({ ...req, gen: "g2", state: { binding: { backend: "sandbox" } } }, Date.now())).toEqual({
+      expect(await inst.claim({ ...req, gen: "g2", phase: "attaching", system: "" }, Date.now())).toMatchObject({
         ok: true,
+        allocationAck: {
+          version: 1,
+          runId: rec.id,
+          threadKey: rec.threadKey,
+          gen: "g2",
+          startedAt: rec.startedAt,
+          allocation: null,
+        },
+      });
+      expect((await inst.listLive())[0]!.state.branchIdentityBaseline).toEqual(baseline);
+      expect(
+        await inst.claim({ ...req, gen: "g2", state: { binding: { backend: "sandbox" } } }, Date.now()),
+      ).toMatchObject({
+        ok: true,
+        allocationAck: {
+          version: 1,
+          runId: rec.id,
+          threadKey: rec.threadKey,
+          gen: "g2",
+          startedAt: rec.startedAt,
+          allocation: null,
+        },
       });
       expect((await inst.listLive())[0]!.state.branchIdentityBaseline).toEqual(baseline);
       const changed = { ...baseline, binding: { ...baseline.binding, head: "b".repeat(40) } };

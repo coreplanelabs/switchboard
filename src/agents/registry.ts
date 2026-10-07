@@ -1,5 +1,6 @@
 // Agent definitions. An agent is a system prompt + toolset + machine class + wall-clock budget.
 import BUILTIN_CONFIG from "./defaults.json" with { type: "json" };
+import { resourceLifetimeOrRetained, type ResourceLifetimeDeclaration } from "./resourceLifetime.js";
 import { BASH_TIMEOUT_MAX_MS } from "../execution/bashTimeout.js";
 import { RUNAWAY_TURNS_PER_MINUTE, runawayTurnCap } from "../core/budgets.js";
 import {
@@ -84,6 +85,9 @@ export interface AgentDef {
    *  worktree flag and the token the sandbox env and the `repo-cold` vet mint
    *  read this, through the run's effective profile. */
   identity: Identity;
+  /** Original purpose/placement policy as registered data, independent of
+   * the effective profile. Missing data is retained; consumers are separate. */
+  resourceLifetime?: ResourceLifetimeDeclaration;
   /** The model tiers this preset may run on (`MODEL_TIERS`): what a parent's
    *  spawn — and the operator's bind — may put in the child's request slot.
    *  A preset that writes code (`coding`, `ship`, `review`) never includes
@@ -790,6 +794,7 @@ export const AGENTS: Record<string, AgentDef> = Object.fromEntries(
         tools: AgentDef["toolset"];
         machine: MachineClass;
         identity: Identity;
+        resourceLifetime?: unknown;
         tiers: ModelTier[];
         routable?: false;
         limits: { maxTokens: number; maxMinutes: number; maxTurns?: number };
@@ -803,6 +808,7 @@ export const AGENTS: Record<string, AgentDef> = Object.fromEntries(
           toolset: def.tools,
           machine: def.machine,
           identity: def.identity,
+          resourceLifetime: resourceLifetimeOrRetained(def.resourceLifetime),
           tiers: def.tiers,
           ...(def.routable !== undefined ? { routable: def.routable } : {}),
           maxTokens: def.limits.maxTokens,

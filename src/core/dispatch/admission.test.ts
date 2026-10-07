@@ -784,7 +784,9 @@ describe("adoptCarriedRun — taking up a resumed or restarted run's row", () =>
       },
     ]);
     expect(taken.reserved?.runId).toBe("run-reserved");
-    expect(taken.requestRow).toBe(request);
+    expect(taken.requestRow).toStrictEqual(request);
+    expect(taken.requestRow).not.toBe(request);
+    expect(taken.requestRow).toBe(row.meta.request);
     expect(taken.ledgerRun).toBeUndefined();
   });
 

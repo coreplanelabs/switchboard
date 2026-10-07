@@ -1,3 +1,14 @@
+import { sessionSeed } from "../../src/core/dispatch/seed.ts";
+import type { ChatMessage } from "../../src/core/chatMessage.ts";
+import {
+  buildExpectedSeedManifest,
+  encodeExpectedSeedHeader,
+  EXPECTED_SEED_HEADER,
+} from "../../src/core/runLedger/seedManifest.ts";
+import { MAX_RECORD_BYTES } from "../../src/core/runRecord.ts";
+import { turnRows } from "../../src/core/runLedger/transcript.ts";
+import { getAgent } from "../../src/agents/registry.ts";
+import { originalColdAllocation, workspaceDurabilityKey } from "../../src/core/runLedger/workspaceDurability.ts";
 import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { fetchMemoryTest } from "./testFetch.ts";
 import { describe, expect, it, vi } from "vitest";
@@ -27,6 +38,1993 @@ import type { IntakeReceipt } from "../../src/core/runLedger/types.ts";
 import type { RunMetricsPoint } from "../../src/core/runMetrics.ts";
 import { historicalNativeChain } from "../../src/core/coordinator/historicalNativeAudit.ts";
 import { messageFromInbox } from "../../src/core/runLedger/inboxMessage.ts";
+import type { WorkspaceAllocation } from "../../src/core/runLedger/workspaceDurability.ts";
+import type { ClaimRequest } from "../../src/core/runLedger/types.ts";
+import type { RunEvent } from "../../src/core/runEvents.ts";
+import { WorkerRunLedger } from "../../src/core/runLedgerWorker.ts";
+import { createCheckExecution } from "../../src/core/checkExecution.ts";
+import type { LiveRunRow } from "../../src/core/runLedger/types.ts";
+import type { StoredWorkspaceCustody } from "../../src/core/runLedger/workspaceDurability.ts";
+import { appendRunReport } from "../../src/core/runLedger/threadSession.ts";
+import { contextThreadSessionKey } from "../../src/core/runLedger/sessionLog.ts";
+import { UNKNOWN_CONTEXT_DEPENDENCIES } from "../../src/core/references/contextDependencies.ts";
+import { markdownOutput } from "../../src/core/llmOutput/markdown.ts";
+import { createLedgerWriteThrough } from "../../src/core/runLedger/writeThrough.ts";
+import { UnknownAllocationClaimError } from "../../src/core/runLedger/allocationAck.ts";
+import { PROMOTION_BODY_BYTES, promotionBytes, promotionBodyOf } from "../../src/core/runLedger/promotion.ts";
+
+// The check producer imports the unused LocalExecutor environment helper.
+// Workerd has no host secret manifest; no local execution uses this stub.
+vi.mock("../../src/secrets.ts", () => ({ publicEnv: () => ({}) }));
+
+describe("original workspace durability in real SQLite", () => {
+  const id = "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb";
+  const thread = "mcp:fixture:durability";
+  const allocation: WorkspaceAllocation = {
+    version: 1,
+    kind: "exclusive-scratch",
+    runId: id,
+    requester: "slack:UALICE",
+    threadKey: thread,
+    repo: "fixture/repo",
+    ref: "codex/fixture",
+    headSha: "a".repeat(40),
+    allocationKey: `review:${id}`,
+    custody: "session-report",
+  };
+  function request(
+    key: string,
+    contract: WorkspaceAllocation | null = allocation,
+    gen = "g1",
+  ): { storeKey: string; run: ClaimRequest } {
+    return {
+      storeKey: key,
+      run: {
+        runId: id,
+        threadKey: thread,
+        gen,
+        leaseMs: LEASE_MS,
+        startedAt: 1,
+        phase: "attaching",
+        system: "",
+        tools: [],
+        meta: {
+          agent: "review",
+          channelId: "slack:C1",
+          userId: allocation.requester,
+          threadKey: thread,
+          repo: allocation.repo,
+          ref: allocation.ref,
+          headSha: allocation.headSha,
+          readonly: true,
+          profile: { machine: "repo-resident", identity: "read", minutes: 25 },
+          ...(contract ? { workspaceAllocation: contract } : {}),
+        },
+      },
+    };
+  }
+  it("prepares exact original promotion bytes in SQLite and holds actual lifecycle mutations without claiming or upgrading null", async () => {
+    for (const contract of [allocation, null]) {
+      const key = storeKey(),
+        req = request(key, contract);
+      const client = new WorkerRunLedger({
+        baseUrl: BASE,
+        token: "test-token",
+        storeKey: key,
+        fetch: (input, init) => fetchMemoryTest(String(input), init),
+      });
+      expect(await client.claim(req.run)).toMatchObject({ ok: true });
+      const originalBody = JSON.stringify({
+        ...req,
+        run: {
+          ...req.run,
+          phase: "live",
+          system: "original prepared prompt",
+          state: { binding: { backend: "resident", workspace: "/private/original" } },
+        },
+      });
+      const prepared = await client.preparePromotion(originalBody);
+      expect(prepared.kind).toBe("prepared");
+      if (prepared.kind !== "prepared") throw new Error("prepare refused");
+      expect(
+        await client.readPromotion({ runId: id, gen: "g1", bodySha256: prepared.receipt.bodySha256 }),
+      ).toMatchObject({ kind: "prepared", preparation: { bodyJson: originalBody } });
+      expect(await client.preparePromotion(originalBody)).toEqual(prepared);
+      expect(
+        await client.preparePromotion(originalBody.replace("original prepared prompt", "replacement")),
+      ).toMatchObject({ kind: "held" });
+      await expect(client.setState(id, "g1", {})).rejects.toMatchObject({ name: "PromotionPendingError" });
+      await expect(client.claim({ ...req.run, phase: "live" })).rejects.toMatchObject({
+        name: "PromotionPendingError",
+      });
+      await expect(client.abandon(id, "g1")).rejects.toMatchObject({ name: "PromotionPendingError" });
+      await expect(client.finish(id, "g1", record(id, thread))).rejects.toMatchObject({
+        name: "PromotionPendingError",
+      });
+      await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner, state) => {
+        const before = JSON.stringify(await owner.listLive());
+        await expect(owner.setState(id, "g1", { binding: { backend: "sandbox" } })).rejects.toMatchObject({
+          name: "PromotionPendingError",
+        });
+        await expect(owner.finishing(id, "g1")).rejects.toMatchObject({ name: "PromotionPendingError" });
+        await expect(owner.abandon(id, "g1")).rejects.toMatchObject({ name: "PromotionPendingError" });
+        await expect(owner.finish(id, "g1", record(id, thread))).rejects.toMatchObject({
+          name: "PromotionPendingError",
+        });
+        expect(await owner.handoff("g1", [id], true)).toEqual({ marked: [] });
+        expect(await owner.reclaim("g2", 100_000, 30_000)).toEqual([]);
+        expect(JSON.stringify(await owner.listLive())).toBe(before);
+        const raw = state.storage.sql
+          .exec<{ allocation_json: string }>(
+            "SELECT allocation_json FROM workspace_settlements WHERE allocation_json IS NOT NULL",
+          )
+          .one();
+        expect(JSON.parse(raw.allocation_json)).toMatchObject({
+          allocation: contract,
+          promotion: { bodyJson: originalBody },
+        });
+        const corrupt = { ...JSON.parse(raw.allocation_json), promotion: { privateBytes: "unreadable original" } };
+        state.storage.sql.exec(
+          "UPDATE workspace_settlements SET allocation_json = ? WHERE allocation_json IS NOT NULL",
+          JSON.stringify(corrupt),
+        );
+        await expect(owner.setState(id, "g1", {})).rejects.toMatchObject({ name: "PromotionPendingError" });
+        await expect(owner.abandon(id, "g1")).rejects.toMatchObject({ name: "PromotionPendingError" });
+        expect(JSON.stringify(await owner.listLive())).toBe(before);
+        expect(
+          state.storage.sql
+            .exec<{ allocation_json: string }>(
+              "SELECT allocation_json FROM workspace_settlements WHERE allocation_json IS NOT NULL",
+            )
+            .one().allocation_json,
+        ).toBe(JSON.stringify(corrupt));
+      });
+      await expect(client.abandon(id, "g1")).rejects.toMatchObject({
+        name: "PromotionPendingError",
+        reason: "corrupt",
+      });
+    }
+  });
+  it("accepts the full original 512KiB prepare body over HTTP and refuses the next byte without mutation", async () => {
+    const key = storeKey(),
+      req = request(key, null);
+    expect((await post("/runs/claim", req)).status).toBe(200);
+    const envelope = { ...req, run: { ...req.run, phase: "live", system: "" } };
+    envelope.run.system = "x".repeat(PROMOTION_BODY_BYTES - promotionBytes(JSON.stringify(envelope)));
+    const body = JSON.stringify(envelope);
+    expect(promotionBytes(body)).toBe(PROMOTION_BODY_BYTES);
+    const client = new WorkerRunLedger({
+      baseUrl: BASE,
+      token: "test-token",
+      storeKey: key,
+      fetch: (input, init) => fetchMemoryTest(String(input), init),
+    });
+    expect(await client.preparePromotion(body)).toMatchObject({ kind: "prepared" });
+    const tooLarge = await fetchMemoryTest(`${BASE}/runs/promotion/prepare`, {
+      method: "POST",
+      headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+      body: body + " ",
+    });
+    expect(tooLarge.status).toBe(413);
+    expect(await client.readPromotion({ runId: id, gen: "g1" })).toMatchObject({
+      kind: "prepared",
+      preparation: { bodyJson: body },
+    });
+    expect(await client.claim(promotionBodyOf(body)!, body)).toMatchObject({
+      ok: true,
+      promotionCommit: { phase: "unconfirmed" },
+    });
+    expect(await client.readPromotion({ runId: id, gen: "g1" })).toMatchObject({
+      kind: "committed",
+      preparation: { bodyJson: body },
+    });
+    await expect(client.abandon(id, "g1")).rejects.toMatchObject({ name: "PromotionPendingError" });
+  });
+  it("reads a real committed prepare after lost HTTP acknowledgment through a new client without repeating prepare", async () => {
+    const key = storeKey(),
+      req = request(key, null);
+    expect((await post("/runs/claim", req)).status).toBe(200);
+    let calls = 0;
+    const client = new WorkerRunLedger({
+      baseUrl: BASE,
+      token: "test-token",
+      storeKey: key,
+      fetch: async (input, init) => {
+        const actual = await fetchMemoryTest(String(input), init);
+        if (String(input).endsWith("/prepare")) {
+          calls++;
+          expect(actual.status).toBe(200);
+          throw new Error("actual prepare ACK lost");
+        }
+        return actual;
+      },
+    });
+    const originalBody = JSON.stringify({ ...req, run: { ...req.run, phase: "live" } });
+    expect(await client.preparePromotion(originalBody)).toEqual({ kind: "held", reason: "unknown" });
+    const restartedClient = new WorkerRunLedger({
+      baseUrl: BASE,
+      token: "test-token",
+      storeKey: key,
+      fetch: (input, init) => fetchMemoryTest(String(input), init),
+    });
+    expect(await restartedClient.readPromotion({ runId: id, gen: "g1" })).toMatchObject({
+      kind: "prepared",
+      preparation: { bodyJson: originalBody },
+    });
+    expect(calls).toBe(1);
+  });
+  it.each([false, true])(
+    "commits actual SQLite prepared originals once through HTTP and reads lost replies while keeping custody held: allocated=%s",
+    async (allocated) => {
+      const key = storeKey(),
+        req = request(key, null);
+      req.run.meta.pr = 42;
+      if (allocated)
+        req.run.meta.workspaceAllocation = originalColdAllocation({
+          runId: id,
+          identity: req.run.meta,
+          registered: getAgent("review"),
+          target: { repo: allocation.repo!, ref: allocation.ref!, headSha: allocation.headSha!, pr: 42 },
+        });
+      expect((await post("/runs/claim", req)).status).toBe(200);
+      const wire = JSON.stringify({
+        ...req,
+        run: {
+          ...req.run,
+          phase: "live",
+          system: "original raw prepared commit",
+          state: { binding: { backend: "resident", workspace: "/private/original-commit" } },
+        },
+      });
+      let claims = 0;
+      const client = new WorkerRunLedger({
+        baseUrl: BASE,
+        token: "test-token",
+        storeKey: key,
+        fetch: async (input, init) => {
+          const response = await fetchMemoryTest(String(input), init);
+          if (String(input).endsWith("/runs/claim")) {
+            claims++;
+            expect(response.status).toBe(200);
+            await response.json();
+            throw new Error("actual claim response lost");
+          }
+          return response;
+        },
+      });
+      expect(await client.preparePromotion(wire)).toMatchObject({ kind: "prepared" });
+      await expect(client.claim(promotionBodyOf(wire)!, wire)).rejects.toMatchObject({
+        name: "UnknownAllocationClaimError",
+      });
+      const restarted = new WorkerRunLedger({
+        baseUrl: BASE,
+        token: "test-token",
+        storeKey: key,
+        fetch: (input, init) => fetchMemoryTest(String(input), init),
+      });
+      const saved = await restarted.readPromotion({ runId: id, gen: "g1" });
+      expect(saved).toMatchObject({
+        kind: "committed",
+        preparation: { bodyJson: wire },
+        receipt: { phase: "unconfirmed" },
+        allocationAck: { allocation: req.run.meta.workspaceAllocation ?? null },
+      });
+      const before = await post("/runs/live", { storeKey: key });
+      expect(await client.claim(promotionBodyOf(wire)!, wire)).toMatchObject({
+        ok: true,
+        promotionCommit: { phase: "unconfirmed" },
+      });
+      expect(claims).toBe(1);
+      const duplicate = await fetchMemoryTest(`${BASE}/runs/claim`, {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: wire,
+      });
+      expect(duplicate.status).toBe(200);
+      const duplicateBody = await duplicate.json();
+      expect(duplicateBody).toMatchObject({
+        ok: true,
+        promotionCommit: saved.kind === "committed" ? saved.receipt : undefined,
+      });
+      expect(await post("/runs/live", { storeKey: key })).toEqual(before);
+      await expect(restarted.setState(id, "g1", {})).rejects.toMatchObject({ name: "PromotionPendingError" });
+      await expect(restarted.finish(id, "g1", record(id, thread))).rejects.toMatchObject({
+        name: "PromotionPendingError",
+      });
+      await expect(restarted.abandon(id, "g1")).rejects.toMatchObject({ name: "PromotionPendingError" });
+      await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner, state) => {
+        expect(await owner.reclaim("g2", 100_000, 30_000)).toEqual([]);
+        expect(await owner.handoff("g1", [id], true)).toEqual({ marked: [] });
+        const actual = state.storage.sql
+          .exec<{ allocation_json: string }>(
+            "SELECT allocation_json FROM workspace_settlements WHERE owner_key = ? AND revision = 1",
+            workspaceDurabilityKey(id),
+          )
+          .one();
+        expect(JSON.parse(actual.allocation_json)).toMatchObject({
+          promotion: { bodyJson: wire },
+          promotionCommit: saved.kind === "committed" ? saved.receipt : undefined,
+          allocation: req.run.meta.workspaceAllocation ?? null,
+        });
+      });
+    },
+  );
+  it.each(["actor", "target", "body", "gen", "start", "revision", "digest", "corrupt"])(
+    "holds actual SQLite prepared commit conflicts before effect: %s",
+    async (mode) => {
+      const key = storeKey(),
+        req = request(key, null);
+      expect((await post("/runs/claim", req)).status).toBe(200);
+      const run = { ...req.run, phase: "live" as const, system: "immutable original" },
+        wire = JSON.stringify({ ...req, run });
+      const client = new WorkerRunLedger({
+        baseUrl: BASE,
+        token: "test-token",
+        storeKey: key,
+        fetch: (input, init) => fetchMemoryTest(String(input), init),
+      });
+      expect(await client.preparePromotion(wire)).toMatchObject({ kind: "prepared" });
+      if (["revision", "digest", "corrupt"].includes(mode))
+        await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner, state) => {
+          const row = state.storage.sql
+            .exec<{ allocation_json: string }>(
+              "SELECT allocation_json FROM workspace_settlements WHERE owner_key = ?",
+              workspaceDurabilityKey(id),
+            )
+            .one();
+          const raw = JSON.parse(row.allocation_json);
+          if (mode === "revision")
+            state.storage.sql.exec(
+              "UPDATE workspace_settlements SET revision = 2 WHERE owner_key = ?",
+              workspaceDurabilityKey(id),
+            );
+          else {
+            if (mode === "digest") raw.promotion.receipt.bodySha256 = "b".repeat(64);
+            else raw.promotion.unexpected = true;
+            state.storage.sql.exec(
+              "UPDATE workspace_settlements SET allocation_json = ? WHERE owner_key = ?",
+              JSON.stringify(raw),
+              workspaceDurabilityKey(id),
+            );
+          }
+        });
+      if (mode === "actor") run.meta = { ...run.meta, userId: "slack:OTHER" };
+      if (mode === "target") run.meta = { ...run.meta, ref: "codex/rival" };
+      if (mode === "gen") run.gen = "g2";
+      if (mode === "start") run.startedAt = 2;
+      const archiveBefore = await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner, state) =>
+        state.storage.sql
+          .exec<{ revision: number; allocation_json: string }>(
+            "SELECT revision,allocation_json FROM workspace_settlements WHERE owner_key = ?",
+            workspaceDurabilityKey(id),
+          )
+          .toArray(),
+      );
+      const before = await post("/runs/live", { storeKey: key });
+      const result = await fetchMemoryTest(`${BASE}/runs/claim`, {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: mode === "body" ? wire + " " : JSON.stringify({ ...req, run }),
+      });
+      expect(result.status).toBe(mode === "gen" ? 409 : 423);
+      await result.json();
+      expect(await post("/runs/live", { storeKey: key })).toEqual(before);
+      await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner, state) => {
+        expect(
+          state.storage.sql
+            .exec<{ revision: number; allocation_json: string }>(
+              "SELECT revision,allocation_json FROM workspace_settlements WHERE owner_key = ?",
+              workspaceDurabilityKey(id),
+            )
+            .toArray(),
+        ).toEqual(archiveBefore);
+      });
+    },
+  );
+  it("stores expected seed with full512KiB original body and reads actual lost prepare reply without reissuing", async () => {
+    const key = storeKey(),
+      req = request(key, null);
+    req.run.meta.session = {
+      key: "task:fixture:expected",
+      threadSession: "task:fixture:@thread",
+      seedFrom: 4,
+      request: 5,
+      range: { from: 5 },
+    };
+    expect((await post("/runs/claim", req)).status).toBe(200);
+    const envelope = { ...req, run: { ...req.run, phase: "live" as const, system: "" } };
+    envelope.run.system = "x".repeat(PROMOTION_BODY_BYTES - promotionBytes(JSON.stringify(envelope)));
+    const wire = JSON.stringify(envelope);
+    expect(promotionBytes(wire)).toBe(PROMOTION_BODY_BYTES);
+    const messages = [
+        { role: "user" as const, content: [{ type: "text" as const, text: "original reused source" }] },
+        { role: "user" as const, content: [{ type: "text" as const, text: "original fresh input" }] },
+      ],
+      prior = turnRows(4, messages[0], {}, "slack:UALICE");
+    const built = await buildExpectedSeedManifest({
+      bodyJson: wire,
+      open: {
+        runId: id,
+        threadKey: thread,
+        startedAt: 1,
+        system: envelope.run.system,
+        seed: {
+          messages,
+          actors: ["slack:UALICE", "slack:UALICE"],
+          context: UNKNOWN_CONTEXT_DEPENDENCIES,
+          notepad: "complete original notes",
+          budgetMs: 1_500_000,
+          log: { from: 4, turns: 1 },
+        },
+      },
+      observation: {
+        key: "task:fixture:expected",
+        next: 5,
+        reused: {
+          key: "task:fixture:expected",
+          from: 4,
+          through: 4,
+          next: 5,
+          rows: prior.rows,
+          attachments: prior.attachments,
+          context: UNKNOWN_CONTEXT_DEPENDENCIES,
+          notepad: "complete original notes",
+          owner: { runId: id, gen: "g1" },
+        },
+      },
+    });
+    if (built.kind !== "built") throw new Error("complete seed refused");
+    let prepares = 0;
+    const client = new WorkerRunLedger({
+      baseUrl: BASE,
+      token: "test-token",
+      storeKey: key,
+      fetch: async (input, init) => {
+        const actual = await fetchMemoryTest(String(input), init);
+        if (String(input).endsWith("/prepare")) {
+          prepares++;
+          expect(actual.status).toBe(200);
+          await actual.json();
+          throw new Error("actual prepare reply lost");
+        }
+        return actual;
+      },
+    });
+    expect(await client.preparePromotion(wire, built.manifest)).toEqual({ kind: "held", reason: "unknown" });
+    const restarted = new WorkerRunLedger({
+      baseUrl: BASE,
+      token: "test-token",
+      storeKey: key,
+      fetch: (input, init) => fetchMemoryTest(String(input), init),
+    });
+    expect(await restarted.readPromotion({ runId: id, gen: "g1" })).toMatchObject({
+      kind: "prepared",
+      preparation: { bodyJson: wire, expectedSeed: built.manifest, receipt: { expectedSeedSha256: built.digest } },
+    });
+    expect(prepares).toBe(1);
+    expect(await restarted.claim(promotionBodyOf(wire)!, wire)).toMatchObject({
+      ok: true,
+      promotionCommit: { phase: "unconfirmed", expectedSeedSha256: built.digest },
+    });
+    await expect(restarted.abandon(id, "g1")).rejects.toMatchObject({ name: "PromotionPendingError" });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner, state) => {
+      const raw = state.storage.sql
+        .exec<{ allocation_json: string }>(
+          "SELECT allocation_json FROM workspace_settlements WHERE owner_key = ?",
+          workspaceDurabilityKey(id),
+        )
+        .one().allocation_json;
+      expect(new TextEncoder().encode(raw).byteLength).toBeLessThanOrEqual(MAX_RECORD_BYTES);
+      expect(JSON.parse(raw)).toMatchObject({
+        promotion: { bodyJson: wire, expectedSeed: built.manifest },
+        promotionCommit: { expectedSeedSha256: built.digest },
+      });
+    });
+    const over = await fetchMemoryTest(`${BASE}/runs/promotion/prepare`, {
+      method: "POST",
+      headers: {
+        authorization: "Bearer test-token",
+        "content-type": "application/json",
+        [EXPECTED_SEED_HEADER]: encodeExpectedSeedHeader(built.manifest),
+      },
+      body: wire + " ",
+    });
+    expect(over.status).toBe(413);
+    await over.json();
+  });
+  it.each(["malformed", "nonascii", "duplicate", "foreign"])(
+    "refuses invalid expected seed header before actualSQLite mutation: %s",
+    async (mode) => {
+      const key = storeKey(),
+        req = request(key, null);
+      req.run.meta.session = {
+        key: "task:fixture:expected",
+        threadSession: "task:fixture:@thread",
+        seedFrom: 0,
+        request: 0,
+        range: { from: 0 },
+      };
+      expect((await post("/runs/claim", req)).status).toBe(200);
+      const wire = JSON.stringify({ ...req, run: { ...req.run, phase: "live", system: "actual system" } });
+      const built = await buildExpectedSeedManifest({
+        bodyJson: wire,
+        open: {
+          runId: id,
+          threadKey: thread,
+          startedAt: 1,
+          system: "actual system",
+          seed: {
+            messages: [{ role: "user", content: [{ type: "text", text: "original request" }] }],
+            actors: ["slack:UALICE"],
+            context: UNKNOWN_CONTEXT_DEPENDENCIES,
+            notepad: "",
+            budgetMs: 1_500_000,
+          },
+        },
+        observation: { key: "task:fixture:expected", next: 0 },
+      });
+      if (built.kind !== "built") throw new Error("fixture refused");
+      const headers = new Headers({ authorization: "Bearer test-token", "content-type": "application/json" });
+      let value = encodeExpectedSeedHeader(built.manifest);
+      if (mode === "malformed") value = "%%";
+      if (mode === "nonascii") value = "é";
+      if (mode === "foreign") value = encodeExpectedSeedHeader({ ...built.manifest, requester: "slack:OTHER" });
+      headers.set(EXPECTED_SEED_HEADER, value);
+      if (mode === "duplicate") headers.append(EXPECTED_SEED_HEADER, value);
+      const result = await fetchMemoryTest(`${BASE}/runs/promotion/prepare`, { method: "POST", headers, body: wire });
+      expect(result.status).toBe(mode === "foreign" ? 200 : 400);
+      const reply = await result.json();
+      if (mode === "foreign") expect(reply).toMatchObject({ kind: "held", reason: "mismatch" });
+      await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner, state) => {
+        expect((await owner.listLive())[0].phase).toBe("attaching");
+        const raw = state.storage.sql
+          .exec<{ allocation_json: string }>(
+            "SELECT allocation_json FROM workspace_settlements WHERE owner_key = ?",
+            workspaceDurabilityKey(id),
+          )
+          .one().allocation_json;
+        expect(JSON.parse(raw)).not.toHaveProperty("promotion");
+      });
+    },
+  );
+  async function originalSourceFixture() {
+    const sk = storeKey(),
+      req = request(sk, null),
+      sessionKey = "task:source-verification:" + sk;
+    req.run.meta.session = {
+      key: sessionKey,
+      threadSession: "task:fixture:@thread",
+      seedFrom: 0,
+      request: 0,
+      range: { from: 0 },
+    };
+    const wire = JSON.stringify({ ...req, run: { ...req.run, phase: "live", system: "actual source system" } }),
+      messages = [{ role: "user" as const, content: [{ type: "text" as const, text: "original source input" }] }];
+    const built = await buildExpectedSeedManifest({
+      bodyJson: wire,
+      open: {
+        runId: id,
+        threadKey: thread,
+        startedAt: 1,
+        system: "actual source system",
+        seed: {
+          messages,
+          actors: ["slack:UALICE"],
+          context: UNKNOWN_CONTEXT_DEPENDENCIES,
+          notepad: "original source notes",
+          budgetMs: 1_500_000,
+        },
+      },
+      observation: { key: sessionKey, next: 0 },
+    });
+    if (built.kind !== "built") throw new Error("fixture refused");
+    const client = new WorkerRunLedger({
+      baseUrl: BASE,
+      token: "test-token",
+      storeKey: sk,
+      fetch: (input, init) => fetchMemoryTest(String(input), init),
+    });
+    expect(await client.claim(req.run)).toMatchObject({ ok: true });
+    expect(await client.preparePromotion(wire, built.manifest)).toMatchObject({ kind: "prepared" });
+    expect(await client.claim(promotionBodyOf(wire)!, wire)).toMatchObject({ ok: true });
+    await client.claimSession(sessionKey, id, "g1");
+    expect(
+      await client.writeSessionSources(sessionKey, id, "g1", {
+        version: 1,
+        status: "unknown",
+        context: UNKNOWN_CONTEXT_DEPENDENCIES,
+      }),
+    ).toEqual({ ok: true });
+    expect(await client.writeNotepad(sessionKey, "g1", "original source notes", id)).toEqual({ ok: true });
+    expect(await client.seed(id, "g1", [{ idx: 0, message: messages[0], actor: "slack:UALICE" }], sessionKey)).toEqual({
+      ok: true,
+    });
+    const reference = {
+      storeKey: sk,
+      runId: id,
+      gen: "g1",
+      bodySha256: built.manifest.bodySha256,
+      expectedSeedSha256: built.digest,
+    };
+    return { client, reference, sessionKey, sk, messages, built };
+  }
+  it("commits actual source verification receipt and pending holder through HTTP, refusing source mutations and newer-revision removal", async () => {
+    const { client, reference, sessionKey, messages } = await originalSourceFixture();
+    const verified = await client.verifyExpectedSeed(sessionKey, reference);
+    expect(verified).toMatchObject({
+      kind: "verified",
+      receipt: { phase: "pending-confirmation", key: sessionKey, runId: id, gen: "g1", count: 1 },
+    });
+    expect(await client.readExpectedSeed(sessionKey, reference)).toEqual(verified);
+    await expect(client.claimSession(sessionKey, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa", "g2")).rejects.toMatchObject({
+      name: "SourceSeedPendingError",
+    });
+    await expect(client.writeNotepad(sessionKey, "g1", "foreign notes", id)).rejects.toMatchObject({
+      name: "SourceSeedPendingError",
+    });
+    await expect(
+      client.seed(
+        id,
+        "g1",
+        [
+          {
+            idx: 0,
+            message: { role: "user", content: [{ type: "text", text: "foreign source" }] },
+            actor: "slack:UALICE",
+          },
+        ],
+        sessionKey,
+      ),
+    ).rejects.toMatchObject({ name: "SourceSeedPendingError" });
+    await expect(client.releaseSession(sessionKey, id, "g1")).rejects.toMatchObject({ name: "SourceSeedPendingError" });
+    await runInDurableObject(
+      env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(sessionKey)),
+      async (owner: SessionLogDO, state) => {
+        const revision = await owner.custodyPinRevision();
+        expect(revision?.guarded).toBe(true);
+        expect(await owner.retainRangePinsIfRevision(revision!, [])).toMatchObject({ ok: true });
+        const newer = await owner.custodyPinRevision();
+        expect(newer!.revision).toBeGreaterThan(revision!.revision);
+        expect(await owner.retainRangePinsIfRevision(newer!, [])).toMatchObject({ ok: true });
+        expect(
+          JSON.parse(
+            state.storage.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key='range_pins'").one().value,
+          )[id],
+        ).toContainEqual({ from: 0, to: 0 });
+        await expect(owner.drop()).rejects.toMatchObject({ name: "SourceSeedPendingError" });
+      },
+    );
+    expect(await client.readExpectedSeed(sessionKey, reference)).toEqual(verified);
+    expect(await client.seed(id, "g1", [{ idx: 0, message: messages[0], actor: "slack:UALICE" }], sessionKey)).toEqual({
+      ok: true,
+    });
+    expect(await client.writeNotepad(sessionKey, "g1", "original source notes", id)).toEqual({ ok: true });
+  });
+  it.each(["body", "manifest", "store", "key", "trimmed", "context", "owner"])(
+    "declines foreign or incomplete actual source before installing a receipt: %s",
+    async (mode) => {
+      const { client, reference, sessionKey } = await originalSourceFixture();
+      let target = sessionKey;
+      const ref = { ...reference };
+      if (mode === "body") ref.bodySha256 = "b".repeat(64);
+      if (mode === "manifest") ref.expectedSeedSha256 = "b".repeat(64);
+      if (mode === "store") ref.storeKey = "runs:foreign";
+      if (mode === "key") target = "task:foreign";
+      if (["trimmed", "context", "owner"].includes(mode))
+        await runInDurableObject(
+          env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(sessionKey)),
+          async (_owner, state) => {
+            if (mode === "trimmed") state.storage.sql.exec("UPDATE turns SET trimmed=1");
+            if (mode === "context")
+              state.storage.sql.exec(
+                "UPDATE meta SET value=? WHERE key='sources'",
+                JSON.stringify({
+                  version: 1,
+                  status: "unknown",
+                  context: { ...UNKNOWN_CONTEXT_DEPENDENCIES, revision: 1 },
+                }),
+              );
+            if (mode === "owner") state.storage.sql.exec("UPDATE owner SET gen='foreign-generation'");
+          },
+        );
+      expect(await client.verifyExpectedSeed(target, ref)).toMatchObject({ kind: "held" });
+      await runInDurableObject(env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(sessionKey)), async (_owner, state) => {
+        expect(state.storage.sql.exec("SELECT value FROM meta WHERE key='expected_seed_pending'").toArray()).toEqual(
+          [],
+        );
+      });
+    },
+  );
+  it("real source changes during hashing refuse the source-own transaction and install no hold", async () => {
+    const { reference, sessionKey } = await originalSourceFixture();
+    const stub = env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(sessionKey));
+    await runInDurableObject(stub, async (owner: SessionLogDO, state) => {
+      const internal = owner as unknown as { sourceSeedSnapshot: (from: number, to: number) => unknown };
+      const original = internal.sourceSeedSnapshot.bind(owner);
+      let reads = 0;
+      internal.sourceSeedSnapshot = (...args) => {
+        const value = original(...args);
+        if (++reads === 1) state.storage.sql.exec("UPDATE notepad SET text='changed between hash and commit'");
+        return value;
+      };
+      expect(await owner.verifyExpectedSeed(sessionKey, reference)).toMatchObject({ kind: "held" });
+      internal.sourceSeedSnapshot = original;
+      expect(state.storage.sql.exec("SELECT value FROM meta WHERE key='expected_seed_pending'").toArray()).toEqual([]);
+    });
+  });
+  async function confirmationFixture() {
+    const f = await originalSourceFixture();
+    expect(
+      await f.client.step(
+        id,
+        "g1",
+        {
+          step: 0,
+          seq: 0,
+          turnIndex: 1,
+          inFlight: [],
+          inboxConsumedSeq: 0,
+          remainingMs: 1500000,
+          turn: 0,
+          iteration: 0,
+        },
+        [],
+        f.sessionKey,
+      ),
+    ).toEqual({ ok: true });
+    expect(await f.client.verifyExpectedSeed(f.sessionKey, f.reference)).toMatchObject({ kind: "verified" });
+    return f;
+  }
+  it("real HTTP confirmation and release retain exact immutable receipts across lost replies and new clients", async () => {
+    const { client, reference, sessionKey, sk } = await confirmationFixture();
+    let confirms = 0,
+      releases = 0;
+    const lost = new WorkerRunLedger({
+      baseUrl: BASE,
+      token: "test-token",
+      storeKey: sk,
+      fetch: async (input, init) => {
+        const response = await fetchMemoryTest(String(input), init),
+          body = JSON.parse(String(init?.body));
+        if (body.confirm) {
+          confirms++;
+          expect(response.status).toBe(200);
+          throw new Error("actual confirmation committed reply lost");
+        }
+        if (body.release) {
+          releases++;
+          expect(response.status).toBe(200);
+          throw new Error("actual release committed reply lost");
+        }
+        return response;
+      },
+    });
+    expect(await lost.confirmPromotion(reference)).toMatchObject({ kind: "held", reason: "unknown" });
+    const confirmation = await client.readPromotion({ runId: id, gen: "g1" });
+    expect(confirmation).toMatchObject({ kind: "confirmed", receipt: { phase: "confirmed" } });
+    await expect(client.writeNotepad(sessionKey, "g1", "late mutation", id)).rejects.toMatchObject({
+      name: "SourceSeedPendingError",
+    });
+    expect(await lost.releaseExpectedSeed(sessionKey, reference)).toMatchObject({ kind: "held", reason: "unknown" });
+    const release = await client.readExpectedSeed(sessionKey, reference);
+    expect(release).toMatchObject({ kind: "verified", release: { phase: "released" } });
+    expect(await client.releaseExpectedSeed(sessionKey, reference)).toEqual(release);
+    expect(await client.confirmPromotion(reference)).toMatchObject(
+      confirmation.kind === "confirmed" ? { kind: "confirmed", receipt: confirmation.receipt } : {},
+    );
+    expect(await client.writeNotepad(sessionKey, "g1", "normal post-confirmation notes", id)).toEqual({ ok: true });
+    expect(await client.readExpectedSeed(sessionKey, reference)).toEqual(release);
+    await runInDurableObject(env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(sessionKey)), async (owner, state) => {
+      expect(await owner.retainRangePinsIfRevision((await owner.custodyPinRevision())!, [])).toMatchObject({
+        ok: true,
+      });
+      expect(
+        JSON.parse(
+          state.storage.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key='range_pins'").one().value,
+        )[id],
+      ).toContainEqual({ from: 0, to: 0 });
+      await expect(owner.drop()).rejects.toMatchObject({ name: "SourceSeedPendingError" });
+    });
+    expect(confirms).toBe(1);
+    expect(releases).toBe(1);
+  });
+  it.each([
+    "system",
+    "budget",
+    "step0",
+    "later-step",
+    "flight",
+    "source-owner",
+    "trimmed",
+    "source-gap",
+    "namespace",
+    "owner-generation",
+  ])("actual SQLite %s conflict refuses confirmation and release without changing receipts or holder", async (mode) => {
+    const { client, reference, sessionKey, sk } = await confirmationFixture();
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(sk)), async (_owner, state) => {
+      if (mode === "system") state.storage.sql.exec("UPDATE live_runs SET system_text='foreign'");
+      if (mode === "owner-generation") state.storage.sql.exec("UPDATE live_runs SET owner_gen='foreign'");
+      if (mode === "budget" || mode === "namespace") {
+        const meta = JSON.parse(
+          state.storage.sql.exec<{ meta_json: string }>("SELECT meta_json FROM live_runs").one().meta_json,
+        );
+        if (mode === "budget") meta.profile.minutes = 24;
+        else meta.channelId = "mcp:foreign";
+        state.storage.sql.exec("UPDATE live_runs SET meta_json=?", JSON.stringify(meta));
+      }
+      if (mode === "step0") state.storage.sql.exec("DELETE FROM run_steps WHERE step=0");
+      if (mode === "later-step")
+        state.storage.sql.exec(
+          "INSERT INTO run_steps(run_id,step,json) SELECT run_id,1,json FROM run_steps WHERE step=0",
+        );
+      if (mode === "flight") {
+        const step = JSON.parse(
+          state.storage.sql.exec<{ json: string }>("SELECT json FROM run_steps WHERE step=0").one().json,
+        );
+        step.inFlight = [{ callId: "foreign", tool: "bash" }];
+        state.storage.sql.exec("UPDATE run_steps SET json=? WHERE step=0", JSON.stringify(step));
+      }
+    });
+    await runInDurableObject(env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(sessionKey)), async (_owner, state) => {
+      if (mode === "source-owner") state.storage.sql.exec("UPDATE owner SET gen='foreign'");
+      if (mode === "trimmed") state.storage.sql.exec("UPDATE turns SET trimmed=1");
+      if (mode === "source-gap") state.storage.sql.exec("DELETE FROM turns");
+    });
+    expect(await client.confirmPromotion(reference)).toMatchObject({ kind: "held" });
+    expect(await client.releaseExpectedSeed(sessionKey, reference)).toMatchObject({ kind: "held" });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(sk)), async (_owner, state) => {
+      expect(
+        JSON.parse(
+          state.storage.sql
+            .exec<{ allocation_json: string }>(
+              "SELECT allocation_json FROM workspace_settlements WHERE allocation_json IS NOT NULL",
+            )
+            .one().allocation_json,
+        ),
+      ).not.toHaveProperty("promotionConfirmation");
+    });
+    await runInDurableObject(env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(sessionKey)), async (_owner, state) => {
+      expect(state.storage.sql.exec("SELECT value FROM meta WHERE key='expected_seed_release'").toArray()).toEqual([]);
+      expect(state.storage.sql.exec("SELECT value FROM meta WHERE key='expected_seed_pending'").toArray()).toHaveLength(
+        1,
+      );
+    });
+  });
+  it("Runs owning SQLite transaction rereads its actual seed boundary after source acknowledgment and hashing", async () => {
+    const { reference, sk } = await confirmationFixture();
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(sk)), async (owner, state) => {
+      const internal = owner as unknown as { confirmationSnapshot: (run: string) => unknown };
+      const original = internal.confirmationSnapshot.bind(owner);
+      let reads = 0;
+      internal.confirmationSnapshot = (run) => {
+        const snapshot = original(run);
+        if (++reads === 1) state.storage.sql.exec("UPDATE live_runs SET system_text='changed after own snapshot'");
+        return snapshot;
+      };
+      expect(await owner.confirmPromotion(reference)).toMatchObject({ kind: "held" });
+      internal.confirmationSnapshot = original;
+      expect(
+        JSON.parse(
+          state.storage.sql
+            .exec<{ allocation_json: string }>(
+              "SELECT allocation_json FROM workspace_settlements WHERE allocation_json IS NOT NULL",
+            )
+            .one().allocation_json,
+        ),
+      ).not.toHaveProperty("promotionConfirmation");
+    });
+  });
+  it("source owning release transaction rereads its owner and data after canonical Runs confirmation", async () => {
+    const { reference, sessionKey, client } = await confirmationFixture();
+    expect((await client.confirmPromotion(reference)).kind).toBe("confirmed");
+    await runInDurableObject(env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(sessionKey)), async (owner, state) => {
+      const internal = owner as unknown as { sourceSeedSnapshot: (from: number, to: number) => unknown };
+      const original = internal.sourceSeedSnapshot.bind(owner);
+      let reads = 0;
+      internal.sourceSeedSnapshot = (...args) => {
+        const snapshot = original(...args);
+        if (++reads === 1) state.storage.sql.exec("UPDATE notepad SET text='changed after release snapshot'");
+        return snapshot;
+      };
+      expect(await owner.releaseExpectedSeed(sessionKey, reference)).toMatchObject({ kind: "held" });
+      internal.sourceSeedSnapshot = original;
+      expect(state.storage.sql.exec("SELECT value FROM meta WHERE key='expected_seed_release'").toArray()).toEqual([]);
+      expect(state.storage.sql.exec("SELECT value FROM meta WHERE key='expected_seed_pending'").toArray()).toHaveLength(
+        1,
+      );
+    });
+  });
+  it("actual confirmed source pending release stays outside restart and direct terminal RPC effects", async () => {
+    const { client, reference, sk } = await confirmationFixture();
+    expect((await client.confirmPromotion(reference)).kind).toBe("confirmed");
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(sk)), async (owner) => {
+      const original = await owner.listLive();
+      expect(await owner.reclaim("gen-NEXT", 1000000, 30000)).toEqual([]);
+      expect(await owner.handoff("g1", [id])).toEqual({ marked: [] });
+      await expect(owner.finishing(id, "g1")).rejects.toMatchObject({ name: "PromotionPendingError" });
+      await expect(owner.abandon(id, "g1")).rejects.toMatchObject({ name: "PromotionPendingError" });
+      expect(await owner.listLive()).toEqual(original);
+    });
+  });
+  it.each(["same-id", "distinct-id"])(
+    "actual producer same-session %s successor has separate immutable receipt and independent source/model readiness",
+    async (mode) => {
+      const sk = storeKey(),
+        sessionKey = "task:producer-successor:" + sk;
+      const client = new WorkerRunLedger({
+        baseUrl: BASE,
+        token: "test-token",
+        storeKey: sk,
+        fetch: (input, init) => fetchMemoryTest(String(input), init),
+      });
+      const writer = createLedgerWriteThrough({
+        ledger: client,
+        gen: "g1",
+        now: () => 1000,
+        warn: () => {},
+        fallback: { put: async () => {}, abandoned: () => {} },
+        setInterval: () => ({ unref() {} }),
+        clearInterval: () => {},
+      });
+      const originals: Array<{
+        runId: string;
+        ref: import("../../src/core/runLedger/seedVerification.ts").SourceSeedReference;
+        source: unknown;
+      }> = [];
+      for (let index = 0; index < 2; index++) {
+        const req = request(sk, null).run;
+        req.runId = index === 0 || mode === "same-id" ? id : "eeeeeeee-eeee-4eee-eeee-eeeeeeeeeeee";
+        req.startedAt = mode === "same-id" ? 1 : 1 + index;
+        if (mode === "same-id" && index > 0) req.meta.restartOf = req.runId;
+        req.system = "actual original system " + index;
+        req.meta.profile!.minutes = index === 0 ? 25 : 10;
+        const seed = {
+          key: sessionKey,
+          messages: [
+            { role: "user" as const, content: [{ type: "text" as const, text: "actual original input " + index }] },
+          ],
+          actors: [req.meta.userId],
+          budgetMs: req.meta.profile!.minutes * 60000,
+          context: UNKNOWN_CONTEXT_DEPENDENCIES,
+          notepad: "",
+        };
+        const reserved = await writer.reserve(req);
+        if (reserved.kind !== "tracked") throw new Error("fixture reservation refused");
+        const opened = await writer.open({ ...req, seed, reservation: reserved.run });
+        expect(opened.kind).toBe("tracked");
+        const actual = await client.readPromotion({ runId: req.runId, gen: "g1" });
+        if (actual.kind !== "confirmed") throw new Error("actual original not confirmed");
+        const ref = {
+          storeKey: sk,
+          runId: req.runId,
+          gen: "g1",
+          bodySha256: actual.receipt.bodySha256,
+          expectedSeedSha256: actual.receipt.expectedSeedSha256,
+        };
+        const source = await client.readExpectedSeed(sessionKey, ref);
+        expect(source).toMatchObject({
+          kind: "verified",
+          release: { phase: "released" },
+          receipt: { runId: req.runId, from: index },
+        });
+        originals.push({ runId: req.runId, ref, source });
+        await client.abandon(req.runId, "g1");
+        await reserved.run.close();
+      }
+      expect(originals[0].ref.bodySha256).not.toBe(originals[1].ref.bodySha256);
+      for (const original of originals)
+        expect(await client.readExpectedSeed(sessionKey, original.ref)).toEqual(original.source);
+      await runInDurableObject(env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(sessionKey)), async (owner, state) => {
+        expect(await owner.retainRangePinsIfRevision((await owner.custodyPinRevision())!, [])).toMatchObject({
+          ok: true,
+        });
+        const pins = JSON.parse(
+          state.storage.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key='range_pins'").one().value,
+        );
+        for (let i = 0; i < originals.length; i++) expect(pins[originals[i].runId]).toContainEqual({ from: i, to: i });
+        expect(
+          state.storage.sql.exec("SELECT key FROM meta WHERE key GLOB 'expected_seed_original:*'").toArray(),
+        ).toHaveLength(2);
+      });
+    },
+  );
+  it.each(["orphan-result", "policy-refusal", "thinking", "thinking-only", "empty-tail", "over-budget", "legacy-copy"])(
+    "actual HTTP producer confirms projected follow-up without rewriting original SQLite rows: %s",
+    async (mode) => {
+      const sk = storeKey(),
+        key = "task:projection:" + sk;
+      const client = new WorkerRunLedger({
+        baseUrl: BASE,
+        token: "test-token",
+        storeKey: sk,
+        fetch: (input, init) => fetchMemoryTest(String(input), init),
+      });
+      const req = request(sk, null).run;
+      const context = { version: 1 as const, status: "known" as const, revision: 0, origins: [], slack: [], mcp: [] };
+      const raw: ChatMessage[] = [
+        { role: "user", content: [{ type: "text", text: "prior request" }] },
+        { role: "assistant", content: [{ type: "text", text: "prior answer" }] },
+      ];
+      if (mode === "orphan-result")
+        raw[0].content.push({ type: "tool_result", toolUseId: "before-cut", content: "private result" });
+      if (mode === "thinking")
+        raw[1].content.unshift({ type: "thinking", thinking: "private reasoning", signature: "fixture" });
+      if (mode === "thinking-only")
+        raw[1] = { role: "assistant", content: [{ type: "redacted_thinking", data: "private reasoning" }] };
+      if (mode === "empty-tail")
+        raw.splice(0, raw.length, { role: "assistant", content: [{ type: "text", text: "no user turn" }] });
+      if (mode !== "legacy-copy") {
+        for (let i = 0; i < raw.length; i++) {
+          const row = turnRows(i, raw[i], {}, i === 0 ? req.meta.userId : undefined);
+          expect(await client.appendSession(key, "prior-" + i, row.rows, context)).toMatchObject({ ok: true });
+        }
+      }
+      const before = await client.observeExpectedSeed(key, 0, 100);
+      const tail =
+        mode === "legacy-copy"
+          ? { from: 0, transcript: { messages: raw, turns: raw.length, complete: true as const, compactions: [] } }
+          : await client.readSessionTail(key, mode === "over-budget" ? 1 : 1000000);
+      const projected = sessionSeed({
+        tail,
+        previous: { broken: false },
+        history: [],
+        request: { text: "follow up", actor: req.meta.userId },
+        refusedRequests: mode === "policy-refusal" ? [0] : [],
+      })!;
+      if (mode === "legacy-copy") projected.log = { from: 0, turns: 0 };
+      const seed = { ...projected, key, budgetMs: req.meta.profile!.minutes * 60000, context, notepad: "" };
+      const writer = createLedgerWriteThrough({
+        ledger: client,
+        gen: "g1",
+        now: () => 1000,
+        warn: () => {},
+        fallback: { put: async () => {}, abandoned: () => {} },
+        setInterval: () => ({ unref() {} }),
+        clearInterval: () => {},
+      });
+      const reserved = await writer.reserve(req);
+      if (reserved.kind !== "tracked") throw new Error("original reservation refused");
+      expect((await writer.open({ ...req, seed, reservation: reserved.run })).kind).toBe("tracked");
+      const actual = await client.readPromotion({ runId: req.runId, gen: "g1" });
+      expect(actual.kind).toBe("confirmed");
+      if (actual.kind !== "confirmed") throw new Error("original projection not confirmed");
+      expect(actual.preparation.expectedSeed?.reused === undefined).toBe(projected.log.turns === 0);
+      const after = await client.observeExpectedSeed(key, 0, 100);
+      expect(after.rows.filter((r) => r.idx < before.next)).toEqual(before.rows);
+      expect(after.attachments).toEqual(before.attachments);
+      const ref = {
+        storeKey: sk,
+        runId: req.runId,
+        gen: "g1",
+        bodySha256: actual.receipt.bodySha256,
+        expectedSeedSha256: actual.receipt.expectedSeedSha256,
+      };
+      expect(await client.readExpectedSeed(key, ref)).toMatchObject({
+        kind: "verified",
+        release: { phase: "released" },
+      });
+      await reserved.run.close();
+    },
+  );
+  it("returns the original allocation ACK from the successful private claim transaction and canonical null stays null", async () => {
+    for (const original of [allocation, null]) {
+      const key = storeKey(),
+        req = request(key, original);
+      await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner, state) => {
+        for (const phase of ["attaching", "attaching", "live", "live"] as const) {
+          req.run.phase = phase;
+          const result = await owner.claim(req.run, 1000);
+          expect(result).toMatchObject({
+            ok: true,
+            allocationAck: { version: 1, runId: id, threadKey: thread, gen: "g1", startedAt: 1, allocation: original },
+          });
+          const stored = state.storage.sql
+            .exec<{ allocation_json: string }>(
+              "SELECT allocation_json FROM workspace_settlements WHERE allocation_json IS NOT NULL",
+            )
+            .one();
+          expect(result.ok && result.allocationAck!.allocation).toEqual(JSON.parse(stored.allocation_json).allocation);
+          if (result.ok && result.allocationAck?.allocation) result.allocationAck.allocation.kind = "retained";
+          expect(
+            JSON.parse(
+              state.storage.sql
+                .exec<{ allocation_json: string }>(
+                  "SELECT allocation_json FROM workspace_settlements WHERE allocation_json IS NOT NULL",
+                )
+                .one().allocation_json,
+            ).allocation,
+          ).toEqual(original);
+          delete req.run.meta.workspaceAllocation;
+        }
+      });
+    }
+    const key = storeKey();
+    const client = new WorkerRunLedger({
+      baseUrl: BASE,
+      token: "test-token",
+      storeKey: key,
+      fetch: (input, init) => fetchMemoryTest(String(input), init),
+    });
+    const result = await client.claim(request(key).run);
+    expect(result).toMatchObject({ ok: true, allocationAck: { allocation } });
+  });
+  it("preserves a committed allocation after a lost HTTP ACK and refuses reserve without a retry or handle", async () => {
+    const key = storeKey();
+    let claims = 0,
+      heartbeats = 0;
+    const client = new WorkerRunLedger({
+      baseUrl: BASE,
+      token: "test-token",
+      storeKey: key,
+      fetch: async (input, init) => {
+        const response = await fetchMemoryTest(String(input), init);
+        if (String(input).endsWith("/runs/claim")) {
+          claims++;
+          expect(response.status).toBe(200);
+          throw new Error("fixture lost ACK after actual SQLite commit");
+        }
+        return response;
+      },
+    });
+    const writer = createLedgerWriteThrough({
+      ledger: client,
+      gen: "g1",
+      warn: () => {},
+      now: () => 1000,
+      claimAttempts: 3,
+      fallback: { put: async () => {}, abandoned: () => {} },
+      setInterval: () => {
+        heartbeats++;
+        return { unref() {} };
+      },
+      clearInterval: () => {},
+    });
+    await expect(writer.reserve(request(key).run)).rejects.toBeInstanceOf(UnknownAllocationClaimError);
+    expect(claims).toBe(1);
+    expect(heartbeats).toBe(0);
+    expect(writer.liveRuns()).toEqual([]);
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner) => {
+      expect((await owner.listLive())[0].meta.workspaceAllocation).toEqual(allocation);
+    });
+  });
+  it.each(["v2", "null"] as const)(
+    "promotes actual %s originals through HTTP at their first start and preserves unknown promotion ACKs",
+    async (kind) => {
+      const declared: WorkspaceAllocation = {
+        version: 2,
+        kind: "exclusive-scratch",
+        runId: id,
+        requester: allocation.requester,
+        threadKey: thread,
+        repo: "fixture/repo",
+        ref: "codex/fixture",
+        headSha: "a".repeat(40),
+        pr: 42,
+        allocationKey: `review:${id}`,
+        custody: "session-report-and-review-publication",
+        policy: {
+          version: 1,
+          purpose: "pull-request-review",
+          resident: "retained",
+          cold: {
+            kind: "exclusive-scratch",
+            scope: "original-cold-allocation",
+            custody: "session-report-and-review-publication",
+          },
+        },
+      };
+      const original = kind === "v2" ? declared : null;
+      for (const mode of ["accepted", "lost", "foreign", "missing"] as const) {
+        const key = storeKey();
+        let calls = 0;
+        const client = new WorkerRunLedger({
+          baseUrl: BASE,
+          token: "test-token",
+          storeKey: key,
+          fetch: async (input, init) => {
+            if (mode !== "accepted" && calls >= 2 && String(input).endsWith("/runs/promotion/read"))
+              return Response.json({ kind: "held", reason: "unknown" });
+            const response = await fetchMemoryTest(String(input), init);
+            if (
+              !String(input).endsWith("/runs/claim") ||
+              !JSON.parse(String(init?.body)).run ||
+              ++calls === 1 ||
+              mode === "accepted"
+            )
+              return response;
+            expect(response.status).toBe(200);
+            if (mode === "lost") throw new Error("actual promotion reply lost after SQLite commit");
+            const body = (await response.json()) as { ok: true; allocationAck: { gen: string } };
+            if (mode === "foreign") body.allocationAck.gen = "foreign";
+            return Response.json(mode === "missing" ? { ok: true } : body);
+          },
+        });
+        const writer = createLedgerWriteThrough({
+          ledger: client,
+          gen: "g1",
+          now: () => 2500,
+          warn: () => {},
+          claimAttempts: 3,
+          fallback: { put: async () => {}, abandoned: () => {} },
+          setInterval: () => ({ unref() {} }),
+          clearInterval: () => {},
+        });
+        const req = request(key, original).run;
+        if (original) req.meta.pr = 42;
+        const reserved = await writer.reserve(req);
+        if (reserved.kind !== "tracked") throw new Error("fixture reserve refused");
+        const ack = reserved.run.allocationAck;
+        const promotion = writer.open({
+          ...req,
+          system: "original prompt",
+          reservation: reserved.run,
+          seed: {
+            messages: [{ role: "user", content: [{ type: "text", text: "actual original input" }] }],
+            actors: [req.meta.userId],
+            budgetMs: 1500000,
+            context: UNKNOWN_CONTEXT_DEPENDENCIES,
+            notepad: "",
+          },
+        });
+        if (mode === "accepted") {
+          const result = await promotion;
+          expect(result.kind).toBe("tracked");
+          expect(reserved.run.allocationAck).toEqual(ack);
+        } else {
+          await expect(promotion).rejects.toBeInstanceOf(UnknownAllocationClaimError);
+          expect(reserved.run.tracked()).toBe(true);
+          expect(reserved.run.allocationAck).toEqual(ack);
+        }
+        expect(calls).toBe(2);
+        await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner, state) => {
+          expect((await owner.listLive())[0]).toMatchObject({ runId: id, startedAt: 1, phase: "live" });
+          const stored = state.storage.sql
+            .exec<{ allocation_json: string }>(
+              "SELECT allocation_json FROM workspace_settlements WHERE allocation_json IS NOT NULL",
+            )
+            .one();
+          expect(JSON.parse(stored.allocation_json).allocation).toEqual(original);
+        });
+        await reserved.run.close();
+      }
+    },
+  );
+  it("retains first contract or legacy absence through abandon and refuses replacement", async () => {
+    for (const original of [allocation, null]) {
+      const key = storeKey();
+      expect((await post("/runs/claim", request(key, original))).status).toBe(200);
+      expect((await post("/runs/abandon", { storeKey: key, runId: id, gen: "g1" })).status).toBe(200);
+      const changed = { ...allocation, custody: "session-report-and-review-publication" as const };
+      await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner) => {
+        await expect(owner.claim(request(key, changed).run, 1000)).rejects.toThrow(/workspace allocation/);
+        expect(await owner.workspaceDisposition(allocation)).toMatchObject({ kind: original ? "terminal" : "held" });
+      });
+    }
+  });
+  it("allocation-only envelopes preserve unrelated ownership and cannot hide malformed resident rows", async () => {
+    const key = storeKey();
+    await post("/runs/claim", request(key));
+    await post("/runs/abandon", { storeKey: key, runId: id, gen: "g1" });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner, state) => {
+      expect(await owner.findPullOwners({ repo: "fixture/repo", ref: "codex/unrelated" })).toEqual({
+        ok: true,
+        owners: [],
+      });
+      const columns = state.storage.sql.exec<{ name: string }>("PRAGMA table_info(workspace_settlements)").toArray();
+      expect(columns.some((c) => c.name === "allocation_json")).toBe(true);
+      const rows = state.storage.sql
+        .exec<{ json: string | null; allocation_json: string | null }>(
+          "SELECT json,allocation_json FROM workspace_settlements",
+        )
+        .toArray();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].json).toBeNull();
+      expect(rows[0].allocation_json).toBeTruthy();
+      state.storage.sql.exec(
+        "INSERT INTO workspace_settlements(owner_key,revision,json) VALUES (?,1,?)",
+        "malformed-original-resident",
+        "{",
+      );
+      expect(await owner.findPullOwners({ repo: "fixture/repo", ref: "codex/unrelated" })).toMatchObject({
+        ok: false,
+        reason: "incomplete",
+      });
+      expect(
+        state.storage.sql
+          .exec("SELECT json FROM workspace_settlements WHERE owner_key=?", "malformed-original-resident")
+          .toArray(),
+      ).toEqual([{ json: "{" }]);
+    });
+  });
+  function closureContract(over?: { parent?: boolean; maintenance?: boolean }, key?: string) {
+    return {
+      ...allocation,
+      ...(key ? { threadKey: `${thread}:${key}` } : {}),
+      ...(over?.parent || over?.maintenance
+        ? {
+            parentInstanceId: "original-parent",
+            coordinatorUnit: "unit",
+            idempotencyKey: "original-parent:unit/0/review",
+          }
+        : {}),
+      ...(over?.maintenance ? { maintenanceActionId: `m_${"c".repeat(64)}` } : {}),
+    };
+  }
+  async function closure(
+    key: string,
+    missing = false,
+    over?: { raw?: string; missingReport?: boolean; parent?: boolean; maintenance?: boolean },
+  ) {
+    const req = request(key);
+    const contract = closureContract(over, key);
+    req.run.threadKey = contract.threadKey;
+    req.run.meta.threadKey = contract.threadKey;
+    req.run.meta.workspaceAllocation = contract;
+    Object.assign(req.run.meta, {
+      parentInstanceId: contract.parentInstanceId,
+      coordinatorUnit: contract.coordinatorUnit,
+      idempotencyKey: contract.idempotencyKey,
+      maintenanceActionId: contract.maintenanceActionId,
+    });
+    req.run.phase = "live";
+    const session = { key: `${contract.threadKey}:review`, seedFrom: 0, request: 0, range: { from: 0 } };
+    Object.assign(req.run.meta, { session });
+    expect((await post("/runs/claim", req)).status).toBe(200);
+    expect((await post("/runs/session/owner", { key: session.key, runId: id, gen: "g1" })).status).toBe(200);
+    const raw = over?.raw ?? "owned durable report";
+    const parsed = markdownOutput.parse(raw);
+    if (!parsed.ok) throw new Error("fixture output refused");
+    const events: RunEvent[] = [
+      { type: "lease", seq: 1, startedAt: 1, endsAt: 100, loopEndsAt: 90 },
+      { type: "answer", seq: 2, text: parsed.value },
+    ];
+    expect((await post("/runs/append", { storeKey: key, runId: id, gen: "g1", events })).status).toBe(200);
+    const client = new WorkerRunLedger({
+      baseUrl: BASE,
+      token: "test-token",
+      storeKey: key,
+      fetch: (input, init) => fetchMemoryTest(String(input), init),
+    });
+    if (!over?.missingReport)
+      await appendRunReport(
+        client,
+        {
+          runId: id,
+          threadKey: contract.threadKey,
+          requester: allocation.requester,
+          channelId: req.run.meta.channelId,
+          text: parsed.value,
+          context: UNKNOWN_CONTEXT_DEPENDENCIES,
+        },
+        async () => null,
+      );
+    if (!missing) {
+      const client = new WorkerRunLedger({
+        baseUrl: BASE,
+        token: "test-token",
+        storeKey: key,
+        fetch: (input, init) => fetchMemoryTest(String(input), init),
+      });
+      expect(
+        await client.step(
+          id,
+          "g1",
+          { step: 0, seq: 2, turnIndex: 2, inFlight: [], inboxConsumedSeq: 0, remainingMs: 0, turn: 1, iteration: 1 },
+          [
+            { idx: 0, message: { role: "user", content: [{ type: "text", text: "original request" }] } },
+            { idx: 1, message: { role: "assistant", content: [{ type: "text", text: raw }] } },
+          ],
+          session.key,
+        ),
+      ).toEqual({ ok: true });
+    }
+    expect(
+      (
+        await post("/runs/state", {
+          storeKey: key,
+          runId: id,
+          gen: "g1",
+          state: {
+            binding: {
+              backend: "sandbox",
+              sandboxKey: allocation.allocationKey,
+              ref: allocation.ref,
+              container: "cccccccc-cccc-4ccc-cccc-cccccccccccc",
+            },
+            harness: {
+              harness: "pi",
+              pid: 12,
+              logOffset: 0,
+              relaunches: 0,
+              container: "cccccccc-cccc-4ccc-cccc-cccccccccccc",
+              processBirth: "dddddddd-dddd-4ddd-dddd-dddddddddddd:12",
+              bearerHash: "b".repeat(64),
+            },
+          },
+        })
+      ).status,
+    ).toBe(200);
+    expect((await post("/runs/finishing", { storeKey: key, runId: id, gen: "g1" })).status).toBe(200);
+    return {
+      ...record(id, contract.threadKey),
+      startedAt: 1,
+      repo: allocation.repo,
+      ...(contract.parentInstanceId
+        ? {
+            parentInstanceId: contract.parentInstanceId,
+            coordinatorUnit: contract.coordinatorUnit,
+            idempotencyKey: contract.idempotencyKey,
+          }
+        : {}),
+      ...(contract.maintenanceActionId ? { maintenanceActionId: contract.maintenanceActionId } : {}),
+      events,
+      eventCount: 2,
+      storedEventCount: 2,
+      session: { ...session, range: { from: 0, to: 1 } },
+    };
+  }
+  it("closes normalized reports and original parent or maintenance identities through independent custody", async () => {
+    for (const over of [{ raw: "*Review complete.*" }, { parent: true }, { maintenance: true }]) {
+      const key = storeKey(),
+        ended = await closure(key, false, over);
+      expect((await post("/runs/finish", { storeKey: key, runId: id, gen: "g1", record: ended })).status).toBe(200);
+      expect(
+        (await post("/runs/workspace-disposition", { storeKey: key, allocation: closureContract(over, key) })).data,
+      ).toMatchObject({ kind: "terminal", disposition: { kind: "scratch-custody-closed" } });
+    }
+  });
+  it("holds missing report ACKs and rechecks changed trimmed foreign unknown report or loop rows", async () => {
+    const missingKey = storeKey(),
+      missing = await closure(missingKey, false, { missingReport: true });
+    await post("/runs/finish", { storeKey: missingKey, runId: id, gen: "g1", record: missing });
+    expect(
+      (
+        await post("/runs/workspace-disposition", {
+          storeKey: missingKey,
+          allocation: closureContract(undefined, missingKey),
+        })
+      ).data,
+    ).toMatchObject({ kind: "terminal", disposition: { kind: "retained" } });
+    for (const kind of ["changed", "trimmed", "foreign", "unknown", "loop"] as const) {
+      const key = storeKey(),
+        ended = await closure(key);
+      await post("/runs/finish", { storeKey: key, runId: id, gen: "g1", record: ended });
+      const sessionKey = kind === "loop" ? `${ended.threadKey}:review` : contextThreadSessionKey(ended.threadKey);
+      await runInDurableObject(env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(sessionKey)), async (_log, state) => {
+        if (kind === "trimmed") state.storage.sql.exec("UPDATE turns SET trimmed=1 WHERE idx=0");
+        else if (kind === "unknown") state.storage.sql.exec("DELETE FROM turns");
+        else if (kind === "foreign")
+          state.storage.sql.exec("UPDATE turns SET row_id=? WHERE idx=0", "run:foreign:answer");
+        else
+          state.storage.sql.exec(
+            "UPDATE turns SET json=? WHERE idx=0 AND part=0",
+            JSON.stringify({ role: "assistant", part: { type: "text", text: "changed stored bytes" } }),
+          );
+      });
+      expect(
+        (await post("/runs/workspace-disposition", { storeKey: key, allocation: closureContract(undefined, key) }))
+          .data,
+        kind,
+      ).toEqual({ kind: "held", reason: "custody-unavailable" });
+    }
+  });
+  it("fences report and loop mutation during asynchronous finish custody", async () => {
+    for (const kind of ["report", "loop"] as const) {
+      const key = storeKey(),
+        ended = await closure(key);
+      await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner) => {
+        const target = owner as unknown as { workspaceCustody(row: LiveRunRow): Promise<StoredWorkspaceCustody> };
+        const original = target.workspaceCustody.bind(owner);
+        let once = false;
+        target.workspaceCustody = async (row) => {
+          const custody = await original(row);
+          if (!once) {
+            once = true;
+            const sessionKey =
+              kind === "report" ? contextThreadSessionKey(ended.threadKey) : `${ended.threadKey}:review`;
+            await runInDurableObject(
+              env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(sessionKey)),
+              async (_log, state) => {
+                state.storage.sql.exec("UPDATE turns SET json=? WHERE idx=0 AND part=0", "{}");
+              },
+            );
+          }
+          return custody;
+        };
+        expect(await owner.finish(id, "g1", ended)).toEqual({ ok: false, reason: "fenced" });
+        expect(await owner.workspaceDisposition(closureContract(undefined, key))).toEqual({
+          kind: "held",
+          reason: "live",
+        });
+      });
+    }
+  });
+  it("holds foreign or unreadable original report rows and actual pending work before finish", async () => {
+    for (const kind of ["foreign", "unreadable", "job", "inbox", "paused"] as const) {
+      const key = storeKey(),
+        ended = await closure(key, false, { parent: true });
+      if (kind === "foreign" || kind === "unreadable") {
+        await runInDurableObject(
+          env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(contextThreadSessionKey(ended.threadKey))),
+          async (_log, state) => {
+            if (kind === "unreadable") state.storage.sql.exec("UPDATE turns SET json=? WHERE idx=0", "{");
+            else
+              state.storage.sql.exec(
+                "UPDATE turns SET json=? WHERE idx=0",
+                JSON.stringify({
+                  role: "user",
+                  part: { type: "text", text: "owned durable report" },
+                  context: UNKNOWN_CONTEXT_DEPENDENCIES,
+                }),
+              );
+          },
+        );
+      } else
+        await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner, state) => {
+          if (kind === "job")
+            state.storage.sql.exec("INSERT INTO run_jobs(run_id,kind,json) VALUES (?,?,?)", id, "fixture", "{}");
+          else if (kind === "inbox") await owner.pushInbox(id, { text: "unread" });
+          else {
+            const row = (await owner.listLive())[0];
+            await owner.setState(id, "g1", { ...row.state, pausedForRetry: true });
+          }
+        });
+      expect((await post("/runs/finish", { storeKey: key, runId: id, gen: "g1", record: ended })).status).toBe(200);
+      expect(
+        (
+          await post("/runs/workspace-disposition", {
+            storeKey: key,
+            allocation: closureContract({ parent: true }, key),
+          })
+        ).data,
+        kind,
+      ).toMatchObject({ kind: "terminal", disposition: { kind: "retained" } });
+    }
+  });
+  it("withholds an earlier closed receipt when a new unresolved run effect appears", async () => {
+    const key = storeKey(),
+      ended = await closure(key);
+    await post("/runs/finish", { storeKey: key, runId: id, gen: "g1", record: ended });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner, state) => {
+      expect(await owner.workspaceDisposition(closureContract(undefined, key))).toMatchObject({
+        kind: "terminal",
+        disposition: { kind: "scratch-custody-closed" },
+      });
+      state.storage.sql.exec(
+        "INSERT INTO plane_effects(id,body_json,offered_at) VALUES (?,?,?)",
+        `late:${id}`,
+        JSON.stringify({ id: `late:${id}`, kind: "pr_open", runId: id, repo: allocation.repo, branch: allocation.ref }),
+        1000,
+      );
+      expect(await owner.workspaceDisposition(closureContract(undefined, key))).toEqual({
+        kind: "held",
+        reason: "custody-unavailable",
+      });
+    });
+  });
+  it("holds every run-bound external effect beyond the response cap while retiring exact admission and steer intents", async () => {
+    for (const kind of ["external", "admit", "steer", "malformed"] as const) {
+      const key = storeKey(),
+        ended = await closure(key);
+      await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner, state) => {
+        for (let index = 0; index < 100; index++)
+          state.storage.sql.exec(
+            "INSERT INTO plane_effects(id,body_json,offered_at) VALUES (?,?,?)",
+            `probe:unrelated-${index}`,
+            JSON.stringify({ id: `probe:unrelated-${index}`, kind: "probe", resident: `unrelated-${index}` }),
+            index,
+          );
+        const effect =
+          kind === "admit"
+            ? { id: `admit:${id}`, kind: "admit", runId: id, threadKey: ended.threadKey, request: {} }
+            : kind === "steer"
+              ? { id: `steer:${id}:1`, kind: "steer", runId: id, seq: 1, message: { text: "stored steer" } }
+              : { id: `external:${id}`, kind: "pr_open", runId: id, repo: allocation.repo, branch: allocation.ref };
+        state.storage.sql.exec(
+          "INSERT INTO plane_effects(id,body_json,offered_at) VALUES (?,?,?)",
+          effect.id,
+          kind === "malformed" ? "{" : JSON.stringify(effect),
+          1000,
+        );
+        expect(await owner.finish(id, "g1", ended)).toMatchObject({ ok: true });
+        expect(await owner.workspaceDisposition(closureContract(undefined, key)), kind).toMatchObject({
+          kind: "terminal",
+          disposition: { kind: kind === "admit" || kind === "steer" ? "scratch-custody-closed" : "retained" },
+        });
+      });
+    }
+  });
+  it("retains both custody pins through actual maintenance before and after finish", async () => {
+    for (const terminal of [false, true]) {
+      const key = storeKey(),
+        ended = await closure(key);
+      const keys = [ended.session!.key, contextThreadSessionKey(ended.threadKey)];
+      await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner) => {
+        const target = owner as unknown as {
+          workspaceCustody(row: LiveRunRow): Promise<StoredWorkspaceCustody>;
+          syncRangePins(keys: readonly string[]): Promise<void>;
+        };
+        if (terminal) await owner.finish(id, "g1", ended);
+        else await target.workspaceCustody((await owner.listLive())[0]);
+        for (const sessionKey of keys)
+          await runInDurableObject(env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(sessionKey)), async (log) => {
+            const pins = (log as unknown as { rangePins(): Record<string, unknown> }).rangePins();
+            expect(pins[id]).toBeDefined();
+          });
+        await target.syncRangePins(keys);
+        for (const sessionKey of keys)
+          await runInDurableObject(env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(sessionKey)), async (log) => {
+            const pins = (log as unknown as { rangePins(): Record<string, unknown> }).rangePins();
+            expect(
+              pins[id],
+              terminal ? "terminal custody pin was pruned" : "live pre-finish custody pin was pruned",
+            ).toBeDefined();
+          });
+      });
+    }
+  });
+  it("advances same-range protection and atomically declines stale or legacy pin pruning", async () => {
+    const key = storeKey(),
+      ended = await closure(key);
+    const log = env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(ended.session!.key));
+    const before = (await log.custodyPinRevision())!;
+    const first = await log.protectCustodyRanges(id, [{ from: 0, to: 1 }]);
+    const beforeReacquisition = (await log.custodyPinRevision())!;
+    const second = await log.protectCustodyRanges(id, [{ from: 0, to: 1 }]);
+    expect(first.ok && second.ok && second.revision > first.revision).toBe(true);
+    expect(await log.retainRangePinsIfRevision(before, [])).toMatchObject({ ok: false, reason: "revision-changed" });
+    expect(await log.retainRangePinsIfRevision(beforeReacquisition, [])).toMatchObject({
+      ok: false,
+      reason: "revision-changed",
+    });
+    expect(await log.retainRangePins([])).toMatchObject({ ok: false, reason: "custody-protected" });
+    const current = (await log.custodyPinRevision())!;
+    expect(await log.retainRangePinsIfRevision(current, [id])).toMatchObject({
+      ok: true,
+      revision: current.revision + 1,
+    });
+    await runInDurableObject(log, async (owner) => {
+      expect((owner as unknown as { rangePins(): Record<string, unknown> }).rangePins()[id]).toEqual([
+        { from: 0, to: 1 },
+      ]);
+    });
+    const ordinary = env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(contextThreadSessionKey(ended.threadKey)));
+    const unguarded = (await ordinary.custodyPinRevision())!;
+    expect((await ordinary.protectRanges("ordinary-context", [{ from: 0, to: 0 }])).ok).toBe(true);
+    expect(await ordinary.custodyPinRevision()).toEqual({
+      version: 1,
+      revision: unguarded.revision + 1,
+      guarded: false,
+    });
+    expect(await ordinary.retainRangePins([])).toMatchObject({ ok: true });
+  });
+  it("refuses a delayed prune when successor allocation protection arrives after holder selection", async () => {
+    const key = storeKey(),
+      ended = await closure(key);
+    await post("/runs/finish", { storeKey: key, runId: id, gen: "g1", record: ended });
+    const reportKey = contextThreadSessionKey(ended.threadKey),
+      successor = "eeeeeeee-eeee-4eee-eeee-eeeeeeeeeeee";
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner) => {
+      const target = owner as unknown as {
+        env: { SESSION_LOGS: typeof env.SESSION_LOGS };
+        syncRangePins(keys: readonly string[]): Promise<void>;
+      };
+      const original = target.env.SESSION_LOGS;
+      let interleaved = false,
+        refused = false;
+      target.env = {
+        ...target.env,
+        SESSION_LOGS: new Proxy(original, {
+          get(namespace, property) {
+            if (property !== "get") {
+              const value = Reflect.get(namespace, property);
+              return typeof value === "function"
+                ? (...args: unknown[]) => Reflect.apply(value, namespace, args)
+                : value;
+            }
+            return (name: DurableObjectId) => {
+              const log = original.get(name);
+              return new Proxy(log, {
+                get(receiver, method) {
+                  if (method !== "retainRangePinsIfRevision") {
+                    const value = Reflect.get(receiver, method);
+                    return typeof value === "function"
+                      ? (...args: unknown[]) => Reflect.apply(value, receiver, args)
+                      : value;
+                  }
+                  return async (
+                    revision: Awaited<ReturnType<SessionLogDO["custodyPinRevision"]>>,
+                    holders: readonly string[],
+                  ) => {
+                    const contract = {
+                      ...closureContract(undefined, key),
+                      runId: successor,
+                      allocationKey: `review:${successor}`,
+                    };
+                    const req = request(key, contract).run;
+                    req.runId = successor;
+                    req.threadKey = ended.threadKey;
+                    req.meta.threadKey = ended.threadKey;
+                    expect(await owner.claim(req, 1000)).toMatchObject({ ok: true });
+                    expect((await log.protectCustodyRanges(successor, [{ from: 0, to: 0 }])).ok).toBe(true);
+                    interleaved = true;
+                    const result = await log.retainRangePinsIfRevision(revision!, holders);
+                    refused = !result.ok && result.reason === "revision-changed";
+                    return result;
+                  };
+                },
+              });
+            };
+          },
+        }),
+      };
+      await target.syncRangePins([reportKey]);
+      target.env = { ...target.env, SESSION_LOGS: original };
+      expect(interleaved && refused).toBe(true);
+    });
+    await runInDurableObject(env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(reportKey)), async (log) => {
+      expect((log as unknown as { rangePins(): Record<string, unknown> }).rangePins()[successor]).toBeDefined();
+    });
+  });
+  it("holds unknown or old receivers without unconditional fallback and preserves guarded data after reset", async () => {
+    const key = storeKey(),
+      ended = await closure(key);
+    await post("/runs/finish", { storeKey: key, runId: id, gen: "g1", record: ended });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner) => {
+      const target = owner as unknown as {
+        env: { SESSION_LOGS: typeof env.SESSION_LOGS };
+        syncRangePins(keys: readonly string[]): Promise<void>;
+      };
+      const original = target.env.SESSION_LOGS;
+      let legacy = 0;
+      target.env = {
+        ...target.env,
+        SESSION_LOGS: new Proxy(original, {
+          get(namespace, property) {
+            if (property !== "get") {
+              const value = Reflect.get(namespace, property);
+              return typeof value === "function"
+                ? (...args: unknown[]) => Reflect.apply(value, namespace, args)
+                : value;
+            }
+            return (name: DurableObjectId) =>
+              new Proxy(original.get(name), {
+                get(receiver, method) {
+                  if (method === "custodyPinRevision")
+                    return async () => {
+                      throw new Error("fixture old receiver: missing RPC");
+                    };
+                  if (method === "retainRangePins")
+                    return async () => {
+                      legacy++;
+                    };
+                  const value = Reflect.get(receiver, method);
+                  return typeof value === "function"
+                    ? (...args: unknown[]) => Reflect.apply(value, receiver, args)
+                    : value;
+                },
+              });
+          },
+        }),
+      };
+      await target.syncRangePins([ended.session!.key]);
+      target.env = { ...target.env, SESSION_LOGS: original };
+      expect(legacy).toBe(0);
+    });
+    const log = env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(ended.session!.key));
+    await runInDurableObject(log, async (_receiver, state) => {
+      state.storage.sql.exec("DELETE FROM meta WHERE key='range_pin_revision'");
+    });
+    expect(await log.custodyPinRevision()).toBeUndefined();
+    expect(
+      (await post("/runs/workspace-disposition", { storeKey: key, allocation: closureContract(undefined, key) })).data,
+    ).toEqual({ kind: "held", reason: "custody-unavailable" });
+    expect(await log.retainRangePins([])).toMatchObject({ ok: false, reason: "custody-protected" });
+  });
+  it("retains malformed pin metadata without inventing a protection or prune receipt", async () => {
+    const key = storeKey(),
+      ended = await closure(key);
+    const log = env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(ended.session!.key));
+    const unknown = JSON.stringify({ [id]: "unknown saved protection" });
+    await runInDurableObject(log, async (_receiver, state) => {
+      state.storage.sql.exec("INSERT INTO meta(key,value) VALUES ('range_pins',?)", unknown);
+    });
+    expect(await log.custodyPinRevision()).toBeUndefined();
+    expect((await log.protectCustodyRanges(id, [{ from: 0, to: 1 }])).ok).toBe(false);
+    expect((await log.retainRangePinsIfRevision({ version: 1, revision: 0, guarded: false }, [])).ok).toBe(false);
+    await runInDurableObject(log, async (_receiver, state) => {
+      expect(
+        state.storage.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key='range_pins'").one().value,
+      ).toBe(unknown);
+    });
+  });
+  it("does not retry an unknown conditional prune response and retains the acknowledged custody pins", async () => {
+    const key = storeKey(),
+      ended = await closure(key);
+    await post("/runs/finish", { storeKey: key, runId: id, gen: "g1", record: ended });
+    const reportKey = contextThreadSessionKey(ended.threadKey);
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner) => {
+      const target = owner as unknown as {
+        env: { SESSION_LOGS: typeof env.SESSION_LOGS };
+        syncRangePins(keys: readonly string[]): Promise<void>;
+      };
+      const original = target.env.SESSION_LOGS;
+      let calls = 0;
+      target.env = {
+        ...target.env,
+        SESSION_LOGS: new Proxy(original, {
+          get(namespace, property) {
+            if (property !== "get") {
+              const value = Reflect.get(namespace, property);
+              return typeof value === "function"
+                ? (...args: unknown[]) => Reflect.apply(value, namespace, args)
+                : value;
+            }
+            return (name: DurableObjectId) => {
+              const log = original.get(name);
+              return new Proxy(log, {
+                get(receiver, method) {
+                  if (method !== "retainRangePinsIfRevision") {
+                    const value = Reflect.get(receiver, method);
+                    return typeof value === "function"
+                      ? (...args: unknown[]) => Reflect.apply(value, receiver, args)
+                      : value;
+                  }
+                  return async (
+                    revision: NonNullable<Awaited<ReturnType<SessionLogDO["custodyPinRevision"]>>>,
+                    holders: readonly string[],
+                  ) => {
+                    calls++;
+                    expect((await log.retainRangePinsIfRevision(revision, holders)).ok).toBe(true);
+                    throw new Error("fixture lost conditional prune response");
+                  };
+                },
+              });
+            };
+          },
+        }),
+      };
+      await target.syncRangePins([reportKey]);
+      target.env = { ...target.env, SESSION_LOGS: original };
+      expect(calls).toBe(1);
+    });
+    await runInDurableObject(env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(reportKey)), async (log) => {
+      expect((log as unknown as { rangePins(): Record<string, unknown> }).rangePins()[id]).toBeDefined();
+    });
+  });
+  it("derives closure from actual session and step custody and holds missing writes", async () => {
+    for (const missing of [false, true]) {
+      const key = storeKey();
+      const ended = await closure(key, missing);
+      expect(
+        (await post("/runs/workspace-disposition", { storeKey: key, allocation: closureContract(undefined, key) }))
+          .data,
+      ).toEqual({
+        kind: "held",
+        reason: "live",
+      });
+      expect((await post("/runs/finish", { storeKey: key, runId: id, gen: "g1", record: ended })).status).toBe(200);
+      expect(
+        (await post("/runs/workspace-disposition", { storeKey: key, allocation: closureContract(undefined, key) }))
+          .data,
+      ).toMatchObject({
+        kind: "terminal",
+        disposition: { kind: missing ? "retained" : "scratch-custody-closed" },
+      });
+      const client = new WorkerRunLedger({
+        baseUrl: BASE,
+        token: "test-token",
+        storeKey: key,
+        fetch: (input, init) => fetchMemoryTest(String(input), init),
+      });
+      expect(await client.workspaceDisposition(closureContract(undefined, key))).toMatchObject({
+        kind: "terminal",
+        disposition: { kind: missing ? "retained" : "scratch-custody-closed" },
+      });
+      expect(
+        (
+          await post("/runs/workspace-disposition", {
+            storeKey: key,
+            allocation: { ...closureContract(undefined, key), requester: "slack:foreign" },
+          })
+        ).data,
+      ).toMatchObject({ kind: "held" });
+      expect(
+        (
+          await post("/runs/put", {
+            storeKey: key,
+            record: { ...ended, workspaceDisposition: { kind: "scratch-custody-closed" } },
+          })
+        ).status,
+      ).toBe(400);
+    }
+  });
+  it("refuses mutation of canonical execution custody during the awaited session boundary", async () => {
+    const key = storeKey(),
+      ended = await closure(key);
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner) => {
+      const live = (await owner.listLive())[0];
+      await owner.setState(id, "g1", {
+        ...live.state,
+        binding: { ...(live.state.binding as Record<string, unknown>), workspace: "/workspace/checkout" },
+      });
+      const firstControl = new AbortController(),
+        secondControl = new AbortController();
+      const checks = createCheckExecution({
+        executor: () => ({
+          execResult: async () => ({
+            stdout: "/workspace/checkout\n" + "a".repeat(40) + "\n" + "b".repeat(40) + "\n",
+            stderr: "",
+            exitCode: 0,
+            truncated: false,
+          }),
+        }),
+        workspace: () => "/workspace/checkout",
+        recordingAvailable: true,
+        owner: {
+          runId: id,
+          requester: allocation.requester,
+          threadKey: ended.threadKey,
+          repo: allocation.repo!,
+        },
+        authorizeCommand: () => true,
+        remainingMs: () => 120_000,
+        signal: firstControl.signal,
+        clock: () => 10,
+        save: async (state) => {
+          const current = (await owner.listLive())[0];
+          return (await owner.setState(id, "g1", { ...current.state, checkExecutions: state })).ok;
+        },
+      });
+      expect((await checks.run({ command: "exit 7", purpose: "verification" }, "before-await")).kind).toBe("recorded");
+      firstControl.abort();
+      const target = owner as unknown as { workspaceCustody: (row: LiveRunRow) => Promise<StoredWorkspaceCustody> };
+      const original = target.workspaceCustody.bind(owner);
+      target.workspaceCustody = async (row) => {
+        const facts = await original(row);
+        let sends = 0;
+        const next = createCheckExecution({
+          previous: (await owner.listLive())[0].state.checkExecutions,
+          executor: () => ({
+            execResult: async () => {
+              if (++sends > 1) throw new Error("fixture unknown collection");
+              return {
+                stdout: "/workspace/checkout\n" + "a".repeat(40) + "\n" + "b".repeat(40) + "\n",
+                stderr: "",
+                exitCode: 0,
+                truncated: false,
+              };
+            },
+          }),
+          workspace: () => "/workspace/checkout",
+          recordingAvailable: true,
+          owner: {
+            runId: id,
+            requester: allocation.requester,
+            threadKey: ended.threadKey,
+            repo: allocation.repo!,
+          },
+          authorizeCommand: () => true,
+          remainingMs: () => 120_000,
+          signal: secondControl.signal,
+          clock: () => 10,
+          save: async (state) => {
+            const current = (await owner.listLive())[0];
+            return (await owner.setState(id, "g1", { ...current.state, checkExecutions: state })).ok;
+          },
+        });
+        expect((await next.run({ command: "exit 8", purpose: "verification" }, "during-await")).kind).toBe("recorded");
+        secondControl.abort();
+        return facts;
+      };
+      expect(await owner.finish(id, "g1", ended)).toEqual({ ok: false, reason: "fenced" });
+      expect(await owner.workspaceDisposition(closureContract(undefined, key))).toEqual({
+        kind: "held",
+        reason: "live",
+      });
+    });
+  });
+});
 
 // Feature: docs/reference/specs/orchestration-plane.md — exact Workflow discovery and durable report obligations.
 describe("durable coordinator Workflow reconciliation", () => {
@@ -792,7 +2790,11 @@ describe("exact owner evidence for resident preservation", () => {
     expect((await post("/runs/preservation-owner", { storeKey: key, ...owner })).data.kind).toBe("live");
     const stored = await runInDurableObject(stub, async (_instance: RunHistoryDO, state) => ({
       history: state.storage.sql.exec(`SELECT run_id FROM runs WHERE run_id = ?`, runId).toArray(),
-      versions: state.storage.sql.exec(`SELECT revision FROM workspace_settlements ORDER BY revision`).toArray(),
+      versions: state.storage.sql
+        .exec(
+          `SELECT revision FROM workspace_settlements WHERE allocation_json IS NULL OR json IS NOT NULL ORDER BY revision`,
+        )
+        .toArray(),
     }));
     expect(stored.history).toEqual([]);
     expect(stored.versions).toHaveLength(20);
@@ -908,7 +2910,7 @@ describe("exact owner evidence for resident preservation", () => {
         version: 1,
         repo: "owner/name",
         branches: [{ ref: "codex/retained", pr: 7 }],
-        complete: true,
+        complete: true as const,
       };
       expect(
         (
@@ -1378,7 +3380,7 @@ describe("historical original native adoption owner CAS", () => {
             },
             terminal.startedAt,
           ),
-        ).toEqual({ ok: true });
+        ).toMatchObject({ ok: true });
         expect(await owner.finishing(id, "g1")).toEqual({ ok: true });
         expect((await owner.finish(id, "g1", terminal)).stored).toBe(true);
         const proof = await owner.prepareAdoptionAudit(unit, id);
@@ -1605,7 +3607,7 @@ describe("historical original native adoption owner CAS", () => {
           },
           terminal.startedAt,
         ),
-      ).toEqual({ ok: true });
+      ).toMatchObject({ ok: true });
       const resident = await owner.residentClaim(id, "g1", thread);
       expect(resident.ok).toBe(true);
       if (!resident.ok) throw new Error("resident fixture claim refused");
@@ -5657,7 +7659,7 @@ describe("the plane's endings and the alarm — the cause on close, /plane/recla
     const key = storeKey();
     const sent = await coordinatorDouble(key);
     const meta = { ...claimBody(key, "r1", "slack:C2:1.0").run.meta, ...TAG, restartOf: "r1" };
-    expect((await post("/runs/claim", claimBody(key, "r1", "slack:C2:1.0", "g1", { meta }))).data).toEqual({
+    expect((await post("/runs/claim", claimBody(key, "r1", "slack:C2:1.0", "g1", { meta }))).data).toMatchObject({
       ok: true,
     });
     expect(sent).toEqual([
@@ -5686,7 +7688,7 @@ describe("the plane's endings and the alarm — the cause on close, /plane/recla
           }),
         )
       ).data,
-    ).toEqual({ ok: true });
+    ).toMatchObject({ ok: true });
   });
 
   it("the alarm at a lease end offers the row and never ends a run — the row stays live and unclosed, and the owner's heartbeat re-arms the alarm to the new earliest", async () => {
@@ -6436,7 +8438,9 @@ describe("complete canonical pull ownership", () => {
     ).toBe(200);
     await runInDurableObject(stub, async (owner: RunHistoryDO, state) => {
       const expected = { ok: true, owners: [{ kind: "unit", instanceId: instance.id, unit: unit.unit }] };
-      const before = state.storage.sql.exec(`SELECT json FROM workspace_settlements`).toArray();
+      const before = state.storage.sql
+        .exec(`SELECT json FROM workspace_settlements WHERE allocation_json IS NULL OR json IS NOT NULL`)
+        .toArray();
       expect(before).toHaveLength(1);
       expect(await owner.findPullOwners({ repo: instance.repo, ref: unit.branch })).toEqual(expected);
       expect(await owner.findPullOwners({ repo: "other/repo", pr: 7 })).toEqual({ ok: true, owners: [] });
@@ -6543,7 +8547,11 @@ describe("complete canonical pull ownership", () => {
       };
       expect(await owner.compareAndReplaceUnit(mapped, ended, 8)).toEqual({ ok: true });
       expect(await owner.findPullOwners({ repo: instance.repo, ref: unit.branch })).toEqual({ ok: true, owners: [] });
-      expect(state.storage.sql.exec(`SELECT json FROM workspace_settlements`).toArray()).toEqual(before);
+      expect(
+        state.storage.sql
+          .exec(`SELECT json FROM workspace_settlements WHERE allocation_json IS NULL OR json IS NOT NULL`)
+          .toArray(),
+      ).toEqual(before);
       const evidence = state.storage.sql
         .exec<{ summary_json: string }>(`SELECT summary_json FROM runs WHERE run_id = ?`, id)
         .one();
@@ -8026,7 +10034,7 @@ describe("pull-owner source-local diagnostic provenance", () => {
             version: 1,
             repo: "acme/api",
             branches: [{ ref: "fix/provenance", sha: "a".repeat(40), pr: 7 }],
-            complete: true,
+            complete: true as const,
           },
         }),
       );

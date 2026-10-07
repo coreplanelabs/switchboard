@@ -9,10 +9,19 @@ import { UncertainStoreError } from "../storeFailure.js";
 import { storeRequestWitness } from "../storeResponse.js";
 import * as receipts from "../references/receipts.js";
 import { InMemoryRunLedger } from "./inMemory.js";
+import { WorkerRunLedger } from "../runLedgerWorker.js";
+import { PromotionPendingError } from "./promotion.js";
+import { UNKNOWN_CONTEXT_DEPENDENCIES } from "../references/contextDependencies.js";
+import { UnknownAllocationClaimError } from "./allocationAck.js";
+import { originalColdAllocation } from "./workspaceDurability.js";
+import { getAgent } from "../../agents/registry.js";
 import { sealPausedHardStop } from "./pausedStop.js";
 import type { RunLedger } from "./ledger.js";
 import type { PlaneEffect } from "../plane/decide.js";
 import { FollowUpInbox } from "../threadAdmission.js";
+import { seedContentHash } from "./seedManifest.js";
+import { sessionSeed } from "../dispatch/seed.js";
+import { turnRows } from "./transcript.js";
 import { GEN_PATTERN, TRANSCRIPT_PART_BYTES, type IntakeReceipt } from "./types.js";
 import {
   actorOfStoredRow,
@@ -146,6 +155,419 @@ const openReq = (over: Partial<OpenRunRequest> = {}): OpenRunRequest => ({
   tools: [{ name: "bash", description: "run", inputSchema: { type: "object" } }],
   seed: { messages: [user("earlier"), assistant("sure"), user("go")], budgetMs: 600_000 },
   ...over,
+});
+
+describe("original reservation promotion custody", () => {
+  function original(kind: "v2" | "null"): OpenRunRequest {
+    const req = openReq({
+      seed: {
+        messages: [user("actual original input")],
+        budgetMs: 1500000,
+        context: UNKNOWN_CONTEXT_DEPENDENCIES,
+        notepad: "",
+      },
+    });
+    req.meta = {
+      ...req.meta,
+      repo: "acme/api",
+      ref: "unit/review",
+      headSha: "a".repeat(40),
+      pr: 42,
+      readonly: true,
+      profile: { machine: "repo-resident", identity: "read", minutes: 25 },
+    };
+    if (kind === "v2")
+      req.meta.workspaceAllocation = originalColdAllocation({
+        runId: req.runId,
+        registered: getAgent("review"),
+        identity: req.meta,
+        target: { repo: "acme/api", ref: "unit/review", headSha: "a".repeat(40), pr: 42 },
+      })!;
+    return req;
+  }
+  it.each([
+    "compaction",
+    "budget-cut",
+    "policy-refusal",
+    "thinking",
+    "thinking-only",
+    "unchanged",
+    "empty-tail",
+    "over-budget",
+    "legacy-copy",
+    "no-pointer",
+    "nonempty-pointer",
+    "stale-pointer",
+    "foreign-projection",
+    "foreign-policy",
+    "foreign-thinking",
+    "legacy-projection",
+    "incomplete-source",
+  ])("confirms supported session projection while retaining the raw original: %s", async (mode) => {
+    const store = new InMemoryRunLedger(() => 10_000),
+      h = harness({ ledger: store }),
+      req = original("null");
+    const key = "task:fixture:projection";
+    const context = { version: 1 as const, status: "known" as const, revision: 0, origins: [], slack: [], mcp: [] };
+    const raw: ChatMessage[] = [user("prior request"), assistant("prior answer")];
+    if (mode === "compaction" || mode === "budget-cut" || mode === "legacy-projection")
+      raw[0].content.push({ type: "tool_result", toolUseId: "before-cut", content: "private result" });
+    if (mode === "thinking")
+      raw[1].content.unshift({ type: "thinking", thinking: "private reasoning", signature: "fixture" });
+    if (mode === "thinking-only")
+      raw[1] = { role: "assistant", content: [{ type: "redacted_thinking", data: "private reasoning" }] };
+    if (mode === "empty-tail") raw.splice(0, raw.length, assistant("no user turn"));
+    if (mode !== "no-pointer" && mode !== "legacy-copy") {
+      if (mode === "compaction") {
+        const row = turnRows(0, { compaction: { summary: "prior compacted context" } });
+        expect(await store.appendSession(key, "compaction", row.rows, context)).toMatchObject({ ok: true });
+      }
+      for (let i = 0; i < raw.length; i++) {
+        const row = turnRows(i, raw[i], {}, i === 0 ? req.meta.userId : undefined);
+        expect(await store.appendSession(key, "prior-" + i, row.rows, context)).toMatchObject({ ok: true });
+      }
+    }
+    if (mode === "legacy-projection") {
+      const claim = store.claim.bind(store);
+      store.claim = async (input, body) => {
+        const result = await claim(input, body);
+        return result.ok ? { ok: true } : result;
+      };
+    }
+    const before = await store.observeExpectedSeed(key, 0, 100);
+    const tail =
+      mode === "legacy-copy"
+        ? { from: 0, transcript: { messages: raw, turns: raw.length, complete: true as const, compactions: [] } }
+        : await store.readSessionTail(key, mode === "over-budget" ? 1 : 1000000);
+    const projected = sessionSeed({
+      tail,
+      previous: { broken: false },
+      history: [],
+      request: { text: "follow up", actor: req.meta.userId },
+      refusedRequests: mode === "policy-refusal" ? [0] : [],
+    });
+    const seed = {
+      ...projected,
+      messages: projected?.messages ?? [user("follow up")],
+      key,
+      budgetMs: 1500000,
+      context: context,
+      notepad: "",
+    };
+    if (mode === "legacy-copy") seed.log = { from: 0, turns: 0 };
+    if (mode === "stale-pointer") seed.log = { from: 0, turns: 0 };
+    if (mode === "foreign-projection") seed.messages[0] = user("forged prior request");
+    if (mode === "foreign-policy")
+      seed.messages[0] = user("(a request the model refused under its usage policy was left out here)");
+    if (mode === "foreign-thinking") seed.messages[1] = assistant("(reasoning omitted)");
+    req.seed = seed;
+    const reserved = runOf(await h.wt.reserve(req))!;
+    if (mode === "incomplete-source") {
+      const observe = store.observeExpectedSeed.bind(store);
+      store.observeExpectedSeed = async (...args) => {
+        const actual = await observe(...args);
+        return { ...actual, rows: actual.rows.filter((r) => r.idx !== 1) };
+      };
+    }
+    if (mode.startsWith("foreign-") || mode === "incomplete-source") {
+      await expect(h.wt.open({ ...req, reservation: reserved })).rejects.toMatchObject({
+        name: "PromotionPendingError",
+      });
+      if (mode.startsWith("foreign-")) expect(await store.observeExpectedSeed(key, 0, 100)).toEqual(before);
+      expect((await store.readPromotion({ runId: req.runId, gen: "gen-A" })).kind).not.toBe("confirmed");
+    } else {
+      expect((await h.wt.open({ ...req, reservation: reserved })).kind).toBe("tracked");
+      if (mode === "legacy-projection") {
+        expect((await store.readSessionTail(key, 1000000)).transcript.messages.slice(0, raw.length)).toEqual(raw);
+        await reserved.close();
+        return;
+      }
+      const actual = await store.readPromotion({ runId: req.runId, gen: "gen-A" });
+      expect(actual.kind).toBe("confirmed");
+      if (actual.kind !== "confirmed") throw new Error("original not confirmed");
+      const reused = seed.log && seed.log.from + seed.log.turns === before.next ? seed.log.turns : 0;
+      expect(actual.preparation.expectedSeed?.reusedCount).toBe(reused);
+      expect(actual.preparation.expectedSeed?.modelMessagesHash).toBe(await seedContentHash(seed.messages));
+      expect(actual.preparation.expectedSeed?.reused === undefined).toBe(reused === 0);
+      const after = await store.observeExpectedSeed(key, 0, 100);
+      expect(after.rows.filter((r) => r.idx < before.next)).toEqual(before.rows);
+      expect(after.attachments).toEqual(before.attachments);
+      const ref = {
+        storeKey: "runs:default",
+        runId: req.runId,
+        gen: "gen-A",
+        bodySha256: actual.receipt.bodySha256,
+        expectedSeedSha256: actual.receipt.expectedSeedSha256,
+      };
+      expect(await store.readExpectedSeed(key, ref)).toMatchObject({
+        kind: "verified",
+        release: { phase: "released" },
+      });
+    }
+    await reserved.close();
+  });
+  it("holds the old reserve-UA versus promote-UALICE fixture conflict without any promotion or abandonment", async () => {
+    const store = new InMemoryRunLedger(() => 10_000),
+      h = harness({ ledger: store });
+    const req = original("null");
+    req.meta.userId = "slack:UA";
+    const reserved = runOf(await h.wt.reserve(req))!,
+      saved = structuredClone(store.live.get(req.runId));
+    const promotion = structuredClone(req);
+    promotion.meta.userId = "slack:UALICE";
+    let claims = 0,
+      abandons = 0;
+    const claim = store.claim.bind(store),
+      abandon = store.abandon.bind(store);
+    store.claim = async (input, bodyJson) => {
+      claims++;
+      return claim(input, bodyJson);
+    };
+    store.abandon = async (id, gen) => {
+      abandons++;
+      return abandon(id, gen);
+    };
+    await expect(h.wt.open({ ...promotion, reservation: reserved })).rejects.toMatchObject({ name: "RefusalError" });
+    expect({ claims, abandons }).toEqual({ claims: 0, abandons: 0 });
+    expect(h.sleeps).toEqual([]);
+    expect((await store.readTranscript(req.runId)).turns).toBe(0);
+    expect(store.live.get(req.runId)).toEqual(saved);
+    expect(h.wt.liveRuns()).toEqual([reserved]);
+    await reserved.close();
+  });
+  it("refuses null-ACK actor and original target substitution before sending another claim", async () => {
+    for (const field of [
+      "userId",
+      "channelId",
+      "authenticatedAs",
+      "postedBy",
+      "repo",
+      "ref",
+      "pr",
+      "maintenanceActionId",
+    ] as const) {
+      const store = new InMemoryRunLedger(() => 10_000),
+        h = harness({ ledger: store }),
+        req = original("null");
+      const reserved = runOf(await h.wt.reserve(req))!,
+        saved = structuredClone(store.live.get(req.runId)),
+        originalClaim = store.claim.bind(store);
+      let calls = 0;
+      store.claim = async (input, bodyJson) => {
+        calls++;
+        return originalClaim(input, bodyJson);
+      };
+      const changed = structuredClone(req);
+      Object.assign(changed.meta, { [field]: field === "pr" ? 43 : "foreign" });
+      await expect(h.wt.open({ ...changed, reservation: reserved })).rejects.toThrow();
+      expect(calls).toBe(0);
+      expect(store.live.get(req.runId)).toEqual(saved);
+      expect(reserved.allocationAck).toMatchObject({ allocation: null });
+      await reserved.close();
+    }
+  });
+  it("allows a null original's observed head to move while holding a conflicting allocated head at the same original time", async () => {
+    for (const kind of ["null", "v2"] as const) {
+      const store = new InMemoryRunLedger(() => 10_000),
+        h = harness({ ledger: store }),
+        req = original(kind);
+      const reserved = runOf(await h.wt.reserve(req))!,
+        saved = structuredClone(store.live.get(req.runId));
+      const promoted = structuredClone(req);
+      promoted.meta.headSha = "b".repeat(40);
+      let claims = 0,
+        abandons = 0;
+      const claim = store.claim.bind(store),
+        abandon = store.abandon.bind(store);
+      store.claim = async (input, bodyJson) => {
+        claims++;
+        return claim(input, bodyJson);
+      };
+      store.abandon = async (id, gen) => {
+        abandons++;
+        return abandon(id, gen);
+      };
+      if (kind === "null") {
+        expect(await h.wt.open({ ...promoted, reservation: reserved })).toMatchObject({ kind: "tracked" });
+        expect(store.live.get(req.runId)).toMatchObject({
+          startedAt: req.startedAt,
+          meta: { headSha: promoted.meta.headSha },
+        });
+        expect(reserved.allocationAck).toMatchObject({ startedAt: req.startedAt, allocation: null });
+        expect(claims).toBe(1);
+      } else {
+        await expect(h.wt.open({ ...promoted, reservation: reserved })).rejects.toMatchObject({ name: "RefusalError" });
+        expect(store.live.get(req.runId)).toEqual(saved);
+        expect(claims).toBe(0);
+      }
+      expect(abandons).toBe(0);
+      expect(h.sleeps).toEqual([]);
+      await reserved.close();
+    }
+  });
+  it.each(["v2", "null"] as const)(
+    "preserves actual %s original admission after lost foreign ACK or accepted-session failure with one attempt",
+    async (kind) => {
+      for (const mode of ["lost", "missing", "foreign", "session"] as const) {
+        const store = new InMemoryRunLedger(() => 10_000),
+          h = harness({ ledger: store }),
+          req = original(kind);
+        const reserved = runOf(await h.wt.reserve(req))!,
+          ack = reserved.allocationAck,
+          originalClaim = store.claim.bind(store);
+        let calls = 0;
+        let sessions = 0;
+        if (mode !== "session") store.readPromotion = async () => ({ kind: "held", reason: "unknown" });
+        store.claimSession = async () => {
+          sessions++;
+          throw new RouteMissingError("accepted session unavailable");
+        };
+        store.claim = async (input, bodyJson) => {
+          calls++;
+          const result = await originalClaim(input, bodyJson);
+          if (mode === "lost") throw new TransientStoreError("accepted promotion reply lost");
+          if (!result.ok) return result;
+          if (mode === "session") return result;
+          return mode === "missing"
+            ? { ok: true }
+            : {
+                ok: true,
+                allocationAck: { ...result.allocationAck!, gen: "foreign" },
+              };
+        };
+        await expect(
+          h.wt.open({
+            ...req,
+            reservation: reserved,
+            seed: { messages: [user("seed")], budgetMs: 1500000, context: UNKNOWN_CONTEXT_DEPENDENCIES, notepad: "" },
+          }),
+        ).rejects.toBeInstanceOf(UnknownAllocationClaimError);
+        expect(calls).toBe(1);
+        expect(h.sleeps).toEqual([]);
+        expect(sessions).toBe(mode === "session" ? 1 : 0);
+        expect(store.live.get(req.runId)).toMatchObject({ phase: "live", startedAt: req.startedAt });
+        expect(reserved.tracked()).toBe(true);
+        expect(reserved.allocationAck).toEqual(ack);
+        expect(reserved.session).toBeUndefined();
+        expect(h.wt.liveRuns()).toEqual([reserved]);
+        await reserved.close();
+      }
+    },
+  );
+  it("keeps proven fenced and thread-live promotion refusals known without abandoning original custody", async () => {
+    for (const mode of ["fenced", "thread-live"] as const) {
+      const store = new InMemoryRunLedger(() => 10_000),
+        h = harness({ ledger: store }),
+        req = original("null");
+      const reserved = runOf(await h.wt.reserve(req))!,
+        saved = structuredClone(store.live.get(req.runId));
+      let calls = 0;
+      store.claim = async () => {
+        calls++;
+        return {
+          ok: false,
+          reason: "thread-live",
+          live: { runId: mode === "fenced" ? req.runId : "other-owner", startedAt: 1 },
+        };
+      };
+      if (mode === "fenced") expect(await h.wt.open({ ...req, reservation: reserved })).toEqual({ kind: "fenced" });
+      else await expect(h.wt.open({ ...req, reservation: reserved })).rejects.toMatchObject({ name: "RefusalError" });
+      expect(calls).toBe(1);
+      expect(h.sleeps).toEqual([]);
+      expect(store.live.get(req.runId)).toEqual(saved);
+      expect(reserved.allocationAck).toMatchObject({ allocation: null });
+      await reserved.close();
+    }
+  });
+  it("holds an acknowledged handle from another writer before any claim instead of treating it as a new run", async () => {
+    const store = new InMemoryRunLedger(() => 10_000),
+      h = harness({ ledger: store }),
+      req = original("null");
+    const reserved = runOf(await h.wt.reserve(req))!,
+      saved = structuredClone(store.live.get(req.runId));
+    const other = createLedgerWriteThrough({
+      ledger: store,
+      gen: "gen-other",
+      now: () => 10_000,
+      warn: () => {},
+      fallback: { put: async () => {}, abandoned: () => {} },
+      ...timers(),
+    });
+    let claims = 0;
+    const claim = store.claim.bind(store);
+    store.claim = async (input, bodyJson) => {
+      claims++;
+      return claim(input, bodyJson);
+    };
+    await expect(other.open({ ...req, reservation: reserved })).rejects.toMatchObject({ name: "RefusalError" });
+    expect(claims).toBe(0);
+    expect(store.live.get(req.runId)).toEqual(saved);
+    expect(h.wt.liveRuns()).toEqual([reserved]);
+    expect(other.liveRuns()).toEqual([]);
+    await reserved.close();
+  });
+
+  it("holds an ACK-only old receiver before promotion because it cannot supply durable prepare or commitment", async () => {
+    const store = new InMemoryRunLedger(() => 10_000),
+      req = original("v2");
+    let claims = 0;
+    const client = new WorkerRunLedger({
+      baseUrl: "https://older-receiver.invalid",
+      token: "fixture",
+      storeKey: "runs:fixture",
+      fetch: async (input, init) => {
+        if (!String(input).endsWith("/runs/claim")) return Response.json({ error: "unsupported" }, { status: 404 });
+        claims++;
+        const body = JSON.parse(String(init?.body));
+        return Response.json(await store.claim(body.run));
+      },
+    });
+    const h = harness({ ledger: client }),
+      reserved = runOf(await h.wt.reserve(req))!;
+    const originalRow = structuredClone(store.live.get(req.runId));
+    await expect(h.wt.open({ ...req, reservation: reserved })).rejects.toThrow();
+    expect(claims).toBe(1);
+    expect(store.live.get(req.runId)).toEqual(originalRow);
+    await reserved.close();
+  });
+
+  it.each(["reclaim", "finish", "abandon"] as const)(
+    "keeps an unconfirmed accepted original through the existing %s lifecycle boundary",
+    async (boundary) => {
+      const store = new InMemoryRunLedger(() => 10_000),
+        h = harness({ ledger: store }),
+        req = original("null");
+      const reserved = runOf(await h.wt.reserve(req))!,
+        claim = store.claim.bind(store);
+      store.readPromotion = async () => ({ kind: "held", reason: "unknown" });
+      store.claim = async (input, bodyJson) => {
+        await claim(input, bodyJson);
+        throw new TransientStoreError("accepted reply lost");
+      };
+      await expect(
+        h.wt.open({
+          ...req,
+          state: { binding: { backend: "resident", workspace: "/private/original" } },
+          reservation: reserved,
+        }),
+      ).rejects.toBeInstanceOf(UnknownAllocationClaimError);
+      const saved = structuredClone(store.live.get(req.runId));
+      if (boundary === "reclaim") {
+        await reserved.close();
+        expect(await store.reclaim("gen-RESTART", 100_000, 30_000)).toEqual([]);
+      } else if (boundary === "abandon")
+        await expect(store.abandon(req.runId, "gen-A")).rejects.toBeInstanceOf(PromotionPendingError);
+      else {
+        await expect(store.finishing(req.runId, "gen-A")).rejects.toBeInstanceOf(PromotionPendingError);
+        await expect(
+          store.finish(req.runId, "gen-A", { ...record(req.runId), startedAt: req.startedAt }),
+        ).rejects.toBeInstanceOf(PromotionPendingError);
+      }
+      expect(store.live.get(req.runId)).toEqual(saved);
+      expect(store.finished.has(req.runId)).toBe(false);
+      await reserved.close();
+    },
+  );
 });
 
 const step = (over: Partial<StepReport> = {}): StepReport => ({
@@ -960,7 +1382,7 @@ describe("open — claim and seed", () => {
     expect(row.tools.map((t) => t.name)).toEqual(["bash"]);
     // The seed lands in the thread-and-agent session log, never in a per-run object.
     expect(await ledger.readSession("slack:C1:1.0:review", 0)).toEqual({
-      complete: true,
+      complete: true as const,
       turns: 3,
       messages: [user("earlier"), assistant("sure"), user("go")],
       compactions: [],
@@ -1092,7 +1514,7 @@ describe("open — claim and seed", () => {
     const run = await openRun(wt, openReq({ seed: undefined, system: "", tools: [] }));
     expect(run?.tracked()).toBe(true);
     expect(ledger.live.get("r1")?.system).toBe("");
-    expect(await ledger.readTranscript("r1")).toMatchObject({ complete: true, turns: 0 });
+    expect(await ledger.readTranscript("r1")).toMatchObject({ complete: true as const, turns: 0 });
     expect(ledger.steps.get("r1")).toBeUndefined(); // no seed record either: a reclaim closes it
   });
 });
@@ -1100,7 +1522,7 @@ describe("open — claim and seed", () => {
 describe("reserve — the row before the prompt (item 42)", () => {
   const request = {
     channelId: "slack:C1",
-    userId: "slack:UA",
+    userId: "slack:UALICE",
     threadKey: "slack:C1:1.0",
     text: "agent:review go",
     at: 8_000,
@@ -1109,7 +1531,7 @@ describe("reserve — the row before the prompt (item 42)", () => {
     runId: "r1",
     threadKey: "slack:C1:1.0",
     startedAt: 9_000,
-    meta: { channelId: "slack:C1", userId: "slack:UA", threadKey: "slack:C1:1.0", agent: "review", request },
+    meta: { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:1.0", agent: "review", request },
     card: { channel: "C1", ts: "1.1" },
   });
 
@@ -1141,7 +1563,14 @@ describe("reserve — the row before the prompt (item 42)", () => {
   it("open with the reservation promotes it in place: the same tracked run, the prompt, tools, card and state on the row, phase live, the seed written, one heartbeat still — and the run is resumable from here", async () => {
     const { ledger, wt, t, warnings } = harness();
     const reserved = runOf(await wt.reserve(reserveReq()))!;
-    const run = await openRun(wt, openReq({ reservation: reserved, state: { checklist: [] } }));
+    const run = await openRun(
+      wt,
+      openReq({
+        reservation: reserved,
+        state: { checklist: [] },
+        meta: { ...openReq().meta, profile: { machine: "repo-resident", identity: "read", minutes: 10 } },
+      }),
+    );
     expect(run).toBe(reserved);
     expect(run?.resumable).toBe(true);
     expect(t.heartbeats()).toBe(1);
@@ -1168,7 +1597,15 @@ describe("reserve — the row before the prompt (item 42)", () => {
       await t.beat();
       expect(fenced).toBe(1);
       expect(reserved.tracked()).toBe(false);
-      expect(await openRun(wt, openReq({ reservation: reserved }))).toBeUndefined();
+      expect(
+        await openRun(
+          wt,
+          openReq({
+            reservation: reserved,
+            meta: { ...openReq().meta, profile: { machine: "repo-resident", identity: "read", minutes: 10 } },
+          }),
+        ),
+      ).toBeUndefined();
       expect((await ledger.readTranscript("r1")).turns).toBe(0);
       expect(fenced).toBe(1);
       expect(warnings.some((w) => w.includes("fenced"))).toBe(true);
@@ -1180,7 +1617,15 @@ describe("reserve — the row before the prompt (item 42)", () => {
       const reserved = runOf(await wt.reserve({ ...reserveReq(), onFenced: () => fenced++ }))!;
       ledger.live.get("r1")!.leaseUntil = 0;
       await ledger.reclaim("gen-B", 10_000, 30_000);
-      expect(await openRun(wt, openReq({ reservation: reserved }))).toBeUndefined();
+      expect(
+        await openRun(
+          wt,
+          openReq({
+            reservation: reserved,
+            meta: { ...openReq().meta, profile: { machine: "repo-resident", identity: "read", minutes: 10 } },
+          }),
+        ),
+      ).toBeUndefined();
       expect(fenced).toBe(1);
       expect(reserved.tracked()).toBe(false);
       expect((await ledger.readTranscript("r1")).turns).toBe(0);
@@ -1198,7 +1643,8 @@ describe("reserve — the row before the prompt (item 42)", () => {
         claim: async (req) => {
           if (!reservationDone) {
             reservationDone = true;
-            return inner.claim(req);
+            const result = await inner.claim(req);
+            return result.ok ? { ok: true } : result;
           }
           throw new TransientStoreError("socket hang up");
         },
@@ -1233,7 +1679,10 @@ describe("reserve — the row before the prompt (item 42)", () => {
       const h = harness({
         ledger: overriding(inner, {
           claim: async (req) => {
-            if (req.phase === "attaching") return inner.claim(req);
+            if (req.phase === "attaching") {
+              const result = await inner.claim(req);
+              return result.ok ? { ok: true } : result;
+            }
             if (failure === "missing routes") throw new RouteMissingError("promotion route unavailable");
             throw new TransientStoreError("promotion unavailable");
           },
@@ -1272,7 +1721,7 @@ describe("reserve — the row before the prompt (item 42)", () => {
           if (req.runId === "r1") reservationDone = true;
           const result = await inner.claim(req);
           claims.push(`${req.runId} ${result.ok ? "ok" : result.reason}`);
-          return result;
+          return result.ok ? { ok: true } : result;
         },
         abandon: async (runId, gen) => {
           if (abandonFailures-- > 0) throw new TransientStoreError("run ledger /runs/abandon: HTTP 503");
