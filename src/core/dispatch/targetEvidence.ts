@@ -100,9 +100,12 @@ function authoredSpan(text: string, quote: string): boolean {
   return completeSpan(addressable, quote);
 }
 
+export type PrTargetFailure = "invalid_shape" | "invalid_identifier" | "not_requester_authored" | "identity_mismatch";
+export type PrTargetCheck = { ok: true; evidence: PrTargetEvidence } | { ok: false; reason: PrTargetFailure };
+
 /** A model's target is usable only when the same actor authored the complete
  *  quoted identity and it resolves to the same PR and repository. */
-export function verifyPrTargetEvidence(
+export function inspectPrTargetEvidence(
   raw: unknown,
   context: {
     requestText: string;
@@ -110,8 +113,8 @@ export function verifyPrTargetEvidence(
     tail?: readonly { actor?: string; text: string }[];
     repo?: string;
   },
-): PrTargetEvidence | undefined {
-  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+): PrTargetCheck {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, reason: "invalid_shape" };
   const value = raw as Record<string, unknown>;
   if (
     typeof value.number !== "number" ||
@@ -123,16 +126,26 @@ export function verifyPrTargetEvidence(
     value.quote.length > 512 ||
     value.quote.trim() !== value.quote
   )
-    return undefined;
+    return { ok: false, reason: "invalid_shape" };
   const quote = value.quote;
+  const target = quotedPr(quote);
+  if (target === undefined) return { ok: false, reason: "invalid_identifier" };
   const authored =
     value.source === "request"
       ? authoredSpan(context.requestText, quote)
       : context.requesterId !== undefined &&
         context.tail?.some((turn) => turn.actor === context.requesterId && authoredSpan(turn.text, quote)) === true;
-  if (!authored) return undefined;
-  const target = quotedPr(quote);
-  if (target === undefined || target.number !== value.number) return undefined;
-  if (target.repo !== undefined && context.repo?.toLowerCase() !== target.repo) return undefined;
-  return { number: target.number, source: value.source, quote };
+  if (!authored) return { ok: false, reason: "not_requester_authored" };
+  if (target.number !== value.number || (target.repo !== undefined && context.repo?.toLowerCase() !== target.repo))
+    return { ok: false, reason: "identity_mismatch" };
+  return { ok: true, evidence: { number: target.number, source: value.source, quote } };
+}
+
+/** Compatibility projection: diagnostics never enlarge the admitted target set. */
+export function verifyPrTargetEvidence(
+  raw: unknown,
+  context: Parameters<typeof inspectPrTargetEvidence>[1],
+): PrTargetEvidence | undefined {
+  const result = inspectPrTargetEvidence(raw, context);
+  return result.ok ? result.evidence : undefined;
 }

@@ -1766,6 +1766,120 @@ channels:
     expect(operatorTools(turn).map((t) => t.name)).toContain("repo_list");
   });
 
+  it("repairs a context-only PR proposal without turning a correction's issue into PR authority", async () => {
+    const requesterId = "slack:UPILOT";
+    const text = "Fix it.";
+    const prTarget = { number: 7, source: "thread", quote: "https://github.com/acme/old/pull/7" };
+    const model = vi.fn<RouteModel>(async (prompt) => {
+      const repair = prompt.retries?.at(-1)?.violation ?? "";
+      return repair.includes("not authored by this requester")
+        ? {
+            tool: OPERATOR_BIND_TOOL,
+            input: {
+              preset: "ship",
+              shipEntry: "work_from_thread",
+              repo: "acme/api",
+              prTarget: null,
+              reason: "Correct the original issue.",
+            },
+          }
+        : {
+            tool: OPERATOR_BIND_TOOL,
+            input: { preset: "review", repo: "acme/old", prTarget, reason: "Review the historical PR." },
+          };
+    });
+    const answer = await runOperator(
+      input({
+        text,
+        requesterId,
+        requesterTarget: {
+          repo: "acme/api",
+          issue: "acme/api#42",
+          provenance: "Investigate https://github.com/acme/api/issues/42",
+        },
+        projection: projectionOf(["review", "ship"]),
+        tail: [
+          {
+            actor: requesterId,
+            text: "user: Investigate https://github.com/acme/api/issues/42 and explain the failure.",
+          },
+          {
+            actor: "slack:UBOT",
+            text: "assistant: Issue 42 is unresolved; https://github.com/acme/old/pull/7 is historical context.",
+          },
+        ],
+      }),
+      model,
+    );
+    expect(model).toHaveBeenCalledTimes(2);
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ repo: "acme/api", repoSource: "thread", shipEntry: "work_from_thread", line: "agent:ship Fix it." }],
+    });
+    if (answer.decision.kind !== "binds") throw new Error("expected the original correction");
+    expect(answer.decision.binds[0]).not.toHaveProperty("prTarget");
+    expect(model.mock.calls[1]![0].retries?.at(-1)?.violation).toContain("context cannot establish a PR target");
+    expect(answer.attempts?.[0]?.violation).toContain("pr_target:not_requester_authored:");
+  });
+
+  it("malformed PR identity repair reconsiders work without normalizing the supplied quote", async () => {
+    const text = "Correct the issue discussed above.";
+    const model = vi.fn<RouteModel>(async (prompt) => {
+      const repair = prompt.retries?.at(-1)?.violation ?? "";
+      return repair.includes("pr_target:invalid_identifier:") && repair.includes("non-review work uses prTarget null")
+        ? {
+            tool: OPERATOR_BIND_TOOL,
+            input: {
+              preset: "ship",
+              shipEntry: "work_from_thread",
+              repo: "acme/api",
+              prTarget: null,
+              reason: "Correct the original issue.",
+            },
+          }
+        : {
+            tool: OPERATOR_BIND_TOOL,
+            input: {
+              preset: "review",
+              repo: "acme/api",
+              prTarget: {
+                number: 42,
+                source: "thread",
+                quote: "https://github.com/acme/api/issues/42 and explain the failure",
+              },
+              reason: "Inspect the issue as a PR.",
+            },
+          };
+    });
+    const answer = await runOperator(
+      input({
+        text,
+        requesterId: "slack:UPILOT",
+        requesterTarget: {
+          repo: "acme/api",
+          issue: "acme/api#42",
+          provenance: "Investigate https://github.com/acme/api/issues/42",
+        },
+        projection: projectionOf(["review", "ship"]),
+        tail: [
+          {
+            actor: "slack:UPILOT",
+            text: "user: Investigate https://github.com/acme/api/issues/42 and explain the failure.",
+          },
+        ],
+      }),
+      model,
+    );
+    expect(model).toHaveBeenCalledTimes(2);
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ repo: "acme/api", repoSource: "thread", shipEntry: "work_from_thread", line: `agent:ship ${text}` }],
+    });
+    if (answer.decision.kind !== "binds") throw new Error("expected original work");
+    expect(answer.decision.binds[0]).not.toHaveProperty("prTarget");
+    expect(answer.attempts?.[0]?.violation).toContain("pr_target:invalid_identifier:");
+  });
+
   it("repairs a PR quote that includes adjacent head context", async () => {
     const requestText =
       "agent:review review https://github.com/acme/api/pull/7 at head 1111111111111111111111111111111111111111. Focus on the Door boundary.";

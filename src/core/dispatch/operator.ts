@@ -81,7 +81,12 @@ import {
   type RepositoryBriefApi,
   type RepositoryBriefContext,
 } from "./repositoryBriefs.js";
-import { prUrlIdentity, verifyPrTargetEvidence, type PrTargetEvidence } from "./targetEvidence.js";
+import {
+  prUrlIdentity,
+  inspectPrTargetEvidence,
+  verifyPrTargetEvidence,
+  type PrTargetEvidence,
+} from "./targetEvidence.js";
 import { requesterTargetText, requesterUrlText, requesterUrlWords } from "./requesterText.js";
 import { barePrNumberOf, explicitPrOf, explicitRepoOf, type ResidentSlugs } from "../repoContext.js";
 import { parseSlug } from "../residentAdmin.js";
@@ -1455,21 +1460,27 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
     const suppliedPrTarget = reviewsPr && prTarget !== null ? prTarget : undefined;
     if (reviewsPr && suppliedPrTarget === undefined)
       return { kind: "violation", violation: "a PR target is required for review; ask for the PR" };
-    const verifiedPrTarget =
+    const targetCheck =
       suppliedPrTarget === undefined
         ? undefined
-        : verifyPrTargetEvidence(suppliedPrTarget, {
+        : inspectPrTargetEvidence(suppliedPrTarget, {
             requestText: ctx.requestText,
             ...(ctx.requesterId !== undefined ? { requesterId: ctx.requesterId } : {}),
             ...(ctx.tail !== undefined ? { tail: ctx.tail } : {}),
             ...(repository !== undefined ? { repo: repository } : {}),
           });
-    if (suppliedPrTarget !== undefined && verifiedPrTarget === undefined)
-      return {
-        kind: "violation",
-        violation:
-          "the PR target quote must be the exact authored PR identifier alone, without adjacent constraints or task text, matching its number and repository",
-      };
+    if (targetCheck?.ok === false) {
+      const violation =
+        targetCheck.reason === "not_requester_authored"
+          ? "the proposed PR target identifier was not authored by this requester; assistant or foreign-actor context cannot establish a PR target. Same-requester authored thread identifiers remain valid. Reconsider the current request and its requester-authored context. Keep the actual asked work; use prTarget null for non-review work, or ask for the PR when a review has no authored target. Do not copy or invent a context quote"
+          : targetCheck.reason === "identity_mismatch"
+            ? "the authored PR target identifier does not match the proposed repository or PR number; preserve the original identifier and resolve its matching typed identity, never relabel it"
+            : targetCheck.reason === "invalid_shape"
+              ? "prTarget needs a positive PR number, request|thread source and one exact nonempty identifier quote; null is for non-review work. An issue checkpoint is not a PR target"
+              : "the PR target quote is not one complete PR identifier; it may include an issue, adjacent constraints or task text. Use the exact authored PR identifier alone, never trim, normalize or invent it. Reconsider the actual request: non-review work uses prTarget null; a requested review needs an exact requester-authored PR target or an ask";
+      return { kind: "violation", violation: `pr_target:${targetCheck.reason}: ${violation}` };
+    }
+    const verifiedPrTarget = targetCheck?.ok ? targetCheck.evidence : undefined;
     if (verifiedPrTarget !== undefined && repository === undefined)
       return { kind: "violation", violation: "bind the PR target's repository as a typed repo" };
     const words = stripDirectiveHead(ctx.requestText, selectedPreset);
