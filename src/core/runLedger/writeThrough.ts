@@ -3,7 +3,7 @@ import { PromotionPendingError, PromotionIdentityRefusal } from "./promotion.js"
 import { sourceSeedReferenceMatches, type SourceSeedReference } from "./seedVerification.js";
 import { UNKNOWN_CONTEXT_DEPENDENCIES } from "../references/contextDependencies.js";
 import { sameWorkspaceAllocation } from "./workspaceDurability.js";
-import { allocationAckOf, UnknownAllocationClaimError } from "./allocationAck.js";
+import { allocationAckOf, UnknownAllocationClaimError, type OriginalPromotionDiagnosis } from "./allocationAck.js";
 import { RefusalError, refusalOf } from "../refusal.js";
 import type { OperationTarget } from "../repoContext.js";
 import type { WorkspaceAllocationAck } from "./types.js";
@@ -2449,7 +2449,25 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       bodySha256: built.manifest.bodySha256,
       expectedSeedSha256: built.digest,
     };
-    const read = () => ledger.readPromotion!({ runId: request.runId, gen, bodySha256: reference.bodySha256 });
+    let phase: OriginalPromotionDiagnosis["phase"] = "prepare";
+    let operation: OriginalPromotionDiagnosis["operation"] = "write";
+    let observedFailure: OriginalPromotionDiagnosis | undefined;
+    const reasonOf = (error: unknown): OriginalPromotionDiagnosis["reason"] =>
+      error instanceof UncertainStoreError
+        ? "unknown"
+        : error instanceof RouteMissingError
+          ? "unsupported"
+          : error instanceof TransientStoreError
+            ? "transient"
+            : error instanceof PermanentStoreError
+              ? "invalid"
+              : "unknown";
+    const unknown = (cause: unknown, reason = reasonOf(cause)) =>
+      new UnknownAllocationClaimError(cause, observedFailure ?? { phase, operation, reason });
+    const read = () => {
+      operation = "read";
+      return ledger.readPromotion!({ runId: request.runId, gen, bodySha256: reference.bodySha256 });
+    };
     const exact = (value: Awaited<ReturnType<typeof read>>) =>
       value.kind !== "held" &&
       value.preparation.bodyJson === bodyJson &&
@@ -2470,13 +2488,16 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         const actual = await read();
         if (!exact(actual) || actual.kind !== "prepared") return hold();
       }
+      phase = "claim";
+      operation = "write";
       let result: Awaited<ReturnType<RunLedger["claim"]>> | undefined;
       try {
         result = await ledger.claim(request, bodyJson);
-      } catch {
+      } catch (error) {
+        observedFailure = { phase, operation, reason: reasonOf(error) };
         const actual = await read();
         if (!exact(actual) || actual.kind !== "committed")
-          throw new UnknownAllocationClaimError("the original claim remains unconfirmed");
+          throw unknown("the original claim remains unconfirmed", actual.kind === "held" ? actual.reason : "mismatch");
         result = { ok: true, allocationAck: actual.allocationAck, promotionCommit: actual.receipt };
       }
       reserved.assertOriginalPromotionActive();
@@ -2490,7 +2511,10 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       }
       const actualCommit = await read();
       if (!exact(actualCommit) || actualCommit.kind !== "committed")
-        throw new UnknownAllocationClaimError("the original claim remains unconfirmed");
+        throw unknown(
+          "the original claim remains unconfirmed",
+          actualCommit.kind === "held" ? actualCommit.reason : "mismatch",
+        );
       const ack = allocationAckOf(actualCommit.allocationAck, request);
       if (
         !ack ||
@@ -2498,32 +2522,46 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           ? ack.allocation !== null
           : !sameWorkspaceAllocation(originalAck.allocation, ack.allocation))
       )
-        throw new UnknownAllocationClaimError("the original allocation acknowledgment is unavailable");
+        throw unknown("the original allocation acknowledgment is unavailable", "mismatch");
+      observedFailure = undefined;
+      phase = "source-owner";
+      operation = "write";
       try {
         await ledger.claimSession(key, req.runId, gen);
-      } catch {
+      } catch (error) {
+        observedFailure = { phase, operation, reason: reasonOf(error) };
+        operation = "read";
         const actual = await ledger.observeExpectedSeed(key, from, built.manifest.through);
         if (actual.owner?.runId !== req.runId || actual.owner.gen !== gen)
-          throw new UnknownAllocationClaimError("the original source owner is unconfirmed");
+          throw unknown("the original source owner is unconfirmed", "owner");
       }
+      observedFailure = undefined;
       reserved.assertOriginalPromotionActive();
+      phase = "source-seed";
+      operation = "write";
       let seedUnknown: unknown;
       try {
         await reserved.seedOriginal(input, session, notes, sources);
       } catch (error) {
         if (error instanceof PromotionPendingError) throw error;
         seedUnknown = error;
+        observedFailure = { phase, operation, reason: reasonOf(error) };
       }
       reserved.assertOriginalPromotionActive();
+      phase = "source-verification";
+      operation = "write";
       let verified: Awaited<ReturnType<NonNullable<RunLedger["verifyExpectedSeed"]>>> = {
         kind: "held",
         reason: "unknown",
       };
       try {
         verified = await ledger.verifyExpectedSeed(key, reference);
-      } catch {
+        if (verified.kind === "held") observedFailure ??= { phase, operation, reason: verified.reason };
+      } catch (error) {
+        observedFailure ??= { phase, operation, reason: reasonOf(error) };
         /* Reconcile the original, never repeat the mutation. */
       }
+      operation = "read";
       const actualSource = await ledger.readExpectedSeed(key, reference);
       if (
         (verified.kind !== "verified" && actualSource.kind !== "verified") ||
@@ -2531,11 +2569,19 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         actualSource.release ||
         !sourceSeedReferenceMatches(actualSource.receipt, reference, key)
       )
-        throw new UnknownAllocationClaimError(seedUnknown ?? "the original source is unconfirmed");
+        throw unknown(
+          seedUnknown ?? "the original source is unconfirmed",
+          actualSource.kind === "held" ? actualSource.reason : "mismatch",
+        );
+      observedFailure = undefined;
       reserved.assertOriginalPromotionActive();
+      phase = "confirmation";
+      operation = "write";
       try {
-        await ledger.confirmPromotion(reference);
-      } catch {
+        const confirmation = await ledger.confirmPromotion(reference);
+        if (confirmation.kind === "held") observedFailure = { phase, operation, reason: confirmation.reason };
+      } catch (error) {
+        observedFailure = { phase, operation, reason: reasonOf(error) };
         /* Exact canonical read resolves a lost reply. */
       }
       const confirmed = await read();
@@ -2544,13 +2590,22 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         confirmed.kind !== "confirmed" ||
         !sourceSeedReferenceMatches(confirmed.receipt.source, reference, key)
       )
-        throw new UnknownAllocationClaimError("the original seed confirmation is unknown");
+        throw unknown(
+          "the original seed confirmation is unknown",
+          confirmed.kind === "held" ? confirmed.reason : "mismatch",
+        );
+      observedFailure = undefined;
       reserved.assertOriginalPromotionActive();
+      phase = "release";
+      operation = "write";
       try {
-        await ledger.releaseExpectedSeed(key, reference);
-      } catch {
+        const release = await ledger.releaseExpectedSeed(key, reference);
+        if (release.kind === "held") observedFailure = { phase, operation, reason: release.reason };
+      } catch (error) {
+        observedFailure = { phase, operation, reason: reasonOf(error) };
         /* Exact own release read resolves a lost reply. */
       }
+      operation = "read";
       const released = await ledger.readExpectedSeed(key, reference);
       const current = await read();
       if (
@@ -2561,7 +2616,10 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         current.kind !== "confirmed" ||
         JSON.stringify(released.release.confirmation) !== JSON.stringify(current.receipt)
       )
-        throw new UnknownAllocationClaimError("the original release remains unconfirmed");
+        throw unknown(
+          "the original release remains unconfirmed",
+          released.kind === "held" ? released.reason : current.kind === "held" ? current.reason : "mismatch",
+        );
       reserved.assertOriginalPromotionActive();
       reserved.bindAllocationAck(ack);
       reserved.adoptConfirmedOriginal(input, session, notes, context);
@@ -2574,7 +2632,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         error instanceof PromotionIdentityRefusal
       )
         throw error;
-      throw new UnknownAllocationClaimError(error);
+      throw unknown(error);
     }
   }
 
