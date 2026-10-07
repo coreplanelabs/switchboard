@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.289.5](https://github.com/coreplanelabs/switchboard/compare/v1.289.4...v1.289.5) (2026-10-07)
+
+
+### Bug fixes
+
+* **dispatcher:** explain rejected PR target evidence ([#2832](https://github.com/coreplanelabs/switchboard/issues/2832)) ([389f0d3](https://github.com/coreplanelabs/switchboard/commit/389f0d3196aa74e44ccf78b139d81570c24dd02d))
+
 ## [1.289.4](https://github.com/coreplanelabs/switchboard/compare/v1.289.3...v1.289.4) (2026-10-07)
 
 
