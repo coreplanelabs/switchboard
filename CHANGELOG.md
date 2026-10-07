@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.289.10](https://github.com/coreplanelabs/switchboard/compare/v1.289.9...v1.289.10) (2026-10-07)
+
+
+### Bug fixes
+
+* **resident:** recognize acknowledged retained run owners ([#2845](https://github.com/coreplanelabs/switchboard/issues/2845)) ([61d22bd](https://github.com/coreplanelabs/switchboard/commit/61d22bdb47908b58e143175ff06d5b2589c5686a))
+* **runs:** isolate rejected archives and diagnose state failures ([#2847](https://github.com/coreplanelabs/switchboard/issues/2847)) ([427139a](https://github.com/coreplanelabs/switchboard/commit/427139a2099445c8b5b87497c82015f56622d5dc))
+
 ## [1.289.9](https://github.com/coreplanelabs/switchboard/compare/v1.289.8...v1.289.9) (2026-10-07)
 
 
