@@ -2383,6 +2383,7 @@ export async function runOperator(
     ...(input.providers !== undefined ? { providers: input.providers } : {}),
     ...(input.catalogueProviders !== undefined ? { catalogueProviders: input.catalogueProviders } : {}),
   };
+  const initialCommands = ctx.commands;
   // The answers' size, summed over the attempts: the replay's token rows read
   // the whole turn's estimate (three characters a token, as ever).
   let chars = 0;
@@ -2634,7 +2635,13 @@ export async function runOperator(
                 ? turn.violation
                 : "";
         attempts.push({ outcome: "violation", violation });
-        if (reads >= OPERATOR_READS_MAX || violations >= STRUCTURED_RETRIES_MAX)
+        // Read exhaustion still permits bounded action repair. A command already
+        // withdrawn by fulfillment cannot spend that repair after reads are gone.
+        const withdrawnCommand =
+          typeof answer !== "string" &&
+          initialCommands.some((command) => command.tool.name === answer.tool) &&
+          !ctx.commands.some((command) => command.tool.name === answer.tool);
+        if ((reads >= OPERATOR_READS_MAX && withdrawnCommand) || violations >= STRUCTURED_RETRIES_MAX)
           return answered({ kind: "non_decision", reason: tidy(violation) });
         violations++;
         turns.push({ answer: answerText, violation: reAskTurn("a decision", "offered", violation) });

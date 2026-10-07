@@ -56,6 +56,72 @@ const work: RouteToolCall = {
   },
 };
 
+describe("action repair after read exhaustion", () => {
+  const request: OperatorInput = {
+    text: "agent:review review https://github.com/acme/api/pull/7 at head 1111111111111111111111111111111111111111. Focus on the Door boundary.",
+    projection,
+    tail: [],
+  };
+  const review: RouteToolCall = {
+    tool: OPERATOR_BIND_TOOL,
+    input: {
+      preset: "review",
+      repo: "acme/api",
+      prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
+      reason: "Review the requested PR at the requested head.",
+    },
+  };
+
+  it.each([
+    { tool: OPERATOR_READ_TOOLS.repositoryBrief, input: { repo: "acme/api" } },
+    { tool: "unoffered_action", input: {} },
+  ])("four helpers then $tool still allow a bounded valid action repair", async (extra) => {
+    const read = vi.fn(async () => undefined);
+    const replies = [
+      ...Array.from({ length: 4 }, () => ({
+        tool: OPERATOR_READ_TOOLS.repositoryBrief,
+        input: { repo: "acme/api" },
+      })),
+      extra,
+      review,
+    ];
+    const model = vi.fn<RouteModel>(async () => replies.shift()!);
+    const answer = await runOperator(
+      { ...request, repositoryBriefs: { status: "available", catalog: [], read } },
+      model,
+    );
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [
+        { repo: "acme/api", prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" } },
+      ],
+    });
+    if (answer.decision.kind !== "binds") throw new Error("expected the authored review");
+    expect(answer.decision.binds[0]!.line).toContain("1111111111111111111111111111111111111111");
+    expect(read).toHaveBeenCalledTimes(4);
+    expect(model).toHaveBeenCalledTimes(6);
+    expect(model.mock.calls[5]![0].user).toContain(request.text);
+    expect(model.mock.calls[5]![0].retries).toHaveLength(5);
+    expect(model.mock.calls.every(([prompt]) => prompt.tool.name !== VERIFY_TOOL_NAME)).toBe(true);
+  });
+
+  it("extra helpers spend only the existing structural repair slots and never execute a fifth read", async () => {
+    const read = vi.fn(async () => undefined);
+    const model = vi.fn<RouteModel>(async () => ({
+      tool: OPERATOR_READ_TOOLS.repositoryBrief,
+      input: { repo: "acme/api" },
+    }));
+    const answer = await runOperator(
+      { ...request, repositoryBriefs: { status: "available", catalog: [], read } },
+      model,
+    );
+    expect(answer.decision.kind).toBe("non_decision");
+    expect(read).toHaveBeenCalledTimes(4);
+    expect(model).toHaveBeenCalledTimes(7); // Four reads, one violation, two existing repairs.
+    expect(answer.attempts).toHaveLength(3);
+  });
+});
+
 // These models script semantic verdicts; they prove the boundary, not live model accuracy.
 describe("terminal command fulfillment", () => {
   it("a known rejected argument-free command is withdrawn from the same request's repair offer", async () => {
