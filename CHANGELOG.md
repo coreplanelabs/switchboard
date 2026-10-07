@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.289.6](https://github.com/coreplanelabs/switchboard/compare/v1.289.5...v1.289.6) (2026-10-07)
+
+
+### Bug fixes
+
+* **runs:** report held state writes without internal errors ([#2834](https://github.com/coreplanelabs/switchboard/issues/2834)) ([4b3b4d2](https://github.com/coreplanelabs/switchboard/commit/4b3b4d2fcc15dcb05104b5c118e2df9b4476beb3))
+
 ## [1.289.5](https://github.com/coreplanelabs/switchboard/compare/v1.289.4...v1.289.5) (2026-10-07)
 
 
