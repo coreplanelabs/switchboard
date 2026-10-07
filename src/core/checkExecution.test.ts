@@ -1,6 +1,8 @@
 import { createLedgerWriteThrough } from "./runLedger/writeThrough.js";
 import { InMemoryRunStore } from "./runStore.js";
-import { UncertainStoreError } from "./storeFailure.js";
+import { WorkerRunLedger } from "./runLedgerWorker.js";
+import type { RunRecord } from "./runRecord.js";
+import { analyzeRunFriction } from "./runFriction.js";
 import { storeRequestWitness } from "./storeResponse.js";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -544,21 +546,43 @@ describe("recorded checks with uncertain canonical ACK", () => {
     const inner = new InMemoryRunLedger(() => 100);
     const writes: CheckExecutionState[] = [];
     let lost = false;
+    let lostRequestDigest: string | undefined;
+    const wire = new WorkerRunLedger({
+      baseUrl: "https://state.invalid",
+      token: "fixture",
+      storeKey: "runs:fixture",
+      fetch: async (url, init) => {
+        const body = JSON.parse(String(init?.body));
+        expect(body.storeKey).toBe("runs:fixture");
+        const path = new URL(String(url)).pathname;
+        if (path === "/runs/state") {
+          const checks = body.state.checkExecutions as CheckExecutionState | undefined;
+          if (checks) writes.push(structuredClone(checks));
+          const outcome = checks?.receipts.at(-1)?.outcome.kind;
+          if (!lost && outcome === (phase === "intent" ? "pending" : "completed")) {
+            lost = true;
+            lostRequestDigest = (await storeRequestWitness(path, String(init?.body))).digest;
+            if (committed) expect((await inner.setState(body.runId, body.gen, body.state)).ok).toBe(true);
+            return new Response("reply unavailable", { status: 500 });
+          }
+          const result = await inner.setState(body.runId, body.gen, body.state);
+          return Response.json(result, { status: result.ok ? 200 : 409 });
+        }
+        if (path === "/runs/inbox/read") {
+          expect(body.peek).toBe(true);
+          return Response.json(await inner.peekInbox(body.runId, body.gen, body.afterSeq));
+        }
+        if (path === "/runs/live-state") {
+          return Response.json(await inner.assignLiveState(body.runId, body.gen, body.assignment));
+        }
+        throw new Error(`unexpected fixture route ${path}`);
+      },
+    });
     const ledger = new Proxy(inner, {
       get(target, key) {
-        if (key === "setState")
-          return async (runId: string, gen: string, state: Record<string, unknown>) => {
-            const checks = state.checkExecutions as CheckExecutionState | undefined;
-            if (checks) writes.push(structuredClone(checks));
-            const outcome = checks?.receipts.at(-1)?.outcome.kind;
-            if (!lost && outcome === (phase === "intent" ? "pending" : "completed")) {
-              lost = true;
-              const witness = await storeRequestWitness("/runs/state", JSON.stringify({ runId, gen, state }));
-              if (committed) expect((await inner.setState(runId, gen, state)).ok).toBe(true);
-              throw new UncertainStoreError("body interrupted", witness);
-            }
-            return inner.setState(runId, gen, state);
-          };
+        if (key === "setState") return wire.setState.bind(wire);
+        if (key === "peekInbox") return wire.peekInbox.bind(wire);
+        if (key === "assignLiveState") return wire.assignLiveState.bind(wire);
         const value = Reflect.get(target, key, target);
         return typeof value === "function" ? value.bind(target) : value;
       },
@@ -585,6 +609,9 @@ describe("recorded checks with uncertain canonical ACK", () => {
       tools: [],
     });
     if (opened.kind !== "tracked") throw new Error("canonical claim required");
+    expect(
+      (await opened.run.assignLiveState({ state: "admitted", at: 100, expectedSeq: 0, eventSeq: 1, bound: 10000 })).ok,
+    ).toBe(true);
     const s = setup();
     s.binding.owner = { runId: "r1", requester: "slack:UALICE", threadKey: "slack:C1:1", repo: "acme/repo" };
     s.binding.save = (state) => opened.run.setStateAndFlush({ checkExecutions: state });
@@ -607,7 +634,22 @@ describe("recorded checks with uncertain canonical ACK", () => {
           ],
         });
       const failure = opened.run.writeBoundaryFailure;
-      expect(failure).toMatchObject({ kind: "state", runId: "r1", gen: "check-current" });
+      expect(failure).toMatchObject({
+        kind: "state",
+        runId: "r1",
+        gen: "check-current",
+        requestDigest: lostRequestDigest,
+      });
+      const status = await opened.run.assignLiveState({
+        state: "working",
+        at: 150,
+        expectedSeq: 1,
+        eventSeq: 2,
+        bound: 10000,
+        detail: "model turn",
+      });
+      expect(status.ok).toBe(committed);
+      if (!committed) expect(status).toEqual({ ok: false, reason: "unavailable" });
       expect(await opened.run.commitState({ checklist: "after canonical reconciliation" })).toBe(
         committed ? "ok" : "unavailable",
       );
@@ -616,6 +658,33 @@ describe("recorded checks with uncertain canonical ACK", () => {
       expect(await cap.run(input, "another-check")).toEqual({ kind: "unavailable", reason: "persistence_failed" });
       expect(s.execResult).toHaveBeenCalledTimes(phase === "intent" ? 1 : 2);
       expect(inner.live.get("r1")!.state.checkExecutions).toEqual(before);
+      const ending: RunRecord = {
+        id: "r1",
+        channelId: "slack:C1",
+        channelVisibility: "public",
+        userId: "slack:UALICE",
+        threadKey: "slack:C1:1",
+        startedAt: 100,
+        finishedAt: 200,
+        status: "failed",
+        events: [],
+        eventCount: 0,
+        storedEventCount: 0,
+        truncated: false,
+        diagnosis: analyzeRunFriction([]),
+      };
+      if (committed) {
+        await opened.run.sink.put(ending);
+        expect(inner.live.has("r1")).toBe(false);
+      } else {
+        const row = structuredClone(inner.live.get("r1"));
+        await expect(opened.run.sink.put(ending)).rejects.toMatchObject({
+          hold: { runId: "r1", gen: "check-current", requestDigest: lostRequestDigest },
+          request: { operation: "/runs/state", digest: lostRequestDigest },
+        });
+        expect(inner.live.get("r1")).toEqual(row);
+        expect(opened.run.writeBoundaryFailure).toEqual(failure);
+      }
     } finally {
       await opened.run.close();
     }
