@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.289.7](https://github.com/coreplanelabs/switchboard/compare/v1.289.6...v1.289.7) (2026-10-07)
+
+
+### Bug fixes
+
+* **dispatcher:** withdraw known rejected singleton commands ([#2836](https://github.com/coreplanelabs/switchboard/issues/2836)) ([c5ba892](https://github.com/coreplanelabs/switchboard/commit/c5ba8929f897867ad8f00df424d521a804986626))
+
 ## [1.289.6](https://github.com/coreplanelabs/switchboard/compare/v1.289.5...v1.289.6) (2026-10-07)
 
 
