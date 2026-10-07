@@ -1691,6 +1691,20 @@ function boundCommandOf(
   return typed !== undefined ? typed : commands ? parseChatCommand(bind.line, commands) : null;
 }
 
+/** The same ownership predicate is used before semantic checking and effects.
+ * A fold or original-owner steer needs no terminal-read verdict. */
+function ownedCommandRuns(
+  owner: OperatorThreadOwner,
+  def: Parameters<typeof boundBlastRadius>[0] & { id: string },
+  input: CommandInput,
+  requestText?: string,
+  line?: string,
+): boolean {
+  if (owner.kind === "pipeline") return false;
+  if (def.id === "steer.run") return !(owner.kind === "live" && owner.runId === undefined);
+  return boundBlastRadius(def, input) === "read" && (owner.kind !== "unit" || requestText?.trim() === line?.trim());
+}
+
 function ownedDecisionRuns(
   event: OperatorEventFields,
   owner: OperatorThreadOwner,
@@ -1715,20 +1729,7 @@ function ownedDecisionRuns(
     if (parsed?.kind !== "invoke" || commands === undefined) return false;
     const def = commands!.list().find((c) => c.id === parsed.id);
     if (!def) return false;
-    // A live owner without a run id is a hosted pipeline runner (thread-
-    // admission item 9's seed rule): it takes no inbox, so a steer bind there
-    // would queue words nothing drains — it folds like any other decision, and
-    // the fold meets the seed refusal naming where to reply. An ended pipeline
-    // has no live steer target either: folding reaches the dispatcher's durable
-    // task re-issue path instead of letting a transcript's stale run id answer.
-    if (def.id === "steer.run") return !(owner.kind === "live" && owner.runId === undefined);
-    // An inferred read cannot answer an idle unit's action request. The
-    // author's exact command line is evidence for a separate read without
-    // a second grammar interpreting the incoming message.
-    return (
-      boundBlastRadius(def as CommandDef<unknown>, parsed.input) === "read" &&
-      (owner.kind !== "unit" || requestText?.trim() === bind.line.trim())
-    );
+    return ownedCommandRuns(owner, def as CommandDef<unknown>, parsed.input, requestText, bind.line);
   });
 }
 
