@@ -3,8 +3,8 @@
 # one release PR carrying the next version and the changelog entry; merging
 # that PR tags the version, publishes the GitHub release — and deploys
 # production unless its exact tag is held for a scoped manual deploy:
-# deploy-production.yml runs `deploy all --affected`, so only the
-# Workers whose inputs this release changed roll, in the one supported order.
+# deploy-production.yml captures the configured target selector (affected by
+# default), then follows the gates and the one supported Worker order.
 # The release PR itself shows that plan before anyone merges it: the
 # release-pr-deploy-targets job below posts it on every push to main.
 # The same release publishes the three container images to GitHub Container
@@ -125,8 +125,8 @@ jobs:
   # release PR: the PR's own `deploy targets` job judges a diff against its
   # base, while the release needs judging against PRODUCTION — each Worker's
   # live commit — and re-rendering on every merge to main, which this push is.
-  # The plan is `deploy plan --affected` on the release branch's tree — main
-  # plus the release commit.
+  # The preview captures the same target selector as execution, on the release
+  # branch's tree. It is a plan snapshot, not proof of a later upload.
   release-pr-deploy-targets:
     name: the release PR carries its deploy plan
     needs: release-please
@@ -181,6 +181,7 @@ jobs:
           permission-contents: read
       - run: npm run deploy:targets
         env:
+          TARGETS: ${{ vars.SWITCHBOARD_RELEASE_DEPLOY_TARGETS || 'affected' }}
           SWITCHBOARD_DEPLOY_PROFILE: ${{ vars.SWITCHBOARD_DEPLOY_PROFILE }}
           CONFIG_REPO_TOKEN: ${{ steps.infra-token.outputs.token }}
 
