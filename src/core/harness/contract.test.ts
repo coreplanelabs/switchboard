@@ -789,6 +789,12 @@ describe("original session policy canonical first-fact ACK", () => {
       expect(result.outcome.kind).toBe("failed");
       if (result.outcome.kind !== "failed") throw new Error("expected unknown original policy held");
       expect(result.outcome.error).toBeInstanceOf(HarnessEndingUnconfirmedError);
+      // Dispatch records openingError after one custody-wrapper unwrap.
+      expect((result.outcome.error as HarnessEndingUnconfirmedError).openingError).toMatchObject({
+        name: "HarnessContainerError",
+        operation: "checkpoint",
+        message: "harness container: checkpoint failed — The original session policy checkpoint was not acknowledged.",
+      });
       expect(result.modelCalls).toEqual([]);
       expect(result.starts).toHaveLength(1);
       expect(result.killed).toEqual([]);
@@ -796,6 +802,35 @@ describe("original session policy canonical first-fact ACK", () => {
       expect(result.facts[0]).toMatchObject({
         sessionPolicy: { version: 1, commandRoute: "hosted-review", identity: "read" },
       });
+    },
+  );
+  it.each(["pi", "opencode"] as const)(
+    "a foreign %s custody error cannot replace the current run's identity",
+    async (name) => {
+      const driver = name === "pi" ? piDriver() : openCodeDriver();
+      const opening = new Error("foreign opening");
+      const ending = new Error("foreign ending");
+      const foreign = new HarnessEndingUnconfirmedError("foreign-run", opening, ending);
+      const result = await driver.run({
+        identity: "read",
+        commandPolicy: "hosted-review",
+        onFacts: async () => {
+          throw foreign;
+        },
+        turns: [{ content: [{ type: "text", text: "must not enter model" }], stopReason: "end_turn" }],
+      });
+      if (result.outcome.kind !== "failed") throw new Error("expected held error");
+      expect(result.outcome.error).toBeInstanceOf(HarnessEndingUnconfirmedError);
+      const error = result.outcome.error as HarnessEndingUnconfirmedError;
+      expect(error).not.toBe(foreign);
+      expect(error.runId).not.toBe("foreign-run");
+      expect(error.openingError).toBe(foreign);
+      expect(error.endingError).toBe(foreign);
+      expect(foreign.openingError).toBe(opening);
+      expect(foreign.endingError).toBe(ending);
+      expect(result.modelCalls).toEqual([]);
+      expect(result.killed).toEqual([]);
+      expect(result.removed).toEqual([]);
     },
   );
   it.each(["pi", "opencode"] as const)(
