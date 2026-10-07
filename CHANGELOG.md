@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.289.1](https://github.com/coreplanelabs/switchboard/compare/v1.289.0...v1.289.1) (2026-10-07)
+
+
+### Bug fixes
+
+* **harness:** preserve original session policy across restarts ([#2822](https://github.com/coreplanelabs/switchboard/issues/2822)) ([e75783c](https://github.com/coreplanelabs/switchboard/commit/e75783cf57a5bc10654bd371903fcdea15d97f17))
+* **release:** select deploy targets and the published CLI ([#2823](https://github.com/coreplanelabs/switchboard/issues/2823)) ([4a6ce8b](https://github.com/coreplanelabs/switchboard/commit/4a6ce8b7d450928408af2225d2edfb02ee6d4269))
+* **runs:** preserve uncertain checkpoints before closing runs ([#2824](https://github.com/coreplanelabs/switchboard/issues/2824)) ([1f7867c](https://github.com/coreplanelabs/switchboard/commit/1f7867c5c1ddfb611422042a3793233a5c4fc96e))
+* **runs:** retain unknown writes before changing run state ([#2820](https://github.com/coreplanelabs/switchboard/issues/2820)) ([a06fce2](https://github.com/coreplanelabs/switchboard/commit/a06fce25c09f8203e7641c976cb89aaa09a363b9))
+
 ## [1.289.0](https://github.com/coreplanelabs/switchboard/compare/v1.288.0...v1.289.0) (2026-10-07)
 
 
