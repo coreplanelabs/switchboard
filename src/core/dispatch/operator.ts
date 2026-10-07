@@ -112,6 +112,8 @@ import {
   outputCapRetry,
   outputCapWithReasoning,
   quoteRequest,
+  commandFulfillmentPrompt,
+  parseVerifierAnswer,
   renderPresetTable,
   routableCommands,
   routablePresets,
@@ -1689,6 +1691,20 @@ function boundCommandOf(
   return typed !== undefined ? typed : commands ? parseChatCommand(bind.line, commands) : null;
 }
 
+/** The same ownership predicate is used before semantic checking and effects.
+ * A fold or original-owner steer needs no terminal-read verdict. */
+function ownedCommandRuns(
+  owner: OperatorThreadOwner,
+  def: Parameters<typeof boundBlastRadius>[0] & { id: string },
+  input: CommandInput,
+  requestText?: string,
+  line?: string,
+): boolean {
+  if (owner.kind === "pipeline") return false;
+  if (def.id === "steer.run") return !(owner.kind === "live" && owner.runId === undefined);
+  return boundBlastRadius(def, input) === "read" && (owner.kind !== "unit" || requestText?.trim() === line?.trim());
+}
+
 function ownedDecisionRuns(
   event: OperatorEventFields,
   owner: OperatorThreadOwner,
@@ -1713,20 +1729,7 @@ function ownedDecisionRuns(
     if (parsed?.kind !== "invoke" || commands === undefined) return false;
     const def = commands!.list().find((c) => c.id === parsed.id);
     if (!def) return false;
-    // A live owner without a run id is a hosted pipeline runner (thread-
-    // admission item 9's seed rule): it takes no inbox, so a steer bind there
-    // would queue words nothing drains — it folds like any other decision, and
-    // the fold meets the seed refusal naming where to reply. An ended pipeline
-    // has no live steer target either: folding reaches the dispatcher's durable
-    // task re-issue path instead of letting a transcript's stale run id answer.
-    if (def.id === "steer.run") return !(owner.kind === "live" && owner.runId === undefined);
-    // An inferred read cannot answer an idle unit's action request. The
-    // author's exact command line is evidence for a separate read without
-    // a second grammar interpreting the incoming message.
-    return (
-      boundBlastRadius(def as CommandDef<unknown>, parsed.input) === "read" &&
-      (owner.kind !== "unit" || requestText?.trim() === bind.line.trim())
-    );
+    return ownedCommandRuns(owner, def as CommandDef<unknown>, parsed.input, requestText, bind.line);
   });
 }
 
@@ -2389,7 +2392,69 @@ export async function runOperator(
   let noCallTurns = 0;
   let outputCapCuts = 0;
   let maxOutputTokens = opts.maxOutputTokens ?? operatorMaxOutputTokens();
-  const signal = AbortSignal.timeout(opts.timeoutMs ?? OPERATOR_TIMEOUT_MS);
+  const timeoutMs = opts.timeoutMs ?? OPERATOR_TIMEOUT_MS;
+  const signal = AbortSignal.timeout(timeoutMs);
+  const expired = () => signal.aborted || now() - started >= timeoutMs;
+  const sourceTurns = input.requesterId
+    ? input.tail
+        .filter((turn) => turn.actor === input.requesterId && turn.text.startsWith("user: "))
+        .map((turn) => turn.text.slice(6))
+    : [];
+  if (input.requesterId && !input.targetStoreUnavailable && input.requesterTarget && !input.requesterTarget.conflict) {
+    sourceTurns.push(`Requester target checkpoint (context only): ${JSON.stringify(input.requesterTarget)}`);
+  }
+  sourceTurns.push(input.text);
+  const commandCheck = async (decision: OperatorDecision): Promise<string | undefined> => {
+    if (decision.kind !== "binds") return undefined;
+    const invocation = decision.binds.length === 1 ? decision.binds[0]?.invocation : undefined;
+    if (invocation?.kind !== "invoke") return undefined;
+    const command = ctx.commands.find((entry) => entry.def.id === invocation.id);
+    if (
+      input.owner &&
+      (!command ||
+        invocation.id === "steer.run" ||
+        !ownedCommandRuns(input.owner, command.def, invocation.input, input.text, decision.binds[0]?.line))
+    )
+      return undefined;
+    // Record the proposal separately from the verdict; neither is command execution.
+    attempts.push({ outcome: "accepted" });
+    const violation = (reason: string) => {
+      const safe = tidy(reason);
+      attempts.push({ outcome: "violation", stage: "command_fulfillment", violation: safe });
+      return safe;
+    };
+    if (expired()) return violation("command fulfillment deadline expired");
+    if (reads >= OPERATOR_READS_MAX) return violation("command fulfillment read allowance is spent");
+    reads++;
+    if (!command) return violation("command fulfillment definition is unavailable");
+    let answer: RouteToolCall | string;
+    try {
+      answer = await model(
+        commandFulfillmentPrompt({
+          turns: sourceTurns,
+          command: {
+            id: invocation.id,
+            input: invocation.input,
+            tool: command.tool,
+            argumentNames: command.def.args?.map((arg) => arg.name) ?? [],
+          },
+        }),
+        { maxTokens: maxOutputTokens, signal },
+      );
+    } catch (err) {
+      const carried = attemptsOfThrow(err);
+      if (carried) attempts.push(...carried);
+      violation("command fulfillment could not be verified");
+      throw err;
+    }
+    chars += (typeof answer === "string" ? answer : (JSON.stringify(answer) ?? "")).length;
+    if (expired()) return violation("command fulfillment deadline expired");
+    const verdict = parseVerifierAnswer(answer, { strict: true });
+    if (!verdict) return violation("command fulfillment verdict is unknown");
+    if (!verdict.agrees) return violation(`command does not fulfill the whole request: ${verdict.reason}`);
+    attempts.push({ outcome: "accepted", stage: "command_fulfillment" });
+    return undefined;
+  };
   try {
     for (;;) {
       let answer: RouteToolCall | string;
@@ -2473,7 +2538,12 @@ export async function runOperator(
               attempts.push({ outcome: "violation", violation: catalogueViolation });
               return answered({ kind: "non_decision", reason: tidy(catalogueViolation) });
             }
-            if (taken.decision.kind !== "non_decision") attempts.push({ outcome: "accepted" });
+            const beforeCheck = attempts.length;
+            const fulfillmentViolation = await commandCheck(taken.decision);
+            if (fulfillmentViolation !== undefined)
+              return answered({ kind: "non_decision", reason: fulfillmentViolation });
+            if (taken.decision.kind !== "non_decision" && attempts.length === beforeCheck)
+              attempts.push({ outcome: "accepted" });
             return answered(taken.decision);
           }
           return answered({ kind: "non_decision", reason: tidy(violation) });
@@ -2542,13 +2612,26 @@ export async function runOperator(
         turns.push({ answer: answerText, violation: reAskTurn("a decision", "offered", violation) });
         continue;
       }
-      if (turn.decision.kind !== "non_decision") attempts.push({ outcome: "accepted" });
+      const beforeCheck = attempts.length;
+      const fulfillmentViolation = await commandCheck(turn.decision);
+      if (fulfillmentViolation !== undefined) {
+        if (expired() || reads >= OPERATOR_READS_MAX || violations >= STRUCTURED_RETRIES_MAX)
+          return answered({ kind: "non_decision", reason: fulfillmentViolation });
+        violations++;
+        turns.push({
+          answer: answerText,
+          violation: reAskTurn("a decision that fulfills the whole request", "offered", fulfillmentViolation),
+        });
+        continue;
+      }
+      if (turn.decision.kind !== "non_decision" && attempts.length === beforeCheck)
+        attempts.push({ outcome: "accepted" });
       return answered(turn.decision);
     }
   } catch (err) {
-    // Failures after the provider turn (parse/catalogue/loop internals) end
-    // at the door. The model call itself returns above as a typed
-    // provider refusal and cannot reach this catch.
+    // Parse, catalogue and fulfillment-check failures end at the door.
+    // The routing call returns its typed provider refusal above; an unavailable
+    // fulfillment call cannot authorize a terminal command here.
     const why = tidy(err instanceof Error ? err.message : String(err));
     const carried = attemptsOfThrow(err);
     if (carried) attempts.push(...carried);

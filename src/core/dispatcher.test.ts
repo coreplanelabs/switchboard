@@ -26227,7 +26227,14 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       };
     };
   }) =>
-    vi.fn<RouteModel>(async () => {
+    vi.fn<RouteModel>(async (prompt) => {
+      // These fixtures declare the expected action; the second role checks it
+      // without choosing a replacement. Negative verdicts have dedicated controls.
+      if (prompt.tool.name === "verify")
+        return {
+          tool: "verify",
+          input: { agrees: true, reason: "The declared command fulfills this fixture request." },
+        };
       if (input.question) return { tool: "ask", input: { ...input.question, reason: input.reason ?? "why" } };
       const bind = input.binds?.[0];
       if (!bind) return "";
@@ -26640,7 +26647,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     deps.operatorModel = decides({ reason: "list MCP tools", binds: [{ line: "mcp list", reason: "list MCP tools" }] });
     const { io } = fakeIO();
     await dispatch(deps, msg("mcp list", "slack:UADMIN"), io);
-    expect(deps.operatorModel).toHaveBeenCalledTimes(1);
+    expect(deps.operatorModel).toHaveBeenCalledTimes(2);
     expect(deps.invoked).toEqual(["mcp.list"]);
     expect(deps.invoked).not.toContain("help.show");
   });
@@ -26653,7 +26660,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     });
     const { io } = fakeIO();
     await dispatch(deps, msg("config show", "slack:UADMIN"), io);
-    expect(deps.operatorModel).toHaveBeenCalledTimes(1);
+    expect(deps.operatorModel).toHaveBeenCalledTimes(2);
     // The readers ran the typed line; the operator's disagreeing bind ran nothing.
     expect(deps.invoked).toEqual(["config.show"]);
     const snap = registry.snapshotById("r1")!;
@@ -26893,7 +26900,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     await savePendingQuestion(fresh, pendingThread);
     fresh.operatorModel = decides({ reason: "fresh", binds: [{ line: "help", reason: "the menu" }] });
     await dispatch(fresh, msg("no, the runs one", "slack:UADMIN"), fakeIO().io, { thread: pendingThread });
-    expect(fresh.operatorModel).toHaveBeenCalledTimes(1);
+    expect(fresh.operatorModel).toHaveBeenCalledTimes(2);
     expect(fresh.invoked).toEqual(["help.show"]);
   });
 
@@ -27340,10 +27347,14 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       const slot = inbox === "live" ? deps.admission!.claim("slack:CX:22.0", { agent: "general" }).live : undefined;
       if (slot) slot.runId = run.id;
       const words = `First ghp_${"a".repeat(40)}  two\twords, "quoted".\nNext line: café 日本語 🧭 ${"last ".repeat(90)}FINISH`;
-      deps.operatorModel = vi.fn<RouteModel>(async () => ({
-        tool: "steer_run",
-        input: { id: run.id, words, intent: "write", reason: "send all the words" },
-      }));
+      deps.operatorModel = vi.fn<RouteModel>(async (prompt) =>
+        prompt.tool.name === "verify"
+          ? { tool: "verify", input: { agrees: true, reason: "The typed payload is the requested effect." } }
+          : {
+              tool: "steer_run",
+              input: { id: run.id, words, intent: "write", reason: "send all the words" },
+            },
+      );
       const { io, replies } = fakeIO();
       await dispatch(deps, msg("send this follow-up", "slack:UADMIN"), io);
       expect(pushInbox).toHaveBeenCalledOnce();
@@ -27532,10 +27543,14 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
   it("on: confirmation stores typed quoted and multiline instructions through the click", async () => {
     const { deps, store } = confirming();
     const words = 'Keep  both spaces, "quotes", café\nand a new line';
-    deps.operatorModel = vi.fn<RouteModel>(async () => ({
-      tool: "config_instructions",
-      input: { scope: "me", text: words, intent: "write", reason: "set my instructions" },
-    }));
+    deps.operatorModel = vi.fn<RouteModel>(async (prompt) =>
+      prompt.tool.name === "verify"
+        ? { tool: "verify", input: { agrees: true, reason: "The typed payload is the requested effect." } }
+        : {
+            tool: "config_instructions",
+            input: { scope: "me", text: words, intent: "write", reason: "set my instructions" },
+          },
+    );
     const { io, offers } = offering();
     await dispatch(deps, msg("set my instructions", "slack:UADMIN"), io);
     expect(offers).toHaveLength(1);
@@ -28325,7 +28340,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     deps.operatorModel = decides({ reason: "list runs", binds: [{ line: "runs list", reason: "list runs" }] });
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("runs list", "slack:UADMIN"), io);
-    expect(deps.operatorModel).toHaveBeenCalledTimes(1);
+    expect(deps.operatorModel).toHaveBeenCalledTimes(2);
     expect(deps.invoked).toEqual(["runs.list"]);
     expect(slot.live.inbox.size).toBe(0);
     expect(replies.length).toBeGreaterThan(0);
@@ -28479,7 +28494,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     });
     const { io } = fakeIO();
     await dispatch(deps, msg(`runs stop ${runaway.id} --mode hard`, "slack:UADMIN"), io);
-    expect(deps.operatorModel).toHaveBeenCalledTimes(1);
+    expect(deps.operatorModel).toHaveBeenCalledTimes(2);
     expect(deps.invoked).toEqual([]);
     expect(registry.snapshotById("r2")?.events.find((e) => e.type === "operator")).toMatchObject({
       outcome: "binds",
@@ -28525,7 +28540,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     wireCommands(deps);
     deps.operatorModel = decides({ reason: "typed listing", binds: [{ line: "runs list", reason: "typed listing" }] });
     await dispatch(deps, msg("runs list", "slack:UADMIN"), fakeIO().io);
-    expect(deps.operatorModel).toHaveBeenCalledTimes(1);
+    expect(deps.operatorModel).toHaveBeenCalledTimes(2);
     expect(deps.invoked).toEqual(["runs.list"]);
   });
 
@@ -28542,14 +28557,88 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     });
   });
 
-  it("on: a registry read runs at once through the ladder — one model turn, no second judge (the verifier retired)", async () => {
+  it("on: a requested owned Review catalog read keeps the original run and needs a positive verdict", async () => {
+    const { deps, registry } = operatorDeps(ON_YAML);
+    wireCommands(deps, { ...deps.capabilities, residents: true });
+    const review = registry.create("the original Review", {
+      agent: "review",
+      channelId: "slack:CX",
+      userId: "slack:UADMIN",
+      threadKey: "slack:CX:1.0",
+    });
+    const slot = deps.admission!.claim("slack:CX:1.0", { agent: "review" });
+    slot.live.runId = review.id;
+    deps.operatorModel = vi.fn<RouteModel>(async (prompt) =>
+      prompt.tool.name === "verify"
+        ? { tool: "verify", input: { agrees: true, reason: "The catalog answers this question." } }
+        : { tool: "repo_list", input: { intent: "read", reason: "List connected repositories." } },
+    );
+    await dispatch(deps, msg("Which repositories are connected?", "slack:UADMIN"), fakeIO().io);
+    expect(deps.invoked).toEqual(["repo.list"]);
+    expect(slot.live.inbox.drain()).toEqual([]);
+    expect(deps.operatorModel).toHaveBeenCalledTimes(2);
+    expect(registry.getById(review.id)?.agent).toBe("review");
+    expect(registry.listActive().filter((run) => run.agent === "review")).toHaveLength(1);
+  });
+
+  it("on: an owned Review follow-up cannot complete as repository discovery", async () => {
+    const { deps, registry } = operatorDeps(ON_YAML);
+    wireCommands(deps, { ...deps.capabilities, residents: true });
+    const review = registry.create("the original Review", {
+      agent: "review",
+      channelId: "slack:CX",
+      userId: "slack:UADMIN",
+      threadKey: "slack:CX:1.0",
+    });
+    const slot = deps.admission!.claim("slack:CX:1.0", { agent: "review" });
+    slot.live.runId = review.id;
+    const text = "Inspect more cases in the current Review and retain its exact target.";
+    let proposals = 0;
+    deps.operatorModel = vi.fn<RouteModel>(async (prompt) => {
+      if (prompt.tool.name === "verify")
+        return { tool: "verify", input: { agrees: false, reason: "Discovery does not inspect the requested cases." } };
+      return proposals++ === 0
+        ? { tool: "repo_list", input: { intent: "read", reason: "Find the repository for this Review follow-up." } }
+        : {
+            tool: "steer_run",
+            input: { id: review.id, words: text, intent: "write", reason: "Continue the original Review." },
+          };
+    });
+    await dispatch(deps, msg(text, "slack:UADMIN"), fakeIO().io);
+    expect(deps.invoked).not.toContain("repo.list");
+    expect(slot.live.inbox.drain()).toEqual([expect.objectContaining({ text })]);
+    expect(deps.operatorModel).toHaveBeenCalledTimes(3);
+    expect(registry.getById(review.id)?.agent).toBe("review");
+    expect(registry.listActive().filter((run) => run.agent === "review")).toHaveLength(1);
+  });
+
+  it("on: a registry read needs a fulfillment verdict before the ladder", async () => {
     const { deps } = operatorDeps(ON_YAML);
     wireCommands(deps);
-    deps.operatorModel = decides({ reason: "a listing", binds: [{ line: "runs list", reason: "the listing" }] });
+    const route = decides({ reason: "a listing", binds: [{ line: "runs list", reason: "the listing" }] });
+    let entered!: () => void;
+    const verifying = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let release!: (value: { tool: string; input: unknown }) => void;
+    const verdict = new Promise<{ tool: string; input: unknown }>((resolve) => {
+      release = resolve;
+    });
+    deps.operatorModel = vi.fn<RouteModel>(async (prompt, opts) => {
+      if (prompt.tool.name === "verify") {
+        entered();
+        return verdict;
+      }
+      return route(prompt, opts);
+    });
     const { io } = fakeIO();
-    await dispatch(deps, msg("list the runs", "slack:UADMIN"), io);
+    const running = dispatch(deps, msg("list the runs", "slack:UADMIN"), io);
+    await verifying;
+    expect(deps.invoked).toEqual([]);
+    release({ tool: "verify", input: { agrees: true, reason: "The listing answers the request." } });
+    await running;
     expect(deps.invoked).toEqual(["runs.list"]);
-    expect(deps.operatorModel).toHaveBeenCalledTimes(1);
+    expect(deps.operatorModel).toHaveBeenCalledTimes(2);
   });
 
   it("the default is on: a config that never names routing.operator runs the operator's decision, not the readers'", async () => {
@@ -28558,7 +28647,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     deps.operatorModel = decides({ reason: "one listing", binds: [{ line: "config show", reason: "the scopes" }] });
     const { io } = fakeIO();
     await dispatch(deps, msg("show me the config", "slack:UADMIN"), io);
-    expect(deps.operatorModel).toHaveBeenCalledTimes(1);
+    expect(deps.operatorModel).toHaveBeenCalledTimes(2);
     expect(deps.invoked).toEqual(["config.show"]);
     // The decision is what runs: no route model, no agent run, no model turn.
     expect(provider.requests).toHaveLength(0);
@@ -29061,7 +29150,10 @@ describe("durable operator conversation without an agent run", () => {
           originAudience: async () =>
             incoming.threadKey === MEMORY_PRODUCER.threadKey && !visible ? undefined : "public",
         });
-        deps.operatorModel = vi.fn<RouteModel>(async () => {
+        deps.operatorModel = vi.fn<RouteModel>(async (prompt) => {
+          // Even a positive semantic claim cannot revive a revoked source.
+          if (prompt.tool.name === "verify")
+            return { tool: "verify", input: { agrees: true, reason: "scripted semantic claim" } };
           if (revoke) visible = false;
           return decision === "question"
             ? { tool: "ask", input: { text: secret, reason: "a preference" } }
@@ -29072,7 +29164,7 @@ describe("durable operator conversation without an agent run", () => {
         const channel = fakeIO();
         await dispatch(deps, msg("What is the deploy command?", "slack:UADMIN"), channel.io);
         await deps.runHistoryWriter.settled();
-        expect(deps.operatorModel).toHaveBeenCalledOnce();
+        expect(deps.operatorModel).toHaveBeenCalledTimes(decision === "command" ? 2 : 1);
         expect(JSON.stringify(vi.mocked(deps.operatorModel).mock.calls)).toContain(
           "the deploy command is npm run deploy",
         );

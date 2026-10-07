@@ -1718,10 +1718,43 @@ channels:
     "agent:unknown List repositories.",
   ])("ordinary or quoted commands remain available: %s", async (text) => {
     const answer = await runOperator(
-      input({ text, projection: { presets: projectionOf(["review"]).presets, commands: [command("repo.list")] } }),
-      async () => ({ tool: "repo_list", input: { intent: "read", reason: "list repos" } }),
+      input({
+        text,
+        projection: { presets: projectionOf(["review", "general"]).presets, commands: [command("repo.list")] },
+      }),
+      async (prompt) => {
+        // This family proves the marker does not filter command tools. The
+        // new semantic verdict independently rejects listings as explanations.
+        const commandRequest = text === "List repositories." || text === "agent:unknown List repositories.";
+        if (prompt.tool.name === "verify")
+          return {
+            tool: "verify",
+            input: {
+              agrees: commandRequest,
+              reason: commandRequest
+                ? "The requester asks for the catalog."
+                : "A listing does not explain this marker.",
+            },
+          };
+        if (prompt.retries?.length)
+          return { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "Explain the marker." } };
+        return { tool: "repo_list", input: { intent: "read", reason: "list repos" } };
+      },
     );
-    expect(answer.decision).toMatchObject({ kind: "binds", binds: [{ invocation: { id: "repo.list" } }] });
+    const commandRequest = text === "List repositories." || text === "agent:unknown List repositories.";
+    expect(
+      operatorTools(
+        input({
+          text,
+          projection: { presets: projectionOf(["review", "general"]).presets, commands: [command("repo.list")] },
+        }),
+      ).map((t) => t.name),
+    ).toContain("repo_list");
+    expect(answer.decision).toMatchObject(
+      commandRequest
+        ? { kind: "binds", binds: [{ invocation: { id: "repo.list" } }] }
+        : { kind: "binds", binds: [{ line: `agent:general ${text}` }] },
+    );
   });
 
   it("owned threads retain their command actions ahead of an explicit preset marker", () => {

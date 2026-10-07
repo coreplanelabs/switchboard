@@ -101,6 +101,7 @@ Statuses: **proposed** (written, not yet agreed), **accepted** (agreed, being bu
 | 0090 | [One unit lifetime keeps effects and settlement under existing owners](../decisions/0090-one-unit-lifetime-keeps-effects-and-settlement-under-existing-owners.md) | Single-writer state, compare-and-swap reservation, transactional outbox and retained finalization obligations | proposed | 2026-10-04 |
 | 0091 | [Bound response validation off the gateway event loop](../decisions/0091-bound-response-validation-off-the-gateway-event-loop.md) | Bulkhead isolation and backpressure | accepted | 2026-10-05 |
 | 0092 | [Consumers read configuration owned by their immutable image identity](../decisions/0092-consumers-read-configuration-owned-by-their-immutable-image-identity.md) | Immutable identity, explicit input witnesses and conditional publication | proposed | 2026-10-05 |
+| 0093 | [An inferred command needs a semantic fulfillment verdict](../decisions/0093-an-inferred-command-needs-a-semantic-fulfillment-verdict.md) | One bounded interpreter with a separate admissibility judgment | accepted | 2026-10-07 |
 
 <!-- /generated:decision-records -->
 
