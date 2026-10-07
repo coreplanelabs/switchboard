@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.289.4](https://github.com/coreplanelabs/switchboard/compare/v1.289.3...v1.289.4) (2026-10-07)
+
+
+### Bug fixes
+
+* **harness:** preserve the original checkpoint failure cause ([#2829](https://github.com/coreplanelabs/switchboard/issues/2829)) ([c50e533](https://github.com/coreplanelabs/switchboard/commit/c50e533f0b906e32ef75959867283c71b3242632))
+* **runs:** retain the first storage failure diagnosis ([#2830](https://github.com/coreplanelabs/switchboard/issues/2830)) ([27147ea](https://github.com/coreplanelabs/switchboard/commit/27147ea7019c5338bd2a1dee688ebf2ba83c7754))
+
 ## [1.289.3](https://github.com/coreplanelabs/switchboard/compare/v1.289.2...v1.289.3) (2026-10-07)
 
 
