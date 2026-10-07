@@ -16,9 +16,9 @@
 # images instead of building them — `deploy all` copies them into its Cloudflare
 # account registry over HTTPS (docs/decisions/0027-images-copied-into-the-account-registry.md,
 # docs/decisions/0030-deploy-all-copies-the-images-it-needs.md).
-# This project's own deploy builds each Dockerfile with wrangler instead, so a
-# failed publish never blocks the deploy, and vice versa. And it publishes the
-# CLI to npm (publish-npm below), the package an operator runs `init` from
+# Checkout deployments build each Dockerfile with wrangler. Package deployments
+# require successful npm publication at the exact released version. The release
+# also publishes the CLI to npm (publish-npm below), the package an operator runs `init` from
 # without a checkout.
 #
 # release-please acts as our GitHub App, not as GITHUB_TOKEN. A release PR
@@ -53,6 +53,7 @@ jobs:
     # Whichever attempt succeeded speaks (the first when it did; else the retry).
     outputs:
       release_created: ${{ steps.release.outcome == 'success' && steps.release.outputs.release_created || steps.release-retry.outputs.release_created }}
+      version: ${{ steps.deploy-version.outputs.version }}
       tag_name: ${{ steps.release.outcome == 'success' && steps.release.outputs.tag_name || steps.release-retry.outputs.tag_name }}
       prs_created: ${{ steps.release.outcome == 'success' && steps.release.outputs.prs_created || steps.release-retry.outputs.prs_created }}
       pr: ${{ steps.release.outcome == 'success' && steps.release.outputs.pr || steps.release-retry.outputs.pr }}
@@ -98,6 +99,17 @@ jobs:
         # this step would be skipped exactly when the retry failed too.
         if: always() && steps.release.outcome == 'failure'
         run: echo "::warning title=release-please retried::the first release-please attempt failed (its step above has the message) and the retry ${{ steps.release-retry.outcome }}. GitHub refused the release-branch update once; the retry's outputs drive this run."
+      - name: the released deployment version
+        id: deploy-version
+        if: (steps.release.outcome == 'success' && steps.release.outputs.release_created || steps.release-retry.outputs.release_created) == 'true'
+        env:
+          TAG: ${{ steps.release.outcome == 'success' && steps.release.outputs.tag_name || steps.release-retry.outputs.tag_name }}
+        run: |
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::release tag must name an exact version. Nothing was deployed."
+            exit 1
+          fi
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
       # A skipped job has no log, so the one line saying why the package was not
       # published lives here, on the release that would have published it.
       - name: npm publish is off
@@ -179,12 +191,14 @@ jobs:
   # all` copies `ghcr.io/…:<version>` into the account registry — an image that
   # is still publishing would be a copy of nothing. A failed publish leg leaves
   # `deploy` skipped, and the release is finished by rerunning the failed jobs.
+  # Package mode also waits for npm; checkout mode still runs when npm is off.
+  # Repository variables select the existing reusable inputs without a dispatch.
   deploy:
-    needs: [release-please, publish-image]
+    needs: [release-please, publish-image, publish-npm]
     # A single release can hold its automatic rollout while preserving the
     # release and image publishes. The operator then uses deploy-production's
     # existing scoped dispatch. An unset or stale tag cannot hold a later release.
-    if: needs.release-please.outputs.release_created == 'true' && (vars.SWITCHBOARD_RELEASE_DEPLOY_SKIP_TAG == '' || vars.SWITCHBOARD_RELEASE_DEPLOY_SKIP_TAG != needs.release-please.outputs.tag_name)
+    if: always() && !cancelled() && needs.release-please.result == 'success' && needs.publish-image.result == 'success' && needs.release-please.outputs.release_created == 'true' && (vars.SWITCHBOARD_RELEASE_DEPLOY_CLI != 'package' || needs.publish-npm.result == 'success') && (vars.SWITCHBOARD_RELEASE_DEPLOY_SKIP_TAG == '' || vars.SWITCHBOARD_RELEASE_DEPLOY_SKIP_TAG != needs.release-please.outputs.tag_name)
     # The called workflow declares each secret by name and requires none; this
     # repository's own call inherits the full set on purpose (an operator's
     # repository passes them by name instead) — src/ciWorkflow.test.ts pins both.
@@ -192,7 +206,9 @@ jobs:
     permissions:
       contents: read
     with:
-      targets: affected
+      targets: ${{ vars.SWITCHBOARD_RELEASE_DEPLOY_TARGETS || 'affected' }}
+      cli: ${{ vars.SWITCHBOARD_RELEASE_DEPLOY_CLI || 'checkout' }}
+      version: ${{ needs.release-please.outputs.version }}
       # deploy all copies and verifies only images in the affected plan.
       copy-images: never
       # Enable only after disposable smoke fixtures and bounded grants are configured.
@@ -330,7 +346,8 @@ jobs:
   # 422 `Unsupported GitHub Actions runner environment: "self-hosted"` (twice:
   # once with the flag, once with no flag at all). The package publishes
   # unsigned; the images keep their attestations (the attest action signs from
-  # any runner). Independent of `deploy` and `publish-image`.
+  # any runner). Package deployment waits for this job; checkout deployment
+  # remains available when npm publishing is off.
   # OFF until the owner turns it on: the job runs only when the repository
   # variable SWITCHBOARD_PUBLISH_NPM is the string `true` — unset, the job is
   # skipped and the `npm publish is off` step above says so in one line — so a
@@ -363,4 +380,13 @@ jobs:
       - run: npm install -g npm@11.19.1 # zizmor: ignore[adhoc-packages]
       - run: npm ci
       - run: npm run build -w packages/switchboard
+      - name: the package matches the release
+        env:
+          VERSION: ${{ needs.release-please.outputs.version }}
+        run: |
+          actual=$(node -p "require('./packages/switchboard/package.json').version")
+          if [ -z "$VERSION" ] || [ "$actual" != "$VERSION" ]; then
+            echo "::error::package version does not match the release tag. Nothing was published."
+            exit 1
+          fi
       - run: npm publish --workspace packages/switchboard --access public --provenance=false

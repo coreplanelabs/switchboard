@@ -1,7 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { runInNewContext } from "node:vm";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import { describe, expect, it } from "vitest";
@@ -636,6 +637,7 @@ describe("the release publishes the npm package", () => {
       "npm install -g npm@11.19.1",
       "npm ci",
       "npm run build -w packages/switchboard",
+      job.steps.find((s) => s.name === "the package matches the release")!.run!.trim(),
       PUBLISH_LINE,
     ]);
     // Provenance is turned OFF by name: a bare publish still generates a bundle under trusted publishing,
@@ -1055,20 +1057,158 @@ describe("the production deploy is one reusable workflow", () => {
     const call = release.jobs.deploy;
     expect(call.uses).toBe("./.github/workflows/deploy-production.yml");
     expect(call.with).toEqual({
-      targets: "affected",
+      targets: "${{ vars.SWITCHBOARD_RELEASE_DEPLOY_TARGETS || 'affected' }}",
+      cli: "${{ vars.SWITCHBOARD_RELEASE_DEPLOY_CLI || 'checkout' }}",
+      version: "${{ needs.release-please.outputs.version }}",
       "copy-images": "never",
       smoke: "${{ vars.SMOKE_INGRESS_ENABLED == 'true' }}",
     });
     expect(call.secrets).toBe("inherit");
   });
 
+  it.each(["success", "failure", "skipped", "cancelled"])(
+    "package releases require successful npm publication: %s",
+    (npmResult) => {
+      const release = parse(read(".github/workflows/release-please.yml")) as Workflow;
+      expect(needsOf(release.jobs.deploy)).toContain("publish-npm");
+      const decide = (mode: string, imageResult = "success", cancelled = false) => {
+        const values: Record<string, unknown> = {
+          "needs.release-please.result": "success",
+          "needs.publish-image.result": imageResult,
+          "needs.publish-npm.result": npmResult,
+          "needs.release-please.outputs.release_created": "true",
+          "needs.release-please.outputs.tag_name": "v1.2.3",
+          "vars.SWITCHBOARD_RELEASE_DEPLOY_SKIP_TAG": "",
+          "vars.SWITCHBOARD_RELEASE_DEPLOY_CLI": mode,
+        };
+        const expression = release.jobs.deploy
+          .if!.replace(/always\(\)/g, "true")
+          .replace(/cancelled\(\)/g, String(cancelled))
+          .replace(/(?:needs|vars)\.[A-Za-z0-9_.-]+/g, (key) => JSON.stringify(values[key]));
+        return runInNewContext(expression, {}, { timeout: 100 });
+      };
+      expect(decide("package")).toBe(npmResult === "success");
+      expect(decide("")).toBe(true);
+      expect(decide("checkout")).toBe(true);
+      expect(decide("package", "failure")).toBe(false);
+      expect(decide("checkout", "skipped")).toBe(false);
+      expect(decide("checkout", "success", true)).toBe(false);
+    },
+  );
+
+  it("automatic package deployments derive an exact version from the released tag", () => {
+    const release = parse(read(".github/workflows/release-please.yml")) as Workflow;
+    const version = release.jobs["release-please"].steps.find((s) => s.name === "the released deployment version")!;
+    expect(version).toBeDefined();
+    expect(version.env).toEqual({
+      TAG: "${{ steps.release.outcome == 'success' && steps.release.outputs.tag_name || steps.release-retry.outputs.tag_name }}",
+    });
+    const dir = mkdtempSync(path.join(tmpdir(), "swb-release-version-"));
+    try {
+      for (const tag of ["v1.2.3", "v1.2.3-rc.1", "latest", "v", "v1.2.3;echo unsafe", "1.2.3"]) {
+        const output = path.join(dir, "output");
+        writeFileSync(output, "");
+        const result = spawnSync("bash", ["-e", "-c", version.run!], {
+          encoding: "utf8",
+          env: { ...process.env, TAG: tag, GITHUB_OUTPUT: output },
+        });
+        const valid = tag === "v1.2.3" || tag === "v1.2.3-rc.1";
+        expect(result.status).toBe(valid ? 0 : 1);
+        expect(readFileSync(output, "utf8")).toBe(valid ? `version=${tag.slice(1)}\n` : "");
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    const verify = release.jobs["publish-npm"].steps.find((s) => s.name === "the package matches the release")!;
+    {
+      // Run the actual gate with the real package manifest from this checkout.
+      const actual = JSON.parse(read("packages/switchboard/package.json")).version as string;
+      for (const version of [actual, "", "0.0.0", "latest"]) {
+        const result = spawnSync("bash", ["-e", "-c", verify.run!], {
+          cwd: root,
+          encoding: "utf8",
+          env: { ...process.env, VERSION: version },
+        });
+        expect(result.status).toBe(version === actual ? 0 : 1);
+      }
+    }
+    expect(verify.env?.VERSION).toBe("${{ needs.release-please.outputs.version }}");
+    const publishIndex = release.jobs["publish-npm"].steps.findIndex((s) => s.run?.startsWith("npm publish"));
+    expect(release.jobs["publish-npm"].steps.indexOf(verify)).toBeLessThan(publishIndex);
+  });
+
+  it("the reusable CLI refuses unknown modes and nonexact package versions", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "swb-release-cli-"));
+    try {
+      for (const [mode, version, expected] of [
+        ["checkout", "", "npm run --silent cli --"],
+        ["package", "1.2.3", `npx --yes ${facts.npmPackage}@1.2.3`],
+        ["package", "", undefined],
+        ["package", "latest", undefined],
+        ["typo", "1.2.3", undefined],
+      ]) {
+        const output = path.join(dir, "output");
+        writeFileSync(output, "");
+        const result = spawnSync("bash", ["-e", "-c", cliStep.run!], {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            MODE: mode!,
+            VERSION: version!,
+            COPY_IMAGES: "never",
+            REF_TYPE: "branch",
+            REF_NAME: "main",
+            GITHUB_SHA: "a".repeat(40),
+            GITHUB_OUTPUT: output,
+          },
+        });
+        expect(result.status).toBe(expected === undefined ? 1 : 0);
+        expect(readFileSync(output, "utf8")).toBe(
+          expected === undefined
+            ? ""
+            : `cli=${expected}\nlabel=${mode === "package" ? `${facts.npmPackage}@${version}` : "aaaaaaa"}\n`,
+        );
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("scoped targets cannot expand into extra deploy flags", () => {
+    const selection = steps.find((s) => s.id === "selection")!;
+    const dir = mkdtempSync(path.join(tmpdir(), "swb-release-targets-"));
+    try {
+      for (const [targets, args] of [
+        ["", "--affected"],
+        ["affected", "--affected"],
+        ["all", ""],
+        ["memory,bot", "--only memory,bot"],
+        ["resident,sandbox", "--only resident,sandbox"],
+        ["memory --force", undefined],
+        ["bot,unknown", undefined],
+        ["bot;echo unsafe", undefined],
+      ]) {
+        const output = path.join(dir, "output");
+        writeFileSync(output, "");
+        const result = spawnSync("bash", ["-e", "-c", selection.run!], {
+          encoding: "utf8",
+          env: { ...process.env, TARGETS: targets!, FORCE: "false", GITHUB_OUTPUT: output },
+        });
+        expect(result.status).toBe(args === undefined ? 1 : 0);
+        expect(readFileSync(output, "utf8")).toBe(args === undefined ? "" : `args=${args}\n`);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("holds automatic deployment only for the named release tag", () => {
     const release = parse(read(".github/workflows/release-please.yml")) as {
       jobs: Record<string, { if?: string; needs?: string[] }>;
     };
-    expect(release.jobs.deploy.needs).toEqual(["release-please", "publish-image"]);
+    expect(release.jobs.deploy.needs).toEqual(["release-please", "publish-image", "publish-npm"]);
     expect(release.jobs.deploy.if).toBe(
-      "needs.release-please.outputs.release_created == 'true' && (vars.SWITCHBOARD_RELEASE_DEPLOY_SKIP_TAG == '' || vars.SWITCHBOARD_RELEASE_DEPLOY_SKIP_TAG != needs.release-please.outputs.tag_name)",
+      "always() && !cancelled() && needs.release-please.result == 'success' && needs.publish-image.result == 'success' && needs.release-please.outputs.release_created == 'true' && (vars.SWITCHBOARD_RELEASE_DEPLOY_CLI != 'package' || needs.publish-npm.result == 'success') && (vars.SWITCHBOARD_RELEASE_DEPLOY_SKIP_TAG == '' || vars.SWITCHBOARD_RELEASE_DEPLOY_SKIP_TAG != needs.release-please.outputs.tag_name)",
     );
     expect(release.jobs["publish-image"].if).toBe("needs.release-please.outputs.release_created == 'true'");
   });

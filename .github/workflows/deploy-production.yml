@@ -12,8 +12,7 @@
 #             calling repository is checked out (it IS this repository), `npm ci`,
 #             and every command is `npm run --silent cli --` on that tree, so the
 #             release deploys exactly the commit that triggered it.
-#   package   an operator's repository: nothing of this repository is checked
-#             out. Node is set up at the version the CLI's own `engines` names and
+#   package   the published CLI: nothing of this repository is checked out. Node is set up at the version the CLI's own `engines` names and
 #             every command is `npx --yes <the published package>@<version>` —
 #             `version` from the input, else the caller's tag without its `v`
 #             (`v1.13.0` → `1.13.0`); never `latest`, so every run says which
@@ -113,7 +112,7 @@ on:
         type: string
         default: ""
       cli:
-        description: "`checkout` (default): `npm run --silent cli --` on the checked-out repository — this repository's own release; `package`: `npx --yes <the published package>@<version>` with nothing of this repository checked out — an operator's repository"
+        description: "`checkout` (default): `npm run --silent cli --` on the checked-out repository; `package`: `npx --yes <the published package>@<version>` with nothing of this repository checked out"
         type: string
         default: checkout
       version:
@@ -357,7 +356,12 @@ jobs:
           case "$TARGETS" in
             affected|"") args="--affected" ;;
             all) args="" ;;
-            *) args="--only $TARGETS" ;;
+            *)
+              if ! [[ "$TARGETS" =~ ^(memory|bot|resident|sandbox)(,(memory|bot|resident|sandbox))*$ ]]; then
+                echo "::error::targets must be affected, all, or comma-separated Worker names. Nothing was deployed."
+                exit 1
+              fi
+              args="--only $TARGETS" ;;
           esac
           if [ "$FORCE" = "true" ]; then args="$args --force"; fi
           echo "args=$args" >> "$GITHUB_OUTPUT"
