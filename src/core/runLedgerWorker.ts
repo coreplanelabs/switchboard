@@ -163,6 +163,7 @@ import {
 import type { Secrets } from "../secrets.js";
 import { UncertainStoreError, type StoreRequestWitness } from "./storeFailure.js";
 import { readStoreResponse, storeRequestWitness, type StoreOperationKind } from "./storeResponse.js";
+import { STATE_WRITE_DIAGNOSTIC_HEADER, stateWriteDiagnosticFromHeader } from "./runStateWriteDiagnostic.js";
 
 export interface WorkerRunLedgerOptions {
   baseUrl: string;
@@ -267,9 +268,13 @@ export class WorkerRunLedger implements RunLedger {
     }
     if (res.status === 404) throw new RouteMissingError(`run ledger ${path}: route missing (older state Worker)`);
     if (res.status >= 500 || res.status === 408 || res.status === 429) {
+      const stateWrite =
+        path === "/runs/state" && res.status >= 500
+          ? stateWriteDiagnosticFromHeader(res.headers.get(STATE_WRITE_DIAGNOSTIC_HEADER), request.digest)
+          : undefined;
       if (kind === "write")
         throw new UncertainStoreError(`run ledger ${path}: mutation outcome unknown (HTTP ${res.status})`, request, {
-          diagnosis: { kind: "http", status: res.status },
+          diagnosis: { kind: "http", status: res.status, ...(stateWrite ? { stateWrite } : {}) },
         });
       throw new TransientStoreError(`run ledger ${path}: HTTP ${res.status}`);
     }

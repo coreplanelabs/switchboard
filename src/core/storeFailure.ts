@@ -1,3 +1,5 @@
+import { stateWriteFailureOf, type StateWriteFailure } from "./runStateWriteDiagnostic.js";
+
 /** The `/runs/*` route answered 404: the Worker does not have this route yet. Never retried. */
 export class RouteMissingError extends Error {
   readonly name = "RouteMissingError";
@@ -21,8 +23,9 @@ export interface StoreRequestWitness {
 /** Observed transport facts only; no response body or private exception text. */
 export type UncertainStoreDiagnosis =
   | { readonly kind: "transport" }
+  | { readonly kind: "http"; readonly status: number; readonly stateWrite?: StateWriteFailure }
   | {
-      readonly kind: "http" | "response-body" | "response-json" | "response-shape" | "acknowledgement";
+      readonly kind: "response-body" | "response-json" | "response-shape" | "acknowledgement";
       readonly status: number;
     };
 
@@ -36,9 +39,19 @@ function closedDiagnosis(value: UncertainStoreDiagnosis | undefined): UncertainS
     Number.isInteger(value.status) &&
     value.status >= 100 &&
     value.status <= 599 &&
-    Object.keys(value).every((key) => key === "kind" || key === "status")
-  )
-    return Object.freeze({ kind: value.kind, status: value.status }) as UncertainStoreDiagnosis;
+    Object.keys(value).every(
+      (key) => key === "kind" || key === "status" || (value.kind === "http" && key === "stateWrite"),
+    )
+  ) {
+    const stateWrite =
+      value.kind === "http" && value.stateWrite !== undefined ? stateWriteFailureOf(value.stateWrite) : undefined;
+    if (value.kind === "http" && value.stateWrite !== undefined && (!stateWrite || value.status < 500)) return;
+    return Object.freeze({
+      kind: value.kind,
+      status: value.status,
+      ...(stateWrite ? { stateWrite: Object.freeze(stateWrite) } : {}),
+    }) as UncertainStoreDiagnosis;
+  }
   return undefined;
 }
 
@@ -73,5 +86,9 @@ export function storeWriteDiagnosisSummary(operationInput: string, diagnosisInpu
     ? operationInput
     : "other";
   const diagnosis = closedDiagnosis(diagnosisInput);
-  return `operation=${operation} failure=${diagnosis?.kind ?? "unclassified"}${diagnosis && "status" in diagnosis ? ` status=${diagnosis.status}` : ""}`;
+  const stateWrite = operation === "/runs/state" && diagnosis?.kind === "http" ? diagnosis.stateWrite : undefined;
+  const stage = stateWrite
+    ? ` stage=${stateWrite.stage}${"errorKind" in stateWrite ? ` errorKind=${stateWrite.errorKind}` : ` replyShape=${stateWrite.replyShape}`}`
+    : "";
+  return `operation=${operation} failure=${diagnosis?.kind ?? "unclassified"}${diagnosis && "status" in diagnosis ? ` status=${diagnosis.status}` : ""}${stage}`;
 }

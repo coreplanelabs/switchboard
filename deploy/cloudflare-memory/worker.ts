@@ -1,4 +1,11 @@
 import { originalPromotionArchiveKey } from "../../src/core/runLedger/workspaceDurability.ts";
+import { storeRequestWitness } from "../../src/core/storeResponse.ts";
+import {
+  STATE_WRITE_DIAGNOSTIC_HEADER,
+  StateWriteBoundaryError,
+  stateWriteException,
+  stateWriteReplyShape,
+} from "../../src/core/runStateWriteDiagnostic.ts";
 import { isConfigPublicationSnapshotKey, type ConfigSourcePrecondition } from "../../src/configPublicationProtocol.js";
 import { DO_MAX_BOUND_PARAMETERS, RUN_EVENT_INSERT_BATCH } from "../../src/memorySqlLimits.js";
 import {
@@ -2027,6 +2034,10 @@ function planeAgreementOf(outcome: string, decider: "proceed" | "queued"): boole
 /** The most effects one answer carries (record 0064; orchestration-plane item 7): the rest ride the next heartbeat. */
 const PLANE_EFFECTS_PER_ANSWER = 32;
 const COORDINATOR_SCAN_LIMIT = 16;
+
+/** An expected canonical archive refusal must leave the shared object alive.
+ * Throwing it inside blockConcurrencyWhile resets unrelated run requests. */
+class CanonicalArchiveRefusal extends Error {}
 
 export class RunHistoryDO extends DurableObject<Env> {
   private readonly sql: SqlStorage;
@@ -5142,35 +5153,44 @@ export class RunHistoryDO extends DurableObject<Env> {
   }
 
   private async archiveCheckpoint(record: RunRecord): Promise<RunRecord> {
-    return this.ctx.blockConcurrencyWhile(async () => {
-      await this.recoverPendingCheckpoint(record.id);
-      const live = this.liveRow(record.id);
-      for (const field of ["workReads", "unitSeedReceipt", "branchIdentityBaseline"] as const) {
-        const canonical = live?.state[field];
-        if (canonical === undefined) continue;
-        if (record[field] !== undefined && JSON.stringify(record[field]) !== JSON.stringify(canonical))
-          throw new Error("work evidence is not canonical");
-        record = { ...record, [field]: structuredClone(canonical) };
+    const result = await this.ctx.blockConcurrencyWhile(async () => {
+      try {
+        await this.recoverPendingCheckpoint(record.id);
+        const live = this.liveRow(record.id);
+        for (const field of ["workReads", "unitSeedReceipt", "branchIdentityBaseline"] as const) {
+          const canonical = live?.state[field];
+          if (canonical === undefined) continue;
+          if (record[field] !== undefined && JSON.stringify(record[field]) !== JSON.stringify(canonical))
+            throw new CanonicalArchiveRefusal("work evidence is not canonical");
+          record = { ...record, [field]: structuredClone(canonical) };
+        }
+        if (!workEvidenceBelongsToRun(record, record))
+          throw new CanonicalArchiveRefusal("work evidence does not match its canonical run");
+        const receipt = live?.state.contextCheckpointReceipt;
+        if (!isContextCheckpointReceipt(receipt)) return record;
+        if (
+          record.contextCheckpointReceipt !== undefined &&
+          JSON.stringify(record.contextCheckpointReceipt) !== JSON.stringify(receipt)
+        )
+          throw new CanonicalArchiveRefusal("checkpoint receipt is not canonical");
+        const context = applyContextCheckpoint(
+          mergeContextDependencies(
+            record.contextDependencies ?? (live!.state.contextDependencies as ContextDependencies),
+            receipt.normalized,
+          ),
+          receipt,
+        );
+        const sealed = { ...record, contextDependencies: context, contextCheckpointReceipt: receipt };
+        if (!isRunRecord(sealed))
+          throw new CanonicalArchiveRefusal("checkpoint archive does not match its canonical run");
+        return sealed;
+      } catch (error) {
+        if (error instanceof CanonicalArchiveRefusal) return error;
+        throw error;
       }
-      if (!workEvidenceBelongsToRun(record, record)) throw new Error("work evidence does not match its canonical run");
-      const receipt = live?.state.contextCheckpointReceipt;
-      if (!isContextCheckpointReceipt(receipt)) return record;
-      if (
-        record.contextCheckpointReceipt !== undefined &&
-        JSON.stringify(record.contextCheckpointReceipt) !== JSON.stringify(receipt)
-      )
-        throw new Error("checkpoint receipt is not canonical");
-      const context = applyContextCheckpoint(
-        mergeContextDependencies(
-          record.contextDependencies ?? (live!.state.contextDependencies as ContextDependencies),
-          receipt.normalized,
-        ),
-        receipt,
-      );
-      const sealed = { ...record, contextDependencies: context, contextCheckpointReceipt: receipt };
-      if (!isRunRecord(sealed)) throw new Error("checkpoint archive does not match its canonical run");
-      return sealed;
     });
+    if (result instanceof CanonicalArchiveRefusal) throw result;
+    return result;
   }
 
   private async recoverPendingCheckpoint(runId: string): Promise<void> {
@@ -11572,11 +11592,28 @@ async function handleLedger(
   if (!key.ok) return json({ error: key.error }, 400);
   const stub = env.RUNS.get(env.RUNS.idFromName(key.value));
   const now = systemClock();
+  const stateWitness =
+    pathname === "/runs/state" && originalBody !== undefined
+      ? await storeRequestWitness(pathname, originalBody)
+      : undefined;
   if (["/runs/state", "/runs/live-state", "/runs/finishing", "/runs/finish", "/runs/abandon"].includes(pathname)) {
     const id = parseRunId(b.runId),
       owner = gen(b.gen);
     if (id.ok && owner.ok) {
-      const pending = await stub.promotionHold(id.value, owner.value);
+      let pending: PromotionHold | null;
+      try {
+        pending = await stub.promotionHold(id.value, owner.value);
+      } catch (error) {
+        if (!stateWitness) throw error;
+        throw new StateWriteBoundaryError(
+          {
+            version: 1,
+            requestDigest: stateWitness.digest,
+            failure: stateWriteException("promotion-preflight", error),
+          },
+          error,
+        );
+      }
       if (pending) return json(pending, 423);
     }
   }
@@ -12093,7 +12130,20 @@ async function handleLedger(
   }
   if (pathname === "/runs/state") {
     if (typeof b.state !== "object" || b.state === null) return json({ error: "state must be an object" }, 400);
-    const result = await stub.setState(runId.value, g.value, b.state as RunState);
+    let result: FenceResult | PromotionHold;
+    try {
+      result = await stub.setState(runId.value, g.value, b.state as RunState);
+    } catch (error) {
+      if (!stateWitness) throw error;
+      throw new StateWriteBoundaryError(
+        {
+          version: 1,
+          requestDigest: stateWitness.digest,
+          failure: stateWriteException("state-rpc", error),
+        },
+        error,
+      );
+    }
     if (result && typeof result === "object") {
       if (
         "kind" in result &&
@@ -12112,7 +12162,16 @@ async function handleLedger(
       )
         return fenced(result);
     }
-    throw new Error("run state RPC returned an invalid acknowledgement");
+    const invalid = new Error("run state RPC returned an invalid acknowledgement");
+    if (!stateWitness) throw invalid;
+    throw new StateWriteBoundaryError(
+      {
+        version: 1,
+        requestDigest: stateWitness.digest,
+        failure: { stage: "acknowledgment", replyShape: stateWriteReplyShape(result) },
+      },
+      invalid,
+    );
   }
   if (pathname === "/runs/finishing") return fenced(await stub.finishing(runId.value, g.value));
   if (pathname === "/runs/abandon") {
@@ -12286,8 +12345,8 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
   }
 
   let body: unknown;
-  if (url.pathname === "/runs/promotion/prepare" || url.pathname === "/runs/claim") {
-    const header = request.headers.get(EXPECTED_SEED_HEADER);
+  if (url.pathname === "/runs/promotion/prepare" || url.pathname === "/runs/claim" || url.pathname === "/runs/state") {
+    const header = url.pathname === "/runs/state" ? null : request.headers.get(EXPECTED_SEED_HEADER);
     const expectedSeed = header === null ? undefined : decodeExpectedSeedHeader(header);
     if (
       header !== null &&
@@ -12403,6 +12462,17 @@ export default {
       root.end(res.status >= 500 ? "error" : "ok", { httpStatus: res.status });
       return res;
     } catch (err) {
+      if (err instanceof StateWriteBoundaryError) {
+        root.fail(err.cause);
+        root.end("error", {
+          httpStatus: 500,
+          stateWriteStage: err.diagnostic.failure.stage,
+          requestDigest: err.diagnostic.requestDigest,
+        });
+        const response = json({ error: "run state mutation outcome unknown" }, 500);
+        response.headers.set(STATE_WRITE_DIAGNOSTIC_HEADER, JSON.stringify(err.diagnostic));
+        return response;
+      }
       if (err instanceof PromotionPendingError) {
         root.end("ok", { httpStatus: 423 });
         return json({ kind: "held", reason: "promotion_pending", runId: err.runId }, 423);

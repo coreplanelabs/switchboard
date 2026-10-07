@@ -215,6 +215,16 @@ Three runs cover the shared capability families: ordinary answer; workspace read
 
 The JSON artifact records `capabilityOutcome`, passed/failed/incomplete/skipped scenarios, original run/actor/thread, served commit and exact review artifact. Its separate `productAcceptance` stays `incomplete` while the private route is unproven. The workflow reports upload/readiness separately. The private question → Fix it → draft-PR path remains a live gap because its attested Slack DM boundary is unavailable through HTTP/MCP. It needs a separately authorized disposable DM procedure and original unit/draft artifact receipts. Scripted CI, route probes and these three capability checks cannot prove it.
 
+A failed initial policy checkpoint can report a bounded `/runs/state` failure
+stage: `promotion-preflight`, `state-rpc`, or `acknowledgment`. The server binds
+that diagnostic to the exact request bytes; a missing, malformed or foreign
+diagnostic leaves the generic HTTP failure. Preserve the original uncertain
+request. Neither the stage nor HTTP500 proves whether the mutation committed,
+and neither permits replay. The original exception remains in the private
+`state.fetch` trace for a qualified cause comparison. An archived-record refusal
+and a state-write failure are separate observations until their original facts
+are correlated.
+
 ## Findings work after a pull request merges
 
 A findings run can finish after its pull request merges or closes. Switchboard
