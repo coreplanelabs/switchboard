@@ -47,3 +47,7 @@ OS users are pooled, one per concurrent thread, released on detach. An hourly sw
 
 - [Resident repositories](../reference/specs/resident-repos.md) — the pool, the budget, the sweep, the cap.
 - [Decision 0016](../decisions/0016-long-lived-process-not-serverless.md) — why there is a bot container to size.
+
+## Sandbox fleet ceiling
+
+The Sandbox deployment template sets `max_instances` to 250 while worker cleanup remains incomplete. Build and registry deployments both retain this ceiling. Billing depends on awake sandboxes and resource use. Lower it deliberately in the source template after cleanup is verified.

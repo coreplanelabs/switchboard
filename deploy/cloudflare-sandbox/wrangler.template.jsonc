@@ -58,13 +58,10 @@
       "instance_type": "standard-4",
       // The fleet's ceiling on AWAKE per-thread sandboxes; the next thread past
       // it waits (docs/reference/specs/execution.md item 14). Billing is per awake
-      // instance, so a higher ceiling costs nothing while instances sleep, and
-      // the account has ~15x headroom on the containers limits (6 TiB memory /
-      // 1500 vCPU against 25 × 12 GiB = 300 GiB, ~20x, and 25 × 4 = 100 vCPU,
-      // 15x — the vCPU line is the tighter one). Seen live: thirteen cold
-      // runs in 45 min exhausted the previous ceiling of 10 and a review
-      // aborted in 33 s reading the wait as a dead sandbox.
-      "max_instances": 25,
+      // instance, so a higher ceiling costs nothing while instances sleep.
+      // Keep the temporary recovery ceiling in the source template so a
+      // release cannot reset it. Reduce it deliberately after worker cleanup.
+      "max_instances": 250,
       // Replace the old-image instances in ONE wave on a deploy, not the
       // platform's default [10, 100] with minutes between the waves. A Worker
       // and its image deploy as two artifacts, and until the rollout finishes
