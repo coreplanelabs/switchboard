@@ -25,7 +25,10 @@ export async function readStoreResponse(
   } catch (cause) {
     const message = `store ${request.operation}: response body interrupted (HTTP ${response.status})`;
     if (kind === "read") throw new TransientStoreError(message, { cause });
-    throw new UncertainStoreError(message, request, { cause });
+    throw new UncertainStoreError(message, request, {
+      cause,
+      diagnosis: { kind: "response-body", status: response.status },
+    });
   }
   let value: unknown;
   try {
@@ -33,12 +36,15 @@ export async function readStoreResponse(
   } catch (cause) {
     const message = `store ${request.operation}: non-JSON body (HTTP ${response.status})`;
     if (kind === "read") throw new PermanentStoreError(message, { cause });
-    throw new UncertainStoreError(message, request, { cause });
+    throw new UncertainStoreError(message, request, {
+      cause,
+      diagnosis: { kind: "response-json", status: response.status },
+    });
   }
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     const message = `store ${request.operation}: invalid response object (HTTP ${response.status})`;
     if (kind === "read") throw new PermanentStoreError(message);
-    throw new UncertainStoreError(message, request);
+    throw new UncertainStoreError(message, request, { diagnosis: { kind: "response-shape", status: response.status } });
   }
   return value as Record<string, unknown>;
 }

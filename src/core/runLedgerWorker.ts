@@ -259,13 +259,18 @@ export class WorkerRunLedger implements RunLedger {
       });
     } catch (err) {
       if (kind === "write")
-        throw new UncertainStoreError(`run ledger ${path}: transport outcome unknown`, request, { cause: err });
+        throw new UncertainStoreError(`run ledger ${path}: transport outcome unknown`, request, {
+          cause: err,
+          diagnosis: { kind: "transport" },
+        });
       throw new TransientStoreError(`run ledger ${path}: ${err instanceof Error ? err.message : String(err)}`);
     }
     if (res.status === 404) throw new RouteMissingError(`run ledger ${path}: route missing (older state Worker)`);
     if (res.status >= 500 || res.status === 408 || res.status === 429) {
       if (kind === "write")
-        throw new UncertainStoreError(`run ledger ${path}: mutation outcome unknown (HTTP ${res.status})`, request);
+        throw new UncertainStoreError(`run ledger ${path}: mutation outcome unknown (HTTP ${res.status})`, request, {
+          diagnosis: { kind: "http", status: res.status },
+        });
       throw new TransientStoreError(`run ledger ${path}: HTTP ${res.status}`);
     }
     const data = await readStoreResponse(res, kind, request);
@@ -313,6 +318,7 @@ export class WorkerRunLedger implements RunLedger {
     throw new UncertainStoreError(
       `run ledger ${r.request.operation}: invalid acknowledgement (HTTP ${r.status})`,
       r.request,
+      { diagnosis: { kind: "acknowledgement", status: r.status } },
     );
   }
 
@@ -748,6 +754,7 @@ export class WorkerRunLedger implements RunLedger {
     throw new UncertainStoreError(
       `run ledger /runs/session/checkpoint: invalid acknowledgement (HTTP ${result.status})`,
       result.request,
+      { diagnosis: { kind: "acknowledgement", status: result.status } },
     );
   }
 
@@ -1049,7 +1056,11 @@ export class WorkerRunLedger implements RunLedger {
       (data.liveStateSeq as number) >= 0
     )
       return data as unknown as LiveStateAssignResult;
-    throw new UncertainStoreError(`run ledger /runs/live-state: invalid acknowledgement (HTTP ${r.status})`, r.request);
+    throw new UncertainStoreError(
+      `run ledger /runs/live-state: invalid acknowledgement (HTTP ${r.status})`,
+      r.request,
+      { diagnosis: { kind: "acknowledgement", status: r.status } },
+    );
   }
 
   async setState(runId: string, gen: string, state: RunState): Promise<FenceResult> {

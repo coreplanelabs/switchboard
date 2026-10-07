@@ -56,7 +56,13 @@ import type { RecordSink } from "../runHistoryWriter.js";
 import type { AssembledTranscript } from "./transcript.js";
 import type { FenceResult, Notepad, SessionHit } from "./types.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "../runStoreWorker.js";
-import { UncertainStoreError, type StoreRequestWitness } from "../storeFailure.js";
+import {
+  UncertainStoreError,
+  uncertainStoreSummary,
+  storeWriteDiagnosisSummary,
+  type StoreRequestWitness,
+  type UncertainStoreDiagnosis,
+} from "../storeFailure.js";
 import { preserveHarnessPolicy } from "./checkpointState.js";
 import { assignLedgerLiveState } from "./decisions.js";
 import type { RunLiveState } from "../runLiveState.js";
@@ -345,7 +351,7 @@ export type OpenOutcome =
  *  asked or this run is untracked, reply as before (the run is this process's). */
 export type FinishingGate = "ok" | "fenced" | "unavailable";
 
-export type WriteBoundaryFailure =
+export type WriteBoundaryFailure = { diagnosis?: UncertainStoreDiagnosis } & (
   | {
       version: 1;
       runId: string;
@@ -371,9 +377,22 @@ export type WriteBoundaryFailure =
       kind: "live-state" | "context-checkpoint";
       requestDigest: string;
       expectedDigest: string;
-    };
+    }
+);
 
 type ContextBoundaryExpected = { request: ContextCheckpointRequest; session: RunSession; through: number };
+
+/** Only a classified original obligation contributes to the failure note. */
+export function writeBoundaryDiagnosticSummary(failure: WriteBoundaryFailure | undefined): string | undefined {
+  if (!failure?.diagnosis) return undefined;
+  const operation = {
+    state: "/runs/state",
+    step: "/runs/step",
+    "live-state": "/runs/live-state",
+    "context-checkpoint": "/runs/session/checkpoint",
+  }[failure.kind];
+  return storeWriteDiagnosisSummary(operation, failure.diagnosis);
+}
 
 /** One tracked run. Every method is safe to call after a detach. */
 export interface LedgerRun {
@@ -1766,10 +1785,14 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
                   gen,
                   requestDigest: err.request.digest,
                   expectedDigest: await sourceHash(expected),
+                  ...(err.diagnosis ? { diagnosis: err.diagnosis } : {}),
                 },
                 request: err.request,
                 expected,
               });
+              warn(
+                `[ledger] ${this.threadKey} context commitment is unknown — original boundary retained; ${uncertainStoreSummary(err)}`,
+              );
             }
             return unavailable;
           }
@@ -1993,12 +2016,15 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
                 step: expected.step,
                 requestDigest: err.request.digest,
                 expectedDigest,
+                ...(err.diagnosis ? { diagnosis: err.diagnosis } : {}),
               },
               request: err.request,
               expected,
             });
             this.checkpointFailure = "state-unavailable";
-            warn(`[ledger] ${this.threadKey} step ${record.step} commitment is unknown — original boundary retained`);
+            warn(
+              `[ledger] ${this.threadKey} step ${record.step} commitment is unknown — original boundary retained; ${uncertainStoreSummary(err)}`,
+            );
             return;
           }
           if (err instanceof RouteMissingError || err instanceof PermanentStoreError || attempt >= 2) {
@@ -2092,11 +2118,14 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
                 gen,
                 requestDigest: err.request.digest,
                 expectedDigest: await sourceHash(expected ?? effective),
+                ...(err.diagnosis ? { diagnosis: err.diagnosis } : {}),
               },
               request: err.request,
               expected,
             });
-          warn(`[ledger] ${this.threadKey} live state not written: ${describe(err)}`);
+          warn(
+            `[ledger] ${this.threadKey} live state not written: ${err instanceof UncertainStoreError ? uncertainStoreSummary(err) : describe(err)}`,
+          );
           return { ok: false, reason: "unavailable" };
         }
       });
@@ -2158,6 +2187,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
                 stateVersion: version,
                 requestDigest: err.request.digest,
                 expectedDigest,
+                ...(err.diagnosis ? { diagnosis: err.diagnosis } : {}),
               },
               request: err.request,
               expected: snapshot,
@@ -2165,7 +2195,9 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
             this.stateDirty = true;
             this.stateWriteFailure = "state-unknown";
             this.checkpointFailure = "state-unavailable";
-            warn(`[ledger] ${this.threadKey} state commitment is unknown — original snapshot retained`);
+            warn(
+              `[ledger] ${this.threadKey} run=${this.runId} state commitment is unknown — original snapshot retained; ${uncertainStoreSummary(err)}`,
+            );
             return;
           }
           if (err instanceof RouteMissingError || err instanceof PermanentStoreError || attempt >= 2) {
