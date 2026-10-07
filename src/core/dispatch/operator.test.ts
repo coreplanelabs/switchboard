@@ -1625,6 +1625,114 @@ channels:
     });
   });
 
+  it("repairs a terminal repository listing on an explicit standalone PR review", async () => {
+    const text =
+      "agent:review review https://github.com/acme/api/pull/7 at head 1111111111111111111111111111111111111111. Focus on the Door boundary.";
+    const projection = { presets: projectionOf(["review", "general"]).presets, commands: [command("repo.list")] };
+    const model = vi
+      .fn<RouteModel>()
+      .mockResolvedValueOnce({
+        tool: "repo_list",
+        input: { intent: "read", reason: "Find the connected repository entry for the requested PR review." },
+      })
+      .mockResolvedValueOnce({
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "review",
+          repo: "acme/api",
+          prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
+          reason: "review the PR",
+        },
+      });
+    const answer = await runOperator(input({ text, projection }), model);
+    expect(model).toHaveBeenCalledTimes(2);
+    expect(answer.attempts).toMatchObject([{ outcome: "violation" }, { outcome: "accepted" }]);
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ line: text, prTarget: { number: 7, quote: "https://github.com/acme/api/pull/7" } }],
+    });
+    expect([model.mock.calls[0]![0].tool, ...(model.mock.calls[0]![0].tools ?? [])].map((t) => t.name)).not.toContain(
+      "repo_list",
+    );
+  });
+
+  it.each(["general", "research", "ship", "review"])(
+    "an explicit %s preset retains grounding helpers but removes terminal command actions",
+    (preset) => {
+      const turn = input({
+        text: `agent:${preset} Investigate this request with its full constraints.`,
+        projection: { presets: projectionOf([preset]).presets, commands: [command("repo.list")] },
+      });
+      expect(operatorTools(turn).map((t) => t.name)).not.toContain("repo_list");
+      expect(operatorTools(turn).map((t) => t.name)).toContain(OPERATOR_READ_TOOLS.registryHelp);
+      expect(buildOperatorPrompt(turn).system).not.toContain("`repo_list`:");
+      expect(answerOperatorRead(OPERATOR_READ_TOOLS.registryHelp, turn)).toContain("`repo_list`:");
+    },
+  );
+
+  it("an explicit review cannot accept a listing through exhausted multi-call repair", async () => {
+    const model = vi.fn<RouteModel>(async () => {
+      throw new MultiToolCallError([
+        { tool: OPERATOR_READ_TOOLS.threadState, input: {} },
+        { tool: "repo_list", input: { intent: "read", reason: "find its repository" } },
+      ]);
+    });
+    const answer = await runOperator(
+      input({
+        text: "agent:review Inspect this PR and keep the focus constraint.",
+        projection: { presets: projectionOf(["review"]).presets, commands: [command("repo.list")] },
+      }),
+      model,
+    );
+    expect(answer.decision.kind).toBe("non_decision");
+    expect(model).toHaveBeenCalledTimes(3);
+    expect(answer.attempts?.every((a) => a.outcome === "violation")).toBe(true);
+  });
+
+  it("an explicit review can ground repository facts before binding the original request", async () => {
+    const text = "agent:review Inspect https://github.com/acme/api/pull/7 for security and retain the requested scope.";
+    const answers: RouteToolCall[] = [
+      { tool: OPERATOR_READ_TOOLS.registryHelp, input: {} },
+      { tool: OPERATOR_READ_TOOLS.threadState, input: {} },
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "review",
+          repo: "acme/api",
+          prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
+          reason: "review",
+        },
+      },
+    ];
+    const answer = await runOperator(
+      input({ text, projection: { presets: projectionOf(["review"]).presets, commands: [command("repo.list")] } }),
+      async () => answers.shift()!,
+    );
+    expect(answer.decision).toMatchObject({ kind: "binds", binds: [{ line: text }] });
+  });
+
+  it.each([
+    "List repositories.",
+    "Explain how agent:review works.",
+    "`agent:review` is a quoted example.",
+    "agent:unknown List repositories.",
+  ])("ordinary or quoted commands remain available: %s", async (text) => {
+    const answer = await runOperator(
+      input({ text, projection: { presets: projectionOf(["review"]).presets, commands: [command("repo.list")] } }),
+      async () => ({ tool: "repo_list", input: { intent: "read", reason: "list repos" } }),
+    );
+    expect(answer.decision).toMatchObject({ kind: "binds", binds: [{ invocation: { id: "repo.list" } }] });
+  });
+
+  it("owned threads retain their command actions ahead of an explicit preset marker", () => {
+    const turn = input({
+      text: "agent:review Continue the existing owner's work.",
+      owner: { kind: "live", runId: "original" },
+      projection: { presets: projectionOf(["review"]).presets, commands: [command("repo.list")] },
+    });
+    expect(operatorTools(turn).map((t) => t.name)).toContain("repo_list");
+  });
+
   it("repairs a PR quote that includes adjacent head context", async () => {
     const requestText =
       "agent:review review https://github.com/acme/api/pull/7 at head 1111111111111111111111111111111111111111. Focus on the Door boundary.";

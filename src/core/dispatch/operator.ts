@@ -564,6 +564,17 @@ export interface OperatorInput {
   owner?: OperatorThreadOwner;
 }
 
+/** A leading preset directive selects work, not a terminal registry reply.
+ * Helper reads still ground that work. Ownership takes precedence so this
+ * restriction cannot redirect a follow-up away from its original writer. */
+function actionProjection(input: OperatorInput): OperatorProjection {
+  if (input.owner) return ownedProjection(input.projection, input.owner);
+  const preset = parseDirectives(input.text).agent;
+  return preset !== undefined && input.projection.presets.some((offered) => offered.name === preset)
+    ? { ...input.projection, commands: [] }
+    : input.projection;
+}
+
 /**
  * The operator's prompt, in the fixed order the one-door plan names — rules, projection,
  * briefs, tail oldest-first, request — with everything per-deployment in the
@@ -575,7 +586,7 @@ export interface OperatorInput {
 export function buildOperatorPrompt(input: OperatorInput): RoutePrompt {
   // An owned thread's event is shown only what a follow-up may bind (issue
   // 2027); a decision outside that table is one the executor folds.
-  const projection = input.owner ? ownedProjection(input.projection, input.owner) : input.projection;
+  const projection = actionProjection(input);
   const commandList = projection.commands
     .map((c) => `- \`${c.tool.name}\`: ${oneLine(c.tool.description ?? c.id)}`)
     .join("\n");
@@ -727,7 +738,7 @@ export function buildOperatorPrompt(input: OperatorInput): RoutePrompt {
  *  bind the author may not run is unrepresentable, and a line to mangle never
  *  exists: the schema carries the arguments typed. */
 export function operatorTools(input: OperatorInput): ToolDef[] {
-  const projection = input.owner ? ownedProjection(input.projection, input.owner) : input.projection;
+  const projection = actionProjection(input);
   const presets = projection.presets.map((p) => p.name);
   const repositoryWriters = projection.presets
     .filter((preset) => preset.identity === "write" && machineNeedsRepo(preset.machine))
@@ -2337,7 +2348,7 @@ export async function runOperator(
     ...(input.requesterId !== undefined ? { requesterId: input.requesterId } : {}),
     tail: input.tail,
     presets: input.projection.presets.map((p) => p.name),
-    commands: input.projection.commands,
+    commands: input.owner ? input.projection.commands : actionProjection(input).commands,
     ...(input.newestFinishedRun?.repo ? { threadRepo: input.newestFinishedRun.repo } : {}),
     ...requesterTarget,
     ...(input.requesterTarget?.issue && !requesterTarget.requesterRepoConflict
