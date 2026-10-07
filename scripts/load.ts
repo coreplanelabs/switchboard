@@ -225,7 +225,7 @@ commands
              --print-prompt --task <name>: print the task's prompt and exit (for the same task on today's coding agent)
   route      the one door replayed against finished runs whose requester typed the preset (the label), with
              the checked-in compound, imperative and defect fixture sets all driven through runOperator; no readers'
-             classifier or second model is called
+             classifier is called; the same model checks inferred terminal command fulfillment within the shared read allowance
              --provider NAME  --model ID  [--key-env VAR  --base-url URL  --since DATE  --limit N  --default-agent NAME
              --concurrency N  --smoke  --profile-model]
              --smoke: before deployment, use the candidate source and a real model on an ordinary read, a read with review/severity words, an
@@ -1272,7 +1272,8 @@ async function piReviewSuite(f: Flags): Promise<boolean> {
  *  call on every bind of a write- or destructive-class command (record 0044's
  *  verifier), scored as write misbinds removed and correct binds rejected and
  *  printed beside the command rows, never a verdict row. Live model spend: one
- *  small call per request — two on a verified bind — the key from the
+ *  call per operator turn; inferred terminal commands also spend a shared
+ *  read slot on fulfillment, and --verify adds its separate replay check — the key from the
  *  environment. */
 async function routeReplay(f: Flags): Promise<boolean> {
   const id = runId();

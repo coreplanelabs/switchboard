@@ -34,6 +34,8 @@ export type StructuredParse<T> = (
 export interface StructuredAttempt {
   outcome: "accepted" | "violation";
   violation?: string;
+  /** A semantic check is a recorded model attempt, never an execution receipt. */
+  stage?: "command_fulfillment";
 }
 
 /** One structured ask: the prompt (its tool forced as ever), the caller's
