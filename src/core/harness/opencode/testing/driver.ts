@@ -2602,7 +2602,7 @@ async function runOpenCode(script: RunScript, options: FakeServeOptions = {}): P
   const container = new FakeHarnessContainer();
   container.vm = script.containerWord === null ? undefined : (script.containerWord ?? CONTAINER_WORD);
   container.freePort = PORT;
-  const control = new RunControl();
+  const control = script.control ?? new RunControl();
   const inbox = new FollowUpInbox();
   if (script.followUp !== undefined)
     inbox.push({
@@ -2638,7 +2638,19 @@ async function runOpenCode(script: RunScript, options: FakeServeOptions = {}): P
     onProgress: (n) => void progress.push(n),
     onStep: async (r) => void steps.push(r),
     // The survival clause switched off: the row's facts are never written.
-    ...(options.mutate === "survival" ? {} : { saveFacts: (f: HarnessFacts) => void facts.push(f) }),
+    ...(options.mutate === "survival"
+      ? {}
+      : {
+          saveFacts: (f: HarnessFacts, control?: { requireAcknowledgement: true }) => {
+            if (script.onFacts) {
+              facts.push(f);
+              return script.onFacts(f, control);
+            }
+            if (control?.requireAcknowledgement) return "untracked" as const;
+            facts.push(f);
+          },
+        }),
+    ...(script.commandPolicy ? { commandPolicy: script.commandPolicy } : {}),
     ...(script.resume ? { resume: script.resume } : {}),
   };
   // The credential clause switched off: a provider key rides the server's

@@ -1,3 +1,4 @@
+import { originalSessionPolicyOf, type OriginalSessionPolicy } from "./sessionPolicy.js";
 // The harness contract (docs/reference/specs/harness.md; record 0038): the
 // seam between the run loop and any process that runs a model loop for a run.
 // Six clauses — credential, gate, relay, record, conversation, survival — held
@@ -26,7 +27,12 @@ import type { RunControl } from "../runRegistry/runControl.js";
 import type { FollowUpInbox, FollowUpInput } from "../threadAdmission.js";
 import type { Backend } from "../trace/attrs.js";
 import type { Clock, Span } from "../trace/types.js";
-import type { HarnessContainer, ReplacedCondition } from "./container.js";
+import {
+  HarnessContainerError,
+  HarnessEndingUnconfirmedError,
+  type HarnessContainer,
+  type ReplacedCondition,
+} from "./container.js";
 import type { HarnessRegistry } from "./pi/relay.js";
 import type { ToolRuleContext } from "./pi/toolRules.js";
 
@@ -49,6 +55,8 @@ export const SAID_ONCE_SUFFIX = " (said once: later events of this kind are not 
 /** What a run's row remembers about its pi (harness-pi.md item 8), so the next
  *  bot generation finds it: read by `harnessFactsOf`, written by pi's loop. */
 export interface PiHarnessFacts {
+  /** Original logical launch policy, acknowledged with this producer's facts. */
+  sessionPolicy?: OriginalSessionPolicy;
   harness: "pi";
   pid: number;
   /** Launch-time kernel birth identity; older rows cannot attest credentials. */
@@ -106,6 +114,8 @@ export interface PiHarnessFacts {
  *  hash, the container and the relaunch count. Nothing in this tree writes one
  *  yet; the union carries it so the seam is read against two shapes, not one. */
 export interface OpenCodeHarnessFacts {
+  /** Original logical launch policy; never an effective native-table attestation. */
+  sessionPolicy?: OriginalSessionPolicy;
   harness: "opencode";
   pid: number;
   /** Launch-time kernel birth identity; older rows cannot attest credentials. */
@@ -460,6 +470,42 @@ export interface HarnessResume {
 /** Runner-selected command route for a bound, tracked Review. */
 export type HarnessCommandPolicy = "hosted-review";
 
+/** First policy-bearing facts are a security boundary. Native callers with no
+ * persistence keep their legacy path without gaining a canonical policy. */
+export async function confirmSessionFacts<T extends HarnessFacts>(run: HarnessRun, facts: T): Promise<T> {
+  if (!facts.sessionPolicy) {
+    run.saveFacts?.(facts);
+    return facts;
+  }
+  const answer = await run.saveFacts?.(facts, { requireAcknowledgement: true });
+  if (answer === true) return facts;
+  if (
+    (answer === undefined || answer === "untracked") &&
+    facts.sessionPolicy.commandRoute === "native" &&
+    run.resume?.facts?.sessionPolicy === undefined
+  ) {
+    const { sessionPolicy: _policy, ...legacy } = facts;
+    if (answer === "untracked") run.saveFacts?.(legacy as T);
+    return legacy as T;
+  }
+  const held = new HarnessContainerError("checkpoint", "The original session policy checkpoint was not acknowledged.");
+  throw new HarnessEndingUnconfirmedError(run.runId, held, held);
+}
+
+export function sessionPolicyFor(run: HarnessRun): OriginalSessionPolicy | undefined {
+  const requested = run.commandPolicy ?? "native";
+  if (run.resume === undefined) return { version: 1, commandRoute: requested, identity: run.agent.identity };
+  const raw = run.resume.facts?.sessionPolicy;
+  const original = originalSessionPolicyOf(raw);
+  if (original && original.commandRoute === requested && original.identity === run.agent.identity) return original;
+  if (raw === undefined && requested === "native") return undefined;
+  const held = new HarnessContainerError(
+    "resume",
+    "The original session's command policy cannot be verified for this continuation.",
+  );
+  throw new HarnessEndingUnconfirmedError(run.runId, held, held);
+}
+
 /** One run as the loop hands it to a harness: the preset and its budget, the
  *  model, the seed, the relayed tools and their context, the gate's rules, the
  *  sinks the record is written through, and a resume. Nothing here names a
@@ -548,7 +594,10 @@ export interface HarnessRun {
    *  without a session — the events carry no row. */
   logIndexOf?: (localIndex: number) => number | undefined;
   /** The row's write for the harness facts (`ledgerRun.setState({ harness })`). */
-  saveFacts?: (facts: HarnessFacts) => void;
+  saveFacts?: (
+    facts: HarnessFacts,
+    control?: { requireAcknowledgement: true },
+  ) => void | boolean | "untracked" | Promise<void | boolean | "untracked">;
   resume?: HarnessResume;
 }
 

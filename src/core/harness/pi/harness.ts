@@ -1,3 +1,4 @@
+import { sessionPolicyFor, confirmSessionFacts } from "../contract.js";
 import { RUN_DEADLINE_RESERVE_MS } from "../../../execution/bashTimeout.js";
 import { HarnessEndingUnconfirmedError } from "../container.js";
 // The pi harness (docs/reference/specs/harness-pi.md): what drives every run.
@@ -506,13 +507,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     run.onEvent?.({ type: "run_note", kind: "harness_error", summary: mismatch.message, at: now() });
     throw mismatch;
   }
-  if (run.commandPolicy === "hosted-review" && run.resume !== undefined) {
-    const held = new HarnessContainerError(
-      "resume",
-      "The original session's recorded-command policy has not been verified.",
-    );
-    throw new HarnessEndingUnconfirmedError(run.runId, held, held);
-  }
+  const sessionPolicy = sessionPolicyFor(run);
   const agentSpan = run.span?.start("run.agent");
   if (agentSpan) deps.bearers?.reparent(run.runId, agentSpan);
   /** The session-log row a tool event's turn lands on (run-history item 53):
@@ -579,7 +574,8 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
   if (run.deadlineAt !== undefined && startedAt >= run.deadlineAt)
     throw new Error("The admitted run deadline ended before model admission.");
   const admitModelWrite = (command: Record<string, unknown>): boolean =>
-    (command.type !== "prompt" && command.type !== "steer") || now() < (run.deadlineAt ?? Infinity);
+    (command.type !== "prompt" && command.type !== "steer") ||
+    (run.control?.hardSignal.aborted !== true && now() < (run.deadlineAt ?? Infinity));
   const remainingMs = Math.min(
     run.resume?.remainingMs ?? run.agent.maxMinutes * MINUTE_MS,
     run.deadlineAt === undefined ? Infinity : Math.max(0, run.deadlineAt - startedAt),
@@ -811,10 +807,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
    *  (`PiHarnessFacts.logOffset`): a fresh pi's log from its first byte, a
    *  re-attach from where the row said, then wherever the mirror last wrote. */
   let mirrored = 0;
+  let policyConfirmed = false;
   const save = () => {
     if (facts) {
       facts = { ...facts, logOffset: mirrored };
-      run.saveFacts?.(facts);
+      if (!facts.sessionPolicy || policyConfirmed) run.saveFacts?.(facts);
     }
   };
   /** The ledger moved — a step or a compaction row landed — so the row's
@@ -1143,6 +1140,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       const bearerHash = bearerHashOf(deps.bearer);
       facts = {
         harness: "pi",
+        ...(sessionPolicy ? { sessionPolicy } : {}),
         pid,
         ...(started.processBirth === undefined ? {} : { processBirth: started.processBirth }),
         logOffset: 0,
@@ -1153,7 +1151,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         ...(here !== undefined ? { container: here } : {}),
         relaunches: recorded?.relaunches ?? 0,
       };
-      save();
+      if (!facts.sessionPolicy) save();
       transport = new PiRpcTransport({
         admitWrite: admitModelWrite,
         container,
@@ -1162,6 +1160,13 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         pollMs: deps.pollMs ?? 750,
         sleep: deps.sleep,
       });
+    }
+
+    if (facts?.sessionPolicy) {
+      openingCustodyUnknown = true;
+      facts = await confirmSessionFacts(run, facts);
+      policyConfirmed = true;
+      openingCustodyUnknown = false;
     }
 
     // This generation's command ids carry the moment it began and a nonce: the

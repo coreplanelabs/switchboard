@@ -3,7 +3,7 @@
 Every coding workspace receives the same task-directed validation guidance. The agent reads repository instructions, scripts and CI and chooses a bounded check relevant to the task. Where a trusted checkout binding, typed executor and durable ledger are available, `run_check` records execution. The default requires no repository-specific test command. Environment preparation and its ownership/recovery guards remain separate; the older [startup smoke policy](first-coding-test.md) is compatibility behavior, not automatically a task baseline.
 
 - **Code**: `src/agents/registry.ts`, `src/core/dispatch/runLoop.ts`, `src/core/checkExecution.ts`, `src/core/checkExecutionTypes.ts`, `src/tools/check.ts`, `src/tools/toolsets.ts`, `src/tools/runnableTool.ts`, `src/execution/executor.ts`
-- **Tests**: `src/agents/registry.test.ts`, `src/core/dispatch/runLoop.test.ts`, `src/core/checkExecution.test.ts`, `src/tools/check.test.ts`, `src/tools/toolsets.test.ts`
+- **Tests**: `src/core/checkExecution.metadata.test.ts`, `src/agents/registry.test.ts`, `src/core/dispatch/runLoop.test.ts`, `src/core/checkExecution.test.ts`, `src/tools/check.test.ts`, `src/tools/toolsets.test.ts`
 - **Related**: [Coding agent](agent-coding.md), [Execution](execution.md), [First coding baseline compatibility](first-coding-test.md)
 
 ## Behavior
@@ -48,3 +48,5 @@ Use an authorized test installation and disposable fixtures, with normal coding 
 4. Confirm a later verification has a distinct call identity and names its own result. The earlier baseline remains history. Publication still requires the existing ownership, exact-tree checks and review rules.
 5. On a supported installation, confirm typed receipts; on a path without a trusted checkout or typed executor, confirm the agent describes ordinary shell evidence without inventing a receipt. A command-policy refusal or ambiguous earlier operation must not trigger a shell fallback.
 6. Exercise duplicate delivery and an interrupted response in the test harness. Confirm exact completed replay executes once and pending/unknown replay executes zero additional commands. Authoritative operation reconciliation is not implemented by this tool; retain the unresolved operation, and never substitute a model-written file.
+
+| Metadata execution, result and framing failures retain a bounded structural diagnostic on the existing unavailable tool result. Typed infrastructure reasons require the actual typed cause; prose, private streams, paths, stacks and names are never emitted or classified. No business command or intent/result write begins on metadata failure. | `[unit]` `src/core/checkExecution.metadata.test.ts::recorded check structural metadata diagnostics::*` |

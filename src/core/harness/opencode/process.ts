@@ -31,6 +31,7 @@ import {
   type HarnessResponse,
 } from "../container.js";
 import type { OpenCodeHarnessFacts } from "../contract.js";
+import type { OriginalSessionPolicy } from "../sessionPolicy.js";
 import { HARNESS_URL_ENV, PROXY_PROVIDER, RUN_BEARER_ENV, takesAdaptiveThinking } from "../pi/process.js";
 import {
   OPENCODE_ROUTES,
@@ -891,11 +892,19 @@ export async function launchOpenCode(
  *  bearer), the container's word, and the loop's relaunch count. */
 export function openCodeFacts(
   started: Pick<OpenCodeStarted, "pid" | "processBirth" | "port" | "paths" | "tailerPid" | "tailerProcessBirth">,
-  run: { sessionID: string; logOffset: number; bearer?: string; container?: string; relaunches: number },
+  run: {
+    sessionID: string;
+    logOffset: number;
+    bearer?: string;
+    container?: string;
+    relaunches: number;
+    sessionPolicy?: OriginalSessionPolicy;
+  },
 ): OpenCodeHarnessFacts {
   const bearerHash = run.bearer === undefined ? undefined : bearerHashOf(run.bearer);
   return {
     harness: "opencode",
+    ...(run.sessionPolicy ? { sessionPolicy: run.sessionPolicy } : {}),
     pid: started.pid,
     ...(started.processBirth === undefined ? {} : { processBirth: started.processBirth }),
     port: started.port,

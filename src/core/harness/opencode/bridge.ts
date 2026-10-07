@@ -2289,6 +2289,8 @@ export async function driveOpenCode(
   const auth = { Authorization: openCodeAuthHeader(conn.password) };
   const sessionRoutes = openCodeSessionRoutes(conn.sessionID);
   const request = (route: { method: string; path: string }, body?: unknown) => {
+    if (route.path === sessionRoutes["session.prompt"].path && run.control?.hardSignal.aborted === true)
+      return Promise.reject(new Error("The admitted run was stopped before model admission."));
     if (route.path === sessionRoutes["session.prompt"].path && now() >= (run.deadlineAt ?? Infinity))
       return Promise.reject(new Error("The admitted run deadline ended before model admission."));
     const send =

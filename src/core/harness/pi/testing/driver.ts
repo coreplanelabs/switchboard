@@ -155,7 +155,7 @@ export function piDriver(): HarnessDriver {
         script.resume.facts.root !== undefined &&
         script.resume.facts.bearerHash === bearerHashOf(BEARER);
       const registry = new HarnessRegistry();
-      const control = new RunControl();
+      const control = script.control ?? new RunControl();
       const inbox = new FollowUpInbox();
       if (script.followUp !== undefined)
         inbox.push({
@@ -344,7 +344,15 @@ export function piDriver(): HarnessDriver {
         onEvent: (e) => void events.push(e),
         onProgress: (n) => void progress.push(n),
         onStep: async (r) => void steps.push(r),
-        saveFacts: (f) => void facts.push(f),
+        saveFacts: (f, control) => {
+          if (script.onFacts) {
+            facts.push(f);
+            return script.onFacts(f, control);
+          }
+          if (control?.requireAcknowledgement) return "untracked";
+          facts.push(f);
+        },
+        ...(script.commandPolicy ? { commandPolicy: script.commandPolicy } : {}),
         ...(script.resume ? { resume: script.resume } : {}),
       };
       const deps: HarnessDeps = {

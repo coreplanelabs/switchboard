@@ -1,3 +1,4 @@
+import { sessionPolicyFor, confirmSessionFacts } from "../contract.js";
 import { HarnessEndingUnconfirmedError } from "../container.js";
 // The OpenCode harness (docs/reference/specs/harness.md item 7): OpenCode as the
 // contract's second object. `open` is the run — the server started and the
@@ -226,13 +227,7 @@ export async function openOpenCodeRun(
     run.onProgress?.(summary);
     emit({ type: "run_note", kind, summary });
   };
-  if (run.commandPolicy === "hosted-review" && run.resume !== undefined) {
-    const held = new HarnessContainerError(
-      "resume",
-      "The original session's recorded-command policy has not been verified.",
-    );
-    throw new HarnessEndingUnconfirmedError(run.runId, held, held);
-  }
+  const sessionPolicy = sessionPolicyFor(run);
   const identity = run.agent.identity;
 
   // The run on the relay, so the plugin's `/harness/tools`, `/harness/authorize`
@@ -310,9 +305,10 @@ export async function openOpenCodeRun(
   // The row's facts as this generation last wrote them: the launch's or the
   // re-attach's, then the feed offset following the ledger's steps.
   let facts: OpenCodeHarnessFacts | undefined;
+  let policyConfirmed = false;
   const saveFacts = (next: OpenCodeHarnessFacts) => {
     facts = next;
-    run.saveFacts?.(next);
+    if (!next.sessionPolicy || policyConfirmed) run.saveFacts?.(next);
   };
   // The requests the loop posts and does not wait on (`OpenCodeConnection.posted`), joined by `end` after the kill that cuts the unanswered.
   const posted = new Set<Promise<unknown>>();
@@ -509,9 +505,17 @@ export async function openOpenCodeRun(
             bearer: deps.bearer,
             ...(here !== undefined ? { container: here } : {}),
             relaunches: resumeFacts?.relaunches ?? 0,
+            ...(sessionPolicy ? { sessionPolicy } : {}),
           },
         ),
       );
+    }
+
+    if (facts?.sessionPolicy) {
+      openingCustodyUnknown = true;
+      facts = await confirmSessionFacts(run, facts);
+      policyConfirmed = true;
+      openingCustodyUnknown = false;
     }
 
     for (const m of server.reattach?.store ?? []) known.add(m.id);

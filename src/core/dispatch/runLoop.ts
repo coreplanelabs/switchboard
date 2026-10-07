@@ -1,3 +1,4 @@
+import { originalSessionPolicyOf } from "../harness/sessionPolicy.js";
 import { runCheckTool } from "../../tools/check.js";
 import { PUSHED_MAX } from "../../execution/residentRebind.js";
 import {
@@ -73,6 +74,7 @@ import {
   harnessFactsOf,
   openThroughSeam,
   type HarnessFacts,
+  type HarnessRun,
   type HarnessResume,
   type HarnessSession,
 } from "../harness/contract.js";
@@ -439,6 +441,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     coordinator,
     seed,
   } = ctx;
+
   const ledgerTrackedAtEntry = ledgerRun?.tracked() === true;
   // A private tool's result can reach model-authored progress before the final
   // answer. Keep every card frame free of model text for the whole DM run.
@@ -2052,9 +2055,18 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     typeof executor.execResult === "function" &&
     checkOwner !== undefined &&
     Object.values(checkOwner).every((value) => typeof value === "string" && value.length > 0);
-  const commandPolicy = canRecordReview ? ("hosted-review" as const) : undefined;
+  const originalSessionPolicy = originalSessionPolicyOf(harnessFactsOf(ctx.resume?.row.state.harness)?.sessionPolicy);
+  const commandPolicy = originalSessionPolicy
+    ? originalSessionPolicy.commandRoute === "hosted-review"
+      ? ("hosted-review" as const)
+      : undefined
+    : canRecordReview
+      ? ("hosted-review" as const)
+      : undefined;
   const checkExecution =
-    checkOwner && ((agent.name === "coding" && profile.identity === "write") || reviewCheckReady)
+    checkOwner &&
+    ((agent.name === "coding" && profile.identity === "write") ||
+      (reviewCheckReady && commandPolicy === "hosted-review"))
       ? createCheckExecution({
           executor: () => executor,
           workspace: () => currentCheckout,
@@ -2202,7 +2214,13 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // read off (harness.md item 6), whichever generation wrote it; the harness's
   // every save goes through here and onto the row.
   let lastFacts: HarnessFacts | undefined = facts;
-  const saveFacts = (h: HarnessFacts) => {
+  const saveFacts: NonNullable<HarnessRun["saveFacts"]> = (h, control) => {
+    if (control?.requireAcknowledgement) {
+      if (!ledgerTrackedAtEntry) return "untracked";
+      if (ledgerRun?.tracked() !== true) return false;
+      lastFacts = h; // Actual producer pointers remain available on an unknown ACK.
+      return ledgerRun.setStateAndFlush({ harness: h });
+    }
     lastFacts = h;
     ledgerRun?.setState({ harness: h });
   };
@@ -2833,7 +2851,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                       mainWork !== undefined,
                       mainStart !== undefined && verifiedAtOpen && mainWorkTrusted && !privateAudienceLatch.revoked,
                     ),
-                    ...(reviewCheckReady && checkExecution ? [runCheckTool] : []),
+                    ...(reviewCheckReady && commandPolicy === "hosted-review" && checkExecution ? [runCheckTool] : []),
                   ].filter((tool) => slackContext !== undefined || tool.name !== "slack_context"),
                   mcpForRun?.tools,
                 ),
