@@ -384,6 +384,22 @@ describe("bot container validation capacity", () => {
 // apart and fails when someone steps the size down again without changing the
 // spec.
 describe("the sandbox Worker's container", () => {
+  it.each([TEST_PROFILE, TEST_REGISTRY_PROFILE])(
+    "keeps the deployed sandbox ceiling at 250 for image mode $images",
+    (profile) => {
+      const template = readFileSync(
+        new URL(`../../deploy/cloudflare-sandbox/${TEMPLATE_FILE}`, import.meta.url),
+        "utf8",
+      );
+      const rendered = renderTemplate(template, templateView(profile, "sandbox", TEST_PUBLISHED_IMAGES)!);
+      expect(rendered.ok).toBe(true);
+      if (!rendered.ok) throw new Error(rendered.problems.join("\n"));
+      const config = JSON.parse(stripJsonc(rendered.text)) as { containers: Array<{ max_instances: number }> };
+      expect(config.containers).toHaveLength(1);
+      expect(config.containers[0].max_instances).toBe(250);
+    },
+  );
+
   it("the cold per-thread sandbox runs on standard-4 — 4 vCPU / 12 GiB / 20 GB, the largest predefined type — so one thread can typecheck a large monorepo", () => {
     const template = readFileSync(new URL(`../../deploy/cloudflare-sandbox/${TEMPLATE_FILE}`, import.meta.url), "utf8");
     const rendered = renderTemplate(template, templateView(TEST_PROFILE, "sandbox", TEST_PUBLISHED_IMAGES)!);
