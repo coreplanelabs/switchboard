@@ -347,6 +347,23 @@ describe("terminal command fulfillment", () => {
     expect(model).toHaveBeenCalledTimes(6);
   });
 
+  it.each([
+    { final: work, outcome: "binds" },
+    { final: { tool: "unoffered_action", input: {} }, outcome: "non_decision" },
+  ])("mixed helper and fulfillment reads share repair slots: $outcome", async ({ final, outcome }) => {
+    const helper = { tool: OPERATOR_READ_TOOLS.repositoryBrief, input: { repo: "acme/api" } };
+    const read = vi.fn(async () => undefined);
+    // Two helpers, one negative verdict and one helper spend all four reads.
+    // The negative verdict and the extra helper spend the two repair slots.
+    const replies = [helper, helper, listing, verdict(false), helper, helper, final];
+    const model = vi.fn<RouteModel>(async () => replies.shift()!);
+    const answer = await runOperator({ ...fix, repositoryBriefs: { status: "available", catalog: [], read } }, model);
+    expect(answer.decision.kind).toBe(outcome);
+    expect(read).toHaveBeenCalledTimes(3);
+    expect(model.mock.calls.filter(([prompt]) => prompt.tool.name === VERIFY_TOOL_NAME)).toHaveLength(1);
+    expect(model).toHaveBeenCalledTimes(7);
+  });
+
   it.each(["", "not a verdict", '{"agrees":true,"reason":"yes"}'])(
     "a no-call verdict cannot accept the command: %s",
     async (reply) => {
