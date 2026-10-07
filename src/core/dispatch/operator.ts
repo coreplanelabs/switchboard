@@ -181,8 +181,8 @@ export const OPERATOR_READ_TOOLS = {
    *  openrouter OpenAI refs that exist, never a provider the config lacks. */
   providerModels: "provider_models",
 } as const;
-/** The most read calls one turn may spend before it must act: the reads are
- *  grounding, not a budget for wandering. */
+/** Grounding helpers and terminal-command fulfillment verdicts share this
+ *  read allowance. Structural action repairs spend their own bounded slots. */
 export const OPERATOR_READS_MAX = 4;
 /** Provider schema refusals consume a separate repair budget: the measured
  * catalogue has four tools carrying the one known incompatible construct, so
@@ -2398,6 +2398,8 @@ export async function runOperator(
   // The turns so far, rendered by `providerStructuredModel` as assistant/user
   // pairs: a read tool's answer, or a violation's re-ask (record 0067).
   const turns: { answer: string; violation: string }[] = [];
+  // Neither allowance resets when the loop switches between helpers,
+  // fulfillment checks and structural corrections.
   let reads = 0;
   let violations = 0;
   let schemaReasks = 0;
