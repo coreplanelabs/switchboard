@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.289.9](https://github.com/coreplanelabs/switchboard/compare/v1.289.8...v1.289.9) (2026-10-07)
+
+
+### Bug fixes
+
+* **deploy:** show the captured release target selection ([#2842](https://github.com/coreplanelabs/switchboard/issues/2842)) ([0387408](https://github.com/coreplanelabs/switchboard/commit/0387408a0e61131de1fd227d543fae25f02bce03))
+* **dispatcher:** permit bounded correction after the last verdict ([#2844](https://github.com/coreplanelabs/switchboard/issues/2844)) ([80a370d](https://github.com/coreplanelabs/switchboard/commit/80a370da6aeec4a8dd904254eef524226602f4bd))
+
 ## [1.289.8](https://github.com/coreplanelabs/switchboard/compare/v1.289.7...v1.289.8) (2026-10-07)
 
 
