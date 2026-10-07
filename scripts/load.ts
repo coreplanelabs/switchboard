@@ -1468,6 +1468,7 @@ async function routeReplay(f: Flags): Promise<boolean> {
         model,
         {
           timeoutMs: OPERATOR_TIMEOUT_MS,
+          includeAllowance: true,
           ...(completion ? { maxOutputTokens: operatorMaxOutputTokens(completion) } : {}),
         },
       );
@@ -1479,7 +1480,7 @@ async function routeReplay(f: Flags): Promise<boolean> {
       );
       if (!ok) {
         process.stdout.write(
-          `door smoke detail: ${JSON.stringify({ decision: result.decision, attempts: result.attempts })}\n`,
+          `door smoke detail: ${JSON.stringify({ decision: result.decision, attempts: result.attempts, allowance: result.allowance })}\n`,
         );
         passed = false;
       }
