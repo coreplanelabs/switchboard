@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { verifyPrTargetEvidence } from "./targetEvidence.js";
+import { verifyPrTargetEvidence, inspectPrTargetEvidence } from "./targetEvidence.js";
 
 describe("requester-authored PR links", () => {
   it.each([
@@ -76,5 +76,57 @@ describe("requester-authored PR links", () => {
         { requestText: `review ${quote}`, repo: "acme/api" },
       ),
     ).toBeUndefined();
+  });
+});
+
+describe("PR target diagnostic preserves admission", () => {
+  const quote = "https://github.com/acme/api/pull/7";
+  const valid = { number: 7, source: "request", quote };
+  const context = {
+    requestText: `Review ${quote}`,
+    repo: "acme/api",
+    requesterId: "slack:UOWNER",
+    tail: [
+      { actor: "slack:UOWNER", text: `user: Review ${quote}` },
+      { actor: "slack:UBOT", text: "assistant: https://github.com/acme/old/pull/7 is historical" },
+    ],
+  };
+  it.each([valid, { ...valid, source: "thread" }])("retains exact authored evidence %j", (evidence) => {
+    expect(inspectPrTargetEvidence(evidence, context)).toEqual({ ok: true, evidence });
+    expect(verifyPrTargetEvidence(evidence, context)).toEqual(evidence);
+  });
+  it.each([
+    [null, "invalid_shape"],
+    [{ ...valid, number: 0 }, "invalid_shape"],
+    [{ ...valid, source: "assistant" }, "invalid_shape"],
+    [{ ...valid, quote: "x".repeat(513) }, "invalid_shape"],
+    [{ ...valid, quote: ` ${quote}` }, "invalid_shape"],
+    [{ ...valid, quote: `${quote} at head abc` }, "invalid_identifier"],
+    [{ ...valid, quote: "acme/api#not-a-number" }, "invalid_identifier"],
+    [{ ...valid, source: "thread", quote: "https://github.com/acme/old/pull/7" }, "not_requester_authored"],
+    [{ ...valid, quote: "https://github.com/acme/other/pull/7" }, "not_requester_authored"],
+    [{ ...valid, number: 8 }, "identity_mismatch"],
+  ])("keeps the target refused and supplies only a closed diagnosis %j", (evidence, reason) => {
+    expect(verifyPrTargetEvidence(evidence, context)).toBeUndefined();
+    expect(inspectPrTargetEvidence(evidence, context)).toEqual({ ok: false, reason });
+  });
+  it("retains same-requester historical PR evidence when a later review uses the thread", () => {
+    const evidence = { ...valid, source: "thread" };
+    const later = { ...context, requestText: "Review it again." };
+    expect(inspectPrTargetEvidence(evidence, later)).toEqual({ ok: true, evidence });
+    expect(verifyPrTargetEvidence(evidence, later)).toEqual(evidence);
+  });
+  it("wrong source actor and repository remain refusals", () => {
+    expect(
+      inspectPrTargetEvidence({ ...valid, source: "thread" }, { ...context, requesterId: "slack:UOTHER" }),
+    ).toEqual({ ok: false, reason: "not_requester_authored" });
+    expect(
+      verifyPrTargetEvidence({ ...valid, source: "thread" }, { ...context, requesterId: "slack:UOTHER" }),
+    ).toBeUndefined();
+    expect(inspectPrTargetEvidence(valid, { ...context, repo: "acme/other" })).toEqual({
+      ok: false,
+      reason: "identity_mismatch",
+    });
+    expect(verifyPrTargetEvidence(valid, { ...context, repo: "acme/other" })).toBeUndefined();
   });
 });
