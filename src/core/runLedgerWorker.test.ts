@@ -1,3 +1,6 @@
+import { planContextCheckpoint } from "./references/contextCheckpoint.js";
+import { contextDependenciesHash } from "./references/contextDependencies.js";
+import { storeRequestWitness } from "./storeResponse.js";
 import { UNKNOWN_CONTEXT_DEPENDENCIES } from "./references/contextDependencies.js";
 import { testSessionSources } from "./testing/slackSources.js";
 import { describe, expect, it } from "vitest";
@@ -874,4 +877,181 @@ describe("intake receipts — the routes and the retry (run-history item 59)", (
     expect(await wt.recordIntake("slack:C1:2.0", receipt())).toEqual({ inserted: true, stored: receipt() });
     expect(w.calls.map((c) => c.path)).toEqual(["/runs/intake", "/runs/intake/read"]);
   });
+});
+
+describe("status and checkpoint mutation acknowledgement custody", () => {
+  const statusRequest = { expectedSeq: 0, eventSeq: 1, at: 1000, state: "admitted" as const, bound: 10000 };
+  const contextRequest = {
+    key: "slack:C1:1.0:review",
+    runId: "r1",
+    gen: "g1",
+    expected: {
+      beforeHash: "a".repeat(64),
+      revision: 0,
+      inputs: { transcriptHash: "b".repeat(64), systemHash: "c".repeat(64), notepadHash: "d".repeat(64) },
+    },
+  };
+  it.each(["status", "context"] as const)(
+    "retains original %s bytes for malformed possibly-committed acknowledgements",
+    async (kind) => {
+      for (const body of [{ ok: true }, { ok: false, reason: "made-up" }, { ok: true, receipt: {} }]) {
+        let payload = "",
+          path = "",
+          writes = 0;
+        const ledger = new WorkerRunLedger({
+          baseUrl: "https://memory.test",
+          token: "tok",
+          storeKey: "runs:default",
+          fetch: async (url, init) => {
+            writes++;
+            path = new URL(String(url)).pathname;
+            payload = String(init?.body);
+            return Response.json(body);
+          },
+        });
+        let caught: unknown;
+        try {
+          if (kind === "status") await ledger.assignLiveState("r1", "g1", statusRequest);
+          else await ledger.normalizeContextOrigins(contextRequest);
+        } catch (error) {
+          caught = error;
+        }
+        expect(caught).toMatchObject({
+          name: "UncertainStoreError",
+          outcome: "unknown",
+          request: { operation: path, payload },
+        });
+        expect((caught as { request: { digest: string } }).request.digest).toBe(
+          (await storeRequestWitness(path, payload)).digest,
+        );
+        expect(writes).toBe(1);
+      }
+    },
+  );
+  it.each(["status", "context"] as const)("keeps original %s request on a non-JSON successful reply", async (kind) => {
+    let payload = "",
+      path = "",
+      writes = 0;
+    const ledger = new WorkerRunLedger({
+      baseUrl: "https://memory.test",
+      token: "tok",
+      storeKey: "runs:default",
+      fetch: async (url, init) => {
+        writes++;
+        path = new URL(String(url)).pathname;
+        payload = String(init?.body);
+        return new Response("reply interrupted", { status: 200 });
+      },
+    });
+    const mutation =
+      kind === "status"
+        ? ledger.assignLiveState("r1", "g1", statusRequest)
+        : ledger.normalizeContextOrigins(contextRequest);
+    let caught: unknown;
+    try {
+      await mutation;
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      name: "UncertainStoreError",
+      outcome: "unknown",
+      request: { operation: path, payload },
+    });
+    expect(writes).toBe(1);
+    expect(JSON.parse(payload)).toHaveProperty("gen", "g1");
+  });
+  it.each(["fenced", "unknown-run", "checkpoint-unavailable"] as const)(
+    "preserves a known checkpoint refusal: %s",
+    async (reason) => {
+      const w = stubWorker(() => ({ status: 409, data: { ok: false, reason } }));
+      expect(await w.ledger.normalizeContextOrigins(contextRequest)).toEqual({ ok: false, reason });
+      expect(w.calls).toHaveLength(1);
+    },
+  );
+});
+
+describe("checkpoint acknowledgment original binding", () => {
+  async function original() {
+    const context = {
+      version: 1 as const,
+      status: "known" as const,
+      revision: 0,
+      origins: [{ runId: "r1", requester: "slack:UA", channelId: "slack:C1", threadKey: "slack:C1:1.0" }],
+      slack: [],
+      mcp: [],
+    };
+    const inputs = { transcriptHash: "a".repeat(64), systemHash: "b".repeat(64), notepadHash: "c".repeat(64) };
+    const expected = { beforeHash: await contextDependenciesHash(context), revision: 0, inputs };
+    const key = "slack:C1:1.0:review";
+    const receipt = await planContextCheckpoint({
+      run: {
+        runId: "r1",
+        meta: {
+          userId: "slack:UA",
+          channelId: "slack:C1",
+          threadKey: "slack:C1:1.0",
+          channelVisibility: "public",
+          session: { key, threadSession: "slack:C1:1.0:@thread", seedFrom: 0, request: 0, range: { from: 0 } },
+        },
+        context,
+      },
+      ownerGen: "g1",
+      through: 0,
+      inputs,
+      expected,
+      sources: [],
+    });
+    if (!receipt) throw new Error("actual planned receipt unavailable");
+    return { request: { key, runId: "r1", gen: "g1", expected }, receipt };
+  }
+  it("accepts a matching planned canonical checkpoint receipt", async () => {
+    const { request, receipt } = await original();
+    const w = stubWorker(() => ({ status: 200, data: { ok: true, receipt } }));
+    expect(await w.ledger.normalizeContextOrigins(request)).toEqual({ ok: true, receipt });
+    expect(w.calls).toHaveLength(1);
+  });
+  it("checks a provided local original session without changing the wire request", async () => {
+    const { request, receipt } = await original();
+    const w = stubWorker(() => ({ status: 200, data: { ok: true, receipt } }));
+    expect(await w.ledger.normalizeContextOrigins(request, receipt.session)).toEqual({ ok: true, receipt });
+    expect(w.calls[0].body).toEqual({ storeKey: "runs:default", ...request });
+  });
+  it.each(["key", "seedFrom", "request", "from", "through"] as const)(
+    "keeps a receipt outside the captured local %s boundary uncertain",
+    async (key) => {
+      const { request, receipt } = await original();
+      const expected = { ...receipt.session };
+      if (key === "key") expected.key = "slack:C1:2.0:review";
+      else expected[key]++;
+      const w = stubWorker(() => ({ status: 200, data: { ok: true, receipt } }));
+      await expect(w.ledger.normalizeContextOrigins(request, expected)).rejects.toMatchObject({
+        name: "UncertainStoreError",
+        request: { operation: "/runs/session/checkpoint" },
+      });
+      expect(w.calls[0].body).toEqual({ storeKey: "runs:default", ...request });
+    },
+  );
+  it.each(["run", "generation", "key", "before", "revision", "inputs", "nonboolean-ok"])(
+    "retains the request when a successful checkpoint reply is bound to foreign %s",
+    async (mode) => {
+      const { request, receipt } = await original(),
+        reply = structuredClone(receipt);
+      if (mode === "run") reply.runId = "r2";
+      if (mode === "generation") reply.ownerGen = "g2";
+      if (mode === "key") reply.session.key = "slack:C1:2.0:review";
+      if (mode === "before") reply.beforeHash = "d".repeat(64);
+      if (mode === "revision") reply.beforeRevision++;
+      if (mode === "inputs") reply.inputs.systemHash = "d".repeat(64);
+      const w = stubWorker(() => ({
+        status: 200,
+        data: { ok: mode === "nonboolean-ok" ? "true" : true, receipt: reply },
+      }));
+      await expect(w.ledger.normalizeContextOrigins(request)).rejects.toMatchObject({
+        name: "UncertainStoreError",
+        request: { operation: "/runs/session/checkpoint" },
+      });
+      expect(w.calls).toHaveLength(1);
+    },
+  );
 });

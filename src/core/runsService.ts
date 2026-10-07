@@ -1,3 +1,4 @@
+import type { LedgerRun as TrackedLedgerRun, LedgerWriteThrough } from "./runLedger/writeThrough.js";
 import { answerOutcomeOf, type AnswerOutcome } from "./answerOutcome.js";
 import { audienceRefusalOf, type AudienceRefusalReceipt } from "./audienceDecision.js";
 import { matchesPredicate } from "./authz/predicate.js";
@@ -517,6 +518,8 @@ const ordinaryRun = (view: { threadKey?: string }, access?: typeof PRIVATE_WORKE
   access === PRIVATE_WORKER_INTERNAL_READ || !privateWorkerRun(view);
 
 export interface RunsServiceDeps {
+  /** This process's existing writer; its actual run handle owns canonical closure. */
+  writer?: Pick<LedgerWriteThrough, "gen" | "sessionPersistence" | "liveRuns">;
   registry: RunRegistry;
   /** null when run history is off (live-only). */
   store: RunStore | null;
@@ -988,7 +991,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       kind: "stop_requested",
       mode: "hard",
       actor: sanitizeActor(actor),
-      summary: "hard stop requested — sealing the hosted pipeline",
+      summary: "hard stop requested",
       at,
     });
     const instanceId = (registry.snapshotById(id)?.events ?? []).reduce<string | undefined>(
@@ -1015,17 +1018,41 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
         warn(`[runs] unit rows unavailable for the hard stop of ${id}: ${describe(err)}`);
       }
     }
+    let tracked: TrackedLedgerRun | undefined;
+    let canonicalRow: LiveRunRow | undefined;
+    if (ledger) {
+      try {
+        if (!(await ledger.requestStop(id, "hard")).ok) return { ok: false, error: "unavailable" };
+        const writer = deps.writer;
+        const rows = (await ledger.listLive()).filter((row) => row.runId === id);
+        if (!writer || writer.sessionPersistence !== true || deps.generation !== writer.gen || rows.length !== 1)
+          return { ok: false, error: "unavailable" };
+        canonicalRow = rows[0];
+        const handles = writer.liveRuns().filter((run) => run.runId === id && run.tracked());
+        if (
+          canonicalRow.ownerGen !== writer.gen ||
+          canonicalRow.phase === "handoff" ||
+          canonicalRow.phase === "attaching" ||
+          canonicalRow.state.pausedForRetry === true ||
+          handles.length !== 1
+        )
+          return { ok: false, error: "unavailable" };
+        tracked = handles[0];
+        if ((await tracked.finishing()) !== "ok") return { ok: false, error: "unavailable" };
+      } catch (err) {
+        warn(`[runs] hosted canonical closure remains unavailable for ${id}: ${describe(err)}`);
+        return { ok: false, error: "unavailable" };
+      }
+    }
     // The answer before finish() — a publish on a finished run is a no-op — so
     // the record's last content event is the units' state.
     registry.publish(id, { type: "answer", text: hostedSealAnswer(unitRows, runnerStopped), at: clock() });
-    registry.finish(id, "failed");
     const snap = registry.snapshotById(id);
-    const seal = registry.seal(id);
     const summary = registry.getById(id);
     if (ledger) {
       try {
         // Fresh, never the TTL cache: the row's ownerGen fences the finish.
-        const row = (await ledger.listLive()).find((r) => r.runId === id);
+        const row = canonicalRow;
         if (row) {
           const finishedAt = snap?.finishedAt ?? at;
           const m = row.meta;
@@ -1055,15 +1082,18 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
               truncated: snap?.truncated ?? false,
               window: { start: snap?.receivedAt ?? snap?.startedAt ?? at, end: finishedAt },
             }),
-            seal,
           });
-          const done = await ledger.finish(id, row.ownerGen, record);
-          if (!done.ok) warn(`[runs] run ledger finish refused for ${id} (${done.reason ?? "unknown"})`);
+          await tracked!.sink.put(record);
+          const outcome = await tracked!.waitForFinish();
+          if (outcome.kind !== "landed") return { ok: false, error: "unavailable" };
         }
       } catch (err) {
         warn(`[runs] run ledger finish failed for ${id}: ${describe(err)}`);
+        return { ok: false, error: "unavailable" };
       }
     }
+    registry.finish(id, "failed");
+    registry.seal(id);
     return { ok: true, value: { id, mode: "hard", state: "stopping" } };
   };
 

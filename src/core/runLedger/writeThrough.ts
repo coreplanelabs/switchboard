@@ -3,7 +3,7 @@ import { PromotionPendingError, PromotionIdentityRefusal } from "./promotion.js"
 import { sourceSeedReferenceMatches, type SourceSeedReference } from "./seedVerification.js";
 import { UNKNOWN_CONTEXT_DEPENDENCIES } from "../references/contextDependencies.js";
 import { sameWorkspaceAllocation } from "./workspaceDurability.js";
-import { allocationAckOf, UnknownAllocationClaimError } from "./allocationAck.js";
+import { allocationAckOf, UnknownAllocationClaimError, type OriginalPromotionDiagnosis } from "./allocationAck.js";
 import { RefusalError, refusalOf } from "../refusal.js";
 import type { OperationTarget } from "../repoContext.js";
 import type { WorkspaceAllocationAck } from "./types.js";
@@ -12,6 +12,8 @@ import {
   applyContextCheckpoint,
   isContextCheckpointReceipt,
   type CanonicalCheckpointSource,
+  type ContextCheckpointRequest,
+  type ContextCheckpointReceipt,
   type ContextCheckpointResult,
 } from "../references/contextCheckpoint.js";
 import { mergeSessionSources, sourceBinding, sourceHash, type SessionSources } from "../references/receipts.js";
@@ -56,6 +58,8 @@ import type { FenceResult, Notepad, SessionHit } from "./types.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "../runStoreWorker.js";
 import { UncertainStoreError, type StoreRequestWitness } from "../storeFailure.js";
 import { preserveHarnessPolicy } from "./checkpointState.js";
+import { assignLedgerLiveState } from "./decisions.js";
+import type { RunLiveState } from "../runLiveState.js";
 import { messageFromInbox } from "./inboxMessage.js";
 import { createAppendFlusher } from "./flusher.js";
 import type { HeartbeatFacts, RequesterTarget, RunLedger } from "./ledger.js";
@@ -359,7 +363,17 @@ export type WriteBoundaryFailure =
       requestDigest: string;
       expectedDigest: string;
       stateVersion: number;
+    }
+  | {
+      version: 1;
+      runId: string;
+      gen: string;
+      kind: "live-state" | "context-checkpoint";
+      requestDigest: string;
+      expectedDigest: string;
     };
+
+type ContextBoundaryExpected = { request: ContextCheckpointRequest; session: RunSession; through: number };
 
 /** One tracked run. Every method is safe to call after a detach. */
 export interface LedgerRun {
@@ -1192,15 +1206,72 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       const pending = this.pendingBoundaries[0];
       return pending && { ...pending.failure };
     }
+    private checkpointMatches(
+      receipt: unknown,
+      expected: ContextBoundaryExpected,
+    ): receipt is ContextCheckpointReceipt {
+      return (
+        isContextCheckpointReceipt(receipt) &&
+        receipt.runId === expected.request.runId &&
+        receipt.ownerGen === expected.request.gen &&
+        receipt.session.key === expected.request.key &&
+        receipt.session.seedFrom === expected.session.seedFrom &&
+        receipt.session.request === expected.session.request &&
+        expected.session.range !== "broken" &&
+        receipt.session.from === expected.session.range.from &&
+        receipt.session.through === expected.through &&
+        receipt.beforeHash === expected.request.expected.beforeHash &&
+        receipt.beforeRevision === expected.request.expected.revision &&
+        (["transcriptHash", "systemHash", "notepadHash"] as const).every(
+          (key) => receipt.inputs[key] === expected.request.expected.inputs[key],
+        )
+      );
+    }
     private async reconcilePendingBoundary(): Promise<boolean> {
       try {
         for (const pending of [...this.pendingBoundaries]) {
           const observed = await ledger.peekInbox(this.runId, gen, 0);
           if (!this.pendingBoundaries.includes(pending)) continue;
           if (!observed.ok) return false;
-          const value = pending.failure.kind === "step" ? observed.boundary.lastStep : observed.boundary.state;
-          if (value === undefined || value === null || (await sourceHash(value)) !== pending.failure.expectedDigest)
-            return false;
+          const state = observed.boundary.state as RunState | undefined;
+          if (pending.failure.kind === "context-checkpoint") {
+            const expected = pending.expected as ContextBoundaryExpected;
+            const receipt = state?.contextCheckpointReceipt;
+            if (!this.checkpointMatches(receipt, expected)) return false;
+            this.state = {
+              ...this.state,
+              contextDependencies: structuredClone(receipt.normalized),
+              contextCheckpointReceipt: structuredClone(receipt),
+            };
+          } else {
+            let value = pending.failure.kind === "step" ? observed.boundary.lastStep : state;
+            if (pending.failure.kind === "live-state") {
+              const expected = pending.expected as
+                { liveState: RunLiveState; liveStateSeq: number; statePatch: RunState } | undefined;
+              if (!expected || !state) return false;
+              value = {
+                liveState: state.liveState,
+                liveStateSeq: state.liveStateSeq,
+                statePatch: Object.fromEntries(Object.keys(expected.statePatch).map((key) => [key, state[key]])),
+              };
+            }
+            if (value === undefined || value === null || (await sourceHash(value)) !== pending.failure.expectedDigest)
+              return false;
+            if (pending.failure.kind === "live-state") {
+              const expected = pending.expected as {
+                liveState: RunLiveState;
+                liveStateSeq: number;
+                statePatch: RunState;
+              };
+              this.state = {
+                ...this.state,
+                ...expected.statePatch,
+                liveState: structuredClone(expected.liveState),
+                liveStateSeq: expected.liveStateSeq,
+              };
+              this.lastSeq = Math.max(this.lastSeq, expected.liveStateSeq);
+            }
+          }
           // Another reconciliation may have resolved this object, or an
           // already-started mutation may have added a different obligation.
           const index = this.pendingBoundaries.indexOf(pending);
@@ -1208,7 +1279,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           if (pending.failure.kind === "step") {
             const expected = pending.expected as StepRecord;
             this.turnsWritten = Math.max(this.turnsWritten ?? 0, expected.turnIndex);
-          } else {
+          } else if (pending.failure.kind === "state") {
             this.acknowledgedStateVersion = Math.max(this.acknowledgedStateVersion, pending.failure.stateVersion);
           }
           this.pendingBoundaries.splice(index, 1);
@@ -1230,7 +1301,18 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     private lastSeq: number;
     private state: RunState;
     private stateSending: Promise<void> = Promise.resolve();
-    private stepSending: Promise<void> = Promise.resolve();
+    private boundarySending: Promise<void> = Promise.resolve();
+    private trackBoundary<T>(send: (prior: Promise<void>) => Promise<T>): Promise<T> {
+      const prior = this.boundarySending;
+      const sending = send(prior);
+      this.boundarySending = Promise.allSettled([prior, sending]).then(() => {});
+      return sending;
+    }
+    private serializeState<T>(send: () => Promise<T>): Promise<T> {
+      const sending = this.stateSending.then(send);
+      this.stateSending = sending.then(() => {});
+      return sending;
+    }
     private stateDirty = false;
     private stateVersion = 0;
     private acknowledgedStateVersion = 0;
@@ -1366,7 +1448,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     async pauseForRetry(): Promise<boolean> {
       if (!this.resumable || !this.tracked() || this.handedOff || this.finished || this.finishLanding) return false;
       try {
-        await Promise.all([this.stateSending, this.stepSending]);
+        await Promise.all([this.stateSending, this.boundarySending]);
         await this.flusher.flush();
         if (!(await this.reconcilePendingBoundary())) return false;
         const { marked } = await ledger.handoff(gen, [this.runId], { pausedForRetry: true });
@@ -1424,7 +1506,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         const entry = (this.finishLanding ??= landingFor(this.runId));
         if (entry.unknown.length > 0)
           throw new TerminalCommitmentUnknownError(entry.unknown[0].hold, entry.unknown[0].request);
-        await Promise.all([this.stateSending, this.stepSending]);
+        await Promise.all([this.stateSending, this.boundarySending]);
         if (!(await this.reconcilePendingBoundary())) {
           for (const pending of this.pendingBoundaries)
             this.retainTerminalUnknown(entry, JSON.stringify(plain), pending.request);
@@ -1615,7 +1697,12 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       return checkpoint;
     }
 
-    async normalizeContextOrigins(): Promise<ContextCheckpointResult> {
+    normalizeContextOrigins(): Promise<ContextCheckpointResult> {
+      if (this.finishLanding) return Promise.resolve({ ok: false, reason: "checkpoint-unavailable" });
+      return this.trackBoundary((prior) => this.normalizeOrigins(prior));
+    }
+    private async normalizeOrigins(prior: Promise<void>): Promise<ContextCheckpointResult> {
+      await prior;
       const unavailable: ContextCheckpointResult = { ok: false, reason: "checkpoint-unavailable" };
       if (this.detached || this.finished) return unavailable;
       const committed = this.state.contextCheckpointReceipt;
@@ -1640,7 +1727,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         const transcript = await ledger.readSession(this.sessionRow.key, this.sessionRow.seedFrom, through);
         if (!transcript.complete || transcript.turns !== this.turnsWritten) return unavailable;
         const before = structuredClone(this.state.contextDependencies);
-        const result = await ledger.normalizeContextOrigins({
+        const request: ContextCheckpointRequest = {
           key: this.sessionRow.key,
           runId: this.runId,
           gen,
@@ -1653,24 +1740,51 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
               notepadHash: await sourceHash(this.seedNotepad ?? ""),
             },
           },
+        };
+        const session = structuredClone(this.sessionRow);
+        if (session.range === "broken") return unavailable;
+        const expectedSession = Object.freeze({
+          key: request.key,
+          seedFrom: session.seedFrom,
+          request: session.request,
+          from: session.range.from,
+          through,
         });
-        if (result.ok) {
-          if (
-            !isContextCheckpointReceipt(result.receipt) ||
-            result.receipt.runId !== this.runId ||
-            result.receipt.ownerGen !== gen ||
-            result.receipt.beforeHash !== (await contextDependenciesHash(before))
-          )
+        return await this.serializeState<ContextCheckpointResult>(async () => {
+          if (!(await this.reconcilePendingBoundary())) return unavailable;
+          let result: ContextCheckpointResult;
+          try {
+            result = await ledger.normalizeContextOrigins(request, expectedSession);
+          } catch (err) {
+            if (err instanceof UncertainStoreError) {
+              const expected = { request: structuredClone(request), session, through };
+              this.pendingBoundaries.push({
+                failure: {
+                  version: 1,
+                  kind: "context-checkpoint",
+                  runId: this.runId,
+                  gen,
+                  requestDigest: err.request.digest,
+                  expectedDigest: await sourceHash(expected),
+                },
+                request: err.request,
+                expected,
+              });
+            }
             return unavailable;
-          // The store committed both the receipt and source metadata before ACK.
-          // Copy that state directly; a union would reintroduce covered origins.
-          this.state = {
-            ...this.state,
-            contextDependencies: structuredClone(result.receipt.normalized),
-            contextCheckpointReceipt: structuredClone(result.receipt),
-          };
-        }
-        return result;
+          }
+          if (result.ok) {
+            if (!this.checkpointMatches(result.receipt, { request, session, through })) return unavailable;
+            // The store committed both the receipt and source metadata before ACK.
+            // Copy that state directly; a union would reintroduce covered origins.
+            this.state = {
+              ...this.state,
+              contextDependencies: structuredClone(result.receipt.normalized),
+              contextCheckpointReceipt: structuredClone(result.receipt),
+            };
+          }
+          return result;
+        });
       } catch {
         return unavailable;
       }
@@ -1813,9 +1927,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
 
     step(report: StepReport): Promise<void> {
       if (this.finished || this.finishLanding) return Promise.resolve();
-      const sending = this.sendStep(report);
-      this.stepSending = Promise.allSettled([this.stepSending, sending]).then(() => {});
-      return sending;
+      return this.trackBoundary(() => this.sendStep(report));
     }
 
     private async sendStep(report: StepReport): Promise<void> {
@@ -1926,31 +2038,68 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       this.flusher.push({ ...event, seq });
     }
 
-    async assignLiveState(assignment: LiveStateAssignRequest): Promise<LiveStateAssignResult> {
+    assignLiveState(assignment: LiveStateAssignRequest): Promise<LiveStateAssignResult> {
+      if (this.detached || this.finished) return Promise.resolve({ ok: false, reason: "unknown-run" });
+      if (this.finishLanding) return Promise.resolve({ ok: false, reason: "unavailable" });
+      return this.trackBoundary((prior) => this.assignState(assignment, prior));
+    }
+    private async assignState(
+      assignment: LiveStateAssignRequest,
+      prior: Promise<void>,
+    ): Promise<LiveStateAssignResult> {
       if (this.detached || this.finished) return { ok: false, reason: "unknown-run" };
       if (this.finishLanding) return { ok: false, reason: "unavailable" };
       await this.flusher.flush();
-      await Promise.all([this.stateSending, this.stepSending]);
-      try {
-        if (!(await this.reconcilePendingBoundary())) return { ok: false, reason: "unavailable" };
-        const result = await ledger.assignLiveState(this.runId, gen, assignment);
-        if (!result.ok) {
-          if (result.reason === "fenced" || result.reason === "unknown-run")
-            this.detach(`live state refused (${result.reason})`, result.reason === "fenced");
+      await prior;
+      return this.serializeState<LiveStateAssignResult>(async () => {
+        const effective = JSON.parse(JSON.stringify(assignment)) as LiveStateAssignRequest;
+        const planned = assignLedgerLiveState(
+          this.state.liveState as RunLiveState | undefined,
+          (this.state.liveStateSeq as number | undefined) ?? 0,
+          effective,
+        );
+        const seq =
+          planned.ok && planned.event
+            ? effective.eventSeq
+            : (effective.sourceEvents?.at(-1)?.seq ?? (this.state.liveStateSeq as number | undefined) ?? 0);
+        const expected =
+          planned.ok && seq !== undefined
+            ? { liveState: planned.liveState, liveStateSeq: seq, statePatch: effective.statePatch ?? {} }
+            : undefined;
+        try {
+          if (!(await this.reconcilePendingBoundary())) return { ok: false, reason: "unavailable" };
+          const result = await ledger.assignLiveState(this.runId, gen, effective);
+          if (!result.ok) {
+            if (result.reason === "fenced" || result.reason === "unknown-run")
+              this.detach(`live state refused (${result.reason})`, result.reason === "fenced");
+            return result;
+          }
+          this.state = {
+            ...this.state,
+            ...assignment.statePatch,
+            liveState: result.liveState,
+            liveStateSeq: result.liveStateSeq,
+          };
+          this.lastSeq = Math.max(this.lastSeq, result.liveStateSeq);
           return result;
+        } catch (err) {
+          if (err instanceof UncertainStoreError)
+            this.pendingBoundaries.push({
+              failure: {
+                version: 1,
+                kind: "live-state",
+                runId: this.runId,
+                gen,
+                requestDigest: err.request.digest,
+                expectedDigest: await sourceHash(expected ?? effective),
+              },
+              request: err.request,
+              expected,
+            });
+          warn(`[ledger] ${this.threadKey} live state not written: ${describe(err)}`);
+          return { ok: false, reason: "unavailable" };
         }
-        this.state = {
-          ...this.state,
-          ...assignment.statePatch,
-          liveState: result.liveState,
-          liveStateSeq: result.liveStateSeq,
-        };
-        this.lastSeq = Math.max(this.lastSeq, result.liveStateSeq);
-        return result;
-      } catch (err) {
-        warn(`[ledger] ${this.threadKey} live state not written: ${describe(err)}`);
-        return { ok: false, reason: "unavailable" };
-      }
+      });
     }
 
     setState(patch: RunState): void {
@@ -2061,7 +2210,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
 
     async abandon(): Promise<void> {
       if (this.detached || this.finished || this.finishLanding) return;
-      await Promise.all([this.stateSending, this.stepSending]);
+      await Promise.all([this.stateSending, this.boundarySending]);
       if (!(await this.reconcilePendingBoundary())) return;
       this.finished = true; // nothing is written after this
       live.delete(this);
@@ -2181,7 +2330,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
 
     async close(): Promise<void> {
       this.stopHeartbeat();
-      await Promise.all([this.stateSending, this.stepSending]);
+      await Promise.all([this.stateSending, this.boundarySending]);
       await this.flusher.close();
     }
   }
@@ -2300,7 +2449,25 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       bodySha256: built.manifest.bodySha256,
       expectedSeedSha256: built.digest,
     };
-    const read = () => ledger.readPromotion!({ runId: request.runId, gen, bodySha256: reference.bodySha256 });
+    let phase: OriginalPromotionDiagnosis["phase"] = "prepare";
+    let operation: OriginalPromotionDiagnosis["operation"] = "write";
+    let observedFailure: OriginalPromotionDiagnosis | undefined;
+    const reasonOf = (error: unknown): OriginalPromotionDiagnosis["reason"] =>
+      error instanceof UncertainStoreError
+        ? "unknown"
+        : error instanceof RouteMissingError
+          ? "unsupported"
+          : error instanceof TransientStoreError
+            ? "transient"
+            : error instanceof PermanentStoreError
+              ? "invalid"
+              : "unknown";
+    const unknown = (cause: unknown, reason = reasonOf(cause)) =>
+      new UnknownAllocationClaimError(cause, observedFailure ?? { phase, operation, reason });
+    const read = () => {
+      operation = "read";
+      return ledger.readPromotion!({ runId: request.runId, gen, bodySha256: reference.bodySha256 });
+    };
     const exact = (value: Awaited<ReturnType<typeof read>>) =>
       value.kind !== "held" &&
       value.preparation.bodyJson === bodyJson &&
@@ -2321,13 +2488,16 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         const actual = await read();
         if (!exact(actual) || actual.kind !== "prepared") return hold();
       }
+      phase = "claim";
+      operation = "write";
       let result: Awaited<ReturnType<RunLedger["claim"]>> | undefined;
       try {
         result = await ledger.claim(request, bodyJson);
-      } catch {
+      } catch (error) {
+        observedFailure = { phase, operation, reason: reasonOf(error) };
         const actual = await read();
         if (!exact(actual) || actual.kind !== "committed")
-          throw new UnknownAllocationClaimError("the original claim remains unconfirmed");
+          throw unknown("the original claim remains unconfirmed", actual.kind === "held" ? actual.reason : "mismatch");
         result = { ok: true, allocationAck: actual.allocationAck, promotionCommit: actual.receipt };
       }
       reserved.assertOriginalPromotionActive();
@@ -2341,7 +2511,10 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       }
       const actualCommit = await read();
       if (!exact(actualCommit) || actualCommit.kind !== "committed")
-        throw new UnknownAllocationClaimError("the original claim remains unconfirmed");
+        throw unknown(
+          "the original claim remains unconfirmed",
+          actualCommit.kind === "held" ? actualCommit.reason : "mismatch",
+        );
       const ack = allocationAckOf(actualCommit.allocationAck, request);
       if (
         !ack ||
@@ -2349,32 +2522,46 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           ? ack.allocation !== null
           : !sameWorkspaceAllocation(originalAck.allocation, ack.allocation))
       )
-        throw new UnknownAllocationClaimError("the original allocation acknowledgment is unavailable");
+        throw unknown("the original allocation acknowledgment is unavailable", "mismatch");
+      observedFailure = undefined;
+      phase = "source-owner";
+      operation = "write";
       try {
         await ledger.claimSession(key, req.runId, gen);
-      } catch {
+      } catch (error) {
+        observedFailure = { phase, operation, reason: reasonOf(error) };
+        operation = "read";
         const actual = await ledger.observeExpectedSeed(key, from, built.manifest.through);
         if (actual.owner?.runId !== req.runId || actual.owner.gen !== gen)
-          throw new UnknownAllocationClaimError("the original source owner is unconfirmed");
+          throw unknown("the original source owner is unconfirmed", "owner");
       }
+      observedFailure = undefined;
       reserved.assertOriginalPromotionActive();
+      phase = "source-seed";
+      operation = "write";
       let seedUnknown: unknown;
       try {
         await reserved.seedOriginal(input, session, notes, sources);
       } catch (error) {
         if (error instanceof PromotionPendingError) throw error;
         seedUnknown = error;
+        observedFailure = { phase, operation, reason: reasonOf(error) };
       }
       reserved.assertOriginalPromotionActive();
+      phase = "source-verification";
+      operation = "write";
       let verified: Awaited<ReturnType<NonNullable<RunLedger["verifyExpectedSeed"]>>> = {
         kind: "held",
         reason: "unknown",
       };
       try {
         verified = await ledger.verifyExpectedSeed(key, reference);
-      } catch {
+        if (verified.kind === "held") observedFailure ??= { phase, operation, reason: verified.reason };
+      } catch (error) {
+        observedFailure ??= { phase, operation, reason: reasonOf(error) };
         /* Reconcile the original, never repeat the mutation. */
       }
+      operation = "read";
       const actualSource = await ledger.readExpectedSeed(key, reference);
       if (
         (verified.kind !== "verified" && actualSource.kind !== "verified") ||
@@ -2382,11 +2569,19 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         actualSource.release ||
         !sourceSeedReferenceMatches(actualSource.receipt, reference, key)
       )
-        throw new UnknownAllocationClaimError(seedUnknown ?? "the original source is unconfirmed");
+        throw unknown(
+          seedUnknown ?? "the original source is unconfirmed",
+          actualSource.kind === "held" ? actualSource.reason : "mismatch",
+        );
+      observedFailure = undefined;
       reserved.assertOriginalPromotionActive();
+      phase = "confirmation";
+      operation = "write";
       try {
-        await ledger.confirmPromotion(reference);
-      } catch {
+        const confirmation = await ledger.confirmPromotion(reference);
+        if (confirmation.kind === "held") observedFailure = { phase, operation, reason: confirmation.reason };
+      } catch (error) {
+        observedFailure = { phase, operation, reason: reasonOf(error) };
         /* Exact canonical read resolves a lost reply. */
       }
       const confirmed = await read();
@@ -2395,13 +2590,22 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         confirmed.kind !== "confirmed" ||
         !sourceSeedReferenceMatches(confirmed.receipt.source, reference, key)
       )
-        throw new UnknownAllocationClaimError("the original seed confirmation is unknown");
+        throw unknown(
+          "the original seed confirmation is unknown",
+          confirmed.kind === "held" ? confirmed.reason : "mismatch",
+        );
+      observedFailure = undefined;
       reserved.assertOriginalPromotionActive();
+      phase = "release";
+      operation = "write";
       try {
-        await ledger.releaseExpectedSeed(key, reference);
-      } catch {
+        const release = await ledger.releaseExpectedSeed(key, reference);
+        if (release.kind === "held") observedFailure = { phase, operation, reason: release.reason };
+      } catch (error) {
+        observedFailure = { phase, operation, reason: reasonOf(error) };
         /* Exact own release read resolves a lost reply. */
       }
+      operation = "read";
       const released = await ledger.readExpectedSeed(key, reference);
       const current = await read();
       if (
@@ -2412,7 +2616,10 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         current.kind !== "confirmed" ||
         JSON.stringify(released.release.confirmation) !== JSON.stringify(current.receipt)
       )
-        throw new UnknownAllocationClaimError("the original release remains unconfirmed");
+        throw unknown(
+          "the original release remains unconfirmed",
+          released.kind === "held" ? released.reason : current.kind === "held" ? current.reason : "mismatch",
+        );
       reserved.assertOriginalPromotionActive();
       reserved.bindAllocationAck(ack);
       reserved.adoptConfirmedOriginal(input, session, notes, context);
@@ -2425,7 +2632,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         error instanceof PromotionIdentityRefusal
       )
         throw error;
-      throw new UnknownAllocationClaimError(error);
+      throw unknown(error);
     }
   }
 

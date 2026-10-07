@@ -1,3 +1,6 @@
+import { createLedgerWriteThrough } from "./runLedger/writeThrough.js";
+import { UncertainStoreError } from "./storeFailure.js";
+import { storeRequestWitness } from "./storeResponse.js";
 import { seedCoordinatorInstance } from "./testing/coordinatorInstance.js";
 // Feature: docs/reference/specs/run-history.md — `RunsService`: the one async
 // service behind every `runs.*` read and stop. It merges the live registry with
@@ -2790,10 +2793,20 @@ describe("RunsService.stopRun — a hosted parent: soft refused, hard seals (rec
       }),
       unitRow("U17", { threadKey: "web:s:u2" }),
     ]);
+    const writer = createLedgerWriteThrough({
+      ledger,
+      gen: GEN,
+      now: () => NOW,
+      warn: () => {},
+      fallback: new InMemoryRunStore(),
+      setInterval: () => ({ unref() {} }),
+      clearInterval: () => {},
+    });
     const svc = createRunsService({
       registry: reg,
       store: new InMemoryRunStore({ now: () => NOW }),
       ledger,
+      writer,
       units,
       generation: GEN,
       clock: () => NOW,
@@ -2812,9 +2825,119 @@ describe("RunsService.stopRun — a hosted parent: soft refused, hard seals (rec
       system: "",
       tools: [],
     });
-    return { reg, ledger, svc, id, token, units };
+    const opened = await writer.open({
+      runId: id,
+      threadKey: "web:s:c9#host",
+      startedAt: NOW - 5000,
+      meta: hostedMeta,
+      system: "",
+      tools: [],
+    });
+    if (opened.kind !== "tracked") throw new Error("hosted writer absent");
+    return { reg, ledger, svc, id, token, units, writer, tracked: opened.run };
   }
 
+  it.each([true, false])(
+    "HERE hosted stop retains an actual unknown writer before canonical closure: committed=%s",
+    async (committed) => {
+      const w = await hostedWorld();
+      const write = w.ledger.setState.bind(w.ledger);
+      const opened = { run: w.tracked };
+      let original: Awaited<ReturnType<typeof storeRequestWitness>> | undefined;
+      w.ledger.setState = async (id, gen, state) => {
+        original = await storeRequestWitness("/runs/state", JSON.stringify({ runId: id, gen, state }));
+        if (committed) expect(await write(id, gen, state)).toEqual({ ok: true });
+        throw new UncertainStoreError("original reply lost", original);
+      };
+      expect(await opened.run.commitState({ original: "held" })).toBe("unavailable");
+      const witness = opened.run.writeBoundaryFailure;
+      expect(witness?.requestDigest).toBe(original?.digest);
+      const finish = vi.spyOn(w.ledger, "finish");
+      try {
+        await w.svc.stopRun(w.id, "hard", actor);
+        if (committed) {
+          expect(finish).toHaveBeenCalledTimes(1);
+          expect(opened.run.writeBoundaryFailure).toBeUndefined();
+          expect(w.ledger.live.has(w.id)).toBe(false);
+        } else {
+          expect(finish).not.toHaveBeenCalled();
+          expect(w.ledger.live.has(w.id)).toBe(true);
+          expect(opened.run.writeBoundaryFailure).toEqual(witness);
+          expect(w.reg.getById(w.id)?.finished).toBe(false);
+        }
+      } finally {
+        await opened.run.close();
+      }
+    },
+  );
+  it.each(["missing", "ambiguous", "foreign", "handoff", "unstarted", "off", "fallback"])(
+    "HERE stop holds canonical closure without actual terminal evidence: %s",
+    async (mode) => {
+      const w = await hostedWorld();
+      const finish = vi.spyOn(w.ledger, "finish");
+      const facade = {
+        gen: mode === "foreign" ? "foreign" : GEN,
+        sessionPersistence: mode !== "off",
+        liveRuns: () => (mode === "missing" ? [] : mode === "ambiguous" ? [w.tracked, w.tracked] : [w.tracked]),
+      };
+      if (mode === "handoff") w.ledger.live.get(w.id)!.phase = "handoff";
+      if (mode === "unstarted") w.ledger.live.get(w.id)!.phase = "attaching";
+      if (mode === "fallback") {
+        vi.spyOn(w.tracked.sink, "put").mockResolvedValue({ ok: true });
+        vi.spyOn(w.tracked, "waitForFinish").mockResolvedValue({ kind: "refused" });
+      }
+      const service = createRunsService({
+        registry: w.reg,
+        store: new InMemoryRunStore(),
+        ledger: w.ledger,
+        writer: facade,
+        generation: GEN,
+        units: w.units,
+        clock: () => NOW,
+      });
+      try {
+        expect(await service.stopRun(w.id, "hard", actor)).toEqual({ ok: false, error: "unavailable" });
+        expect(finish).not.toHaveBeenCalled();
+        expect(w.ledger.live.has(w.id)).toBe(true);
+        expect(w.ledger.live.get(w.id)?.stop).toBe("hard");
+        expect(w.reg.getById(w.id)?.finished).toBe(false);
+        expect(w.reg.snapshotById(w.id)?.events.some((e) => e.type === "run_note" && e.kind === "stop_requested")).toBe(
+          true,
+        );
+      } finally {
+        await w.tracked.close();
+      }
+    },
+  );
+  it("HERE hosted closure joins its already-started original state write", async () => {
+    const w = await hostedWorld();
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>((resolve) => (entered = resolve)),
+      settled = new Promise<void>((resolve) => (release = resolve));
+    const original = w.ledger.setState.bind(w.ledger);
+    w.ledger.setState = async (...args) => {
+      entered();
+      await settled;
+      return original(...args);
+    };
+    const write = w.tracked.commitState({ original: "in-flight" });
+    await started;
+    const finish = vi.spyOn(w.ledger, "finish");
+    const stop = w.svc.stopRun(w.id, "hard", actor);
+    try {
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(finish).not.toHaveBeenCalled();
+      expect(w.reg.getById(w.id)?.finished).toBe(false);
+      release();
+      expect(await write).toBe("ok");
+      expect(await stop).toMatchObject({ ok: true });
+      expect(finish).toHaveBeenCalledTimes(1);
+    } finally {
+      release();
+      await Promise.allSettled([write, stop]);
+      await w.tracked.close();
+    }
+  });
   it("a soft stop answers `hosted` and touches nothing: the run stays live, no stop_requested, the ledger untouched", async () => {
     const { reg, ledger, svc, id } = await hostedWorld();
     const requestStop = vi.spyOn(ledger, "requestStop");
@@ -2919,7 +3042,6 @@ describe("RunsService.stopRun — a hosted parent: soft refused, hard seals (rec
     const svc = createRunsService({
       registry: reg,
       store: new InMemoryRunStore({ now: () => NOW }),
-      ledger,
       units,
       warn: (m) => void warned.push(m),
     });

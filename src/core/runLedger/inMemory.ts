@@ -1407,7 +1407,10 @@ export class InMemoryRunLedger implements RunLedger {
     return source?.receipt && (await validateContextCheckpoint(source.receipt, source)) ? source : undefined;
   }
 
-  async normalizeContextOrigins(request: ContextCheckpointRequest): Promise<ContextCheckpointResult> {
+  async normalizeContextOrigins(
+    request: ContextCheckpointRequest,
+    expectedSession?: Readonly<import("../references/contextCheckpoint.js").ContextCheckpointSession>,
+  ): Promise<ContextCheckpointResult> {
     const pending = this.sourceSeedPending(request.key);
     if (pending) throw new SourceSeedPendingError(request.key, pending.runId);
     const row = this.live.get(request.runId);
@@ -1415,6 +1418,27 @@ export class InMemoryRunLedger implements RunLedger {
     if (!fence.ok) return fence;
     if (!row) return { ok: false, reason: "unknown-run" };
     const unavailable = (): ContextCheckpointResult => ({ ok: false, reason: "checkpoint-unavailable" });
+    if (expectedSession !== undefined) {
+      const session = row.meta.session;
+      const receipt = row.state.contextCheckpointReceipt ?? row.state.pendingContextCheckpoint;
+      const last = this.steps.get(request.runId)?.at(-1);
+      const actual = isContextCheckpointReceipt(receipt)
+        ? receipt.session
+        : session && session.range !== "broken" && last
+          ? {
+              key: session.key,
+              seedFrom: session.seedFrom,
+              request: session.request,
+              from: session.range.from,
+              through: session.seedFrom + last.turnIndex - 1,
+            }
+          : undefined;
+      if (
+        !actual ||
+        (["key", "seedFrom", "request", "from", "through"] as const).some((key) => actual[key] !== expectedSession[key])
+      )
+        return unavailable();
+    }
     const committed = await this.readContextCheckpoint(request.runId);
     if (committed?.receipt) return { ok: true, receipt: committed.receipt };
     const log = this.sessions.get(request.key);

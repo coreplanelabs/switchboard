@@ -1,4 +1,5 @@
 import type { ClaimRequest, LiveRunRow, WorkspaceAllocationAck } from "./types.js";
+import type { PromotionHoldReason } from "./promotion.js";
 import {
   allocationMatchesRun,
   sameWorkspaceAllocation,
@@ -6,12 +7,26 @@ import {
   workspaceDurabilityArchiveOf,
 } from "./workspaceDurability.js";
 
+export interface OriginalPromotionDiagnosis {
+  readonly phase:
+    "prepare" | "claim" | "source-owner" | "source-seed" | "source-verification" | "confirmation" | "release";
+  readonly operation: "write" | "read";
+  readonly reason: PromotionHoldReason | "missing" | "owner" | "transient" | "invalid";
+}
+
 /** The original allocation-bearing claim may have committed. This is neither
  * a refusal nor permission to attach or issue the claim again. */
 export class UnknownAllocationClaimError extends Error {
-  constructor(cause: unknown) {
-    super("The original allocation claim outcome is unknown.", { cause });
+  readonly diagnosis?: Readonly<OriginalPromotionDiagnosis>;
+  constructor(cause: unknown, diagnosis?: OriginalPromotionDiagnosis) {
+    const bounded = diagnosis && { phase: diagnosis.phase, operation: diagnosis.operation, reason: diagnosis.reason };
+    super(
+      "The original allocation claim outcome is unknown." +
+        (bounded ? ` Phase: ${bounded.phase}; ${bounded.operation}: ${bounded.reason}.` : ""),
+      { cause },
+    );
     this.name = "UnknownAllocationClaimError";
+    if (bounded) this.diagnosis = Object.freeze(bounded);
   }
 }
 

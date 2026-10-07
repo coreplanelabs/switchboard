@@ -713,19 +713,42 @@ export class WorkerRunLedger implements RunLedger {
     return source?.runId === runId && isContextCheckpointReceipt(source.receipt) ? source : undefined;
   }
 
-  async normalizeContextOrigins(request: ContextCheckpointRequest): Promise<ContextCheckpointResult> {
+  async normalizeContextOrigins(
+    request: ContextCheckpointRequest,
+    expectedSession?: Readonly<import("./references/contextCheckpoint.js").ContextCheckpointSession>,
+  ): Promise<ContextCheckpointResult> {
     this.checkSessionKey(request.key);
     this.checkIds(request.runId, request.gen);
     const result = await this.post("/runs/session/checkpoint", { storeKey: this.opts.storeKey, ...request });
     const body = result.data as unknown as ContextCheckpointResult;
-    if (body.ok && isContextCheckpointReceipt(body.receipt) && body.receipt.runId === request.runId) return body;
-    return {
-      ok: false,
-      reason:
-        !body.ok && (body.reason === "fenced" || body.reason === "unknown-run")
-          ? body.reason
-          : "checkpoint-unavailable",
-    };
+    if (
+      result.status === 200 &&
+      body.ok === true &&
+      isContextCheckpointReceipt(body.receipt) &&
+      body.receipt.runId === request.runId &&
+      body.receipt.ownerGen === request.gen &&
+      body.receipt.session.key === request.key &&
+      body.receipt.beforeHash === request.expected.beforeHash &&
+      body.receipt.beforeRevision === request.expected.revision &&
+      (expectedSession === undefined ||
+        (["key", "seedFrom", "request", "from", "through"] as const).every(
+          (key) => body.receipt.session[key] === expectedSession[key],
+        )) &&
+      (["transcriptHash", "systemHash", "notepadHash"] as const).every(
+        (key) => body.receipt.inputs[key] === request.expected.inputs[key],
+      )
+    )
+      return body;
+    if (
+      result.status === 409 &&
+      body.ok === false &&
+      (body.reason === "fenced" || body.reason === "unknown-run" || body.reason === "checkpoint-unavailable")
+    )
+      return { ok: false, reason: body.reason };
+    throw new UncertainStoreError(
+      `run ledger /runs/session/checkpoint: invalid acknowledgement (HTTP ${result.status})`,
+      result.request,
+    );
   }
 
   async writeSessionSources(key: string, runId: string, gen: string, sources: SessionSources): Promise<FenceResult> {
@@ -1026,7 +1049,7 @@ export class WorkerRunLedger implements RunLedger {
       (data.liveStateSeq as number) >= 0
     )
       return data as unknown as LiveStateAssignResult;
-    throw new PermanentStoreError(`run ledger /runs/live-state: invalid acknowledgement (HTTP ${r.status})`);
+    throw new UncertainStoreError(`run ledger /runs/live-state: invalid acknowledgement (HTTP ${r.status})`, r.request);
   }
 
   async setState(runId: string, gen: string, state: RunState): Promise<FenceResult> {
