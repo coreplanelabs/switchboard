@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.289.0](https://github.com/coreplanelabs/switchboard/compare/v1.288.0...v1.289.0) (2026-10-07)
+
+
+### Features
+
+* **load:** require measured concurrency for capacity receipts ([#2814](https://github.com/coreplanelabs/switchboard/issues/2814)) ([ef632b5](https://github.com/coreplanelabs/switchboard/commit/ef632b569ca9767fd52789a3985ed9e88508515b))
+
+
+### Bug fixes
+
+* **config:** bind deployments to each executing consumer ([#2806](https://github.com/coreplanelabs/switchboard/issues/2806)) ([b94c2da](https://github.com/coreplanelabs/switchboard/commit/b94c2da4a48a78a9efc080ad519355f1852e0997))
+* **dispatcher:** accept pull request tab links ([2609874](https://github.com/coreplanelabs/switchboard/commit/2609874a42c6129bd4c9c9d695b022ea15008630))
+* **harness:** retain sessions and honor review check cancellation ([#2809](https://github.com/coreplanelabs/switchboard/issues/2809)) ([c33ea95](https://github.com/coreplanelabs/switchboard/commit/c33ea9526ee86fa4516196485ec7874efe2bc47e))
+* **memory:** start config storage without Node compatibility ([#2817](https://github.com/coreplanelabs/switchboard/issues/2817)) ([baccd0b](https://github.com/coreplanelabs/switchboard/commit/baccd0b80ad104565ec0ac37a3f8e60a87101f25))
+* **providers:** bound Responses work within bot capacity ([#2804](https://github.com/coreplanelabs/switchboard/issues/2804)) ([d8371f6](https://github.com/coreplanelabs/switchboard/commit/d8371f61c4c9c1b3b857df0d8e82b17d603e56bb))
+* **resident:** identify blocked review workspace advances ([#2815](https://github.com/coreplanelabs/switchboard/issues/2815)) ([47ff63d](https://github.com/coreplanelabs/switchboard/commit/47ff63d269f42b25a5a94994b30e821e9e10c17c))
+* **review:** make review comments readable for people ([#2816](https://github.com/coreplanelabs/switchboard/issues/2816)) ([736b493](https://github.com/coreplanelabs/switchboard/commit/736b493ae118d0f3a28565e0228556ba6b086d1a))
+* **runs:** keep agent work safe through interrupted startup ([#2812](https://github.com/coreplanelabs/switchboard/issues/2812)) ([0eda906](https://github.com/coreplanelabs/switchboard/commit/0eda906dab005fb4d434acdbbaa76b994eb0f4d1))
+* **runs:** preserve queued inputs across uncertain handoff ([#2807](https://github.com/coreplanelabs/switchboard/issues/2807)) ([31e5d64](https://github.com/coreplanelabs/switchboard/commit/31e5d64c1d7c207050d2274b2591a161d63c44d1))
+* **sandbox:** retain unresolved workspace lifecycle records ([#2818](https://github.com/coreplanelabs/switchboard/issues/2818)) ([6cf19b6](https://github.com/coreplanelabs/switchboard/commit/6cf19b6c7eb22039e1c2e0334115c04e9ddfda7d))
+
 ## [1.288.0](https://github.com/coreplanelabs/switchboard/compare/v1.287.5...v1.288.0) (2026-10-06)
 
 
