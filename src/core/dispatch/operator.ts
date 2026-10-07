@@ -81,7 +81,7 @@ import {
   type RepositoryBriefApi,
   type RepositoryBriefContext,
 } from "./repositoryBriefs.js";
-import { verifyPrTargetEvidence, type PrTargetEvidence } from "./targetEvidence.js";
+import { prUrlIdentity, verifyPrTargetEvidence, type PrTargetEvidence } from "./targetEvidence.js";
 import { requesterTargetText, requesterUrlText, requesterUrlWords } from "./requesterText.js";
 import { barePrNumberOf, explicitPrOf, explicitRepoOf, type ResidentSlugs } from "../repoContext.js";
 import { parseSlug } from "../residentAdmin.js";
@@ -2213,7 +2213,8 @@ function explicitPrDirective(input: OperatorInput): OperatorDecision | undefined
     } catch {
       return undefined;
     }
-    if (labelled[1] !== `${labelUrl.hostname}${labelUrl.pathname}`) return undefined;
+    const labelPath = `${labelUrl.hostname}${labelUrl.pathname}`;
+    if (labelled[1] !== labelPath && labelled[1] !== `${labelPath}${labelUrl.search}${labelUrl.hash}`) return undefined;
     before = before.slice(0, -1).trim();
     after = after.slice(labelled[0].length).trim();
   }
@@ -2260,35 +2261,19 @@ function explicitPrDirective(input: OperatorInput): OperatorDecision | undefined
   } catch {
     return undefined;
   }
-  if (
-    url.protocol !== "https:" ||
-    url.hostname !== "github.com" ||
-    url.username ||
-    url.password ||
-    url.port ||
-    url.search ||
-    url.hash
-  )
+  if (url.protocol !== "https:" || url.hostname !== "github.com" || url.username || url.password || url.port)
     return undefined;
+  const identity = prUrlIdentity(quote);
+  if (!identity) return undefined;
   if (naturalPr) {
-    const targetPath = url.pathname.toLowerCase();
     for (const word of requesterUrlWords(requesterTargetText(laterLines))) {
       const raw = requesterUrlText(word);
       if (!raw) continue;
-      try {
-        const other = new URL(raw);
-        if (
-          other.hostname === "github.com" &&
-          /^\/[^/]+\/[^/]+\/pull\/[1-9]\d*$/.test(other.pathname) &&
-          other.pathname.toLowerCase() !== targetPath
-        )
-          return undefined;
-      } catch {
-        // An unrelated malformed link cannot select a different PR.
-      }
+      const other = prUrlIdentity(raw);
+      if (other && (other.repo !== identity.repo || other.number !== identity.number)) return undefined;
     }
     for (const match of laterLines.matchAll(/\bPR\s*#([1-9]\d*)\b/gi))
-      if (Number(match[1]) !== Number(url.pathname.split("/").at(-1))) return undefined;
+      if (Number(match[1]) !== identity.number) return undefined;
   }
   const direct = explicitPrOf(input.text);
   const repo = explicitRepoOf(input.text);
