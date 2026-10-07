@@ -629,6 +629,9 @@ export async function openOpenCodeRun(
     if (err instanceof HarnessContainerReplacedError) replaced = true;
     if (openingCustodyUnknown) {
       forget();
+      // Keep a same-run custody error's original opening cause visible to
+      // dispatch's single unwrap; this does not confirm or end the producer.
+      if (err instanceof HarnessEndingUnconfirmedError && err.runId === run.runId) throw err;
       throw new HarnessEndingUnconfirmedError(run.runId, err, err);
     }
     try {
