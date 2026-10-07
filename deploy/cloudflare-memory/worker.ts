@@ -81,6 +81,7 @@ import {
   workspaceAcknowledgment,
   isWorkspaceOwner,
   type WorkspaceOwner,
+  type AcknowledgedWorkspaceOwner,
   type WorkspaceSettlement,
   type WorkspaceAck,
 } from "../../src/core/workspaceSettlement.js";
@@ -7536,11 +7537,11 @@ export class RunHistoryDO extends DurableObject<Env> {
       if (settlement) return { kind: "terminal", record: settlement.record, settlement };
       const revision = this.workspaceRevision(owner);
       return settlement === undefined && revision !== undefined
-        ? {
+        ? ({
             kind: "acknowledged",
             owner: { runId: owner.runId, ownerGen: owner.ownerGen, ownerFence: owner.ownerFence },
             revision,
-          }
+          } satisfies AcknowledgedWorkspaceOwner)
         : settlement === undefined
           ? { kind: "absent", owner: { runId: owner.runId, ownerGen: owner.ownerGen, ownerFence: owner.ownerFence } }
           : { kind: "unknown" };

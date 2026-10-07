@@ -9,6 +9,14 @@ export interface WorkspaceOwner {
   ownerFence: number;
 }
 
+/** Memory retains this exact owner revision after its settlement was acknowledged.
+ * It proves retained terminal ownership, never permission to remove a workspace. */
+export interface AcknowledgedWorkspaceOwner {
+  kind: "acknowledged";
+  owner: WorkspaceOwner;
+  revision: number;
+}
+
 /** A terminal obligation lives with its ledger owner until the resident has
  * retained these facts. Its acknowledgment never authorizes deleting files. */
 export interface WorkspaceSettlement {
@@ -54,6 +62,21 @@ export function isWorkspaceOwner(v: unknown): v is WorkspaceOwner {
 
 export function workspaceOwnerKey(owner: WorkspaceOwner): string {
   return JSON.stringify([owner.runId, owner.ownerGen, owner.ownerFence]);
+}
+
+export function isAcknowledgedWorkspaceOwner(
+  value: unknown,
+  expected: WorkspaceOwner,
+): value is AcknowledgedWorkspaceOwner {
+  return (
+    object(value) &&
+    !Array.isArray(value) &&
+    value.kind === "acknowledged" &&
+    isWorkspaceOwner(expected) &&
+    isWorkspaceOwner(value.owner) &&
+    workspaceOwnerKey(value.owner) === workspaceOwnerKey(expected) &&
+    positive(value.revision)
+  );
 }
 
 /** Coordinator reservations may use a host key for exclusivity while their

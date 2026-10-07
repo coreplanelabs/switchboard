@@ -1,5 +1,6 @@
 import {
   isWorkspaceOwner,
+  isAcknowledgedWorkspaceOwner,
   workspaceOwnerKey,
   workspaceBindingOf,
   workspaceSettlementOf,
@@ -207,6 +208,7 @@ function probe(
   const markPoolUserSpent = vi.fn(async () => options.spendAccepted !== false);
   const Scope = runInNewContext(`${compiled}\nPreservationUnderTest`, {
     isWorkspaceOwner,
+    isAcknowledgedWorkspaceOwner,
     workspaceOwnerKey,
     workspaceSettlementOf,
     workspaceBindingOf,

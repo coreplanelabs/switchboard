@@ -593,6 +593,7 @@ Terminal PR reads propagate refused durable writes before reporting merged or cl
 | Criterion | Proof |
 | --- | --- |
 | A workspace ACK refuses an unknown run, generation or fence with no retained revision. Duplicate ACKs require a known retained version; live ownership still refuses. ACK success never authorizes removal of private files. | `[unit]` `src/core/workspaceSettlement.test.ts::exact retained workspace acknowledgment::*`; `deploy/cloudflare-memory/runLedger.test.ts::durable coordinator Workflow reconciliation::*` |
+| All retained-owner ACK consumers use one exact owner and positive safe revision validator. Live, absent, unknown, malformed and foreign observations cannot become ACKs. Workspace removal and predecessor settlement still require their saved exact revision and full binding/publication checks. | `[unit]` `src/core/workspaceSettlement.test.ts::acknowledged workspace owner evidence::*`; `deploy/cloudflare-resident/workspaceSettlement.test.ts::*`; `deploy/cloudflare-resident/dependencyInspection.test.ts::*` |
 
 | Criterion | Proof |
 | --- | --- |

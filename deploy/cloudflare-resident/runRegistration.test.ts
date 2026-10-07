@@ -1,5 +1,6 @@
 import {
   isWorkspaceOwner,
+  isAcknowledgedWorkspaceOwner,
   workspaceOwnerKey,
   workspaceBindingOf,
   workspaceSettlementOf,
@@ -1011,6 +1012,7 @@ async function ownerFlow(pathForm: "canonical" | "collision-safe replacement" | 
       decideWorkspaceRemoval,
       hasRunOwnerField,
       isWorkspaceOwner,
+      isAcknowledgedWorkspaceOwner,
       workspaceOwnerKey,
       workspaceSettlementOf,
       workspaceBindingOf,

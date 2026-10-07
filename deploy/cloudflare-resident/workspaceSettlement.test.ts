@@ -3,6 +3,7 @@ import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 import {
   isWorkspaceOwner,
+  isAcknowledgedWorkspaceOwner,
   workspaceOwnerKey,
   workspaceBindingOf,
   workspaceSettlementOf,
@@ -172,6 +173,7 @@ function harness(
     JSON,
     structuredClone,
     isWorkspaceOwner,
+    isAcknowledgedWorkspaceOwner,
     workspaceOwnerKey,
     workspaceBindingOf,
     workspaceSettlementOf,

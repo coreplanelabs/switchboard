@@ -112,6 +112,7 @@ import { KeyedAsyncLock } from "./keyedAsyncLock.js";
 import { decideWorkspaceRemoval, hasRunOwnerField, type PreservationDecision } from "./workspacePreservation.js";
 import {
   isWorkspaceOwner,
+  isAcknowledgedWorkspaceOwner,
   workspaceOwnerKey,
   workspaceSettlementOf,
   workspaceBindingOf,
@@ -8204,10 +8205,8 @@ export class ResidentDO extends Sandbox<Env> {
           const record =
             answer?.kind === "terminal"
               ? answer.record
-              : answer?.kind === "acknowledged" &&
-                  isWorkspaceOwner(answer.owner) &&
+              : isAcknowledgedWorkspaceOwner(answer, owner) &&
                   saved &&
-                  workspaceOwnerKey(answer.owner) === workspaceOwnerKey(owner) &&
                   workspaceOwnerKey(saved.owner) === workspaceOwnerKey(owner) &&
                   answer.revision === saved.revision
                 ? saved.record
@@ -8846,9 +8845,7 @@ export class ResidentDO extends Sandbox<Env> {
           const terminal =
             observedCurrent?.kind === "terminal"
               ? workspaceSettlementOf(observedCurrent.settlement)
-              : observedCurrent?.kind === "acknowledged" &&
-                  isWorkspaceOwner(observedCurrent.owner) &&
-                  workspaceOwnerKey(observedCurrent.owner) === workspaceOwnerKey(current) &&
+              : isAcknowledgedWorkspaceOwner(observedCurrent, current) &&
                   observedCurrent.revision === binding.workspaceSettlement?.revision
                 ? workspaceSettlementOf(binding.workspaceSettlement)
                 : undefined;
@@ -8895,9 +8892,7 @@ export class ResidentDO extends Sandbox<Env> {
       const saved =
         answer.kind === "terminal"
           ? workspaceSettlementOf(answer.settlement)
-          : answer.kind === "acknowledged" &&
-              isWorkspaceOwner(answer.owner) &&
-              workspaceOwnerKey(answer.owner) === workspaceOwnerKey(ref.owner)
+          : isAcknowledgedWorkspaceOwner(answer, ref.owner)
             ? workspaceSettlementOf(ref.applied ?? binding.workspaceSettlement)
             : undefined;
       if (
@@ -8961,9 +8956,7 @@ export class ResidentDO extends Sandbox<Env> {
         revision?: unknown;
       } | null;
       if (
-        after?.kind === "acknowledged" &&
-        isWorkspaceOwner(after.owner) &&
-        workspaceOwnerKey(after.owner) === key &&
+        isAcknowledgedWorkspaceOwner(after, ref.owner) &&
         after.revision === saved.revision &&
         binding.workspacePredecessors?.some((p) => workspaceOwnerKey(p.owner) === key)
       ) {
@@ -9238,12 +9231,7 @@ export class ResidentDO extends Sandbox<Env> {
       const resource = await this.ctx.storage.get<string>(RESOURCE_KEY);
       if (resource !== `repo:${saved.record.repo}`)
         return { removable: false, reason: "workspace-settlement-unverified" };
-      if (
-        answer?.kind !== "acknowledged" ||
-        !isWorkspaceOwner(answer.owner) ||
-        workspaceOwnerKey(answer.owner) !== workspaceOwnerKey(saved.owner) ||
-        answer.revision !== saved.revision
-      )
+      if (!isAcknowledgedWorkspaceOwner(answer, saved.owner) || answer.revision !== saved.revision)
         return { removable: false, reason: "workspace-settlement-unverified" };
       input.owner = { kind: "terminal", record: saved.record };
     }
