@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { CommandRegistry } from "../commandRegistry.js";
 import { ALL_CAPABILITIES } from "../capabilities.js";
 import { registerCoreCommands, type CoreCommandDeps } from "../commands/all.js";
+import { ProviderFailure } from "../provider.js";
 import {
   operatorPresets,
   runOperator,
@@ -55,6 +56,135 @@ const work: RouteToolCall = {
     reason: "Fix the original requester issue.",
   },
 };
+
+describe("last-read command correction", () => {
+  const helper = { tool: OPERATOR_READ_TOOLS.repositoryBrief, input: { repo: "acme/api" } };
+
+  it.each([
+    { final: work, outcome: "binds" },
+    { final: listing, outcome: "non_decision" },
+  ])(
+    "a last-read negative verdict permits action correction but holds a withdrawn selection: $outcome",
+    async ({ final, outcome }) => {
+      const read = vi.fn(async () => undefined);
+      const replies = [helper, helper, helper, listing, verdict(false), final];
+      const model = vi.fn<RouteModel>(async () => replies.shift()!);
+      const answer = await runOperator({ ...fix, repositoryBriefs: { status: "available", catalog: [], read } }, model);
+      expect(answer.decision.kind).toBe(outcome);
+      expect(answer).not.toHaveProperty("allowance");
+      expect(read).toHaveBeenCalledTimes(3);
+      expect(model).toHaveBeenCalledTimes(6);
+      expect(model.mock.calls[5]![0].retries?.at(-1)?.violation).toContain("no further reads or verification");
+      expect(model.mock.calls.filter(([prompt]) => prompt.tool.name === VERIFY_TOOL_NAME)).toHaveLength(1);
+      expect(
+        [model.mock.calls[5]![0].tool, ...(model.mock.calls[5]![0].tools ?? [])].map((tool) => tool.name),
+      ).not.toContain("repo_list");
+      if (answer.decision.kind === "binds") {
+        expect(answer.decision.binds[0]).toMatchObject({
+          repo: "acme/api",
+          repoSource: "thread",
+          shipEntry: "work_from_thread",
+        });
+        expect(answer.decision.binds[0]).not.toHaveProperty("prTarget");
+      }
+    },
+  );
+
+  it("schema, output and no-call corrections cannot reset the read or action allowance", async () => {
+    const read = vi.fn(async () => undefined);
+    const replies: (RouteToolCall | string | Error)[] = [
+      new OutputCapError(100),
+      new ProviderFailure("request-rejected", {
+        status: 400,
+        schemaRejection: { tool: OPERATOR_READ_TOOLS.providerModels, keyword: "futureKeyword" },
+      }),
+      "",
+      helper,
+      helper,
+      helper,
+      listing,
+      verdict(false),
+      work,
+    ];
+    const model = vi.fn<RouteModel>(async () => {
+      const next = replies.shift()!;
+      if (next instanceof Error) throw next;
+      return next;
+    });
+    const answer = await runOperator({ ...fix, repositoryBriefs: { status: "available", catalog: [], read } }, model, {
+      maxOutputTokens: 100,
+      includeAllowance: true,
+    });
+    expect(answer.decision.kind).toBe("binds");
+    expect(model).toHaveBeenCalledTimes(9);
+    expect(read).toHaveBeenCalledTimes(3);
+    expect(answer.allowance).toEqual({
+      version: 1,
+      helpers: Array(3).fill(OPERATOR_READ_TOOLS.repositoryBrief),
+      reads: 4,
+      repairs: 1,
+      schemaRepairs: 1,
+      outputCuts: 1,
+      noCallRepairs: 1,
+    });
+    const [, ...afterCut] = model.mock.calls;
+    expect(afterCut.every(([, options]) => options.maxTokens > 100)).toBe(true);
+    expect(new Set(model.mock.calls.map(([, options]) => options.signal)).size).toBe(1);
+    expect(JSON.stringify(answer.allowance)).not.toMatch(/acme|Fix it|repo_list|input|quote|profile|credential/);
+  });
+
+  it("an exhausted multi-call repair cannot buy another correction with a last-read rejection", async () => {
+    const multi = new MultiToolCallError([helper, listing]);
+    const replies: (RouteToolCall | Error)[] = [multi, multi, helper, helper, helper, multi, verdict(false)];
+    const model = vi.fn<RouteModel>(async () => {
+      const next = replies.shift()!;
+      if (next instanceof Error) throw next;
+      return next;
+    });
+    const answer = await runOperator(fix, model);
+    expect(answer.decision.kind).toBe("non_decision");
+    expect(model).toHaveBeenCalledTimes(7);
+    expect(answer.attempts?.filter((attempt) => attempt.stage === "command_fulfillment")).toHaveLength(1);
+  });
+});
+
+describe("unconfirmed last-read checks", () => {
+  const helper = { tool: OPERATOR_READ_TOOLS.repositoryBrief, input: { repo: "acme/api" } };
+
+  it("an unknown last-read verdict cannot buy a correction or another verifier", async () => {
+    const replies: RouteToolCall[] = [helper, helper, helper, listing, { tool: VERIFY_TOOL_NAME, input: {} }, work];
+    const model = vi.fn<RouteModel>(async () => replies.shift()!);
+    const answer = await runOperator(fix, model, { includeAllowance: true });
+    expect(answer.decision.kind).toBe("non_decision");
+    expect(model).toHaveBeenCalledTimes(5);
+    expect(answer.allowance).toMatchObject({ reads: 4, repairs: 0 });
+  });
+
+  it("a parameter repair after the last verdict still needs an available verification read", async () => {
+    const proposed = { tool: "runs_list", input: { intent: "read", reason: "requested status", status: "all" } };
+    const corrected = { ...proposed, input: { ...proposed.input, status: "failed" } };
+    const replies: RouteToolCall[] = [helper, helper, helper, proposed, verdict(false), corrected];
+    const model = vi.fn<RouteModel>(async () => replies.shift()!);
+    const answer = await runOperator({ ...fix, text: "List only failed runs." }, model, { includeAllowance: true });
+    expect(answer.decision.kind).toBe("non_decision");
+    expect(model).toHaveBeenCalledTimes(6);
+    expect(model.mock.calls.filter(([prompt]) => prompt.tool.name === VERIFY_TOOL_NAME)).toHaveLength(1);
+    expect(answer.allowance).toMatchObject({ reads: 4, repairs: 1 });
+  });
+
+  it("a last-read negative verdict after the deadline cannot obtain action correction", async () => {
+    let now = 0;
+    const replies: RouteToolCall[] = [helper, helper, helper, listing, verdict(false), work];
+    const model = vi.fn<RouteModel>(async (prompt) => {
+      if (prompt.tool.name === VERIFY_TOOL_NAME) now = 100;
+      return replies.shift()!;
+    });
+    const answer = await runOperator(fix, model, { timeoutMs: 100, now: () => now, includeAllowance: true });
+    expect(answer.decision).toMatchObject({ kind: "non_decision", reason: expect.stringContaining("deadline") });
+    expect(model).toHaveBeenCalledTimes(5);
+    expect(answer.allowance).toMatchObject({ reads: 4, repairs: 0 });
+  });
+});
 
 describe("action repair after read exhaustion", () => {
   const request: OperatorInput = {

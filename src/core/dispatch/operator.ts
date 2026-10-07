@@ -1906,6 +1906,17 @@ export function renderOperatorQuestion(decision: Extract<OperatorDecision, { kin
     : `${decision.text}\nProposed command (display only; yes cannot confirm it): \`${decision.proposal}\``;
 }
 
+/** A snapshot of the loop's existing allowances, with only closed tool names. */
+export interface OperatorAllowance {
+  version: 1;
+  helpers: (typeof OPERATOR_READ_TOOLS)[keyof typeof OPERATOR_READ_TOOLS][];
+  reads: number;
+  repairs: number;
+  schemaRepairs: number;
+  outputCuts: number;
+  noCallRepairs: number;
+}
+
 /** What one operator turn answers beyond the decision: the wall-clock latency
  *  and the answer's output tokens (estimated at three characters a token
  *  when the seam carries no usage) — the replay's median
@@ -1921,6 +1932,8 @@ export interface OperatorAnswer {
    *  absent when the model call failed before any answer came back — a throw
    *  mid-loop keeps the attempts already collected. */
   attempts?: StructuredAttempt[];
+  /** Opt-in model-loop counters; no request, tool arguments or profile values. */
+  allowance?: OperatorAllowance;
 }
 
 /** The output cap for one turn's answer: the largest visible answer the
@@ -2335,7 +2348,7 @@ function explicitPrDirective(input: OperatorInput): OperatorDecision | undefined
 export async function runOperator(
   input: OperatorInput,
   model: RouteModel,
-  opts: { timeoutMs?: number; now?: () => number; maxOutputTokens?: number } = {},
+  opts: { timeoutMs?: number; now?: () => number; maxOutputTokens?: number; includeAllowance?: boolean } = {},
 ): Promise<OperatorAnswer> {
   const now = opts.now ?? Date.now;
   const started = now();
@@ -2388,12 +2401,26 @@ export async function runOperator(
   // the whole turn's estimate (three characters a token, as ever).
   let chars = 0;
   const attempts: StructuredAttempt[] = [];
+  const helperNames: OperatorAllowance["helpers"] = [];
   const answered = (decision: OperatorDecision, operatorDiagnostic?: string): OperatorAnswer => ({
     decision,
     latencyMs: now() - started,
     outputTokens: Math.ceil(chars / 3),
     ...(operatorDiagnostic !== undefined ? { operatorDiagnostic } : {}),
     ...(attempts.length > 0 ? { attempts } : {}),
+    ...(opts.includeAllowance
+      ? {
+          allowance: {
+            version: 1 as const,
+            helpers: [...helperNames],
+            reads,
+            repairs: violations,
+            schemaRepairs: schemaReasks,
+            outputCuts: outputCapCuts,
+            noCallRepairs: noCallTurns,
+          },
+        }
+      : {}),
   });
   // The turns so far, rendered by `providerStructuredModel` as assistant/user
   // pairs: a read tool's answer, or a violation's re-ask (record 0067).
@@ -2410,8 +2437,14 @@ export async function runOperator(
   const signal = AbortSignal.timeout(timeoutMs);
   const expired = () => signal.aborted || now() - started >= timeoutMs;
   const reAskAction = (answer: string, violation: string, noun = "a decision") => {
+    if (expired() || violations >= STRUCTURED_RETRIES_MAX) return false;
     violations++;
-    turns.push({ answer, violation: reAskTurn(noun, "offered", violation) });
+    const feedback =
+      reads >= OPERATOR_READS_MAX
+        ? `${violation}; the read allowance is spent; choose an offered action that needs no further reads or verification`
+        : violation;
+    turns.push({ answer, violation: reAskTurn(noun, "offered", feedback) });
+    return true;
   };
   const sourceTurns = input.requesterId
     ? input.tail
@@ -2422,7 +2455,8 @@ export async function runOperator(
     sourceTurns.push(`Requester target checkpoint (context only): ${JSON.stringify(input.requesterTarget)}`);
   }
   sourceTurns.push(input.text);
-  const commandCheck = async (decision: OperatorDecision): Promise<string | undefined> => {
+  type CommandViolation = { kind: "rejected" | "unconfirmed"; violation: string };
+  const commandCheck = async (decision: OperatorDecision): Promise<CommandViolation | undefined> => {
     if (decision.kind !== "binds") return undefined;
     const invocation = decision.binds.length === 1 ? decision.binds[0]?.invocation : undefined;
     if (invocation?.kind !== "invoke") return undefined;
@@ -2436,10 +2470,10 @@ export async function runOperator(
       return undefined;
     // Record the proposal separately from the verdict; neither is command execution.
     attempts.push({ outcome: "accepted" });
-    const violation = (reason: string) => {
+    const violation = (reason: string, kind: CommandViolation["kind"] = "unconfirmed"): CommandViolation => {
       const safe = tidy(reason);
       attempts.push({ outcome: "violation", stage: "command_fulfillment", violation: safe });
-      return safe;
+      return { kind, violation: safe };
     };
     if (expired()) return violation("command fulfillment deadline expired");
     if (reads >= OPERATOR_READS_MAX) return violation("command fulfillment read allowance is spent");
@@ -2484,7 +2518,7 @@ export async function runOperator(
           ctx.commands = ctx.commands.filter((entry) => entry.tool.name !== command.tool.name);
         }
       }
-      return violation(`command does not fulfill the whole request: ${verdict.reason}`);
+      return violation(`command does not fulfill the whole request: ${verdict.reason}`, "rejected");
     }
     attempts.push({ outcome: "accepted", stage: "command_fulfillment" });
     return undefined;
@@ -2575,14 +2609,14 @@ export async function runOperator(
             const beforeCheck = attempts.length;
             const fulfillmentViolation = await commandCheck(taken.decision);
             if (fulfillmentViolation !== undefined)
-              return answered({ kind: "non_decision", reason: fulfillmentViolation });
+              return answered({ kind: "non_decision", reason: fulfillmentViolation.violation });
             if (taken.decision.kind !== "non_decision" && attempts.length === beforeCheck)
               attempts.push({ outcome: "accepted" });
             return answered(taken.decision);
           }
           return answered({ kind: "non_decision", reason: tidy(violation) });
         }
-        reAskAction(calls, violation);
+        if (!reAskAction(calls, violation)) return answered({ kind: "non_decision", reason: tidy(violation) });
         continue;
       }
       const answerText =
@@ -2602,6 +2636,10 @@ export async function runOperator(
       }
       if (turn.kind === "read" && reads < OPERATOR_READS_MAX) {
         reads++;
+        if (opts.includeAllowance) {
+          const helper = Object.values(OPERATOR_READ_TOOLS).find((name) => name === turn.tool);
+          if (helper !== undefined) helperNames.push(helper);
+        }
         // The providers catalogue is the one asynchronous read (issue 2088):
         // answered through the reader when the stage wired one, its failure a
         // named note on the turn, never a failed dispatch.
@@ -2646,17 +2684,20 @@ export async function runOperator(
           typeof answer !== "string" &&
           initialCommands.some((command) => command.tool.name === answer.tool) &&
           !ctx.commands.some((command) => command.tool.name === answer.tool);
-        if ((reads >= OPERATOR_READS_MAX && withdrawnCommand) || violations >= STRUCTURED_RETRIES_MAX)
+        if ((reads >= OPERATOR_READS_MAX && withdrawnCommand) || !reAskAction(answerText, violation))
           return answered({ kind: "non_decision", reason: tidy(violation) });
-        reAskAction(answerText, violation);
         continue;
       }
       const beforeCheck = attempts.length;
       const fulfillmentViolation = await commandCheck(turn.decision);
       if (fulfillmentViolation !== undefined) {
-        if (expired() || reads >= OPERATOR_READS_MAX || violations >= STRUCTURED_RETRIES_MAX)
-          return answered({ kind: "non_decision", reason: fulfillmentViolation });
-        reAskAction(answerText, fulfillmentViolation, "a decision that fulfills the whole request");
+        // A confirmed rejection can be corrected into an action without another
+        // read. An exhausted unconfirmed check cannot buy a verification call.
+        if (
+          (reads >= OPERATOR_READS_MAX && fulfillmentViolation.kind === "unconfirmed") ||
+          !reAskAction(answerText, fulfillmentViolation.violation, "a decision that fulfills the whole request")
+        )
+          return answered({ kind: "non_decision", reason: fulfillmentViolation.violation });
         continue;
       }
       if (turn.decision.kind !== "non_decision" && attempts.length === beforeCheck)
