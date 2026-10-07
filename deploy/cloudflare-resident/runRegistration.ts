@@ -1,4 +1,5 @@
 import { parsePoolBindings, parseSpentPoolUsers } from "../../src/execution/residentPoolSpends.js";
+import { isAcknowledgedWorkspaceOwner } from "../../src/core/workspaceSettlement.js";
 
 export function validRunOwner(runId: unknown, ownerGen: unknown, ownerFence: unknown): boolean {
   return (
@@ -307,6 +308,14 @@ export function deployRegistrationState(input: {
       ? "executing"
       : "unknown";
   }
+  if (
+    isAcknowledgedWorkspaceOwner(observed, {
+      runId: registration.runId!,
+      ownerGen: registration.ownerGen!,
+      ownerFence: registration.ownerFence!,
+    })
+  )
+    return "retained";
   if (observed.kind !== "terminal") return "unknown";
   const row = observed.record;
   if (typeof row !== "object" || row === null) return "unknown";

@@ -1,4 +1,9 @@
-import { isWorkspaceOwner, workspaceOwnerKey, workspaceSettlementOf } from "../../src/core/workspaceSettlement.js";
+import {
+  isWorkspaceOwner,
+  isAcknowledgedWorkspaceOwner,
+  workspaceOwnerKey,
+  workspaceSettlementOf,
+} from "../../src/core/workspaceSettlement.js";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
@@ -251,6 +256,7 @@ ${methodOf(source, "withThreadBusy")}
       parsePoolBindings,
       validRunOwner,
       isWorkspaceOwner,
+      isAcknowledgedWorkspaceOwner,
       workspaceOwnerKey,
       workspaceSettlementOf,
       THREAD_USERS: ["worker2"],

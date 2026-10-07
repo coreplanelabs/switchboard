@@ -53,6 +53,7 @@ import { markdownOutput } from "../../src/core/llmOutput/markdown.ts";
 import { createLedgerWriteThrough } from "../../src/core/runLedger/writeThrough.ts";
 import { UnknownAllocationClaimError } from "../../src/core/runLedger/allocationAck.ts";
 import { PROMOTION_BODY_BYTES, promotionBytes, promotionBodyOf } from "../../src/core/runLedger/promotion.ts";
+import { deployRegistrationState } from "../cloudflare-resident/runRegistration.ts";
 
 // The check producer imports the unused LocalExecutor environment helper.
 // Workerd has no host secret manifest; no local execution uses this stub.
@@ -2939,6 +2940,13 @@ describe("exact owner evidence for resident preservation", () => {
           await instance.delete(runId);
         });
       const read = () => post("/runs/preservation-owner", { storeKey: key, ...owner });
+      const deployState = (observed: unknown) =>
+        deployRegistrationState({
+          threadKey,
+          registration: { threadKey, ...owner },
+          fence: owner,
+          owner: observed,
+        });
       const receipt = await read();
       expect(receipt.data).toMatchObject({
         kind: "terminal",
@@ -2957,6 +2965,10 @@ describe("exact owner evidence for resident preservation", () => {
       expect((await read()).data.settlement).toEqual(receipt.data.settlement);
       expect((await post("/runs/workspace-ack", { storeKey: key, ...owner, revision: 1 })).data).toEqual({ ok: true });
       expect((await read()).data).toEqual({ kind: "acknowledged", owner, revision: 1 });
+      expect(deployState((await read()).data)).toBe("retained");
+      expect(
+        deployState((await post("/runs/preservation-owner", { storeKey: key, ...owner, ownerFence: 8 })).data),
+      ).toBe("unknown");
       expect((await post("/runs/workspace-ack", { storeKey: key, ...owner, revision: 1 })).data).toEqual({ ok: true });
       expect(
         (
@@ -2966,6 +2978,9 @@ describe("exact owner evidence for resident preservation", () => {
           )
         ).status,
       ).toBe(200);
+      // The actual producer checks the new live row before old retained ACKs.
+      expect((await read()).data).toMatchObject({ kind: "live", row: { runId, ownerGen: "g1" } });
+      expect(deployState((await read()).data)).toBe("executing");
       expect((await post("/runs/finish", { storeKey: key, runId, gen: "g1", record: terminal })).status).toBe(200);
       expect((await post("/runs/workspace-ack", { storeKey: key, ...owner, revision: 1 })).data).toEqual({
         ok: true,

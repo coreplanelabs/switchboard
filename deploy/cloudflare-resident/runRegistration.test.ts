@@ -1,5 +1,6 @@
 import {
   isWorkspaceOwner,
+  isAcknowledgedWorkspaceOwner,
   workspaceOwnerKey,
   workspaceBindingOf,
   workspaceSettlementOf,
@@ -34,6 +35,85 @@ describe("deploy registration activity", () => {
   it("counts a live owner as executing and keeps an exact terminal owner retained", () => {
     expect(state({ kind: "live", row: { runId: "r1", threadKey: "mcp:run", ownerGen: "g1" } })).toBe("executing");
     expect(state({ kind: "terminal", record: { id: "r1", threadKey: "mcp:run", status: "failed" } })).toBe("retained");
+  });
+
+  it("retains an exact acknowledged owner without granting workspace removal", () => {
+    const owner = { kind: "acknowledged", owner: fence, revision: 1 };
+    expect(state(owner)).toBe("retained");
+    expect(
+      decideWorkspaceRemoval({
+        binding: { threadKey: "mcp:run", ref: "main", user: "worker2", worktreePath: "/private/work" },
+        registration,
+        fence,
+        owner,
+        tree: { present: false, absenceVerified: true },
+      }),
+    ).toEqual({ removable: false, reason: "owner-unverified" });
+  });
+
+  it("keeps acknowledged retention subject to the exact UID ledger and sole claimant", () => {
+    const input = {
+      threadKey: "mcp:run",
+      registration,
+      fence,
+      owner: { kind: "acknowledged", owner: fence, revision: 1 },
+      user: "worker2",
+      ledger: [{ user: "worker2", owner: "thread:mcp:run" }],
+      claimants: ["mcp:run"],
+      pool: ["worker2"],
+      cutoff: 0,
+      now: 1_000_000,
+      graceMs: 60_000,
+      opInFlight: 0,
+    };
+    expect(classifyDeployRegistrationWithLedger(input).state).toBe("retained");
+    expect(classifyDeployRegistrationWithLedger({ ...input, ledger: [] })).toMatchObject({
+      state: "unknown",
+      reason: "ledger-unverified",
+    });
+    expect(classifyDeployRegistrationWithLedger({ ...input, claimants: ["mcp:run", "mcp:other"] })).toMatchObject({
+      state: "unknown",
+      reason: "binding-conflict",
+    });
+  });
+
+  it("reconciles an acknowledged owner through the same retained observation", () => {
+    expect(
+      decideOwnerReconciliation({
+        binding: { threadKey: "mcp:run", user: "worker2" },
+        registration,
+        fence,
+        lastRunOwner: null,
+        owner: { kind: "acknowledged", owner: fence, revision: 1 },
+        ledger: [{ user: "worker2", owner: "thread:mcp:run" }],
+        claimants: ["mcp:run"],
+        pool: ["worker2"],
+        cutoff: 0,
+        now: 1_000_000,
+        graceMs: 60_000,
+        opInFlight: 0,
+      }),
+    ).toEqual({ action: "current", legacy: false, spend: false });
+  });
+
+  it("refuses foreign or malformed acknowledged evidence without changing live-owner protection", () => {
+    const acknowledged = { kind: "acknowledged", owner: fence, revision: 1 };
+    for (const revision of [undefined, null, 0, -1, 0.5, "1", true, Number.NaN, Number.MAX_SAFE_INTEGER + 1])
+      expect(state({ ...acknowledged, revision })).toBe("unknown");
+    for (const owner of [
+      undefined,
+      null,
+      [],
+      { ...fence, runId: "r2" },
+      { ...fence, ownerGen: "g2" },
+      { ...fence, ownerFence: 8 },
+    ])
+      expect(state({ ...acknowledged, owner })).toBe("unknown");
+    expect(state(acknowledged, { fence: { ...fence, ownerFence: 8 } })).toBe("unknown");
+    expect(state(acknowledged, { registration: { ...registration, threadKey: "mcp:other" } })).toBe("unknown");
+    expect(state({ kind: "live", row: { runId: "r1", threadKey: "mcp:run", ownerGen: "g1" }, revision: 1 })).toBe(
+      "executing",
+    );
   });
 
   it("fails closed on missing owner, stale generation or fence, and provisional terminal history", () => {
@@ -1011,6 +1091,7 @@ async function ownerFlow(pathForm: "canonical" | "collision-safe replacement" | 
       decideWorkspaceRemoval,
       hasRunOwnerField,
       isWorkspaceOwner,
+      isAcknowledgedWorkspaceOwner,
       workspaceOwnerKey,
       workspaceSettlementOf,
       workspaceBindingOf,
