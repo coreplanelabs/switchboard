@@ -2011,6 +2011,7 @@ function rowToLive(r: LiveRow): LiveRunRow {
 }
 
 type HeartbeatAnswer = FenceResult & { stop?: StopMode | null; phase?: LivePhase; effects?: PlaneEffect[] };
+type PromotionHold = { kind: "held"; reason: "promotion_pending" | "promotion_corrupt"; runId: string };
 
 /** Whether the bot's outcome and the decider's word agree (orchestration-plane item 8): `proceeded`
  *  beside `proceed`, and a thread-live refusal beside `queued` — the refusal
@@ -6001,10 +6002,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     return raw !== undefined && (!workspaceDurabilityArchiveOf(raw) || promotionPending(raw));
   }
   /** Thin negative precondition from actual private state; never a witness or permit. */
-  async promotionHold(
-    runId: string,
-    gen?: string,
-  ): Promise<{ kind: "held"; reason: "promotion_pending" | "promotion_corrupt"; runId: string } | null> {
+  async promotionHold(runId: string, gen?: string): Promise<PromotionHold | null> {
     const row = this.liveRow(runId);
     if (!row || (gen !== undefined && row.ownerGen !== gen)) return null;
     const raw = this.allocationArchive(runId),
@@ -6680,17 +6678,24 @@ export class RunHistoryDO extends DurableObject<Env> {
     return out;
   }
 
-  async setState(runId: string, gen: string, state: RunState): Promise<FenceResult> {
-    if (workspaceDurabilityArchiveOf(this.allocationArchive(runId))?.promotion)
-      await this.requirePromotionRelease(runId, gen);
+  async setState(runId: string, gen: string, state: RunState): Promise<FenceResult | PromotionHold> {
+    // A known precondition crosses RPC as data. A remote exception cannot keep
+    // the custom class that the HTTP handler would otherwise need to catch.
+    const pending = (): PromotionHold => ({ kind: "held", reason: "promotion_pending", runId });
+    if (workspaceDurabilityArchiveOf(this.allocationArchive(runId))?.promotion) {
+      const before = canonicalSeedJson(this.allocationArchive(runId));
+      const hold = await this.promotionHold(runId, gen);
+      if (hold) return hold;
+      if (before !== canonicalSeedJson(this.allocationArchive(runId))) return pending();
+    }
     if (workspaceAuthorityFieldsPresent(state)) return { ok: false, reason: "fenced" };
-    if (this.promotionHeld(runId, gen)) throw new PromotionPendingError(runId);
-    const result = await this.ctx.blockConcurrencyWhile(async (): Promise<FenceResult | PromotionPendingError> => {
+    if (this.promotionHeld(runId, gen)) return pending();
+    return this.ctx.blockConcurrencyWhile(async (): Promise<FenceResult | PromotionHold> => {
       const row = this.liveRow(runId);
       const fence = checkFence(row, gen);
       if (!fence.ok) return fence;
       if (!row) return { ok: false, reason: "unknown-run" };
-      if (this.promotionHeld(runId, gen)) return new PromotionPendingError(runId);
+      if (this.promotionHeld(runId, gen)) return pending();
       const restored = this.preserveArchivedBaseline(runId, state, { id: runId, ...row.meta });
       if (!restored) return { ok: false, reason: "fenced" };
       state = restored;
@@ -6725,10 +6730,10 @@ export class RunHistoryDO extends DurableObject<Env> {
         )
           return { ok: false, reason: "fenced" };
       }
-      let promotionRefusal: PromotionPendingError | undefined;
+      let promotionRefused = false;
       this.ctx.storage.transactionSync(() => {
         if (this.promotionHeld(runId, gen)) {
-          promotionRefusal = new PromotionPendingError(runId);
+          promotionRefused = true;
           return;
         }
         if (isContextDependencies(preserved.contextDependencies))
@@ -6736,11 +6741,9 @@ export class RunHistoryDO extends DurableObject<Env> {
         if (receipt) this.pinReference(runId, runId, receipt.seed.key);
         this.sql.exec(`UPDATE live_runs SET state_json = ? WHERE run_id = ?`, JSON.stringify(preserved), runId);
       });
-      if (promotionRefusal) return promotionRefusal;
+      if (promotionRefused) return pending();
       return { ok: true };
     });
-    if (result instanceof PromotionPendingError) throw result;
-    return result;
   }
 
   /** Any generation: a steer arrives on whichever container is up. */
@@ -12089,7 +12092,26 @@ async function handleLedger(
   }
   if (pathname === "/runs/state") {
     if (typeof b.state !== "object" || b.state === null) return json({ error: "state must be an object" }, 400);
-    return fenced(await stub.setState(runId.value, g.value, b.state as RunState));
+    const result = await stub.setState(runId.value, g.value, b.state as RunState);
+    if (result && typeof result === "object") {
+      if (
+        "kind" in result &&
+        result.kind === "held" &&
+        (result.reason === "promotion_pending" || result.reason === "promotion_corrupt") &&
+        result.runId === runId.value &&
+        Object.keys(result).every((key) => ["kind", "reason", "runId"].includes(key))
+      )
+        return json(result, 423);
+      if (
+        "ok" in result &&
+        ((result.ok === true && Object.keys(result).length === 1) ||
+          (result.ok === false &&
+            (result.reason === "fenced" || result.reason === "unknown-run") &&
+            Object.keys(result).every((key) => ["ok", "reason"].includes(key))))
+      )
+        return fenced(result);
+    }
+    throw new Error("run state RPC returned an invalid acknowledgement");
   }
   if (pathname === "/runs/finishing") return fenced(await stub.finishing(runId.value, g.value));
   if (pathname === "/runs/abandon") {

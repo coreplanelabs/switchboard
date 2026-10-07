@@ -24,7 +24,7 @@ import {
 } from "../../src/core/publicationSettlement.ts";
 import { PRIVATE_WORKER_REPLY_MAX_CHARS } from "../../src/core/privateWorkerLog.ts";
 import { assertNoPendingBackgroundTasks } from "./backgroundTasks.ts";
-import type { RunHistoryDO, SessionLogDO } from "./worker.ts";
+import memoryWorker, { type RunHistoryDO, type SessionLogDO } from "./worker.ts";
 import {
   coordinatorReportAdmission,
   freezeAdmittedCoordinatorReport,
@@ -144,8 +144,10 @@ describe("original workspace durability in real SQLite", () => {
       });
       await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner, state) => {
         const before = JSON.stringify(await owner.listLive());
-        await expect(owner.setState(id, "g1", { binding: { backend: "sandbox" } })).rejects.toMatchObject({
-          name: "PromotionPendingError",
+        await expect(owner.setState(id, "g1", { binding: { backend: "sandbox" } })).resolves.toEqual({
+          kind: "held",
+          reason: "promotion_pending",
+          runId: id,
         });
         await expect(owner.finishing(id, "g1")).rejects.toMatchObject({ name: "PromotionPendingError" });
         await expect(owner.abandon(id, "g1")).rejects.toMatchObject({ name: "PromotionPendingError" });
@@ -169,7 +171,11 @@ describe("original workspace durability in real SQLite", () => {
           "UPDATE workspace_settlements SET allocation_json = ? WHERE allocation_json IS NOT NULL",
           JSON.stringify(corrupt),
         );
-        await expect(owner.setState(id, "g1", {})).rejects.toMatchObject({ name: "PromotionPendingError" });
+        await expect(owner.setState(id, "g1", {})).resolves.toEqual({
+          kind: "held",
+          reason: "promotion_pending",
+          runId: id,
+        });
         await expect(owner.abandon(id, "g1")).rejects.toMatchObject({ name: "PromotionPendingError" });
         expect(JSON.stringify(await owner.listLive())).toBe(before);
         expect(
@@ -10192,4 +10198,167 @@ it("matches omitted-policy caller bytes to actual SQLite readback after accepted
   expect(actual.boundary.state).toEqual(JSON.parse((witness as { payload: string }).payload).state);
   expect(expected).toEqual(saved);
   expect(writes).toBe(1);
+});
+
+describe("state-write holds across Durable Object RPC", () => {
+  const id = "eeeeeeee-eeee-4eee-aeee-eeeeeeeeeeee",
+    gen = "g-rpc";
+  const claim = () => ({
+    runId: id,
+    threadKey: "http:fixture:rpc-state",
+    gen,
+    leaseMs: 30000,
+    startedAt: 1,
+    phase: "attaching" as const,
+    system: "fixture system",
+    tools: [],
+    meta: {
+      agent: "general",
+      channelId: "http:fixture",
+      userId: "http:fixture",
+      threadKey: "http:fixture:rpc-state",
+      profile: { machine: "none" as const, identity: "none" as const, minutes: 4 },
+    },
+  });
+  const state = {
+    harness: {
+      harness: "pi",
+      pid: 4242,
+      logOffset: 0,
+      sessionPolicy: { version: 1, commandRoute: "native", identity: "none" },
+    },
+  };
+  const request = (key: string) => {
+    const body = JSON.stringify({ storeKey: key, runId: id, gen, state });
+    return new Request("https://memory.test/runs/state", {
+      method: "POST",
+      body,
+      headers: {
+        authorization: "Bearer test-token",
+        "content-type": "application/json",
+        "content-length": String(new TextEncoder().encode(body).length),
+      },
+    });
+  };
+  function routedEnv(stub: ReturnType<typeof env.RUNS.get>, override: (name: PropertyKey) => unknown) {
+    const wrapped = new Proxy(stub, {
+      get(target, name) {
+        const replacement = override(name);
+        if (replacement !== undefined) return replacement;
+        const value = Reflect.get(target, name, target);
+        // RpcCallable does not have Function.bind: accessing it invokes a remote
+        // method named bind. Reflect.apply preserves the actual stub invocation.
+        return typeof value === "function" ? (...args: unknown[]) => Reflect.apply(value, target, args) : value;
+      },
+    });
+    const namespace = new Proxy(env.RUNS, {
+      get(target, name) {
+        if (name === "get") return () => wrapped;
+        const value = Reflect.get(target, name, target);
+        return typeof value === "function" ? (...args: unknown[]) => Reflect.apply(value, target, args) : value;
+      },
+    });
+    return new Proxy(env, {
+      get(target, name) {
+        return name === "RUNS" ? namespace : Reflect.get(target, name, target);
+      },
+    });
+  }
+  it("returns the existing held response when preparation arrives after the actual RPC preflight", async () => {
+    const key = "runs:rpc-state-race",
+      stub = env.RUNS.get(env.RUNS.idFromName(key));
+    expect((await stub.claim(claim(), 1)).ok).toBe(true);
+    const body = JSON.stringify({ storeKey: key, run: { ...claim(), phase: "live" } });
+    let preflights = 0;
+    const routed = routedEnv(stub, (name) =>
+      name === "promotionHold"
+        ? async (...args: unknown[]) => {
+            const observed = await Reflect.apply(stub.promotionHold, stub, args);
+            expect(observed).toBeNull();
+            preflights++;
+            expect((await stub.preparePromotion(body)).kind).toBe("prepared");
+            return observed;
+          }
+        : undefined,
+    );
+    const response = await memoryWorker.fetch(request(key), routed);
+    expect(preflights).toBe(1);
+    expect(response.status).toBe(423);
+    expect(await response.json()).toEqual({ kind: "held", reason: "promotion_pending", runId: id });
+    expect((await stub.listLive())[0].state).not.toHaveProperty("harness");
+    expect(await stub.promotionHold(id, gen)).toMatchObject({ kind: "held", runId: id });
+  });
+  it("does not turn an unknown error after an actual state commit into a held response, even when its name matches", async () => {
+    const key = "runs:rpc-state-unknown",
+      stub = env.RUNS.get(env.RUNS.idFromName(key));
+    expect((await stub.claim(claim(), 1)).ok).toBe(true);
+    const routed = routedEnv(stub, (name) =>
+      name === "setState"
+        ? async (...args: unknown[]) => {
+            expect(await Reflect.apply(stub.setState, stub, args)).toEqual({ ok: true });
+            try {
+              await Reflect.apply(Reflect.get(stub, "undefinedFixtureMethod"), stub, []);
+            } catch (error) {
+              expect(error).toMatchObject({ remote: true });
+              Object.assign(error as object, { name: "PromotionPendingError", kind: "promotion-pending", runId: id });
+              throw error;
+            }
+            throw new Error("remote unknown-outcome control did not throw");
+          }
+        : undefined,
+    );
+    await expect(memoryWorker.fetch(request(key), routed)).rejects.toMatchObject({
+      name: "PromotionPendingError",
+      remote: true,
+    });
+    expect((await stub.listLive())[0].state).toHaveProperty("harness.sessionPolicy", state.harness.sessionPolicy);
+  });
+  it("keeps an ordinary identity-none state write acknowledged through the real HTTP and RPC path", async () => {
+    const key = "runs:rpc-state-positive",
+      stub = env.RUNS.get(env.RUNS.idFromName(key));
+    expect((await stub.claim(claim(), 1)).ok).toBe(true);
+    const response = await fetchMemoryTest(request(key).url, {
+      method: "POST",
+      headers: request(key).headers,
+      body: await request(key).text(),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true });
+    expect((await stub.listLive())[0].state).toHaveProperty("harness.sessionPolicy", state.harness.sessionPolicy);
+  });
+  it.each([
+    null,
+    { kind: "held", reason: "promotion_pending", runId: "ffffffff-ffff-4fff-afff-ffffffffffff" },
+    { kind: "held", reason: "unknown", runId: id },
+    { kind: "held", reason: "promotion_pending", runId: id, unexpected: true },
+    { ok: true, kind: "unknown" },
+  ])("rejects a malformed, foreign or unknown RPC acknowledgement: %j", async (value) => {
+    const key = "runs:rpc-state-invalid",
+      stub = env.RUNS.get(env.RUNS.idFromName(key));
+    expect((await stub.claim(claim(), 1)).ok).toBe(true);
+    const routed = routedEnv(stub, (name) => (name === "setState" ? async () => value : undefined));
+    await expect(memoryWorker.fetch(request(key), routed)).rejects.toThrow("invalid acknowledgement");
+    expect((await stub.listLive())[0].state).not.toHaveProperty("harness");
+  });
+  it("keeps an actual foreign-generation state write fenced without changing its owner", async () => {
+    const key = "runs:rpc-state-fenced",
+      stub = env.RUNS.get(env.RUNS.idFromName(key));
+    expect((await stub.claim(claim(), 1)).ok).toBe(true);
+    const original = request(key),
+      body = JSON.parse(await original.text());
+    body.gen = "foreign-gen";
+    const encoded = JSON.stringify(body);
+    const response = await fetchMemoryTest(original.url, {
+      method: "POST",
+      headers: {
+        authorization: "Bearer test-token",
+        "content-type": "application/json",
+        "content-length": String(new TextEncoder().encode(encoded).length),
+      },
+      body: encoded,
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ ok: false, reason: "fenced" });
+    expect((await stub.listLive())[0]).toMatchObject({ ownerGen: gen, state: {} });
+  });
 });
