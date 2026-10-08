@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.293.0](https://github.com/coreplanelabs/switchboard/compare/v1.292.0...v1.293.0) (2026-10-08)
+
+
+### Features
+
+* **deploy:** create empty staging installations safely ([#2866](https://github.com/coreplanelabs/switchboard/issues/2866)) ([b465923](https://github.com/coreplanelabs/switchboard/commit/b4659231b33aedec294634ca95639e63fce4cdcb))
+* **deploy:** deploy trusted candidates to isolated staging ([#2860](https://github.com/coreplanelabs/switchboard/issues/2860)) ([d26952f](https://github.com/coreplanelabs/switchboard/commit/d26952f1f4ecbbd078e19334937605070bad88e1))
+
+
+### Bug fixes
+
+* **resident:** settle PR pushes and expand UID and repo limits ([#2865](https://github.com/coreplanelabs/switchboard/issues/2865)) ([bb45bdd](https://github.com/coreplanelabs/switchboard/commit/bb45bdd96bfe84e937470a818e34191167d685ca))
+* **runs:** make hard stop close failed startup runs ([#2861](https://github.com/coreplanelabs/switchboard/issues/2861)) ([155595e](https://github.com/coreplanelabs/switchboard/commit/155595eca00554d783a0e70c0cc52b100120477a))
+
 ## [1.292.0](https://github.com/coreplanelabs/switchboard/compare/v1.291.0...v1.292.0) (2026-10-08)
 
 
