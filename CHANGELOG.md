@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.290.1](https://github.com/coreplanelabs/switchboard/compare/v1.290.0...v1.290.1) (2026-10-08)
+
+
+### Bug fixes
+
+* **runs:** retain known initial pushes under their original unit ([#2855](https://github.com/coreplanelabs/switchboard/issues/2855)) ([07c77d3](https://github.com/coreplanelabs/switchboard/commit/07c77d336882cbeaeacfa0f8fe806c7fd7f10147))
+
 ## [1.290.0](https://github.com/coreplanelabs/switchboard/compare/v1.289.12...v1.290.0) (2026-10-08)
 
 
