@@ -69,8 +69,8 @@
       // the reserve the attach admission holds back (snapshot staging + a
       // 1 GiB floor, 2965) = 6669 MB base; a hardlinked thread tree 555 MB; a
       // thread whose lockfile differs 2853 MB; 20 000 MB mounts as ~18 858 MB
-      // usable → 16 hardlinked + 1 installing trees (or 12 + 2) fit; the
-      // pool's 16 + 2 does not fit even this ceiling, so the disk stays a
+      // usable → 16 hardlinked + 1 installing trees (or 12 + 2) fit; neither
+      // 16 + 2 nor all 32 hardlinked pool trees fit, so the disk stays a
       // BUDGET (residentDiskBudget.ts): the next tree past it is refused
       // `disk-pressure` and runs cold, never ENOSPC. The pnpm store holds no
       // second copy of the deps (measured).
@@ -91,10 +91,10 @@
       // reached from the other side: one cold thread must be able to typecheck
       // a large monorepo alone — and it is awake only for one run.)
       "instance_type": { "vcpu": 4, "memory_mib": 12288, "disk_mb": 20000 },
-      // Platform ceiling only. The enforced cap is RESIDENT_CAP (6) in
+      // Platform ceiling only. The enforced cap is RESIDENT_CAP (12) in
       // worker.ts — deliberately below this so an onboard is always refused
       // atomically by the registry, never by a platform scheduling failure.
-      "max_instances": 10
+      "max_instances": 20
     }
   ],
   "durable_objects": {

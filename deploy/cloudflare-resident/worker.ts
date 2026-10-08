@@ -470,6 +470,7 @@ import {
   errMsg,
   GIT_NETWORK_TIMEOUT_MS,
   THREAD_POOL_SIZE,
+  WORKTREE_SWEEP_BATCH_SIZE,
   R2_TRANSFER_TIMEOUT_MS,
   REFRESH_BUILD_TIMEOUT_MS,
   REFRESH_INSTALL_TIMEOUT_MS,
@@ -580,12 +581,11 @@ export interface Env {
 // ---------------------------------------------------------------------------
 
 /** Hard cap on onboarded residents, enforced atomically by the registry DO.
- *  Deliberately BELOW wrangler.jsonc's containers max_instances (10) so an
+ *  Deliberately BELOW wrangler.jsonc's containers max_instances (20) so an
  *  over-cap onboard is always refused by the registry, never by a platform
  *  scheduling failure. Bump the two together. */
-// 6 = the number of repos one team works on concurrently. Past the cap,
-// `evictColdest:true` makes room (docs/reference/specs/resident-repos.md item 46).
-const RESIDENT_CAP = 6;
+// Past the cap, `evictColdest:true` makes room (resident-repos item 46).
+const RESIDENT_CAP = 12;
 
 /** R2 lifetime of snapshot objects. We delete replaced/offboarded snapshots
  *  explicitly (see deleteBackupObjects); the TTL is a leak backstop, and it
@@ -1239,6 +1239,7 @@ type WorkspaceReference = {
   applied?: WorkspaceSettlement;
 };
 const WORKSPACE_SETTLEMENT_CURSOR_KEY = "workspace:settlement-cursor";
+const WORKTREE_SWEEP_CURSOR_KEY = "workspace:sweep-cursor";
 
 interface ThreadBinding {
   /** Metadata delivery survives owner replacement and VM loss. */
@@ -9901,55 +9902,65 @@ export class ResidentDO extends Sandbox<Env> {
     const cutoff = systemClock() - ttlDays * 86_400_000;
     const all = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
     const idleCutoff = systemClock() - CLEAN_IDLE_RELEASE_S * 1000;
-    for (const binding of all.values()) {
-      if (binding.evicted || !binding.user) continue;
-      const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(binding.threadKey));
-      if (
-        registration?.deadlineAt !== undefined &&
-        Number.isSafeInteger(registration.deadlineAt) &&
-        systemClock() <= registration.deadlineAt + RUN_REGISTRATION_GRACE_MS
-      ) {
-        kept++;
-        continue;
-      }
-      const last = Date.parse(binding.lastAttachAt);
-      if (last >= cutoff) {
-        // Not past the TTL. Still release it if it has been idle for an hour
-        // and nothing is running on it. The preservation decision below
-        // still needs the exact owner and current tree evidence before removal.
-        const busy = this.threadOpsInFlight.get(binding.threadKey) ?? 0;
-        if (last >= idleCutoff || busy > 0) {
+    const live = [...all]
+      .filter(([, binding]) => !binding.evicted && binding.user)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    const cursor = await this.ctx.storage.get<string>(WORKTREE_SWEEP_CURSOR_KEY);
+    const remaining = cursor ? live.filter(([key]) => key > cursor) : live;
+    const batch = (remaining.length > 0 ? remaining : live).slice(0, WORKTREE_SWEEP_BATCH_SIZE);
+    for (const [key, binding] of batch) {
+      try {
+        const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(binding.threadKey));
+        if (
+          registration?.deadlineAt !== undefined &&
+          Number.isSafeInteger(registration.deadlineAt) &&
+          systemClock() <= registration.deadlineAt + RUN_REGISTRATION_GRACE_MS
+        ) {
           kept++;
           continue;
         }
+        const last = Date.parse(binding.lastAttachAt);
+        if (last >= cutoff) {
+          // Not past the TTL. Still release it if it has been idle for an hour
+          // and nothing is running on it. The preservation decision below
+          // still needs the exact owner and current tree evidence before removal.
+          const busy = this.threadOpsInFlight.get(binding.threadKey) ?? 0;
+          if (last >= idleCutoff || busy > 0) {
+            kept++;
+            continue;
+          }
+        }
+        // Re-read the binding: earlier iterations awaited (the DO yields), so a
+        // re-attach that completed meanwhile bumped lastAttachAt and rebuilt the
+        // tree — evicting from this loop's stale snapshot would rm the fresh tree.
+        const current = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(binding.threadKey));
+        if (!current || current.evicted || current.lastAttachAt !== binding.lastAttachAt) {
+          kept++;
+          continue;
+        }
+        // `active` is re-read per binding: the container can wake mid-sweep (an
+        // attach), and an eviction decided on a stale "inactive" would skip the
+        // rm and orphan a real tree.
+        const activeNow = await this.isRuntimeActive().catch(() => true);
+        // What the tree holds goes on the eviction's record (item 17), measured
+        // while the runtime is up; a slept container has no tree to measure.
+        const tree = activeNow ? await this.measureTreeBeforeEviction(current) : undefined;
+        if (
+          (await this.evictBinding(
+            current,
+            activeNow,
+            `worktree-sweep ${resource}`,
+            last >= cutoff ? "clean-idle" : "ttl",
+            tree,
+          )) === "evicted"
+        )
+          evicted.push(binding.threadKey);
+        else kept++;
+      } finally {
+        await this.ctx.storage.put(WORKTREE_SWEEP_CURSOR_KEY, key);
       }
-      // Re-read the binding: earlier iterations awaited (the DO yields), so a
-      // re-attach that completed meanwhile bumped lastAttachAt and rebuilt the
-      // tree — evicting from this loop's stale snapshot would rm the fresh tree.
-      const current = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(binding.threadKey));
-      if (!current || current.evicted || current.lastAttachAt !== binding.lastAttachAt) {
-        kept++;
-        continue;
-      }
-      // `active` is re-read per binding: the container can wake mid-sweep (an
-      // attach), and an eviction decided on a stale "inactive" would skip the
-      // rm and orphan a real tree.
-      const activeNow = await this.isRuntimeActive().catch(() => true);
-      // What the tree holds goes on the eviction's record (item 17), measured
-      // while the runtime is up; a slept container has no tree to measure.
-      const tree = activeNow ? await this.measureTreeBeforeEviction(current) : undefined;
-      if (
-        (await this.evictBinding(
-          current,
-          activeNow,
-          `worktree-sweep ${resource}`,
-          last >= cutoff ? "clean-idle" : "ttl",
-          tree,
-        )) === "evicted"
-      )
-        evicted.push(binding.threadKey);
-      else kept++;
     }
+    if (batch.at(-1)?.[0] === live.at(-1)?.[0]) await this.ctx.storage.delete(WORKTREE_SWEEP_CURSOR_KEY);
     return { evicted, kept };
   }
 
@@ -10624,6 +10635,7 @@ export class ResidentDO extends Sandbox<Env> {
       imageReport: map.get(IMAGE_REPORT_PENDING_KEY) !== undefined ? "pending" : "current",
       recreateAdmissionHeld: this.recreateAdmission.pending || map.get(RECREATE_ADMISSION_KEY) === true,
       poolUsersSpent: poolSpends?.size ?? null,
+      poolUsersTotal: THREAD_USERS.length,
       // Read-scoped owner receipts explain historical occupancy even after
       // every live binding and disposable op has ended.
       poolUserSpends: poolSpends ? [...poolSpends].map(([user, owner]) => ({ user, owner })) : null,

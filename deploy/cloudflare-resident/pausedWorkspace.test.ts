@@ -215,6 +215,8 @@ function probe(
     WORKSPACE_PREDECESSORS_MAX: 20,
     WORKSPACE_RECONCILE_BINDINGS_MAX: 20,
     WORKSPACE_SETTLEMENT_CURSOR_KEY: "settlement-cursor",
+    WORKTREE_SWEEP_BATCH_SIZE: 16,
+    WORKTREE_SWEEP_CURSOR_KEY: "sweep-cursor",
     RESOURCE_KEY: "resource",
     decideWorkspaceRemoval,
     planForceDetach,
@@ -293,6 +295,41 @@ function probe(
 }
 
 describe("paused unpublished work at resident removal", () => {
+  it("sweeps a larger pool in bounded durable batches without starving later bindings", async () => {
+    const p = probe({ privateTree: { ...cleanTree, unpushedCommits: 0 } });
+    const rows = new Map<string, any>();
+    for (let i = 0; i < 32; i++) {
+      const key = i === 0 ? "slack:C1:sweep-Z" : `slack:C1:sweep-a${String(i).padStart(2, "0")}`;
+      rows.set(`thread:${key}`, { ...original, threadKey: key, user: `worker${i + 2}`, sha: "b".repeat(40) });
+      rows.set(`runReg:${key}`, { ...registration, threadKey: key, deadlineAt: i === 31 ? NOW - DAY : NOW + DAY });
+      rows.set(`runFence:${key}`, runFence);
+    }
+    for (let i = 0; i < 40; i++) rows.set(`thread:old-${i}`, { ...original, evicted: true, user: "" });
+    Object.assign(p.instance, {
+      ctx: {
+        storage: {
+          get: async (key: string) => structuredClone(rows.get(key)),
+          put: async (key: string, value: unknown) => rows.set(key, structuredClone(value)),
+          delete: async (key: string) => rows.delete(key),
+          list: async ({ prefix }: { prefix: string }) =>
+            new Map([...rows].filter(([key]) => key.startsWith(prefix)).sort(([a], [b]) => a.localeCompare(b))),
+        },
+      },
+      observeRunForEviction: async (owner: typeof registration) => ({
+        kind: "terminal",
+        record: { ...ordinaryTerminal.record, threadKey: owner.threadKey },
+      }),
+      putThreadBinding: async (binding: typeof original) =>
+        rows.set(`thread:${binding.threadKey}`, structuredClone(binding)),
+    });
+    expect(await p.instance.sweepWorktrees("repo:owner/name")).toEqual({ evicted: [], kept: 16 });
+    expect(rows.get("sweep-cursor")).toBe("thread:slack:C1:sweep-a15");
+    expect(await p.instance.sweepWorktrees("repo:owner/name")).toEqual({ evicted: ["slack:C1:sweep-a31"], kept: 15 });
+    expect(rows.get("thread:slack:C1:sweep-a31")).toMatchObject({ evicted: true, user: "" });
+    expect(rows.has("sweep-cursor")).toBe(false);
+    expect(await p.instance.sweepWorktrees("repo:owner/name")).toEqual({ evicted: [], kept: 16 });
+  });
+
   it("keeps a live owner after deadline, grace, clean-idle and TTL", async () => {
     for (const lastAttachAt of [original.lastAttachAt, new Date(NOW - 8 * DAY).toISOString()]) {
       const p = probe({ lastAttachAt });

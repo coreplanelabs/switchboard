@@ -169,15 +169,21 @@ describe("resident instance type (deploy/cloudflare-resident/wrangler.jsonc)", (
     expect(requiredDiskMb(LARGE_MONOREPO, 16, 1, previousUsable)).toBeGreaterThan(previousUsable);
   });
 
-  it("the configured disk fits the pool's seats: 16 hardlinked + 1 deps-installing trees, or 12 hardlinked + 2 deps-installing, each with the reserve", () => {
+  it("the configured disk fits 16 hardlinked + 1 deps-installing trees, or 12 hardlinked + 2 deps-installing, each with the reserve", () => {
     expect(requiredDiskMb(LARGE_MONOREPO, 16, 1, usable)).toBeLessThanOrEqual(usable);
     expect(requiredDiskMb(LARGE_MONOREPO, 12, 2, usable)).toBeLessThanOrEqual(usable);
     // Not over-provisioned either: the disk is within a quarter of the 16 + 1 working set.
     expect(usable).toBeLessThan(requiredDiskMb(LARGE_MONOREPO, 16, 1, usable) * 1.25);
   });
 
-  it("the pool's theoretical maximum (16 hardlinked + 2 installing) does not fit even the platform ceiling this IS — admission stays mandatory at every size", () => {
+  it("the UID pool matches the image and exceeds measured disk capacity, so admission remains mandatory", () => {
+    const shared = readFileSync(fileURLToPath(new URL("./shared.ts", import.meta.url)), "utf8");
+    const image = readFileSync(fileURLToPath(new URL("./Dockerfile", import.meta.url)), "utf8");
+    const pool = Number(shared.match(/THREAD_POOL_SIZE = (\d+)/)?.[1]);
+    const users = Number(image.match(/seq 1 (\d+)/)?.[1]);
+    expect(users).toBe(pool + 1);
     expect(it_.disk_mb).toBe(MAX_DISK_MB);
+    expect(requiredDiskMb(LARGE_MONOREPO, pool, 0, usable)).toBeGreaterThan(usable);
     expect(requiredDiskMb(LARGE_MONOREPO, 16, 2, usable)).toBeGreaterThan(usable);
   });
 

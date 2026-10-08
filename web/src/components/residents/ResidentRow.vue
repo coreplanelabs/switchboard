@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import StatusDot from "../StatusDot.vue";
+import ResidentUidGauge from "./ResidentUidGauge.vue";
 import { formatRelative, splitRunLabel } from "../../lib/format";
 import {
   AGENT_HUE,
@@ -209,6 +210,7 @@ const idleCount = computed(() => rows.value.filter((r) => !r.run).length);
           class="running shrink-0 rounded border border-ok/25 bg-ok/8 px-1.5 font-mono text-[0.68rem] font-medium tabular-nums text-ok"
           >{{ runs.length }} running</span
         >
+        <ResidentUidGauge :record="record" />
         <!-- The facts wrap to their own indented line on a phone instead of
              breaking mid-token at the left edge. -->
         <span

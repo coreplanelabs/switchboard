@@ -3895,8 +3895,22 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       let local = base,
         remote = base,
         dirty = false;
+      let refused = false;
       const push = async () => {
         const update = { ref: `refs/heads/${ref}`, old: remote, next: local };
+        if (!refused) {
+          const noWrite = adopted
+            ? await bindings.beginPublication("run-l", update)
+            : await bindings.beginBranch("run-l", update);
+          expect(await noWrite!.finish("not_forwarded")).toBe(true);
+          expect(inner.live.get("run-l")!.state.branchPublication).toEqual({
+            version: 1,
+            repo: "o/r",
+            branches: [],
+            complete: true,
+          });
+          refused = true;
+        }
         const claim = adopted
           ? await bindings.beginPublication("run-l", update)
           : await bindings.beginBranch("run-l", update);
@@ -3976,6 +3990,13 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       expect(record.events).toContainEqual(expect.objectContaining({ type: "answer", text: out.answer }));
       expect(record.headSha).toBe(last);
       expect(record.pushed).toEqual([{ ref, sha: last, by: latest === "push" ? "push" : "salvage" }]);
+      if (adopted)
+        expect(record.branchPublication).toEqual({
+          version: 1,
+          repo: "o/r",
+          branches: [{ ref: "fix/compaction", pr: 7 }],
+          complete: true,
+        });
     },
   );
 
@@ -4630,105 +4651,143 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     await s.writer.settled();
   });
 
-  it("commits a Git-door existing-PR intent before forwarding and its accepted head before reporting success", async () => {
-    const old = "a".repeat(40);
-    const head = "b".repeat(40);
-    const ref = "fix/existing";
-    const publication = {
-      repo: "o/r",
-      pr: 7,
-      headRef: ref,
-      baseRef: "main",
-      expectedHeadSha: old,
-      publicationRef: ref,
-      owner: { instanceId: "coord-p", unit: "U12" },
-    };
-    const bindings = new GitBindings();
-    expect(
-      bindings.register(
-        "run-l",
-        { repo: "o/r", ref },
-        { repo: "o/r", ref: `refs/heads/${ref}`, refConfirmed: true },
-        async () => true,
-        true,
-      ),
-    ).toBe(true);
-    const inner = new InMemoryRunLedger(() => NOW);
-    const ledger = createLedgerWriteThrough({
-      ledger: inner,
-      gen: "gen-T",
-      fallback: { put: async () => {}, abandoned: () => {} },
-      warn: () => {},
-    });
-    const opened = await ledger.open({
-      runId: "run-l",
-      threadKey: THREAD,
-      startedAt: NOW,
-      meta: { agent: "coding", channelId: "slack:CX", userId: "slack:UX", threadKey: THREAD },
-      card: null,
-      system: "test",
-      tools: [],
-      seed: { messages: [{ role: "user", content: [{ type: "text", text: "fix" }] }], budgetMs: 60_000 },
-    });
-    if (opened.kind !== "tracked") throw new Error("untracked test");
-    const working = { state: "working" as const, since: NOW, bound: NOW + 60_000 };
-    const row = inner.live.get("run-l")!;
-    row.liveState = working;
-    row.liveStateSeq = 0;
-    const s = endingIn(
-      async () => {
-        const update = { ref: `refs/heads/${ref}`, old, next: head };
-        const claim = await bindings.beginPublication("run-l", update);
-        expect(claim).toBeDefined();
-        expect(inner.live.get("run-l")!.state.doorPublicationPending).toMatchObject({ update });
-        expect(inner.live.get("run-l")!.state.publicationReceipts).toBeUndefined();
-        expect(await claim!.finish("accepted")).toBe(true);
-        expect(inner.live.get("run-l")!.state.doorPublicationPending).toBeNull();
-        expect(inner.live.get("run-l")!.state.publicationReceipts).toContainEqual(
-          expect.objectContaining({ type: "pushed_head", sha: head }),
-        );
-        return sessionAnswering("done");
-      },
-      {
-        coding: true,
-        repoCtx: { repo: "o/r", pr: 7, ref, baseRef: "main", headSha: old },
-        binding: { ref, sha: old, workspace: "/srv/wt/existing" },
-        coordinator: {
-          parentInstanceId: "coord-p",
-          idempotencyKey: "coord-p:U12/1/findings",
-          base: "main",
-          publication,
+  it.each(["acknowledged", "rejected then acknowledged", "unacknowledged"] as const)(
+    "commits a Git-door existing-PR intent before forwarding and its accepted head before reporting success: %s",
+    async (outcome) => {
+      const old = "a".repeat(40);
+      const head = "b".repeat(40);
+      const ref = "fix/existing";
+      const publication = {
+        repo: "o/r",
+        pr: 7,
+        headRef: ref,
+        baseRef: "main",
+        expectedHeadSha: old,
+        publicationRef: ref,
+        owner: { instanceId: "coord-p", unit: "U12" },
+      };
+      const bindings = new GitBindings();
+      expect(
+        bindings.register(
+          "run-l",
+          { repo: "o/r", ref },
+          { repo: "o/r", ref: `refs/heads/${ref}`, refConfirmed: true },
+          async () => true,
+          true,
+        ),
+      ).toBe(true);
+      const inner = new InMemoryRunLedger(() => NOW);
+      if (outcome === "unacknowledged") {
+        const setState = inner.setState.bind(inner);
+        inner.setState = async (runId, gen, state) => {
+          const projection = state.branchPublication as { complete?: boolean; branches?: unknown[] } | undefined;
+          if (projection?.complete && projection.branches?.length === 1)
+            throw new PermanentStoreError("publication projection refused");
+          return setState(runId, gen, state);
+        };
+      }
+      const ledger = createLedgerWriteThrough({
+        ledger: inner,
+        gen: "gen-T",
+        fallback: { put: async () => {}, abandoned: () => {} },
+        warn: () => {},
+      });
+      const opened = await ledger.open({
+        runId: "run-l",
+        threadKey: THREAD,
+        startedAt: NOW,
+        meta: { agent: "coding", channelId: "slack:CX", userId: "slack:UX", threadKey: THREAD },
+        card: null,
+        system: "test",
+        tools: [],
+        seed: { messages: [{ role: "user", content: [{ type: "text", text: "fix" }] }], budgetMs: 60_000 },
+      });
+      if (opened.kind !== "tracked") throw new Error("untracked test");
+      const working = { state: "working" as const, since: NOW, bound: NOW + 60_000 };
+      const row = inner.live.get("run-l")!;
+      row.liveState = working;
+      row.liveStateSeq = 0;
+      const s = endingIn(
+        async () => {
+          const update = { ref: `refs/heads/${ref}`, old, next: head };
+          const claim = await bindings.beginPublication("run-l", update);
+          expect(claim).toBeDefined();
+          expect(inner.live.get("run-l")!.state.doorPublicationPending).toMatchObject({ update });
+          expect(inner.live.get("run-l")!.state.publicationReceipts).toBeUndefined();
+          if (outcome === "rejected then acknowledged") {
+            expect(await claim!.finish("rejected")).toBe(true);
+            expect(inner.live.get("run-l")!.state.branchPublication).toEqual({
+              version: 1,
+              repo: "o/r",
+              branches: [],
+              complete: true,
+            });
+            const retry = await bindings.beginPublication("run-l", update);
+            expect(await retry!.finish("accepted")).toBe(true);
+          } else expect(await claim!.finish("accepted")).toBe(outcome === "acknowledged");
+          if (outcome === "unacknowledged") {
+            expect(inner.live.get("run-l")!.state.doorPublicationPending).toMatchObject({ update });
+            expect(inner.live.get("run-l")!.state.branchPublication).toEqual({
+              version: 1,
+              repo: "o/r",
+              branches: [],
+              complete: false,
+            });
+            return sessionAnswering("publication is held");
+          }
+          expect(inner.live.get("run-l")!.state.doorPublicationPending).toBeNull();
+          expect(inner.live.get("run-l")!.state.publicationReceipts).toContainEqual(
+            expect.objectContaining({ type: "pushed_head", sha: head }),
+          );
+          expect(inner.live.get("run-l")!.state.branchPublication).toEqual({
+            version: 1,
+            repo: "o/r",
+            branches: [{ ref: "fix/existing", pr: 7 }],
+            complete: true,
+          });
+          return sessionAnswering("done");
         },
-        executor: {
-          exec: async (cmd) => {
-            if (cmd.includes("rev-parse --abbrev-ref HEAD")) return ref;
-            if (cmd.includes("rev-parse HEAD") || cmd.includes("rev-parse @{u}")) return head;
-            if (cmd.includes("ls-remote")) return `${head}\trefs/heads/${ref}`;
-            return "";
+        {
+          coding: true,
+          repoCtx: { repo: "o/r", pr: 7, ref, baseRef: "main", headSha: old },
+          binding: { ref, sha: old, workspace: "/srv/wt/existing" },
+          coordinator: {
+            parentInstanceId: "coord-p",
+            idempotencyKey: "coord-p:U12/1/findings",
+            base: "main",
+            publication,
+          },
+          executor: {
+            exec: async (cmd) => {
+              if (cmd.includes("rev-parse --abbrev-ref HEAD")) return ref;
+              if (cmd.includes("rev-parse HEAD") || cmd.includes("rev-parse @{u}")) return head;
+              if (cmd.includes("ls-remote")) return `${head}\trefs/heads/${ref}`;
+              return "";
+            },
           },
         },
-      },
-    );
-    s.deps.githubBindings = bindings;
-    s.deps.fetchPrFacts = async () => ({
-      state: "open",
-      sameRepoHead: true,
-      headBranchExists: true,
-      headRef: ref,
-      baseRef: "main",
-      headSha: old,
-      verifiedHead: { repo: "o/r", ref, sha: old },
-    });
-    s.registry.commitLiveState("run-l", { ok: true, liveState: working, liveStateSeq: 0 });
-    s.registry.subscribe("run-l", "tok", { onEvent: (event, seq) => opened.run.event(event, seq) });
-    answered(await runLoop(s.deps, { ...s.ctx, ledgerRun: opened.run }));
-    await opened.run.close();
-    expect(restoredPublicationHead(publicationReceiptsFromState(row.state.publicationReceipts), publication)).toBe(
-      head,
-    );
-    s.ending.drain(undefined);
-    await s.writer.settled();
-  });
+      );
+      s.deps.githubBindings = bindings;
+      s.deps.fetchPrFacts = async () => ({
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: ref,
+        baseRef: "main",
+        headSha: old,
+        verifiedHead: { repo: "o/r", ref, sha: old },
+      });
+      s.registry.commitLiveState("run-l", { ok: true, liveState: working, liveStateSeq: 0 });
+      s.registry.subscribe("run-l", "tok", { onEvent: (event, seq) => opened.run.event(event, seq) });
+      answered(await runLoop(s.deps, { ...s.ctx, ledgerRun: opened.run }));
+      await opened.run.close();
+      expect(restoredPublicationHead(publicationReceiptsFromState(row.state.publicationReceipts), publication)).toBe(
+        outcome !== "unacknowledged" ? head : undefined,
+      );
+      s.ending.drain(undefined);
+      await s.writer.settled();
+    },
+  );
 
   it.each(["accepted", "unknown"] as const)(
     "keeps a forwarded Git-door %s outcome in the final record after the model ends",

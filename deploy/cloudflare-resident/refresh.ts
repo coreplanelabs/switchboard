@@ -34,7 +34,7 @@ import {
   REFRESH_INSTALL_TIMEOUT_MS,
   REFRESH_INTERVAL_S,
   residentStub,
-  THREAD_POOL_SIZE,
+  WORKTREE_SWEEP_BATCH_SIZE,
   tracer,
   traceSinks,
 } from "./shared";
@@ -60,9 +60,8 @@ const REFRESH_FETCH_STEP_BUDGET_MS = RESTORE_MAX_MS + GIT_NETWORK_TIMEOUT_MS; //
 const REFRESH_INSTALL_STEP_BUDGET_MS = REFRESH_INSTALL_TIMEOUT_MS + DEPS_STEP_OVERHEAD_MS; // the install's own lease
 const REFRESH_BUILD_STEP_BUDGET_MS = 5 * GIT_NETWORK_TIMEOUT_MS + 2 * REFRESH_BUILD_TIMEOUT_MS; // five git-budgeted commands — stage-clear, stage, the staging fetch (under the stage lock), the checkout update and the swap (under the swap lock) — plus the off-lock reset/clean, deps re-link and build
 const REFRESH_SNAPSHOT_STEP_BUDGET_MS = R2_TRANSFER_TIMEOUT_MS + GIT_NETWORK_TIMEOUT_MS; // the archives, then the reclaim pass
-/** The sweep: one cleanliness check per binding idle past an hour (at most the
- *  pool's worth, one exec budget each), then the removals under the mirror lock. */
-const REFRESH_SWEEP_STEP_BUDGET_MS = THREAD_POOL_SIZE * DEFAULT_EXEC_TIMEOUT_MS + GIT_NETWORK_TIMEOUT_MS;
+/** The sweep page's checks, then removals under the mirror lock. */
+const REFRESH_SWEEP_STEP_BUDGET_MS = WORKTREE_SWEEP_BATCH_SIZE * DEFAULT_EXEC_TIMEOUT_MS + GIT_NETWORK_TIMEOUT_MS;
 /** The measurement: `df`, the `du` over the parts and the store's listing (one
  *  network-class budget each), then the store's removals. */
 const REFRESH_MEASURE_STEP_BUDGET_MS = 2 * GIT_NETWORK_TIMEOUT_MS + DEFAULT_EXEC_TIMEOUT_MS;
