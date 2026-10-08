@@ -1,4 +1,5 @@
 import { isPublicationSettlement } from "./publicationSettlement.js";
+import { typedExecutionDiagnosticFrom } from "../execution/typedExecutionDiagnostic.js";
 import { RUN_NOTE_KINDS, type RunEvent, type RunNoteKind } from "./runEvents.js";
 import { RUN_LIVE_STATE_NAMES, type RunLiveStateName } from "./runLiveState.js";
 import { PLANE_ENDING_CAUSES, type PlaneEndingCause } from "./plane/decide.js";
@@ -35,8 +36,15 @@ export function parseRunEventLines(text: string): { events: RunEvent[]; skipped:
       skipped++;
       continue;
     }
-    if (isRunEvent(parsed)) events.push(parsed);
-    else if (!isTransportFrame(parsed)) skipped++; // garbage, or an event-shaped payload this reader does not know
+    if (isRunEvent(parsed)) {
+      if (parsed.type === "run_note" && Object.hasOwn(parsed, "executionDiagnostic")) {
+        const diagnostic =
+          parsed.kind === "run_failed" ? typedExecutionDiagnosticFrom(parsed.executionDiagnostic) : undefined;
+        if (diagnostic) parsed.executionDiagnostic = diagnostic;
+        else delete parsed.executionDiagnostic;
+      }
+      events.push(parsed);
+    } else if (!isTransportFrame(parsed)) skipped++; // garbage, or an event-shaped payload this reader does not know
   }
   return { events, skipped };
 }

@@ -12,6 +12,12 @@ import type { Span } from "../core/trace/types.js";
 import { systemClock } from "../core/trace/clock.js";
 import type { PushedBranch } from "./residentRebind.js";
 import type { FleetBusyEndingFacts } from "./sandboxErrors.js";
+import {
+  typedExecutionDiagnosticFrom,
+  executionDiagnosticContextFrom,
+  type TypedExecutionDiagnostic,
+  type ExecutionDiagnosticContext,
+} from "./typedExecutionDiagnostic.js";
 import type { LeftBehind } from "./residentCleanliness.js";
 import { publicEnv } from "../secrets.js";
 
@@ -294,12 +300,45 @@ export function requestFailedMessage(worker: "resident" | "sandbox", route: stri
  *  queryable line (`fleetBusyRunEndedLine`) beside the run id it alone knows. */
 export class ExecCapacityError extends Error {
   readonly capacity = true as const;
+  declare executionDiagnostic?: TypedExecutionDiagnostic;
   constructor(
     message: string,
     readonly fleetBusy?: FleetBusyEndingFacts,
+    executionDiagnostic?: TypedExecutionDiagnostic,
   ) {
     super(message);
     this.name = "ExecCapacityError";
+    const diagnostic = typedExecutionDiagnosticFrom(executionDiagnostic);
+    if (diagnostic) {
+      try {
+        Object.defineProperty(this, "executionDiagnostic", {
+          value: diagnostic,
+          writable: true,
+          configurable: true,
+          enumerable: true,
+        });
+      } catch {
+        /* Observation must not prevent construction of the original error. */
+      }
+    }
+  }
+}
+
+/** Trusted call sites add closed observation context without replacing an
+ * exception, changing its stack or weakening any execution decision. */
+export function annotateExecutionDiagnostic(error: unknown, context: ExecutionDiagnosticContext): void {
+  try {
+    const original = typedExecutionDiagnosticFrom(
+      error && typeof error === "object"
+        ? Object.getOwnPropertyDescriptor(error, "executionDiagnostic")?.value
+        : undefined,
+    );
+    const closedContext = executionDiagnosticContextFrom(context);
+    if (!(error instanceof ExecCapacityError) || original?.caller !== "executor" || !closedContext) return;
+    const diagnostic = typedExecutionDiagnosticFrom({ ...original, ...closedContext });
+    if (diagnostic) error.executionDiagnostic = diagnostic;
+  } catch {
+    /* A diagnostic never replaces the original failure. */
   }
 }
 

@@ -40,6 +40,7 @@ import {
   type PublicationSettlement,
 } from "../publicationSettlement.js";
 import { createCheckExecution } from "../checkExecution.js";
+import { typedExecutionDiagnosticOf } from "../../execution/typedExecutionDiagnostic.js";
 import { ensureFirstTest, firstTestContext, FirstTestHeld, type FirstTestReceipt } from "../firstTest.js";
 import { MINUTE_MS, GIT_PUBLICATION_SETTLE_TIMEOUT_MS } from "../budgets.js";
 import type { ResolvedRequest } from "../../config.js";
@@ -3897,10 +3898,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         err instanceof Error ? err.message : String(err),
         ENDING_NOTE_MAX - (diagnosis ? diagnosis.length + 2 : 0),
       );
+      const executionDiagnostic = typedExecutionDiagnosticOf(err);
       events.publish({
         type: "run_note",
         kind: "run_failed",
         summary: diagnosis ? `${cause}; ${diagnosis}` : cause,
+        ...(executionDiagnostic ? { executionDiagnostic } : {}),
       });
     }
     // pi first: it runs in the workspace released next; what the ending left

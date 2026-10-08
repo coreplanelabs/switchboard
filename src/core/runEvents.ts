@@ -669,6 +669,8 @@ export type RunEvent =
       type: "run_note";
       kind: RunNoteKind;
       summary: string;
+      /** Closed observation only; never a command outcome or recovery receipt. */
+      executionDiagnostic?: import("../execution/typedExecutionDiagnostic.js").TypedExecutionDiagnostic;
       /** A bounded private source decision; never includes a message, actor or repository. */
       sourceReason?: MainSourceFailureCode;
       /** Bounded capture-stage or typed checkpoint cause; no private source bytes. */

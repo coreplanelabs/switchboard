@@ -20,6 +20,7 @@
 
 import {
   ExecControlResetError,
+  annotateExecutionDiagnostic,
   ExecInfraError,
   ExecSandboxRestartedError,
   infraMayClear,
@@ -1229,11 +1230,19 @@ export class ExecHarnessContainer implements HarnessContainer {
     try {
       return await send();
     } catch (error) {
+      annotateExecutionDiagnostic(error, {
+        caller: "harness",
+        operation: input.kind === "http" ? (input.observation ? "http_observation" : "http_control") : input.kind,
+      });
       if (!(error instanceof ExecControlResetError)) throw error;
       if (!idempotent) throw new HarnessContainerControlResetError(input.kind, error.message);
       try {
         return await send();
       } catch (again) {
+        annotateExecutionDiagnostic(again, {
+          caller: "harness",
+          operation: input.kind === "http" ? (input.observation ? "http_observation" : "http_control") : input.kind,
+        });
         if (again instanceof ExecControlResetError)
           throw new HarnessContainerControlResetError(input.kind, again.message);
         throw again;
@@ -1252,10 +1261,12 @@ export class ExecHarnessContainer implements HarnessContainer {
     try {
       return await this.exec(script, env, deadlineAt);
     } catch (err) {
+      annotateExecutionDiagnostic(err, { caller: "harness", operation: "request_observation" });
       if (!(err instanceof ExecControlResetError)) throw err;
       try {
         return await this.exec(script, env, deadlineAt);
       } catch (again) {
+        annotateExecutionDiagnostic(again, { caller: "harness", operation: "request_observation" });
         if (again instanceof ExecControlResetError)
           throw new HarnessContainerControlResetError(operation, again.message);
         throw again;
@@ -1267,10 +1278,18 @@ export class ExecHarnessContainer implements HarnessContainer {
    *  outcome is unknown, so it is raised as the seam's own for the harness to
    *  resolve by pi's echo (harness-pi item 16) — a blind re-send would duplicate
    *  a prompt or steer, a corruption. */
-  private async execWrite(operation: string, script: string, env?: Record<string, string>): Promise<ExecResult> {
+  private async execWrite(
+    operation: "write" | "start" | "send" | "request",
+    script: string,
+    env?: Record<string, string>,
+  ): Promise<ExecResult> {
     try {
       return await this.exec(script, env);
     } catch (err) {
+      annotateExecutionDiagnostic(err, {
+        caller: "harness",
+        operation: operation === "request" ? "request_control" : operation,
+      });
       if (err instanceof ExecControlResetError) throw new HarnessContainerControlResetError(operation, err.message);
       throw err;
     }
