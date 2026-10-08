@@ -2568,8 +2568,7 @@ export class ResidentDO extends Sandbox<Env> {
     if (this.destroying || (await this.ctx.storage.get(DESTROY_UNCONFIRMED_KEY))) {
       throw new Error("resident-destroy-unconfirmed: container reuse refused until destruction is confirmed");
     }
-    const scope = this.threadOperationScope?.getStore();
-    await this.assertThreadOperationAllowed();
+    let settleNative = await this.beginThreadNativeOperation();
     const timeout = opts.timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
     const launch = {
       ...(opts.cwd ? { cwd: opts.cwd } : {}),
@@ -2585,7 +2584,6 @@ export class ResidentDO extends Sandbox<Env> {
     // unsafe cases surface as RuntimeReplacedError for the routes to name.
     let proc: Awaited<ReturnType<ReturnType<typeof createExtensionProcessSandbox>["exec"]>>;
     try {
-      if (scope) scope.pendingNative++;
       proc = await createExtensionProcessSandbox(this).exec(argv as unknown as SandboxCommand, launch);
     } catch (err) {
       // A DO code-update reset (our own Worker deploy) BEFORE a runtime
@@ -2601,7 +2599,7 @@ export class ResidentDO extends Sandbox<Env> {
         // container accepts again in moments — the typed word, for the thread
         // routes to answer with the wait token; never counted as unreachable.
         if (isRuntimeBusy(err)) {
-          if (scope) scope.pendingNative--;
+          settleNative();
           throw new SandboxRuntimeBusyError({ containerId: this.ctx.id.toString(), cause: errMsg(err) });
         }
         // The control port never answered the SDK's connect (its 30 s abort,
@@ -2610,7 +2608,7 @@ export class ResidentDO extends Sandbox<Env> {
         // reads the count — and name it, so no reason ever carries the bare
         // `The operation was aborted`.
         if (isRuntimeUnreachable(err)) {
-          if (scope) scope.pendingNative--;
+          settleNative();
           throw new RuntimeUnreachableError((await this.noteRuntimeUnreachable()).count, err);
         }
         throw err;
@@ -2649,9 +2647,8 @@ export class ResidentDO extends Sandbox<Env> {
           cause: err,
         });
       }
-      if (scope) scope.pendingNative--;
-      await this.assertThreadOperationAllowed();
-      if (scope) scope.pendingNative++;
+      settleNative();
+      settleNative = await this.beginThreadNativeOperation();
       proc = await createExtensionProcessSandbox(this).exec(argv as unknown as SandboxCommand, launch);
     }
     // The spawn is the proof the control port answers: a persisted count of
@@ -2659,7 +2656,7 @@ export class ResidentDO extends Sandbox<Env> {
     await this.clearRuntimeUnreachable();
     try {
       const out = await proc.output({ encoding: "utf8", timeout: timeout + 30_000 });
-      if (scope && Number.isSafeInteger(out.exitCode) && out.exitCode >= 0) scope.pendingNative--;
+      if (Number.isSafeInteger(out.exitCode) && out.exitCode >= 0) settleNative();
       // `truncated` is the SDK saying the process log stream was cut past its
       // own retention — the output here is a prefix, whatever our caps say.
       return {
@@ -2700,7 +2697,7 @@ export class ResidentDO extends Sandbox<Env> {
         console.log(
           `exec: ${argv.join(" ").slice(0, 200)} outlived its ${timeout}ms budget — killed (exit ${exitCode ?? "unobserved"})`,
         );
-        if (scope && exitCode !== null) scope.pendingNative--;
+        if (exitCode !== null) settleNative();
         return abandonedWaitStepResult({ detail: errMsg(err), exitCode });
       }
       throw err;
@@ -8115,12 +8112,24 @@ export class ResidentDO extends Sandbox<Env> {
   }
 
   private async writeOwnedFile(path: string, content: string) {
+    const settleNative = await this.beginThreadNativeOperation();
+    const result = await this.writeFile(path, content);
+    settleNative();
+    return result;
+  }
+
+  /** Admit before native work; only a known completion or no-start result settles it.
+   * An unknown outcome deliberately keeps the enclosing durable operation held. */
+  private async beginThreadNativeOperation(): Promise<() => void> {
     await this.assertThreadOperationAllowed();
     const scope = this.threadOperationScope?.getStore();
     if (scope) scope.pendingNative++;
-    const result = await this.writeFile(path, content);
-    if (scope) scope.pendingNative--;
-    return result;
+    let settled = false;
+    return () => {
+      if (settled) return;
+      settled = true;
+      if (scope) scope.pendingNative--;
+    };
   }
 
   private async withOwnedNativeOperation<T>(
@@ -8568,9 +8577,7 @@ export class ResidentDO extends Sandbox<Env> {
             validateEnvNames(env);
             // A dedicated one-send transport: no generic exec logging, retries,
             // output files, timeout recovery command or raw failure response.
-            await this.assertThreadOperationAllowed();
-            const scope = this.threadOperationScope.getStore();
-            if (scope) scope.pendingNative++;
+            const settleNative = await this.beginThreadNativeOperation();
             const proc = await createExtensionProcessSandbox(this).exec(
               [
                 "/usr/bin/su",
@@ -8584,7 +8591,7 @@ export class ResidentDO extends Sandbox<Env> {
             );
             try {
               const raw = await proc.output({ encoding: "utf8", timeout: options.timeoutMs });
-              if (scope && Number.isSafeInteger(raw.exitCode) && raw.exitCode >= 0) scope.pendingNative--;
+              if (Number.isSafeInteger(raw.exitCode) && raw.exitCode >= 0) settleNative();
               return { ...raw, truncated: raw.truncated === true };
             } catch {
               await proc.kill(9).catch(() => {});
@@ -8629,24 +8636,22 @@ export class ResidentDO extends Sandbox<Env> {
         const objects = await this.run(["test", "-d", command.env.GIT_ALTERNATE_OBJECT_DIRECTORIES]);
         if (objects.exitCode !== 0)
           return { error: "publication source objects are unavailable", status: 409, cause: "request" };
-        const scope = this.threadOperationScope.getStore();
-        if (scope) scope.pendingNative++;
+        const settlePublication = await this.beginThreadNativeOperation();
         let result: Awaited<ReturnType<ResidentDO["run"]>>;
         try {
           result = await this.run(command.argv, { timeoutMs: BASH_TIMEOUT_MS, env: command.env });
         } catch (error) {
           if (
-            scope &&
-            (error instanceof RunCancelledError ||
-              error instanceof SandboxRuntimeBusyError ||
-              error instanceof RuntimeUnreachableError)
+            error instanceof RunCancelledError ||
+            error instanceof SandboxRuntimeBusyError ||
+            error instanceof RuntimeUnreachableError
           )
-            scope.pendingNative--;
+            settlePublication();
           throw error;
         }
         // A failed push can have reached the remote. Its native exit alone
         // does not settle the publication; keep its exact admission held.
-        if (scope && result.exitCode === 0 && !result.timedOut) scope.pendingNative--;
+        if (result.exitCode === 0 && !result.timedOut) settlePublication();
         return {
           stdout: result.stdout.slice(0, EXEC_OUTPUT_CAP),
           stderr: result.stderr.slice(0, EXEC_OUTPUT_CAP),

@@ -37,6 +37,7 @@ const names = [
   "withThreadBusy",
   "withOwnedNativeOperation",
   "assertThreadOperationAllowed",
+  "beginThreadNativeOperation",
   "execThread",
   "run",
   "waitForThreadDrain",

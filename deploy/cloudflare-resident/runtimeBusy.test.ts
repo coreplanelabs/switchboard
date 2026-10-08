@@ -28,7 +28,7 @@ describe("the refused connect is named at the spawn alone", () => {
     const spawn = run.slice(0, split);
     const collect = run.slice(split);
     expect(spawn).toMatch(
-      /if \(isRuntimeBusy\(err\)\) \{\s*if \(scope\) scope\.pendingNative--;\s*throw new SandboxRuntimeBusyError\(\{ containerId: this\.ctx\.id\.toString\(\), cause: errMsg\(err\) \}\);/,
+      /if \(isRuntimeBusy\(err\)\) \{[^}]*throw new SandboxRuntimeBusyError\(\{ containerId: this\.ctx\.id\.toString\(\), cause: errMsg\(err\) \}\);/,
     );
     expect(spawn.indexOf("isControlReset(err)")).toBeLessThan(spawn.indexOf("isRuntimeBusy(err)"));
     expect(spawn.indexOf("!isRuntimeReplacement(err)")).toBeLessThan(spawn.indexOf("isRuntimeBusy(err)"));
