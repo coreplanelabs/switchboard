@@ -254,6 +254,10 @@
     "smoke:ingress": {
       "does": "Checks three deployment capability families and writes an acceptance receipt; --check validates setup without network.",
       "when": "Explicitly configured disposable smoke scope; release acceptance."
+    },
+    "staging:deploy": {
+      "when": "Manual staging candidates; requires separate staging and production account pins.",
+      "does": "Validates staging isolation, freezes deployment inputs, and deploys the selected candidate Workers. --check validates without upload."
     }
   }
 }

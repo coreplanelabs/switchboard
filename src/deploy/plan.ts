@@ -502,7 +502,11 @@ export function planDeploy(
     command: ["npm", "run", "deploy"],
     unsetEnv: UNSET_ENV,
     setEnv: w.preflight
-      ? { [w.preflight.baseUrlEnv]: w.baseUrl, ...(opts.force ? { [w.preflight.forceEnv]: "1" } : {}) }
+      ? {
+          [w.preflight.baseUrlEnv]: w.baseUrl,
+          ...(w.liveGate?.kind === "bot" ? { SWITCHBOARD_BOT_CONTAINER_APP: w.liveGate.containerApp } : {}),
+          ...(opts.force ? { [w.preflight.forceEnv]: "1" } : {}),
+        }
       : {},
     ...(opts.force && w.preflight ? { forcedBy: w.preflight.forceEnv } : {}),
     requiredEnv: w.requiredEnv ?? [],

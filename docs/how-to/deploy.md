@@ -168,6 +168,7 @@ docker run -d --name switchboard --restart unless-stopped --env-file .env -v "$P
 
 ## Next
 
+- [Staging](staging.md): isolated candidate deploys from CLI or a PR label.
 - [Operate production](operate-production.md): a deploy outside a release, a config change, the span log.
 - [Rotate a secret](rotate-a-secret.md): a put and a restart.
 - [Release and deploy](../reference/specs/release-and-deploy.md): the contract behind every command here.

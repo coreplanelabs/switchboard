@@ -1,0 +1,143 @@
+name: deploy staging
+
+# The workflow comes from the base branch. A maintainer explicitly authorizes
+# one same-repository candidate to execute with staging-only credentials.
+# This explicitly authorizes candidate execution, after the writer/head gates,
+# with staging-only secrets. No fork or production credential reaches deploy.
+on: # zizmor: ignore[dangerous-triggers]
+  pull_request_target:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Exact 40-character source commit to deploy
+        required: true
+        type: string
+      targets:
+        description: all, affected, or comma-separated Worker names
+        type: string
+        default: all
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  authorize:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'deploy:staging'
+    runs-on: depot-ubuntu-24.04-4
+    timeout-minutes: 5
+    outputs:
+      commit: ${{ steps.request.outputs.commit }}
+    steps:
+      - name: authorize and capture the candidate
+        id: request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_COMMIT: ${{ inputs.commit }}
+        run: |
+          permission=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$GITHUB_ACTOR/permission" --jq .permission)
+          case "$permission" in admin|maintain|write) ;; *) echo '::error::Staging deployment requires repository write access'; exit 1 ;; esac
+          if [ "$GITHUB_EVENT_NAME" = pull_request_target ]; then
+            head_repo=$(jq -r '.pull_request.head.repo.full_name' "$GITHUB_EVENT_PATH")
+            [ "$head_repo" = "$GITHUB_REPOSITORY" ] || { echo '::error::Fork deployments are refused'; exit 1; }
+            commit=$(jq -r '.pull_request.head.sha' "$GITHUB_EVENT_PATH")
+            number=$(jq -r '.pull_request.number' "$GITHUB_EVENT_PATH")
+            current=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$number" --jq '.head.sha')
+            [ "$current" = "$commit" ] || { echo '::error::PR head changed; remove and reapply deploy:staging'; exit 1; }
+          else
+            [ "$GITHUB_REF" = refs/heads/main ] || { echo '::error::Dispatch staging from main'; exit 1; }
+            commit="$REQUESTED_COMMIT"
+          fi
+          [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || { echo '::error::An exact source commit is required'; exit 1; }
+          gh api "repos/$GITHUB_REPOSITORY/commits/$commit" --jq .sha | { read -r actual; [ "$actual" = "$commit" ]; }
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: authorize
+    runs-on: depot-ubuntu-24.04-4
+    timeout-minutes: 90
+    environment: staging
+    concurrency:
+      group: deploy-staging
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.authorize.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      # Candidate scripts receive no deploy credentials during installation.
+      - run: npm ci
+      - name: recheck a labeled head before giving the candidate credentials
+        if: github.event_name == 'pull_request_target'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT: ${{ needs.authorize.outputs.commit }}
+        run: |
+          number=$(jq -r '.pull_request.number' "$GITHUB_EVENT_PATH")
+          current=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$number" --jq 'select(.state == "open" and any(.labels[]; .name == "deploy:staging")) | .head.sha')
+          [ "$current" = "$COMMIT" ] || { echo '::error::Staging request is stale or withdrawn; reapply the label'; exit 1; }
+      - name: staging inputs are complete
+        env:
+          PROFILE: ${{ vars.SWITCHBOARD_STAGING_PROFILE }}
+          STAGING_ACCOUNT: ${{ vars.SWITCHBOARD_STAGING_ACCOUNT }}
+          PRODUCTION_ACCOUNT: ${{ vars.SWITCHBOARD_PRODUCTION_ACCOUNT }}
+          CF_TOKEN: ${{ secrets.STAGING_CLOUDFLARE_DEPLOY_TOKEN }}
+          MEMORY: ${{ secrets.STAGING_MEMORY_TOKEN }}
+          RESIDENT_READ: ${{ secrets.STAGING_RESIDENT_READ_TOKEN }}
+          RESIDENT_DRAIN: ${{ secrets.STAGING_RESIDENT_DRAIN_TOKEN }}
+          SANDBOX: ${{ secrets.STAGING_SANDBOX_TOKEN }}
+        run: |
+          for name in PROFILE STAGING_ACCOUNT PRODUCTION_ACCOUNT CF_TOKEN MEMORY RESIDENT_READ RESIDENT_DRAIN SANDBOX; do
+            [ -n "${!name}" ] || { echo "::error::Missing staging input: $name. Nothing deployed."; exit 1; }
+          done
+      - name: read the private staging configuration
+        id: config-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.STAGING_CONFIG_REPO_APP_CLIENT_ID }}
+          private-key: ${{ secrets.STAGING_CONFIG_REPO_APP_PRIVATE_KEY }}
+          owner: ${{ vars.CONFIG_REPO_OWNER }}
+          repositories: ${{ vars.CONFIG_REPO_NAME }}
+          permission-contents: read
+      - name: deploy the captured commit to staging
+        env:
+          SWITCHBOARD_DEPLOY_PROFILE: ${{ vars.SWITCHBOARD_STAGING_PROFILE }}
+          SWITCHBOARD_STAGING_ACCOUNT: ${{ vars.SWITCHBOARD_STAGING_ACCOUNT }}
+          SWITCHBOARD_PRODUCTION_ACCOUNT: ${{ vars.SWITCHBOARD_PRODUCTION_ACCOUNT }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.STAGING_CLOUDFLARE_DEPLOY_TOKEN }}
+          MEMORY_TOKEN: ${{ secrets.STAGING_MEMORY_TOKEN }}
+          RESIDENT_READ_TOKEN: ${{ secrets.STAGING_RESIDENT_READ_TOKEN }}
+          RESIDENT_DRAIN_TOKEN: ${{ secrets.STAGING_RESIDENT_DRAIN_TOKEN }}
+          SANDBOX_TOKEN: ${{ secrets.STAGING_SANDBOX_TOKEN }}
+          CONFIG_REPO_TOKEN: ${{ steps.config-token.outputs.token }}
+          TARGETS: ${{ inputs.targets || 'all' }}
+          CI: "1"
+          WRANGLER_SEND_METRICS: "false"
+        run: |
+          case "$TARGETS" in
+            all) args=() ;;
+            affected) args=(--affected) ;;
+            *)
+              [[ "$TARGETS" =~ ^(memory|bot|resident|sandbox)(,(memory|bot|resident|sandbox))*$ ]] || { echo '::error::Invalid targets'; exit 1; }
+              args=(--only "$TARGETS") ;;
+          esac
+          set -o pipefail
+          npm run --silent staging:deploy -- "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/staging-deploy.log"
+      - name: staging deployment receipt
+        if: always()
+        env:
+          COMMIT: ${{ needs.authorize.outputs.commit }}
+        run: |
+          printf 'Staging source: `%s`\n\n' "$COMMIT" >> "$GITHUB_STEP_SUMMARY"
+          echo 'Readiness: see deploy runner live gates. End-to-end acceptance: requires separate scenario receipts.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: staging-deploy-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/staging-deploy.log
+          if-no-files-found: ignore

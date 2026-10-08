@@ -87,7 +87,8 @@
     "screenshots:gen": "tsx scripts/screenshots.mts",
     "screenshots:check": "tsx scripts/screenshots.mts --check",
     "load": "tsx scripts/load.ts",
-    "smoke:ingress": "tsx scripts/smoke-ingress.ts"
+    "smoke:ingress": "tsx scripts/smoke-ingress.ts",
+    "staging:deploy": "tsx scripts/staging-deploy.ts"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.87.1",

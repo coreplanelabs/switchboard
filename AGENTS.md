@@ -91,6 +91,7 @@ The repo's whole interface: deterministic, non-interactive, no credential unless
 | `npm run screenshots:check` | Each surface's inputs still hash to what its screenshots were rendered from — no browser. | Part of `check:consistency`. |
 | `npm run load` | Load harness for infrastructure and route checks. | Capacity receipts. |
 | `npm run smoke:ingress` | Checks three deployment capability families and writes an acceptance receipt; --check validates setup without network. | Explicitly configured disposable smoke scope; release acceptance. |
+| `npm run staging:deploy` | Validates staging isolation, freezes deployment inputs, and deploys the selected candidate Workers. --check validates without upload. | Manual staging candidates; requires separate staging and production account pins. |
 
 <!-- /generated:commands -->
 
