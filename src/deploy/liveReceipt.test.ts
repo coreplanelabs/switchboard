@@ -28,6 +28,8 @@ function runReceipt(
     emptyRegistry?: boolean;
     packageCommit?: string;
     selected?: boolean;
+    deployOutcome?: string;
+    acceptance?: boolean;
   } = {},
 ) {
   const dir = mkdtempSync(join(tmpdir(), "live-receipt-"));
@@ -62,7 +64,12 @@ exit ${opts.httpFailure ? 22 : 0}
 `,
       { mode: 0o755 },
     );
-    writeFileSync(join(dir, "receipt.sh"), receipt);
+    const script = opts.acceptance
+      ? Object.values(workflow.jobs as Record<string, { steps: { name?: string; run?: string }[] }>)
+          .flatMap((job) => job.steps)
+          .find((step) => step.name === "deployment acceptance receipt")!.run!
+      : receipt;
+    writeFileSync(join(dir, "receipt.sh"), script);
     const result = spawnSync("bash", ["-e", "-o", "pipefail", join(dir, "receipt.sh")], {
       encoding: "utf8",
       timeout: 30_000,
@@ -74,12 +81,22 @@ exit ${opts.httpFailure ? 22 : 0}
         CLI: join(dir, "cli"),
         LABEL: "release",
         RESIDENT_READ_TOKEN: opts.token ?? "read-fixture",
+        DEPLOY_OUTCOME: opts.deployOutcome ?? "success",
+        SMOKE_REQUIRED: "true",
+        SMOKE_OUTCOME: "skipped",
       },
     });
     return {
       code: result.status,
       output: result.stdout + result.stderr,
       summary: readFileSync(join(dir, "summary"), "utf8"),
+      reads: (() => {
+        try {
+          return readFileSync(join(dir, "reads"), "utf8");
+        } catch {
+          return "";
+        }
+      })(),
     };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -90,6 +107,30 @@ exit ${opts.httpFailure ? 22 : 0}
 // shard can spend more than Vitest's 5s default under concurrent jobs. Keep
 // the case budget above the child timeout so a hung shell fails by name.
 describe("what is live deployment receipt", { timeout: 35_000 }, () => {
+  it("retains a truthful local cancelled acceptance receipt without smoke or readiness credit", () => {
+    const result = runReceipt({ deployOutcome: "cancelled", acceptance: true });
+    expect(result.code).toBe(0);
+    expect(result.summary).toContain("Deployment cancelled. Earlier completed uploads may remain");
+    expect(result.summary).toContain("Capability acceptance: not run — deployment cancelled");
+    expect(result.summary).toContain("drain cleanup remain unconfirmed");
+    expect(result.summary).not.toContain("Capability acceptance: passed");
+    expect(result.reads).toBe("");
+    const incomplete = runReceipt({ acceptance: true });
+    expect(incomplete.code).toBe(1);
+    expect(incomplete.summary).toContain("failed or incomplete");
+  });
+
+  it("reports cancellation locally without starting health reads", () => {
+    const normal = runReceipt();
+    expect(normal.code).toBe(0);
+    expect(normal.summary).toContain("Selected Workers match the exact source commit");
+    expect(normal.reads).toContain("/healthz");
+    const cancelled = runReceipt({ deployOutcome: "cancelled" });
+    expect(cancelled.code).toBe(0);
+    expect(cancelled.summary).toContain("Readiness not read: deployment cancelled");
+    expect(cancelled.reads).toBe("");
+  });
+
   it("the executable workflow fails a healthy Worker when registry image reports are pending", () => {
     const r = runReceipt({
       registry: {

@@ -18,7 +18,7 @@ import {
   loadProfileOnHost,
   pushConfigOnHost,
   runBotRestart,
-  runDeployPlan,
+  runDeployPlanOnHost,
 } from "../deploy/run.js";
 import { imagesHostIO } from "../deploy/imagesHost.js";
 import { artifactsBucketHost } from "../deploy/artifactsBucket.js";
@@ -452,7 +452,7 @@ export function buildCoreCommands(
     schedule: { schedules: SCHEDULES, store: wiring.scheduleStore, now: wiring.now ?? Date.now },
     deploy: {
       run: (plan) =>
-        runDeployPlan(plan, {
+        runDeployPlanOnHost(plan, {
           log: (l) => console.log(l),
           warn: (l) => console.error(l),
           stream: (c) => process.stdout.write(c),

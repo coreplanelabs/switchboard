@@ -449,10 +449,15 @@ jobs:
       # What production serves now, whatever happened above — the receipt.
       - name: what is live
         id: readiness
-        if: always()
+        if: always() && !cancelled()
         env:
           LABEL: ${{ steps.cli.outputs.label }}
+          DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
         run: |
+          if [ "${DEPLOY_OUTCOME:-}" = cancelled ]; then
+            echo "Readiness not read: deployment cancelled. Earlier completed uploads may remain; no new validation started." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           # Freeze the selection BEFORE upload. Recomputing --affected now can
           # erase a selected Worker from the receipt as soon as its health moves.
           plan="$RUNNER_TEMP/plan.json"
@@ -548,6 +553,11 @@ jobs:
         run: |
           echo "Upload step: $DEPLOY_OUTCOME. Readiness is reported separately above." >> "$GITHUB_STEP_SUMMARY"
           echo "Product acceptance: incomplete — private question → Fix it → draft PR remains unproven." >> "$GITHUB_STEP_SUMMARY"
+          if [ "$DEPLOY_OUTCOME" = cancelled ]; then
+            echo "Deployment cancelled. Earlier completed uploads may remain; they were not rolled back." >> "$GITHUB_STEP_SUMMARY"
+            echo "Capability acceptance: not run — deployment cancelled; readiness and drain cleanup remain unconfirmed unless separately acknowledged." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           if [ "$SMOKE_REQUIRED" != "true" ]; then
             echo "Capability acceptance: skipped — smoke disabled; no product acceptance receipt." >> "$GITHUB_STEP_SUMMARY"
             exit 0
