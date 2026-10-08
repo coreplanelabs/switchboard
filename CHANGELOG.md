@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.289.12](https://github.com/coreplanelabs/switchboard/compare/v1.289.11...v1.289.12) (2026-10-08)
+
+
+### Bug fixes
+
+* **load:** ground candidate smoke and retain closed diagnostics ([#2852](https://github.com/coreplanelabs/switchboard/issues/2852)) ([040a588](https://github.com/coreplanelabs/switchboard/commit/040a5882f3ab313b5b99126c05281cc073a0652c))
+* **runs:** keep target ownership lookup bounded ([#2850](https://github.com/coreplanelabs/switchboard/issues/2850)) ([9839a6f](https://github.com/coreplanelabs/switchboard/commit/9839a6fab3df045bfef078a04a15724c5fbb1bc9))
+
 ## [1.289.11](https://github.com/coreplanelabs/switchboard/compare/v1.289.10...v1.289.11) (2026-10-08)
 
 
