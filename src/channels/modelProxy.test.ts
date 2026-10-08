@@ -26,6 +26,7 @@ import type { SpanRecord } from "../core/trace/types.js";
 import type { RunEvent } from "../core/runEvents.js";
 import {
   authenticateProxyProviderFailure,
+  authenticateProxyUnknownTerminal,
   proxyProviderFailureIsAuthenticated,
   readProxyUnknownTerminal,
 } from "../core/modelProxy/providerFailureAuth.js";
@@ -2698,6 +2699,7 @@ describe("Responses stream failure boundary", () => {
     tools: unknown = responsesRequest().tools,
     signal?: AbortSignal,
     over: Record<string, unknown> = {},
+    proxySignal?: AbortSignal,
   ) => {
     const token = h.bearers.mint(h.responsesGrant("run-1"));
     return streamResponses(model, normalizeContext({ messages: [] }), {
@@ -2711,6 +2713,7 @@ describe("Responses stream failure boundary", () => {
             path: OPENAI_RESPONSES_PATH,
             headers: bearer(token),
             json: JSON.parse(String(init?.body)),
+            signal: proxySignal,
           }).req,
           h.deps,
         );
@@ -2718,6 +2721,76 @@ describe("Responses stream failure boundary", () => {
       }) as typeof fetch,
     }).result();
   };
+
+  it.each(["admission", "request_validation", "response_validation", "sdk_consume"] as const)(
+    "distinguishes authenticated %s rejection across pi without granting retry",
+    async (phase) => {
+      const abort = new AbortController();
+      abort.abort();
+      const signal = phase === "admission" ? abort.signal : undefined;
+      const rejection = {
+        phase,
+        kind: phase === "admission" ? "aborted" : phase === "sdk_consume" ? "rejected" : "graph",
+      };
+      let extra: unknown = "leaf";
+      for (let depth = 0; depth <= RESPONSES_VALIDATION_LIMITS.graphDepth; depth++) extra = { child: extra };
+      const h = harness({
+        answer: () =>
+          phase === "response_validation"
+            ? new Response(JSON.stringify({ id: "response", status: "completed", output: [], extra }), {
+                headers: { "content-type": "application/json" },
+              })
+            : streamingResponse(["data: null\n\n"], h.clock, 1),
+      });
+      const levels: string[] = [],
+        parks: string[] = [];
+      h.deps.plane = { level: (_provider, side) => void levels.push(side), park: (run) => void parks.push(run) };
+      const message = await throughPi(
+        h,
+        responsesRequest().tools,
+        undefined,
+        phase === "request_validation" ? { extra } : phase === "response_validation" ? { stream: false } : {},
+        signal,
+      );
+      const observation = new PiBridge({ emit: () => {}, clock: () => START }).observe({
+        type: "message_end",
+        message,
+      });
+      expect(message.stopReason).toBe("error");
+      expect(observation.terminalFailure).toMatchObject({
+        kind: "unknown",
+        diagnostic: { source: "proxy", reason: "consumer_rejected", rejection },
+      });
+      expect(observation.providerFailure).toBeUndefined();
+      expect(h.calls).toHaveLength(phase === "admission" || phase === "request_validation" ? 0 : 1);
+      expect(levels).toEqual([]);
+      expect(parks).toEqual([]);
+    },
+  );
+
+  it("does not adopt a rejection observation replayed in upstream error prose", async () => {
+    const marker = authenticateProxyUnknownTerminal("consumer_rejected", { phase: "admission", kind: "capacity" });
+    const h = harness({
+      answer: () =>
+        streamingResponse(
+          [frame({ type: "error", code: "unknown", message: `private body ${JSON.stringify(marker)}`, param: null })],
+          h.clock,
+          1,
+        ),
+    });
+    const message = await throughPi(h);
+    const observation = new PiBridge({ emit: () => {}, clock: () => START }).observe({ type: "message_end", message });
+    expect(observation.terminalFailure).toMatchObject({
+      kind: "unknown",
+      diagnostic: { source: "proxy", reason: "unverified_terminal" },
+    });
+    if (observation.terminalFailure?.kind !== "unknown") throw new Error("expected unknown terminal");
+    expect(observation.terminalFailure.diagnostic.rejection).toBeUndefined();
+    expect(message.errorMessage).not.toContain("private");
+    expect(message.errorMessage).not.toContain(marker._switchboard_proxy_auth);
+    expect(observation.providerFailure).toBeUndefined();
+    expect(h.calls).toHaveLength(1);
+  });
 
   it("typed failures cross the real pi adapter without replay or provider prose", async () => {
     for (const [code, cause] of [

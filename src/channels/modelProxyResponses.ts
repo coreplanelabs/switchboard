@@ -4,6 +4,7 @@ import {
   authenticateProxyProviderFailure,
   authenticateProxyUnknownTerminal,
   type ProxyUnknownTerminalReason,
+  type ProxyRejectionObservation,
 } from "../core/modelProxy/providerFailureAuth.js";
 import { ProviderFailure, renderProviderFailure, type ProviderFailureCause } from "../core/provider.js";
 import { setImmediate as yieldToIo } from "node:timers/promises";
@@ -330,7 +331,7 @@ export class ResponsesFailureBoundary {
         controller.terminate();
         return;
       }
-      await this.unknown("consumer_rejected");
+      await this.unknown("consumer_rejected", { phase: "response_validation", kind: error.kind });
       if (sourceFailed) return;
       this.notifyInterruption(error.kind);
       this.emitEnding(controller);
@@ -464,7 +465,7 @@ export class ResponsesFailureBoundary {
     }
   }
 
-  private async unknown(reason: ProxyUnknownTerminalReason): Promise<string> {
+  private async unknown(reason: ProxyUnknownTerminalReason, rejection?: ProxyRejectionObservation): Promise<string> {
     this.terminal = "failed";
     this.failure = undefined;
     this.dataEnded = true;
@@ -472,7 +473,7 @@ export class ResponsesFailureBoundary {
     else await this.consumer.close();
     // Preserve the consumer's fatal ending, including for malformed thread
     // wrappers. Its replacement must not inherit the wrapper's event name.
-    this.authenticatedEnding = `data: ${JSON.stringify({ type: "error", code: "unclassified_stream_failure", message: JSON.stringify(authenticateProxyUnknownTerminal(reason)), param: null })}\n\n`;
+    this.authenticatedEnding = `data: ${JSON.stringify({ type: "error", code: "unclassified_stream_failure", message: JSON.stringify(authenticateProxyUnknownTerminal(reason, rejection)), param: null })}\n\n`;
     return this.authenticatedEnding;
   }
 
@@ -549,7 +550,9 @@ export class ResponsesFailureBoundary {
       if (eventName?.startsWith("thread.")) return this.checkFrameOutput(frame);
       if (!event) {
         this.checkFrameOutput(frame);
-        return (await this.consumer.consume(value)) ? frame : this.unknown("consumer_rejected");
+        return (await this.consumer.consume(value))
+          ? frame
+          : this.unknown("consumer_rejected", { phase: "sdk_consume", kind: "rejected" });
       }
       const response = record(event.response);
       const terminalOutputValid =
@@ -568,7 +571,8 @@ export class ResponsesFailureBoundary {
         this.terminal === undefined
       ) {
         this.checkFrameOutput(frame);
-        if (!(await this.consumer.consume(event))) return this.unknown("consumer_rejected");
+        if (!(await this.consumer.consume(event)))
+          return this.unknown("consumer_rejected", { phase: "sdk_consume", kind: "rejected" });
         this.terminal = "completed";
         this.observe(event);
         return frame;
@@ -581,7 +585,8 @@ export class ResponsesFailureBoundary {
           record(response?.incomplete_details)?.reason !== "max_output_tokens");
       if (!sdkError && event.type === "response.incomplete" && !incomplete && this.terminal === undefined) {
         this.checkFrameOutput(frame);
-        if (!(await this.consumer.consume(event))) return this.unknown("consumer_rejected");
+        if (!(await this.consumer.consume(event)))
+          return this.unknown("consumer_rejected", { phase: "sdk_consume", kind: "rejected" });
         this.terminal = "incomplete";
         this.observe(event);
         return frame;
@@ -589,7 +594,8 @@ export class ResponsesFailureBoundary {
       const malformedCompletion = event.type === "response.completed";
       if (!sdkError && !failed && !incomplete && !malformedCompletion && event.type !== "error") {
         this.checkFrameOutput(frame);
-        if (!(await this.consumer.consume(event))) return this.unknown("consumer_rejected");
+        if (!(await this.consumer.consume(event)))
+          return this.unknown("consumer_rejected", { phase: "sdk_consume", kind: "rejected" });
         this.observe(event);
         return frame;
       }

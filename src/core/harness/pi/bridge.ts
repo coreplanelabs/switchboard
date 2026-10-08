@@ -30,6 +30,7 @@ import {
   proxyTurnBudgetExhaustedIsAuthenticated,
   type ProxyUnknownTerminalEnvelope,
   type ProxyUnknownTerminalReason,
+  type ProxyRejectionObservation,
 } from "../../modelProxy/providerFailureAuth.js";
 import type { CompactionEntry } from "../../runLedger/types.js";
 import { classifyProviderFailure, type ProviderFailure } from "../../provider.js";
@@ -124,6 +125,7 @@ export type PiTerminalFailure =
       diagnostic: {
         source: "proxy" | "unverified";
         reason?: ProxyUnknownTerminalReason;
+        rejection?: ProxyRejectionObservation;
         errorMessage: "missing" | "empty" | "present";
         contentParts: number | "invalid";
       };
@@ -195,6 +197,7 @@ const unknownTerminal = (
   diagnostic: {
     source: proxy === undefined ? "unverified" : "proxy",
     ...(proxy?.reason === undefined ? {} : { reason: proxy.reason }),
+    ...(proxy?.rejection === undefined ? {} : { rejection: proxy.rejection }),
     errorMessage: message.errorMessage === undefined ? "missing" : message.errorMessage === "" ? "empty" : "present",
     contentParts: Array.isArray(message.content) ? message.content.length : "invalid",
   },

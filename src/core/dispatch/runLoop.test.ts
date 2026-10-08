@@ -50,6 +50,7 @@ import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { planResume, transcriptSource } from "../runLedger/resume.js";
 import { localWorkspaceDir, type ExecutorSelection } from "../../execution/factory.js";
 import { reattachWorkspace } from "./provision.js";
+import { authenticateProxyUnknownTerminal } from "../modelProxy/providerFailureAuth.js";
 import { bearerHashOf, RunBearerStore } from "../modelProxy/runBearers.js";
 import { GitBindings, type GitPublicationClaim } from "../modelProxy/gitBindings.js";
 import { RUN_BEARER_ENV } from "../harness/pi/process.js";
@@ -3573,6 +3574,29 @@ describe("runLoop — the model turn and everything that rides on it", () => {
 
   // docs/reference/specs/run-history.md item 15: a failed run carries its reason
   // on the record itself, even when the reply is never delivered.
+  it("saves authenticated proxy rejection provenance on the failed original run without replay", async () => {
+    const envelope = authenticateProxyUnknownTerminal("consumer_rejected", {
+      phase: "request_validation",
+      kind: "graph",
+    });
+    const s = setup(new Error(`private adapter prefix ${JSON.stringify(envelope)}`));
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow(UNKNOWN_MODEL_TERMINAL_MESSAGE);
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    const record = (await s.store.get("run-l"))!;
+    expect(record.status).toBe("failed");
+    expect(record.events.filter((event) => event.type === "run_note" && event.kind === "harness_error")).toEqual([
+      expect.objectContaining({
+        summary:
+          'the model call ended without a classified result; no provider failure was established — pi stop: "error"; provider stop: "missing"; terminal evidence: {"source":"proxy","reason":"consumer_rejected","rejection":{"phase":"request_validation","kind":"graph"},"errorMessage":"present","contentParts":0}',
+      }),
+    ]);
+    expect(JSON.stringify(record.events.filter((event) => event.type === "run_note"))).not.toContain("private");
+    expect(JSON.stringify(record.events.filter((event) => event.type === "run_note"))).not.toContain(
+      envelope._switchboard_proxy_auth,
+    );
+  });
+
   it("a failed run leaves its reason on the record: the loop's throw is published as a `run_failed` run_note before the finish, so the run page says why", async () => {
     const s = setup(new Error("harness container: read failed — runtime-replaced"));
     await expect(runLoop(s.deps, s.ctx)).rejects.toThrow(UNKNOWN_MODEL_TERMINAL_MESSAGE);

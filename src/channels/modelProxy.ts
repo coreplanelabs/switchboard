@@ -885,7 +885,9 @@ export async function handleAdmitted(
     return {
       status: 403,
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ error: authenticateProxyUnknownTerminal("consumer_rejected") }),
+      body: JSON.stringify({
+        error: authenticateProxyUnknownTerminal("consumer_rejected", { phase: "admission", kind: error.kind }),
+      }),
       requestBodyDisposition: "unread",
     };
   }
@@ -950,7 +952,12 @@ export async function handleAdmitted(
       return {
         status: 403,
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ error: authenticateProxyUnknownTerminal("consumer_rejected") }),
+        body: JSON.stringify({
+          error: authenticateProxyUnknownTerminal("consumer_rejected", {
+            phase: "request_validation",
+            kind: error.kind,
+          }),
+        }),
       };
     }
     throw error;
@@ -1350,7 +1357,12 @@ async function handleAdmittedCall(
     return {
       status: 403,
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ error: authenticateProxyUnknownTerminal("consumer_rejected") }),
+      body: JSON.stringify({
+        error: authenticateProxyUnknownTerminal("consumer_rejected", {
+          phase: "response_validation",
+          kind: error.kind,
+        }),
+      }),
     };
   };
   let providerFailure = await failureOf(res, thrown);
