@@ -52,6 +52,8 @@ export interface ReleaseOptions extends ExecTraceOptions {
  *  the stop, never past it. */
 export interface MoveOptions extends ExecTraceOptions {
   signal?: AbortSignal;
+  /** Trusted attach/seed/cold binding, never a model-selected directory. */
+  checkout?: string;
 }
 
 export interface Executor {

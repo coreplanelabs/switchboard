@@ -6769,6 +6769,147 @@ describe("the pi harness — the container replaced under a living bot: the rela
     expect(record.events.some((e) => e.type === "child_resumed" || e.type === "child_interrupted")).toBe(false);
   });
 
+  it("posts a relaunched review from its new acknowledged checkout instead of the original round", async () => {
+    const head = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+    const nextHead = "b1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+    let checkoutHead = head;
+    const registry = new HarnessRegistry();
+    const old = new FakeHarnessContainer();
+    old.onStdin = piThatMeetsTheRoll(registry);
+    const replacement = new FakeHarnessContainer();
+    replacement.vm = "vm-new";
+    let turn = 0;
+    scriptPiFromProvider(replacement, {
+      registry,
+      beforeModelCall: () => new Promise((resolve) => setTimeout(resolve, 10)),
+      provider: {
+        name: "fake",
+        complete: async () => {
+          const phase = turn++ % 3;
+          const input =
+            phase === 0
+              ? { name: "github_pull_get", input: { repo: "o/r", number: 42, includeReviewHistory: true } }
+              : {
+                  name: "submit_verdict",
+                  input: {
+                    verdict: "approve",
+                    summary: "The replacement checkout is correct.",
+                    head: checkoutHead,
+                    findings: [],
+                  },
+                };
+          return phase < 2
+            ? { content: [{ type: "tool_use", id: `new-${turn}`, ...input }], stopReason: "tool_use" }
+            : { content: [{ type: "text", text: "The replacement checkout is correct." }], stopReason: "end_turn" };
+        },
+      },
+    });
+    const commands: string[] = [];
+    const currentExecutor = {
+      execResult: async (command: string) => {
+        commands.push(command);
+        if (command !== "git -C '/workspace/new checkout' rev-parse --verify HEAD")
+          throw new Error("the replacement has no original checkout");
+        return { stdout: checkoutHead + "\n", stderr: "", exitCode: 0, truncated: false };
+      },
+      moveTo: async (sha: string, options?: { checkout?: string }) => {
+        if (options?.checkout !== "/workspace/new checkout")
+          throw new Error("the replacement has no original checkout");
+        checkoutHead = sha;
+        return { sha };
+      },
+    };
+    const prepare = relaunchModule.prepareRelaunch;
+    const relaunch = vi.spyOn(relaunchModule, "prepareRelaunch").mockImplementation(async (...args) => {
+      const decision = await prepare(...args);
+      if (decision.kind !== "relaunch" || decision.round === undefined) return decision;
+      return {
+        ...decision,
+        round: {
+          ...decision.round,
+          selection: {
+            executor: currentExecutor as Executor,
+            backend: "local",
+            binding: { ref: "fix/the-pr-head", sha: head, workspace: "/workspace/new checkout" },
+          },
+        },
+      };
+    });
+    try {
+      let opens = 0;
+      const posts: Array<{ target: ReviewCommentTarget; body: string }> = [];
+      const s = setup("unused", {
+        agent: "review",
+        yaml: yamlWithWorkspace(),
+        harness: harnessOver(registry, () => (opens++ === 0 ? old : replacement)),
+        repoCtx: { repo: "o/r", pr: 42, ref: "fix/the-pr-head", baseRef: "main", headSha: head },
+        binding: { ref: "fix/the-pr-head", sha: head, workspace: "/workspace/old checkout" },
+        review: {
+          head,
+          currentHead: nextHead,
+          commits: (sha) => ({
+            commits: [
+              { sha: head, message: "feat: initial" },
+              ...(sha === nextHead ? [{ sha: nextHead, message: "fix: next" }] : []),
+            ],
+            files: ["src/x.ts"],
+            filesTruncated: false,
+          }),
+          post: async (target, body) => {
+            posts.push({ target, body });
+            return { state: "accepted" };
+          },
+        },
+      });
+      const github = new InMemoryGithubApi({
+        "o/r": {
+          pulls: [
+            {
+              number: 42,
+              title: "Fix behavior",
+              body: "",
+              state: "open",
+              draft: false,
+              url: "https://github.com/o/r/pull/42",
+              author: "author",
+              updatedAt: "2026-01-01T00:00:00Z",
+              head: { repo: "o/r", ref: "fix/the-pr-head", sha: head },
+              base: { repo: "o/r", ref: "main" },
+            },
+          ],
+        },
+      });
+      const get = github.getPullRequest.bind(github);
+      github.getPullRequest = async (repo, number) => {
+        const pull = await get(repo, number);
+        return { ...pull, head: { ...pull.head, sha: checkoutHead } };
+      };
+      s.deps.githubApi = github;
+      const out = answered(await runLoop(s.deps, await trackedReviewContext(s)));
+      expect(out.answer).toBe("The replacement checkout is correct.");
+      expect(posts).toEqual([
+        {
+          target: { repo: "o/r", number: 42, commitId: "b1b2c3d4e5f60718293a4b5c6d7e8f9012345678" },
+          body: expect.stringContaining("LGTM:"),
+        },
+      ]);
+      expect(checkoutHead).toBe("b1b2c3d4e5f60718293a4b5c6d7e8f9012345678");
+      expect(commands).toEqual(Array(3).fill("git -C '/workspace/new checkout' rev-parse --verify HEAD"));
+      s.ending.drain(true);
+      await s.writer.settled();
+      expect((await s.store.get("run-l"))?.reviewPost).toEqual({
+        posted: true,
+        target: { repo: "o/r", number: 42 },
+        head: "b1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+        verdict: "approve",
+      });
+      await out.releaseWorkspace();
+      expect(s.releases).toEqual(["paired"]);
+    } finally {
+      relaunch.mockRestore();
+    }
+  });
+
   it("observes a coding run after reattach in the new workspace instead of its old bound checkout", async () => {
     const registry = new HarnessRegistry();
     const old = new FakeHarnessContainer();
