@@ -476,6 +476,7 @@ import {
   errMsg,
   GIT_NETWORK_TIMEOUT_MS,
   THREAD_POOL_SIZE,
+  RESIDENT_WORKLOAD_LIMIT,
   WORKTREE_SWEEP_BATCH_SIZE,
   R2_TRANSFER_TIMEOUT_MS,
   REFRESH_BUILD_TIMEOUT_MS,
@@ -587,11 +588,11 @@ export interface Env {
 // ---------------------------------------------------------------------------
 
 /** Hard cap on onboarded residents, enforced atomically by the registry DO.
- *  Deliberately BELOW wrangler.jsonc's containers max_instances (20) so an
+ *  Deliberately BELOW wrangler.jsonc's containers max_instances (10) so an
  *  over-cap onboard is always refused by the registry, never by a platform
  *  scheduling failure. Bump the two together. */
 // Past the cap, `evictColdest:true` makes room (resident-repos item 46).
-const RESIDENT_CAP = 12;
+const RESIDENT_CAP = 6;
 
 /** R2 lifetime of snapshot objects. We delete replaced/offboarded snapshots
  *  explicitly (see deleteBackupObjects); the TTL is a leak backstop, and it
@@ -2223,6 +2224,12 @@ export class ResidentDO extends Sandbox<Env> {
     pendingNative: number;
     attachment: boolean;
     active: boolean;
+  }>();
+  private readonly opOperationScope = new AsyncLocalStorage<{
+    owner: string;
+    pendingNative: number;
+    active: boolean;
+    allocated: boolean;
   }>();
 
   private currentSteps(): ResidentStep[] {
@@ -6203,6 +6210,114 @@ export class ResidentDO extends Sandbox<Env> {
   /** The prior binding read, allocation and possible rollback are one
    *  same-thread operation, even while an attach awaits disk or Git. */
   private readonly threadAttaches = new KeyedAsyncLock();
+  private readonly workloadAdmissions = new KeyedAsyncLock();
+  private readonly workloadReservations = new Set<string>();
+
+  /** Count active owners, not historical UID spends or retained private files.
+   * Native operations and current UID processes remain occupied after a reset. */
+  private async activeWorkloadOwners(): Promise<Set<string>> {
+    const owners = new Set([...this.workloadReservations, ...this.opUsersInUse.values()]);
+    const [bindings, registrations, ledger, native] = await Promise.all([
+      this.liveBindings(),
+      this.ctx.storage.list<RunRegistration>({ prefix: RUN_REG_KEY_PREFIX }),
+      this.ctx.storage.get<unknown>(SPENT_POOL_USERS_KEY),
+      this.ctx.storage.list<Partial<WorkspaceOwner> & { opOwner?: string }>({ prefix: "native-operation:" }),
+    ]);
+    const spent = parseSpentPoolUsers(ledger, THREAD_USERS);
+    if (!spent) throw new Error("UID ownership is unverified");
+    const now = systemClock();
+    await Promise.all(
+      bindings.map(async (binding) => {
+        const key = `thread:${binding.threadKey}`;
+        if (owners.has(key)) return;
+        const registration = registrations.get(runRegKey(binding.threadKey));
+        const [fence, owner, claimants] = await Promise.all([
+          this.ctx.storage.get(runFenceKey(binding.threadKey)),
+          registration?.runId ? this.observeRunForEviction(registration, binding) : Promise.resolve(null),
+          this.ctx.storage.get(poolBindingKey(binding.user)),
+        ]);
+        const { state, category } = classifyDeployRegistrationWithLedger({
+          threadKey: binding.threadKey,
+          registration,
+          fence,
+          lastRunOwner: binding.lastRunOwner,
+          owner,
+          lastAttachAt: binding.lastAttachAt,
+          cutoff: now - CLEAN_IDLE_RELEASE_S * 1000,
+          now,
+          graceMs: RUN_REGISTRATION_GRACE_MS,
+          opInFlight: this.threadOpsInFlight.get(binding.threadKey) ?? 0,
+          ledger,
+          claimants,
+          user: binding.user,
+          pool: THREAD_USERS,
+        });
+        // Only positively terminal ownership removes a held tree from this
+        // workload count. A binding without a run registration is still unknown.
+        if (state !== "retained" || category !== "owned") owners.add(key);
+      }),
+    );
+    for (const [key, owner] of native) {
+      if (typeof owner?.opOwner === "string" && /^op:\S+$/.test(owner.opOwner)) {
+        owners.add(owner.opOwner);
+        continue;
+      }
+      const end = validRunOwner(owner?.runId, owner?.ownerGen, owner?.ownerFence)
+        ? key.lastIndexOf(`:${owner.runId}:`)
+        : -1;
+      const thread = end > "native-operation:".length ? key.slice("native-operation:".length, end) : "";
+      owners.add(THREAD_KEY_RE.test(thread) ? `thread:${thread}` : `native:${key}`);
+    }
+    if (await this.isRuntimeActive()) {
+      const processes = await this.run(["ps", "-eo", "user="]);
+      if (processes.exitCode !== 0 || processes.timedOut || processes.truncated || processes.stderr !== "")
+        throw new Error("resident process observation is incomplete");
+      for (const name of processes.stdout
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)) {
+        if (!/^(?:[A-Za-z_][A-Za-z0-9_.+-]*\$?|\d+)$/.test(name))
+          throw new Error("resident process observation is invalid");
+        const user =
+          /^\d+$/.test(name) && Number(name) >= 2002 && Number(name) <= 2000 + THREAD_USERS.length + 1
+            ? `worker${Number(name) - 2000}`
+            : name;
+        if (user === BUILD_USER) continue;
+        if (user.startsWith("worker") && !THREAD_USERS.includes(user))
+          throw new Error("resident process identity is unverified");
+        if (THREAD_USERS.includes(user)) owners.add(spent.get(user) ?? `uid:${user}`);
+      }
+    }
+    return owners;
+  }
+
+  /** Serialize the capacity read and reservation, not the clone or command.
+   * A successful attach records its durable owner before releasing this slot. */
+  private async reserveWorkloadSlot(owner: string): Promise<ThreadErr | null> {
+    const key = "workload";
+    return this.workloadAdmissions.run(key, async () => {
+      let owners: Set<string>;
+      try {
+        owners = await this.activeWorkloadOwners();
+      } catch {
+        return {
+          error: "resident workload could not be verified",
+          status: 503,
+          reason: "workload-unverified",
+          cause: "system",
+        };
+      }
+      if (!owners.has(owner) && owners.size >= RESIDENT_WORKLOAD_LIMIT)
+        return {
+          error: `resident workload is full (${owners.size}/${RESIDENT_WORKLOAD_LIMIT} active owners)`,
+          status: 503,
+          reason: "workload-full",
+          cause: "system",
+        };
+      this.workloadReservations.add(owner);
+      return null;
+    });
+  }
 
   /** Claim an old retained binding before any user-scoped probe. A duplicate
    * legacy binding may name the same UID, but only its ledger owner proceeds. */
@@ -6394,114 +6509,141 @@ export class ResidentDO extends Sandbox<Env> {
             return { error: "run-registration-incomplete: attach requires a verifiable owner", status: 400 };
           if (await this.ctx.storage.get(`cancelled:${threadKey}:${runId}`))
             return { error: "run cancelled", status: 409 } satisfies ThreadErr;
-          return this.withOwnedNativeOperation(
-            threadKey,
-            { runId: runId!, ownerGen: ownerGen!, ownerFence: ownerFence! },
-            async () => {
-              const current = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
-              const accepted = await this.ctx.storage.get<Pick<RunRegistration, "runId" | "ownerGen" | "ownerFence">>(
-                runFenceKey(threadKey),
-              );
-              if (
-                !registeredRunAllowsClaim(current, runId, ownerGen, ownerFence) ||
-                !registeredRunAllowsClaim(accepted, runId, ownerGen, ownerFence)
-              )
-                return { error: "run-registration-mismatch: a newer generation owns the thread", status: 409 };
-              const retained = await this.retainWorkspacePredecessor(threadKey, {
-                runId: runId!,
-                ownerGen: ownerGen!,
-                ownerFence: ownerFence!,
-              });
-              if (retained) return retained;
-              if (await this.recreateAdmission.blocked()) return this.recreateRefusal();
-              await this.ensureHydrated();
-              if (await this.recreateAdmission.blocked()) return this.recreateRefusal();
-              // The fleet drain (item 69): a deploy is waiting for the runs in flight
-              // to end, and a NEW run's attach is refused with the record the bot
-              // waits on — a real 503 in the streamed document, read by the client as
-              // `draining`, never as the platform's transient. A run already in flight
-              // — with an owned, live registration (item 44) — re-attaches
-              // through: a rolled container, an evicted worktree, a resumed run are
-              // the runs the drain waits FOR, and refusing them would hold the fleet
-              // closed on the run it is closed for. Read before the image reconcile so
-              // a refused attach never restarts a container.
-              const drain = await this.fleetDrain();
-              const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
-              const registered = registeredRunAllowsReattach(
-                registration,
-                runId,
-                systemClock(),
-                RUN_REGISTRATION_GRACE_MS,
-                ownerGen,
-                ownerFence,
-              );
-              if (drain && (drain.swapFence || !registered)) {
-                const refusal: ThreadErr & { draining: DrainRecord } = drainRefusal(drain);
-                return refusal;
-              }
-              // Item 70: above the soft memory threshold a NEW attach is refused like
-              // `mirror-busy` (the bot falls back or waits, the card says why) — after
-              // the drain (storage only, cheaper) and before the image reconcile, so a
-              // refused attach never restarts a container. An owned, live run's
-              // re-attach passes for the same reason it passes the drain above.
-              const memory = await this.memoryGate("attach", registered);
-              if (memory) return memory;
-              const resourceId = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
-              // An attach never restarts the container (issue 2101): a `stale` verdict
-              // refuses the NEW run — it falls back to the seeded sandbox — while a
-              // owned, live run's re-attach passes exactly as it passes the drain and
-              // the memory gate; the restart itself is the refresh cycle's or the
-              // deploy's.
-              if ((await this.reconcileImage("attach")) === "stale" && !registered) {
-                const s = await this.getStatus();
-                return {
-                  error:
-                    "image-stale: the container predates the deploy and restarts on the next quiet refresh; new runs use the fallback sandbox until then",
-                  status: 503,
-                  state: s.state,
-                  stateReason: s.reason,
-                  reason: "image-stale",
-                };
-              }
-              // From here the attach may hold the mirror lock through clone/install:
-              // count it so a concurrent refresh-cycle reconcileImage never stops the
-              // container under it (and isIdle never parks the cycle mid-attach).
-              this.attachesInFlight++;
-              const priorTree = !reuse
-                ? await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey))
-                : undefined;
-              if (priorTree && !priorTree.evicted && priorTree.user) this.workspaceExclusiveOpsInFlight.add(threadKey);
-              try {
-                const res = await this.attachThreadBody(
-                  threadKey,
-                  refHint,
-                  readonly,
-                  wantSha,
-                  reuse,
-                  resourceId,
-                  t0,
-                  record,
-                  reason,
-                  githubDoor,
-                  registered && readonly && wantSha !== null && !reuse
-                    ? { runId: runId!, ownerGen: ownerGen!, ownerFence: ownerFence! }
-                    : undefined,
-                );
-                // The run this attach opens is now in flight until its release —
-                // whatever its op counters read between the bot's calls (item 44).
-                if (!("error" in res)) {
-                  await this.registerRun(threadKey, runBudgetMs, runId, ownerGen, ownerFence, res);
-                  res.ownerFence = ownerFence;
-                }
-                return res;
-              } finally {
-                if (priorTree && !priorTree.evicted && priorTree.user)
-                  this.workspaceExclusiveOpsInFlight.delete(threadKey);
-                this.attachesInFlight--;
-              }
-            },
-            true,
+          const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
+          const fence = await this.ctx.storage.get<Pick<RunRegistration, "runId" | "ownerGen" | "ownerFence">>(
+            runFenceKey(threadKey),
           );
+          if (
+            !registeredRunAllowsClaim(registration, runId, ownerGen, ownerFence) ||
+            !registeredRunAllowsClaim(fence, runId, ownerGen, ownerFence)
+          )
+            return { error: "run-registration-mismatch: a newer generation owns the thread", status: 409 };
+          const existing = registeredRunAllowsReattach(
+            registration,
+            runId,
+            systemClock(),
+            RUN_REGISTRATION_GRACE_MS,
+            ownerGen,
+            ownerFence,
+          );
+          const workloadOwner = `thread:${threadKey}`;
+          if (!existing) {
+            const workload = await this.reserveWorkloadSlot(workloadOwner);
+            if (workload) return workload;
+          }
+          try {
+            return await this.withOwnedNativeOperation(
+              threadKey,
+              { runId: runId!, ownerGen: ownerGen!, ownerFence: ownerFence! },
+              async () => {
+                const current = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
+                const accepted = await this.ctx.storage.get<Pick<RunRegistration, "runId" | "ownerGen" | "ownerFence">>(
+                  runFenceKey(threadKey),
+                );
+                if (
+                  !registeredRunAllowsClaim(current, runId, ownerGen, ownerFence) ||
+                  !registeredRunAllowsClaim(accepted, runId, ownerGen, ownerFence)
+                )
+                  return { error: "run-registration-mismatch: a newer generation owns the thread", status: 409 };
+                const retained = await this.retainWorkspacePredecessor(threadKey, {
+                  runId: runId!,
+                  ownerGen: ownerGen!,
+                  ownerFence: ownerFence!,
+                });
+                if (retained) return retained;
+                if (await this.recreateAdmission.blocked()) return this.recreateRefusal();
+                await this.ensureHydrated();
+                if (await this.recreateAdmission.blocked()) return this.recreateRefusal();
+                // The fleet drain (item 69): a deploy is waiting for the runs in flight
+                // to end, and a NEW run's attach is refused with the record the bot
+                // waits on — a real 503 in the streamed document, read by the client as
+                // `draining`, never as the platform's transient. A run already in flight
+                // — with an owned, live registration (item 44) — re-attaches
+                // through: a rolled container, an evicted worktree, a resumed run are
+                // the runs the drain waits FOR, and refusing them would hold the fleet
+                // closed on the run it is closed for. Read before the image reconcile so
+                // a refused attach never restarts a container.
+                const drain = await this.fleetDrain();
+                const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
+                const registered = registeredRunAllowsReattach(
+                  registration,
+                  runId,
+                  systemClock(),
+                  RUN_REGISTRATION_GRACE_MS,
+                  ownerGen,
+                  ownerFence,
+                );
+                if (drain && (drain.swapFence || !registered)) {
+                  const refusal: ThreadErr & { draining: DrainRecord } = drainRefusal(drain);
+                  return refusal;
+                }
+                // Item 70: above the soft memory threshold a NEW attach is refused like
+                // `mirror-busy` (the bot falls back or waits, the card says why) — after
+                // the drain (storage only, cheaper) and before the image reconcile, so a
+                // refused attach never restarts a container. An owned, live run's
+                // re-attach passes for the same reason it passes the drain above.
+                const memory = await this.memoryGate("attach", registered);
+                if (memory) return memory;
+                const resourceId = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
+                // An attach never restarts the container (issue 2101): a `stale` verdict
+                // refuses the NEW run — it falls back to the seeded sandbox — while a
+                // owned, live run's re-attach passes exactly as it passes the drain and
+                // the memory gate; the restart itself is the refresh cycle's or the
+                // deploy's.
+                if ((await this.reconcileImage("attach")) === "stale" && !registered) {
+                  const s = await this.getStatus();
+                  return {
+                    error:
+                      "image-stale: the container predates the deploy and restarts on the next quiet refresh; new runs use the fallback sandbox until then",
+                    status: 503,
+                    state: s.state,
+                    stateReason: s.reason,
+                    reason: "image-stale",
+                  };
+                }
+                // From here the attach may hold the mirror lock through clone/install:
+                // count it so a concurrent refresh-cycle reconcileImage never stops the
+                // container under it (and isIdle never parks the cycle mid-attach).
+                this.attachesInFlight++;
+                const priorTree = !reuse
+                  ? await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey))
+                  : undefined;
+                if (priorTree && !priorTree.evicted && priorTree.user)
+                  this.workspaceExclusiveOpsInFlight.add(threadKey);
+                try {
+                  const res = await this.attachThreadBody(
+                    threadKey,
+                    refHint,
+                    readonly,
+                    wantSha,
+                    reuse,
+                    resourceId,
+                    t0,
+                    record,
+                    reason,
+                    githubDoor,
+                    registered && readonly && wantSha !== null && !reuse
+                      ? { runId: runId!, ownerGen: ownerGen!, ownerFence: ownerFence! }
+                      : undefined,
+                  );
+                  // The run this attach opens is now in flight until its release —
+                  // whatever its op counters read between the bot's calls (item 44).
+                  if (!("error" in res)) {
+                    await this.registerRun(threadKey, runBudgetMs, runId, ownerGen, ownerFence, res);
+                    res.ownerFence = ownerFence;
+                  }
+                  return res;
+                } finally {
+                  if (priorTree && !priorTree.evicted && priorTree.user)
+                    this.workspaceExclusiveOpsInFlight.delete(threadKey);
+                  this.attachesInFlight--;
+                }
+              },
+              true,
+            );
+          } finally {
+            if (!existing) this.workloadReservations.delete(workloadOwner);
+          }
         }),
       );
     } catch (err) {
@@ -8122,8 +8264,12 @@ export class ResidentDO extends Sandbox<Env> {
    * An unknown outcome deliberately keeps the enclosing durable operation held. */
   private async beginThreadNativeOperation(): Promise<() => void> {
     await this.assertThreadOperationAllowed();
-    const scope = this.threadOperationScope?.getStore();
-    if (scope && !scope.active) throw new RunCancelledError("run cancelled");
+    const thread = this.threadOperationScope?.getStore();
+    const scope = thread ?? this.opOperationScope?.getStore();
+    if (scope && !scope.active) {
+      if (thread) throw new RunCancelledError("run cancelled");
+      throw new Error("operator command ended");
+    }
     if (scope) scope.pendingNative++;
     let settled = false;
     return () => {
@@ -10057,7 +10203,26 @@ export class ResidentDO extends Sandbox<Env> {
     const regs = await this.ctx.storage.list<RunRegistration>({ prefix: RUN_REG_KEY_PREFIX });
     const bindings = await this.liveBindings();
     const cutoff = systemClock() - CLEAN_IDLE_RELEASE_S * 1000;
-    let n = (await this.ctx.storage.list({ prefix: "native-operation:", limit: 1 })).size ? 1 : 0;
+    // An operator awaiting a UID has not begun its command yet.
+    // Only its exact, acknowledged pre-allocation marker may be excluded;
+    // reading two entries still detects a foreign marker after that one.
+    const native = await this.ctx.storage.list<{ opOwner?: string }>({ prefix: "native-operation:", limit: 2 });
+    const op = this.opOperationScope?.getStore();
+    let n = [...native].some(
+      ([key, value]) =>
+        !(
+          op?.active &&
+          !op.allocated &&
+          op.pendingNative === 0 &&
+          key === `native-operation:${op.owner}` &&
+          value?.opOwner === op.owner &&
+          typeof value === "object" &&
+          value !== null &&
+          Object.keys(value).length === 1
+        ),
+    )
+      ? 1
+      : 0;
     for (const binding of bindings) {
       const r = regs.get(runRegKey(binding.threadKey));
       const fence = await this.ctx.storage.get<unknown>(runFenceKey(binding.threadKey));
@@ -10245,12 +10410,27 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** The inspection reservation transfers to the op reservation synchronously. */
   private async allocateOpUser(): Promise<string | ThreadErr> {
-    const owner = `op:${crypto.randomUUID()}`;
+    const scope = this.opOperationScope.getStore();
+    if (!scope?.active) throw new Error("operator command has no active admission");
+    const owner = scope.owner;
     const reserved = await this.reserveSafePoolUser(owner);
     if (typeof reserved !== "string") return reserved;
+    scope.allocated = true;
     this.opUsersInUse.set(reserved, owner);
     this.poolUsersInspecting.delete(reserved);
     return reserved;
+  }
+
+  /** The existing native echo counter also protects anonymous operator work.
+   * An unknown command outcome keeps its capacity marker across an isolate reset. */
+  private async withOpNativeOperation<T>(owner: string, fn: () => Promise<T>): Promise<T> {
+    const scope = { owner, pendingNative: 0, active: true, allocated: false };
+    try {
+      return await this.opOperationScope.run(scope, fn);
+    } finally {
+      scope.active = false;
+      if (scope.pendingNative === 0) await this.ctx.storage.delete(`native-operation:${owner}`);
+    }
   }
 
   /** POST /op work half: run ONE readonly command-table entry in a
@@ -10273,7 +10453,20 @@ export class ResidentDO extends Sandbox<Env> {
     } else {
       this.opAdmissionsInFlight++;
       try {
-        res = await this.stepTrace.run(trace, () => this.runOpTraced(op, refArg, t0));
+        const owner = `op:${crypto.randomUUID()}`;
+        const workload = await this.reserveWorkloadSlot(owner);
+        if (workload) res = workload;
+        else {
+          try {
+            // This capacity marker grants no run ownership or deletion authority.
+            await this.ctx.storage.put(`native-operation:${owner}`, { opOwner: owner });
+            res = await this.withOpNativeOperation(owner, () =>
+              this.stepTrace.run(trace, () => this.runOpTraced(op, refArg, t0)),
+            );
+          } finally {
+            this.workloadReservations.delete(owner);
+          }
+        }
       } finally {
         this.opAdmissionsInFlight--;
       }
@@ -10906,6 +11099,7 @@ export class ResidentDO extends Sandbox<Env> {
       recreateAdmissionHeld: this.recreateAdmission.pending || map.get(RECREATE_ADMISSION_KEY) === true,
       poolUsersSpent: poolSpends?.size ?? null,
       poolUsersTotal: THREAD_USERS.length,
+      workloadLimit: RESIDENT_WORKLOAD_LIMIT,
       // Read-scoped owner receipts explain historical occupancy even after
       // every live binding and disposable op has ended.
       poolUserSpends: poolSpends ? [...poolSpends].map(([user, owner]) => ({ user, owner })) : null,

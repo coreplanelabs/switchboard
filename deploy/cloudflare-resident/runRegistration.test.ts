@@ -10,8 +10,18 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
+import { idleForPoolRecycle, retryPoolRecycleAfterRefresh } from "../../src/execution/residentRecreateAdmission.js";
+import { liveDrain } from "./drain.js";
+import { KeyedAsyncLock } from "./keyedAsyncLock.js";
 import { methodOf, readSource } from "./testing/sourceScan";
-import { mayRunAsPoolUser, parsePoolBindings, spendPoolUser } from "../../src/execution/residentPoolSpends";
+import {
+  mayRunAsPoolUser,
+  parsePoolBindings,
+  parseSpentPoolUsers,
+  spendPoolUser,
+  unavailablePoolUsers,
+  ownedPoolUsers,
+} from "../../src/execution/residentPoolSpends";
 import { admitThreadDiskWithRollback, boundByFor, rememberOwnBranches } from "../../src/execution/residentRebind";
 import { planForceDetach } from "../../src/execution/residentDetach";
 import { decideWorkspaceRemoval, hasRunOwnerField } from "./workspacePreservation";
@@ -892,6 +902,27 @@ describe("a run's registration is held from attach to release", () => {
     expect(fixture.rows.get(`runReg:${fixture.threadKey}`)).toEqual(registration);
   });
 
+  it("refuses new work before materialization but permits the exact live owner's reattach", async () => {
+    const fixture = await ownerFlow("canonical");
+    const full = {
+      error: "resident workload is full (16/16 active owners)",
+      status: 503,
+      reason: "workload-full",
+      cause: "system",
+    };
+    fixture.instance.reserveWorkloadSlot = async () => full;
+    expect(await fixture.attach("new-run", 8)).toEqual(full);
+    expect(fixture.materializations()).toBe(0);
+    fixture.instance.reserveWorkloadSlot = async (owner: string) => {
+      fixture.instance.workloadReservations.add(owner);
+      return null;
+    };
+    expect(await fixture.attach("new-run", 8)).toMatchObject({ ownerFence: 8 });
+    expect([...fixture.instance.workloadReservations]).toEqual([]);
+    fixture.instance.reserveWorkloadSlot = async () => full;
+    expect(await fixture.attach("new-run", 8)).toMatchObject({ ownerFence: 8 });
+  });
+
   it("the binding's eviction clears the registration — detach, sweep and disk pressure all end there", () => {
     const evict = method("evictBinding");
     expect(evict).toMatch(/await this\.ctx\.storage\.delete\(runRegKey\(binding\.threadKey\)\);/);
@@ -1032,6 +1063,8 @@ const compiledOwnerFlow = ts.transpileModule(
 ).outputText;
 
 type OwnerFlowInstance = {
+  reserveWorkloadSlot(owner: string): Promise<unknown>;
+  workloadReservations: Set<string>;
   getInFlightCount(): Promise<number>;
   reconcileRetainedOwner(key: string): Promise<unknown>;
   attachThreadTraced(
@@ -1085,7 +1118,7 @@ async function ownerFlow(pathForm: "canonical" | "collision-safe replacement" | 
       parentDir: (path: string) => path.slice(0, path.lastIndexOf("/")),
       decideOwnerReconciliation,
       registeredRunAllowsClaim,
-      registeredRunAllowsReattach: () => false,
+      registeredRunAllowsReattach,
       registeredRunOwnsRelease,
       registeredRunNeedsProtection,
       validRunOwner,
@@ -1184,6 +1217,8 @@ async function ownerFlow(pathForm: "canonical" | "collision-safe replacement" | 
     liveBindings: async () => [rows.get(`thread:${threadKey}`)],
     fleetDrain: async () => null,
     memoryGate: async () => null,
+    reserveWorkloadSlot: async () => null,
+    workloadReservations: new Set(),
     reconcileImage: async () => "current",
     refreshIfStale: async () => {},
     isRuntimeActive: async () => true,
@@ -1317,5 +1352,349 @@ describe("cancelled owner attachment", () => {
       ownerFence: 101,
     });
     expect(h.privateBytes()).toBe("private uncommitted work");
+  });
+});
+
+const workloadSource = readSource("worker.ts");
+const sharedWorkloadSource = readSource("shared.ts");
+const RESIDENT_WORKLOAD_LIMIT = Number(sharedWorkloadSource.match(/RESIDENT_WORKLOAD_LIMIT = (\d+)/)?.[1]);
+const THREAD_POOL_SIZE = Number(sharedWorkloadSource.match(/THREAD_POOL_SIZE = (\d+)/)?.[1]);
+const workloadPool = Array.from({ length: THREAD_POOL_SIZE }, (_, i) => `worker${i + 2}`);
+
+function workloadResident(
+  options: { live?: number; retained?: number; unknown?: number; processes?: string; probeFails?: boolean } = {},
+) {
+  const compiled = ts.transpileModule(
+    `class Resident { ${[
+      "activeWorkloadOwners",
+      "reserveWorkloadSlot",
+      "allocateOpUser",
+      "withOpNativeOperation",
+      "runOp",
+      "run",
+      "beginThreadNativeOperation",
+      "registeredRunsBeyondOps",
+      "recycleSpentPoolForAdmission",
+      "automaticContainerLoss",
+      "recreateContainer",
+      "inFlightCount",
+      "runsInFlightCount",
+      "reserveSafePoolUser",
+      "findFreePoolUser",
+      "markPoolUserSpent",
+    ]
+      .map((name) => methodOf(workloadSource, name) ?? "")
+      .join("\n")} }`,
+    { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
+  ).outputText;
+  const native = { loseOutput: false };
+  const Native = runInNewContext(`${compiled}\nResident`, {
+    crypto: webcrypto,
+    RESIDENT_WORKLOAD_LIMIT,
+    THREAD_USERS: workloadPool,
+    BUILD_USER: "worker1",
+    RUN_REG_KEY_PREFIX: "run:",
+    SPENT_POOL_USERS_KEY: "spent",
+    THREAD_KEY_PREFIX: "thread:",
+    IMAGE_REPORT_PENDING_KEY: "image-pending",
+    SNAPSHOT_KEY: "snapshot",
+    idleForPoolRecycle,
+    retryPoolRecycleAfterRefresh,
+    liveDrain,
+    spendPoolUser,
+    unavailablePoolUsers,
+    ownedPoolUsers,
+    hasRunOwnerField,
+    registeredRunNeedsProtection,
+    CLEAN_IDLE_RELEASE_S: 3600,
+    RUN_REGISTRATION_GRACE_MS: 10_000,
+    THREAD_KEY_RE: /^[a-z]{1,32}:[A-Za-z0-9._:-]{1,128}$/,
+    runRegKey: (thread: string) => `run:${thread}`,
+    runFenceKey: (thread: string) => `fence:${thread}`,
+    poolBindingKey: (user: string) => `claim:${user}`,
+    systemClock: () => 10_000_000,
+    classifyDeployRegistrationWithLedger,
+    parseSpentPoolUsers,
+    validRunOwner,
+    createStepTrace: () => ({ steps: () => [] }),
+    emitStepRoot: () => {},
+    refusalOutcome: () => "refused",
+    DESTROY_UNCONFIRMED_KEY: "destroy-unconfirmed",
+    DEFAULT_EXEC_TIMEOUT_MS: 1000,
+    createExtensionProcessSandbox: () => ({
+      exec: async () => ({
+        output: async () => {
+          if (native.loseOutput) throw new Error("native output lost");
+          return { stdout: "completed", stderr: "", exitCode: 0, timedOut: false, truncated: false };
+        },
+      }),
+    }),
+    isControlReset: () => false,
+    isRuntimeReplacement: () => false,
+    ProcessWaitTimeoutError: class extends Error {},
+  });
+  const instance = new Native();
+  const rows = new Map<string, unknown>();
+  const lifecycle: string[] = [];
+  const bindings: any[] = [];
+  const owners = new Map<string, unknown>();
+  const spent: { user: string; owner: string }[] = [];
+  const live = options.live ?? 0;
+  const retained = options.retained ?? 0;
+  const unknown = options.unknown ?? 0;
+  for (let i = 0; i < live + retained + unknown; i++) {
+    const threadKey = `mcp:owner-${i}`;
+    const owner = { runId: `run-${i}`, ownerGen: "generation", ownerFence: i + 1 };
+    const user = `worker${i + 2}`;
+    bindings.push({ threadKey, user, lastAttachAt: "1970-01-01T00:00:00Z" });
+    rows.set(`run:${threadKey}`, { ...owner, threadKey });
+    rows.set(`fence:${threadKey}`, owner);
+    rows.set(`claim:${user}`, [threadKey]);
+    spent.push({ user, owner: `thread:${threadKey}` });
+    owners.set(
+      owner.runId,
+      i < live
+        ? { kind: "live", row: { ...owner, threadKey } }
+        : i < live + retained
+          ? { kind: "terminal", record: { id: owner.runId, threadKey, status: "completed" } }
+          : null,
+    );
+  }
+  rows.set("spent", spent);
+  Object.assign(instance, {
+    workloadAdmissions: new KeyedAsyncLock(),
+    workloadReservations: new Set<string>(),
+    poolUsersInspecting: new Set<string>(),
+    opOperationScope: new AsyncLocalStorage(),
+    stepTrace: { run: (_trace: unknown, fn: () => unknown) => fn() },
+    recreateAdmission: { pending: false, run: async (fn: () => unknown) => ({ busy: false, value: await fn() }) },
+    attachesInFlight: 0,
+    attachAdmissionsInFlight: 0,
+    refreshesInFlight: 0,
+    refreshAdmissionsInFlight: 0,
+    adminWorkInFlight: 0,
+    hydration: null,
+    workspaceExclusiveOpsInFlight: new Set<string>(),
+    getStatus: async () => ({ state: "warm" }),
+    registry: () => ({ getDrain: async () => null }),
+    swapIncarnation: () => {},
+    setResidentState: async () => {},
+    recordRefreshError: async () => {},
+    destroyConfirmed: async () => {
+      lifecycle.push("destroyed");
+      rows.set("spent", []);
+    },
+    ensureHydrated: async () => {
+      lifecycle.push("hydrated");
+    },
+    poolUserHasOldThreadDir: async () => false,
+    poolUserHasOldStageContent: async () => false,
+    assertThreadOperationAllowed: async () => {},
+    clearRuntimeUnreachable: async () => {},
+    opAdmissionsInFlight: 0,
+    runOpTraced: async () => {
+      const user = await instance.allocateOpUser();
+      return typeof user === "string" ? { ok: true, user } : user;
+    },
+    opUsersInUse: new Map<string, string>(),
+    threadOpsInFlight: new Map<string, number>(),
+    ctx: {
+      storage: {
+        get: async (key: string) => structuredClone(rows.get(key)),
+        list: async ({ prefix, limit }: { prefix: string; limit?: number }) =>
+          new Map(
+            [...rows]
+              .filter(([key]) => key.startsWith(prefix))
+              .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+              .slice(0, limit),
+          ),
+        put: async (key: string, value: unknown) => rows.set(key, structuredClone(value)),
+        delete: async (key: string) => rows.delete(key),
+      },
+    },
+    liveBindings: async () => bindings,
+    observeRunForEviction: async (registration: { runId: string }) => owners.get(registration.runId),
+    isRuntimeActive: async () => true,
+    run: async () => ({
+      exitCode: options.probeFails ? 1 : 0,
+      stdout: options.processes ?? "root\nworker1\n",
+      stderr: "",
+      timedOut: false,
+      truncated: false,
+    }),
+    reserveSafePoolUser: async () => "worker18",
+  });
+  instance.ctx.storage.transaction = async (fn: (store: unknown) => unknown) => fn(instance.ctx.storage);
+  return { instance, rows, native, lifecycle };
+}
+
+describe("resident workload admission", () => {
+  it("refuses a new disposable operation at sixteen live owners despite unused UIDs", async () => {
+    const { instance } = workloadResident({ live: 16 });
+    expect(await instance.runOp("test", null)).toEqual({
+      error: "resident workload is full (16/16 active owners)",
+      trace: [],
+      status: 503,
+      reason: "workload-full",
+      cause: "system",
+    });
+    expect([...instance.opUsersInUse]).toEqual([]);
+  });
+
+  it("admits work despite sixteen retained finished owners and their spent identities", async () => {
+    const { instance } = workloadResident({ retained: 16 });
+    expect(await instance.runOp("test", null)).toEqual({ ok: true, user: "worker18" });
+    expect([...instance.opUsersInUse.values()]).toEqual([expect.stringMatching(/^op:/)]);
+  });
+
+  it("counts unknown owners, and processes remaining under finished owners", async () => {
+    const unknown = workloadResident({ unknown: 16 });
+    expect(await unknown.instance.reserveWorkloadSlot("thread:mcp:new")).toMatchObject({
+      status: 503,
+      reason: "workload-full",
+    });
+    const lingering = workloadResident({ retained: 16, processes: workloadPool.slice(0, 16).join("\n") + "\n" });
+    expect(await lingering.instance.reserveWorkloadSlot("thread:mcp:new")).toMatchObject({
+      status: 503,
+      reason: "workload-full",
+    });
+  });
+
+  it("allows admission below the limit when one owner lookup is unavailable, but refuses an unreadable UID ledger", async () => {
+    const { instance, rows } = workloadResident({ unknown: 1 });
+    expect(await instance.runOp("test", null)).toEqual({ ok: true, user: "worker18" });
+    rows.set("spent", { unreadable: true });
+    expect(await instance.reserveWorkloadSlot("thread:mcp:new")).toMatchObject({
+      status: 503,
+      reason: "workload-unverified",
+    });
+  });
+
+  it("recycles an otherwise idle exhausted pool before assigning the next operator UID", async () => {
+    const { instance, rows, lifecycle } = workloadResident();
+    rows.set(
+      "spent",
+      workloadPool.map((user, i) => ({ user, owner: `op:ended-${i}` })),
+    );
+    rows.set("snapshot", { mirrorBackupId: "mirror", checkoutBackupId: "checkout" });
+    instance.reserveSafePoolUser = Object.getPrototypeOf(instance).reserveSafePoolUser;
+    expect(await instance.runOp("test", null)).toEqual({ ok: true, user: "worker2" });
+    expect(lifecycle).toEqual(["destroyed", "hydrated"]);
+    expect(rows.get("spent")).toEqual([{ user: "worker2", owner: expect.stringMatching(/^op:/) }]);
+  });
+
+  it("does not exclude a foreign native marker after the caller's own marker", async () => {
+    const { instance, rows, lifecycle } = workloadResident();
+    rows.set(
+      "spent",
+      workloadPool.map((user, i) => ({ user, owner: `op:ended-${i}` })),
+    );
+    rows.set("snapshot", { mirrorBackupId: "mirror", checkoutBackupId: "checkout" });
+    rows.set("native-operation:zz-foreign", { opOwner: "op:foreign" });
+    instance.reserveSafePoolUser = Object.getPrototypeOf(instance).reserveSafePoolUser;
+    expect(await instance.runOp("test", null)).toMatchObject({
+      status: 503,
+      error: "pool-recycle-required: all UIDs spent and the resident is not idle for checked VM recycle",
+    });
+    expect(lifecycle).toEqual([]);
+    expect(rows.get("native-operation:zz-foreign")).toEqual({ opOwner: "op:foreign" });
+  });
+
+  it("does not exclude the caller after UID allocation or an unobserved native result", async () => {
+    const allocated = workloadResident();
+    allocated.rows.set("native-operation:op:allocated", { opOwner: "op:allocated" });
+    expect(
+      await allocated.instance.withOpNativeOperation("op:allocated", async () => {
+        expect(await allocated.instance.allocateOpUser()).toBe("worker18");
+        return allocated.instance.registeredRunsBeyondOps();
+      }),
+    ).toBe(1);
+
+    const pending = workloadResident();
+    pending.rows.set("native-operation:op:pending", { opOwner: "op:pending" });
+    pending.instance.run = Object.getPrototypeOf(pending.instance).run;
+    pending.native.loseOutput = true;
+    expect(
+      await pending.instance.withOpNativeOperation("op:pending", async () => {
+        await expect(pending.instance.run(["true"])).rejects.toThrow("native output lost");
+        return pending.instance.registeredRunsBeyondOps();
+      }),
+    ).toBe(1);
+    expect(pending.rows.get("native-operation:op:pending")).toEqual({ opOwner: "op:pending" });
+  });
+
+  it("admits only one of two competing owners for the final slot", async () => {
+    const { instance } = workloadResident({ live: 15 });
+    expect(
+      await Promise.all([
+        instance.reserveWorkloadSlot("thread:mcp:first"),
+        instance.reserveWorkloadSlot("thread:mcp:second"),
+      ]),
+    ).toEqual([
+      null,
+      {
+        error: "resident workload is full (16/16 active owners)",
+        status: 503,
+        reason: "workload-full",
+        cause: "system",
+      },
+    ]);
+    expect([...instance.workloadReservations]).toEqual(["thread:mcp:first"]);
+    expect(await instance.reserveWorkloadSlot("thread:mcp:owner-0")).toBeNull();
+  });
+
+  it("retains native operations across an isolate restart and deduplicates their owners", async () => {
+    const { instance, rows } = workloadResident({ retained: 16 });
+    for (let i = 0; i < 16; i++) {
+      const owner = { runId: `run-${i}`, ownerGen: "generation", ownerFence: i + 1 };
+      rows.set(`native-operation:mcp:owner-${i}:run-${i}:request-a`, owner);
+      rows.set(`native-operation:mcp:owner-${i}:run-${i}:request-b`, owner);
+    }
+    expect(await instance.reserveWorkloadSlot("thread:mcp:new")).toMatchObject({
+      status: 503,
+      reason: "workload-full",
+    });
+    expect(await instance.reserveWorkloadSlot("thread:mcp:owner-0")).toBeNull();
+  });
+
+  it("keeps unresolved anonymous operations occupied after the in-memory map is lost", async () => {
+    const { instance, rows } = workloadResident();
+    for (let i = 0; i < 16; i++) rows.set(`native-operation:op:operation-${i}`, { opOwner: `op:operation-${i}` });
+    expect(await instance.runOp("test", null)).toMatchObject({ status: 503, reason: "workload-full" });
+    expect(await instance.reserveWorkloadSlot("op:operation-0")).toBeNull();
+  });
+
+  it("refuses an unreadable process probe without spending an identity", async () => {
+    const { instance } = workloadResident({ probeFails: true });
+    expect(await instance.runOp("test", null)).toEqual({
+      error: "resident workload could not be verified",
+      trace: [],
+      status: 503,
+      reason: "workload-unverified",
+      cause: "system",
+    });
+    expect([...instance.workloadReservations]).toEqual([]);
+  });
+
+  it("releases an acknowledged operator command but keeps an unobserved native outcome", async () => {
+    const { instance, rows, native } = workloadResident();
+    instance.run = Object.getPrototypeOf(instance).run;
+    rows.set("native-operation:op:known", { opOwner: "op:known" });
+    expect(await instance.withOpNativeOperation("op:known", () => instance.run(["true"]))).toEqual({
+      stdout: "completed",
+      stderr: "",
+      exitCode: 0,
+      timedOut: false,
+      truncated: false,
+    });
+    expect(rows.has("native-operation:op:known")).toBe(false);
+    rows.set("native-operation:op:unknown", { opOwner: "op:unknown" });
+    native.loseOutput = true;
+    await expect(instance.withOpNativeOperation("op:unknown", () => instance.run(["true"]))).rejects.toThrow(
+      "native output lost",
+    );
+    expect(rows.get("native-operation:op:unknown")).toEqual({ opOwner: "op:unknown" });
+    native.loseOutput = false;
+    expect([...(await instance.activeWorkloadOwners())]).toEqual(["op:unknown"]);
   });
 });

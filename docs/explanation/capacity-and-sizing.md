@@ -47,15 +47,17 @@ Each refresh cycle releases eligible idle trees and reclaims worktrees whose bra
 
 An unused resident parks its refresh and sleeps. The fleet caps warm residents; onboarding over the cap can, per request, offboard the coldest eligible resident instead.
 
-## Doubling the UID pool and resident fleet
+## Identity slots and active work
 
-The source configures 32 UID slots per VM and 12 residents, twice the previous limits. The image creates `worker1` through `worker33`; `worker1` remains the build user. The resident template allows 20 running containers, keeping platform headroom above the registry cap. Both build and registry deployments use these settings. Source settings do not prove uptake by a running fleet.
+A resident has 32 UID slots and a separate limit of 16 active owners. The fleet cap remains six repositories, with a platform ceiling of ten containers. Each repository still routes to one VM with four vCPUs, 12 GiB memory and 20 GB disk. Extra identities provide room for historical owners; they do not add compute or promise more concurrent work.
 
-This gives 384 UID slots across a full fleet, compared with 96 under the previous limits. It does not double each VM's compute or disk: each resident still has four vCPUs, 12 GiB memory and 20 GB disk, the largest supported size. The disk and memory checks must continue to refuse work that does not fit. Each sweep processes at most 16 live bindings. A durable cursor advances after each binding and resets at the end, so protected first-page work cannot starve later bindings. This keeps the configured step budget at 21 minutes, below the 30-minute Workflow ceiling, while the 32-slot pool spans two passes.
+An attach or operator command reserves capacity before cloning or executing. The exact existing owner may reattach at capacity. Live or uncertain owners, unacknowledged native operations and processes still running under old UIDs remain occupied. Verified finished owners can retain private files without using an active-work slot. Their disk use and preservation obligations remain subject to the existing checks.
 
-At full awake occupancy, doubling the resident fleet doubles provisioned memory and disk from 72 to 144 GiB and from 120 to 240 GB. CPU billing still depends on use. Verify the account's effective limits and existing workloads before deployment. Larger individual VMs require a platform limit increase or a separate multi-container design; see [Cloudflare limits](https://developers.cloudflare.com/containers/platform/limits/).
+The UID display reports historical spends against the image's pool size. `workloadLimit` reports the separate active-owner limit. Disk and memory checks may refuse work below that limit: the measured mixed workload of sixteen hardlinked plus two dependency-installing trees already exceeds this VM's disk budget.
 
-Increasing the UID pool requires a new image. An old VM lacks the additional Linux users and cannot use the larger pool until the existing checked image-replacement path succeeds. Retained workspaces must pass their preservation gate first. Keep unknown work and owner receipts; a capacity increase does not authorize a force rebuild or UID reuse.
+Cleanup processes at most sixteen bindings per pass with a durable cursor. Protected early entries do not starve later eligible entries. Its configured step budget stays below the Workflow ceiling.
+
+The existing overflow path uses a separate seeded sandbox for each run. Several warm residents for one repository would need placement and durable ownership changes. Raising the repository cap or UID count does not supply that routing. Dynamic UID provisioning is a later change; this version retains a finite pool and never transfers a spent identity to another owner. See [decision 0095](../decisions/0095-identity-allocation-is-separate-from-active-work.md).
 
 ## Read next
 
