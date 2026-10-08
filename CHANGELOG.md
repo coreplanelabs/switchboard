@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.290.0](https://github.com/coreplanelabs/switchboard/compare/v1.289.12...v1.290.0) (2026-10-08)
+
+
+### Features
+
+* **runs:** locate held publication owners for diagnosis ([#2853](https://github.com/coreplanelabs/switchboard/issues/2853)) ([bba9b88](https://github.com/coreplanelabs/switchboard/commit/bba9b888a9699e6f325134f58af1a801c9194576))
+
 ## [1.289.12](https://github.com/coreplanelabs/switchboard/compare/v1.289.11...v1.289.12) (2026-10-08)
 
 
