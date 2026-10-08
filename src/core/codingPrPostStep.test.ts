@@ -2722,7 +2722,15 @@ describe("salvageBudgetPush — a ship coding child pushes what it has at the bu
         record,
       },
     });
-    expect(out).toMatchObject({ pushed: false, settlement: { checkpoint: { kind: "clean", head } } });
+    expect(out).toMatchObject({
+      pushed: false,
+      settlement: {
+        checkpoint: { kind: "clean", head },
+        publication: { kind: "not_attempted" },
+        preservation: { kind: "pending" },
+        release: { kind: "pending" },
+      },
+    });
     expect(w.commands.some((command) => command.includes(" push "))).toBe(false);
     expect(record).toHaveBeenCalledTimes(2);
     const foreign = fakeExecutor({

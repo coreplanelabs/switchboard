@@ -3,6 +3,7 @@ import { pullOwnerReadDiagnosticFrom, pullOwnerReadDiagnosticFor } from "./pullO
 import { analyzeRunFriction } from "../runFriction.js";
 import { describe, expect, it } from "vitest";
 import { InMemoryCoordinatorInstanceStore, NullCoordinatorInstanceStore } from "./instanceStore.js";
+import type { RunRecord } from "../runRecord.js";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { findPullOwnersInRows, type PullOwnershipDiagnostics } from "./pullOwnership.js";
 import type { CoordinatorInstance, CoordinatorUnit } from "./contract.js";
@@ -30,176 +31,281 @@ const unit: CoordinatorUnit = {
 };
 
 describe("complete canonical pull ownership", () => {
-  it("keeps an accepted pre-PR coding publication under its original unit", () => {
-    const runId = "original_coding";
-    const head = "b".repeat(40);
-    const current: CoordinatorUnit = {
-      ...unit,
-      pr: undefined,
-      currentEffect: {
-        version: 1,
-        id: `${unit.unit}/0/coding`,
-        ordinal: 2,
-        execution: { workflowId: instance.id },
-        phase: "settled",
-        target: { repo: instance.repo, ref: unit.branch, base: "main", headSha: "a".repeat(40) },
-        calls: [{ operation: "spawn", state: "accepted", runId }],
-      },
-    };
-    const record = {
-      id: runId,
-      agent: "coding",
-      status: "completed",
-      repo: instance.repo,
-      userId: instance.userId,
-      channelId: instance.channelId,
-      threadKey: instance.threadKey,
-      parentInstanceId: instance.id,
-      coordinatorUnit: unit.unit,
-      coordinatorAttempt: 0,
-      idempotencyKey: `${instance.id}:${unit.unit}/0/coding`,
-      publicationSettlement: {
-        version: 1,
-        binding: {
-          runId,
-          instanceId: instance.id,
-          step: `${instance.id}:${unit.unit}/0/coding`,
-          repo: instance.repo,
-          branch: unit.branch,
-          requester: instance.userId,
-          threadKey: instance.threadKey,
-          generation: "g1",
+  it.each(["checkpoint", "model"] as const)(
+    "keeps an accepted pre-PR %s publication under its original unit",
+    async (producer) => {
+      const runId = "original_coding";
+      const head = "b".repeat(40);
+      const current: CoordinatorUnit = {
+        ...unit,
+        pr: undefined,
+        currentEffect: {
+          version: 1,
+          id: `${unit.unit}/0/coding`,
+          ordinal: 2,
+          execution: { workflowId: instance.id },
+          phase: "settled",
+          target: { repo: instance.repo, ref: unit.branch, base: "main", headSha: "a".repeat(40) },
+          calls: [{ operation: "spawn", state: "accepted", runId }],
         },
-        checkpoint: { kind: "created", head },
-        publication: { kind: "accepted", head },
-        preservation: { kind: "pending" },
-        release: { kind: "pending" },
-      },
-    };
-    const publication = { version: 1, repo: instance.repo, branches: [], complete: false };
-    const run = {
-      runId,
-      repo: instance.repo,
-      live: false,
-      publication,
-      record,
-      pushReceipts: [{ ref: unit.branch, sha: head, by: "push" }],
-    };
-    const rows = { complete: true, units: [{ instance, unit: current }], runs: [run], effects: [] };
-    const expected = { ok: true, owners: [{ kind: "unit", instanceId: instance.id, unit: unit.unit }] };
-    expect(findPullOwnersInRows({ repo: instance.repo, ref: unit.branch }, rows)).toEqual(expected);
-    const publish = {
-      ...current,
-      currentEffect: {
-        ...current.currentEffect!,
-        id: `${unit.unit}/0/coding/pr-check`,
-        ordinal: 3,
-        phase: "active" as const,
-        target: { ...current.currentEffect!.target, headSha: head },
-        calls: [{ operation: "pull_create" as const, state: "unstarted" as const }],
-      },
-    };
-    expect(
-      findPullOwnersInRows(
-        { repo: instance.repo, ref: unit.branch },
-        { ...rows, units: [{ instance, unit: publish }] },
-      ),
-    ).toEqual(expected);
-    const mapped = {
-      ...publish,
-      pr: unit.pr,
-      publication: {
+      };
+      const record = {
+        id: runId,
+        agent: "coding",
+        status: "completed",
+        headSha: head,
         repo: instance.repo,
-        pr: 7,
-        headRef: unit.branch,
-        publicationRef: unit.branch,
-        baseRef: "main",
-        expectedHeadSha: head,
-        owner: { instanceId: instance.id, unit: unit.unit },
-      },
-      currentEffect: {
-        ...publish.currentEffect,
-        id: `${unit.unit}/1/review`,
-        target: { ...publish.currentEffect.target, pr: 7 },
-        calls: [{ operation: "spawn" as const, state: "accepted" as const, runId: "next_review" }],
-      },
-    };
-    expect(
-      findPullOwnersInRows({ repo: instance.repo, pr: 7 }, { ...rows, units: [{ instance, unit: mapped }] }),
-    ).toEqual(expected);
-    const ended: CoordinatorUnit = {
-      ...mapped,
-      currentEffect: { ...mapped.currentEffect, phase: "settled" },
-      ending: {
-        kind: "refused",
-        report: "ended",
-        at: 2,
-        outcome: { schemaVersion: 1, kind: "refused", reviewRounds: 0 },
-      },
-    };
-    expect(
-      findPullOwnersInRows({ repo: instance.repo, ref: unit.branch }, { ...rows, units: [{ instance, unit: ended }] }),
-    ).toEqual({ ok: true, owners: [] });
-    const actionId = `r_${"d".repeat(64)}`;
-    const recovering: CoordinatorUnit = {
-      ...current,
-      history: { version: 1, receiptId: "rc_claim" },
-      recovery: {
-        kind: "coding",
-        round: 0,
-        actionId,
-        workflowId: `recovery-${actionId}`,
-        expectedHeadSha: head,
-        remainingMs: 1000,
-        claimedAt: 2,
-        deadlineAt: 1002,
-        step: `${unit.unit}/recovery/${actionId}/0/coding`,
-        codingRunId: runId,
-        codingKey: record.idempotencyKey,
-        previousEnding: { kind: "failed", report: "PR creation refused", at: 1 },
-        accounting: {
-          spendUsd: 0,
-          children: [{ runId, key: record.idempotencyKey, usd: 0 }],
-          grant: { renewals: 0 },
-          renewalsSpent: 0,
+        userId: instance.userId,
+        channelId: instance.channelId,
+        threadKey: instance.threadKey,
+        parentInstanceId: instance.id,
+        coordinatorUnit: unit.unit,
+        coordinatorAttempt: 0,
+        idempotencyKey: `${instance.id}:${unit.unit}/0/coding`,
+        publicationSettlement: {
+          version: 1,
+          binding: {
+            runId,
+            instanceId: instance.id,
+            step: `${instance.id}:${unit.unit}/0/coding`,
+            repo: instance.repo,
+            branch: unit.branch,
+            requester: instance.userId,
+            threadKey: instance.threadKey,
+            generation: "g1",
+            baseHeadSha: "a".repeat(40),
+          },
+          checkpoint: { kind: producer === "model" ? "clean" : "created", head },
+          publication: producer === "model" ? { kind: "not_attempted" } : { kind: "accepted", head },
+          preservation: { kind: "pending" },
+          release: { kind: "pending" },
         },
-      },
-    };
-    expect(
-      findPullOwnersInRows(
-        { repo: instance.repo, ref: unit.branch },
-        { ...rows, units: [{ instance, unit: recovering }] },
-      ),
-    ).toEqual({ ok: true, owners: [{ kind: "unit", instanceId: instance.id, unit: unit.unit, actionId }] });
-    // Lookup does not rewrite private publication or release evidence.
-    expect(run.publication).toEqual(publication);
-    expect(record.publicationSettlement.release).toEqual({ kind: "pending" });
-    expect(findPullOwnersInRows({ repo: "other/repo", pr: 7 }, rows)).toEqual({ ok: true, owners: [] });
-    for (const altered of [
-      { record: { ...record, userId: "cli:stranger" } },
-      { record: { ...record, coordinatorAttempt: 1 } },
-      { record: { ...record, agent: "review" } },
-      { record: { ...record, provisional: true } },
-      { pushReceipts: [{ ref: "fix/other", sha: head, by: "push" }] },
-      { pushReceipts: [{ ref: unit.branch, sha: "c".repeat(40), by: "push" }] },
-      {
-        door: {
-          id: "unknown",
-          repo: instance.repo,
-          update: { ref: `refs/heads/${unit.branch}`, old: "a".repeat(40), next: head },
+      };
+      const publication = { version: 1, repo: instance.repo, branches: [], complete: false };
+      const run = {
+        runId,
+        repo: instance.repo,
+        live: false,
+        publication,
+        record,
+        pushReceipts: [{ ref: unit.branch, sha: head, by: "push" }],
+      };
+      const rows = { complete: true, units: [{ instance, unit: current }], runs: [run], effects: [] };
+      const expected = { ok: true, owners: [{ kind: "unit", instanceId: instance.id, unit: unit.unit }] };
+      expect(findPullOwnersInRows({ repo: instance.repo, ref: unit.branch }, rows)).toEqual(expected);
+      if (producer === "model") {
+        const ledger = new InMemoryRunLedger();
+        ledger.finished.set(runId, {
+          ...record,
+          startedAt: 1,
+          finishedAt: 2,
+          channelVisibility: "unknown",
+          eventCount: 0,
+          storedEventCount: 0,
+          truncated: false,
+          events: [],
+          diagnosis: analyzeRunFriction([]),
+          branchPublication: publication,
+          branchPushReceipts: run.pushReceipts,
+        } as RunRecord);
+        const store = new InMemoryCoordinatorInstanceStore(ledger);
+        const cells = store as unknown as { rows: Map<string, string>; units: Map<string, string> };
+        cells.rows.set(instance.id, JSON.stringify(instance));
+        cells.units.set(`${instance.id}\0${unit.unit}`, JSON.stringify(current));
+        const before = JSON.stringify([...ledger.finished]);
+        expect(await store.findPullOwners({ repo: instance.repo, ref: unit.branch })).toEqual(expected);
+        expect(await store.findPullOwners({ repo: instance.repo, pr: 999 })).toEqual({ ok: true, owners: [] });
+        expect(JSON.stringify([...ledger.finished])).toBe(before);
+        const ended = {
+          ...current,
+          ending: {
+            kind: "aborted",
+            report: "no PR",
+            at: 2,
+            outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 0 },
+          },
+        };
+        expect(
+          findPullOwnersInRows(
+            { repo: instance.repo, ref: unit.branch },
+            { ...rows, units: [{ instance, unit: ended }] },
+          ),
+        ).toEqual({ ok: true, owners: [] });
+        expect(record.publicationSettlement).toMatchObject({
+          checkpoint: { kind: "clean", head },
+          publication: { kind: "not_attempted" },
+          preservation: { kind: "pending" },
+          release: { kind: "pending" },
+        });
+        const proof = record.publicationSettlement;
+        for (const altered of [
+          { record: { ...record, headSha: undefined } },
+          { record: { ...record, headSha: "c".repeat(40) } },
+          {
+            record: {
+              ...record,
+              publicationSettlement: { ...proof, checkpoint: { kind: "clean", head: "c".repeat(40) } },
+            },
+          },
+          {
+            record: {
+              ...record,
+              publicationSettlement: { ...proof, binding: { ...proof.binding, baseHeadSha: undefined } },
+            },
+          },
+          {
+            record: {
+              ...record,
+              publicationSettlement: { ...proof, binding: { ...proof.binding, baseHeadSha: "c".repeat(40) } },
+            },
+          },
+          ...["pending", "unknown", "rejected", "accepted"].map((kind) => ({
+            record: {
+              ...record,
+              publicationSettlement: { ...proof, publication: { kind, reason: "unconfirmed", head } },
+            },
+          })),
+          ...["pending", "unknown", "failed", "created"].map((kind) => ({
+            record: {
+              ...record,
+              publicationSettlement: { ...proof, checkpoint: { kind, head, stage: "observe", reason: "unconfirmed" } },
+            },
+          })),
+          { pushReceipts: [] },
+          { pushReceipts: [{ ref: unit.branch, sha: head, by: "salvage" }] },
+          { pushReceipts: [...run.pushReceipts, { ref: "fix/foreign", sha: head, by: "push" }] },
+        ])
+          expect(
+            findPullOwnersInRows({ repo: instance.repo, pr: 999 }, { ...rows, runs: [{ ...run, ...altered }] }),
+          ).toEqual({ ok: false, reason: "incomplete" });
+        for (const effect of [
+          { ...current.currentEffect!, phase: "active" },
+          { ...current.currentEffect!, calls: [{ operation: "spawn", state: "unknown" }] },
+          { ...current.currentEffect!, calls: [{ operation: "spawn", state: "accepted", runId: "foreign_child" }] },
+        ])
+          expect(
+            findPullOwnersInRows(
+              { repo: instance.repo, pr: 999 },
+              { ...rows, units: [{ instance, unit: { ...current, currentEffect: effect } }] },
+            ),
+          ).toEqual({ ok: false, reason: "incomplete" });
+      }
+      const publish = {
+        ...current,
+        currentEffect: {
+          ...current.currentEffect!,
+          id: `${unit.unit}/0/coding/pr-check`,
+          ordinal: 3,
+          phase: "active" as const,
+          target: { ...current.currentEffect!.target, headSha: head },
+          calls: [{ operation: "pull_create" as const, state: "unstarted" as const }],
         },
-      },
-      { publication: { ...publication, targets: [{ pr: 9, headSha: head }] } },
-    ]) {
+      };
       expect(
-        findPullOwnersInRows({ repo: instance.repo, ref: unit.branch }, { ...rows, runs: [{ ...run, ...altered }] }),
-      ).toEqual({ ok: false, reason: "incomplete" });
-    }
-    expect(findPullOwnersInRows({ repo: instance.repo, ref: unit.branch }, { ...rows, units: [] })).toEqual({
-      ok: false,
-      reason: "incomplete",
-    });
-  });
+        findPullOwnersInRows(
+          { repo: instance.repo, ref: unit.branch },
+          { ...rows, units: [{ instance, unit: publish }] },
+        ),
+      ).toEqual(expected);
+      const mapped = {
+        ...publish,
+        pr: unit.pr,
+        publication: {
+          repo: instance.repo,
+          pr: 7,
+          headRef: unit.branch,
+          publicationRef: unit.branch,
+          baseRef: "main",
+          expectedHeadSha: head,
+          owner: { instanceId: instance.id, unit: unit.unit },
+        },
+        currentEffect: {
+          ...publish.currentEffect,
+          id: `${unit.unit}/1/review`,
+          target: { ...publish.currentEffect.target, pr: 7 },
+          calls: [{ operation: "spawn" as const, state: "accepted" as const, runId: "next_review" }],
+        },
+      };
+      expect(
+        findPullOwnersInRows({ repo: instance.repo, pr: 7 }, { ...rows, units: [{ instance, unit: mapped }] }),
+      ).toEqual(expected);
+      const ended: CoordinatorUnit = {
+        ...mapped,
+        currentEffect: { ...mapped.currentEffect, phase: "settled" },
+        ending: {
+          kind: "refused",
+          report: "ended",
+          at: 2,
+          outcome: { schemaVersion: 1, kind: "refused", reviewRounds: 0 },
+        },
+      };
+      expect(
+        findPullOwnersInRows(
+          { repo: instance.repo, ref: unit.branch },
+          { ...rows, units: [{ instance, unit: ended }] },
+        ),
+      ).toEqual({ ok: true, owners: [] });
+      const actionId = `r_${"d".repeat(64)}`;
+      const recovering: CoordinatorUnit = {
+        ...current,
+        history: { version: 1, receiptId: "rc_claim" },
+        recovery: {
+          kind: "coding",
+          round: 0,
+          actionId,
+          workflowId: `recovery-${actionId}`,
+          expectedHeadSha: head,
+          remainingMs: 1000,
+          claimedAt: 2,
+          deadlineAt: 1002,
+          step: `${unit.unit}/recovery/${actionId}/0/coding`,
+          codingRunId: runId,
+          codingKey: record.idempotencyKey,
+          previousEnding: { kind: "failed", report: "PR creation refused", at: 1 },
+          accounting: {
+            spendUsd: 0,
+            children: [{ runId, key: record.idempotencyKey, usd: 0 }],
+            grant: { renewals: 0 },
+            renewalsSpent: 0,
+          },
+        },
+      };
+      expect(
+        findPullOwnersInRows(
+          { repo: instance.repo, ref: unit.branch },
+          { ...rows, units: [{ instance, unit: recovering }] },
+        ),
+      ).toEqual({ ok: true, owners: [{ kind: "unit", instanceId: instance.id, unit: unit.unit, actionId }] });
+      // Lookup does not rewrite private publication or release evidence.
+      expect(run.publication).toEqual(publication);
+      expect(record.publicationSettlement.release).toEqual({ kind: "pending" });
+      expect(findPullOwnersInRows({ repo: "other/repo", pr: 7 }, rows)).toEqual({ ok: true, owners: [] });
+      for (const altered of [
+        { record: { ...record, userId: "cli:stranger" } },
+        { record: { ...record, coordinatorAttempt: 1 } },
+        { record: { ...record, agent: "review" } },
+        { record: { ...record, provisional: true } },
+        { pushReceipts: [{ ref: "fix/other", sha: head, by: "push" }] },
+        { pushReceipts: [{ ref: unit.branch, sha: "c".repeat(40), by: "push" }] },
+        {
+          door: {
+            id: "unknown",
+            repo: instance.repo,
+            update: { ref: `refs/heads/${unit.branch}`, old: "a".repeat(40), next: head },
+          },
+        },
+        { publication: { ...publication, targets: [{ pr: 9, headSha: head }] } },
+      ]) {
+        expect(
+          findPullOwnersInRows({ repo: instance.repo, ref: unit.branch }, { ...rows, runs: [{ ...run, ...altered }] }),
+        ).toEqual({ ok: false, reason: "incomplete" });
+      }
+      expect(findPullOwnersInRows({ repo: instance.repo, ref: unit.branch }, { ...rows, units: [] })).toEqual({
+        ok: false,
+        reason: "incomplete",
+      });
+    },
+  );
   it("retains the canonical target for a pending original report without making its envelope a new owner", () => {
     const effect = {
       id: `coordinator-reconcile:${"a".repeat(64)}`,

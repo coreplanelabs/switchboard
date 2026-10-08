@@ -420,7 +420,14 @@ export function findPullOwnersInRows(
   // receipts and the original unit's admission identify the sole owner.
   const initialCodingOwner = (
     run: PullOwnershipRows["runs"][number],
-  ): { owner: Extract<PullOwner, { kind: "unit" }>; ref: string; holds: boolean } | undefined => {
+  ):
+    | {
+        owner: Extract<PullOwner, { kind: "unit" }>;
+        ref: string;
+        holds: boolean;
+        confirmation: "checkpoint" | "model" | "historical";
+      }
+    | undefined => {
     const refuse = (predicate: InitialOwnerPredicate): undefined => {
       if (diagnostics?.qualifyRecord) {
         try {
@@ -482,13 +489,27 @@ export function findPullOwnersInRows(
       audit.firstHead === audited.firstHead &&
       audit.eventCount === (full as { eventCount?: unknown }).eventCount &&
       unit.adoption?.headSha === audited.head;
-    const accepted = proof?.checkpoint.kind === "created" && proof.publication.kind === "accepted";
+    const checkpointAccepted = proof?.checkpoint.kind === "created" && proof.publication.kind === "accepted";
+    // A model push has its own durable native receipt. A clean completion
+    // checkpoint measures that head without publishing it again; it cannot
+    // manufacture checkpoint acceptance or erase the earlier owned write.
+    // A stored adoption audit keeps its own causal-chain authority and must
+    // not fall back to this original-child receipt when that audit changes.
+    const modelAccepted =
+      unit.adoption?.audit === undefined &&
+      proof?.checkpoint.kind === "clean" &&
+      proof.publication.kind === "not_attempted" &&
+      proof.binding.baseHeadSha !== undefined &&
+      (record as typeof record & { headSha?: unknown }).headSha === proof.checkpoint.head;
+    const accepted = checkpointAccepted || modelAccepted;
     const branch = historical ? unit.branch : proof?.binding.branch;
     const head = historical
       ? audited.head
       : proof?.publication.kind === "accepted"
         ? proof.publication.head
-        : undefined;
+        : modelAccepted && proof?.checkpoint.kind === "clean"
+          ? proof.checkpoint.head
+          : undefined;
     const firstHead = historical ? audited.firstHead : proof?.binding.baseHeadSha;
     const pushes = branchPushReceiptsOf(run.pushReceipts);
     if (
@@ -541,6 +562,7 @@ export function findPullOwnersInRows(
       owner: unitOwner(unit),
       ref: branch,
       holds: unitHoldsPulls(unit, instance),
+      confirmation: historical ? "historical" : modelAccepted ? "model" : "checkpoint",
     };
   };
   for (const [rowIndex, run] of rows.runs.entries()) {
@@ -587,7 +609,7 @@ export function findPullOwnersInRows(
       const run = rows.runs.find((run) => run.runId === settlement.owner.runId);
       const owner = run && initialCodingOwner(run);
       const proof = publicationSettlementForRun(settlement.record.publicationSettlement, settlement.record);
-      const historical =
+      const cleanBound =
         proof?.checkpoint.kind === "clean" &&
         proof.binding.generation === settlement.owner.ownerGen &&
         settlement.binding?.ref === proof.binding.branch &&
@@ -601,7 +623,9 @@ export function findPullOwnersInRows(
               JSON.stringify(settlement.record.publicationSettlement) &&
             JSON.stringify(candidate.publication) === JSON.stringify(settlement.publication)
           );
-        }).length === 1 &&
+        }).length === 1;
+      const historical =
+        cleanBound &&
         rows.units.some(
           (row) =>
             isCoordinatorUnit(row.unit) &&
@@ -612,7 +636,7 @@ export function findPullOwnersInRows(
       if (
         !owner ||
         !proof ||
-        (proof.publication.kind !== "accepted" && !historical) ||
+        (proof.publication.kind !== "accepted" && !historical && !(owner.confirmation === "model" && cleanBound)) ||
         !run ||
         JSON.stringify(settlement.publication) !== JSON.stringify(run.publication) ||
         JSON.stringify(settlement.record.publicationSettlement) !==
