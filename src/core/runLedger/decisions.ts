@@ -82,9 +82,12 @@ export function reclaimPhase(from: LivePhase): LivePhase {
 }
 
 /** The fencing token: only the generation that holds the lease may write. */
-export function checkFence(row: { ownerGen: string } | undefined, gen: string): FenceResult {
+export function checkFence(
+  row: { ownerGen: string; state?: Record<string, unknown> } | undefined,
+  gen: string,
+): FenceResult {
   if (!row) return { ok: false, reason: "unknown-run" };
-  return row.ownerGen === gen ? { ok: true } : { ok: false, reason: "fenced" };
+  return row.ownerGen === gen && row.state?.cancellation === undefined ? { ok: true } : { ok: false, reason: "fenced" };
 }
 
 /** What a reclaiming generation takes over: every run whose lease has expired
@@ -95,12 +98,12 @@ export function checkFence(row: { ownerGen: string } | undefined, gen: string): 
  *  Worker blip), not a dead owner: taking it would launch the run a second
  *  time in the same process, and the fence, which compares generations, would
  *  never stop the first. */
-export function selectReclaim<T extends { leaseUntil: number; phase: LivePhase; ownerGen: string }>(
-  rows: readonly T[],
-  now: number,
-  gen: string,
-): T[] {
-  return rows.filter((r) => r.ownerGen !== gen && (r.phase === "handoff" || r.leaseUntil <= now));
+export function selectReclaim<
+  T extends { leaseUntil: number; phase: LivePhase; ownerGen: string; state?: Record<string, unknown> },
+>(rows: readonly T[], now: number, gen: string): T[] {
+  return rows.filter(
+    (r) => r.state?.cancellation === undefined && r.ownerGen !== gen && (r.phase === "handoff" || r.leaseUntil <= now),
+  );
 }
 
 /** Which inbox rows a reclaim hands the next generation (run-history item 40):

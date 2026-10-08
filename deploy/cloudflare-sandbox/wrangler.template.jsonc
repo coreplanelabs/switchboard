@@ -14,6 +14,15 @@
   "workers_dev": false,
   "routes": [{ "pattern": "{{hostname}}", "custom_domain": true }],
   "observability": { "enabled": true },
+  "vars": {
+    // {{#if urls.stateWorkerUrl}}
+    "STATE_WORKER_URL": "{{urls.stateWorkerUrl}}",
+    // {{/if}}
+    // {{#if resident}}
+    "CLOUDFLARE_ACCOUNT_ID": "{{account}}",
+    "BACKUP_BUCKET_NAME": "{{resident.script}}-cache"
+    // {{/if}}
+  },
   // {{#if resident}}
   // The seed (docs/reference/specs/execution.md item 25): a cold sandbox restores
   // the resident's checkout snapshot and its deps-store entry from the
@@ -27,10 +36,6 @@
   // `backupTransfer` says which. The bucket is the resident's, named after its
   // script exactly as the resident's template names it. A profile without a
   // resident has nothing to seed from and renders none of this.
-  "vars": {
-    "CLOUDFLARE_ACCOUNT_ID": "{{account}}",
-    "BACKUP_BUCKET_NAME": "{{resident.script}}-cache"
-  },
   "r2_buckets": [{ "binding": "BACKUP_BUCKET", "bucket_name": "{{resident.script}}-cache" }],
   // {{/if}}
   "containers": [

@@ -1,3 +1,12 @@
+import {
+  prepareCancellation,
+  cancellationBindingMatches,
+  cancellationOf,
+  cancellationMatches,
+  cancellationRecordMatches,
+  type CancellationActor,
+  type RunCancellation,
+} from "../../src/core/runLedger/cancellation.ts";
 import { qualifyPullOwnerSnapshot } from "../../src/core/coordinator/pullOwnerQualification.ts";
 import { originalPromotionArchiveKey } from "../../src/core/runLedger/workspaceDurability.ts";
 import { storeRequestWitness } from "../../src/core/storeResponse.ts";
@@ -6459,6 +6468,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     return { kind: "prepared", preparation: structuredClone(prepared) };
   }
   async claim(req: ClaimRequest, now: number, originalBodyJson?: string): Promise<ClaimResult> {
+    if (this.liveRow(req.runId)?.state.cancellation !== undefined) throw new PromotionPendingError(req.runId);
     const restartArchiveBefore = canonicalSeedJson(this.allocationArchive(req.runId));
     const restartHeld =
       req.phase === "attaching" && req.meta.restartOf === req.runId
@@ -6488,7 +6498,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       }
     }
     if (Object.hasOwn(req.meta, "workspaceDisposition")) throw new Error("workspace disposition is store-derived");
-    if (workspaceAuthorityFieldsPresent(req.state))
+    if ((req.state && Object.hasOwn(req.state, "cancellation")) || workspaceAuthorityFieldsPresent(req.state))
       throw new Error("workspace allocation cannot be written as mutable state");
     req = structuredClone(req);
     return this.withRangePins([{ id: req.runId, handoff: req.meta.childHandoff }], async () => {
@@ -6793,7 +6803,11 @@ export class RunHistoryDO extends DurableObject<Env> {
   ): Promise<LiveStateAssignResult> {
     if (workspaceDurabilityArchiveOf(this.allocationArchive(runId))?.promotion)
       await this.requirePromotionRelease(runId, gen);
-    if (workspaceAuthorityFieldsPresent(assignment.statePatch)) return { ok: false, reason: "fenced" };
+    if (
+      (assignment.statePatch && Object.hasOwn(assignment.statePatch, "cancellation")) ||
+      workspaceAuthorityFieldsPresent(assignment.statePatch)
+    )
+      return { ok: false, reason: "fenced" };
     let out: LiveStateAssignResult = { ok: false, reason: "unknown-run" };
     this.ctx.storage.transactionSync(() => {
       const row = this.liveRow(runId);
@@ -6886,7 +6900,8 @@ export class RunHistoryDO extends DurableObject<Env> {
       if (hold) return hold;
       if (before !== canonicalSeedJson(this.allocationArchive(runId))) return pending();
     }
-    if (workspaceAuthorityFieldsPresent(state)) return { ok: false, reason: "fenced" };
+    if (Object.hasOwn(state, "cancellation") || workspaceAuthorityFieldsPresent(state))
+      return { ok: false, reason: "fenced" };
     if (this.promotionHeld(runId, gen)) return pending();
     return this.ctx.blockConcurrencyWhile(async (): Promise<FenceResult | PromotionHold> => {
       const row = this.liveRow(runId);
@@ -7432,6 +7447,91 @@ export class RunHistoryDO extends DurableObject<Env> {
       }
     });
     return out;
+  }
+
+  async prepareCancellation(runId: string, actor: CancellationActor) {
+    let result: import("../../src/core/runLedger/cancellation.ts").CancellationPreparation = {
+      ok: false,
+      reason: "unknown-run",
+    };
+    this.ctx.storage.transactionSync(() => {
+      const row = this.liveRow(runId);
+      if (!row) return;
+      result = prepareCancellation(row, actor, crypto.randomUUID());
+      if (result.ok)
+        this.sql.exec("UPDATE live_runs SET state_json=? WHERE run_id=?", JSON.stringify(row.state), runId);
+    });
+    return result;
+  }
+  async cancellationPrepared(cancellation: RunCancellation, binding?: unknown): Promise<boolean> {
+    const row = this.liveRow(cancellation.runId);
+    return (
+      !!row &&
+      cancellationMatches(row, cancellation) &&
+      (binding === undefined || cancellationBindingMatches(row.state.binding, binding))
+    );
+  }
+  async finishCancellation(cancellation: RunCancellation, record: RunRecord, point?: RunMetricsPoint) {
+    const row = this.liveRow(cancellation.runId);
+    if (!row) {
+      const stored = await this.get(cancellation.runId);
+      return stored?.cancellation?.cancellation.id === cancellation.id
+        ? { ok: true as const, stored: true }
+        : { ok: false as const, reason: "unknown-run" as const };
+    }
+    if (!cancellationMatches(row, cancellation) || !cancellationRecordMatches(record, cancellation))
+      return { ok: false as const, reason: "fenced" as const };
+    if (row.meta.session?.key) {
+      const source = this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(row.meta.session.key));
+      if (!(await source.cancelSeed(this.ctx.id.toString(), cancellation)))
+        return { ok: false as const, reason: "fenced" as const };
+    }
+    let result = { ok: false as const, reason: "fenced" as const } as {
+      ok: boolean;
+      reason?: "fenced";
+      stored?: boolean;
+      turnedFinal?: boolean;
+    };
+    this.ctx.storage.transactionSync(() => {
+      const current = this.liveRow(cancellation.runId);
+      if (!current || !cancellationMatches(current, cancellation)) return;
+      this.checkWorkspaceFinishCapacity(current, record);
+      const put = this.upsertInTransaction(record);
+      if (!put.stored) return;
+      const obligation = terminalWorkspaceSettlement(current, record);
+      if (obligation) {
+        obligation.revision = nextWorkspaceRevision(this.workspaceRevision(obligation.owner));
+        this.sql.exec(
+          "INSERT INTO workspace_settlements(owner_key,revision,json) VALUES(?,?,?)",
+          workspaceOwnerKey(obligation.owner),
+          obligation.revision,
+          JSON.stringify(obligation),
+        );
+      }
+      // Retain original steps, inbox, jobs, source receipts and allocation bytes.
+      this.sql.exec("DELETE FROM live_runs WHERE run_id=?", current.runId);
+      this.recordPlaneEnding(
+        current.runId,
+        "stopped_hard",
+        causeOfClose("stopped_hard", false),
+        record.finishedAt,
+        true,
+      );
+      result = { ok: true, stored: true, turnedFinal: put.turnedFinal };
+    });
+    if (result.ok) {
+      this.planeSealed(record.id, record.threadKey, systemClock());
+      this.writeMetricsPoint(record.id, point, result.turnedFinal === true);
+      const transportWorkflowId =
+        record.parentInstanceId === undefined
+          ? undefined
+          : this.recoveryTransport(record.parentInstanceId, record.idempotencyKey);
+      await sendRunFinished(this.env.SHIP_COORDINATOR, {
+        ...record,
+        ...(transportWorkflowId ? { transportWorkflowId } : {}),
+      });
+    }
+    return result;
   }
 
   async listLive(): Promise<LiveRunRow[]> {
@@ -9883,14 +9983,14 @@ export class SessionLogDO extends DurableObject<Env> {
   }
   private sourceSeedPending(): SourceSeedReceipt | undefined {
     const current = this.currentSourceSeedRecord(),
-      pending = this.sourceSeedRecords().filter((record) => !record.release);
+      pending = this.sourceSeedRecords().filter((record) => !record.release && !record.cancelledBy);
     if (
       pending.some(
         (record) => !current || sourceSeedOriginalKey(record.receipt) !== sourceSeedOriginalKey(current.receipt),
       )
     )
       throw new SourceSeedPendingError(pending[0].receipt.key, pending[0].receipt.runId);
-    return current?.release ? undefined : current?.receipt;
+    return current?.release || current?.cancelledBy ? undefined : current?.receipt;
   }
   private retainSourceSeedRecord(record: SourceSeedOriginalRecord): void {
     this.setSourceMeta(sourceSeedOriginalKey(record.receipt), JSON.stringify(record));
@@ -9986,7 +10086,7 @@ export class SessionLogDO extends DurableObject<Env> {
     if (!expected) return { kind: "held", reason: "mismatch" };
     if (this.sourceSeedRecord(ref)) return this.readExpectedSeed(key, ref);
     const previous = this.currentSourceSeedRecord();
-    if (previous && !previous.release) return { kind: "held", reason: "owner" };
+    if (previous && !previous.release && !previous.cancelledBy) return { kind: "held", reason: "owner" };
     const previousBefore = canonicalSeedJson(previous ?? null);
     const snapshot = this.sourceSeedSnapshot(expected.from, expected.through),
       before = canonicalSeedJson(snapshot),
@@ -10032,6 +10132,7 @@ export class SessionLogDO extends DurableObject<Env> {
     return result;
   }
   async readExpectedSeed(key: string, input: SourceSeedReference): Promise<SourceSeedResult> {
+    if (this.sourceSeedRecord(input)?.cancelledBy) return { kind: "held", reason: "mismatch" };
     const ref = sourceSeedReferenceOf(input);
     if (!ref || !this.ctx.id.equals(this.env.SESSION_LOGS.idFromName(key))) return { kind: "held", reason: "mismatch" };
     let receipt: SourceSeedReceipt | undefined;
@@ -10083,6 +10184,12 @@ export class SessionLogDO extends DurableObject<Env> {
   }
   async setOwner(runId: string, gen: string, maxBytes: number = DEFAULT_SESSION_LOG_MAX_BYTES): Promise<{ ok: true }> {
     this.ctx.storage.transactionSync(() => {
+      if (
+        this.sourceSeedRecords().some(
+          (original) => original.cancelledBy && original.receipt.runId === runId && original.receipt.gen === gen,
+        )
+      )
+        throw new SourceSeedPendingError(this.ctx.id.toString(), runId);
       const held = this.sourceSeedPending();
       if (held) {
         if (held.runId === runId && held.gen === gen && String(maxBytes) === this.sourceMeta("max_bytes")) return;
@@ -10368,6 +10475,25 @@ export class SessionLogDO extends DurableObject<Env> {
   /** The owner releases the log at its finish so a zombie of a finished run is
    *  refused rather than appending to a session it no longer drives; only the
    *  owner may. The rows stay. */
+  async cancelSeed(objectId: string, cancellation: RunCancellation): Promise<boolean> {
+    const runs = this.env.RUNS.get(this.env.RUNS.idFromString(objectId));
+    if (!(await runs.cancellationPrepared(cancellation))) return false;
+    this.ctx.storage.transactionSync(() => {
+      for (const original of this.sourceSeedRecords()) {
+        if (
+          original.receipt.runId === cancellation.runId &&
+          original.receipt.gen === cancellation.ownerGen &&
+          !original.release
+        )
+          this.retainSourceSeedRecord({ ...original, cancelledBy: cancellation.id });
+      }
+      const owner = this.owner();
+      if (owner?.runId === cancellation.runId && owner.gen === cancellation.ownerGen)
+        this.sql.exec("DELETE FROM owner WHERE k=1");
+    });
+    return true;
+  }
+
   async clearOwner(runId: string, gen: string): Promise<FenceResult> {
     let out: FenceResult = { ok: true };
     this.ctx.storage.transactionSync(() => {
@@ -10992,6 +11118,9 @@ const LEDGER_ROUTES = new Set([
   "/runs/coordinator/wake",
   "/runs/decision-record/reserve",
   "/runs/claim",
+  "/runs/cancellation/prepare",
+  "/runs/cancellation/read",
+  "/runs/cancellation/finish",
   "/runs/promotion/prepare",
   "/runs/promotion/read",
   "/runs/resident-claim",
@@ -11768,6 +11897,29 @@ async function handleLedger(
   const key = parseStoreKey(b);
   if (!key.ok) return json({ error: key.error }, 400);
   const stub = env.RUNS.get(env.RUNS.idFromName(key.value));
+  if (pathname === "/runs/cancellation/read") {
+    const cancellation = cancellationOf(b.cancellation);
+    if (!cancellation) return json({ error: "invalid cancellation" }, 400);
+    if (b.binding === undefined) return json({ error: "invalid cancellation target" }, 400);
+    return json({
+      prepared: await stub.cancellationPrepared(cancellation, b.binding),
+      cancellationId: cancellation.id,
+    });
+  }
+  if (pathname === "/runs/cancellation/prepare") {
+    const id = parseRunId(b.runId);
+    if (!id.ok || !b.actor || typeof b.actor !== "object") return json({ error: "invalid cancellation" }, 400);
+    return json(await stub.prepareCancellation(id.value, b.actor as CancellationActor));
+  }
+  if (pathname === "/runs/cancellation/finish") {
+    const cancellation = cancellationOf(b.cancellation);
+    if (!cancellation || !isRunRecord(b.record) || !cancellationRecordMatches(b.record, cancellation))
+      return json({ error: "invalid cancellation" }, 400);
+    const parsed = parseRunPut({ ...b, storeKey: key.value });
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+    const result = await stub.finishCancellation(cancellation, parsed.value.record, parsed.value.point);
+    return json(result, result.ok ? 200 : 409);
+  }
   const now = systemClock();
   const stateWitness =
     pathname === "/runs/state" && originalBody !== undefined

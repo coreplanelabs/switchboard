@@ -102,6 +102,7 @@ Statuses: **proposed** (written, not yet agreed), **accepted** (agreed, being bu
 | 0091 | [Bound response validation off the gateway event loop](../decisions/0091-bound-response-validation-off-the-gateway-event-loop.md) | Bulkhead isolation and backpressure | accepted | 2026-10-05 |
 | 0092 | [Consumers read configuration owned by their immutable image identity](../decisions/0092-consumers-read-configuration-owned-by-their-immutable-image-identity.md) | Immutable identity, explicit input witnesses and conditional publication | proposed | 2026-10-05 |
 | 0093 | [An inferred command needs a semantic fulfillment verdict](../decisions/0093-an-inferred-command-needs-a-semantic-fulfillment-verdict.md) | One bounded interpreter with a separate admissibility judgment | accepted | 2026-10-07 |
+| 0094 | [Hard stop is a negative resolution independent of startup confirmation](../decisions/0094-hard-stop-is-a-negative-resolution-independent-of-startup-confirmation.md) | Fenced cancellation and retained evidence | accepted | 2026-10-08 |
 
 <!-- /generated:decision-records -->
 

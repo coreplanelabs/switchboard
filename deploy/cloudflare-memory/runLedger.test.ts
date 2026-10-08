@@ -1,3 +1,6 @@
+import { cancellationRecordMatches } from "../../src/core/runLedger/cancellation.ts";
+import { isRunRecord } from "../../src/core/runRecord.ts";
+import { reclaimedRunRecord } from "../../src/core/dispatch/record.ts";
 import { sourceHash } from "../../src/core/references/receipts.ts";
 import {
   pullOwnerQualificationSnapshot,
@@ -601,13 +604,17 @@ describe("original workspace durability in real SQLite", () => {
       });
     },
   );
-  async function originalSourceFixture() {
+  async function originalSourceFixture(noWorkspace = false) {
     const sk = storeKey(),
       req = request(sk, null),
       sessionKey = "task:source-verification:" + sk;
+    if (noWorkspace) {
+      req.run.meta.selection = "none";
+      req.run.meta.profile = { machine: "none", identity: "read", minutes: 25 };
+    }
     req.run.meta.session = {
       key: sessionKey,
-      threadSession: "task:fixture:@thread",
+      threadSession: contextThreadSessionKey(thread),
       seedFrom: 0,
       request: 0,
       range: { from: 0 },
@@ -766,8 +773,8 @@ describe("original workspace durability in real SQLite", () => {
       expect(state.storage.sql.exec("SELECT value FROM meta WHERE key='expected_seed_pending'").toArray()).toEqual([]);
     });
   });
-  async function confirmationFixture() {
-    const f = await originalSourceFixture();
+  async function confirmationFixture(noWorkspace = false) {
+    const f = await originalSourceFixture(noWorkspace);
     expect(
       await f.client.step(
         id,
@@ -789,6 +796,155 @@ describe("original workspace durability in real SQLite", () => {
     expect(await f.client.verifyExpectedSeed(f.sessionKey, f.reference)).toMatchObject({ kind: "verified" });
     return f;
   }
+  it.each([true, false])(
+    "a lost cancellation terminal acknowledgment reconciles only a committed record: committed=%s",
+    async (committed) => {
+      const { client, sk } = await confirmationFixture(true);
+      expect(await client.requestStop(id, "hard")).toMatchObject({ ok: true });
+      const prepared = await client.prepareCancellation(id, { kind: "chat", id: "slack:operator" });
+      if (!prepared.ok) throw new Error("cancellation not prepared");
+      const ending = reclaimedRunRecord({
+        row: prepared.row,
+        events: [],
+        status: "stopped_hard",
+        finishedAt: Date.now(),
+      });
+      ending.cancellation = {
+        version: 1,
+        actor: prepared.cancellation.actor,
+        cancellation: prepared.cancellation,
+        disposition: "no-workspace",
+      };
+      const writes: string[] = [];
+      const uncertain = new WorkerRunLedger({
+        baseUrl: BASE,
+        token: "test-token",
+        storeKey: sk,
+        fetch: async (input, init) => {
+          const path = new URL(String(input)).pathname;
+          if (path === "/runs/cancellation/finish") {
+            writes.push(path);
+            if (committed) await fetchMemoryTest(String(input), init);
+            throw new Error("terminal response lost");
+          }
+          return fetchMemoryTest(String(input), init);
+        },
+      });
+      if (committed) {
+        expect(await uncertain.finishCancellation(prepared.cancellation, ending)).toEqual({ ok: true, stored: true });
+        await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(sk)), async (owner) => {
+          expect((await owner.get(id))?.status).toBe("stopped_hard");
+          expect(await owner.listLive()).toEqual([]);
+        });
+      } else {
+        await expect(uncertain.finishCancellation(prepared.cancellation, ending)).rejects.toMatchObject({
+          name: "UncertainStoreError",
+        });
+        expect((await client.listLive())[0]).toMatchObject({
+          runId: id,
+          state: { cancellation: { id: prepared.cancellation.id } },
+        });
+      }
+      expect(writes).toEqual(["/runs/cancellation/finish"]);
+    },
+  );
+  it("cancelled SQLite resident ownership remains readable and can be acknowledged without a VM", async () => {
+    const sk = storeKey();
+    const client = new WorkerRunLedger({
+      baseUrl: BASE,
+      token: "test-token",
+      storeKey: sk,
+      fetch: (input, init) => fetchMemoryTest(String(input), init),
+    });
+    const req = request(sk, null).run;
+    req.state = {
+      branchPublication: { version: 1, repo: allocation.repo, branches: [], complete: true },
+      binding: {
+        backend: "resident",
+        ref: "main",
+        workspace: "/workspace/threads/fixture/main",
+        user: "worker2",
+        container: "fixture-container",
+        ownerGen: "g1",
+        ownerFence: 7,
+      },
+    };
+    expect(await client.claim(req)).toMatchObject({ ok: true });
+    expect(await client.requestStop(id, "hard")).toMatchObject({ ok: true });
+    const prepared = await client.prepareCancellation(id, { kind: "chat", id: "slack:operator" });
+    if (!prepared.ok) throw new Error("cancellation not prepared");
+    const record = reclaimedRunRecord({
+      row: prepared.row,
+      events: [],
+      status: "stopped_hard",
+      finishedAt: Date.now(),
+    });
+    record.cancellation = {
+      version: 1,
+      actor: prepared.cancellation.actor,
+      cancellation: prepared.cancellation,
+      disposition: "processes-stopped",
+    };
+    expect(await client.finishCancellation(prepared.cancellation, record)).toEqual({ ok: true, stored: true });
+    const owner = { runId: id, ownerGen: "g1", ownerFence: 7 };
+    expect(await client.workspaceSettlement(owner)).toMatchObject({
+      owner,
+      revision: 1,
+      binding: {
+        backend: "resident",
+        workspace: "/workspace/threads/fixture/main",
+        user: "worker2",
+        container: "fixture-container",
+      },
+      record: { id, status: "stopped_hard" },
+    });
+    expect(await client.ackWorkspaceSettlement(owner, 1)).toEqual({ ok: true });
+    const response = await fetchMemoryTest(BASE + "/runs/preservation-owner", {
+      method: "POST",
+      headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+      body: JSON.stringify({ storeKey: sk, ...owner }),
+    });
+    expect(await response.json()).toMatchObject({ kind: "acknowledged", owner, revision: 1 });
+  });
+  it("hard stop cancellation closes a real SQLite unconfirmed original without releasing its source", async () => {
+    const { client, reference, sessionKey, sk } = await confirmationFixture(true);
+    const source = await client.readExpectedSeed(sessionKey, reference);
+    expect(source.kind).toBe("verified");
+    expect(await client.requestStop(id, "hard")).toMatchObject({ ok: true });
+    const prepared = await client.prepareCancellation(id, { kind: "chat", id: "slack:operator" });
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) throw new Error("cancellation was not prepared");
+    expect(await client.append(id, "g1", [{ type: "answer", text: "late answer", seq: 90 }])).toEqual({
+      ok: false,
+      reason: "fenced",
+    });
+    const ending = reclaimedRunRecord({
+      row: prepared.row,
+      events: await client.readEvents(id),
+      status: "stopped_hard",
+      finishedAt: Date.now(),
+    });
+    ending.cancellation = {
+      version: 1,
+      actor: prepared.cancellation.actor,
+      cancellation: prepared.cancellation,
+      disposition: "no-workspace",
+    };
+    expect(cancellationRecordMatches(ending, prepared.cancellation)).toBe(true);
+    expect(isRunRecord(ending)).toBe(true);
+    expect(await client.finishCancellation(prepared.cancellation, ending)).toEqual({ ok: true, stored: true });
+    expect(await client.finishCancellation(prepared.cancellation, ending)).toEqual({ ok: true, stored: true });
+    expect(await client.readExpectedSeed(sessionKey, reference)).toEqual({ kind: "held", reason: "mismatch" });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(sk)), async (owner) => {
+      expect((await owner.get(id))?.status).toBe("stopped_hard");
+      expect(await owner.listLive()).toEqual([]);
+    });
+    await client.claimSession(sessionKey, "cccccccc-cccc-4ccc-cccc-cccccccccccc", "g2");
+    expect(await client.writeNotepad(sessionKey, "g2", "next task", "cccccccc-cccc-4ccc-cccc-cccccccccccc")).toEqual({
+      ok: true,
+    });
+    expect(await client.readNotepad(sessionKey)).toMatchObject({ text: "next task" });
+  });
   it("confirms actual SQLite seed custody while the original owner heartbeat renews only liveness", async () => {
     const { client, reference, sessionKey, sk } = await confirmationFixture();
     const prepared = await client.readPromotion({ runId: id, gen: "g1" });

@@ -325,6 +325,40 @@ describe("ResidentExecutor.exec", () => {
     expect("env" in sentBody(calls[1])).toBe(false);
   });
 
+  it("binds commands, reads, writes and publication to the caller's original run owner", async () => {
+    const { calls } = stubFetch(
+      { body: { stdout: "ok", stderr: "", exitCode: 0, truncated: false } },
+      { body: { content: "owned", truncated: false } },
+      { body: { ok: true, bytes: 5 } },
+      { body: { stdout: "published", stderr: "", exitCode: 0, truncated: false } },
+    );
+    const ex = new ResidentExecutor({ ...OPTS, runId: "run-original", ownerGen: "gen-original", ownerFence: 7 });
+    expect(await ex.exec("echo owned")).toBe("ok");
+    expect(await ex.readFile("owned.txt")).toBe("owned");
+    expect(await ex.writeFile("owned.txt", "owned")).toBe("Wrote owned.txt");
+    expect(
+      await ex.publishBranchResult({
+        repo: "jshttp/vary",
+        doorOrigin: "https://door.example",
+        branch: "fix/owned",
+        next: "a".repeat(40),
+        bearer: "effect-test-token",
+      }),
+    ).toMatchObject({ stdout: "published", exitCode: 0 });
+    expect(
+      calls.map((call) => ({
+        route: route(call),
+        runId: sentBody(call).runId,
+        ownerGen: sentBody(call).ownerGen,
+        ownerFence: sentBody(call).ownerFence,
+      })),
+    ).toEqual([
+      { route: "/exec", runId: "run-original", ownerGen: "gen-original", ownerFence: 7 },
+      { route: "/read", runId: "run-original", ownerGen: "gen-original", ownerFence: 7 },
+      { route: "/write", runId: "run-original", ownerGen: "gen-original", ownerFence: 7 },
+      { route: "/publish", runId: "run-original", ownerGen: "gen-original", ownerFence: 7 },
+    ]);
+  });
   it("keeps model env from replacing the door bearer and sends publication only through the typed route", async () => {
     const { calls } = stubFetch(
       { body: { stdout: "ok", stderr: "", exitCode: 0, truncated: false } },

@@ -1,3 +1,5 @@
+import type { RunCancellation, RuntimeStopResult } from "./runLedger/cancellation.js";
+import { reclaimedRunRecord } from "./dispatch/record.js";
 import type { LedgerRun as TrackedLedgerRun, LedgerWriteThrough } from "./runLedger/writeThrough.js";
 import { answerOutcomeOf, type AnswerOutcome } from "./answerOutcome.js";
 import { audienceRefusalOf, type AudienceRefusalReceipt } from "./audienceDecision.js";
@@ -370,7 +372,7 @@ export interface StopRunView {
   mode: StopMode;
   /** `withdrawn` is a queued ask's stop (record 0064, "The queue"): the plane's
    *  waiting row is closed — nothing was running, so nothing is "stopping". */
-  state: "stopping" | "withdrawn";
+  state: "stopping" | "withdrawn" | "stopped";
 }
 
 /** One hit of a session search (session-log item 11): the log turn, whose it
@@ -518,6 +520,10 @@ const ordinaryRun = (view: { threadKey?: string }, access?: typeof PRIVATE_WORKE
   access === PRIVATE_WORKER_INTERNAL_READ || !privateWorkerRun(view);
 
 export interface RunsServiceDeps {
+  /** Trusted runtime stop, bound to the store-fenced original target. */
+  stopRuntime?: ((row: LiveRunRow, cancellation: RunCancellation) => Promise<RuntimeStopResult>) & {
+    supports?: (row: LiveRunRow) => boolean;
+  };
   /** This process's existing writer; its actual run handle owns canonical closure. */
   writer?: Pick<LedgerWriteThrough, "gen" | "sessionPersistence" | "liveRuns">;
   registry: RunRegistry;
@@ -535,10 +541,10 @@ export interface RunsServiceDeps {
    *  `finish`, the one-transaction seal a hard stop gives a hosted parent this
    *  process hosts (record 0060), which releases the host key with the row.
    *  Null or absent when the ledger is off. */
-  ledger?: Pick<
-    RunLedger,
-    "listLive" | "readEvents" | "requestStop" | "finish" | "planeWithdraw" | "planeQueued"
-  > | null;
+  ledger?:
+    | (Pick<RunLedger, "listLive" | "readEvents" | "requestStop" | "finish" | "planeWithdraw" | "planeQueued"> &
+        Partial<Pick<RunLedger, "prepareCancellation" | "finishCancellation">>)
+    | null;
   /** Only the bot that owns this generation may close its paused rows.
    *  A CLI or another reader has no generation and only signals a stop. */
   generation?: string;
@@ -1457,6 +1463,57 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
     },
 
     async stopRun(id, mode, actor) {
+      let cancellationCandidate: LiveRunRow | undefined;
+      if (mode === "hard" && ledger?.prepareCancellation && ledger.finishCancellation && deps.stopRuntime) {
+        try {
+          cancellationCandidate = (await ledger.listLive()).find((row) => row.runId === id);
+        } catch {
+          return { ok: false, error: "unavailable" };
+        }
+      }
+      if (
+        mode === "hard" &&
+        ledger?.prepareCancellation &&
+        ledger.finishCancellation &&
+        deps.stopRuntime &&
+        cancellationCandidate &&
+        (cancellationCandidate.state.cancellation !== undefined ||
+          deps.stopRuntime.supports?.(cancellationCandidate) !== false)
+      ) {
+        try {
+          const stopped = await ledger.requestStop(id, "hard");
+          if (stopped.ok) {
+            registry.requestStopById(id, "hard", actor);
+            const prepared = await ledger.prepareCancellation(id, sanitizeActor(actor));
+            if (prepared.ok) {
+              const runtime = await deps.stopRuntime(prepared.row, prepared.cancellation);
+              if (!runtime.stopped) return { ok: false, error: "unavailable" };
+              const events = await ledger.readEvents(id);
+              const record = reclaimedRunRecord({
+                row: prepared.row,
+                events,
+                status: "stopped_hard",
+                finishedAt: clock(),
+              });
+              record.cancellation = {
+                version: 1,
+                actor: prepared.cancellation.actor,
+                cancellation: prepared.cancellation,
+                disposition: runtime.disposition,
+              };
+              const sealed = await ledger.finishCancellation(prepared.cancellation, record);
+              if (!sealed.ok || !sealed.stored) return { ok: false, error: "unavailable" };
+              registry.confirmCancellation(record);
+              return { ok: true, value: { id, mode, state: "stopped" } };
+            }
+            if (prepared.reason !== "unsupported") return { ok: false, error: "unavailable" };
+          }
+        } catch (err) {
+          warn(`[runs] hard stop cancellation unconfirmed for ${id}: ${describe(err)}`);
+          return { ok: false, error: "unavailable" };
+        }
+      }
+
       // A hosted parent this process hosts (record 0060; live-view items 10 and
       // 16): no run loop observes its control, so a soft stop would end nothing
       // — refused, pointing at the hard escape — and a hard stop is the

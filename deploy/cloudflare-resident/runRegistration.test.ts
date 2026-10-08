@@ -6,6 +6,7 @@ import {
   workspaceSettlementOf,
 } from "../../src/core/workspaceSettlement";
 import { webcrypto } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
@@ -35,6 +36,9 @@ describe("deploy registration activity", () => {
   it("counts a live owner as executing and keeps an exact terminal owner retained", () => {
     expect(state({ kind: "live", row: { runId: "r1", threadKey: "mcp:run", ownerGen: "g1" } })).toBe("executing");
     expect(state({ kind: "terminal", record: { id: "r1", threadKey: "mcp:run", status: "failed" } })).toBe("retained");
+    expect(state({ kind: "terminal", record: { id: "r1", threadKey: "mcp:run", status: "stopped_hard" } })).toBe(
+      "retained",
+    );
   });
 
   it("retains an exact acknowledged owner without granting workspace removal", () => {
@@ -990,6 +994,7 @@ const parsedWorker = ts.createSourceFile("worker.ts", source, ts.ScriptTarget.La
 const ownerMethods = [
   "reconcileRetainedOwner",
   "attachThreadTraced",
+  "withOwnedNativeOperation",
   "attachThreadBody",
   "allocateThreadUser",
   "claimRetainedThreadUser",
@@ -1169,6 +1174,7 @@ async function ownerFlow(pathForm: "canonical" | "collision-safe replacement" | 
     env: {},
     threadAttaches: { run: async (_key: string, action: () => Promise<unknown>) => action() },
     threadOpsInFlight: new Map(),
+    threadOperationScope: new AsyncLocalStorage(),
     opUsersInUse: new Map(),
     poolUsersInspecting: new Set(),
     workspaceExclusiveOpsInFlight: new Set(),
@@ -1297,3 +1303,19 @@ async function ownerFlow(pathForm: "canonical" | "collision-safe replacement" | 
       ),
   };
 }
+
+describe("cancelled owner attachment", () => {
+  it("rejects reuse of a cancelled original with a higher fence and allows a distinct successor", async () => {
+    const h = await ownerFlow("canonical");
+    h.rows.set(`cancelled:${h.threadKey}:run-cancelled`, { stopped: true });
+    expect(await h.attach("run-cancelled", 100)).toMatchObject({ error: "run cancelled", status: 409 });
+    expect(h.materializations()).toBe(0);
+    expect(await h.attach("run-distinct", 101)).toMatchObject({ ref: "main", user: "worker2" });
+    expect(h.rows.get(`runReg:${h.threadKey}`)).toMatchObject({
+      runId: "run-distinct",
+      ownerGen: "new-gen",
+      ownerFence: 101,
+    });
+    expect(h.privateBytes()).toBe("private uncommitted work");
+  });
+});

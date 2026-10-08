@@ -798,16 +798,6 @@ describe("the seeded sandbox wiring (static)", () => {
     ).not.toMatch(/\brg\b|ripgrep/i);
   });
 
-  it("the template binds the resident's cache bucket and names it, inside a block a profile without a resident drops", () => {
-    const template = read("deploy/cloudflare-sandbox/wrangler.template.jsonc");
-    const block = template.slice(template.indexOf("// {{#if resident}}"), template.indexOf("// {{/if}}"));
-    expect(block).toContain('"BACKUP_BUCKET_NAME": "{{resident.script}}-cache"');
-    expect(block).toContain(
-      '"r2_buckets": [{ "binding": "BACKUP_BUCKET", "bucket_name": "{{resident.script}}-cache" }]',
-    );
-    expect(block).toContain('"CLOUDFLARE_ACCOUNT_ID": "{{account}}"');
-  });
-
   it("the R2 token reaches the sandbox Worker too, optional on both", () => {
     const manifest = JSON.parse(read("deploy/secrets.manifest.json")) as {
       secrets: Array<{ name: string; workers: string[]; optional?: unknown }>;

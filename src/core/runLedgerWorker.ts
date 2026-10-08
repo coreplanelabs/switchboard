@@ -1,4 +1,11 @@
 import {
+  cancellationRecordMatches,
+  cancellationOf,
+  type CancellationActor,
+  type RunCancellation,
+  type CancellationPreparation,
+} from "./runLedger/cancellation.js";
+import {
   sourceSeedReleaseOf,
   promotionConfirmationOf,
   confirmationMatchesPreparation,
@@ -110,7 +117,7 @@ import { type SessionSources, isSessionSources, sourceHash } from "./references/
 //   POST /runs/intake/delivery/finish {storeKey, key, poster, delivered}  → {ok:true}
 //   POST /runs/intake/list      {storeKey, threadKey?, since?}           → {receipts: IntakeReceipt[]}
 
-import { RUN_ID_PATTERN, SESSION_KEY_PATTERN, type RunRecord } from "./runRecord.js";
+import { isRunRecord, RUN_ID_PATTERN, SESSION_KEY_PATTERN, type RunRecord } from "./runRecord.js";
 import { RUN_LIVE_STATE_NAMES } from "./runLiveState.js";
 import { pointOf } from "./runMetrics.js";
 import type { ModelPriceTable } from "./modelPricing.js";
@@ -1165,6 +1172,48 @@ export class WorkerRunLedger implements RunLedger {
       items,
       boundary: { state: observed.state, lastStep: observed.lastStep },
     };
+  }
+
+  async prepareCancellation(runId: string, actor: CancellationActor): Promise<CancellationPreparation> {
+    const result = await this.post("/runs/cancellation/prepare", { storeKey: this.opts.storeKey, runId, actor });
+    if (result.data.ok !== true) return result.data as unknown as CancellationPreparation;
+    const cancellation = cancellationOf(result.data.cancellation);
+    const row = result.data.row as LiveRunRow | undefined;
+    if (
+      !cancellation ||
+      cancellation.runId !== runId ||
+      !row ||
+      row.runId !== runId ||
+      row.ownerGen !== cancellation.ownerGen
+    )
+      throw new UncertainStoreError("run cancellation preparation acknowledgment is malformed", result.request);
+    return { ok: true, cancellation, row };
+  }
+  async finishCancellation(cancellation: RunCancellation, record: RunRecord): Promise<FinishResult> {
+    const point = pointOf(record, this.opts.prices);
+    try {
+      const result = await this.post(
+        "/runs/cancellation/finish",
+        { storeKey: this.opts.storeKey, cancellation, record, ...(point ? { point } : {}) },
+        true,
+      );
+      const fence = this.fenceResult(result);
+      if (!fence.ok) return fence;
+      if (result.data.stored !== true)
+        throw new UncertainStoreError("run cancellation terminal acknowledgment is malformed", result.request);
+      return { ok: true, stored: true };
+    } catch (error) {
+      if (error instanceof UncertainStoreError) {
+        try {
+          const stored = await this.read("/runs/get", { storeKey: this.opts.storeKey, id: cancellation.runId });
+          if (isRunRecord(stored.data.record) && cancellationRecordMatches(stored.data.record, cancellation))
+            return { ok: true, stored: true };
+        } catch {
+          /* The original terminal remains unknown; never replay it. */
+        }
+      }
+      throw error;
+    }
   }
 
   async requestStop(runId: string, mode: StopMode): Promise<{ ok: boolean; ownerLive?: boolean }> {

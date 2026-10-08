@@ -18,7 +18,9 @@ describe("resident Worker /exec env (static)", () => {
   it("reads the env map from the body through envFromRequest and hands it to execThread", () => {
     expect(worker).toMatch(/import \{ envFromRequest \} from "\.\.\/\.\.\/src\/execution\/sandboxEnv\.js";/);
     expect(worker).toMatch(/const execEnv = envFromRequest\(\{ body \}\);/);
-    expect(worker).toMatch(/execThread\(ctx\.threadKey, body\.command, timeoutMs, traceparent, execEnv\)/);
+    expect(worker).toMatch(
+      /execThread\(\s*ctx\.threadKey,\s*body\.command,\s*timeoutMs,\s*traceparent,\s*execEnv,\s*requestWorkspaceOwner\(body\),?\s*\)/,
+    );
   });
 
   it("threads the env through to the thread run, merged under the Worker's own injected variables and validated by name", () => {

@@ -1,3 +1,10 @@
+import {
+  prepareCancellation,
+  cancellationMatches,
+  cancellationRecordMatches,
+  type CancellationActor,
+  type RunCancellation,
+} from "./cancellation.js";
 import { originalPromotionArchiveKey } from "./workspaceDurability.js";
 import { RUN_STORE_KEY } from "../runStoreConstants.js";
 import {
@@ -344,14 +351,14 @@ export class InMemoryRunLedger implements RunLedger {
   }
   private sourceSeedPending(key: string): SourceSeedReceipt | undefined {
     const current = this.currentSourceSeedRecord(key),
-      pending = this.sourceSeedRecords(key).filter((record) => !record.release);
+      pending = this.sourceSeedRecords(key).filter((record) => !record.release && !record.cancelledBy);
     if (
       pending.some(
         (record) => !current || sourceSeedOriginalKey(record.receipt) !== sourceSeedOriginalKey(current.receipt),
       )
     )
       throw new SourceSeedPendingError(key, pending[0].receipt.runId);
-    return current?.release ? undefined : current?.receipt;
+    return current?.release || current?.cancelledBy ? undefined : current?.receipt;
   }
   private retainSourceSeedRecord(key: string, record: SourceSeedOriginalRecord): void {
     const log = this.sessions.get(key)!;
@@ -472,7 +479,7 @@ export class InMemoryRunLedger implements RunLedger {
     if (!expected) return { kind: "held", reason: "mismatch" };
     if (this.sourceSeedRecord(key, ref)) return this.readExpectedSeed(key, ref);
     const previous = this.currentSourceSeedRecord(key);
-    if (previous && !previous.release) return { kind: "held", reason: "owner" };
+    if (previous && !previous.release && !previous.cancelledBy) return { kind: "held", reason: "owner" };
     const previousBefore = canonicalSeedJson(previous ?? null);
     const snapshot = this.sourceSeedSnapshot(key, expected.from, expected.through),
       before = canonicalSeedJson(snapshot);
@@ -509,6 +516,7 @@ export class InMemoryRunLedger implements RunLedger {
     return { kind: "verified", receipt: structuredClone(receipt) };
   }
   async readExpectedSeed(key: string, input: SourceSeedReference): Promise<SourceSeedResult> {
+    if (this.sourceSeedRecord(key, input)?.cancelledBy) return { kind: "held", reason: "mismatch" };
     const ref = sourceSeedReferenceOf(input);
     if (!ref) return { kind: "held", reason: "mismatch" };
     let receipt: SourceSeedReceipt | undefined;
@@ -1127,6 +1135,7 @@ export class InMemoryRunLedger implements RunLedger {
   }
 
   async claim(req: ClaimRequest, originalBodyJson?: string): Promise<ClaimResult> {
+    if (this.live.get(req.runId)?.state.cancellation !== undefined) throw new PromotionPendingError(req.runId);
     const seedBefore = workspaceDurabilityArchiveOf(this.allocationArchive(req.runId))?.promotion?.expectedSeed;
     const seedJsonBefore = canonicalSeedJson(seedBefore ?? null);
     const actualSeedSha256 = seedBefore ? await seedContentHash(seedBefore) : undefined;
@@ -1151,7 +1160,7 @@ export class InMemoryRunLedger implements RunLedger {
       }
     }
     if (Object.hasOwn(req.meta, "workspaceDisposition")) throw new Error("workspace disposition is store-derived");
-    if (workspaceAuthorityFieldsPresent(req.state))
+    if ((req.state && Object.hasOwn(req.state, "cancellation")) || workspaceAuthorityFieldsPresent(req.state))
       throw new Error("workspace allocation cannot be written as mutable state");
     const existing = this.byThread(req.threadKey);
     if (
@@ -1713,7 +1722,11 @@ export class InMemoryRunLedger implements RunLedger {
     gen: string,
     assignment: LiveStateAssignRequest,
   ): Promise<LiveStateAssignResult> {
-    if (workspaceAuthorityFieldsPresent(assignment.statePatch)) return { ok: false, reason: "fenced" };
+    if (
+      (assignment.statePatch && Object.hasOwn(assignment.statePatch, "cancellation")) ||
+      workspaceAuthorityFieldsPresent(assignment.statePatch)
+    )
+      return { ok: false, reason: "fenced" };
     const row = this.live.get(runId);
     const fence = checkFence(row, gen);
     if (!fence.ok) return fence;
@@ -1761,7 +1774,8 @@ export class InMemoryRunLedger implements RunLedger {
   }
 
   async setState(runId: string, gen: string, state: RunState): Promise<FenceResult> {
-    if (workspaceAuthorityFieldsPresent(state)) return { ok: false, reason: "fenced" };
+    if (Object.hasOwn(state, "cancellation") || workspaceAuthorityFieldsPresent(state))
+      return { ok: false, reason: "fenced" };
     if (this.promotionHeld(runId, gen)) throw new PromotionPendingError(runId);
     const row = this.live.get(runId);
     const fence = checkFence(row, gen);
@@ -1888,6 +1902,50 @@ export class InMemoryRunLedger implements RunLedger {
       items,
       boundary: { state: snapshot.state, lastStep: snapshot.lastStep },
     };
+  }
+
+  async prepareCancellation(runId: string, actor: CancellationActor) {
+    const row = this.live.get(runId);
+    if (!row) return { ok: false as const, reason: "unknown-run" as const };
+    return prepareCancellation(row, actor, crypto.randomUUID());
+  }
+
+  async finishCancellation(cancellation: RunCancellation, record: RunRecord) {
+    const row = this.live.get(cancellation.runId);
+    if (!row)
+      return this.finished.get(cancellation.runId)?.cancellation?.cancellation.id === cancellation.id
+        ? { ok: true as const, stored: true }
+        : { ok: false as const, reason: "unknown-run" as const };
+    if (!cancellationMatches(row, cancellation) || !cancellationRecordMatches(record, cancellation))
+      return { ok: false as const, reason: "fenced" as const };
+    const obligation = terminalWorkspaceSettlement(row, record);
+    if (obligation) {
+      const ownerKey = workspaceOwnerKey(obligation.owner),
+        prior = this.workspaceObligations.get(ownerKey);
+      if ((prior?.pending.size ?? 0) >= WORKSPACE_SETTLEMENTS_MAX)
+        throw new Error("workspace obligation capacity exhausted");
+      obligation.revision = nextWorkspaceRevision(prior?.revision);
+      const pending = prior?.pending ?? new Map<number, WorkspaceSettlement>();
+      pending.set(obligation.revision, obligation);
+      this.workspaceObligations.set(ownerKey, { revision: obligation.revision, pending });
+    }
+    const key = row.meta.session?.key;
+    if (key) {
+      const log = this.sessions.get(key);
+      for (const original of this.sourceSeedRecords(key)) {
+        if (original.receipt.runId === row.runId && original.receipt.gen === row.ownerGen && !original.release)
+          this.retainSourceSeedRecord(key, { ...original, cancelledBy: cancellation.id });
+      }
+      if (log?.owner?.runId === row.runId && log.owner.gen === row.ownerGen) delete log.owner;
+    }
+    this.finished.set(row.runId, structuredClone(record));
+    this.live.delete(row.runId);
+    this.planeEndings.set(row.runId, {
+      kind: "stopped_hard",
+      cause: causeOfClose("stopped_hard", false),
+      at: record.finishedAt,
+    });
+    return { ok: true as const, stored: true };
   }
 
   async requestStop(runId: string, mode: StopMode): Promise<{ ok: boolean; ownerLive?: boolean }> {
@@ -2123,6 +2181,12 @@ export class InMemoryRunLedger implements RunLedger {
   }
 
   async claimSession(key: string, runId: string, gen: string, maxBytes?: number): Promise<void> {
+    if (
+      this.sourceSeedRecords(key).some(
+        (original) => original.cancelledBy && original.receipt.runId === runId && original.receipt.gen === gen,
+      )
+    )
+      throw new SourceSeedPendingError(key, runId);
     const pending = this.sourceSeedPending(key);
     if (pending) {
       const current = this.sessions.get(key)!;
