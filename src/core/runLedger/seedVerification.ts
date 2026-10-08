@@ -336,6 +336,14 @@ export function sourceSeedReleaseOf(value: unknown): SourceSeedReleaseReceipt | 
   if (!source || !confirmation || canonicalSeedJson(source) !== canonicalSeedJson(confirmation.source)) return;
   return { version: 1, phase: "released", source, confirmation };
 }
+/** Lease renewal keeps the original owner alive; it changes no admitted input
+ * or allowance. Every other row fact still fences source confirmation. */
+export function promotionConfirmationRow(row: import("./types.js").LiveRunRow | undefined) {
+  if (!row) return;
+  const { leaseUntil: _leaseUntil, ...boundary } = row;
+  return boundary;
+}
+
 /** No caller-supplied system, budget or step is used here. */
 export async function confirmStoredSeedBoundary(
   original: Extract<PromotionReadResult, { kind: "committed" }>,
