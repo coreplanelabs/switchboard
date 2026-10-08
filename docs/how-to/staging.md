@@ -56,3 +56,11 @@ Deploy logs are retained as an artifact. Upload and readiness are separate from 
 Use the [release and deploy contract](../reference/specs/release-and-deploy.md) to separate readiness from acceptance. Retain receipts outside this repository with the run ID, actor, exact PR/head, selected Worker commits, output/artifact and outcome. Start with Slack question, review and Ship; then private Fix it, both executors, restart and busy deploy. A successful health response does not establish these outcomes.
 
 Keep capability smoke until these staged paths are repeatable. Ship can be tested here while production Review remains pinned to its current release. They still share one bot artifact; independent agent releases need a separate architecture change.
+
+## First installation
+
+`npm run staging:deploy -- --initialize` creates an empty staging installation from a clean checkout. Use the same profile and account pins as `--check`, with a local staging secret directory. It needs the manifest's required secrets, separate GitHub credentials, ingress and executor bearers, MCP credential encryption and both bucket-scoped R2 pairs. The operator's `MEMORY_TOKEN` and `SANDBOX_TOKEN` must match that directory. Docker must be available. The profile must name a restart deployer with one matching ingress bearer.
+
+Creation checks complete native Worker, Container, namespace and Workflow inventories. Existing selected resources refuse. Provisional Memory omits Bot service/Workflow bindings until the Bot exists; it is not parity-ready. The command creates the executors, publishes the owned config slot only against canonical version zero with an empty legacy slot, then creates the Bot, provisions its secrets and uses the existing authenticated restart route without force before proving its singleton and exact config. It restores full Memory bindings last. Normal update preflights are unchanged.
+
+Use one operator for first installation. A lost answer or failed phase leaves a partial installation and stops. Inspect the captured receipts and current native resources before further action; `--initialize` does not adopt, delete or reset a partial installation. Do not use force to finish it. Full product acceptance still requires the scenarios above.

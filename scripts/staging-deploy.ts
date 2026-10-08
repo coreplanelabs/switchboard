@@ -9,19 +9,22 @@ import { stagingProblems } from "../src/deploy/staging.js";
 const args = process.argv.slice(2);
 const selection: string[] = [];
 let check = false;
+let initialize = false;
 for (let i = 0; i < args.length; i++) {
   const arg = args[i];
-  if (arg === "--check" && !check) check = true;
-  else if (arg === "--affected" && selection.length === 0) selection.push(arg);
+  if (arg === "--initialize" && !initialize && selection.length === 0) initialize = true;
+  else if (arg === "--check" && !check) check = true;
+  else if (arg === "--affected" && !initialize && selection.length === 0) selection.push(arg);
   else if (
     arg === "--only" &&
+    !initialize &&
     selection.length === 0 &&
     /^(memory|bot|resident|sandbox)(,(memory|bot|resident|sandbox))*$/.test(args[i + 1] ?? "")
   )
     selection.push(arg, args[++i]);
   else
     throw new Error(
-      "staging:deploy accepts --check and either --affected or --only <Worker list>; preflight bypass is not supported",
+      "staging:deploy accepts --check, --initialize, or --affected/--only <Worker list>; preflight bypass is not supported",
     );
 }
 if (!process.env.SWITCHBOARD_DEPLOY_PROFILE) throw new Error("SWITCHBOARD_DEPLOY_PROFILE must explicitly name staging");
@@ -36,7 +39,10 @@ if (problems.length) throw new Error(problems.join("\n"));
 console.log(
   "Staging isolation: profile and resolved runtime endpoints passed; credentials and app scope require provisioning proof.",
 );
-if (!check) {
+if (!check && initialize) {
+  const { initializeOnHost } = await import("./staging-initialize.js");
+  await initializeOnHost(structuredClone(loaded.profile), Object.freeze({ ...config }));
+} else if (!check) {
   const directory = mkdtempSync(join(tmpdir(), "switchboard-staging-"));
   try {
     // Freeze both remote inputs outside the checkout; the deploy runner still checks its clean tree.
