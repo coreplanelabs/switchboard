@@ -27,6 +27,8 @@ import {
 import { capBytesFor, capWrappedCommand } from "../../src/execution/residentExecWrap";
 import { KeyedAsyncLock } from "./keyedAsyncLock";
 import { isRuntimeBusySignal, SandboxRuntimeBusyError } from "../../src/execution/sandboxErrors";
+import { planForceDetach } from "../../src/execution/residentDetach";
+import { legacyStageReuseScrubCommand } from "./legacyCredentials";
 
 const source = ts.createSourceFile("worker.ts", readSource("worker.ts"), ts.ScriptTarget.Latest, true);
 const resident = source.statements.find(
@@ -34,9 +36,12 @@ const resident = source.statements.find(
 )!;
 const names = [
   "cancelRun",
+  "detachThread",
+  "killThreadUserProcesses",
   "withThreadBusy",
   "withOwnedNativeOperation",
   "assertThreadOperationAllowed",
+  "beginThreadNativeOperation",
   "execThread",
   "run",
   "waitForThreadDrain",
@@ -66,6 +71,13 @@ const compiled = ts.transpileModule(
     )
     .map((s) => s.getText(source).replace("export ", ""))
     .join("\n")}
+${source.statements
+  .filter(
+    (s) =>
+      ts.isVariableStatement(s) && s.declarationList.declarations.some((d) => d.name.getText(source) === "parentDir"),
+  )
+  .map((s) => s.getText(source))
+  .join("\n")}
 class UnderTest {
  ${resident.members
    .filter((m) => ts.isMethodDeclaration(m) && ts.isIdentifier(m.name) && names.includes(m.name.text))
@@ -222,6 +234,7 @@ function harness(
     READ_CONTENT_CAP: 1000,
     ControlResetError: class ControlResetError extends Error {},
     RuntimeReplacedError: class RuntimeReplacedError extends Error {},
+    StepError: class StepError extends Error {},
     SandboxRuntimeBusyError,
     DEFAULT_EXEC_TIMEOUT_MS: 1000,
     BASH_TIMEOUT_MS: 1000,
@@ -243,6 +256,8 @@ function harness(
     JSON,
     structuredClone,
     registeredRunOwnsRelease,
+    planForceDetach,
+    legacyStageReuseScrubCommand,
     cancellationRefusal: () => false,
     FORCE_DETACH_KILL_TIMEOUT_MS: 1000,
     SECOND_MS: 1000,
@@ -429,6 +444,73 @@ describe("resident cancellation admission", () => {
     h.instance.threadOpsInFlight = new Map();
     h.instance.run = async () => ({ exitCode: 137, timedOut: false, truncated: false });
     expect(await h.instance.cancelRun(ticket, physical)).toEqual({ stopped: false });
+  });
+  it("settles a completed native write but retains an unknown write outcome", async () => {
+    const write = async (lost: boolean) => {
+      const h = harness();
+      h.instance.runOk = async () => {};
+      h.instance.threadRunOk = async () => {};
+      h.instance.writeFile = async () => {
+        if (lost) throw new Error("native write reply lost");
+        return { success: true };
+      };
+      const result = await h.instance.writeThreadFile(threadKey, "owned.txt", "owned", owner);
+      h.instance.run = async () => ({ exitCode: 137, timedOut: false, truncated: false });
+      return { result, stopped: await h.instance.cancelRun(ticket, physical) };
+    };
+    expect(await write(false)).toEqual({
+      result: { ok: true, bytes: 5 },
+      stopped: { stopped: true, cancellationId: ticket.id, disposition: "processes-stopped" },
+    });
+    expect(await write(true)).toEqual({
+      result: { error: "write-failed: Error: native write reply lost", status: 400 },
+      stopped: { stopped: false },
+    });
+  });
+  it("refuses native work whose parent scope closes during owner validation", async () => {
+    const h = harness();
+    h.instance.run = Object.getPrototypeOf(h.instance).run;
+    let enter!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const get = h.instance.ctx.storage.get;
+    let reads = 0;
+    h.instance.ctx.storage.get = async (key: string) => {
+      if (key === "runReg:" + threadKey && ++reads === 2) {
+        enter();
+        await pending;
+      }
+      return get(key);
+    };
+    h.instance.processSandbox = {
+      exec: async () => ({
+        output: async () => ({ stdout: "late", stderr: "", exitCode: 0, timedOut: false, truncated: false }),
+      }),
+    };
+    let late!: Promise<unknown>;
+    h.instance.execThreadImpl = async () => {
+      late = h.instance.run(["echo", "late"]).catch((error: Error) => ({ error: error.message }));
+      await entered;
+      return { stdout: "parent finished", stderr: "", exitCode: 0, truncated: false };
+    };
+    expect(await h.instance.execThread(threadKey, "echo work", 1000, undefined, undefined, owner)).toEqual({
+      stdout: "parent finished",
+      stderr: "",
+      exitCode: 0,
+      truncated: false,
+    });
+    release();
+    expect(await late).toEqual({ error: "run cancelled" });
+    h.instance.execThreadImpl = async () => h.instance.run(["echo", "next"]);
+    expect(await h.instance.execThread(threadKey, "echo next", 1000, undefined, undefined, owner)).toMatchObject({
+      stdout: "late",
+      exitCode: 0,
+    });
   });
   it.each(["cancelled", "busy", "unreachable"])(
     "a publication proven never started clears its hold: %s",
@@ -726,6 +808,57 @@ describe("resident run cancellation", () => {
     expect(h.rows.get(`cancelled:${threadKey}:${owner.runId}`)).toMatchObject({
       cancellation: { id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb" },
     });
+  });
+});
+
+describe("resident force detach shutdown", () => {
+  it.each(["wrong boot", "timeout", "lost response", "truncated", "missing boot"])(
+    "keeps the workspace when shutdown is unconfirmed: %s",
+    async (outcome) => {
+      const h = harness();
+      if (outcome === "missing boot") delete h.rows.get("thread:" + threadKey).container;
+      h.instance.threadOpsInFlight.set(threadKey, 1);
+      h.instance.waitForThreadDrain = async () => {
+        h.instance.threadOpsInFlight.delete(threadKey);
+        return 0;
+      };
+      h.instance.isRuntimeActive = async () => true;
+      h.instance.evictBinding = async () => {
+        h.rows.delete("thread:" + threadKey);
+        return "removed";
+      };
+      h.instance.run = async (argv: string[]) => {
+        if (outcome === "lost response") throw new Error("native reply lost");
+        return {
+          exitCode:
+            outcome === "wrong boot" && argv.some((v) => v.includes("/proc/sys/kernel/random/boot_id")) ? 2 : 137,
+          timedOut: outcome === "timeout",
+          truncated: outcome === "truncated",
+        };
+      };
+      expect(
+        await h.instance.detachThread(threadKey, true, [], owner.runId, owner.ownerGen, owner.ownerFence),
+      ).toMatchObject({ status: 503, error: "runtime-stop-unconfirmed: force detach kept the workspace" });
+      expect(h.rows.get("thread:" + threadKey)).toMatchObject({ user: "worker2", worktreePath: physical.workspace });
+      expect(h.rows.get("runReg:" + threadKey)).toMatchObject(owner);
+    },
+  );
+  it("continues to the workspace preservation decision after a confirmed kill and drain", async () => {
+    const h = harness();
+    h.instance.threadOpsInFlight.set(threadKey, 1);
+    h.instance.waitForThreadDrain = async () => {
+      h.instance.threadOpsInFlight.delete(threadKey);
+      return 0;
+    };
+    h.instance.isRuntimeActive = async () => true;
+    h.instance.run = async () => ({ exitCode: 137, timedOut: false, truncated: false });
+    h.instance.evictBinding = async () => "preserved";
+    expect(await h.instance.detachThread(threadKey, true, [], owner.runId, owner.ownerGen, owner.ownerFence)).toEqual({
+      released: false,
+      reason: "workspace-preservation: owner or saved work is not verified",
+      user: "worker2",
+    });
+    expect(h.rows.get("runReg:" + threadKey)).toMatchObject(owner);
   });
 });
 

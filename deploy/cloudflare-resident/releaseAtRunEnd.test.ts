@@ -45,7 +45,7 @@ describe("detachThread releases the tree whatever it holds, and names what it di
   it("the measurement is a non-force release's alone — a read-only tree holds nothing, a hard stop's tree is whatever the killed command left — and runs only with the runtime up", () => {
     expect(detach).toMatch(/let tree: EvictedTree \| undefined;\s*if \(!force && active\) tree = await/);
     const measure = detach.indexOf("tree = await this.measureTreeBeforeEviction(binding);");
-    const kill = detach.indexOf("await this.killThreadUserProcesses(plan.user, threadKey)");
+    const kill = detach.indexOf("await this.killThreadUserProcesses(plan.user, threadKey, binding.container)");
     const drain = detach.indexOf("const left = await this.waitForThreadDrain(threadKey);");
     expect(kill).toBeGreaterThan(-1);
     expect(drain).toBeGreaterThan(kill);

@@ -2568,8 +2568,7 @@ export class ResidentDO extends Sandbox<Env> {
     if (this.destroying || (await this.ctx.storage.get(DESTROY_UNCONFIRMED_KEY))) {
       throw new Error("resident-destroy-unconfirmed: container reuse refused until destruction is confirmed");
     }
-    const scope = this.threadOperationScope?.getStore();
-    await this.assertThreadOperationAllowed();
+    let settleNative = await this.beginThreadNativeOperation();
     const timeout = opts.timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
     const launch = {
       ...(opts.cwd ? { cwd: opts.cwd } : {}),
@@ -2585,7 +2584,6 @@ export class ResidentDO extends Sandbox<Env> {
     // unsafe cases surface as RuntimeReplacedError for the routes to name.
     let proc: Awaited<ReturnType<ReturnType<typeof createExtensionProcessSandbox>["exec"]>>;
     try {
-      if (scope) scope.pendingNative++;
       proc = await createExtensionProcessSandbox(this).exec(argv as unknown as SandboxCommand, launch);
     } catch (err) {
       // A DO code-update reset (our own Worker deploy) BEFORE a runtime
@@ -2601,7 +2599,7 @@ export class ResidentDO extends Sandbox<Env> {
         // container accepts again in moments — the typed word, for the thread
         // routes to answer with the wait token; never counted as unreachable.
         if (isRuntimeBusy(err)) {
-          if (scope) scope.pendingNative--;
+          settleNative();
           throw new SandboxRuntimeBusyError({ containerId: this.ctx.id.toString(), cause: errMsg(err) });
         }
         // The control port never answered the SDK's connect (its 30 s abort,
@@ -2610,7 +2608,7 @@ export class ResidentDO extends Sandbox<Env> {
         // reads the count — and name it, so no reason ever carries the bare
         // `The operation was aborted`.
         if (isRuntimeUnreachable(err)) {
-          if (scope) scope.pendingNative--;
+          settleNative();
           throw new RuntimeUnreachableError((await this.noteRuntimeUnreachable()).count, err);
         }
         throw err;
@@ -2649,9 +2647,8 @@ export class ResidentDO extends Sandbox<Env> {
           cause: err,
         });
       }
-      if (scope) scope.pendingNative--;
-      await this.assertThreadOperationAllowed();
-      if (scope) scope.pendingNative++;
+      settleNative();
+      settleNative = await this.beginThreadNativeOperation();
       proc = await createExtensionProcessSandbox(this).exec(argv as unknown as SandboxCommand, launch);
     }
     // The spawn is the proof the control port answers: a persisted count of
@@ -2659,7 +2656,7 @@ export class ResidentDO extends Sandbox<Env> {
     await this.clearRuntimeUnreachable();
     try {
       const out = await proc.output({ encoding: "utf8", timeout: timeout + 30_000 });
-      if (scope && Number.isSafeInteger(out.exitCode) && out.exitCode >= 0) scope.pendingNative--;
+      if (Number.isSafeInteger(out.exitCode) && out.exitCode >= 0) settleNative();
       // `truncated` is the SDK saying the process log stream was cut past its
       // own retention — the output here is a prefix, whatever our caps say.
       return {
@@ -2700,7 +2697,7 @@ export class ResidentDO extends Sandbox<Env> {
         console.log(
           `exec: ${argv.join(" ").slice(0, 200)} outlived its ${timeout}ms budget — killed (exit ${exitCode ?? "unobserved"})`,
         );
-        if (scope && exitCode !== null) scope.pendingNative--;
+        if (exitCode !== null) settleNative();
         return abandonedWaitStepResult({ detail: errMsg(err), exitCode });
       }
       throw err;
@@ -8115,12 +8112,25 @@ export class ResidentDO extends Sandbox<Env> {
   }
 
   private async writeOwnedFile(path: string, content: string) {
+    const settleNative = await this.beginThreadNativeOperation();
+    const result = await this.writeFile(path, content);
+    settleNative();
+    return result;
+  }
+
+  /** Admit before native work; only a known completion or no-start result settles it.
+   * An unknown outcome deliberately keeps the enclosing durable operation held. */
+  private async beginThreadNativeOperation(): Promise<() => void> {
     await this.assertThreadOperationAllowed();
     const scope = this.threadOperationScope?.getStore();
+    if (scope && !scope.active) throw new RunCancelledError("run cancelled");
     if (scope) scope.pendingNative++;
-    const result = await this.writeFile(path, content);
-    if (scope) scope.pendingNative--;
-    return result;
+    let settled = false;
+    return () => {
+      if (settled) return;
+      settled = true;
+      if (scope) scope.pendingNative--;
+    };
   }
 
   private async withOwnedNativeOperation<T>(
@@ -8568,9 +8578,7 @@ export class ResidentDO extends Sandbox<Env> {
             validateEnvNames(env);
             // A dedicated one-send transport: no generic exec logging, retries,
             // output files, timeout recovery command or raw failure response.
-            await this.assertThreadOperationAllowed();
-            const scope = this.threadOperationScope.getStore();
-            if (scope) scope.pendingNative++;
+            const settleNative = await this.beginThreadNativeOperation();
             const proc = await createExtensionProcessSandbox(this).exec(
               [
                 "/usr/bin/su",
@@ -8584,7 +8592,7 @@ export class ResidentDO extends Sandbox<Env> {
             );
             try {
               const raw = await proc.output({ encoding: "utf8", timeout: options.timeoutMs });
-              if (scope && Number.isSafeInteger(raw.exitCode) && raw.exitCode >= 0) scope.pendingNative--;
+              if (Number.isSafeInteger(raw.exitCode) && raw.exitCode >= 0) settleNative();
               return { ...raw, truncated: raw.truncated === true };
             } catch {
               await proc.kill(9).catch(() => {});
@@ -8629,24 +8637,22 @@ export class ResidentDO extends Sandbox<Env> {
         const objects = await this.run(["test", "-d", command.env.GIT_ALTERNATE_OBJECT_DIRECTORIES]);
         if (objects.exitCode !== 0)
           return { error: "publication source objects are unavailable", status: 409, cause: "request" };
-        const scope = this.threadOperationScope.getStore();
-        if (scope) scope.pendingNative++;
+        const settlePublication = await this.beginThreadNativeOperation();
         let result: Awaited<ReturnType<ResidentDO["run"]>>;
         try {
           result = await this.run(command.argv, { timeoutMs: BASH_TIMEOUT_MS, env: command.env });
         } catch (error) {
           if (
-            scope &&
-            (error instanceof RunCancelledError ||
-              error instanceof SandboxRuntimeBusyError ||
-              error instanceof RuntimeUnreachableError)
+            error instanceof RunCancelledError ||
+            error instanceof SandboxRuntimeBusyError ||
+            error instanceof RuntimeUnreachableError
           )
-            scope.pendingNative--;
+            settlePublication();
           throw error;
         }
         // A failed push can have reached the remote. Its native exit alone
         // does not settle the publication; keep its exact admission held.
-        if (scope && result.exitCode === 0 && !result.timedOut) scope.pendingNative--;
+        if (result.exitCode === 0 && !result.timedOut) settlePublication();
         return {
           stdout: result.stdout.slice(0, EXEC_OUTPUT_CAP),
           stderr: result.stderr.slice(0, EXEC_OUTPUT_CAP),
@@ -9593,8 +9599,8 @@ export class ResidentDO extends Sandbox<Env> {
         });
         if (plan.action === "refuse") return { released: false, reason: plan.reason, user: binding.user };
         if (plan.action === "kill") {
-          if (!(await this.killThreadUserProcesses(plan.user, threadKey)))
-            return { error: "pool-owner-mismatch: force detach refused before kill", status: 503 };
+          if (!(await this.killThreadUserProcesses(plan.user, threadKey, binding.container)))
+            return { error: "runtime-stop-unconfirmed: force detach kept the workspace", status: 503 };
           console.log(
             `detach: force — killed ${plan.user}'s processes for ${threadKey} (${plan.inFlight} op(s) were in flight)`,
           );
@@ -9674,16 +9680,7 @@ export class ResidentDO extends Sandbox<Env> {
         try {
           await this.ctx.storage.put(key, { cancellation });
           await this.ctx.storage.put(`cancelled-thread:${threadKey}`, true);
-          const kill = [
-            "/bin/sh",
-            "-c",
-            'test "$(/bin/cat /proc/sys/kernel/random/boot_id)" = "$1" || exit 2; exec /usr/bin/su -s /bin/bash "$2" -c "kill -9 -1"',
-            "--",
-            binding.container!,
-            binding.user,
-          ];
-          const result = await this.run(kill, { timeoutMs: FORCE_DETACH_KILL_TIMEOUT_MS });
-          if (result.timedOut || result.truncated || ![0, 137].includes(result.exitCode))
+          if (!(await this.killThreadUserProcesses(binding.user, threadKey, binding.container)))
             return { stopped: cancellationRefusal(cancellation, "resident", "kill-unconfirmed") };
           if (await this.waitForThreadDrain(threadKey))
             return { stopped: cancellationRefusal(cancellation, "resident", "operations-busy") };
@@ -9698,8 +9695,7 @@ export class ResidentDO extends Sandbox<Env> {
           // An admitted launch may have resumed after the first kill. All its
           // waits have now settled; kill detached children too, then ask the
           // native container for its physical identity and this UID's absence.
-          const finalKill = await this.run(kill, { timeoutMs: FORCE_DETACH_KILL_TIMEOUT_MS });
-          if (finalKill.timedOut || finalKill.truncated || ![0, 137].includes(finalKill.exitCode))
+          if (!(await this.killThreadUserProcesses(binding.user, threadKey, binding.container)))
             return { stopped: cancellationRefusal(cancellation, "resident", "kill-unconfirmed") };
           if (this.ctx.container?.running !== true)
             return { stopped: cancellationRefusal(cancellation, "resident", "runtime-unavailable") };
@@ -9756,22 +9752,32 @@ export class ResidentDO extends Sandbox<Env> {
     );
   }
 
-  /** Force-detach's kill: end every process owned by the pool user —
+  /** Both shutdown paths kill only the recorded boot and pool user —
    *  `kill -9 -1` sent AS THAT USER reaches exactly its own processes (the
    *  thread's `su … bash -c` shell, the command, anything it backgrounded),
    *  nothing else in the container, and needs no procps. The shell kills
-   *  itself too, so su exits 137 — any exit code is fine, and a throw
-   *  (runtime replaced mid-kill) is fine as well: the drain wait after it is
-   *  what decides, and it is bounded. Only ever called with a plan from
-   *  `planForceDetach`, which refuses anything but a `THREAD_USERS` member. */
-  private async killThreadUserProcesses(user: string, threadKey: string): Promise<boolean> {
-    if (!(await this.poolUserOwnerMatches(user, `thread:${threadKey}`))) return false;
+   *  itself too, so su exits 137. Lost, timed-out or foreign-boot results do
+   *  not acknowledge a kill. Callers still drain and apply their own ending
+   *  or workspace-preservation policy after this physical operation. */
+  private async killThreadUserProcesses(user: string, threadKey: string, container?: string): Promise<boolean> {
+    if (!container || !THREAD_USERS.includes(user) || !(await this.poolUserOwnerMatches(user, `thread:${threadKey}`)))
+      return false;
     try {
-      await this.run(["su", "-s", "/bin/bash", user, "-c", "kill -9 -1"], { timeoutMs: FORCE_DETACH_KILL_TIMEOUT_MS });
-    } catch (err) {
-      console.log(`detach: force — kill as ${user} threw (continuing to the drain wait): ${errMsg(err)}`);
+      const result = await this.run(
+        [
+          "/bin/sh",
+          "-c",
+          'test "$(/bin/cat /proc/sys/kernel/random/boot_id)" = "$1" || exit 2; exec /usr/bin/su -s /bin/bash "$2" -c "kill -9 -1"',
+          "--",
+          container,
+          user,
+        ],
+        { timeoutMs: FORCE_DETACH_KILL_TIMEOUT_MS },
+      );
+      return !result.timedOut && !result.truncated && [0, 137].includes(result.exitCode);
+    } catch {
+      return false;
     }
-    return true;
   }
 
   /** Wait (bounded, see FORCE_DETACH_DRAIN_MS) for this thread's in-flight op
