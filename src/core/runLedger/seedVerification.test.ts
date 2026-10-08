@@ -3,13 +3,14 @@ import { describe, it, expect, vi } from "vitest";
 import { InMemoryRunLedger } from "./inMemory.js";
 import { buildExpectedSeedManifest } from "./seedManifest.js";
 import { UNKNOWN_CONTEXT_DEPENDENCIES } from "../references/contextDependencies.js";
+import { workspaceDurabilityKey, type WorkspaceDurabilityArchive } from "./workspaceDurability.js";
 
 const id = "ffffffff-ffff-4fff-ffff-ffffffffffff",
   gen = "gen-SOURCE",
   key = "task:fixture:source",
   thread = "mcp:fixture:source";
-async function setupSource() {
-  const store = new InMemoryRunLedger(() => 2),
+async function setupSource(clock: () => number = () => 2) {
+  const store = new InMemoryRunLedger(clock),
     messages = [{ role: "user" as const, content: [{ type: "text" as const, text: "actual original request" }] }];
   const req = {
     runId: id,
@@ -178,8 +179,8 @@ describe("pending source writer barrier controls", () => {
 });
 
 describe("receiver confirmation and authenticated source release", () => {
-  async function ready() {
-    const fixture = await setupSource();
+  async function ready(clock?: () => number) {
+    const fixture = await setupSource(clock);
     await fixture.store.step(
       id,
       gen,
@@ -221,6 +222,73 @@ describe("receiver confirmation and authenticated source release", () => {
     expect(await store.releaseExpectedSeed(key, ref)).toEqual(released);
     expect(await store.confirmPromotion(ref)).toEqual(confirm);
   });
+  it("confirms the original seed across an authenticated heartbeat without renewing its budget or changing custody", async () => {
+    let now = 2;
+    const { store, ref, source } = await ready(() => now);
+    const before = structuredClone(store.live.get(id)!);
+    const prepared = await store.readPromotion({ runId: id, gen });
+    const read = store.readExpectedSeed.bind(store);
+    let beats = 0;
+    store.readExpectedSeed = async (...args) => {
+      const actual = await read(...args);
+      now += 10_000;
+      expect(await store.heartbeat(id, gen, 30_000)).toMatchObject({ ok: true });
+      beats++;
+      return actual;
+    };
+    const confirmed = await store.confirmPromotion(ref);
+    store.readExpectedSeed = read;
+    expect(beats).toBe(1);
+    expect(confirmed.kind).toBe("confirmed");
+    const after = structuredClone(store.live.get(id)!);
+    expect(after.leaseUntil).toBe(before.leaseUntil + 10_000);
+    expect({ ...after, leaseUntil: before.leaseUntil }).toEqual(before);
+    const original = await store.readPromotion({ runId: id, gen });
+    expect(original.kind).toBe("confirmed");
+    if (prepared.kind !== "committed" || original.kind !== "confirmed")
+      throw new Error("original confirmation required");
+    expect(original.preparation).toEqual(prepared.preparation);
+    expect(original.commit).toEqual(prepared.receipt);
+    expect(await store.readExpectedSeed(key, ref)).toEqual(source);
+    await expect(store.writeNotepad(key, gen, "changed", id)).rejects.toMatchObject({ name: "SourceSeedPendingError" });
+  });
+  it.each(["owner", "stop", "state", "system", "seed", "step", "meta", "archive", "budget"] as const)(
+    "keeps concurrent %s drift fenced even beside a valid owner heartbeat",
+    async (mode) => {
+      let now = 2;
+      const { store, ref, source } = await ready(() => now);
+      const read = store.readExpectedSeed.bind(store);
+      store.readExpectedSeed = async (...args) => {
+        const actual = await read(...args);
+        now += 10_000;
+        expect(await store.heartbeat(id, gen, 30_000)).toMatchObject({ ok: true });
+        const row = store.live.get(id)!;
+        if (mode === "owner") row.ownerGen = "foreign-owner";
+        if (mode === "stop") row.stop = "hard";
+        if (mode === "state") row.state = { ...row.state, semanticChange: true };
+        if (mode === "system") row.system = "foreign system";
+        if (mode === "meta") row.meta.channelId = "mcp:foreign";
+        if (mode === "budget") row.meta.profile!.minutes = 24;
+        const step = store.steps.get(id)![0];
+        if (mode === "seed") step.turnIndex = 2;
+        if (mode === "step") store.steps.get(id)!.push({ ...step, step: 1 });
+        if (mode === "archive") {
+          const held = store as unknown as {
+            workspaceObligations: Map<string, { allocation: WorkspaceDurabilityArchive }>;
+          };
+          held.workspaceObligations.get(workspaceDurabilityKey(id))!.allocation.startedAt += 1;
+        }
+        return actual;
+      };
+      expect(await store.confirmPromotion(ref)).toMatchObject({ kind: "held", reason: "mismatch" });
+      store.readExpectedSeed = read;
+      expect(store.sessions.get(key)?.expectedSeedPending).toEqual(source.kind === "verified" ? source.receipt : null);
+      expect(store.sessions.get(key)?.expectedSeedRelease).toBeUndefined();
+      await expect(store.writeNotepad(key, gen, "changed", id)).rejects.toMatchObject({
+        name: "SourceSeedPendingError",
+      });
+    },
+  );
   it.each([
     "system",
     "budget",

@@ -19,6 +19,7 @@ import { bindInboxCustody } from "../../src/core/runLedger/inboxMessage.ts";
 import {
   sourceSeedReleaseOf,
   confirmStoredSeedBoundary,
+  promotionConfirmationRow,
   type SourceSeedReleaseReceipt,
   type PromotionConfirmationResult,
   sourceSeedReferenceOf,
@@ -6177,7 +6178,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     if (original.kind !== "committed" || !original.preparation.expectedSeed?.key)
       return { kind: "held", reason: "unsupported" };
     const snapshot = this.confirmationSnapshot(ref.runId),
-      before = canonicalSeedJson(snapshot);
+      before = canonicalSeedJson({ ...snapshot, row: promotionConfirmationRow(snapshot.row) });
     if (!snapshot.row) return { kind: "held", reason: "fenced" };
     let steps: StepRecord[];
     try {
@@ -6196,7 +6197,8 @@ export class RunHistoryDO extends DurableObject<Env> {
     if (!receipt) return { kind: "held", reason: "mismatch" };
     let result: PromotionConfirmationResult = { kind: "held", reason: "mismatch" };
     this.ctx.storage.transactionSync(() => {
-      if (canonicalSeedJson(this.confirmationSnapshot(ref.runId)) !== before) return;
+      const current = this.confirmationSnapshot(ref.runId);
+      if (canonicalSeedJson({ ...current, row: promotionConfirmationRow(current.row) }) !== before) return;
       const archive = workspaceDurabilityArchiveOf(snapshot.archive);
       if (!archive?.promotion || !archive.promotionCommit) return;
       const next = { ...archive, promotionConfirmation: receipt, promotionAllocationAck: original.allocationAck };

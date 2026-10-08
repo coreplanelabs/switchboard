@@ -10,6 +10,7 @@ import {
 import {
   sourceSeedReleaseOf,
   confirmStoredSeedBoundary,
+  promotionConfirmationRow,
   type SourceSeedReleaseReceipt,
   type PromotionConfirmationResult,
 } from "./seedVerification.js";
@@ -424,14 +425,14 @@ export class InMemoryRunLedger implements RunLedger {
         ),
       ),
       raw = structuredClone(this.allocationArchive(ref.runId));
-    const before = canonicalSeedJson({ row, steps, raw });
+    const before = canonicalSeedJson({ row: promotionConfirmationRow(row), steps, raw });
     const source = await this.readExpectedSeed(original.preparation.expectedSeed.key, ref);
     const receipt = await confirmStoredSeedBoundary(original, source, row, steps);
     if (
       !receipt ||
       before !==
         canonicalSeedJson({
-          row: this.live.get(ref.runId),
+          row: promotionConfirmationRow(this.live.get(ref.runId)),
           steps: (this.steps.get(ref.runId) ?? []).slice(
             workspaceDurabilityArchiveOf(this.allocationArchive(ref.runId))?.promotionStepBase ?? 0,
           ),

@@ -785,6 +785,127 @@ describe("original workspace durability in real SQLite", () => {
     expect(await f.client.verifyExpectedSeed(f.sessionKey, f.reference)).toMatchObject({ kind: "verified" });
     return f;
   }
+  it("confirms actual SQLite seed custody while the original owner heartbeat renews only liveness", async () => {
+    const { client, reference, sessionKey, sk } = await confirmationFixture();
+    const prepared = await client.readPromotion({ runId: id, gen: "g1" });
+    const source = await client.readExpectedSeed(sessionKey, reference);
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(sk)), async (owner) => {
+      const before = structuredClone((await owner.listLive())[0]);
+      const internal = owner as unknown as { confirmationSnapshot: (run: string) => { row: LiveRunRow } };
+      const snapshot = internal.confirmationSnapshot.bind(owner);
+      let heartbeat: ReturnType<RunHistoryDO["heartbeat"]> | undefined;
+      let snapshots = 0;
+      internal.confirmationSnapshot = (run) => {
+        const value = snapshot(run);
+        if (++snapshots === 1)
+          heartbeat = owner.heartbeat(id, "g1", LEASE_MS, value.row.leaseUntil - LEASE_MS + 10_000);
+        return value;
+      };
+      let confirmation;
+      try {
+        confirmation = await owner.confirmPromotion(reference);
+      } finally {
+        internal.confirmationSnapshot = snapshot;
+      }
+      expect(await heartbeat).toMatchObject({ ok: true });
+      expect(confirmation.kind).toBe("confirmed");
+      const after = (await owner.listLive())[0];
+      expect(after.leaseUntil).toBe(before.leaseUntil + 10_000);
+      expect({ ...after, leaseUntil: before.leaseUntil }).toEqual(before);
+    });
+    const confirmed = await client.readPromotion({ runId: id, gen: "g1" });
+    if (prepared.kind !== "committed" || confirmed.kind !== "confirmed")
+      throw new Error("original confirmation required");
+    expect(confirmed.preparation).toEqual(prepared.preparation);
+    expect(confirmed.commit).toEqual(prepared.receipt);
+    expect(await client.readExpectedSeed(sessionKey, reference)).toEqual(source);
+    await expect(client.writeNotepad(sessionKey, "g1", "changed", id)).rejects.toMatchObject({
+      name: "SourceSeedPendingError",
+    });
+  });
+  it.each(["owner", "stop", "state", "system", "seed", "step", "meta", "archive", "budget"] as const)(
+    "keeps actual concurrent SQLite %s drift held during an owner heartbeat",
+    async (mode) => {
+      const { client, reference, sessionKey, sk } = await confirmationFixture();
+      const source = await client.readExpectedSeed(sessionKey, reference);
+      await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(sk)), async (owner, state) => {
+        const internal = owner as unknown as { confirmationSnapshot: (run: string) => { row: LiveRunRow } };
+        const snapshot = internal.confirmationSnapshot.bind(owner);
+        let heartbeat: ReturnType<RunHistoryDO["heartbeat"]> | undefined;
+        let snapshots = 0;
+        internal.confirmationSnapshot = (run) => {
+          const value = snapshot(run);
+          if (++snapshots === 1) {
+            heartbeat = owner.heartbeat(id, "g1", LEASE_MS, value.row.leaseUntil - LEASE_MS + 10_000);
+            if (mode === "owner")
+              state.storage.sql.exec("UPDATE live_runs SET owner_gen='foreign-owner' WHERE run_id=?", id);
+            if (mode === "stop") state.storage.sql.exec("UPDATE live_runs SET stop='hard' WHERE run_id=?", id);
+            if (mode === "system")
+              state.storage.sql.exec("UPDATE live_runs SET system_text='foreign system' WHERE run_id=?", id);
+            if (mode === "state")
+              state.storage.sql.exec(
+                "UPDATE live_runs SET state_json=json_set(state_json,'$.semanticChange',true) WHERE run_id=?",
+                id,
+              );
+            if (mode === "meta")
+              state.storage.sql.exec(
+                "UPDATE live_runs SET meta_json=json_set(meta_json,'$.channelId','mcp:foreign') WHERE run_id=?",
+                id,
+              );
+            if (mode === "budget")
+              state.storage.sql.exec(
+                "UPDATE live_runs SET meta_json=json_set(meta_json,'$.profile.minutes',24) WHERE run_id=?",
+                id,
+              );
+            if (mode === "seed")
+              state.storage.sql.exec(
+                "UPDATE run_steps SET json=json_set(json,'$.turnIndex',2) WHERE run_id=? AND step=0",
+                id,
+              );
+            if (mode === "step")
+              state.storage.sql.exec(
+                "INSERT INTO run_steps(run_id,step,json) SELECT run_id,1,json_set(json,'$.step',1) FROM run_steps WHERE run_id=? AND step=0",
+                id,
+              );
+            if (mode === "archive")
+              state.storage.sql.exec(
+                "UPDATE workspace_settlements SET allocation_json=json_set(allocation_json,'$.startedAt',2) WHERE owner_key=?",
+                workspaceDurabilityKey(id),
+              );
+          }
+          return value;
+        };
+        try {
+          expect(await owner.confirmPromotion(reference)).toMatchObject({ kind: "held", reason: "mismatch" });
+          expect(await heartbeat).toMatchObject({ ok: true });
+        } finally {
+          internal.confirmationSnapshot = snapshot;
+        }
+        const archive = JSON.parse(
+          state.storage.sql
+            .exec<{ allocation_json: string }>(
+              "SELECT allocation_json FROM workspace_settlements WHERE owner_key=?",
+              workspaceDurabilityKey(id),
+            )
+            .one().allocation_json,
+        );
+        expect(archive).not.toHaveProperty("promotionConfirmation");
+      });
+      await runInDurableObject(env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(sessionKey)), async (_owner, state) => {
+        expect(state.storage.sql.exec("SELECT value FROM meta WHERE key='expected_seed_release'").toArray()).toEqual(
+          [],
+        );
+        const pending = JSON.parse(
+          state.storage.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key='expected_seed_pending'").one()
+            .value,
+        );
+        expect(pending).toEqual(source.kind === "verified" ? source.receipt : null);
+      });
+      await expect(client.writeNotepad(sessionKey, "g1", "changed", id)).rejects.toMatchObject({
+        name: "SourceSeedPendingError",
+      });
+    },
+  );
   it("real HTTP confirmation and release retain exact immutable receipts across lost replies and new clients", async () => {
     const { client, reference, sessionKey, sk } = await confirmationFixture();
     let confirms = 0,
