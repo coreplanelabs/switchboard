@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.289.11](https://github.com/coreplanelabs/switchboard/compare/v1.289.10...v1.289.11) (2026-10-08)
+
+
+### Bug fixes
+
+* **runs:** confirm original work across owner heartbeats ([#2848](https://github.com/coreplanelabs/switchboard/issues/2848)) ([c0f894c](https://github.com/coreplanelabs/switchboard/commit/c0f894cee99be4de2697492a326384206bb884be))
+
 ## [1.289.10](https://github.com/coreplanelabs/switchboard/compare/v1.289.9...v1.289.10) (2026-10-07)
 
 
