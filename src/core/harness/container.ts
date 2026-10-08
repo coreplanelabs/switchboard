@@ -1267,7 +1267,11 @@ export class ExecHarnessContainer implements HarnessContainer {
    *  outcome is unknown, so it is raised as the seam's own for the harness to
    *  resolve by pi's echo (harness-pi item 16) — a blind re-send would duplicate
    *  a prompt or steer, a corruption. */
-  private async execWrite(operation: string, script: string, env?: Record<string, string>): Promise<ExecResult> {
+  private async execWrite(
+    operation: "write" | "start" | "send" | "request",
+    script: string,
+    env?: Record<string, string>,
+  ): Promise<ExecResult> {
     try {
       return await this.exec(script, env);
     } catch (err) {
