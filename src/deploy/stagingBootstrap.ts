@@ -3,6 +3,7 @@ import type { WorkerKind } from "./profile.js";
 
 /** Only the first installation uses this protocol. Updates keep the regular deploy runner. */
 export interface BootstrapIO {
+  resumeMemory?(): Promise<void>;
   absent(workers: readonly WorkerKind[]): Promise<void>;
   upload(worker: WorkerKind, provisional?: boolean): Promise<void>;
   provision(worker: WorkerKind): Promise<void>;
@@ -15,9 +16,14 @@ export interface BootstrapIO {
 /** No failed read, old serving process, or partial installation authorizes creation. */
 export async function initializeStaging(commit: string, io: BootstrapIO) {
   if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error("first installation requires a clean source commit");
-  await io.absent(["memory", "bot", "resident", "sandbox"]);
-  await io.upload("memory", true);
-  await io.provision("memory");
+  if (io.resumeMemory) {
+    await io.absent(["bot", "resident", "sandbox"]);
+    await io.resumeMemory();
+  } else {
+    await io.absent(["memory", "bot", "resident", "sandbox"]);
+    await io.upload("memory", true);
+    await io.provision("memory");
+  }
   await io.verify("memory");
   for (const worker of ["resident", "sandbox"] as const) {
     await io.absent([worker]);

@@ -10,9 +10,21 @@ const args = process.argv.slice(2);
 const selection: string[] = [];
 let check = false;
 let initialize = false;
+let receiptPath: string | undefined;
+let resumeMemory: string | undefined;
 for (let i = 0; i < args.length; i++) {
   const arg = args[i];
-  if (arg === "--initialize" && !initialize && selection.length === 0) initialize = true;
+  if (
+    (arg === "--receipt" || arg === "--resume-memory") &&
+    selection.length === 0 &&
+    args[i + 1] &&
+    !args[i + 1].startsWith("--")
+  ) {
+    initialize = true;
+    if (arg === "--receipt" && !receiptPath) receiptPath = args[++i];
+    else if (arg === "--resume-memory" && !resumeMemory) resumeMemory = args[++i];
+    else throw new Error("duplicate initialization receipt option");
+  } else if (arg === "--initialize" && !initialize && selection.length === 0) initialize = true;
   else if (arg === "--check" && !check) check = true;
   else if (arg === "--affected" && !initialize && selection.length === 0) selection.push(arg);
   else if (
@@ -41,7 +53,7 @@ console.log(
 );
 if (!check && initialize) {
   const { initializeOnHost } = await import("./staging-initialize.js");
-  await initializeOnHost(structuredClone(loaded.profile), Object.freeze({ ...config }));
+  await initializeOnHost(structuredClone(loaded.profile), Object.freeze({ ...config }), { receiptPath, resumeMemory });
 } else if (!check) {
   const directory = mkdtempSync(join(tmpdir(), "switchboard-staging-"));
   try {
