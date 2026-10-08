@@ -9846,6 +9846,445 @@ describe("coordinator admission diagnostics", () => {
   });
 });
 
+describe("bounded SQLite terminal pull-owner candidates", () => {
+  const candidateInstance: CoordinatorInstance = {
+    id: "target_index",
+    kind: "ship",
+    userId: "slack:UALICE",
+    channelId: "slack:C1",
+    threadKey: "slack:C1:target",
+    repo: "acme/api",
+    branch: "fix/target",
+    base: "main",
+    createdAt: 1,
+  };
+  const candidateUnit: CoordinatorUnit = {
+    instanceId: candidateInstance.id,
+    unit: "UINDEX",
+    slug: "target",
+    branch: candidateInstance.branch,
+    dependsOn: [],
+    rounds: [],
+    pr: { number: 8, url: "https://github.com/acme/api/pull/8" },
+  };
+  const pending = (pr: number) => ({
+    version: 1 as const,
+    repo: "acme/api",
+    branches: [],
+    complete: false,
+    pending: { id: "retained-call", pr, ref: "fix/held", headSha: "a".repeat(40) },
+  });
+  async function insertCandidate(key: string, id = "retained", pr = 7) {
+    const row = { ...record(id, `slack:C1:${id}`), repo: "acme/api", branchPublication: pending(pr) };
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO runs (run_id, channel_id, user_id, thread_key, started_at, finished_at, stored_at,
+        status, event_count, stored_event_count, truncated, bytes, diagnosis_json, summary_json)
+        VALUES (?, 'slack:C1', 'slack:UALICE', ?, 1, 2, 2, 'completed', 0, 0, 0, ?, '{}', ?)`,
+        id,
+        row.threadKey,
+        JSON.stringify(row).length,
+        JSON.stringify(row),
+      );
+    });
+    return row;
+  }
+  const lookup = async (
+    key: string,
+    target: { repo: string; pr?: number; ref?: string } = { repo: "acme/api", pr: 8 },
+  ) => (await post("/runs/coordinator/pull-owners", { storeKey: key, target })).data;
+  it("makes bounded index progress then admits a disjoint target while preserving every retained source", async () => {
+    const key = storeKey();
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (_owner: RunHistoryDO, state) => {
+      for (let i = 0; i < 4; i++) {
+        const row = {
+          ...record(`index_large_${i}`, `slack:C1:index-${i}`),
+          repo: "acme/api",
+          branchPublication: {
+            version: 1,
+            repo: "acme/api",
+            branches: [],
+            complete: false,
+            pending: { id: "x".repeat(Math.floor(1.4 * 1024 * 1024)), pr: 7, headSha: "a".repeat(40) },
+          },
+        };
+        state.storage.sql.exec(
+          `INSERT INTO runs (run_id, channel_id, user_id, thread_key, started_at, finished_at, stored_at, status, event_count, stored_event_count, truncated, bytes, diagnosis_json, summary_json) VALUES (?, 'slack:C1', 'slack:UALICE', ?, 1, 2, 2, 'completed', 0, 0, 0, ?, '{}', ?)`,
+          row.id,
+          row.threadKey,
+          JSON.stringify(row).length,
+          JSON.stringify(row),
+        );
+      }
+    });
+    const originals = (await cells(key)).runs;
+    const request = { storeKey: key, target: { repo: "ACME/API", pr: 8 } };
+    expect((await post("/runs/coordinator/pull-owners", request)).data).toEqual({ ok: false, reason: "incomplete" });
+    await runInDurableObject(stub, async (_owner: RunHistoryDO, state) => {
+      expect(
+        state.storage.sql.exec(`SELECT run_id FROM terminal_pull_owner_coverage WHERE dirty=0 AND valid=1`).toArray(),
+      ).toHaveLength(3);
+      const charged = state.storage.sql
+        .exec<{ bytes: number }>(
+          `SELECT SUM(length(summary_json)*3) AS bytes FROM runs
+        WHERE run_id IN (SELECT run_id FROM terminal_pull_owner_coverage WHERE dirty=0 AND valid=1)`,
+        )
+        .one().bytes;
+      expect(charged).toBeLessThanOrEqual(16 * 1024 * 1024);
+    });
+    expect((await post("/runs/coordinator/pull-owners", request)).data).toEqual({ ok: true, owners: [] });
+    expect((await post("/runs/coordinator/pull-owners", request)).data).toEqual({ ok: true, owners: [] });
+    expect((await post("/runs/coordinator/put", { storeKey: key, instance: candidateInstance })).data).toEqual({
+      ok: true,
+    });
+    expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [candidateUnit] })).data).toEqual({
+      ok: true,
+    });
+    expect(
+      (await post("/runs/coordinator/pull-owners", { ...request, target: { repo: "acme/api", pr: 7 } })).data,
+    ).toEqual({ ok: false, reason: "incomplete" });
+    expect((await cells(key)).runs).toEqual(originals);
+    await runInDurableObject(stub, async (_owner: RunHistoryDO, state) => {
+      expect(state.storage.sql.exec("SELECT run_id FROM runs").toArray()).toHaveLength(4);
+      expect(
+        state.storage.sql.exec<{ bytes: number }>("SELECT MIN(length(summary_json)) AS bytes FROM runs").one().bytes,
+      ).toBeGreaterThan(1.4 * 1024 * 1024);
+    });
+  });
+  it.each(["summary", "private"] as const)(
+    "invalidates %s source updates before a new unit can claim the old negative",
+    async (mode) => {
+      const key = storeKey();
+      await insertCandidate(key);
+      expect(await lookup(key)).toEqual({ ok: true, owners: [] });
+      await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+        if (mode === "summary")
+          state.storage.sql.exec(
+            `UPDATE runs SET summary_json=json_set(summary_json,'$.branchPublication',json(?)) WHERE run_id='retained'`,
+            JSON.stringify(pending(8)),
+          );
+        else
+          state.storage.sql.exec(
+            `UPDATE runs SET work_evidence_json=? WHERE run_id='retained'`,
+            JSON.stringify({ version: 1, branchPublication: pending(8) }),
+          );
+        expect(
+          state.storage.sql
+            .exec<{ dirty: number }>(`SELECT dirty FROM terminal_pull_owner_coverage WHERE run_id='retained'`)
+            .one().dirty,
+        ).toBe(1);
+      });
+      expect((await post("/runs/coordinator/put", { storeKey: key, instance: candidateInstance })).data).toEqual({
+        ok: true,
+      });
+      expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [candidateUnit] })).data).toEqual({
+        ok: false,
+        reason: "owned",
+      });
+      expect(await lookup(key)).toEqual({ ok: true, owners: [{ kind: "run", runId: "retained" }] });
+      expect(
+        (await post("/runs/coordinator/units/list", { storeKey: key, instanceId: candidateInstance.id })).data.units,
+      ).toEqual([]);
+    },
+  );
+  it("revalidates unindexed sources and refuses incomplete candidate coverage", async () => {
+    const key = storeKey();
+    const original = await insertCandidate(key, "retained", 8);
+    expect(await lookup(key)).toEqual({ ok: true, owners: [{ kind: "run", runId: "retained" }] });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(`DELETE FROM terminal_pull_owner_coverage WHERE run_id='retained'`);
+      state.storage.sql.exec(`DELETE FROM terminal_pull_owner_targets WHERE run_id='retained'`);
+    });
+    expect(await lookup(key)).toEqual({ ok: true, owners: [{ kind: "run", runId: "retained" }] });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(`DELETE FROM terminal_pull_owner_targets WHERE run_id='retained'`);
+      expect(
+        JSON.parse(
+          state.storage.sql
+            .exec<{ summary_json: string }>(`SELECT summary_json FROM runs WHERE run_id='retained'`)
+            .one().summary_json,
+        ),
+      ).toEqual(original);
+    });
+    expect(await lookup(key)).toEqual({ ok: false, reason: "incomplete" });
+  });
+  it.each(["publication", "door", "identity", "legacy", "json", "private"] as const)(
+    "keeps retained foreign %s failures globally held after backfill",
+    async (mode) => {
+      const key = storeKey();
+      await insertCandidate(key);
+      expect(await lookup(key, { repo: "other/repo", pr: 8 })).toEqual({ ok: true, owners: [] });
+      await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+        if (mode === "publication")
+          state.storage.sql.exec(
+            `UPDATE runs SET summary_json=json_set(summary_json,'$.branchPublication',json('{"version":9}'))`,
+          );
+        if (mode === "door")
+          state.storage.sql.exec(
+            `UPDATE runs SET summary_json=json_set(summary_json,'$.doorPublicationPending',json('{"private":"preserve"}'))`,
+          );
+        if (mode === "identity")
+          state.storage.sql.exec(`UPDATE runs SET summary_json=json_set(summary_json,'$.threadKey','')`);
+        if (mode === "legacy")
+          state.storage.sql.exec(
+            `UPDATE runs SET summary_json=json_set(summary_json,'$.branchPublication',json('{"version":1,"branches":[],"complete":false}'))`,
+          );
+        if (mode === "json") state.storage.sql.exec(`UPDATE runs SET summary_json='{'`);
+        if (mode === "private")
+          state.storage.sql.exec(`UPDATE runs SET work_evidence_json='{"version":9,"private":"preserve"}'`);
+      });
+      const before = await cells(key);
+      expect(await lookup(key, { repo: "other/repo", pr: 8 })).toEqual({ ok: false, reason: "incomplete" });
+      expect(await lookup(key, { repo: "other/repo", pr: 8 })).toEqual({ ok: false, reason: "incomplete" });
+      expect(await cells(key)).toEqual(before);
+    },
+  );
+  it("revalidates deletion and reinsertion of the same canonical run id", async () => {
+    const key = storeKey();
+    await insertCandidate(key);
+    expect(await lookup(key)).toEqual({ ok: true, owners: [] });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(`DELETE FROM runs WHERE run_id='retained'`);
+      expect(state.storage.sql.exec(`SELECT * FROM terminal_pull_owner_coverage`).toArray()).toEqual([]);
+      expect(state.storage.sql.exec(`SELECT * FROM terminal_pull_owner_targets`).toArray()).toEqual([]);
+    });
+    expect(await lookup(key)).toEqual({ ok: true, owners: [] });
+    await insertCandidate(key, "retained", 8);
+    expect(await lookup(key)).toEqual({ ok: true, owners: [{ kind: "run", runId: "retained" }] });
+  });
+  it("sees a changed source after awaited input custody and before the admission transaction", async () => {
+    const key = storeKey();
+    await insertCandidate(key);
+    expect(await lookup(key)).toEqual({ ok: true, owners: [] });
+    await post("/runs/coordinator/put", { storeKey: key, instance: candidateInstance });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+      const internal = owner as unknown as {
+        withRangePins: (holders: unknown, action: () => Promise<unknown>) => Promise<unknown>;
+      };
+      const pins = internal.withRangePins.bind(owner);
+      internal.withRangePins = (holders, action) =>
+        pins(holders, async () => {
+          state.storage.sql.exec(
+            `UPDATE runs SET summary_json=json_set(summary_json,'$.branchPublication',json(?)) WHERE run_id='retained'`,
+            JSON.stringify(pending(8)),
+          );
+          return action();
+        });
+      try {
+        expect(await owner.putUnits([candidateUnit], 100)).toEqual({ ok: false, reason: "owned" });
+      } finally {
+        internal.withRangePins = pins;
+      }
+      expect(state.storage.sql.exec(`SELECT * FROM coordinator_units`).toArray()).toEqual([]);
+    });
+  });
+  it("rereads workspace and unit dependencies even when every terminal candidate is disjoint", async () => {
+    const key = storeKey();
+    await insertCandidate(key);
+    expect(await lookup(key)).toEqual({ ok: true, owners: [] });
+    const settlement = {
+      version: 1,
+      revision: 1,
+      owner: { runId: "workspace", ownerGen: "g1", ownerFence: 7 },
+      binding: null,
+      record: {
+        id: "workspace",
+        threadKey: "slack:C1:workspace",
+        status: "completed",
+        userId: "slack:UALICE",
+        repo: "acme/api",
+      },
+      publication: pending(8),
+    };
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO workspace_settlements (owner_key,revision,json) VALUES (?,1,?)`,
+        JSON.stringify(["workspace", "g1", 7]),
+        JSON.stringify(settlement),
+      );
+    });
+    expect(await lookup(key)).toEqual({ ok: true, owners: [{ kind: "run", runId: "workspace" }] });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(`UPDATE workspace_settlements SET json='{'`);
+    });
+    expect(await lookup(key)).toEqual({ ok: false, reason: "incomplete" });
+  });
+
+  it("rereads audit and settlement terminal dependencies even without ordinary candidate keys", async () => {
+    const key = storeKey();
+    await insertCandidate(key, "dependency");
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        `UPDATE runs SET summary_json=json_set(summary_json,'$.branchPublication',json('{"version":1,"branches":[],"complete":true}'))`,
+      );
+    });
+    expect(await lookup(key, { repo: "other/repo", pr: 8 })).toEqual({ ok: true, owners: [] });
+    await post("/runs/coordinator/put", { storeKey: key, instance: candidateInstance });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+      const spawn = {
+        version: 1,
+        id: "UINDEX/0/coding",
+        ordinal: 2,
+        execution: { workflowId: candidateInstance.id },
+        phase: "settled",
+        target: { repo: candidateInstance.repo, ref: candidateUnit.branch, base: "main", headSha: "a".repeat(40) },
+        calls: [{ operation: "spawn", state: "accepted", runId: "dependency" }],
+      };
+      const adopted = {
+        ...candidateUnit,
+        adoption: {
+          version: 1,
+          actionId: "audit-action",
+          runId: "dependency",
+          headSha: "b".repeat(40),
+          requester: candidateInstance.userId,
+          threadKey: candidateInstance.threadKey,
+          messageId: "source",
+          claimedAt: 3,
+          state: "claimed",
+          audit: {
+            version: 1,
+            firstHead: "a".repeat(40),
+            head: "b".repeat(40),
+            eventCount: 1,
+            eventDigest: "c".repeat(64),
+            spawn,
+            projection: "{}",
+          },
+        },
+      };
+      state.storage.sql.exec(
+        `INSERT INTO coordinator_units (instance_id,unit,json,updated_at) VALUES (?,?,?,3)`,
+        candidateInstance.id,
+        candidateUnit.unit,
+        JSON.stringify(adopted),
+      );
+      const internal = owner as unknown as {
+        terminalPullOwnershipRow: (row: { run_id: string }, diagnostics?: unknown) => unknown;
+      };
+      const decode = internal.terminalPullOwnershipRow.bind(owner);
+      const seen: string[] = [];
+      internal.terminalPullOwnershipRow = (row, diagnostics) => {
+        seen.push(row.run_id);
+        return decode(row, diagnostics);
+      };
+      try {
+        expect(await owner.findPullOwners({ repo: "other/repo", pr: 8 })).toEqual({ ok: false, reason: "incomplete" });
+        expect(seen).toEqual(["dependency"]);
+        state.storage.sql.exec(`DELETE FROM coordinator_units`);
+        state.storage.sql.exec(
+          `INSERT INTO workspace_settlements (owner_key,revision,json) VALUES (?,1,?)`,
+          JSON.stringify(["dependency", "g1", 7]),
+          JSON.stringify({
+            version: 1,
+            revision: 1,
+            owner: { runId: "dependency", ownerGen: "g1", ownerFence: 7 },
+            binding: null,
+            record: {
+              id: "dependency",
+              threadKey: "slack:C1:dependency",
+              status: "completed",
+              userId: "slack:UALICE",
+              repo: "acme/api",
+            },
+            publication: pending(8),
+          }),
+        );
+        seen.length = 0;
+        expect(await owner.findPullOwners({ repo: "other/repo", pr: 8 })).toEqual({ ok: true, owners: [] });
+        expect(seen).toEqual(["dependency"]);
+      } finally {
+        internal.terminalPullOwnershipRow = decode;
+      }
+    });
+  });
+
+  it("queries normalized keys for branch and cross-repository Door custody", async () => {
+    const key = storeKey();
+    await insertCandidate(key);
+    expect(await lookup(key, { repo: "ACME/API", ref: "refs/heads/fix/held" })).toEqual({
+      ok: true,
+      owners: [{ kind: "run", runId: "retained" }],
+    });
+    const door = {
+      id: "held-door",
+      repo: "other/repo",
+      pr: 12,
+      update: { ref: "refs/heads/fix/door", old: "a".repeat(40), next: "b".repeat(40) },
+    };
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        `UPDATE runs SET summary_json=json_set(summary_json,'$.doorPublicationPending',json(?))`,
+        JSON.stringify(door),
+      );
+    });
+    expect(await lookup(key, { repo: "OTHER/REPO", ref: "fix/door" })).toEqual({
+      ok: true,
+      owners: [{ kind: "run", runId: "retained" }],
+    });
+    const before = await indexCells(key);
+    expect(await lookup(key, { repo: "OTHER/REPO", pr: 12 })).toEqual({
+      ok: true,
+      owners: [{ kind: "run", runId: "retained" }],
+    });
+    expect(await indexCells(key)).toEqual(before);
+  });
+
+  it("rebuilds a missing or older projection version from canonical source within the same bounds", async () => {
+    const key = storeKey();
+    await insertCandidate(key, "retained", 8);
+    expect(await lookup(key)).toEqual({ ok: true, owners: [{ kind: "run", runId: "retained" }] });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(`UPDATE meta SET value='unsupported' WHERE key='terminal_pull_owner_index_version'`);
+      state.storage.sql.exec(`DELETE FROM terminal_pull_owner_targets`);
+    });
+    expect(await lookup(key)).toEqual({ ok: true, owners: [{ kind: "run", runId: "retained" }] });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+      expect(
+        state.storage.sql
+          .exec<{ value: string }>(`SELECT value FROM meta WHERE key='terminal_pull_owner_index_version'`)
+          .one().value,
+      ).toBe("1");
+    });
+  });
+
+  it("refuses same-cardinality derived key drift before a false negative can admit a unit", async () => {
+    const key = storeKey();
+    await insertCandidate(key, "retained", 8);
+    expect(await lookup(key)).toEqual({ ok: true, owners: [{ kind: "run", runId: "retained" }] });
+    const original = await cells(key);
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(`UPDATE terminal_pull_owner_targets SET repo='other/repo' WHERE run_id='retained'`);
+      expect(
+        state.storage.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM terminal_pull_owner_targets`).one().n,
+      ).toBe(1);
+      expect(
+        state.storage.sql.exec<{ target_count: number }>(`SELECT target_count FROM terminal_pull_owner_coverage`).one()
+          .target_count,
+      ).toBe(1);
+    });
+    expect(await lookup(key)).toEqual({ ok: false, reason: "incomplete" });
+    expect(await cells(key)).toEqual(original);
+    expect(await lookup(key)).toEqual({ ok: true, owners: [{ kind: "run", runId: "retained" }] });
+  });
+  async function indexCells(key: string) {
+    return runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => ({
+      coverage: state.storage.sql.exec(`SELECT * FROM terminal_pull_owner_coverage ORDER BY run_id`).toArray(),
+      targets: state.storage.sql
+        .exec(`SELECT * FROM terminal_pull_owner_targets ORDER BY run_id,repo,pr,ref`)
+        .toArray(),
+    }));
+  }
+  async function cells(key: string) {
+    return runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => ({
+      runs: state.storage.sql.exec(`SELECT run_id,summary_json,work_evidence_json FROM runs`).toArray(),
+      units: state.storage.sql.exec(`SELECT * FROM coordinator_units`).toArray(),
+      settlements: state.storage.sql.exec(`SELECT * FROM workspace_settlements`).toArray(),
+    }));
+  }
+});
+
 describe("read-only pull-owner scan diagnostics", () => {
   it("reports an unreadable global producer before target matching without changing raw state", async () => {
     const key = storeKey(),

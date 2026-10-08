@@ -38,6 +38,9 @@ import {
 } from "./workflowReconciliation.js";
 import {
   findPullOwnersInRows,
+  terminalPullOwnerTargets,
+  pullOwnerTargetMatches,
+  unitPullTargets,
   pullBindingChanges,
   needsPullBindingAdmission,
   isPullBindingRefusal,
@@ -263,7 +266,7 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     try {
       const prepared = await prepareMaintenanceAdmission(input);
       if (!this.runOwner) return { ok: false, reason: "unavailable" };
-      const rows = this.pullOwnershipRows();
+      const rows = this.pullOwnershipRows(undefined, [prepared.input.target]);
       const result = planMaintenanceAdmission(
         prepared,
         rows,
@@ -327,12 +330,16 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     if (!isPullTarget(target)) return { ok: false, reason: "invalid" };
     if (!this.runOwner) return { ok: false, reason: "unavailable" };
     try {
-      return findPullOwnersInRows(target, this.pullOwnershipRows());
+      return findPullOwnersInRows(target, this.pullOwnershipRows(undefined, [target]));
     } catch {
       return { ok: false, reason: "incomplete" };
     }
   }
-  private pullOwnershipRows(auditing?: CoordinatorUnit): PullOwnershipRows {
+  private readonly terminalPullIndex = new Map<
+    string,
+    { source: string; targets: PullTarget[] | undefined; targetsJson: string | undefined }
+  >();
+  private pullOwnershipRows(auditing?: CoordinatorUnit, targets?: readonly PullTarget[]): PullOwnershipRows {
     if (!this.runOwner) throw new Error("pull owner unavailable");
     let count = 0,
       bytes = 0;
@@ -354,9 +361,11 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
       if (isCoordinatorUnit(unit) && unit.adoption?.audit) auditedRunIds.add(unit.adoption.runId);
     }
     for (const row of this.runOwner.live.values()) visit(JSON.stringify(row.meta), JSON.stringify(row.state));
+    const terminal = new Map<string, ReturnType<typeof historicalOwnerRecord>>();
+    let covered = true;
     for (const record of this.runOwner.finished.values()) {
       const evidence = this.runOwner.finishedWorkEvidence.get(record.id);
-      const canonical = {
+      const canonical = historicalOwnerRecord({
         ...record,
         branchPublication:
           evidence && Object.hasOwn(evidence, "branchPublication")
@@ -370,11 +379,57 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
           evidence && Object.hasOwn(evidence, "doorPublicationPending")
             ? evidence.doorPublicationPending
             : record.doorPublicationPending,
-      };
-      visit(JSON.stringify(historicalOwnerRecord(canonical)));
-      if (auditedRunIds.has(record.id)) visit(JSON.stringify(record.events.map(historicalOwnerEvent)));
+      });
+      terminal.set(record.id, canonical);
+      if (!targets) continue;
+      if (!isRunRecord(record) || !isPullOwnerLiveMeta(canonical)) covered = false;
+      const source = JSON.stringify(canonical);
+      if (this.terminalPullIndex.get(record.id)?.source !== source) {
+        if (count + 1 > PULL_OWNER_SCAN_MAX || bytes + 3 * source.length > PULL_OWNER_SCAN_MAX_BYTES) {
+          covered = false;
+          continue;
+        }
+        visit(source);
+        const keys =
+          isRunRecord(record) && isPullOwnerLiveMeta(canonical)
+            ? terminalPullOwnerTargets({
+                runId: record.id,
+                repo: canonical.repo,
+                live: false,
+                record: canonical,
+                publication: canonical.branchPublication,
+                door: canonical.doorPublicationPending,
+              })
+            : undefined;
+        this.terminalPullIndex.set(record.id, { source, targets: keys, targetsJson: JSON.stringify(keys) });
+      }
+      const indexed = this.terminalPullIndex.get(record.id);
+      if (indexed && JSON.stringify(indexed.targets) !== indexed.targetsJson) {
+        this.terminalPullIndex.delete(record.id);
+        covered = false;
+      }
+      if (this.terminalPullIndex.get(record.id)?.targets === undefined) covered = false;
     }
+    for (const id of this.terminalPullIndex.keys()) if (!terminal.has(id)) this.terminalPullIndex.delete(id);
+    if (!covered) return { complete: false, units: [], runs: [], effects: [] };
     const settlements = this.runOwner.workspacePublicationRows();
+    const referenced = new Set(settlements.map((row) => row?.owner?.runId));
+    const selected = new Set(
+      [...terminal.keys()].filter(
+        (id) =>
+          !targets ||
+          auditedRunIds.has(id) ||
+          referenced.has(id) ||
+          this.terminalPullIndex
+            .get(id)!
+            .targets!.some((candidate) => targets.some((target) => pullOwnerTargetMatches(candidate, target))),
+      ),
+    );
+    for (const id of selected) {
+      visit(JSON.stringify(terminal.get(id)));
+      if (auditedRunIds.has(id))
+        visit(JSON.stringify(this.runOwner.finished.get(id)!.events.map(historicalOwnerEvent)));
+    }
     for (const row of settlements) visit(JSON.stringify(row));
     if (
       [...this.runOwner.live.values()].some(
@@ -400,25 +455,27 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
           publication: row.state.branchPublication,
           door: row.state.doorPublicationPending,
         })),
-        ...[...this.runOwner.finished.values()].map((row) => {
-          if (!isRunRecord(row)) throw new Error("unreadable terminal producer");
-          return {
-            runId: row.id,
-            repo: row.repo,
-            live: false,
-            record: historicalOwnerRecord(row),
-            historicalEvents: auditedRunIds.has(row.id) ? row.events.map(historicalOwnerEvent) : undefined,
-            pushReceipts: Object.hasOwn(this.runOwner!.finishedWorkEvidence.get(row.id) ?? {}, "branchPushReceipts")
-              ? this.runOwner!.finishedWorkEvidence.get(row.id)!.branchPushReceipts
-              : row.branchPushReceipts,
-            publication: Object.hasOwn(this.runOwner!.finishedWorkEvidence.get(row.id) ?? {}, "branchPublication")
-              ? this.runOwner!.finishedWorkEvidence.get(row.id)!.branchPublication
-              : row.branchPublication,
-            door: Object.hasOwn(this.runOwner!.finishedWorkEvidence.get(row.id) ?? {}, "doorPublicationPending")
-              ? this.runOwner!.finishedWorkEvidence.get(row.id)!.doorPublicationPending
-              : row.doorPublicationPending,
-          };
-        }),
+        ...[...this.runOwner.finished.values()]
+          .filter((row) => selected.has(row.id))
+          .map((row) => {
+            if (!isRunRecord(row)) throw new Error("unreadable terminal producer");
+            return {
+              runId: row.id,
+              repo: row.repo,
+              live: false,
+              record: historicalOwnerRecord(row),
+              historicalEvents: auditedRunIds.has(row.id) ? row.events.map(historicalOwnerEvent) : undefined,
+              pushReceipts: Object.hasOwn(this.runOwner!.finishedWorkEvidence.get(row.id) ?? {}, "branchPushReceipts")
+                ? this.runOwner!.finishedWorkEvidence.get(row.id)!.branchPushReceipts
+                : row.branchPushReceipts,
+              publication: Object.hasOwn(this.runOwner!.finishedWorkEvidence.get(row.id) ?? {}, "branchPublication")
+                ? this.runOwner!.finishedWorkEvidence.get(row.id)!.branchPublication
+                : row.branchPublication,
+              door: Object.hasOwn(this.runOwner!.finishedWorkEvidence.get(row.id) ?? {}, "doorPublicationPending")
+                ? this.runOwner!.finishedWorkEvidence.get(row.id)!.doorPublicationPending
+                : row.doorPublicationPending,
+            };
+          }),
       ],
       effects: [...this.runOwner.planeOffers.values()],
       settlements,
@@ -455,7 +512,7 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
       if (!isCoordinatorInstance(instance)) return "incomplete";
       if (!force && !pullBindingChanges(instance, current, next)) return;
       if (!this.runOwner) return "unavailable";
-      const rows = this.pullOwnershipRows(next.adoption?.audit ? next : undefined);
+      const rows = this.pullOwnershipRows(next.adoption?.audit ? next : undefined, unitPullTargets(instance, next));
       for (const unit of staged)
         rows.units.push({ unit, instance: JSON.parse(this.rows.get(unit.instanceId) ?? "null") });
       return unitPullBindingRefusal(rows, instance, current, next);
@@ -497,7 +554,11 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
       if (!result.ok) return result;
       if (input.kind === "admit") {
         if (!this.runOwner) return { ok: false, reason: "unavailable" };
-        const reason = unitPullTargetsRefusal(this.pullOwnershipRows(), instance, result.unit);
+        const reason = unitPullTargetsRefusal(
+          this.pullOwnershipRows(undefined, unitPullTargets(instance, result.unit)),
+          instance,
+          result.unit,
+        );
         if (reason) return { ok: false, reason };
       }
       // No awaits separate these owner reads from their single mutation.
