@@ -1,4 +1,10 @@
 import type { ExecOptions, ExecResult, MoveOptions } from "./executor.js";
+import { shellQuote } from "./shellQuote.js";
+
+/** Share the existing choice between a supplied checkout and executor cwd. */
+export function gitInCheckout(checkout?: string): string {
+  return checkout ? `git -C ${shellQuote(checkout)}` : "git";
+}
 
 /** Cold executors advance their bound checkout through typed command facts.
  * Missing Git state or private changes cannot become a model's checkout task. */

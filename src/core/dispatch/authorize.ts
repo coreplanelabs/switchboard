@@ -1,3 +1,4 @@
+import { gitInCheckout } from "../../execution/workspaceAdvance.js";
 // The authorize stage of the dispatch pipeline (docs/decisions/0024-dispatcher-as-a-staged-pipeline.md):
 // the gates a resolved request passes before a model turn, each asked against
 // the RESOLVED actor and agent (AGENTS.md invariant 3) — the agent allowlist,
@@ -536,9 +537,7 @@ export async function authorizeAttachedHead(
     const expectedHeadSha = repoCtx.headSha;
     let guard = await root
       .span("dispatch.gate.attached_head", async (span) => {
-        const command = selection.seeded?.workspace
-          ? `git -C ${shellQuote(selection.seeded.workspace)} rev-parse HEAD`
-          : "git rev-parse HEAD";
+        const command = `${gitInCheckout(selection.seeded?.workspace)} rev-parse HEAD`;
         if (!resume && !resident && selection.seeded === undefined && expectedHeadSha !== undefined) {
           await executor.exec(
             coldReviewCheckoutCommand(
