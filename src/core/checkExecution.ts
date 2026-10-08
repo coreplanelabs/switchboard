@@ -243,22 +243,45 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
       metadataBudget.kind === "clipped" ? metadataBudget.timeoutMs : requestedTimeout,
     );
     let observed: ExecResult | undefined;
+    let metadataSignal: AbortSignal | undefined;
     try {
+      const command = metadataCommand(workspace);
+      metadataSignal = execDeadline(metadataTimeout, signal);
       observed = boundedResult(
-        await executor.execResult(metadataCommand(workspace), {
+        await executor.execResult(command, {
           timeoutMs: metadataTimeout,
-          signal: execDeadline(metadataTimeout, signal),
+          signal: metadataSignal,
         }),
       );
     } catch (error) {
       annotateExecutionDiagnostic(error, { caller: "check", operation: "metadata" });
       const executionDiagnostic = typedExecutionDiagnosticOf(error);
       const infrastructureReason = metadataInfrastructureReason(error);
+      let abortSource: CheckMetadataFailure["abortSource"];
+      if (infrastructureReason === "aborted") {
+        abortSource = "unknown";
+        try {
+          if (metadataSignal?.aborted) {
+            const runAborted = binding.signal.aborted;
+            const callAborted = control.signal?.aborted === true;
+            if (!runAborted && !callAborted) abortSource = "metadata_deadline";
+            else if (runAborted && callAborted) abortSource = "ambiguous";
+            else {
+              const parent = runAborted ? binding.signal : control.signal;
+              abortSource =
+                metadataSignal.reason === parent?.reason ? (runAborted ? "run_control" : "call_control") : "ambiguous";
+            }
+          }
+        } catch {
+          // Optional signal observation cannot replace the original failure.
+        }
+      }
       return {
         ...unavailable("metadata_unavailable", {
           phase: "execute",
           kind: "thrown",
           ...(infrastructureReason ? { infrastructureReason } : {}),
+          ...(abortSource ? { abortSource, effectiveTimeoutMs: metadataTimeout } : {}),
         }),
         ...(executionDiagnostic ? { executionDiagnostic } : {}),
       };
