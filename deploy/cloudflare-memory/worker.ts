@@ -345,6 +345,8 @@ import {
   pullOwnerReadDiagnosticFor,
   type PullOwnershipSource,
   findPullOwnersInRows,
+  terminalPullOwnerTargets,
+  unitPullTargets,
   pullBindingChanges,
   needsPullBindingAdmission,
   unitPullBindingRefusal,
@@ -2040,6 +2042,29 @@ const COORDINATOR_SCAN_LIMIT = 16;
  * Throwing it inside blockConcurrencyWhile resets unrelated run requests. */
 class CanonicalArchiveRefusal extends Error {}
 
+// Bump when terminal candidate projection or decoder semantics change.
+const TERMINAL_PULL_OWNER_INDEX_VERSION = "1";
+// The independent validation footprint detects missing and same-size wrong
+// keys without rereading canonical bodies or trusting a candidate count.
+const TERMINAL_PULL_TARGET_CONTENT = `(SELECT json_group_array(json_object('repo',repo,'pr',pr,'ref',ref))
+  FROM (SELECT repo,pr,ref FROM terminal_pull_owner_targets
+    WHERE run_id=terminal_pull_owner_coverage.run_id ORDER BY repo,pr,ref))`;
+const TERMINAL_PULL_OWNER_COLUMNS = `SELECT run_id,
+           CASE WHEN json_valid(summary_json) THEN
+           (SELECT json_group_object(key, json(CASE
+              WHEN type IN ('array', 'object') THEN value
+              WHEN type = 'true' THEN 'true'
+              WHEN type = 'false' THEN 'false'
+              ELSE json_quote(value) END))
+            FROM json_each(runs.summary_json)
+            WHERE key IN ('id', 'repo', 'userId', 'channelId', 'threadKey',
+              'parentInstanceId', 'coordinatorUnit', 'coordinatorAttempt',
+              'idempotencyKey', 'session', 'agent', 'status', 'provisional', 'publicationSettlement',
+              'startedAt', 'finishedAt', 'eventCount', 'storedEventCount', 'truncated', 'headSha', 'pushed', 'restarting', 'pr',
+              'branchPublication', 'branchPushReceipts', 'doorPublicationPending'))
+           ELSE 'null' END AS owner_json,
+           work_evidence_json`;
+
 export class RunHistoryDO extends DurableObject<Env> {
   private readonly sql: SqlStorage;
   /** Where a turned-final run's point goes (run-metrics.md): the Analytics
@@ -2091,6 +2116,37 @@ export class RunHistoryDO extends DurableObject<Env> {
       );
     `);
     this.migrateRunsTable();
+    // Derived candidates never grant authority. Source writes invalidate them
+    // in the same SQLite transaction, including legacy imports and deletions.
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS terminal_pull_owner_coverage (
+        run_id TEXT PRIMARY KEY, dirty INTEGER NOT NULL DEFAULT 1,
+        valid INTEGER NOT NULL DEFAULT 0, target_count INTEGER NOT NULL DEFAULT 0, targets_json TEXT NOT NULL DEFAULT '[]'
+      );
+      CREATE INDEX IF NOT EXISTS terminal_pull_owner_dirty ON terminal_pull_owner_coverage(dirty);
+      CREATE TABLE IF NOT EXISTS terminal_pull_owner_targets (
+        run_id TEXT NOT NULL, repo TEXT NOT NULL, pr INTEGER NOT NULL, ref TEXT NOT NULL,
+        PRIMARY KEY (run_id, repo, pr, ref)
+      );
+      CREATE INDEX IF NOT EXISTS terminal_pull_owner_pr ON terminal_pull_owner_targets(repo, pr);
+      CREATE INDEX IF NOT EXISTS terminal_pull_owner_ref ON terminal_pull_owner_targets(repo, ref);
+      CREATE TRIGGER IF NOT EXISTS terminal_pull_owner_insert AFTER INSERT ON runs BEGIN
+        INSERT INTO terminal_pull_owner_coverage (run_id) VALUES (NEW.run_id)
+        ON CONFLICT(run_id) DO UPDATE SET dirty=1, valid=0, target_count=0;
+        DELETE FROM terminal_pull_owner_targets WHERE run_id=NEW.run_id;
+      END;
+      CREATE TRIGGER IF NOT EXISTS terminal_pull_owner_update AFTER UPDATE OF run_id, summary_json, work_evidence_json ON runs BEGIN
+        DELETE FROM terminal_pull_owner_coverage WHERE run_id=OLD.run_id AND OLD.run_id<>NEW.run_id;
+        DELETE FROM terminal_pull_owner_targets WHERE run_id=OLD.run_id AND OLD.run_id<>NEW.run_id;
+        INSERT INTO terminal_pull_owner_coverage (run_id) VALUES (NEW.run_id)
+        ON CONFLICT(run_id) DO UPDATE SET dirty=1, valid=0, target_count=0;
+        DELETE FROM terminal_pull_owner_targets WHERE run_id=NEW.run_id;
+      END;
+      CREATE TRIGGER IF NOT EXISTS terminal_pull_owner_delete AFTER DELETE ON runs BEGIN
+        DELETE FROM terminal_pull_owner_coverage WHERE run_id=OLD.run_id;
+        DELETE FROM terminal_pull_owner_targets WHERE run_id=OLD.run_id;
+      END;
+    `);
     // The indexes the visibility predicate's leaves walk (`channel_id IN`,
     // `channel_visibility IN`, `user_id =`), each ordered like the page; the
     // session the sweep asks about; the parent a children listing filters on;
@@ -4109,7 +4165,11 @@ export class RunHistoryDO extends DurableObject<Env> {
       if (!isCoordinatorInstance(instance)) return report("incomplete", "instance_shape");
       if (!force && !pullBindingChanges(instance, current, next)) return;
       stage = "ownership_scan";
-      const rows = this.pullOwnershipRows(diagnostics, next.adoption?.audit ? next : undefined);
+      const rows = this.pullOwnershipRows(
+        diagnostics,
+        next.adoption?.audit ? next : undefined,
+        unitPullTargets(instance, next),
+      );
       for (const unit of staged) {
         const saved = this.sql
           .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, unit.instanceId)
@@ -4305,7 +4365,11 @@ export class RunHistoryDO extends DurableObject<Env> {
             throw new Error("unreadable maintenance owner");
           return instance;
         });
-        const planned = planMaintenanceAdmission(prepared, this.pullOwnershipRows(), instances);
+        const planned = planMaintenanceAdmission(
+          prepared,
+          this.pullOwnershipRows(undefined, undefined, [prepared.input.target]),
+          instances,
+        );
         if (!planned.ok || planned.replayed) {
           result = planned;
           return;
@@ -4420,7 +4484,11 @@ export class RunHistoryDO extends DurableObject<Env> {
       if (input.kind === "admit") {
         let reason: PullBindingRefusal | undefined;
         try {
-          reason = unitPullTargetsRefusal(this.pullOwnershipRows(), instance!, planned.unit);
+          reason = unitPullTargetsRefusal(
+            this.pullOwnershipRows(undefined, undefined, unitPullTargets(instance!, planned.unit)),
+            instance!,
+            planned.unit,
+          );
         } catch {
           reason = "incomplete";
         }
@@ -4626,7 +4694,55 @@ export class RunHistoryDO extends DurableObject<Env> {
     return events;
   }
 
-  private pullOwnershipRows(diagnostics?: PullOwnershipDiagnostics, auditing?: CoordinatorUnit): PullOwnershipRows {
+  private terminalPullOwnershipRow(
+    row: { run_id: string; owner_json: string; work_evidence_json: string | null },
+    diagnostics?: PullOwnershipDiagnostics,
+  ): PullOwnershipRows["runs"][number] {
+    const fail = (check: PullOwnershipCheck, cause: "shape" | "json" = "shape"): never => {
+      if (diagnostics) {
+        diagnostics.failure = { check, ...diagnostics.cursor };
+        diagnostics.cause = cause;
+      }
+      throw new Error("unreadable terminal producer");
+    };
+    const parse = (raw: string, check: PullOwnershipCheck) => {
+      try {
+        return JSON.parse(raw);
+      } catch {
+        return fail(check, "json");
+      }
+    };
+    const raw = parse(row.owner_json, "inventory_terminal_producer");
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) fail("inventory_terminal_producer");
+    const { branchPublication, branchPushReceipts, doorPublicationPending, ...identity } = raw;
+    if (!isRunWorkOwner(identity) || !isPullOwnerLiveMeta(identity) || identity.id !== row.run_id)
+      fail("inventory_terminal_producer");
+    const evidence =
+      row.work_evidence_json === null
+        ? undefined
+        : parseWorkEvidence(parse(row.work_evidence_json, "inventory_private_producer"), identity);
+    if (row.work_evidence_json !== null && !evidence) fail("inventory_private_producer");
+    return {
+      runId: row.run_id,
+      repo: identity.repo,
+      live: false,
+      record: identity,
+      pushReceipts:
+        evidence && Object.hasOwn(evidence, "branchPushReceipts") ? evidence.branchPushReceipts : branchPushReceipts,
+      publication:
+        evidence && Object.hasOwn(evidence, "branchPublication") ? evidence.branchPublication : branchPublication,
+      door:
+        evidence && Object.hasOwn(evidence, "doorPublicationPending")
+          ? evidence.doorPublicationPending
+          : doorPublicationPending,
+    };
+  }
+
+  private pullOwnershipRows(
+    diagnostics?: PullOwnershipDiagnostics,
+    auditing?: CoordinatorUnit,
+    targets?: readonly PullTarget[],
+  ): PullOwnershipRows {
     let count = 0,
       bytes = 0;
     const position = (source: PullOwnershipSource, rowIndex?: number) => {
@@ -4758,6 +4874,104 @@ export class RunHistoryDO extends DurableObject<Env> {
       });
       if (diagnostics) diagnostics.runOrigins!.push({ source: "live_runs", rowIndex: diagnostics.scan!.rowIndex });
     }
+    if (targets) {
+      const version = this.sql
+        .exec<{ value: string }>(`SELECT value FROM meta WHERE key='terminal_pull_owner_index_version'`)
+        .toArray()[0]?.value;
+      if (version !== TERMINAL_PULL_OWNER_INDEX_VERSION) {
+        this.sql.exec(`UPDATE terminal_pull_owner_coverage SET dirty=1, valid=0, target_count=0`);
+        this.sql.exec(`DELETE FROM terminal_pull_owner_targets`);
+        this.sql.exec(
+          `INSERT OR REPLACE INTO meta (key,value) VALUES ('terminal_pull_owner_index_version',?)`,
+          TERMINAL_PULL_OWNER_INDEX_VERSION,
+        );
+      }
+      // A missing entry is dirty, never a negative owner observation. These
+      // derived writes may make bounded progress even when admission refuses.
+      this.sql.exec(
+        `INSERT OR IGNORE INTO terminal_pull_owner_coverage (run_id)
+        SELECT run_id FROM runs WHERE run_id NOT IN (SELECT run_id FROM terminal_pull_owner_coverage) LIMIT ?`,
+        limit,
+      );
+      position("runs");
+      try {
+        for (const row of bounded(
+          this.sql.exec<{ run_id: string; owner_json: string; work_evidence_json: string | null }>(
+            `${TERMINAL_PULL_OWNER_COLUMNS} FROM runs WHERE run_id IN
+           (SELECT run_id FROM terminal_pull_owner_coverage WHERE dirty=1) LIMIT ?`,
+            limit,
+          ),
+          "runs",
+        )) {
+          const canonical = this.terminalPullOwnershipRow(row, diagnostics);
+          const keys = terminalPullOwnerTargets(canonical, diagnostics);
+          if (keys === undefined) {
+            return { ...rows, complete: false };
+          }
+          this.sql.exec(`DELETE FROM terminal_pull_owner_targets WHERE run_id=?`, row.run_id);
+          for (const key of keys)
+            this.sql.exec(
+              `INSERT OR IGNORE INTO terminal_pull_owner_targets (run_id, repo, pr, ref) VALUES (?, ?, ?, ?)`,
+              row.run_id,
+              key.repo,
+              key.pr ?? 0,
+              key.ref ?? "",
+            );
+          const total = this.sql
+            .exec<{ n: number }>(`SELECT COUNT(*) AS n FROM terminal_pull_owner_targets WHERE run_id=?`, row.run_id)
+            .one().n;
+          const content = this.sql
+            .exec<{ json: string }>(
+              `SELECT ${TERMINAL_PULL_TARGET_CONTENT} AS json FROM terminal_pull_owner_coverage WHERE run_id=?`,
+              row.run_id,
+            )
+            .one().json;
+          this.sql.exec(
+            `UPDATE terminal_pull_owner_coverage SET dirty=0, valid=1, target_count=?, targets_json=? WHERE run_id=?`,
+            total,
+            content,
+            row.run_id,
+          );
+        }
+      } catch {
+        // Return, rather than throw out of the owner transaction: partial
+        // index work survives, but incomplete coverage still refuses admission.
+        return { ...rows, complete: false };
+      }
+      if (
+        this.sql
+          .exec(`SELECT 1 FROM runs WHERE run_id NOT IN (SELECT run_id FROM terminal_pull_owner_coverage) LIMIT 1`)
+          .toArray().length
+      ) {
+        unreadable("inventory_incomplete");
+        return { ...rows, complete: false };
+      }
+      // Corrupt candidates invalidate only derived cache. This read grants
+      // no absence; a later bounded lookup must decode actual source again.
+      const broken = `target_count<>(SELECT COUNT(*) FROM terminal_pull_owner_targets t WHERE t.run_id=terminal_pull_owner_coverage.run_id)
+        OR targets_json<>${TERMINAL_PULL_TARGET_CONTENT}`;
+      const invalidated = this.sql.exec(`UPDATE terminal_pull_owner_coverage SET dirty=1, valid=0
+        WHERE dirty=0 AND valid=1 AND (${broken})`).rowsWritten;
+      if (
+        invalidated ||
+        this.sql.exec(`SELECT 1 FROM terminal_pull_owner_coverage WHERE dirty=1 OR valid<>1 LIMIT 1`).toArray().length
+      ) {
+        unreadable("inventory_incomplete");
+        return { ...rows, complete: false };
+      }
+    }
+    const selectedTerminal = targets
+      ? ` WHERE run_id IN (
+      SELECT t.run_id FROM terminal_pull_owner_targets t, json_each(?) requested
+      WHERE t.repo=lower(json_extract(requested.value, '$.repo')) AND
+        ((t.pr=0 AND t.ref='') OR t.pr=json_extract(requested.value, '$.pr') OR
+         t.ref=CASE WHEN substr(json_extract(requested.value, '$.ref'),1,11)='refs/heads/'
+           THEN substr(json_extract(requested.value, '$.ref'),12) ELSE json_extract(requested.value, '$.ref') END)
+      UNION SELECT value FROM json_each(?)
+      UNION SELECT json_extract(json, '$.owner.runId') FROM workspace_settlements WHERE json_valid(json)
+    )`
+      : "";
+    const queryArgs = targets ? [JSON.stringify(targets), JSON.stringify([...auditedRunIds]), limit] : [limit];
     position("runs");
     for (const row of bounded(
       this.sql.exec<{ run_id: string; owner_json: string; work_evidence_json: string | null }>(
@@ -4766,58 +4980,13 @@ export class RunHistoryDO extends DurableObject<Env> {
         // publication remain in this transaction, including unreadable values.
         // SQLite accepts JSON5; refuse it before projection can normalize NaN
         // into the null sentinel used for a cleared Door publication.
-        `SELECT run_id,
-           CASE WHEN json_valid(summary_json) THEN
-           (SELECT json_group_object(key, json(CASE
-              WHEN type IN ('array', 'object') THEN value
-              WHEN type = 'true' THEN 'true'
-              WHEN type = 'false' THEN 'false'
-              ELSE json_quote(value) END))
-            FROM json_each(runs.summary_json)
-            WHERE key IN ('id', 'repo', 'userId', 'channelId', 'threadKey',
-              'parentInstanceId', 'coordinatorUnit', 'coordinatorAttempt',
-              'idempotencyKey', 'session', 'agent', 'status', 'provisional', 'publicationSettlement',
-              'startedAt', 'finishedAt', 'eventCount', 'storedEventCount', 'truncated', 'headSha', 'pushed', 'restarting', 'pr',
-              'branchPublication', 'branchPushReceipts', 'doorPublicationPending'))
-           ELSE 'null' END AS owner_json,
-           work_evidence_json FROM runs LIMIT ?`,
-        limit,
+        `${TERMINAL_PULL_OWNER_COLUMNS} FROM runs${selectedTerminal} LIMIT ?`,
+        ...queryArgs,
       ),
       "runs",
     )) {
-      const raw: Record<string, unknown> = parse(row.owner_json, "inventory_terminal_producer");
-      if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-        if (diagnostics)
-          diagnostics.failure = {
-            check: "inventory_terminal_producer",
-            source: diagnostics.scan?.source,
-            rowIndex: diagnostics.scan?.rowIndex,
-          };
-        throw new Error("unreadable terminal producer");
-      }
-      const { branchPublication, branchPushReceipts, doorPublicationPending, ...identity } = raw;
-      if (!isRunWorkOwner(identity) || !isPullOwnerLiveMeta(identity) || identity.id !== row.run_id) {
-        if (diagnostics)
-          diagnostics.failure = {
-            check: "inventory_terminal_producer",
-            source: diagnostics.scan?.source,
-            rowIndex: diagnostics.scan?.rowIndex,
-          };
-        throw new Error("unreadable terminal producer");
-      }
-      const evidence =
-        row.work_evidence_json === null
-          ? undefined
-          : parseWorkEvidence(parse(row.work_evidence_json, "inventory_private_producer"), identity);
-      if (row.work_evidence_json !== null && !evidence) {
-        if (diagnostics)
-          diagnostics.failure = {
-            check: "inventory_private_producer",
-            source: diagnostics.scan?.source,
-            rowIndex: diagnostics.scan?.rowIndex,
-          };
-        throw new Error("unreadable private producer");
-      }
+      const canonical = this.terminalPullOwnershipRow(row, diagnostics);
+      const identity = canonical.record;
       const audited = auditedRunIds.has(row.run_id);
       if (audited && !isHistoricalOwnerRecord(identity)) {
         unreadable("inventory_terminal_producer");
@@ -4837,21 +5006,7 @@ export class RunHistoryDO extends DurableObject<Env> {
           throw new Error("pull owner scan incomplete");
         }
       }
-      rows.runs.push({
-        runId: row.run_id,
-        repo: identity.repo,
-        live: false,
-        record: identity,
-        historicalEvents,
-        pushReceipts:
-          evidence && Object.hasOwn(evidence, "branchPushReceipts") ? evidence.branchPushReceipts : branchPushReceipts,
-        publication:
-          evidence && Object.hasOwn(evidence, "branchPublication") ? evidence.branchPublication : branchPublication,
-        door:
-          evidence && Object.hasOwn(evidence, "doorPublicationPending")
-            ? evidence.doorPublicationPending
-            : doorPublicationPending,
-      });
+      rows.runs.push({ ...canonical, historicalEvents });
       if (diagnostics) diagnostics.runOrigins!.push({ source: "runs", rowIndex: diagnostics.scan!.rowIndex });
     }
     position("settlements");
@@ -4887,7 +5042,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     };
     try {
       this.ctx.storage.transactionSync(() => {
-        result = findPullOwnersInRows(target, this.pullOwnershipRows(diagnostics), diagnostics);
+        result = findPullOwnersInRows(target, this.pullOwnershipRows(diagnostics, undefined, [target]), diagnostics);
       });
     } catch {
       return reported("read");

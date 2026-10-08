@@ -242,6 +242,57 @@ export function isPullTarget(value: unknown): value is PullTarget {
 
 const pullRef = (ref: string) => (ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : ref);
 
+/** Candidate keys only, after canonical producer decoding. Unknown evidence
+ * blocks every target; a key never replaces the owning transaction's proof. */
+export function terminalPullOwnerTargets(
+  run: PullOwnershipRows["runs"][number],
+  diagnostics?: PullOwnershipDiagnostics,
+): PullTarget[] | undefined {
+  const fail = (check: PullOwnershipCheck): undefined => {
+    if (diagnostics) {
+      diagnostics.failure = { check, ...diagnostics.cursor };
+      diagnostics.cause = "validation";
+    }
+    return undefined;
+  };
+  if (run.live || !isRunWorkOwner(run.record) || run.record.id !== run.runId || run.record.repo !== run.repo)
+    return fail("run_shape");
+  const targets: PullTarget[] = [];
+  if (run.publication !== undefined) {
+    const publication = branchPublicationOf(run.publication, typeof run.repo === "string" ? run.repo : undefined);
+    if (!publication || (!publication.complete && !publication.repo)) return fail("run_publication");
+    if (!publication.complete) {
+      const repo = publication.repo!;
+      if (!publication.pending) targets.push({ repo });
+      else {
+        targets.push({ repo, pr: publication.pending.pr, ref: publication.pending.ref });
+        for (const branch of publication.branches) targets.push({ repo, pr: branch.pr, ref: branch.ref });
+        for (const target of publication.targets ?? []) targets.push({ repo, pr: target.pr, ref: target.ref });
+      }
+    }
+  }
+  if (run.door !== undefined && run.door !== null) {
+    const door = doorPublicationOf(run.door);
+    if (!door) return fail("run_door");
+    if (door.outcome !== "rejected" && door.outcome !== "not_forwarded")
+      targets.push({ repo: door.repo, pr: door.pr, ref: door.update.ref });
+  }
+  return targets.map((target) => ({
+    repo: target.repo.toLowerCase(),
+    ...(target.pr !== undefined ? { pr: target.pr } : {}),
+    ...(target.ref !== undefined ? { ref: pullRef(target.ref) } : {}),
+  }));
+}
+
+export function pullOwnerTargetMatches(candidate: PullTarget, target: PullTarget): boolean {
+  return (
+    candidate.repo.toLowerCase() === target.repo.toLowerCase() &&
+    ((candidate.pr === undefined && candidate.ref === undefined) ||
+      (target.pr !== undefined && candidate.pr === target.pr) ||
+      (target.ref !== undefined && candidate.ref !== undefined && pullRef(candidate.ref) === pullRef(target.ref)))
+  );
+}
+
 export function isPullOwnerLiveMeta(value: unknown): value is { repo?: string } {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const meta = value as Record<string, unknown>;
@@ -289,6 +340,7 @@ export function findPullOwnersInRows(
     return { ok: false, reason };
   };
   if (!isPullTarget(target)) return fail("target", undefined, undefined, "invalid");
+  if (!rows.complete && diagnostics?.failure) return { ok: false, reason: "incomplete" };
   if (
     !rows.complete ||
     rows.units.length + rows.runs.length + rows.effects.length + (rows.settlements?.length ?? 0) > PULL_OWNER_SCAN_MAX
