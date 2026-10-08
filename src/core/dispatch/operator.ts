@@ -1,3 +1,8 @@
+import {
+  candidateSmokeDiagnostic,
+  type CandidateSmokeDiagnostic,
+  type SmokeReadResult,
+} from "./operatorSmokeDiagnostic.js";
 import { configuredAgent, settingsForAgent } from "../../config/agents.js";
 import { OFFER_CONTEXT_LINE } from "./confirm.js";
 import { audienceRefusalText, type AudienceCheck } from "../audienceDecision.js";
@@ -1920,6 +1925,8 @@ export interface OperatorAnswer {
   attempts?: StructuredAttempt[];
   /** Opt-in model-loop counters; no request, tool arguments or profile values. */
   allowance?: OperatorAllowance;
+  /** Candidate-only closed observations, never requester or durable run data. */
+  smokeDiagnostic?: CandidateSmokeDiagnostic;
 }
 
 /** The output cap for one turn's answer: the largest visible answer the
@@ -2334,10 +2341,17 @@ function explicitPrDirective(input: OperatorInput): OperatorDecision | undefined
 export async function runOperator(
   input: OperatorInput,
   model: RouteModel,
-  opts: { timeoutMs?: number; now?: () => number; maxOutputTokens?: number; includeAllowance?: boolean } = {},
+  opts: {
+    timeoutMs?: number;
+    now?: () => number;
+    maxOutputTokens?: number;
+    includeAllowance?: boolean;
+    smokeDiagnosticScope?: "candidate-smoke-v1";
+  } = {},
 ): Promise<OperatorAnswer> {
   const now = opts.now ?? Date.now;
   const started = now();
+  const smokeDiagnostic = candidateSmokeDiagnostic(opts.smokeDiagnosticScope);
   // An unambiguous, current requester directive is already a typed target.
   // Do not make the model reconstruct its repo and PR before the review door.
   const direct = explicitPrDirective(input);
@@ -2346,6 +2360,7 @@ export async function runOperator(
       decision: direct,
       latencyMs: now() - started,
       outputTokens: 0,
+      ...(smokeDiagnostic ? { smokeDiagnostic: smokeDiagnostic.snapshot() } : {}),
     };
   let prompt = buildOperatorPrompt(input);
   // The turn parse reads the author's FULL projection even on an owned thread
@@ -2394,6 +2409,7 @@ export async function runOperator(
     outputTokens: Math.ceil(chars / 3),
     ...(operatorDiagnostic !== undefined ? { operatorDiagnostic } : {}),
     ...(attempts.length > 0 ? { attempts } : {}),
+    ...(smokeDiagnostic ? { smokeDiagnostic: smokeDiagnostic.snapshot() } : {}),
     ...(opts.includeAllowance
       ? {
           allowance: {
@@ -2454,6 +2470,13 @@ export async function runOperator(
         !ownedCommandRuns(input.owner, command.def, invocation.input, input.text, decision.binds[0]?.line))
     )
       return undefined;
+    if (smokeDiagnostic) {
+      try {
+        smokeDiagnostic.command(command?.effect);
+      } catch {
+        smokeDiagnostic.command(undefined);
+      }
+    }
     // Record the proposal separately from the verdict; neither is command execution.
     attempts.push({ outcome: "accepted" });
     const violation = (reason: string, kind: CommandViolation["kind"] = "unconfirmed"): CommandViolation => {
@@ -2626,22 +2649,49 @@ export async function runOperator(
           const helper = Object.values(OPERATOR_READ_TOOLS).find((name) => name === turn.tool);
           if (helper !== undefined) helperNames.push(helper);
         }
-        // The providers catalogue is the one asynchronous read (issue 2088):
-        // answered through the reader when the stage wired one, its failure a
-        // named note on the turn, never a failed dispatch.
+        // Request-wired catalog readers retain failures as named context
+        // notes; a grounding read never dispatches an action.
+        const finishDiagnostic = smokeDiagnostic?.begin(
+          turn.tool,
+          turn.tool === OPERATOR_READ_TOOLS.repositoryBrief
+            ? { repo: turn.repo }
+            : turn.tool === OPERATOR_READ_TOOLS.providerModels
+              ? { filter: turn.filter }
+              : {},
+        );
+        let result: SmokeReadResult = "reply";
+        if (turn.tool === OPERATOR_READ_TOOLS.repositoryBrief)
+          result = !turn.repo ? "invalid_arguments" : !input.repositoryBriefs ? "reader_unavailable" : "unknown";
+        if (turn.tool === OPERATOR_READ_TOOLS.providerModels && input.providerModels === undefined)
+          result = "reader_unavailable";
         const read =
           turn.tool === OPERATOR_READ_TOOLS.repositoryBrief
             ? turn.repo && input.repositoryBriefs
               ? await input.repositoryBriefs
                   .read(turn.repo)
-                  .then((brief) =>
-                    brief ? renderRepositoryBrief(brief) : "That repository brief is unavailable to this requester.",
-                  )
-                  .catch(() => "The repository brief could not be read; other context remains available.")
+                  .then((brief) => {
+                    result = brief ? "reply" : "not_found";
+                    if (smokeDiagnostic && brief) {
+                      try {
+                        const sources = Object.getOwnPropertyDescriptor(brief, "sources")?.value;
+                        if (Array.isArray(sources) && sources.length === 0) result = "metadata_only";
+                      } catch {
+                        result = "unknown";
+                      }
+                    }
+                    return brief
+                      ? renderRepositoryBrief(brief)
+                      : "That repository brief is unavailable to this requester.";
+                  })
+                  .catch(() => {
+                    result = "read_error";
+                    return "The repository brief could not be read; other context remains available.";
+                  })
               : "Pass a repository from the connected catalog."
             : turn.tool === OPERATOR_READ_TOOLS.providerModels && input.providerModels !== undefined
               ? await readProviderModels(input.providerModels, turn.filter)
               : answerOperatorRead(turn.tool, input);
+        finishDiagnostic?.(result);
         turns.push({ answer: answerText, violation: read });
         continue;
       }

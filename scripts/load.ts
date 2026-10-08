@@ -1361,6 +1361,7 @@ async function routeReplay(f: Flags): Promise<boolean> {
       const result = await runOperator(candidateDoorSmokeInput(probe, projection, providerName), model, {
         timeoutMs: OPERATOR_TIMEOUT_MS,
         includeAllowance: true,
+        smokeDiagnosticScope: "candidate-smoke-v1",
         ...(completion ? { maxOutputTokens: operatorMaxOutputTokens(completion) } : {}),
       });
       const bind =
@@ -1371,7 +1372,7 @@ async function routeReplay(f: Flags): Promise<boolean> {
       );
       if (!ok) {
         process.stdout.write(
-          `door smoke detail: ${JSON.stringify({ decision: result.decision, attempts: result.attempts, allowance: result.allowance })}\n`,
+          `door smoke detail: ${JSON.stringify({ decision: result.decision, attempts: result.attempts, allowance: result.allowance, smokeDiagnostic: result.smokeDiagnostic })}\n`,
         );
         passed = false;
       }

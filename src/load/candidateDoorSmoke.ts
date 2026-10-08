@@ -1,3 +1,4 @@
+import { renderRepositoryBriefs, type RepositoryBriefContext } from "../core/dispatch/repositoryBriefs.js";
 import { presetBindOf } from "../core/dispatch/operator.js";
 import type { OperatorBind, OperatorInput } from "../core/dispatch/operator.js";
 
@@ -106,10 +107,38 @@ export function candidateDoorSmokeCases(projection: OperatorInput["projection"])
   ];
 }
 
+/** Explicit synthetic catalog metadata only: no file, head, owner, grant,
+ * source receipt or standing execution facts are invented by this reader. */
+export function candidateRepositoryBriefs(): RepositoryBriefContext {
+  const brief = {
+    repo: "acme/api",
+    description: "Synthetic candidate smoke catalog entry; no live source is read.",
+    defaultBranch: "main",
+    observedAt: 0,
+    sourceStatus: "unavailable" as const,
+    sources: [],
+  };
+  return {
+    status: "available",
+    catalog: [structuredClone(brief)],
+    read: async (repo) =>
+      typeof repo === "string" && repo.toLowerCase() === brief.repo ? structuredClone(brief) : undefined,
+  };
+}
+
 export function candidateDoorSmokeInput(
   probe: CandidateDoorSmokeCase,
   projection: OperatorInput["projection"],
   provider: string,
 ): OperatorInput {
-  return { ...probe.context, text: probe.text, projection, tail: probe.context?.tail ?? [], providers: [provider] };
+  const repositoryBriefs = probe.context?.repositoryBriefs ?? candidateRepositoryBriefs();
+  return {
+    ...probe.context,
+    text: probe.text,
+    projection,
+    tail: probe.context?.tail ?? [],
+    providers: [provider],
+    repositoryBriefs,
+    briefs: renderRepositoryBriefs(repositoryBriefs),
+  };
 }
