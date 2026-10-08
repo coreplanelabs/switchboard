@@ -128,6 +128,14 @@ export function mergeRequesterTarget(prior: RequesterTarget | null, next: Reques
 }
 
 export interface RunLedger {
+  prepareCancellation?(
+    runId: string,
+    actor: import("./cancellation.js").CancellationActor,
+  ): Promise<import("./cancellation.js").CancellationPreparation>;
+  finishCancellation?(
+    cancellation: import("./cancellation.js").RunCancellation,
+    record: RunRecord,
+  ): Promise<FinishResult>;
   originalPromotionBody?(request: ClaimRequest): string;
   observeExpectedSeed?(
     key: string,

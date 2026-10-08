@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { redactAndCap, sanitizeActor, type RunActor, type RunEvent, type StopMode, isSpanRecord } from "./runEvents.js";
-import type { RunStatus } from "./runRecord.js";
+import type { RunStatus, RunRecord } from "./runRecord.js";
 import { RunControl } from "./runRegistry/runControl.js";
 import {
   appendToBacklog,
@@ -539,6 +539,26 @@ export class RunRegistry {
     if (!run) return;
     run.persisted = true;
     this.index.notify({ type: "upsert", run: summaryOf(run, this.now()) });
+  }
+
+  /** Reconcile the local projection only after the store acknowledged cancellation. */
+  confirmCancellation(record: RunRecord): void {
+    const run = this.runs.get(record.id);
+    if (
+      !run ||
+      record.status !== "stopped_hard" ||
+      !record.cancellation ||
+      run.startedAt !== record.startedAt ||
+      run.meta?.threadKey !== record.threadKey ||
+      run.meta?.userId !== record.userId ||
+      run.meta?.channelId !== record.channelId
+    )
+      return;
+    this.finish(record.id, "stopped_hard");
+    run.status = "stopped_hard";
+    run.finishedAt = record.finishedAt;
+    this.seal(record.id);
+    this.markPersisted(record.id);
   }
 
   /** True iff the run exists (not yet evicted) and the token matches — the same

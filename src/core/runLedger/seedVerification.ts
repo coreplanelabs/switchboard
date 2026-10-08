@@ -406,6 +406,8 @@ export async function confirmStoredSeedBoundary(
 /** Flat entries in the existing session metadata carrier, one immutable original per exact fingerprint. */
 export const SOURCE_SEED_RECORD_PREFIX = "expected_seed_original:";
 export interface SourceSeedOriginalRecord {
+  /** Negative resolution only; the original receipt remains unconfirmed. */
+  cancelledBy?: string;
   version: 1;
   receipt: SourceSeedReceipt;
   release?: SourceSeedReleaseReceipt;
@@ -426,15 +428,24 @@ export function sourceSeedOriginalOf(value: unknown): SourceSeedOriginalRecord |
   if (
     !object(value) ||
     value.version !== 1 ||
-    Object.keys(value).some((k) => !["version", "receipt", "release"].includes(k))
+    Object.keys(value).some((k) => !["version", "receipt", "release", "cancelledBy"].includes(k))
   )
     return;
   const receipt = sourceSeedReceiptOf(value.receipt),
     release = value.release === undefined ? undefined : sourceSeedReleaseOf(value.release);
   if (
     !receipt ||
+    (value.cancelledBy !== undefined &&
+      (typeof value.cancelledBy !== "string" ||
+        !RUN_ID_PATTERN.test(value.cancelledBy) ||
+        value.release !== undefined)) ||
     (value.release !== undefined && (!release || canonicalSeedJson(release.source) !== canonicalSeedJson(receipt)))
   )
     return;
-  return { version: 1, receipt, ...(release ? { release } : {}) };
+  return {
+    version: 1,
+    receipt,
+    ...(release ? { release } : {}),
+    ...(typeof value.cancelledBy === "string" ? { cancelledBy: value.cancelledBy } : {}),
+  };
 }

@@ -1,3 +1,4 @@
+import { createRunStop } from "../execution/runStop.js";
 import type { CredentialsCommandDeps } from "./commands/credentials.js";
 import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -275,6 +276,7 @@ export function buildCoreCommands(
       registry: wiring.registry,
       store: await runStore(),
       ledger: workerLedger,
+      stopRuntime: createRunStop(config.execution, wiring.secrets),
       sessions: workerLedger,
       units: buildCoordinatorInstanceStore(history, wiring.secrets),
       // A finished run's tokens are priced through `costs.prices` (costs.md item 4c), the list alone without one.

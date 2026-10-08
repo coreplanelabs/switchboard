@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import ts from "typescript";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -284,22 +285,64 @@ describe("sandbox Worker wiring (static)", () => {
     expect(worker).toMatch(/reason: r\.reason/);
     expect(worker).toMatch(/status: 503, reason: stat\.reason/);
   });
-
-  // item 22: the one place the Worker ends a container is the idle guard's
-  // host — the SDK's clean destroy and the platform's kill are handed to
-  // IdleGuard, which decides from served-time alone; no route destroys, and
-  // the SDK's own expiry hook is answered by the guard, never left to its
-  // process probes.
-  it("the Worker destroys a container only through the idle guard, and answers the SDK's expiry with the guard's verdict", () => {
-    expect(worker.match(/this\.destroy\(/g)).toHaveLength(1);
-    expect(worker).toMatch(/destroySandbox: \(\) => this\.destroy\(\)/);
-    expect(worker.match(/container\?\.destroy\(\)/g)).toHaveLength(1);
+  it("automatic lifecycle destruction and served operations remain wired through the idle guard", () => {
+    const idle = worker.slice(
+      worker.indexOf("private idleHost()"),
+      worker.indexOf("private async readLegacyPreservation("),
+    );
+    expect(idle).toMatch(/destroySandbox: \(\) => this\.destroy\(\)/);
+    expect(idle).toMatch(/await this\.ctx\.container\?\.destroy\(\)/);
     expect(worker).toMatch(/override async onActivityExpired\(\): Promise<void> \{\s*await this\.idle\.expired\(\);/);
     expect(worker).toMatch(/blockConcurrencyWhile\(\(\) => this\.idle\.wake\(\)\)/);
-    // every route the fetch handler calls runs inside served() — the seed among them (item 25) — and so does the start gate's warm-up
-    expect(worker.match(/this\.idle\.served\(/g)).toHaveLength(10);
-    expect(worker).toMatch(/async fetchPublicationBase\([\s\S]*?return this\.idle\.served\(/);
-    expect(worker).toMatch(/async publishControlled\([\s\S]*?return this\.idle\.served\(/);
+    const servedMethodsOf = (source: string) => {
+      const tree = ts.createSourceFile("worker.ts", source, ts.ScriptTarget.Latest, true);
+      const sandbox = tree.statements.find(
+        (statement): statement is ts.ClassDeclaration =>
+          ts.isClassDeclaration(statement) && statement.name?.text === "SwitchboardSandbox",
+      )!;
+      return sandbox.members
+        .filter(ts.isMethodDeclaration)
+        .filter((method) => {
+          let served = false;
+          const visit = (node: ts.Node) => {
+            if (ts.isCallExpression(node) && node.expression.getText(tree) === "this.idle.served") served = true;
+            ts.forEachChild(node, visit);
+          };
+          if (method.body) visit(method.body);
+          return served;
+        })
+        .map((method) => method.name.getText(tree))
+        .sort();
+    };
+    const expected = [
+      "exportPublicationPack",
+      "fetchPublicationBase",
+      "publishControlled",
+      "readBase64",
+      "readText",
+      "repairDependencies",
+      "runCommand",
+      "seed",
+      "startHost",
+      "write",
+    ];
+    expect(servedMethodsOf(worker)).toEqual(expected);
+    // Removing one method's own wrapper must not borrow proof from its neighbour.
+    const tree = ts.createSourceFile("worker.ts", worker, ts.ScriptTarget.Latest, true);
+    const sandbox = tree.statements.find(
+      (statement): statement is ts.ClassDeclaration =>
+        ts.isClassDeclaration(statement) && statement.name?.text === "SwitchboardSandbox",
+    )!;
+    for (const name of ["readText", "readBase64", "repairDependencies", "exportPublicationPack"]) {
+      const method = sandbox.members
+        .filter(ts.isMethodDeclaration)
+        .find((method) => method.name.getText(tree) === name)!;
+      const disconnected =
+        worker.slice(0, method.getStart(tree)) +
+        method.getText(tree).replace("this.idle.served", "this.idle.disconnected") +
+        worker.slice(method.end);
+      expect(servedMethodsOf(disconnected)).toEqual(expected.filter((method) => method !== name));
+    }
   });
 
   // item 23: every route passes through the start gate, whose warm-up is one

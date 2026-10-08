@@ -1,3 +1,5 @@
+import { cancellationOf } from "../core/runLedger/cancellation.js";
+import { sameCancellation } from "../core/runLedger/cancellation.js";
 import { readFileSync } from "node:fs";
 import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
@@ -53,6 +55,8 @@ function actualMethods(): Record<string, (...args: unknown[]) => Promise<unknown
   const names = [
     "preserveBeforeDestroy",
     "preservationRecord",
+    "cancellationState",
+    "cancelRun",
     "inspectRepairDependencies",
     "seed",
     "claimMatches",
@@ -76,6 +80,9 @@ function actualMethods(): Record<string, (...args: unknown[]) => Promise<unknown
     "decodeLifecycle",
     "updateCheckpoint",
     "sameOwner",
+    "sameCancellation",
+    "cancellationRefusal",
+    "cancellationOf",
     "normalizedSeedDoorOrigin",
     "boundSeedOriginMatches",
     "seedClaimHeadMatches",
@@ -91,6 +98,9 @@ function actualMethods(): Record<string, (...args: unknown[]) => Promise<unknown
     decodeLifecycle,
     updateCheckpoint,
     sameOwner,
+    sameCancellation,
+    () => false,
+    cancellationOf,
     normalizedSeedDoorOrigin,
     boundSeedOriginMatches,
     seedClaimHeadMatches,
@@ -126,6 +136,47 @@ function host(record: unknown, options: { seeded?: boolean; running?: boolean } 
   Object.setPrototypeOf(f, actualMethods());
   return f;
 }
+
+describe("sandbox run cancellation", () => {
+  it("destroys only the exact dedicated run slot and fences it against restarting", async () => {
+    const state = new Map<string, unknown>([[OWNER_KEY, legacy]]);
+    const f = host(legacy, { seeded: true }) as ReturnType<typeof host> & {
+      cancelRun: (ticket: unknown, binding: unknown) => Promise<unknown>;
+      cancellationState: () => Promise<unknown>;
+      destroy: () => Promise<void>;
+    };
+    f.ctx.id.name = `review:${legacy.owner.run}`;
+    Object.assign(f.ctx, { blockConcurrencyWhile: async (fn: () => Promise<unknown>) => fn() });
+    f.ctx.storage.get = vi.fn(async (key) => state.get(key));
+    f.ctx.storage.put = vi.fn(async (key: string, value: unknown) => {
+      state.set(key, value);
+    });
+    f.destroy = async () => {
+      f.ctx.container.running = false;
+    };
+    const ticket = {
+      version: 1,
+      id: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa",
+      runId: legacy.owner.run,
+      ownerGen: "g1",
+      threadKey: "mcp:fixture:thread",
+      startedAt: 1,
+      actor: { kind: "chat", id: "slack:operator" },
+    };
+    expect(await f.cancelRun(ticket, { container: "foreign", sandboxKey: f.ctx.id.name })).toEqual({ stopped: false });
+    expect(f.ctx.container.running).toBe(true);
+    expect(await f.cancelRun(ticket, { container: legacy.owner.container, sandboxKey: f.ctx.id.name })).toEqual({
+      stopped: true,
+      cancellationId: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa",
+      disposition: "workspace-discarded",
+    });
+    expect(f.ctx.container.running).toBe(false);
+    expect(await f.cancellationState()).toEqual(ticket);
+    expect(
+      await f.cancelRun({ ...ticket }, { container: legacy.owner.container, sandboxKey: f.ctx.id.name }),
+    ).toMatchObject({ stopped: true, cancellationId: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa" });
+  });
+});
 
 describe("sandbox preservation lifecycle reader", () => {
   it("retains pending or unverified versioned records before a waking probe or unseeded teardown", async () => {

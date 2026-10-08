@@ -4,6 +4,11 @@ import { createLedgerWriteThrough, type OpenRunRequest } from "./writeThrough.js
 import { UnknownAllocationClaimError } from "./allocationAck.js";
 import { TransientStoreError, UncertainStoreError } from "../storeFailure.js";
 import { storeRequestWitness } from "../storeResponse.js";
+import { RunRegistry } from "../runRegistry.js";
+import { createRunsService } from "../runsService.js";
+import { createRunStop } from "../../execution/runStop.js";
+import { secretsFrom } from "../../secrets.js";
+import { reclaimedRunRecord } from "../dispatch/record.js";
 
 // Feature: docs/reference/specs/run-history.md — an original may be committed
 // and its source verified while confirmation remains held. Diagnosis must not
@@ -27,11 +32,12 @@ async function world() {
     startedAt: 9_000,
     meta: {
       agent: "review",
+      selection: "none",
       channelId: "mcp:fixture",
       userId: "slack:fixture",
       threadKey: "mcp:fixture:original-hold",
       channelVisibility: "machine",
-      profile: { machine: "repo-resident", identity: "read", minutes: 25 },
+      profile: { machine: "none", identity: "read", minutes: 25 },
     },
     system: "original system",
     tools: [],
@@ -54,6 +60,201 @@ async function world() {
 }
 
 describe("original promotion hold diagnosis", () => {
+  it("cancelled resident work retains exact terminal settlement ownership", async () => {
+    const store = new InMemoryRunLedger(() => 20_000);
+    const runId = "cccccccc-cccc-4ccc-cccc-cccccccccccc";
+    const binding = {
+      backend: "resident",
+      ref: "main",
+      workspace: "/workspace/threads/fixture/main",
+      user: "worker2",
+      container: "fixture-container",
+      ownerGen: "g1",
+      ownerFence: 7,
+    };
+    expect(
+      await store.claim({
+        runId,
+        threadKey: "mcp:fixture:resident",
+        gen: "g1",
+        leaseMs: 30_000,
+        startedAt: 1,
+        meta: {
+          agent: "review",
+          channelId: "mcp:fixture",
+          userId: "slack:fixture",
+          threadKey: "mcp:fixture:resident",
+          repo: "fixture/repo",
+          selection: "resident",
+        },
+        state: { binding },
+        system: "",
+        tools: [],
+      }),
+    ).toMatchObject({ ok: true });
+    expect(await store.requestStop(runId, "hard")).toMatchObject({ ok: true });
+    const prepared = await store.prepareCancellation(runId, { kind: "chat", id: "slack:operator" });
+    if (!prepared.ok) throw new Error("cancellation not prepared");
+    const record = reclaimedRunRecord({ row: prepared.row, events: [], status: "stopped_hard", finishedAt: 20_000 });
+    record.cancellation = {
+      version: 1,
+      actor: prepared.cancellation.actor,
+      cancellation: prepared.cancellation,
+      disposition: "processes-stopped",
+    };
+    expect(await store.finishCancellation(prepared.cancellation, record)).toEqual({ ok: true, stored: true });
+    expect(await store.workspaceSettlement({ runId, ownerGen: "g1", ownerFence: 7 })).toMatchObject({
+      owner: { runId, ownerGen: "g1", ownerFence: 7 },
+      binding,
+      record: { id: runId, status: "stopped_hard" },
+    });
+  });
+  it("unsupported local fallback retains ordinary hard stop and canonical finish", async () => {
+    const store = new InMemoryRunLedger(() => 10_000);
+    const runId = "dddddddd-dddd-4ddd-dddd-dddddddddddd";
+    expect(
+      await store.claim({
+        runId,
+        threadKey: "mcp:fixture:local",
+        gen: "g1",
+        leaseMs: 30_000,
+        startedAt: 1,
+        meta: {
+          agent: "coding",
+          channelId: "mcp:fixture",
+          userId: "slack:fixture",
+          threadKey: "mcp:fixture:local",
+          selection: "local",
+        },
+        state: { binding: { backend: "local", workspace: "/fixture" } },
+        system: "",
+        tools: [],
+      }),
+    ).toMatchObject({ ok: true });
+    const service = createRunsService({
+      registry: new RunRegistry(),
+      store: null,
+      ledger: store,
+      generation: "g2",
+      stopRuntime: createRunStop(
+        { type: "cloudflare", url: "https://sandbox.example", resident: { baseUrl: "https://resident.example" } },
+        secretsFrom({}),
+      ),
+    });
+    expect(await service.stopRun(runId, "hard", { kind: "chat", id: "slack:operator" })).toEqual({
+      ok: true,
+      value: { id: runId, mode: "hard", state: "stopping" },
+    });
+    const owned = (await store.listLive())[0];
+    expect(owned).toMatchObject({ stop: "hard", ownerGen: "g1" });
+    expect(owned.state).not.toHaveProperty("cancellation");
+    const record = reclaimedRunRecord({ row: owned, events: [], status: "stopped_hard", finishedAt: 20_000 });
+    expect(await store.finish(runId, "g1", record)).toEqual({ ok: true, stored: true });
+  });
+  it("hard stop cancels an unconfirmed original without confirming its source or retaining an active run", async () => {
+    const w = await world();
+    w.confirm.mockResolvedValue({ kind: "held", reason: "mismatch" });
+    await expect(w.writer.open({ ...w.req, reservation: w.reserved })).rejects.toBeInstanceOf(
+      UnknownAllocationClaimError,
+    );
+    const before = await w.store.readPromotion({ runId: w.req.runId, gen: "g1" });
+    expect(before.kind).toBe("committed");
+    const registry = new RunRegistry({ now: () => 20_000 });
+    registry.create("review", w.req.meta, { id: w.req.runId, startedAt: w.req.startedAt });
+    const service = createRunsService({
+      registry,
+      store: null,
+      ledger: w.store,
+      generation: "g2",
+      clock: () => 20_000,
+      stopRuntime: async () => {
+        registry.finish(w.req.runId, "failed");
+        return { stopped: true, disposition: "no-workspace" };
+      },
+    });
+    expect(await service.stopRun(w.req.runId, "hard", { kind: "chat", id: "slack:operator" })).toEqual({
+      ok: true,
+      value: { id: w.req.runId, mode: "hard", state: "stopped" },
+    });
+    expect(w.store.finished.get(w.req.runId)).toMatchObject({
+      id: w.req.runId,
+      status: "stopped_hard",
+      cancellation: { version: 1, actor: { kind: "chat", id: "slack:operator" }, disposition: "no-workspace" },
+    });
+    expect((await service.listRuns({ visibleTo: { kind: "all" }, status: "active" })).runs).toEqual([]);
+    expect(registry.getById(w.req.runId)).toMatchObject({ finished: true, status: "stopped_hard", persisted: true });
+    expect(w.confirm).toHaveBeenCalledTimes(1);
+    expect(w.release).not.toHaveBeenCalled();
+    expect(await w.store.readPromotion({ runId: w.req.runId, gen: "g1" })).toMatchObject({ kind: "held" });
+    w.confirm.mockRestore();
+    const nextWriter = createLedgerWriteThrough({
+      ledger: w.store,
+      gen: "g2",
+      now: () => 20_000,
+      setInterval: () => ({ unref() {} }),
+      clearInterval: () => {},
+      warn: () => {},
+      fallback: { put: async () => {}, abandoned: () => {} },
+    });
+    const next = {
+      ...w.req,
+      runId: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+      startedAt: 20_000,
+      seed: {
+        ...w.req.seed!,
+        messages: [{ role: "user" as const, content: [{ type: "text" as const, text: "new request" }] }],
+      },
+    };
+    const reservation = await nextWriter.reserve(next);
+    expect(reservation.kind).toBe("tracked");
+    if (reservation.kind !== "tracked") throw new Error("next request was not reserved");
+    const opened = await nextWriter.open({ ...next, reservation: reservation.run });
+    expect(opened.kind).toBe("tracked");
+    expect(await w.store.readPromotion({ runId: next.runId, gen: "g2" })).toMatchObject({
+      kind: "confirmed",
+      receipt: { phase: "confirmed" },
+    });
+    if (opened.kind === "tracked") await opened.run.close();
+  });
+  it("an unacknowledged runtime stop keeps the exact cancellation fenced and a retry uses the same target", async () => {
+    const w = await world();
+    w.confirm.mockResolvedValue({ kind: "held", reason: "mismatch" });
+    await expect(w.writer.open({ ...w.req, reservation: w.reserved })).rejects.toBeInstanceOf(
+      UnknownAllocationClaimError,
+    );
+    const ids: string[] = [];
+    let stopped = false;
+    const service = createRunsService({
+      registry: new RunRegistry(),
+      store: null,
+      ledger: w.store,
+      generation: "g2",
+      stopRuntime: async (_row, cancellation) => {
+        ids.push(cancellation.id);
+        return stopped ? { stopped: true, disposition: "no-workspace" } : { stopped: false };
+      },
+    });
+    expect(await service.stopRun(w.req.runId, "hard", { kind: "chat", id: "slack:operator" })).toEqual({
+      ok: false,
+      error: "unavailable",
+    });
+    expect((await w.store.listLive())[0]).toMatchObject({
+      runId: w.req.runId,
+      stop: "hard",
+      state: { cancellation: { version: 1 } },
+    });
+    expect(await w.store.append(w.req.runId, "g1", [{ type: "answer", text: "late answer", seq: 100 }])).toEqual({
+      ok: false,
+      reason: "fenced",
+    });
+    stopped = true;
+    expect(await service.stopRun(w.req.runId, "hard", { kind: "chat", id: "slack:operator" })).toMatchObject({
+      ok: true,
+      value: { state: "stopped" },
+    });
+    expect(ids[0]).toBe(ids[1]);
+    expect(w.store.finished.get(w.req.runId)).toMatchObject({ status: "stopped_hard" });
+  });
   it.each(["unknown", "transient", "foreign"] as const)(
     "retains a committed and verified original when its source read is %s",
     async (mode) => {

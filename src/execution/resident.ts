@@ -1153,7 +1153,14 @@ export class ResidentExecutor implements Executor {
             "content-type": "application/json",
             authorization: `Bearer ${this.opts.token}`,
           },
-          body: JSON.stringify({ resource: this.opts.resource, threadKey: this.opts.threadKey, ...body }),
+          body: JSON.stringify({
+            resource: this.opts.resource,
+            threadKey: this.opts.threadKey,
+            runId: this.opts.runId,
+            ownerGen: this.opts.ownerGen,
+            ownerFence: this.opts.ownerFence,
+            ...body,
+          }),
           // Bound every route so a hung resident can't stall the dispatch; /exec
           // streams and can legitimately run minutes, so it passes its command
           // budget plus EXEC_CALL_MARGIN_MS (the server's own exit-124 answer

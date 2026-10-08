@@ -589,3 +589,27 @@ describe("the image mode in the committed templates", () => {
     }
   });
 });
+
+// Feature: docs/reference/specs/execution.md — cancellation is configured without a resident seed.
+describe("sandbox runtime cancellation configuration", () => {
+  it("renders the state endpoint independently of optional resident cache bindings", () => {
+    const template = readFileSync(
+      new URL("../../deploy/cloudflare-sandbox/wrangler.template.jsonc", import.meta.url),
+      "utf8",
+    );
+    const full = renderTemplate(template, VIEW);
+    if (!full.ok) throw new Error("full sandbox profile did not render");
+    const config = JSON.parse(stripJsonc(full.text));
+    expect(config.vars).toEqual({
+      STATE_WORKER_URL: "https://switchboard-memory.example.test",
+      CLOUDFLARE_ACCOUNT_ID: "1234567890abcdef".repeat(2),
+      BACKUP_BUCKET_NAME: "switchboard-resident-cache",
+    });
+    expect(config.r2_buckets).toEqual([{ binding: "BACKUP_BUCKET", bucket_name: "switchboard-resident-cache" }]);
+    const cold = renderTemplate(template, { ...VIEW, resident: undefined });
+    if (!cold.ok) throw new Error("cold sandbox profile did not render");
+    const coldConfig = JSON.parse(stripJsonc(cold.text));
+    expect(coldConfig.vars).toEqual({ STATE_WORKER_URL: "https://switchboard-memory.example.test" });
+    expect(coldConfig.r2_buckets).toBeUndefined();
+  });
+});

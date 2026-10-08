@@ -1,3 +1,9 @@
+import {
+  cancellationTargetPrepared,
+  cancellationRefusal,
+  cancellationOf,
+  type RunCancellation,
+} from "../../src/core/runLedger/cancellation.js";
 // Resident Worker: always-warm per-repo environments on Cloudflare Sandbox 1.0
 // (@cloudflare/sandbox@next, exact-pinned; the Dockerfile FROM tag must match).
 // One ResidentDO — a Sandbox subclass, i.e. a container — per onboarded
@@ -2094,6 +2100,8 @@ class CycleRestartError extends Error {
   }
 }
 
+class RunCancelledError extends Error {}
+
 export class ResidentDO extends Sandbox<Env> {
   // TIMER RULE: lifecycle code never arms the Durable Object's own alarm slot
   // — the Container base class owns it (its sleepAfter machinery and the
@@ -2208,6 +2216,13 @@ export class ResidentDO extends Sandbox<Env> {
    *  caused them — never on a concurrent request's. Empty outside a traced
    *  request (a refresh cycle, a watchdog). */
   private readonly stepTrace = new AsyncLocalStorage<StepTrace>();
+  private readonly threadOperationScope = new AsyncLocalStorage<{
+    threadKey: string;
+    owner: WorkspaceOwner;
+    pendingNative: number;
+    attachment: boolean;
+    active: boolean;
+  }>();
 
   private currentSteps(): ResidentStep[] {
     return this.stepTrace.getStore()?.steps() ?? [];
@@ -2552,6 +2567,8 @@ export class ResidentDO extends Sandbox<Env> {
     if (this.destroying || (await this.ctx.storage.get(DESTROY_UNCONFIRMED_KEY))) {
       throw new Error("resident-destroy-unconfirmed: container reuse refused until destruction is confirmed");
     }
+    const scope = this.threadOperationScope?.getStore();
+    await this.assertThreadOperationAllowed();
     const timeout = opts.timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
     const launch = {
       ...(opts.cwd ? { cwd: opts.cwd } : {}),
@@ -2567,6 +2584,7 @@ export class ResidentDO extends Sandbox<Env> {
     // unsafe cases surface as RuntimeReplacedError for the routes to name.
     let proc: Awaited<ReturnType<ReturnType<typeof createExtensionProcessSandbox>["exec"]>>;
     try {
+      if (scope) scope.pendingNative++;
       proc = await createExtensionProcessSandbox(this).exec(argv as unknown as SandboxCommand, launch);
     } catch (err) {
       // A DO code-update reset (our own Worker deploy) BEFORE a runtime
@@ -2582,6 +2600,7 @@ export class ResidentDO extends Sandbox<Env> {
         // container accepts again in moments — the typed word, for the thread
         // routes to answer with the wait token; never counted as unreachable.
         if (isRuntimeBusy(err)) {
+          if (scope) scope.pendingNative--;
           throw new SandboxRuntimeBusyError({ containerId: this.ctx.id.toString(), cause: errMsg(err) });
         }
         // The control port never answered the SDK's connect (its 30 s abort,
@@ -2590,6 +2609,7 @@ export class ResidentDO extends Sandbox<Env> {
         // reads the count — and name it, so no reason ever carries the bare
         // `The operation was aborted`.
         if (isRuntimeUnreachable(err)) {
+          if (scope) scope.pendingNative--;
           throw new RuntimeUnreachableError((await this.noteRuntimeUnreachable()).count, err);
         }
         throw err;
@@ -2628,6 +2648,9 @@ export class ResidentDO extends Sandbox<Env> {
           cause: err,
         });
       }
+      if (scope) scope.pendingNative--;
+      await this.assertThreadOperationAllowed();
+      if (scope) scope.pendingNative++;
       proc = await createExtensionProcessSandbox(this).exec(argv as unknown as SandboxCommand, launch);
     }
     // The spawn is the proof the control port answers: a persisted count of
@@ -2635,6 +2658,7 @@ export class ResidentDO extends Sandbox<Env> {
     await this.clearRuntimeUnreachable();
     try {
       const out = await proc.output({ encoding: "utf8", timeout: timeout + 30_000 });
+      if (scope && Number.isSafeInteger(out.exitCode) && out.exitCode >= 0) scope.pendingNative--;
       // `truncated` is the SDK saying the process log stream was cut past its
       // own retention — the output here is a prefix, whatever our caps say.
       return {
@@ -2675,6 +2699,7 @@ export class ResidentDO extends Sandbox<Env> {
         console.log(
           `exec: ${argv.join(" ").slice(0, 200)} outlived its ${timeout}ms budget — killed (exit ${exitCode ?? "unobserved"})`,
         );
+        if (scope && exitCode !== null) scope.pendingNative--;
         return abandonedWaitStepResult({ detail: errMsg(err), exitCode });
       }
       throw err;
@@ -2747,7 +2772,7 @@ export class ResidentDO extends Sandbox<Env> {
     if (!token) {
       return this.runOk(["git", "-c", "credential.helper=", ...gitArgs], step, { timeoutMs, env: injected });
     }
-    await this.writeFile(CRED_FILE, `https://x-access-token:${token}@github.com\n`);
+    await this.writeOwnedFile(CRED_FILE, `https://x-access-token:${token}@github.com\n`);
     try {
       return await this.runOk(
         ["git", "-c", "credential.helper=", "-c", `credential.helper=store --file=${CRED_FILE}`, ...gitArgs],
@@ -2870,10 +2895,10 @@ export class ResidentDO extends Sandbox<Env> {
     installingKey?: string;
     builtSha?: string;
   }): Promise<void> {
-    if (m.ready !== undefined) await this.writeFile(READY_MARKER, `${m.ready}\n`);
-    if (m.depsKey !== undefined) await this.writeFile(DEPS_MARKER, `${m.depsKey}\n`);
-    if (m.installingKey !== undefined) await this.writeFile(INSTALLING_MARKER, `${m.installingKey}\n`);
-    if (m.builtSha !== undefined) await this.writeFile(BUILT_MARKER, `${m.builtSha}\n`);
+    if (m.ready !== undefined) await this.writeOwnedFile(READY_MARKER, `${m.ready}\n`);
+    if (m.depsKey !== undefined) await this.writeOwnedFile(DEPS_MARKER, `${m.depsKey}\n`);
+    if (m.installingKey !== undefined) await this.writeOwnedFile(INSTALLING_MARKER, `${m.installingKey}\n`);
+    if (m.builtSha !== undefined) await this.writeOwnedFile(BUILT_MARKER, `${m.builtSha}\n`);
   }
 
   /** What the checkout actually holds, for the refresh planner: its HEAD (read
@@ -6369,104 +6394,116 @@ export class ResidentDO extends Sandbox<Env> {
           // attach cannot slip between this check and a fallback-eligible refusal.
           if (!validRunOwner(runId, ownerGen, ownerFence))
             return { error: "run-registration-incomplete: attach requires a verifiable owner", status: 400 };
-          const current = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
-          const accepted = await this.ctx.storage.get<Pick<RunRegistration, "runId" | "ownerGen" | "ownerFence">>(
-            runFenceKey(threadKey),
+          if (await this.ctx.storage.get(`cancelled:${threadKey}:${runId}`))
+            return { error: "run cancelled", status: 409 } satisfies ThreadErr;
+          return this.withOwnedNativeOperation(
+            threadKey,
+            { runId: runId!, ownerGen: ownerGen!, ownerFence: ownerFence! },
+            async () => {
+              const current = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
+              const accepted = await this.ctx.storage.get<Pick<RunRegistration, "runId" | "ownerGen" | "ownerFence">>(
+                runFenceKey(threadKey),
+              );
+              if (
+                !registeredRunAllowsClaim(current, runId, ownerGen, ownerFence) ||
+                !registeredRunAllowsClaim(accepted, runId, ownerGen, ownerFence)
+              )
+                return { error: "run-registration-mismatch: a newer generation owns the thread", status: 409 };
+              const retained = await this.retainWorkspacePredecessor(threadKey, {
+                runId: runId!,
+                ownerGen: ownerGen!,
+                ownerFence: ownerFence!,
+              });
+              if (retained) return retained;
+              if (await this.recreateAdmission.blocked()) return this.recreateRefusal();
+              await this.ensureHydrated();
+              if (await this.recreateAdmission.blocked()) return this.recreateRefusal();
+              // The fleet drain (item 69): a deploy is waiting for the runs in flight
+              // to end, and a NEW run's attach is refused with the record the bot
+              // waits on — a real 503 in the streamed document, read by the client as
+              // `draining`, never as the platform's transient. A run already in flight
+              // — with an owned, live registration (item 44) — re-attaches
+              // through: a rolled container, an evicted worktree, a resumed run are
+              // the runs the drain waits FOR, and refusing them would hold the fleet
+              // closed on the run it is closed for. Read before the image reconcile so
+              // a refused attach never restarts a container.
+              const drain = await this.fleetDrain();
+              const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
+              const registered = registeredRunAllowsReattach(
+                registration,
+                runId,
+                systemClock(),
+                RUN_REGISTRATION_GRACE_MS,
+                ownerGen,
+                ownerFence,
+              );
+              if (drain && (drain.swapFence || !registered)) {
+                const refusal: ThreadErr & { draining: DrainRecord } = drainRefusal(drain);
+                return refusal;
+              }
+              // Item 70: above the soft memory threshold a NEW attach is refused like
+              // `mirror-busy` (the bot falls back or waits, the card says why) — after
+              // the drain (storage only, cheaper) and before the image reconcile, so a
+              // refused attach never restarts a container. An owned, live run's
+              // re-attach passes for the same reason it passes the drain above.
+              const memory = await this.memoryGate("attach", registered);
+              if (memory) return memory;
+              const resourceId = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
+              // An attach never restarts the container (issue 2101): a `stale` verdict
+              // refuses the NEW run — it falls back to the seeded sandbox — while a
+              // owned, live run's re-attach passes exactly as it passes the drain and
+              // the memory gate; the restart itself is the refresh cycle's or the
+              // deploy's.
+              if ((await this.reconcileImage("attach")) === "stale" && !registered) {
+                const s = await this.getStatus();
+                return {
+                  error:
+                    "image-stale: the container predates the deploy and restarts on the next quiet refresh; new runs use the fallback sandbox until then",
+                  status: 503,
+                  state: s.state,
+                  stateReason: s.reason,
+                  reason: "image-stale",
+                };
+              }
+              // From here the attach may hold the mirror lock through clone/install:
+              // count it so a concurrent refresh-cycle reconcileImage never stops the
+              // container under it (and isIdle never parks the cycle mid-attach).
+              this.attachesInFlight++;
+              const priorTree = !reuse
+                ? await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey))
+                : undefined;
+              if (priorTree && !priorTree.evicted && priorTree.user) this.workspaceExclusiveOpsInFlight.add(threadKey);
+              try {
+                const res = await this.attachThreadBody(
+                  threadKey,
+                  refHint,
+                  readonly,
+                  wantSha,
+                  reuse,
+                  resourceId,
+                  t0,
+                  record,
+                  reason,
+                  githubDoor,
+                  registered && readonly && wantSha !== null && !reuse
+                    ? { runId: runId!, ownerGen: ownerGen!, ownerFence: ownerFence! }
+                    : undefined,
+                );
+                // The run this attach opens is now in flight until its release —
+                // whatever its op counters read between the bot's calls (item 44).
+                if (!("error" in res)) {
+                  await this.registerRun(threadKey, runBudgetMs, runId, ownerGen, ownerFence, res);
+                  res.ownerFence = ownerFence;
+                }
+                return res;
+              } finally {
+                if (priorTree && !priorTree.evicted && priorTree.user)
+                  this.workspaceExclusiveOpsInFlight.delete(threadKey);
+                this.attachesInFlight--;
+              }
+            },
+            true,
           );
-          if (
-            !registeredRunAllowsClaim(current, runId, ownerGen, ownerFence) ||
-            !registeredRunAllowsClaim(accepted, runId, ownerGen, ownerFence)
-          )
-            return { error: "run-registration-mismatch: a newer generation owns the thread", status: 409 };
-          const retained = await this.retainWorkspacePredecessor(threadKey, {
-            runId: runId!,
-            ownerGen: ownerGen!,
-            ownerFence: ownerFence!,
-          });
-          if (retained) return retained;
-          if (await this.recreateAdmission.blocked()) return this.recreateRefusal();
-          await this.ensureHydrated();
-          if (await this.recreateAdmission.blocked()) return this.recreateRefusal();
-          // The fleet drain (item 69): a deploy is waiting for the runs in flight
-          // to end, and a NEW run's attach is refused with the record the bot
-          // waits on — a real 503 in the streamed document, read by the client as
-          // `draining`, never as the platform's transient. A run already in flight
-          // — with an owned, live registration (item 44) — re-attaches
-          // through: a rolled container, an evicted worktree, a resumed run are
-          // the runs the drain waits FOR, and refusing them would hold the fleet
-          // closed on the run it is closed for. Read before the image reconcile so
-          // a refused attach never restarts a container.
-          const drain = await this.fleetDrain();
-          const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
-          const registered = registeredRunAllowsReattach(
-            registration,
-            runId,
-            systemClock(),
-            RUN_REGISTRATION_GRACE_MS,
-            ownerGen,
-            ownerFence,
-          );
-          if (drain && (drain.swapFence || !registered)) {
-            const refusal: ThreadErr & { draining: DrainRecord } = drainRefusal(drain);
-            return refusal;
-          }
-          // Item 70: above the soft memory threshold a NEW attach is refused like
-          // `mirror-busy` (the bot falls back or waits, the card says why) — after
-          // the drain (storage only, cheaper) and before the image reconcile, so a
-          // refused attach never restarts a container. An owned, live run's
-          // re-attach passes for the same reason it passes the drain above.
-          const memory = await this.memoryGate("attach", registered);
-          if (memory) return memory;
-          const resourceId = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
-          // An attach never restarts the container (issue 2101): a `stale` verdict
-          // refuses the NEW run — it falls back to the seeded sandbox — while a
-          // owned, live run's re-attach passes exactly as it passes the drain and
-          // the memory gate; the restart itself is the refresh cycle's or the
-          // deploy's.
-          if ((await this.reconcileImage("attach")) === "stale" && !registered) {
-            const s = await this.getStatus();
-            return {
-              error:
-                "image-stale: the container predates the deploy and restarts on the next quiet refresh; new runs use the fallback sandbox until then",
-              status: 503,
-              state: s.state,
-              stateReason: s.reason,
-              reason: "image-stale",
-            };
-          }
-          // From here the attach may hold the mirror lock through clone/install:
-          // count it so a concurrent refresh-cycle reconcileImage never stops the
-          // container under it (and isIdle never parks the cycle mid-attach).
-          this.attachesInFlight++;
-          const priorTree = !reuse ? await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey)) : undefined;
-          if (priorTree && !priorTree.evicted && priorTree.user) this.workspaceExclusiveOpsInFlight.add(threadKey);
-          try {
-            const res = await this.attachThreadBody(
-              threadKey,
-              refHint,
-              readonly,
-              wantSha,
-              reuse,
-              resourceId,
-              t0,
-              record,
-              reason,
-              githubDoor,
-              registered && readonly && wantSha !== null && !reuse
-                ? { runId: runId!, ownerGen: ownerGen!, ownerFence: ownerFence! }
-                : undefined,
-            );
-            // The run this attach opens is now in flight until its release —
-            // whatever its op counters read between the bot's calls (item 44).
-            if (!("error" in res)) {
-              await this.registerRun(threadKey, runBudgetMs, runId, ownerGen, ownerFence, res);
-              res.ownerFence = ownerFence;
-            }
-            return res;
-          } finally {
-            if (priorTree && !priorTree.evicted && priorTree.user) this.workspaceExclusiveOpsInFlight.delete(threadKey);
-            this.attachesInFlight--;
-          }
         }),
       );
     } catch (err) {
@@ -8076,19 +8113,94 @@ export class ResidentDO extends Sandbox<Env> {
     }
   }
 
-  private async withThreadBusy<T>(threadKey: string, fn: () => Promise<T>): Promise<T | ThreadErr> {
-    return this.withDeployAdmission(async () => {
-      if (this.workspaceExclusiveOpsInFlight.has(threadKey))
-        return { error: "workspace is busy", status: 409, reason: "busy", cause: "system" } satisfies ThreadErr;
-      this.threadOpsInFlight.set(threadKey, (this.threadOpsInFlight.get(threadKey) ?? 0) + 1);
-      try {
-        return await fn();
-      } finally {
-        const n = (this.threadOpsInFlight.get(threadKey) ?? 1) - 1;
-        if (n <= 0) this.threadOpsInFlight.delete(threadKey);
-        else this.threadOpsInFlight.set(threadKey, n);
-      }
-    });
+  private async writeOwnedFile(path: string, content: string) {
+    await this.assertThreadOperationAllowed();
+    const scope = this.threadOperationScope?.getStore();
+    if (scope) scope.pendingNative++;
+    const result = await this.writeFile(path, content);
+    if (scope) scope.pendingNative--;
+    return result;
+  }
+
+  private async withOwnedNativeOperation<T>(
+    threadKey: string,
+    owner: WorkspaceOwner,
+    fn: () => Promise<T>,
+    attachment = false,
+  ): Promise<T> {
+    const key = `native-operation:${threadKey}:${owner.runId}:${crypto.randomUUID()}`;
+    const scope = { threadKey, owner, pendingNative: 0, attachment, active: true };
+    // A reset can lose the waiting caller, but cannot turn an admitted native
+    // operation into evidence of shutdown. Only its observed completion clears this entry.
+    await this.ctx.storage.put(key, owner);
+    try {
+      const result = await this.threadOperationScope.run(scope, fn);
+      scope.active = false;
+      if (scope.pendingNative === 0) await this.ctx.storage.delete(key);
+      return result;
+    } catch (error) {
+      scope.active = false;
+      if (scope.pendingNative === 0) await this.ctx.storage.delete(key);
+      throw error;
+    }
+  }
+
+  private async assertThreadOperationAllowed(): Promise<void> {
+    const scope = this.threadOperationScope?.getStore();
+    if (!scope) return;
+    if (!scope.active) throw new RunCancelledError("run cancelled");
+    const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(scope.threadKey));
+    if (
+      (!scope.attachment &&
+        !registeredRunOwnsRelease(registration, scope.owner.runId, scope.owner.ownerGen, scope.owner.ownerFence)) ||
+      (await this.ctx.storage.get(`cancelled:${scope.threadKey}:${scope.owner.runId}`))
+    )
+      throw new RunCancelledError("run cancelled");
+  }
+
+  private async withThreadBusy<T>(
+    threadKey: string,
+    fn: () => Promise<T>,
+    requestOwner?: WorkspaceOwner | null,
+  ): Promise<T | ThreadErr> {
+    if (this.workspaceExclusiveOpsInFlight.has(threadKey))
+      return { error: "workspace is busy", status: 409, reason: "busy", cause: "system" };
+    // Count before the first admission await: cancellation must see requests
+    // waiting for deploy admission, storage, preflight or native launch too.
+    this.threadOpsInFlight.set(threadKey, (this.threadOpsInFlight.get(threadKey) ?? 0) + 1);
+    try {
+      return await this.withDeployAdmission(async () => {
+        const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
+        const last =
+          registration ?? (await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey)))?.lastRunOwner;
+        if (
+          (requestOwner &&
+            (!isWorkspaceOwner(requestOwner) ||
+              !registeredRunOwnsRelease(
+                registration,
+                requestOwner.runId,
+                requestOwner.ownerGen,
+                requestOwner.ownerFence,
+              ))) ||
+          (requestOwner === null && (await this.ctx.storage.get(`cancelled-thread:${threadKey}`))) ||
+          (last?.runId && (await this.ctx.storage.get(`cancelled:${threadKey}:${requestOwner?.runId ?? last.runId}`)))
+        )
+          return { error: "run cancelled", status: 409, reason: "busy", cause: "system" } satisfies ThreadErr;
+        if (this.workspaceExclusiveOpsInFlight.has(threadKey))
+          return { error: "workspace is busy", status: 409, reason: "busy", cause: "system" } satisfies ThreadErr;
+        return requestOwner !== undefined && isWorkspaceOwner(last)
+          ? this.withOwnedNativeOperation(threadKey, requestOwner ?? last, fn)
+          : fn();
+      });
+    } catch (error) {
+      if (error instanceof RunCancelledError)
+        return { error: "run cancelled", status: 409, reason: "busy", cause: "system" };
+      throw error;
+    } finally {
+      const n = (this.threadOpsInFlight.get(threadKey) ?? 1) - 1;
+      if (n <= 0) this.threadOpsInFlight.delete(threadKey);
+      else this.threadOpsInFlight.set(threadKey, n);
+    }
   }
 
   async execThread(
@@ -8097,13 +8209,18 @@ export class ResidentDO extends Sandbox<Env> {
     timeoutMs: number,
     traceparent?: string,
     env?: Record<string, string>,
+    requestOwner: WorkspaceOwner | null = null,
   ): Promise<{ stdout: string; stderr: string; exitCode: number; truncated: boolean } | ThreadErr> {
     const queuedAt = systemClock();
     let startedAt = queuedAt;
-    const res = await this.withThreadBusy(threadKey, () => {
-      startedAt = systemClock();
-      return this.execThreadImpl(threadKey, command, timeoutMs, env);
-    });
+    const res = await this.withThreadBusy(
+      threadKey,
+      () => {
+        startedAt = systemClock();
+        return this.execThreadImpl(threadKey, command, timeoutMs, env);
+      },
+      requestOwner,
+    );
     // The command as the resident's own `resident.exec` root (docs/reference/specs/tracing.md
     // item 22): started when the command did, the wait for the thread's turn an attr.
     emitStepRoot("resident.exec", startedAt, [], traceparent, "error" in res ? refusalOutcome(res) : "ok", {
@@ -8420,53 +8537,62 @@ export class ResidentDO extends Sandbox<Env> {
     threadKey: string,
     input: unknown,
     env: Record<string, string>,
+    requestOwner: WorkspaceOwner | null = null,
   ): Promise<CredentialInspection> {
     try {
-      const inspection = await this.withThreadBusy(threadKey, async () => {
-        if (this.workspaceExclusiveOpsInFlight.has(threadKey)) return emptyCredentialInspection();
-        if (await this.memoryGate("exec")) return emptyCredentialInspection();
-        // Inspection cannot hydrate, reattach or repair the selected runtime.
-        const parsed = credentialInspectionInputSchema.safeParse(input);
-        if (
-          !parsed.success ||
-          this.destroying ||
-          (await this.ctx.storage.get(DESTROY_UNCONFIRMED_KEY)) ||
-          !(await this.isRuntimeActive())
-        )
-          return emptyCredentialInspection();
-        const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
-        if (
-          !binding ||
-          binding.evicted ||
-          !THREAD_USERS.includes(binding.user) ||
-          binding.ref !== parsed.data.ref ||
-          !(await this.poolUserOwnerMatches(binding.user, `thread:${threadKey}`))
-        )
-          return emptyCredentialInspection();
-        return inspectResidentCredentials(input, env, binding.githubDoorHost, async (command, options) => {
-          validateEnvNames(env);
-          // A dedicated one-send transport: no generic exec logging, retries,
-          // output files, timeout recovery command or raw failure response.
-          const proc = await createExtensionProcessSandbox(this).exec(
-            [
-              "/usr/bin/su",
-              "-s",
-              "/bin/sh",
-              binding.user,
-              "-c",
-              `cd ${binding.worktreePath} && exec ${command}`,
-            ] as SandboxCommand,
-            { timeout: options.timeoutMs, env: { ...env, GIT_TERMINAL_PROMPT: "0" } },
-          );
-          try {
-            const raw = await proc.output({ encoding: "utf8", timeout: options.timeoutMs });
-            return { ...raw, truncated: raw.truncated === true };
-          } catch {
-            await proc.kill(9).catch(() => {});
-            return undefined;
-          }
-        });
-      });
+      const inspection = await this.withThreadBusy(
+        threadKey,
+        async () => {
+          if (this.workspaceExclusiveOpsInFlight.has(threadKey)) return emptyCredentialInspection();
+          if (await this.memoryGate("exec")) return emptyCredentialInspection();
+          // Inspection cannot hydrate, reattach or repair the selected runtime.
+          const parsed = credentialInspectionInputSchema.safeParse(input);
+          if (
+            !parsed.success ||
+            this.destroying ||
+            (await this.ctx.storage.get(DESTROY_UNCONFIRMED_KEY)) ||
+            !(await this.isRuntimeActive())
+          )
+            return emptyCredentialInspection();
+          const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
+          if (
+            !binding ||
+            binding.evicted ||
+            !THREAD_USERS.includes(binding.user) ||
+            binding.ref !== parsed.data.ref ||
+            !(await this.poolUserOwnerMatches(binding.user, `thread:${threadKey}`))
+          )
+            return emptyCredentialInspection();
+          return inspectResidentCredentials(input, env, binding.githubDoorHost, async (command, options) => {
+            validateEnvNames(env);
+            // A dedicated one-send transport: no generic exec logging, retries,
+            // output files, timeout recovery command or raw failure response.
+            await this.assertThreadOperationAllowed();
+            const scope = this.threadOperationScope.getStore();
+            if (scope) scope.pendingNative++;
+            const proc = await createExtensionProcessSandbox(this).exec(
+              [
+                "/usr/bin/su",
+                "-s",
+                "/bin/sh",
+                binding.user,
+                "-c",
+                `cd ${binding.worktreePath} && exec ${command}`,
+              ] as SandboxCommand,
+              { timeout: options.timeoutMs, env: { ...env, GIT_TERMINAL_PROMPT: "0" } },
+            );
+            try {
+              const raw = await proc.output({ encoding: "utf8", timeout: options.timeoutMs });
+              if (scope && Number.isSafeInteger(raw.exitCode) && raw.exitCode >= 0) scope.pendingNative--;
+              return { ...raw, truncated: raw.truncated === true };
+            } catch {
+              await proc.kill(9).catch(() => {});
+              return undefined;
+            }
+          });
+        },
+        requestOwner,
+      );
       return "error" in inspection ? emptyCredentialInspection() : inspection;
     } catch {
       return emptyCredentialInspection();
@@ -8479,6 +8605,7 @@ export class ResidentDO extends Sandbox<Env> {
   async publishThread(
     threadKey: string,
     input: Omit<ResidentPublicationInput, "worktreePath">,
+    requestOwner: WorkspaceOwner | null = null,
   ): Promise<{ stdout: string; stderr: string; exitCode: number; truncated: boolean } | ThreadErr> {
     return this.withThreadBusy(
       threadKey,
@@ -8501,7 +8628,24 @@ export class ResidentDO extends Sandbox<Env> {
         const objects = await this.run(["test", "-d", command.env.GIT_ALTERNATE_OBJECT_DIRECTORIES]);
         if (objects.exitCode !== 0)
           return { error: "publication source objects are unavailable", status: 409, cause: "request" };
-        const result = await this.run(command.argv, { timeoutMs: BASH_TIMEOUT_MS, env: command.env });
+        const scope = this.threadOperationScope.getStore();
+        if (scope) scope.pendingNative++;
+        let result: Awaited<ReturnType<ResidentDO["run"]>>;
+        try {
+          result = await this.run(command.argv, { timeoutMs: BASH_TIMEOUT_MS, env: command.env });
+        } catch (error) {
+          if (
+            scope &&
+            (error instanceof RunCancelledError ||
+              error instanceof SandboxRuntimeBusyError ||
+              error instanceof RuntimeUnreachableError)
+          )
+            scope.pendingNative--;
+          throw error;
+        }
+        // A failed push can have reached the remote. Its native exit alone
+        // does not settle the publication; keep its exact admission held.
+        if (scope && result.exitCode === 0 && !result.timedOut) scope.pendingNative--;
         return {
           stdout: result.stdout.slice(0, EXEC_OUTPUT_CAP),
           stderr: result.stderr.slice(0, EXEC_OUTPUT_CAP),
@@ -8512,6 +8656,7 @@ export class ResidentDO extends Sandbox<Env> {
             result.stderr.length > EXEC_OUTPUT_CAP,
         };
       },
+      requestOwner,
     );
   }
 
@@ -8595,8 +8740,9 @@ export class ResidentDO extends Sandbox<Env> {
     threadKey: string,
     path: string,
     encoding: ReadEncoding = "utf8",
+    requestOwner: WorkspaceOwner | null = null,
   ): Promise<{ content: string; truncated: boolean } | Base64ReadAnswer | ThreadErr> {
-    return this.withThreadBusy(threadKey, () => this.readThreadFileImpl(threadKey, path, encoding));
+    return this.withThreadBusy(threadKey, () => this.readThreadFileImpl(threadKey, path, encoding), requestOwner);
   }
 
   private async readThreadFileImpl(
@@ -8686,9 +8832,12 @@ export class ResidentDO extends Sandbox<Env> {
     threadKey: string,
     path: string,
     content: string,
+    requestOwner: WorkspaceOwner | null = null,
   ): Promise<{ ok: true; bytes: number } | ThreadErr> {
-    return this.withThreadBusy(threadKey, () =>
-      this.threadWrites.run(threadKey, () => this.writeThreadFileImpl(threadKey, path, content)),
+    return this.withThreadBusy(
+      threadKey,
+      () => this.threadWrites.run(threadKey, () => this.writeThreadFileImpl(threadKey, path, content)),
+      requestOwner,
     );
   }
 
@@ -8711,7 +8860,7 @@ export class ResidentDO extends Sandbox<Env> {
     const stage = `${stageDir}/put`;
     try {
       await this.ensureStageDir(binding.user, stageDir);
-      await this.writeFile(stage, content);
+      await this.writeOwnedFile(stage, content);
       await this.runOk(
         ["sh", "-c", `chown ${binding.user}:${binding.user} ${stage} && chmod 600 ${stage}`],
         "stage-perms",
@@ -8724,6 +8873,7 @@ export class ResidentDO extends Sandbox<Env> {
         DEFAULT_EXEC_TIMEOUT_MS,
       );
     } catch (err) {
+      if (err instanceof RunCancelledError) throw err;
       try {
         await this.runOk(legacyStageReuseScrubCommand(stageDir), "stage-write-cleanup");
       } catch (cleanupErr) {
@@ -9492,6 +9642,119 @@ export class ResidentDO extends Sandbox<Env> {
     );
   }
 
+  async cancelRun(
+    cancellation: RunCancellation,
+    expected: { user?: string; ownerGen?: string; ownerFence?: number; container?: string; workspace?: string },
+  ) {
+    const threadKey = cancellation.threadKey;
+    return this.withDeployAdmission(() =>
+      this.threadAttaches.run(threadKey, async () => {
+        const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
+        const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
+        const key = `cancelled:${threadKey}:${cancellation.runId}`;
+        const prior = await this.ctx.storage.get<{ cancellation: RunCancellation; stopped?: true }>(key);
+        if (prior?.cancellation.id === cancellation.id && prior.stopped)
+          return { stopped: true, cancellationId: cancellation.id, disposition: "processes-stopped" };
+        if (
+          !binding ||
+          binding.evicted ||
+          this.destroying ||
+          this.ctx.container?.running !== true ||
+          binding.user !== expected.user ||
+          binding.container !== expected.container ||
+          binding.worktreePath !== expected.workspace ||
+          !THREAD_USERS.includes(binding.user) ||
+          !registeredRunOwnsRelease(registration, cancellation.runId, expected.ownerGen, expected.ownerFence) ||
+          expected.ownerGen !== cancellation.ownerGen ||
+          !(await this.poolUserOwnerMatches(binding.user, `thread:${threadKey}`))
+        )
+          return { stopped: cancellationRefusal(cancellation, "resident", "target-mismatch") };
+        this.workspaceExclusiveOpsInFlight.add(threadKey);
+        try {
+          await this.ctx.storage.put(key, { cancellation });
+          await this.ctx.storage.put(`cancelled-thread:${threadKey}`, true);
+          const kill = [
+            "/bin/sh",
+            "-c",
+            'test "$(/bin/cat /proc/sys/kernel/random/boot_id)" = "$1" || exit 2; exec /usr/bin/su -s /bin/bash "$2" -c "kill -9 -1"',
+            "--",
+            binding.container!,
+            binding.user,
+          ];
+          const result = await this.run(kill, { timeoutMs: FORCE_DETACH_KILL_TIMEOUT_MS });
+          if (result.timedOut || result.truncated || ![0, 137].includes(result.exitCode))
+            return { stopped: cancellationRefusal(cancellation, "resident", "kill-unconfirmed") };
+          if (await this.waitForThreadDrain(threadKey))
+            return { stopped: cancellationRefusal(cancellation, "resident", "operations-busy") };
+          // A vanished isolate or lost native response leaves the admission
+          // durable. Neither a zero counter nor a process sample clears it.
+          const unresolved = await this.ctx.storage.list({
+            prefix: `native-operation:${threadKey}:${cancellation.runId}:`,
+            limit: 1,
+          });
+          if (unresolved.size)
+            return { stopped: cancellationRefusal(cancellation, "resident", "native-outcome-unknown") };
+          // An admitted launch may have resumed after the first kill. All its
+          // waits have now settled; kill detached children too, then ask the
+          // native container for its physical identity and this UID's absence.
+          const finalKill = await this.run(kill, { timeoutMs: FORCE_DETACH_KILL_TIMEOUT_MS });
+          if (finalKill.timedOut || finalKill.truncated || ![0, 137].includes(finalKill.exitCode))
+            return { stopped: cancellationRefusal(cancellation, "resident", "kill-unconfirmed") };
+          if (this.ctx.container?.running !== true)
+            return { stopped: cancellationRefusal(cancellation, "resident", "runtime-unavailable") };
+          const probe = await this.ctx.container.exec([
+            "/usr/bin/timeout",
+            "-s",
+            "KILL",
+            String(FORCE_DETACH_KILL_TIMEOUT_MS / SECOND_MS),
+            "/bin/sh",
+            "-c",
+            'test "$(/bin/cat /proc/sys/kernel/random/boot_id)" = "$1" || exit 2; /usr/bin/pgrep -u "$2" >/dev/null 2>&1; test "$?" = 1',
+            "--",
+            binding.container!,
+            binding.user,
+          ]);
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const exit = await Promise.race([
+            probe.exitCode,
+            new Promise<null>((resolve) => {
+              timer = setTimeout(() => resolve(null), FORCE_DETACH_KILL_TIMEOUT_MS);
+            }),
+          ]).finally(() => {
+            if (timer !== undefined) clearTimeout(timer);
+          });
+          if (exit !== 0 || this.ctx.container?.running !== true)
+            return { stopped: cancellationRefusal(cancellation, "resident", "native-observation-unconfirmed") };
+          const currentBinding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
+          const currentRegistration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
+          if (
+            !currentBinding ||
+            currentBinding.evicted ||
+            ["threadKey", "ref", "worktreePath", "user", "container"].some(
+              (field) => currentBinding[field as keyof ThreadBinding] !== binding[field as keyof ThreadBinding],
+            ) ||
+            !registeredRunOwnsRelease(
+              currentRegistration,
+              cancellation.runId,
+              expected.ownerGen,
+              expected.ownerFence,
+            ) ||
+            !(await this.poolUserOwnerMatches(binding.user, `thread:${threadKey}`))
+          )
+            return { stopped: cancellationRefusal(cancellation, "resident", "target-changed") };
+          await this.putThreadBinding({ ...currentBinding, lastRunOwner: currentRegistration });
+          await this.ctx.storage.put(key, { cancellation, stopped: true });
+          return { stopped: true, cancellationId: cancellation.id, disposition: "processes-stopped" };
+        } catch (error) {
+          cancellationRefusal(cancellation, "resident", "runtime-unconfirmed");
+          throw error;
+        } finally {
+          this.workspaceExclusiveOpsInFlight.delete(threadKey);
+        }
+      }),
+    );
+  }
+
   /** Force-detach's kill: end every process owned by the pool user —
    *  `kill -9 -1` sent AS THAT USER reaches exactly its own processes (the
    *  thread's `su … bash -c` shell, the command, anything it backgrounded),
@@ -9513,9 +9776,8 @@ export class ResidentDO extends Sandbox<Env> {
   /** Wait (bounded, see FORCE_DETACH_DRAIN_MS) for this thread's in-flight op
    *  counter to reach zero after a kill. The counter drops inside
    *  `withThreadBusy`'s finally, i.e. only after `run()` has collected the
-   *  killed process's exit — so a zero here means every process the op ran
-   *  is already dead, and the eviction's `rm -rf` of the worktree (the op's
-   *  cwd) cannot race a live command. The killed op itself completes
+   *  killed process's exit — so zero means the admitted calls
+   *  have settled. Detached children require a separate native UID observation. The killed op itself completes
    *  normally through `execThreadImpl` → `streamThreadExec` (exit 137 to a
    *  client that has usually already hung up). Returns the count still in
    *  flight when the bound expires (0 = drained). */
@@ -9788,7 +10050,7 @@ export class ResidentDO extends Sandbox<Env> {
     const regs = await this.ctx.storage.list<RunRegistration>({ prefix: RUN_REG_KEY_PREFIX });
     const bindings = await this.liveBindings();
     const cutoff = systemClock() - CLEAN_IDLE_RELEASE_S * 1000;
-    let n = 0;
+    let n = (await this.ctx.storage.list({ prefix: "native-operation:", limit: 1 })).size ? 1 : 0;
     for (const binding of bindings) {
       const r = regs.get(runRegKey(binding.threadKey));
       const fence = await this.ctx.storage.get<unknown>(runFenceKey(binding.threadKey));
@@ -9855,6 +10117,8 @@ export class ResidentDO extends Sandbox<Env> {
       else if (state === "retained") retainedRuns++;
       else if (state === "unknown") unknownRuns++;
     }
+    if (this.runsInFlightCount() === 0 && (await this.ctx.storage.list({ prefix: "native-operation:", limit: 1 })).size)
+      unknownRuns++;
     return {
       ...(await this.getResidentInfo()),
       executingRuns: executingRuns + this.runsInFlightCount(),
@@ -11214,6 +11478,7 @@ const ROUTES: Record<string, { scope: Scope; method: string }> = {
   "/attach": { scope: "operator", method: "POST" },
   "/run-deadline": { scope: "operator", method: "POST" },
   "/detach": { scope: "operator", method: "POST" },
+  "/cancel-run": { scope: "operator", method: "POST" },
   "/exec": { scope: "operator", method: "POST" },
   "/inspect-credentials": { scope: "operator", method: "POST" },
   "/publish": { scope: "operator", method: "POST" },
@@ -11358,6 +11623,23 @@ export default {
             return await handleAttach(env, body, traceparent);
           case "/run-deadline":
             return await handleRunDeadline(env, body);
+          case "/cancel-run": {
+            const cancellation = cancellationOf(body.cancellation);
+            const resource = parseResource(body.resource);
+            if (
+              !cancellation ||
+              "error" in resource ||
+              body.resource !== `repo:${cancellation.repo}` ||
+              !body.binding ||
+              typeof body.binding !== "object"
+            ) {
+              cancellationRefusal(cancellation, "resident", "invalid-request");
+              return json({ error: "invalid cancellation" }, 400);
+            }
+            if (!(await cancellationTargetPrepared(cancellation, body.binding, env.STATE_WORKER_URL, env.MEMORY_TOKEN)))
+              return json({ stopped: false }, 409);
+            return json(await residentStub(env, resource.resource).cancelRun(cancellation, body.binding));
+          }
           case "/detach":
             return await handleDetach(env, body);
           case "/exec":
@@ -12302,6 +12584,11 @@ async function handleDetach(env: Env, body: Record<string, unknown>): Promise<Re
   return json(result);
 }
 
+function requestWorkspaceOwner(body: Record<string, unknown>): WorkspaceOwner | null {
+  const owner = { runId: body.runId, ownerGen: body.ownerGen, ownerFence: body.ownerFence };
+  return isWorkspaceOwner(owner) ? owner : null;
+}
+
 async function handleExec(env: Env, body: Record<string, unknown>, traceparent?: string): Promise<Response> {
   const ctx = await resolveThreadRoute(env, body);
   if (ctx instanceof Response) return ctx;
@@ -12319,7 +12606,10 @@ async function handleExec(env: Env, body: Record<string, unknown>, traceparent?:
   // Worker uses, and handed to the exec's env option, never onto the command.
   const execEnv = envFromRequest({ body });
   return streamThreadExec(
-    withLevels(ctx.stub, ctx.stub.execThread(ctx.threadKey, body.command, timeoutMs, traceparent, execEnv)),
+    withLevels(
+      ctx.stub,
+      ctx.stub.execThread(ctx.threadKey, body.command, timeoutMs, traceparent, execEnv, requestWorkspaceOwner(body)),
+    ),
   );
 }
 
@@ -12329,7 +12619,12 @@ async function handleInspectCredentials(env: Env, body: Record<string, unknown>)
     if (!input.success || body.resource !== `repo:${input.data.repo}`) return json(emptyCredentialInspection());
     const ctx = await resolveThreadRoute(env, body);
     if (ctx instanceof Response) return json(emptyCredentialInspection());
-    const result = await ctx.stub.inspectThreadCredentials(ctx.threadKey, input.data, envFromRequest({ body }) ?? {});
+    const result = await ctx.stub.inspectThreadCredentials(
+      ctx.threadKey,
+      input.data,
+      envFromRequest({ body }),
+      requestWorkspaceOwner(body),
+    );
     return json(parseCredentialInspection(result));
   } catch {
     return json(emptyCredentialInspection());
@@ -12352,14 +12647,18 @@ async function handlePublish(env: Env, body: Record<string, unknown>): Promise<R
   return streamThreadExec(
     withLevels(
       ctx.stub,
-      ctx.stub.publishThread(ctx.threadKey, {
-        repo: body.repo,
-        doorOrigin: body.doorOrigin,
-        branch: body.branch,
-        next: body.next,
-        ...(body.old === undefined ? {} : { old: body.old }),
-        bearer: body.bearer,
-      }),
+      ctx.stub.publishThread(
+        ctx.threadKey,
+        {
+          repo: body.repo,
+          doorOrigin: body.doorOrigin,
+          branch: body.branch,
+          next: body.next,
+          ...(body.old === undefined ? {} : { old: body.old }),
+          bearer: body.bearer,
+        },
+        requestWorkspaceOwner(body),
+      ),
     ),
   );
 }
@@ -12433,13 +12732,14 @@ async function handleRead(env: Env, body: Record<string, unknown>): Promise<Resp
   if (ctx instanceof Response) return ctx;
   if (typeof body.path !== "string")
     return json({ error: "path must be a string relative to the thread worktree" }, 400);
+  const requestOwner = requestWorkspaceOwner(body);
   const encoding = readEncodingOf(body);
   if (typeof encoding !== "string") return json({ error: encoding.error }, 400);
   // A stub that rejects (the DO reset under the call, a storage operation that
   // did not complete) is answered as the DO answers the same fact inside, never
   // left to the fetch handler's catch-all.
   const result = await ctx.stub
-    .readThreadFile(ctx.threadKey, body.path, encoding)
+    .readThreadFile(ctx.threadKey, body.path, encoding, requestOwner)
     .catch((err: unknown) => threadRejectionErr(err, "/read"));
   if ("error" in result) return threadErrResponse(result);
   return json(result);
@@ -12453,8 +12753,9 @@ async function handleWrite(env: Env, body: Record<string, unknown>): Promise<Res
   if (typeof body.content !== "string" || body.content.length > MAX_WRITE_CONTENT) {
     return json({ error: `content must be a string of at most ${MAX_WRITE_CONTENT} chars` }, 400);
   }
+  const requestOwner = requestWorkspaceOwner(body);
   const result = await ctx.stub
-    .writeThreadFile(ctx.threadKey, body.path, body.content)
+    .writeThreadFile(ctx.threadKey, body.path, body.content, requestOwner)
     .catch((err: unknown) => threadRejectionErr(err, "/write"));
   if ("error" in result) return threadErrResponse(result);
   return json(result);

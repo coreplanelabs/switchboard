@@ -1,3 +1,10 @@
+import {
+  cancellationTargetPrepared,
+  cancellationRefusal,
+  cancellationOf,
+  sameCancellation,
+  type RunCancellation,
+} from "../../src/core/runLedger/cancellation.js";
 // Sandbox proxy Worker: fronts per-thread Cloudflare Sandboxes with a minimal
 // authenticated HTTP API the bot's CloudflareSandboxExecutor calls.
 //
@@ -454,6 +461,43 @@ export class SwitchboardSandbox extends Sandbox<Env> {
     }
   }
 
+  async cancellationState(): Promise<RunCancellation | undefined> {
+    const raw = await this.ctx.storage.get<unknown>("switchboard.cancellation");
+    const cancellation = cancellationOf(raw);
+    if (raw !== undefined && !cancellation) throw new Error("cancellation state unavailable");
+    return cancellation;
+  }
+  async cancelRun(cancellation: RunCancellation, binding: { container?: string; sandboxKey?: string }) {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const key = this.ctx.id.name;
+      if (!key || binding.sandboxKey !== key || !key.endsWith(`:${cancellation.runId}`))
+        return { stopped: cancellationRefusal(cancellation, "sandbox", "target-mismatch") };
+      const prior = await this.cancellationState();
+      if (prior && !sameCancellation(prior, cancellation))
+        return { stopped: cancellationRefusal(cancellation, "sandbox", "ticket-conflict") };
+      const record = await this.readLegacyPreservation();
+      if (record && (record.owner.run !== cancellation.runId || record.owner.container !== binding.container))
+        return { stopped: cancellationRefusal(cancellation, "sandbox", "target-mismatch") };
+      if (binding.container && !record)
+        return { stopped: cancellationRefusal(cancellation, "sandbox", "custody-unverified") };
+      await this.ctx.storage.put("switchboard.cancellation", cancellation);
+      // SDK destroy ends outstanding runtime handles and destroys this dedicated VM.
+      try {
+        await this.destroy();
+      } catch (error) {
+        cancellationRefusal(cancellation, "sandbox", "destroy-unconfirmed");
+        throw error;
+      }
+      const stopped = this.ctx.container?.running === false;
+      if (!stopped) cancellationRefusal(cancellation, "sandbox", "destroy-unconfirmed");
+      return {
+        stopped,
+        cancellationId: cancellation.id,
+        disposition: "workspace-discarded",
+      };
+    });
+  }
+
   /** Durable metadata only. This RPC never calls the SDK, StartGate or an
    * executor; in particular it cannot start a stopped container. */
   async preservationRecord(): Promise<{
@@ -563,6 +607,7 @@ export class SwitchboardSandbox extends Sandbox<Env> {
       containerRunning: () => this.ctx.container?.running,
       warmUp: () =>
         this.idle.served(async () => {
+          if (await this.cancellationState()) throw new Error("run cancelled");
           // Only a cold start can be classified unseeded. A DO upgraded over a
           // running legacy writer has no such evidence and remains protected.
           if (this.ctx.container?.running === false) {
@@ -1349,6 +1394,8 @@ function timeoutNote(execTimeoutSecs: number): string {
 interface Env {
   Sandbox: DurableObjectNamespace<SwitchboardSandbox>;
   SANDBOX_TOKEN: string;
+  STATE_WORKER_URL?: string;
+  MEMORY_TOKEN?: string;
   // The seed (docs/reference/specs/execution.md item 25): the resident's cache
   // bucket and the four values the SDK's presigned restore reads — rendered
   // only when the profile has a resident (wrangler.template.jsonc), the keys
@@ -1452,6 +1499,22 @@ export default {
         ),
       );
     }
+    if (url.pathname === "/cancel-run") {
+      const body = (await request.json()) as {
+        cancellation?: unknown;
+        binding?: { container?: string; sandboxKey?: string };
+      };
+      const cancellation = cancellationOf(body.cancellation);
+      if (!cancellation || !threadKey || !body.binding || body.binding.sandboxKey !== threadKey) {
+        cancellationRefusal(cancellation, "sandbox", "invalid-request");
+        return json({ error: "invalid cancellation" }, 400);
+      }
+      if (!(await cancellationTargetPrepared(cancellation, body.binding, env.STATE_WORKER_URL, env.MEMORY_TOKEN)))
+        return json({ stopped: false }, 409);
+      return json(await env.Sandbox.get(env.Sandbox.idFromName(threadKey)).cancelRun(cancellation, body.binding));
+    }
+    if (threadKey && (await env.Sandbox.get(env.Sandbox.idFromName(threadKey)).cancellationState()))
+      return json({ error: "run cancelled" }, 409);
     const modelIdentity = modelSandboxIdentity(url.pathname, threadKey);
     if (!modelIdentity) return json({ error: "invalid route or thread identity" }, 400);
 

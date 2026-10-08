@@ -1,3 +1,4 @@
+import { cancellationOf, cancellationRecordMatches } from "./runLedger/cancellation.js";
 import { RUN_ID_PATTERN } from "./runIdentity.js";
 import { isBranchIdentityBaseline, type BranchIdentityBaseline } from "./branchIdentityBaseline.js";
 import { validMaintenanceTransport, maintenanceEventsMatch } from "./coordinator/maintenanceIdentity.js";
@@ -133,6 +134,13 @@ export function branchPushReceiptsOf(value: unknown): BranchPushReceipt[] | unde
 }
 
 export interface RunRecord {
+  /** A negative execution outcome; supplies no promotion or source-release authority. */
+  cancellation?: {
+    version: 1;
+    actor: import("./runLedger/cancellation.js").CancellationActor;
+    cancellation: import("./runLedger/cancellation.js").RunCancellation;
+    disposition: import("./runLedger/cancellation.js").CancellationDisposition;
+  };
   /** Native ref acknowledgments retained independently of display events; internal readers only. */
   branchPushReceipts?: BranchPushReceipt[];
   /** Authored-output facts; absent on legacy records means unknown. */
@@ -1251,6 +1259,11 @@ export function isRunRecord(v: unknown): v is RunRecord {
     return false;
   if (!isRunWorkOwner(v)) return false;
   const r = v as RunWorkOwner & Record<string, unknown>;
+  if (r.cancellation !== undefined) {
+    const receipt = r.cancellation as RunRecord["cancellation"];
+    const cancellation = cancellationOf(receipt?.cancellation);
+    if (!cancellation || !cancellationRecordMatches(r as unknown as RunRecord, cancellation)) return false;
+  }
   if (!isOptionalString(r.label) || !isOptionalString(r.agent) || !isOptionalString(r.model)) return false;
   if (!isOptionalString(r.activity) || !isOptionalString(r.sourceUrl) || !isOptionalString(r.userName)) return false;
   if (r.record !== undefined && (typeof r.record !== "string" || !/^\d{4}$/.test(r.record))) return false;
