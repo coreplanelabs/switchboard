@@ -3113,6 +3113,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // gate (agent-review item 10).
     if (isPrReview && repoCtx.repo && repoCtx.pr !== undefined && !tailSkipped() && postedBefore === undefined) {
       const settled = await settleReviewedHead({
+        ...(currentCheckout !== undefined ? { checkout: () => checkoutOfSelection(firstTestSelection) } : {}),
         ...(coordinator?.publication ? { publication: coordinator.publication } : {}),
         span: root,
         pr: { repo: repoCtx.repo, number: repoCtx.pr },

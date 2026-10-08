@@ -1,3 +1,4 @@
+import { gitInCheckout } from "../execution/workspaceAdvance.js";
 import type { ExistingPrPublicationBinding } from "./coordinator/contract.js";
 // Per-round review + workspace machinery, extracted from dispatch() as
 // callable units (zero behavior change): everything a
@@ -614,6 +615,8 @@ export class ReviewWorkspaceAdvanceError extends Error {
 }
 
 export interface SettleReviewedHeadInput {
+  /** The checkout acknowledged by this round's current attachment. */
+  checkout?: () => string | undefined;
   /** Canonical child permission stays at this exact head through settlement. */
   publication?: ExistingPrPublicationBinding;
   /** The parent span, when the run is traced. */
@@ -651,10 +654,16 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
   // under `run.settle_reviewed_head` (docs/reference/specs/tracing.md item 17).
   const trace = span ? { span } : undefined;
   const stopped = () => input.preReviewStopped() || turn.control.hardSignal.aborted;
+  const checkout = () => {
+    if (!input.checkout) return undefined;
+    const path = input.checkout();
+    if (path === undefined) throw new Error("review checkout binding is unavailable");
+    return path;
+  };
   const probeHead = async () => {
     if (!executor.execResult) return undefined;
     const result = await executor
-      .execResult("git rev-parse --verify HEAD", { ...trace, signal: turn.control.hardSignal })
+      .execResult(`${gitInCheckout(checkout())} rev-parse --verify HEAD`, { ...trace, signal: turn.control.hardSignal })
       .catch((err) => {
         if (err instanceof ResidentRegistrationMismatchError) throw err;
         return undefined;
@@ -789,8 +798,17 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
         // a model turn still running in the old checkout.
         if (!executor.moveTo)
           throw new ReviewWorkspaceAdvanceError(current, "executor cannot advance the review workspace");
-        const moved = await executor.moveTo(current, { ...trace, signal: turn.control.hardSignal });
+        const beforeCheckout = checkout();
+        const moved = await executor.moveTo(current, {
+          ...trace,
+          signal: turn.control.hardSignal,
+          ...(beforeCheckout !== undefined ? { checkout: beforeCheckout } : {}),
+        });
         if (stopped()) return outcome();
+        // The existing harness still belongs to its original cwd. A fresh
+        // attachment path needs a separate verified harness transition.
+        if (checkout() !== beforeCheckout)
+          throw new ReviewWorkspaceAdvanceError(current, "acknowledged checkout changed during review");
         const at = normalizeHead(moved.sha);
         if (!at || !sameCommit(at, current))
           throw new ReviewWorkspaceAdvanceError(current, "executor answered a different head");

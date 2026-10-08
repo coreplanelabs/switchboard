@@ -1,4 +1,5 @@
 import { gitInCheckout } from "../../execution/workspaceAdvance.js";
+import { checkoutOfSelection } from "../../execution/factory.js";
 // The authorize stage of the dispatch pipeline (docs/decisions/0024-dispatcher-as-a-staged-pipeline.md):
 // the gates a resolved request passes before a model turn, each asked against
 // the RESOLVED actor and agent (AGENTS.md invariant 3) — the agent allowlist,
@@ -537,7 +538,7 @@ export async function authorizeAttachedHead(
     const expectedHeadSha = repoCtx.headSha;
     let guard = await root
       .span("dispatch.gate.attached_head", async (span) => {
-        const command = `${gitInCheckout(selection.seeded?.workspace)} rev-parse HEAD`;
+        const checkout = () => checkoutOfSelection(selection);
         if (!resume && !resident && selection.seeded === undefined && expectedHeadSha !== undefined) {
           await executor.exec(
             coldReviewCheckoutCommand(
@@ -550,7 +551,7 @@ export async function authorizeAttachedHead(
         if (stopSignal.aborted) return { outcome: "stopped" as const };
         const observeHead = () =>
           executor
-            .exec(command, { timeoutMs: 30_000, signal: stopSignal, span })
+            .exec(`${gitInCheckout(checkout())} rev-parse HEAD`, { timeoutMs: 30_000, signal: stopSignal, span })
             .then(parseRevParseOutput)
             .catch(() => undefined);
         const sha = await observeHead();
@@ -564,7 +565,12 @@ export async function authorizeAttachedHead(
           reprovision: async (headSha) => {
             if (stopSignal.aborted) return { sha: undefined };
             if (executor.moveTo) {
-              await executor.moveTo(headSha, { signal: stopSignal, span });
+              const beforeCheckout = checkout();
+              await executor.moveTo(headSha, {
+                signal: stopSignal,
+                span,
+                ...(beforeCheckout !== undefined ? { checkout: beforeCheckout } : {}),
+              });
               if (stopSignal.aborted) return { sha: undefined };
               const observedSha = await observeHead();
               if (selection.binding && observedSha !== undefined) {
@@ -572,6 +578,7 @@ export async function authorizeAttachedHead(
                   ...selection.binding,
                   ref: repoCtx.ref ?? selection.binding.ref,
                   sha: observedSha,
+                  ...(checkout() !== undefined ? { workspace: checkout() } : {}),
                 };
               }
               return {

@@ -55,6 +55,7 @@ import { InMemoryArtifactStore } from "../artifacts/store.js";
 import { ExecCapacityError, ExecInfraError, ExecSandboxRestartedError, LocalExecutor } from "../execution/executor.js";
 import { classifyError } from "./trace/classify.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
+import { shellQuote } from "../execution/shellQuote.js";
 import type { ChannelIO, HistoryItem, IncomingMessage, RunReceipt, StatusUpdate } from "./types.js";
 import { privateWorkerIO } from "../channels/privateWorker.js";
 import { InMemoryPrivateWorkerLog } from "./privateWorkerLog.js";
@@ -3255,6 +3256,7 @@ function residentFetchStub(
 ) {
   const calls: Array<{ path: string; host: string; body?: Record<string, unknown> }> = [];
   let attachedSha = "abc";
+  let attachedWorkspace: string | undefined;
   const fn = vi.fn(async (url: unknown, init?: RequestInit) => {
     const { pathname: path, host } = new URL(String(url));
     const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined;
@@ -3273,15 +3275,25 @@ function residentFetchStub(
       const answer = (await response
         .clone()
         .json()
-        .catch(() => undefined)) as { sha?: unknown } | undefined;
+        .catch(() => undefined)) as { sha?: unknown; workspace?: unknown } | undefined;
       if (typeof answer?.sha === "string") attachedSha = answer.sha;
+      attachedWorkspace = typeof answer?.workspace === "string" ? answer.workspace : undefined;
       return response;
     }
     if (path === "/run-deadline") return new Response(JSON.stringify({ deadlineAt: 0 }), { status: 200 });
     if (path === "/exec") {
       if (
         handlers.exec === undefined &&
-        !["git rev-parse HEAD", "git rev-parse --verify HEAD"].includes(String(body?.command))
+        ![
+          "git rev-parse HEAD",
+          "git rev-parse --verify HEAD",
+          ...(attachedWorkspace === undefined
+            ? []
+            : [
+                `git -C ${shellQuote(attachedWorkspace)} rev-parse HEAD`,
+                `git -C ${shellQuote(attachedWorkspace)} rev-parse --verify HEAD`,
+              ]),
+        ].includes(String(body?.command))
       ) {
         throw new Error(`unexpected fetch: ${String(url)}`);
       }
@@ -3297,6 +3309,44 @@ function residentFetchStub(
   vi.stubGlobal("fetch", fn);
   return { fn, calls };
 }
+
+describe("resident admission fixture command boundary", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("answers exact acknowledged checkout HEAD reads and refuses foreign paths or other commands", async () => {
+    const { fn } = residentFetchStub({
+      attach: () =>
+        new Response(
+          JSON.stringify({
+            workspace: "/workspace/review's checkout",
+            ref: "fix/head",
+            sha: "a1b2c3d4",
+            user: "worker2",
+          }),
+        ),
+    });
+    await fn("https://resident.test/attach");
+    const exec = (command: string) => fn("https://resident.test/exec", { body: JSON.stringify({ command }) });
+    for (const command of [
+      "git -C '/workspace/review'\\''s checkout' rev-parse HEAD",
+      "git -C '/workspace/review'\\''s checkout' rev-parse --verify HEAD",
+      "git rev-parse HEAD",
+    ]) {
+      expect(await (await exec(command)).json()).toEqual({
+        stdout: "a1b2c3d4\n",
+        stderr: "",
+        exitCode: 0,
+        truncated: false,
+      });
+    }
+    for (const command of [
+      "git -C '/workspace/foreign' rev-parse HEAD",
+      "git -C '/workspace/review'\\''s checkout' status --porcelain",
+      "git -C '/workspace/review'\\''s checkout' rev-parse HEAD; git reset --hard",
+    ])
+      await expect(exec(command)).rejects.toThrow("unexpected fetch");
+  });
+});
 
 // Feature: docs/reference/specs/resident-repos.md — repo-management commands are
 // config-family (answered inline, never a model turn); all but `list` gated
