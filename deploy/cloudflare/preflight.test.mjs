@@ -183,3 +183,13 @@ describe("bot deploy preflight — catchUpWarnings()", () => {
     expect(d.message).toContain("groups:read");
   });
 });
+
+describe("bot deploy preflight — selected application", () => {
+  it("allows a settled staging application and refuses its rollout without consulting the production name", () => {
+    const appName = "switchboard-staging-switchboardserver";
+    expect(decide({ health: health(0), apps: apps("active", appName) }, { appName }).allow).toBe(true);
+    const refused = decide({ health: health(0), apps: apps("updating", appName) }, { appName });
+    expect(refused.allow).toBe(false);
+    expect(refused.problems).toEqual(["container rollout in progress: state=updating — wait until it is active"]);
+  });
+});

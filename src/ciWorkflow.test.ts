@@ -895,15 +895,16 @@ describe("the production deploy is one reusable workflow", () => {
       expect(code, `${f} names the vault token`).not.toContain("OP_SERVICE_ACCOUNT_TOKEN");
       expect(code, `${f} loads from 1Password`).not.toContain("1password/");
       expect(code, `${f} carries an op:// reference`).not.toMatch(/op:\/\/[A-Za-z]/);
-      // Every App token is minted from the two repository secrets, never from an env the run filled.
+      // Staging candidates use their own App; production's key never reaches that runner.
       const wf = parse(text) as Workflow;
       for (const j of Object.values(wf.jobs ?? {})) {
         for (const s of j.steps ?? []) {
           if (!s.uses?.startsWith("actions/create-github-app-token@")) continue;
+          const prefix = f === "deploy-staging.yml" ? "STAGING_" : "";
           expect(s.with?.["client-id"], `${f}: an App minted from something other than the secret`).toBe(
-            "${{ secrets.CONFIG_REPO_APP_CLIENT_ID }}",
+            `\${{ secrets.${prefix}CONFIG_REPO_APP_CLIENT_ID }}`,
           );
-          expect(s.with?.["private-key"]).toBe("${{ secrets.CONFIG_REPO_APP_PRIVATE_KEY }}");
+          expect(s.with?.["private-key"]).toBe(`\${{ secrets.${prefix}CONFIG_REPO_APP_PRIVATE_KEY }}`);
         }
       }
     }

@@ -35,6 +35,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 export const BASE_URL_ENV = "SWITCHBOARD_BASE_URL";
 /** The Containers application `wrangler deploy` creates for `SwitchboardServer` in wrangler.jsonc. */
 export const APP_NAME = "switchboard-switchboardserver";
+/** The runner binds this to the selected profile's native application. */
+export const APP_NAME_ENV = "SWITCHBOARD_BOT_CONTAINER_APP";
 /** Application states in which no rollout is in progress. Anything else —
  *  `provisioning`, `updating`, or a state this script does not know — refuses. */
 const SETTLED_APP_STATES = new Set(["active", "ready"]);
@@ -148,7 +150,7 @@ export function catchUpWarnings(payload) {
  * `warnings` never block: this deploy may be the fix for what they name.
  * @returns {{ allow: boolean, forced: boolean, problems: string[], warnings: string[], message: string }}
  */
-export function decide({ health, apps }, { force = false } = {}) {
+export function decide({ health, apps }, { force = false, appName = APP_NAME } = {}) {
   const problems = [];
   const warnings = health?.ok === true ? catchUpWarnings(health.payload) : [];
 
@@ -181,10 +183,10 @@ export function decide({ health, apps }, { force = false } = {}) {
   if (!apps || apps.ok !== true) {
     problems.push(`container application not consulted: ${apps?.error ?? "unknown error"}`);
   } else {
-    const app = Array.isArray(apps.payload) ? apps.payload.find((a) => a?.name === APP_NAME) : undefined;
+    const app = Array.isArray(apps.payload) ? apps.payload.find((a) => a?.name === appName) : undefined;
     if (!app) {
       problems.push(
-        `container application ${APP_NAME} not in \`wrangler containers list\` (wrong account, or renamed class?)`,
+        `container application ${appName} not in \`wrangler containers list\` (wrong account, or renamed class?)`,
       );
     } else if (!SETTLED_APP_STATES.has(app.state)) {
       problems.push(`container rollout in progress: state=${app.state} — wait until it is active`);
@@ -234,7 +236,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     fetchHealth(baseUrl),
     listContainerApps({ config: env.SWITCHBOARD_DEPLOY_CONFIG }),
   ]);
-  const d = decide({ health, apps }, { force });
+  const d = decide({ health, apps }, { force, appName: env[APP_NAME_ENV] ?? APP_NAME });
   (d.allow && !d.forced && d.warnings.length === 0 ? console.log : console.error)(`[bot-preflight] ${d.message}`);
   return d.allow ? 0 : 1;
 }

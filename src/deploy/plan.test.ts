@@ -285,6 +285,20 @@ describe("planDeploy", () => {
     expect(plan({ only: ["resident", "bot"] }).steps.map((s) => s.name)).toEqual(["bot", "resident"]);
   });
 
+  it("binds a staging bot preflight to the profile's actual native application", () => {
+    const selected = plan({ only: ["bot"] }, installed, {
+      ...LOADED,
+      profile: {
+        ...LOADED.profile,
+        workers: { ...LOADED.profile.workers, bot: { ...LOADED.profile.workers.bot, script: "switchboard-staging" } },
+      },
+    });
+    expect(selected.steps[0].setEnv).toEqual({
+      SWITCHBOARD_BASE_URL: "https://switchboard.example.test",
+      SWITCHBOARD_BOT_CONTAINER_APP: "switchboard-staging-switchboardserver",
+    });
+  });
+
   it("--skip removes steps; --only and --skip compose", () => {
     expect(plan({ skip: ["sandbox"] }).steps.map((s) => s.name)).toEqual(["memory", "bot", "resident"]);
     expect(plan({ only: ["bot", "resident"], skip: ["resident"] }).steps.map((s) => s.name)).toEqual(["bot"]);
@@ -298,7 +312,10 @@ describe("planDeploy", () => {
       expect(s.unsetEnv).toEqual(["CLOUDFLARE_ACCOUNT_ID"]);
     }
     // The preflights have no address of their own: deploy all tells each one where its Worker is.
-    expect(plain.bot.setEnv).toEqual({ SWITCHBOARD_BASE_URL: "https://switchboard.example.test" });
+    expect(plain.bot.setEnv).toEqual({
+      SWITCHBOARD_BASE_URL: "https://switchboard.example.test",
+      SWITCHBOARD_BOT_CONTAINER_APP: "switchboard-switchboardserver",
+    });
     expect(plain.resident.setEnv).toEqual({ RESIDENT_BASE_URL: "https://switchboard-resident.example.test" });
     expect(plain.memory.setEnv).toEqual({});
     expect(plain.sandbox.setEnv).toEqual({});
@@ -312,6 +329,7 @@ describe("planDeploy", () => {
     const forced = byName(forcedPlan);
     expect(forced.bot.setEnv).toEqual({
       SWITCHBOARD_BASE_URL: "https://switchboard.example.test",
+      SWITCHBOARD_BOT_CONTAINER_APP: "switchboard-switchboardserver",
       SWITCHBOARD_DEPLOY_FORCE: "1",
     });
     expect(forced.resident.setEnv).toEqual({
