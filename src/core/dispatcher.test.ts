@@ -393,21 +393,22 @@ async function threadWithFinishedRun(deps: TestDeps, agent: string, over: Partia
 }
 
 /** The run store as production reads it once the ledger has drained a finished
- *  run into it (run-history item 36): the in-memory pair keeps the two apart, so
- *  the ledger's finished records are copied over before every read. */
+ * run into it (run-history item 36). Point reads synchronize their canonical
+ * target; lists synchronize the full archive. Neither uses cached authority. */
 function ledgerBackedStore(ledger: InMemoryRunLedger, store: RunStore): RunStore {
-  const drained = async () => {
-    for (const record of ledger.finished.values()) await store.put(record);
+  const drained = async (id?: string) => {
+    const records = id === undefined ? ledger.finished.values() : [ledger.finished.get(id)];
+    for (const record of records) if (record) await store.put(record);
   };
   return {
     put: (record, trace) => store.put(record, trace),
     abandoned: () => {},
     get: async (id) => {
-      await drained();
+      await drained(id);
       return store.get(id);
     },
     getSummary: async (id) => {
-      await drained();
+      await drained(id);
       return store.getSummary(id);
     },
     list: async (opts) => {
@@ -415,7 +416,7 @@ function ledgerBackedStore(ledger: InMemoryRunLedger, store: RunStore): RunStore
       return store.list(opts);
     },
     events: async (id, opts) => {
-      await drained();
+      await drained(id);
       return store.events(id, opts);
     },
     delete: (id) => store.delete(id),
@@ -609,6 +610,79 @@ describe("dispatch", () => {
     expect(deps.operatorModel).not.toHaveBeenCalled();
     expect(provider.requests[0]?.system).toContain("Switchboard's orchestrator");
     expect(replies).toContain("The answer is 17.");
+  });
+
+  it("bounds canonical fixture point reads while retaining current context, updates and full list semantics", async () => {
+    const provider = capturingProvider("The conversation continues.");
+    const deps = makeDeps(mainDmYaml, provider);
+    const ledger = new InMemoryRunLedger();
+    const store = new InMemoryRunStore();
+    const facade = ledgerBackedStore(ledger, store);
+    deps.runStore = facade;
+    deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
+    deps.slackContextForRun = (_actor, origin) => testSlackCapability(origin, async () => "source");
+    for (let turn = 0; turn < 3; turn++) {
+      const registry = new RunRegistry({ genId: () => `bounded-context-${turn}` });
+      deps.runRegistry = registry;
+      deps.runLedger = createLedgerWriteThrough({ ledger, gen: `generation-${turn}`, fallback: store, warn: () => {} });
+      deps.runs = createRunsService({ registry, store: facade, ledger });
+      const { io, replies } = mainDmIO();
+      await dispatch(
+        deps,
+        { ...mainDm(`Continue, turn ${turn}.`), messageId: `${turn + 1}`, threadReply: turn > 0 },
+        io,
+      );
+      expect(replies).toContain("The conversation continues.");
+    }
+    const put = vi.spyOn(store, "put");
+    const copied: string[][] = [];
+    const record = await facade.get("bounded-context-1");
+    copied.push(put.mock.calls.map(([value]) => value.id));
+    expect(record).toMatchObject({
+      id: "bounded-context-1",
+      status: "completed",
+      contextDependencies: { status: "known" },
+    });
+    const { contextAccessForMessage } = await import("./dispatch/contextAccess.js");
+    expect(
+      await contextAccessForMessage(deps, { msg: mainDm("continue"), io: mainDmIO().io }).validateDependencies(
+        record!.contextDependencies!,
+      ),
+    ).toEqual({ ok: true });
+
+    // A later canonical display update is read even when the stored object identity stays the same.
+    ledger.finished.get("bounded-context-1")!.label = "private updated label";
+    put.mockClear();
+    expect(await facade.getSummary("bounded-context-1")).toMatchObject({
+      id: "bounded-context-1",
+      label: "private updated label",
+    });
+    copied.push(put.mock.calls.map(([value]) => value.id));
+    put.mockClear();
+    const page = await facade.events("bounded-context-1", {});
+    expect(page?.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "answer", text: "See the private conversation for the answer." }),
+      ]),
+    );
+    expect(JSON.stringify(page)).not.toContain("The conversation continues.");
+    copied.push(put.mock.calls.map(([value]) => value.id));
+
+    ledger.finished.get("bounded-context-2")!.label = "private list update";
+    put.mockClear();
+    const listed = await facade.list({});
+    expect(listed.map(({ id }) => id).sort()).toEqual(["bounded-context-0", "bounded-context-1", "bounded-context-2"]);
+    expect(listed.find(({ id }) => id === "bounded-context-2")?.label).toBe("private list update");
+    expect(listed.some((item) => "events" in item)).toBe(false);
+    expect(put.mock.calls.map(([value]) => value.id)).toEqual([
+      "bounded-context-0",
+      "bounded-context-1",
+      "bounded-context-2",
+    ]);
+    put.mockClear();
+    expect(await facade.get("absent-context")).toBeNull();
+    copied.push(put.mock.calls.map(([value]) => value.id));
+    expect(copied).toEqual([["bounded-context-1"], ["bounded-context-1"], ["bounded-context-1"], []]);
   });
 
   it("keeps ordinary conversation context known across 256 runs and fresh process facades", async () => {
