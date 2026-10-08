@@ -3,6 +3,7 @@ import { pullOwnerReadDiagnosticFrom, pullOwnerReadDiagnosticFor } from "./pullO
 import { analyzeRunFriction } from "../runFriction.js";
 import { describe, expect, it } from "vitest";
 import { InMemoryCoordinatorInstanceStore, NullCoordinatorInstanceStore } from "./instanceStore.js";
+import type { RunRecord } from "../runRecord.js";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { findPullOwnersInRows, type PullOwnershipDiagnostics } from "./pullOwnership.js";
 import type { CoordinatorInstance, CoordinatorUnit } from "./contract.js";
@@ -30,9 +31,9 @@ const unit: CoordinatorUnit = {
 };
 
 describe("complete canonical pull ownership", () => {
-  it.each(["checkpoint"] as const)(
+  it.each(["checkpoint", "model"] as const)(
     "keeps an accepted pre-PR %s publication under its original unit",
-    async (_producer) => {
+    async (producer) => {
       const runId = "original_coding";
       const head = "b".repeat(40);
       const current: CoordinatorUnit = {
@@ -52,6 +53,7 @@ describe("complete canonical pull ownership", () => {
         id: runId,
         agent: "coding",
         status: "completed",
+        headSha: head,
         repo: instance.repo,
         userId: instance.userId,
         channelId: instance.channelId,
@@ -71,9 +73,10 @@ describe("complete canonical pull ownership", () => {
             requester: instance.userId,
             threadKey: instance.threadKey,
             generation: "g1",
+            baseHeadSha: "a".repeat(40),
           },
-          checkpoint: { kind: "created", head },
-          publication: { kind: "accepted", head },
+          checkpoint: { kind: producer === "model" ? "clean" : "created", head },
+          publication: producer === "model" ? { kind: "not_attempted" } : { kind: "accepted", head },
           preservation: { kind: "pending" },
           release: { kind: "pending" },
         },
@@ -90,6 +93,103 @@ describe("complete canonical pull ownership", () => {
       const rows = { complete: true, units: [{ instance, unit: current }], runs: [run], effects: [] };
       const expected = { ok: true, owners: [{ kind: "unit", instanceId: instance.id, unit: unit.unit }] };
       expect(findPullOwnersInRows({ repo: instance.repo, ref: unit.branch }, rows)).toEqual(expected);
+      if (producer === "model") {
+        const ledger = new InMemoryRunLedger();
+        ledger.finished.set(runId, {
+          ...record,
+          startedAt: 1,
+          finishedAt: 2,
+          channelVisibility: "unknown",
+          eventCount: 0,
+          storedEventCount: 0,
+          truncated: false,
+          events: [],
+          diagnosis: analyzeRunFriction([]),
+          branchPublication: publication,
+          branchPushReceipts: run.pushReceipts,
+        } as RunRecord);
+        const store = new InMemoryCoordinatorInstanceStore(ledger);
+        const cells = store as unknown as { rows: Map<string, string>; units: Map<string, string> };
+        cells.rows.set(instance.id, JSON.stringify(instance));
+        cells.units.set(`${instance.id}\0${unit.unit}`, JSON.stringify(current));
+        const before = JSON.stringify([...ledger.finished]);
+        expect(await store.findPullOwners({ repo: instance.repo, ref: unit.branch })).toEqual(expected);
+        expect(await store.findPullOwners({ repo: instance.repo, pr: 999 })).toEqual({ ok: true, owners: [] });
+        expect(JSON.stringify([...ledger.finished])).toBe(before);
+        const ended = {
+          ...current,
+          ending: {
+            kind: "aborted",
+            report: "no PR",
+            at: 2,
+            outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 0 },
+          },
+        };
+        expect(
+          findPullOwnersInRows(
+            { repo: instance.repo, ref: unit.branch },
+            { ...rows, units: [{ instance, unit: ended }] },
+          ),
+        ).toEqual({ ok: true, owners: [] });
+        expect(record.publicationSettlement).toMatchObject({
+          checkpoint: { kind: "clean", head },
+          publication: { kind: "not_attempted" },
+          preservation: { kind: "pending" },
+          release: { kind: "pending" },
+        });
+        const proof = record.publicationSettlement;
+        for (const altered of [
+          { record: { ...record, headSha: undefined } },
+          { record: { ...record, headSha: "c".repeat(40) } },
+          {
+            record: {
+              ...record,
+              publicationSettlement: { ...proof, checkpoint: { kind: "clean", head: "c".repeat(40) } },
+            },
+          },
+          {
+            record: {
+              ...record,
+              publicationSettlement: { ...proof, binding: { ...proof.binding, baseHeadSha: undefined } },
+            },
+          },
+          {
+            record: {
+              ...record,
+              publicationSettlement: { ...proof, binding: { ...proof.binding, baseHeadSha: "c".repeat(40) } },
+            },
+          },
+          ...["pending", "unknown", "rejected", "accepted"].map((kind) => ({
+            record: {
+              ...record,
+              publicationSettlement: { ...proof, publication: { kind, reason: "unconfirmed", head } },
+            },
+          })),
+          ...["pending", "unknown", "failed", "created"].map((kind) => ({
+            record: {
+              ...record,
+              publicationSettlement: { ...proof, checkpoint: { kind, head, stage: "observe", reason: "unconfirmed" } },
+            },
+          })),
+          { pushReceipts: [] },
+          { pushReceipts: [{ ref: unit.branch, sha: head, by: "salvage" }] },
+          { pushReceipts: [...run.pushReceipts, { ref: "fix/foreign", sha: head, by: "push" }] },
+        ])
+          expect(
+            findPullOwnersInRows({ repo: instance.repo, pr: 999 }, { ...rows, runs: [{ ...run, ...altered }] }),
+          ).toEqual({ ok: false, reason: "incomplete" });
+        for (const effect of [
+          { ...current.currentEffect!, phase: "active" },
+          { ...current.currentEffect!, calls: [{ operation: "spawn", state: "unknown" }] },
+          { ...current.currentEffect!, calls: [{ operation: "spawn", state: "accepted", runId: "foreign_child" }] },
+        ])
+          expect(
+            findPullOwnersInRows(
+              { repo: instance.repo, pr: 999 },
+              { ...rows, units: [{ instance, unit: { ...current, currentEffect: effect } }] },
+            ),
+          ).toEqual({ ok: false, reason: "incomplete" });
+      }
       const publish = {
         ...current,
         currentEffect: {

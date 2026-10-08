@@ -8472,9 +8472,9 @@ describe("durable maintenance admission", () => {
 });
 
 describe("complete canonical pull ownership", () => {
-  it.each(["checkpoint"] as const)(
+  it.each(["checkpoint", "model"] as const)(
     "admits the original pre-PR %s child and retains its workspace obligation through PR binding",
-    async () => {
+    async (producer) => {
       const key = storeKey(),
         id = "initial_coding",
         thread = "slack:C1:initial-coding",
@@ -8517,12 +8517,13 @@ describe("complete canonical pull ownership", () => {
         requester: instance.userId,
         threadKey: thread,
         generation: "g1",
+        baseHeadSha: "a".repeat(40),
       };
       const publicationSettlement: PublicationSettlement = {
         version: 1,
         binding,
-        checkpoint: { kind: "created", head },
-        publication: { kind: "accepted", head },
+        checkpoint: { kind: producer === "model" ? "clean" : "created", head },
+        publication: producer === "model" ? { kind: "not_attempted" } : { kind: "accepted", head },
         preservation: { kind: "pending" },
         release: { kind: "pending" },
       };
@@ -8583,7 +8584,7 @@ describe("complete canonical pull ownership", () => {
             storeKey: key,
             runId: id,
             gen: "g1",
-            record: { ...record(id, thread), ...meta, publicationSettlement },
+            record: { ...record(id, thread), ...meta, headSha: head, publicationSettlement },
           })
         ).status,
       ).toBe(200);
@@ -8595,6 +8596,173 @@ describe("complete canonical pull ownership", () => {
         expect(before).toHaveLength(1);
         expect(await owner.findPullOwners({ repo: instance.repo, ref: unit.branch })).toEqual(expected);
         expect(await owner.findPullOwners({ repo: "other/repo", pr: 7 })).toEqual({ ok: true, owners: [] });
+        if (producer === "model") {
+          const source = state.storage.sql
+            .exec<{ summary_json: string; work_evidence_json: string }>(
+              `SELECT summary_json, work_evidence_json FROM runs WHERE run_id = ?`,
+              id,
+            )
+            .one();
+          state.storage.sql.exec(
+            `UPDATE coordinator_units SET json = ? WHERE instance_id = ? AND unit = ?`,
+            JSON.stringify({
+              ...unit,
+              ending: {
+                kind: "aborted",
+                report: "no PR",
+                at: 2,
+                outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 0 },
+              },
+            }),
+            instance.id,
+            unit.unit,
+          );
+          expect(
+            (
+              await post("/runs/coordinator/pull-owners", {
+                storeKey: key,
+                target: { repo: instance.repo, ref: unit.branch },
+              })
+            ).data,
+          ).toEqual({ ok: true, owners: [] });
+          expect(
+            state.storage.sql
+              .exec(`SELECT json FROM workspace_settlements WHERE allocation_json IS NULL OR json IS NOT NULL`)
+              .toArray(),
+          ).toEqual(before);
+          state.storage.sql.exec(
+            `UPDATE coordinator_units SET json = ? WHERE instance_id = ? AND unit = ?`,
+            JSON.stringify(unit),
+            instance.id,
+            unit.unit,
+          );
+          const summary = JSON.parse(source.summary_json);
+          const privateWork = JSON.parse(source.work_evidence_json);
+          const assertHeld = async () =>
+            expect(
+              (
+                await post("/runs/coordinator/pull-owners", {
+                  storeKey: key,
+                  target: { repo: instance.repo, pr: 999 },
+                  diagnostic: true,
+                })
+              ).data,
+            ).toMatchObject({ ok: false, reason: "incomplete" });
+          for (const altered of [
+            { headSha: undefined },
+            { headSha: "c".repeat(40) },
+            {
+              publicationSettlement: { ...publicationSettlement, checkpoint: { kind: "clean", head: "c".repeat(40) } },
+            },
+            { publicationSettlement: { ...publicationSettlement, binding: { ...binding, baseHeadSha: undefined } } },
+            {
+              publicationSettlement: { ...publicationSettlement, binding: { ...binding, baseHeadSha: "c".repeat(40) } },
+            },
+            ...["pending", "unknown", "rejected", "accepted"].map((kind) => ({
+              publicationSettlement: { ...publicationSettlement, publication: { kind, head, reason: "unconfirmed" } },
+            })),
+          ]) {
+            state.storage.sql.exec(
+              `UPDATE runs SET summary_json = ? WHERE run_id = ?`,
+              JSON.stringify({ ...summary, ...altered }),
+              id,
+            );
+            await assertHeld();
+          }
+          state.storage.sql.exec(`UPDATE runs SET summary_json = ? WHERE run_id = ?`, source.summary_json, id);
+          for (const altered of [
+            { branchPushReceipts: [] },
+            { branchPushReceipts: [{ ref: unit.branch, sha: head, by: "salvage" }] },
+            { branchPushReceipts: [{ ref: "fix/foreign", sha: head, by: "push" }] },
+            { branchPushReceipts: [...native, { ref: "fix/foreign", sha: head, by: "push" }] },
+            {
+              doorPublicationPending: {
+                id: "unknown",
+                repo: instance.repo,
+                update: { ref: `refs/heads/${unit.branch}`, old: "a".repeat(40), next: head },
+              },
+            },
+          ]) {
+            state.storage.sql.exec(
+              `UPDATE runs SET work_evidence_json = ? WHERE run_id = ?`,
+              JSON.stringify({ ...privateWork, ...altered }),
+              id,
+            );
+            await assertHeld();
+          }
+          state.storage.sql.exec(
+            `UPDATE runs SET work_evidence_json = ? WHERE run_id = ?`,
+            source.work_evidence_json,
+            id,
+          );
+          for (const effect of [
+            { ...unit.currentEffect!, phase: "active" },
+            { ...unit.currentEffect!, calls: [{ operation: "spawn", state: "unknown" }] },
+            { ...unit.currentEffect!, calls: [{ operation: "spawn", state: "accepted", runId: "foreign_child" }] },
+          ]) {
+            state.storage.sql.exec(
+              `UPDATE coordinator_units SET json = ? WHERE instance_id = ? AND unit = ?`,
+              JSON.stringify({ ...unit, currentEffect: effect }),
+              instance.id,
+              unit.unit,
+            );
+            await assertHeld();
+          }
+          state.storage.sql.exec(
+            `UPDATE coordinator_units SET json = ? WHERE instance_id = ? AND unit = ?`,
+            JSON.stringify(unit),
+            instance.id,
+            unit.unit,
+          );
+          const retained = state.storage.sql
+            .exec<{ owner_key: string; revision: number; json: string }>(
+              `SELECT owner_key, revision, json FROM workspace_settlements WHERE json IS NOT NULL`,
+            )
+            .one();
+          const obligation = JSON.parse(retained.json);
+          for (const altered of [
+            { owner: { ...obligation.owner, ownerGen: "foreign_generation" } },
+            { binding: { ...obligation.binding, ref: "fix/foreign" } },
+            { binding: { ...obligation.binding, publicationBaseSha: "c".repeat(40) } },
+          ]) {
+            state.storage.sql.exec(
+              `UPDATE workspace_settlements SET json = ? WHERE owner_key = ? AND revision = ?`,
+              JSON.stringify({ ...obligation, ...altered }),
+              retained.owner_key,
+              retained.revision,
+            );
+            await assertHeld();
+          }
+          state.storage.sql.exec(
+            `UPDATE workspace_settlements SET json = ? WHERE owner_key = ? AND revision = ?`,
+            retained.json,
+            retained.owner_key,
+            retained.revision,
+          );
+          state.storage.sql.exec(
+            `INSERT INTO workspace_settlements (owner_key, revision, json) VALUES (?, ?, ?)`,
+            retained.owner_key,
+            retained.revision + 1,
+            retained.json,
+          );
+          await assertHeld();
+          state.storage.sql.exec(
+            `DELETE FROM workspace_settlements WHERE owner_key = ? AND revision = ?`,
+            retained.owner_key,
+            retained.revision + 1,
+          );
+          expect(
+            (
+              await post("/runs/coordinator/pull-owners", {
+                storeKey: key,
+                target: { repo: instance.repo, ref: unit.branch },
+              })
+            ).data,
+          ).toEqual(expected);
+          expect(
+            state.storage.sql.exec(`SELECT summary_json, work_evidence_json FROM runs WHERE run_id = ?`, id).one(),
+          ).toEqual(source);
+        }
         const actionId = `r_${"d".repeat(64)}`;
         const recovering: CoordinatorUnit = {
           ...unit,
