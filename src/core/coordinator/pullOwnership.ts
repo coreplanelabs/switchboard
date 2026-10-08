@@ -1,3 +1,10 @@
+import {
+  initialOwnerUnits,
+  pullOwnerQualificationSnapshot,
+  type PullOwnerQualificationSnapshot,
+  type PullOwnerQualification,
+  type InitialOwnerPredicate,
+} from "./pullOwnerQualification.js";
 import { doorPublicationOf, branchPublicationOf, isPublicationRepo } from "../branchPublication.js";
 import { branchPushReceiptsOf, isRunWorkOwner } from "../runRecord.js";
 import {
@@ -99,6 +106,8 @@ export interface PullOwnerReadDiagnostic {
   sourceBytes: number;
 }
 export interface PullOwnershipDiagnostics {
+  qualifyRecord?: true;
+  qualificationSnapshot?: PullOwnerQualificationSnapshot;
   /** Physical locations align with merged run rows; they carry no ownership facts. */
   runOrigins?: Array<{ source: "live_runs" | "runs"; rowIndex: number }>;
   cursor?: { source: PullOwnershipSource; rowIndex?: number };
@@ -207,7 +216,12 @@ export type PullOwner =
   | { kind: "effect"; id: string };
 export type PullOwnersResult =
   | { ok: true; owners: PullOwner[] }
-  | { ok: false; reason: "unavailable" | "incomplete" | "invalid"; diagnostic?: PullOwnerReadDiagnostic };
+  | {
+      ok: false;
+      reason: "unavailable" | "incomplete" | "invalid";
+      diagnostic?: PullOwnerReadDiagnostic;
+      qualification?: PullOwnerQualification;
+    };
 
 /** Bound work in the owner transaction; reaching it never proves absence. */
 export const PULL_OWNER_SCAN_MAX = 32768;
@@ -407,8 +421,19 @@ export function findPullOwnersInRows(
   const initialCodingOwner = (
     run: PullOwnershipRows["runs"][number],
   ): { owner: Extract<PullOwner, { kind: "unit" }>; ref: string; holds: boolean } | undefined => {
+    const refuse = (predicate: InitialOwnerPredicate): undefined => {
+      if (diagnostics?.qualifyRecord) {
+        try {
+          diagnostics.qualificationSnapshot = pullOwnerQualificationSnapshot(target, run, rows.units, predicate);
+        } catch {
+          diagnostics.qualificationSnapshot = undefined;
+        }
+      }
+      return undefined;
+    };
     const record = run.record;
-    if (run.live || !isRunWorkOwner(record) || record.id !== run.runId || record.repo !== run.repo) return;
+    if (run.live || !isRunWorkOwner(record) || record.id !== run.runId || record.repo !== run.repo)
+      return refuse("record_identity");
     const terminal = record as typeof record & {
       agent?: unknown;
       status?: unknown;
@@ -420,7 +445,7 @@ export function findPullOwnersInRows(
       (terminal.provisional !== undefined && terminal.provisional !== false) ||
       !["completed", "failed", "interrupted", "stopped_soft", "stopped_hard"].includes(String(terminal.status))
     )
-      return;
+      return refuse("terminal_coding");
     const publication = branchPublicationOf(run.publication, record.repo);
     if (
       !publication ||
@@ -429,20 +454,13 @@ export function findPullOwnersInRows(
       publication.branches.length ||
       publication.targets?.length
     )
-      return;
+      return refuse("publication_shape");
     if (run.door !== undefined && run.door !== null) {
       const door = doorPublicationOf(run.door);
-      if (!door || (door.outcome !== "rejected" && door.outcome !== "not_forwarded")) return;
+      if (!door || (door.outcome !== "rejected" && door.outcome !== "not_forwarded")) return refuse("door_intent");
     }
-    const bound = rows.units.filter(
-      (row) =>
-        isCoordinatorInstance(row.instance) &&
-        isCoordinatorUnit(row.unit) &&
-        row.instance.id === record.parentInstanceId &&
-        row.unit.instanceId === record.parentInstanceId &&
-        row.unit.unit === record.coordinatorUnit,
-    );
-    if (bound.length !== 1) return;
+    const bound = initialOwnerUnits(record, rows.units);
+    if (bound.length !== 1) return refuse("canonical_unit");
     const { instance, unit } = bound[0] as { instance: CoordinatorInstance; unit: CoordinatorUnit };
     const proof = publicationSettlementForRun(terminal.publicationSettlement, record);
     const full = { ...record, branchPublication: run.publication, branchPushReceipts: run.pushReceipts };
@@ -481,7 +499,7 @@ export function findPullOwnersInRows(
       pushes[0]?.ref !== branch ||
       pushes[0].sha !== head
     )
-      return;
+      return refuse(!accepted && !historical ? "native_confirmation" : "native_receipt");
     const effect = unit.currentEffect;
     if (
       instance.kind !== "ship" ||
@@ -494,7 +512,7 @@ export function findPullOwnersInRows(
       unit.branch !== branch ||
       (effect !== undefined && effect.target.base !== instance.base)
     )
-      return;
+      return refuse("owner_binding");
     const admitted =
       effect?.id === `${unit.unit}/0/coding` &&
       effect.phase === "settled" &&
@@ -518,7 +536,7 @@ export function findPullOwnersInRows(
       !mapped &&
       (unit.recovery?.kind !== "coding" || unit.recovery.codingRunId !== run.runId)
     )
-      return;
+      return refuse("unit_authority");
     return {
       owner: unitOwner(unit),
       ref: branch,

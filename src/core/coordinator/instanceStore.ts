@@ -1,3 +1,9 @@
+import {
+  qualifyPullOwnerSnapshot,
+  pullOwnerTargetProjection,
+  pullOwnerQualificationFrom,
+} from "./pullOwnerQualification.js";
+import { sourceHash } from "../references/receipts.js";
 // The parent ship records (docs/reference/specs/run-history.md item 49): one
 // seam, two implementations (docs/decisions/0001-seams-with-two-implementations.md).
 // A coordinator instance's record — the requester, channel, thread, repository
@@ -48,6 +54,7 @@ import {
   unitPullBindingRefusal,
   unitPullTargetsRefusal,
   type PullOwnershipRows,
+  type PullOwnershipDiagnostics,
   isPullTarget,
   isPullOwnerLiveMeta,
   PULL_OWNER_SCAN_MAX,
@@ -165,7 +172,10 @@ export interface CoordinatorInstanceStore {
   /** Reserve the same unit cell from an already authorized command or native watch intent. */
   admitMaintenance(input: MaintenanceAdmissionInput): Promise<MaintenanceAdmissionResult>;
   /** Complete canonical owner snapshot; reservation must share this owner transaction. */
-  findPullOwners(target: PullTarget, options?: { diagnostic?: boolean }): Promise<PullOwnersResult>;
+  findPullOwners(
+    target: PullTarget,
+    options?: { diagnostic?: boolean; qualifyRecord?: boolean },
+  ): Promise<PullOwnersResult>;
   /** Native ended execution discovery persists an exact existing outbox offer. */
   offerReconciliation(key: UnitEventKey): Promise<{ offered: boolean }>;
   transitionRecovery(input: RecoveryTransition): Promise<RecoveryTransitionResult>;
@@ -326,11 +336,29 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     this.runOwner.planeOffers.set(effect.id, effect);
     return { offered: true };
   }
-  async findPullOwners(target: PullTarget): Promise<PullOwnersResult> {
+  async findPullOwners(
+    target: PullTarget,
+    options?: { diagnostic?: boolean; qualifyRecord?: boolean },
+  ): Promise<PullOwnersResult> {
     if (!isPullTarget(target)) return { ok: false, reason: "invalid" };
     if (!this.runOwner) return { ok: false, reason: "unavailable" };
+    const diagnostics: PullOwnershipDiagnostics | undefined =
+      options?.diagnostic === true && options.qualifyRecord === true ? { qualifyRecord: true } : undefined;
     try {
-      return findPullOwnersInRows(target, this.pullOwnershipRows(undefined, [target]));
+      const result = findPullOwnersInRows(target, this.pullOwnershipRows(undefined, [target]), diagnostics);
+      if (
+        !result.ok &&
+        result.reason === "incomplete" &&
+        diagnostics?.failure?.check === "run_initial_coding_owner" &&
+        diagnostics.qualificationSnapshot
+      ) {
+        try {
+          return { ...result, qualification: await qualifyPullOwnerSnapshot(diagnostics.qualificationSnapshot) };
+        } catch {
+          return result;
+        }
+      }
+      return result;
     } catch {
       return { ok: false, reason: "incomplete" };
     }
@@ -1110,11 +1138,15 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     if (response.status === 200 && typeof result.offered === "boolean") return { offered: result.offered };
     throw new Error(`coordinator reconciliation unavailable (HTTP ${response.status})`);
   }
-  async findPullOwners(target: PullTarget, options?: { diagnostic?: boolean }): Promise<PullOwnersResult> {
+  async findPullOwners(
+    target: PullTarget,
+    options?: { diagnostic?: boolean; qualifyRecord?: boolean },
+  ): Promise<PullOwnersResult> {
     try {
       const response = await this.post("/runs/coordinator/pull-owners", {
         target,
         ...(options?.diagnostic === true ? { diagnostic: true } : {}),
+        ...(options?.diagnostic === true && options.qualifyRecord === true ? { qualifyRecord: true } : {}),
       });
       if (response.status !== 200 || !isPullOwnersResult(response.data)) return { ok: false, reason: "unavailable" };
       if (response.data.ok) return { ok: true, owners: response.data.owners };
@@ -1122,7 +1154,27 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
         options?.diagnostic === true && response.data.reason === "incomplete"
           ? pullOwnerReadDiagnosticFrom(response.data.diagnostic)
           : undefined;
-      return { ok: false, reason: response.data.reason, ...(diagnostic ? { diagnostic } : {}) };
+      let qualification;
+      if (
+        options?.diagnostic === true &&
+        options.qualifyRecord === true &&
+        diagnostic?.stage === "run_initial_coding_owner"
+      ) {
+        try {
+          qualification = pullOwnerQualificationFrom(
+            response.data.qualification,
+            await sourceHash(pullOwnerTargetProjection(target)),
+          );
+        } catch {
+          qualification = undefined;
+        }
+      }
+      return {
+        ok: false,
+        reason: response.data.reason,
+        ...(diagnostic ? { diagnostic } : {}),
+        ...(qualification ? { qualification } : {}),
+      };
     } catch {
       return { ok: false, reason: "unavailable" };
     }
