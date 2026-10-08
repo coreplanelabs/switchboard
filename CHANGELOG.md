@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.291.0](https://github.com/coreplanelabs/switchboard/compare/v1.290.1...v1.291.0) (2026-10-08)
+
+
+### Features
+
+* **harness:** retain closed typed refusal diagnostics ([#2857](https://github.com/coreplanelabs/switchboard/issues/2857)) ([c4d2906](https://github.com/coreplanelabs/switchboard/commit/c4d29060443f0f274eb30bd98a73db7a31a40e4b))
+
+
+### Bug fixes
+
+* **review:** use the acknowledged checkout for head settlement ([#2859](https://github.com/coreplanelabs/switchboard/issues/2859)) ([ea2163d](https://github.com/coreplanelabs/switchboard/commit/ea2163d0a03450f82026ab258d0b6a8355546937))
+
 ## [1.290.1](https://github.com/coreplanelabs/switchboard/compare/v1.290.0...v1.290.1) (2026-10-08)
 
 
