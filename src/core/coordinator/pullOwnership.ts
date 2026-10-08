@@ -1,3 +1,4 @@
+import { initialOwnerUnits } from "./pullOwnerQualification.js";
 import { doorPublicationOf, branchPublicationOf, isPublicationRepo } from "../branchPublication.js";
 import { branchPushReceiptsOf, isRunWorkOwner } from "../runRecord.js";
 import {
@@ -434,14 +435,7 @@ export function findPullOwnersInRows(
       const door = doorPublicationOf(run.door);
       if (!door || (door.outcome !== "rejected" && door.outcome !== "not_forwarded")) return;
     }
-    const bound = rows.units.filter(
-      (row) =>
-        isCoordinatorInstance(row.instance) &&
-        isCoordinatorUnit(row.unit) &&
-        row.instance.id === record.parentInstanceId &&
-        row.unit.instanceId === record.parentInstanceId &&
-        row.unit.unit === record.coordinatorUnit,
-    );
+    const bound = initialOwnerUnits(record, rows.units);
     if (bound.length !== 1) return;
     const { instance, unit } = bound[0] as { instance: CoordinatorInstance; unit: CoordinatorUnit };
     const proof = publicationSettlementForRun(terminal.publicationSettlement, record);
