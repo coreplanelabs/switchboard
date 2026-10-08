@@ -4,12 +4,14 @@ import {
   execDeadline,
   ExecInfraError,
   EXEC_INFRA_REASONS,
+  annotateExecutionDiagnostic,
   type Executor,
   type ExecResult,
 } from "../execution/executor.js";
 import { bashBudgetWithinRun, clampBashTimeout } from "../execution/bashTimeout.js";
 import { shellQuote } from "../execution/shellQuote.js";
 import { FIRST_TEST_PREFLIGHT_MS } from "./budgets.js";
+import { typedExecutionDiagnosticOf, type TypedExecutionDiagnostic } from "../execution/typedExecutionDiagnostic.js";
 import { redactAndCap } from "./redact.js";
 import type {
   CheckExecutionCapability,
@@ -249,12 +251,17 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
         }),
       );
     } catch (error) {
+      annotateExecutionDiagnostic(error, { caller: "check", operation: "metadata" });
+      const executionDiagnostic = typedExecutionDiagnosticOf(error);
       const infrastructureReason = metadataInfrastructureReason(error);
-      return unavailable("metadata_unavailable", {
-        phase: "execute",
-        kind: "thrown",
-        ...(infrastructureReason ? { infrastructureReason } : {}),
-      });
+      return {
+        ...unavailable("metadata_unavailable", {
+          phase: "execute",
+          kind: "thrown",
+          ...(infrastructureReason ? { infrastructureReason } : {}),
+        }),
+        ...(executionDiagnostic ? { executionDiagnostic } : {}),
+      };
     }
     if (!observed) return unavailable("metadata_unavailable", { phase: "result", kind: "invalid_result" });
     if (observed.exitCode !== 0 || observed.truncated)
@@ -299,6 +306,7 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
     state.receipts.push(receipt);
     if (!(await persist())) return unavailable("persistence_failed");
     const dispatchAllowed = await authorized(input.command, timeoutMs);
+    let executionDiagnostic: TypedExecutionDiagnostic | undefined;
     const dispatchBudget = budget();
     // A known pre-dispatch refusal is different from a command whose response
     // was lost. Recording that difference avoids an unnecessary recovery hold.
@@ -324,13 +332,19 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
           : commandSignal.aborted || [124, 137, 143].includes(result.exitCode)
             ? { kind: "unknown", reason: "interrupted", result }
             : { kind: "completed", ...result };
-      } catch {
+      } catch (error) {
+        annotateExecutionDiagnostic(error, { caller: "check", operation: "command" });
+        executionDiagnostic = typedExecutionDiagnosticOf(error);
         receipt.outcome = { kind: "unknown", reason: commandSignal.aborted ? "interrupted" : "transport" };
       }
     }
     receipt.completedAt = binding.clock();
     if (!(await persist())) return unavailable("persistence_failed");
-    return { kind: "recorded", receipt: structuredClone(receipt) };
+    return {
+      kind: "recorded",
+      receipt: structuredClone(receipt),
+      ...(executionDiagnostic ? { executionDiagnostic } : {}),
+    };
   }
 
   return {

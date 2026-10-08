@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { BASH_TIMEOUT_MAX_MS, BASH_TIMEOUT_MIN_MS } from "../execution/bashTimeout.js";
 import type { RunnableTool } from "./runnableTool.js";
+import { typedExecutionDiagnosticFrom, type TypedExecutionDiagnostic } from "../execution/typedExecutionDiagnostic.js";
 
 const inputSchema = z
   .object({
@@ -39,10 +40,32 @@ export const runCheckTool: RunnableTool = {
       signal: ctx.signal,
       remainingMs: ctx.remainingMs,
     });
+    let diagnostic: TypedExecutionDiagnostic | undefined;
+    try {
+      const observed = typedExecutionDiagnosticFrom(
+        Object.getOwnPropertyDescriptor(response, "executionDiagnostic")?.value,
+      );
+      if (
+        observed?.caller === "check" &&
+        ((observed.operation === "metadata" &&
+          response.kind === "unavailable" &&
+          response.reason === "metadata_unavailable" &&
+          response.metadataFailure?.phase === "execute" &&
+          response.metadataFailure.kind === "thrown") ||
+          (observed.operation === "command" &&
+            response.kind === "recorded" &&
+            response.receipt.outcome.kind === "unknown" &&
+            ["transport", "interrupted"].includes(response.receipt.outcome.reason)))
+      )
+        diagnostic = observed;
+    } catch {
+      /* Optional observation cannot change the original tool result. */
+    }
+    const diagnosticText = diagnostic ? `\nExecution diagnostic: ${JSON.stringify(diagnostic)}` : "";
     if (response.kind === "unavailable" && response.reason === "recording_unavailable")
       return "error: recording capability unavailable; command did not start";
     if (response.kind === "unavailable")
-      return `error: recorded check unavailable (${response.reason}); no completion receipt was returned${
+      return `error: recorded check unavailable (${response.reason}); no completion receipt was returned${diagnosticText}${
         response.metadataFailure ? `\nMetadata diagnostic: ${JSON.stringify(response.metadataFailure)}` : ""
       }`;
     const receipt = response.receipt;
@@ -57,6 +80,6 @@ export const runCheckTool: RunnableTool = {
         : receipt.outcome.kind === "not_started"
           ? `Command did not start (${receipt.outcome.reason}). No execution result exists.`
           : "Command outcome is unknown; do not blindly rerun it. Existing workspace recovery must reconcile the operation.";
-    return `${receipt.outcome.kind === "completed" ? "" : "error: "}${summary}\n<untrusted-check-evidence>\n${encoded}\n</untrusted-check-evidence>`;
+    return `${receipt.outcome.kind === "completed" ? "" : "error: "}${summary}${diagnosticText}\n<untrusted-check-evidence>\n${encoded}\n</untrusted-check-evidence>`;
   },
 };

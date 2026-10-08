@@ -57,6 +57,7 @@ import { SANDBOX_CREDENTIAL_FILE } from "./sandboxCredentials.js";
 import { legacySandboxCredentialScrub } from "./legacySandboxCredentials.js";
 import type { Span } from "../core/trace/types.js";
 import { coldPublicationInput, coldPublicationDiagnostics } from "./coldPublication.js";
+import type { TypedExecutionDiagnostic } from "./typedExecutionDiagnostic.js";
 
 // Remote execution in a Cloudflare Sandbox, via the authenticated proxy Worker
 // in deploy/cloudflare-sandbox/ (the Sandbox SDK only runs inside Workers).
@@ -319,7 +320,12 @@ export class CloudflareSandboxExecutor implements Executor {
     for (;;) {
       const answer = await this.send(route, sent, headers, budgetMs, signal, span, singleSend);
       if (answer.kind === "ok") return answer.data;
-      if (singleSend) throw new ExecCapacityError("The typed command was refused before execution.");
+      if (singleSend)
+        throw new ExecCapacityError(
+          "The typed command was refused before execution.",
+          undefined,
+          answer.executionDiagnostic,
+        );
       const setupRemaining = this.opts.setupRemainingMs?.();
       const setupWaitMs =
         typeof setupRemaining === "number" && Number.isFinite(setupRemaining) && setupRemaining >= 0
@@ -369,7 +375,13 @@ export class CloudflareSandboxExecutor implements Executor {
     singleSend = false,
   ): Promise<
     | { kind: "ok"; data: Record<string, unknown> }
-    | { kind: "busy"; reason: WaitReason; refusal: string; containerId?: string }
+    | {
+        kind: "busy";
+        reason: WaitReason;
+        refusal: string;
+        containerId?: string;
+        executionDiagnostic?: TypedExecutionDiagnostic;
+      }
   > {
     // Sandbox cold starts can 5xx on a thread's first command — retry briefly.
     const delays = singleSend ? [0] : [0, 3000, 6000, 12000];
@@ -432,13 +444,41 @@ export class CloudflareSandboxExecutor implements Executor {
       // the Worker names them only before any command or file op started, so
       // nothing ran.
       const reason = waitReasonOf(res, data);
-      if (reason)
+      if (reason) {
+        // Observation needs the known refusal shape. Malformed replies retain
+        // the existing capacity failure but supply no pre-execution evidence.
+        const qualified =
+          route === "/exec" &&
+          (res.status === 200 || res.status === 503) &&
+          typeof data.error === "string" &&
+          data.error.length > 0 &&
+          data.error.length <= 4096 &&
+          (data.exitCode === undefined || data.exitCode === 127) &&
+          (data.stdout === undefined || data.stdout === "") &&
+          (data.stderr === undefined || data.stderr === data.error) &&
+          (data.truncated === undefined || data.truncated === false) &&
+          (data.containerId === undefined ||
+            (typeof data.containerId === "string" && data.containerId.length > 0 && data.containerId.length <= 512));
         return {
           kind: "busy",
           reason,
+          ...(qualified
+            ? {
+                executionDiagnostic: {
+                  version: 1 as const,
+                  phase: "pre_execution_busy" as const,
+                  route: "exec" as const,
+                  reason,
+                  responseClass: res.ok ? ("success" as const) : ("service_unavailable" as const),
+                  caller: "executor" as const,
+                  operation: "unclassified" as const,
+                },
+              }
+            : {}),
           refusal: String(data.error ?? ""),
           ...(typeof data.containerId === "string" ? { containerId: data.containerId } : {}),
         };
+      }
       // A success body has no `error` key at all, so a PRESENT but empty
       // `error` is the Worker's failure shape with its text missing — infra,
       // not a command exit. A thread placed on a previous-image container

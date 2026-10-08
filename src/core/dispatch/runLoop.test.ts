@@ -1,4 +1,6 @@
 import type { CheckExecutionReceipt } from "../checkExecutionTypes.js";
+import { CloudflareSandboxExecutor } from "../../execution/cloudflareSandbox.js";
+import { ExecHarnessContainer } from "../harness/container.js";
 import { HarnessEndingUnconfirmedError } from "../harness/container.js";
 import type { GithubWriteResult } from "../../execution/githubPulls.js";
 import { findPullOwnersInRows } from "../coordinator/pullOwnership.js";
@@ -3581,6 +3583,63 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect(rec.events.filter((e) => e.type === "run_note" && e.kind === "run_failed")).toEqual([
       expect.objectContaining({ summary: expect.stringContaining(UNKNOWN_MODEL_TERMINAL_MESSAGE) }),
     ]);
+  });
+
+  it("saves a closed adapter and harness refusal on the original failure note without changing its ending", async () => {
+    const fetch = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({ reason: "runtime-busy", error: "private refusal", containerId: "private-container" }),
+        ),
+    );
+    vi.stubGlobal("fetch", fetch);
+    try {
+      const executor = new CloudflareSandboxExecutor({
+        url: "https://sandbox.example",
+        token: "private-token",
+        threadKey: "cli:private",
+        resolveEnvs: async () => ({}),
+      });
+      const error = await new ExecHarnessContainer(executor).alive(4242).catch((error) => error);
+      const stack = error.stack;
+      const observed = watched(piHarness);
+      observed.harness.open = async () => {
+        throw error;
+      };
+      const s = setup("unused", {
+        harness: {
+          harnesses: roster(observed.harness),
+          registry: new HarnessRegistry(),
+          loopbackUrl: "http://127.0.0.1:8080",
+        },
+      });
+      await expect(runLoop(s.deps, s.ctx)).rejects.toThrow(error.message);
+      s.ending.drain(undefined);
+      await s.writer.settled();
+      const record = (await s.store.get(s.run.id))!;
+      expect(record.status).toBe("failed");
+      expect(record.events.filter((event) => event.type === "run_note" && event.kind === "run_failed")).toEqual([
+        expect.objectContaining({
+          summary: error.message,
+          executionDiagnostic: {
+            version: 1,
+            phase: "pre_execution_busy",
+            route: "exec",
+            reason: "runtime-busy",
+            responseClass: "success",
+            caller: "harness",
+            operation: "alive",
+          },
+        }),
+      ]);
+      expect(error.stack).toBe(stack);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(
+        JSON.stringify(record.events.filter((event) => event.type === "run_note" && event.kind === "run_failed")),
+      ).not.toContain("private");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("a failed run exposes only its original owner-bound write diagnosis on the readable failure event", async () => {

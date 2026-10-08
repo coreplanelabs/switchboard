@@ -1,5 +1,6 @@
 import type { ExecInfraReason } from "../execution/executor.js";
 import type { ExecResult } from "../execution/execResult.js";
+import type { TypedExecutionDiagnostic } from "../execution/typedExecutionDiagnostic.js";
 
 export interface CheckExecutionInput {
   command: string;
@@ -54,10 +55,11 @@ export interface CheckMetadataFailure {
 }
 
 export type CheckExecutionResponse =
-  | { kind: "recorded"; receipt: CheckExecutionReceipt }
+  | { kind: "recorded"; receipt: CheckExecutionReceipt; executionDiagnostic?: TypedExecutionDiagnostic }
   | {
       kind: "unavailable";
       metadataFailure?: CheckMetadataFailure;
+      executionDiagnostic?: TypedExecutionDiagnostic;
       reason:
         | "invalid_input"
         | "command_refused"
