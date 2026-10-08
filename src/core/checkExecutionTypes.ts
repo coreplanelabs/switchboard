@@ -46,6 +46,9 @@ export interface CheckMetadataFailure {
   phase: "execute" | "result" | "framing";
   kind: "thrown" | "invalid_result" | "nonzero_exit" | "truncated" | "invalid_fields";
   infrastructureReason?: ExecInfraReason;
+  /** Signal observations identify neither remote ending nor retry authority. */
+  abortSource?: "metadata_deadline" | "run_control" | "call_control" | "ambiguous" | "unknown";
+  effectiveTimeoutMs?: number;
   exitCode?: number;
   truncated?: boolean;
   lineCount?: number;

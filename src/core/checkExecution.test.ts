@@ -13,6 +13,10 @@ import { InMemoryRunLedger } from "./runLedger/inMemory.js";
 import { createCheckExecution, type CheckExecutionBinding } from "./checkExecution.js";
 import type { CheckExecutionInput, CheckExecutionState } from "./checkExecutionTypes.js";
 import { BASH_TIMEOUT_MS, RUN_DEADLINE_RESERVE_MS } from "../execution/bashTimeout.js";
+import { ResidentExecutor } from "../execution/resident.js";
+import { CloudflareSandboxExecutor } from "../execution/cloudflareSandbox.js";
+import { runCheckTool } from "../tools/check.js";
+import { ExecInfraError } from "../execution/executor.js";
 
 const ok = { stdout: "", stderr: "", exitCode: 0, truncated: false };
 const metadata = { ...ok, stdout: `/work/repo\n${"a".repeat(40)}\n${"b".repeat(40)}\n` };
@@ -40,6 +44,157 @@ function setup(previous?: unknown) {
 }
 
 describe("recorded coding checks", () => {
+  it.each([
+    ["resident", "metadata_deadline"],
+    ["resident", "run_control"],
+    ["resident", "call_control"],
+    ["resident", "simultaneous"],
+    ["resident", "later_control"],
+    ["resident", "default"],
+    ["resident", "clipped"],
+    ["sandbox", "metadata_deadline"],
+    ["sandbox", "run_control"],
+    ["sandbox", "call_control"],
+    ["sandbox", "simultaneous"],
+    ["sandbox", "later_control"],
+    ["sandbox", "default"],
+    ["sandbox", "clipped"],
+  ] as const)(
+    "distinguishes metadata deadline and control cancellation through the actual %s adapter: %s",
+    async (backend, source) => {
+      try {
+        vi.useFakeTimers();
+        const s = setup();
+        if (source === "clipped") s.binding.remainingMs = () => RUN_DEADLINE_RESERVE_MS + 1500;
+        const effectiveTimeoutMs = source === "default" ? 10000 : source === "clipped" ? 1500 : 1000;
+        const call = new AbortController();
+        const wires: Array<{ command: string; timeoutMs: number }> = [];
+        let pendingBody = false;
+        let failMetadata: (() => void) | undefined;
+        vi.stubGlobal(
+          "fetch",
+          vi.fn(async (_url, init: RequestInit) => {
+            wires.push(JSON.parse(String(init.body)));
+            if (!pendingBody)
+              return new Response(
+                JSON.stringify(wires.length === 1 ? metadata : { ...ok, stdout: "private completed output" }),
+              );
+            return new Response(
+              new ReadableStream({
+                start(controller) {
+                  failMetadata = () => controller.error(new Error("private body failure"));
+                  init.signal?.addEventListener(
+                    "abort",
+                    () => {
+                      if (source !== "later_control") failMetadata!();
+                    },
+                    { once: true },
+                  );
+                },
+              }),
+            );
+          }),
+        );
+        const executor =
+          backend === "resident"
+            ? new ResidentExecutor({
+                baseUrl: "https://resident.example",
+                token: "private-token",
+                resource: "repo:acme/repo",
+                threadKey: "cli:private",
+              })
+            : new CloudflareSandboxExecutor({
+                url: "https://sandbox.example",
+                token: "private-token",
+                threadKey: "cli:private",
+                resolveEnvs: async () => ({ PRIVATE: "private-env" }),
+              });
+        s.binding.executor = () => executor;
+        const capability = s.capability();
+        const ctx = { checkExecution: capability, callId: "call-completed" } as Parameters<typeof runCheckTool.run>[1];
+        const selected = {
+          ...input,
+          timeoutMs: source === "default" ? undefined : source === "clipped" ? 10000 : 1000,
+        };
+        const completed = await runCheckTool.run(selected, ctx);
+        expect(completed).toContain("completed with exit 0");
+        expect(s.saved.at(-1)?.receipts[0]?.outcome).toEqual({
+          kind: "completed",
+          ...ok,
+          stdout: "private completed output",
+        });
+        expect(s.saved.map((state) => state.receipts[0]?.outcome.kind)).toEqual(["pending", "completed"]);
+        expect(wires[1]?.command).toContain("node tests/focused.js");
+        const savedBytes = JSON.stringify(s.saved);
+        vi.clearAllTimers();
+        wires.length = 0;
+        pendingBody = true;
+        const result = runCheckTool.run(selected, { ...ctx, callId: "call-pending", signal: call.signal });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(wires).toHaveLength(1);
+        expect(wires[0]?.timeoutMs).toBe(effectiveTimeoutMs);
+        if (source === "run_control") s.stop.abort(new Error("private run reason"));
+        else if (source === "call_control") call.abort(new Error("private call reason"));
+        else if (source === "simultaneous") {
+          s.stop.abort(new Error("private run reason"));
+          call.abort(new Error("private call reason"));
+        } else {
+          await vi.advanceTimersByTimeAsync(effectiveTimeoutMs);
+          if (source === "later_control") {
+            call.abort(new Error("private late reason"));
+            failMetadata!();
+          }
+        }
+        const output = await result;
+        expect(output).toContain(
+          "error: recorded check unavailable (metadata_unavailable); no completion receipt was returned",
+        );
+        expect(wires).toHaveLength(1);
+        expect(wires[0]?.command).not.toBe(selected.command);
+        expect(JSON.stringify(s.saved)).toBe(savedBytes);
+        expect(output).not.toContain("private");
+        if (typeof output !== "string") throw new Error("Expected string result");
+        expect(JSON.parse(output.split("Metadata diagnostic: ")[1]!)).toEqual({
+          phase: "execute",
+          kind: "thrown",
+          infrastructureReason: "aborted",
+          abortSource: ["simultaneous", "later_control"].includes(source)
+            ? "ambiguous"
+            : ["default", "clipped"].includes(source)
+              ? "metadata_deadline"
+              : source,
+          effectiveTimeoutMs,
+        });
+      } finally {
+        vi.clearAllTimers();
+        vi.useRealTimers();
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
+  it("keeps an unobserved typed abort unknown and leaves arbitrary error diagnostics unchanged", async () => {
+    for (const typed of [false, true]) {
+      const s = setup();
+      s.execResult
+        .mockReset()
+        .mockRejectedValue(
+          typed ? new ExecInfraError("private abort", "aborted") : new Error("private TimeoutError aborted"),
+        );
+      expect(await s.capability().run({ ...input, timeoutMs: 2000 }, "call-one")).toEqual({
+        kind: "unavailable",
+        reason: "metadata_unavailable",
+        metadataFailure: {
+          phase: "execute",
+          kind: "thrown",
+          ...(typed ? { infrastructureReason: "aborted", abortSource: "unknown", effectiveTimeoutMs: 2000 } : {}),
+        },
+      });
+      expect(s.execResult).toHaveBeenCalledTimes(1);
+      expect(s.saved).toEqual([]);
+    }
+  });
+
   it("uses the existing command policy before metadata or intent and rechecks it before dispatch", async () => {
     const denied = setup();
     denied.binding.authorizeCommand = () => false;
