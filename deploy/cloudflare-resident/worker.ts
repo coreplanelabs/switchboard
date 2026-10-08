@@ -8123,6 +8123,7 @@ export class ResidentDO extends Sandbox<Env> {
   private async beginThreadNativeOperation(): Promise<() => void> {
     await this.assertThreadOperationAllowed();
     const scope = this.threadOperationScope?.getStore();
+    if (scope && !scope.active) throw new RunCancelledError("run cancelled");
     if (scope) scope.pendingNative++;
     let settled = false;
     return () => {
@@ -9598,8 +9599,8 @@ export class ResidentDO extends Sandbox<Env> {
         });
         if (plan.action === "refuse") return { released: false, reason: plan.reason, user: binding.user };
         if (plan.action === "kill") {
-          if (!(await this.killThreadUserProcesses(plan.user, threadKey)))
-            return { error: "pool-owner-mismatch: force detach refused before kill", status: 503 };
+          if (!(await this.killThreadUserProcesses(plan.user, threadKey, binding.container)))
+            return { error: "runtime-stop-unconfirmed: force detach kept the workspace", status: 503 };
           console.log(
             `detach: force — killed ${plan.user}'s processes for ${threadKey} (${plan.inFlight} op(s) were in flight)`,
           );
@@ -9679,16 +9680,7 @@ export class ResidentDO extends Sandbox<Env> {
         try {
           await this.ctx.storage.put(key, { cancellation });
           await this.ctx.storage.put(`cancelled-thread:${threadKey}`, true);
-          const kill = [
-            "/bin/sh",
-            "-c",
-            'test "$(/bin/cat /proc/sys/kernel/random/boot_id)" = "$1" || exit 2; exec /usr/bin/su -s /bin/bash "$2" -c "kill -9 -1"',
-            "--",
-            binding.container!,
-            binding.user,
-          ];
-          const result = await this.run(kill, { timeoutMs: FORCE_DETACH_KILL_TIMEOUT_MS });
-          if (result.timedOut || result.truncated || ![0, 137].includes(result.exitCode))
+          if (!(await this.killThreadUserProcesses(binding.user, threadKey, binding.container)))
             return { stopped: cancellationRefusal(cancellation, "resident", "kill-unconfirmed") };
           if (await this.waitForThreadDrain(threadKey))
             return { stopped: cancellationRefusal(cancellation, "resident", "operations-busy") };
@@ -9703,8 +9695,7 @@ export class ResidentDO extends Sandbox<Env> {
           // An admitted launch may have resumed after the first kill. All its
           // waits have now settled; kill detached children too, then ask the
           // native container for its physical identity and this UID's absence.
-          const finalKill = await this.run(kill, { timeoutMs: FORCE_DETACH_KILL_TIMEOUT_MS });
-          if (finalKill.timedOut || finalKill.truncated || ![0, 137].includes(finalKill.exitCode))
+          if (!(await this.killThreadUserProcesses(binding.user, threadKey, binding.container)))
             return { stopped: cancellationRefusal(cancellation, "resident", "kill-unconfirmed") };
           if (this.ctx.container?.running !== true)
             return { stopped: cancellationRefusal(cancellation, "resident", "runtime-unavailable") };
@@ -9761,22 +9752,32 @@ export class ResidentDO extends Sandbox<Env> {
     );
   }
 
-  /** Force-detach's kill: end every process owned by the pool user —
+  /** Both shutdown paths kill only the recorded boot and pool user —
    *  `kill -9 -1` sent AS THAT USER reaches exactly its own processes (the
    *  thread's `su … bash -c` shell, the command, anything it backgrounded),
    *  nothing else in the container, and needs no procps. The shell kills
-   *  itself too, so su exits 137 — any exit code is fine, and a throw
-   *  (runtime replaced mid-kill) is fine as well: the drain wait after it is
-   *  what decides, and it is bounded. Only ever called with a plan from
-   *  `planForceDetach`, which refuses anything but a `THREAD_USERS` member. */
-  private async killThreadUserProcesses(user: string, threadKey: string): Promise<boolean> {
-    if (!(await this.poolUserOwnerMatches(user, `thread:${threadKey}`))) return false;
+   *  itself too, so su exits 137. Lost, timed-out or foreign-boot results do
+   *  not acknowledge a kill. Callers still drain and apply their own ending
+   *  or workspace-preservation policy after this physical operation. */
+  private async killThreadUserProcesses(user: string, threadKey: string, container?: string): Promise<boolean> {
+    if (!container || !THREAD_USERS.includes(user) || !(await this.poolUserOwnerMatches(user, `thread:${threadKey}`)))
+      return false;
     try {
-      await this.run(["su", "-s", "/bin/bash", user, "-c", "kill -9 -1"], { timeoutMs: FORCE_DETACH_KILL_TIMEOUT_MS });
-    } catch (err) {
-      console.log(`detach: force — kill as ${user} threw (continuing to the drain wait): ${errMsg(err)}`);
+      const result = await this.run(
+        [
+          "/bin/sh",
+          "-c",
+          'test "$(/bin/cat /proc/sys/kernel/random/boot_id)" = "$1" || exit 2; exec /usr/bin/su -s /bin/bash "$2" -c "kill -9 -1"',
+          "--",
+          container,
+          user,
+        ],
+        { timeoutMs: FORCE_DETACH_KILL_TIMEOUT_MS },
+      );
+      return !result.timedOut && !result.truncated && [0, 137].includes(result.exitCode);
+    } catch {
+      return false;
     }
-    return true;
   }
 
   /** Wait (bounded, see FORCE_DETACH_DRAIN_MS) for this thread's in-flight op
