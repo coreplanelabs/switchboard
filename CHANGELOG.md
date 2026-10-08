@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.292.0](https://github.com/coreplanelabs/switchboard/compare/v1.291.0...v1.292.0) (2026-10-08)
+
+
+### Features
+
+* **providers:** retain authenticated rejection stages ([#2862](https://github.com/coreplanelabs/switchboard/issues/2862)) ([8ed3be2](https://github.com/coreplanelabs/switchboard/commit/8ed3be261e47ee690d38ea240abc215e9ae5da8d))
+* **tools:** retain metadata abort observations ([#2863](https://github.com/coreplanelabs/switchboard/issues/2863)) ([9d1b01a](https://github.com/coreplanelabs/switchboard/commit/9d1b01ab64be80eb94aaa9fe089f8b8805559b7b))
+
 ## [1.291.0](https://github.com/coreplanelabs/switchboard/compare/v1.290.1...v1.291.0) (2026-10-08)
 
 
