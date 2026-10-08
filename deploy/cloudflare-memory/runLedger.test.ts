@@ -1,4 +1,8 @@
 import { sourceHash } from "../../src/core/references/receipts.ts";
+import {
+  pullOwnerQualificationSnapshot,
+  qualifyPullOwnerSnapshot,
+} from "../../src/core/coordinator/pullOwnerQualification.ts";
 import { sessionSeed } from "../../src/core/dispatch/seed.ts";
 import type { ChatMessage } from "../../src/core/chatMessage.ts";
 import {
@@ -10283,6 +10287,235 @@ describe("bounded SQLite terminal pull-owner candidates", () => {
       settlements: state.storage.sql.exec(`SELECT * FROM workspace_settlements`).toArray(),
     }));
   }
+});
+
+describe("private initial publication owner qualification in SQLite", () => {
+  const target = { repo: "acme/api", pr: 7 };
+  const originalInstance: CoordinatorInstance = {
+    id: "original_owner",
+    kind: "ship",
+    userId: "slack:UALICE",
+    channelId: "slack:C1",
+    threadKey: "slack:C1:original",
+    repo: "acme/api",
+    branch: "fix/original",
+    base: "main",
+    createdAt: 1,
+  };
+  const originalUnit: CoordinatorUnit = {
+    instanceId: originalInstance.id,
+    unit: "UOWNER",
+    slug: "original",
+    branch: originalInstance.branch,
+    dependsOn: [],
+    rounds: [],
+  };
+  async function seedQualification(withUnit = false) {
+    const key = storeKey(),
+      id = "original_coding";
+    const value = {
+      ...record(id, originalInstance.threadKey),
+      agent: "coding",
+      eventCount: 0,
+      storedEventCount: 0,
+      events: [],
+      repo: target.repo,
+      ...(withUnit
+        ? {
+            parentInstanceId: originalInstance.id,
+            coordinatorUnit: originalUnit.unit,
+            coordinatorAttempt: 0,
+            idempotencyKey: `${originalInstance.id}:${originalUnit.unit}/0/coding`,
+          }
+        : {}),
+      branchPublication: { version: 1, repo: target.repo, branches: [], complete: false },
+    };
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO runs (run_id, channel_id, user_id, thread_key, started_at, finished_at, stored_at,
+        status, event_count, stored_event_count, truncated, bytes, diagnosis_json, summary_json)
+        VALUES (?, 'slack:C1', 'slack:UALICE', ?, 1, 2, 2, 'completed', 0, 0, 0, ?, '{}', ?)`,
+        id,
+        value.threadKey,
+        JSON.stringify(value).length,
+        JSON.stringify(value),
+      );
+      if (withUnit) {
+        state.storage.sql.exec(
+          `INSERT INTO coordinator_instances(instance_id,json,created_at) VALUES (?,?,1)`,
+          originalInstance.id,
+          JSON.stringify(originalInstance),
+        );
+        state.storage.sql.exec(
+          `INSERT INTO coordinator_units(instance_id,unit,json,updated_at) VALUES (?,?,?,1)`,
+          originalInstance.id,
+          originalUnit.unit,
+          JSON.stringify(originalUnit),
+        );
+      }
+    });
+    return { key, id, value };
+  }
+  it("locates one exact failed canonical run through the existing authenticated read while preserving ownership refusal", async () => {
+    const key = storeKey(),
+      id = "original_coding";
+    const value = {
+      ...record(id, "slack:C1:original"),
+      agent: "coding",
+      eventCount: 0,
+      storedEventCount: 0,
+      events: [],
+      repo: "acme/api",
+      branchPublication: { version: 1, repo: "acme/api", branches: [], complete: false },
+    };
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO runs (run_id, channel_id, user_id, thread_key, started_at, finished_at, stored_at,
+        status, event_count, stored_event_count, truncated, bytes, diagnosis_json, summary_json)
+        VALUES (?, 'slack:C1', 'slack:UALICE', ?, 1, 2, 2, 'completed', 0, 0, 0, ?, '{}', ?)`,
+        id,
+        value.threadKey,
+        JSON.stringify(value).length,
+        JSON.stringify(value),
+      );
+    });
+    const result = (
+      await post("/runs/coordinator/pull-owners", {
+        storeKey: key,
+        target: { repo: "acme/api", pr: 7 },
+        diagnostic: true,
+        qualifyRecord: true,
+      })
+    ).data;
+    expect(result).toMatchObject({
+      ok: false,
+      reason: "incomplete",
+      qualification: {
+        version: 1,
+        runId: id,
+        failedPredicate: "canonical_unit",
+        targetDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+        ownerProjectionDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+        dependencyDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
+    });
+    expect(
+      (await post("/runs/coordinator/pull-owners", { storeKey: key, target: { repo: "acme/api", pr: 7 } })).data,
+    ).toEqual({ ok: false, reason: "incomplete" });
+    const read = (await post("/runs/get", { storeKey: key, id })).data.record as RunRecord;
+    const reconstructed = await qualifyPullOwnerSnapshot(
+      pullOwnerQualificationSnapshot(
+        { repo: "acme/api", pr: 7 },
+        {
+          runId: id,
+          repo: read.repo,
+          live: false,
+          record: read,
+          publication: read.branchPublication,
+          pushReceipts: read.branchPushReceipts,
+          door: read.doorPublicationPending,
+        },
+        [],
+        "canonical_unit",
+      )!,
+    );
+    expect(result.qualification).toEqual(reconstructed);
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+      expect(
+        state.storage.sql.exec<{ summary_json: string }>(`SELECT summary_json FROM runs WHERE run_id=?`, id).one()
+          .summary_json,
+      ).toBe(JSON.stringify(value));
+    });
+  });
+  it("keeps anonymous/default decisions and original source bytes exact; only explicit qualification emits the key", async () => {
+    const { key, value } = await seedQualification();
+    const anonymous = (await post("/runs/coordinator/pull-owners", { storeKey: key, target, diagnostic: true })).data;
+    expect(anonymous).not.toHaveProperty("qualification");
+    expect(JSON.stringify(anonymous)).not.toMatch(/original_coding|slack:|acme\/|fix\//);
+    const qualified = (
+      await post("/runs/coordinator/pull-owners", { storeKey: key, target, diagnostic: true, qualifyRecord: true })
+    ).data;
+    const { qualification, ...normal } = qualified;
+    expect(normal.ok).toBe(anonymous.ok);
+    expect(normal.reason).toBe(anonymous.reason);
+    expect(normal.diagnostic).toMatchObject({ stage: "run_initial_coding_owner", cause: "validation", source: "runs" });
+    expect(Object.keys(qualification as object).sort()).toEqual([
+      "dependencyDigest",
+      "failedPredicate",
+      "ownerProjectionDigest",
+      "runId",
+      "targetDigest",
+      "version",
+    ]);
+    expect(JSON.stringify(qualification)).not.toMatch(/slack:|acme\/|fix\/|userId|threadKey|branch/);
+    const after = (await post("/runs/get", { storeKey: key, id: value.id })).data.record as RunRecord;
+    expect(after.branchPublication).toEqual(value.branchPublication);
+  });
+  it("captures the owner and canonical dependency before asynchronous hashing and makes later changes detectable", async () => {
+    const { key, id, value } = await seedQualification(true);
+    const expected = await qualifyPullOwnerSnapshot(
+      pullOwnerQualificationSnapshot(
+        target,
+        {
+          runId: id,
+          repo: value.repo,
+          live: false,
+          record: value,
+          publication: value.branchPublication,
+        },
+        [{ instance: originalInstance, unit: originalUnit }],
+        "native_confirmation",
+      )!,
+    );
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+      const pending = owner.findPullOwners(target, true, true);
+      state.storage.sql.exec(
+        `UPDATE runs SET summary_json=json_set(summary_json,'$.threadKey','slack:C1:changed') WHERE run_id=?`,
+        id,
+      );
+      state.storage.sql.exec(`UPDATE coordinator_instances SET json=json_set(json,'$.userName','changed')`);
+      const result = await pending;
+      expect(result).toMatchObject({ ok: false, reason: "incomplete", qualification: expected });
+      const later = await owner.findPullOwners(target, true, true);
+      expect(later.ok).toBe(false);
+      if (!later.ok) {
+        expect(later.qualification!.ownerProjectionDigest).not.toBe(expected.ownerProjectionDigest);
+        expect(later.qualification!.dependencyDigest).not.toBe(expected.dependencyDigest);
+      }
+      expect(state.storage.sql.exec(`SELECT * FROM coordinator_unit_events`).toArray()).toEqual([]);
+    });
+  });
+  it("requires existing authentication and exact boolean opt-in without changing invalid/success or legacy failure decisions", async () => {
+    const { key } = await seedQualification();
+    for (const flags of [{ qualifyRecord: true }, { diagnostic: true, qualifyRecord: "yes" }])
+      expect((await post("/runs/coordinator/pull-owners", { storeKey: key, target, ...flags })).status).toBe(400);
+    const denied = await fetchMemoryTest(`${BASE}/runs/coordinator/pull-owners`, {
+      method: "POST",
+      headers: { authorization: "Bearer wrong-fixture", "content-type": "application/json" },
+      body: JSON.stringify({ storeKey: key, target, diagnostic: true, qualifyRecord: true }),
+    });
+    expect(denied.status).toBe(401);
+    expect(await denied.text()).not.toContain("original_coding");
+    expect(
+      (
+        await post("/runs/coordinator/pull-owners", {
+          storeKey: storeKey(),
+          target,
+          diagnostic: true,
+          qualifyRecord: true,
+        })
+      ).data,
+    ).toEqual({ ok: true, owners: [] });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(`UPDATE runs SET summary_json='{'`);
+    });
+    const unreadable = (
+      await post("/runs/coordinator/pull-owners", { storeKey: key, target, diagnostic: true, qualifyRecord: true })
+    ).data;
+    expect(unreadable.ok).toBe(false);
+    expect(unreadable.reason).toBe("incomplete");
+    expect(unreadable).not.toHaveProperty("qualification");
+  });
 });
 
 describe("read-only pull-owner scan diagnostics", () => {

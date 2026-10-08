@@ -1,3 +1,4 @@
+import { qualifyPullOwnerSnapshot } from "../../src/core/coordinator/pullOwnerQualification.ts";
 import { originalPromotionArchiveKey } from "../../src/core/runLedger/workspaceDurability.ts";
 import { storeRequestWitness } from "../../src/core/storeResponse.ts";
 import {
@@ -5032,9 +5033,15 @@ export class RunHistoryDO extends DurableObject<Env> {
     return rows;
   }
 
-  async findPullOwners(target: PullTarget, includeDiagnostic = false): Promise<PullOwnersResult> {
+  async findPullOwners(
+    target: PullTarget,
+    includeDiagnostic = false,
+    qualifyRecord = false,
+  ): Promise<PullOwnersResult> {
     if (!isPullTarget(target)) return { ok: false, reason: "invalid" };
-    const diagnostics: PullOwnershipDiagnostics | undefined = includeDiagnostic ? {} : undefined;
+    const diagnostics: PullOwnershipDiagnostics | undefined = includeDiagnostic
+      ? { ...(qualifyRecord ? { qualifyRecord: true as const } : {}) }
+      : undefined;
     let result: PullOwnersResult = { ok: false, reason: "incomplete" };
     const reported = (fallback: "read" | "validation"): PullOwnersResult => {
       const diagnostic = diagnostics && pullOwnerReadDiagnosticFor(diagnostics, fallback);
@@ -5047,7 +5054,20 @@ export class RunHistoryDO extends DurableObject<Env> {
     } catch {
       return reported("read");
     }
-    return reported("validation");
+    const report = reported("validation");
+    if (
+      !report.ok &&
+      report.reason === "incomplete" &&
+      diagnostics?.failure?.check === "run_initial_coding_owner" &&
+      diagnostics.qualificationSnapshot
+    ) {
+      try {
+        return { ...report, qualification: await qualifyPullOwnerSnapshot(diagnostics.qualificationSnapshot) };
+      } catch {
+        return report;
+      }
+    }
+    return report;
   }
 
   async listActiveRecoveries(): Promise<CoordinatorUnit[]> {
@@ -12085,7 +12105,11 @@ async function handleLedger(
     if (!isPullTarget(b.target)) return json({ error: "target must name a repository and PR or ref" }, 400);
     if (b.diagnostic !== undefined && typeof b.diagnostic !== "boolean")
       return json({ error: "diagnostic must be boolean" }, 400);
-    return json(await stub.findPullOwners(b.target, b.diagnostic === true));
+    if (b.qualifyRecord !== undefined && typeof b.qualifyRecord !== "boolean")
+      return json({ error: "qualifyRecord must be boolean" }, 400);
+    if (b.qualifyRecord === true && b.diagnostic !== true)
+      return json({ error: "qualification requires diagnostic" }, 400);
+    return json(await stub.findPullOwners(b.target, b.diagnostic === true, b.qualifyRecord === true));
   }
   if (pathname === "/runs/coordinator/units/list-active-recoveries")
     return json({ units: await stub.listActiveRecoveries() });
