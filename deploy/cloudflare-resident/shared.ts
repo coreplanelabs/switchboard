@@ -30,9 +30,12 @@ export const REFRESH_INTERVAL_S = 600;
  *  ten-minute buckets since the last instance. */
 export const IDLE_REFRESH_INTERVAL_S = 6 * 60 * 60;
 
-/** The image's `worker2`..`worker17` pool: 16 one-use identities per VM
+/** The image's `worker2`..`worker33` pool: 32 one-use identities per VM
  *  generation for thread owners and disposable operations. */
-export const THREAD_POOL_SIZE = 16;
+export const THREAD_POOL_SIZE = 32;
+
+/** Each sweep processes a bounded page; its durable cursor reaches later bindings. */
+export const WORKTREE_SWEEP_BATCH_SIZE = 16;
 
 /** Exec budgets. Each is a refresh step's own budget too (refresh.ts), so a
  *  step timeout and the command timeout it bounds agree; every one is under

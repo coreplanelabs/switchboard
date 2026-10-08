@@ -2,6 +2,7 @@
 import { computed } from "vue";
 import AppShell from "../components/AppShell.vue";
 import StatusDot from "../components/StatusDot.vue";
+import ResidentUidGauge from "../components/residents/ResidentUidGauge.vue";
 import { useSeed } from "../lib/seed";
 import {
   diskHeadroom,
@@ -146,6 +147,10 @@ const diskParts = computed(() => {
                 >waiting for the deployed image report</span
               >
             </td>
+          </tr>
+          <tr class="border-t border-muted">
+            <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">UID pool</td>
+            <td class="px-2 py-1 align-top"><ResidentUidGauge :record="record" /></td>
           </tr>
           <tr class="border-t border-muted">
             <td class="w-32 px-2 py-1 align-top text-muted sm:w-48 sm:whitespace-nowrap">last refresh error</td>

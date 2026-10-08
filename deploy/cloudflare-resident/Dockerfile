@@ -37,7 +37,7 @@ RUN git config --system user.name "switchboard-resident" \
 # COPY cannot reach the canonical file).
 COPY --chmod=0755 prepare-commit-msg /opt/switchboard/hooks/prepare-commit-msg
 
-# The container is FOUR vCPUs shared by up to 16 threads (wrangler.jsonc).
+# The container is FOUR vCPUs; thread work shares its CPU and disk budget.
 # Node test runners size their worker pools from the CPU count the kernel
 # reports — the HOST's, not the cgroup's — so an unconfigured `vitest`/`jest`
 # run forks a dozen workers and thrashes (seen live on the 1 vCPU resident: a
@@ -248,14 +248,14 @@ RUN npm install -g --allow-scripts=@opencode/cli @opencode/cli@2.0.18 \
 # (verified against 0.13.0-next.751.1), so the container server itself runs as
 # root and per-command demotion is done with `su -s /bin/bash workerN -c ...`
 # (verified live: exec via su lands at uid 200N). Provision a pool of
-# unprivileged users — one per resident cap slot — and shut the escalation
+# unprivileged users for thread and operation owners, and shut the escalation
 # paths back up:
 #   - sudo: not installed in the base image; purge defensively in case a later
 #     base bump adds it.
 #   - su back to root: root's password is locked, so workerN -> root fails.
 # `su` itself must stay (it is the demotion mechanism, used only by root).
 RUN set -eux; \
-    for i in $(seq 1 17); do useradd -m -u "$((2000 + i))" -s /bin/bash "worker$i"; chmod 700 "/home/worker$i"; done; \
+    for i in $(seq 1 33); do useradd -m -u "$((2000 + i))" -s /bin/bash "worker$i"; chmod 700 "/home/worker$i"; done; \
     if dpkg -s sudo >/dev/null 2>&1; then apt-get remove -y --purge sudo; fi; \
     passwd -l root
 

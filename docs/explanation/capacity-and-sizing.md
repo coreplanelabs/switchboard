@@ -1,6 +1,6 @@
 # Capacity and sizing
 
-The bot uses one gateway event loop and bounded validation workers on a `standard-1` container; a resident is sized for sixteen threads sharing its vCPUs and disk; a cold sandbox is the largest predefined type.
+The bot uses one gateway event loop and bounded validation workers on a `standard-1` container; a resident has 32 UID slots sharing its vCPUs and disk; a cold sandbox is the largest predefined type.
 
 ## One event loop in the bot
 
@@ -19,7 +19,7 @@ At a held960MiB baseline, the isolated pipeline passed on `standard-1`:1235.93Mi
 
 The sizing guard covers both build and registry profile rendering against that finite qualification footprint. It is a regression guard, not a universal memory bound. Applying the source template does not resize the running service; release, deployment and serving-capacity readback remain separate.
 
-## Sixteen threads in a resident
+## Shared resources in a resident
 
 A resident's cores are for concurrent threads, so worker pools must not oversubscribe them. The image's environment defaults set `CI=1`, `VITEST_MAX_WORKERS=1` (and the thread and fork variants), one libuv thread per vCPU and a Node heap ceiling; a repository's own configuration wins.
 
@@ -41,7 +41,21 @@ A cold sandbox clones, installs and checks a repository from scratch; a large mo
 
 ## Residents do not accumulate
 
-OS users are pooled, one per concurrent thread, released on detach. An hourly sweep releases clean idle trees; each refresh cycle reclaims worktrees whose branch is gone or whose pull request is closed; an unused resident parks its refresh and sleeps. The fleet caps warm residents; onboarding over the cap can, per request, offboard the coldest eligible resident instead.
+Each UID (Linux user ID) stays with its first owner for the VM generation. Detach releases a live binding, but does not clear that UID's spend. The pool resets only after confirmed VM destruction. The residents index and detail page show spent UIDs against the pool size; a full pool is red. Hover or focus the count for its explanation. An older Worker that does not report the size shows `?`, and an unknown spend count shows `—`.
+
+Each refresh cycle releases eligible idle trees and reclaims worktrees whose branch is gone or whose pull request is closed. A known owner's workspace stays protected until terminal ownership, publication metadata and private-tree preservation are verified. Retained workspaces can therefore block an exhausted pool's safe VM recycle even after their runs end. Increasing the pool delays exhaustion; it does not settle those obligations.
+
+An unused resident parks its refresh and sleeps. The fleet caps warm residents; onboarding over the cap can, per request, offboard the coldest eligible resident instead.
+
+## Doubling the UID pool and resident fleet
+
+The source configures 32 UID slots per VM and 12 residents, twice the previous limits. The image creates `worker1` through `worker33`; `worker1` remains the build user. The resident template allows 20 running containers, keeping platform headroom above the registry cap. Both build and registry deployments use these settings. Source settings do not prove uptake by a running fleet.
+
+This gives 384 UID slots across a full fleet, compared with 96 under the previous limits. It does not double each VM's compute or disk: each resident still has four vCPUs, 12 GiB memory and 20 GB disk, the largest supported size. The disk and memory checks must continue to refuse work that does not fit. Each sweep processes at most 16 live bindings. A durable cursor advances after each binding and resets at the end, so protected first-page work cannot starve later bindings. This keeps the configured step budget at 21 minutes, below the 30-minute Workflow ceiling, while the 32-slot pool spans two passes.
+
+At full awake occupancy, doubling the resident fleet doubles provisioned memory and disk from 72 to 144 GiB and from 120 to 240 GB. CPU billing still depends on use. Verify the account's effective limits and existing workloads before deployment. Larger individual VMs require a platform limit increase or a separate multi-container design; see [Cloudflare limits](https://developers.cloudflare.com/containers/platform/limits/).
+
+Increasing the UID pool requires a new image. An old VM lacks the additional Linux users and cannot use the larger pool until the existing checked image-replacement path succeeds. Retained workspaces must pass their preservation gate first. Keep unknown work and owner receipts; a capacity increase does not authorize a force rebuild or UID reuse.
 
 ## Read next
 

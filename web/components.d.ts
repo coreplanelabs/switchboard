@@ -38,6 +38,7 @@ declare module 'vue' {
     ReceiptChip: typeof import('./src/components/home/ReceiptChip.vue')['default']
     ReplyBlock: typeof import('./src/components/run/ReplyBlock.vue')['default']
     ResidentRow: typeof import('./src/components/residents/ResidentRow.vue')['default']
+    ResidentUidGauge: typeof import('./src/components/residents/ResidentUidGauge.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
     RunChildrenBlock: typeof import('./src/components/run/RunChildrenBlock.vue')['default']

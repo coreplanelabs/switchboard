@@ -707,7 +707,32 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         : {}),
     });
   let activeDoorPublication: { id: string; update: GitPublicationUpdate } | undefined;
+  let projectionCompleteBeforePush = false;
   let lastDoorRefusal = restoredDoorIntent?.outcome === "rejected" ? restoredDoorIntent : undefined;
+  const recordNoWriteOutcome = async (
+    pending: NonNullable<typeof activeDoorPublication>,
+    outcome: "rejected" | "not_forwarded",
+  ): Promise<boolean> => {
+    const projection = branchPublication && {
+      ...branchPublication,
+      complete:
+        projectionCompleteBeforePush &&
+        branchPublication.pending === undefined &&
+        [...branchReceipts, ...publicationReceipts].every((accepted) =>
+          branchPublication!.branches.some((branch) => branch.ref === accepted.ref),
+        ),
+    };
+    const committed = await ledgerRun?.setStateAndFlush({
+      doorPublicationPending: { ...pending, outcome },
+      ...(projection ? { branchPublication: projection } : {}),
+    });
+    if (committed) {
+      branchPublication = projection;
+      activeDoorPublication = undefined;
+      lastDoorRefusal = outcome === "rejected" ? { ...pending, outcome } : undefined;
+    }
+    return committed === true;
+  };
   // The bounded display backlog may trim a push during a long test run. Its
   // small typed receipts also ride the durable state, atomically with results.
   const restoredReceipts = publicationReceiptsFromState(restored.publicationReceipts);
@@ -2308,6 +2333,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               const authority = existingPrPublicationFence?.authority;
               if (
                 !ledgerRun?.tracked() ||
+                !branchPublication ||
                 malformedBranchReceipts ||
                 unresolvedDoorPublication ||
                 activeDoorPublication ||
@@ -2319,6 +2345,13 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                 return;
               const pending = newDoorIntent(update);
               if (!pending) return;
+              if (
+                !branchPublication.branches.some((branch) => branch.ref === authority.ref) &&
+                branchPublication.branches.length >= PUSHED_MAX
+              )
+                return;
+              // This write cannot clear an older incomplete publication record.
+              projectionCompleteBeforePush = branchPublication.complete;
               if (branchPublication && !branchPublication.branches.some((branch) => branch.ref === authority.ref))
                 branchPublication = { ...branchPublication, complete: false };
               committed = await ledgerRun.setStateAndFlush({
@@ -2358,12 +2391,34 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                     owner: { ...original.owner },
                   },
                 };
+                const branches = [
+                  ...(branchPublication?.branches ?? []).filter((branch) => branch.ref !== original.publicationRef),
+                  { ref: original.publicationRef, pr: original.pr },
+                ];
+                const projection = branchPublicationOf(
+                  {
+                    ...branchPublication,
+                    branches,
+                    complete:
+                      projectionCompleteBeforePush &&
+                      branchPublication?.pending === undefined &&
+                      [...branchReceipts, ...publicationReceipts, receipt].every((accepted) =>
+                        branches.some((branch) => branch.ref === accepted.ref),
+                      ),
+                  },
+                  original.repo,
+                );
+                if (!projection) {
+                  blockExistingPrPublication("the accepted branch record could not be saved");
+                  return;
+                }
                 committed = await ledgerRun.setStateAndFlush({
                   doorPublicationPending: null,
                   publicationReceipts: [...publicationReceipts, receipt],
-                  ...(branchPublication !== undefined ? { branchPublication } : {}),
+                  branchPublication: projection,
                 });
                 if (committed) {
+                  branchPublication = projection;
                   activeDoorPublication = undefined;
                   lastDoorRefusal = undefined;
                   publicationReceipts.push(receipt);
@@ -2373,13 +2428,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                   if (existingPrPublicationFence) existingPrPublicationFence.authority = existingPrPublication;
                 }
               } else {
-                committed = await ledgerRun.setStateAndFlush({
-                  doorPublicationPending: { ...pending, outcome },
-                });
-                if (committed) {
-                  activeDoorPublication = undefined;
-                  lastDoorRefusal = outcome === "rejected" ? { ...pending, outcome } : undefined;
-                }
+                committed = await recordNoWriteOutcome(pending, outcome);
               }
               if (!committed)
                 blockExistingPrPublication("the Git door publication outcome could not be committed durably");
@@ -2449,6 +2498,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               const pending = newDoorIntent(update);
               if (!pending) return;
               const ref = update.ref.slice("refs/heads/".length);
+              projectionCompleteBeforePush = branchPublication?.complete === true;
               if (branchPublication && !branchPublication.branches.some((branch) => branch.ref === ref))
                 branchPublication = { ...branchPublication, complete: false };
               committed = await ledgerRun.setStateAndFlush({
@@ -2493,13 +2543,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                   publishEvent(receipt, false);
                 }
               } else {
-                committed = await ledgerRun.setStateAndFlush({
-                  doorPublicationPending: { ...pending, outcome },
-                });
-                if (committed) {
-                  activeDoorPublication = undefined;
-                  lastDoorRefusal = outcome === "rejected" ? { ...pending, outcome } : undefined;
-                }
+                committed = await recordNoWriteOutcome(pending, outcome);
               }
             });
             return committed;

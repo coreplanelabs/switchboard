@@ -158,6 +158,29 @@ afterEach(() => {
 });
 
 describe("ResidentsIndexPage", () => {
+  it("shows spent UID slots, highlights exhaustion, and updates from the resident feed", async () => {
+    const { wrapper: w, es } = mountIndex(
+      indexSeed([{ ...WARM, live: { ...WARM.live, poolUsersSpent: 16, poolUsersTotal: 16 } }]),
+    );
+    expect(w.find(".uid-count").text()).toBe("UIDs 16/16 spent");
+    expect(w.find(".uid-count").classes()).toContain("text-error");
+    expect(w.find(".uid-count").attributes("aria-label")).toContain("Linux user IDs");
+    es().emitMessage({
+      type: "residents",
+      cap: 6,
+      count: 1,
+      residents: [{ ...WARM, live: { ...WARM.live, poolUsersSpent: 3, poolUsersTotal: 32 } }],
+    });
+    await nextTick();
+    expect(w.find(".uid-count").text()).toBe("UIDs 3/32 spent");
+    expect(w.find(".uid-count").classes()).toContain("text-muted");
+  });
+
+  it("shows unknown UID values without claiming unused slots on older or unreachable residents", () => {
+    const { wrapper: w } = mountIndex(indexSeed([WARM, { ...DOWN, live: { ...DOWN.live, poolUsersSpent: 9 } }]));
+    expect(w.findAll(".uid-count").map((c) => c.text())).toEqual(["UIDs —/? spent", "UIDs 9/? spent"]);
+  });
+
   it("shows a deploy drain even when the resident listing is empty", () => {
     const { wrapper: w } = mountIndex({ ...indexSeed([]), draining: { reason: "deploy abc1234" } });
     expect(w.find(".drain-status").text()).toContain("deploy abc1234");
@@ -442,6 +465,13 @@ describe("ResidentsIndexPage — live over the feed", () => {
 });
 
 describe("ResidentDetailPage", () => {
+  it("shows the same UID pool count and warning on the detail page", () => {
+    const w = mountApp(ResidentDetailPage, {
+      seed: detailSeed({ ...WARM, live: { ...WARM.live, poolUsersSpent: 12, poolUsersTotal: 16 } }),
+    });
+    expect(w.find(".uid-count").text()).toBe("UIDs 12/16 spent");
+    expect(w.find(".uid-count").classes()).toContain("text-warn");
+  });
   it("shows the container image report separately from lifecycle", () => {
     const record = { ...WARM, live: { ...WARM.live, imageReport: "pending" } };
     const w = mountApp(ResidentDetailPage, { seed: detailSeed(record) });

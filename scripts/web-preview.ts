@@ -1034,6 +1034,8 @@ const RESIDENTS = {
       onboardedAt: "2026-08-26T01:02:03.000Z",
       updatedAt: "2026-08-26T01:02:03.000Z",
       live: {
+        poolUsersSpent: 16,
+        poolUsersTotal: 16,
         state: "warm",
         imageReport: "current",
         reason: "",

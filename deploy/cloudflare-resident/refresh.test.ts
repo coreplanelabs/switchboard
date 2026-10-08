@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { runInNewContext } from "node:vm";
+import { stepTimeoutMs } from "../../src/execution/residentInstanceId";
 
 // The refresh cycle as a Workflow instance lives in refresh.ts, not in the
 // Worker's entry — and the Workflows binding resolves its class by name on the
@@ -24,6 +26,17 @@ function boundClassName(): string {
 }
 
 describe("the refresh module — the Workflow entrypoint leaves worker.ts, which re-exports it for the binding", () => {
+  it("the sweep timeout covers its configured page budget without platform clamping", () => {
+    const shared = read("shared.ts")
+      .match(/^export const (?:DEFAULT_EXEC_TIMEOUT_MS|GIT_NETWORK_TIMEOUT_MS|WORKTREE_SWEEP_BATCH_SIZE) = .*;$/gm)
+      ?.join("\n")
+      .replace(/export /g, "");
+    const sweep = read("refresh.ts").match(/^const REFRESH_SWEEP_STEP_BUDGET_MS = .*;$/m)?.[0];
+    if (!shared || !sweep) throw new Error("sweep budget declarations missing");
+    const budget = runInNewContext(`${shared}\n${sweep}\nREFRESH_SWEEP_STEP_BUDGET_MS`);
+    expect(stepTimeoutMs(budget)).toBe(budget);
+  });
+
   const name = boundClassName();
   it("worker.ts declares no class by the binding's name", () => {
     expect(read("worker.ts")).not.toMatch(new RegExp(`\\bclass ${name}\\b`));
