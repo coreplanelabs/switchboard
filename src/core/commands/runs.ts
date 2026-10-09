@@ -1,3 +1,4 @@
+import { cancellationFailureMessage } from "../runLedger/cancellation.js";
 import { z } from "zod";
 import { authorize } from "../authz/authorize.js";
 import { allOf, ownedBy, predicateFor } from "../authz/predicate.js";
@@ -94,8 +95,7 @@ export const HOSTED_STOP_REFUSAL =
 function unwrap<T>(res: Result<T>, what: "run" | "unit" = "run"): T {
   if (res.ok) return res.value;
   if (res.error === "hosted") throw new CommandError("conflict", HOSTED_STOP_REFUSAL);
-  if (res.error === "unavailable")
-    throw new CommandError("unavailable", "the stop could not be recorded; check the run and retry");
+  if (res.error === "unavailable") throw new CommandError("unavailable", cancellationFailureMessage(res.refusal));
   throw new CommandError(res.error, res.error === "not_found" ? `no ${what} found` : "the run already finished");
 }
 

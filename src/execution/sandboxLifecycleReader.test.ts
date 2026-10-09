@@ -1,3 +1,4 @@
+import { cancellationFailure } from "../core/runLedger/cancellation.js";
 import { cancellationOf } from "../core/runLedger/cancellation.js";
 import { sameCancellation } from "../core/runLedger/cancellation.js";
 import { readFileSync } from "node:fs";
@@ -82,6 +83,7 @@ function actualMethods(): Record<string, (...args: unknown[]) => Promise<unknown
     "sameOwner",
     "sameCancellation",
     "cancellationRefusal",
+    "cancellationFailure",
     "cancellationOf",
     "normalizedSeedDoorOrigin",
     "boundSeedOriginMatches",
@@ -100,6 +102,7 @@ function actualMethods(): Record<string, (...args: unknown[]) => Promise<unknown
     sameOwner,
     sameCancellation,
     () => false,
+    cancellationFailure,
     cancellationOf,
     normalizedSeedDoorOrigin,
     boundSeedOriginMatches,
@@ -163,7 +166,9 @@ describe("sandbox run cancellation", () => {
       startedAt: 1,
       actor: { kind: "chat", id: "slack:operator" },
     };
-    expect(await f.cancelRun(ticket, { container: "foreign", sandboxKey: f.ctx.id.name })).toEqual({ stopped: false });
+    expect(await f.cancelRun(ticket, { container: "foreign", sandboxKey: f.ctx.id.name })).toMatchObject({
+      stopped: false,
+    });
     expect(f.ctx.container.running).toBe(true);
     expect(await f.cancelRun(ticket, { container: legacy.owner.container, sandboxKey: f.ctx.id.name })).toEqual({
       stopped: true,

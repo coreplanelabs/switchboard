@@ -1,5 +1,6 @@
 import {
-  cancellationTargetPrepared,
+  readCancellationPreparation,
+  cancellationFailure,
   cancellationRefusal,
   cancellationOf,
   sameCancellation,
@@ -471,15 +472,14 @@ export class SwitchboardSandbox extends Sandbox<Env> {
     return this.ctx.blockConcurrencyWhile(async () => {
       const key = this.ctx.id.name;
       if (!key || binding.sandboxKey !== key || !key.endsWith(`:${cancellation.runId}`))
-        return { stopped: cancellationRefusal(cancellation, "sandbox", "target-mismatch") };
+        return cancellationFailure(cancellation, "sandbox", "target-mismatch");
       const prior = await this.cancellationState();
       if (prior && !sameCancellation(prior, cancellation))
-        return { stopped: cancellationRefusal(cancellation, "sandbox", "ticket-conflict") };
+        return cancellationFailure(cancellation, "sandbox", "ticket-conflict");
       const record = await this.readLegacyPreservation();
       if (record && (record.owner.run !== cancellation.runId || record.owner.container !== binding.container))
-        return { stopped: cancellationRefusal(cancellation, "sandbox", "target-mismatch") };
-      if (binding.container && !record)
-        return { stopped: cancellationRefusal(cancellation, "sandbox", "custody-unverified") };
+        return cancellationFailure(cancellation, "sandbox", "target-mismatch");
+      if (binding.container && !record) return cancellationFailure(cancellation, "sandbox", "custody-unverified");
       await this.ctx.storage.put("switchboard.cancellation", cancellation);
       // SDK destroy ends outstanding runtime handles and destroys this dedicated VM.
       try {
@@ -1509,8 +1509,13 @@ export default {
         cancellationRefusal(cancellation, "sandbox", "invalid-request");
         return json({ error: "invalid cancellation" }, 400);
       }
-      if (!(await cancellationTargetPrepared(cancellation, body.binding, env.STATE_WORKER_URL, env.MEMORY_TOKEN)))
-        return json({ stopped: false }, 409);
+      const preparation = await readCancellationPreparation(
+        cancellation,
+        body.binding,
+        env.STATE_WORKER_URL,
+        env.MEMORY_TOKEN,
+      );
+      if (!("prepared" in preparation)) return json(preparation, 409);
       return json(await env.Sandbox.get(env.Sandbox.idFromName(threadKey)).cancelRun(cancellation, body.binding));
     }
     if (threadKey && (await env.Sandbox.get(env.Sandbox.idFromName(threadKey)).cancellationState()))

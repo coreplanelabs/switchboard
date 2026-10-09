@@ -1,3 +1,4 @@
+import { cancellationFailureMessage } from "../core/runLedger/cancellation.js";
 import { publicationSettlementForRun, publicationSettlementOf } from "../core/publicationSettlement.js";
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { runDurationMs } from "../core/runDuration.js";
@@ -833,8 +834,7 @@ export function createLiveViewHandler(
           if (!result.ok) {
             if (result.reason === "finished") text(res, 409, "the run already finished");
             else if (result.reason === "hosted") text(res, 409, HOSTED_STOP);
-            else if (result.reason === "unavailable")
-              text(res, 503, "the stop could not be recorded; check the run and retry");
+            else if (result.reason === "unavailable") text(res, 503, cancellationFailureMessage());
             else text(res, 404, NOT_FOUND);
             return;
           }
@@ -900,8 +900,7 @@ export function createLiveViewHandler(
         if (!stopped.ok) {
           if (stopped.error === "hosted") text(res, 409, HOSTED_STOP);
           else if (stopped.error === "conflict") text(res, 409, "the run already finished");
-          else if (stopped.error === "unavailable")
-            text(res, 503, "the stop could not be recorded; check the run and retry");
+          else if (stopped.error === "unavailable") text(res, 503, cancellationFailureMessage(stopped.refusal));
           else text(res, 404, NOT_FOUND);
           return;
         }
