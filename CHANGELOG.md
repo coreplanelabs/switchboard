@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.294.0](https://github.com/coreplanelabs/switchboard/compare/v1.293.0...v1.294.0) (2026-10-09)
+
+
+### Features
+
+* **deploy:** continue a recorded staging Memory checkpoint ([#2869](https://github.com/coreplanelabs/switchboard/issues/2869)) ([357afab](https://github.com/coreplanelabs/switchboard/commit/357afab0e3f4b5f57fba1b3cd2e034fef3a8aafc))
+* **slack:** read linked sources without joining channels ([#2881](https://github.com/coreplanelabs/switchboard/issues/2881)) ([195cd21](https://github.com/coreplanelabs/switchboard/commit/195cd21030f3f6b02248f173e3b27aebead9cd39))
+
+
+### Bug fixes
+
+* **deploy:** make staging reviews usable after updates ([#2875](https://github.com/coreplanelabs/switchboard/issues/2875)) ([007060d](https://github.com/coreplanelabs/switchboard/commit/007060de75ee45634f9710e97e8204e7495390d1))
+* **deploy:** stop later work after cooperative cancellation ([03dec30](https://github.com/coreplanelabs/switchboard/commit/03dec30ae715bdfb1a00df6d092d5f5285626e62))
+* **deploy:** wait for staging agent runs without holding HTTP open ([90ad849](https://github.com/coreplanelabs/switchboard/commit/90ad849acbbd8c9c59f1329486e5cc830da5dc55))
+* **dispatcher:** keep settled tool errors out of refusal warnings ([#2874](https://github.com/coreplanelabs/switchboard/issues/2874)) ([7219313](https://github.com/coreplanelabs/switchboard/commit/7219313fafa89bdc16ea0ee6c0d5f433c588b121))
+* **harness:** allow quoted source searches through the shell guard ([#2876](https://github.com/coreplanelabs/switchboard/issues/2876)) ([57e5818](https://github.com/coreplanelabs/switchboard/commit/57e58188735365201c81002c1029f1d6c9cae1c5))
+* **harness:** share run temporary paths with file tools ([#2883](https://github.com/coreplanelabs/switchboard/issues/2883)) ([600ba11](https://github.com/coreplanelabs/switchboard/commit/600ba1194be0e8ddc2a056c54f7ed7898ae105a4))
+* **harness:** wait for unstarted log observations ([#2887](https://github.com/coreplanelabs/switchboard/issues/2887)) ([49db937](https://github.com/coreplanelabs/switchboard/commit/49db937fb140db90f0318efc7c95ad7cba1bd5c8))
+* **providers:** decode model responses once in the harness ([f04e891](https://github.com/coreplanelabs/switchboard/commit/f04e891a46371b015b58a4a333f517a477e25daa))
+* **resident:** bound active work independently of spent UIDs ([#2872](https://github.com/coreplanelabs/switchboard/issues/2872)) ([3a1185d](https://github.com/coreplanelabs/switchboard/commit/3a1185d648796ee0c353e2b941c2b0da93d3e77e))
+* **resident:** fence late commands and confirm forced shutdown ([#2868](https://github.com/coreplanelabs/switchboard/issues/2868)) ([158b66c](https://github.com/coreplanelabs/switchboard/commit/158b66cf68f6bebeeefceaf429a085fe6f6fd872))
+* **resident:** retire explicitly discarded absent workspace holds ([#2882](https://github.com/coreplanelabs/switchboard/issues/2882)) ([29e3b14](https://github.com/coreplanelabs/switchboard/commit/29e3b14c8486e6a9cbc425c013edde07d68e933e))
+* **review:** compute diff digests in the bound checkout ([#2879](https://github.com/coreplanelabs/switchboard/issues/2879)) ([e70a37e](https://github.com/coreplanelabs/switchboard/commit/e70a37efabe31c00118e1c8df9c96ddb3a0d8a02))
+* **review:** refresh finding history after a restart ([#2880](https://github.com/coreplanelabs/switchboard/issues/2880)) ([e029027](https://github.com/coreplanelabs/switchboard/commit/e029027718160063063de44c2ae9005422722b2c))
+* **review:** restore proven history before resumed review turns ([#2886](https://github.com/coreplanelabs/switchboard/issues/2886)) ([e790857](https://github.com/coreplanelabs/switchboard/commit/e790857dab0b2ad7719f81470dbff7dcb68a4eb8))
+* **runs:** match tool results to their original calls ([#2877](https://github.com/coreplanelabs/switchboard/issues/2877)) ([c34fb0d](https://github.com/coreplanelabs/switchboard/commit/c34fb0d465735b8d90d60e6cfdc032e6d93e7d89))
+* **tools:** allow short checks after checkout inspection ([#2878](https://github.com/coreplanelabs/switchboard/issues/2878)) ([13f29fd](https://github.com/coreplanelabs/switchboard/commit/13f29fda4e6f736469110a09cc6b8570c3440540))
+
 ## [1.293.0](https://github.com/coreplanelabs/switchboard/compare/v1.292.0...v1.293.0) (2026-10-08)
 
 
