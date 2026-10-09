@@ -17,6 +17,7 @@
 
 import { distillDiffStats } from "../core/diffDigest.js";
 import { shellQuote } from "../execution/shellQuote.js";
+import { gitInCheckout } from "../execution/workspaceAdvance.js";
 import type { RunnableTool } from "./runnableTool.js";
 
 const NAME_STATUS_MARK = "@@diff_digest:name-status@@";
@@ -57,17 +58,48 @@ export const diffDigestTool: RunnableTool = {
     if (base.startsWith("-")) {
       return "diff_digest: base ref may not start with '-' (rejected to prevent git option injection).";
     }
+    const held = (reason: string): string => {
+      ctx.onDigest?.({ complete: false, base: baseName, reason });
+      return `diff_digest: ${reason}.`;
+    };
+    const bound = ctx.checkout !== undefined;
+    let checkout: string | undefined;
+    let git = "git";
+    if (bound) {
+      if (typeof ctx.checkout !== "function") return held("the acknowledged checkout binding is invalid");
+      try {
+        checkout = ctx.checkout();
+      } catch {
+        return held("the acknowledged checkout is unavailable");
+      }
+      if (checkout === undefined) return held("the acknowledged checkout is unavailable");
+      try {
+        git = gitInCheckout(checkout);
+      } catch {
+        return held("the acknowledged checkout binding is invalid");
+      }
+    }
+    const changed = (): boolean => {
+      if (!bound) return false;
+      try {
+        return ctx.checkout!() !== checkout;
+      } catch {
+        return true;
+      }
+    };
+    const moved = () => held("the acknowledged checkout changed while the digest was read");
     // Quote a caller-supplied base into one inert shell token so it can't break
     // out of the argument. No base → resolve the default branch at run time,
     // falling back to origin/main when origin/HEAD isn't set.
     const baseExpr = base
       ? shellQuote(base)
-      : '"$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null || echo origin/main)"';
+      : `"$(${git} rev-parse --abbrev-ref origin/HEAD 2>/dev/null || echo origin/main)"`;
     const range = `--end-of-options ${baseExpr}...HEAD`;
-    const listing = `git diff --numstat ${range} && echo ${NAME_STATUS_MARK} && git diff --name-status ${range}`;
+    const listing = `${git} diff --numstat ${range} && echo ${NAME_STATUS_MARK} && ${git} diff --name-status ${range}`;
     let raw = await ctx.executor.exec(listing);
-    // The Executor's output cap, checked FIRST: a listing this long (one line
-    // per file) means thousands of files, and the cut can land before the
+    if (changed()) return moved();
+    // Before parsing the listing, check the Executor's output cap: this many lines
+    // mean thousands of files, and the cut can land before the
     // marker — which would otherwise read as a failed command. Totals from a
     // cut listing would be a smaller change than the real one — the exact
     // failure this tool exists to prevent.
@@ -84,10 +116,13 @@ export const diffDigestTool: RunnableTool = {
     // origin it cannot fetch from, by design; its failure stays legible).
     let marker = NAME_STATUS_MARK_LINE.exec(raw);
     if (!marker) {
-      const shallow = (await ctx.executor.exec("git rev-parse --is-shallow-repository")).trim() === "true";
+      const shallow = (await ctx.executor.exec(`${git} rev-parse --is-shallow-repository`)).trim() === "true";
+      if (changed()) return moved();
       if (shallow) {
-        await ctx.executor.exec('git fetch --unshallow --quiet origin "+refs/heads/*:refs/remotes/origin/*"');
+        await ctx.executor.exec(`${git} fetch --unshallow --quiet origin "+refs/heads/*:refs/remotes/origin/*"`);
+        if (changed()) return moved();
         raw = await ctx.executor.exec(listing);
+        if (changed()) return moved();
         if (OUTPUT_CUT_RE.test(raw)) return incomplete();
         marker = NAME_STATUS_MARK_LINE.exec(raw);
       }

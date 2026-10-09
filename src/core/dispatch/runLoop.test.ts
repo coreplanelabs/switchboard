@@ -6,6 +6,7 @@ import type { GithubWriteResult } from "../../execution/githubPulls.js";
 import { findPullOwnersInRows } from "../coordinator/pullOwnership.js";
 import { terminalPublicationRetentionRequired } from "../branchPublication.js";
 import { parentContextOf } from "./handoff.js";
+import { diffDigestTool } from "../../tools/diffDigest.js";
 import { contextCapsuleOf } from "./unitContext.js";
 import { MainContextCaptureError } from "./mainContextCapture.js";
 import type { AudienceCheck } from "../audienceDecision.js";
@@ -567,6 +568,75 @@ describe("runLoop — the model turn and everything that rides on it", () => {
         summary: "fd is not available and could not be downloaded",
       }),
     );
+  });
+
+  it("relays a digest through the dispatcher's acknowledged checkout rather than a model directory", async () => {
+    const observed = watched(piHarness);
+    let digest: RelayedToolAnswer | undefined;
+    let recorded: unknown;
+    observed.harness.open = async (_deps, run) => {
+      const onDigest = run.toolContext.onDigest;
+      run.toolContext.onDigest = (report) => {
+        recorded = report;
+        onDigest?.(report);
+      };
+      const live: LiveHarness = {
+        runId: "run-l",
+        tools: [diffDigestTool],
+        toolContext: run.toolContext,
+        backend: "local",
+        rules: { identity: "read", checkout: "/model directory", branch: "feature" },
+        emit: () => {},
+        toolSpan: () => undefined,
+        gateSaw: () => {},
+        toolsBlocked: () => undefined,
+      };
+      digest = await runRelayedTool(live, {
+        toolCallId: "bound-digest",
+        tool: "diff_digest",
+        input: { base: "main", checkout: "/model directory" },
+      });
+      return {
+        answer: "The acknowledged diff is readable.",
+        followUp: async () => "",
+        remainingMs: () => 20 * 60_000,
+        end: async () => {},
+      };
+    };
+    const s = setup("unused", {
+      agent: "review",
+      harness: {
+        harnesses: roster(observed.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+      },
+      repoCtx: { repo: "o/r", ref: "feature", baseRef: "main" },
+      seeded: {
+        slug: "o/r",
+        ref: "feature",
+        sha: "a".repeat(40),
+        workspace: "/workspace/acknowledged checkout",
+        cached: true,
+        ms: 0,
+      },
+      executor: {
+        exec: async (command) =>
+          command.startsWith("git -C '/workspace/acknowledged checkout' diff")
+            ? "1\t0\tsrc/a.ts\n@@diff_digest:name-status@@\nM\tsrc/a.ts\n"
+            : "exit129: Not a git repository",
+      },
+    });
+    const out = answered(await runLoop(s.deps, await trackedReviewContext(s)));
+    s.ending.drain(true);
+    await s.writer.settled();
+    await out.releaseWorkspace();
+    expect(out.answer).toBe("The acknowledged diff is readable.");
+    expect(digest).toMatchObject({
+      isError: false,
+      content: [{ type: "text", text: expect.stringContaining("1 file changed, +1 -0") }],
+    });
+    expect(recorded).toEqual({ complete: true, base: "main", totals: { files: 1, additions: 1, deletions: 0 } });
   });
 
   it.each(["landed", "retried", "newer owner", "failed", "hard stop", "late hard stop"] as const)(
@@ -6913,27 +6983,37 @@ describe("the pi harness — the container replaced under a living bot: the rela
       provider: {
         name: "fake",
         complete: async () => {
-          const phase = turn++ % 3;
+          const phase = turn++ % 4;
           const input =
             phase === 0
               ? { name: "github_pull_get", input: { repo: "o/r", number: 42, includeReviewHistory: true } }
-              : {
-                  name: "submit_verdict",
-                  input: {
-                    verdict: "approve",
-                    summary: "The replacement checkout is correct.",
-                    head: checkoutHead,
-                    findings: [],
-                  },
-                };
-          return phase < 2
+              : phase === 1
+                ? { name: "diff_digest", input: { base: "main", checkout: "/workspace/old checkout" } }
+                : {
+                    name: "submit_verdict",
+                    input: {
+                      verdict: "approve",
+                      summary: "The replacement checkout is correct.",
+                      head: checkoutHead,
+                      findings: [],
+                    },
+                  };
+          return phase < 3
             ? { content: [{ type: "tool_use", id: `new-${turn}`, ...input }], stopReason: "tool_use" }
             : { content: [{ type: "text", text: "The replacement checkout is correct." }], stopReason: "end_turn" };
         },
       },
     });
     const commands: string[] = [];
+    const digests: string[] = [];
     const currentExecutor = {
+      exec: async (command: string) => {
+        const out = command.startsWith("git -C '/workspace/new checkout' diff")
+          ? "1\t0\tsrc/x.ts\n@@diff_digest:name-status@@\nM\tsrc/x.ts\n"
+          : "exit129: no acknowledged checkout";
+        digests.push(out);
+        return out;
+      },
       execResult: async (command: string) => {
         commands.push(command);
         if (command !== "git -C '/workspace/new checkout' rev-parse --verify HEAD")
@@ -6970,7 +7050,14 @@ describe("the pi harness — the container replaced under a living bot: the rela
         agent: "review",
         yaml: yamlWithWorkspace(),
         harness: harnessOver(registry, () => (opens++ === 0 ? old : replacement)),
-        repoCtx: { repo: "o/r", pr: 42, ref: "fix/the-pr-head", baseRef: "main", headSha: head },
+        repoCtx: {
+          repo: "o/r",
+          pr: 42,
+          ref: "fix/the-pr-head",
+          baseRef: "main",
+          headSha: head,
+          prSize: { changedFiles: 1, additions: 1, deletions: 0 },
+        },
         binding: { ref: "fix/the-pr-head", sha: head, workspace: "/workspace/old checkout" },
         review: {
           head,
@@ -7021,6 +7108,7 @@ describe("the pi harness — the container replaced under a living bot: the rela
           body: expect.stringContaining("LGTM:"),
         },
       ]);
+      expect(digests).toEqual(Array(2).fill("1\t0\tsrc/x.ts\n@@diff_digest:name-status@@\nM\tsrc/x.ts\n"));
       expect(checkoutHead).toBe("b1b2c3d4e5f60718293a4b5c6d7e8f9012345678");
       expect(commands).toEqual(Array(3).fill("git -C '/workspace/new checkout' rev-parse --verify HEAD"));
       s.ending.drain(true);

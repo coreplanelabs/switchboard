@@ -1,9 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { LocalExecutor, type Executor } from "../execution/executor.js";
 import { execSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { shellQuote } from "../execution/shellQuote.js";
 import type { DigestReport } from "../core/diffDigest.js";
 import { TOOLSETS } from "./toolsets.js";
 import { diffDigestTool } from "./diffDigest.js";
@@ -40,6 +42,96 @@ function scripted(answers: Array<(cmd: string) => string>) {
 }
 
 describe("diff_digest tool", () => {
+  it("a binding change during the shallow probe starts no fetch or digest credit", async () => {
+    let checkout = "/trusted checkout";
+    const commands: string[] = [];
+    const reports: DigestReport[] = [];
+    const ctx = Object.assign(
+      ctxWith(async (command) => {
+        commands.push(command);
+        if (command.includes("--is-shallow-repository")) {
+          checkout = "/changed checkout";
+          return "true\n";
+        }
+        return "exit128: no merge base";
+      }),
+      { checkout: () => checkout, onDigest: (r: DigestReport) => reports.push(r) },
+    );
+    expect(await diffDigestTool.run({}, ctx)).toBe(
+      "diff_digest: the acknowledged checkout changed while the digest was read.",
+    );
+    expect(reports).toEqual([
+      { complete: false, base: "origin/HEAD", reason: "the acknowledged checkout changed while the digest was read" },
+    ]);
+    expect(commands).toHaveLength(2);
+    expect(commands.some((command) => command.includes("git fetch"))).toBe(false);
+  });
+
+  it("a throwing checkout lookup exposes no private error or recovery command", async () => {
+    for (const fail of [false, true]) {
+      let calls = 0;
+      const ctx = Object.assign(
+        ctxWith(async () => {
+          calls++;
+          return ONE_FILE;
+        }),
+        {
+          checkout: () => {
+            if (fail) throw new Error("private directory and token");
+            return "/trusted checkout";
+          },
+        },
+      );
+      const out = await diffDigestTool.run({}, ctx);
+      if (fail) {
+        expect(out).toBe("diff_digest: the acknowledged checkout is unavailable.");
+        expect(calls).toBe(0);
+      } else {
+        expect(out).toContain("1 file changed, +1 -0");
+        expect(calls).toBe(1);
+      }
+      expect(out).not.toContain("private directory and token");
+    }
+  });
+
+  it.each([undefined, "relative/checkout", "/invalid\ncheckout"])(
+    "refuses a present missing or malformed checkout binding %j before Git",
+    async (checkout) => {
+      const reports: DigestReport[] = [];
+      let calls = 0;
+      const ctx = Object.assign(
+        ctxWith(async () => {
+          calls++;
+          return ONE_FILE;
+        }),
+        { checkout: () => checkout, onDigest: (r: DigestReport) => reports.push(r) },
+      );
+      expect(await diffDigestTool.run({}, ctx)).toBe(
+        checkout === undefined
+          ? "diff_digest: the acknowledged checkout is unavailable."
+          : "diff_digest: the acknowledged checkout binding is invalid.",
+      );
+      expect(reports.some((r) => r.complete)).toBe(false);
+      expect(calls).toBe(0);
+    },
+  );
+
+  it("refuses a checkout that changes during the listing without digest credit", async () => {
+    let checkout = "/trusted checkout";
+    const reports: DigestReport[] = [];
+    const ctx = Object.assign(
+      ctxWith(async () => {
+        checkout = "/other checkout";
+        return ONE_FILE;
+      }),
+      { checkout: () => checkout, onDigest: (r: DigestReport) => reports.push(r) },
+    );
+    expect(await diffDigestTool.run({}, ctx)).toBe(
+      "diff_digest: the acknowledged checkout changed while the digest was read.",
+    );
+    expect(reports.some((r) => r.complete)).toBe(false);
+  });
+
   it("distills the file listing the executor returns and reports its totals through onDigest", async () => {
     const reports: DigestReport[] = [];
     const ctx = ctxWith(async () => ONE_FILE);
@@ -200,8 +292,8 @@ describe("diff_digest tool on a real multi-commit branch (LocalExecutor)", () =>
   let wt: string;
   beforeAll(() => {
     dir = mkdtempSync(join(tmpdir(), "digest-"));
-    wt = join(dir, "wt");
-    sh(dir, "git init -q -b main wt");
+    wt = join(dir, "checkout ' with spaces");
+    sh(dir, `git init -q -b main ${shellQuote(wt)}`);
     writeFileSync(join(wt, "README.md"), "hello\n");
     sh(wt, "git add . && git commit -qm base && git checkout -qb feature");
     // commit 1: a file sorted FIRST alphabetically whose unified diff alone
@@ -219,13 +311,57 @@ describe("diff_digest tool on a real multi-commit branch (LocalExecutor)", () =>
     sh(
       wt,
       "git add src/late.ts && git commit -qm late && git add . && git commit -qm last" +
-        // origin/HEAD → main and origin/main at the base, as a real clone has,
+        // origin/HEAD names trunk at the base; origin/main differs deliberately.
+        // A default-ref subshell outside the bound checkout must not silently
+        // fall back to origin/main and report the smaller change.
         // without paying for a second repository and a clone
-        " && git update-ref refs/remotes/origin/main main" +
-        " && git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main",
+        " && git update-ref refs/remotes/origin/main HEAD~2" +
+        " && git update-ref refs/remotes/origin/trunk main" +
+        " && git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/trunk",
     );
   }, 20_000);
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+  it.each([undefined, "main"])(
+    "uses the acknowledged nested checkout from a non-repository executor root (base %s)",
+    async (base) => {
+      const reports: DigestReport[] = [];
+      const head = sh(wt, "git rev-parse HEAD");
+      const ctx = Object.assign(
+        { executor: new LocalExecutor(dir), onDigest: (r: DigestReport) => reports.push(r) },
+        { checkout: () => wt },
+      );
+      const out = await diffDigestTool.run(base ? { base } : {}, ctx);
+      expect(out).toContain("4 files changed, +4204 -0");
+      for (const name of ["a-huge.txt", "src/late.ts", "zz-last.md", "README.md"]) expect(out).toContain(name);
+      expect(reports).toEqual([
+        { complete: true, base: base ?? "origin/HEAD", totals: { files: 4, additions: 4204, deletions: 0 } },
+      ]);
+      expect(readFileSync(join(wt, "README.md"), "utf8")).toBe("hello\nworld\n");
+      expect(sh(wt, "git rev-parse HEAD")).toBe(head);
+      expect(sh(wt, "git status --porcelain")).toBe("");
+    },
+  );
+
+  it("deepens only the bound local-file shallow checkout and preserves its head and files", async () => {
+    const clone = join(dir, "shallow ' checkout");
+    sh(dir, `git clone -q --depth 1 --branch feature ${shellQuote(pathToFileURL(wt).href)} ${shellQuote(clone)}`);
+    const head = sh(clone, "git rev-parse HEAD");
+    expect(sh(clone, "git rev-parse --is-shallow-repository")).toBe("true\n");
+    const reports: DigestReport[] = [];
+    const ctx = Object.assign(
+      { executor: new LocalExecutor(dir), onDigest: (r: DigestReport) => reports.push(r) },
+      { checkout: () => clone },
+    );
+    expect(await diffDigestTool.run({ base: "origin/main" }, ctx)).toContain("4 files changed, +4204 -0");
+    expect(reports).toEqual([
+      { complete: true, base: "origin/main", totals: { files: 4, additions: 4204, deletions: 0 } },
+    ]);
+    expect(sh(clone, "git rev-parse --is-shallow-repository")).toBe("false\n");
+    expect(sh(clone, "git rev-parse HEAD")).toBe(head);
+    expect(readFileSync(join(clone, "README.md"), "utf8")).toBe("hello\nworld\n");
+    expect(sh(clone, "git status --porcelain")).toBe("");
+  });
 
   it("covers every commit's files and states exact totals even when the unified diff exceeds the output cap", async () => {
     const reports: DigestReport[] = [];
