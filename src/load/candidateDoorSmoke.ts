@@ -12,6 +12,11 @@ export interface CandidateDoorSmokeCase {
 /** Fixed synthetic decisions only; this scope has no run store or execution. */
 export function candidateDoorSmokeCases(projection: OperatorInput["projection"]): CandidateDoorSmokeCase[] {
   return [
+    ...["status show", "statsu show"].map((text) => ({
+      name: text === "status show" ? "named status command" : "mistyped status command",
+      text,
+      expected: (bind: OperatorBind) => bind.invocation?.kind === "invoke" && bind.invocation.id === "status.show",
+    })),
     {
       name: "ordinary read",
       text: "What is 2 + 2? Answer in one sentence.",

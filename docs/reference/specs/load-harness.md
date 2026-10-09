@@ -36,6 +36,7 @@ Historical review comparisons can supply `--fixtures <JSON>` (a nonempty array o
 ## Validation criteria
 
 | Criterion | Evidence |
+| Candidate command smoke checks both `status show` and a clear typo against the real selection and fulfillment model; a substituted `plane show` fails acceptance. These calls select and check commands without executing them. | `[unit]` `src/load/candidateDoorSmoke.test.ts::fixed candidate smoke named command::*`; `[live]` Run `npm run load -- route --smoke --profile-model` with the deployment profile and trusted model origin; both named-command rows must pass. |
 | Fixed candidate smoke supplies an explicit synthetic repository catalogue through the existing brief-reader seam. Reads return metadata only, with no source files, live heads, owners, grants or execution receipts; unknown repositories and invalid inputs remain unavailable and reader errors preserve the existing fallback. Catalogue/read copies cannot change other cases. Existing Review target and renewal cases remain intact. | `[unit]` `src/load/candidateDoorSmoke.test.ts::fixed candidate smoke repository dependency::*` |
 |-----------|----------|
 | 20: the telemetry CLI parses the documented options and reads the Analytics Engine intake report without querying the ledger, Slack or a model | `[unit]` `src/load/intakeCli.test.ts::intake A/B CLI::reads the telemetry report without touching the ledger, Slack or a model` |
