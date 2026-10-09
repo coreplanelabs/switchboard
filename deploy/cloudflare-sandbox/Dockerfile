@@ -49,13 +49,18 @@ ENV NODE_OPTIONS=--max-old-space-size=8192
 # which MOUNTS the archive (squashfuse + fuse-overlayfs) instead of extracting
 # it; the Worker extracts it onto the disk the way the resident does
 # (resident-repos item 61) so the checkout is one plain ext4 tree.
-# ripgrep (`rg`): the search binary is an image invariant for both fresh and
-# seeded sandboxes; restoring a seed changes the disk, not the image tools.
-# The build asserts both binaries with the probes their callers use.
+# ripgrep (`rg`) + fd: grep/find use image tools on fresh and seeded sandboxes.
+# Ubuntu names fd's binary `fdfind`; expose the name pi calls on PATH.
+# Restoring a seed changes the checkout, not these image tools.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git curl ca-certificates docker.io iptables squashfs-tools ripgrep \
+  && apt-get install -y --no-install-recommends git curl ca-certificates docker.io iptables squashfs-tools ripgrep fd-find \
+  && ln -s /usr/bin/fdfind /usr/local/bin/fd \
   && command -v unsquashfs >/dev/null \
   && command -v rg >/dev/null \
+  && command -v fd >/dev/null \
+  && mkdir /tmp/find-proof && touch /tmp/find-proof/source.ts \
+  && fd --glob '*.ts' /tmp/find-proof | grep -qx '/tmp/find-proof/source.ts' \
+  && rm -rf /tmp/find-proof \
   && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
        -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
   && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \

@@ -800,7 +800,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     if (event.type === "tool_call" && event.tool !== "update_status" && event.callId)
       pendingToolCalls.add(event.callId);
     if (event.type === "tool_result") {
-      if (!event.ok || event.cut) incompleteToolEffects = true;
+      // A settled error is a known result. Only a cut or typed refusal leaves
+      // the effect unverified; failed searches can be recovered in the run.
+      if (event.cut) incompleteToolEffects = true;
       if (event.callId) pendingToolCalls.delete(event.callId);
     }
     if (
