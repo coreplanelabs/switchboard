@@ -101,7 +101,7 @@
     "src/core/authz/viewAs.ts": "cbfefdca793e908ff07b299af98186e38d47838162a76613e10f71f51554df63",
     "src/core/branchIdentityBaseline.ts": "b13b930408b3d87887736275b08ad0b7f740514082ca3b2b3f9a75c2f8ad5ead",
     "src/core/branchPublication.ts": "c4d749996d997e598993a46aadac6f386071e106bad1c52275ddddf03afec6a2",
-    "src/core/budgets.ts": "eb71f6c1f50d22e14b83e8495072d1569df17b29c1ac24e152c45ef734a55f85",
+    "src/core/budgets.ts": "2e559676b2ea173cb0ab1b8d1a5e96bedcf2cacc2bb62a44b9fa53b5f3977a0f",
     "src/core/capabilities.ts": "5d95cfcefc532d454d583b1e267d591d1f013193fa954391d9975bec176ec481",
     "src/core/chatMessage.ts": "927d2931ac24b29555c29fcac1c077fb205aa7eead55352cec8b5a18df6afd04",
     "src/core/coordinator/contract.ts": "998e90be1e31ae1b03ca644dd772217b27316607f1e8efbd5f45fe7aa01d2b3e",

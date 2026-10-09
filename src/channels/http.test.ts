@@ -776,6 +776,21 @@ describe('async mode (`"async": true` → 202 Accepted, run continues in backgro
     d.finish();
   });
 
+  it("binds an asynchronous admission to the serving build before completion", async () => {
+    const d = slowRunDispatch("run-build-async");
+    const build = { commit: "a".repeat(40), version: "1.2.3" };
+    const res = await handleIngressRequest(
+      { method: "POST", headers: bearer("tok"), body: JSON.stringify({ text: "go", async: true }) },
+      { ...deps, build },
+      { auth: good, dispatch: d.fn },
+    );
+    expect(res).toEqual({
+      status: 202,
+      body: { runId: "run-build-async", runUrl: "/runs/run-build-async", threadKey: "http:default:default", build },
+    });
+    d.finish();
+  });
+
   it("runUrl degrades to a path when no publicBaseUrl is configured", async () => {
     const d = slowRunDispatch("run-8");
     const res = await handleIngressRequest(
