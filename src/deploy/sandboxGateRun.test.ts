@@ -1,7 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { LIVE_GATE_DEADLINE_MS, LIVE_GATE_POLL_MS } from "./liveGate.js";
 import { SANDBOX_BEARER_ENV, workersFor, type DeployStep, type SandboxLiveGate } from "./plan.js";
-import { deployStep, waitUntilSandboxLive, type SandboxGateDeps, type SandboxRollout, type StepExec } from "./run.js";
+import {
+  deployStep,
+  defaultSandboxGateDeps,
+  waitUntilSandboxLive,
+  type SandboxGateDeps,
+  type SandboxRollout,
+  type StepExec,
+} from "./run.js";
 import type { LogLine } from "../core/trace/sinks.js";
 import {
   probeThreadKey,
@@ -112,6 +119,178 @@ function harness(script: Scripted, env: Record<string, string> = { SANDBOX_TOKEN
 }
 
 describe("waitUntilSandboxLive", () => {
+  it("the existing readiness deadline waits for owned read cleanup and grants no late readiness", async () => {
+    const h = harness({ health: [serving(HEAD)] });
+    const deadline = new AbortController();
+    const timeout = AbortSignal.timeout.bind(AbortSignal);
+    const timers = vi
+      .spyOn(AbortSignal, "timeout")
+      .mockImplementation((ms) => (ms === LIVE_GATE_DEADLINE_MS ? deadline.signal : timeout(ms)));
+    let entered!: () => void;
+    const reading = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let acknowledge!: () => void;
+    const cleanup = new Promise<void>((resolve) => {
+      acknowledge = resolve;
+    });
+    let interrupted = false;
+    let releaseInterrupted!: () => void;
+    h.deps.readAppState = async (...args: unknown[]) => {
+      entered();
+      const signal = args.find((arg): arg is AbortSignal => arg instanceof AbortSignal);
+      await new Promise<void>((resolve) => {
+        releaseInterrupted = resolve;
+        signal?.addEventListener(
+          "abort",
+          () => {
+            interrupted = true;
+            resolve();
+          },
+          { once: true },
+        );
+      });
+      await cleanup;
+      return after;
+    };
+    let outcome: Awaited<ReturnType<typeof waitUntilSandboxLive>> | undefined;
+    const waiting = waitUntilSandboxLive(step, gate, HEAD, rollout, h.io, h.deps).then((result) => {
+      outcome = result;
+      return result;
+    });
+    try {
+      await reading;
+      deadline.abort(new DOMException("readiness deadline", "TimeoutError"));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(interrupted).toBe(true);
+      expect(outcome).toBeUndefined();
+      acknowledge();
+      expect(await waiting).toEqual({
+        live: false,
+        reason:
+          "application read incomplete — still not live after 20 min (deadline 20 min); readiness and native outcome unverified",
+      });
+      expect(h.count("probeExec")).toBe(0);
+      expect(h.count("readInstances")).toBe(0);
+    } finally {
+      releaseInterrupted?.();
+      acknowledge();
+      await waiting;
+      timers.mockRestore();
+    }
+  });
+
+  it.each(["healthy", "headers", "body"] as const)(
+    "the default probe carries original cancellation through %s settlement",
+    async (phase) => {
+      const control = new AbortController();
+      let entered!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+        const signal = init?.signal;
+        const waiting = () =>
+          new Promise<never>((_resolve, reject) => {
+            signal?.addEventListener("abort", () => reject(new DOMException("synthetic read aborted", "AbortError")), {
+              once: true,
+            });
+            entered();
+          });
+        if (phase === "headers") return waiting();
+        return {
+          ok: true,
+          text: async () =>
+            phase === "body" ? waiting() : JSON.stringify({ stdout: "ok\n", stderr: "", exitCode: 0 }),
+        } as Response;
+      });
+      try {
+        const pending = defaultSandboxGateDeps.probeExec(
+          "https://sandbox.example.test/exec",
+          "synthetic-bearer",
+          KEY,
+          control.signal,
+        );
+        if (phase !== "healthy") {
+          await started;
+          control.abort();
+        }
+        const result = await pending;
+        expect(result).toEqual(
+          phase === "healthy"
+            ? { body: { stdout: "ok\n", stderr: "", exitCode: 0 } }
+            : { error: "POST /exec failed: synthetic read aborted" },
+        );
+        expect(fetcher.mock.calls).toHaveLength(1);
+        expect(JSON.stringify(result)).not.toContain("synthetic-bearer");
+      } finally {
+        control.abort();
+        fetcher.mockRestore();
+      }
+    },
+  );
+
+  it("counts time spent inside a read before accepting readiness or starting the next operation", async () => {
+    const h = harness({ health: [serving(HEAD)] });
+    let now = 0;
+    h.deps.now = () => now;
+    h.deps.readAppState = async () => {
+      now = 1_200_001;
+      return after;
+    };
+    expect(await waitUntilSandboxLive(step, gate, HEAD, rollout, h.io, h.deps)).toEqual({
+      live: false,
+      reason:
+        "application read incomplete — still not live after 20 min (deadline 20 min); readiness and native outcome unverified",
+    });
+    expect(h.count("probeExec")).toBe(0);
+    expect(h.count("readInstances")).toBe(0);
+  });
+
+  it("operator cancellation settles an owned pending application read without starting later readiness work", async () => {
+    const healthy = harness({ health: [serving(HEAD)] });
+    expect(await waitUntilSandboxLive(step, gate, HEAD, rollout, healthy.io, healthy.deps)).toEqual({
+      live: true,
+      waitedMs: 0,
+      detail: LIVE_DETAIL,
+    });
+    const h = harness({ health: [serving(HEAD)] });
+    const control = new AbortController();
+    h.deps.signal = control.signal;
+    let entered!: () => void;
+    const reading = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let release!: (result: Read<AppState>) => void;
+    const ownedRead = new Promise<Read<AppState>>((resolve) => {
+      release = resolve;
+    });
+    h.deps.readAppState = async (...args: unknown[]) => {
+      entered();
+      const signal = args.find((arg): arg is AbortSignal => arg instanceof AbortSignal);
+      signal?.addEventListener("abort", () => release({ error: "owned read cancelled; remote outcome unknown" }), {
+        once: true,
+      });
+      return ownedRead;
+    };
+    let outcome: Awaited<ReturnType<typeof waitUntilSandboxLive>> | undefined;
+    const waiting = waitUntilSandboxLive(step, gate, HEAD, rollout, h.io, h.deps).then((result) => {
+      outcome = result;
+      return result;
+    });
+    try {
+      await reading;
+      control.abort();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(outcome).toEqual({ live: false, reason: "deployment cancelled" });
+      expect(h.count("probeExec")).toBe(0);
+      expect(h.count("readInstances")).toBe(0);
+    } finally {
+      release({ error: "test-owned read released; remote outcome unknown" });
+      await waiting;
+    }
+  });
+
   it("cancellation during the owned probe prevents the next inventory read without readiness credit", async () => {
     for (const cancel of [false, true]) {
       const h = harness({ health: [serving(HEAD)] });
@@ -144,16 +323,16 @@ describe("waitUntilSandboxLive", () => {
     const r = await waitUntilSandboxLive(step, gate, HEAD, rollout, h.io, h.deps);
     expect(r).toEqual({ live: true, waitedMs: 0, detail: LIVE_DETAIL });
     expect(h.calls.map((c) => c.dep)).toEqual(["readHealth", "readAppState", "probeExec", "readInstances"]);
-    expect(h.calls[0].args).toEqual([SANDBOX_HEALTH_URL, "tok-sandbox"]);
+    expect(h.calls[0].args.slice(0, 2)).toEqual([SANDBOX_HEALTH_URL, "tok-sandbox"]);
     expect(gate).toEqual({
       kind: "sandbox",
       healthUrl: SANDBOX_HEALTH_URL,
       bearerEnv: SANDBOX_BEARER_ENV,
       containerApp: SANDBOX_CONTAINER_APP,
     });
-    expect(h.calls[1].args).toEqual(["deploy/cloudflare-sandbox", SANDBOX_CONTAINER_APP]);
-    expect(h.calls[2].args).toEqual(["https://switchboard-sandbox.example.test/exec", "tok-sandbox", KEY]);
-    expect(h.calls[3].args).toEqual(["deploy/cloudflare-sandbox", SANDBOX_CONTAINER_APP]);
+    expect(h.calls[1].args.slice(0, 2)).toEqual(["deploy/cloudflare-sandbox", SANDBOX_CONTAINER_APP]);
+    expect(h.calls[2].args.slice(0, 3)).toEqual(["https://switchboard-sandbox.example.test/exec", "tok-sandbox", KEY]);
+    expect(h.calls[3].args.slice(0, 2)).toEqual(["deploy/cloudflare-sandbox", SANDBOX_CONTAINER_APP]);
     expect(h.lines).toEqual([]);
   });
 
@@ -272,7 +451,7 @@ describe("waitUntilSandboxLive", () => {
       reason:
         "probe: /exec failed with an EMPTY error — the probe's container may still run the previous image — still not live after 20 min (deadline 20 min)",
     });
-    expect(h.count("readHealth")).toBe(LIVE_GATE_DEADLINE_MS / LIVE_GATE_POLL_MS + 1);
+    expect(h.count("readHealth")).toBe(LIVE_GATE_DEADLINE_MS / LIVE_GATE_POLL_MS);
     expect(h.lines).toHaveLength(LIVE_GATE_DEADLINE_MS / LIVE_GATE_POLL_MS);
   });
 

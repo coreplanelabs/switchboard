@@ -1,11 +1,11 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, watch } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { PACKAGE_ROOT, PACKAGE_SOURCE_FILE, packageVersion } from "../packageRoot.js";
 import { cliVersionOnHost, OPERATOR_ROOT, workAreaNpmCiArgs } from "./host.js";
 import { resolveOperatorRoot } from "./operatorRoot.js";
-import { run } from "./run.js";
+import { run, defaultSandboxGateDeps } from "./run.js";
 import { TEST_PROFILE } from "./testing/profile.js";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -21,17 +21,31 @@ afterAll(() => {
 });
 
 describe("deployment command cancellation", () => {
-  it("cancellation during whoami prevents token verification and the next capability or Git command", async () => {
+  it("cancellation during whoami prevents token verification and the next capability or Git command", async ({
+    signal,
+    onTestFinished,
+  }) => {
     for (const cancel of [false, true]) {
       const dir = mkdtempSync(join(tmpdir(), "deploy-prechecks-"));
       const calls = join(dir, "calls");
       const ready = join(dir, "ready");
+      const release = join(dir, "release-whoami");
       const written = join(dir, "written-configs.jsonl");
+      let child: ReturnType<typeof spawn> | undefined;
+      let done: Promise<{ code: number | null; signal: string | null }> | undefined;
+      let readyWatch: ReturnType<typeof watch> | undefined;
+      const stop = () => child?.kill("SIGTERM");
+      signal.addEventListener("abort", stop);
+      onTestFinished(async () => {
+        readyWatch?.close();
+        if (child && child.exitCode === null && child.signalCode === null) stop();
+        if (done) await done;
+      });
       try {
         writeFileSync(
           join(dir, "npx"),
           `#!${process.execPath}
-const fs=require('node:fs');const args=process.argv.slice(2).join(' ');if(args==='wrangler whoami'){fs.writeFileSync(process.env.FIXTURE_READY,'ready');setTimeout(()=>console.log('no memberships'),200);}else if(args==='wrangler containers list --json'){fs.appendFileSync(process.env.FIXTURE_CALLS,'capability\\n');console.log('[]');}else process.exit(99);`,
+const fs=require('node:fs');const args=process.argv.slice(2).join(' ');if(args==='wrangler whoami'){const finish=()=>{if(fs.existsSync(process.env.FIXTURE_RELEASE)){held.close();console.log('no memberships');}};const held=fs.watch(process.env.TMPDIR,finish);fs.writeFileSync(process.env.FIXTURE_READY,'ready');finish();}else if(args==='wrangler containers list --json'){fs.appendFileSync(process.env.FIXTURE_CALLS,'capability\\n');console.log('[]');}else process.exit(99);`,
           { mode: 0o755 },
         );
         writeFileSync(
@@ -61,7 +75,19 @@ plan.checks.cleanTree=false;plan.checks.atOriginMain=false;mkdirSync(${JSON.stri
 const result=await runDeployPlanOnHost(plan,{log:()=>{},warn:()=>{},stream:()=>{}});console.log(JSON.stringify(result));
 `,
         );
-        const child = spawn(process.execPath, ["--import", "tsx", file], {
+        const readyObserved = new Promise<void>((resolve, reject) => {
+          const watcher = watch(dir, () => {
+            try {
+              if (readFileSync(ready, "utf8") === "ready") resolve();
+            } catch {
+              // The watcher can see the new file before its contents are written.
+            }
+          });
+          readyWatch = watcher;
+          watcher.on("error", reject);
+        });
+        signal.throwIfAborted();
+        child = spawn(process.execPath, ["--import", "tsx", file], {
           cwd: root,
           env: {
             PATH: `${dir}:${process.env.PATH}`,
@@ -70,29 +96,29 @@ const result=await runDeployPlanOnHost(plan,{log:()=>{},warn:()=>{},stream:()=>{
             TEMP: dir,
             FIXTURE_READY: ready,
             FIXTURE_CALLS: calls,
+            FIXTURE_RELEASE: release,
           },
           stdio: ["ignore", "pipe", "pipe"],
         });
         let output = "";
-        child.stdout.on("data", (chunk) => {
+        child.stdout!.on("data", (chunk) => {
           output += String(chunk);
         });
-        child.stderr.on("data", (chunk) => {
+        child.stderr!.on("data", (chunk) => {
           output += String(chunk);
         });
-        const done = new Promise<{ code: number | null; signal: string | null }>((resolve) =>
-          child.on("close", (code, signal) => resolve({ code, signal })),
+        done = new Promise<{ code: number | null; signal: string | null }>((resolve) =>
+          child!.on("close", (code, signal) => resolve({ code, signal })),
         );
-        await expect
-          .poll(() => {
-            try {
-              return readFileSync(ready, "utf8");
-            } catch {
-              return "pending";
-            }
-          })
-          .toBe("ready");
+        await Promise.race([
+          readyObserved,
+          done.then(() => {
+            throw new Error("fixture child closed before ready");
+          }),
+        ]);
+        readyWatch?.close();
         if (cancel) child.kill("SIGTERM");
+        else writeFileSync(release, "continue");
         expect(await done, output).toEqual({ code: 0, signal: null });
         const writtenPaths = readFileSync(written, "utf8")
           .trim()
@@ -113,6 +139,10 @@ const result=await runDeployPlanOnHost(plan,{log:()=>{},warn:()=>{},stream:()=>{
           expect(readFileSync(calls, "utf8")).toBe("http\ncapability\ngit\n");
         }
       } finally {
+        signal.removeEventListener("abort", stop);
+        readyWatch?.close();
+        if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+        if (done) await done;
         rmSync(dir, { recursive: true, force: true });
       }
     }
@@ -250,14 +280,216 @@ console.log('terminal:'+result.kind+':'+(result.kind==='ran'?result.ok+':'+resul
     },
   );
 
+  it("readiness inventory refuses repeated cursors instead of returning a partial fleet", async () => {
+    const savedEnv = process.env;
+    for (const repeat of [false, true]) {
+      const dir = mkdtempSync(join(tmpdir(), "readiness-pages-"));
+      const calls = join(dir, "calls");
+      const app = `fixture-app-${randomUUID()}`;
+      try {
+        writeFileSync(
+          join(dir, "npx"),
+          `#!${process.execPath}
+const fs=require('node:fs');const a=process.argv.slice(2);const file=process.env.FIXTURE_CALLS;
+if(a.slice(0,3).join(' ')==='wrangler containers list'){console.log(JSON.stringify([{name:process.env.FIXTURE_APP,id:'owned-fixture-app'}]));}
+else if(a.slice(0,3).join(' ')==='wrangler containers instances'){
+const at=fs.existsSync(file)?fs.readFileSync(file,'utf8').trim().split('\\n').length:0;fs.appendFileSync(file,'page\\n');
+console.log(JSON.stringify({instances:[{name:at===0?'first':'second',state:'running',version:12}],result_info:{next_page_token:at===0||process.env.FIXTURE_REPEAT==='yes'?'private-cursor':null}}));
+}else process.exit(98);`,
+          { mode: 0o755 },
+        );
+        // Only the owned shim is on PATH; no live credential or endpoint is inherited.
+        process.env = {
+          PATH: dir,
+          CLOUDFLARE_API_TOKEN: "synthetic-no-access",
+          FIXTURE_CALLS: calls,
+          FIXTURE_APP: app,
+          FIXTURE_REPEAT: repeat ? "yes" : "no",
+        };
+        const result = await defaultSandboxGateDeps.readInstances(
+          "deploy/cloudflare-sandbox",
+          app,
+          undefined,
+          new AbortController().signal,
+        );
+        if (repeat)
+          expect(result).toEqual({ error: "instance inventory repeated a page token; completeness unverified" });
+        else
+          expect(result).toEqual({
+            value: [
+              { name: "first", state: "running", version: 12 },
+              { name: "second", state: "running", version: 12 },
+            ],
+          });
+        expect(readFileSync(calls, "utf8")).toBe("page\npage\n");
+        expect(JSON.stringify(result)).not.toContain("private-cursor");
+      } finally {
+        process.env = savedEnv;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("owned readiness command exits and uncertain group signalling retain truthful results", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "readiness-results-"));
+    const unset = Object.keys(process.env).filter((name) => name !== "PATH");
+    try {
+      expect(
+        await run(process.execPath, ["-e", "process.stdout.write('diagnostic');process.exit(7)"], {
+          cwd: dir,
+          unset,
+          ownedReadGroup: true,
+        }),
+      ).toEqual({ code: 7, output: "diagnostic" });
+      const missing = await run(join(dir, "not-a-command"), [], { cwd: dir, unset, ownedReadGroup: true });
+      expect(missing.code).toBe(127);
+      expect(missing.output).toContain("ENOENT");
+      const control = new AbortController();
+      const kill = process.kill.bind(process);
+      const spy = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+        if (pid < 0) {
+          const err = new Error("synthetic group refusal") as NodeJS.ErrnoException;
+          err.code = "EPERM";
+          throw err;
+        }
+        return kill(pid, signal);
+      });
+      try {
+        const result = await run(
+          process.execPath,
+          ["-e", "process.stdout.write('ready\\n');setInterval(()=>{},1000)"],
+          {
+            cwd: dir,
+            unset,
+            ownedReadGroup: true,
+            signal: control.signal,
+            stream: (text) => {
+              if (text.includes("ready")) control.abort();
+            },
+          },
+        );
+        expect(result).toEqual({ code: 130, cancelled: true, output: "ready\n", cleanup: "unconfirmed" });
+        expect(result).not.toHaveProperty("stopped");
+      } finally {
+        spy.mockRestore();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("an already cancelled owned readiness command never spawns or writes", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "readiness-preabort-"));
+    try {
+      const marker = join(dir, "unexpected");
+      const normal = await run(
+        process.execPath,
+        ["-e", "require('node:fs').writeFileSync(process.argv[1],'complete')", marker],
+        {
+          cwd: dir,
+          ownedReadGroup: true,
+          unset: Object.keys(process.env).filter((name) => name !== "PATH"),
+        },
+      );
+      expect(normal).toEqual({ code: 0, output: "" });
+      expect(readFileSync(marker, "utf8")).toBe("complete");
+      rmSync(marker);
+      const control = new AbortController();
+      control.abort();
+      const result = await run(
+        process.execPath,
+        ["-e", "require('node:fs').writeFileSync(process.argv[1],'unexpected')", marker],
+        {
+          cwd: dir,
+          signal: control.signal,
+          ownedReadGroup: true,
+          unset: Object.keys(process.env).filter((name) => name !== "PATH"),
+        },
+      );
+      expect(result).toEqual({ code: 130, output: "", cancelled: true });
+      expect(() => readFileSync(marker, "utf8")).toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([false, true])(
+    "an owned readiness group stops noncooperating descendants before later work, privateStdio=%s",
+    async (privateStdio) => {
+      const dir = mkdtempSync(join(tmpdir(), "readiness-owned-group-"));
+      let parentPid: number | undefined;
+      let descendantPid: number | undefined;
+      try {
+        const marker = join(dir, "later");
+        const ids = join(dir, "ids");
+        const readyFile = join(dir, "child-ready");
+        const childFile = join(dir, "child ' quoted.cjs");
+        writeFileSync(
+          childFile,
+          "const fs=require('node:fs');process.on('SIGTERM',()=>{});fs.appendFileSync(process.argv[3],process.pid+'\\n');if(process.argv[5]==='private')fs.writeFileSync(process.argv[4],'ready');else process.stdout.write('child-ready\\n');setTimeout(()=>fs.writeFileSync(process.argv[2],'later'),250);setInterval(()=>{},1000);",
+        );
+        const script =
+          "const fs=require('node:fs');const privateStdio=process.argv[5]==='private';fs.writeFileSync(process.argv[2],process.pid+'\\n');process.on('SIGTERM',()=>{});require('node:child_process').spawn(process.execPath,[process.argv[4],process.argv[1],process.argv[2],process.argv[3],process.argv[5]],{stdio:privateStdio?'ignore':['ignore','inherit','inherit']});if(privateStdio){const probe=setInterval(()=>{if(fs.existsSync(process.argv[3])){clearInterval(probe);process.stdout.write('child-ready\\n');}},5);}setInterval(()=>{},1000);";
+        const control = new AbortController();
+        let returned: Awaited<ReturnType<typeof run>> | undefined;
+        let ready!: () => void;
+        const started = new Promise<void>((resolve) => {
+          ready = resolve;
+        });
+        const pending = run(
+          process.execPath,
+          ["-e", script, marker, ids, readyFile, childFile, privateStdio ? "private" : "inherit"],
+          {
+            cwd: dir,
+            unset: Object.keys(process.env).filter((name) => name !== "PATH"),
+            signal: control.signal,
+            ownedReadGroup: true,
+            stream: (text) => {
+              if (text.includes("child-ready")) ready();
+            },
+          } as Parameters<typeof run>[2],
+        ).then((result) => {
+          returned = result;
+          return result;
+        });
+        try {
+          await started;
+          [parentPid, descendantPid] = readFileSync(ids, "utf8").trim().split("\n").map(Number);
+          control.abort();
+          // This delay observes the source's actual settlement; it is not a production grace timer.
+          await new Promise<void>((resolve) => setTimeout(resolve, 300));
+          expect(returned).toEqual({ code: 130, cancelled: true, output: "child-ready\n" });
+          expect(() => readFileSync(marker, "utf8")).toThrow();
+        } finally {
+          for (const pid of [parentPid, descendantPid])
+            if (Number.isSafeInteger(pid) && pid! > 0) {
+              try {
+                process.kill(pid!, "SIGKILL");
+              } catch {
+                /* The owned fixture may have already ended. */
+              }
+            }
+          await pending;
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("a parent close does not claim ending for a noncooperating descendant with private stdio", async () => {
     const dir = mkdtempSync(join(tmpdir(), "deploy-unconfirmed-"));
     try {
       const marker = join(dir, "later ' quoted");
-      const child = "setTimeout(()=>{require('node:fs').writeFileSync(process.argv[1],'still active');},150);";
-      const script = `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(child)},process.argv[1]],{stdio:'ignore'});process.stdout.write('ready\\n');setInterval(()=>{},1000);`;
+      const childFile = join(dir, "child ' quoted.cjs");
+      writeFileSync(
+        childFile,
+        "setTimeout(()=>{require('node:fs').writeFileSync(process.argv[2],'still active');},150);",
+      );
+      const script =
+        "require('node:child_process').spawn(process.execPath,[process.argv[2],process.argv[1]],{stdio:'ignore'});process.stdout.write('ready\\n');setInterval(()=>{},1000);";
       const control = new AbortController();
-      const result = await run(process.execPath, ["-e", script, marker], {
+      const result = await run(process.execPath, ["-e", script, marker, childFile], {
         cwd: dir,
         unset: Object.keys(process.env).filter((name) => name !== "PATH"),
         signal: control.signal,
