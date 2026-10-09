@@ -5147,6 +5147,7 @@ export async function dispatchClick(deps: CoreDeps, click: ClickRequest): Promis
       () =>
         root.span("post.reply", async () => {
           const current = await res.publicationCheck?.();
+          if ((!current || current.ok) && res.result.cardShown) return;
           return io.reply(current && !current.ok ? OFFER_CONTEXT_LINE : res.text);
         }),
     );

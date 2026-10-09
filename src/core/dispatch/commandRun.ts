@@ -40,7 +40,11 @@ import { defaultRunRegistry } from "../runRegistry.js";
 import type { RunEnding } from "../runEnding.js";
 import { messageIdOf, type ChannelIO, type HistoryItem, type IncomingMessage } from "../types.js";
 import { assembleRunRecord, channelVisibilityOf } from "./record.js";
-import { composeRunLabel, errorReply } from "./reply.js";
+import { composeRunLabel, errorReply, liveViewLink } from "./reply.js";
+import { createCardShell } from "../statusCardFrame.js";
+import { parseDirectives } from "../../directives.js";
+import { shows } from "../verbosity.js";
+import type { StatusHandle } from "../types.js";
 import type { FastPathDeps } from "./fastPath.js";
 
 /** The `route` event a command the router bound rides its run with
@@ -76,6 +80,8 @@ export interface CommandRunOptions {
  *  the record and says nothing: a hand-back, or the paste of a command that was
  *  never a run, is answered exactly as it was before it was recorded. */
 export interface InlineRunOptions extends CommandRunOptions {
+  /** Repository management uses the same progress message as agent work. */
+  progress?: string;
   announce?: boolean;
 }
 
@@ -136,19 +142,27 @@ export async function runChatCommand(
     }
   };
   const persistResult = async (result: ChatCommandResult): Promise<ChatCommandResult> => {
-    await persistText(result.text);
-    await opts.beforePublish?.();
-    const followUp = result.followUp;
+    try {
+      await persistText(result.text);
+      await opts.beforePublish?.();
+    } catch (error) {
+      if (result.finishCard) await result.finishCard(redactSecrets(errorReply(error))).catch(() => false);
+      throw error;
+    }
+    const { finishCard, ...stored } = result;
+    const cardShown = await finishCard?.();
+    const displayed = cardShown ? { ...stored, cardShown: true } : stored;
+    const followUp = displayed.followUp;
     return followUp
       ? {
-          ...result,
+          ...displayed,
           followUp: async () => {
             const outcome = await followUp();
             if (outcome) await persistText(outcome.text, ":settled");
             return outcome;
           },
         }
-      : result;
+      : displayed;
   };
   const resolveRepo = async (): Promise<string | undefined> =>
     (await resolveRepoForCommand(deps, msg, await io.history())).repo;
@@ -174,6 +188,9 @@ export async function runChatCommand(
         await runInlineCommandRun(deps, msg, cliWords(parsed.id)[0], io, invoke, ending, trace, {
           ...opts,
           announce: inline,
+          ...(/^repo\.(onboard|offboard|rebuild|reconfigure)$/.test(parsed.id)
+            ? { progress: cliWords(parsed.id).join(" ") }
+            : {}),
         }),
       );
   }
@@ -386,7 +403,15 @@ export function postSettledOutcome(
  * channel: the record is written, the surface answers as if no run existed.
  */
 export async function runInlineCommandRun<
-  T extends { text: string; ok: boolean; trace?: unknown; residentMs?: number },
+  T extends {
+    text: string;
+    ok: boolean;
+    trace?: unknown;
+    residentMs?: number;
+    quietText?: string;
+    cardShown?: boolean;
+    finishCard?: (error?: string) => Promise<boolean>;
+  },
 >(
   deps: FastPathDeps,
   msg: IncomingMessage,
@@ -444,8 +469,25 @@ export async function runInlineCommandRun<
   // where a routed agent run carries the same event.
   if (opts.route) registry.publish(run.id, { type: "route", ...opts.route, at: clock() });
   if (opts.operator) registry.publish(run.id, { type: "operator", ...opts.operator, at: clock() });
+  const verbosity =
+    opts.progress && announce
+      ? deps.config.verbosityFor(msg.channelId, msg.userId, parseDirectives(msg.text).verbosity)
+      : "quiet";
+  const url = liveViewLink(run.id, run.token);
+  const shell =
+    opts.progress && announce
+      ? createCardShell({
+          label: `*${opts.progress}*`,
+          startedAt: trace.receivedAt,
+          now: clock,
+          verbosity,
+          ...(url ? { link: { url, label: "open run ↗" } } : {}),
+        })
+      : undefined;
+  let card: StatusHandle | undefined;
   let result: T | undefined;
   try {
+    if (shell) card = await io.status(shell.live({ detail: ["• working…"] }), { verbosity }).catch(() => undefined);
     // The command's deterministic body is the run's one counted step (`tools`
     // for a command run); a resident op's own steps graft under it.
     result = await root.span(
@@ -471,6 +513,34 @@ export async function runInlineCommandRun<
     );
     await opts.beforePublish?.();
     registry.publish(run.id, { type: "answer", text: redactSecrets(result.text), at: clock() });
+    if (shell && card) {
+      const progress = card;
+      const outcome = result;
+      result = {
+        ...result,
+        finishCard: async (error?: string) => {
+          await opts.beforePublish?.();
+          shell.freeze(registry.snapshot(run.id, run.token)?.finishedAt ?? clock());
+          const frame = shell.close({
+            kind: "done",
+            icon: error || !outcome.ok ? "⚠️" : "✅",
+            detail: (error ?? outcome.quietText ?? outcome.text)
+              .split("\n")
+              .map((line) => `• ${line}`)
+              .join("\n"),
+          });
+          const delivery = progress.doneWithReceipt
+            ? await progress.doneWithReceipt(frame).catch(() => undefined)
+            : (await progress.done(frame).catch(() => undefined), undefined);
+          return (
+            delivery?.delivered === true &&
+            delivery.complete === true &&
+            !!progress.handle &&
+            !shows(verbosity, "verbose")
+          );
+        },
+      };
+    }
     return result;
   } catch (err) {
     // A thrown command still gets an `answer`: the same `⚠️ <error>` line the
@@ -478,6 +548,10 @@ export async function runInlineCommandRun<
     // `failed` status and the channel reply stays a projection of it.
     await opts.beforePublish?.();
     registry.publish(run.id, { type: "answer", text: redactSecrets(errorReply(err)), at: clock() });
+    if (shell && card)
+      await card
+        .done(shell.close({ kind: "done", icon: "⚠️", detail: `• ${redactSecrets(errorReply(err))}` }))
+        .catch(() => {});
     throw err;
   } finally {
     const status: RunStatus = result?.ok ? "completed" : "failed";

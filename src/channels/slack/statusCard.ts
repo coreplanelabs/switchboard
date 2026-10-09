@@ -10,6 +10,16 @@ import { escapeMrkdwn } from "../slackEscape.js";
 // per-message limits whatever the tools emit.
 const RENDER_DETAIL_RAW_MAX = 900;
 
+const clippedDetail = (detail: string) => detail.slice(0, RENDER_DETAIL_RAW_MAX).replace(/[\uD800-\uDBFF]$/u, "");
+
+/** A clipped frame cannot replace the complete command outcome. */
+export function completeFrame(frame: StatusUpdate): boolean {
+  return (
+    clippedDetail(frame.detail ?? "") === (frame.detail ?? "") &&
+    (frame.activity?.kind !== "command" || clipCommand(frame.activity.command) === frame.activity.command)
+  );
+}
+
 /** Status cards THIS process is currently driving (channel:ts), added when the
  *  card is posted and removed when it is closed. The reconnect sweep consults
  *  it so a websocket reconnect without a restart never closes a running run's
@@ -133,7 +143,7 @@ export function render(frame: StatusUpdate): { text: string; blocks: object[] } 
   if (frame.link) elements.push({ type: "link", url: frame.link.url, text: frame.link.label });
   // The cap cut can land mid-astral-char; a lone high surrogate is invalid
   // JSON text and Slack rejects the payload, so drop it from the cut edge.
-  if (frame.detail) line(frame.detail.slice(0, RENDER_DETAIL_RAW_MAX).replace(/[\uD800-\uDBFF]$/u, ""));
+  if (frame.detail) line(clippedDetail(frame.detail));
   // The activity is typed (run-visibility item 2): a command draws as a caption
   // naming the tool and a `rich_text_preformatted` code block beside the
   // section — a sibling element of the same rich_text block, so the no-fold

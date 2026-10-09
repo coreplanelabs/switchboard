@@ -9,6 +9,7 @@ import { viewingRefusal } from "./authz/viewAs.js";
 import type { Actor, Resource } from "./authz/types.js";
 import { ALL_CAPABILITIES, type Capabilities } from "./capabilities.js";
 import { PROVISIONAL_LABEL } from "./runRecord.js";
+import type { Verbosity } from "./verbosity.js";
 
 // Command registry (docs/decisions/0008-one-command-definition-every-surface.md): the ONE seam
 // behind every operator surface. The lowest level is plain TypeScript: a
@@ -230,7 +231,7 @@ export interface CommandDef<
   render?(output: JsonValue): string;
   /** Chat's projection when `render` is shaped for a terminal (aligned
    *  columns collapse in a proportional font). Absent → `render`. */
-  renderChat?(output: JsonValue): string;
+  renderChat?(output: JsonValue, display?: { verbosity?: Verbosity }): string | undefined;
   /** The DEFERRED outcome of a command whose effect completes after its reply
    *  (a resident accepted for provisioning reaches `warm` or `down` minutes
    *  later). Given the handler's own output, it waits — bounded, by its own
@@ -796,9 +797,12 @@ export const STORE_UNAVAILABLE_BANNER = "⚠ history store unavailable — showi
 export function renderText(
   cmd: Pick<CommandDef<unknown>, "id" | "render" | "renderChat">,
   output: JsonValue,
-  opts: { now?: number; surface?: "chat" | "text" } = {},
+  opts: { now?: number; surface?: "chat" | "text"; verbosity?: Verbosity } = {},
 ): string {
-  if (opts.surface === "chat" && cmd.renderChat) return cmd.renderChat(output);
+  if (opts.surface === "chat") {
+    const text = cmd.renderChat?.(output, opts);
+    if (text !== undefined) return text;
+  }
   return cmd.render ? cmd.render(output) : renderCompact(cmd.id, output, opts);
 }
 

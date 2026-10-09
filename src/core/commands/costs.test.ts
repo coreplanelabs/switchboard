@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Caller } from "../commandRegistry.js";
-import { CommandError } from "../commandRegistry.js";
+import { CommandError, renderText } from "../commandRegistry.js";
 import type { CostsByReport } from "../costsBy.js";
 import { COSTS_OFF_MESSAGE, NoCostsSnapshotError, NullCostsService, type CostsService } from "../costsService.js";
 import { costsBy, costsSnapshot, takerLabel } from "./costs.js";
@@ -228,7 +228,7 @@ describe("costs.by", () => {
     expect(lines[5]).toBe(
       "LLM attributed $15.75 of $19.50 on the workspace over 3 day(s) · $3.75 unattributed · cloud allocated $2.00 · $1.40 on days with no runs",
     );
-    const chat = costsBy.renderChat!(out).split("\n");
+    const chat = renderText(costsBy, out, { surface: "chat" }).split("\n");
     expect(chat[1]).toBe("• alice (slack:UALICE) — 7 runs · LLM $12.25 · cloud $1.50 · total $13.75 (77%)");
     expect(chat[2]).toBe("• http:ops — 2 runs · LLM $3.50 · cloud $0.50 · total $4.00 (23%) · unpriced tokens");
     expect(chat).toHaveLength(5); // no column header line in chat

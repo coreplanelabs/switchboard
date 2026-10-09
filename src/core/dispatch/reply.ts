@@ -644,8 +644,12 @@ export async function replyCommandOutput(
   io: ChannelIO,
   parsed: ParsedChatCommand,
   text: string,
-  display: { verbosity?: Verbosity; ok?: boolean } = {},
+  display: { verbosity?: Verbosity; ok?: boolean; quietText?: string; cardShown?: boolean } = {},
 ): Promise<void> {
+  if (!shows(display.verbosity ?? "quiet", "verbose")) {
+    if (display.cardShown) return;
+    text = display.quietText ?? text;
+  }
   // `steer.run`'s successful text is the same routine fold acknowledgement as
   // admission's `steerAck`, even when it came through a direct typed command
   // or the operator. A failed steer is action-required and always speaks.

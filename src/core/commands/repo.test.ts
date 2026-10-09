@@ -402,6 +402,39 @@ describe("gates (fail-closed) and scopes", () => {
 });
 
 describe("repo onboard", () => {
+  it("quiet eviction names the removed repo and preserves cleanup errors", async () => {
+    const c = mockClient({
+      onboard: ok(
+        {
+          resource: "repo:acme/api",
+          state: "onboarding",
+          evicted: { resource: "repo:acme/old", errors: ["backup deletion failed", "prefix sweep failed"] },
+        },
+        202,
+      ),
+    });
+    const commands = bind({ admin: c, inspect: inspecting(PNPM_ROOT) });
+    const { res } = await say(commands, "repo onboard acme/api --evict-coldest", admin);
+    if (!res.ok) throw new Error(res.message);
+    expect(renderText(commands.get("repo.onboard")!, res.value, { surface: "chat", verbosity: "quiet" })).toBe(
+      "Provisioning `acme/api`.\nEvicted `acme/old`.\n⚠️ Eviction cleanup: backup deletion failed\n⚠️ Eviction cleanup: prefix sweep failed",
+    );
+  });
+  it("quiet cold registration shows one outcome and detects infrastructure commands from minimal syntax", async () => {
+    const c = mockClient({ onboard: ok({ resource: "repo:acme/infra", state: "cold" }) });
+    const commands = bind({ admin: c, inspect: inspecting({ entries: ["main.tf"] }) });
+    const { res } = await say(commands, "repo onboard acme/infra --no-resident", admin);
+    expect(c.onboard).toHaveBeenCalledWith(
+      expect.objectContaining({ defaultRef: "main", commands: { build: "true", test: "true" }, noResident: true }),
+    );
+    if (!res.ok) throw new Error(res.message);
+    expect(renderText(commands.get("repo.onboard")!, res.value, { surface: "chat", verbosity: "quiet" })).toBe(
+      "Registered `acme/infra` · cold.",
+    );
+    expect(renderText(commands.get("repo.onboard")!, res.value, { surface: "chat", verbosity: "verbose" })).toContain(
+      "Commands:",
+    );
+  });
   it("--no-resident registers a cold repo and never polls provisioning", async () => {
     const c = mockClient({ onboard: ok({ resource: "repo:acme/api", state: "cold" }) });
     const commands = bind({ admin: c, inspect: inspecting(PNPM_ROOT) });

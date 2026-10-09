@@ -158,6 +158,28 @@ afterEach(() => {
 });
 
 describe("ResidentsIndexPage", () => {
+  it("shows cold registrations beside highlighted warm residents and keeps both current", async () => {
+    const cold = { resource: "repo:acme/infra", noResident: true, defaultRef: "main", live: { state: "cold" } };
+    const seed = Object.assign(indexSeed([WARM]), { repositories: [cold] });
+    const { wrapper: w, es } = mountIndex(seed);
+    expect(w.find('[data-slug="acme/infra"]').text()).toContain("cold");
+    expect(w.find('[data-slug="acme/infra"] .uid-count').exists()).toBe(false);
+    expect(w.find('[data-slug="acme/infra"] .disk').exists()).toBe(false);
+    expect(w.find('[data-slug="jshttp/vary"]').classes()).toContain("bg-ok/5");
+    expect(w.text()).toContain("1 cold");
+    es().emitMessage({ type: "residents", count: 1, cap: 5, residents: [WARM], repositories: [] });
+    await nextTick();
+    expect(w.find('[data-slug="acme/infra"]').exists()).toBe(false);
+  });
+  it("shows an all-cold repository fleet without claiming a warm slot", () => {
+    const seed = Object.assign(indexSeed([]), {
+      repositories: [{ resource: "repo:acme/infra", noResident: true, defaultRef: "main", live: { state: "cold" } }],
+    });
+    const { wrapper: w } = mountIndex(seed);
+    expect(w.text()).toContain("0/5 resident slots in use · 1 cold");
+    expect(w.text()).toContain("acme/infra");
+    expect(w.text()).not.toContain("No repos onboarded");
+  });
   it("shows spent UID slots, highlights exhaustion, and updates from the resident feed", async () => {
     const { wrapper: w, es } = mountIndex(
       indexSeed([{ ...WARM, live: { ...WARM.live, poolUsersSpent: 16, poolUsersTotal: 16 } }]),
@@ -428,7 +450,7 @@ describe("ResidentsIndexPage — live over the feed", () => {
 
   it("a residents frame replaces the listing — state, bindings, disk, count — and the tab's title and favicon follow the runs and the fleet tone", async () => {
     const { wrapper: w, es } = mountIndex(indexSeed([WARM], 5, 1, [run("r1")]));
-    expect(setTitle).toHaveBeenLastCalledWith("(1) Resident repos");
+    expect(setTitle).toHaveBeenLastCalledWith("(1) Repositories");
     expect(setFavicon).toHaveBeenLastCalledWith(FAVICON_BY_TONE.green);
     es().emitOpen();
     es().emitMessage({
@@ -445,7 +467,7 @@ describe("ResidentsIndexPage — live over the feed", () => {
     expect(setFavicon).toHaveBeenLastCalledWith(FAVICON_BY_TONE.red);
     es().emitMessage({ type: "upsert", run: run("r1", { finished: true }) });
     await nextTick();
-    expect(setTitle).toHaveBeenLastCalledWith("Resident repos");
+    expect(setTitle).toHaveBeenLastCalledWith("Repositories");
   });
 
   it("a reconnect reloads the page for a fresh snapshot instead of drifting", () => {

@@ -1021,6 +1021,9 @@ function serveLiveStream(res: import("node:http").ServerResponse): void {
 }
 
 const RESIDENTS = {
+  repositories: [
+    { resource: "repo:acme/infrastructure", noResident: true, defaultRef: "main", live: { state: "cold" } },
+  ],
   cap: 6,
   count: 2,
   residents: [
@@ -2600,7 +2603,7 @@ function page(
   if (pathname.startsWith("/runs/"))
     return { title: "Run not found", seed: { page: "runNotFound", retentionDays: 30 }, status: 404 };
   if (pathname === "/residents")
-    return { title: "(1) Resident repos", seed: { page: "residents", ...RESIDENTS, now: NOW, runs: RESIDENT_RUNS } };
+    return { title: "(1) Repositories", seed: { page: "residents", ...RESIDENTS, now: NOW, runs: RESIDENT_RUNS } };
   if (pathname.startsWith("/residents/"))
     return { title: "acme/web", seed: { page: "resident", slug: "acme/web", record: RESIDENTS.residents[0] } };
   if (pathname === "/plane") {

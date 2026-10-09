@@ -25,12 +25,14 @@ Omit `--install`, `--test` or `--build` and Switchboard detects them from the lo
 ## Register without a resident
 
 ```
-@switchboard repo onboard acme/api --no-resident --ref main
+@switchboard repo onboard acme/api --no-resident
 ```
+
+The default ref is `main`. Command flags are optional: Switchboard detects them from the repo root. Without a root `package.json`, there is no install step; absent build/test scripts are stored as `true`, a command that does nothing. If detection fails, the reply warns that npm defaults were saved.
 
 This saves the repository and command table immediately. It starts no resident, creates no snapshot or refresh schedule, and uses no resident capacity. Coding and review tasks naming the repo run in per-thread sandboxes; an explicit task branch wins over the registered default ref. Dependencies are prepared during the task rather than kept warm.
 
-`repo list` shows these registrations as `cold`. The same GitHub App membership and `repo:write` checks apply. The resident Worker's registry and credentials are still required for registration.
+`repo list` and the Repositories page show these registrations as `cold`. Warm residents are highlighted. Quiet chat commands show a short bullet outcome with a run link; the run record retains the detailed receipt. The same GitHub App membership and `repo:write` checks apply. The resident Worker's registry and credentials are still required for registration.
 
 `repo reconfigure` edits the saved commands or ref. `repo offboard` removes only the registration. To give it a resident later, offboard the cold registration and onboard it again without `--no-resident`. `repo rebuild` and deterministic `repo test` / `repo build` require a resident. Ready-environment pilot tasks retain their existing warm-environment requirement.
 

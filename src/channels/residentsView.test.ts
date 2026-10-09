@@ -60,7 +60,8 @@ const DOWN = {
   live: { state: "down", reason: "provision-failed at clone: fatal: could not read Username" },
 };
 
-const LISTING: ResidentListing = { cap: 5, count: 2, residents: [WARM, DOWN] };
+const COLD = { resource: "repo:acme/infra", noResident: true, defaultRef: "main", live: { state: "cold" } };
+const LISTING: ResidentListing = { cap: 5, count: 2, residents: [WARM, DOWN], repositories: [COLD] };
 
 const page = makePageSender({ js: "/assets/main-test.js", css: [] }, ALL_CAPABILITIES);
 
@@ -216,6 +217,7 @@ describe("createResidentsViewHandler", () => {
       expect(seed.cap).toBe(5);
       expect(seed.count).toBe(2);
       expect(seed.residents).toEqual([WARM, DOWN]);
+      expect(seed.repositories).toEqual([COLD]);
     }
     expect(calls).toBe(2);
   });
@@ -499,7 +501,13 @@ describe("createResidentsViewHandler — the runs on residents and the live feed
     const after = frames();
     // the create's upsert (a span record never repaints the index), then the listing the attach end caused
     expect(ids(after).slice(2)).toEqual([`${late.id}:false`, "residents"]);
-    expect(after.at(-1)).toEqual({ type: "residents", cap: 5, count: 2, residents: [WARM, DOWN] });
+    expect(after.at(-1)).toEqual({
+      type: "residents",
+      cap: 5,
+      count: 2,
+      residents: [WARM, DOWN],
+      repositories: [COLD],
+    });
   });
 
   it("the feed's listing reads run under their own `dashboard.residents` root (route `feed`), one per read", async () => {

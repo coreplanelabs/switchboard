@@ -3805,7 +3805,13 @@ export async function executeOperatorDecision(
       });
       carried = true;
       await checkContext();
-      if (res.text.length > 0) await replyCommandOutput(io, invocation, res.text, { verbosity, ok: res.ok });
+      if (res.text.length > 0)
+        await replyCommandOutput(io, invocation, res.text, {
+          verbosity,
+          ok: res.ok,
+          quietText: res.quietText,
+          cardShown: res.cardShown,
+        });
     }
     // A decision nothing ran from records on a door record of its own, or the
     // shadow-vs-on ledger would have a hole.
